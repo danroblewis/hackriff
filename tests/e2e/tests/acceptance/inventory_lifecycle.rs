@@ -206,7 +206,7 @@ fn cf32(bytes: &[u8]) -> impl Iterator<Item = f32> + '_ {
 
 /// The real ci8 FM recording (scaled x/128, as the pipeline quantises) with a synthetic cf32
 /// station of the same capture added, keeping both truths.
-fn add_station(real: &Path, synth: &hk_e2e::SynthOutput, dir: &Path) -> PathBuf {
+pub fn add_station(real: &Path, synth: &hk_e2e::SynthOutput, dir: &Path) -> PathBuf {
     let mut meta = read_json(real);
     let raw = std::fs::read(real.with_extension("sigmf-data")).unwrap();
     let mut iq: Vec<f32> = raw[..raw.len() / 2 * 2]

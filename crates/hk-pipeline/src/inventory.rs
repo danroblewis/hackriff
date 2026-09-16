@@ -78,6 +78,11 @@ pub const CONFIRM_RULE: &str = "hk-pipeline/confirm@1";
 /// Actor of automatic retractions of provisional live entries (T-109) in the lifecycle history.
 pub const RETRACT_RULE: &str = "hk-pipeline/retract@1";
 
+/// T-219: actor recorded on overlap-resolution claims (a Confirmed entry suppressing an
+/// overlapping candidate, the weaker of a duplicate group, a receiver artifact attributed to its
+/// source). Every claim is append-only and reversible; nothing is ever deleted.
+pub const OVERLAP_RULE: &str = "hk-pipeline/overlap@1";
+
 /// Reason of same-emission merges (T-082) in the merge record.
 pub const SAME_EMISSION_REASON: &str =
     "same emission: track and decoder entries of one emitter (hk-pipeline/link@1)";
@@ -260,6 +265,12 @@ pub struct TrackInventory {
     pub confirmed: u64,
     /// Same-emission merges (T-082).
     pub merged: u64,
+    /// T-219: candidates recorded as suppressed by an overlapping Confirmed entry.
+    pub suppressed: u64,
+    /// T-219: candidates recorded as the weaker of an overlapping duplicate group.
+    pub duplicates: u64,
+    /// T-219: candidates attributed to the source whose receiver artifact they are.
+    pub artifacts: u64,
 }
 
 impl Default for TrackInventory {
@@ -283,6 +294,9 @@ impl TrackInventory {
             created: 0,
             confirmed: 0,
             merged: 0,
+            suppressed: 0,
+            duplicates: 0,
+            artifacts: 0,
         }
     }
 
@@ -343,6 +357,26 @@ impl TrackInventory {
     /// The confirmation policy in force.
     pub fn policy(&self) -> &ConfirmPolicy {
         &self.policy
+    }
+
+    /// T-219: resolves the overlapping inventory rows around `emitter` — a Confirmed entry
+    /// suppresses candidates overlapping its band, the remaining overlapping candidates compete on
+    /// the SNR × duty × trust proxy, and a candidate landing on a predicted image / harmonic /
+    /// intermod frequency of a strong confirmed emitter is attributed to it. Every claim is an
+    /// append-only row carrying its reasoning ([`OVERLAP_RULE`]); no row is ever mutated or
+    /// deleted, so later evidence revives a superseded one. Rules: `hk_model::relate`.
+    fn resolve_overlaps(
+        &mut self,
+        repo: &mut Repository,
+        emitter: EmitterId,
+    ) -> Result<(), RepoError> {
+        let id = repo.live_emitter_id(emitter)?;
+        let t = repo.emitter(id)?.last_seen;
+        let out = repo.resolve_overlaps(id, OVERLAP_RULE, t, &Tolerances::default())?;
+        self.suppressed += out.suppressed.len() as u64;
+        self.duplicates += out.duplicates.len() as u64;
+        self.artifacts += out.artifacts.len() as u64;
+        Ok(())
     }
 
     /// Reviews a candidate against the policy; confirms it when the evidence holds.
@@ -459,7 +493,8 @@ impl Inventory for TrackInventory {
         if let Some(table) = &self.table {
             explain_emitter(repo, table, id)?;
         }
-        self.review(repo, id, None)
+        self.review(repo, id, None)?;
+        self.resolve_overlaps(repo, id)
     }
 }
 
@@ -517,6 +552,7 @@ impl TrackInventory {
             explain_emitter(repo, table, id)?;
         }
         self.review(repo, id, trust)?;
+        self.resolve_overlaps(repo, id)?;
         Ok((r.emitter_id, r.created))
     }
 }

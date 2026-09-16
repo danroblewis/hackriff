@@ -75,6 +75,9 @@ mod lifecycle;
 mod lifecycle_tests;
 mod measure;
 mod refined;
+mod relate; // T-219
+#[cfg(test)]
+mod relate_tests;
 #[cfg(test)]
 mod same_emission_tests;
 mod selections;
@@ -105,6 +108,7 @@ pub use bookmarks::{BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmar
 pub use inventory::EmitterUpsert;
 pub use lifecycle::LIFECYCLE_TEXT_MAX;
 pub use refined::{REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning};
+pub use relate::{MAX_ARTIFACT_SOURCES, MAX_EVIDENCE_DETECTIONS, MAX_NEIGHBOURS, OverlapOutcome};
 pub use selections::{
     SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX,
     SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, Selection, SelectionLink,
@@ -122,6 +126,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0005_content_checks_optional.sql"), // T-143 gating opt-in
     include_str!("migrations/0006_user_band.sql"), // T-191 user band override
     include_str!("migrations/0007_classification.sql"), // T-211 M3 classification columns
+    include_str!("migrations/0008_emitter_relation.sql"), // T-219 C40 signal relationships
 ];
 
 /// Schema version this build creates and understands.

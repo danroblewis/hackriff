@@ -929,6 +929,10 @@ pub struct InventoryQuery {
     pub identity_scheme: Option<IdentityScheme>,
     /// Current family (latest classification, else fingerprint family).
     pub family: Option<String>,
+    /// T-219: whether rows that currently defer to another row (suppressed by a Confirmed entry,
+    /// a weaker duplicate, or an attributed receiver artifact) are listed. The default hides
+    /// them; their rows, detections, tracks and history are always kept and reachable by id.
+    pub relations: crate::relate::RelationVisibility,
     /// Page size (1..=[`MAX_INVENTORY_PAGE`]).
     pub limit: u32,
     /// Rows to skip.
@@ -947,6 +951,7 @@ impl Default for InventoryQuery {
             tag: None,
             identity_scheme: None,
             family: None,
+            relations: crate::relate::RelationVisibility::default(),
             limit: 100,
             offset: 0,
             access: IdentityAccess::Standard,

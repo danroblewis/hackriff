@@ -17,9 +17,9 @@
 use hk_model::attention::baseline::SiteKey;
 use hk_model::ids::SiteId;
 use hk_model::{
-    AnnotationAuthor, AnnotationTarget, FreqRange, IdentityAccess, IdentityScheme, InventoryEntry,
-    InventoryIdentity, InventoryQuery, KnownStatus, LifecycleAuthor, LifecycleState, RepoError,
-    Repository, StatusAuthor, TimeRange, Timestamp,
+    AnnotationAuthor, AnnotationTarget, ArtifactKind, FreqRange, IdentityAccess, IdentityScheme,
+    InventoryEntry, InventoryIdentity, InventoryQuery, KnownStatus, LifecycleAuthor,
+    LifecycleState, RelationVisibility, RepoError, Repository, StatusAuthor, TimeRange, Timestamp,
 };
 use hk_store::history::{
     FORMAT_VERSION, FilterSummary, FrontEndState, Geometry, HistoryStat, OriginField, OriginFilter,
@@ -629,6 +629,14 @@ pub fn parse_inventory_query(q: &Params) -> Result<InventoryQuery, ApiError> {
             .filter(|&o| o <= MAX_INVENTORY_CURSOR)
             .ok_or_else(|| bad("invalid cursor"))?,
     };
+    // T-219: rows that currently defer to another row (suppressed by a Confirmed entry, the weaker
+    // of a duplicate group, an attributed receiver artifact) are hidden unless asked for. Their
+    // rows, detections, tracks and history are kept and still reachable by id.
+    let relations = match nonempty(q, "relations") {
+        None | Some("shown") => RelationVisibility::Shown,
+        Some("all") => RelationVisibility::All,
+        Some(_) => return Err(bad("relations must be shown or all")),
+    };
     Ok(InventoryQuery {
         freq,
         time,
@@ -637,6 +645,7 @@ pub fn parse_inventory_query(q: &Params) -> Result<InventoryQuery, ApiError> {
         tag: short_text(q, "tag")?,
         identity_scheme,
         family: short_text(q, "family")?,
+        relations,
         limit: limit as u32,
         offset,
         access: IdentityAccess::Standard,
@@ -823,6 +832,23 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
         // T-158: the newest linked detection's peak SNR and absolute peak level, or `null` when
         // the emitter has no linked detection yet (e.g. an identity-only sighting).
         let measurement = repo.emitter_latest_measurement(e.id)?;
+        // T-219 (C40): the standing relationship, when this row defers to another — suppressed by
+        // an overlapping Confirmed entry, the weaker of a duplicate group, or a receiver artifact
+        // attributed to its source. The reason is backend-rendered from emitter ids, frequency
+        // arithmetic and the rank terms, so it never names an identity.
+        let relation = repo.emitter_relations(e.id)?.first().map(|r| {
+            json!({
+                "kind": r.kind.as_str(),
+                "artifact": r.artifact.map(ArtifactKind::as_str),
+                "source_id": r.source_id.to_string(),
+                "author": r.author.as_str(),
+                "actor": r.actor,
+                "t_s": ts_s(r.t),
+                "reason": r.reason,
+                "score": r.score,
+                "detail": r.detail,
+            })
+        });
         // T-191: the user-adjusted band, beside (never replacing) the measured f_lo_hz/f_hi_hz.
         let user_band = repo.user_band(e.id)?.map(|b| user_band_json(&b, withheld));
         let rec = repo.emitter_recurrence(e.id, RECENT_APPEARANCES)?;
@@ -875,6 +901,9 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
             "withheld": withheld,
             "snr_db": measurement.map(|(snr, _)| snr),
             "peak_dbfs": measurement.map(|(_, peak)| peak),
+            // T-219 (C40): why this row defers to another, when it does. Never a deletion — the
+            // row, its detections, tracks and history are all kept and the claim is reversible.
+            "relation": relation,
         });
         if let Some(v) = value {
             row["identity_value"] = json!(v);

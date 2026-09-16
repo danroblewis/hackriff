@@ -377,15 +377,15 @@ fn carry_evidence(
 
 /// One observation-ledger span of an emitter.
 #[derive(Clone, Copy)]
-struct Span {
+pub(super) struct Span {
     track: bool,
-    t0: i64,
-    t1: i64,
+    pub(super) t0: i64,
+    pub(super) t1: i64,
     count: i64,
 }
 
 /// An emitter's observation spans, by start.
-fn observation_spans(conn: &Connection, id: EmitterId) -> Result<Vec<Span>, RepoError> {
+pub(super) fn observation_spans(conn: &Connection, id: EmitterId) -> Result<Vec<Span>, RepoError> {
     let mut spans: Vec<Span> = conn
         .prepare_cached(
             "SELECT source_kind = 'track', t_start, t_end, count FROM emitter_observation \
@@ -1642,6 +1642,13 @@ fn inventory_where(
              json_extract(fingerprint, '$.family')) = ?",
         ));
         p.push(SqlValue::Text(family.clone()));
+    }
+    // T-219: a row that currently defers to another (suppressed by a Confirmed entry, the weaker
+    // of a duplicate group, or an attributed receiver artifact) is not listed by default. The row
+    // itself, its detections, tracks and history are untouched and still reachable by id.
+    if q.relations == crate::relate::RelationVisibility::Shown {
+        sql.push_str(" AND NOT ");
+        sql.push_str(super::relate::DEFERS_SQL);
     }
     let tag_needs_gate = q.tag.as_deref().is_some_and(|t| !tag_in_vocabulary(t));
     Ok((sql, p, tag_needs_gate))
