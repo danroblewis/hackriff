@@ -91,6 +91,23 @@ pub enum CrcStatus {
     Unknown,
 }
 
+/// A decode's evidence for the labelled-capture dataset export (T-205, ADR-0016 §7): the CRC
+/// status and the demodulation it decoded, without identity or content. **Only [`CrcStatus::Valid`]
+/// counts as decoder-validated ground truth** — a future bounded-correction status (T-210) is a
+/// distinct variant and this contract never treats it as evidence, by construction: a reader
+/// matches on `Valid` explicitly rather than `!= Invalid`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodeEvidence {
+    /// The decode.
+    pub decode_id: DecodeId,
+    /// The demodulation it decoded (names the emitter and the modulation `mode`).
+    pub demodulation_id: DemodulationId,
+    /// Frame check.
+    pub crc_status: CrcStatus,
+    /// Frame time.
+    pub t: Timestamp,
+}
+
 /// Structured output from a decoder plugin or bit-framing inference (docs/07 §2.15).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Decode {

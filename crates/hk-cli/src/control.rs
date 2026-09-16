@@ -19,7 +19,7 @@ use hk_pipeline::{
     ControlFailure, DisplayPatch, DisplaySettings, OutputError, OutputKind, OutputRecorders,
     OutputRequest, OutputTarget, PipelineController, RecordingStatus,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// Display, pause and recording control over a running pipeline.
 pub struct PipelineRunControl(pub PipelineController);
@@ -201,6 +201,152 @@ impl hk_api::IqBufferControl for PipelineIqBuffer {
                     message: e.to_string(),
                 }
             })
+    }
+}
+
+/// Labelled-capture dataset export (T-205) over the pipeline's IQ capture buffer (for snippet
+/// export, reusing the same clip writer as `/api/iqbuffer/clip`) and its own repository handle,
+/// opened fresh per call like [`hk_pipeline::iqbuffer::IqBufferService`]'s own `Recording` writer
+/// does. Manifests are JSON files under `<data dir>/datasets/`, indexing the `Recording` and
+/// `Annotation` rows `hk_store::dataset::export_dataset` wrote — no database row of their own.
+pub struct PipelineDatasets {
+    db_path: PathBuf,
+    iq_buffer: Arc<hk_pipeline::iqbuffer::IqBufferService>,
+    dir: PathBuf,
+}
+
+impl PipelineDatasets {
+    /// `data_dir` is the run's data directory; manifests land in its `datasets/` subdirectory.
+    pub fn new(
+        db_path: PathBuf,
+        iq_buffer: Arc<hk_pipeline::iqbuffer::IqBufferService>,
+        data_dir: &std::path::Path,
+    ) -> Self {
+        Self {
+            db_path,
+            iq_buffer,
+            dir: data_dir.join("datasets"),
+        }
+    }
+}
+
+/// [`hk_store::dataset::SnippetExporter`] over the pipeline's IQ capture buffer clip writer.
+struct ClipSnippetExporter<'a>(&'a hk_pipeline::iqbuffer::IqBufferService);
+
+impl hk_store::dataset::SnippetExporter for ClipSnippetExporter<'_> {
+    fn export(
+        &mut self,
+        window: hk_model::TimeRange,
+        band: Option<(f64, f64)>,
+    ) -> Result<hk_store::dataset::ExportedSnippet, hk_store::dataset::DatasetError> {
+        use hk_pipeline::iqbuffer::{ClipFailure, ClipRequest};
+        use hk_store::iqbuffer::ClipRange;
+        self.0
+            .export_clip(&ClipRequest {
+                range: ClipRange::Time {
+                    t0_ns: window.start.as_unix_nanos(),
+                    t1_ns: window.end.as_unix_nanos(),
+                },
+                band,
+                label: None,
+                run: None,
+            })
+            .map(|c| hk_store::dataset::ExportedSnippet {
+                recording_id: c.id,
+                sample_rate_hz: c.sample_rate_hz,
+                center_hz: c.center_hz,
+            })
+            .map_err(|e: ClipFailure| {
+                hk_store::dataset::DatasetError::SnippetUnavailable(e.to_string())
+            })
+    }
+}
+
+fn dataset_failed(message: impl Into<String>) -> hk_api::DatasetFailure {
+    hk_api::DatasetFailure {
+        status: 500,
+        code: "failed".into(),
+        message: message.into(),
+    }
+}
+
+fn dataset_error(e: hk_store::dataset::DatasetError) -> hk_api::DatasetFailure {
+    match e {
+        hk_store::dataset::DatasetError::Invalid(m) => hk_api::DatasetFailure {
+            status: 400,
+            code: "invalid".into(),
+            message: m,
+        },
+        hk_store::dataset::DatasetError::Repo(e) => dataset_failed(format!("dataset store: {e}")),
+        hk_store::dataset::DatasetError::SnippetUnavailable(m) => dataset_failed(m),
+    }
+}
+
+impl hk_api::DatasetControl for PipelineDatasets {
+    fn export(
+        &self,
+        req: &hk_store::dataset::DatasetRequest,
+    ) -> Result<Value, hk_api::DatasetFailure> {
+        let mut repo = hk_model::Repository::open(&self.db_path)
+            .map_err(|e| dataset_failed(format!("opening the dataset database: {e}")))?;
+        let mut exporter = ClipSnippetExporter(&self.iq_buffer);
+        let manifest = hk_store::dataset::export_dataset(&mut repo, &mut exporter, req)
+            .map_err(dataset_error)?;
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| dataset_failed(format!("creating the dataset directory: {e}")))?;
+        let body = serde_json::to_value(&manifest).unwrap_or_default();
+        let path = self.dir.join(format!("{}.json", manifest.id));
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+        )
+        .map_err(|e| dataset_failed(format!("writing the dataset manifest: {e}")))?;
+        Ok(body)
+    }
+
+    fn list(&self) -> Result<Value, hk_api::DatasetFailure> {
+        let mut rows: Vec<(String, Value)> = Vec::new();
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(json!({ "datasets": [] }));
+            }
+            Err(e) => return Err(dataset_failed(format!("listing datasets: {e}"))),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| dataset_failed(format!("listing datasets: {e}")))?;
+            let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            let created = v["created_at"].as_str().unwrap_or_default().to_owned();
+            rows.push((created, v));
+        }
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(json!({ "datasets": rows.into_iter().map(|(_, v)| v).collect::<Vec<_>>() }))
+    }
+
+    fn get(&self, id: &str) -> Result<Value, hk_api::DatasetFailure> {
+        if id.contains(['/', '\\']) || id.is_empty() {
+            return Err(hk_api::DatasetFailure {
+                status: 404,
+                code: "not_found".into(),
+                message: "no such dataset".into(),
+            });
+        }
+        let path = self.dir.join(format!("{id}.json"));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text)
+                .map_err(|e| dataset_failed(format!("reading dataset manifest: {e}"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(hk_api::DatasetFailure {
+                status: 404,
+                code: "not_found".into(),
+                message: "no such dataset".into(),
+            }),
+            Err(e) => Err(dataset_failed(format!("reading dataset manifest: {e}"))),
+        }
     }
 }
 

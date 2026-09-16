@@ -19,6 +19,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 # T-116: zstd tile payloads (history codec v2).
 zstd.workspace = true
+# T-205: dataset export manifest ids.
+uuid.workspace = true
 
 [dev-dependencies]
 hk-core.workspace = true
