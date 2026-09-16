@@ -3754,6 +3754,21 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-234
+    milestone: M2-hardening
+    title: "M2 gate test asserts bandit dwell in wall time: under concurrent load it sees 0 outcomes and 0 dwells and fails, though the survey report itself is correct"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPELINE
+    use_cases: [AWARE-042]
+    found_by: "full check after the T-218 merge (2026-09-15): m2_scene.rs:1411 '[T-124] the bandit did not dwell: 0 outcomes, 0 dwells' while three agents ran CPU burners and full suites; passes 3/3 alone at ~41 s; T-218 touched classification rank, migration 0009 and the taxonomy route, none of which can stop the scheduler dwelling"
+    acceptance: "the bandit-dwell assertion no longer depends on wall-clock scheduling: wait for N dwell outcomes against a SAMPLE-CLOCK deadline, or assert the scheduler was GIVEN its dwell budget rather than that it consumed it in real time; note that acceptance-m2 runs under cargo test so a nextest pin cannot apply and the fix must be in the test or the product; passes 20/20 with 6 CPU burners running; the same treatment is applied to scheduler_bandit_e2e, which T-228 left on the same-class list for the same reason; no threshold loosened and no retry added"
+    area: tests/e2e/tests/acceptance/m2_scene.rs, crates/hk-pipeline (bandit dwell accounting), crates/hk-core scheduler
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
