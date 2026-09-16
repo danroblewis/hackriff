@@ -43,6 +43,7 @@ pub mod classifier;
 pub mod density;
 pub mod eval;
 pub mod features;
+pub mod harness;
 pub mod openset;
 pub mod synth;
 pub mod thresholds;
@@ -59,7 +60,9 @@ pub use classifier::{Classifier, ClassifyRequest};
 pub use density::{DensityModel, FamilyScore};
 pub use eval::EvalReport;
 pub use features::{FeatureInput, Features, features};
-pub use fuse::{FamilyPriorSet, FamilyPriors, NoPriors, StaticPriors, fuse as fuse_fn};
+// `FamilyPriorSet`, `FamilyPriors`, `NoPriors`, `StaticPriors` and the `fuse` function come
+// through the `hk_model::classify` re-export above (T-218).
+pub use harness::{GridSize, Harness, OtaTruth, Report, RunMeta, SeedGuard, Split};
 pub use thresholds::{FEATURES_VERSION, RULES_VERSION, THRESHOLDS_VERSION, thresholds_of};
 
 #[cfg(test)]

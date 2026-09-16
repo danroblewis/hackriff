@@ -2582,7 +2582,8 @@ tasks:
   - id: T-160
     milestone: MUI
     title: "MUI API gap 4: stage tap view=spectrum for MPX/subcarrier plots"
-    status: in-progress
+    status: done
+    commit: c9f5fb4
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -3127,7 +3128,8 @@ tasks:
   - id: T-195
     milestone: MUI
     title: "MUI per-signal output panels in the freed right panel: packet inspector for digital, waveform/audio scope + RDS text for FM/AM; one panel per confirmed signal with an active output"
-    status: in-progress
+    status: done
+    commit: 3c4409e
     priority: normal
     deps: [T-192, T-159]
     parallel_group: MUI-X1
@@ -3409,7 +3411,8 @@ tasks:
   - id: T-213
     milestone: M3
     title: "M3 evaluation harness: dev vs acceptance seed split, per-SNR accuracy/unknown-rate reports, OTA labels only from CRC-valid decodes"
-    status: in-progress
+    status: done
+    commit: 001940d
     priority: normal
     deps: [T-211]
     parallel_group: M3V
@@ -3486,7 +3489,7 @@ tasks:
   - id: T-218
     milestone: M3
     title: "M3 contracts skeleton remainder that T-211 left out: fuse() + prior invariants, hk_model::signature module, hk-ml stub crate, EvalReport type, /api/taxonomy route, datasets migration, and the Fingerprint family_of gate (an M2 behaviour change: it would merge fsk/2fsk emitters)"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-211]
     parallel_group: M3K
@@ -3670,7 +3673,8 @@ tasks:
   - id: T-229
     milestone: M2-hardening
     title: "Replay/test harness leaks its temp directories: 2731 hk-replay-<pid>-<ts>-N dirs accumulated to about 12 GB and nearly breached the 20 GB disk floor"
-    status: in-progress
+    status: done
+    commit: 670f39c
     priority: high
     deps: []
     parallel_group: PIPELINE
@@ -3687,7 +3691,7 @@ tasks:
   - id: T-230
     milestone: M3
     title: "Close the classifier accuracy gap to the ADR-0016 floors: top-1 0.754 vs 0.90 and top-2 0.933 vs 0.95, driven by analog/noise-like abstention and a simulation-to-reality gap (both OTA fixtures abstain)"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-199, T-213]
     parallel_group: M3A
@@ -3699,6 +3703,40 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+    baseline_discrepancy: "T-213 (the harness with ENFORCED seed separation) reproduced T-199 but not exactly: top-1 0.732 vs 0.754, top-2 0.923 vs 0.923 reported as 0.933, wrong-label 0.000/0.002 vs 0.000/0.003, held-out unknown recall 0.829 vs 0.81. Two headline figures moved DOWN by about two points. Before optimising anything, explain the difference: is it a measurement change (binning, gate+5 dB selection, per-class vs per-family scoring) or were T-199 numbers optimistic because fitting touched seeds the guard now refuses? Treat the HARNESS numbers as the baseline; do not adopt whichever figure is more favourable. Report the explanation as part of the task."
+
+  - id: T-231
+    milestone: M2-hardening
+    title: "mock_device t057_scheduled_replay_keeps_every_frequency_truthful failed once: a detection 116 kHz outside the recorded band"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: CORE
+    use_cases: []
+    found_by: "T-229 run (2026-09-15), reported as pre-existing and unrelated to the files that task touched"
+    acceptance: "reproduce under load and decide whether the mock device can emit a frequency outside the recorded band (a real truthfulness bug in the device interface, which would undermine every blind test) or whether the detection centre is mis-mapped at a band edge; fix the cause; 20/20 under 6 CPU burners; no bound loosened and no retry added"
+    area: crates/hk-core/src/source (mock SDR), tests/e2e mock_device
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-232
+    milestone: M2-hardening
+    title: "Temp-dir leak persists after T-229: one full suite run grew hk-replay dirs 30 -> 56, and 56 of 57 were dead-pid orphans carrying ring.ci8 files"
+    status: in-progress
+    priority: high
+    deps: [T-229]
+    parallel_group: PIPELINE
+    use_cases: []
+    found_by: "coordinator verification 2026-09-15 after merging T-229: measured before/after a full suite run rather than trusting the fix's own tests"
+    acceptance: "CONFIRM the cause before fixing - two hypotheses, neither established: (a) a MERGE-ORDER GAP - of the 8 files calling temp_data_dir, only crates/hk-cli/tests/iq_buffer_allocation_http.rs (added by T-217, developed in parallel with T-229) lacks TempDataDirGuard, and it deliberately creates rings, matching the ring.ci8 in the orphans; (b) a second path - one pid left 25+ dirs, which a single test cannot explain but a cargo test binary running many tests in one process can, so a guarded call site may not be firing (process killed, helper not taking the guard, or the guard dropped after the harness forked). Then: every temp_data_dir call site holds a guard (assert it with a test that greps or a compile-time pattern); a full suite run leaves NO net new dirs once the sweep age is accounted for; and decide explicitly whether T-229's 1-hour sweep age means fresh leftovers are a BOUNDED lag (acceptable, document it) or an unbounded leak (not). Measure before and after a full suite run, not just targeted tests"
+    area: crates/hk-cli (pipeline.rs temp_data_dir, iq_buffer_allocation_http.rs), tests/e2e
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+    refined_diagnosis: "STRONGEST hypothesis after further evidence (still confirm before fixing): the leaked dirs belong to spawned `hk serve` CHILD processes, not to the test harness. Evidence: two different pids each left EXACTLY 25 dirs (a fixed set of tests in one cargo-test binary, e.g. api_contract start_server), and the contents are a running server data dir - baselines/, captures/, control-audit.jsonl, hackriff.db(+shm/wal), iqbuffer/ring.ci8 - not a scratch dir. A child killed at teardown never runs its RAII Drop, so TempDataDirGuard cannot fire, which also explains why T-229 own tests passed: they covered in-process guards, never killed children. Likely fixes: the PARENT owns and removes the child data dir; or tests stop the server with SIGTERM plus a graceful shutdown path that drops the guard; or the child registers its dir for the next sweep. Prefer parent-side ownership since a SIGKILLed child can never clean up by construction."
+
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
