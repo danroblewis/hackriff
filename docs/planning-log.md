@@ -2450,3 +2450,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Guard case passes:** two stations 300 kHz apart stay two rows with zero relations.
   - **User field case (100.3 MHz): attributed as an IMAGE of 101.303 MHz.** LO 100.8, so 2*100.8 - 101.303 = 100.297; measured 100.3386, error 41.6 kHz against an 83.2 kHz tolerance driven by the source bandwidth. Plausible, not pinpoint; reversible suggestion, never a delete.
   - **Tests:** hk-model 154, api_contract 25, acceptance_m0 31, acceptance_m2 8, hk-pipeline 100, hk-api 45, hk-context 4; fmt and clippy clean.
+- **B0.511 Full check green after the T-224 merge (b8d88ae).** Lint clean; 1451/1451 tests; acceptance 29/29; 34 GB free.
+  - **T-217 launched** (Sonnet, T-178 IQ-ring follow-ups): chosen because it touches files no running agent is editing. T-218 and T-212/T-213 would collide with T-199's classifier work, so they stay queued.
+  - **One slot kept free** for T-219's merge check once its review returns.

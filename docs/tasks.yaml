@@ -3466,7 +3466,7 @@ tasks:
   - id: T-217
     milestone: MUI
     title: "T-178 follow-ups: HTTP-level test that serve answers during ring allocation; count samples lost while a large ring allocates; surface the buffer-off library default; measure ring fsync cost on the Jetson"
-    status: todo
+    status: in-progress
     priority: low
     deps: [T-178]
     parallel_group: STORE
