@@ -59,6 +59,45 @@ Do a design task first, then parallelise.
 
 Keep the demo mergeable; the supervisor rebuilds the bears demo when UI changes land.
 
-## Pending user sign-off: time-bounded signals and a view-scoped inventory (2026-09-16)
+## Time-bounded signals, a view-scoped Explore, and a History surface (2026-09-16)
 
-User direction from live Explore testing: the inventory answers "what has EVER been seen here" but is presented as "what is here NOW", so dead signals pile up as live candidates. The reframe - signals as time-bounded events (bursts and chirps first-class, no carrier or stable frequency required), Explore scoped to the viewed waterfall window with scrub-back over the IQ ring, and the all-time catalogue moved to a separate history surface - is **designed under T-253 and awaits the user's sign-off. Do not implement it from this note.**
+The model is **settled by the user** (CLAUDE.md, "Signal & inventory model"); it is recorded in **[ADR-0017](adr/0017-time-extent-signal-model.md)** and the data-model side is [docs/07 §2.27](07-data-model.md). **The staged plan (ADR-0017 §9, stages TM-1…TM-10) awaits the user's sign-off — do not implement ahead of it.** What follows is what MUI looks like once it lands; it amends the panels above rather than replacing them.
+
+### Explore is scoped to the viewed waterfall window
+
+The bug it fixes: the inventory answers "what has **ever** been seen here" while Explore presents it as "what is here **now**", so dead signals pile up as live candidates.
+
+- The LIVE inventory poll sends `t0 = now − waterfall span`, `t1 = now`. **This amends [ADR-0013 §3.3](adr/0013-ui-architecture.md)**, which currently says the inventory is "unbounded in time" while LIVE — that sentence is the bug.
+- **Candidates are window-scoped.** A candidate is a hypothesis about energy in the current window; outside it there is no energy to hypothesise about, so the row is simply not listed. Nothing expires and nothing is deleted.
+- **Confirmed rows are always listed.** A confirmed emitter is a catalogue entry carrying its own time-presence track. It stays put whether or not it is transmitting, and its **liveness** says which.
+- **Liveness** per row, from the API (`presence.liveness`): `live` (on air now), `ended` (with `ended_t_s` — "ended 4 min ago"), `absent` (Confirmed only).
+- **Sort by in-window on-air time, never by `count`.** `count` is a lifetime total and belongs to History only.
+- Rows show `intervals` and `on_air_s` ("17 events over 6 h, 4.2 s on air"), **never** the `first_seen`→`last_seen` hull as if it were a duration.
+- The family may be marked *(from earlier)* when `family_in_window` is `null` — the classification stands, but nothing in this window re-evidenced it.
+
+### Boxes, not brackets
+
+Each in-window row draws a **box** spanning the spectrum trace and the waterfall: `(f_lo..f_hi) × (presence interval ∩ window)`, one per intersecting interval.
+
+- A persisting signal's box **grows** along the time axis as its open interval advances with the live edge.
+- A one-off burst's box is a few milliseconds tall and stays that way. Bursts finally look like bursts.
+- A chirp gets the **bounding box** of its sweep (ADR-0017 §1.3 — a swept polyline is a later refinement, deliberately not in the plan).
+- The **focused** row keeps the existing draggable-edge yellow box from the docs/15 §7 scope above, so the user-band drag (T-191) is unaffected.
+
+### Timeline scrubber and scrub-back
+
+- The scrubber **marks past events** over the capture window from presence intervals, so a burst is visible on the timeline before you scrub to it.
+- Scrubbing sets `[t0, t1]` and **re-derives** the lists and the boxes from the same query — one indexed range query, not a detector replay, which is why it stays interactive.
+- Waterfall detail below the tile resolution comes from the IQ ring ([ADR-0014](adr/0014-iq-capture-ring.md), 30 min on staging); above it, from `/api/history` tiles. The **lists** come from the interval query and reach as far back as retention allows.
+
+### History surface (workflow #3)
+
+A **separate surface**, not a tab of Explore: the durable catalogue of every event, one-offs included, browsable by region and time (`GET /api/events`, and `GET /api/inventory/{id}/presence` for one emitter's track).
+
+Nothing is ever deleted from the record to make the live list correct — that is the whole point of splitting the surfaces.
+
+### Listen and decode (the latency ruling)
+
+ADR-0017 §6 rules that **Listen stays live-edge** ([ADR-0011 §8.5](adr/0011-decoder-workbench-contracts.md)) and that "decode only the newly-arrived part" governs **bounded-region** analysis, not live audio.
+
+For the UI this means: a region job and a listener on the same signal are **two pipelines in the dock**, not one. A gap in RDS text beside live audio is correct behaviour (the sibling decode output inherits the audio reader's policy), not a bug to chase — relevant to the RDS readout panel.
