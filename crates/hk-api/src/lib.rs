@@ -32,6 +32,7 @@ pub mod auth;
 pub mod bridge;
 pub mod captures;
 pub mod control;
+pub mod datasets; // T-205
 pub mod decode; // T-159
 pub mod http;
 pub mod inspector;
@@ -61,6 +62,7 @@ pub use bridge::{StreamInfo, StreamRegistry};
 pub use control::{
     AuditLog, DisplayLimits, DisplayState, DisplayUpdate, RecordingState, RunControl, RunState,
 };
+pub use datasets::{DatasetControl, DatasetFailure};
 pub use http::{ApiState, ROUTES, Server, ServerConfig};
 pub use iqbuffer::{ClipStart, IqBufferControl, IqBufferFailure, IqBufferQuery};
 pub use live_control::{

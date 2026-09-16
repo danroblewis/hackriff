@@ -30,6 +30,8 @@
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
 //! | `/api/outputs[/record/start\|/record/stop]`, `/api/outputs/<id>/files/<name>` | GET, POST | token (header only for mutating) | T-061 output recordings and downloads ([`crate::outputs`]) |
 //! | `/api/analyze` | POST | token | T-190 stub: validates a selection/emitter/band target, answers `501 not_implemented` until MAUTO fills it in ([`crate::analyze`]) |
+//! | `/api/iqbuffer[?…]`, `/api/iqbuffer/clip` | GET, POST | token (header only for mutating) | T-157 rolling IQ capture buffer and clip export ([`crate::iqbuffer`]) |
+//! | `/api/datasets[/<id>]` | GET, POST | token (header only for mutating) | T-205 labelled-capture dataset export (CRC-valid decodes and user labels) ([`crate::datasets`]) |
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
@@ -129,6 +131,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     // T-157 rolling IQ capture buffer
     ("GET", "/api/iqbuffer"),
     ("POST", "/api/iqbuffer/clip"),
+    // T-205 labelled-capture dataset export
+    ("GET", "/api/datasets"),
+    ("POST", "/api/datasets"),
+    ("GET", "/api/datasets/{id}"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
@@ -285,6 +291,9 @@ pub struct ApiState {
     /// T-157: the rolling IQ capture buffer for `/api/iqbuffer*` ([`crate::iqbuffer`]); `None`
     /// answers 503.
     pub iq_buffer: Option<Arc<dyn crate::iqbuffer::IqBufferControl>>,
+    /// T-205: labelled-capture dataset export for `/api/datasets*` ([`crate::datasets`]); `None`
+    /// answers 503.
+    pub datasets: Option<Arc<dyn crate::datasets::DatasetControl>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -753,6 +762,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::outputs::route(state, &ctl))
         .or_else(|| crate::analyze::route(state, &ctl)) // T-190
         .or_else(|| crate::iqbuffer::route(state, &ctl)) // T-157
+        .or_else(|| crate::datasets::route(state, &ctl)) // T-205
         // Decoder workbench (ADR-0011 §7): one line per owning task, pre-added by T-085.
         .or_else(|| crate::recipes::route(state, &ctl)) // T-088
         .or_else(|| crate::inspector::route(state, &ctl)) // T-089
