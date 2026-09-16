@@ -188,6 +188,88 @@ pub struct CoverageSummary {
     pub gaps_truncated: bool,
 }
 
+/// One cell of an [`Overview`] (T-338). Unobserved when `sources == 0`: not observed is not quiet
+/// (C26), so an empty cell is `NaN`, never a floor or a zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverviewCell {
+    /// Max-hold over the folded cells, dB/Hz; `NaN` when none was observed.
+    pub max_db: f32,
+    /// Highest `occupancy_max` folded; `NaN` when none was observed.
+    pub occupancy_max: f32,
+    /// Mean observed fraction of the folded cells (0 when none was observed).
+    pub coverage: f32,
+    /// Frames behind the cell.
+    pub frames: u64,
+    /// Observed source cells folded in. `0` = unobserved.
+    pub sources: u32,
+}
+
+impl OverviewCell {
+    /// A cell nothing was folded into.
+    pub const UNOBSERVED: OverviewCell = OverviewCell {
+        max_db: f32::NAN,
+        occupancy_max: f32::NAN,
+        coverage: 0.0,
+        frames: 0,
+        sources: 0,
+    };
+
+    /// Whether anything was observed here.
+    pub fn observed(&self) -> bool {
+        self.sources > 0
+    }
+
+    fn fold(&mut self, c: &CellStats) {
+        self.max_db = if self.sources == 0 {
+            c.max_db
+        } else {
+            self.max_db.max(c.max_db)
+        };
+        self.occupancy_max = if self.sources == 0 {
+            c.occupancy_max
+        } else {
+            self.occupancy_max.max(c.occupancy_max)
+        };
+        self.coverage += c.coverage;
+        self.frames += u64::from(c.frames);
+        self.sources += 1;
+    }
+}
+
+/// A [`RegionHistory`] compressed onto a fixed `nt × nf` grid laid on a requested window
+/// ([`RegionHistory::overview`], T-338).
+///
+/// Unlike a [`RegionHistory`], whose grid is the pyramid level's and snaps outward, an overview's
+/// cells are exactly `window / nt` by `(hi − lo) / nf`, so the grid **is** the window it was asked
+/// for: the timeline that draws it spans the capture window and nothing else.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Overview {
+    /// Time cells.
+    pub nt: usize,
+    /// Frequency cells.
+    pub nf: usize,
+    /// Start of time cell 0, Unix ns (the window's start exactly).
+    pub t0_ns: i64,
+    /// Time-cell duration, ns (fractional: the window divided by `nt`, not a pyramid tier).
+    pub t_cell_ns: f64,
+    /// Low edge of frequency cell 0, Hz.
+    pub f_lo_hz: f64,
+    /// Frequency-cell width, Hz.
+    pub f_cell_hz: f64,
+    /// Cells, row-major: time then frequency.
+    pub cells: Vec<OverviewCell>,
+    /// Cells into which at least one observed source cell was folded.
+    pub observed_cells: usize,
+    /// Time cells of the source grid (what the pyramid level gave).
+    pub src_nt: usize,
+    /// Frequency cells of the source grid.
+    pub src_nf: usize,
+    /// `(min, max)` of the observed `max_db`, the grid's own dynamic range; `None` when nothing was
+    /// observed. Served so the client never decides a colour scale from the numbers it happens to
+    /// hold — that choice is a measurement too.
+    pub range_db: Option<(f32, f32)>,
+}
+
 impl RegionHistory {
     /// The grid's coverage mask digest: observed cells, mean coverage, fully unobserved time runs.
     pub fn coverage_summary(&self) -> CoverageSummary {
@@ -254,6 +336,100 @@ impl RegionHistory {
                 (c.hi_hz.min(channel.hi_hz) - c.lo_hz.max(channel.lo_hz)) >= need
             })
             .collect()
+    }
+
+    /// Compresses the grid onto an `nt × nf` overview covering exactly `window × freq` (T-338).
+    ///
+    /// This is the **backend** half of the timeline's compressed "sideways" overview waterfall. The
+    /// pyramid's ladder couples its two axes — a level coarse enough in frequency to fit a thin
+    /// strip's rows (100 kHz cells) has one-day time cells — so no single level can serve a grid
+    /// that is fine in time and coarse in frequency. Choosing which measured value stands for an
+    /// output cell is a **measurement**, and T-334 put measurements here rather than in the client;
+    /// this is that reduction, done once, over cells the pyramid already returned.
+    ///
+    /// **Every statistic folded here folds exactly**, which is why only these four are carried:
+    /// the max of max-holds is the max-hold, the max of `occupancy_max` is the peak occupancy,
+    /// frames sum, and `coverage` is a mean over source cells of equal duration — the observed
+    /// fraction of the output cell. Nothing is invented: a percentile (`p_low_db`, `floor_db`)
+    /// cannot be folded from cell values at all, so it is not offered rather than approximated.
+    ///
+    /// The output grid is laid on `window`/`freq`, not on the source's outward-snapped grid: output
+    /// cell `(t, f)` covers `[window.start + t·Δt, …)` × `[freq.lo_hz + f·Δf, …)` and takes every
+    /// source cell that **overlaps** it. A source cell coarser than an output cell therefore
+    /// replicates across the output cells it covers — T-334's safe direction (a measured value
+    /// repeated), never an interpolated one.
+    ///
+    /// `nt` and `nf` must be at least 1; `window` must have positive duration.
+    pub fn overview(&self, window: TimeRange, freq: FreqRange, nt: usize, nf: usize) -> Overview {
+        let (nt, nf) = (nt.max(1), nf.max(1));
+        let (t0_ns, t1_ns) = (
+            window.start.as_unix_nanos(),
+            window
+                .end
+                .as_unix_nanos()
+                .max(window.start.as_unix_nanos() + 1),
+        );
+        let (f_lo, f_hi) = (freq.lo_hz, freq.hi_hz.max(freq.lo_hz + f64::EPSILON));
+        let dt = (t1_ns - t0_ns) as f64 / nt as f64;
+        let df = (f_hi - f_lo) / nf as f64;
+        let mut cells = vec![OverviewCell::UNOBSERVED; nt * nf];
+        // Source cell (t, f) → the output cells it overlaps. Half-open on both axes, so a source
+        // boundary landing exactly on an output boundary contributes to the later cell only.
+        let span = |lo: f64, hi: f64, origin: f64, step: f64, n: usize| -> (usize, usize) {
+            let a = ((lo - origin) / step).floor().max(0.0) as usize;
+            let b = (((hi - origin) / step).ceil().max(0.0) as usize).min(n);
+            (a.min(n), b.max(a.min(n)))
+        };
+        for t in 0..self.nt {
+            let cell_t0 = (self.t_first_cell + t as i64) * self.t_cell_ns;
+            let (ta, tb) = span(
+                (cell_t0 - t0_ns) as f64,
+                (cell_t0 + self.t_cell_ns - t0_ns) as f64,
+                0.0,
+                dt,
+                nt,
+            );
+            if ta >= tb {
+                continue;
+            }
+            for f in 0..self.nf {
+                let src = self.cell(t, f);
+                if !src.observed() {
+                    continue;
+                }
+                let cell_f0 = (self.f_first_cell + f as i64) as f64 * self.f_cell_hz;
+                let (fa, fb) = span(cell_f0, cell_f0 + self.f_cell_hz, f_lo, df, nf);
+                for ot in ta..tb {
+                    for of in fa..fb {
+                        cells[ot * nf + of].fold(src);
+                    }
+                }
+            }
+        }
+        let (mut lo_db, mut hi_db) = (f32::INFINITY, f32::NEG_INFINITY);
+        let mut observed_cells = 0;
+        for c in &mut cells {
+            if c.sources == 0 {
+                continue;
+            }
+            observed_cells += 1;
+            c.coverage /= c.sources as f32;
+            lo_db = lo_db.min(c.max_db);
+            hi_db = hi_db.max(c.max_db);
+        }
+        Overview {
+            nt,
+            nf,
+            t0_ns,
+            t_cell_ns: dt,
+            f_lo_hz: f_lo,
+            f_cell_hz: df,
+            cells,
+            observed_cells,
+            src_nt: self.nt,
+            src_nf: self.nf,
+            range_db: (observed_cells > 0).then_some((lo_db, hi_db)),
+        }
     }
 
     /// Per-channel summaries over the grid. See [`ChannelSummary`] for the estimators.

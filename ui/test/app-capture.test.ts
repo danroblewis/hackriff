@@ -1,38 +1,69 @@
-// T-150 (ADR-0013 §3.3, §4.4, §8): capture-timeline pure helpers — activity-band reduction,
-// scrub↔time mapping and the "reviewing N ago" / coverage wording. No DOM.
+// T-150 (ADR-0013 §3.3, §4.4, §8): capture-timeline pure helpers — scrub↔time mapping, the
+// "reviewing N ago" / coverage wording, and shading a grid the backend measured. No DOM.
+//
+// T-338: there is no `WINDOW_S` any more. Every helper takes the capture window's span, and the
+// span comes from `GET /api/timeline` (the IQ ring's configured retention). The test at the bottom
+// of this file is the guard: a default would let the band silently size itself from a constant
+// again, which is exactly the failure the user's invariant names.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  DRAG_PX, MAX_MARKS, MIN_MARK_PCT, WINDOW_S, agoText, coverageText, currentSpan, eventMarkTitle, eventMarks,
-  inCoverageGap, iqBackingAt, pctForAgo, reduceActivity, ringSpan, scrubDataNote, scrubToTime, selectionSpans,
-  timeRegionName, timeWindowFromScrub, type EventRow, type HistoryGrid,
+  DRAG_PX, MAX_MARKS, MIN_MARK_PCT, agoText, bufferedSpan, captureWindow, coverageText, currentSpan, durationText,
+  eventMarkTitle, eventMarks, inCoverageGap, iqBackingAt, observedFraction, overviewShade, pctForAgo,
+  scrubDataNote, scrubToTime, selectionSpans, timeRegionName, timeWindowFromScrub,
+  type CaptureWindow, type EventRow,
 } from "../src/app/capture/timeline";
 
-test("reduceActivity: empty grid and an all-gap grid are every column null", () => {
-  assert.deepEqual(reduceActivity({ nf: 0, nt: 0, max_db: [] }, 4), [null, null, null, null]);
-  assert.deepEqual(reduceActivity({ nf: 2, nt: 2, max_db: [null, null, null, null] }, 2), [null, null]);
+/** A capture window as `GET /api/timeline` reports it. */
+const winOf = (t1S: number, spanS: number, buffered: { t0S: number; t1S: number } | null = null): CaptureWindow =>
+  ({ t0S: t1S - spanS, t1S, spanS, buffered });
+
+test("captureWindow: the band is the ring's retention, and an incomplete window is unknown", () => {
+  // The invariant, at the client's edge. The span is whatever the backend reported, so a
+  // reconfigured retention moves the band; anything missing is `null`, never a default span.
+  const w = captureWindow({ window: { t0_s: 900, t1_s: 1000, span_s: 100, buffered: { t0_s: 970, t1_s: 1000 } } });
+  assert.deepEqual(w, { t0S: 900, t1S: 1000, spanS: 100, buffered: { t0S: 970, t1S: 1000 } });
+  assert.equal(captureWindow({ window: { t0_s: 900, t1_s: 1000, span_s: 3600, buffered: null } })!.spanS, 3600,
+    "a longer retention is a longer band, not a rescaled one");
+  assert.equal(captureWindow(null), null, "not answered yet");
+  assert.equal(captureWindow({ window: null }), null, "no capture window on this server");
+  assert.equal(captureWindow({ window: { t0_s: null, t1_s: null, span_s: null } }), null, "no live edge yet");
+  assert.equal(captureWindow({ window: { t0_s: 900, t1_s: 1000, span_s: 0 } }), null, "a zero retention is no band");
 });
 
-test("reduceActivity: a column's value is the max over every frequency bin in its time share", () => {
-  // One time row, two frequency bins, one column: the column covers both, so its value is their max.
-  assert.deepEqual(reduceActivity({ nf: 2, nt: 1, max_db: [-90, -60] }, 1), [1]);
+test("bufferedSpan: what the ring holds sits inside the band and never resizes it", () => {
+  // A ring part-way through filling covers part of its retention. That difference is the thing the
+  // track exists to show, so it is placed against the band, not used to shorten it.
+  assert.deepEqual(bufferedSpan(winOf(1000, 100, { t0S: 950, t1S: 1000 })), { id: "ring", leftPct: 50, widthPct: 50 });
+  assert.deepEqual(bufferedSpan(winOf(1000, 100, { t0S: 900, t1S: 1000 })), { id: "ring", leftPct: 0, widthPct: 100 });
+  assert.equal(bufferedSpan(winOf(1000, 100, null)), null, "a ring holding nothing is unknown, not empty");
+  assert.equal(bufferedSpan(null), null, "not answered yet");
 });
 
-test("reduceActivity: columns are chronological and normalised against the grid's own range", () => {
-  const grid: HistoryGrid = { nf: 1, nt: 2, max_db: [-90, -60] };
-  assert.deepEqual(reduceActivity(grid, 2), [0, 1]);
+test("overviewShade: normalised against the range the backend measured, not against the values in hand", () => {
+  // Deciding a band's dynamic range from whatever came back is a measurement. With a served range
+  // the shade is arithmetic; without one there is nothing measured to shade against.
+  const grid = { nt: 2, nf: 1, max_db: [-100, -60], range_db: { lo: -100, hi: -60 } };
+  assert.equal(overviewShade(grid, 0), 0);
+  assert.equal(overviewShade(grid, 1), 1);
+  // the same values against a wider measured range shade differently — proof the range is used
+  assert.equal(overviewShade({ ...grid, range_db: { lo: -100, hi: -20 } }, 1), 0.5);
+  assert.equal(overviewShade({ ...grid, range_db: null }, 1), null, "no measured range, no shading");
+  assert.equal(overviewShade({ nt: 1, nf: 1, max_db: [null], range_db: { lo: -100, hi: -60 } }, 0), null,
+    "an unobserved cell is null, never the low end of the scale");
 });
 
-test("reduceActivity: a column with no observed cell is null even when other columns have data", () => {
-  const grid: HistoryGrid = { nf: 1, nt: 2, max_db: [-80, null] };
-  assert.deepEqual(reduceActivity(grid, 2), [0, null]);
+test("observedFraction comes from the grid's own counts, and unknown stays unknown", () => {
+  assert.equal(observedFraction({ nt: 4, nf: 2, max_db: [], cells: 8, observed_cells: 2 }), 0.25);
+  assert.equal(observedFraction(null), null, "not asked yet is never 'nothing was observed'");
+  assert.equal(observedFraction({ nt: 4, nf: 2, max_db: [] }), null, "counts absent is unknown");
 });
 
 test("scrubToTime: live past 98.5%, otherwise ago maps linearly over the window", () => {
   const now = 1_800_000_000;
-  assert.deepEqual(scrubToTime(100, now, WINDOW_S), { live: true, tS: now, agoS: 0 });
-  assert.deepEqual(scrubToTime(99, now, WINDOW_S), { live: true, tS: now, agoS: 0 });
+  assert.deepEqual(scrubToTime(100, now, 48 * 3600), { live: true, tS: now, agoS: 0 });
+  assert.deepEqual(scrubToTime(99, now, 48 * 3600), { live: true, tS: now, agoS: 0 });
   const mid = scrubToTime(50, now, 100);
   assert.equal(mid.live, false);
   assert.equal(mid.agoS, 50);
@@ -55,11 +86,22 @@ test("agoText: minutes under an hour, hours to one decimal above", () => {
   assert.equal(agoText(3 * 3600), "3.0 h");
 });
 
-test("coverageText: honest interim, no invented buffered-hours/bytes numbers", () => {
-  assert.equal(coverageText(null), "coverage unknown");
-  assert.equal(coverageText(0.992), "99% of the last 48 h observed");
-  assert.equal(coverageText(0), "0% of the last 48 h observed");
-  assert.doesNotMatch(coverageText(0.5), /GB|buffered/);
+test("coverageText names the capture window it measured, never a constant", () => {
+  assert.equal(coverageText(null, 120), "coverage unknown");
+  assert.equal(coverageText(0.5, null), "coverage unknown", "no window is unknown, not 50% of nothing");
+  assert.equal(coverageText(0.992, 60), "99% of the retained 60 s observed");
+  assert.equal(coverageText(0, 3600), "0% of the retained 1.0 h observed");
+  // the wording follows the configured retention: a reconfigured ring reads differently
+  assert.notEqual(coverageText(0.5, 60), coverageText(0.5, 3600));
+  assert.doesNotMatch(coverageText(0.5, 60), /GB|buffered|48 h/);
+});
+
+test("durationText keeps seconds: a 90 s retention is not rounded into minutes", () => {
+  assert.equal(durationText(45), "45 s");
+  assert.equal(durationText(89), "89 s");
+  assert.equal(durationText(120), "2 min");
+  assert.equal(durationText(300), "5 min");
+  assert.equal(durationText(3600), "1.0 h");
 });
 
 test("currentSpan prefers the live geometry, falls back to the tuned device span, else null", () => {
@@ -125,7 +167,7 @@ test("eventMarks: a one-off burst keeps its measured timespan and is still drawn
   // time model, so it is drawn at the floor — and the floor is a drawing width, never a duration:
   // tStartS/tEndS keep what was measured, and eventMarkTitle reports the real 40 ms.
   const now = 1_800_000_000;
-  const [m] = eventMarks([evRow({ presence: { last_interval: { t_start_s: now - 3600, t_end_s: now - 3599.96 } } })], now);
+  const [m] = eventMarks([evRow({ presence: { last_interval: { t_start_s: now - 3600, t_end_s: now - 3599.96 } } })], now, 48 * 3600);
   assert.equal(m.widthPct, MIN_MARK_PCT);
   assert.ok(Math.abs(m.tEndS - m.tStartS - 0.04) < 1e-6, "the measured timespan is carried through untouched");
   assert.match(eventMarkTitle(m, now), /lasted 40 ms/, "the title reports the measurement, not the drawn width");
@@ -161,21 +203,12 @@ test("eventMarks carries no liveness: an appearance never measured one", () => {
 
 // ---- what backs a scrub-back: no data vs nothing on air ----
 
-test("ringSpan: only a ring that is enabled and holds something is placed; everything else is unknown", () => {
-  const now = 1000;
-  assert.equal(ringSpan(null, now, 100), null, "not answered yet");
-  assert.equal(ringSpan({ enabled: false, t0: null, t1: null }, now, 100), null, "no ring on this server");
-  assert.equal(ringSpan({ enabled: true, t0: null, t1: null }, now, 100), null, "a ring holding nothing");
-  assert.equal(ringSpan({ enabled: true, t0: 700, t1: 800 }, now, 100), null, "rolled past the retained window");
-  assert.deepEqual(ringSpan({ enabled: true, t0: 950, t1: 1000 }, now, 100), { id: "ring", leftPct: 50, widthPct: 50 });
-});
-
 test("iqBackingAt / inCoverageGap: three distinct answers, and unknown is one of them", () => {
-  const ring = { enabled: true, t0: 900, t1: 1000 };
+  const ring = winOf(1000, 3600, { t0S: 900, t1S: 1000 });
   assert.equal(iqBackingAt(1000, true, ring), "live");
   assert.equal(iqBackingAt(950, false, ring), "ring");
   assert.equal(iqBackingAt(500, false, ring), "outside-ring");
-  assert.equal(iqBackingAt(950, false, null), "unknown", "an unanswered status is not 'no ring'");
+  assert.equal(iqBackingAt(950, false, null), "unknown", "an unanswered window is not 'no ring'");
   assert.equal(inCoverageGap(950, null), null, "no coverage summary yet is unknown, not observed");
   assert.equal(inCoverageGap(950, [{ t0_s: 940, t1_s: 960 }]), true);
   assert.equal(inCoverageGap(970, [{ t0_s: 940, t1_s: 960 }]), false);
@@ -184,7 +217,7 @@ test("iqBackingAt / inCoverageGap: three distinct answers, and unknown is one of
 test("scrubDataNote: an unobserved window never reads as a quiet band", () => {
   // The trap this exists for: an empty list over a window nobody listened to is not a measurement
   // that nothing was transmitting. The two claims lead a user to act differently.
-  const ring = { enabled: true, t0: 900, t1: 1000 };
+  const ring = winOf(1000, 3600, { t0S: 900, t1S: 1000 });
   const gapNote = scrubDataNote(950, false, ring, [{ t0_s: 940, t1_s: 960 }]);
   assert.match(gapNote, /no data for this window/);
   // every mention of quiet in the sentence is a negated one: the note denies the reading, and
@@ -198,7 +231,7 @@ test("scrubDataNote: an unobserved window never reads as a quiet band", () => {
 });
 
 test("scrubDataNote: live says nothing extra; the ring, past the ring, and unknown are distinct", () => {
-  const ring = { enabled: true, t0: 900, t1: 1000 };
+  const ring = winOf(1000, 3600, { t0S: 900, t1S: 1000 });
   assert.equal(scrubDataNote(1000, true, ring, []), "", "the band's own coverage text speaks for the live edge");
   assert.match(scrubDataNote(950, false, ring, []), /IQ retained/);
   assert.match(scrubDataNote(500, false, ring, []), /past the IQ ring/);
@@ -208,8 +241,20 @@ test("scrubDataNote: live says nothing extra; the ring, past the ring, and unkno
   assert.equal(new Set(notes).size, 3, "three different situations never share one sentence");
 });
 
-test("capture.css: the marks layer and the ring track are drawn, and neither is fixed-width", () => {
+test("the band's span has no default: nothing can fall back to a constant window", () => {
+  // The regression this file exists to prevent. `WINDOW_S = 48 * 3600` used to size the scrubber,
+  // which let it offer times the IQ ring had already overwritten. Every helper must require the
+  // span, and no RF or retention constant may live in this module.
+  const src = readFileSync("src/app/capture/timeline.ts", "utf8");
+  assert.doesNotMatch(src, /windowS\s*:\s*number\s*=/, "a defaulted windowS is a constant in disguise");
+  assert.doesNotMatch(src, /(export )?const WINDOW_S/, "the constant itself is gone, not merely unused");
+  assert.doesNotMatch(src.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, ""), /48\s*\*\s*3600/);
+});
+
+test("capture.css: the marks layer, ring track and overview canvas are drawn, and none is fixed-width", () => {
   const css = readFileSync("src/app/capture/capture.css", "utf8");
+  assert.match(css, /\.cap-overview\s*\{/, "the band is a data display, not an empty box");
+  assert.match(css, /image-rendering:\s*pixelated/, "upscaling repeats measured cells, never interpolates");
   assert.match(css, /\.cap-mark\s*\{/);
   assert.match(css, /\.cap-mark\.confirmed\s*\{/, "confirmed and candidate marks are told apart");
   assert.match(css, /\.cap-ring\s*\{/);

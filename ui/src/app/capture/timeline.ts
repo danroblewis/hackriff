@@ -1,63 +1,98 @@
-// Capture-timeline pure helpers (ADR-0013 §3.3, §4.4, §8). Owner: T-150. Activity-band reduction,
-// scrub↔time mapping and the "reviewing N ago" wording — no DOM, no fetch, unit-tested. API GAP 1
-// (rolling capture buffer / clip export): none of this invents buffered-hours or byte-quota
-// numbers; the retained window is a fixed UI constant (this device's own history), and the note
-// text uses only `coverage_summary.observed_fraction` from `GET /api/history`.
+// Capture-timeline pure helpers (ADR-0013 §3.3, §4.4, §8). Owner: T-150. Scrub↔time mapping, the
+// "reviewing N ago" wording and the shading arithmetic for a grid the backend measured — no DOM, no
+// fetch, no RF constants, unit-tested.
+//
+// T-338 — **the band's span is not this file's to decide.** It was a hard-coded `WINDOW_S = 48 h`,
+// which is the failure the user's invariant names: a scrubber sized from anything but the capture
+// window offers times the IQ ring has already overwritten, and looks right while it lies. Every
+// function here now takes `windowS` and there is no default, so nothing can silently fall back to a
+// constant; `GET /api/timeline` supplies it from the ring's configured retention (docs/api.md,
+// "The capture window, and the overview drawn on it").
+//
+// The band's *content* is not this file's either. Reducing a history grid to drawn columns used to
+// happen here (`reduceActivity`, a max over every frequency cell plus a min/max normalisation);
+// both were measurements, and T-334's rule puts measurements in the backend. `/api/timeline` now
+// serves the compressed grid and its dynamic range, and what is left below is arithmetic over
+// numbers the backend already decided.
 
-/** The retained window the capture band always shows (48 h, matching the mockup). */
-export const WINDOW_S = 48 * 3600;
+/** The capture window `GET /api/timeline` reports: the IQ ring's configured retention (ADR-0014),
+ * which is what the band spans — never the longer, lossy spectrum-history horizon. */
+export interface CaptureWindow {
+  /** Band start / end / span, Unix s. */
+  t0S: number; t1S: number; spanS: number;
+  /** What the ring currently holds, inside the band; `null` when it holds nothing. */
+  buffered: { t0S: number; t1S: number } | null;
+}
 
-/** The `/api/history` fields the activity band needs. */
-export interface HistoryGrid { nf: number; nt: number; max_db: readonly (number | null)[] }
+/** The `GET /api/timeline` response fields the band reads. */
+export interface TimelineResponse {
+  window?: {
+    enabled?: boolean;
+    retention_s?: number | null;
+    t0_s?: number | null; t1_s?: number | null; span_s?: number | null;
+    buffered?: { t0_s: number; t1_s: number } | null;
+  } | null;
+  grid?: OverviewResponse | null;
+}
 
 /**
- * Reduces a `nt × nf` history grid (row-major: time then frequency) to `columns` values in
- * chronological order: each column is the max `max_db` over its share of time rows and every
- * frequency bin, normalised 0–1 against the grid's own observed range. `null` means no cell in
- * that share of the grid was observed — an unobserved gap, drawn grey (C26), never quiet.
- *
- * T-334 — **the time axis is no longer reduced here.** The band asks for `max_t = columns`, so the
- * backend serves one time cell per drawn column (or fewer, when the pyramid ladder has nothing
- * finer) and the `t0…t1` loop below **replicates** a served cell across columns rather than
- * choosing which of several values a column stands for. It only reduces when the response reports
- * `resolution.over_resolved` containing `"max_t"`.
- *
- * **The frequency collapse and the normalisation are still client-side measurements, and they are
- * known debt, not an exemption.** "Max over the band" is the same operation that
- * `GET /api/analysis/strongest` exists to keep in the backend, and the min/max normalisation
- * decides the band's dynamic range from whatever happened to be in the response. The pyramid
- * cannot serve them: its coarsest cell is 100 kHz, so no `max_f` collapses a megahertz-wide band
- * to one column, and a band-collapsed activity-vs-time series is a backend product that does not
- * exist yet (filed as follow-up; see docs/14 "Span-matched resolution").
+ * The capture window, or `null` when the server reports none — no ring, no retention, or no live
+ * edge yet. `null` is **unknown**, and the band must draw it as unknown: a default span here would
+ * be the 48 h constant all over again.
  */
-export function reduceActivity(grid: HistoryGrid, columns: number): (number | null)[] {
-  const { nf, nt, max_db } = grid;
-  if (columns <= 0) return [];
-  if (nt <= 0 || nf <= 0) return new Array(columns).fill(null);
-  let lo = Infinity, hi = -Infinity;
-  for (const v of max_db) if (v !== null) { if (v < lo) lo = v; if (v > hi) hi = v; }
-  const range = hi > lo ? hi - lo : 1;
-  const out: (number | null)[] = [];
-  for (let c = 0; c < columns; c++) {
-    const t0 = Math.floor((c * nt) / columns), t1 = Math.max(t0 + 1, Math.floor(((c + 1) * nt) / columns));
-    let m: number | null = null;
-    for (let t = t0; t < t1; t++) {
-      const row = t * nf;
-      for (let f = 0; f < nf; f++) {
-        const v = max_db[row + f];
-        if (v !== null && (m === null || v > m)) m = v;
-      }
-    }
-    out.push(m === null ? null : Math.max(0, Math.min(1, (m - lo) / range)));
-  }
-  return out;
+export function captureWindow(r: TimelineResponse | null): CaptureWindow | null {
+  const w = r?.window;
+  if (!w) return null;
+  const { t0_s, t1_s, span_s } = w;
+  if (typeof t0_s !== "number" || typeof t1_s !== "number" || typeof span_s !== "number") return null;
+  if (!(span_s > 0) || !(t1_s > t0_s)) return null;
+  const b = w.buffered;
+  return {
+    t0S: t0_s, t1S: t1_s, spanS: span_s,
+    buffered: b && typeof b.t0_s === "number" && typeof b.t1_s === "number" ? { t0S: b.t0_s, t1S: b.t1_s } : null,
+  };
+}
+
+/** The compressed overview grid `GET /api/timeline` draws the band from: `nt × nf` cells, row-major
+ * (time then frequency), already folded onto the capture window by the backend. `null` in `max_db`
+ * is **not observed**, never quiet (C26). */
+export interface OverviewResponse {
+  nt: number; nf: number;
+  max_db: readonly (number | null)[];
+  range_db?: { lo: number; hi: number } | null;
+  /** Cells in the grid, and the ones something was folded into. */
+  cells?: number; observed_cells?: number;
+}
+
+/** The observed fraction of the capture window, from the grid's own counts; `null` when no grid has
+ * been served (unknown, never "nothing was observed"). */
+export function observedFraction(grid: OverviewResponse | null | undefined): number | null {
+  if (!grid || typeof grid.cells !== "number" || typeof grid.observed_cells !== "number") return null;
+  return grid.cells > 0 ? grid.observed_cells / grid.cells : null;
+}
+
+/**
+ * The 0–1 shade of one overview cell, against the range **the backend measured** (`range_db`), or
+ * `null` for a cell nothing was observed in.
+ *
+ * Deliberately not a normalisation over the values in hand: deciding a band's dynamic range from
+ * whatever came back is a measurement, and it belongs where the floor and the occupancy are known.
+ * With no range served there is nothing measured to shade against, so every cell reads unknown.
+ */
+export function overviewShade(grid: OverviewResponse, index: number): number | null {
+  const v = grid.max_db[index];
+  const r = grid.range_db;
+  if (v === null || v === undefined || !r) return null;
+  const span = r.hi > r.lo ? r.hi - r.lo : 1;
+  return Math.max(0, Math.min(1, (v - r.lo) / span));
 }
 
 export interface Scrub { live: boolean; tS: number; agoS: number }
 
 /** Maps a pointer's percent along the band to a time cursor: > 98.5 % is live, otherwise it's
- * `agoS` seconds before `nowS` (0…`windowS`, clamped). */
-export function scrubToTime(pct: number, nowS: number, windowS: number = WINDOW_S): Scrub {
+ * `agoS` seconds before `nowS` (0…`windowS`, clamped). `windowS` is the capture window's span and
+ * has no default — see the note at the top of this file. */
+export function scrubToTime(pct: number, nowS: number, windowS: number): Scrub {
   const clamped = Math.max(0, Math.min(100, pct));
   const live = clamped > 98.5;
   const agoS = live ? 0 : ((100 - clamped) / 100) * windowS;
@@ -66,7 +101,7 @@ export function scrubToTime(pct: number, nowS: number, windowS: number = WINDOW_
 
 /** The percent along the band for a given "ago" duration (the inverse of `scrubToTime`, for
  * drawing the playhead while reviewing). */
-export function pctForAgo(agoS: number, windowS: number = WINDOW_S): number {
+export function pctForAgo(agoS: number, windowS: number): number {
   return Math.max(0, Math.min(100, 100 - (agoS / windowS) * 100));
 }
 
@@ -76,10 +111,21 @@ export function agoText(agoS: number): string {
   return mins < 60 ? `${Math.max(0, mins)} min` : `${(mins / 60).toFixed(1)} h`;
 }
 
-/** GAP 1 interim coverage note from `coverage_summary.observed_fraction` (no invented buffered
- * hours/bytes); null when the history poll hasn't answered yet. */
-export function coverageText(observedFraction: number | null): string {
-  return observedFraction === null ? "coverage unknown" : `${Math.round(observedFraction * 100)}% of the last 48 h observed`;
+/** How much of the capture window was observed, from the overview grid the backend served: its own
+ * `observed_cells / cells`, over the window it says it spans. `null` (not asked yet, or no window)
+ * reads as unknown, never as "nothing observed". */
+export function coverageText(observedFraction: number | null, windowS: number | null): string {
+  if (observedFraction === null || windowS === null) return "coverage unknown";
+  return `${Math.round(observedFraction * 100)}% of the retained ${durationText(windowS)} observed`;
+}
+
+/** A capture window's length in words. Unlike `agoText` this keeps seconds, because a retention is
+ * commonly seconds (`--iq-retention 90s`) and rounding it to "2 min" would misstate the span the
+ * band is claiming to be. */
+export function durationText(s: number): string {
+  if (s < 90) return `${Math.round(s)} s`;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  return `${(s / 3600).toFixed(1)} h`;
 }
 
 /** The current view span to query `/api/history` for: the live geometry once T-152 sets it,
@@ -107,7 +153,7 @@ export interface TimeWindow { t_lo: number; t_hi: number }
  * ordered (through `scrubToTime`'s mapping, so the LIVE edge resolves to `nowS`); null when it has
  * no width (both ends resolved to the same instant — e.g. both past the LIVE threshold).
  */
-export function timeWindowFromScrub(pctA: number, pctB: number, nowS: number, windowS: number = WINDOW_S): TimeWindow | null {
+export function timeWindowFromScrub(pctA: number, pctB: number, nowS: number, windowS: number): TimeWindow | null {
   const a = scrubToTime(pctA, nowS, windowS), b = scrubToTime(pctB, nowS, windowS);
   const t_lo = Math.min(a.tS, b.tS), t_hi = Math.max(a.tS, b.tS);
   return t_hi > t_lo ? { t_lo, t_hi } : null;
@@ -145,8 +191,8 @@ export interface EventMark {
   tStartS: number; tEndS: number;
 }
 
-/** Narrowest a mark is drawn, % of the band. A one-off burst is milliseconds against a 48 h band,
- * so its true width rounds to nothing; it is still the event this whole model exists to make
+/** Narrowest a mark is drawn, % of the band. A one-off burst is milliseconds against a band of
+ * minutes, so its true width rounds to nothing; it is still the event this whole model exists to make
  * first-class (ADR-0017 §1.2), so it is drawn at this floor. The floor is a **drawing** minimum —
  * `tStartS`/`tEndS` keep the measured timespan, and nothing reads the width back as a duration. */
 export const MIN_MARK_PCT = 0.3;
@@ -162,7 +208,7 @@ export const MAX_MARKS = 400;
  * started, is omitted rather than clamped to the band's edge (which would put an event at a time it
  * never happened). Rows in neither list are skipped.
  */
-export function eventMarks(rows: readonly EventRow[], nowS: number, windowS: number = WINDOW_S): EventMark[] {
+export function eventMarks(rows: readonly EventRow[], nowS: number, windowS: number): EventMark[] {
   const out: EventMark[] = [];
   for (const r of rows) {
     if (r.state !== "candidate" && r.state !== "confirmed") continue;
@@ -205,31 +251,34 @@ export function eventMarkTitle(m: Pick<EventMark, "tStartS" | "tEndS">, nowS: nu
 // the IQ ring has already rolled past it. The user acts differently on each, so neither is ever
 // rendered as the other, and an unanswered poll reads as **unknown**, not as either.
 
-/** The `GET /api/iqbuffer` status fields the timeline reads (docs/api.md `IqBufferStatus`). */
-export interface RingStatus { enabled: boolean; t0: number | null; t1: number | null }
-
 /** One `coverage_summary.gaps[]` run of `GET /api/history`: a stretch in which **no** cell of the
  * grid was observed. "A gap is never reported as quiet." */
 export interface CoverageGap { t0_s: number; t1_s: number }
 
-/** The retained IQ ring placed on the band (ADR-0014; 30 min on staging against a 48 h band), or
- * `null` when there is no ring, it holds nothing, or the status has not been answered — all of
- * which are "unknown", never "the ring is empty". */
-export function ringSpan(ring: RingStatus | null, nowS: number, windowS: number = WINDOW_S): SelSpan | null {
-  if (!ring?.enabled || ring.t0 === null || ring.t1 === null) return null;
-  if (!(ring.t1 > ring.t0) || nowS - ring.t1 > windowS) return null;
-  const leftPct = pctForAgo(nowS - ring.t0, windowS), rightPct = pctForAgo(nowS - ring.t1, windowS);
+/**
+ * What the ring **holds** placed on the band (ADR-0014), or `null` when it holds nothing or no
+ * window has been answered — both "unknown", never "the ring is empty".
+ *
+ * T-338: this sits *inside* the band rather than sizing it. The band is the ring's configured
+ * retention; a ring part-way through filling covers only part of it, and that difference is the
+ * thing this track exists to show.
+ */
+export function bufferedSpan(w: CaptureWindow | null): SelSpan | null {
+  if (!w?.buffered) return null;
+  const { t0S, t1S } = w.buffered;
+  if (!(t1S > t0S)) return null;
+  const leftPct = pctForAgo(w.t1S - t0S, w.spanS), rightPct = pctForAgo(w.t1S - t1S, w.spanS);
   return rightPct > leftPct ? { id: "ring", leftPct, widthPct: rightPct - leftPct } : null;
 }
 
 /** Whether the reviewed instant still has IQ behind it: `"live"` at the live edge, `"ring"` inside
- * the retained ring, `"outside-ring"` past it, `"unknown"` when no status has been answered. */
+ * what the ring holds, `"outside-ring"` past it, `"unknown"` when no window has been answered. */
 export type IqBacking = "live" | "ring" | "outside-ring" | "unknown";
 
-export function iqBackingAt(tS: number, live: boolean, ring: RingStatus | null): IqBacking {
+export function iqBackingAt(tS: number, live: boolean, w: CaptureWindow | null): IqBacking {
   if (live) return "live";
-  if (!ring?.enabled || ring.t0 === null || ring.t1 === null) return "unknown";
-  return tS >= ring.t0 && tS <= ring.t1 ? "ring" : "outside-ring";
+  if (!w?.buffered) return "unknown";
+  return tS >= w.buffered.t0S && tS <= w.buffered.t1S ? "ring" : "outside-ring";
 }
 
 /** Whether the reviewed instant falls in a stretch the history grid reports as observed by nothing;
@@ -246,10 +295,10 @@ export function inCoverageGap(tS: number, gaps: readonly CoverageGap[] | null): 
  * means *the receiver was not listening*, and saying anything else there would let silence read as
  * a measurement.
  */
-export function scrubDataNote(tS: number, live: boolean, ring: RingStatus | null, gaps: readonly CoverageGap[] | null): string {
+export function scrubDataNote(tS: number, live: boolean, w: CaptureWindow | null, gaps: readonly CoverageGap[] | null): string {
   if (live) return "";
   if (inCoverageGap(tS, gaps)) return "nothing was observed here — no data for this window, not a quiet band";
-  switch (iqBackingAt(tS, live, ring)) {
+  switch (iqBackingAt(tS, live, w)) {
     case "ring": return "IQ retained for this window";
     case "outside-ring": return "past the IQ ring — lists come from stored history, no IQ detail";
     default: return "IQ coverage unknown";
@@ -263,7 +312,7 @@ export interface SelSpan { id: string; leftPct: number; widthPct: number }
  * `pctForAgo`). A selection with no time window, or whose window falls wholly outside the
  * retained window, is omitted.
  */
-export function selectionSpans(list: readonly { id: string; t_lo?: number; t_hi?: number }[], nowS: number, windowS: number = WINDOW_S): SelSpan[] {
+export function selectionSpans(list: readonly { id: string; t_lo?: number; t_hi?: number }[], nowS: number, windowS: number): SelSpan[] {
   const out: SelSpan[] = [];
   for (const s of list) {
     if (s.t_lo === undefined || s.t_hi === undefined) continue;

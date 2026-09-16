@@ -57,6 +57,12 @@ fn unix_now() -> f64 {
 /// still leaves an orphan, which is what T-232 measured as its one residual per run and why no
 /// amount of retrying in the guard could fix it. First in the tuple means dropped last.
 fn start_server() -> (TempDataDirGuard, Serving, SocketAddr) {
+    start_server_retaining(None)
+}
+
+/// [`start_server`] with an explicit IQ-ring retention (T-338), so a test can reconfigure the
+/// capture window and watch the timeline follow it.
+fn start_server_retaining(retention_s: Option<f64>) -> (TempDataDirGuard, Serving, SocketAddr) {
     let dir = temp_data_dir();
     let guard = TempDataDirGuard::new(dir.clone());
     let serving = start(&ServeOptions {
@@ -75,7 +81,7 @@ fn start_server() -> (TempDataDirGuard, Serving, SocketAddr) {
         compute: Default::default(),
         // T-178: the ring is allocated up front, so tests keep it small.
         iq_buffer: hk_cli::pipeline::IqBufferArgs {
-            retention_s: None,
+            retention_s,
             max_bytes: Some(64 << 20),
         },
         iq_buffer_hooks: None,
@@ -4463,6 +4469,167 @@ fn navigation_snaps_to_achievable_states_and_never_claims_uncaptured_detail() {
     assert_eq!(state["device"]["tuning_step"], json!("uniform"), "{state}");
     assert_eq!(state["device"]["tuning_step_hz"], json!(step), "{state}");
 
+    stop_server(serving);
+}
+
+/// T-338: **the timeline is the capture window, and it is a visualization.**
+///
+/// The property is that the scrubber's span *is* the IQ ring's configured retention — which is
+/// only demonstrated by **reconfiguring it and watching the span follow**. A constant that happens
+/// to equal one retention would pass a single-value assertion.
+///
+/// The control is the other horizon. The spectrum-history pyramid outlives the ring by a long way,
+/// and a scrubber sized from it offers times the ring has already overwritten: the band looks right
+/// and lies. So the same server is asked for a history window far longer than the ring's, gets one,
+/// and the timeline still spans the ring's — the two horizons are demonstrably different lengths
+/// here, and the timeline took the capture one.
+///
+/// Values, not shape (T-315).
+#[test]
+fn the_timeline_spans_the_capture_window_and_draws_it() {
+    let band = format!(
+        "f_lo={}&f_hi={}",
+        FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
+        FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0
+    );
+
+    // ---- the property: the span is the configured retention, at two different retentions ----
+    let mut spans = Vec::new();
+    for retention_s in [90.0f64, 300.0] {
+        let (_dir_guard, serving, addr) = start_server_retaining(Some(retention_s));
+        let mut v = Value::Null;
+        wait_for(
+            "a capture window with retained capture drawn on it",
+            Duration::from_secs(60),
+            || {
+                let (st, got) = get(addr, &format!("/api/timeline?{band}&columns=64&rows=4"));
+                assert_eq!(st, 200, "{got}");
+                v = got;
+                v["window"]["span_s"].is_f64()
+                    && v["window"]["buffered"]["t0_s"].is_f64()
+                    && v["grid"]["observed_cells"].as_u64().unwrap_or(0) > 0
+            },
+        );
+
+        let w = &v["window"];
+        assert_eq!(w["enabled"], json!(true), "{w}");
+        assert_eq!(w["retention_s"], json!(retention_s), "{w}");
+        assert_eq!(w["span_s"], json!(retention_s), "{w}");
+        // The band ends at the live edge and starts exactly one retention earlier — no rounding,
+        // no fixed constant, no history horizon.
+        let (t0, t1) = (
+            w["t0_s"].as_f64().expect("t0_s"),
+            w["t1_s"].as_f64().expect("t1_s"),
+        );
+        assert_eq!(t1 - t0, retention_s, "{w}");
+        // Which retention this is. The response says so rather than leaving it to be assumed.
+        assert_eq!(w["horizon"], json!("iq-ring"), "{w}");
+        // What the ring actually holds sits *inside* the band, never resizes it: a ring 10 s into
+        // a 90 s retention is a mostly-empty 90 s capture window, not a 10 s one.
+        let b = &w["buffered"];
+        let (b0, b1) = (
+            b["t0_s"].as_f64().expect("buffered.t0_s"),
+            b["t1_s"].as_f64().expect("buffered.t1_s"),
+        );
+        assert!(b0 >= t0 && b1 <= t1 && b1 - b0 < retention_s, "{w}");
+
+        // ---- never an empty box: the band is a compressed overview waterfall ----
+        let g = &v["grid"];
+        assert_eq!(g["nt"], json!(64), "{g}");
+        assert_eq!(g["nf"], json!(4), "{g}");
+        assert_eq!(g["cells"], json!(256), "{g}");
+        // The grid *is* the window: cell 0 starts at the band's start and cells divide it exactly.
+        assert_eq!(g["t0_s"].as_f64(), Some(t0), "{g}");
+        assert_eq!(g["t_cell_s"].as_f64(), Some(retention_s / 64.0), "{g}");
+        assert_eq!(g["f_cell_hz"].as_f64(), Some(FIXTURE_RATE_HZ / 4.0), "{g}");
+        for k in ["max_db", "occupancy_max", "coverage", "frames"] {
+            assert_eq!(g[k].as_array().map(Vec::len), Some(256), "{k}: {g}");
+        }
+        let observed = g["observed_cells"].as_u64().expect("observed_cells");
+        assert!(
+            observed > 0,
+            "the timeline must draw the retained capture: {g}"
+        );
+        // The dynamic range is measured here, not decided by the client from the values it holds.
+        let r = &g["range_db"];
+        assert!(
+            r["lo"].as_f64().unwrap() <= r["hi"].as_f64().unwrap(),
+            "{r}"
+        );
+        // Unobserved cells are null, never a floor value that would read as a measured quiet band.
+        let max_db = g["max_db"].as_array().unwrap();
+        assert!(
+            max_db.iter().any(|x| x.is_f64()),
+            "no observed cell in the band: {g}"
+        );
+
+        // ---- the detail claim: the horizon is the ring's, the pixels are the pyramid's ----
+        let res = &v["resolution"];
+        assert_eq!(res["source"], json!("spectrum-history"), "{res}");
+        assert_eq!(res["live"], json!(false), "{res}");
+        assert_eq!(res["horizon"], json!("iq-ring"), "{res}");
+        assert_eq!(res["served_span_hz"], json!(FIXTURE_RATE_HZ), "{res}");
+        assert_eq!(res["requested"], json!({"columns": 64, "rows": 4}), "{res}");
+        assert_eq!(
+            res["served"],
+            json!({"nt": 64, "nf": 4, "cells": 256}),
+            "{res}"
+        );
+        // The fold happens in the backend, so the client is never handed cells it cannot draw.
+        assert_eq!(res["matched"], json!(true), "{res}");
+        assert_eq!(res["over_resolved"], json!([]), "{res}");
+        assert!(res["reduced_from"]["nf"].as_u64().unwrap() >= 4, "{res}");
+
+        // ---- the control: the spectrum history reaches much further back, and is not used ----
+        // A 48 h history request is answered (the pyramid's horizon is nothing like 90 s), and the
+        // timeline still spans the ring's retention. Without this the property could pass on a
+        // server where the two horizons happened to coincide.
+        let (st, hist) = get(
+            addr,
+            &format!(
+                "/api/history?{band}&t0={}&t1={t1}&max_t=8",
+                t1 - 48.0 * 3600.0
+            ),
+        );
+        assert_eq!(st, 200, "{hist}");
+        let hist_span_s = hist["nt"].as_f64().unwrap() * hist["t_cell_s"].as_f64().unwrap();
+        assert!(
+            hist_span_s > retention_s * 10.0,
+            "the history horizon must differ from the ring's for this control to mean anything: \
+             history {hist_span_s} s vs ring {retention_s} s"
+        );
+        assert_eq!(v["window"]["span_s"], json!(retention_s));
+        // The specific regression: the band used to be a hard-coded 48 h UI constant.
+        assert_ne!(w["span_s"].as_f64(), Some(48.0 * 3600.0), "{w}");
+        // And `/api/navigation`'s time block is the *history* edge, deliberately not this span.
+        let (_, nav) = get(addr, "/api/navigation");
+        assert!(nav["time"]["latest_s"].is_f64(), "{nav}");
+
+        spans.push(w["span_s"].as_f64().unwrap());
+        stop_server(serving);
+    }
+    // Reconfiguring the retention moved the span. This is what makes it the capture window rather
+    // than a constant that happens to match one.
+    assert_eq!(spans, vec![90.0, 300.0]);
+
+    // ---- with no frequency region there is still a window, and no invented picture ----
+    let (_dir_guard, serving, addr) = start_server_retaining(Some(45.0));
+    let (st, v) = get(addr, "/api/timeline");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["window"]["retention_s"], json!(45.0), "{v}");
+    assert!(v["region"].is_null() && v["grid"].is_null(), "{v}");
+    for bad in ["f_lo=1000", "columns=0", "rows=99999", "t0=1&t1=2"] {
+        let (st, v) = get(addr, &format!("/api/timeline?{bad}"));
+        assert_eq!(st, 400, "expected 400 for {bad}: {v}");
+    }
+    let (st, _) = call(
+        addr,
+        "POST",
+        "/api/timeline",
+        Some(&format!("Bearer {TOKEN}")),
+        Some("{}"),
+    );
+    assert_eq!(st, 405);
     stop_server(serving);
 }
 

@@ -52,6 +52,7 @@ pub mod selections;
 pub mod signatures; // T-201
 pub mod taxonomy; // T-218
 pub mod tcp;
+pub mod timeline; // T-338: the capture window, and the compressed overview drawn on it
 
 // ADR-0012 §8/§11 attention + memory routes (pre-added by T-113; the owners fill them in).
 pub mod anomalies; // T-122

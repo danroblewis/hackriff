@@ -152,7 +152,8 @@ pub use frame::{
 };
 pub use query::{
     CellStats, ChannelSummary, CoverageSummary, FULL_CELL_OCCUPANCY, FilterSummary,
-    MAX_COVERAGE_GAPS, MAX_QUERY_CELLS, RegionHistory, RegionQuery, Resolution, burst_histogram,
+    MAX_COVERAGE_GAPS, MAX_QUERY_CELLS, Overview, OverviewCell, RegionHistory, RegionQuery,
+    Resolution, burst_histogram,
 };
 pub use shape::NoiseShapeEstimator;
 pub use store::{IngestOutcome, Pyramid, PyramidStats};
