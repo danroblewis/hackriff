@@ -141,7 +141,11 @@ pub struct PluginStats {
     /// The plugin can account for the input it is given: it sent a `ready` line (T-223), or its
     /// manifest declares no `input.ready_signal` and its process is attached ([`PluginState::Running`]).
     pub ready: bool,
-    /// Records offered before the plugin's first `ready` line (0 without a readiness signal).
+    /// Records offered to a plugin process that had not reported itself ready (0 without a
+    /// readiness signal). Counted **per process** (T-224): the flag re-arms at every restart, so
+    /// each record is judged against the process it was offered to, and a restart can never
+    /// re-count records offered to an earlier one. A process that never sends its `ready` line
+    /// (a live producer feeding after its bounded wait) counts every record offered to it.
     pub records_offered_before_ready: u64,
     /// Effective output ceiling (manifest class clamped to the input class).
     pub content_ceiling: ContentClass,
@@ -207,6 +211,8 @@ pub struct LogTail {
 #[derive(Default)]
 struct Counters {
     offered: AtomicU64,
+    /// Records offered while the running process had not reported ready (T-223/T-224). Counted in
+    /// [`PluginInstance::push`], so it is per process: the `ready` flag re-arms at every restart.
     offered_before_ready: AtomicU64,
     enqueued: AtomicU64,
     dropped_full: AtomicU64,
@@ -497,6 +503,13 @@ impl PluginInstance {
         let outcome = self.feed.push(record)?;
         let c = &self.shared.counters;
         bump(&c.offered);
+        // Early-input accounting is per record and per process (T-224): `offered` is cumulative
+        // for the instance while `ready` re-arms at every restart, so a counter derived from the
+        // cumulative total at the ready line would charge a restarted process with every record
+        // ever offered. One relaxed load and a branch; no wait, nothing on the capture path.
+        if self.shared.manifest.input.ready_signal && !self.shared.ready.load(Ordering::Acquire) {
+            bump(&c.offered_before_ready);
+        }
         Ok(if outcome.consumers == 0 {
             bump(&c.dropped_detached);
             PushOutcome::DroppedDetached
@@ -926,10 +939,11 @@ fn read_stdout(shared: &Arc<Shared>, stdout: impl Read, abandon: &AtomicBool) {
             let result = match parsed.output {
                 PluginOutput::Ready => {
                     if !shared.ready.swap(true, Ordering::AcqRel) {
-                        let offered = c.offered.load(Ordering::Relaxed);
-                        c.offered_before_ready.fetch_max(offered, Ordering::Relaxed);
+                        // Records offered to a not-ready process are counted as they are pushed
+                        // (T-224), so nothing is derived from the cumulative total here.
+                        let early = c.offered_before_ready.load(Ordering::Relaxed);
                         shared.log(format!(
-                            "host: plugin reported ready; {offered} records had been offered"
+                            "host: plugin reported ready; {early} records had been offered before that"
                         ));
                     }
                     shared.wake.notify_all();

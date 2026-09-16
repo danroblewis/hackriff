@@ -177,6 +177,87 @@ fn readiness_waits_for_the_plugin_ready_line_and_counts_records_offered_early() 
     inst.shutdown();
 }
 
+/// T-224 (readiness, per process): `records_offered` is cumulative for the instance while the
+/// `ready` flag re-arms at every restart, so a counter derived from the total at the `ready` line
+/// charged a restarted process with every record the instance had ever offered — and the
+/// producers that assert "nothing was fed before ready" then failed for a restart they had
+/// nothing to do with. Each record is counted as it is offered, against the process it was
+/// offered to: here the first process is ready before its three records, so only the two offered
+/// to the restarted process while it was still starting up count.
+#[test]
+fn a_restart_counts_only_the_records_offered_to_the_new_process() {
+    const SAMPLES: usize = 256;
+    let mut m = repo_manifest();
+    m.input.ready_signal = true;
+    add_args(
+        &mut m,
+        &[
+            "--every",
+            "1",
+            "--ready-after-ms",
+            "1500",
+            "--crash-after",
+            "3",
+        ],
+    );
+    let sink = shared_ingest(Repository::open_in_memory().unwrap());
+    let mut inst =
+        PluginInstance::spawn(m, input(), PluginContext::default(), Arc::clone(&sink)).unwrap();
+    wait_running(&inst);
+    assert!(
+        inst.wait_ready(Duration::from_secs(20)),
+        "{:?} {:?}",
+        inst.stats(),
+        inst.monitor().log_tail()
+    );
+    assert_eq!(inst.stats().records_offered_before_ready, 0);
+    // The first process is ready, reads its three records and exits on the third.
+    for i in 0..3u64 {
+        push(
+            &mut inst,
+            i,
+            &tone(i * SAMPLES as u64, SAMPLES),
+            SAMPLES as u64,
+        );
+    }
+    let mon = inst.monitor();
+    assert!(
+        mon.wait_for(Duration::from_secs(30), |s| s.starts == 2
+            && s.state == PluginState::Running),
+        "the plugin did not restart: {:?} {:?}",
+        mon.stats(),
+        mon.log_tail()
+    );
+    assert!(
+        !inst.stats().ready,
+        "a restarted process is not ready until it says so again: {:?}",
+        inst.stats()
+    );
+    // Two records offered to the new process while it is still setting itself up.
+    for i in 3..5u64 {
+        push(
+            &mut inst,
+            i,
+            &tone(i * SAMPLES as u64, SAMPLES),
+            SAMPLES as u64,
+        );
+    }
+    assert!(
+        inst.wait_ready(Duration::from_secs(30)),
+        "{:?} {:?}",
+        inst.stats(),
+        inst.monitor().log_tail()
+    );
+    let stats = inst.stats();
+    assert_eq!(stats.records_offered, 5);
+    assert_eq!(
+        stats.records_offered_before_ready, 2,
+        "only the records offered to the process that was not ready count, \
+         not every record the instance ever offered: {stats:?}"
+    );
+    inst.shutdown();
+}
+
 /// Dummy round trip: synthetic channel samples in, messages out, Decode rows in an in-memory
 /// repository with the metadata/content split, host-stamped time and manifest identity.
 #[test]

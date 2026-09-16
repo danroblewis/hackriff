@@ -238,8 +238,9 @@ counter_group!(
         plugin_waits,
         /// Plugin backpressure waits abandoned (plugin failed or made no progress for 30 s).
         plugin_wait_timeouts,
-        /// Records offered to a plugin before it reported ready (T-223; 0 for a plugin that
-        /// declares no readiness signal).
+        /// Records offered to a plugin process that had not reported ready (T-223; 0 for a plugin
+        /// that declares no readiness signal). Per process (T-224): a restart re-arms readiness,
+        /// and a process that never signals counts every record fed to it after the bounded wait.
         plugin_fed_before_ready,
         /// Readiness waits that timed out, so the chain fed the plugin anyway (T-223).
         plugin_ready_timeouts,
