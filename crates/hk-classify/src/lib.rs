@@ -59,6 +59,14 @@ pub use hk_model::classify::*;
 /// re-exported here so `hk_classify::fuse::…` keeps working.
 pub use hk_model::classify::fuse;
 
+/// The MAUTO seed interface (T-215, ADR-0016 §8): ordered decode hypotheses with a prune flag and
+/// the reserved open-search share. It lives in [`hk_model::classify::seed`] with the other
+/// contracts and is re-exported here. **Interface only — it runs no search.**
+pub use hk_model::classify::seed::{
+    BudgetHint, ClusterPipeline, ClusterSeed, Hypothesis, OPEN_SEARCH_MIN_SHARE,
+    PRUNE_LIKELIHOOD_SHARE, SearchSeed, SeedBoost, SeedInputs,
+};
+
 pub use classifier::{Classifier, ClassifyRequest};
 pub use density::{DensityModel, FamilyScore};
 pub use dl::{DL_INPUT_DIM, DlStage, ShadowRecord, classify_shadowed, dl_input};
