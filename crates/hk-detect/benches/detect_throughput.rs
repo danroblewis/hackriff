@@ -210,7 +210,7 @@ fn classify_only(name: &str, frames: &[SpectrumFrame]) {
                 &floor,
                 &th,
                 Branches::Or,
-                None,
+                hk_detect::BranchMasks::default(),
                 &mut codes,
             ));
         }

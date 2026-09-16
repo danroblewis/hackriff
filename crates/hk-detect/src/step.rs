@@ -63,6 +63,30 @@
 //! an active pair is refreshed and a pending pair keeps its persistence count, so a step close to
 //! `jump_db` neither flickers nor waits for consecutive exceedances.
 //!
+//! **Narrow floor features (T-316).** Everything above works on block floors, so the narrowest
+//! feature it can see is about a block (256 bins, hop 64 ≈ 1.2 MHz of reference resolution). A
+//! span of raised *noise* narrower than that falls between the two background estimators: the
+//! floor branch compares it against a reference that is effectively the band level, and the OS
+//! branch's reference cells at `±(G+1 … G+R)` straddle its edges, so `Z` is pulled towards the
+//! level outside and every cell in the span reads as a target. Spans wider than the OS guard band
+//! (`2G+1`, so from `2G+2`) and narrower than its reference span (`2(G+R)+1`) whose running mean sits more than
+//! `narrow_feature_db` above the reference are therefore classified by the same power statistics
+//! as a block-scale feature; a **floor-like** one takes its own per-bin running mean as the floor
+//! ([`StepGuard::narrow_floor`]) and runs the floor branch alone ([`StepGuard::narrow_mask`]).
+//! Outside the width band nothing changes: a narrower span fits inside the cell under test's guard
+//! band and biases no reference cell, and a wider one already has a homogeneous OS reference.
+//!
+//! Two rules keep a real emission out of it. A bin must classify floor-like for `persist_frames`
+//! consecutive frames before the guard acts there; and a span that classifies **signal-like even
+//! once** is disqualified for the rest of the segment, because this guard is only ever about a
+//! *stationary* noise feature and one signal-like verdict refutes that premise. The asymmetry is
+//! measured: on the 2026-09-15 FM capture every one of the three noise shelves reads floor-like in
+//! 100.0 % of frames, while the three measured emissions read floor-like in 33 %, 3.0 % and 0.1 %
+//! — a WFM station reads floor-like through a quiet passage of its programme audio. Neither a
+//! longer time constant nor a timed hold separates them (at 512 frames the 99.6999 MHz station
+//! still reads floor-like in 7.8 % of frames); latching the signal-like verdict does, and it fails
+//! in the safe direction — a noise shelf misjudged once is merely detected as it was before.
+//!
 //! **Limits.** A stationary noise-like emission (Gaussian at the bin level: OFDM, a wideband noise
 //! jammer) has the floor's statistics and is taken for a floor feature: its edges are OS-only and,
 //! on the wide reference, its interior runs on the per-frame floor (which reads it as floor). The
@@ -98,6 +122,7 @@ use std::ops::Range;
 
 use hk_dsp::floor::BlockConfig;
 
+use crate::config::CfarWindow;
 use crate::rules::Geometry;
 
 /// Floor-step guard settings.
@@ -140,6 +165,15 @@ pub struct StepGuardConfig {
     pub wide_min_frames: u64,
     /// The floor tracker's block layout ([`BlockConfig::default`]: 256 / 64).
     pub blocks: BlockConfig,
+    /// A span whose running mean sits more than this above the floor reference is a candidate
+    /// **narrow floor feature**, dB (1.5). Same budget as `wide_residual_db`, and for the same
+    /// reason: it is the residual the floor model already admits it cannot explain, not a
+    /// detection threshold.
+    pub narrow_feature_db: f64,
+    /// The detector's OS-CFAR window: the narrow-feature width band is derived from it — wider
+    /// than the guard band (`2G+1`, so from `2G+2`) and narrower than the reference span
+    /// (`2(G+R)+1`). Outside that band the OS branch is sound and nothing is done.
+    pub cfar_window: CfarWindow,
 }
 
 impl Default for StepGuardConfig {
@@ -161,6 +195,8 @@ impl Default for StepGuardConfig {
             stat_min_bins: 32,
             wide_min_frames: 32,
             blocks: BlockConfig::default(),
+            narrow_feature_db: 1.5,
+            cfar_window: CfarWindow::default(),
         }
     }
 }
@@ -198,6 +234,11 @@ pub struct GuardFrame<'a> {
     pub shape: Option<ShapeView<'a>>,
     /// The per-frame and wide floors when the configured reference is the wide one.
     pub wide: Option<WideView<'a>>,
+    /// The floor reference the detector is about to use (the configured [`FloorReference`]
+    /// trace), against which narrow floor features are found.
+    ///
+    /// [`FloorReference`]: crate::FloorReference
+    pub reference: &'a [f32],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -280,11 +321,16 @@ pub struct StepGuard {
     scratch: Vec<f32>,
     mean: Vec<f32>,
     var: Vec<f32>,
+    narrow: Vec<bool>,
+    narrow_floor: Vec<f32>,
+    narrow_persist: Vec<u32>,
+    narrow_veto: Vec<bool>,
     stat_frames: u64,
     available: bool,
     guarded: usize,
     wide_bins: usize,
     frame_ref_bins: usize,
+    narrow_bins: usize,
 }
 
 fn ratio_of(db: f64) -> f32 {
@@ -415,11 +461,16 @@ impl StepGuard {
             scratch: Vec::new(),
             mean: Vec::new(),
             var: Vec::new(),
+            narrow: Vec::new(),
+            narrow_floor: Vec::new(),
+            narrow_persist: Vec::new(),
+            narrow_veto: Vec::new(),
             stat_frames: 0,
             available: false,
             guarded: 0,
             wide_bins: 0,
             frame_ref_bins: 0,
+            narrow_bins: 0,
         }
     }
 
@@ -436,6 +487,10 @@ impl StepGuard {
             self.os_floor.resize(bins, 0.0);
             self.mean.resize(bins, 0.0);
             self.var.resize(bins, 0.0);
+            self.narrow.resize(bins, false);
+            self.narrow_floor.resize(bins, 0.0);
+            self.narrow_persist.resize(bins, 0);
+            self.narrow_veto.resize(bins, false);
             self.scratch.reserve(bins);
             self.stat_frames = 0;
         }
@@ -450,6 +505,11 @@ impl StepGuard {
         self.os_floor.fill(0.0);
         self.mean.fill(0.0);
         self.var.fill(0.0);
+        self.narrow.fill(false);
+        self.narrow_floor.fill(0.0);
+        self.narrow_persist.fill(0);
+        self.narrow_veto.fill(false);
+        self.narrow_bins = 0;
         self.stat_frames = 0;
         self.persist.fill(0);
         self.hold.fill(0);
@@ -499,6 +559,8 @@ impl StepGuard {
         self.wide.fill(false);
         self.frame_ref.fill(false);
         self.os_floor.fill(0.0);
+        self.narrow.fill(false);
+        self.narrow_floor.fill(0.0);
         self.observe(frame.psd, frame.impulsive);
         let block = self.cfg.blocks.block_bins.min(n).max(1);
         let hop = self.cfg.blocks.hop_bins.max(1);
@@ -524,6 +586,10 @@ impl StepGuard {
             scratch,
             mean,
             var,
+            narrow,
+            narrow_floor,
+            narrow_persist,
+            narrow_veto,
             ..
         } = self;
         let stats = Stats {
@@ -754,9 +820,90 @@ impl StepGuard {
                 }
             }
         }
+        // Narrow floor features (T-316). A span of raised *noise* between the OS window's guard
+        // band and its reference span is invisible to everything above: the block floor (256 bins,
+        // hop 64) cannot resolve it, so the floor branch runs against a reference that is the band
+        // level rather than the local one; and the OS branch's reference cells straddle its edges,
+        // so `Z` is pulled towards the level outside and the cell reads as a target. On the real
+        // 2026-09-15 FM capture a 75 kHz shelf 4.6 dB above the band floor put the OS branch's
+        // per-cell seed rate at 3.9e-3 against its 1e-6 design and made 875 boxes in 45 s.
+        // The span's own running mean is the only unbiased reference there.
+        if frame.reference.len() == n {
+            let w = cfg.cfar_window;
+            let min_bins = 2 * w.guard_per_side + 2;
+            let max_bins = 2 * (w.guard_per_side + w.reference_per_side) + 1;
+            let thr = ratio_of(cfg.narrow_feature_db);
+            let reference = frame.reference;
+            // A span of at most `2G+1` bins fits inside the cell under test's guard band and
+            // reaches no reference cell, so it cannot bias `Z` and is a target by construction;
+            // one of `2(G+R)+1` or more leaves every reference cell of its interior inside it,
+            // where the OS branch is homogeneous and already sound.
+            let nstats = Stats { min_bins, ..stats };
+            let elevated =
+                |mean: &[f32], b: usize| reference[b] > 0.0 && mean[b] > reference[b] * thr;
+            let mut b = 0;
+            while b < n {
+                if !elevated(mean, b) {
+                    b += 1;
+                    continue;
+                }
+                let lo = b;
+                while b < n && elevated(mean, b) {
+                    b += 1;
+                }
+                // Only a *confidently* floor-like span becomes floor: acting here removes
+                // detections, so `Undecided` — and every signal-like span — is left alone. This is
+                // the opposite of the block-scale guard's convention, where acting means being
+                // more careful and `Undecided` is handled as floor-like.
+                if (min_bins..=max_bins).contains(&(b - lo)) {
+                    match nstats.class(lo..b, |k, m| m > reference[k] * thr, scratch) {
+                        Class::FloorLike => {
+                            narrow[lo..b].fill(true);
+                            narrow_floor[lo..b].copy_from_slice(&mean[lo..b]);
+                        }
+                        // Signal-like even **once** disqualifies the span for the rest of the
+                        // segment. This guard exists only for a *stationary* noise feature, so
+                        // any evidence of non-stationarity refutes its premise outright; a
+                        // segment ends on a retune, gain change or discontinuity, so the latch is
+                        // bounded and self-cleaning.
+                        //
+                        // The asymmetry is measured, not assumed. On the 2026-09-15 capture at
+                        // the default 32-frame (68 ms) time constant, the share of frames whose
+                        // statistic lands inside the floor-like band is 100.0 % for all three
+                        // noise shelves but 33 %, 3.0 % and 0.1 % for the three measured
+                        // emissions: noise reads as noise *always*, a real emission only
+                        // sometimes — a WFM station reads floor-like through a quiet passage of
+                        // its programme audio. Neither a longer time constant nor a timed hold
+                        // fixes that: at 512 frames the 99.6999 MHz station still reads
+                        // floor-like in 7.8 % of frames, and a 32-frame hold expires inside a
+                        // quiet passage, leaving it cut from 46 boxes into 68.
+                        Class::SignalLike => narrow_veto[lo..b].fill(true),
+                        Class::Undecided => {}
+                    }
+                }
+            }
+            // A bin must classify floor-like for `persist_frames` consecutive frames, and must
+            // never have classified signal-like in this segment, before the guard acts there.
+            for ((p, on), veto) in narrow_persist
+                .iter_mut()
+                .zip(narrow.iter_mut())
+                .zip(narrow_veto.iter())
+            {
+                if *veto {
+                    *on = false;
+                    *p = 0;
+                } else if *on {
+                    *p = p.saturating_add(1);
+                    *on = *p >= cfg.persist_frames;
+                } else {
+                    *p = 0;
+                }
+            }
+        }
         self.guarded = self.mask.iter().filter(|&&ok| !ok).count();
         self.wide_bins = self.wide.iter().filter(|&&w| w).count();
         self.frame_ref_bins = self.frame_ref.iter().filter(|&&f| f).count();
+        self.narrow_bins = self.narrow.iter().filter(|&&x| x).count();
         &self.mask
     }
 
@@ -797,6 +944,23 @@ impl StepGuard {
     /// Bins of the last frame on the per-frame floor instead of the wide reference.
     pub fn frame_ref_bins(&self) -> usize {
         self.frame_ref_bins
+    }
+
+    /// The last narrow-floor-feature mask (`true`: the bin is inside a span of raised noise that
+    /// neither the block floor nor the OS reference window can estimate; the detector takes
+    /// [`StepGuard::narrow_floor`] as the floor there and runs the floor branch alone).
+    pub fn narrow_mask(&self) -> &[bool] {
+        &self.narrow
+    }
+
+    /// The per-bin running mean inside narrow floor features; 0 elsewhere.
+    pub fn narrow_floor(&self) -> &[f32] {
+        &self.narrow_floor
+    }
+
+    /// Bins inside a narrow floor feature in the last frame.
+    pub fn narrow_bins(&self) -> usize {
+        self.narrow_bins
     }
 
     /// The block layout matched the last frame.
@@ -873,6 +1037,10 @@ mod tests {
                         block_floor: self.blocks,
                         shape: self.shape,
                         wide: self.wide,
+                        // These cases are block-scale; an empty reference skips the
+                        // narrow-feature pass, which is covered end to end in
+                        // `tests/false_alarm.rs`.
+                        reference: &[],
                     },
                     &g,
                     edges,
@@ -920,6 +1088,7 @@ mod tests {
                     block_floor: &[1.0; 7],
                     shape: None,
                     wide: None,
+                    reference: &[],
                 },
                 &g,
                 &[100e6],

@@ -85,6 +85,8 @@ pub struct DetectorStats {
     pub wide_guarded_frames: u64,
     /// Frames whose block floors did not match the step guard's layout (guard inactive).
     pub step_guard_unavailable: u64,
+    /// Frames in which some bins were inside a narrow floor feature (T-316).
+    pub narrow_guarded_frames: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -140,7 +142,10 @@ pub struct Detector {
     eff_floor: Vec<f32>,
     /// The last frame's floor-branch mask (per-frame or wide reference).
     floor_ok: Vec<bool>,
+    /// The last frame's OS-branch mask (false inside a narrow floor feature).
+    os_ok: Vec<bool>,
     guard_active: bool,
+    narrow_active: bool,
     integrated: IntegratedSpectrum,
     comb: CombFinder,
     seg: Option<SegmentInfo>,
@@ -172,7 +177,9 @@ impl Detector {
             step: config.step_guard.map(StepGuard::new),
             eff_floor: Vec::new(),
             floor_ok: Vec::new(),
+            os_ok: Vec::new(),
             guard_active: false,
+            narrow_active: false,
             integrated: IntegratedSpectrum::new(config.integration, config.rules.comb.max_lines),
             comb: CombFinder::new(config.rules.comb),
             seg: None,
@@ -230,6 +237,12 @@ impl Detector {
     /// guard allows it.
     pub fn floor_branch_reference(&self) -> &[f32] {
         &self.eff_floor
+    }
+
+    /// Where the OS branch ran in the last frame (`None`: everywhere; it is off only inside a
+    /// narrow floor feature).
+    pub fn os_branch_mask(&self) -> Option<&[bool]> {
+        self.narrow_active.then_some(self.os_ok.as_slice())
     }
 
     /// The floor-step guard (its per-frame and wide masks are those of the last frame).
@@ -355,6 +368,7 @@ impl Detector {
         };
         self.eff_floor.copy_from_slice(reference);
         self.guard_active = false;
+        self.narrow_active = false;
         if floor.valid {
             if let Some(g) = &mut self.step
                 && branches != Branches::OsOnly
@@ -378,6 +392,7 @@ impl Detector {
                         block_floor: &floor.block_floor,
                         shape,
                         wide,
+                        reference,
                     },
                     &geometry,
                     &self.config.response_edges_hz,
@@ -404,6 +419,21 @@ impl Detector {
                         *eff = eff.max(g.os_floor()[b]);
                     }
                 }
+                // A narrow floor feature (T-316) overrides the block-scale masks: it is the more
+                // local estimate, and inside it the OS branch is the biased one, not the floor
+                // branch.
+                self.narrow_active = g.narrow_bins() > 0;
+                if self.narrow_active {
+                    self.os_ok.fill(true);
+                    self.stats.narrow_guarded_frames += 1;
+                    for (b, &nb) in g.narrow_mask().iter().enumerate() {
+                        if nb {
+                            self.eff_floor[b] = g.narrow_floor()[b];
+                            self.floor_ok[b] = true;
+                            self.os_ok[b] = false;
+                        }
+                    }
+                }
                 self.guard_active = true;
             }
             self.last_classify = self.cfar.classify(
@@ -411,7 +441,10 @@ impl Detector {
                 &self.eff_floor,
                 &thresholds,
                 branches,
-                self.guard_active.then_some(self.floor_ok.as_slice()),
+                crate::cfar::BranchMasks {
+                    floor_ok: self.guard_active.then_some(self.floor_ok.as_slice()),
+                    os_ok: self.narrow_active.then_some(self.os_ok.as_slice()),
+                },
                 &mut self.codes,
             );
             // The integrated spectrum averages the reference the floor branch used (T-033: the
@@ -534,7 +567,10 @@ impl Detector {
         self.eff_floor.resize(bins, 0.0);
         self.floor_ok.resize(bins, true);
         self.floor_ok.fill(true);
+        self.os_ok.resize(bins, true);
+        self.os_ok.fill(true);
         self.guard_active = false;
+        self.narrow_active = false;
         self.integrated
             .configure(bins, frame_period_s, self.stats.segments);
         self.in_impulsive = false;
