@@ -38,6 +38,9 @@ use crate::time::Timestamp;
 /// Schema version of [`Signature`] and [`SignatureMatch`].
 pub const SIGNATURE_SCHEMA: u16 = 1;
 
+// T-202 (ADR-0016 §5): clusters of unknown emissions — "the same thing I saw before".
+pub mod cluster;
+
 /// Default relative tolerance on a symbol rate (ADR-0016 §5: ±1 %).
 pub const DEFAULT_SYMBOL_RATE_TOLERANCE: f64 = 0.01;
 
@@ -48,6 +51,24 @@ pub const DEFAULT_MIN_DISCRIMINATING: u32 = 3;
 /// Normalised distance (`z = |Δ| / tolerance`) above which a field **conflicts**: it is evidence
 /// against the signature, not merely a miss.
 pub const Z_CONFLICT: f64 = 3.0;
+
+/// Default **relative** tolerance for a numeric field whose [`FieldSpec`] names none.
+///
+/// One table, used by both comparisons that exist: the catalogue matcher (T-201) and the
+/// clustering distance (T-202). They mirror `crate::cluster::Tolerances::default` where the two
+/// overlap, so matching, clustering and entity resolution never disagree about how close counts
+/// as close.
+pub fn default_tolerance(name: &str) -> f64 {
+    match name {
+        field::SYMBOL_RATE_HZ => DEFAULT_SYMBOL_RATE_TOLERANCE,
+        field::DEVIATION_HZ => 0.10,
+        field::PERIOD_S | field::TDMA_PERIOD_S | field::PRI_S | field::SCAN_PERIOD_S => 0.05,
+        field::DUTY_CYCLE | field::BURST_LENGTH_S => 0.25,
+        field::OBW_HZ => 0.20,
+        field::F_CENTER_HZ | field::HOP_RASTER_HZ | field::COMB_SPACING_HZ => 0.02,
+        _ => 0.10,
+    }
+}
 
 /// Smallest score a `full` match may carry.
 pub const FULL_MATCH_MIN_SCORE: f64 = 0.8;
@@ -850,6 +871,69 @@ impl Feat {
     }
 }
 
+/// Folds one observation of one field into a map of aggregates.
+///
+/// This is the arithmetic behind [`EmissionFeatures::fold`], written once so that the cluster
+/// centroids of [`cluster::ClusterCentroid`] (T-202) fold members exactly the way an emitter folds
+/// sightings — one uncertainty rule, at both levels:
+///
+/// - **Numeric.** A capped running mean ([`FEATURE_FOLD_WEIGHT_CAP`]) with a Welford update for
+///   `spread`, and a running mean of the observations' own sigmas. The reported [`Feat::sigma`] is
+///   the larger of the two (see [`Feat`] for why it never shrinks as `1/√n`).
+/// - **Label / bits.** A streaming plurality vote (Boyer–Moore): a matching observation raises the
+///   counter, a differing one lowers it, and the candidate is replaced when the counter reaches
+///   zero. `agreement` is `votes / n`, a lower bound on the true share — so a sync word seen once
+///   among many disagreeing reads is visibly weak evidence rather than silently authoritative.
+/// - **Kind change.** An observation of a different kind (a number where a label stands) replaces
+///   the field and restarts its statistics: the two are not averageable.
+pub fn fold_field(fields: &mut BTreeMap<String, Feat>, name: &str, obs: Feat) {
+    match fields.get_mut(name) {
+        None => {
+            fields.insert(name.to_owned(), obs);
+        }
+        Some(cur) if !cur.value.same_kind(&obs.value) => {
+            *cur = obs;
+        }
+        Some(cur) => {
+            let n = cur.n.saturating_add(1);
+            let w = f64::from(cur.n.clamp(1, FEATURE_FOLD_WEIGHT_CAP));
+            match (&cur.value, &obs.value) {
+                (FeatValue::Num { value: old }, FeatValue::Num { value: new }) => {
+                    let (old, new) = (*old, *new);
+                    let mean = (old * w + new) / (w + 1.0);
+                    // Welford in its weighted form: the spread follows the observations even
+                    // once the mean's weight is capped.
+                    let var =
+                        (cur.spread * cur.spread * w + (new - old) * (new - mean)) / (w + 1.0);
+                    cur.value = FeatValue::Num { value: mean };
+                    cur.spread = if var.is_finite() && var > 0.0 {
+                        var.sqrt()
+                    } else {
+                        0.0
+                    };
+                    cur.sigma_meas = (cur.sigma_meas * w + obs.sigma_meas) / (w + 1.0);
+                    cur.agreement = 1.0;
+                }
+                _ => {
+                    // Streaming plurality vote over labels and bit patterns.
+                    if cur.value.same(&obs.value) {
+                        cur.votes = cur.votes.saturating_add(1);
+                    } else if cur.votes <= 1 {
+                        cur.value = obs.value.clone();
+                        cur.method = obs.method.clone();
+                        cur.votes = 1;
+                    } else {
+                        cur.votes -= 1;
+                    }
+                    cur.agreement = f64::from(cur.votes) / f64::from(n.max(1));
+                }
+            }
+            cur.n = n;
+            cur.recompute_sigma();
+        }
+    }
+}
+
 /// The aggregated, uncertainty-carrying measurement of one emitter (ADR-0016 §5), from which a
 /// [`SignatureMatch`] is computed.
 ///
@@ -926,51 +1010,7 @@ impl EmissionFeatures {
     /// - **Kind change.** An observation of a different kind (a number where a label stands)
     ///   replaces the field and restarts its statistics: the two are not averageable.
     pub fn fold(&mut self, name: &str, obs: Feat) {
-        match self.fields.get_mut(name) {
-            None => {
-                self.fields.insert(name.to_owned(), obs);
-            }
-            Some(cur) if !cur.value.same_kind(&obs.value) => {
-                *cur = obs;
-            }
-            Some(cur) => {
-                let n = cur.n.saturating_add(1);
-                let w = f64::from(cur.n.clamp(1, FEATURE_FOLD_WEIGHT_CAP));
-                match (&cur.value, &obs.value) {
-                    (FeatValue::Num { value: old }, FeatValue::Num { value: new }) => {
-                        let (old, new) = (*old, *new);
-                        let mean = (old * w + new) / (w + 1.0);
-                        // Welford in its weighted form: the spread follows the observations even
-                        // once the mean's weight is capped.
-                        let var =
-                            (cur.spread * cur.spread * w + (new - old) * (new - mean)) / (w + 1.0);
-                        cur.value = FeatValue::Num { value: mean };
-                        cur.spread = if var.is_finite() && var > 0.0 {
-                            var.sqrt()
-                        } else {
-                            0.0
-                        };
-                        cur.sigma_meas = (cur.sigma_meas * w + obs.sigma_meas) / (w + 1.0);
-                        cur.agreement = 1.0;
-                    }
-                    _ => {
-                        // Streaming plurality vote over labels and bit patterns.
-                        if cur.value.same(&obs.value) {
-                            cur.votes = cur.votes.saturating_add(1);
-                        } else if cur.votes <= 1 {
-                            cur.value = obs.value.clone();
-                            cur.method = obs.method.clone();
-                            cur.votes = 1;
-                        } else {
-                            cur.votes -= 1;
-                        }
-                        cur.agreement = f64::from(cur.votes) / f64::from(n.max(1));
-                    }
-                }
-                cur.n = n;
-                cur.recompute_sigma();
-            }
-        }
+        fold_field(&mut self.fields, name, obs);
     }
 
     /// Folds a whole observation (several fields measured at once) and counts it.

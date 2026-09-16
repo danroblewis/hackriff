@@ -43,11 +43,11 @@ use std::collections::BTreeMap;
 
 use hk_model::classify::TaxonomyRef;
 use hk_model::classify::taxonomy::{UNKNOWN, family_of};
+pub use hk_model::signature::default_tolerance;
 use hk_model::signature::{
-    DEFAULT_SYMBOL_RATE_TOLERANCE, EmissionFeatures, FULL_MATCH_MIN_SCORE, Feat, FeatValue,
-    FieldAgreement, FieldExpect, FieldSpec, MATCH_CANDIDATES_MAX, MatchOutcome,
-    PARTIAL_MATCH_MIN_SCORE, RecipeRef, SIGNATURE_SCHEMA, Signature, SignatureCandidate,
-    SignatureMatch, Z_CONFLICT, field,
+    EmissionFeatures, FULL_MATCH_MIN_SCORE, Feat, FeatValue, FieldAgreement, FieldExpect,
+    FieldSpec, MATCH_CANDIDATES_MAX, MatchOutcome, PARTIAL_MATCH_MIN_SCORE, RecipeRef,
+    SIGNATURE_SCHEMA, Signature, SignatureCandidate, SignatureMatch, Z_CONFLICT, field,
 };
 use hk_model::time::Timestamp;
 use serde_json::json;
@@ -60,21 +60,6 @@ pub const MATCH_MIN_DISCRIMINATING: u32 = 3;
 /// `z` given to a label that simply differs (line code, CRC name): above [`Z_CONFLICT`], so a
 /// wrong label is evidence *against* the entry rather than a near miss.
 pub const TEXT_MISMATCH_Z: f64 = Z_CONFLICT + 1.0;
-
-/// Default **relative** tolerance for a numeric field whose [`FieldSpec`] names none. These
-/// mirror `hk_model::cluster::Tolerances::default` where the two overlap, so matching and entity
-/// resolution do not disagree about how close counts as close.
-pub fn default_tolerance(name: &str) -> f64 {
-    match name {
-        field::SYMBOL_RATE_HZ => DEFAULT_SYMBOL_RATE_TOLERANCE,
-        field::DEVIATION_HZ => 0.10,
-        field::PERIOD_S | field::TDMA_PERIOD_S | field::PRI_S | field::SCAN_PERIOD_S => 0.05,
-        field::DUTY_CYCLE | field::BURST_LENGTH_S => 0.25,
-        field::OBW_HZ => 0.20,
-        field::F_CENTER_HZ | field::HOP_RASTER_HZ | field::COMB_SPACING_HZ => 0.02,
-        _ => 0.10,
-    }
-}
 
 /// How one candidate scored, before the match-level outcome is decided.
 struct Scored {
@@ -136,7 +121,7 @@ fn numeric_distance(measured: f64, expect: &FieldExpect) -> Option<(f64, f64, se
 /// Rotations beyond polarity (the PSK constellation-rotation set of ADR-0016 §5) need the symbol
 /// mapping, not the sliced bits, so they are not attempted here — a rotated PSK sync word reads as
 /// a miss rather than a false agreement, which is the safe direction.
-fn bit_errors(measured: &str, pattern: &str) -> Option<u32> {
+pub(crate) fn bit_errors(measured: &str, pattern: &str) -> Option<u32> {
     if measured.is_empty() || pattern.is_empty() {
         return None;
     }

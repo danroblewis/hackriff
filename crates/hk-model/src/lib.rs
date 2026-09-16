@@ -123,9 +123,14 @@ pub use repo::{
     Selection, SelectionLink, SelectionLinkKind, TrustTest, TrustVerdict, USER_BAND_MAX_GAP_HZ,
     USER_BAND_MAX_WIDTH_HZ, UserBand,
 };
+pub use signature::cluster::{
+    CLUSTER_FIELDS, CLUSTER_MIN_APPEARANCES, CLUSTER_MIN_MEMBERS, ClusterCentroid, ClusterEvent,
+    ClusterEventKind, ClusterState, EmitterClusterLink, SignatureCluster, is_cluster_field,
+    is_cluster_id, new_cluster_id,
+};
 pub use signature::{
     EMISSION_FEATURES_VERSION, EmissionFeatures, Feat, FeatValue, FieldAgreement, FieldExpect,
     FieldSpec, InvalidSignature, MatchOutcome, SIGNATURE_SCHEMA, Signature, SignatureCandidate,
-    SignatureKind, SignatureMatch, SignatureProvenance, SignatureRef,
+    SignatureKind, SignatureMatch, SignatureProvenance, SignatureRef, fold_field,
 };
 pub use time::{SampleTime, Timestamp, TimestampMethod};

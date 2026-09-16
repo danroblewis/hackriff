@@ -15,9 +15,14 @@
 //! named, rather than being snapped to the nearest entry. Clustering of unknowns (T-202) and the
 //! rtl_433 importer (T-214) build on these two pieces.
 
+pub mod cluster;
 pub mod features;
 pub mod matcher;
 
+pub use cluster::{
+    CLUSTER_EPSILON, CLUSTER_MIN_SHARED_FIELDS, Closeness, REPAIR_MIN_POINTS, RepairReport,
+    Separated, assign_emitter, compare, promote, repair,
+};
 pub use features::{FeatureObservation, aggregate, fold_observation};
 pub use matcher::{MATCH_MIN_DISCRIMINATING, default_tolerance, match_signatures, missing_fields};
 
@@ -73,5 +78,7 @@ pub fn offers_recipe(m: &SignatureMatch) -> bool {
     m.outcome != MatchOutcome::None && m.top().is_some_and(|c| c.recipe.is_some())
 }
 
+#[cfg(test)]
+mod cluster_tests; // T-202
 #[cfg(test)]
 mod tests;
