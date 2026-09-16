@@ -2832,3 +2832,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Coordination noted in the briefs:** T-244 and T-215 share crates/hk-classify, so T-215 was told to stay out of harness.rs, eval.rs and the generator/density code; T-242 owns the pipeline call site.
 - **B0.597 Full check green after merging T-202 and T-165 (5b22f48).** Lint clean; 1655/1655 tests; acceptance 31/31; acceptance_m2 8/8; disk reclaimed to 47 GB by removing the two merged worktrees.
   - **Merging T-164** (recipe ranking) with its own check. That leaves only the three in-flight gate tasks - T-215, T-242, T-244 - before T-206 can run.
+- **B0.598 Main was broken for two commits by my own merge resolution; repaired at 389ec7a.**
+  - Resolving the T-164/T-202 conflict in `api_contract.rs` with a marker regex dropped the closing brace of `cluster_routes_answer_as_documented` and nested T-164's test inside it. `hk-cli`'s api_contract target did not compile from 995b4d6 through c6ec391.
+  - **Why it got committed:** the verify step (`just test-one api_contract`) was in the chain but ordered *after* the commit, so it reported the breakage instead of preventing it. Rule: the compile gate precedes the commit, and reverts on failure.
+  - **Why diagnosis took four attempts:** I compared brace counts against `c6ec391^1` assuming `^1` meant main; it was my own merge commit. One `git log --format=%p` would have settled it. Worse, I saved that wrong-ref content to `side-main.rs`, so the bad baseline silently fed the next rebuild, which failed on its own assertion. Assertions caught this, not my reasoning.
+  - **Repair:** brace-matched the complete T-164 item out of c50a8f9 and appended it after the complete T-202 item from 2b0edf6, with both sources' balance asserted before use. Gate passed 32/32; full check green: lint clean, 1674/1674 tests, acceptance 32/32, 41 GB free.
+  - M3 gate unaffected: T-215, T-242 and T-244 branch from 9720bfe, before the break.
