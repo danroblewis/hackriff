@@ -4697,7 +4697,8 @@ tasks:
   - id: T-271
     milestone: M4
     title: 'M4 DMR Tier III / Capacity Plus, SmartNet/EDACS and NXDN Type-C control decode'
-    status: in-progress
+    status: done
+    commit: 9236ddf
     priority: normal
     deps:
     - T-268
@@ -6510,6 +6511,46 @@ tasks:
       T-283 is separately investigating for hk-ml. DO NOT add a nextest retry: this project has been removing
       those, and a retry would hide exactly the kind of bug T-293 spent a session diagnosing. An honest
       ''reproduced N times in M runs under deliberate load'' is the deliverable'
+  - id: T-345
+    milestone: M4
+    title: 'NXDN Type-C is identified but not decoded: the FSW is verified, the CAC layout is not, and a
+      channel number needs a configured map anyway'
+    status: todo
+    priority: normal
+    deps:
+    - T-271
+    parallel_group: M4C
+    model: opus
+    acceptance: 'T-271 verified NXDN''s frame sync word 0xCDF59 BY ARITHMETIC - it decodes to -3,+1,-3,+3,-3,-3,+3,+3,-1,+3
+      under the standard dibit map, reproducing the published symbol sequence exactly - and then decoded
+      nothing from it, because the CAC''s FEC and CRC layout could not be corroborated. That is the right
+      shape: identified is not decoded, and claiming a grant from an uncorroborated layout is how a convincing
+      wrong answer gets written. Two things must both be solved to finish it. FIRST, corroborate the CAC
+      layout against an independent reference, with arithmetic where possible (T-271''s own standard: check
+      a property the value must satisfy, not just a table someone typed). SECOND, and this is the structural
+      half: a Type-C channel number needs a CONFIGURED channel map or base/step, because the air does not
+      carry one - so even a correctly decoded grant usually resolves to nothing, exactly like DMR''s LPCN.
+      Do not invent a default map. If it resolves to nothing, say so with a reason the way T-271''s no-channel-parameters
+      does'
+  - id: T-346
+    milestone: M2-hardening
+    title: just lint is fmt plus clippy only, so Python lint failures live on main outside every gate
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPE
+    model: sonnet
+    acceptance: 'T-271 found a ruff failure in py/tests/test_occupancy_scene.py (unused pathlib.Path) that
+      EXISTS ON MAIN and is invisible to every gate, because just lint runs fmt and clippy only. It correctly
+      left it alone as not its change. This is the same class of hole as the gate-scope defect recorded
+      in B0.635 - a gate that does not cover the files a task may touch - one layer out: the gate does not
+      cover a LANGUAGE the repo uses. CLAUDE.md says CI runs just test plus Python tooling tests, so Python
+      is in scope for the project even though it is out of scope for the lint recipe. Fix the existing failure,
+      then decide whether ruff belongs in just lint or in a separate recipe the coordinator runs - and say
+      which, with the reason. If it goes in just lint, every agent''s gate gets slower, so that trade is
+      worth stating rather than assuming. Note py/ is orchestration and research only, never the real-time
+      path, so the bar is tidiness rather than correctness - but an invisible failure trains everyone to
+      ignore the tool that reports it, which is the T-293 lesson'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
