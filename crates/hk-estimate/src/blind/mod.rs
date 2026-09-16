@@ -14,7 +14,8 @@
 //!    `x[n]x*[n−D]` (D = round(fs/(2·OBW))) and |d IF|² (IF smoothed over fs/(2·OBW)).
 //!    Agreement counts only across groups: |x_c²| ≡ |x|² is not a second method (pitfall 1).
 //!    A line counts at ≥ 12 dB; line-only trust needs ≥ 14 dB from both groups. Search
-//!    `[max(4·fs/N, OBW/50), min(1.2·OBW, fs/2.5)]`.
+//!    `[OBW/50, min(1.2·OBW, fs/2.5)]` — **pinned by the signal and the receiver, never by the
+//!    record** (T-327), as is the whitening block width.
 //! 3. **Family scores** in [0, 1]: OOK (two envelope levels, low level < 2.5 σ of the noise,
 //!    contrast ≥ 8 dB, ≥ 12 changes); FSK (centre IF of the top candidates bimodal: J ≥ 2.5
 //!    saturating at 4.5, valley < 0.6, occupancy > 10 %, periodicity < 0.95, pitfall 8); BPSK
@@ -137,6 +138,11 @@ pub struct CyclicLine {
     pub significance_db: f64,
     /// One-sigma frequency uncertainty, Hz.
     pub sigma_hz: Option<f64>,
+    /// This line's whitening block had to be widened past the pinned
+    /// [`BlindConfig::whiten_block_obw`] because the record held too few independent cells, so
+    /// [`CyclicLine::significance_db`] was **not** measured at C14's pinned geometry (T-327).
+    #[serde(default)]
+    pub whiten_clamped: bool,
 }
 
 /// Coarse modulation family (C15 family scores).
@@ -258,10 +264,30 @@ pub struct BlindConfig {
     pub line_count_db: f64,
     /// Line significance for line-only trust (both groups), dB.
     pub line_trust_db: f64,
-    /// Lower rate bound as a fraction of OBW99.
+    /// Lower rate bound as a fraction of OBW99 — **the whole lower edge** since T-327.
+    ///
+    /// It used to be `max(rate_min_cells·fs/n, obw·rate_min_obw)`, so the band searched was a
+    /// function of how long the record was: on the dev grid the floor moved 212 → 27 Hz (`am`),
+    /// 377 → 129 (`nbfm`), 1965 → 246 (most keyed classes) between an eighth of the window and
+    /// all of it, and `rate_range_hz` — a reported field — moved with it. The resolution term that
+    /// caused that is real but belongs to the **transform**: it is now `DC_GUARD_NATIVE_BINS`
+    /// inside [`lines::spectral_line`], where it limits which bins can be *reported* without
+    /// moving the band, the candidate set, or the reported range.
+    ///
+    /// The surviving bound is physical. For every modulation C14 covers the occupied bandwidth is
+    /// within a small factor of the symbol rate (docs/04 §4.5; the module docs above measure
+    /// OBW99/Rs at 1.25 for GFSK h = 0.5 and PSK α = 0.35, up to 3.3 for NRZ OOK), so 1/50 leaves
+    /// better than 15× margin past the widest ratio in the taxonomy. Raise it and a genuinely slow
+    /// emission inside a wide detection box goes unseen — C14 reports no line rather than its
+    /// rate; lower it and the search runs down into the feature series' own near-DC continuum
+    /// (AGC, fading, envelope drift), which is where the periodogram is least white, and buys
+    /// false lines there.
     pub rate_min_obw: f64,
-    /// Lower rate bound in periodogram resolution cells (`k·fs/N`).
-    pub rate_min_cells: f64,
+    /// Whitening block width as a fraction of OBW99 (T-327).
+    ///
+    /// Pinned to the signal, never to the record: see [`lines`] for the two bounds that meet in
+    /// it and for what happens when a record is too short to hold the statistical minimum.
+    pub whiten_block_obw: f64,
     /// Upper rate bound as a multiple of OBW99.
     pub rate_max_obw: f64,
     /// Upper rate bound as a fraction of fs.
@@ -295,7 +321,7 @@ impl Default for BlindConfig {
             line_count_db: 12.0,
             line_trust_db: 14.0,
             rate_min_obw: 1.0 / 50.0,
-            rate_min_cells: 4.0,
+            whiten_block_obw: 1.0 / 8.0,
             rate_max_obw: 1.2,
             rate_max_fs: 1.0 / 2.5,
             rate_min_hz: None,
@@ -468,7 +494,8 @@ pub struct SymbolParameters {
     pub lines: Vec<CyclicLine>,
     /// The winning candidate's transition fit, if ok.
     pub transition_fit: Option<TransitionFit>,
-    /// Search range, Hz.
+    /// Search range, Hz. A function of OBW99 and the sample rate only: two readings of one emitter
+    /// searched the same band however long each was watched for (T-327).
     pub rate_range_hz: (f64, f64),
     /// Family label (`Unknown` unless SNR_ext ≥ floor and confidence ≥ floor).
     pub family: Family,
@@ -855,10 +882,10 @@ impl BlindEstimator {
         let fis = moving_avg(&fi, ((fs / obw / 2.0) as usize).max(1));
         let on1 = &on[1..];
 
-        // 2. Raw cyclic lines.
-        let f_min = cfg
-            .rate_min_hz
-            .unwrap_or_else(|| (cfg.rate_min_cells * fs / n as f64).max(obw * cfg.rate_min_obw));
+        // 2. Raw cyclic lines. Both edges of the band and the whitening width are pinned by the
+        // signal and the receiver; none of them may be a function of `n` (T-327).
+        let f_min = cfg.rate_min_hz.unwrap_or(obw * cfg.rate_min_obw);
+        let whiten_hz = cfg.whiten_block_obw * obw;
         let f_max = cfg
             .rate_max_hz
             .unwrap_or(cfg.rate_max_obw * obw)
@@ -884,23 +911,24 @@ impl BlindEstimator {
             freq_hz: l.map(|l| l.freq_hz),
             significance_db: l.map_or(0.0, |l| l.significance_db),
             sigma_hz: l.map(|l| l.sigma_hz),
+            whiten_clamped: l.is_some_and(|l| l.whiten_clamped),
         };
         let raw_lines = vec![
             mk(
                 LineMethod::EnvelopeSquare,
-                spectral_line(plans, &env_sq, fs, f_min, f_max),
+                spectral_line(plans, &env_sq, fs, f_min, f_max, whiten_hz),
             ),
             mk(
                 LineMethod::EnvelopeDiff,
-                spectral_line(plans, &env_diff, fs, f_min, f_max),
+                spectral_line(plans, &env_diff, fs, f_min, f_max, whiten_hz),
             ),
             mk(
                 LineMethod::DelayMultiply,
-                complex_line(plans, &dm, fs, f_min, f_max),
+                complex_line(plans, &dm, fs, f_min, f_max, whiten_hz),
             ),
             mk(
                 LineMethod::IfDiff,
-                spectral_line(plans, &if_diff, fs, f_min, f_max),
+                spectral_line(plans, &if_diff, fs, f_min, f_max, whiten_hz),
             ),
         ];
 

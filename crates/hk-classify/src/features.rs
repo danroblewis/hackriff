@@ -695,18 +695,52 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
 ///    `noise-like`, `ook` and `pulse`. Two readings of one emitter are then frequently not the
 ///    same measurement at all. The four series do not share a growth law either (per-method mean
 ///    slopes 4.0–6.0 dB/decade with **sd 6.2–13.8**).
-/// 2. **C14's search band and whitening both scale as `fs/n`.** The rate search starts at
-///    `f_min = max(rate_min_cells·fs/n, obw·rate_min_obw)`, so a shorter window searches from a
-///    *higher* frequency: on `2fsk` 1964.6 Hz at N/8 against 1121.7 Hz at N (`am` 212.1 → 26.5,
-///    `cw` 21.8 → 1.2). At N/8 the true symbol-rate line is below the floor and only its harmonic
-///    is findable — the winning line's frequency is 0.49× at N/8 versus N for `2fsk`, 0.42× for
-///    `4fsk`, 0.50× for `gfsk`, 0.57× for `msk`, i.e. exactly the classes whose slope is negative.
-///    The whitening block is 24 native bins, so its width in Hz is `24·fs/n` and the floor a line
-///    is judged against gets more local as the record grows.
+/// 2. **C14's search band and whitening both scaled as `fs/n`.** The rate search started at
+///    `f_min = max(rate_min_cells·fs/n, obw·rate_min_obw)`, so a shorter window searched from a
+///    *higher* frequency (`am` 212.1 → 26.5 Hz, `nbfm` 377.3 → 129.1, most keyed classes
+///    1964.6 → 245.5 between N/8 and N), and the whitening block was 24 *native* bins, i.e.
+///    `24·fs/n` Hz wide.
 ///
 /// This is the same class of defect as the resolution note on [`spectral_features`] (T-281's
 /// seventh finding, T-312): **the analysis geometry is a function of the record**. It lives in
-/// C14, not here.
+/// C14, not here, and **T-327 fixed it** — the band is now `[OBW99/50, min(1.2·OBW99, fs/2.5)]`
+/// and the whitening block `OBW99/8`, neither a function of `n`.
+///
+/// ## What T-327 found when it pinned them: the geometry was not the mechanism
+///
+/// Measured with one instrument across both geometries (21 classes × 4 dev seeds × N/8…N at 25 dB,
+/// C14's window truncated and nothing else changed):
+///
+/// | | before T-327 | after T-327 |
+/// |---|---|---|
+/// | mean `\|cyclic_db(N) − cyclic_db(N/8)\|` | 10.16 dB | 9.40 dB |
+/// | sd of `cyclic_db` across N/8…N | 4.78 dB | 4.47 dB |
+/// | `F` between/within class, fixed length | 89.6 | 92.1 |
+/// | `F` between/within class, lengths pooled | 48.5 | 54.6 |
+/// | winning `LineMethod` changes across N/8…N | 59 of 84 | 58 of 84 |
+/// | `rate_range_hz` lower edge differs N/8 vs N | 51 of 84 | **0 of 84** |
+///
+/// The reported search band is now exactly length-free and pooling window lengths costs about an
+/// eighth less class separation than it did. **But `cyclic_db` is still strongly window-dependent**
+/// — 9.40 dB of mean movement against 10.16 — and `2fsk` (−9.2 dB), `gfsk` (−8.6), `msk` (−8.8) and
+/// `4fsk` (−13.7) still read *lower* the longer they are watched. `wfm` and `ppm` crossed to
+/// positive, so the negative set is 4 of 21 rather than 6. **The geometry was a real defect and not
+/// the mechanism.**
+///
+/// T-310 attributed those negative slopes to the moving floor — "at N/8 the true symbol-rate line
+/// is below the floor and only its harmonic is findable". **That explanation does not survive
+/// measurement.** On the same grid the 2-FSK lines sit at 27–54 kHz while the floor they were
+/// blamed on is 2.5 kHz, twenty times below both, so the floor never excluded them; and the short
+/// window's winner is at *half* the long window's (the 0.49×/0.50×/0.57× T-310 recorded), which is
+/// a **sub**harmonic below, not a harmonic above. Pinning the floor moves those four classes by
+/// about a decibel.
+///
+/// What survives is T-310's own **first** finding: the argmax over four heterogeneous series moves
+/// with the window, and it still does at essentially the old rate (58 of 84 against 59 of 84) with
+/// the geometry pinned. `cyclic_db` is a max over four series with no shared growth law, so two
+/// readings of one emitter are frequently not the same measurement for that reason alone. Whatever
+/// fixes this dimension has to address the max — T-310's four-dimension expansion, or a rule for
+/// choosing among the four — and not the geometry, which is now done.
 ///
 /// ## Every length-free form of this statistic was measured, and each loses discrimination
 ///
@@ -754,11 +788,11 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
 /// samples, so a *continuous* emission is always measured at the cap and is self-consistent. The
 /// dependence bites on **bursts shorter than the cap** — the ephemeral emissions CLAUDE.md makes
 /// first-class — where one emitter seen as a short burst and again as a long one lands at a
-/// different `cyclic_db`, and so at a different Mahalanobis distance from the same class. The fix
-/// is to stop C14's search band and whitening from scaling with the record; that changes
-/// `significance_db` for every C14 consumer, so it is not a rescaling that can be done in this
-/// module. `cyclic_line_window.rs` pins the two structural findings so the wrong law cannot be
-/// re-derived from a single seed.
+/// different `cyclic_db`, and so at a different Mahalanobis distance from the same class. T-327
+/// stopped C14's search band and whitening from scaling with the record, which removes about 7 % of
+/// that movement and all of the reported-band defect; the rest is the max-over-four collapse below.
+/// `cyclic_line_window.rs` pins the structural findings — including, now, that the band **does
+/// not** move — so neither the wrong law nor the fixed defect can be re-derived from a single seed.
 fn symbol_features(f: &mut Features, input: &FeatureInput<'_>) {
     let Some(s) = input.symbols else {
         return;

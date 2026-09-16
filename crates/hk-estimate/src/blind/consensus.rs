@@ -255,6 +255,7 @@ mod tests {
             freq_hz: Some(f),
             significance_db: s,
             sigma_hz: Some(1.0),
+            whiten_clamped: false,
         }
     }
 
