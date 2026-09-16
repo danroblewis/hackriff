@@ -305,6 +305,10 @@ impl HistoryTiles {
             obw_hz,
             unit: self.grid.unit,
             calibration: self.grid.provenance.calibration,
+            // T-359: read beside the calibration, from the same summary — a tile stand-in row
+            // states the antenna-port state it was measured under, or `Unknown` when the tiles
+            // pooled more than one.
+            bias_tee: crate::occupancy::engine::grid_bias_tee(&self.grid.provenance),
             confidence: None,
             revisit_biased: true,
             // T-118 additive fields: the tile stand-in measures none of them.

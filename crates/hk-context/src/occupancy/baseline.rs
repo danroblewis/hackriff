@@ -277,8 +277,14 @@ impl IntervalObservation {
     }
 }
 
-/// T-118 adapter: an `OccupancyStat` row as a fold, with its site and calibration keys. `None` for
-/// band subjects and rows without usable revisits.
+/// T-118 adapter: an `OccupancyStat` row as a fold, with its site, calibration and bias-tee keys.
+/// `None` for band subjects and rows without usable revisits.
+///
+/// **Bias tee (T-359)** is the row's own [`OccupancyStat::bias_tee`], so the fold is keyed on the
+/// antenna-port state it was measured under ([`Baselines::key`]) rather than on a constant. A row
+/// carrying [`BiasTee::Unknown`] — one whose source could not report the state, one pooling two
+/// states, or one written before T-359 — folds into the `Unknown` cohort, which is the honest
+/// answer and never `Off`.
 ///
 /// **Level (T-128)** is the channel's level **above its local noise floor**
 /// ([`channel_level_excess`]): the median occupied-visit level (`level_occupied_p50_db`) when at
@@ -296,7 +302,7 @@ impl IntervalObservation {
 pub fn from_occupancy_stat(
     stat: &OccupancyStat,
     gain: u32,
-) -> Option<(SiteKey, CalKey, IntervalObservation)> {
+) -> Option<(SiteKey, CalKey, BiasTee, IntervalObservation)> {
     let OccupancySubject::Channel { key } = stat.subject else {
         return None;
     };
@@ -333,7 +339,7 @@ pub fn from_occupancy_stat(
     let cal = stat
         .calibration
         .map_or(CalKey::Uncalibrated, CalKey::Calibrated);
-    Some((stat.site, cal, obs))
+    Some((stat.site, cal, stat.bias_tee, obs))
 }
 
 /// A channel row's representative level and max level above its local floor, dB
@@ -2745,7 +2751,7 @@ mod tests {
                 return;
             }
         };
-        let (site, cal, o) = from_occupancy_stat(&stat, 3).unwrap();
+        let (site, cal, _, o) = from_occupancy_stat(&stat, 3).unwrap();
         assert_eq!((site, cal), (SiteKey::Mobile, CalKey::Uncalibrated));
         assert_eq!(o.subject, BaselineSubject::Channel { key });
         assert_eq!(o.observed_s, 900.0);
@@ -2791,7 +2797,7 @@ mod tests {
             } else {
                 leveled_row(hours, 0.0, -100.0, 2.0 + 0.3 * ((q % 5) as f64 - 2.0), 25.0)
             };
-            let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+            let (_, _, _, o) = from_occupancy_stat(&row, 0).unwrap();
             assert!(o.level_db.is_some(), "a level from T-118 fields");
             let out = e.observe(&o);
             if hours < 72.0 {
@@ -2847,7 +2853,7 @@ mod tests {
             let floor = if hours >= 72.0 { -91.0 } else { -101.0 };
             let wobble = 0.3 * ((q % 5) as f64 - 2.0);
             let row = leveled_row(hours, 0.3, floor, 2.0 + wobble, 20.0 + wobble);
-            let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+            let (_, _, _, o) = from_occupancy_stat(&row, 0).unwrap();
             let out = e.observe(&o);
             assert!(o.level_db.is_some(), "a real level at {hours} h");
             assert!(
@@ -3020,7 +3026,7 @@ mod tests {
                     (0x1234, 12.0)
                 };
                 let row = leveled_row(hours, 0.5, -100.0, 2.0, occ + 0.3 * rng.normal());
-                let (_, _, o) = from_occupancy_stat(&row, gain).unwrap();
+                let (_, _, _, o) = from_occupancy_stat(&row, gain).unwrap();
                 subject = Some(o.subject);
                 let out = e.observe(&o);
                 if (72.0..78.0).contains(&hours) {
@@ -3071,7 +3077,7 @@ mod tests {
                 2.0 + 0.3 * rng.normal(),
                 20.0 + 0.3 * rng.normal(),
             );
-            let (_, _, o) = from_occupancy_stat(&row, gain).unwrap();
+            let (_, _, _, o) = from_occupancy_stat(&row, gain).unwrap();
             let out = e.observe(&o);
             if o.level_class() != LevelClass::Occupied || o.level_db.is_none() {
                 continue;
@@ -3113,7 +3119,7 @@ mod tests {
             // Every 8th interval one of 12 visits is occupied, +20 dB above the floor.
             let fco = if q % 8 == 0 { 1.0 / 12.0 } else { 0.0 };
             let row = leveled_row(hours, fco, -100.0, 2.0 + 0.3 * rng.normal(), 20.0);
-            let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+            let (_, _, _, o) = from_occupancy_stat(&row, 0).unwrap();
             let out = e.observe(&o);
             if hours >= 24.0 && q % 8 == 0 {
                 assert_eq!(o.level_db, None, "one occupied visit folds occupancy only");
@@ -3127,7 +3133,7 @@ mod tests {
             let hours = f64::from(q) / 4.0;
             let occ = if hours >= 72.0 { 18.0 } else { 12.0 } + 0.5 * rng.normal();
             let row = leveled_row(hours, 0.5, -100.0, 2.0, occ);
-            let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+            let (_, _, _, o) = from_occupancy_stat(&row, 0).unwrap();
             let out = e.observe(&o);
             let lz = out.novelty.level_z.unwrap_or(f64::NEG_INFINITY);
             if (24.0..72.0).contains(&hours) {
@@ -3222,7 +3228,7 @@ mod tests {
             let weak = hours >= ONSET_H;
             let occ = 12.0 + if weak { 1.5 } else { 0.0 } + rng.normal();
             let row = leveled_row(hours, 0.5, -100.0, 2.0, occ);
-            let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+            let (_, _, _, o) = from_occupancy_stat(&row, 0).unwrap();
             if weak && ref_before.is_none() {
                 ref_before = Some(mean_of(&e, o.subject, BaselineCopy::Reference));
             }
@@ -3271,7 +3277,7 @@ mod tests {
             for q in 0..(24 * 4 * 30) {
                 let hours = f64::from(q) / 4.0;
                 let row = leveled_row(hours, 0.5, -100.0, 2.0, 12.0 + rng.normal());
-                let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+                let (_, _, _, o) = from_occupancy_stat(&row, 0).unwrap();
                 subject = Some(o.subject);
                 e.observe(&o);
             }
@@ -3473,7 +3479,7 @@ mod tests {
         for q in 0..(24 * 4 * 3) {
             let hours = f64::from(q) / 4.0;
             let row = leveled_row(hours, 0.0, -100.0, 2.0 + 0.3 * ((q % 5) as f64 - 2.0), 25.0);
-            let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
+            let (_, _, _, o) = from_occupancy_stat(&row, 0).unwrap();
             b.observe(
                 site,
                 0,
@@ -3487,7 +3493,8 @@ mod tests {
         let loaded = b.memory_bytes();
         b.set_memory_cap(Some(loaded));
         // An emitter 25 dB above the floor: a new occupied-level series, so the fold would grow.
-        let (_, _, o) = from_occupancy_stat(&leveled_row(72.0, 0.8, -100.0, 2.0, 25.0), 0).unwrap();
+        let (_, _, _, o) =
+            from_occupancy_stat(&leveled_row(72.0, 0.8, -100.0, 2.0, 25.0), 0).unwrap();
         let out = b
             .observe(
                 site,

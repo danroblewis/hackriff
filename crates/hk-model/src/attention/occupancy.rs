@@ -14,6 +14,7 @@ use super::baseline::SiteKey;
 use super::{ValidationError, ensure, ensure_in, ensure_opt_in, ensure_schema};
 use crate::frames::PowerUnit;
 use crate::ids::CalibrationStateId;
+use crate::provenance::BiasTee;
 use crate::region::{FreqRange, TimeRange};
 use crate::time::Timestamp;
 
@@ -434,6 +435,23 @@ pub struct OccupancyStat {
     /// Calibration in force.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calibration: Option<CalibrationStateId>,
+    /// Antenna-port bias-tee state the interval was measured under (T-359), from the provenance of
+    /// the history the visits were read from.
+    ///
+    /// [`BiasTee::Unknown`] is a **value, not an absence**: it says no single known state can be
+    /// attributed to this row — either the source could not report one, or the row pools frames
+    /// measured under more than one (`ProvenanceSummary::bias_tee_mixed`). It never means the DC
+    /// was off, and must not be `unwrap_or(false)`-ed into that claim (T-325). Rows written before
+    /// T-359 carry no field and read as `Unknown`, which is what they are; reading them as `Off`
+    /// would claim a comparability nothing measured.
+    ///
+    /// The bias tee powers an external LNA, so it belongs to the row rather than to the run: it is
+    /// switched **during** a run, and the floor moves the instant the DC arrives. T-333 keys
+    /// baselines on this value, so folds measured under different states are never compared.
+    /// Serialised like `calibration`: omitted while unknown rather than written as a null a reader
+    /// might coerce.
+    #[serde(default, skip_serializing_if = "BiasTee::is_unknown")]
+    pub bias_tee: BiasTee,
     /// Interval on `fco`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<ConfidenceInterval>,
@@ -658,6 +676,7 @@ mod tests {
             obw_hz: Some(25_000.0),
             unit: PowerUnit::Dbfs,
             calibration: None,
+            bias_tee: BiasTee::Unknown,
             confidence: Some(ci),
             revisit_biased: false,
             fco_window: None,
@@ -673,6 +692,20 @@ mod tests {
         // Rows written before the level fields existed still read.
         assert!(!json.contains("floor_db") && !json.contains("level_idle_db"));
         assert_eq!(serde_json::from_str::<OccupancyStat>(&json).unwrap(), s);
+        // T-359: an unknown bias tee stays off the wire (calibration's precedent: omit, never a
+        // null), and a row written before the field existed reads back `Unknown` — never `Off`.
+        assert!(!json.contains("bias_tee"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<OccupancyStat>(&json)
+                .unwrap()
+                .bias_tee,
+            BiasTee::Unknown
+        );
+        let mut on = s.clone();
+        on.bias_tee = BiasTee::On;
+        let json_on = serde_json::to_string(&on).unwrap();
+        assert!(json_on.contains(r#""bias_tee":"on""#), "{json_on}");
+        assert_eq!(serde_json::from_str::<OccupancyStat>(&json_on).unwrap(), on);
         let mut lv = s.clone();
         lv.floor_db = Some(-110.0);
         lv.floor_source = Some(FloorSource::History);

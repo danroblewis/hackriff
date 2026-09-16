@@ -1334,6 +1334,7 @@ mod tests {
             floor_source: hk_model::attention::occupancy::FloorSource::History,
             floor_suspect: false,
             gain_key,
+            bias_tee: hk_model::BiasTee::Unknown,
         };
         let key = |lo| ChannelKey {
             scheme: 1,
@@ -1911,5 +1912,224 @@ mod tests {
         );
         assert!(max_queued < crate::history::HISTORY_QUEUE_FRAMES / 4);
         assert!(folded > 0);
+    }
+
+    // T-359: the bias tee reaches the occupancy row.
+
+    /// 6.25 kHz × 1 s level-0 cells, 16 per tile: history scheme 1's geometry, in miniature.
+    fn t359_pyramid(dir: &std::path::Path) -> hk_store::Pyramid {
+        hk_store::Pyramid::open(
+            dir,
+            hk_store::PyramidConfig {
+                scheme: 1,
+                f_cell_hz: F_CELL,
+                t_cell: Duration::from_secs(1),
+                f_cells_per_block: 16,
+                levels: vec![hk_store::LevelConfig {
+                    f_factor: 1,
+                    t_cells_per_block: 16,
+                    max_age: None,
+                    byte_quota: None,
+                }],
+                seal_lag: Duration::ZERO,
+                checkpoint_interval: None,
+                byte_budget: u64::MAX,
+                ..hk_store::PyramidConfig::default()
+            },
+        )
+        .unwrap()
+    }
+
+    const T359_T0: i64 = 1_789_300_800 * T_CELL; // 2026-09-13T12:00:00Z
+    const T359_SECS: i64 = 240;
+    /// 100.000–100.100 MHz.
+    const T359_LO_CELL: i64 = 16_000;
+
+    /// A run of [`T359_SECS`] one-second frames over 16 cells from 100 MHz, the antenna-port bias
+    /// tee in state `bias(second)` and **nothing else moving**, ingested into a real pyramid,
+    /// sealed and reopened (so the state round-trips the tile format), then read back through the
+    /// production occupancy path: `evaluate_band` → `VisitSample`s → `rows_for` → `OccupancyStat`.
+    fn t359_rows(tag: &str, bias: impl Fn(i64) -> hk_model::BiasTee) -> Vec<OccupancyStat> {
+        let dir =
+            std::env::temp_dir().join(format!("hk-t359-{tag}-{}", hk_model::ids::SiteId::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let mut p = t359_pyramid(&dir);
+            // −100 dBFS/Hz noise with a carrier in the first channel, so rows have levels as well
+            // as occupancy. The gain state, calibration, port and mask are identical throughout: a
+            // bias-only change is invisible to every other part of the front-end state (T-331).
+            let mut psd = vec![10f32.powf(-10.0); 16];
+            psd[1] = 10f32.powf(-10.0) * 1000.0;
+            let gain = hk_store::GainState {
+                lna_db: 16.0,
+                vga_db: 20.0,
+                amp_on: false,
+            };
+            for k in 0..T359_SECS {
+                let mut f = hk_store::FrameInput::new(
+                    ts(T359_T0 + k * T_CELL),
+                    T_CELL,
+                    T359_LO_CELL as f64 * F_CELL,
+                    F_CELL,
+                    PowerUnit::Dbfs,
+                    &psd,
+                );
+                f.gain = Some(gain);
+                f.bias_tee = bias(k);
+                p.ingest(&f).unwrap();
+            }
+            p.seal_through(ts(T359_T0 + T359_SECS * T_CELL)).unwrap();
+        }
+        let p = t359_pyramid(&dir);
+        let cfg = OccupancyConfig::default();
+        let key = ChannelKey {
+            scheme: 1,
+            lo_cell: T359_LO_CELL,
+            hi_cell: T359_LO_CELL + 4,
+        };
+        // The learned plan is not what this test is about: one channel, stated.
+        let channels = vec![Channel {
+            key,
+            source: hk_model::attention::occupancy::ChannelSource::Learned,
+            plan_version: 1,
+            first_learned: ts(T359_T0),
+            evidence: 1,
+            obw_hz: key.freq(F_CELL).width_hz(),
+            raster_hint: None,
+        }];
+        let span = TimeRange::new(ts(T359_T0), ts(T359_T0 + T359_SECS * T_CELL));
+        let (band, band_id) = snap_band(
+            FreqRange::new(
+                T359_LO_CELL as f64 * F_CELL,
+                (T359_LO_CELL + 16) as f64 * F_CELL,
+            ),
+            F_CELL,
+        );
+        let job = BandJob {
+            cfg: &cfg,
+            levels: &p,
+            obs: None,
+            dets: &[],
+            f_cell: F_CELL,
+            t_cell_ns: T_CELL,
+            max_samples: MAX_SPAN_SAMPLES,
+        };
+        let mut series = BTreeMap::new();
+        let mut unit = PowerUnit::Dbfs;
+        evaluate_band(&job, band, band_id, &channels, span, &mut series, &mut unit).unwrap();
+        let rows = rows_for(&cfg, &channels, &series, span, span, unit, F_CELL);
+        drop(p);
+        let _ = std::fs::remove_dir_all(&dir);
+        rows.into_iter()
+            .filter(|r| matches!(r.subject, OccupancySubject::Channel { .. }))
+            .collect()
+    }
+
+    /// The bias-tee states of `rows`, deduplicated.
+    fn t359_states(rows: &[OccupancyStat]) -> Vec<hk_model::BiasTee> {
+        let mut v: Vec<hk_model::BiasTee> = rows.iter().map(|r| r.bias_tee).collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// T-359, **end to end**: the antenna-port bias-tee state rides from the ingested frame to the
+    /// occupancy row and keys the baseline the row folds into — the last hop of T-325 → T-331 →
+    /// T-333 → T-332, each of which was live while every fold was still `Unknown`.
+    ///
+    /// - **Property:** a run with the tee **on** produces rows carrying `On`, and they fold into a
+    ///   different baseline than `Off` rows from the same site, subject and slot. The floor and the
+    ///   gain state are identical in both runs, so nothing but the tee can separate them.
+    /// - **Control:** a run whose source cannot report the state still produces `Unknown`, and two
+    ///   such runs fold into **one** baseline — unknown still compares with unknown (T-333), so the
+    ///   change cannot pass by making everything incomparable.
+    /// - **Mixed:** a run that switches mid-span produces `Unknown`, never the longer-held state: a
+    ///   row measured under two receive chains cannot claim either.
+    /// - **Migration:** a row stored before T-359 (no `bias_tee` field on the wire) reads `Unknown`
+    ///   and folds with the other unknowns — it is **not** promoted to `Off`.
+    #[test]
+    fn occupancy_rows_carry_the_bias_tee_and_key_their_own_baseline() {
+        use hk_model::BiasTee;
+
+        let on = t359_rows("on", |_| BiasTee::On);
+        let off = t359_rows("off", |_| BiasTee::Off);
+        let unknown = t359_rows("unknown", |_| BiasTee::Unknown);
+        let unknown2 = t359_rows("unknown2", |_| BiasTee::Unknown);
+        let switched = t359_rows("switch", |k| {
+            if k < T359_SECS / 2 {
+                BiasTee::Off
+            } else {
+                BiasTee::On
+            }
+        });
+        for (name, rows) in [
+            ("on", &on),
+            ("off", &off),
+            ("unknown", &unknown),
+            ("switched", &switched),
+        ] {
+            assert!(!rows.is_empty(), "{name}: no channel row");
+        }
+        assert_eq!(t359_states(&on), vec![BiasTee::On], "the tee was on");
+        assert_eq!(t359_states(&off), vec![BiasTee::Off], "the tee was off");
+        assert_eq!(
+            t359_states(&unknown),
+            vec![BiasTee::Unknown],
+            "the source could not report: unknown, never off"
+        );
+        assert_eq!(
+            t359_states(&switched),
+            vec![BiasTee::Unknown],
+            "a row straddling a switch claims neither state"
+        );
+        // Migration: the pre-T-359 wire form of an `on` row is its JSON with the field absent.
+        let legacy: Vec<OccupancyStat> = on
+            .iter()
+            .map(|r| {
+                let mut v = serde_json::to_value(r).unwrap();
+                assert!(v.get("bias_tee").is_some(), "the row states its state");
+                v.as_object_mut().unwrap().remove("bias_tee");
+                serde_json::from_value::<OccupancyStat>(v).unwrap()
+            })
+            .collect();
+        assert_eq!(
+            t359_states(&legacy),
+            vec![BiasTee::Unknown],
+            "a row written before T-359 reads unknown, never off"
+        );
+
+        // The folds. One site, one subject, one slot: only the tee can separate the cohorts.
+        let a = crate::attention::AttentionService::in_memory().unwrap();
+        let cur = a
+            .set_current_site(crate::attention::SiteSelect {
+                name: Some("bench".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let id: hk_model::ids::SiteId = cur["record"]["id"].as_str().unwrap().parse().unwrap();
+        let span_end = ts(T359_T0 + T359_SECS * T_CELL);
+        let mut folded = 0;
+        for rows in [&on, &off, &unknown, &unknown2, &legacy] {
+            let mut rows = rows.clone();
+            stamp_site(&a, &mut rows, span_end);
+            folded += a.ingest_interval(&rows, 0, span_end, BTreeMap::new()).len();
+        }
+        assert!(folded >= 5, "every run folded: {folded}");
+        let b = a.baselines_json(Some(id)).unwrap();
+        let cohorts: Vec<String> = b["baselines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["bias_tee"].as_str().unwrap().to_string())
+            .collect();
+        println!("T-359 baseline cohorts after five runs: {cohorts:?}");
+        assert_eq!(
+            cohorts.len(),
+            3,
+            "on, off and unknown — the two unknown runs and the legacy row share one: {cohorts:?}"
+        );
+        for state in ["on", "off", "unknown"] {
+            assert!(cohorts.iter().any(|c| c == state), "{cohorts:?}");
+        }
     }
 }

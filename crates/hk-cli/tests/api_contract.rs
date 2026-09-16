@@ -5098,6 +5098,11 @@ fn occupancy_and_channel_routes_answer_as_documented() {
                 "{r}"
             );
             assert_eq!(r["revisit_biased"], false);
+            // T-359: three-valued and omitted while unknown — never a null, never a bool.
+            assert!(
+                r["bias_tee"].is_null() || matches!(r["bias_tee"].as_str(), Some("off" | "on")),
+                "{r}"
+            );
         }
     }
     let (status, v) = get(

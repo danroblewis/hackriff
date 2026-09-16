@@ -72,6 +72,7 @@ fn stat(req: &ReportRequest, subject: OccupancySubject, fco: f64) -> OccupancySt
         obw_hz: None,
         unit: PowerUnit::Dbfs,
         calibration: None,
+        bias_tee: hk_model::BiasTee::Unknown,
         confidence: None,
         revisit_biased: false,
         fco_window: None,
