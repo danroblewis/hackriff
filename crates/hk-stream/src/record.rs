@@ -224,6 +224,9 @@ pub(crate) struct MessageWire<'a> {
     #[serde(rename = "type")]
     pub kind: &'static str,
     pub seq: u64,
+    /// Frame time, **integer Unix nanoseconds** — the name says so (§5.1, T-354). Contract 1.0/1.1
+    /// spelled it `t`; readers accept both, producers emit only this.
+    #[serde(rename = "t_ns")]
     pub t: Timestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emitter_id: Option<EmitterId>,
@@ -329,7 +332,7 @@ pub(crate) fn encode_marker(binary: bool, m: &DropMarker, buf: &mut [u8; MARKER_
         let mut cursor = std::io::Cursor::new(&mut buf[payload_start..]);
         writeln!(
             cursor,
-            "{{\"type\":\"dropped\",\"first_seq\":{},\"count\":{},\"t\":{}}}",
+            "{{\"type\":\"dropped\",\"first_seq\":{},\"count\":{},\"t_ns\":{}}}",
             m.first_seq,
             m.count,
             m.t.as_unix_nanos()

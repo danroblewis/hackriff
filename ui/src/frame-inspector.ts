@@ -56,7 +56,12 @@ export interface FrameMetadataDto {
 export interface FrameRecordDto {
   type?: string;
   seq?: number;
-  t?: number; // nanoseconds since epoch (stream-contract §5.1)
+  /**
+   * Integer Unix nanoseconds (stream-contract §5.1). The name carries the unit since contract
+   * 1.2 (T-354); past `Number.MAX_SAFE_INTEGER`, so `JSON.parse` has already rounded it to about
+   * ¼ µs — fine for placing a frame on a time axis, never an exact instant.
+   */
+  t_ns?: number;
   content_class?: string;
   gated: boolean;
   crc_status?: "valid" | "invalid" | "no-crc" | "unknown";
@@ -116,7 +121,7 @@ export interface FrameView {
 export function frameViewFromCapture(f: FrameRecordDto, fallbackIndex: number): FrameView {
   return {
     index: f.metadata?.frame ?? fallbackIndex,
-    timeS: f.t !== undefined ? f.t / 1e9 : undefined,
+    timeS: f.t_ns !== undefined ? f.t_ns / 1e9 : undefined,
     channel: f.metadata?.channel,
     channelHz: f.metadata?.channel_hz,
     bitLen: f.metadata?.bit_len ?? 0,

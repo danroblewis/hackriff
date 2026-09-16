@@ -355,7 +355,7 @@ Values:
 Specified in [`docs/stream-contract.md` §14](../stream-contract.md) (1.2 draft); types in `hk_stream::inspector`. In brief:
 - **Stream:** a `messages` stream with `message_schema: "hackriff.inspector/1"` and an optional header `inspector` object `{pipeline_id, recipe_id, recipe_version, output_id, source (live | capture), channels[]}`. Stream id `inspector/<pipeline>/<output>`.
 - **One `frame` record per frame:**
-  - `seq`, `t` (time of the first bit), `content_class`, `gated`, `crc_status`, `decoder` (`recipe:<id>@<version>`), `frame_model`, `emitter_id`;
+  - `seq`, `t_ns` (time of the first bit, integer Unix nanoseconds; `t` before stream contract 1.2, T-354), `content_class`, `gated`, `crc_status`, `decoder` (`recipe:<id>@<version>`), `frame_model`, `emitter_id`;
   - `metadata {frame, sample_index, channel, channel_hz, bit_len, recipe_version, edit_rev, fec_corrected_bits, fit}`;
   - `content {hex, layers}`.
 - **Interleaved records:** `status` (one per ~250 ms tick, all nodes batched) and `edit` (hot-edit boundary).

@@ -129,10 +129,10 @@ export function tallyChannels(frames: readonly FrameRecord[]): { label: string; 
   return [...counts.entries()].map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count);
 }
 
-/** Keeps only frames whose `t` (ns) falls in the last `windowS` seconds of `nowNs`. */
+/** Keeps only frames whose `t_ns` (stream-contract §5.1) falls in the last `windowS` seconds of `nowNs`. */
 export function withinWindow(frames: readonly FrameRecord[], nowNs: number, windowS: number): FrameRecord[] {
   const cutoff = nowNs - windowS * 1e9;
-  return frames.filter((f) => typeof f.t === "number" && f.t >= cutoff);
+  return frames.filter((f) => typeof f.t_ns === "number" && f.t_ns >= cutoff);
 }
 
 // ---- mount ----

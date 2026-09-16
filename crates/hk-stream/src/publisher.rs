@@ -66,6 +66,8 @@ struct FrameWire<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
     seq: u64,
+    /// Integer Unix nanoseconds; named for its unit since 1.2 (§5.1, T-354).
+    #[serde(rename = "t_ns")]
     t: i64,
     content_class: ContentClass,
     gated: bool,
@@ -88,6 +90,8 @@ struct MetaWire<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
     seq: u64,
+    /// Integer Unix nanoseconds; named for its unit since 1.2 (§5.1, T-354).
+    #[serde(rename = "t_ns")]
     t: Timestamp,
     content_class: ContentClass,
     gated: bool,

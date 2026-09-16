@@ -264,7 +264,7 @@ fn recording(frames: usize) -> Vec<u8> {
         )
         .unwrap();
         if i % 1000 == 0 {
-            let status = json!({"type": "status", "seq": i, "t": 0, "content_class": "unrestricted",
+            let status = json!({"type": "status", "seq": i, "t_ns": 0, "content_class": "unrestricted",
                                 "gated": false, "metadata": {"crc.error_rate": 0.0}});
             encode_frame(
                 &mut out,
