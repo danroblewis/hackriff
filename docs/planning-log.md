@@ -3346,3 +3346,46 @@ genuinely one filter argument, or the fold already averaged it away — in which
 pooled control is for, and the brief says to land the diagnosis plus the smallest honest change rather
 than manufacture a pass. It also carries T-359's lesson forward one layer: if a cell cannot be
 attributed to one chain, exclude it or mark it unknown — never take the dominant contributor.
+
+### B0.653 — T-367: the reported bug was not the bug, and the real one was worse (2026-09-16)
+
+Merged at `9a46489`. The user reported that wiring both navigator bars to scrub time is a bug.
+Checked against the source, **it was not the shipped behaviour**: `mountFreqNav` never wrote time
+and `mountTimeNav` never wrote frequency. The brief had told the agent to verify rather than trust
+T-340's report, and that instruction earned its keep in the opposite direction from the one intended
+— the report was accurate about gestures, and the user's inference from the symptom was not.
+
+What was missing was a *guarantee*. The separation held by inspection; nothing would have failed if a
+later edit crossed the wires. It is now asserted three ways: after a gesture the other axis's slice is
+**the same object** (`Object.is`, not deep-equal); a source guard forbids each mount from naming the
+other's writers, with a positive control listing what the time mount *must* use so it cannot pass by
+doing nothing; and time gestures resolve to a `TimeTarget`, a type with no shape that can name a
+frequency.
+
+**The real defect was that the vertical bar was drawing an empty canvas.** Its poll asked
+`/api/timeline?columns=160&rows=6` with no `f_lo`/`f_hi`, and `timeline_json` returns `grid: null`
+when no region is given, so `renderOverview(null)` cleared a 1×1 canvas. The bar whose entire content
+is *"what has been happening here"* was showing nothing at all — a worse failure than showing the
+wrong range, and invisible to anyone reading the gesture code looking for a crossed wire.
+
+No backend parameter was needed. `/api/timeline` has accepted `f_lo`/`f_hi` since T-338: the window is
+the server's, the band is the caller's, and the client simply never sent one. The contract test pins
+the distinction — `grid.f_lo_hz` and `resolution.served_span_hz` follow the request while
+`window.span_s` does not move. **The time extent is not a function of the band; the picture is.**
+
+**T-368 launched into the freed slot, promoted from third.** The user ranked it last of three
+("2 is data-model+UI"), but T-367 deliberately left the frequency navigator's other half unbuilt and
+gave the reason: the invariant also asks that bar to show occupancy across the range, and a survey
+strip without a coverage map **would paint never-observed spectrum as quiet**. That is the same class
+of dishonesty as faking resolution — inventing an absence-of-signal finding out of an absence of data.
+So T-368 is not third any more, it is the thing standing between us and filling that bar.
+
+The brief's spine is three states that must not collapse: observed-with-energy, observed-and-quiet
+(a real finding), and never-observed (no claim). State 3 must be **unrepresentable** as state 2 on the
+wire — the same rule as `BiasTee::Unknown` ≠ `Off`, with a mutation control that assumes coverage
+everywhere and must fail. It also carries T-305's device-local rule: coverage is per front end, and two
+devices covering disjoint ranges must not union into a claim that one saw both.
+
+Fences are tight with four agents live: T-368 is explicitly barred from `hk-store/src/history/query.rs`
+and the occupancy modules, because T-314 is inside exactly that question right now, and told to stop
+short and report rather than edit if it needs something there.
