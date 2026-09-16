@@ -3788,6 +3788,7 @@ tasks:
     milestone: M3
     title: "Fingerprint family_of gate stays DEFERRED: it merges within-family pairs (bpsk/qpsk, 2fsk/gfsk, am/wfm) into one emitter; decide whether the fingerprint needs a finer discriminator before it can ever land"
     status: done
+    commit: e197175
     priority: normal
     deps: [T-218, T-201]
     parallel_group: M3B
@@ -6414,6 +6415,7 @@ tasks:
     title: The timeline is the capture window and is itself a compressed overview waterfall, not an empty
       box
     status: done
+    commit: 21cd27d
     priority: high
     deps: []
     parallel_group: UI
@@ -6580,6 +6582,18 @@ tasks:
       and /api/floor already proves the shape (max_steps is a time-axis budget), so this is their sibling
       rather than new machinery. Update docs/api.md and api_contract.rs together per T-079 and assert the
       FIELD''s value, not the response shape'
+    superseded_and_retargeted_by_t338_2026_09_16: 'SUPERSEDED IN ITS ORIGINAL FORM by T-338, and RETARGETED
+      rather than closed. T-338''s RegionHistory::overview fold IS the backend band-collapsed measurement
+      this ticket was filed for - T-342 is its rows = 1 case - and capture/timeline.ts''s reduceActivity,
+      with its max over every frequency cell and its min/max normalisation, is DELETED. The reason
+      it had to be the backend is structural: the pyramid ladder COUPLES ITS AXES (the 100 kHz tier
+      has one-day time cells), so no level is fine in time and coarse in frequency, and serving the
+      band any other way left an empty box. WHAT REMAINS: the one client-side reduction T-338 did
+      not touch, in ui/src/app/explore/inventory.ts. Judge whether it is a MEASUREMENT (deciding which
+      value represents an interval - backend work) or PRESENTATION over already-known state (legitimate
+      thin-client work per CLAUDE.md, like the pixel-to-Hz axis mapping). If the latter, CLOSE THIS
+      TICKET and say so: a ticket that no longer describes a defect is worse than no ticket'
+
   - id: T-343
     milestone: M2-hardening
     title: 'Setting centre from the frequency navigator is a real retune: a device action under the one-agent-at-a-time
