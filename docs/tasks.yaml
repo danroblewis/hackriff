@@ -3215,7 +3215,8 @@ tasks:
   - id: T-200
     milestone: M3
     title: "C15 likelihood verifier (ALRT/GLRT) within the post-sync candidate set"
-    status: in-progress
+    status: done
+    commit: ace42e7
     priority: normal
     deps: [T-199]
     parallel_group: M3A
@@ -3913,6 +3914,21 @@ tasks:
     found_by: "T-201 report (2026-09-15): it landed matching and said plainly that there is no hk-pipeline call site yet, so matches exist only if something writes them; recorded on T-206 as a field, promoted to its own ticket so it can be scheduled rather than missed"
     acceptance: "a pipeline call site invokes signature matching for emissions as they are observed (T-201 reports `match_emitter()` makes this a one-liner), so `GET` of an emitter's matches returns real rows on a normal run; matching runs off the capture and audio threads with its cost stated and bounded; a blind e2e test through the mock SDR shows a known emission accumulating a match and an unknown one not being forced into a match; the T-201 invariants still hold - a match never sets identity, family or lifecycle, and too few fields still yields a ranked partial; no acceptance threshold changes"
     area: crates/hk-pipeline (call site), crates/hk-context, crates/hk-model
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-243
+    milestone: M3
+    title: "The feature tree gives bpsk a prior of exactly 0.00, so BPSK can never be named and bpsk/qpsk separation is structurally impossible downstream"
+    status: todo
+    priority: high
+    deps: [T-200]
+    parallel_group: M3A
+    use_cases: [SIGNAL-062]
+    found_by: "T-200 (2026-09-15): its verifier moved gfsk 0.000 -> 0.333/0.417 but left bpsk/qpsk at 0.000 -> 0.000, and traced the cause to the tree's cumulant class call assigning bpsk exactly zero prior - so no downstream stage can recover it"
+    acceptance: "the cumulant class call in tree.rs gives bpsk a non-zero prior where the evidence warrants it, so bpsk is nameable at all; measured bpsk/qpsk class top-1 improves from 0.000 at the SNRs T-200 tested (15/20/25 dB), reported per class and per SNR from T-213's harness; every floor holds unchanged (top-1 >= 0.90, top-2 >= 0.95, wrong-label <= 0.003, unknown recall >= 0.80, false-known <= 0.10); NO confident wrong answers - confidently-wrong (p >= 0.9) must stay at zero for these pairs, as T-200 measured; if the cumulant features genuinely cannot separate bpsk from qpsk at these SNRs, say so with numbers and recommend where it belongs instead (the DL stage, or accepting the abstention)"
+    area: crates/hk-classify/src/tree.rs (cumulant class call), densities
     needs: none
     model: opus
     effort: medium
