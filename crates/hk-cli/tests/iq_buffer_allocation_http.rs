@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use hk_cli::pipeline::{IqBufferArgs, IqBufferHooksOverride, LiveArgs, temp_data_dir};
+use hk_cli::pipeline::{
+    IqBufferArgs, IqBufferHooksOverride, LiveArgs, TempDataDirGuard, temp_data_dir,
+};
 use hk_cli::serve::{ServeOptions, ServeSource, Serving, start};
 use hk_store::iqbuffer::{FsSpace, IqBufferHooks};
 use serde_json::Value;
@@ -126,6 +128,11 @@ fn stop_server(serving: Serving) {
 fn hk_serve_answers_status_and_capture_routes_while_a_144gb_ring_allocates() {
     let gate = Arc::new(GatedAllocation::default());
     let dir = temp_data_dir();
+    // T-232: this test previously cleaned up with a bare `remove_dir_all` at the end, which a
+    // panic (or an early `assert!` failure) would skip entirely — this file's guard was the one
+    // call site of eight that lacked it. `TempDataDirGuard` also keeps the directory on failure
+    // for inspection, matching every other `temp_data_dir()` call site in this crate.
+    let _guard = TempDataDirGuard::new(dir.clone());
     let start_t = Instant::now();
     let serving = start(&ServeOptions {
         source: ServeSource::HackRf {
@@ -223,5 +230,4 @@ fn hk_serve_answers_status_and_capture_routes_while_a_144gb_ring_allocates() {
 
     gate.release();
     stop_server(serving);
-    let _ = std::fs::remove_dir_all(dir);
 }

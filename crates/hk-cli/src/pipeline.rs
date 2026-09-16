@@ -457,7 +457,43 @@ fn sweep_stale_replay_dirs() {
 /// recordings that produced the failure. A run that is killed outright (no unwind at all, e.g.
 /// SIGKILL or a hard process abort) leaves its directory too; [`sweep_stale_replay_dirs`] reclaims
 /// those later once their pid is dead and they've aged past [`STALE_REPLAY_DIR_AGE`].
+///
+/// **T-232.** `hk_api::http::Server::shutdown` (its `Drop`) joins only its accept-loop thread;
+/// each accepted connection is handled on its own detached thread that "finishes on its own"
+/// (`crates/hk-api/src/http.rs`'s `Server` doc comment) and is never joined. A test that spawns a
+/// server (`hk_cli::serve::start`) and drops both it and this guard in the same scope can race
+/// that detached thread: it may still be writing to a file under the guarded directory (the
+/// audit log, the ring, SQLite's WAL) when `remove_dir_all` walks it, which fails with
+/// `ENOTEMPTY`/similar on the entry that reappeared mid-removal. That race is rare in isolation
+/// but common on a loaded, shared machine (confirmed empirically: a full `hk-cli` nextest run
+/// left one fresh orphan per server-spawning test under load, while the same tests run alone left
+/// none). Retrying the removal for a bounded window absorbs that race without requiring every
+/// crate that spawns a background thread near a data directory to join it first.
 pub struct TempDataDirGuard(PathBuf);
+
+/// Backoff schedule for [`TempDataDirGuard`]'s removal retries (T-232): about 4 s total. Measured
+/// empirically on a loaded, shared dev machine (several concurrent agents building/testing, load
+/// average ~15 on 28 cores): an isolated `hk-cli` run left zero orphans, but a full-suite run
+/// under that contention still left one in roughly twenty passing server-spawning tests even after
+/// ~1.5 s of retries, which pointed at slow I/O (fsync contention) rather than a fixed-latency
+/// race, so this window is longer than the fastest fix that closed the common case. A directory
+/// that outlives even this is left for [`sweep_stale_replay_dirs`] once its pid is dead and it has
+/// aged past [`STALE_REPLAY_DIR_AGE`] — a bounded lag under extreme load, not a leak.
+const REMOVE_RETRY_BACKOFF: &[Duration] = &[
+    Duration::from_millis(10),
+    Duration::from_millis(20),
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+    Duration::from_millis(400),
+    Duration::from_millis(400),
+    Duration::from_millis(800),
+    Duration::from_millis(800),
+    Duration::from_millis(800),
+    Duration::from_millis(1500),
+    Duration::from_millis(1500),
+];
 
 impl TempDataDirGuard {
     /// Guards `dir` (typically a [`temp_data_dir`]) for cleanup on drop.
@@ -471,6 +507,38 @@ impl TempDataDirGuard {
     }
 }
 
+/// Removes `dir` recursively, retrying on failure per [`REMOVE_RETRY_BACKOFF`] (T-232): a lagging
+/// background thread can still be creating or writing entries under `dir` for a short time after
+/// its owning server was told to stop, which races a single-shot `remove_dir_all` on a loaded
+/// machine. Returns the last error if every attempt fails (the directory is left for
+/// [`sweep_stale_replay_dirs`] to reclaim once its pid is dead and it has aged out — a bounded
+/// lag, not a leak, since that outcome is now rare rather than the routine case it was before this
+/// retry existed).
+fn remove_dir_all_retrying(dir: &Path) -> std::io::Result<()> {
+    let mut last = Ok(());
+    for (i, backoff) in REMOVE_RETRY_BACKOFF.iter().enumerate() {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(_) if !dir.exists() => return Ok(()),
+            Err(e) => {
+                if std::env::var_os("HK_DEBUG_TEMP_DIR_RETRY").is_some() {
+                    eprintln!("T-232 DEBUG: attempt {i} failed: {e}");
+                    if let Ok(rd) = std::fs::read_dir(dir) {
+                        for entry in rd.flatten() {
+                            eprintln!("T-232 DEBUG:   remaining: {}", entry.path().display());
+                        }
+                    }
+                }
+                last = Err(e);
+                if i + 1 < REMOVE_RETRY_BACKOFF.len() {
+                    std::thread::sleep(*backoff);
+                }
+            }
+        }
+    }
+    last
+}
+
 impl Drop for TempDataDirGuard {
     fn drop(&mut self) {
         if std::thread::panicking() {
@@ -480,7 +548,13 @@ impl Drop for TempDataDirGuard {
             );
             return;
         }
-        let _ = std::fs::remove_dir_all(&self.0);
+        if let Err(e) = remove_dir_all_retrying(&self.0) {
+            eprintln!(
+                "T-232: temp data dir still busy after retrying removal for ~1.5s (left for the \
+                 stale-orphan sweep to reclaim): {} ({e})",
+                self.0.display()
+            );
+        }
     }
 }
 
