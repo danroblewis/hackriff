@@ -6145,6 +6145,33 @@ tasks:
       geometry, then measure the same short-burst harm again before deciding. If it still rejects genuine
       short bursts, say so and leave it unshipped - a large discrimination win that breaks ephemeral emissions
       is not a win, because CLAUDE.md makes those first-class'
+  - id: T-329
+    milestone: M2-hardening
+    title: 'With the false alarms gone the analog chain session adds 0 sightings where it added 1: is the
+      count or the test wrong?'
+    status: in-progress
+    priority: high
+    deps:
+    - T-316
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'T-316 takes real-air false alarms from 875 detections to 2 and 5 candidate emitters to
+      1, and one test fails as a consequence: hk-pipeline::signal_062_session_writes::signal_062_one_session_counts_one_sighting_and_stores_its_refined_tuning_once
+      expects the analog chain session to add exactly 1 to the station emitter''s count, and it now adds
+      0. T-316 BISECTED IT rather than assuming: reverting WIDEBAND_FM_OBW_HZ alone leaves it failing, so
+      it is the detector change and not the constant. The ledger rows are IDENTICAL to main - two analog-chain
+      demodulation rows plus one hk-track row, all count 1 - and only emitter.count differs, 2 on main against
+      1 here, so the chain''s first demodulation sighting counted before and now resolves against the existing
+      entry instead. Identification is unaffected: /chains/identifications still fires and PI 1694 still
+      decodes. DECIDE WHICH IS RIGHT, on the semantics rather than on which makes the suite green: does
+      a chain session that re-observes an emitter the detector already has constitute a new sighting, or
+      the same one? The run is otherwise more accurate (10 emitters against 16, station width 136 kHz against
+      333 kHz), which is evidence that resolving against the existing entry is the correct behaviour and
+      the test pinned a count inflated by duplicates - but verify that rather than assuming it, because
+      the opposite reading is that a genuine second observation is now being swallowed. This is T-209 sighting-semantics
+      territory. Whichever way it goes, state the rule in the code so the next person does not re-derive
+      it from a failing assertion'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
