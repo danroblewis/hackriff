@@ -6299,11 +6299,25 @@ tasks:
       happened', and a merge is something happening that the proxy cannot see. Use a signal that actually
       tracks the evidence (a version, a dirty flag, or the merge itself) rather than a count. Narrow change;
       do not alter what count MEANS - T-329 settled that it is a lifetime total of occurrences, not of writes
+    evidence_from_t336_2026_09_16: 'T-336 proved this defect is REAL rather than theoretical, and
+      that its own change makes it worse. TrackInventory::characterise skips an entry whose sighting
+      count has not moved - count as a proxy for ''a measurement arrived''. Once T-336''s cross-producer
+      discount could take a sighting''s contribution to 0, TWO acceptance_m3 signature/cluster scenes
+      FAILED on its branch while passing on main. T-336 made the minimum change to land - the skip
+      key is now (count, fingerprint observations), the fingerprint counter moving once per folded
+      measurement, which is exactly the bound the skip documents - and explicitly did NOT redesign.
+      THIS TICKET STILL OWNS THE REDESIGN: a merge whose discount adds 0 still leaves BOTH halves
+      of that key unmoved, so an entry that just absorbed a partner can still skip re-characterisation.
+      Use a signal that tracks the evidence (a version, a dirty flag, or the merge itself) rather
+      than any count-shaped proxy. Do not change what count MEANS - T-329 settled that it is a lifetime
+      total of occurrences, and T-336 made the implementation match'
+
   - id: T-336
     milestone: M2-hardening
     title: The final arm of resolve counts within a producer and never asks whether another producer already
       counted the span
-    status: in-progress
+    status: done
+    commit: e0a1068
     priority: normal
     deps:
     - T-329
