@@ -5773,7 +5773,7 @@ tasks:
     milestone: M3
     title: 'cyclic_db is a density dimension in 21 of 21 classes and grows ~10*log10(N): +11 dB from watching
       the same emission 8x longer'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-281
