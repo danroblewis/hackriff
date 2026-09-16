@@ -2426,3 +2426,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-224 launched** into the freed slot.
 - **B0.506 Full check green after the T-205 merge, with the dense-burst pin in place (73580bb).** Lint clean; 1447/1447 tests; acceptance 29/29; 37 GB free.
   - **Merging T-188** (refine lock validity) with its own check; an Opus read-only review runs in parallel because it changes lock semantics on the real-time path.
+- **B0.507 T-188 Opus review: ACCEPT, with an important caveat and three follow-ups (filed as T-226, high).**
+  - **No false-negative path:** exactly one case changes, validate ran and did not lock. `locked` now means the RETURNED tuning locked at validate depth, which is stronger evidence than before, since the old `last` vouched for a different tuning measured at 0.1/0.25 s. No added work on the chain thread.
+  - **Caveat on the evidence, recorded honestly:** 0 failures in 20 loaded runs is weak on its own - at the prior ~3% rate that is about a 54% chance of zero by luck. The unit test that fails pre-fix is the real proof, and it does not yet cover the budget path.
+  - **Follow-up 1 (the same bug, different route):** when validate is SKIPPED by `max_evaluations` or the 20 s time budget - exactly what CPU load causes - the code still reports locked from a stale measurement. T-226 gates `locked` on validation having happened.
+  - **Follow-up 2:** acquire discards an over-one-step centre correction while track clamps the same quantity, so the -52.9 kHz correction that caused this bug is still never applied. T-188 stops it being trusted; it does not reach the right centre.
+  - **Follow-up 3:** an off-raster probe that no longer validates sets `accepted=false` and stops the chain, so T-186 identification never happens; consider a fallback rather than dropping.

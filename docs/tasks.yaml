@@ -3610,6 +3610,21 @@ tasks:
     model: sonnet
     effort: medium
     core_interface: false
+  - id: T-226
+    milestone: M2-hardening
+    title: "T-188 review follow-ups: refinement still reports locked from a stale measurement when validate is SKIPPED by budget exhaustion; acquire discards an over-step centre correction while track clamps it; an off-raster probe that no longer validates can stop the chain so T-186 never identifies"
+    status: todo
+    priority: high
+    deps: [T-188]
+    parallel_group: DEMOD
+    use_cases: [SIGNAL-062]
+    found_by: "Opus review of T-188 (2026-09-15), verdict ACCEPT"
+    acceptance: "(1) crates/hk-demod/src/refine.rs:798 (the None => last arm): add `validated` to RefinementOutcome (or gate `locked` on validated_locked) so a tuning skipped by max_evaluations (64) or time_budget (20 s) can never be reported locked - this is the same false positive T-188 fixed, surviving on the budget path that CPU load actually triggers; unit test that exhausts the budget and asserts the outcome is not locked; (2) refine.rs:571-578 vs :668 - acquire DISCARDS a centre correction over one step while track CLAMPS the same quantity; make them consistent (clamp and re-measure, or re-acquire from the corrected centre) and test the -52.9 kHz case from T-188 so the correct centre is reached rather than merely not trusted; (3) chains/analog.rs:291-299 - an off-raster probe that fails validation sets accepted=false and stops the chain, so identification never happens; consider falling back to s.rf_center_hz + owns instead of dropping, with a test; no threshold loosened"
+    area: crates/hk-demod/src/refine.rs, crates/hk-pipeline/src/chains/analog.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
