@@ -66,7 +66,7 @@ How it was measured:
 |---|---|---|---|---|
 | **101.298663 MHz** | 127.7 kHz | 13.70 dB | 1648/1648 bins | WFM broadcast. 19 kHz pilot **+35.5 dB**; RDS **PI 1694** decoded CRC-valid (PTY 7, groups 0A/2A/12A). On the 101.3 MHz raster. Same station as the 2026-09-13 fixture, 2.5 days earlier. |
 | **99.699944 MHz** | 70.3 kHz | 4.72 dB | 889/1648 bins | WFM broadcast. 19 kHz pilot **+8.7 dB**, in the same 12.21 Hz bin as the strong station's. Weak and narrow because it is 1.10 MHz off centre, outside the filter passband. Not intermittent: detected in every 5 s of the capture. |
-| **100.465339 MHz** | 28.1 kHz | 7.02 dB | 1646/1648 bins | **Unidentified**, and anticipated by nobody. Continuous and very steady. No 19 kHz pilot (+0.2 dB), so not stereo FM; its IQ mirror at 101.1347 MHz is empty, so not a receiver image. Modulation unverified. |
+| **100.465339 MHz** | 28.1 kHz | 7.02 dB | 1646/1648 bins | **Harmonic 43 of a free-running ~2.3364 MHz oscillator** — a local unintentional emitter, identified by T‑317 (see below). Anticipated by nobody. Continuous and very steady. No 19 kHz pilot (+0.2 dB), no RDS, no carrier line, no symbol structure: it carries no information. Its IQ mirror at 101.1347 MHz is empty, so not a receiver image. |
 
 ### Receiver artefacts (flagged, never catalogued as emitters)
 
@@ -99,12 +99,73 @@ pass measured every entry. It is superseded, and it was wrong in instructive way
   is flat noise. The high look count was, again, a false-alarm cluster.
 - **G1, "~99.75 MHz"** — the station is at **99.6999 MHz**; 99.75 MHz ± 100 kHz is empty.
 - **G4, G5, G7** (100.735, 101.05–101.16, 101.70 MHz) — **all noise**, 0/1648 bins present.
-- **100.4653 MHz** — a real, continuous, unidentified emission that **no draft entry
-  mentioned at all**.
+- **100.4653 MHz** — a real, continuous emission that **no draft entry mentioned at
+  all**, and that took a second pass (T‑317) to name.
 
 A "look count" from a live clusterer measures how often the *detector* fired, not how
 strong a signal is; on this capture the two highest counts are both noise. That is the
 property the acceptance test now guards.
+
+## Identifying the 100.4653 MHz emission (T‑317)
+
+T‑289 could only record what it is **not**. One 2.4 MHz window was never going to be
+enough, because the evidence is outside it. The three 2026‑09‑13 captures of the same
+site include two at a **98 MHz centre and 20 Msps**, spanning 90.6–105.4 MHz, and they
+show the emission has **siblings**:
+
+| capture | n = 43 | n = 44 | n = 45 | f₀ = fₙ/n |
+|---|---|---|---|---|
+| 98 MHz / 20 Msps, **amp off** | 100.446474 | 102.782818 | 105.118406 MHz | 2.335965 / 2.335973 / 2.335965 MHz |
+| 98 MHz / 20 Msps, **amp on** | 100.422778 | 102.757154 | 105.093087 MHz | 2.335413 / 2.335390 / 2.335402 MHz |
+
+Three independent estimates of the fundamental agreeing to **9 Hz (3.7 ppm)**, and
+fitting `f = n·f₀ + b` gives **b = +67 Hz** against an f₀ of 2.336 MHz — an index off by
+one would put b at ±2.34 MHz, so the harmonic numbers are pinned exactly.
+
+Two things make this an identification rather than a coincidence:
+
+- **The width scales with the harmonic number.** rms spectral width ÷ n is 138, 120 and
+  137 Hz (amp off) and 136, 134 and 130 Hz (amp on). The fundamental carries ~134 Hz rms
+  of frequency noise; harmonic 43 carries 43× it, 5.8 kHz. Three unrelated emitters
+  cannot do that. Their normalised line shapes also correlate at 0.967–0.988.
+- **It moves.** The n = 43 member measured 100.422778, 100.443522, 100.446474 and
+  100.464646 MHz across the four captures — 41.9 kHz of spread, f₀ drifting 417 ppm over
+  two days. The two broadcast stations in this capture are within 1.34 kHz and 56 Hz of
+  their channels.
+
+And it carries nothing. The modulus is constant (|z| kurtosis 1.386 against 2.03 for
+noise-only controls), there is no carrier line at 1.14 Hz RBW, x² and x⁴ recover no
+carrier or symbol rate (3.2 and 4.8 dB peaks), the instantaneous-frequency histogram is
+unimodal, and the discriminator's 0.1–1 kHz power is constant to **0.30 dB** standard
+deviation across 45 one-second blocks. Speech and music vary second to second; this does
+not. The 28 kHz is the fundamental's frequency noise, multiplied by 43.
+
+The band plan offers exactly one row here — `fm-broadcast`, 88–108 MHz (47 CFR 2.106) —
+and the measurement contradicts it on every count: 28 kHz against 120–128 kHz for the
+real stations in the same survey, 34.7 kHz off the nearest US channel, no pilot, no RDS,
+no programme, and a centre that wanders tens of kHz between sessions. Ranked the way the
+product vision asks: *looks like a multiplied free-running oscillator; FM broadcast is
+the only thing allocated here; 34.7 kHz off raster and 100 kHz too narrow to be one.*
+The annotation's `identification` block carries the evidence and the ten hypotheses it
+excludes; it stays `role = emission`, not `artefact`, because it is energy the receiver
+took in, not a spur the tuner synthesised.
+
+## A capture-chain artefact this fixture carries (T‑317)
+
+The raw ci8 stream has a **periodic gain step**: samples 0–895 of every 8192-sample
+period are **0.431 dB** lower in power than samples 896–8191, flat either side of the
+step, measured over all 13,184 whole periods. It is stream-wide — it shows in the
+wideband total power, on the receiver's own DC line (27 dB) and reference harmonic
+(16 dB), and in bands with **no emission at all** (23 dB at 100.150 MHz).
+
+It puts a comb at **292.969 Hz (= 2.4 MHz / 8192)** and at least 27 harmonics into the
+amplitude and, through a channel filter, the discriminator of anything narrowband and
+weak, with the sinc nulls of a 896/8192 duty cycle near harmonics 9 and 18. Taken at
+face value it reads as a 3.41 ms TDMA frame that is not there, and it did exactly that
+during this investigation. **Anything looking for periodicity, frame rates or
+cyclostationarity in this fixture must exclude n × 292.969 Hz.** The source is not
+identified; the 2026-09-13 2.4 Msps capture of the same device carries it too. Recorded
+in `hackriff:provenance.capture_artefact`.
 
 ## What the acceptance test asserts
 
@@ -112,8 +173,9 @@ property the acceptance test now guards.
 with the truth stripped before the device sees the recording:
 
 1. Every measured emission is **detected blind**, and the two measured to be WFM carry
-   an FM-broadcast explanation in their top-k. The unidentified one asserts detection
-   only — the band plan is never allowed to name what the measurement did not.
+   an FM-broadcast explanation in their top-k. The oscillator harmonic asserts detection
+   only — the band plan is never allowed to name what the measurement did not, and the
+   only row it has here (`fm-broadcast`) is the one the measurement rules out.
 2. **Confirmed emitters are exactly the measured emissions** — each one reaches a
    Confirmed row, and no Confirmed row sits anywhere else (no ghosts).
 3. **Measured silence stays silent**: no Confirmed emitter inside a measured-silent
@@ -128,8 +190,16 @@ with the truth stripped before the device sees the recording:
 
 ## Still open
 
-- The 100.4653 MHz emission's modulation is unidentified. Identifying it needs either
-  a longer look or a targeted demodulation pass.
+- The 100.4653 MHz oscillator harmonic is identified as a family, but **the emitter is
+  not**: nothing here says which device runs at 2.336 MHz, or whether it radiates into
+  the antenna or couples into the receive chain conducted. All four captures share one
+  antenna and host, and the 20 Msps pair is quantisation-limited, so turning the amp off
+  moved the family's excess over the floor no more than it moved the real stations'. A
+  capture with a **50 Ω terminator** in place of the antenna would settle it.
+- The 8192-sample gain step above has no identified source.
+- Nothing in the system spots a harmonic family. Image and reference-harmonic
+  attribution exist (T-302); "these three emitters are harmonics of one fundamental
+  nobody can see" is a capability that does not.
 - The reference-harmonic attribution is not retune-verified in this recording, because
   it is a single tune. A capture pair at two centres would settle it outright.
 - The over-splitting and image/IMD behaviour the first draft hoped to exercise is
