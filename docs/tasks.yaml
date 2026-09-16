@@ -5012,7 +5012,8 @@ tasks:
     milestone: M2-hardening
     title: 'hk-ml conformance fails under concurrency: the shadow-host provenance test
       failed once at conformance.rs:416 under four concurrent worktrees, passes 3/3 isolated'
-    status: in-progress
+    status: done
+    commit: 4dce6cf
     priority: normal
     deps: []
     parallel_group: PIPE
@@ -7034,6 +7035,32 @@ tasks:
       mappings and the nominal rows-per-second error grew LINEARLY WITH AGE (a box 400 rows back sat about
       40 rows off, roughly 5 percent of canvas) - so the per-frame evaluation must use axis.rowsBackAt over
       the rows'' OWN timestamps, never a nominal rate'
+  - id: T-363
+    milestone: M3
+    title: 'ModelHost and HostStats have no reference outside hk-ml: the counters T-283 just made coherent
+      have no production reader'
+    status: todo
+    priority: normal
+    deps:
+    - T-283
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    acceptance: 'T-283 fixed a real happens-before defect in the model host - counters published after the
+      replies they accounted for - and then noticed, outside its scope, that grep finds NO REFERENCE to
+      ModelHost or HostStats anywhere outside crates/hk-ml/. hk-classify depends on the crate but never
+      instantiates the host. So the counters that were just made coherent have no production reader, and
+      the shadow-host path they describe is exercised only by its own conformance suite. THIS IS THE SEVENTH
+      INSTANCE of the capability-with-no-caller pattern in this project: T-242 (match_emitter), T-247 (classify_box/record),
+      T-206 (two vacuous gate dimensions), T-267/T-287 (a confirmer nothing invoked), T-297 (hk_dsp::chirp
+      measured but unwired), T-334 (Resolution::MaxCells with no caller). Establish whether the host is
+      MEANT to be wired - ADR-0016 and T-204''s shadow-mode work are the place to look, since T-204 landed
+      a per-family DL stage in shadow and concluded no family earned an ML stage on the dev evidence - or
+      whether it is deliberately dormant until that evidence changes. If dormant BY DESIGN, say so in the
+      crate docs so the next reader does not mistake it for an oversight, the way T-274 declared hk-gnss
+      reachable only from its own tests. If it is meant to be wired, prove non-vacuity as a falsifiable
+      pair the way T-287 and T-297 did: remove the wiring and a test fails, remove the host and a different
+      test fails'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
