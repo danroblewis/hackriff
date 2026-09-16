@@ -2599,7 +2599,7 @@ tasks:
   - id: T-161
     milestone: MUI
     title: "MUI API gap 5: eye/timing diagram data (stream-contract change)"
-    status: in-progress
+    status: done
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -3926,7 +3926,7 @@ tasks:
   - id: T-243
     milestone: M3
     title: "The feature tree gives bpsk a prior of exactly 0.00, so BPSK can never be named and bpsk/qpsk separation is structurally impossible downstream"
-    status: in-progress
+    status: done
     priority: high
     deps: [T-200]
     parallel_group: M3A
@@ -3976,6 +3976,36 @@ tasks:
       contract genuinely does not promise it, change the assertion to what the
       contract does promise and state the difference.'
     area: crates/hk-pipeline (recipes/runtime.rs, chains), crates/hk-pipeline/tests/follow_hops.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-246
+    milestone: M3
+    title: 'Verifier psk-qam ALRT is monotone in constellation size on every input:
+      it re-ranks 8psk -> qam64 on 100%% of bpsk and qpsk snippets'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: M3A
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-243 (2026-09-16), handed on rather than fixed: on genuine bpsk at
+      20 dB the ALRT scored qam64 -5.8 > qam16 -9.4 > 8psk -12.0 > qpsk -23.7. The
+      1/M term (ln 64 ~ 4.2 nats) is swamped by distance penalties of tens of nats,
+      which is the signature of a constellation smeared by residual CFO or timing
+      error, not of a correct known-SNR ALRT'
+    acceptance: 'MASKED TODAY, do not let that hide it: after T-243 the tree''s call
+      is decisive enough that the runner-up falls below CANDIDATE_MIN_P, so the
+      verifier skips with SingleCandidate and on/off are identical - it resurfaces
+      the moment the psk-qam prior is less decisive. Establish whether the ALRT is
+      mis-derived or is being fed a smeared constellation (measure residual CFO and
+      timing error at the stage input before concluding); then either fix the
+      likelihood or state with numbers that a known-SNR ALRT cannot work at this
+      geometry and recommend removing it for psk-qam rather than leaving a stage
+      that always prefers the largest constellation. Every ADR-0016 floor holds
+      unchanged; confidently-wrong must stay at zero'
+    area: crates/hk-classify/src/verify.rs (psk_qam_loglikelihoods)
     needs: none
     model: opus
     effort: medium
