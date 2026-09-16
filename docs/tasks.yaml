@@ -3015,7 +3015,8 @@ tasks:
   - id: T-188
     milestone: M2-hardening
     title: "Listen-centre flake under CPU load: acceptance_m0 listen.rs:224 listen channel at 101.352 MHz, >50 kHz from truth (2/10 burn runs in T-183)"
-    status: in-progress
+    status: done
+    commit: 88235e9
     priority: normal
     deps: []
     parallel_group: PIPELINE
@@ -3277,7 +3278,8 @@ tasks:
   - id: T-205
     milestone: M3
     title: "Labelled-capture dataset path for fine-tuning: CRC-valid decoder labels and user labels become exportable training snippets with provenance"
-    status: in-progress
+    status: done
+    commit: 5d37ca5
     priority: normal
     deps: [T-211]
     parallel_group: M3L
@@ -3578,6 +3580,52 @@ tasks:
     core_interface: false
     intermittency: "not constant: failed twice in a row at load ~14, then passed 29/29 in the full check after the T-187/T-210 merge at similar load (8ddb1a0). Treat as a start-up race whose margin depends on scheduling, not a hard break; the fix must still make it deterministic (10/10 under 6 burners), not rely on luck."
 
+  - id: T-224
+    milestone: M2-hardening
+    title: "T-223 review follow-ups: records_offered_before_ready over-counts after a plugin restart (spurious plugin_fed_before_ready failures), the ready wait ignores shared.stop/Detach, readsb stdout undrained until ready"
+    status: done
+    commit: 044a5ee
+    priority: high
+    deps: [T-223]
+    parallel_group: PLUGINS
+    use_cases: [SIGNAL-001]
+    found_by: "Opus review of T-223 (2026-09-15), verdict ACCEPT"
+    acceptance: "(1) crates/hk-plugins host.rs:928-931 counts a DELTA of offered per process (snapshot in run_once) instead of fetch_max over a cumulative counter, so a restarted plugin no longer reports every record ever offered and the plugin_fed_before_ready == 0 assertions in acceptance/signal_001 cannot fail spuriously - test with a plugin restart mid-run; (2) the ready wait in chains/plugin.rs:264 breaks on &shared.stop like wait_for_room does, so a declaring plugin that never signals cannot hold the chain thread up to 30 s past shutdown - test a stop during the ready wait; (3) hk-plugin-readsb.rs:893 spawns pump_stdout BEFORE blocking on ready_rx so stdout cannot fill its pipe; (4) add a test for the live ready-timeout branch (plugin.rs:264-268); (5) decide and document whether plugins/readsb/manifest.json should set ready_timeout_ms, since the wrapper allows 20 s to connect while a live chain bounds at 5 s"
+    area: crates/hk-plugins (host, readsb bin), crates/hk-pipeline/src/chains/plugin.rs, plugins/readsb/manifest.json
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-225
+    milestone: M2-hardening
+    title: "T-112 dense-burst writer test asserts dropped == 0 at a fixed paced decode rate, so it fails under suite-wide CPU contention (pinned heavy-serial + retry meanwhile)"
+    status: todo
+    priority: low
+    deps: []
+    parallel_group: PIPELINE
+    use_cases: []
+    found_by: "full check after the T-205 merge (2026-09-15): failed once at load ~25; passes 3/3 quiet and 3/3 under 6 CPU burners; T-205 touched no decode write path"
+    acceptance: "the test measures what it means to measure without depending on machine load: either pace by the sample clock rather than wall time, or assert the writer never drops when it is given the queue depth it needs (drops allowed only when the queue is genuinely full, and counted); passes 20/20 under 6 CPU burners with the nextest retry pin REMOVED; no throughput bound loosened"
+    area: crates/hk-pipeline/tests/recipe_runtime.rs, crates/hk-pipeline (decode writer), .config/nextest.toml
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-226
+    milestone: M2-hardening
+    title: "T-188 review follow-ups: refinement still reports locked from a stale measurement when validate is SKIPPED by budget exhaustion; acquire discards an over-step centre correction while track clamps it; an off-raster probe that no longer validates can stop the chain so T-186 never identifies"
+    status: in-progress
+    priority: high
+    deps: [T-188]
+    parallel_group: DEMOD
+    use_cases: [SIGNAL-062]
+    found_by: "Opus review of T-188 (2026-09-15), verdict ACCEPT"
+    acceptance: "(1) crates/hk-demod/src/refine.rs:798 (the None => last arm): add `validated` to RefinementOutcome (or gate `locked` on validated_locked) so a tuning skipped by max_evaluations (64) or time_budget (20 s) can never be reported locked - this is the same false positive T-188 fixed, surviving on the budget path that CPU load actually triggers; unit test that exhausts the budget and asserts the outcome is not locked; (2) refine.rs:571-578 vs :668 - acquire DISCARDS a centre correction over one step while track CLAMPS the same quantity; make them consistent (clamp and re-measure, or re-acquire from the corrected centre) and test the -52.9 kHz case from T-188 so the correct centre is reached rather than merely not trusted; (3) chains/analog.rs:291-299 - an off-raster probe that fails validation sets accepted=false and stops the chain, so identification never happens; consider falling back to s.rf_center_hz + owns instead of dropping, with a test; no threshold loosened"
+    area: crates/hk-demod/src/refine.rs, crates/hk-pipeline/src/chains/analog.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

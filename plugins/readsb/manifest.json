@@ -3,7 +3,7 @@
   "id": "readsb",
   "version": "0.1.0",
   "licence": "GPL-3.0-or-later",
-  "description": "ADS-B / Mode S (T-015): readsb exec'd as a subprocess behind hk-plugin-readsb, which converts ci8 -> UC8 and parses --raw output into NDJSON decode lines. See docs/stream-contract.md §9.6.",
+  "description": "ADS-B / Mode S (T-015): readsb exec'd as a subprocess behind hk-plugin-readsb, which converts ci8 -> UC8 and parses --raw output into NDJSON decode lines. The wrapper reports ready once readsb's Beast connection and the pre-roll are in place (1.6 s under load, T-223), so limits.ready_timeout_ms is set explicitly to the 5 s default: ~3x that worst case, and a live chain reads no samples while it waits. See docs/stream-contract.md §9.3 and §9.6.",
   "executable": "hk-plugin-readsb",
   "args": ["--freq", "{input.center_hz}"],
   "input": {
@@ -22,6 +22,7 @@
   "limits": {
     "input_queue_bytes": 8388608,
     "stall_timeout_ms": 10000,
+    "ready_timeout_ms": 5000,
     "max_message_bytes": 1048576,
     "stderr_lines": 200,
     "nice": 10

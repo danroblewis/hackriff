@@ -439,6 +439,31 @@ With `band`, only segments whose tuned window (`center ± rate/2`) overlaps `[f_
 - **`Clip`**: `{id, label, meta_uri, data_uri, meta_path, data_path, t0, t1, t0_ns, t1_ns, samples, bytes, sample_rate_hz, center_hz, band ([f_lo, f_hi] or null), content_class, captures: [{sample_start, samples, global_index, t0, t0_ns, segment, run, center_hz, sample_rate_hz, bandwidth_hz, lna_db, vga_db, amp_on, device_id}]}` (`*_uri` relative to the data directory).
 - **Errors** `{"error", "code"}`: `400 invalid` (no range or more than one, a negative time, start ≥ end, zero `samples`, bad `band`/`label`/`run`, unknown field or query parameter, a clip over `max_clip_bytes`), `404 not_found` (nothing buffered in the range, band and run, e.g. already evicted, or overwritten during the export), `409 conflict` (the range spans a sample-rate change: SigMF has one rate per file, so export each side; or a time range spans runs), `503 unavailable` (the run has no buffer, or this server has none), `507 insufficient_storage` (the clip does not fit above the free-space floor), `500 failed` (storage), `405` other methods. Messages never echo values.
 
+## Labelled-capture dataset export (T-205, ADR-0016 §7/§9)
+
+The path from live captures to a training/evaluation set: normalised IQ snippets, each with a `hk-mod@1` label and provenance, for later model fine-tuning (C38) and blind evaluation (T-213). Code: `hk_store::dataset` (label-finding and the manifest shape), `crates/hk-api/src/datasets.rs` (routes).
+
+- **Label sources**, both marked in the exported annotation's provenance:
+  - **decoder-validated**: a decode whose CRC check passed (`crc_status: "valid"` only — never a future bounded-correction status, ADR-0016 §7: "corrected frames do not count"). The label is the demodulation's `mode` mapped into the current `hk-mod@1` taxonomy (the same mapping pre-M3 labels use, e.g. `2fsk` → family `fsk`, `wfm` → family `analog`); a decode whose mode does not map into the taxonomy (a service-only label) contributes no dataset sample.
+  - **user**: an emitter's current classification when it was set by an explicit user reclassification (arbitration rank `user`), carrying its own `hk-mod@1` family/class and confidence. An `unknown` call is not exported as a positive label.
+- **What each sample carries**: the IQ snippet (an ordinary SigMF `Recording`, `kind: iq-snippet`, written by the same clip exporter as `/api/iqbuffer/clip`), its sample rate and tuned centre, the labelled emission's centre offset from that tuned centre, a measured SNR when known ([`Repository::emitter_latest_measurement`]), the `hk-mod@1` label with taxonomy version, the source emitter and session (the producing demodulation's id for a decoder label; `null` for a user label — ADR-0016 §7 splits by session, never by frame), the label event's timestamp, and the label source (`decoder`/`user`).
+- **Provenance and label storage.** Each sample's label is a `GroundTruth` (decoder-sourced) or `Label` (user-sourced) `Annotation` on the Recording (docs/07 §2.13), `author` `decoder`/`user`, `metadata` carrying `{taxonomy, label, source, split, emitter_id, session, snr_db}`, `exported: true` from the moment it is written. Nothing here overwrites or re-labels an existing annotation.
+- **Format.** SigMF recordings (reusing the existing IQ-capture-buffer clip writer — no new I/O code) plus a JSON **manifest** that indexes the resulting recordings and stamps one split on the whole export. No database migration was needed: the manifest is a file (like a `.sigmf-meta`), and the labelled data itself is ordinary `Recording`/`Annotation` rows the repository already had.
+- **Dev/acceptance split (ADR-0016 §7).** Every export names its `split` (`"dev"` or `"acceptance"`) once, in the request; every sample and the manifest itself carry it. There is no automatic split inference (e.g. from time or content) — a training pipeline reads `split` and never mixes them, so acceptance data (T-206) can never contaminate training.
+- **Snippet availability.** A labelled emission whose snippet the underlying buffer can no longer produce (evicted, out of retention) is counted in the manifest's `skipped`, not treated as a failure of the whole export.
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| POST | `/api/datasets` | `{"filter": {"emitter"?, "time"? {"t0", "t1"}, "family"?}, "split": "dev" \| "acceptance", "pad_pre_s"?, "pad_post_s"?, "max_samples"?}` | `{"dataset": DatasetManifest}` (201; audited `dataset_export`) |
+| GET | `/api/datasets` | – | `{"datasets": [DatasetManifest, ...]}`, newest first |
+| GET | `/api/datasets/{id}` | – | `{"dataset": DatasetManifest}`; 404 `not_found` |
+
+- **`filter`** (all set fields must hold; omit for every candidate emitter): `emitter` (an id, overrides the others), `time` (`{t0, t1}` Unix s, an emitter's last-seen window), `family` (an `hk-mod@1` family name — matched per labelled emission, not the emitter's current classification, since a decoder label need not have one recorded).
+- **`pad_pre_s`/`pad_post_s`** (default 0.05 s each): snippet padding before/after the label event. **`max_samples`** (default 200): a guard on both the search and the export.
+- **`DatasetManifest`**: `{id, filter, split, created_at, samples: [DatasetSample], skipped}`.
+- **`DatasetSample`**: `{emitter_id, session, recording_id, annotation_id, label: {taxonomy, label, source, provenance, confidence}, snr_db, sample_rate_hz, center_offset_hz, t, split}`.
+- **Errors** `{"error", "code"}`: `400 invalid` (bad filter/split/padding/`max_samples`, unknown field), `404 not_found` (no such manifest), `503 unavailable` (this server has no dataset export, e.g. no IQ capture buffer), `500 failed` (storage), `405` other methods.
+
 ## Streams: WebSocket, TCP and on-demand openers
 
 Full framing, header fields, binary record layout, drop markers, backpressure and `content_class` egress gating are the versioned wire contract: **[`docs/stream-contract.md`](stream-contract.md)**. This section covers only the HTTP/WS-level *endpoints* that open or discover a stream.

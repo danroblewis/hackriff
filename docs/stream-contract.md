@@ -316,6 +316,10 @@ One JSON object per line; lines longer than `max_message_bytes` are discarded an
 
 **Readiness (T-223).** `PluginState::Running` only means the process is attached: a decoder can still be setting up what it needs to account for input. A manifest that sets `input.ready_signal: true` promises a `{"type":"ready"}` line once it is past that, and the host tracks it (`PluginStats::ready`, `PluginInstance::wait_ready`, and `records_offered_before_ready`, the records offered before the first `ready`). A producer that can pause — a lossless replay, whose gate cursor holds capture — must hold its first record until then; a producer that cannot (a live chain) waits at most `limits.ready_timeout_ms` (default 5 s) and then feeds anyway, counting it. A restart re-arms the flag: the new process reports ready again. Without the declaration a plugin is ready as soon as it is attached, and nothing waits. The `ready` line carries no values, so it is accepted under every class.
 
+**Early-input accounting is per process (T-224).** `records_offered_before_ready` counts each record as it is offered while the running process has not reported ready, not a snapshot of the cumulative `records_offered` taken at the `ready` line: `records_offered` spans the instance while readiness re-arms at every restart, so a snapshot would charge a restarted process with every record the instance ever offered. A process that never sends its line — the live case below — therefore counts every record fed to it, and `== 0` means what it says: no record reached a decoder that had not accounted for itself.
+
+**The live bound is a sample-loss budget.** A chain waiting for readiness is not reading the ring, so up to `ready_timeout_ms` of live samples can lap out of it and be counted as lost (the same is true of the 15 s wait for `Running` that precedes it). Choose `ready_timeout_ms` from the decoder's measured start-up, not from the largest wait that seems harmless. A producer's wait also ends immediately on shutdown, so a plugin that declares readiness and never signals cannot hold a chain past a stop or detach.
+
 **Time:** the host stamps rows from the line's `sample_index`, using the input anchor and rate (`PluginInstance::set_anchor` after a retune). Plugin wall-clock times are ignored.
 
 ### 9.4 Persistence and republish
@@ -346,11 +350,14 @@ readsb is GPL, so it will run as a subprocess against this manifest. Its model:
 - its JSON/raw output must become §9.3 `decode` lines, `identity {scheme: "adsb-icao"}`, `crc_status: "valid"`. readsb doesn't print per-message NDJSON on stdout by default, so T-015 will likely need a thin wrapper or a network-output adapter;
 - `content_class: "unrestricted"`.
 
+**Readiness bound (T-223/T-224).** `hk-plugin-readsb` reports ready once readsb's Beast connection is up and the pre-roll is written; under load at `nice` 10 that took 1.63 s, and the wrapper itself gives up waiting after 25 s and reports ready regardless, so its output is never withheld. The manifest sets `limits.ready_timeout_ms` explicitly to **5000**, the same value as the default, because the number is a decision and not an accident: it is ~3× the measured worst case, and it is what a live chain pays in lapped ring samples when a decoder never signals. Raising it towards the wrapper's own 25 s bound would trade seconds of live coverage for a start-up case that has never been observed; lowering it towards the measurement would feed readsb unready under ordinary load. A lossless replay ignores the bound (it waits as long as a lossless push would, holding capture with its gate cursor), so this value only ever governs live chains.
+
 ### 9.7 Test plugin
 
 `hk-dummy-plugin` (bin target of `hk-plugins`, manifest `plugins/dummy/manifest.json`) reads framed or raw input and emits one decode per `--every` records. Its test switches:
 - `--profile adsb-like`
 - `--crash-after K`
+- `--ready-after-ms MS` (the §9.3 `ready` line after a start-up delay; omitted with `input.ready_signal` set, the plugin never signals)
 - `--stall`
 - `--claim-class`, `--content`
 - `--annotate`

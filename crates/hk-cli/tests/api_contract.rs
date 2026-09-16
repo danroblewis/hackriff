@@ -1499,6 +1499,75 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
     stop_server(serving);
 }
 
+/// T-205: `POST /api/datasets` (a filter matching nothing, so the export is deterministic and
+/// fast: no live decode needs to happen), `GET /api/datasets` and `GET /api/datasets/{id}`, and
+/// the documented `400`/`404`/`405` refusals.
+#[test]
+fn dataset_export_and_manifest_lookup_answer_as_documented() {
+    let (serving, addr) = start_server();
+
+    let (st, v) = get(addr, "/api/datasets");
+    assert_eq!(st, 200, "{v}");
+    assert!(is_array(&v["datasets"]), "{v}");
+
+    // A family no fixture ever produces: the export runs and finds nothing, deterministically.
+    let (st, v) = post(
+        addr,
+        "/api/datasets",
+        &json!({ "filter": { "family": "css" }, "split": "dev" }).to_string(),
+    );
+    assert_eq!(st, 201, "{v}");
+    let dataset = &v["dataset"];
+    assert!(dataset["id"].is_string(), "{dataset}");
+    assert_eq!(dataset["split"], json!("dev"), "{dataset}");
+    assert_eq!(dataset["filter"]["family"], json!("css"), "{dataset}");
+    assert!(is_array(&dataset["samples"]), "{dataset}");
+    assert_eq!(dataset["samples"], json!([]), "{dataset}");
+    assert_eq!(dataset["skipped"], json!(0), "{dataset}");
+    let id = dataset["id"].as_str().unwrap().to_owned();
+
+    // The manifest is readable back by id, and listed.
+    let (st, v) = get(addr, &format!("/api/datasets/{id}"));
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["dataset"]["id"], json!(id), "{v}");
+    let (st, v) = get(addr, "/api/datasets");
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        v["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["id"] == json!(id)),
+        "{v}"
+    );
+
+    let (st, v) = get(addr, "/api/datasets/no-such-id");
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
+
+    for bad in [
+        json!({ "filter": {} }), // split is required
+        json!({ "filter": {}, "split": "sideways" }),
+        json!({ "filter": {}, "split": "dev", "max_samples": 0 }),
+        json!({ "filter": {}, "split": "dev", "pad_pre_s": -1.0 }),
+        json!({ "filter": { "emitter": "not-an-id" }, "split": "dev" }),
+        json!({ "filter": {}, "split": "dev", "extra": 1 }),
+    ] {
+        let (st, v) = post(addr, "/api/datasets", &bad.to_string());
+        assert_eq!(
+            (st, v["code"].as_str()),
+            (400, Some("invalid")),
+            "{bad}: {v}"
+        );
+    }
+
+    let (st, _) = put(addr, "/api/datasets", "{}");
+    assert_eq!(st, 405);
+    let (st, _) = post(addr, "/api/datasets/x", "{}");
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
 // --- WebSocket routes -----------------------------------------------------------------------------
 
 fn connect_ws(addr: SocketAddr, path: &str) -> Result<Ws, tungstenite::Error> {

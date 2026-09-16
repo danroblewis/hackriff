@@ -786,10 +786,15 @@ impl<O: Objective> RefinementLoop<O> {
                         tuning.center_hz = space.clamp_center(tuning.center_hz + d);
                         center_converged = center_converged || d.abs() <= tol;
                     }
-                    Some(m)
-                } else {
-                    last
                 }
+                // The validation measurement stands for the returned tuning whether or not it
+                // locked: an earlier phase's result never vouches for it. Acquisition measures a
+                // short window (`WindowPlan::acquire_s`), where a centre one grid step off the
+                // carrier can read a *higher* pilot C/N0 than the true centre — the channel
+                // filter, centred off the emission, cuts MPX noise while the 19 kHz pilot
+                // survives. Keeping that measurement here reported an unvalidated centre as a
+                // locked refinement (T-188).
+                Some(m)
             }
             None => last,
         };
@@ -1486,6 +1491,70 @@ mod tests {
             assert_eq!(o.provenance, REFINED_BY_OUTPUT_ANALYSIS);
             assert!(o.iterations >= 4 && o.evaluations as usize == o.trace.len());
         }
+    }
+
+    /// An objective only the shallow acquisition window locks, and only on a decoy one grid step
+    /// off the start: the shape of a WFM channel filter sitting beside the carrier, which cuts
+    /// MPX noise while the pilot survives, so a short window reads a *higher* C/N0 there than at
+    /// the true centre. Its centre estimator points back at the emission by more than one step,
+    /// so acquisition discards the correction (T-188).
+    struct ShallowDecoy;
+
+    impl Objective for ShallowDecoy {
+        fn name(&self) -> &str {
+            "decoy@1"
+        }
+        fn mode(&self) -> &str {
+            "toy"
+        }
+        fn space(&self, start: &RefineStart, _: f64) -> ParameterSpace {
+            ParameterSpace {
+                center_hz: (start.center_hz - 20e3, start.center_hz + 20e3),
+                center_step_hz: 5e3,
+                bandwidth_hz: (10e3, 50e3),
+                bandwidth_step_hz: 10e3,
+                nominal_bandwidth_hz: 40e3,
+                bandwidth_tolerance: 1.0,
+                mode_axes: Vec::new(),
+            }
+        }
+        fn evaluate<T: IqSample>(
+            &mut self,
+            _: IqWindow<'_, T>,
+            t: &Tuning,
+            depth: EvalDepth,
+        ) -> Result<Measurement, DemodError> {
+            let decoy = (t.center_hz - 5_000.0).abs() < 1.0;
+            let locked = depth == EvalDepth::Acquire && decoy;
+            Ok(Measurement {
+                quality: if locked { 60.0 } else { 10.0 },
+                locked,
+                center_correction_hz: Some(-6_000.0),
+                ..Measurement::default()
+            })
+        }
+    }
+
+    /// A centre that only ever locked on an acquisition measurement is not a refinement: the
+    /// deeper measurements of it (track, bandwidth, validate) never locked, so the outcome must
+    /// not be reported locked, and nothing downstream may retune to it (T-188).
+    #[test]
+    fn an_acquisition_only_lock_is_never_a_validated_refinement() {
+        let p = prov();
+        let x = vec![Complex32::default(); 16];
+        let start = RefineStart {
+            center_hz: 0.0,
+            bandwidth_hz: 5e3,
+            warm: false,
+        };
+        let o =
+            RefinementLoop::new(ShallowDecoy, LoopConfig::default()).run(window(&p, &x), &start);
+        assert!(
+            !o.locked,
+            "an unvalidated acquisition centre must not lock: {o:?}"
+        );
+        assert!(!o.converged, "{o:?}");
+        assert_eq!(o.stop, StopReason::NoLock, "{o:?}");
     }
 
     #[test]

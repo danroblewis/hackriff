@@ -674,15 +674,19 @@ fn line_stamp(line: &str, timing: &Timing) -> u64 {
 /// Parses readsb's `--raw` stdout into NDJSON decode lines on our own stdout.
 fn pump_stdout(stdout: impl Read, timing: &Timing, window_samples: u64) {
     let mut r = BufReader::new(stdout);
-    let mut out = io::stdout().lock();
     let mut line = String::new();
     let mut cpr: HashMap<String, CprCache> = HashMap::new();
     while r.read_line(&mut line).unwrap_or(0) > 0 {
         let idx = line_stamp(&line, timing);
-        if let Some(frame) = parse_avr_line(&line, &mut cpr, idx, window_samples)
-            && (writeln!(out, "{}", decode_line(&frame)).is_err() || out.flush().is_err())
-        {
-            break; // our own stdout closed (host detaching us); nothing more to do
+        if let Some(frame) = parse_avr_line(&line, &mut cpr, idx, window_samples) {
+            // The lock is taken per line, never held for the life of this thread (T-224): the
+            // main thread writes the §9.3 `ready` line on the same stdout while this pump is
+            // already draining readsb, and a pump holding the lock would deadlock it there —
+            // readsb then starves on its unfed stdin and hits its own wedge watchdog.
+            let mut out = io::stdout().lock();
+            if writeln!(out, "{}", decode_line(&frame)).is_err() || out.flush().is_err() {
+                break; // our own stdout closed (host detaching us); nothing more to do
+            }
         }
         line.clear();
     }
@@ -891,17 +895,21 @@ fn main() {
     let stderr_clean = Arc::clone(&clean_shutdown);
     let err_thread = thread::spawn(move || pump_stderr(readsb_stderr, &stderr_clean));
 
-    // The contract's readiness line (docs/stream-contract.md §9.3, T-223), written before the
-    // readsb reader thread takes stdout: the writer thread has readsb's Beast connection and its
-    // pre-roll in place, so every message from here on can carry its own sample time. The host
-    // holds the chain's first record until this line.
-    let _ = ready_rx.recv_timeout(READY_WAIT);
-    println!("{}", json!({"type": "ready"}));
-    let _ = io::stdout().flush();
-
+    // readsb's stdout is drained from the moment it exists (T-224): the readiness wait below can
+    // last up to `READY_WAIT`, and a readsb that filled its 64 KiB stdout pipe meanwhile would
+    // block in its own write until then. Decodes that predate the ready line are still forwarded;
+    // they are the ones that carry the write-through fallback stamp, which is what readiness
+    // exists to avoid, not something to hide.
     let timing_for_out = Arc::clone(&timing);
     let out_thread =
         thread::spawn(move || pump_stdout(readsb_stdout, &timing_for_out, cpr_window_samples));
+
+    // The contract's readiness line (docs/stream-contract.md §9.3, T-223): the writer thread has
+    // readsb's Beast connection and its pre-roll in place, so every message from here on can
+    // carry its own sample time. The host holds the chain's first record until this line.
+    let _ = ready_rx.recv_timeout(READY_WAIT);
+    println!("{}", json!({"type": "ready"}));
+    let _ = io::stdout().flush();
 
     // Feed loop: convert ci8 -> uc8 (offset binary) and hand it to the writer thread. Never
     // blocks capture: this process's own stdin is the bounded `DecoderFeed` ring (host.rs). The

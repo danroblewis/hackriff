@@ -2,19 +2,21 @@
 //! ExternalEvent cache. Interpretations are insert-only; a new version is a new row.
 
 use rusqlite::{OptionalExtension, params};
+use uuid::Uuid;
 
 use super::{
-    RepoError, Repository, blob, bodies, body_by_id, bump_extent, enum_text, finite, gate,
-    opt_blob, region_bounds,
+    RepoError, Repository, blob, bodies, body_by_id, bump_extent, enum_parse, enum_text, finite,
+    gate, opt_blob, region_bounds,
 };
 use crate::context::{
     Anomaly, AnomalyStatus, AnomalyStatusChange, AnomalySubject, Cause, Evidence, Explanation,
     ExternalEvent,
 };
-use crate::decode::{Bitstream, BitstreamTransport, Decode, Demodulation};
+use crate::decode::{Bitstream, BitstreamTransport, Decode, DecodeEvidence, Demodulation};
 use crate::hash::ContentHash;
 use crate::ids::{
-    AnnotationId, AnomalyId, BitstreamId, DemodulationId, ExplanationId, ExternalEventId,
+    AnnotationId, AnomalyId, BitstreamId, DecodeId, DemodulationId, EmitterId, ExplanationId,
+    ExternalEventId,
 };
 use crate::recording::{Annotation, AnnotationTarget};
 use crate::region::{Region, TimeRange};
@@ -194,6 +196,38 @@ impl Repository {
     }
 
     // Decode reads are gated by class: `repo/gating.rs` (T-036).
+
+    /// Decoder evidence for `emitter_id`'s demodulations, oldest first (T-205, ADR-0016 §7): the
+    /// labelled-capture dataset export's decoder-validated label source. Joins through
+    /// `demodulation.emitter_id` rather than identity, so it also reaches decodes that name no
+    /// identity (e.g. an RDS group). Exposes only `crc_status`, `t` and the ids that place a
+    /// snippet: never identity or content, so nothing here needs gating.
+    pub fn decode_evidence_for_emitter(
+        &self,
+        emitter_id: EmitterId,
+    ) -> Result<Vec<DecodeEvidence>, RepoError> {
+        let rows: Vec<([u8; 16], [u8; 16], String, i64)> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT d.decode_id, d.demod_id, d.crc_status, d.t FROM decode d \
+                 JOIN demodulation m ON m.demod_id = d.demod_id \
+                 WHERE m.emitter_id = ?1 ORDER BY d.t, d.decode_id",
+            )?;
+            stmt.query_map([blob(emitter_id)], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<Result<_, _>>()?
+        };
+        rows.into_iter()
+            .map(|(decode_id, demod_id, crc, t)| {
+                Ok(DecodeEvidence {
+                    decode_id: DecodeId::from_uuid(Uuid::from_bytes(decode_id)),
+                    demodulation_id: DemodulationId::from_uuid(Uuid::from_bytes(demod_id)),
+                    crc_status: enum_parse(crc)?,
+                    t: Timestamp::from_unix_nanos(t),
+                })
+            })
+            .collect()
+    }
 
     /// Appends a bitstream descriptor. A `Stored` bitstream is content and is refused under a
     /// class that does not permit content ([`RepoError::GatedContent`]); a `Live` descriptor is
