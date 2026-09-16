@@ -167,6 +167,54 @@ fn us(samples: f64) -> f64 {
 }
 
 #[test]
+fn a_burst_false_alarm_on_noise_is_always_a_marginal_row() {
+    // T-237. The onset test crosses on pure noise at its configured Pfa — by design, and
+    // `false_alarm_rate_on_noise` pins that rate. Such a crossing has no power above the noise, so
+    // its excess is spread over every bin and the 99 % bandwidth spans the FFT: through the mock
+    // these read as boxes occupying 0.9375, 0.9678 and 0.9941 of a 3 MHz window at ≈ −1 dB peak
+    // SNR. The width cannot be used to reject them (a 120 µs squitter legitimately fills a 2.4 MHz
+    // window), so what makes them safe to tell apart downstream is that the detector always calls
+    // them `marginal`.
+    //
+    // t057 excuses out-of-band rows on exactly that predicate, so this test is what stops that
+    // exemption from silently becoming a no-op: if a burst false alarm on noise ever stops being
+    // `marginal`, this fails here rather than the exemption quietly ceasing to match.
+    let p = prov();
+    let mut g = Gen(Rng(0x7237));
+    let iq = quantise(&noise(&mut g, FS as usize));
+    // A test knob to make the class common; the product default (0.01/s) is unchanged.
+    let cfg = BurstConfig {
+        false_alarm_rate_hz: 2000.0,
+        ..BurstConfig::default()
+    };
+    let mut det = BurstDetector::new(SurveyId::new(), cfg);
+    let got = run(&mut det, &iq, &p);
+    let stats = det.stats();
+    let wide = got
+        .iter()
+        .filter(|d| d.detection.obw_hz >= 0.9 * FS)
+        .count();
+    eprintln!(
+        "pure noise: {} bursts, {} emitted ({wide} filling the window), peak SNR {:?} dB",
+        stats.bursts,
+        stats.emitted,
+        got.first().map(|d| d.detection.snr_peak_db)
+    );
+    assert!(
+        !got.is_empty(),
+        "no burst false alarm on noise, so this test exercises nothing"
+    );
+    for d in &got {
+        assert!(
+            d.detection.flags.marginal,
+            "a burst false alarm on noise was not marginal: {:.0} Hz obw, peak SNR {:.2} dB",
+            d.detection.obw_hz, d.detection.snr_peak_db
+        );
+        assert!(d.detection.detector_version.starts_with(BURST_DETECTOR));
+    }
+}
+
+#[test]
 fn squitters_and_ook_bursts_detected_with_us_timing_by_snr() {
     let p = prov();
     for (seed, snr_db) in [(11u64, 3.0), (12, 6.0), (13, 10.0), (14, 20.0)] {

@@ -3033,7 +3033,8 @@ tasks:
   - id: T-189
     milestone: M2-hardening
     title: "API inventory row classification field (hk-api query.rs:818) still shows latest emitter_classification row; align with T-183 family ranking (track-shape below demod/decoder/classifier)"
-    status: todo
+    status: done
+    completed_by: T-211
     priority: low
     deps: [T-183]
     parallel_group: API
@@ -3045,6 +3046,8 @@ tasks:
     model: sonnet
     effort: low
     core_interface: false
+    closure_evidence_2026_09_15: "Verified in code, not assumed: crates/hk-api/src/query.rs:893 serves classification from repo.current_classification(), the ARBITRATED row that sets family (with a T-211 comment saying so), and latest_classification is a separate field populated only when a newer lower-ranked row differs. That is exactly T-189-s requirement that classification and family can never disagree. docs/api.md and api_contract both reference the fields, satisfying the -updated together- clause. Completed by T-211 (cd82ab7) and left open on the board until this audit."
+
   - id: T-190
     milestone: MUI
     title: "Analyze / synthesize decoder stub endpoint: POST /api/analyze on a selection, emitter or ad-hoc band (optional history window) validates the target and returns 501 not_implemented until MAUTO"
@@ -3144,7 +3147,7 @@ tasks:
   - id: T-196
     milestone: M2-hardening
     title: "Occupancy span_stats FCO for a channel depends on the query band: 433.475 MHz lay inside both bands yet reported 0.073 (old band 433.2375-433.6875) vs 0.296 (fixed band 433.275-433.725), truth 0.258"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-124]
     parallel_group: CONTEXT
@@ -3224,7 +3227,8 @@ tasks:
   - id: T-201
     milestone: M3
     title: "C18 fingerprint schema + editable signature database + matching (partial matches with ranked candidates)"
-    status: in-progress
+    status: done
+    commit: ab1df6e
     priority: normal
     deps: [T-211]
     parallel_group: M3B
@@ -3315,6 +3319,7 @@ tasks:
     effort: medium
     core_interface: true
     scope_audit_2026_09_15: "deps corrected 2026-09-15: T-212 was listed but is DONE (band-plan priors merged, 4a839c3), and T-235 was missing though it is the ONLY remaining blocker on this gate - the classifier meets its accuracy floors (top-1 0.915 vs 0.90, top-2 0.980 vs 0.95, floors verified unmoved and the sweep guards tightened from 0.70/0.90 to the ADR values), leaving false-known 0.171 vs 0.10 and the two abstaining OTA fixtures, which is T-235's scope."
+    integration_gap_2026_09_15: "T-201 landed signature matching but there is NO hk-pipeline call site yet, so the API route serves matches only once something writes them. T-201 reports `match_emitter()` makes that a one-liner. Whoever runs this gate (or T-215) must wire it, otherwise signature match and unknown-clustering coverage in the acceptance suite will be vacuously empty rather than failing loudly."
 
   - id: T-207
     milestone: M3
@@ -3767,7 +3772,8 @@ tasks:
   - id: T-234
     milestone: M2-hardening
     title: "M2 gate test asserts bandit dwell in wall time: under concurrent load it sees 0 outcomes and 0 dwells and fails, though the survey report itself is correct"
-    status: in-progress
+    status: done
+    commit: 1b91d04
     priority: high
     deps: []
     parallel_group: PIPELINE
@@ -3818,7 +3824,8 @@ tasks:
   - id: T-237
     milestone: M2-hardening
     title: "Detector raises a marginal whole-window false alarm on synthetic noise fill (obw 2.8125 MHz = 120 of 128 bins), and T-180's test skip for it has silently become a no-op"
-    status: in-progress
+    status: done
+    commit: 9bab6e5
     priority: high
     deps: [T-231]
     parallel_group: DETECT
@@ -3833,7 +3840,7 @@ tasks:
   - id: T-238
     milestone: M3
     title: "OTA fixtures abstain because C14 symbol estimation never runs in the classification path: six of the most discriminating dimensions abstain with no_symbol_estimate"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-235]
     parallel_group: M3A
@@ -3844,6 +3851,21 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: false
+  - id: T-239
+    milestone: M2-hardening
+    title: "Scheduler leaves the recording almost uncovered in t057: 12,000 of 14,519,977 samples, so 'no emitter at the station' fails 1-in-14 on the unmodified baseline"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: CORE
+    use_cases: []
+    found_by: "T-237 (2026-09-15), which measured it while proving its own change: both of its residual failures were THIS, not the false alarm it fixed, and it quantified the baseline rate rather than attributing them to its own work"
+    acceptance: "root cause of the coverage collapse identified - why a scheduled replay serves only about 0.08 percent of the recording's samples over the station - and fixed so coverage is representative; the failing assertion 'no emitter at the station' passes 20/20 under 6 CPU burners on the FIXED code; the baseline rate (1-in-14 before any change) is re-measured after the fix and reported; no assertion loosened and no retry added; if the true finding is that the scheduler is behaving correctly and the TEST's expectation of coverage is wrong, argue it from the scheduling maths and fix the test instead"
+    area: crates/hk-core/src/scheduler, tests/e2e mock_device
+    needs: none
+    model: opus
+    effort: medium
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

@@ -933,6 +933,11 @@ fn build_record(
         || s.cum_after.quantisation_frames > s.cum_before.quantisation_frames;
     let invalid = s.cum_after.invalid_frames > s.cum_before.invalid_frames;
     let edge = edge_hit(f_lo, f_hi, g);
+    // T-237: a box that fills its own analysis window is provenance-suspect by construction (see
+    // `Rules::whole_window_fraction`). T-231 saw one on pure synthetic noise fill: 2.8125 MHz
+    // occupied of a 3 Msps window, 15/16 of the span.
+    let whole_window =
+        g.bins > 0 && (hi - lo) as f64 >= rules.whole_window_fraction * g.bins as f64;
 
     let spur = spur_decision(
         f_lo,
@@ -962,7 +967,8 @@ fn build_record(
             || quantisation
             || edge
             || invalid
-            || mirror_missing,
+            || mirror_missing
+            || whole_window,
         suspect_imd: false,
         compressed: false,
         impulsive: false,

@@ -124,8 +124,8 @@ pub use repo::{
     USER_BAND_MAX_WIDTH_HZ, UserBand,
 };
 pub use signature::{
-    FieldAgreement, FieldExpect, FieldSpec, InvalidSignature, MatchOutcome, SIGNATURE_SCHEMA,
-    Signature, SignatureCandidate, SignatureKind, SignatureMatch, SignatureProvenance,
-    SignatureRef,
+    EMISSION_FEATURES_VERSION, EmissionFeatures, Feat, FeatValue, FieldAgreement, FieldExpect,
+    FieldSpec, InvalidSignature, MatchOutcome, SIGNATURE_SCHEMA, Signature, SignatureCandidate,
+    SignatureKind, SignatureMatch, SignatureProvenance, SignatureRef,
 };
 pub use time::{SampleTime, Timestamp, TimestampMethod};

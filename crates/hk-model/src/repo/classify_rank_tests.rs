@@ -468,10 +468,12 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
         // `SCHEMA_VERSION - 1`, so a later migration does not silently change what is rolled back.
         // T-218: nor the 0009 signature tables. Every later migration's objects have to go, or
         // replaying them onto this file fails on the first `CREATE TABLE`.
+        // T-201: nor the 0010 measured-features table.
         conn.execute_batch(
             "DROP TABLE IF EXISTS emitter_relation; \
              DROP TABLE IF EXISTS signature_match; \
-             DROP TABLE IF EXISTS signature",
+             DROP TABLE IF EXISTS signature; \
+             DROP TABLE IF EXISTS emission_features",
         )
         .unwrap();
         const BEFORE_0007: i64 = 6;

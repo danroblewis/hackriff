@@ -113,6 +113,9 @@ pub struct BurstStats {
     pub dropped_long: u64,
     /// Bursts over the rate cap.
     pub dropped_rate: u64,
+    /// Bursts dropped because their power filled the window, so they had no measurable centre or
+    /// bandwidth (T-237), or their samples had left the ring.
+    pub dropped_unlocalised: u64,
     /// Open bursts cut by a transition.
     pub dropped_transition: u64,
     /// Detector restarts (transitions).
@@ -501,7 +504,17 @@ impl BurstDetector {
         };
         let fs = self.fs;
         let tuned = prov.tune.center_hz;
-        let (offset, obw) = self.coarse_spectrum(a.start, dur, s2).unwrap_or((0.0, fs));
+        // T-237: a burst whose 99 % bandwidth fills the window — or whose samples have left the
+        // ring — has no measurable centre or bandwidth. The old fallback invented one
+        // (`(0.0, fs)`: centred on the tune, the whole window occupied). On the mock's noise fill
+        // the onset test crosses at its designed Pfa, the "burst" is noise, its power above the
+        // noise is spread over every bin, and the 99 % width then spans the window: T-231 saw
+        // 0.9375 of a 3 MHz window, and this run 0.9678 and 0.9941, all at ≈ −1 dB peak SNR.
+        // Report nothing rather than claim 3 MHz of occupancy that was never measured.
+        let Some((offset, obw)) = self.coarse_spectrum(a.start, dur, s2) else {
+            self.stats.dropped_unlocalised += 1;
+            return;
+        };
         let s = self.s_len as f64;
         let excess = |p: f64| db((p / s2 - 1.0).max(1e-3));
         let snr_peak_db = excess(a.peak_sub as f64 / s);
@@ -621,6 +634,9 @@ impl BurstDetector {
                 break;
             }
         }
+        // A short burst legitimately fills the window (a 120 µs squitter at 2.4 Msps is wider than
+        // the span), so the width alone says nothing about whether this was a signal: T-237 tried
+        // rejecting on it and lost every ADS-B squitter at 3 and 6 dB.
         Some((offset, ((hi + 1).saturating_sub(lo)) as f64 * bin_hz))
     }
 }
