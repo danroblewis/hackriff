@@ -3565,7 +3565,7 @@ tasks:
   - id: T-221
     milestone: MAUTO
     title: "DESIGN: Listen as a decode pipeline with an audio sink (retire the special-cased Listen path; audio and digital decoders share one recipe/output model and one Outputs dock)"
-    status: in-progress
+    status: done
     priority: normal
     deps: [T-220]
     parallel_group: MAUTOD
@@ -3941,7 +3941,7 @@ tasks:
   - id: T-244
     milestone: M3
     title: "OOD coverage gap: no out-of-distribution generator routes to analog or psk-qam, so their open-set behaviour is unmeasured - the M3 gate would report unknown-recall it never tested for two families"
-    status: in-progress
+    status: done
     priority: high
     deps: [T-204, T-213]
     parallel_group: M3V
