@@ -4878,7 +4878,8 @@ tasks:
     milestone: M2-hardening
     title: 'Audit features that measure the OBSERVATION rather than the signal:
       burst_length varies with watch duration, sigma_ap with snippet length'
-    status: in-progress
+    status: done
+    commit: ef8ac7f
     priority: normal
     deps: []
     parallel_group: M3A
@@ -5619,7 +5620,8 @@ tasks:
     milestone: M2-hardening
     title: BaselineKey has no front end in it, so two uncalibrated devices at one site average their noise
       floors together
-    status: in-progress
+    status: done
+    commit: d30500a
     priority: normal
     deps:
     - T-259
@@ -5740,6 +5742,144 @@ tasks:
       call as explicitly truncated so downstream never reads t_end as an observed end. Do NOT silently close
       it at the window edge: that manufactures a boundary the radio never produced. Metadata only, M4 stays
       audio-free'
+  - id: T-309
+    milestone: M2-hardening
+    title: C18 clustering compares period_s, duty_cycle and burst_length_s unconditionally - a single disagreeing
+      burst length refuses a join however much else agrees
+    status: todo
+    priority: high
+    deps:
+    - T-281
+    parallel_group: M3B
+    core_interface: true
+    model: opus
+    acceptance: 'T-281''s highest-value finding, and it points straight at what the user reported from live
+      Explore: 82 near-duplicate candidates that would not merge. hk_context::signature::cluster::compare
+      puts period_s, duty_cycle and burst_length_s in CLUSTER_FIELDS and compares them with NO across-silence
+      exclusion - unlike every other comparison in the codebase, which T-250/T-262 taught to exclude window
+      statistics when presence intervals are disjoint. One field at z > 3 separates a pair however much
+      else agrees, and these also count toward CLUSTER_MIN_SHARED_FIELDS, so a single disagreeing burst
+      length refuses a join outright. These are OBSERVATION statistics: they move with how long and how
+      often the system watched, so two identical emitters watched differently look like different emitters.
+      Give the clustering distance the across-silence exclusion. THE DESIGN ANSWER THIS NEEDS FIRST: what
+      a CENTROID''s time extent means when it folds many members'' windows - a centroid has no single presence
+      interval, so state the rule before coding it. Blind test: two detections of one emitter watched for
+      different durations must join; two genuinely different emitters must still separate. No threshold
+      moves'
+  - id: T-310
+    milestone: M3
+    title: 'cyclic_db is a density dimension in 21 of 21 classes and grows ~10*log10(N): +11 dB from watching
+      the same emission 8x longer'
+    status: todo
+    priority: normal
+    deps:
+    - T-281
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    acceptance: 'T-281 measured cyclic_db (a whitened peak-to-median ratio) growing about 10*log10(N) on
+      ONE waveform: ook 20.17 -> 24.53 -> 26.69 -> 31.44 dB and bpsk 15.32 -> 15.91 -> 23.72 -> 25.08 dB
+      across 8x of window. That +11 dB is LARGER than the inter-class spread this dimension exists to separate,
+      and the classifier compares rows on it in 21 of 21 classes. MAX_WINDOW_SAMPLES caps continuous emissions
+      so those are self-consistent; the dependence bites on BURSTS SHORTER THAN THE CAP - the ephemeral
+      emissions CLAUDE.md makes first-class. Measure a length-free line statistic that preserves the discriminating
+      power, refit both density files, and re-measure the ADR-0016 section 7 gate. THE HARD CONSTRAINT:
+      this must NOT be tuned against acceptance - fix the statistic, then report whatever the gate says.
+      M3 currently passes at unknown recall 0.9747, false-known 0.0253, held-out wrong-family 1 of 396;
+      if an honest normalisation makes it worse, report that rather than compensating elsewhere. Caveat
+      from T-281: its figures are single-seed (4242) synthetic at 25 dB - direction unambiguous, magnitude
+      not calibrated, so re-measure across seeds first'
+  - id: T-311
+    milestone: M3
+    title: 'blind_* family scores jump 0.10 to 1.00 between window sizes: a lock/no-lock transition fed
+      to a Gaussian as a continuous value'
+    status: todo
+    priority: normal
+    deps:
+    - T-281
+    parallel_group: M3A
+    model: opus
+    acceptance: T-281 measured one 2-FSK burst reading blind_fsk 0.10 at N/8 and N/4, then 1.00 at N/2 and
+      N. That is a lock/no-lock transition being handed to a density as though it were a continuous measurement,
+      so the fitted Gaussian is describing a step function. Either make the blind_* scores window-stable,
+      or gate them on a minimum window below which they are ABSENT rather than low - absent means not measured,
+      which is the rule T-297 established for sweep_rate_hz_per_s and which stops a not-yet-locked reading
+      being scored as evidence of a different family. Refitting densities is in scope; moving any floor
+      is not
+  - id: T-312
+    milestone: M3
+    title: Feature FFT length is derived from snippet length, so spectral resolution itself moves with how
+      long the signal was watched
+    status: todo
+    priority: normal
+    deps:
+    - T-281
+    parallel_group: M3A
+    model: opus
+    acceptance: spectral_features/psd_of_real size their FFT as (n/8).next_power_of_two().clamp(64,1024),
+      so below n=8192 the RESOLUTION is a function of the snippet rather than of the signal. T-281 measured
+      that pinning it cut c42_norm spread 1.111 -> 0.728 and cp_corr 0.710 -> 0.324 - a cause, though not
+      the only one. Pin the feature FFT length independent of snippet length, or fit densities per resolution
+      band and say which band a measurement came from. Refit as needed; re-measure the section 7 gate; no
+      floor moves
+  - id: T-313
+    milestone: M2-hardening
+    title: No regression guard stops a future feature from depending on snippet length
+    status: todo
+    priority: normal
+    deps:
+    - T-281
+    parallel_group: M3A
+    model: opus
+    acceptance: 'Six features have now been found depending on the OBSERVATION rather than the signal, five
+      of them by accident while chasing something else (sigma_ap, burst_length, snr_mean_db, Track.bandwidth_hz,
+      if_bimodality, and T-281''s cyclic_db/blind_*). Add a guard: assert that each feature NAMED as a signal
+      property stays within tolerance across snippet truncation of one waveform. T-281 built this as a scratch
+      probe and DELETED it rather than commit a non-asserting test - correct, because a real guard needs
+      per-feature tolerances, which is its own judgement call. Make those tolerances explicit and derived
+      (state what physical variation each admits), not fitted to current values. Features marked as observation
+      statistics are exempt BY NAME, so adding one to the exempt list is a visible decision rather than
+      a silent drift'
+  - id: T-314
+    milestone: M2-hardening
+    title: 'Keying baselines is not end-to-end: occupancy reads history unfiltered, so front ends are already
+      averaged in the level-0 cells before a baseline sees them'
+    status: todo
+    priority: high
+    deps:
+    - T-303
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'T-303 stopped BASELINES pooling two front ends, and said plainly what it did not fix. The
+      occupancy close reads history UNFILTERED: LevelSource::level0 -> Pyramid::query (hk-context/src/occupancy/engine.rs:219-228),
+      and query is query_filtered(q, &OriginFilter::ANY) (hk-store/src/history/query.rs:450-452) via ProductLevels::level0
+      (hk-pipeline/src/occupancy.rs:171-175). Tiles are not split by origin, so several front ends folding
+      into one pyramid are ALREADY AVERAGED in the level-0 cells before occupancy runs. The guarantee therefore
+      stops at the key and does not reach the measurement. The filter already exists from T-133, so this
+      is wiring a per-source occupancy read rather than new capability. Test the end-to-end property the
+      way T-303 tested the key: fold two front ends with different floors into one pyramid, and assert the
+      occupancy measurement each baseline consumes carries only its own chain''s energy - with a pooled
+      control alongside showing the mixture, so the test cannot pass by the read having broken. Recorded
+      in ADR-0012 section 3.1 and the C12 card'
+  - id: T-315
+    milestone: M2-hardening
+    title: The /api/baselines chain field is documented but not contract-tested, so docs and contract can
+      drift
+    status: todo
+    priority: low
+    deps:
+    - T-303
+    parallel_group: DOCS
+    model: sonnet
+    acceptance: T-303 added a chain field to the /api/baselines row and documented it in docs/api.md, flagging
+      honestly that it did NOT touch api_contract.rs because that test asserts the response SHAPE (is_array(v['baselines']))
+      rather than the key set - so the suite stays green and the new field is uncontracted. T-079's rule
+      is that docs/api.md and its contract tests move together; a shape-only assertion satisfies the letter
+      and not the point. Add a contract assertion for the chain field, and consider whether other shape-only
+      assertions in api_contract.rs have the same hole - a field that can be renamed or dropped without
+      a test failing is documentation, not a contract. Report any others found rather than fixing them all
+      here
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

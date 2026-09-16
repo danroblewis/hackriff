@@ -1906,7 +1906,7 @@ mod tests {
         use hk_context::occupancy::baseline::{BaselineConfig, BaselineEngine};
         use hk_context::occupancy::novelty::{SEQUENTIAL_MAX_GAP_S, sequential_step};
         use hk_model::attention::alarm::HysteresisConfig;
-        use hk_model::attention::baseline::BaselineKey;
+        use hk_model::attention::baseline::{BaselineKey, ChainKey};
         use hk_model::attention::occupancy::{ChannelKey, OccupancySubject};
         use hk_model::{Cause, Evidence};
         use hk_store::baseline::{BaselineState, BaselineSubject};
@@ -1927,6 +1927,7 @@ mod tests {
                 BaselineKey {
                     site: site_id,
                     cal: CalKey::Uncalibrated,
+                    chain: ChainKey::Unknown,
                     scheme: 1,
                     cell_factor: 16,
                 },

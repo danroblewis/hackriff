@@ -219,8 +219,64 @@ pub enum CalKey {
     Calibrated(CalibrationStateId),
 }
 
-/// Key of one baseline: site × calibration × grid (§3.1). The 168 slots and the per-slot,
-/// per-gain-state level statistics live inside it.
+/// The receive chain a baseline's levels were measured through (T-303).
+///
+/// A noise floor is a property of **one receive chain** — its antenna, cable, LNA and mixer — so
+/// two front ends at one site have genuinely different floors even under the same calibration.
+/// Pooling them averages the floors, and novelty then fires (or is suppressed) on the mixture:
+/// either chain's ordinary level looks like a change against the other's, and both failures look
+/// like the system working. [`CalKey`] separates devices only incidentally, through
+/// [`CalKey::Calibrated`] being a per-device calibration version; [`CalKey::Uncalibrated`] is one
+/// value for every uncalibrated front end, which is exactly where the pooling happened.
+///
+/// Keyed on the **device**, not the antenna port — unlike [`crate::relate::ReceiveChain`], which
+/// compares the port when both sides recorded one. That refinement cannot be expressed here: a
+/// baseline key is a total equality key *and* the on-disk path, so a port that is `None` until an
+/// Opera Cake is plugged in would split one device's history in two on the day it appears. The
+/// asymmetry is sound because a port switch is **sequential** — a front-end provenance step
+/// (`hk_store::history::ProvenanceStep::FILTER`) that the alarm path already explains as
+/// self-inflicted — while two front ends are **concurrent**: their folds interleave, there is no
+/// step to explain, and only the key can keep them apart.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "kebab-case", tag = "kind", content = "id")]
+pub enum ChainKey {
+    /// No front end recorded: baselines written before T-303, and folds whose device is unknown.
+    #[default]
+    Unknown,
+    /// One front end, keyed by the hash of its `Provenance::device_id`.
+    Device(u64),
+}
+
+impl ChainKey {
+    /// The chain of `device_id` (FNV-1a 64 over its bytes).
+    ///
+    /// Deliberately the same hash as `hk_store::history::source_key`, so a baseline's chain equals
+    /// the history origin's source key for the same device and a per-source history read filters
+    /// on the same value. A test in hk-store pins the two together.
+    pub fn of_device(device_id: &str) -> Self {
+        ChainKey::Device(device_id.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        }))
+    }
+
+    /// No front end recorded.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, ChainKey::Unknown)
+    }
+
+    /// The device hash, `None` when unknown.
+    pub fn id(&self) -> Option<u64> {
+        match self {
+            ChainKey::Unknown => None,
+            ChainKey::Device(id) => Some(*id),
+        }
+    }
+}
+
+/// Key of one baseline: site × calibration × receive chain × grid (§3.1). The 168 slots and the
+/// per-slot, per-gain-state level statistics live inside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BaselineKey {
@@ -228,6 +284,10 @@ pub struct BaselineKey {
     pub site: SiteId,
     /// Calibration.
     pub cal: CalKey,
+    /// Receive chain (T-303): a noise floor belongs to one front end, so levels are only
+    /// comparable within one. Absent from the JSON when unknown (every pre-T-303 baseline).
+    #[serde(default, skip_serializing_if = "ChainKey::is_unknown")]
+    pub chain: ChainKey,
     /// History pyramid scheme whose level-0 grid the cells are multiples of.
     pub scheme: u16,
     /// Baseline cell = `cell_factor` × level-0 cell (default 16: 100 kHz on scheme 1).
@@ -568,5 +628,44 @@ mod tests {
         s.validate().unwrap();
         SiteConfig::default().validate().unwrap();
         AdaptationPolicy::default().validate().unwrap();
+    }
+
+    /// T-303: the receive chain is part of the key, so two front ends at one site under one
+    /// calibration are two baselines — and an unknown chain keys and serialises exactly as a
+    /// baseline did before T-303, so nothing already stored is orphaned or re-shaped.
+    #[test]
+    fn chain_key_separates_front_ends_and_is_omitted_when_unknown() {
+        let base = BaselineKey {
+            site: SiteId::new(),
+            cal: CalKey::Uncalibrated,
+            chain: ChainKey::Unknown,
+            scheme: 1,
+            cell_factor: 16,
+        };
+        let v = serde_json::to_value(base).unwrap();
+        assert!(
+            v.get("chain").is_none(),
+            "unknown chain is not written: {v}"
+        );
+        assert_eq!(serde_json::from_value::<BaselineKey>(v).unwrap(), base);
+
+        let a = BaselineKey {
+            chain: ChainKey::of_device("hackrf:a"),
+            ..base
+        };
+        let b = BaselineKey {
+            chain: ChainKey::of_device("hackrf:b"),
+            ..base
+        };
+        assert_ne!(a, b, "two front ends, one site and calibration");
+        assert_ne!(a, base, "a named chain is not the unknown one");
+        let va = serde_json::to_value(a).unwrap();
+        assert_eq!(va["chain"]["kind"], "device");
+        assert_eq!(serde_json::from_value::<BaselineKey>(va).unwrap(), a);
+
+        assert_eq!(ChainKey::of_device("hackrf:a"), a.chain, "stable hash");
+        assert!(ChainKey::default().is_unknown());
+        assert_eq!(ChainKey::Unknown.id(), None);
+        assert_eq!(a.chain.id(), ChainKey::of_device("hackrf:a").id());
     }
 }

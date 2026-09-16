@@ -45,7 +45,8 @@ use hk_model::Repository;
 use hk_model::attention::alarm::{AlarmKind, AlarmSubject};
 use hk_model::attention::baseline::MATURITY_MIN_OBSERVED_S;
 use hk_model::attention::baseline::{
-    BaselineResolution, CalKey, HourOfWeek, Maturity, SiteConfig, SiteKey, SiteRecord, SiteSource,
+    BaselineResolution, CalKey, ChainKey, HourOfWeek, Maturity, SiteConfig, SiteKey, SiteRecord,
+    SiteSource,
 };
 use hk_model::attention::occupancy::{ChannelKey, OccupancyStat, OccupancySubject};
 use hk_model::attention::report::{BaselineComparison, ChangeEntry, ComparisonStatus};
@@ -288,6 +289,10 @@ pub struct AttentionService {
     provider: Arc<SharedInterestingness>,
     counters: Option<Arc<Counters>>,
     clock: Arc<dyn Fn() -> Timestamp + Send + Sync>,
+    /// T-303: the receive chain every fold of this service is stamped with — the front end whose
+    /// frames its history and occupancy were built from. `Unknown` when no device was named, which
+    /// keys baselines exactly as they were keyed before T-303.
+    chain: ChainKey,
     /// T-128: candidate evidence, channel novelty and the site's first-sighting rate.
     cands: Mutex<CandidateState>,
     /// Class-entropy snapshot, refreshed off the control thread.
@@ -540,9 +545,14 @@ impl SubjectGainKeys for BTreeMap<ChannelKey, u32> {
 
 impl AttentionService {
     /// Opens the service over `data_dir/baselines` and the run database (sites and weights).
+    ///
+    /// `chain` (T-303) is the front end whose measurements this service folds; its baselines are
+    /// keyed by it, so another front end at the same site accrues its own noise floor instead of
+    /// averaging into this one's.
     pub fn open(
         data_dir: &Path,
         repo: Arc<Mutex<Repository>>,
+        chain: ChainKey,
         counters: Option<Arc<Counters>>,
         clock: Arc<dyn Fn() -> Timestamp + Send + Sync>,
     ) -> anyhow::Result<Self> {
@@ -556,16 +566,18 @@ impl AttentionService {
             sites,
             weights,
             Some(store),
+            chain,
             counters,
             clock,
         ))
     }
 
     /// T-128: the run's service over `data_dir` and its own connection to `db_path`, stamped with
-    /// the run's stream time (the wall clock before any frame).
+    /// the run's stream time (the wall clock before any frame) and its receive chain (T-303).
     pub fn open_for_run(
         data_dir: &Path,
         db_path: &Path,
+        chain: ChainKey,
         counters: Arc<Counters>,
     ) -> anyhow::Result<Self> {
         let repo = Arc::new(Mutex::new(Repository::open(db_path)?));
@@ -578,7 +590,7 @@ impl AttentionService {
                 Timestamp::now()
             }
         });
-        Self::open(data_dir, repo, Some(counters), clock)
+        Self::open(data_dir, repo, chain, Some(counters), clock)
     }
 
     /// T-128: a memory-only service (no baseline store, in-memory database), for a scheduler
@@ -594,6 +606,7 @@ impl AttentionService {
             sites,
             weights,
             None,
+            ChainKey::Unknown,
             None,
             Arc::new(|| Timestamp::from_unix_nanos(0)),
         ))
@@ -604,6 +617,7 @@ impl AttentionService {
         sites: Vec<SiteRecord>,
         weights: ScoreWeights,
         store: Option<BaselineStore>,
+        chain: ChainKey,
         counters: Option<Arc<Counters>>,
         clock: Arc<dyn Fn() -> Timestamp + Send + Sync>,
     ) -> Self {
@@ -637,6 +651,7 @@ impl AttentionService {
             provider: Arc::new(SharedInterestingness::default()),
             counters,
             clock,
+            chain,
             cands: Mutex::new(CandidateState::default()),
         }
     }
@@ -742,7 +757,7 @@ impl AttentionService {
         };
         let out = {
             let mut b = lock(&self.baselines);
-            let out = b.observe(site, offset, cal, obs);
+            let out = b.observe(site, offset, cal, self.chain, obs);
             self.sync_baseline_gauges(&b);
             if let Ok(n) = b.flush(obs.t, false) {
                 self.bump(|c| {
@@ -789,10 +804,10 @@ impl AttentionService {
         let offset = lock(&self.sites).utc_offset_min(site);
         let (out, pool_fcos, pool) = {
             let mut b = lock(&self.baselines);
-            let out = b.observe(site, offset, cal, &obs).ok();
+            let out = b.observe(site, offset, cal, self.chain, &obs).ok();
             self.sync_baseline_gauges(&b);
             let sub = b
-                .key(site, cal)
+                .key(site, cal, self.chain)
                 .and_then(|key| b.engines().find(|e| e.state.key == key))
                 .and_then(|e| e.state.subjects.get(&obs.subject));
             let slot = HourOfWeek::of(obs.t, offset);
@@ -957,7 +972,7 @@ impl AttentionService {
             let Some((_, cal, obs)) = from_occupancy_stat(r, 0) else {
                 continue;
             };
-            let Some(key) = b.key(site, cal) else {
+            let Some(key) = b.key(site, cal, self.chain) else {
                 continue;
             };
             let Some(e) = b.engines().find(|e| e.state.key == key) else {
@@ -1673,6 +1688,7 @@ impl AttentionService {
                 json!({
                     "site": id.to_string(),
                     "cal": e.state.key.cal,
+                    "chain": e.state.key.chain,
                     "scheme": e.state.key.scheme,
                     "cell_factor": e.state.key.cell_factor,
                     "subjects": e.state.subjects.len(),
@@ -1871,6 +1887,7 @@ pub(crate) mod tests {
         AttentionService::open(
             dir,
             repo,
+            ChainKey::Unknown,
             Some(Arc::new(Counters::default())),
             Arc::new(|| Timestamp::from_unix_nanos(7 * 86_400 * 1_000_000_000)),
         )
@@ -1887,6 +1904,7 @@ pub(crate) mod tests {
         let s = AttentionService::open(
             &dir,
             Arc::new(Mutex::new(Repository::open_in_memory().unwrap())),
+            ChainKey::Unknown,
             Some(Arc::clone(&counters)),
             Arc::new(|| Timestamp::from_unix_nanos(7 * 86_400 * 1_000_000_000)),
         )
@@ -1970,7 +1988,8 @@ pub(crate) mod tests {
                         suspect_fraction: 0.0,
                         provenance_explained: false,
                     };
-                    b.observe(site, 0, CalKey::Uncalibrated, &obs).unwrap();
+                    b.observe(site, 0, CalKey::Uncalibrated, ChainKey::Unknown, &obs)
+                        .unwrap();
                 }
             }
         }
@@ -2592,6 +2611,7 @@ pub(crate) mod tests {
             AttentionService::open(
                 &dir,
                 Arc::new(Mutex::new(Repository::open(&db).unwrap())),
+                ChainKey::Unknown,
                 None,
                 Arc::new(move || at(0)),
             )

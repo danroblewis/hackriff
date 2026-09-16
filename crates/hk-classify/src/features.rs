@@ -495,6 +495,28 @@ fn cumulant_features(f: &mut Features, x: &[Complex64]) {
 }
 
 /// Spectral flatness, symmetry, carrier line and mean spectral kurtosis over the occupied band.
+///
+/// # The analysis resolution itself moves with the snippet length below n = 8192 (T-281)
+///
+/// `fft_len` is `(n/8).next_power_of_two().clamp(64, 1024)`, so a snippet shorter than 8192
+/// samples is analysed at a *coarser* frequency resolution than a longer one. Every feature below
+/// — and `gamma_max`, which sizes its PSD the same way in [`psd_of_real`] — is therefore measured
+/// against a different yardstick depending on how long the emission was watched.
+///
+/// Measured on one 16 290-sample `noise-like` snippet at 25 dB, relative spread of each feature
+/// over three prefixes where `fft_len` varies (2036 / 4072 / 8145) against four prefixes where it
+/// is pinned at 1024 (8192 / 10240 / 12288 / 16290):
+///
+/// | feature | spread, `fft_len` varying | spread, `fft_len` pinned |
+/// |---|---|---|
+/// | `c42_norm` | 1.111 | 0.728 |
+/// | `cp_corr` | 0.710 | 0.324 |
+/// | `sk_mean` | 0.045 | 0.009 |
+/// | `flatness` | 0.006 | 0.017 |
+///
+/// Pinning the transform removes most of the movement in the shape features but not all of it, so
+/// the resolution change is *a* cause and not the only one. The clamp is left alone: widening it
+/// would change every fitted density mean at once. Recorded, not tuned.
 fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
     let n = input.samples.len();
     let fft_len = (n / 8).next_power_of_two().clamp(64, 1024).min(n);
@@ -633,6 +655,41 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
 }
 
 /// C14 evidence: the strongest cyclic line, OBW/Rs and C14's own family scores.
+///
+/// # `cyclic_db` and the four `blind_*` scores are OBSERVATION STATISTICS (T-281)
+///
+/// **They measure how long C14 was allowed to look, not only what was transmitting**, and unlike
+/// `sigma_ap`/`sigma_dp` below that was not previously recorded anywhere. Both are nonetheless
+/// fitted density dimensions in **21 of 21** classes of the shipped models, so the classifier
+/// compares two snippets on them today.
+///
+/// `cyclic_db` is `10·log10(peak / local median)` of a whitened periodogram
+/// (`hk_estimate::blind::lines::spectral_line`). A coherent cyclic line's peak grows with the
+/// record while the whitened noise median does not, so the ratio grows about `10·log10(N)`.
+/// Measured on one waveform at 25 dB, truncating only the window handed to C14:
+///
+/// | class | N/8 | N/4 | N/2 | N |
+/// |---|---|---|---|---|
+/// | `ook` | 20.17 dB | 24.53 dB | 26.69 dB | 31.44 dB |
+/// | `bpsk` | 15.32 dB | 15.91 dB | 23.72 dB | 25.08 dB |
+///
+/// — **+11 dB from watching the same emission eight times longer**, which is far more than the
+/// spread between classes this dimension is fitted to separate.
+///
+/// The `blind_*` family scores move with the window too, and discontinuously: the same 2-FSK
+/// burst scores `blind_fsk` **0.10** at N/8 and N/4 and **1.00** at N/2 and N, because the line
+/// C14 locks on changes once the record is long enough.
+///
+/// Neither is normalised here. `cyclic_db` has no length-free form that keeps its discriminating
+/// power (dividing out `10·log10(N)` changes what every fitted mean means), and both are density
+/// dimensions, so any change to them needs the densities refitted and the ADR-0016 §7 gate
+/// re-measured. Recorded rather than silently rescaled; see the T-281 follow-ups.
+///
+/// **What this costs today:** `MAX_WINDOW_SAMPLES` caps the window at 65 536 samples, so a
+/// *continuous* emission is always measured at the cap and is self-consistent. The dependence
+/// bites on **bursts shorter than the cap** — the ephemeral emissions CLAUDE.md makes first-class
+/// — where one emitter seen as a short burst and again as a long one lands at different
+/// `cyclic_db`, and so at a different Mahalanobis distance from the same class.
 fn symbol_features(f: &mut Features, input: &FeatureInput<'_>) {
     let Some(s) = input.symbols else {
         return;
