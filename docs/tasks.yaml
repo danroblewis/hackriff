@@ -4864,6 +4864,19 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    reproduction_2026_09_16: 'CONCLUSIVE, and it corrects this ticket own framing.
+      ELEVEN consecutive isolated single-threaded passes (3 + 8) against exactly two
+      observed failures, both during post-merge full checks with three or four worktrees
+      building. So it is load-sensitive, not a latent defect in the model host.
+      CORRECTION: the acceptance above points at a wall-clock deadline as the obvious
+      suspect. The assertion contradicts that - HostStats showed submitted 2, inferred 1,
+      deadline_missed 0, latency_ms_max 7.25 against a 20 ms batching delay. The second
+      request was neither inferred NOR counted late, and the batch closed well inside its
+      window. That points at a batch closing while a second item was in flight (a lost
+      wakeup or a race between submit and flush), not at a timeout firing early. Check
+      that FIRST; the wall-clock theory was the coordinator guess and is not supported by
+      the numbers.'
+
   - id: T-284
     milestone: MUI
     title: 'ADR-0017 TM-2 remainder: the presence / liveness / family_in_window object
