@@ -13,8 +13,11 @@
 //!
 //! 1. **`cyclic_db` is a max over four different feature series, and which one wins moves with the
 //!    window.** Two readings of one emitter are then not the same measurement.
-//! 2. **C14's rate search starts at `f_min ∝ fs/n`**, so a shorter window searches from a higher
-//!    frequency and can only find a harmonic of a symbol-rate line it can no longer reach.
+//! 2. **C14's rate search started at `f_min ∝ fs/n`**, so the band searched — and `rate_range_hz`,
+//!    a reported field — was itself a function of the record. **T-327 pinned it**, and the third
+//!    test below now guards the pin rather than the defect. Pinning it did *not* remove the window
+//!    dependence (10.16 → 9.40 dB mean movement), which is the part of T-310's account T-327
+//!    overturned: the geometry was a real defect but not the mechanism. Finding 1 is.
 //!
 //! Asserted on **means over dev seeds**, never on one seed: these are distributional statements
 //! about a generator, and a single seed would pin noise. The full per-class table is printed rather
@@ -158,39 +161,62 @@ fn the_winning_cyclic_line_changes_when_the_window_changes() {
     );
 }
 
-/// **C14's rate search starts at `f_min = max(rate_min_cells·fs/n, obw·rate_min_obw)`**, so the
-/// band searched is itself a function of the record length.
+/// **C14's rate search band does not move with the record** — T-310 found that it did, T-327
+/// pinned it, and this now guards the pin in the other direction.
 ///
-/// This is the mechanism behind the negative slopes: at the short window the floor rises above the
-/// true symbol-rate line, and only a harmonic of it remains findable. It is the same class of
-/// defect as the analysis-resolution note on `features::spectral_features` — the measurement
-/// geometry moving with the observation — and it lives in C14, which is why T-310 changed no
-/// statistic here.
+/// T-310 measured `f_min = max(rate_min_cells·fs/n, obw·rate_min_obw)`, so the band searched — and
+/// `rate_range_hz`, a *reported* field — was a function of the record length: over the taxonomy the
+/// lower edge moved 212 → 27 Hz (`am`), 377 → 129 (`nbfm`) and 1965 → 246 (most keyed classes)
+/// between an eighth of the window and all of it. Two readings of one emitter then did not search
+/// the same band.
+///
+/// T-327 removed the `fs/n` term. The resolution limit behind it is real but belongs to the
+/// transform, so it now lives in `lines::spectral_line` as a DC guard that limits which bins may be
+/// *reported* without moving the band, the harmonic candidate set `{f/4, f/3, f/2, f, 2f}`, or the
+/// reported range.
+///
+/// **This is not the same claim as "`cyclic_db` is now length-free".** T-327 measured that it is
+/// not: with the band and the whitening width both pinned, the mean `|N − N/8|` movement of
+/// `cyclic_db` falls only from 10.16 dB to 9.40 dB, and `2fsk`, `gfsk`, `msk` and `4fsk` still read
+/// lower the longer they are watched. The geometry was one defect; it was not the mechanism. See
+/// `hk_classify::features::symbol_features`.
 #[test]
-fn the_rate_search_band_itself_moves_with_the_window() {
+fn the_rate_search_band_does_not_move_with_the_window() {
     let mut c14 = SymbolEstimator::new();
-    let mut short_floor = 0.0;
-    let mut long_floor = 0.0;
-    let mut n = 0.0;
-    for seed in DEV_SEEDS.start..DEV_SEEDS.start + SEEDS {
-        let (Some(short), Some(long)) = (
-            estimate(&mut c14, Class::Fsk2, seed, SNR_DB, 8),
-            estimate(&mut c14, Class::Fsk2, seed, SNR_DB, 1),
-        ) else {
-            continue;
-        };
-        short_floor += short.rate_range_hz.0;
-        long_floor += long.rate_range_hz.0;
-        n += 1.0;
+    let mut checked = 0;
+    // Every class, not just one: the old defect's size depended on OBW99, so a single narrowband
+    // or wideband class could pass while the band still moved everywhere else.
+    for class in Class::TAXONOMY {
+        for seed in DEV_SEEDS.start..DEV_SEEDS.start + SEEDS {
+            let (Some(short), Some(long)) = (
+                estimate(&mut c14, *class, seed, SNR_DB, 8),
+                estimate(&mut c14, *class, seed, SNR_DB, 1),
+            ) else {
+                continue;
+            };
+            checked += 1;
+            assert_eq!(
+                short.rate_range_hz.0.to_bits(),
+                long.rate_range_hz.0.to_bits(),
+                "{} seed {seed}: the rate search's lower edge is {} Hz over N/8 and {} Hz over N — \
+                 it must be a function of OBW99 alone, never of the record",
+                class.label(),
+                short.rate_range_hz.0,
+                long.rate_range_hz.0
+            );
+            assert_eq!(
+                short.rate_range_hz.1.to_bits(),
+                long.rate_range_hz.1.to_bits(),
+                "{} seed {seed}: the upper edge moved too ({} vs {})",
+                class.label(),
+                short.rate_range_hz.1,
+                long.rate_range_hz.1
+            );
+        }
     }
-    assert!(n > 0.0, "no 2fsk estimate ran");
-    let (short_floor, long_floor) = (short_floor / n, long_floor / n);
-    eprintln!(
-        "  2fsk rate search starts at {short_floor:.1} Hz over N/8 and {long_floor:.1} Hz over N"
-    );
+    eprintln!("  rate_range_hz identical at N/8 and N on {checked} class × seed pairs");
     assert!(
-        short_floor > long_floor,
-        "the search band's lower edge must move with the record for the harmonic explanation to \
-         hold: {short_floor:.1} Hz at N/8 against {long_floor:.1} Hz at N"
+        checked >= 4 * Class::TAXONOMY.len(),
+        "only {checked} pairs ran"
     );
 }
