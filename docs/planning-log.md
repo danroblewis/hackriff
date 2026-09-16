@@ -2717,3 +2717,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Genuinely blind:** the signature entry is MINTED FROM MEASUREMENT because the generator hides its seed-drawn symbol rate, so hand-writing one would have meant reading truth. All 6 held-out generators rejected.
   - **It attributed its one acceptance failure correctly** to the pre-existing T-234 bandit-dwell issue (passes alone in 77 s) rather than to its own change.
   - **Integration gap recorded on T-206:** nothing in hk-pipeline writes signature matches yet, so the gate could pass vacuously. `match_emitter()` makes the wiring a one-liner.
+- **B0.572 Full check after the T-237 merge (a34d62e): unit 1556/1557 with ONE failure, and it is the already-fixed Verification bug.** Same test, same line 269, failed both tries again - the deterministic defect T-234 fixed in 1b91d04, which was not yet merged, so main still carried it. Acceptance 31/31; 41 GB; zero stray burners after the sweep.
+  - **Merging T-234 then T-201** with one check. A passing scheduler_bandit_e2e in that check is the real confirmation that T-234's fix works ON MAIN rather than only in its worktree.
