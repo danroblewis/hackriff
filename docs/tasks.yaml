@@ -3315,7 +3315,7 @@ tasks:
   - id: T-206
     milestone: M3
     title: "M3 blind acceptance through the mock SDR: family top-k and unknown rate vs hidden truth, signature match and unknown clustering, per-SNR conditions (M3 exit gate)"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-199, T-200, T-201, T-202, T-204, T-213, T-215, T-235]
     parallel_group: M3E
