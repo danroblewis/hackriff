@@ -44,6 +44,7 @@ SMALL: dict[str, dict] = {
     "trunk_tsbk_control_channel": {"duration_s": 0.2},
     "trunk_encrypted_control_channel": {"duration_s": 0.2},
     "trunk_dmr_control_channel": {"duration_s": 0.2},
+    "trunk_nxdn_control_channel": {"duration_s": 0.2},
     "lora_ism_burst": {"duration_s": 0.15, "sf": 7, "first_packet_s": 0.02,
                        "packet_period_s": 0.06, "fsk_period_s": 0.05},
 }
@@ -1251,6 +1252,100 @@ def test_dmr_syncs_are_outer_symbols_only_and_exact_complements():
         assert abs(level[int(d)]) == 3, "a DMR sync never uses an inner symbol"
     for a, b in zip(data, voice):
         assert level[int(a)] == -level[int(b)], "the two BS syncs are not complements"
+
+
+def test_the_nxdn_constants_reproduce_the_published_symbol_sequences():
+    """T-345: two published tables, in different notations, have to agree under the dibit map.
+
+    The specification prints the frame sync word BOTH as hex and as symbols, and prints the
+    Preamble as hex while printing the Post field only as symbols. Both pairs have to close, which
+    is what verifies the constants and the dibit map together -- a transcription error survives
+    neither.
+    """
+    from hkpy.synth import trunking as tk
+
+    level = {0b01: 3, 0b00: 1, 0b10: -1, 0b11: -3}
+    fsw = tk.nxdn_sync_dibits()
+    assert len(fsw) == 10, "the frame sync word is 10 symbols (20 bits)"
+    assert [level[int(d)] for d in fsw] == [-3, 1, -3, 3, -3, -3, 3, 3, -1, 3]
+    post = tk.nxdn_post_dibits()
+    assert len(post) == 12
+    assert [level[int(d)] for d in post] == [3, 3, 3, -3, 3, -3, 3, 3, -3, -3, -3, 3]
+
+    # The CAC coding chain, as arithmetic: 152 + 3 = 155, + 16 = 171, + 4 = 175, x2 = 350,
+    # punctured 12-of-14 = 300, interleaved 25 x 12 = 300.
+    assert tk.NXDN_L3_BITS + 3 == 155
+    assert 155 + 16 + 4 == 175
+    assert 175 * 2 * 12 // 14 == tk.NXDN_CAC_BITS
+    assert tk.NXDN_INTERLEAVE_DEPTH * tk.NXDN_INTERLEAVE_WIDTH == tk.NXDN_CAC_BITS
+    # And the frame: 20 + 16 + 300 + 24 + 24 = 384 bits = 192 symbols.
+    assert 20 + 16 + tk.NXDN_CAC_BITS + 24 + 24 == tk.NXDN_FRAME_DIBITS * 2
+    assert len(fsw) + tk.NXDN_SCRAMBLED_DIBITS == tk.NXDN_FRAME_DIBITS
+
+    # The scrambler is its own inverse and only ever flips a symbol's SIGN, so an outer symbol stays
+    # outer -- which is why the decoder's LICH check does not depend on the shift direction.
+    import numpy as np
+    src = np.arange(tk.NXDN_SCRAMBLED_DIBITS, dtype=np.uint8) % 4
+    once = tk.nxdn_scramble(src)
+    assert np.array_equal(tk.nxdn_scramble(once), src)
+    assert not np.array_equal(once, src)
+    assert np.array_equal(src & 1, once & 1), "the scrambler altered a dibit's low bit"
+
+    # A LICH is eight OUTER symbols, and a frame is 192.
+    lich = tk.nxdn_lich_dibits(0b000_0001)
+    assert len(lich) == 8
+    assert all(int(d) in (0b01, 0b11) for d in lich)
+    frame = tk.nxdn_frame_dibits(tk.nxdn_message(tk.NXDN_MSG_SITE_INFO, bytes(17)),
+                                 np.random.default_rng(0))
+    assert len(frame) == tk.NXDN_FRAME_DIBITS
+
+
+def test_nxdn_scene_baits_the_trap_it_asks_the_decoder_to_refuse(tmp_path):
+    """T-345: the assigned channel number is derived from a frequency that carries real traffic.
+
+    An NXDN Type-C assignment names a 10-bit channel NUMBER and the air interface defines no
+    mapping from one to hertz -- the map is configured in the radio. This scene only proves that
+    refusal if refusing *costs* something, which is why the frequency an assumed 12.5 kHz band plan
+    would produce is (a) inside the window the radio holds and (b) carrying keyings.
+    """
+    from hkpy.synth import trunking as tk
+
+    manifest = gen(tmp_path, "trunk_nxdn_control_channel")
+    _, meta, _ = load(manifest)
+    t = scenario_truth(meta)["trunking"]
+    d = t["nxdn"]
+
+    # The channel number follows from the trap frequency, never the other way round.
+    assert (d["assumed_base_hz"] + d["assumed_spacing_hz"] * d["grant_channel"]
+            == d["wrong_frequency_if_channel_assumed_hz"])
+    assert 1 <= d["grant_channel"] <= tk.NXDN_CHANNEL_MAX
+    # Inside the window, so a guessing decoder could have followed it.
+    assert abs(d["trap_offset_hz"]) < 0.4 * d["sample_rate_hz"]
+    # And carrying traffic, so it would have been rewarded with a convincing call record.
+    keyings = d["trap_keyings_s"]
+    assert keyings, "the trap channel carries no traffic, so refusing costs nothing"
+    tol_s = 1.0 / d["sample_rate_hz"]
+    for a, b in keyings[:-1]:
+        assert abs((b - a) - d["trap_on_s"]) <= tol_s
+
+    # The SECOND assignment baits the same mistake again, and the frequency it points at carries one
+    # of the scene's bursty NBFM neighbours -- so even the second guess would find something.
+    assert d["second_channel"] != d["grant_channel"]
+    second_hz = d["wrong_frequency_for_second_channel_hz"]
+    assert round((second_hz - d["assumed_base_hz"]) / t["raster_hz"]) in t["nbfm_channels"]
+    assert t["n_nbfm_bursts"] > 0
+
+    # Both kinds of assignment are exercised, plus messages the decoder does not read.
+    assert d["counts"]["vcall-assgn"] >= 1 and d["counts"]["vcall-assgn-dup"] >= 1
+    assert d["counts"]["vcall-assgn-individual"] >= 1 and d["counts"]["dcall-assgn"] >= 1
+    assert d["counts"]["site-info"] >= 1, "nothing corroborates the system as Type-C"
+    # Asserted on the cycle rather than on the counts: this fixture is short enough that the last
+    # message of the cycle may not land in it, and that is a fact about the duration, not the scene.
+    assert "other" in d["cycle"], "the stream is only messages the decoder understands"
+
+    # The decoy is still there and still unconfirmable -- now under three framings, not two.
+    assert t["continuous_decoy"]["expected_confirmed"] is False
+    assert t["control_channel"]["sync_hex"] == tk.NXDN_FSW_HEX
 
 
 def test_dmr_scene_baits_the_trap_it_asks_the_decoder_to_refuse(tmp_path):

@@ -856,3 +856,355 @@ def trunk_dmr_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         "dmr": dmr_truth,
     }
     return [scene], {}
+
+
+# =============================================================================================
+# NXDN Type-C (T-345)
+# =============================================================================================
+
+TRUNK_NXDN_DEFAULTS: dict[str, Any] = {
+    "sample_rate": 500e3,
+    # 800 MHz, the same band as the P25 and DMR scenes, so all three are directly comparable.
+    "center_hz": 851.0125e6,
+    "duration_s": 1.0,
+    "raster_hz": tk.LMR_RASTER_HZ,
+    "cc_channel": 3,
+    "decoy_channel": -5,
+    "nbfm_channels": [-2, 7, 11, -9],
+    "cc_snr_db": 20.0,
+    "decoy_snr_db": 20.0,
+    "nbfm_snr_db": 18.0,
+    "symbol_rate_bd": tk.NXDN_SYMBOL_RATE_BD,
+    "fm_deviation_hz": 2500.0,
+    "audio_tone_hz": 1000.0,
+    "burst_mean_on_s": 0.08,
+    "burst_mean_off_s": 0.12,
+    "noise_dbfs": -40.0,
+    "calibration_k_db": -70.0,
+    "start_utc": DEFAULT_START_UTC,
+    # --- THE TRAP.
+    #
+    # An NXDN Type-C assignment names a 10-bit Channel NUMBER (Sec 6.5.31, 1 to 1023) and the air
+    # interface defines no mapping from one to hertz -- not one of its information elements is a
+    # frequency. The map lives in the radio's configuration. So a Channel resolves to NOTHING, and a
+    # decoder that quietly assumed the obvious plan (base = wherever the radio is tuned, step = the
+    # 12.5 kHz LMR raster) would produce a frequency anyway.
+    #
+    # So the scene puts real, followable voice traffic exactly where that assumption points. A
+    # guessing decoder does not merely print a wrong number: it allocates the channel, finds a
+    # transmission, measures its boundaries and writes a completely convincing call record. Nothing
+    # about the run would look wrong. The frequency is chosen FIRST and the Channel derived from it,
+    # so the trap is baited by the same arithmetic the mistake would use.
+    #
+    # 851.0875 MHz is +75 kHz from the tuned centre -- well inside the window the radio holds -- and
+    # lands on raster channel 6, clear of the control channel (3), the decoy (-5) and every NBFM
+    # neighbour. It is deliberately NOT the DMR scene's trap, so a decoder cannot pass both by
+    # refusing one number it was told about.
+    "trap_target_hz": 851.0875e6,
+    "assumed_spacing_hz": tk.LMR_RASTER_HZ,
+    "grant_destination_id": 2468,
+    "grant_source_id": 1357,
+    # A SECOND assignment, an individual call, whose channel number baits the same mistake a second
+    # time: under the assumed plan channel 11 points at 851.15 MHz, which is one of the bursty NBFM
+    # neighbours below and is therefore genuinely transmitting. Two baited numbers, not one, and the
+    # second one needs no traffic of its own because the scene's ordinary neighbours supply it.
+    "second_channel": 11,
+    "second_destination_id": 3690,
+    "second_source_id": 2580,
+    # The traffic on the trap channel: repeated keyings, like T-269's followed channel, so a
+    # follower that got there would have real boundaries to measure. At 40 % duty it never reaches
+    # control-channel candidacy (MIN_CC_FCO is 0.95).
+    "trap_on_s": 0.10,
+    "trap_off_s": 0.15,
+    "trap_snr_db": 18.0,
+    # The site's Radio Access Number (colour code), carried in every frame's SR header.
+    "ran": 0x1B,
+}
+
+
+def _nxdn_stream(p: dict[str, Any], center_hz: float, n_frames: int,
+                 rng: np.random.Generator) -> tuple[np.ndarray, dict[str, Any]]:
+    """The NXDN control channel's outbound CAC stream, and the truth describing it.
+
+    The cycle carries a site-information broadcast, a voice assignment onto the trap channel, its
+    periodic duplicate (NXDN's late entry, which carries no source unit), a second voice assignment
+    as an individual call, a data assignment, a service-information broadcast, and a message type
+    this decoder does not name -- so the stream is not made only of messages it understands.
+    """
+    trap_hz = float(p["trap_target_hz"])
+    spacing = float(p["assumed_spacing_hz"])
+    steps = (trap_hz - center_hz) / spacing
+    if steps != int(steps) or not 1 <= steps <= tk.NXDN_CHANNEL_MAX:
+        raise ValueError(f"trap_target_hz {trap_hz} is not a whole step from the tuned centre")
+    channel = int(steps)
+    second = int(p["second_channel"])
+    if second == channel:
+        raise ValueError("the second assignment must name a different channel")
+
+    ran = int(p["ran"])
+    dst, src = int(p["grant_destination_id"]), int(p["grant_source_id"])
+    s_dst, s_src = int(p["second_destination_id"]), int(p["second_source_id"])
+
+    def payload() -> bytes:
+        """Octets for a message whose own fields this project does not decode.
+
+        Deliberately **not** zeros, for the reason the DMR scene records: a 4FSK receiver estimates
+        its level centre and outer deviation from the symbol distribution, and a stream padded with
+        zeros is a stream whose symbols pile onto one inner level. A real SITE_INFO carries a
+        location ID, service flags and channel-structure information rather than seventeen zeros.
+        """
+        return bytes(int(v) for v in rng.integers(0, 256, 17))
+
+    cycle = [
+        ("site-info", tk.nxdn_message(tk.NXDN_MSG_SITE_INFO, payload(), ran)),
+        ("vcall-assgn", tk.nxdn_message(
+            tk.NXDN_MSG_VCALL_ASSGN,
+            tk.nxdn_assignment_octets(tk.NXDN_CALL_BROADCAST, src, dst, channel), ran)),
+        # The duplicate: how a radio joins a call already up. Its source is the specification's Null
+        # Unit ID, because the message announces a channel rather than a caller.
+        ("vcall-assgn-dup", tk.nxdn_message(
+            tk.NXDN_MSG_VCALL_ASSGN_DUP,
+            tk.nxdn_assignment_octets(tk.NXDN_CALL_BROADCAST, 0, dst, channel), ran)),
+        ("vcall-assgn-individual", tk.nxdn_message(
+            tk.NXDN_MSG_VCALL_ASSGN,
+            tk.nxdn_assignment_octets(tk.NXDN_CALL_INDIVIDUAL, s_src, s_dst, second), ran)),
+        ("dcall-assgn", tk.nxdn_message(
+            tk.NXDN_MSG_DCALL_ASSGN,
+            tk.nxdn_assignment_octets(tk.NXDN_CALL_BROADCAST, s_src, s_dst, second), ran)),
+        ("srv-info", tk.nxdn_message(tk.NXDN_MSG_SRV_INFO, payload(), ran)),
+        # A message type this decoder does not name.
+        ("other", tk.nxdn_message(0x07, payload(), ran)),
+    ]
+    dibits = tk.nxdn_frames_from_messages([m for _, m in cycle], n_frames, rng)
+    counts = {kind: sum(1 for i in range(n_frames) if cycle[i % len(cycle)][0] == kind)
+              for kind, _ in cycle}
+    truth = {
+        "framing": "nxdn-fsw",
+        "ran": ran,
+        "grant_channel": channel,
+        "grant_destination_id": dst,
+        "grant_source_id": src,
+        "second_channel": second,
+        "second_destination_id": s_dst,
+        "second_source_id": s_src,
+        # The numbers nothing may ever report. Real traffic sits on both, so a decoder that assumed
+        # a band plan would follow them and write calls that look entirely right.
+        "wrong_frequency_if_channel_assumed_hz": trap_hz,
+        "wrong_frequency_for_second_channel_hz": center_hz + spacing * second,
+        "assumed_spacing_hz": spacing,
+        "assumed_base_hz": center_hz,
+        "frames_per_cycle": len(cycle),
+        # The cycle itself, not only how often each kind landed: a short recording may not reach
+        # every message in it, and a test that asserts on counts alone would then be asserting on
+        # the duration rather than on the scene.
+        "cycle": [kind for kind, _ in cycle],
+        "counts": counts,
+        "expected": {
+            "protocol": "nxdn-type-c",
+            "grants_decoded": True,
+            "grants_mapped": False,
+            "grant_reason": "no-channel-map",
+            "calls": "none: an assignment with no frequency entitles no channel and no call",
+            "why": "the NXDN air interface carries a 10-bit channel NUMBER and defines no mapping "
+                   "from one to hertz; the map is configured in the radio, and this build has none",
+        },
+        "coding": tk.NXDN_FRAME_SPEC["coding"],
+    }
+    return dibits, truth
+
+
+def trunk_nxdn_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
+    """An NXDN Type-C control channel among the same traffic the P25 and DMR scenes use (T-345).
+
+    Three things have to be true at once for this scene to mean anything:
+
+    1. The hunt is **blind about the air interface**. Nothing tells it this is NXDN rather than P25
+       or DMR; it must try the framings it knows and confirm on the one that matches. The same
+       continuous, on-raster, unframed 4FSK decoy is present and must be rejected by all three.
+    2. The decoder must **read the CAC properly** -- descrambled, deinterleaved, depunctured and
+       Viterbi decoded -- because nothing short of that produces a CRC-valid block at all.
+    3. It must **refuse to invent a frequency**, while real traffic sits exactly where the obvious
+       guess points. See ``trap_target_hz``.
+    """
+    p = ctx.params
+    fs = float(p["sample_rate"])
+    n = _n(p)
+    scene = ctx.scene(
+        "trunk_nxdn_control_channel", fs, n,
+        "hkpy.synth trunk_nxdn_control_channel: an NXDN Type-C outbound RCCH (frame sync word + "
+        "LICH + fully coded CACs) carrying channel assignments whose channel numbers resolve to "
+        "nothing, with real voice traffic parked where an assumed band plan would put them",
+    )
+
+    cap = scene.add_capture(0, n, float(p["center_hz"]), utc_plus(p["start_utc"], 0.0),
+                            calibration_k_db=float(p["calibration_k_db"]))
+    cap.floor_dbfs_per_hz = float(p["noise_dbfs"]) - db(fs)
+    scene.add_samples(0, complex_noise(scene.rng("noise"), n, float(p["noise_dbfs"])))
+    scene.add_floor(0, n, cap.floor_dbfs_per_hz)
+
+    raster = float(p["raster_hz"])
+    rate = float(p["symbol_rate_bd"])
+    # Carson on NXDN's outer deviation plus the symbol rate.
+    nxdn_bw = 2 * (2400.0 + rate / 2)
+    t_all = scene.time(0, n)
+    span_s = n / fs
+
+    def place_4fsk(off_hz: float, dibits: np.ndarray, snr_db: float, rng_name: str) -> float:
+        if abs(off_hz) + nxdn_bw / 2 > fs / 2:
+            raise ValueError(f"an emission at {off_hz} Hz does not fit inside the sample rate")
+        power = _power(cap, snr_db, nxdn_bw)
+        iq = tk.c4fm(dibits, fs, rate, deviations=tk.NXDN_DEVIATIONS_HZ)[:n]
+        phase0 = float(scene.rng(rng_name).uniform(0, 2 * math.pi))
+        scene.add_samples(0, math.sqrt(undb(power)) * iq
+                          * np.exp(1j * (2 * math.pi * off_hz * t_all[: len(iq)] + phase0)))
+        return power
+
+    # --- The control channel: continuous 4FSK, NXDN frame sync, real coded CACs.
+    frames_needed = int(math.ceil(n * rate / fs / tk.NXDN_FRAME_DIBITS)) + 1
+    cc_dibits, nxdn_truth = _nxdn_stream(p, cap.center_hz, frames_needed, scene.rng("cac"))
+    cc_ch = int(p["cc_channel"])
+    cc_off = cc_ch * raster
+    cc_power = place_4fsk(cc_off, cc_dibits, float(p["cc_snr_db"]), "nxdn-cc")
+    cc_f = cap.center_hz + cc_off
+    scene.annotate(
+        0, n, cc_f - nxdn_bw / 2, cc_f + nxdn_bw / 2, "trunk-control-channel",
+        scene.emission_truth(
+            cap, cc_off, nxdn_bw, cc_power,
+            kind="trunk-control-channel", modulation="4fsk", levels=4,
+            symbol_rate_bd=rate, duty_cycle=1.0, fco=1.0,
+            raster_hz=raster, raster_channel=cc_ch,
+            nominal_center_hz=cap.center_hz + cc_ch * raster,
+            is_control_channel=True, confirmable=True,
+            frame=tk.NXDN_FRAME_SPEC,
+            n_frames=frames_needed,
+            sync_hex=tk.NXDN_FSW_HEX,
+            protocol="nxdn-type-c",
+        ),
+    )
+
+    # --- The decoy: continuous, on-raster, 4FSK, unframed. Must be rejected by all three framings.
+    n_dibits = int(math.ceil(n * rate / fs)) + 1
+    dc_ch = int(p["decoy_channel"])
+    dc_off = dc_ch * raster
+    dc_power = place_4fsk(dc_off, tk.continuous_data_dibits(scene.rng("decoy"), n_dibits),
+                          float(p["decoy_snr_db"]), "decoy-phase")
+    dc_f = cap.center_hz + dc_off
+    scene.annotate(
+        0, n, dc_f - nxdn_bw / 2, dc_f + nxdn_bw / 2, "continuous-data",
+        scene.emission_truth(
+            cap, dc_off, nxdn_bw, dc_power,
+            kind="continuous-data", modulation="4fsk", levels=4,
+            symbol_rate_bd=rate, duty_cycle=1.0, fco=1.0,
+            raster_hz=raster, raster_channel=dc_ch,
+            is_control_channel=False, confirmable=False,
+            why_not="continuous 4FSK with no frame sync and no valid block, under any of the "
+                    "three framings: passes FCO candidacy, fails sync+CRC confirmation",
+        ),
+    )
+
+    # --- Bursty NBFM neighbours, so the control channel is found among traffic. One of them sits on
+    # raster channel 11, which is where an assumed band plan would put the second assignment.
+    dev, tone = float(p["fm_deviation_hz"]), float(p["audio_tone_hz"])
+    nbfm_bw = 2 * (dev + tone)
+    n_bursts = 0
+    for ch in [int(c) for c in p["nbfm_channels"]]:
+        off = ch * raster
+        if abs(off) + nbfm_bw / 2 > fs / 2:
+            raise ValueError(f"nbfm channel {ch} does not fit inside the sample rate")
+        power = _power(cap, float(p["nbfm_snr_db"]), nbfm_bw)
+        amp = math.sqrt(undb(power))
+        r = scene.rng("nbfm", ch)
+        for b0, b1 in _on_off(r, span_s, float(p["burst_mean_on_s"]), float(p["burst_mean_off_s"])):
+            i0, i1 = int(round(b0 * fs)), min(n, int(round(b1 * fs)))
+            if i1 <= i0:
+                continue
+            phase0, audio_phase = (float(v) for v in r.uniform(0, 2 * math.pi, 2))
+            tt = scene.time(i0, i1 - i0)
+            phase = (phase0 + 2 * math.pi * off * tt
+                     + (dev / tone) * np.sin(2 * math.pi * tone * (tt - b0) + audio_phase))
+            scene.add_samples(i0, amp * np.exp(1j * phase))
+            f = cap.center_hz + off
+            scene.annotate(
+                i0, i1 - i0, f - nbfm_bw / 2, f + nbfm_bw / 2, "nbfm-burst",
+                scene.emission_truth(
+                    cap, off, nbfm_bw, power, kind="nbfm-burst", modulation="nbfm",
+                    deviation_hz=dev, audio_tone_hz=tone,
+                    raster_hz=raster, raster_channel=ch,
+                    is_control_channel=False, confirmable=False,
+                    burst_start_s=b0, burst_duration_s=b1 - b0,
+                ),
+            )
+            n_bursts += 1
+
+    # --- THE TRAP: real keyings on the frequency an assumed band plan would produce.
+    trap_hz = float(nxdn_truth["wrong_frequency_if_channel_assumed_hz"])
+    trap_off = trap_hz - cap.center_hz
+    if abs(trap_off) + nxdn_bw / 2 > fs / 2:
+        raise ValueError("the trap channel does not fit inside the sample rate")
+    v_power = _power(cap, float(p["trap_snr_db"]), nxdn_bw)
+    v_amp = math.sqrt(undb(v_power))
+    on_s, off_s = float(p["trap_on_s"]), float(p["trap_off_s"])
+    if on_s <= 0 or off_s <= 0:
+        raise ValueError("a keying needs a positive on and off time")
+    rr = scene.rng("trap")
+    keyings: list[tuple[float, float]] = []
+    t_key = 0.0
+    while t_key < span_s:
+        i0, i1 = int(round(t_key * fs)), min(n, int(round((t_key + on_s) * fs)))
+        if i1 > i0:
+            nd = int(math.ceil((i1 - i0) * rate / fs)) + 1
+            iq = tk.c4fm(tk.continuous_data_dibits(rr, nd), fs, rate,
+                         deviations=tk.NXDN_DEVIATIONS_HZ)[: i1 - i0]
+            phase0 = float(rr.uniform(0, 2 * math.pi))
+            tt = scene.time(i0, len(iq))
+            scene.add_samples(i0, v_amp * iq * np.exp(1j * (2 * math.pi * trap_off * tt + phase0)))
+            b0, b1 = i0 / fs, (i0 + len(iq)) / fs
+            keyings.append((b0, b1))
+            scene.annotate(
+                i0, len(iq), trap_hz - nxdn_bw / 2, trap_hz + nxdn_bw / 2, "trunk-voice-keying",
+                scene.emission_truth(
+                    cap, trap_off, nxdn_bw, v_power,
+                    kind="trunk-voice-keying", modulation="4fsk", levels=4,
+                    symbol_rate_bd=rate, raster_hz=raster,
+                    raster_channel=int(round(trap_off / raster)),
+                    is_control_channel=False, confirmable=False,
+                    burst_start_s=b0, burst_duration_s=b1 - b0,
+                    trap="the frequency an ASSUMED NXDN band plan would resolve the assigned "
+                         "channel number to; following this channel would produce a convincing "
+                         "call record that no message supports",
+                ),
+            )
+        t_key += on_s + off_s
+    nxdn_truth.update({
+        "trap_offset_hz": trap_off,
+        "trap_keyings_s": [[a, b] for a, b in keyings],
+        "trap_on_s": on_s,
+        "trap_off_s": off_s,
+        "sample_rate_hz": fs,
+    })
+
+    scene.scenario_truth["trunking"] = {
+        "raster_hz": raster,
+        "raster_origin_hz": cap.center_hz,
+        "control_channel": {
+            "rf_center_hz": cc_f,
+            "raster_channel": cc_ch,
+            "modulation": "4fsk",
+            "symbol_rate_bd": rate,
+            "bandwidth_hz": nxdn_bw,
+            "duty_cycle": 1.0,
+            "sync_hex": tk.NXDN_FSW_HEX,
+            "expected_confirmed": True,
+        },
+        "continuous_decoy": {
+            "rf_center_hz": dc_f,
+            "raster_channel": dc_ch,
+            "expected_confirmed": False,
+            "why_not": "no frame sync, no valid block, under any framing",
+        },
+        "nbfm_channels": [int(c) for c in p["nbfm_channels"]],
+        "n_nbfm_bursts": n_bursts,
+        "frame": tk.NXDN_FRAME_SPEC,
+        "nxdn": nxdn_truth,
+    }
+    return [scene], {}

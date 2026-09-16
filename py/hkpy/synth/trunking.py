@@ -336,6 +336,259 @@ def dmr_frames_from_blocks(blocks: list[bytes], n_frames: int) -> np.ndarray:
     return np.concatenate(out).astype(np.uint8)
 
 
+# ---------------------------------------------------------------------------------------------
+# NXDN Type-C (T-345)
+# ---------------------------------------------------------------------------------------------
+#
+# A THIRD trunking air interface, and the first whose channel coding is implemented faithfully
+# rather than flattened. Everything below is from the NXDN Forum's own published air interface,
+# **NXDN TS 1-A "Common Air Interface" Ver. 1.3**, with TS 1-C for the trunking half, cross-checked
+# against dsd-fme's independent decoder; see crates/hk-detect/src/trunk/nxdn.rs for the full
+# verification notes, including which identities close by arithmetic.
+#
+#   Frame sync, 20 bits: 0xCDF59 (Table 4.4-2), published beside its symbol sequence
+#                        -3,+1,-3,+3,-3,-3,+3,+3,-1,+3, which the hex reproduces exactly.
+#   Outbound RCCH frame, 384 bits: FSW(20) LICH(16) CAC(300) E(24) Post(24). The sum is the check,
+#                        and it is 192 symbols.
+#   LICH: 7 control bits + 1 even-parity bit over the top four, each sent as an OUTER symbol
+#         (1 -> 11 = -3, 0 -> 01 = +3). For an outbound RCCH carrying a CAC the control bits are
+#         00 (RCCH) 00 (CAC) xx (data flag) 1 (outbound).
+#   CAC coding flow (Figure 4.5-1): SR(8) + L3 message(144) + 3 null bits = 155 information bits,
+#         + CRC-16 (X^16+X^12+X^5+1, register preset to all ones) = 171, + 4 zero tail bits = 175,
+#         rate-1/2 K=5 convolutional (G1 = 1+D^3+D^4, G2 = 1+D+D^2+D^4, i.e. the textbook (23,35)
+#         octal pair) = 350, punctured 12-of-14 = 300, interleaved 25 rows x 12 = the 300-bit CAC.
+#         350 x 12/14 = 300 and 300 / 12 = 25: both identities have to close.
+#   Scrambler (Sec 4.6): 9-bit PN, register preset 011100100 = 0xE4, reinitialised per frame,
+#         applied as a SIGN INVERSION to all 182 symbols after the frame sync.
+#   VCALL_ASSGN = message type 00 0100; its nine mandatory octets are msgtype(6 behind 2 spare
+#         flags), CC Option(8), Call Type(3)+Voice Call Option(5), Source Unit ID(16), Destination
+#         Group or Unit ID(16), Call Timer(6)+Channel(10) - 72 bits with nothing over.
+#
+# THE CHANNEL IS THE POINT OF DIFFERENCE, and it is sharper than DMR's. Sec 6.5.31 defines Channel
+# as a 10-bit NUMBER, 1 to 1023, "a value to determine the carrier frequency" -- and the air
+# interface defines no mapping from one to hertz anywhere; not one of its forty-one information
+# elements is a frequency. The map is configured in the radio. So a decoded assignment resolves to
+# NOTHING, and a scene built on that has to contain the trap or it proves nothing. See
+# ``trunk_nxdn_control_channel``.
+#
+# NOT STANDARDS-COMPLIANT in these ways, stated so nobody mistakes it for an NXDN encoder: only the
+# outbound CAC is generated (no inbound Long/Short CAC, no SACCH/FACCH/UDCH/voice), there is no
+# superframe or paging-frame structure, optional information elements past octet 8 are not emitted,
+# and the E (collision control) field is filled with random bits because nothing reads it.
+
+#: NXDN frame sync word, 20 bits (Table 4.4-2). MSB first.
+NXDN_FSW_HEX = "cdf59"
+NXDN_FSW_BITS = 20
+#: The Preamble, published as hex (Table 4.4-1) -- and, symbol for symbol, the Post field, which is
+#: published only as symbols (Table 4.4-3). The two agreeing is what verifies the dibit map.
+NXDN_PREAMBLE_HEX = "5775fd"
+
+#: NXDN 4FSK deviations for the 9600 bps (12.5 kHz) variant (Table 3.3-1): outer +/-2400 Hz, inner
+#: +/-800 Hz. Wider than DMR's and P25's, which is deliberate: the demodulator must find the levels.
+NXDN_DEVIATIONS_HZ = {0b01: 2400.0, 0b00: 800.0, 0b10: -800.0, 0b11: -2400.0}
+
+#: 9600 bps over 4-level FSK is 4800 Bd -- the same symbol rate P25 and DMR use, which is the only
+#: reason this variant is reachable at all. The 6.25 kHz variant is 2400 Bd and is not generated.
+NXDN_SYMBOL_RATE_BD = 4800.0
+
+#: Symbols in one outbound RCCH frame.
+NXDN_FRAME_DIBITS = 192
+#: Symbols the scrambler covers: LICH(8) + CAC(150) + E(12) + Post(12).
+NXDN_SCRAMBLED_DIBITS = 182
+#: Bits of layer-3 information a CAC carries: SR(8) + message(144).
+NXDN_L3_BITS = 152
+NXDN_L3_BYTES = 19
+NXDN_MESSAGE_BYTES = 18
+#: Bits of the coded CAC.
+NXDN_CAC_BITS = 300
+#: Interleaver geometry.
+NXDN_INTERLEAVE_DEPTH = 25
+NXDN_INTERLEAVE_WIDTH = 12
+#: The scrambler's published register preset, S8..S0 = 011100100.
+NXDN_SCRAMBLER_SEED = 0b0_1110_0100
+
+#: NXDN message types (Sec 6.4.5). The RCCH-outbound ones this project names.
+NXDN_MSG_VCALL_ASSGN = 0x04
+NXDN_MSG_VCALL_ASSGN_DUP = 0x05
+NXDN_MSG_DCALL_ASSGN_DUP = 0x0D
+NXDN_MSG_DCALL_ASSGN = 0x0E
+NXDN_MSG_SITE_INFO = 0x18
+NXDN_MSG_SRV_INFO = 0x19
+NXDN_MSG_CCH_INFO = 0x1A
+NXDN_MSG_ADJ_SITE_INFO = 0x1B
+
+#: Call Type values (Sec 6.5.12).
+NXDN_CALL_BROADCAST = 0b000
+NXDN_CALL_CONFERENCE = 0b001
+NXDN_CALL_INDIVIDUAL = 0b100
+
+#: Channel values (Sec 6.5.31): 0 is the Null filler, 1..1023 are channels.
+NXDN_CHANNEL_MAX = 1023
+
+NXDN_FRAME_SPEC: dict[str, Any] = {
+    "sync": "NXDN frame sync word, 20 bits, MSB first",
+    "sync_hex": NXDN_FSW_HEX,
+    "frame": "FSW(20) LICH(16) CAC(300) E(24) Post(24) = 384 bits",
+    "block": "CAC: SR(8) + L3(144) + null(3) + CRC-16/CCITT-FALSE(16) + tail(4), "
+             "rate-1/2 K=5 convolutional (23,35) octal, punctured 12-of-14, interleaved 25x12",
+    "symbol_rate_bd": NXDN_SYMBOL_RATE_BD,
+    "modulation": "4fsk",
+    "dibit_map": {f"{k:02b}": v for k, v in NXDN_DEVIATIONS_HZ.items()},
+    "frame_dibits": NXDN_FRAME_DIBITS,
+    "scrambler": "PN9, register preset 0xE4, sign inversion over the 182 symbols after the FSW",
+    "coding": "faithful (the CAC's FEC IS implemented); outbound CAC only, no superframe "
+              "structure, no optional information elements, E field not modelled",
+}
+
+
+def nxdn_sync_dibits() -> np.ndarray:
+    """The 10 dibits of the NXDN frame sync word."""
+    v = int(NXDN_FSW_HEX, 16)
+    return np.array([(v >> (NXDN_FSW_BITS - 2 - 2 * i)) & 3 for i in range(NXDN_FSW_BITS // 2)],
+                    dtype=np.uint8)
+
+
+def nxdn_post_dibits() -> np.ndarray:
+    """The 12 dibits of the Post field -- the Preamble's pattern, from Table 4.4-1."""
+    return bytes_to_dibits(bytes.fromhex(NXDN_PREAMBLE_HEX))
+
+
+def nxdn_scramble(dibits: np.ndarray) -> np.ndarray:
+    """Scrambles (or descrambles: it is its own inverse) the 182 symbols after a frame sync.
+
+    Sign inversion of a 4-level symbol is exactly "flip the dibit's most significant bit", because
+    the map sends 01/11 to +3/-3 and 00/10 to +1/-1.
+    """
+    reg = NXDN_SCRAMBLER_SEED
+    out = np.array(dibits, dtype=np.uint8, copy=True)
+    for i in range(len(out)):
+        bit = reg & 1
+        feedback = (reg ^ (reg >> 4)) & 1
+        reg = (reg >> 1) | (feedback << 8)
+        if bit:
+            out[i] ^= 0b10
+    return out
+
+
+def nxdn_lich_dibits(control: int) -> np.ndarray:
+    """The 8 outer symbols of a LICH: 7 control bits plus even parity over the top four."""
+    control &= 0x7F
+    parity = bin(control >> 3).count("1") & 1
+    bits = [(control >> (6 - i)) & 1 for i in range(7)] + [parity]
+    return np.array([0b11 if b else 0b01 for b in bits], dtype=np.uint8)
+
+
+def _nxdn_conv_outputs(state: int, u: int) -> tuple[int, int]:
+    """G1 = 1 + D^3 + D^4 and G2 = 1 + D + D^2 + D^4, with ``state`` holding the last four inputs."""
+    g1 = u ^ ((state >> 2) & 1) ^ ((state >> 3) & 1)
+    g2 = u ^ (state & 1) ^ ((state >> 1) & 1) ^ ((state >> 3) & 1)
+    return g1, g2
+
+
+def nxdn_encode_cac(info_bits: list[int]) -> list[int]:
+    """Encodes the 155 information bits into the 300-bit CAC."""
+    if len(info_bits) != 155:
+        raise ValueError(f"a CAC carries 155 information bits, got {len(info_bits)}")
+    crc = crc16_ccitt_false_bits(info_bits)
+    bits = list(info_bits) + [(crc >> (15 - i)) & 1 for i in range(16)] + [0, 0, 0, 0]
+    if len(bits) != 175:
+        raise AssertionError(f"the convolutional encoder takes 175 bits, got {len(bits)}")
+    coded: list[int] = []
+    state = 0
+    for u in bits:
+        g1, g2 = _nxdn_conv_outputs(state, u)
+        coded += [g1, g2]
+        state = ((state << 1) | u) & 0xF
+    # Puncture: of every seven codeword pairs, the G2 bits of pairs 1 and 5 are erased (the
+    # specification's own worked example: "X4 and X12 are erased").
+    punctured: list[int] = []
+    for i in range(175):
+        punctured.append(coded[2 * i])
+        if i % 7 not in (1, 5):
+            punctured.append(coded[2 * i + 1])
+    if len(punctured) != NXDN_CAC_BITS:
+        raise AssertionError(f"puncturing yielded {len(punctured)} bits, not {NXDN_CAC_BITS}")
+    # Interleave: write 25 rows of 12, read down the columns.
+    return [punctured[(k % NXDN_INTERLEAVE_DEPTH) * NXDN_INTERLEAVE_WIDTH
+                      + k // NXDN_INTERLEAVE_DEPTH] for k in range(NXDN_CAC_BITS)]
+
+
+def crc16_ccitt_false_bits(bits: list[int]) -> int:
+    """CRC-16/CCITT-FALSE over a bit sequence of any length (the CAC's 155 bits are not a whole
+    number of octets, which is why this exists beside the byte-wise one)."""
+    crc = 0xFFFF
+    for b in bits:
+        crc ^= (b & 1) << 15
+        crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def nxdn_cac_dibits(info: bytes) -> np.ndarray:
+    """The 150 symbols of a CAC carrying ``info`` (19 bytes: SR + an 18-octet message)."""
+    if len(info) != NXDN_L3_BYTES:
+        raise ValueError(f"a CAC carries {NXDN_L3_BYTES} bytes of layer-3 information")
+    bits = [(info[i // 8] >> (7 - i % 8)) & 1 for i in range(NXDN_L3_BITS)] + [0, 0, 0]
+    cac = nxdn_encode_cac(bits)
+    return np.array([(cac[2 * i] << 1) | cac[2 * i + 1] for i in range(NXDN_CAC_BITS // 2)],
+                    dtype=np.uint8)
+
+
+def nxdn_frame_dibits(info: bytes, rng: np.random.Generator, *, control: int = 0b000_0001
+                      ) -> np.ndarray:
+    """One outbound RCCH frame: FSW, then the scrambled LICH, CAC, E and Post fields."""
+    body = np.concatenate([
+        nxdn_lich_dibits(control),
+        nxdn_cac_dibits(info),
+        # E, the collision control field: real coded data about inbound access, which nothing here
+        # decodes, so it is filled with random symbols rather than a pattern that would bias the
+        # demodulator's level estimate.
+        rng.integers(0, 4, 12).astype(np.uint8),
+        nxdn_post_dibits(),
+    ])
+    if len(body) != NXDN_SCRAMBLED_DIBITS:
+        raise AssertionError(f"a frame body is {NXDN_SCRAMBLED_DIBITS} symbols, got {len(body)}")
+    return np.concatenate([nxdn_sync_dibits(), nxdn_scramble(body)]).astype(np.uint8)
+
+
+def nxdn_message(message_type: int, octets: bytes, ran: int = 0) -> bytes:
+    """The 19 bytes of layer-3 information: SR(structure + RAN) then an 18-octet message."""
+    if len(octets) > NXDN_MESSAGE_BYTES - 1:
+        raise ValueError("a layer-3 message is at most 18 octets including its type")
+    body = bytes([message_type & 0x3F]) + octets
+    return bytes([ran & 0x3F]) + body.ljust(NXDN_MESSAGE_BYTES, b"\x00")
+
+
+def nxdn_assignment_octets(call_type: int, source: int, destination: int, channel: int,
+                           *, call_timer: int = 2, call_option: int = 0b00010,
+                           cc_option: int = 0) -> bytes:
+    """Octets 1..8 of an assignment message (octet 0 is the message type).
+
+    Layout, summing to the nine mandatory octets: CC Option(8), Call Type(3) + Call Option(5),
+    Source Unit ID(16), Destination Group or Unit ID(16), Call Timer(6) + Channel(10).
+    """
+    if not 0 <= channel <= NXDN_CHANNEL_MAX:
+        raise ValueError("an NXDN channel number is 10 bits, 0 (Null) to 1023")
+    if not 0 <= source <= 0xFFFF or not 0 <= destination <= 0xFFFF:
+        raise ValueError("an NXDN unit or group ID is 16 bits")
+    if not 0 <= call_timer <= 0x3F or not 0 <= call_type <= 0b111:
+        raise ValueError("an NXDN assignment field is out of range")
+    return bytes([
+        cc_option & 0xFF,
+        ((call_type & 0b111) << 5) | (call_option & 0x1F),
+        (source >> 8) & 0xFF, source & 0xFF,
+        (destination >> 8) & 0xFF, destination & 0xFF,
+        ((call_timer & 0x3F) << 2) | ((channel >> 8) & 0b11),
+        channel & 0xFF,
+    ])
+
+
+def nxdn_frames_from_messages(messages: list[bytes], n_frames: int,
+                              rng: np.random.Generator) -> np.ndarray:
+    """``n_frames`` outbound RCCH frames, cycling through ``messages``."""
+    out = [nxdn_frame_dibits(messages[i % len(messages)], rng) for i in range(n_frames)]
+    return np.concatenate(out).astype(np.uint8)
+
+
 def continuous_data_dibits(rng: np.random.Generator, n_dibits: int) -> np.ndarray:
     """Unframed continuous 4FSK traffic: the decoy a pure FCO test cannot tell from a CC.
 

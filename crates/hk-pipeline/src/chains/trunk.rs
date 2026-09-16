@@ -109,8 +109,8 @@ use hk_core::{Discontinuity, ProvenanceHandle};
 use hk_demod::fsk::{C4fmConfig, C4fmDemod};
 use hk_detect::trunk::{
     CSBK_BYTES, CcCandidate, CcConfirmer, CcFraming, ChannelMap, DmrGrant, Grant, MIN_CC_FCO,
-    RASTER_TOLERANCE_HZ, Resolved, VoicePermit, best_lmr_raster, dmr_protocol_of, protocol_of,
-    scan_blocks, scan_csbks,
+    NXDN_L3_BYTES, NxdnAssignment, RASTER_TOLERANCE_HZ, Resolved, VoicePermit, best_lmr_raster,
+    dmr_protocol_of, nxdn_protocol_of, protocol_of, scan_blocks, scan_cacs, scan_csbks,
 };
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
 use hk_model::{
@@ -205,6 +205,12 @@ const OUTSIDE_WINDOW: &str = "grant-outside-window";
 /// string the refusal is defined by cannot drift apart — the other reasons in this module are
 /// this chain's own, but this one is `hk_detect`'s statement and belongs to it.
 const NO_CHANNEL_PARAMETERS: &str = hk_detect::trunk::DmrResolved::NoChannelParameters.reason();
+/// Machine reason: an NXDN Type-C assignment names a channel number, and the air interface carries
+/// no map and no base/step to resolve it through, so **no frequency is produced** (T-345).
+///
+/// Taken **from the decoder**, like the DMR reason above, so the string in the row and the string
+/// the refusal is defined by cannot drift apart.
+const NO_CHANNEL_MAP: &str = hk_detect::trunk::NxdnResolved::NoChannelMap.reason();
 /// Machine reason: the call's end was **observed**, as silence on the granted channel.
 const SILENCE_TIMEOUT: &str = "silence-timeout";
 /// Machine reason: the buffered window ran out while the channel was still active, so no end was
@@ -353,6 +359,74 @@ fn dmr_grant_event(system: TrunkSystemId, g: &DmrGrant, t: Timestamp) -> GrantEv
                          which is C23's stale-band-plan pitfall.",
         // UNVERIFIED, recorded verbatim, interpreted by nothing (T-268's discipline).
         "unverified_flag_bits": g.flags,
+    });
+    ev
+}
+
+/// The `grant_event` a decoded **NXDN Type-C** channel assignment produces (T-345).
+///
+/// Split out and pure, like its P25 and DMR siblings, so its refusal can be tested without a
+/// pipeline. This is the **fourth** refusal shape in this chain of tasks, and it differs from
+/// T-271's in the one way that matters:
+///
+/// - **T-271** (`no-channel-parameters`): no DMR Tier III channel-parameter announcement could be
+///   *corroborated*, so nothing in this build knows how to resolve a logical channel number. The
+///   refusal rests on what could not be verified.
+/// - **Here** (`no-channel-map`): the air interface is fully corroborated, and what it says is that
+///   it carries a channel **number** — §6.5.31, ten bits, 1..1023 — and defines no mapping from one
+///   to hertz. Not one of the specification's information elements is a frequency; even `CCH_INFO`,
+///   which tells a radio about its site's control channels, gives their channel numbers. The map
+///   lives in the radio's configuration, so the refusal rests on what the standard *states*, and it
+///   would be lifted by a channel map a person supplies — never by one this build invents.
+///
+/// Everything the message *did* say is recorded: the channel number, the call type, the source unit
+/// and the destination group or unit, the call timer, the site's RAN, and the spare flag and CC
+/// Option octets whose bits this decoder does not interpret.
+///
+/// Encryption is [`hk_model::Encryption::Unknown`], from [`NxdnAssignment::encryption`]: NXDN's
+/// Cipher Type element rides in traffic-channel messages, and an assignment has no room for one.
+/// The call this event opens therefore reaches T-270's [`VoicePermit`] as `Unknown` and is refused,
+/// through the **same** gate a P25 or DMR call goes through.
+fn nxdn_grant_event(system: TrunkSystemId, a: &NxdnAssignment, t: Timestamp) -> GrantEvent {
+    // `UnmappedChannel`, not a new kind: the statement is the one the model already has a variant
+    // for — a channel number that could not be turned into a frequency — and the `reason` in the
+    // detail is what distinguishes "no identifier" from "no band plan exists" from "the air carries
+    // no map at all".
+    let mut ev = GrantEvent::new(system, GrantKind::UnmappedChannel, t);
+    // A group call's destination is a talkgroup; an individual call's is a radio. Recording an
+    // individual call's destination as a talkgroup would be a small lie a call list repeats forever.
+    if a.is_group_call() {
+        ev.talkgroup = Some(a.destination.to_string());
+    }
+    // 0x0000 is the specification's Null Unit ID — a filler, not a radio.
+    ev.unit_id = (a.source != 0).then(|| a.source.to_string());
+    ev.channel = Some(a.channel.to_string());
+    ev.f_hz = None;
+    ev.encryption = a.encryption();
+    ev.detail = json!({
+        "protocol": "nxdn-type-c",
+        "message": a.message_name().unwrap_or("unnamed"),
+        "message_type": a.message_type,
+        "channel": a.channel,
+        "call_type": a.call_type,
+        "source": a.source,
+        "destination": a.destination,
+        "destination_is_group": a.is_group_call(),
+        "call_timer": a.call_timer,
+        "ran": a.ran,
+        "voice": a.is_voice(),
+        "late_entry": a.is_late_entry(),
+        "reason": NO_CHANNEL_MAP,
+        // Why this refusal is about configuration rather than about a gap a longer dwell closes.
+        "unresolvable": "an NXDN Type-C assignment names a 10-bit channel NUMBER (1..1023) and the \
+                         air interface defines no mapping from one to hertz - none of its \
+                         information elements is a frequency, and even CCH_INFO names control \
+                         channels by number. The map is configured in the radio, so no frequency \
+                         is produced until one is supplied; assuming a base and step would give a \
+                         plausible wrong frequency, which is C23's stale-band-plan pitfall.",
+        // UNVERIFIED, recorded verbatim, interpreted by nothing (T-268's discipline).
+        "unverified_spare_flags": a.flags,
+        "unverified_cc_option": a.cc_option,
     });
     ev
 }
@@ -698,6 +772,41 @@ fn hunt(
                          protocol {:?}",
                         scan.blocks,
                         scan.tier3,
+                        events.len(),
+                        scan.unhandled,
+                        k.system.protocol
+                    );
+                }
+                events
+            }
+            CcFraming::NxdnCac => {
+                let blocks: Vec<[u8; NXDN_L3_BYTES]> = confirmer
+                    .crc_valid_blocks_framing(CcFraming::NxdnCac, &symbols.dibits)
+                    .iter()
+                    .filter_map(|b| <[u8; NXDN_L3_BYTES]>::try_from(b.as_slice()).ok())
+                    .collect();
+                let scan = scan_cacs(blocks.iter());
+                add(&c.cc_cacs, scan.blocks as u64);
+                // An NXDN *frame sync* says "NXDN air interface", which a conventional repeater
+                // also has. Naming a system `nxdn-type-c` is gated on corroborated RCCH-outbound
+                // trunking messages (`hk_detect::trunk::nxdn::MIN_NXDN_CACS`).
+                let named = nxdn_protocol_of(&scan);
+                if named != TrunkProtocol::Unknown {
+                    k.system.protocol = named;
+                }
+                let events: Vec<GrantEvent> = scan
+                    .assignments
+                    .iter()
+                    .map(|a| nxdn_grant_event(system_id, a, t_end))
+                    .collect();
+                add(&c.cc_nxdn_grants, events.len() as u64);
+                if crate::debug_enabled() && (scan.blocks > 0 || !events.is_empty()) {
+                    eprintln!(
+                        "hk-pipeline: trunk-cc decoded {} CAC(s): {} Type-C, {} assignment(s) \
+                         (none resolvable: the air interface carries a channel number and no map), \
+                         {} unhandled, protocol {:?}",
+                        scan.blocks,
+                        scan.type_c,
                         events.len(),
                         scan.unhandled,
                         k.system.protocol
@@ -1487,6 +1596,82 @@ mod tests {
         let ev = dmr_grant_event(system, &private, t);
         assert_eq!(ev.talkgroup, None);
         assert_eq!(ev.detail["target"].as_u64(), Some(2468));
+        ev.validate().expect("a writable row");
+    }
+
+    /// The fourth refusal shape, at the row it produces (T-345).
+    ///
+    /// T-271's DMR refusal rests on what could not be *corroborated*. This one rests on what the
+    /// air interface **states**: an NXDN Type-C assignment carries a ten-bit channel number and the
+    /// standard defines no mapping from one to hertz, so the map is configuration and this build
+    /// has none. The row says so, and carries everything the message actually stated.
+    #[test]
+    fn an_nxdn_assignment_is_fully_decoded_and_still_carries_no_frequency() {
+        let system = TrunkSystemId::new();
+        let t = Timestamp::UNIX_EPOCH.saturating_add_nanos(1_000_000_000);
+        let a = NxdnAssignment {
+            message_type: hk_detect::trunk::MSG_VCALL_ASSGN,
+            flags: 0b10,
+            cc_option: 0x5A,
+            call_type: 0b000, // broadcast: a group call
+            call_option: 0b00010,
+            source: 1357,
+            destination: 2468,
+            call_timer: 4,
+            channel: 6,
+            ran: 0x1B,
+        };
+        // What a decoder that assumed the obvious band plan would have produced: base = the tuned
+        // centre, step = the 12.5 kHz LMR raster. Computed here only to name what must not appear.
+        let plausible_but_unsupported_hz = 851.0125e6 + 12_500.0 * f64::from(a.channel);
+
+        let ev = nxdn_grant_event(system, &a, t);
+        assert_eq!(ev.kind, GrantKind::UnmappedChannel);
+        assert_eq!(
+            ev.f_hz, None,
+            "an NXDN assignment produced a frequency; the assumed band plan would give \
+             {plausible_but_unsupported_hz} Hz, which the air interface does not support"
+        );
+        // The machine reason the row carries is the decoder's own, not a second copy that could
+        // drift away from it.
+        assert_eq!(
+            ev.detail["reason"].as_str(),
+            Some(NO_CHANNEL_MAP),
+            "the chain's reason and the decoder's have diverged: {}",
+            ev.detail
+        );
+        assert_eq!(a.resolve().reason(), NO_CHANNEL_MAP);
+        assert_ne!(
+            NO_CHANNEL_MAP, NO_CHANNEL_PARAMETERS,
+            "the two refusals are different statements and must be distinguishable in a row"
+        );
+
+        // Everything the message DID say is recorded.
+        assert_eq!(ev.channel.as_deref(), Some("6"));
+        assert_eq!(ev.talkgroup.as_deref(), Some("2468"));
+        assert_eq!(ev.unit_id.as_deref(), Some("1357"));
+        assert_eq!(ev.detail["message"].as_str(), Some("vcall-assgn"));
+        assert_eq!(ev.detail["ran"].as_u64(), Some(0x1B));
+        assert_eq!(ev.detail["unverified_spare_flags"].as_u64(), Some(0b10));
+        assert_eq!(ev.detail["unverified_cc_option"].as_u64(), Some(0x5A));
+        // Nothing read an encryption indication, so nothing is claimed (T-266, T-270).
+        assert_eq!(ev.encryption, hk_model::Encryption::Unknown);
+        assert!(!ev.encryption.is_clear());
+        ev.validate().expect("a writable row");
+
+        // An INDIVIDUAL call's destination is a radio, not a talkgroup.
+        let individual = NxdnAssignment {
+            call_type: 0b100,
+            source: 0,
+            ..a
+        };
+        let ev = nxdn_grant_event(system, &individual, t);
+        assert_eq!(ev.talkgroup, None);
+        assert_eq!(ev.detail["destination"].as_u64(), Some(2468));
+        assert_eq!(
+            ev.unit_id, None,
+            "the Null Unit ID filler is absent, not \"0\""
+        );
         ev.validate().expect("a writable row");
     }
 
