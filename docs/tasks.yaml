@@ -2599,7 +2599,7 @@ tasks:
   - id: T-161
     milestone: MUI
     title: "MUI API gap 5: eye/timing diagram data (stream-contract change)"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
