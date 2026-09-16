@@ -4038,6 +4038,13 @@ tasks:
       get the shipped grid below 12.35% EVM while reaching 1.29% on a clean control. So
       this ticket is blocked on T-294, not on carrier recovery, and the ALRT derivation is
       still not implicated.'
+    attribution_corrected_by_t291_2026_09_16: 'T-286 located this in the SMEARED INPUT
+      and attributed the smearing to residual CFO. T-291 refuted that by ablation. The
+      smearing is in the GENERATOR, not the receiver: an exhaustive oracle over symbol
+      period, timing phase and roll-off cannot get the shipped psk-qam grid below 12.35 %%
+      EVM while reaching 1.29 %% on a clean control, so those waveforms sit ~15 N0 from
+      their own constellation before any receiver touches them. T-246 stays OPEN and is
+      blocked by T-296, not by the ALRT derivation.'
 
   - id: T-247
     milestone: M3
@@ -5279,6 +5286,16 @@ tasks:
       in constellation size. Its cause is relocated to T-293. (5) The 40-snippet residue is
       untouched and carrier recovery reaches NONE of it - 13 of 40 (16-APSK) have no symbol
       clock at all, and the 27 psk-qam snippets are blocked by T-294.'
+    outcome_2026_09_16: 'ROUTE REFUTED BY ABLATION, and the coordinator chose it. No
+      carrier recovery was implemented because there is nothing to remove: zeroing the
+      generator carrier offset moves genuine QPSK residual 16.08 -> 16.29 N0, and a
+      zero-offset control reproduces the whole pathology. T-286 CFO mechanism is refuted.
+      Worse, the route could never have worked: the verifier re-ranks class WITHIN a
+      family and never touches the family, which is what unknown recall is computed from,
+      so NO post-sync fix reaches the residue. Knowable from ADR-0016 4.5 before the
+      choice. What it did fix is real: verify::symbol_samples guarded by whole SAMPLES
+      instead of whole SYMBOL PERIODS, so every symbol was sampled guard mod sps early or
+      late. Gate unchanged at 0.8990 / 0.1010.'
 
   - id: T-294
     milestone: M3
@@ -5418,6 +5435,34 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: false
+  - id: T-296
+    milestone: M3
+    title: 'The synthetic psk-qam grid is ~15 N0 from its own constellation before any
+      receiver touches it: an oracle over period, phase and roll-off cannot get below
+      12.35%% EVM where a clean control reaches 1.29%%'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-291 (2026-09-16), by ablation and by an exhaustive oracle search'
+    acceptance: 'this is the real M3 open-set blocker and it is in the GENERATOR, not the
+      receiver. T-291 established: zeroing carrier offset, quantisation and IQ imbalance
+      each change genuine QPSK residual by under 0.4 N0; an oracle over symbol period
+      (+/-2%%), timing phase (a full symbol) and roll-off bottoms out at 12.35%% EVM on the
+      shipped grid and 1.29%% on a clean control, with C14 rate exact (best/C14 = 1.0000);
+      the harness channel filter accounts for part of it (1.29 -> 7.34%%) but widening its
+      cutoff 4x changes nothing, so the remainder is UNIDENTIFIED. Find it. The densities
+      are fitted on distorted clouds and the held-out generators are distorted
+      identically, which is precisely why 16-APSK and pi/4-DQPSK are indistinguishable
+      from qam16 and qpsk. Do not tune a threshold; no floor moves. An honest "the
+      distortion is X and fixing it costs Y" is the expected answer'
+    area: py/hkpy/synth, crates/hk-classify (harness channel filter, densities)
+    needs: none
+    model: opus
+    effort: high
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
