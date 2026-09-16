@@ -217,6 +217,11 @@ export const rowFrac = (back: number, rows: number): number => Math.min(rows, Ma
  * through `rowsBackAt` — the same mapping the rows themselves were drawn with — so an overlay sits
  * on, and scrolls with, the exact energy it describes. Null when the range has scrolled off the
  * rows held (or is not yet on screen).
+ *
+ * The pane, not the canvas: the rows are drawn in it, and since T-362 so is every time-varying
+ * overlay, in the same pass (`ui/src/timebox.ts`). There is deliberately **no** canvas-fraction
+ * variant of this any more — one existed for the DOM overlay layer, and a placement helper in
+ * another coordinate system is how a second layer gets started.
  */
 export function timeSpanRows(tLo: number, tHi: number, rowsBackAt: RowsBackAt, rows: number): [number, number] | null {
   if (!Number.isFinite(tLo) || !Number.isFinite(tHi)) return null;
@@ -224,13 +229,6 @@ export function timeSpanRows(tLo: number, tHi: number, rowsBackAt: RowsBackAt, r
   if (!Number.isFinite(backNew) || !Number.isFinite(backOld)) return null;
   if (backNew >= rows || backOld < -1) return null;
   return [rowFrac(backNew, rows), rowFrac(backOld, rows)];
-}
-
-/** [[timeSpanRows]] as fractions of the whole canvas, for overlays drawn across trace and
- * waterfall (the top `specFrac` is the spectrum trace, which has no time axis). */
-export function timeSpanY(tLo: number, tHi: number, rowsBackAt: RowsBackAt, specFrac: number, rows: number): [number, number] | null {
-  const r = timeSpanRows(tLo, tHi, rowsBackAt, rows);
-  return r && [specFrac + r[0] * (1 - specFrac), specFrac + r[1] * (1 - specFrac)];
 }
 
 /** Evenly spaced "nice" ticks inside a view (1/2/5 × 10^k Hz steps). */

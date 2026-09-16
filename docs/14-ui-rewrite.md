@@ -127,12 +127,39 @@ The user's **first** time/waterfall invariant, and the one the boxes above depen
 
 - **Never place anything by a rows-per-second.** The spectrum header's `sample_rate_hz` is a *declared* rate, deliberately up to 10 % above the actual row rate on a gated stream (`RowPlan::declared_hz`), and rows are not evenly spaced in time anyway — a gated row, a dropped run or a backlog-skipped frame advances capture time without advancing the ring. Both errors grow linearly with age, so a box drawn that way walks down the screen away from its energy. A declared period is fine as a *duration* (how long one row stands for: the "↓ 20 s" label's fallback, the newest row's half-open end cap); it is never a placement.
 - **One mapping per view, not five.** Before T-337 this surface had five: the shader's ring index for the rows, a nominal rate for the presence boxes, the exact per-row lookup for hover and drag, wall clock for the scrubber, and a column index for the activity bars. Rows and boxes disagreed by construction, and a region dragged out of the waterfall and drawn back did not land where it was dragged. Rows, presence boxes, timed selections and the drag draft now all go through `RowClock` (`ui/src/app/centre/overlays.ts`).
+- **And one *clock*, not two (T-362).** One mapping is not enough if it is evaluated on the wrong schedule — see the section below.
 - **Never fabricate a placement.** A record whose span has scrolled off the rows held draws nothing, rather than a box clamped to a height it never had — the same rule `presenceBoxes` already applied, now applied to selections too.
 - **Measure the axis label, don't assert it.** "↓ 20 s" is the span the rows on screen actually cover, not `rows × declared period`.
 
 **Still screen-anchored, deliberately:** the focused Confirmed row's full-height yellow band box (T-193's drag-to-adjust edges live on it) is a *frequency* tool and spans both panes by design; every other row draws the time-placed presence box instead (ADR-0017 TM-4).
 
 **Known debt, named:** the capture timeline's half of this is **closed by T-338** (above) — it places by the backend's reported live edge over the ring's retention, not by `Date.now()` over a 48 h constant. The Explore Candidate query still derives its window from a nominal row rate (`ui/src/app/explore/inventory.ts`); that one remains filed, not fixed.
+
+### The boxes are drawn in the waterfall's render pass (T-362)
+
+The user, from live testing the day T-337 landed: *the confirmed/candidate presence boxes **drift then jump**.* This is **not** a regression against the section above. It is the same invariant, sharpened: T-337 made a box's placement a pure function of absolute capture time, and the mapping was correct — but it was **evaluated on the ~1 s inventory poll** while the WebGL2 waterfall scrolls **every animation frame**. Between polls a box stood still while the rows scrolled out from under it; at the poll it snapped back. The invariant held instant by instant and failed over time.
+
+**A right mapping on the wrong clock is the same defect as a wrong mapping**, and it is the failure T-337's own measurement should have predicted: a discipline ("place everything through `RowClock`") is kept by remembering, and remembering is what had just failed. The fix the user asked for is therefore structural, not procedural.
+
+**What changed.** A time-varying overlay is no longer a DOM rectangle. It is a `TimeBox` — a band fraction (0..1 over the bins in order, the *same* coordinates `Waterfall.setView`'s zoom window is in) and two absolute capture times — and it carries **no screen position at all**. The waterfall takes the list (`Waterfall.setBoxes`) and, inside its own `frame()`, in the pass that has just drawn the rows and in that pass's viewport, converts each one to a rectangle through `axis.rowsBackAt` over the rows' own timestamps (`ui/src/timebox.ts` `placeTimeBoxes`, `ui/src/waterfall.ts` `drawBoxes`). Supplying boxes is a **data update**; it is not a placement, and a poll that changes nothing changes nothing on screen.
+
+Why that cannot desync: there is no stored pixel position to go stale. The box's y comes from the same `this.head` and the same `this.times` the row shader's `uHead` came from, three statements earlier in the same function; its x comes from the same `this.u0`/`this.u1` the row shader was handed. Desync would require the renderer to disagree with itself inside one call.
+
+**The dividing line, and it is the rule for anything added later:** *an overlay with a time extent is drawn in the render pass; an overlay without one stays DOM.* So the presence boxes and **timed selections** moved into the canvas; the focused Confirmed row's full-height band box (T-193's drag-to-adjust edges) and a **frequency-only** selection stay DOM, because neither has a time axis to sit on and neither can drift. The `.c-presence-box` / `.c-presence` CSS is gone, and so is `axis.timeSpanY` — a placement helper in canvas fractions with no consumer left is how a second layer gets started.
+
+**Interactivity, without a second opinion about position.** The presence boxes never had DOM interaction (`.c-presence { pointer-events: none }`); their only affordance was a `title`, and clicks on the waterfall have always resolved by *frequency* (`clickTarget`), not by DOM hit-testing — the same path a right-click over a T-193 band box already took. So the readout carries the description now, resolved by `Waterfall.boxAt(u, tS)`: **containment in the boxes' own two axes** at the pointer's own row time, not a test against a remembered rectangle. It therefore names the box actually under the pointer however many rows have scrolled since the last poll. No layer retains its own idea of where a box is.
+
+**How it is tested** (`ui/test/timebox.test.ts`, driving the real `Waterfall` through a recording WebGL2 stub, so the assertions are on the rect the pass submitted):
+
+- **The property — between polls.** Advance the waterfall by *N* rows with **no** `setBoxes` at all; the box must have moved by exactly *N* rows of the rows' own mapping. A test that only checked placement at poll boundaries passes on the broken code.
+- **The control — no jump.** A poll delivering an identical interval must produce a byte-identical rectangle. That is the "jump" half of the bug, and it is what proves a poll is no longer a placement event.
+- **Paused** (T-339: pause freezes the view, never the capture): rows stop being pushed while the ring keeps filling, so the head holds — and the box holds with it, on the rows **displayed**, across 30 frames and several polls.
+- **Zoomed:** the box goes through the zoom window the row pass was handed in that same frame, and a zoom with no poll in between rescales it exactly as it rescales the rows.
+- **Uneven rows:** a 1.2 s gated gap puts a nominal 25 rows/s 29 rows adrift on a 512-row pane; the box follows the ring.
+- **Mutation-checked.** Reverting to poll-rate evaluation fails the between-polls property and the zoom case, while the no-jump and paused controls keep passing — which is exactly the discrimination those controls are for.
+- **Guarded:** `src/timebox.ts` is asserted to contain no dB/SNR/occupancy term, no 6+-digit literal, and no rate (`rowRate`, `rowsPerS`, `rowPeriod`, `sample_rate`, `Date.now`) — a nominal rate would look right for the first second after every poll and drift linearly with age, which is this bug reintroduced.
+
+**Nothing new was needed from the backend.** Every record involved already carries absolute capture time (T-337, docs/07 §4.2); this was entirely a question of when the client evaluated it.
 
 ### Setting centre is a device action, not a view change (T-343)
 

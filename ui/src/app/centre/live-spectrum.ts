@@ -26,9 +26,9 @@ import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
 import { apiConnFor, backoffMs, openStream, parseSpectrumRecord, type StreamSocket } from "../net";
 import { toast } from "../shell-slice";
 import {
-  MIN_BRACKET_FRAC, addModeActive, assumedDc, bracketLayout, clickTarget, confirmedBands, confirmedEdgeAt,
+  MIN_BRACKET_FRAC, addModeActive, assumedDc, bandFrac, bracketLayout, clickTarget, confirmedBands, confirmedEdgeAt,
   dcFromHeader, dcFromObservations, dcQuery, dragBandEdge, dragSelection, draftBox, effectiveBand,
-  hoverText, isDrag, levelU, placeExtent, presenceBoxes, selectionBoxes, selectionLabel, timeScaleText, tipOnLeft,
+  hoverText, isDrag, levelU, placeExtent, presenceBoxes, selectionBoxes, selectionTimeBoxes, selectionLabel, timeScaleText, tipOnLeft,
   type BandEdge, type DcMask, type DragPoint, type RowClock, type Span,
 } from "./overlays";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor } from "./review-render";
@@ -55,7 +55,6 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   const specLayer = h("div", { class: "c-spec" }, brackets);
   const wfLayer = h("div", { class: "c-wf" });
   const bandLayer = h("div", { class: "c-bands" }); // T-193: full-height, spans both panes
-  const presenceLayer = h("div", { class: "c-presence" }); // T-261: time-extent boxes, non-focused rows
   const draftLabel = h("span");
   const draft = h("div", { class: "c-drag", hidden: true }, draftLabel);
   const cross = h("div", { class: "c-cross", hidden: true });
@@ -69,7 +68,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   const badge = h("div", { class: "c-review", role: "status", hidden: true });
   const perf = h("div", { class: "c-perf", hidden: true });
   const note = h("div", { class: "live-note", role: "status" });
-  el.replaceChildren(canvas, specLayer, wfLayer, bandLayer, presenceLayer, draft, cross, tip, hint, addToggle, scale, badge, perf, note);
+  el.replaceChildren(canvas, specLayer, wfLayer, bandLayer, draft, cross, tip, hint, addToggle, scale, badge, perf, note);
 
   let wf: Waterfall | null = null, sock: StreamSocket | null = null, attempt = 0, lastSeq = -1;
   let dc: DcMask | null = null, dcAsk = false;
@@ -144,7 +143,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       bracketEls.clear();
       wfLayer.replaceChildren();
       bandLayer.replaceChildren();
-      presenceLayer.replaceChildren();
+      wf?.setBoxes([]);
       return;
     }
     const focusSig = s.focus.kind === "signal" ? s.focus.id : null;
@@ -182,22 +181,15 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     }
     bandLayer.replaceChildren(...bandEls);
 
-    // T-261 (ADR-0017 TM-4): a time-extent box per non-focused Candidate/Confirmed row, spanning
-    // trace and waterfall. Growth needs no per-frame work — it falls out of re-reading
-    // `presence.last_interval.t_end_s` on the next inventory poll and redrawing (overlays.ts
-    // `presenceBoxes`). Skipped without a waterfall (no clock to place a time extent against yet).
-    const rc = clock();
-    presenceLayer.replaceChildren(...(rc ? presenceBoxes(Object.values(s.inventory.rows), v, rc, focusSig).map((b) => {
-      const e = h("div", {
-        class: `c-presence-box ${b.state}${b.open ? " open" : ""}${b.chirp ? " chirp" : ""}`,
-        "data-id": b.id,
-        title: `${b.label} MHz · ${b.state}${b.open ? " · on air" : ""}${b.chirp ? " · bounding box (chirp: a swept carrier drawn as its extent, not its sweep)" : ""}`,
-      });
-      e.style.top = `${b.topPct}%`;
-      e.style.height = `${b.heightPct}%`;
-      place(e, b);
-      return e;
-    }) : []));
+    // T-261 (ADR-0017 TM-4) / T-362: everything with a **time** extent — a non-focused
+    // Candidate/Confirmed row's presence interval, a timed selection — is handed to the waterfall
+    // as a capture-time region and drawn in its render pass, beside the very rows it describes.
+    // This is a data update, not a placement: the boxes carry no screen position, so this call
+    // happening on the ~1 s poll (or not happening at all for a while) cannot move anything.
+    wf?.setBoxes([
+      ...presenceBoxes(Object.values(s.inventory.rows), g, focusSig),
+      ...selectionTimeBoxes(s.selections.list, g, focusSel),
+    ]);
 
     const layer: HTMLElement[] = [];
     const m = dc ? placeExtent(v, dc.loHz, dc.hiHz, 0.002) : null;
@@ -210,15 +202,13 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       layer.push(e);
     }
     // Selections come straight from the shared SelectionStore (T-194); `data-id` (T-192) lets the
-    // context menu (menu/) resolve which selection a right-click/long-press landed on. A selection
-    // with a time extent is placed through the same row clock as the rows and the presence boxes
-    // (T-337), so it scrolls with the energy it selected; one without stays full height.
-    for (const b of selectionBoxes(s.selections.list, v, focusSel, undefined, rc)) {
+    // context menu (menu/) resolve which selection a right-click/long-press landed on. Only the
+    // **untimed** ones are here: a frequency-only selection has no time axis to sit on, so it is
+    // full height and cannot drift. A timed one went into the render pass above (T-362), and a
+    // right-click over it resolves the same way one over a Confirmed band box does — by frequency.
+    for (const b of selectionBoxes(s.selections.list, v, focusSel)) {
       const e = h("div", { class: `c-sel${b.active ? " active" : ""}${b.pending ? " pending" : ""}`, "data-id": b.id });
       place(e, b);
-      e.style.top = `${b.topPct}%`;
-      e.style.bottom = "auto";
-      e.style.height = `${b.heightPct}%`;
       layer.push(e);
     }
     const fr = focusSig ? s.inventory.rows[focusSig] : undefined;
@@ -245,7 +235,13 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     if (!v || !g || !w) return;
     const p = locate(e), hz = ax.fracToHz(v, p.x);
     const hit = ax.yHit(p.y, w.specFrac, w.rows);
-    tip.textContent = hoverText(g, hz, w.levelAt(levelU(g, hz)), hit.area === "waterfall" ? w.timeAt(hit.rowsBack) : NaN);
+    const tS = hit.area === "waterfall" ? w.timeAt(hit.rowsBack) : NaN;
+    // T-362: a box drawn in the render pass has no DOM node to carry a `title`, so the readout
+    // carries it. The hit test is the boxes' own time–frequency containment (`Waterfall.boxAt`) at
+    // the pointer's row time, not a rectangle remembered from some earlier frame — so it names the
+    // box actually under the pointer however far the rows have scrolled since the last poll.
+    const box = w.boxAt(bandFrac(g, hz), tS);
+    tip.textContent = hoverText(g, hz, w.levelAt(levelU(g, hz)), tS) + (box?.title ? ` · ${box.title}` : "");
     cross.style.left = `${p.x * 100}%`;
     if (tipOnLeft(p.x)) { tip.style.left = "auto"; tip.style.right = `calc(${(1 - p.x) * 100}% + 10px)`; }
     else { tip.style.right = "auto"; tip.style.left = `calc(${p.x * 100}% + 10px)`; }
