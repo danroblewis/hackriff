@@ -2716,7 +2716,7 @@ tasks:
   - id: T-168
     milestone: MUI
     title: "MUI API gap 11-12: document follow_hops in docs/api.md; per-node recipe docs for the Decode step guide"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -3333,7 +3333,7 @@ tasks:
   - id: T-207
     milestone: M3
     title: "MUI: classification distribution, unknown score, signature match and cluster id in the focus panel and inventory"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-199, T-201, T-202]
     parallel_group: MUI-X3
@@ -3949,6 +3949,33 @@ tasks:
     found_by: "T-204 (2026-09-15): measured open-set per family and found fsk and ook-ask covered but analog and psk-qam unmeasured because no OOD generator routes there"
     acceptance: "the synthetic grid includes out-of-distribution generators that route to analog and psk-qam, so open-set AUROC and false-known are MEASURED for every family rather than only the two that happen to have OOD sources; T-213's harness reports per-family open-set coverage and FAILS LOUDLY if a family has no OOD samples, rather than reporting a silent zero; re-measure T-204's shadow comparison with the full coverage and report whether its shadow-only recommendation still holds; no floor loosened"
     area: py/ synth grid (OOD generators), crates/hk-classify/src/harness.rs, tests
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-245
+    milestone: M2-hardening
+    title: 'follow_hops one_recipe_... fails ~1 in 5 isolated runs: the newly-added
+      channel''s first frame is tagged with a message belonging to channel 0'
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: PIPE
+    use_cases: []
+    found_by: 'coordinator 2026-09-15: full check at a1e6413 aborted on this test;
+      5 isolated single-threaded runs then gave 4 pass / 1 fail, so it is intermittent
+      and NOT load-induced'
+    acceptance: 'diagnose before changing anything. Measure the failure rate with
+      n>=20 on current main AND at a2f66f1 (before the T-242/T-241 merges) - single
+      runs prove nothing at a ~20%% rate. Then find the mechanism: the assertion is
+      `message 12 tagged with its channel`, left 3 right 0, i.e. the first frame on
+      the channel added mid-run carries a message that belongs to channel 0. Decide
+      whether it is a product bug in channel tagging/dedup at channel-add or a test
+      that asserts something the contract does not promise, and say which with
+      evidence. Do NOT loosen or delete the assertion to make it pass; if the
+      contract genuinely does not promise it, change the assertion to what the
+      contract does promise and state the difference.'
+    area: crates/hk-pipeline (recipes/runtime.rs, chains), crates/hk-pipeline/tests/follow_hops.rs
     needs: none
     model: opus
     effort: medium
