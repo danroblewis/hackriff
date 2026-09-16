@@ -7,8 +7,11 @@
 //! `hk_context::occupancy::baseline`, which depends on this crate.
 //!
 //! # Layout and format
-//! `<root>/<site>/<cal>/<scheme>-<factor>.bin`, where `<cal>` is `uncalibrated` or the
-//! CalibrationState id. A file is:
+//! `<root>/<site>/<cal>/<scheme>-<factor>[-<chain>].bin`, where `<cal>` is `uncalibrated` or the
+//! CalibrationState id and `<chain>` is the 16-hex receive-chain key (T-303), **absent** when the
+//! chain is unknown. A chain-less key therefore keeps the pre-T-303 name, so every baseline written
+//! before that change is still exactly where its key says it is; the first known chain to ask for
+//! one adopts it ([`BaselineStore::load`]). A file is:
 //! - an uncompressed header: magic `HKBL`, format version (u16), the key, `last_visit` (i64 ns,
 //!   sample clock), so eviction reads only the header;
 //! - a zstd frame of the little-endian body, sparse by slot (empty slots are not written);
@@ -27,7 +30,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use hk_model::attention::baseline::{BaselineKey, CalKey, HourOfWeek, SlotStats};
+use hk_model::attention::baseline::{BaselineKey, CalKey, ChainKey, HourOfWeek, SlotStats};
 use hk_model::attention::occupancy::ChannelKey;
 use hk_model::ids::{CalibrationStateId, SiteId};
 use hk_model::time::Timestamp;
@@ -39,8 +42,10 @@ use serde::{Deserialize, Serialize};
 /// subject). Versions 1 and 2 are still read: the moment and the persistence read 0. Their
 /// adaptive copies gain the moment as they fold, but a **frozen reference never refolds**, so an
 /// upgraded mature baseline keeps its uncorrected (larger, so safer) between-slot spread and a
-/// persistence lift of 1 until it is re-frozen or relearns (ADR-0012 §3.3).
-pub const BASELINE_FORMAT_VERSION: u16 = 3;
+/// persistence lift of 1 until it is re-frozen or relearns (ADR-0012 §3.3). T-303: 4 adds the
+/// receive chain to the key in the header; versions 1–3 read as [`ChainKey::Unknown`], which is
+/// what they are, and nothing about their slot statistics changes.
+pub const BASELINE_FORMAT_VERSION: u16 = 4;
 /// Default store quota (ADR-0012 §3.6).
 pub const BASELINE_QUOTA_BYTES: u64 = 1 << 30;
 /// Gain states kept per subject before it reports `mixed` (ADR-0012 §3.1).
@@ -866,7 +871,7 @@ impl W {
             None => self.u8(0),
         }
     }
-    fn key(&mut self, k: &BaselineKey) {
+    fn key(&mut self, k: &BaselineKey, version: u16) {
         // Ids as their fixed 36-byte hyphenated text (no uuid dependency here).
         self.0.extend_from_slice(k.site.to_string().as_bytes());
         match k.cal {
@@ -881,6 +886,12 @@ impl W {
         }
         self.u16(k.scheme);
         self.u16(k.cell_factor);
+        if version >= 4 {
+            // T-303: always tag + id, so the header stays a fixed length at this version and the
+            // body still starts at a known offset.
+            self.u8(u8::from(!k.chain.is_unknown()));
+            self.u64(k.chain.id().unwrap_or(0));
+        }
     }
 }
 
@@ -940,7 +951,7 @@ impl R<'_> {
             _ => return Err("bad option tag"),
         })
     }
-    fn key(&mut self) -> Rd<BaselineKey> {
+    fn key(&mut self, version: u16) -> Rd<BaselineKey> {
         let site = id_text::<SiteId>(self.take(36)?)?;
         let tag = self.u8()?;
         let cal_text = self.take(36)?;
@@ -949,11 +960,26 @@ impl R<'_> {
             1 => CalKey::Calibrated(id_text::<CalibrationStateId>(cal_text)?),
             _ => return Err("bad calibration tag"),
         };
+        let scheme = self.u16()?;
+        let cell_factor = self.u16()?;
+        // T-303: versions 1–3 predate the receive chain, so their baselines read as `Unknown`.
+        let chain = if version >= 4 {
+            let tag = self.u8()?;
+            let id = self.u64()?;
+            match tag {
+                0 => ChainKey::Unknown,
+                1 => ChainKey::Device(id),
+                _ => return Err("bad chain tag"),
+            }
+        } else {
+            ChainKey::Unknown
+        };
         Ok(BaselineKey {
             site,
             cal,
-            scheme: self.u16()?,
-            cell_factor: self.u16()?,
+            chain,
+            scheme,
+            cell_factor,
         })
     }
 }
@@ -969,12 +995,18 @@ fn header(key: &BaselineKey, last_visit: Timestamp, version: u16) -> Vec<u8> {
     let mut w = W(Vec::with_capacity(64));
     w.0.extend_from_slice(MAGIC);
     w.u16(version);
-    w.key(key);
+    w.key(key, version);
     w.i64(last_visit.as_unix_nanos());
     w.0
 }
 
-const HEADER_LEN: usize = 4 + 2 + 36 + 1 + 36 + 2 + 2 + 8;
+/// Header bytes through version 3: magic, version, key, `last_visit`.
+const HEADER_LEN_V3: usize = 4 + 2 + 36 + 1 + 36 + 2 + 2 + 8;
+
+/// Header bytes at `version`. Version 4 (T-303) adds the receive chain as a fixed tag + `u64`.
+const fn header_len(version: u16) -> usize {
+    HEADER_LEN_V3 + if version >= 4 { 9 } else { 0 }
+}
 
 fn encode_body(state: &BaselineState, version: u16) -> Vec<u8> {
     let mut w = W(Vec::new());
@@ -1287,17 +1319,18 @@ fn read_header(bytes: &[u8]) -> Rd<(BaselineKey, Timestamp, u16)> {
     if !(1..=BASELINE_FORMAT_VERSION).contains(&version) {
         return Err("unsupported format version");
     }
-    let key = r.key()?;
+    let key = r.key(version)?;
     Ok((key, Timestamp::from_unix_nanos(r.i64()?), version))
 }
 
 /// Decodes a file image.
 pub fn decode(bytes: &[u8]) -> Result<BaselineState, &'static str> {
     let (key, last_visit, version) = read_header(bytes)?;
-    if bytes.len() < HEADER_LEN + 8 {
+    let head = header_len(version);
+    if bytes.len() < head + 8 {
         return Err("truncated");
     }
-    let (frame, sum) = bytes[HEADER_LEN..].split_at(bytes.len() - HEADER_LEN - 8);
+    let (frame, sum) = bytes[head..].split_at(bytes.len() - head - 8);
     let body = zstd::decode_all(frame).map_err(|_| "bad compressed body")?;
     if fnv1a(&body).to_le_bytes() != sum {
         return Err("checksum mismatch");
@@ -1311,6 +1344,15 @@ fn cal_dir(cal: CalKey) -> String {
     match cal {
         CalKey::Uncalibrated => "uncalibrated".into(),
         CalKey::Calibrated(id) => id.to_string(),
+    }
+}
+
+/// File name of `key` inside its site/cal directory (T-303). A chain-less key keeps the pre-T-303
+/// name, so existing baselines are not orphaned by the key gaining a field.
+fn chain_file(key: &BaselineKey) -> String {
+    match key.chain.id() {
+        None => format!("{}-{}.bin", key.scheme, key.cell_factor),
+        Some(id) => format!("{}-{}-{id:016x}.bin", key.scheme, key.cell_factor),
     }
 }
 
@@ -1348,7 +1390,7 @@ impl BaselineStore {
         self.root
             .join(key.site.to_string())
             .join(cal_dir(key.cal))
-            .join(format!("{}-{}.bin", key.scheme, key.cell_factor))
+            .join(chain_file(key))
     }
 
     /// Writes `state` atomically (temp → fsync → rename); returns the file size.
@@ -1370,12 +1412,13 @@ impl BaselineStore {
         Ok(bytes.len() as u64)
     }
 
-    /// Reads the state of `key`, `None` when never saved.
+    /// Reads the state of `key`, `None` when never saved. A known chain with no file of its own
+    /// adopts a chain-less one ([`Self::adopt`]).
     pub fn load(&self, key: &BaselineKey) -> Result<Option<BaselineState>, BaselineStoreError> {
         let path = self.path_of(key);
         let bytes = match fs::read(&path) {
             Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return self.adopt(key),
             Err(e) => return Err(e.into()),
         };
         let state = decode(&bytes).map_err(|reason| BaselineStoreError::Corrupt {
@@ -1388,6 +1431,47 @@ impl BaselineStore {
                 reason: "key does not match its path",
             });
         }
+        Ok(Some(state))
+    }
+
+    /// T-303 migration. A baseline learnt before the receive chain was part of the key sits at the
+    /// chain-less path, and the run that learnt it had one front end. The first known chain to ask
+    /// for that key therefore **adopts** the file: it is re-keyed and rewritten under the chain's
+    /// own name, so a single-front-end device keeps every hour it has learnt instead of silently
+    /// restarting immature.
+    ///
+    /// Adoption happens once. The chain-less file is gone afterwards, so a *second* front end finds
+    /// nothing, starts its own baseline (immature, and therefore alarm-suppressed until it has 24 h
+    /// of its own), and is never scored against the first chain's noise floor. The new file is
+    /// written before the old one is removed, so a failure between the two leaves the data twice,
+    /// never zero times.
+    fn adopt(&self, key: &BaselineKey) -> Result<Option<BaselineState>, BaselineStoreError> {
+        if key.chain.is_unknown() {
+            return Ok(None);
+        }
+        let from = BaselineKey {
+            chain: ChainKey::Unknown,
+            ..*key
+        };
+        let path = self.path_of(&from);
+        let bytes = match fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let mut state = decode(&bytes).map_err(|reason| BaselineStoreError::Corrupt {
+            path: path.clone(),
+            reason,
+        })?;
+        if state.key != from {
+            return Err(BaselineStoreError::Corrupt {
+                path,
+                reason: "key does not match its path",
+            });
+        }
+        state.key = *key;
+        self.save(&state)?;
+        fs::remove_file(&path)?;
         Ok(Some(state))
     }
 
@@ -1476,6 +1560,7 @@ mod tests {
         let key = BaselineKey {
             site,
             cal: CalKey::Calibrated(CalibrationStateId::new()),
+            chain: ChainKey::Unknown,
             scheme: 1,
             cell_factor: 16,
         };
@@ -1583,6 +1668,8 @@ mod tests {
         let key = BaselineKey {
             site: "6f1c2a9e-3b4d-4e5f-8a6b-7c8d9e0f1a2b".parse().unwrap(),
             cal: CalKey::Calibrated("0a1b2c3d-4e5f-4a6b-9c7d-8e9f0a1b2c3d".parse().unwrap()),
+            // The golden file is version 2, which predates the chain: it reads as `Unknown`.
+            chain: ChainKey::Unknown,
             scheme: 1,
             cell_factor: 16,
         };
@@ -1662,7 +1749,7 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&GOLDEN_V2_DENSE_HEX[i..i + 2], 16).unwrap())
             .collect();
-        assert_eq!(BASELINE_FORMAT_VERSION, 3);
+        assert_eq!(BASELINE_FORMAT_VERSION, 4);
         let decoded = decode(&bytes).unwrap();
         assert_eq!(decoded, golden_state());
         let sub = &decoded.subjects[&BaselineSubject::Cell { index: 7 }];
@@ -1680,7 +1767,7 @@ mod tests {
             stored,
             vec![(vec![0, 25, 167], vec![0, 100]), (vec![12], vec![12, 13])]
         );
-        let body = |b: &[u8]| zstd::decode_all(&b[HEADER_LEN..b.len() - 8]).unwrap();
+        let body = |b: &[u8]| zstd::decode_all(&b[header_len(2)..b.len() - 8]).unwrap();
         // T-146: the writer is version 3 (one more f64 per slot); the v2 layout is still what a
         // version-2 re-encode produces, byte for byte outside the rounded f64 fields.
         let re = encode_version(&decoded, 2).unwrap();
@@ -1902,5 +1989,103 @@ mod tests {
         assert_eq!(store.enforce_quota(Some(mid)).unwrap(), vec![new]);
         assert_eq!(store.entries().unwrap()[0].0.site, mid);
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// T-303: the receive chain is part of the key, of the file and of the path, so two front ends
+    /// at one site under one calibration are two baselines that never read as each other.
+    #[test]
+    fn baseline_chain_is_part_of_the_key_and_its_path() {
+        let root = temp_root("chain");
+        let store = BaselineStore::open(&root).unwrap();
+        let site = SiteId::new();
+        let key = |chain| BaselineKey {
+            site,
+            cal: CalKey::Uncalibrated,
+            chain,
+            scheme: 1,
+            cell_factor: 16,
+        };
+        let (a, b) = (
+            key(ChainKey::of_device("hackrf:a")),
+            key(ChainKey::of_device("hackrf:b")),
+        );
+        assert_ne!(a, b, "one site and calibration, two front ends");
+        assert_ne!(store.path_of(&a), store.path_of(&b));
+        let (mut sa, mut sb) = (state(site, 1), state(site, 2));
+        sa.key = a;
+        sb.key = b;
+        store.save(&sa).unwrap();
+        store.save(&sb).unwrap();
+        assert_eq!(store.load(&a).unwrap().unwrap(), sa);
+        assert_eq!(store.load(&b).unwrap().unwrap(), sb);
+        assert_eq!(store.entries().unwrap().len(), 2, "two files");
+        // The chain survives the version-4 codec, and versions before it cannot express one.
+        assert_eq!(decode(&encode(&sa).unwrap()).unwrap(), sa);
+        assert!(
+            decode(&encode_version(&sa, 3).unwrap())
+                .unwrap()
+                .key
+                .chain
+                .is_unknown()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T-303 migration: a baseline written before the chain was part of the key keeps its old path
+    /// and still loads. The first known chain adopts it, so a single-front-end device keeps every
+    /// hour it learnt; a second front end then finds nothing and starts its own.
+    #[test]
+    fn baseline_unknown_chain_file_is_adopted_once() {
+        let root = temp_root("adopt");
+        let store = BaselineStore::open(&root).unwrap();
+        let site = SiteId::new();
+        let key = |chain| BaselineKey {
+            site,
+            cal: CalKey::Uncalibrated,
+            chain,
+            scheme: 1,
+            cell_factor: 16,
+        };
+        let legacy = key(ChainKey::Unknown);
+        let mut old = state(site, 5);
+        old.key = legacy;
+        store.save(&old).unwrap();
+        assert!(
+            store.path_of(&legacy).ends_with("1-16.bin"),
+            "the pre-T-303 name"
+        );
+
+        let a = key(ChainKey::of_device("hackrf:a"));
+        let adopted = store.load(&a).unwrap().expect("adopted, not orphaned");
+        assert_eq!(adopted.key, a);
+        assert_eq!(adopted.subjects, old.subjects, "every learnt hour kept");
+        assert!(!store.path_of(&legacy).exists(), "adopted exactly once");
+        assert!(store.path_of(&a).exists());
+
+        let b = key(ChainKey::of_device("hackrf:b"));
+        assert_eq!(
+            store.load(&b).unwrap(),
+            None,
+            "a second front end never inherits the first one's floor"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T-303: a baseline's chain is the same value the history records as a frame's origin source
+    /// ([`crate::history::source_key`]), so a per-source history read and a baseline agree on which
+    /// front end they mean.
+    #[test]
+    fn baseline_chain_matches_the_history_source_key() {
+        for d in [
+            "hackrf:0000000000000000a06063c8234e925f",
+            "sigmf:hackrf",
+            "",
+        ] {
+            assert_eq!(
+                ChainKey::of_device(d).id(),
+                Some(crate::history::source_key(d)),
+                "{d}"
+            );
+        }
     }
 }

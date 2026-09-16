@@ -916,9 +916,12 @@ fn attention_control(
             hk_model::Timestamp::now()
         }
     });
+    // T-303: this fallback opens a service for a handle that has none of its own, so no front end
+    // has named itself; the run's service (the branch above) carries the run's chain.
     let service = hk_pipeline::attention::AttentionService::open(
         handle.data_dir(),
         Arc::clone(db),
+        hk_model::attention::baseline::ChainKey::Unknown,
         Some(counters),
         clock,
     )

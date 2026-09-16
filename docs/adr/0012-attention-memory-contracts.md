@@ -239,11 +239,15 @@ hk-store `occupancy/` (T-118):
 
 ### 3.1 Key and slots
 
-`BaselineKey { site: SiteId, cal: CalKey, scheme, cell_factor }`:
+`BaselineKey { site: SiteId, cal: CalKey, chain: ChainKey, scheme, cell_factor }`:
 - **Cells:** `cell_factor` × level-0 cells. Default 16, which is 100 kHz on scheme 1.
 - **Slots:** each key holds 168 `HourOfWeek` slots (0 = Monday 00:00 in the site's fixed UTC offset).
 - **Per cell and per learned channel, per slot:** mergeable `SlotStats`, with level statistics further split by gain state (at most 4 per slot; beyond that the cell reports `mixed`).
 - **Calibration:** dBFS baselines are keyed `uncalibrated`. A new CalibrationState starts a new key (C12 pitfall: calibration changes look like anomalies).
+- **Receive chain (T-303):** `ChainKey` is `unknown` or one front end's `device_id` hash. A noise floor is a property of **one receive chain** — its antenna, cable, LNA and mixer — so two front ends at one site have genuinely different floors and must not share a baseline; without the chain their levels averaged and novelty fired, or was suppressed, on the mixture. The gain-state split does **not** cover this: `GainState::key` hashes LNA/VGA/amp only, so two identical front ends on their default gains produce the *same* gain key. `CalKey::Calibrated` separates devices only incidentally (a calibration version is per device); `CalKey::Uncalibrated` is one value for every uncalibrated front end, which is exactly where the pooling happened.
+  - Keyed on the **device**, not the antenna port, unlike `relate::ReceiveChain` (T-302), which compares the port only when both sides recorded one. A baseline key is a total equality key *and* the on-disk path, so an `Option` port would split one device's history the day a switch is fitted. The asymmetry is sound: a port change is **sequential** — a `ProvenanceStep::FILTER` the alarm path already explains as self-inflicted — while two front ends are **concurrent**, interleaving folds with no step to explain.
+  - A new chain starts a new, immature key, so gaining one is never novelty (as a calibration step is not).
+  - **Not yet end-to-end.** The occupancy close reads history with `Pyramid::query` (`OriginFilter::ANY`), so several front ends folding into one pyramid are already averaged in the level-0 cells before occupancy runs. The key stops *baselines* pooling; a per-source occupancy read (the filter exists, T-133) is what would make the guarantee reach the measurement.
 
 Only observed cells, and within each series only observed hour-of-week slots (T-134), are stored, in memory and on disk. Size estimate: a 30–1000 MHz plan is ~9 700 cells × 168 × 28 B ≈ 46 MB per site/cal for one copy, doubled with the frozen reference; in memory each stored slot is packed to f32 moments (T-135; 56 B as f64). Each gain state and level class is its own series: a parked week under two gain states stores 9 700 × 2 × 168 slot pairs, ~194 MiB with overhead, under the 256 MiB default cap (T-134/T-135 measurements in `hk-pipeline` attention tests).
 
@@ -334,7 +338,8 @@ H3 (already a dependency) may index sites for nearest-site lookup; it is not the
 ### 3.6 Storage and retention
 
 hk-store `baseline/` (T-119):
-- **Layout:** one file per `BaselineKey` (`<data>/baselines/<site>/<cal>/<scheme>-<factor>.bin`) holding the reference and adaptive slot stats, sparse by cell and slot.
+- **Layout:** one file per `BaselineKey` (`<data>/baselines/<site>/<cal>/<scheme>-<factor>[-<chain>].bin`) holding the reference and adaptive slot stats, sparse by cell and slot. The chain suffix (16 hex, T-303) is absent when the chain is unknown, so every baseline written before T-303 is still at the path its key names and still loads (file versions 1–3 read as `chain: unknown`).
+- **Migration (T-303):** the first *known* chain to ask for a key with no file of its own **adopts** the chain-less one — re-keyed, rewritten under the chain's name, old file removed — so a single-front-end device keeps everything it has learnt instead of silently restarting immature. Adoption happens once, so a second front end finds nothing, starts its own baseline (immature, alarms suppressed until it has 24 h of its own) and is never scored against the first chain's floor. The new file is written before the old one is removed: a failure between the two leaves the data twice, never zero times.
 - **Writes:** temp → fsync → rename when an hour slot closes (≤ 24 writes/day per active key).
 - **Quota:** 1 GiB. Eviction takes the least recently visited site first, and never a site visited within 180 days unless over quota.
 
