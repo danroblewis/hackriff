@@ -4382,7 +4382,7 @@ tasks:
     milestone: M2-hardening
     title: 'Receiver-capability note: 2.4 GHz is a detection/occupancy target, not a
       decode one, on a HackRF - except BLE advertising'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: DOCS
@@ -4475,7 +4475,7 @@ tasks:
     milestone: M2-hardening
     title: 'Audit the source/scheduler/inventory layers for baked-in single-device
       assumptions, so multiple concurrent SDRs stay a future option'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: PIPE
