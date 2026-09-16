@@ -2606,3 +2606,4 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Measured after the fix,** attributed by pid across four full-suite-scale runs: at most ONE residual dir per run, always the same test, always a tiny `observations/` subtree rather than a full server dir, never reproduced in five isolated repeats.
   - **Verdict recorded in docs/10 section 3.3: a bounded lag, not an unbounded leak** - the residual's pid is dead by the time anyone looks and the 1-hour sweep reclaims it.
   - **Filed T-236** for the root cause: `shutdown()` must wait for in-flight connection threads with a bounded timeout, after which T-232's retry backoff can shrink or go.
+- **B0.547 Full check green after the T-230 merge (096423b).** Lint clean; 1553/1553 tests; acceptance 31/31; 37 GB free. Note: that chain did NOT run acceptance_m2, so M2 remains unverified since the T-218 merge.
