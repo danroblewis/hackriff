@@ -2435,3 +2435,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.508 Full check green after the T-188 merge (0a62660).** Lint clean; 1448/1448 tests; acceptance 29/29; acceptance_m2 8/8; 38 GB free.
   - **Identification and Listen unaffected:** signal_062 and the M2 suite pass, so the stricter lock rule did not cost a legitimate lock.
   - **T-226 launched** into the freed slot: the same false positive on the budget-skipped path, plus the acquire/track correction inconsistency and the off-raster probe fallback.
+- **B0.509 T-224 merged (044a5ee): plugin readiness follow-ups, including a real latent deadlock.**
+  - **Restart accounting:** `records_offered_before_ready` now counts per record while the running process is not ready, instead of fetch_max over a cumulative counter. Test shows old 5 vs new 2, failing pre-fix, so the `plugin_fed_before_ready == 0` assertions can no longer fail spuriously after a restart.
+  - **Stop-aware wait:** a stop during the readiness wait now ends the run in 0.577 s instead of 24.89 s, and is not miscounted as a readiness timeout.
+  - **Deadlock found and fixed:** spawning the readsb stdout pump before the readiness wait exposed it holding `io::stdout().lock()` for the thread's life, so the main thread's `ready` line blocked, the decoder starved and its own watchdog fired (4 tests failed). The lock is now taken per line.
+  - **Live timeout branch tested:** a plugin that never signals is fed after the bound, and the counters are now non-zero for that case, which the old accounting could not express.
+  - **Manifest:** `ready_timeout_ms: 5000` set deliberately, about 3x the measured 1.63 s connect under load, with the lapped-samples consequence documented in stream-contract 9.3 and 9.6.
+  - **Evidence:** hk-plugins 43/43, data_path 11/11, signal_001_readsb 2/2, acceptance_m0 signal_001 3/3 under 6 burners; lint clean. Full check running.

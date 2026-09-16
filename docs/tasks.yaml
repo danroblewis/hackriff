@@ -3583,7 +3583,8 @@ tasks:
   - id: T-224
     milestone: M2-hardening
     title: "T-223 review follow-ups: records_offered_before_ready over-counts after a plugin restart (spurious plugin_fed_before_ready failures), the ready wait ignores shared.stop/Detach, readsb stdout undrained until ready"
-    status: in-progress
+    status: done
+    commit: 044a5ee
     priority: high
     deps: [T-223]
     parallel_group: PLUGINS
