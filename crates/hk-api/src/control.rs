@@ -26,6 +26,25 @@
 //! ([`crate::ApiState::live_control`]); on a replayed recording they answer 409 `not_live`, while
 //! display, pause, recording and bookmarks keep working.
 //!
+//! # Device actions vs view changes (T-343)
+//!
+//! Those five endpoints, and only those five, **reach the front end**. [`Action::device_action`]
+//! is the classification — an exhaustive match, so a new route has to choose a side — and each
+//! device route names its [`DeviceAction`]. The consequences are visible on the wire:
+//!
+//! - a device action's answer and audit entry carry `device: {action, id}`, where `id` is the
+//!   front end's provenance `device_id` (`null` when the source reports none, never a
+//!   placeholder), so the log says **which device** a retune moved;
+//! - `/api/control/state`'s `device` object carries the same `device_id`, so a client can name the
+//!   front end a retune would move **before** it asks for one;
+//! - device actions serialise on one [`crate::live_control::DeviceGate`]; a contended one answers
+//!   409 `device_busy` naming the holder rather than racing it to the driver.
+//!
+//! `POST /api/control/center` is not a view control. It re-derives the window's content class and,
+//! when the class or rate changes, stops and re-plumbs the running segment. Pause, scrub and zoom
+//! never reach the device (T-339); a retune does, and that asymmetry is the point. A client must
+//! therefore only call it for an **explicit** user action — never as the continuation of a pan.
+//!
 //! # Security properties
 //! - **Token in the header only.** Mutating requests (`POST`, `PUT`, `DELETE`) must carry
 //!   `Authorization: Bearer <token>`; the `?token=` query form is refused for them (it is for
@@ -71,7 +90,7 @@ use hk_model::{
 use serde_json::{Map, Value, json};
 
 use crate::http::{ApiState, ROUTES};
-use crate::live_control::{LiveControlError, LiveTuning};
+use crate::live_control::{DeviceAction, LiveControl, LiveControlError, LiveTuning};
 
 /// Display settings of the spectrum stream.
 #[derive(Clone, Debug, PartialEq)]
@@ -712,6 +731,45 @@ impl Action {
             Self::State | Self::ListBookmarks | Self::GetBookmark(_)
         )
     }
+
+    /// **Which routes reach the front end** (T-343). This match is the classification: a route is
+    /// a device action if and only if it names a [`DeviceAction`] here, and the arms are
+    /// exhaustive, so a new route cannot be added without deciding which side of the line it is
+    /// on. Everything on the `None` side only changes what is shown — pause, scrub and zoom never
+    /// touch the device (T-339), and a retune does, which is the whole asymmetry.
+    fn device_action(self) -> Option<DeviceAction> {
+        match self {
+            Self::Center => Some(DeviceAction::Retune),
+            Self::Rate => Some(DeviceAction::Rate),
+            Self::Gains => Some(DeviceAction::Gains),
+            Self::BiasTee => Some(DeviceAction::BiasTee),
+            Self::BasebandFilter => Some(DeviceAction::BasebandFilter),
+            Self::State
+            | Self::Display
+            | Self::Pause
+            | Self::Resume
+            | Self::RecordStart
+            | Self::RecordStop
+            | Self::ListBookmarks
+            | Self::CreateBookmark
+            | Self::GetBookmark(_)
+            | Self::UpdateBookmark(_)
+            | Self::DeleteBookmark(_) => None,
+        }
+    }
+}
+
+/// The `device` object on a device action's response and audit entry (T-343): which front end the
+/// action reached and which action it was.
+///
+/// `id` is `null` when the source reports no identity. That is "nothing said", not a device: it is
+/// never filled with a placeholder or with the driver name, so an audit line can never be read as
+/// naming a front end that never said which one it was (the T-325 rule for device identity).
+fn device_json(state: &ApiState, action: DeviceAction) -> Value {
+    json!({
+        "action": action.as_str(),
+        "id": state.live_control.as_deref().and_then(LiveControl::device_id),
+    })
 }
 
 /// Resolves `(method, path)`: `Ok(action)`, `Err(Some(allow))` for a known path with another
@@ -833,11 +891,15 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
         Ok(a) => a,
         Err(allow) => return Some(refuse_route(state, req, allow)),
     };
-    Some(dispatch(
+    // A device action's audit entry says which front end it reached, whether or not it succeeded:
+    // "which device retuned" must survive a refusal as well as a success.
+    let device = action.device_action().map(|d| device_json(state, d));
+    Some(dispatch_device(
         state,
         req,
         action.name(),
         action.mutating(),
+        device,
         |s| read(s, action),
         |s, body| apply(s, action, body),
     ))
@@ -879,6 +941,23 @@ pub(crate) fn dispatch(
     read: impl FnOnce(&ApiState) -> Result<Value, Fail>,
     apply: impl FnOnce(&ApiState, &Map<String, Value>) -> Result<Applied, Fail>,
 ) -> CtlResponse {
+    dispatch_device(state, req, name, mutating, None, read, apply)
+}
+
+/// [`dispatch`] for an action that may reach the front end (T-343): `device` is
+/// [`device_json`]'s object for a [`DeviceAction`], and `None` for everything that only changes
+/// what is shown. It is written to the audit entry as `device`, so the log distinguishes the
+/// requests that changed the world from the ones that changed the view, and says which device.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dispatch_device(
+    state: &ApiState,
+    req: &CtlRequest<'_>,
+    name: &'static str,
+    mutating: bool,
+    device: Option<Value>,
+    read: impl FnOnce(&ApiState) -> Result<Value, Fail>,
+    apply: impl FnOnce(&ApiState, &Map<String, Value>) -> Result<Applied, Fail>,
+) -> CtlResponse {
     if !mutating {
         return match read(state) {
             Ok(v) => CtlResponse {
@@ -909,7 +988,7 @@ pub(crate) fn dispatch(
             (f.status, r.body, Value::Null, Value::Null, Some(f.message))
         }
     };
-    let entry = json!({
+    let mut entry = json!({
         "t_s": now_s(),
         "token_id": req.caller.token_id,
         "peer": req.caller.peer,
@@ -925,6 +1004,11 @@ pub(crate) fn dispatch(
         "status": status,
         "error": error,
     });
+    // Present only on the requests that reached the front end, so a log reader can tell a device
+    // action from a view change without knowing the route table by heart.
+    if let (Some(d), Some(o)) = (device, entry.as_object_mut()) {
+        o.insert("device".into(), d);
+    }
     // Errors are reported (rate-limited) by the log; they never fail the request.
     let _ = audit.append(&entry);
     CtlResponse {
@@ -1131,8 +1215,13 @@ fn baseband_filter_json(f: &BasebandFilters) -> Value {
     }
 }
 
-fn caps_json(c: &SourceCapabilities) -> Value {
+/// The `device` object of `/api/control/state`: the source's capabilities plus, when the source
+/// reports one, its provenance `device_id` (T-343) — the UI names the front end a retune would
+/// move, so "this changes the world" is visible before the click, not after it. `null` when the
+/// source reports no identity; never a placeholder.
+fn caps_json(c: &SourceCapabilities, device_id: Option<&str>) -> Value {
     json!({
+        "device_id": device_id,
         "driver": c.driver,
         "kind": match c.kind {
             SourceKind::Hardware => "hardware",
@@ -1174,7 +1263,7 @@ pub(crate) fn state_json(state: &ApiState) -> Value {
     let live = state.live_control.as_deref();
     json!({
         "live": live.is_some(),
-        "device": live.map(|l| caps_json(l.capabilities())),
+        "device": live.map(|l| caps_json(l.capabilities(), l.device_id())),
         "tuning": live.map(|l| tuning_json(&l.tuning())),
         "run": state.run_control.as_deref().map(|r| run_json(&r.state())),
         "display_limits": state.run_control.as_deref().map(|r| display_limits_json(&r.display_limits())),
@@ -1264,8 +1353,18 @@ fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<
                 lc.set_rate(hz)?
             };
             let new = tuning_json(&t);
+            // T-343: the answer says this was a device action and which front end it moved, so a
+            // client cannot mistake a retune for the view change that a pan is.
+            let device = device_json(
+                state,
+                if action == Action::Center {
+                    DeviceAction::Retune
+                } else {
+                    DeviceAction::Rate
+                },
+            );
             Ok(ok(
-                json!({ "tuning": new, "run": run_body(state) }),
+                json!({ "tuning": new, "run": run_body(state), "device": device }),
                 old,
                 new,
             ))
@@ -1297,7 +1396,8 @@ fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<
             let lc = live(state)?;
             let old = tuning_json(&lc.tuning());
             let new = tuning_json(&lc.set_gains(&gains)?);
-            Ok(ok(json!({ "tuning": new }), old, new))
+            let device = device_json(state, DeviceAction::Gains);
+            Ok(ok(json!({ "tuning": new, "device": device }), old, new))
         }
         Action::BiasTee => {
             only(body, &["enabled"])?;
@@ -1308,7 +1408,8 @@ fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<
             let lc = live(state)?;
             let old = tuning_json(&lc.tuning());
             let new = tuning_json(&lc.set_bias_tee(enabled)?);
-            Ok(ok(json!({ "tuning": new }), old, new))
+            let device = device_json(state, DeviceAction::BiasTee);
+            Ok(ok(json!({ "tuning": new, "device": device }), old, new))
         }
         Action::BasebandFilter => {
             only(body, &["bandwidth_hz"])?;
@@ -1316,7 +1417,8 @@ fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<
             let lc = live(state)?;
             let old = tuning_json(&lc.tuning());
             let new = tuning_json(&lc.set_baseband_filter(hz)?);
-            Ok(ok(json!({ "tuning": new }), old, new))
+            let device = device_json(state, DeviceAction::BasebandFilter);
+            Ok(ok(json!({ "tuning": new, "device": device }), old, new))
         }
         Action::Display => {
             only(body, &["fft_size", "averaging", "rows_per_s", "window"])?;
@@ -1423,6 +1525,64 @@ fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-343: exactly five control routes reach the front end, and every other one is a view (or
+    /// store) change. The table is asserted by route, not by the enum, so adding
+    /// `/api/control/something` and quietly classifying it as harmless fails here.
+    #[test]
+    fn only_the_five_device_routes_reach_the_front_end() {
+        let device: Vec<(&str, &str)> = [
+            ("/api/control/center", "retune"),
+            ("/api/control/rate", "rate"),
+            ("/api/control/gains", "gains"),
+            ("/api/control/bias_tee", "bias_tee"),
+            ("/api/control/baseband_filter", "baseband_filter"),
+        ]
+        .into();
+        for (path, name) in &device {
+            let a = resolve("POST", path).unwrap().unwrap();
+            assert_eq!(
+                a.device_action().map(DeviceAction::as_str),
+                Some(*name),
+                "{path} must be a device action"
+            );
+        }
+        // The view side: pause, scrub and zoom never touch the device (T-339), and neither do
+        // display, recording or bookmarks.
+        for (method, path) in [
+            ("GET", "/api/control/state"),
+            ("POST", "/api/control/display"),
+            ("POST", "/api/control/pause"),
+            ("POST", "/api/control/resume"),
+            ("POST", "/api/control/record/start"),
+            ("POST", "/api/control/record/stop"),
+            ("GET", "/api/bookmarks"),
+            ("POST", "/api/bookmarks"),
+        ] {
+            let a = resolve(method, path).unwrap().unwrap();
+            assert_eq!(
+                a.device_action(),
+                None,
+                "{path} changes the view, not the device"
+            );
+        }
+        // Every control route is one or the other, and the device ones are exactly those five.
+        let reached: Vec<&str> = ROUTES
+            .iter()
+            .filter(|(m, p)| {
+                resolve(m, p)
+                    .and_then(Result::ok)
+                    .is_some_and(|a| a.device_action().is_some())
+            })
+            .map(|(_, p)| *p)
+            .collect();
+        let mut expected: Vec<&str> = device.iter().map(|(p, _)| *p).collect();
+        expected.sort_unstable();
+        let mut reached = reached;
+        reached.sort_unstable();
+        reached.dedup();
+        assert_eq!(reached, expected);
+    }
 
     #[test]
     fn routes_resolve_with_methods() {

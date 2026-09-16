@@ -26,6 +26,7 @@ export function deviceFrom(cs: ControlState): AppState["device"] {
     centerHz: cs.tuning?.center_hz ?? run?.center_hz ?? null,
     sampleRateHz: cs.tuning?.sample_rate_hz ?? run?.sample_rate_hz ?? null,
     rowsPerS: run?.display?.rows_per_s ?? null, recording: !!run?.recording?.active,
+    deviceId: cs.device?.device_id ?? null,
   };
 }
 

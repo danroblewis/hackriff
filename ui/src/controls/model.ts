@@ -8,6 +8,9 @@ export interface GainStageCap { name: string; min_db: number; max_db: number; st
 export type BasebandFilterCap = { min_hz: number; max_hz: number } | { values_hz: number[] };
 
 export interface DeviceCaps {
+  /** The front end's provenance `device_id` (T-343), e.g. `hackrf:<serial>`; null when the source
+   * reports no identity — "nothing said", never a placeholder. */
+  device_id: string | null;
   driver: string;
   kind: "hardware" | "replay";
   controllable: boolean;

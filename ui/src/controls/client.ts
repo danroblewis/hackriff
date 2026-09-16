@@ -73,7 +73,7 @@ export class ControlClient {
 export type Reaction =
   | "reauth"      // 401: ask for the token again
   | "not-live"    // 409 not_live: disable device controls (replay)
-  | "busy"        // 409 conflict: a re-plumb or recording is in progress
+  | "busy"        // 409 conflict / device_busy: a re-plumb, a recording, or another holder of the radio
   | "refused"     // 409 refused: legal/class gating said no (show the reason)
   | "pending"     // 504 timeout: the re-plumb continues; state polling catches up
   | "finished"    // 409 finished: the run ended
@@ -92,6 +92,9 @@ export function reactionTo(e: unknown): { reaction: Reaction; message: string } 
     case "unauthorized": return { reaction: "reauth", message: "token rejected: paste the token again" };
     case "not_live": return { reaction: "not-live", message: "replay: device settings need a live source (display, pause, record and bookmarks still work)" };
     case "conflict": return { reaction: "busy", message: `busy: ${m}` };
+    // T-343: only one process can hold the radio, so a device action can lose it. Say who has it
+    // and stop; never retry a device command into a race.
+    case "device_busy": return { reaction: "busy", message: `radio busy: ${m}` };
     case "refused": return { reaction: "refused", message: `refused: ${m}` };
     case "timeout": return { reaction: "pending", message: `still re-plumbing: ${m}` };
     case "finished": return { reaction: "finished", message: `run finished: ${m}` };
