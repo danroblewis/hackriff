@@ -3227,7 +3227,7 @@ tasks:
   - id: T-201
     milestone: M3
     title: "C18 fingerprint schema + editable signature database + matching (partial matches with ranked candidates)"
-    status: review
+    status: done
     commit: ab1df6e
     priority: normal
     deps: [T-211]
@@ -3772,7 +3772,7 @@ tasks:
   - id: T-234
     milestone: M2-hardening
     title: "M2 gate test asserts bandit dwell in wall time: under concurrent load it sees 0 outcomes and 0 dwells and fails, though the survey report itself is correct"
-    status: review
+    status: done
     commit: 1b91d04
     priority: high
     deps: []
