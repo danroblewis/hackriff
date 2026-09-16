@@ -820,6 +820,16 @@ impl OccupancyService {
         })
     }
 
+    /// T-166: offers one close's first sightings to the armed region watches.
+    fn note_watches(&self, sightings: &[FirstSighting], t: hk_model::Timestamp) {
+        if sightings.is_empty() {
+            return;
+        }
+        let guard = self.alarms.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(slot) = guard.as_ref() else { return };
+        slot.service.observe_watches(sightings, t);
+    }
+
     /// T-131: steps the alarm service with one close's folds and (T-136) its new-emitter inputs
     /// at `site`.
     #[allow(clippy::too_many_arguments)]
@@ -1187,6 +1197,10 @@ impl OccupancyService {
             let emitters = self.inventory_at_close(inner, iv, &own);
             let sightings = self.first_sightings(inner, iv, &emitters);
             a.note_first_sightings(site, &sightings);
+            // T-166: the armed region watches see the same first sightings, filtered by the
+            // T-219 relationships in force on each row (an image, harmonic, intermod or
+            // duplicate of a confirmed source is not new activity).
+            self.note_watches(&sightings, iv.end);
             if a.has_pending_sightings(site) {
                 // The churn look-back runs only on a sighting close while the rule can score.
                 let churned = if sightings.is_empty() || !a.persistent_rule_active(site) {

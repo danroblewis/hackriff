@@ -17,7 +17,7 @@
 //! All contract time is the sample clock in the snapshots (ADR-0012 §0); a dismissal is stamped
 //! with the latest sample time the engine saw (the service clock only before any snapshot).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -29,18 +29,21 @@ use hk_context::occupancy::alarm::{
 };
 use hk_context::occupancy::baseline::{FoldOutcome, IntervalObservation};
 use hk_context::occupancy::novelty::NoveltyConfig;
+use hk_context::watch::{self, StandingRelation, WatchActivity, WatchDecision, WatchRegion};
 use hk_model::attention::baseline::{CalKey, HourOfWeek, SiteKey};
 use hk_model::repo::alarms::{
     AlarmLifecycle, AlarmRow, AlarmState, AnomalyListing, AnomalyQuery, AnomalyView,
     TOP_EXPLANATIONS, anomaly_view_json,
 };
 use hk_model::{
-    AnomalyId, AnomalyStatus, AnomalyStatusChange, ContentClass, RepoError, Repository, Timestamp,
+    Anomaly, AnomalyId, AnomalyKind, AnomalyStatus, AnomalyStatusChange, AnomalySubject, Cause,
+    ContentClass, CorrelationType, EmitterId, Evidence, Explanation, ExplanationId, FreqRange,
+    Region, RepoError, Repository, SelectionId, TimeRange, Timestamp,
 };
 use hk_stream::{MessageRecord, Publisher, PublisherConfig, StreamHeader, StreamKind};
 use serde_json::{Value, json};
 
-use crate::attention::{CELL_FACTOR, SCHEME_1_CELL_HZ};
+use crate::attention::{CELL_FACTOR, FirstSighting, SCHEME_1_CELL_HZ};
 use crate::config::StreamSink;
 
 /// Stream id of the anomalies stream.
@@ -90,6 +93,11 @@ pub struct AlarmService {
     published: AtomicU64,
     inputs_observed: AtomicU64,
     inputs_mature: AtomicU64,
+    /// T-166: per-selection region-watch state (what each watch has already told the user, and
+    /// what it decided not to). Not persisted, like the hysteresis' building counts.
+    watch: Mutex<WatchState>,
+    watch_alerts: AtomicU64,
+    watch_suppressed: AtomicU64,
 }
 
 impl AlarmService {
@@ -130,6 +138,9 @@ impl AlarmService {
             published: AtomicU64::new(0),
             inputs_observed: AtomicU64::new(0),
             inputs_mature: AtomicU64::new(0),
+            watch: Mutex::new(WatchState::default()),
+            watch_alerts: AtomicU64::new(0),
+            watch_suppressed: AtomicU64::new(0),
         })
     }
 
@@ -338,6 +349,10 @@ impl AlarmService {
             "inputs_mature": self.inputs_mature.load(Ordering::Relaxed),
             "errors": self.errors.load(Ordering::Relaxed),
             "published": self.published.load(Ordering::Relaxed),
+            // T-166: region-watch alerts raised, and sightings the watches decided not to alert
+            // on (mostly rows the T-219 rules explain as another row). Disclosed, never silent.
+            "watch_alerts": self.watch_alerts.load(Ordering::Relaxed),
+            "watch_suppressed": self.watch_suppressed.load(Ordering::Relaxed),
             "suppressions": self.suppressions(),
         })
     }
@@ -521,6 +536,762 @@ impl AlarmService {
                 .or_default() += n;
         }
         json!(by_kind)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-166: region watch (ADR-0013 §4.9 gap 9)
+// ---------------------------------------------------------------------------------------------
+
+/// Most alerts kept per selection for its watch report.
+pub const WATCH_ALERTS_KEPT: usize = 256;
+
+/// Most skipped sightings kept per selection for its watch report.
+pub const WATCH_SKIPS_KEPT: usize = 64;
+
+/// One alert a region watch raised.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WatchAlertRecord {
+    /// The watched selection.
+    pub selection: SelectionId,
+    /// The anomaly row written for it.
+    pub anomaly: AnomalyId,
+    /// The emission.
+    pub emitter: EmitterId,
+    /// Its measured extent.
+    pub freq: FreqRange,
+    /// When (sample clock).
+    pub t: Timestamp,
+    /// Why it counted as new activity.
+    pub reason: String,
+}
+
+/// One sighting a region watch decided not to alert on, with its reasoning.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WatchSkipRecord {
+    /// The watched selection.
+    pub selection: SelectionId,
+    /// The emission.
+    pub emitter: EmitterId,
+    /// Why not.
+    pub reason: watch::WatchSkipReason,
+    /// The T-219 relationship that stopped it, when one did.
+    pub relation: Option<StandingRelation>,
+    /// When (sample clock).
+    pub t: Timestamp,
+    /// The reasoning, rendered.
+    pub text: String,
+}
+
+/// One region-watch alert, as [`AlarmService::observe_watches`] returns it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WatchEvent {
+    /// The alert.
+    pub alert: WatchAlertRecord,
+    /// The anomaly row.
+    pub anomaly: Anomaly,
+    /// Its explanation, carrying the reasoning.
+    pub explanation: Explanation,
+}
+
+/// What one selection's watch has done, for `GET /api/selections/{id}/watch`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WatchReport {
+    /// Whether a watch is armed right now.
+    pub armed: bool,
+    /// Alerts raised, newest last.
+    pub alerts: Vec<WatchAlertRecord>,
+    /// Sightings not alerted on, newest last (bounded by [`WATCH_SKIPS_KEPT`]).
+    pub skipped: Vec<WatchSkipRecord>,
+    /// Alerts raised since the service started.
+    pub alerted_total: u64,
+    /// Sightings suppressed since the service started.
+    pub suppressed_total: u64,
+}
+
+#[derive(Default)]
+struct WatchState {
+    /// Emitters each watch has already alerted on (one alert per emitter per watch).
+    alerted: BTreeMap<SelectionId, BTreeSet<EmitterId>>,
+    alerts: BTreeMap<SelectionId, VecDeque<WatchAlertRecord>>,
+    skipped: BTreeMap<SelectionId, VecDeque<WatchSkipRecord>>,
+    totals: BTreeMap<SelectionId, (u64, u64)>,
+}
+
+fn push_bounded<T>(q: &mut VecDeque<T>, item: T, cap: usize) {
+    q.push_back(item);
+    while q.len() > cap {
+        q.pop_front();
+    }
+}
+
+impl AlarmService {
+    /// T-166: runs the armed region watches over one close's inventory first sightings.
+    ///
+    /// This is the only place the watch rule meets the repository, and the order matters. For
+    /// each sighting it reads the **relationships currently in force** on that row
+    /// (`Repository::emitter_relations`, the T-219 claims) and hands them to
+    /// [`hk_context::watch::evaluate`], which refuses to call a row new activity when it is
+    /// suppressed by a Confirmed entry, a duplicate of a stronger candidate, or attributed as an
+    /// image / harmonic / intermod of a confirmed source.
+    ///
+    /// **A relationship read that fails suppresses the alert rather than raising it.** The unsafe
+    /// direction is alerting on an image because the lookup was unavailable, which is exactly when
+    /// the user would stop trusting the watch.
+    ///
+    /// Alerts are anomalies plus explanations plus stream messages. Nothing here tunes, records,
+    /// deletes or changes any other row.
+    pub fn observe_watches(&self, sightings: &[FirstSighting], t: Timestamp) -> Vec<WatchEvent> {
+        if sightings.is_empty() {
+            return Vec::new();
+        }
+        let mut repo = lock(&self.repo);
+        let selections = match repo.selections() {
+            Ok(s) => s,
+            Err(_) => {
+                self.errors.fetch_add(1, Ordering::Relaxed);
+                return Vec::new();
+            }
+        };
+        let regions = watch::armed_regions(&selections);
+        if regions.is_empty() {
+            return Vec::new();
+        }
+        let mut state = lock(&self.watch);
+        let mut out = Vec::new();
+        for s in sightings {
+            let standing = match repo.emitter_relations(s.emitter) {
+                Ok(r) => StandingRelation::standing(&r),
+                Err(_) => {
+                    // Fail closed: without the relationships we cannot tell new activity from the
+                    // receiver's own image of something already confirmed.
+                    self.errors.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            };
+            let activity = WatchActivity {
+                emitter: s.emitter,
+                freq: s.freq,
+                t: s.t,
+                relations: standing,
+            };
+            for region in &regions {
+                let empty = BTreeSet::new();
+                let already = state.alerted.get(&region.selection).unwrap_or(&empty);
+                match watch::evaluate(region, &activity, already) {
+                    WatchDecision::Alert(reason) => {
+                        match self.raise_watch_alert(&mut repo, region, &activity, reason, t) {
+                            Ok(event) => {
+                                state
+                                    .alerted
+                                    .entry(region.selection)
+                                    .or_default()
+                                    .insert(activity.emitter);
+                                push_bounded(
+                                    state.alerts.entry(region.selection).or_default(),
+                                    event.alert.clone(),
+                                    WATCH_ALERTS_KEPT,
+                                );
+                                state.totals.entry(region.selection).or_default().0 += 1;
+                                self.watch_alerts.fetch_add(1, Ordering::Relaxed);
+                                self.publish_watch(&event, region);
+                                out.push(event);
+                            }
+                            Err(_) => {
+                                self.errors.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    WatchDecision::Skip(skip) => {
+                        // Outside the extent is not this watch's business and is not counted as a
+                        // suppression; the other reasons are, and are kept with their reasoning.
+                        if skip.reason == watch::WatchSkipReason::OutsideExtent {
+                            continue;
+                        }
+                        push_bounded(
+                            state.skipped.entry(region.selection).or_default(),
+                            WatchSkipRecord {
+                                selection: region.selection,
+                                emitter: activity.emitter,
+                                reason: skip.reason,
+                                relation: skip.relation.clone(),
+                                t: activity.t,
+                                text: skip.text.clone(),
+                            },
+                            WATCH_SKIPS_KEPT,
+                        );
+                        state.totals.entry(region.selection).or_default().1 += 1;
+                        self.watch_suppressed.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Writes one alert: an anomaly row plus the explanation that carries the rule's reasoning.
+    ///
+    /// The anomaly's `score` is 1 and its `baseline_ref` is a `region-watch:v1` key, never a
+    /// `c12-alarm:v1` one: a watch alert has **no baseline** and claims no measured novelty. It
+    /// says "this is new inside the extent you asked to watch", which is why the user is told.
+    fn raise_watch_alert(
+        &self,
+        repo: &mut Repository,
+        region: &WatchRegion,
+        activity: &WatchActivity,
+        reason: String,
+        t: Timestamp,
+    ) -> Result<WatchEvent, RepoError> {
+        let anomaly = Anomaly {
+            id: AnomalyId::new(),
+            kind: AnomalyKind::NewEmitter,
+            subject: AnomalySubject::Emitter(activity.emitter),
+            region: Region::new(activity.freq, TimeRange::new(activity.t, activity.t)),
+            score: 1.0,
+            baseline_ref: Some(watch::baseline_ref(region.selection, activity.emitter)),
+            t,
+            detector_version: watch::RULE_VERSION.into(),
+        };
+        repo.insert_anomaly(&anomaly)?;
+        let explanation = Explanation {
+            id: ExplanationId::new(),
+            anomaly_ref: anomaly.id,
+            // The device's own memory of what the user asked to watch is what raised this, and
+            // the description is the rule's reasoning in words. Always disclosed.
+            cause: Cause::OwnHistory {
+                description: reason.clone(),
+            },
+            correlation_type: CorrelationType::Geometry,
+            score: 1.0,
+            evidence: vec![
+                Evidence::Value {
+                    name: "f_lo_hz".into(),
+                    value: activity.freq.lo_hz,
+                },
+                Evidence::Value {
+                    name: "f_hi_hz".into(),
+                    value: activity.freq.hi_hz,
+                },
+            ],
+            supersedes: None,
+            provisional: false,
+            rule_version: watch::RULE_VERSION.into(),
+            t,
+        };
+        repo.insert_explanation(&explanation)?;
+        Ok(WatchEvent {
+            alert: WatchAlertRecord {
+                selection: region.selection,
+                anomaly: anomaly.id,
+                emitter: activity.emitter,
+                freq: activity.freq,
+                t: activity.t,
+                reason,
+            },
+            anomaly,
+            explanation,
+        })
+    }
+
+    /// Publishes a watch alert on the `anomalies` stream, in the documented list-row shape plus a
+    /// `watch` block naming the selection whose watch fired.
+    fn publish_watch(&self, e: &WatchEvent, region: &WatchRegion) {
+        let Some(p) = &self.publisher else { return };
+        let view = AnomalyView {
+            listing: AnomalyListing {
+                anomaly: e.anomaly.clone(),
+                status: AnomalyStatus::Open,
+                // No AlarmRow: a watch alert is not a baseline novelty alarm.
+                alarm: None,
+            },
+            explanations: vec![e.explanation.clone()],
+            history: Vec::new(),
+        };
+        let msg = MessageRecord {
+            t: e.alert.t,
+            emitter_id: None,
+            provenance_ref: None,
+            content_class: ContentClass::Unrestricted,
+            decode_id: None,
+            annotation_id: None,
+            decoder: None,
+            frame_model: Some("anomaly".into()),
+            crc_status: None,
+            identity: None,
+            metadata: json!({
+                "kind": "anomaly",
+                "transition": AlarmLifecycle::Raised,
+                "anomaly": anomaly_view_json(&view, Some(TOP_EXPLANATIONS)),
+                "watch": {
+                    "selection_id": region.selection.to_string(),
+                    "name": region.name,
+                    "f_lo": region.freq.lo_hz,
+                    "f_hi": region.freq.hi_hz,
+                    "reason": e.alert.reason,
+                },
+            }),
+            content: None,
+        };
+        if lock(p).publish_message(&msg).is_ok() {
+            self.published.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// T-166: what one selection's watch has done. `NotFound` when there is no such selection.
+    pub fn watch_report(&self, id: SelectionId) -> Result<WatchReport, AlarmFail> {
+        let armed = {
+            let repo = lock(&self.repo);
+            match repo.selection(id) {
+                Ok(s) => s.watching(),
+                Err(RepoError::NotFound { .. }) => return Err(AlarmFail::NotFound),
+                Err(e) => return Err(AlarmFail::Failed(e.to_string())),
+            }
+        };
+        let state = lock(&self.watch);
+        let (alerted_total, suppressed_total) = state.totals.get(&id).copied().unwrap_or((0, 0));
+        Ok(WatchReport {
+            armed,
+            alerts: state
+                .alerts
+                .get(&id)
+                .map(|q| q.iter().cloned().collect())
+                .unwrap_or_default(),
+            skipped: state
+                .skipped
+                .get(&id)
+                .map(|q| q.iter().cloned().collect())
+                .unwrap_or_default(),
+            alerted_total,
+            suppressed_total,
+        })
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use hk_model::*;
+
+    use super::*;
+
+    fn t(sec: i64) -> Timestamp {
+        Timestamp::from_unix_nanos(1_789_000_000_000_000_000 + sec * 1_000_000_000)
+    }
+
+    fn tr(a: i64, b: i64) -> TimeRange {
+        TimeRange::new(t(a), t(b))
+    }
+
+    /// A repository with one survey to hang detections off.
+    fn scene() -> (Repository, SurveyId) {
+        let mut r = Repository::open_in_memory().unwrap();
+        let plan = ScanPlan {
+            id: ScanPlanId::new(),
+            version: 1,
+            name: "fm".into(),
+            created_at: t(0),
+            regions: vec![PlanRegion {
+                freq: FreqRange::new(88e6, 108e6),
+                priority: 1.0,
+                revisit_ns: None,
+            }],
+            policy: ScanPolicy::SweepThenDwell,
+            gain_table: vec![],
+            schedule: Schedule::Cron {
+                expr: "* * * * *".into(),
+            },
+            extra: serde_json::Value::Null,
+        };
+        r.insert_scan_plan(&plan).unwrap();
+        let survey = Survey {
+            id: SurveyId::new(),
+            plan_id: plan.id,
+            plan_version: plan.version,
+            device_id: "test".into(),
+            state: SurveyState::Open,
+            t_start: t(0),
+            t_end: None,
+            summary: None,
+        };
+        r.insert_survey(&survey).unwrap();
+        let id = survey.id;
+        (r, id)
+    }
+
+    fn prov(r: &mut Repository, lo: f64) -> ProvenanceId {
+        r.intern_provenance(&Provenance {
+            device_id: "test".into(),
+            tune: Tune {
+                center_hz: lo,
+                sample_rate_hz: 2.4e6,
+                lna_db: 32.0,
+                vga_db: 30.0,
+                amp_on: true,
+                bandwidth_hz: 1.75e6,
+            },
+            overload: false,
+            quantisation_limited: false,
+            temperature_c: None,
+            antenna_port: None,
+            clock_source: ClockSource::Internal,
+            clock_locked: true,
+            calibration_state_ref: None,
+            spur_mask_ref: None,
+            timestamp_method: TimestampMethod::Synthetic,
+            timestamp_error_budget_ns: None,
+        })
+        .unwrap()
+    }
+
+    /// One inventory row from a track sighting, with a detection linked through its track so the
+    /// T-219 rules can read its level, −3 dB width, suspect flags and tuning centre.
+    #[allow(clippy::too_many_arguments)]
+    fn station(
+        r: &mut Repository,
+        survey: SurveyId,
+        provenance: ProvenanceId,
+        f: f64,
+        obw: f64,
+        snr: f64,
+        peak_dbfs: f32,
+        seen: TimeRange,
+        flags: DetectionFlags,
+    ) -> EmitterId {
+        let track_id = TrackId::new();
+        let fp = Fingerprint {
+            duty_cycle: Some(1.0),
+            ..Fingerprint::new(f, obw)
+        };
+        let id = r
+            .record_sighting(
+                &Sighting {
+                    source: LinkTarget::Track(track_id),
+                    seen,
+                    count: 4,
+                    f_center_hz: f,
+                    bandwidth_hz: obw,
+                    fingerprint: Some(fp),
+                    identity: None,
+                    context: None,
+                    classification: None,
+                    tags: Vec::new(),
+                },
+                None,
+            )
+            .unwrap()
+            .emitter_id;
+        let d = Detection {
+            id: DetectionId::new(),
+            survey_id: survey,
+            time: seen,
+            f_center_hz: f,
+            obw_hz: obw,
+            xdb_bandwidth_hz: Some(obw),
+            xdb_level_db: Some(-3.0),
+            snr_peak_db: snr,
+            snr_mean_db: snr - 3.0,
+            peak_level_dbfs: peak_dbfs,
+            peak_level_dbm: None,
+            sk: None,
+            clip_count: 0,
+            detector_version: "test@1".into(),
+            provenance_ref: provenance,
+            flags,
+        };
+        r.insert_detections(std::slice::from_ref(&d)).unwrap();
+        r.upsert_track(&Track {
+            id: track_id,
+            state: TrackState::Closed,
+            split_from: None,
+            time: seen,
+            f_center_hz: f,
+            bandwidth_hz: obw,
+            detection_count: 1,
+            timing: TimingFeatures {
+                duty_cycle: Some(1.0),
+                ..TimingFeatures::default()
+            },
+            updated_at: seen.end,
+        })
+        .unwrap();
+        r.link_detections_to_track(track_id, &[d.id], seen.end)
+            .unwrap();
+        id
+    }
+
+    fn confirm(r: &mut Repository, id: EmitterId) {
+        r.change_emitter_lifecycle(
+            id,
+            LifecycleState::Confirmed,
+            LifecycleAuthor::Auto,
+            "test/confirm@1",
+            "steady trusted track",
+            t(5),
+        )
+        .unwrap();
+    }
+
+    fn service(repo: Repository) -> AlarmService {
+        AlarmService::open(
+            Arc::new(Mutex::new(repo)),
+            None,
+            Arc::new(|| Timestamp::from_unix_nanos(0)),
+        )
+        .unwrap()
+    }
+
+    fn sighting(emitter: EmitterId, f: f64, bw: f64) -> FirstSighting {
+        FirstSighting {
+            emitter,
+            freq: FreqRange::centered(f, bw),
+            t: t(10),
+        }
+    }
+
+    /// **The T-166 × T-219 interaction, end to end.**
+    ///
+    /// The relationships here are *derived from the measurements* by `resolve_overlaps` — the real
+    /// T-219 rules, not hand-written claims — and they are read back from the repository by the
+    /// watch service itself. So this also proves the relation data is reachable from where the
+    /// watch rule runs.
+    ///
+    /// Inside one watched selection: a genuinely new emission, the receiver's image of a confirmed
+    /// station, and a second box over that same confirmed station. Only the first is new activity.
+    /// A watch that fired on the other two would be teaching the user to ignore it.
+    #[test]
+    fn a_region_watch_alerts_on_new_activity_and_never_on_a_suppressed_or_attributed_row() {
+        let (mut r, sv) = scene();
+        let p = prov(&mut r, 100.8e6);
+        let tol = Tolerances::default();
+
+        // A strong confirmed station at 101.3 MHz.
+        let source = station(
+            &mut r,
+            sv,
+            p,
+            101.3e6,
+            180e3,
+            26.0,
+            -18.0,
+            tr(0, 5),
+            DetectionFlags::default(),
+        );
+        confirm(&mut r, source);
+
+        // Tuned at 100.8 MHz, its mirror lands at 100.3 MHz, 30 dB down, at the source's width,
+        // and the detector's own mirror test flagged it: an image, not an emission.
+        let image = station(
+            &mut r,
+            sv,
+            p,
+            100.3e6,
+            180e3,
+            8.0,
+            -48.0,
+            tr(1, 4),
+            DetectionFlags {
+                image_candidate: true,
+                ..DetectionFlags::default()
+            },
+        );
+        // A second, weaker box 60 kHz into the confirmed station's skirt: the same emission again.
+        let offset = station(
+            &mut r,
+            sv,
+            p,
+            101.36e6,
+            180e3,
+            14.0,
+            -30.0,
+            tr(1, 5),
+            DetectionFlags::default(),
+        );
+        // A real new emission well clear of everything: no mechanism and no overlap explain it.
+        let fresh = station(
+            &mut r,
+            sv,
+            p,
+            99.8e6,
+            180e3,
+            22.0,
+            -22.0,
+            tr(1, 5),
+            DetectionFlags::default(),
+        );
+
+        for id in [image, offset, fresh] {
+            r.resolve_overlaps(id, "test/overlap@1", t(5), &tol)
+                .unwrap();
+        }
+        // The scene is honest: the rules really did attribute two rows and leave the third alone.
+        let kind_of = |r: &Repository, id: EmitterId| {
+            r.emitter_relations(id).unwrap().first().map(|x| x.kind)
+        };
+        assert_eq!(kind_of(&r, image), Some(RelationKind::ArtifactOf));
+        assert_eq!(kind_of(&r, offset), Some(RelationKind::SuppressedBy));
+        assert_eq!(kind_of(&r, fresh), None, "an independent emission");
+
+        // Watch the whole band.
+        let mut sel = Selection::new("FM band", 99.6e6, 102.0e6);
+        sel.watch = Some(SelectionWatch { enabled: true });
+        let selection_id = sel.id;
+        r.insert_selection(&sel).unwrap();
+
+        let svc = service(r);
+        let events = svc.observe_watches(
+            &[
+                sighting(fresh, 99.8e6, 180e3),
+                sighting(image, 100.3e6, 180e3),
+                sighting(offset, 101.36e6, 180e3),
+            ],
+            t(10),
+        );
+
+        // Exactly one alert, and it is the emission nothing explains.
+        assert_eq!(
+            events.iter().map(|e| e.alert.emitter).collect::<Vec<_>>(),
+            vec![fresh],
+            "the image and the suppressed twin must not alert as new activity"
+        );
+        let alert = &events[0];
+        assert_eq!(alert.anomaly.kind, AnomalyKind::NewEmitter);
+        assert_eq!(alert.anomaly.subject, AnomalySubject::Emitter(fresh));
+        assert_eq!(
+            watch::parse_baseline_ref(alert.anomaly.baseline_ref.as_deref().unwrap()),
+            Some((selection_id, fresh)),
+            "the alert is keyed to the selection whose watch fired"
+        );
+
+        // The alert carries its reasoning, in the explanation as well as the record.
+        let Cause::OwnHistory { description } = &alert.explanation.cause else {
+            panic!("a watch alert must explain itself: {:?}", alert.explanation);
+        };
+        assert!(
+            description.contains("FM band") && description.contains("no standing suppression"),
+            "thin reasoning: {description}"
+        );
+
+        // The suppressed rows are disclosed, with the relationship that stopped each of them.
+        let report = svc.watch_report(selection_id).unwrap();
+        assert!(report.armed);
+        assert_eq!(report.alerted_total, 1);
+        assert_eq!(report.suppressed_total, 2);
+        let by_emitter = |id: EmitterId| {
+            report
+                .skipped
+                .iter()
+                .find(|s| s.emitter == id)
+                .unwrap_or_else(|| panic!("no skip recorded for {id}"))
+                .clone()
+        };
+        let img = by_emitter(image);
+        assert_eq!(img.reason, watch::WatchSkipReason::Deferred);
+        assert_eq!(
+            img.relation.as_ref().map(|x| x.kind),
+            Some(RelationKind::ArtifactOf)
+        );
+        assert!(
+            img.text.contains("not new activity") && img.text.contains("100.800000 MHz"),
+            "the skip quotes the artifact arithmetic: {}",
+            img.text
+        );
+        let off = by_emitter(offset);
+        assert_eq!(
+            off.relation.as_ref().map(|x| x.kind),
+            Some(RelationKind::SuppressedBy)
+        );
+
+        // Told once: the same sightings again raise nothing new.
+        let again = svc.observe_watches(&[sighting(fresh, 99.8e6, 180e3)], t(20));
+        assert!(again.is_empty(), "one alert per emitter per watch");
+    }
+
+    /// A watch is armed and disarmed by the user, and disarming is not destructive: new activity
+    /// stops raising alerts, and the alert already raised keeps its row and its reasoning.
+    #[test]
+    fn disarming_a_watch_stops_new_alerts_and_keeps_the_ones_already_raised() {
+        let (mut r, sv) = scene();
+        let p = prov(&mut r, 100.8e6);
+        let first = station(
+            &mut r,
+            sv,
+            p,
+            99.8e6,
+            180e3,
+            22.0,
+            -22.0,
+            tr(1, 5),
+            DetectionFlags::default(),
+        );
+        let second = station(
+            &mut r,
+            sv,
+            p,
+            100.9e6,
+            180e3,
+            22.0,
+            -22.0,
+            tr(1, 5),
+            DetectionFlags::default(),
+        );
+        let mut sel = Selection::new("FM band", 99.6e6, 102.0e6);
+        sel.watch = Some(SelectionWatch { enabled: true });
+        let id = sel.id;
+        r.insert_selection(&sel).unwrap();
+        let svc = service(r);
+
+        assert_eq!(
+            svc.observe_watches(&[sighting(first, 99.8e6, 180e3)], t(10))
+                .len(),
+            1
+        );
+
+        // Disarm through the store, as the API's PUT does.
+        {
+            let mut repo = lock(&svc.repo);
+            let mut stored = repo.selection(id).unwrap();
+            stored.watch = Some(SelectionWatch { enabled: false });
+            repo.update_selection(&stored).unwrap();
+        }
+        assert!(
+            svc.observe_watches(&[sighting(second, 100.9e6, 180e3)], t(20))
+                .is_empty(),
+            "a disarmed watch raises nothing"
+        );
+        let report = svc.watch_report(id).unwrap();
+        assert!(!report.armed);
+        assert_eq!(report.alerts.len(), 1, "the earlier alert is kept");
+        assert!(!report.alerts[0].reason.is_empty(), "with its reasoning");
+    }
+
+    /// An unwatched selection is quiet, and an unknown one is `NotFound`.
+    #[test]
+    fn an_unarmed_selection_never_alerts() {
+        let (mut r, sv) = scene();
+        let p = prov(&mut r, 100.8e6);
+        let e = station(
+            &mut r,
+            sv,
+            p,
+            99.8e6,
+            180e3,
+            22.0,
+            -22.0,
+            tr(1, 5),
+            DetectionFlags::default(),
+        );
+        let sel = Selection::new("FM band", 99.6e6, 102.0e6);
+        let id = sel.id;
+        r.insert_selection(&sel).unwrap();
+        let svc = service(r);
+        assert!(
+            svc.observe_watches(&[sighting(e, 99.8e6, 180e3)], t(10))
+                .is_empty()
+        );
+        assert!(!svc.watch_report(id).unwrap().armed);
+        assert_eq!(
+            svc.watch_report(SelectionId::new()),
+            Err(AlarmFail::NotFound)
+        );
     }
 }
 

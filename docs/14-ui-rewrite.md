@@ -58,3 +58,7 @@ Do a design task first, then parallelise.
   - UI tests + phone-width pass; retire the old stacked layout.
 
 Keep the demo mergeable; the supervisor rebuilds the bears demo when UI changes land.
+
+## Pending user sign-off: time-bounded signals and a view-scoped inventory (2026-09-16)
+
+User direction from live Explore testing: the inventory answers "what has EVER been seen here" but is presented as "what is here NOW", so dead signals pile up as live candidates. The reframe - signals as time-bounded events (bursts and chirps first-class, no carrier or stable frequency required), Explore scoped to the viewed waterfall window with scrub-back over the IQ ring, and the all-time catalogue moved to a separate history surface - is **designed under T-253 and awaits the user's sign-off. Do not implement it from this note.**

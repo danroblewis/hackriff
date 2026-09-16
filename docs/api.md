@@ -337,8 +337,21 @@ Persisted named region selections (several at once, survive a restart, stored in
 | PUT | `/api/selections/{id}` | any create field but `id` (`null` clears `t_lo`/`t_hi`/`notes`/`tags`) | `Selection` |
 | DELETE | `/api/selections/{id}` | – | `{"deleted": Selection}` |
 | POST | `/api/selections/{id}/links` | `{"kind" ("demodulation"|"recording"|"bitstream"|"inspection"), "target", "note"?}` | `Selection` (`201`) |
+| GET | `/api/selections/{id}/watch` | – | the region watch's alerts and the activity it did not alert on (T-166) |
 
-A client may choose `id` (any UUID) so an optimistic/offline-created selection keeps its identity when it syncs; a retried create then answers `409` and the client should `PUT` instead. `Selection`: `{id, name, f_lo, f_hi, t_lo, t_hi (null = any time), notes, tags, links: [{kind, target, t, note}] (oldest first), created, updated}`.
+A client may choose `id` (any UUID) so an optimistic/offline-created selection keeps its identity when it syncs; a retried create then answers `409` and the client should `PUT` instead. `Selection`: `{id, name, f_lo, f_hi, t_lo, t_hi (null = any time), notes, tags, watch, links: [{kind, target, t, note}] (oldest first), created, updated}`.
+
+### Region watch (T-166, ADR-0013 §4.9 gap 9)
+
+`watch` on a selection arms "alert on new activity" over its extent: `{"enabled": true}` to arm, `{"enabled": false}` or `null` to disarm; absent on create or update leaves it as it was, and `null` is the only accepted non-object. **There is no threshold to set on purpose** — what counts as activity is measured, never dialled in. A selection bounded in time (`t_lo`/`t_hi`) is watched only inside that window.
+
+An armed watch offers every emission the pipeline first sights inside the extent to the rule, and raises, for each one it accepts, an `Anomaly` (kind `new-emitter`, `baseline_ref` `region-watch:v1;selection=<uuid>;emitter=<uuid>`, `detector_version` `hk-context.region-watch@1`) with an `Explanation` whose `cause.kind` is `own-history` and whose `description` is the reasoning in words, plus a message on the **`anomalies` stream** in the usual list-row shape with an extra `metadata.watch` block (`{selection_id, name, f_lo, f_hi, reason}`). A watch alert carries `alarm: null`: it is not a baseline novelty alarm, has no baseline, and its `score` of 1 means "new inside the extent you asked to watch", not a measured novelty.
+
+**It never alerts on a row the T-219 relationship rules explain as another row** — one suppressed by a Confirmed entry, a duplicate of a stronger candidate, or attributed as an image, harmonic or intermod of a confirmed source. Such a row is a signal already known, or the receiver's own artifact, and reporting it as new activity would train the user to ignore the watch. A relationship lookup that fails suppresses the alert rather than raising it. Each emitter alerts at most once per watch.
+
+**Alerts carry their reasoning and are reversible, never an automatic action.** Raising one tunes nothing, records nothing and changes no other row; alerts are dismissed and re-opened through `/api/anomalies/{id}/dismiss|reopen` like any other anomaly; and disarming the watch stops new alerts while keeping every alert already raised, with its reasoning and history. Suppressed activity is disclosed rather than dropped silently, the same stance ADR-0012 §7.3 takes towards alarm suppressions.
+
+`GET /api/selections/{id}/watch` answers `{selection_id, watch, armed, alerts, suppressed, alerted_total, suppressed_total}`. `alerts[]` is `{anomaly_id, emitter, f_lo, f_hi, t, reason}` and `suppressed[]` is `{emitter, reason ("deferred" | "already-alerted"), relation ("suppressed-by" | "duplicate-of" | "artifact-of" | null), artifact ("image" | "harmonic" | "intermod" | null), source, t, explanation}`, both oldest first and bounded (256 alerts, 64 suppressed). Counters are per run and also appear in `/api/status` as `watch_alerts` and `watch_suppressed`. `404 not_found` for an unknown selection, `503 unavailable` with no watch service.
 
 ## Output recordings (T-061)
 

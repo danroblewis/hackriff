@@ -18,6 +18,7 @@
 pub mod cluster;
 pub mod features;
 pub mod matcher;
+pub mod rtl433_import; // T-214 (ADR-0016 §5): importing rtl_433 flex specs as untrusted signatures
 pub mod seed; // T-215 (ADR-0016 §8): the MAUTO seed, assembled from the repository
 
 pub use cluster::{
@@ -26,6 +27,10 @@ pub use cluster::{
 };
 pub use features::{FeatureObservation, aggregate, fold_observation};
 pub use matcher::{MATCH_MIN_DISCRIMINATING, default_tolerance, match_signatures, missing_fields};
+pub use rtl433_import::{
+    FlexImport, FlexImportError, ImportIntoRepoError, UnsupportedField, import_flex_spec,
+    import_flex_spec_into,
+};
 pub use seed::seed_emitter;
 
 use hk_model::signature::{EmissionFeatures, MatchOutcome, SignatureMatch};

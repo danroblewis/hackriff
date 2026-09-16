@@ -29,6 +29,7 @@
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
+//! | `/api/selections/<id>/watch` | GET | token | T-166 the selection's region-watch alerts and the activity it did not alert on, with reasoning ([`crate::selections`]) |
 //! | `/api/outputs[/record/start\|/record/stop]`, `/api/outputs/<id>/files/<name>` | GET, POST | token (header only for mutating) | T-061 output recordings and downloads ([`crate::outputs`]) |
 //! | `/api/analyze` | POST | token | T-190 stub: validates a selection/emitter/band target, answers `501 not_implemented` until MAUTO fills it in ([`crate::analyze`]) |
 //! | `/api/iqbuffer[?…]`, `/api/iqbuffer/clip` | GET, POST | token (header only for mutating) | T-157 rolling IQ capture buffer and clip export ([`crate::iqbuffer`]) |
@@ -129,6 +130,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("PUT", "/api/selections/{id}"),
     ("DELETE", "/api/selections/{id}"),
     ("POST", "/api/selections/{id}/links"),
+    ("GET", "/api/selections/{id}/watch"),
     ("GET", "/api/outputs"),
     ("POST", "/api/outputs/record/start"),
     ("POST", "/api/outputs/record/stop"),
@@ -311,6 +313,9 @@ pub struct ApiState {
     /// T-205: labelled-capture dataset export for `/api/datasets*` ([`crate::datasets`]); `None`
     /// answers 503.
     pub datasets: Option<Arc<dyn crate::datasets::DatasetControl>>,
+    /// T-166: the region watch behind `GET /api/selections/{id}/watch`
+    /// ([`crate::selections::WatchControl`]); `None` answers 503.
+    pub watch: Option<Arc<dyn crate::selections::WatchControl>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).

@@ -2683,7 +2683,7 @@ tasks:
   - id: T-166
     milestone: MUI
     title: "MUI API gap 9: region Watch alerts"
-    status: in-progress
+    status: done
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -3457,7 +3457,7 @@ tasks:
   - id: T-214
     milestone: M3
     title: "C18 signature import from rtl_433 flex/device specs into immutable signature versions"
-    status: todo
+    status: done
     priority: normal
     deps: [T-201]
     parallel_group: M3B
@@ -3890,7 +3890,7 @@ tasks:
   - id: T-240
     milestone: M3
     title: "OTA fixtures still abstain after C14 landed: four instantaneous-statistics dimensions (sigma_aa, if_bimodality, gamma_max, sigma_ap) sit at the z=6 clamp - a sim-to-real gap in the synthetic grid's instantaneous statistics"
-    status: in-progress
+    status: done
     priority: normal
     deps: [T-238, T-205]
     parallel_group: M3A
@@ -4071,6 +4071,19 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+    prerequisite_from_t240_2026_09_16: 'sigma_ap/sigma_dp measure UNWRAPPED phase
+      residual, which accumulates with observation length: 95.5 at a 4k-sample snippet
+      vs 252.3 at the 381k-sample production capture (z +5.06). This is a GENERAL defect
+      affecting every long production snippet, not one capture. T-240 implemented
+      length-invariance (fixed 4096 window, median across windows), measured it and
+      REVERTED it: it lifts top-1 0.907->0.919 and fixes FM, but regresses unknown recall
+      0.783->0.753, false-known 0.217->0.247, fsk open-set 0.819->0.667 and introduces
+      wrong-family calls (ask3->analog, chirped-fsk->analog) because per-window detrending
+      removes the drift that rejected chirped-fsk. Treat as a prerequisite to solve, not an
+      optional lever. ALSO: the 915 MHz OTA fixture was abstaining because the TEST was
+      classifying the receiver DC offset - any pre-2026-09-16 conclusion from that fixture
+      must be re-read.'
+
   - id: T-249
     milestone: M3
     title: 'Within-family class accuracy for cw and ssb is ~0 at and above gate (wrong
@@ -4092,6 +4105,125 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+  - id: T-250
+    milestone: M2-hardening
+    title: 'Candidate dedup/merge is not collapsing skirt fragments in the served path:
+      82 candidates around one FM signal, two at the SAME frequency (99.6378), plus
+      Confirmed dupes 99.8166/99.8173'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPE
+    use_cases:
+    - AWARE-053
+    found_by: 'user, live Explore testing on staging 2026-09-16: candidates at 99.6035
+      / 99.6319 / 99.6378 / 99.6378 / 99.6444 are skirt fragments of one emitter'
+    acceptance: 'DIAGNOSE BEFORE CHANGING ANYTHING - the coordinator already checked
+      two wrong hypotheses. The call site EXISTS: TrackInventory::touch calls
+      resolve_overlaps on every touched entry (hk-pipeline/src/inventory.rs:585), and
+      the served inventory defaults to RelationVisibility::Shown so deferring rows are
+      already hidden (hk-api/src/query.rs:633). So this is NOT a missing-caller vacuum
+      like T-242/T-247. Establish the real cause with measurement, in this order:
+      (a) confirm which commit the STAGING build is running - it may simply predate
+      T-219/T-242; (b) two rows at an identical 99.6378 must collapse under any
+      tolerance, so determine whether resolve_overlaps is reached for them at all
+      (lifecycle state, candidate-vs-candidate gating, the `t` argument); (c) HYPOTHESIS
+      ONLY, verify or kill it: skirt fragments may carry under-estimated bandwidth so
+      their bands do not overlap each other, leaving neither the Confirmed-suppresses
+      rule nor the candidate-duplicate rule able to fire. Success = the candidate list
+      shows distinct emitters, not skirt fragments, on the user''s own 99.6 MHz scene.
+      Do not widen a tolerance to make a demo look better: state what you changed and
+      what it costs on the blind acceptance'
+    area: crates/hk-pipeline/src/inventory.rs, crates/hk-model/src/repo/relate.rs, crates/hk-api/src/query.rs
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-251
+    milestone: M2-hardening
+    title: 'Candidates never decay or get re-verified: seen-counts accumulate forever
+      (38 to 582,500 per hour) and a candidate for a signal that stopped hours ago sits
+      in the live list'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPE
+    use_cases:
+    - AWARE-042
+    - AWARE-053
+    found_by: 'user, live Explore testing on staging 2026-09-16'
+    acceptance: 'wire the M2 revisit scheduler to re-check candidates and DECAY
+      confidence when a region goes quiet, demoting stale ones to "no longer likely"
+      and/or expiring them. A candidate whose signal stopped must leave the live list.
+      Decay is evidence-based and reversible - a returning signal revives its entry
+      rather than creating a new one (the relation rows are append-only, T-219). State
+      the decay law and its time constant explicitly and justify them; do not tune to
+      make one screenshot look right. Blind acceptance must not regress. NOTE: the
+      monotonic seen-count is also evidence for the time-model reframe in T-253 - a
+      counter that only increases is what you get when the model has no time extent;
+      coordinate rather than pre-empting that design'
+    area: crates/hk-pipeline (revisit scheduler, inventory review), crates/hk-model (confidence/lifecycle)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
+  - id: T-252
+    milestone: MUI
+    title: 'RDS should surface as an accumulated PS / RadioText / PI / clock view, not
+      a per-frame packet stream'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: MUI-X3
+    use_cases:
+    - SIGNAL-062
+    found_by: 'user, live Explore testing on staging 2026-09-16: "the per-frame stream
+      is plumbing; the readable readout is the product"'
+    acceptance: 'RDS decoded fields accumulate into a readable view - station name (PS),
+      RadioText including its scrolling updates, PI, clock - in a dedicated panel, built
+      over the existing rds.recipe outputs (group-info / station / radiotext). Thin
+      client: accumulate what the backend already serves; if a field needed for the view
+      is not served, report the API gap rather than deriving it in the UI. A field never
+      yet received reads as not-yet-received, never as an empty string or a fabricated
+      value (the T-207 / T-164 rule)'
+    area: ui/src/app (RDS panel), docs/api.md if a gap is found
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
+  - id: T-253
+    milestone: MUI
+    title: 'DESIGN (user sign-off required, do NOT build): signals as time-bounded
+      events; Explore inventory scoped to the viewed waterfall window; all-time
+      catalogue moved to a separate history surface'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: MUI-DESIGN
+    use_cases:
+    - AWARE-053
+    found_by: 'user, live Explore testing 2026-09-16: the inventory answers "what has
+      EVER been seen here" but is presented as "what is here NOW", so ghosts of dead
+      signals pile up as live candidates'
+    acceptance: 'DESIGN ONLY - no code, and no silent implementation. Produce an ADR
+      covering: (1) a time extent (start / end / ongoing) on the emitter and detection
+      model in docs/07, with ephemeral bursts and chirps FIRST-CLASS - a 10-second chirp
+      is a signal, a one-off burst is a signal; no carrier, no stable frequency, no
+      permanence required; (2) Explore Candidates/Confirmed scoped to the visible
+      waterfall window, with scrub back/forward replaying recent IQ-ring history (ring
+      is 30 min on staging); (3) the durable all-time inventory as a SEPARATE history
+      surface cataloguing past events with their timespans. The user''s proposed model
+      to confirm: Candidate = hypothesis about energy in the current time window;
+      Confirmed = a verified emitter carrying its own time-presence track; History =
+      durable catalogue of all events including one-offs. Say plainly what this costs:
+      it touches ADR-0016 arbitration and the cluster contract, not only the UI. Fold
+      the agreed direction into docs/07, docs/14 and docs/15. STOP at the ADR and hand
+      it to the user for sign-off'
+    area: docs/adr (new), docs/07-data-model.md, docs/14-ui-rewrite.md, docs/15-decoder-synthesis.md
+    needs: user sign-off before any implementation
+    model: opus
+    effort: medium
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
