@@ -12,14 +12,18 @@
 //!    of the observation log's dwell windows and visited sweep hops that start in it (so a retune
 //!    by the user or the scheduler inside an interval loses nothing), or, without a log or any
 //!    record in it, the tuned band (centre ± 40 % of the rate);
-//! 3. each band's level-0 history grid is read in **chunks** of at most `chunk_cells` cells (and
-//!    never across a 15-min boundary), each under the product lock for that read only, so the
-//!    history reader's queue (T-037b, 600 frames) drains between chunks;
+//! 3. each band's level-0 history grid is read in **chunks** of at most `chunk_cells` cells, each
+//!    under the product lock for that read only, so the history reader's queue (T-037b, 600
+//!    frames) drains between chunks. Chunks **tile each 15-min interval** (a whole sub-multiple of
+//!    it, never crossing one), so which visits a chunk boundary splits depends on the interval and
+//!    the cell budget alone and not on the width of the band queried (T-196);
 //! 4. visits come from the observation log when one is fed ([`OccupancyService::record_observation`]
 //!    or the T-115 store) or else from the coverage mask ([`hk_context::occupancy::engine::coverage_visits`],
 //!    at `coverage_tier`: a parked, user-tuned device observes independently of activity); a visit
 //!    crossing a chunk boundary is evaluated per chunk piece. Thresholds sit over each column's
-//!    local floor (`engine::local_floors`);
+//!    local floor, measured over the band **widened by `floor.radius_hz`**
+//!    (`engine::local_floors_from`) so a column's neighbourhood reference comes from the spectrum
+//!    around it rather than from the extent the caller queried (T-196);
 //! 5. band and channel visits are evaluated into compact samples kept for `horizon` (24 h + 1 h),
 //!    so §2.5 widening needs no second read;
 //! 6. 15-min rows (and 1-h rows at hour boundaries, recomputed from the same samples, which equals
@@ -30,12 +34,13 @@
 //! interval. [`OccupancyService::span_stats`] computes rows over an arbitrary span on demand
 //! (`/api/occupancy?interval=span`) with the same chunked reads and the final plan.
 //!
-//! **Memory bound of a span query:** one chunk grid (`CHUNK_CELLS` × `size_of::<CellStats>()`,
-//! ≈ 44 MB) plus per-column scratch (a few × band cells × 8 B) plus the visit samples, capped at
+//! **Memory bound of a span query:** two chunk grids (the band's, and the floor read over the band
+//! widened by `floor.radius_hz`; each at most `CHUNK_CELLS` × `size_of::<CellStats>()`, ≈ 44 MB)
+//! plus per-column scratch (a few × band cells × 8 B) plus the visit samples, capped at
 //! `MAX_SPAN_SAMPLES` × `size_of::<VisitSample>()` (≈ 96 MB; a query over it fails rather than
 //! grows). Band × span is limited to `MAX_SPAN_HZ_S` (20 MHz × 6 h), which keeps 1 s coverage
-//! visits of a 20 MHz band and ~90 channels inside the sample cap. A 15-min close holds one chunk
-//! grid at a time as well.
+//! visits of a 20 MHz band and ~90 channels inside the sample cap. A 15-min close holds the same
+//! pair of chunk grids at a time as well.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -363,6 +368,10 @@ fn evaluate_band(
     unit: &mut PowerUnit,
 ) -> Result<(), String> {
     let f_cell = job.f_cell;
+    // T-196: floors are measured over the band widened by the local-floor radius, so a channel's
+    // threshold comes from the spectrum around it and not from the extent the caller asked for.
+    let radius = job.cfg.engine.floor.radius_hz.max(0.0);
+    let floor_band = FreqRange::new(band.lo_hz - radius, band.hi_hz + radius);
     let mut subjects: Vec<(SubjectId, FreqRange, f64)> = vec![(band_id, band, f_cell)];
     subjects.extend(channels.iter().filter_map(|c| {
         let f = c.key.freq(f_cell);
@@ -373,16 +382,26 @@ fn evaluate_band(
         .iter()
         .map(|(_, f, _)| job.obs.map(|o| o.visits(*f, range)).unwrap_or_default())
         .collect();
-    let nf = ((band.width_hz() / f_cell).round() as usize).max(1);
+    // The widened floor read is the larger of the two grids a chunk holds: size the chunk by it.
+    let nf = ((floor_band.width_hz() / f_cell).round() as usize).max(1);
     let t_cell = job.t_cell_ns.max(1);
-    let step = ((job.cfg.chunk_cells / nf).max(1) as i64).saturating_mul(t_cell);
     let quarter = job.cfg.interval_ns.max(t_cell);
+    // T-196: chunks tile the 15-min interval in `k` equal pieces, the fewest that fit the cell
+    // budget. Phasing them on the interval rather than on the epoch, and quantising to a whole
+    // sub-multiple of it, keeps the chunk grid (and so which visits a boundary splits into two
+    // samples) from depending on the band's width.
+    let ceil_div = |a: i64, b: i64| (a + b.max(1) - 1) / b.max(1);
+    let quarter_cells = ceil_div(quarter, t_cell).max(1);
+    let budget_cells = (job.cfg.chunk_cells / nf).max(1) as i64;
+    let k = ceil_div(quarter_cells, budget_cells).max(1);
+    let step = ceil_div(quarter_cells, k).saturating_mul(t_cell);
     let (s0, s1) = (range.start.as_unix_nanos(), range.end.as_unix_nanos());
     let mut added = 0usize;
     let mut a = s0;
     while a < s1 {
-        let b = ((a.div_euclid(step) + 1) * step)
-            .min((a.div_euclid(quarter) + 1) * quarter)
+        let q0 = a.div_euclid(quarter) * quarter;
+        let b = (q0 + ((a - q0).div_euclid(step) + 1) * step)
+            .min(q0 + quarter)
             .min(s1);
         let chunk = TimeRange::new(ts(a), ts(b));
         a = b;
@@ -391,7 +410,10 @@ fn evaluate_band(
             continue;
         };
         *unit = grid.unit;
-        let floors = job.cfg.engine.local_floors(&grid);
+        let floors = match job.levels.level0(floor_band, chunk) {
+            Some(wide) => job.cfg.engine.local_floors_from(&grid, &wide),
+            None => job.cfg.engine.local_floors(&grid),
+        };
         for ((id, f, obw), log) in subjects.iter().zip(&logged) {
             let v: Vec<engine::Visit> = if log.is_empty() {
                 engine::coverage_visits(&grid, *f, job.cfg.coverage_tier)
@@ -1495,6 +1517,203 @@ mod tests {
         assert!(b.lo_hz <= 433_300_001.0 && b.hi_hz >= 433_699_999.0);
         let (_, id2) = snap_band(FreqRange::new(433_300_002.0, 433_699_998.0), 6250.0);
         assert_eq!(id, id2);
+    }
+
+    // ---- T-196: the same channel must report the same FCO from any query band containing it. ----
+
+    /// Recorded extent of the T-196 scene, level-0 cells (433.25–433.75 MHz at 6.25 kHz).
+    const T196_RECORDED: (i64, i64) = (69_320, 69_400);
+    /// The channel under test, cells (433.4625–433.4875 MHz).
+    const T196_CH: (i64, i64) = (69_354, 69_358);
+    /// Span start, on a 15-min boundary.
+    const T196_T0: i64 = 1_800_000_000_000_000_000;
+    /// Span, s (two 15-min intervals).
+    const T196_SECS: i64 = 1800;
+
+    fn t196_cell(mean: f64, floor: f64, occ: f32) -> CellStats {
+        CellStats {
+            max_db: mean as f32,
+            mean_db: mean as f32,
+            p_low_db: floor as f32,
+            p_high_db: mean as f32,
+            occupancy: occ,
+            occupancy_max: occ,
+            coverage: 1.0,
+            floor_db: floor as f32,
+            frames: 10,
+            level: 0,
+        }
+    }
+
+    /// The T-196 scene: noise over the recorded extent, nothing outside it, and one channel
+    /// continuously on for the second half of the span and idle for the first (realized FCO 0.5).
+    /// A continuously-on channel's own cells carry its signal as their floor, which is what the
+    /// history stores and what makes its own-column floor useless.
+    struct SceneLevels;
+
+    impl LevelSource for SceneLevels {
+        fn level0(&self, freq: FreqRange, span: TimeRange) -> Option<RegionHistory> {
+            let f0 = (freq.lo_hz / F_CELL).floor() as i64;
+            let nf = ((freq.hi_hz / F_CELL).ceil() as i64 - f0) as usize;
+            let t0 = span.start.as_unix_nanos().div_euclid(T_CELL);
+            let nt = ((span.end.as_unix_nanos() + T_CELL - 1).div_euclid(T_CELL) - t0) as usize;
+            let half = T196_T0 + T196_SECS / 2 * T_CELL;
+            let mut cells = Vec::with_capacity(nt * nf);
+            for t in 0..nt {
+                let busy_row = (t0 + t as i64) * T_CELL >= half;
+                for f in 0..nf {
+                    let c = f0 + f as i64;
+                    cells.push(if c < T196_RECORDED.0 || c >= T196_RECORDED.1 {
+                        // Never observed: outside the recording.
+                        CellStats {
+                            frames: 0,
+                            ..t196_cell(f64::NAN, f64::NAN, 0.0)
+                        }
+                    } else if (T196_CH.0..T196_CH.1).contains(&c) && busy_row {
+                        t196_cell(-60.0, -60.0, 1.0)
+                    } else {
+                        t196_cell(-99.0, -100.0, 0.0)
+                    });
+                }
+            }
+            Some(RegionHistory {
+                scheme: 1,
+                level: 0,
+                unit: PowerUnit::Dbfs,
+                f_cell_hz: F_CELL,
+                f_first_cell: f0,
+                nf,
+                t_cell_ns: T_CELL,
+                t_first_cell: t0,
+                nt,
+                percentiles: (0.1, 0.9),
+                cells,
+                provenance: Default::default(),
+                tiles_read: 0,
+                filter: None,
+            })
+        }
+    }
+
+    /// A fixed observation log: 60 s activity-independent dwells over the recorded extent.
+    fn t196_log() -> MemoryObservations {
+        use hk_model::attention::observation::{DwellRecord, ObservedWindow, Reason};
+        let mut m = MemoryObservations::default();
+        for i in 0..(T196_SECS / 60) {
+            let iv = TimeRange::new(
+                ts(T196_T0 + i * 60 * T_CELL),
+                ts(T196_T0 + (i + 1) * 60 * T_CELL),
+            );
+            m.push(ObservationRecord::Dwell(DwellRecord {
+                schema: ATTENTION_SCHEMA_VERSION,
+                survey_id: None,
+                seq: i as u64,
+                plan_version: 1,
+                site: SiteKey::Unassigned,
+                reason: Reason::PoiDwell { poi: 1 },
+                tier: Tier::ScheduledPlan,
+                window: ObservedWindow {
+                    center_hz: 433.5e6,
+                    sample_rate_hz: 500e3,
+                    usable: FreqRange::new(
+                        T196_RECORDED.0 as f64 * F_CELL,
+                        T196_RECORDED.1 as f64 * F_CELL,
+                    ),
+                    dc_excluded: None,
+                    rbw_hz: F_CELL,
+                },
+                rf_path: 0,
+                planned: iv,
+                observed: iv,
+                preempted: false,
+                dropped_samples: 0,
+                overload: false,
+                provenance_ref: None,
+            }));
+        }
+        m
+    }
+
+    /// The channel's estimate over the whole span when queried inside `band`.
+    fn t196_estimate(band: FreqRange) -> engine::WindowEstimate {
+        let cfg = OccupancyConfig::default();
+        let key = ChannelKey {
+            scheme: 1,
+            lo_cell: T196_CH.0,
+            hi_cell: T196_CH.1,
+        };
+        let ch = Channel {
+            key,
+            source: hk_model::attention::occupancy::ChannelSource::Learned,
+            plan_version: 1,
+            first_learned: ts(T196_T0),
+            evidence: 10,
+            obw_hz: (T196_CH.1 - T196_CH.0) as f64 * F_CELL,
+            raster_hint: None,
+        };
+        let (band, band_id) = snap_band(band, F_CELL);
+        assert!(
+            inside(key.freq(F_CELL), band),
+            "channel must be in the band"
+        );
+        let log = t196_log();
+        let job = BandJob {
+            cfg: &cfg,
+            levels: &SceneLevels,
+            obs: Some(&log),
+            dets: &[],
+            f_cell: F_CELL,
+            t_cell_ns: T_CELL,
+            max_samples: MAX_SPAN_SAMPLES,
+        };
+        let range = TimeRange::new(ts(T196_T0), ts(T196_T0 + T196_SECS * T_CELL));
+        let mut out = BTreeMap::new();
+        let mut unit = PowerUnit::Dbfs;
+        evaluate_band(&job, band, band_id, &[ch], range, &mut out, &mut unit).unwrap();
+        let s = out.remove(&SubjectId::Channel(key)).unwrap_or_default();
+        engine::estimate(&s, range, cfg.engine.level)
+    }
+
+    fn t196_show(name: &str, band: FreqRange, e: &engine::WindowEstimate) {
+        eprintln!(
+            "[T-196] {name} band {:.4}-{:.4} MHz ({} cells): fco {:?} = occupied {} / clean {} \
+             (all {}, suspect {}) threshold {:?} floor {:?} source {:?} ci {:?}",
+            band.lo_hz / 1e6,
+            band.hi_hz / 1e6,
+            (band.width_hz() / F_CELL).round() as i64,
+            e.fco,
+            e.n_occupied,
+            e.n_revisits - e.n_suspect,
+            e.n_revisits_all,
+            e.n_suspect,
+            e.threshold_db,
+            e.floor_db,
+            e.floor_source,
+            e.confidence,
+        );
+    }
+
+    /// T-196: a channel fully inside two different query bands reports the same FCO and the same
+    /// confidence interval from both. The floor a channel is measured against is a property of the
+    /// spectrum around it, not of the extent the caller happened to ask for.
+    #[test]
+    fn occupancy_channel_fco_does_not_depend_on_the_query_band() {
+        // Both bands contain the channel (cells 69_354..69_358) whole.
+        let narrow = FreqRange::new(69_322_f64 * F_CELL, 69_394_f64 * F_CELL);
+        let wide = FreqRange::new(
+            T196_RECORDED.0 as f64 * F_CELL,
+            T196_RECORDED.1 as f64 * F_CELL,
+        );
+        let (a, b) = (t196_estimate(narrow), t196_estimate(wide));
+        t196_show("narrow", narrow, &a);
+        t196_show("wide  ", wide, &b);
+        // The scene: on for the second half of the span, idle for the first.
+        assert_eq!((a.fco, a.confidence), (b.fco, b.confidence));
+        assert!(
+            a.fco.is_some_and(|f| (f - 0.5).abs() < 0.05),
+            "realized FCO is 0.5, measured {:?}",
+            a.fco
+        );
     }
 
     /// A history that synthesises a fully observed noise grid for any read, under `lock` (the

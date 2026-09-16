@@ -298,6 +298,16 @@ pub struct ColumnFloors {
     pub suspect: Vec<bool>,
 }
 
+impl ColumnFloors {
+    /// The `len` columns starting at `offset`.
+    fn window(mut self, offset: usize, len: usize) -> Self {
+        self.floor_db = self.floor_db[offset..offset + len].to_vec();
+        self.source = self.source[offset..offset + len].to_vec();
+        self.suspect = self.suspect[offset..offset + len].to_vec();
+        self
+    }
+}
+
 /// Local noise floors of every column of `grid` (T-118 review: a whole-band floor is pulled low by
 /// passband ripple and edge roll-off, and in a dense band its lowest fifth is signal).
 ///
@@ -892,6 +902,29 @@ impl EngineConfig {
             self.threshold.guard_db,
             &self.floor,
         )
+    }
+
+    /// [`local_floors`] of `grid`'s columns, measured over `wide`: the same cells and span, widened
+    /// to cover those columns' ±`floor.radius_hz` neighbourhoods (T-196).
+    ///
+    /// A column's reference is a percentile of the column floors within that radius on each side,
+    /// so measuring it on a grid clipped to the caller's query band takes the neighbourhood from
+    /// the query extent instead of from the spectrum: a band narrower than the radius leaves a
+    /// column with no usable side at all, and it falls back to its own floor — which for a busy
+    /// channel is its own signal, putting the threshold above the emission and reading it idle.
+    /// The floor must be a property of the spectrum around a channel, not of the extent asked for.
+    ///
+    /// Falls back to `grid` when `wide` does not align with it or does not contain it.
+    pub fn local_floors_from(&self, grid: &RegionHistory, wide: &RegionHistory) -> ColumnFloors {
+        let offset = grid.f_first_cell - wide.f_first_cell;
+        if wide.f_cell_hz != grid.f_cell_hz
+            || offset < 0
+            || offset as usize + grid.nf > wide.nf
+            || wide.nf == 0
+        {
+            return self.local_floors(grid);
+        }
+        self.local_floors(wide).window(offset as usize, grid.nf)
     }
 }
 
