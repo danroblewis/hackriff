@@ -3691,7 +3691,7 @@ tasks:
   - id: T-230
     milestone: M3
     title: "Close the classifier accuracy gap to the ADR-0016 floors: top-1 0.754 vs 0.90 and top-2 0.933 vs 0.95, driven by analog/noise-like abstention and a simulation-to-reality gap (both OTA fixtures abstain)"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-199, T-213]
     parallel_group: M3A
@@ -3723,7 +3723,7 @@ tasks:
   - id: T-232
     milestone: M2-hardening
     title: "Temp-dir leak persists after T-229: one full suite run grew hk-replay dirs 30 -> 56, and 56 of 57 were dead-pid orphans carrying ring.ci8 files"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-229]
     parallel_group: PIPELINE

@@ -2565,3 +2565,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Why T-229 looked correct:** its tests exercised in-process guards and never covered a killed child, so they passed while the leak continued.
   - **Preferred fix recorded:** the PARENT owns and removes the child's data dir, rather than relying on the child to tidy up after being killed.
   - **My earlier guesses were wrong again** (the unguarded T-217 file, and a guarded-site-not-firing theory). Four wrong causal claims today; the pattern is that I assert mechanism before collecting the cheap evidence that would settle it.
+- **B0.538 Board correction (my error).** T-230 and T-232 had live agents but were still marked todo, so the board showed only T-218 in progress. Both set to in-progress. The rule the user set stands: in-progress means an agent is actively on it, and I broke it by launching without updating status in the same step.
+  - **Process discipline:** when a launch and a status update are separate tool calls, the status update must happen in the same response as the launch, not the next one.
