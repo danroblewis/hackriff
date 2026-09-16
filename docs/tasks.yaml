@@ -6387,7 +6387,7 @@ tasks:
     milestone: M2-hardening
     title: The timeline is the capture window and is itself a compressed overview waterfall, not an empty
       box
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: UI
@@ -6831,7 +6831,7 @@ tasks:
     milestone: M2-hardening
     title: CI acceptance job runs the whole hk-e2e crate, not just acceptance - drift by accretion, and
       the first push will feel it
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-353
