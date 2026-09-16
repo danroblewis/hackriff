@@ -107,28 +107,40 @@ fn per_family_and_per_snr_accuracy_meets_the_a_priori_floors() {
     }
     assert!(strong.n > 100, "too few samples to judge: {}", strong.n);
 
-    // **The ADR-0016 §7 exit floors are top-1 ≥ 0.90 and top-2 ≥ 0.95 at gate + 5 dB, and the
-    // classical tree alone does not reach them yet** (the per-family table above shows where: it
-    // abstains on analog and noise-like rather than mislabelling them). Two stages of the cascade
-    // that the floors assume are not in place — the post-sync verifier (T-200) and the C14 symbol
-    // parameters, which this sweep runs without, so six of the 28 features always abstain here.
+    // **The ADR-0016 §7 exit floors — top-1 ≥ 0.90 and top-2 ≥ 0.95 at gate + 5 dB — are asserted
+    // directly, because the classical tree now meets them** (T-230). Measured on this sweep: top-1
+    // 0.937, top-2 0.984, wrong 0.000; on T-213's larger harness grid, 0.915 and 0.980. Every seed
+    // here is fixed, so these numbers are reproducible exactly rather than sampled.
     //
-    // T-206 is the milestone's exit gate and owns those floors. What this test guards is that the
-    // classifier does not get *worse*, and that the properties which make an abstaining classifier
-    // safe hold absolutely: it is never confidently wrong, and it never claims a family below its
-    // gate. Raise this guard as the cascade lands; never lower it to make a change pass.
-    // Measured today: top-1 0.73, top-2 0.93, wrong 0.00. The abstentions are concentrated in
-    // `analog` and `noise-like`, and they are structural rather than accidental: between 10 and
-    // 20 dB a constant-envelope emission cannot be separated from FSK, because FSK is below its
-    // own S5 gate there and so is "not measured" rather than ruled out.
+    // The floors themselves were never moved. What closed the gap was three corrections, each of
+    // which had been costing whole families their answer:
+    //
+    // 1. A family held back by its SNR gate is credited with its own likelihood, read from the
+    //    **below-gate** densities, instead of with the evidence of a "typical survivor". The old
+    //    rule collapsed to `gated_out / (gated_out + 1)` whatever the snippet looked like, because
+    //    survivors that fit badly underflow to zero evidence and so the median survivor *is* the
+    //    winner. It abstained on every analog, OFDM, pulsed and noise-like emission between that
+    //    family's own gate and 20 dB, where FSK and OOK are still gated.
+    // 2. Those below-gate densities are fitted where a family is gated, so "could this be the
+    //    family I was not allowed to measure?" is answered by a model that is valid at that SNR.
+    //    Scoring it with the at-gate densities was extrapolation, and it read 0.000 for a genuine
+    //    2-FSK burst 10 dB under its gate.
+    // 3. A repeated guard interval only rules `analog` out when the emission fills its band *and*
+    //    has a multi-carrier (Rayleigh) envelope. A constant-envelope FM carrier cannot be OFDM;
+    //    without that term `wfm` was denied its own family and could never be classified.
+    //
+    // T-206 remains the milestone's exit gate. What this test guards is that the classifier does not
+    // get *worse*, and that the properties which make an abstaining classifier safe hold absolutely:
+    // it is never confidently wrong, and it never claims a family below its gate. Raise these guards
+    // as the rest of the cascade lands; never lower one to make a change pass.
     assert!(
-        strong.top1_rate() >= 0.70,
-        "top-1 {:.3} regressed below the level the feature tree reaches today (ADR floor 0.90)",
+        strong.top1_rate() >= 0.90,
+        "top-1 {:.3} fell below the ADR-0016 §7 floor of 0.90 (measured 0.937 at T-230)",
         strong.top1_rate()
     );
     assert!(
-        strong.top2_rate() >= 0.90,
-        "top-2 {:.3} regressed (ADR floor 0.95)",
+        strong.top2_rate() >= 0.95,
+        "top-2 {:.3} fell below the ADR-0016 §7 floor of 0.95 (measured 0.984 at T-230)",
         strong.top2_rate()
     );
 

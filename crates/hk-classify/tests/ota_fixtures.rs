@@ -133,6 +133,36 @@ fn classify_box(
         .value()
         .or_else(|| params.snr_box_db.value());
     req.suspect.clipped = params.flags.clipped;
+
+    // T-230 sim-to-real diagnosis, reported not asserted: which feature dimension puts a real
+    // capture outside each synthetic class. `worst` names the dimension with the largest |z|, so a
+    // family that abstains here says *why* it abstained rather than only that it did.
+    let f = hk_classify::features::features(&hk_classify::features::FeatureInput {
+        samples: &normalised.samples,
+        sample_rate_hz: normalised.sample_rate_hz,
+        obw_hz: req.obw_hz,
+        snr_db: req.snr_db,
+        symbols: None,
+    });
+    let model = hk_classify::DensityModel::builtin();
+    for family in [
+        "analog",
+        "ook-ask",
+        "fsk",
+        "psk-qam",
+        "ofdm",
+        "css",
+        "pulsed",
+        "noise-like",
+    ] {
+        match model.score(family, &f) {
+            Some(s) => eprintln!(
+                "[T-230]   {family:<11} best class {:<11} m {:>8.1} plausibility {:.3} worst {:?}",
+                s.class, s.m, s.plausibility, s.worst
+            ),
+            None => eprintln!("[T-230]   {family:<11} not scored (too few measured features)"),
+        }
+    }
     Some(Classifier::new().classify(&req))
 }
 

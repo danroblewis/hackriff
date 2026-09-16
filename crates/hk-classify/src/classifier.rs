@@ -85,6 +85,9 @@ impl<'a> ClassifyRequest<'a> {
 #[derive(Clone, Debug)]
 pub struct Classifier {
     model: DensityModel,
+    /// Densities fitted below each family's gate. Used only to size the `unknown` mass owed to a
+    /// family the SNR gate held back, never to claim one.
+    below_gate: DensityModel,
 }
 
 impl Default for Classifier {
@@ -98,12 +101,17 @@ impl Classifier {
     pub fn new() -> Self {
         Self {
             model: DensityModel::builtin().clone(),
+            below_gate: DensityModel::builtin_below_gate().clone(),
         }
     }
 
     /// A classifier over a model the caller fitted (the dev-grid fitter, T-204's experiments).
+    /// The shipped below-gate densities are kept: they only ever move mass to `unknown`.
     pub fn with_model(model: DensityModel) -> Self {
-        Self { model }
+        Self {
+            model,
+            below_gate: DensityModel::builtin_below_gate().clone(),
+        }
     }
 
     /// The densities it scores with.
@@ -133,8 +141,10 @@ impl Classifier {
         // 1. Gates and tree exclusions decide which families may be scored at all.
         let rules = admissible(f);
         let mut gated = false;
-        let mut gated_out = 0usize;
         let mut scored: Vec<(String, crate::density::FamilyScore)> = Vec::new();
+        // How plausibly a family held back by its SNR gate could explain this snippet, read from
+        // the below-gate densities. It becomes `unknown` mass below, never a claim.
+        let mut gated_plausibility = 0.0_f64;
         for rule in &rules {
             if !rule.allowed {
                 if let Some(r) = rule.reason {
@@ -142,22 +152,24 @@ impl Classifier {
                 }
                 continue;
             }
-            if !passes_gate(rule.family, request.snr_db) {
-                gated = true;
-                gated_out += 1;
-                push_reason(
-                    &mut reasons,
-                    if request.snr_db.is_some() {
-                        "low_snr"
-                    } else {
-                        "no_snr"
-                    },
-                );
+            if passes_gate(rule.family, request.snr_db) {
+                match self.model.score(rule.family, f) {
+                    Some(s) => scored.push((rule.family.to_owned(), s)),
+                    None => push_reason(&mut reasons, "too_few_features"),
+                }
                 continue;
             }
-            match self.model.score(rule.family, f) {
-                Some(s) => scored.push((rule.family.to_owned(), s)),
-                None => push_reason(&mut reasons, "too_few_features"),
+            gated = true;
+            push_reason(
+                &mut reasons,
+                if request.snr_db.is_some() {
+                    "low_snr"
+                } else {
+                    "no_snr"
+                },
+            );
+            if let Some(s) = self.below_gate.score(rule.family, f) {
+                gated_plausibility = gated_plausibility.max(s.plausibility);
             }
         }
         if gated {
@@ -175,23 +187,26 @@ impl Classifier {
         // ADR-0016 §2 puts its share on `unknown`, not on its neighbours. Dropping it and
         // renormalising over the survivors is what makes a low-SNR FSK burst come back as
         // `analog`: FSK is gated out at 20 dB while analog, gated at 10, is still standing and
-        // collects the whole distribution. Each gated-out family is therefore credited with the
-        // evidence of a typical survivor — the most it could have had — and that mass goes to
-        // `unknown`.
-        let mut evidences: Vec<f64> = scored.iter().map(|(_, s)| s.evidence).collect();
-        evidences.sort_by(f64::total_cmp);
-        let typical = evidences
-            .get(evidences.len() / 2)
-            .copied()
-            .unwrap_or_default();
-        let measured: f64 = evidences.iter().sum();
-        let unmeasured = gated_out as f64 * typical;
-        let p_gated = if measured + unmeasured > 0.0 {
-            unmeasured / (measured + unmeasured)
-        } else {
-            1.0
-        };
-        let open_set = open_set.max(p_gated);
+        // collects the whole distribution.
+        //
+        // So the `unknown` mass is at least the plausibility of the best family the gate held back:
+        // if a gated family could genuinely have produced this snippet, no survivor may be claimed,
+        // because the one measurement that would have separated them is the one we were not allowed
+        // to make. `plausibility` is the right currency for that comparison — a dev-calibrated χ²
+        // tail, so it is directly comparable with the open-set score, unlike `evidence`, which is
+        // `exp(-K_REF*m/2)` and underflows to exactly 0 for any poor fit.
+        //
+        // The plausibility comes from the **below-gate** densities, which are fitted where the
+        // family is gated (`fit-densities` writes both files). The shipped at-gate densities cannot
+        // answer this: scoring a family below its own gate is an extrapolation, and a genuine 2-FSK
+        // burst 10 dB under the FSK gate scored its own family at plausibility 0.000 — so no mass
+        // moved to `unknown` and the constant-envelope `analog` classes, which that waveform really
+        // does resemble at that SNR, claimed it instead (a 0.65 wrong-label rate in that bin).
+        //
+        // An AM carrier at the same SNR is not plausible FSK, contributes nothing, and is still
+        // reported as analog. This is only ever a `max`, so a gated family can move mass to
+        // `unknown` but can never make a claim.
+        let open_set = open_set.max(gated_plausibility);
         let known_mass = 1.0 - open_set;
         let total: f64 = scored.iter().map(|(_, s)| s.evidence).sum();
         let likelihood: Vec<LabelP> = tax

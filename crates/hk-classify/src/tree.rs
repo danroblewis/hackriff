@@ -101,7 +101,30 @@ pub fn admissible(features: &Features) -> Vec<Admissibility> {
     // `unknown`.
     out.push(match (cyclic_db, cp, mu42_a) {
         (Some(c), _, _) if c > NOISE_MAX_CYCLIC_DB => deny("analog", "symbol_clock"),
-        (_, Some(c), _) if c >= OFDM_MIN_CP_CORR => deny("analog", "guard_interval"),
+        // A repeated guard interval only rules analog out when the emission also **fills its band**
+        // (the condition [`coarse_hint`] already applies, for the same reason: any smoothly
+        // modulated carrier repeats itself somewhat, and broadcast FM in particular scores a
+        // prominent short-lag correlation without being digital at all) **and** carries the
+        // envelope of a multi-carrier emission.
+        //
+        // The envelope term is what separates the two for real. OFDM is a sum of many independent
+        // subcarriers, so by the central limit theorem its envelope is Rayleigh — μ₄₂ ≈ 2, the same
+        // value Gaussian noise gives. An analog angle modulation is constant-envelope by
+        // construction: μ₄₂ ≈ 1, and its amplitude carries no information at all. A carrier whose
+        // envelope never varies cannot be OFDM whatever its autocorrelation does.
+        //
+        // Flatness alone was not enough, because a 200 kHz broadcast FM carrier genuinely does fill
+        // its own band: this arm still denied `analog` to between half and seven eighths of the
+        // `wfm` snippets, which is the whole of the residual `analog` abstention (measured: wfm
+        // top-1 0.58 at gate+5, with `analog` admissible in only 0.12-0.50 of trials).
+        (_, Some(c), _)
+            if c >= OFDM_MIN_CP_CORR
+                && flatness.is_some_and(|f| f >= OFDM_MIN_FLATNESS)
+                && (mu42_a.is_some_and(|k| k > NOISE_LIKE_MIN_MU42)
+                    || env_cv.is_some_and(|v| v >= ASK_MIN_ENV_CV)) =>
+        {
+            deny("analog", "guard_interval")
+        }
         (_, _, Some(k))
             if k > NOISE_LIKE_MIN_MU42
                 && flatness.is_some_and(|f| f >= NOISE_MIN_FLATNESS)
