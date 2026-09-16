@@ -5241,6 +5241,30 @@ tasks:
     model: sonnet
     effort: low
     core_interface: false
+  - id: T-293
+    milestone: M2-hardening
+    title: 'Run summary reports "2 errors" on the chains line in the M4 acceptance scene
+      with no error printed - unexplained FSK-chain behaviour on NBFM bursts'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPE
+    use_cases: []
+    found_by: 'T-287 (2026-09-16), which noticed it and established it was NOT its own:
+      cc_demods == 2 proves both DDCs and both process calls succeeded, and no
+      "trunk-cc write:" error printed. It reported the anomaly rather than ignoring a
+      number that did not concern its ticket'
+    acceptance: 'establish what those errors are and either fix them or explain them. A
+      run summary that reports errors nobody can name trains everyone to ignore the error
+      count - this project already spent hours tonight on a red exit that was read as
+      noise. Find which chain increments the counter and why, on the NBFM bursts in the
+      M4 acceptance scene. If they are benign, make the summary say what they are rather
+      than leaving a bare count; if they are real, fix them. No thresholds move'
+    area: crates/hk-pipeline (chains, run summary)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
