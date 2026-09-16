@@ -3127,7 +3127,8 @@ tasks:
   - id: T-195
     milestone: MUI
     title: "MUI per-signal output panels in the freed right panel: packet inspector for digital, waveform/audio scope + RDS text for FM/AM; one panel per confirmed signal with an active output"
-    status: in-progress
+    status: done
+    commit: 3c4409e
     priority: normal
     deps: [T-192, T-159]
     parallel_group: MUI-X1
