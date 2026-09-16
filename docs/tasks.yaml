@@ -3277,7 +3277,8 @@ tasks:
   - id: T-205
     milestone: M3
     title: "Labelled-capture dataset path for fine-tuning: CRC-valid decoder labels and user labels become exportable training snippets with provenance"
-    status: in-progress
+    status: review
+    commit: 5d37ca5
     priority: normal
     deps: [T-211]
     parallel_group: M3L

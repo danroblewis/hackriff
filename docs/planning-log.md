@@ -2394,3 +2394,10 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Live safety:** lossless replay waits as a lossless push would, so nothing is lost; a live chain waits at most `ready_timeout_ms` (5 s) and then feeds anyway, counting `plugin_ready_timeouts` and `plugin_fed_before_ready`. No sleep, no retry, no tolerance change.
   - **Evidence:** 3/3 loaded attempts failed before; acceptance_m0 now passes 10/10 under 6 burners at load 27-39, with zero fallback stamps.
   - **T-219 launched** into the freed slot; an Opus read-only review of the contract change runs in parallel.
+- **B0.501 T-205 committed (5d37ca5): labelled-capture dataset export. Merges after the running T-223 check.**
+  - **Format:** existing SigMF clip writer plus a JSON manifest per export; labels are ordinary annotations, so no migration was needed.
+  - **Routes:** POST/GET `/api/datasets` and GET `/api/datasets/{id}`, audited, documented with contract tests.
+  - **Evidence rule held:** decoder labels come only from `CrcStatus::Valid`, matched explicitly so T-210's `Corrected` can never be mistaken for evidence.
+  - **Splits:** every sample and manifest stamps one dev/acceptance split, so training data cannot contaminate acceptance.
+  - **Small additive hk-model change:** `decode_evidence_for_emitter`, since decodes without a decoded identity (RDS groups) are unreachable via `decodes_for_identity`; it exposes nothing gated.
+  - **Tests:** hk-model 140, hk-store/hk-api pass, api_contract 25/25, lint clean.
