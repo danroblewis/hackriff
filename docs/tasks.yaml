@@ -3926,7 +3926,7 @@ tasks:
   - id: T-243
     milestone: M3
     title: "The feature tree gives bpsk a prior of exactly 0.00, so BPSK can never be named and bpsk/qpsk separation is structurally impossible downstream"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-200]
     parallel_group: M3A
