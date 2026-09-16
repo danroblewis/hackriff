@@ -3440,3 +3440,40 @@ a fit over enough emitters will always find some f₀, so the control is unrelat
 be declared a family. **T-375** is the user's terminator capture, which now has a sharp question:
 conducted coupling survives a 50 Ω load and radiated does not, so it decides whether this oscillator is
 the user's own equipment or something in the room.
+
+### B0.655 — the user's two navigator additions, and why they went to T-368 (2026-09-16)
+
+The user gave these as additions to T-367 "while it is in flight". **T-367 had already merged**
+(`9a46489`, ~40 minutes earlier), so there was nothing to fold into — but T-368 is live in the same
+file, and on inspection the second addition turns out to be the coverage map seen from the other
+side. Both went to T-368 as T-376; the board records it as folded rather than queued.
+
+**Addition (1) was largely already satisfied**, and checking was worth more than building. Both bars
+already wheel-zoom their own axis about the pointer, both through the shared `ax.wheelFactor`, so the
+gesture already matches the waterfall — `mountFreqNav`'s handler at `navigators.ts:398`,
+`mountTimeNav`'s at `:538`.
+
+**Addition (2) is absent, and the real symptom is worse than the user's description.** They asked for
+the bottom bar to be *centred* on the tune centre rather than the 1–6 GHz midpoint. In fact
+`extent()` is `spectrumExtent(...)` — the union of `ranges_hz`, the **whole 1 MHz–6 GHz, fixed**, with
+no viewport at all. A 2.4 MHz tuned window is then **0.04% of the bar**: not off-centre, invisible.
+Worth saying back to them plainly, because "centre it" and "it has no viewport" call for different
+work.
+
+The consequence is a redefinition, not a tweak: the frequency bar's wheel currently zooms the **main
+waterfall view** (`setLiveView`), so giving the bar its own span changes what an existing gesture
+means. The message to T-368 therefore pins the invariants around it rather than the implementation —
+region-drag keeps setting centre through T-343's gated `DeviceAction`, and **T-340's no-retune control
+must survive unchanged** (±1.0 of a 6 GHz bar through a spy client, `calls` empty). No pan, no wheel,
+ever reaches the radio.
+
+One question is left to the agent with my inclination stated but not imposed: what the viewport does
+when the device retunes while the user has panned away. An untouched viewport following the tune
+centre and a user-panned one staying put is my guess at the right answer, but it is a judgement about
+feel, and the agent is closer to it.
+
+The reason this is T-368's work and not a separate ticket: **what fills that bar when you wheel-zoom
+out toward 1–6 GHz is the coverage map**. Without it the zoomed-out bar paints never-observed spectrum
+as quiet — the exact failure T-368 exists to prevent, and why T-367 declined to fill the bar and said
+to sequence T-368 first. The viewport makes the coverage map visible; the coverage map makes the
+viewport honest. The agent is told to report rather than silently drop it if this blows its scope.
