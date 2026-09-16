@@ -5188,7 +5188,7 @@ tasks:
     milestone: M3
     title: 'M3 open set is short by ONE snippet (0.8990 vs 0.90): carrier recovery or a
       symbol-rate estimate C14 will trust on a near-constant-envelope constellation'
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-286
@@ -5213,6 +5213,11 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+    route_chosen_2026_09_16: 'SUPERVISOR RULING: take the CARRIER RECOVERY route. It
+      fixes a real measurement defect (residual CFO) rather than widening what the
+      classifier trusts. Keeping M3 red at 0.8990 until a genuine fix crosses 0.90 is
+      correct - do not round, do not loosen. The C14 rate-trust option is NOT taken.'
+
   - id: T-292
     milestone: M3
     title: 'Test fixtures in hk-ml, hk-store and hk-api hand-write features_version: 1,
