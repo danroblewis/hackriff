@@ -5022,7 +5022,7 @@ tasks:
     milestone: M2-hardening
     title: 'Second dedup mechanism: one station yields ten comparable-strength,
       time-overlapping tracks that entity resolution collapses only to five rows'
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-280
