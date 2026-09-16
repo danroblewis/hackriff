@@ -3692,7 +3692,8 @@ tasks:
   - id: T-230
     milestone: M3
     title: "Close the classifier accuracy gap to the ADR-0016 floors: top-1 0.754 vs 0.90 and top-2 0.933 vs 0.95, driven by analog/noise-like abstention and a simulation-to-reality gap (both OTA fixtures abstain)"
-    status: in-progress
+    status: done
+    commit: 2706e80
     priority: high
     deps: [T-199, T-213]
     parallel_group: M3A
@@ -3768,6 +3769,21 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: false
+  - id: T-235
+    milestone: M3
+    title: "Classifier: false-known 0.171 vs the 0.10 floor (one short-CP OFDM generator), and both OTA fixtures still abstain - close the simulation-to-reality gap with real-capture-derived densities"
+    status: todo
+    priority: high
+    deps: [T-230, T-205]
+    parallel_group: M3A
+    use_cases: [SIGNAL-062]
+    found_by: "T-230 (2026-09-15): accuracy floors met, these two did not"
+    acceptance: "false-known <= 0.10 on the blind acceptance split, with the short-CP OFDM generator either classified correctly or excluded for a documented physical reason (not simply dropped to pass); the two OTA fixtures (fm_100p8M, the 915 MHz FSK burst) are classified rather than abstaining, or their abstention is justified with measured evidence that they genuinely sit outside the taxonomy; use real-capture-derived densities via T-205's dataset export - T-230 already MEASURED that widening front-end impairments is the wrong lever (it moved the nearest-family distances by <0.1 while dropping unknown recall to 0.773, below the floor, and was reverted); every ADR-0016 floor already met by T-230 must still hold, and no floor, gate or threshold may be loosened"
+    area: crates/hk-classify (densities, tree), py/ synth grid, crates/hk-store dataset export
+    needs: none
+    model: opus
+    effort: high
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
