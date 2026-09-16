@@ -2615,7 +2615,8 @@ tasks:
   - id: T-162
     milestone: MUI
     title: "MUI API gap 6: sync_search diagnostic port for the Decode sync-search plot"
-    status: in-progress
+    status: done
+    commit: d4d39a7
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
