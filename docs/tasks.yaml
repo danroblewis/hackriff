@@ -4051,7 +4051,7 @@ tasks:
     milestone: M3
     title: 'M3 gate blocker: open-set abstention on analog (recall 0.528) and psk-qam
       (0.458) against the 0.80 floor; aggregate false-known 0.2222 against 0.10'
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: M3A
@@ -4890,6 +4890,61 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+  - id: T-285
+    milestone: M3
+    title: 'ADR-0016 section 7 states two open-set floors that are arithmetically ONE
+      floor stated twice at different values: the gate computes false_known = 1 - recall,
+      so recall >= 0.80 AND false-known <= 0.10 can only both hold at recall >= 0.90'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-248 (2026-09-16) while fixing the open set: it measured recall 0.8510
+      and false-known 0.1490 and noted the two numbers sum to 1 by construction'
+    acceptance: 'NEEDS A USER/SUPERVISOR DECISION - do not resolve it by picking the
+      easier number. The ADR states unknown recall >= 0.80 and false-known <= 0.10 as if
+      they were independent floors; the gate derives one from the other, so the binding
+      constraint is recall >= 0.90 and the stated 0.80 is dead text. Establish which was
+      intended: (a) recall >= 0.80, which means false-known <= 0.20 and the M3 gate would
+      pass today at 0.1490; or (b) false-known <= 0.10, which means recall >= 0.90 and
+      T-248 measured the residue as a capability gap (T-286), not a tuning gap. Whichever
+      is chosen, amend ADR-0016 section 7 so it states ONE floor once, and record that
+      the coordinator did not choose it. The gate suite prints both readings already'
+    area: docs/adr/0016-classification-contracts.md, tests/e2e/tests/acceptance/m3_grid.rs
+    needs: user or supervisor ruling on which floor was intended
+    model: opus
+    effort: low
+    core_interface: true
+  - id: T-286
+    milestone: M3
+    title: 'The open-set residue is a capability gap, not a tuning gap: 16-APSK,
+      pi/4-DQPSK and VSB-AM need post-sync constellation measurements the feature tree
+      cannot make'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: M3A
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-248 (2026-09-16), with the numbers that establish it'
+    acceptance: 'the residue is 59 of 396 - VSB-AM 29, pi/4-DQPSK 15, 16-APSK 13 - and
+      these sit INSIDE the genuine-member envelope: VSB-AM reaches max|z| 3.47 against
+      am dev p95 of 3.80, 16-APSK 2.76 against qam16 3.56. T-248 measured that pushing
+      the tail harder gives recall 0.8788 / false-known 0.1212, still short of 0.10, and
+      breaks top-1. NO SETTING OF THIS TAIL REACHES 0.10. Separating 16-APSK from 16-QAM
+      is an amplitude-ring question and pi/4-DQPSK from QPSK a differential-phase one -
+      both POST-SYNC constellation measurements, i.e. the verifier and the per-family DL
+      stage (ADR-0016 sections 4.5-4.6), not the feature tree. Build that, or record with
+      measurements that the open set cannot reach 0.10 on classical features alone and
+      say what that means for M3 exit. Every other floor holds unchanged;
+      confidently-wrong stays zero'
+    area: crates/hk-classify (verify.rs, per-family DL stage)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
