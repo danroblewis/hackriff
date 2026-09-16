@@ -5902,7 +5902,7 @@ tasks:
     milestone: M2-hardening
     title: 'Keying baselines is not end-to-end: occupancy reads history unfiltered, so front ends are already
       averaged in the level-0 cells before a baseline sees them'
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-303
