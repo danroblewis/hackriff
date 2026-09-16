@@ -2604,7 +2604,7 @@ tasks:
     parallel_group: MUI-API
     use_cases: []
     found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
-    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    acceptance: "ADR-0013 gap 5 (large, stream-contract change): clock-recovery diagnostic output - per-symbol waveform segments plus their sample instants - exposed either on a diagnostic port or as `view=eye`, FOLLOWING THE PRECEDENT T-160 set with `view=spectrum` on the stage tap (same opener shape, same refusal codes, computed backend-side and bounded to a sane row rate, only while a consumer is attached). Add the stream-contract section 14.4 entry; update docs/api.md and crates/hk-cli/tests/api_contract.rs together. Prove it is USEFUL, not merely well-formed: a test on a known modulated signal showing the eye opens at the true symbol instants and closes between them, the way T-160 proved 19/38/57 kHz resolve."
     area: hk-stream, hk-pipeline, hk-api
     needs: none
     model: opus
@@ -2620,7 +2620,7 @@ tasks:
     parallel_group: MUI-API
     use_cases: []
     found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
-    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    acceptance: "ADR-0013 gap 6 (small): a `sync_search` diagnostic port emitting match score per candidate position, in hk-pipeline blocks. docs/api.md and api_contract updated together; bounded and only computed while a consumer is attached. Prove it is useful: on a signal with a known sync word the score shows a clear peak at the true offset and nothing comparable elsewhere."
     area: hk-pipeline, hk-blocks
     needs: none
     model: sonnet
@@ -2636,7 +2636,7 @@ tasks:
     parallel_group: MUI-API
     use_cases: []
     found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
-    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    acceptance: "ADR-0013 gap 7a (small): the emitter's latest EstimatedParams - symbol rate, modulation, deviation, carrier frequency offset, bandwidth - on `GET /api/inventory/{id}`. Follow the gating pattern T-159 established in hk-api/src/decode.rs so a withheld identity is never confirmed indirectly. docs/api.md and api_contract together. Test that the values come from measurement rather than defaults, and that an emitter with no estimate returns null rather than a fabricated number."
     area: hk-api, hk-pipeline
     needs: none
     model: sonnet
@@ -2652,7 +2652,7 @@ tasks:
     parallel_group: MUI-API
     use_cases: []
     found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
-    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    acceptance: "ADR-0013 gap 7b (large): serve `GET /api/recipes/match?emitter=` ranking recipes against MEASURED parameters with reasons, per the T-088 plan in docs/api.md. Blind rule applies: ranking must be driven by measurement, never by looking the frequency up in a band plan - a band-plan hint may only break ties, as T-212 established for priors. Test that a known FM station ranks the RDS recipe highly with its reasons cited, and that an unknown emission yields a low-confidence or empty ranking rather than a forced match."
     area: hk-recipe, hk-api
     needs: none
     model: opus
@@ -2668,7 +2668,7 @@ tasks:
     parallel_group: MUI-API
     use_cases: []
     found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
-    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    acceptance: "ADR-0013 gap 8 (small): an on-demand channelised IQ opener `open/iq?emitter=` or `?f_lo=&f_hi=`, section 12.1 profile, cf32_le. Bounded like the other openers (only while a consumer is attached), gated like the decode routes, documented in docs/api.md with contract tests. Test that the served centre and bandwidth match what was asked for, and that an unknown emitter is refused rather than served silence."
     area: hk-stream, hk-api
     needs: none
     model: sonnet
@@ -2684,7 +2684,7 @@ tasks:
     parallel_group: MUI-API
     use_cases: []
     found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
-    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    acceptance: "ADR-0013 gap 9 (large): a selection-scoped watch rule raising anomalies and stream messages for new activity inside a selection's extent, in hk-context plus hk-api. Must interact correctly with the T-219 relation rules: a candidate suppressed as a duplicate or attributed as an image/harmonic/intermod of a confirmed source must NOT raise a watch alert as if it were new activity, and the test must cover that. Alerts carry their reasoning and are reversible, never an automatic action. docs/api.md and api_contract together."
     area: hk-pipeline, hk-api, hk-context
     needs: none
     model: opus
@@ -2717,11 +2717,11 @@ tasks:
     parallel_group: MUI-API
     use_cases: []
     found_by: "T-149 ADR-0013 frontend-to-API map (API GAP), 2026-09-15"
-    acceptance: "route/stream/field added per ADR-0013 gap entry; docs/api.md + crates/hk-cli/tests/api_contract.rs updated together; backend-owned logic (no UI logic); targeted tests green"
+    acceptance: "ADR-0013 gaps 11 and 12, both small: (a) document the pipeline `follow_hops` surface served by recipes/runtime.rs in docs/api.md with a contract assertion; (b) add an additive per-node `doc` field to the recipe schema in hk-recipe, shown in the Decode step guide, with a test that an existing recipe without the field still loads. NOTE: docs/api.md is edited frequently by other tasks - merge main immediately before committing."
     area: docs/api.md, hk-recipe
     needs: none
     model: sonnet
-    effort: medium
+    effort: low
     core_interface: false
     size: small
   - id: T-169

@@ -330,19 +330,19 @@ None are implemented here. Each gap has an interim UI behaviour, and none of the
 | # | Gap (mockup element) | Proposed backend task | Owning crate(s) | Size |
 |---|---|---|---|---|
 | 1 | Always-on capture buffer: "Recording all · 48 h buffer", buffered hours and bytes of quota, "Export clip from the buffer" | **Rolling IQ capture buffer with status and clip export**: retention policy, `GET /api/capture/buffer` (`retained_from_s`, `bytes`, `quota_bytes`), `POST /api/capture/clip {t0, t1, f_lo, f_hi}` → SigMF output session | hk-store, hk-pipeline, hk-api | large — **done**: T-157 `GET /api/iqbuffer`, `POST /api/iqbuffer/clip`; T-178 persistent pre-allocated ring ([ADR-0014](0014-iq-capture-ring.md)) |
-| 2 | Row and focus SNR, peak level, level bar | **Inventory row measurements**: latest `snr_db`, `peak_dbfs` (and `floor_dbfs`) from the emitter's detections or track | hk-model (repo query), hk-api | small |
-| 3 | Focus decoded summary (RDS PS/PTY, pager address) | **Emitter's latest decode fields**: `GET /api/inventory/{id}/decodes?limit=` returning Decode rows gated like the `decodes/*` stream | hk-model, hk-api | small |
-| 4 | MPX / subcarrier stage plot | **Stage tap `view=spectrum`** (already specified in stream-contract §14.4; answers 422) | hk-pipeline (recipes/openers), hk-api | small |
+| 2 | Row and focus SNR, peak level, level bar | **Inventory row measurements**: latest `snr_db`, `peak_dbfs` (and `floor_dbfs`) from the emitter's detections or track | hk-model (repo query), hk-api | small — **done**: T-158 |
+| 3 | Focus decoded summary (RDS PS/PTY, pager address) | **Emitter's latest decode fields**: `GET /api/inventory/{id}/decodes?limit=` returning Decode rows gated like the `decodes/*` stream | hk-model, hk-api | small — **done**: T-159 (served as `GET /api/inventory/{id}/decode`) |
+| 4 | MPX / subcarrier stage plot | **Stage tap `view=spectrum`** (already specified in stream-contract §14.4; answers 422) | hk-pipeline (recipes/openers), hk-api | small — **done**: T-160 |
 | 5 | Eye diagram, timing diagram | **Clock-recovery diagnostic output**: per-symbol waveform segments and sample instants on a diagnostic port, or `view=eye`; stream-contract §14.4 addition | hk-pipeline (blocks), hk-stream docs | large |
 | 6 | Sync-search plot | **`sync_search` diagnostic port**: match score per candidate position | hk-pipeline (blocks) | small |
 | 7a | Blind "Use" suggestions for symbol rate, subcarrier, deviation | **Emitter estimated parameters on inventory**: latest `EstimatedParams` (symbol rate, modulation, deviation, CFO, bandwidth) on `GET /api/inventory/{id}` | hk-model, hk-api | small |
 | 7b | "Decode RDS" / recipe choice for a signal | **Serve `GET /api/recipes/match?emitter=`** (planned in api.md, T-088): recipes ranked against measured parameters, with reasons | hk-pipeline (recipes), hk-api | large |
 | 8 | Stream out IQ | **On-demand channelised IQ opener `open/iq?emitter\|f_lo&f_hi`** (§12.1 profile, `cf32_le`) | hk-pipeline (chains), hk-api | small |
 | 9 | Selection "Watch: alert on new activity" | **Region watch**: a selection-scoped alarm rule raising anomalies and stream messages for new activity in its extent | hk-context, hk-api | large |
-| 10 | DC mask on the live view | **DC notch extent on the live geometry**: `dc_excluded_hz` on the spectrum stream header (and `run`) | hk-pipeline, hk-api, stream-contract | small |
+| 10 | DC mask on the live view | **DC notch extent on the live geometry**: `dc_excluded_hz` on the spectrum stream header (and `run`) | hk-pipeline, hk-api, stream-contract | small — **done**: T-167 |
 | 11 | Hopping pipelines | **Document pipeline `follow_hops`** (served by `recipes/runtime.rs`) in docs/api.md, with a contract assertion | hk-api docs, hk-cli tests | small |
 | 12 | Decode step guide prose | **Recipe per-node `doc`** (additive recipe-schema field, shown in the step guide) | hk-recipe | small |
-| 13 | Inventory tab counts past one page | **Inventory `total`**: the matching row count (before `limit`/`cursor`) on `GET /api/inventory`, with a contract assertion | hk-model (repo query), hk-api | small |
+| 13 | Inventory tab counts past one page | **Inventory `total`**: the matching row count (before `limit`/`cursor`) on `GET /api/inventory`, with a contract assertion | hk-model (repo query), hk-api | small — **done**: T-171 |
 
 Small means ≤ 1 day for one agent with contract tests; large means a new store, block or contract surface needing review. GAPS 4, 6, 7a, 10 and 11 unlock most of the mockup and are independent of each other. GAP 5 changes the stream contract, so it goes to Fable or Opus.
 
