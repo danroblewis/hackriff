@@ -4183,7 +4183,7 @@ tasks:
     milestone: MUI
     title: 'RDS should surface as an accumulated PS / RadioText / PI / clock view, not
       a per-frame packet stream'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: MUI-X3
