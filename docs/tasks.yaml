@@ -6200,7 +6200,7 @@ tasks:
     milestone: M2-hardening
     title: Floor context is not keyed on bias-tee state, so an active antenna and a passive one pool into
       one noise floor
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-325
