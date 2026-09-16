@@ -9,7 +9,13 @@
 //!   confirmation), detaches on track close / merge / coverage loss, and reaps finished threads.
 //! - Chain bodies: [`analog`] (C19 auto mode + RDS), [`fsk`] (C13/C14/C20/C21), [`plugin`]
 //!   (DDC + subprocess decoder), [`record`] (pre-trigger SigMF, C25), [`trunk`] (C23
-//!   control-channel hunt, T-287; metadata only).
+//!   control-channel hunt, T-287; metadata only), [`sweep`] (sweep characterisation of a candidate
+//!   region, T-297; metadata only).
+//!
+//! **Selection versus measurement (T-297).** [`Trigger::ConfirmedTrack`] *selects*: the first
+//! matching spec wins and the rest never run. That is right for decoding and wrong for measuring,
+//! so [`Trigger::EveryTrack`] chains attach **beside** the selected one, capped by their own node
+//! spec and counted apart from it (`sweep_attached`, not `attached`).
 //!
 //! **Claims at attach (T-037b).** Every chain and recorder registers its gate cursor on the
 //! control thread when it is attached, at the first sample it will read, and hands it to its
@@ -31,6 +37,7 @@ pub mod outputs;
 pub(crate) mod plugin;
 pub(crate) mod record;
 pub mod spec;
+pub(crate) mod sweep;
 pub mod taps;
 pub(crate) mod trunk;
 
@@ -159,6 +166,8 @@ struct Running {
     id: u64,
     tx: Option<Sender<ChainMsg>>,
     join: JoinHandle<()>,
+    /// A [`Trigger::EveryTrack`] measuring chain (T-297), counted apart from the decode chains.
+    measuring: bool,
 }
 
 /// Longest wait for a chain row's parent detection ([`stored_detection`]).
@@ -349,8 +358,9 @@ fn chain_start(shape: &ChainShape, cand: &Candidate, fs: f64) -> u64 {
     let pre_s = match shape {
         ChainShape::Analog { pre_s, .. } => *pre_s,
         ChainShape::Fsk { pad_s, .. } => *pad_s,
-        // The hunt reads forward from where it attached: there is no trigger box to precede.
-        ChainShape::Plugin { .. } | ChainShape::TrunkCc { .. } => 0.0,
+        // The hunt and the characteriser read forward from where they attached: there is no
+        // trigger box to precede.
+        ChainShape::Plugin { .. } | ChainShape::TrunkCc { .. } | ChainShape::Sweep { .. } => 0.0,
     };
     cand.first_sample.saturating_sub((pre_s * fs) as u64)
 }
@@ -368,6 +378,9 @@ pub(crate) struct ChainManager {
     pending: HashMap<TrackId, Candidate>,
     by_channel: HashMap<ChannelKey, u64>,
     cooldown: ChannelMemory,
+    /// T-297: the measuring chains ([`Trigger::EveryTrack`]) running for each track, kept apart
+    /// from `by_track` because they attach *beside* the decode chain rather than instead of it.
+    measuring: HashMap<TrackId, Vec<u64>>,
 }
 
 const BACKLOG_PER_TRACK: usize = 512;
@@ -386,6 +399,7 @@ impl ChainManager {
             pending: HashMap::new(),
             by_channel: HashMap::new(),
             cooldown: ChannelMemory::default(),
+            measuring: HashMap::new(),
         }
     }
 
@@ -417,6 +431,9 @@ impl ChainManager {
             }
         };
         let class = self.shared.cfg.source_class;
+        // T-297: a measuring chain runs beside the decode chain rather than instead of it, and is
+        // counted apart from it (see `Running::measuring`).
+        let measuring = spec.trigger == Trigger::EveryTrack;
         if crate::debug_enabled() {
             eprintln!(
                 "hk-pipeline: attach {} for {:.4}..{:.4} MHz (bursty {:?}) from sample {} trigger {}",
@@ -469,7 +486,12 @@ impl ChainManager {
                             )
                         })
                 {
-                    self.running.push(Running { id, tx: None, join });
+                    self.running.push(Running {
+                        id,
+                        tx: None,
+                        join,
+                        measuring: false,
+                    });
                 }
             } else {
                 inc(&c.recordings_refused_class);
@@ -569,17 +591,38 @@ impl ChainManager {
                         },
                         cursor,
                     ),
+                    ChainShape::Sweep {
+                        window_s,
+                        frame_s,
+                        max_passes,
+                        ..
+                    } => sweep::run(
+                        shared,
+                        rx,
+                        cand,
+                        sweep::SweepNode {
+                            window_s,
+                            frame_s,
+                            max_passes,
+                        },
+                        cursor,
+                    ),
                 }
                 stat.account_cpu(&mut clock);
                 set_thread_stat(None);
             });
         match spawned {
             Ok(join) => {
-                inc(&c.attached);
+                inc(if measuring {
+                    &c.sweep_attached
+                } else {
+                    &c.attached
+                });
                 self.running.push(Running {
                     id,
                     tx: Some(tx),
                     join,
+                    measuring,
                 });
                 Some(id)
             }
@@ -604,6 +647,9 @@ impl ChainManager {
     }
 
     fn try_attach(&mut self, track: TrackId) {
+        // Measuring chains first, and unconditionally: they must not depend on whether a decode
+        // spec matched, because the region that most needs measuring is the one none claimed.
+        self.attach_measuring(track);
         let Some(cand) = self.pending.get(&track) else {
             return;
         };
@@ -627,6 +673,59 @@ impl ChainManager {
             );
         }
         self.attach_track(track, &spec, cand);
+    }
+
+    /// Measuring chains alive now, across every track.
+    fn live_measuring(&self) -> usize {
+        self.measuring
+            .values()
+            .flatten()
+            .filter(|id| self.running.iter().any(|r| r.id == **id))
+            .count()
+    }
+
+    /// Attaches every [`Trigger::EveryTrack`] spec matching this track, **in addition to** the
+    /// decode chain [`select_for_track`] chooses (T-297).
+    ///
+    /// At most one measuring chain per track, and at most the node spec's `max_chains` alive at
+    /// once across the run — the bound that matters, since the trigger is per confirmed track and a
+    /// busy band has many. Above the cap the attach is refused and counted, never queued.
+    fn attach_measuring(&mut self, track: TrackId) {
+        let Some(cand) = self.pending.get(&track).cloned() else {
+            return;
+        };
+        if self.measuring.contains_key(&track) {
+            return;
+        }
+        // A confirmed track has at least one detection by definition — the confirming one — which
+        // `members` has not necessarily counted yet.
+        let count = self.members.get(&track).copied().unwrap_or(0).max(1);
+        let specs: Vec<ChainSpec> = self
+            .shared
+            .specs
+            .iter()
+            .filter(|s| {
+                s.trigger == Trigger::EveryTrack
+                    && count >= s.min_detections
+                    && s.matches(cand.f_lo_hz, cand.f_hi_hz, cand.bursty)
+            })
+            .cloned()
+            .collect();
+        for spec in specs {
+            let cap = match spec.shape() {
+                Ok(ChainShape::Sweep { max_chains, .. }) => max_chains,
+                _ => continue,
+            };
+            if self.live_measuring() >= cap {
+                inc(&self.shared.counters.chains.sweep_admission_refused);
+                continue;
+            }
+            if let Some(id) = self.attach(&spec, cand.clone()) {
+                self.measuring.entry(track).or_default().push(id);
+            }
+            // One measuring chain per track: a second would read the same region twice.
+            break;
+        }
     }
 
     fn attach_track(&mut self, track: TrackId, spec: &ChainSpec, mut cand: Candidate) {
@@ -710,6 +809,10 @@ impl ChainManager {
     pub fn on_track_closed(&mut self, track: TrackId) {
         self.backlog.remove(&track);
         self.members.remove(&track);
+        // The measuring chain writes what it measured at detach, against a settled inventory.
+        for id in self.measuring.remove(&track).unwrap_or_default() {
+            self.send(id, ChainMsg::Detach);
+        }
         if let Some(c) = self.pending.remove(&track) {
             if crate::debug_enabled() {
                 eprintln!(
@@ -728,6 +831,11 @@ impl ChainManager {
     }
 
     pub fn on_merged(&mut self, from: TrackId, into: TrackId) {
+        // The survivor keeps its own measuring chain; the absorbed track's finishes and writes
+        // whatever it had already measured (the repository re-points a merged emitter).
+        for id in self.measuring.remove(&from).unwrap_or_default() {
+            self.send(id, ChainMsg::Detach);
+        }
         let moved = self.members.remove(&from).unwrap_or(0);
         *self.members.entry(into).or_insert(0) += moved;
         if let Some(mut b) = self.backlog.remove(&from) {
@@ -833,6 +941,7 @@ impl ChainManager {
         }
         self.by_track.clear();
         self.manual.clear();
+        self.measuring.clear();
     }
 
     /// Joins finished chains.
@@ -843,7 +952,12 @@ impl ChainManager {
                 let r = self.running.swap_remove(i);
                 let _ = r.join.join();
                 if r.tx.is_some() {
-                    inc(&self.shared.counters.chains.detached);
+                    let c = &self.shared.counters.chains;
+                    inc(if r.measuring {
+                        &c.sweep_detached
+                    } else {
+                        &c.detached
+                    });
                 }
                 self.by_track.retain(|_, v| *v != r.id);
                 let now = self.shared.ring.next_sample().unwrap_or(0);

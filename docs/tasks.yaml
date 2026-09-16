@@ -5204,7 +5204,7 @@ tasks:
     milestone: M2-hardening
     title: 'Analysis pass over the 2026-09-15 FM-band capture to add truth annotations,
       so it can serve as a blind acceptance fixture'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: PIPE
@@ -5511,7 +5511,7 @@ tasks:
     milestone: M3
     title: 'hk_dsp::chirp is measured but unwired: nothing reads IQ to characterise a
       swept region, so the system detects chirps as regions and claims nothing about them'
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-294
@@ -5539,7 +5539,8 @@ tasks:
     milestone: M3
     title: 'Confidently-wrong is no longer zero: 5 of 396 held-out inputs get a family
       that is not their own (4x chirped-FSK, 1x 8-FSK called analog)'
-    status: in-progress
+    status: done
+    commit: b6f169e
     priority: high
     deps:
     - T-296
@@ -5584,7 +5585,8 @@ tasks:
     milestone: M3
     title: 'Image/harmonic/IMD attribution must read device_id: a fundamental seen on one front end can
       never explain an artifact seen on another'
-    status: todo
+    status: done
+    commit: f5bb4df
     priority: normal
     deps:
     - T-219
@@ -5609,7 +5611,7 @@ tasks:
     milestone: M2-hardening
     title: BaselineKey has no front end in it, so two uncalibrated devices at one site average their noise
       floors together
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-259
@@ -5651,7 +5653,8 @@ tasks:
     milestone: M2-hardening
     title: Document where the source abstraction is N-capable and where the single-device assumption actually
       lives
-    status: todo
+    status: done
+    commit: 63bdb9d
     priority: low
     deps:
     - T-259
@@ -5665,6 +5668,48 @@ tasks:
       Consequences line that the interface assumes one window now. Record the device-local vs shared-air
       rule from T-259: images/harmonics/IMD/noise floor/gain state must read the device; dedup/clustering/identity
       must not. No behaviour change'
+  - id: T-306
+    milestone: M3
+    title: 'The last confidently-wrong call: one chirped-FSK at 20 dB sits at the low tail of its own generator,
+      and the fix must not be a shorter window'
+    status: todo
+    priority: low
+    deps:
+    - T-298
+    parallel_group: M3A
+    model: opus
+    acceptance: 'T-298 took held-out wrong-family from 5 of 396 to 1 of 396 by adding if_local_bimodality
+      and if_local_modality (features@4), statistics about the window''s OWN local trend. ONE case remains:
+      a chirped-FSK at 20 dB, seed 1700074, still reads analog/wfm. It sits at the LOW TAIL of its own generator
+      on the dimension that closes the other three - if_local_bimodality 0.585 where its generator averages
+      0.74 +/- 0.11. Both new dimensions fire, but weakly: neither becomes the SECOND-largest |z| that T-248''s
+      tail term needs. THE REFUSAL TO PRESERVE: shrinking IF_LOCAL_WINDOW from 512 would catch it, and T-298
+      explicitly declined because that is tuning a constant against an acceptance result. Do NOT do it.
+      IF_LOCAL_WINDOW = 512 is the window ramp_linearity already fits a line over and the separation is
+      unchanged at 256, so the length is not what is doing the work - a change there would be fitting the
+      seed, not the physics. A fix must come from a dimension that separates this case on its merits, or
+      from the tail term, or this stays an honest documented remainder. Two candidates are already measured
+      and refuted: lag-product PAPR measures a coherent carrier not a sweep (chirped-FSK 2.61 but am 2.52,
+      ssb 2.47), and per-window IF slope consistency does not separate (keying dominates the drift within
+      a window). Report a negative honestly if the remainder cannot be closed without tuning'
+  - id: T-307
+    milestone: M3
+    title: artifact_detail() discloses the arithmetic of an artifact claim but not the receive chain it
+      was made on
+    status: todo
+    priority: low
+    deps:
+    - T-302
+    parallel_group: DETECT
+    model: sonnet
+    acceptance: 'T-302 made a ReceiveChain (device_id + optional antenna_port) gate every image/harmonic/intermod
+      pairing, so the chain is now part of WHY a claim was made - but artifact_detail() still discloses
+      only lo_hz, orders and error. A user reading the explanation cannot see which front end the claim
+      rests on, which matters as soon as more than one device is in play and matters for auditing a wrong
+      claim even with one. Add the chain to the detail JSON: additive, confined to the detail shape, no
+      change to attribution behaviour. Update docs/api.md and the api_contract tests together per T-079
+      if the field crosses the wire. Keep the T-302 invariant visible in the disclosure: an artifact is
+      a property of ONE receive chain'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

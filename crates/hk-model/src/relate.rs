@@ -21,6 +21,15 @@
 //!    explained was measured under. It is the same "artifact of the receiver, not the air" idea as
 //!    the DC twin rule (ADR-0012 §2.6).
 //!
+//! **Device-local physics reads the receive chain; shared-air reasoning must not** (T-302). An
+//! image, harmonic or intermodulation product is manufactured by one front end's mixer, LO and
+//! non-linearity, so a source measured on *another* receive chain can never explain it — a signal
+//! arriving at device B's antenna was never in device A's mixer. Every artifact pairing below is
+//! therefore gated on [`ReceiveChain`], and [`TunedLo`] exists so that an LO cannot be read apart
+//! from the chain that tuned it. Dedup, competition and identity are the opposite case: two front
+//! ends at a stitched seam seeing one real emitter *should* collapse to one row, so nothing in
+//! [`bands_compete`], [`distinguishing_evidence`] or [`rank_score`] reads the device.
+//!
 //! **Nothing here ever deletes or mutates a row.** A relationship is an append-only claim keyed by
 //! emitter, carrying its reasoning, and revocable when evidence changes (`active = 0`). The losing
 //! candidate keeps its id, detections, tracks, links and history, so later evidence can revive it.
@@ -254,6 +263,82 @@ pub enum RelationVisibility {
 // Evidence and the guard
 // ---------------------------------------------------------------------------------------------
 
+/// One receive chain: the front end that made a measurement, and the RF path into it.
+///
+/// This is the key for **device-local physics** (T-302). An image, harmonic or intermodulation
+/// product is manufactured by one mixer, one LO and one non-linearity; a signal arriving at another
+/// front end's antenna cannot produce an artifact here, however well the arithmetic fits. The port
+/// is part of the key because one device with a switched antenna bank (an Opera Cake) has several
+/// RF paths, and a strong signal entering one port is not in the mixer while another is selected.
+///
+/// Distinct from [`crate::repo::ProvenanceChain`], which resolves a measurement's calibration and
+/// spur-mask versions rather than naming its receive path.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ReceiveChain {
+    /// Source device identity, as [`crate::Provenance::device_id`] records it.
+    pub device_id: String,
+    /// Active antenna/filter port, when the front end recorded one.
+    pub antenna_port: Option<String>,
+}
+
+impl ReceiveChain {
+    /// A chain on `device_id` with no port recorded.
+    pub fn device(device_id: impl Into<String>) -> Self {
+        Self {
+            device_id: device_id.into(),
+            antenna_port: None,
+        }
+    }
+
+    /// Whether two measurements could have been made through the same receive chain.
+    ///
+    /// The device must match — that is the physics, and it is never relaxed. The port is compared
+    /// **only when both sides recorded one**: an unrecorded port is unknown, not a different path,
+    /// and treating it as a mismatch would silently stop attributing artifacts on every front end
+    /// that does not switch antennas.
+    pub fn same_chain(&self, other: &Self) -> bool {
+        self.device_id == other.device_id
+            && match (&self.antenna_port, &other.antenna_port) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            }
+    }
+}
+
+/// A tuning centre and the receive chain that tuned it.
+///
+/// The two are one value on purpose (T-302): an image exists only at the LO of the mixer that made
+/// it, so an LO readable without its chain is an invitation to mirror one front end's emitter about
+/// another front end's tuning.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TunedLo {
+    /// Which receive chain was tuned there.
+    pub chain: ReceiveChain,
+    /// The tuning centre, Hz.
+    pub lo_hz: f64,
+}
+
+/// The distinct receive chains in a tuning history, in first-seen order.
+pub fn distinct_chains(tuned_lo: &[TunedLo]) -> Vec<ReceiveChain> {
+    let mut out: Vec<ReceiveChain> = Vec::new();
+    for t in tuned_lo {
+        if !out.contains(&t.chain) {
+            out.push(t.chain.clone());
+        }
+    }
+    out
+}
+
+/// Whether `chains` holds one that could be the same receive chain as `c`.
+fn on_chain(chains: &[ReceiveChain], c: &ReceiveChain) -> bool {
+    chains.iter().any(|x| x.same_chain(c))
+}
+
+/// Whether `chains` and `targets` share a receive chain.
+fn on_any_chain(chains: &[ReceiveChain], targets: &[ReceiveChain]) -> bool {
+    targets.iter().any(|c| on_chain(chains, c))
+}
+
 /// What the rules need to know about one live inventory row, gathered from its stored measurement
 /// and its linked detections. Everything here is measured; nothing comes from a database of known
 /// signals.
@@ -288,8 +373,9 @@ pub struct RowEvidence {
     pub identity: Option<DecodedIdentity>,
     /// Stored fingerprint, when it has one.
     pub fingerprint: Option<Fingerprint>,
-    /// Distinct tuning centres (LO) the linked detections were measured under, Hz.
-    pub tuned_lo_hz: Vec<f64>,
+    /// Distinct tuning centres (LO) the linked detections were measured under, each paired with
+    /// the receive chain that tuned it. Never a bare frequency: see [`TunedLo`].
+    pub tuned_lo: Vec<TunedLo>,
     /// Observation spans, `(t_start_ns, t_end_ns)`, by start.
     pub spans: Vec<(i64, i64)>,
     /// Sightings counted into the row (a tie-break, never a score).
@@ -310,6 +396,13 @@ impl RowEvidence {
             self.f_center_hz,
             self.xdb_bandwidth_hz.unwrap_or(self.bandwidth_hz),
         )
+    }
+
+    /// The distinct receive chains this row was measured on, in first-seen order. Derived from
+    /// [`RowEvidence::tuned_lo`]: every detection carries the tune state it was measured under, so
+    /// a chain that never tuned never measured this row.
+    pub fn chains(&self) -> Vec<ReceiveChain> {
+        distinct_chains(&self.tuned_lo)
     }
 
     /// The provisional rank proxy (see [`rank_score`]).
@@ -502,7 +595,7 @@ pub fn distinguishing_evidence(
 // ---------------------------------------------------------------------------------------------
 
 /// A strong confirmed emitter offered to [`predict_artifacts`] as a possible source.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ArtifactSource {
     /// The source row.
     pub emitter_id: EmitterId,
@@ -512,6 +605,10 @@ pub struct ArtifactSource {
     pub bandwidth_hz: f64,
     /// Its latest peak level, dBFS.
     pub level_dbfs: f64,
+    /// The receive chains this emitter was actually measured on (T-302). An artifact belongs to
+    /// one receive chain, so a source seen only on another front end — or another antenna port —
+    /// can never explain a measurement made here, whatever the arithmetic says.
+    pub chains: Vec<ReceiveChain>,
 }
 
 /// One arithmetic coincidence that survived the frequency and level tests. It is a **ranked
@@ -612,17 +709,25 @@ fn level_consistent(suppression_db: f64) -> bool {
 }
 
 /// Geometric artifact prediction (C40): every image / harmonic / intermod coincidence between
-/// `target` and the strong confirmed `sources`, using the tuning centres in `tuned_lo_hz`, that
-/// passes both the frequency and the level test. Best first (lowest order, then smallest error).
+/// `target` and the strong confirmed `sources`, using the tuning history in `tuned_lo`, that passes
+/// the frequency, level **and receive-chain** tests. Best first (lowest order, then smallest error).
 ///
-/// This is arithmetic only. The caller still has to apply the **presence** test — an artifact is
-/// there only while its source is — and the guard, before recording a claim.
+/// **Every mechanism is confined to one receive chain** (T-302). An artifact is made by one front
+/// end's mixer and non-linearity, so a source is only ever mirrored about an LO its own chain
+/// tuned, and a harmonic or intermod product is only ever claimed on a chain that measured both the
+/// product and its source(s). A source seen only on another device (or another antenna port) is
+/// skipped. `tuned_lo` is the **target's own** tuning history, so an empty one attributes nothing:
+/// without knowing which chain measured this row there is no receive chain to reason about, and
+/// failing closed keeps the arithmetic from claiming what it cannot support.
+///
+/// Otherwise this is arithmetic only. The caller still has to apply the **presence** test — an
+/// artifact is there only while its source is — and the guard, before recording a claim.
 pub fn predict_artifacts(
     target_f_center_hz: f64,
     target_bandwidth_hz: f64,
     target_level_dbfs: f64,
     sources: &[ArtifactSource],
-    tuned_lo_hz: &[f64],
+    tuned_lo: &[TunedLo],
 ) -> Vec<ArtifactPrediction> {
     let mut out: Vec<ArtifactPrediction> = Vec::new();
     if !target_f_center_hz.is_finite() || !target_level_dbfs.is_finite() {
@@ -630,6 +735,8 @@ pub fn predict_artifacts(
     }
     // One tolerance for every mechanism: it comes from the measured row, not from the prediction.
     let tol = artifact_tolerance_hz(target_bandwidth_hz);
+    // The chains that actually measured this row. Nothing below is claimed off one of them.
+    let target_chains = distinct_chains(tuned_lo);
     let mut push = |p: ArtifactPrediction| {
         // Three independent tests, all measured: the centre, the width the mechanism implies, and
         // the level. A prediction that lands on the source itself says nothing: that is the
@@ -646,12 +753,16 @@ pub fn predict_artifacts(
             continue;
         }
         let suppression = s.level_dbfs - target_level_dbfs;
-        // Image: the mirror of the source about the tuning centre.
-        for &lo in tuned_lo_hz {
-            if !lo.is_finite() {
+        // Image: the mirror of the source about the tuning centre — of the mixer that made it.
+        for lo in tuned_lo {
+            if !lo.lo_hz.is_finite() {
                 continue;
             }
-            let predicted = 2.0 * lo - s.f_center_hz;
+            // This chain's LO can only mirror a signal that entered this chain.
+            if !on_chain(&s.chains, &lo.chain) {
+                continue;
+            }
+            let predicted = 2.0 * lo.lo_hz - s.f_center_hz;
             if predicted <= 0.0 {
                 continue;
             }
@@ -667,7 +778,7 @@ pub fn predict_artifacts(
                 a: 1,
                 b: 0,
                 sign: 1,
-                lo_hz: Some(lo),
+                lo_hz: Some(lo.lo_hz),
                 predicted_hz: predicted,
                 predicted_bandwidth_hz: s.bandwidth_hz,
                 error_hz: target_f_center_hz - predicted,
@@ -675,7 +786,12 @@ pub fn predict_artifacts(
                 suppression_db: suppression,
             });
         }
-        // Harmonics.
+        // Harmonics: this front end's own non-linearity product, so the source has to have been
+        // measured on a chain that measured this row. Deliberately placed after the image loop —
+        // skipping to the next source here skips only the harmonics.
+        if !on_any_chain(&s.chains, &target_chains) {
+            continue;
+        }
         for n in 2..=HARMONIC_MAX_ORDER {
             let predicted = f64::from(n) * s.f_center_hz;
             let bw = f64::from(n) * s.bandwidth_hz;
@@ -700,6 +816,14 @@ pub fn predict_artifacts(
     for (i, s1) in sources.iter().enumerate() {
         for s2 in sources.iter().skip(i + 1) {
             if !s1.f_center_hz.is_finite() || !s2.f_center_hz.is_finite() {
+                continue;
+            }
+            // Both tones have to have reached the same mixer as the row being explained: a product
+            // needs its two sources and its victim on one receive chain.
+            if !target_chains
+                .iter()
+                .any(|c| on_chain(&s1.chains, c) && on_chain(&s2.chains, c))
+            {
                 continue;
             }
             // The weaker source sets how strong the product can be.
@@ -787,10 +911,32 @@ mod tests {
             spur_flagged: false,
             identity: None,
             fingerprint: None,
-            tuned_lo_hz: Vec::new(),
+            tuned_lo: Vec::new(),
             spans: vec![(0, 1_000_000_000)],
             count: 1,
             first_seen_ns: 0,
+        }
+    }
+
+    fn chain(dev: &str) -> ReceiveChain {
+        ReceiveChain::device(dev)
+    }
+
+    fn lo_on(dev: &str, lo: f64) -> TunedLo {
+        TunedLo {
+            chain: chain(dev),
+            lo_hz: lo,
+        }
+    }
+
+    /// A strong confirmed source measured on one named front end.
+    fn source_on(dev: &str, id: u8, f: f64, bw: f64, level: f64) -> ArtifactSource {
+        ArtifactSource {
+            emitter_id: eid(id),
+            f_center_hz: f,
+            bandwidth_hz: bw,
+            level_dbfs: level,
+            chains: vec![chain(dev)],
         }
     }
 
@@ -846,55 +992,44 @@ mod tests {
 
     #[test]
     fn an_image_is_predicted_from_the_tuning_centre_and_a_real_neighbour_is_not() {
-        let source = ArtifactSource {
-            emitter_id: eid(9),
-            f_center_hz: 101.3e6,
-            bandwidth_hz: 180e3,
-            level_dbfs: -18.0,
-        };
+        let source = source_on("A", 9, 101.3e6, 180e3, -18.0);
+        let los = [lo_on("A", 100.8e6)];
         // Tuned at 100.8 MHz, the mirror of 101.3 MHz lands at 100.3 MHz.
-        let hits = predict_artifacts(100.3e6, 180e3, -48.0, &[source], &[100.8e6]);
+        let hits = predict_artifacts(100.3e6, 180e3, -48.0, std::slice::from_ref(&source), &los);
         let top = hits.first().expect("image predicted");
         assert_eq!(top.kind, ArtifactKind::Image);
         assert!(top.error_hz.abs() < 1.0, "{}", top.error_hz);
         assert!((top.suppression_db - 30.0).abs() < 1e-9);
         // A real adjacent station 200 kHz from the source fits no mechanism.
-        assert!(predict_artifacts(101.5e6, 180e3, -20.0, &[source], &[100.8e6]).is_empty());
+        assert!(
+            predict_artifacts(101.5e6, 180e3, -20.0, std::slice::from_ref(&source), &los)
+                .is_empty()
+        );
     }
 
     #[test]
     fn an_artifact_as_strong_as_its_source_is_not_claimed() {
-        let source = ArtifactSource {
-            emitter_id: eid(9),
-            f_center_hz: 101.3e6,
-            bandwidth_hz: 180e3,
-            level_dbfs: -18.0,
-        };
-        assert!(predict_artifacts(100.3e6, 180e3, -20.0, &[source], &[100.8e6]).is_empty());
+        let source = source_on("A", 9, 101.3e6, 180e3, -18.0);
+        assert!(
+            predict_artifacts(100.3e6, 180e3, -20.0, &[source], &[lo_on("A", 100.8e6)]).is_empty()
+        );
     }
 
     #[test]
     fn a_third_order_product_of_two_strong_sources_is_predicted() {
-        let s1 = ArtifactSource {
-            emitter_id: eid(1),
-            f_center_hz: 100.0e6,
-            bandwidth_hz: 180e3,
-            level_dbfs: -20.0,
-        };
-        let s2 = ArtifactSource {
-            emitter_id: eid(2),
-            f_center_hz: 100.4e6,
-            bandwidth_hz: 180e3,
-            level_dbfs: -22.0,
-        };
-        // 2 f1 - f2 = 99.6 MHz, and the product spreads to 2 x 180 + 180 = 540 kHz.
-        let hits = predict_artifacts(99.6e6, 540e3, -55.0, &[s1, s2], &[]);
+        let s1 = source_on("A", 1, 100.0e6, 180e3, -20.0);
+        let s2 = source_on("A", 2, 100.4e6, 180e3, -22.0);
+        // 2 f1 - f2 = 99.6 MHz, and the product spreads to 2 x 180 + 180 = 540 kHz. The chain is
+        // tuned at 100.2 MHz, whose mirrors of the two sources (100.4 and 100.0 MHz) are nowhere
+        // near the product, so the intermod is the only mechanism that fits.
+        let los = [lo_on("A", 100.2e6)];
+        let hits = predict_artifacts(99.6e6, 540e3, -55.0, &[s1.clone(), s2.clone()], &los);
         let top = hits.first().expect("intermod predicted");
         assert_eq!(top.kind, ArtifactKind::Intermod);
         assert_eq!((top.a, top.b, top.sign), (2, 1, -1));
         assert_eq!(top.order, 3);
         // A narrow box on the same frequency is not that product: the mechanism says 540 kHz.
-        assert!(predict_artifacts(99.6e6, 12.5e3, -55.0, &[s1, s2], &[]).is_empty());
+        assert!(predict_artifacts(99.6e6, 12.5e3, -55.0, &[s1, s2], &los).is_empty());
     }
 
     /// The guard's central case: a narrow emission inside a wide one is never its duplicate,
@@ -927,18 +1062,15 @@ mod tests {
     /// an image preserves its source's width.
     #[test]
     fn the_100p3_burst_is_not_the_image_of_a_wideband_station() {
-        let source = ArtifactSource {
-            emitter_id: eid(9),
-            f_center_hz: 101.303e6,
-            bandwidth_hz: 180e3,
-            level_dbfs: -18.0,
-        };
+        let source = source_on("A", 9, 101.303e6, 180e3, -18.0);
+        let los = [lo_on("A", 100.8e6)];
         assert!(
-            predict_artifacts(100.300e6, 8.5e3, -48.0, &[source], &[100.8e6]).is_empty(),
+            predict_artifacts(100.300e6, 8.5e3, -48.0, std::slice::from_ref(&source), &los)
+                .is_empty(),
             "an 8.5 kHz burst is not the image of a 180 kHz station"
         );
         // The same arithmetic on a box of the width the mechanism implies is still offered.
-        let wide = predict_artifacts(100.300e6, 180e3, -48.0, &[source], &[100.8e6]);
+        let wide = predict_artifacts(100.300e6, 180e3, -48.0, std::slice::from_ref(&source), &los);
         assert_eq!(wide.first().map(|p| p.kind), Some(ArtifactKind::Image));
         assert!(
             (wide[0].error_hz - 3_000.0).abs() < 1.0,
@@ -1017,6 +1149,99 @@ mod tests {
         ));
     }
 
+    /// T-302: an image is a property of **one receive chain**. The arithmetic that attributes a
+    /// mirror within one front end must claim nothing when the source was measured on another —
+    /// a signal arriving at device B's antenna was never in device A's mixer.
+    #[test]
+    fn an_image_is_never_mirrored_across_two_front_ends() {
+        let los = [lo_on("hackrf:A", 100.8e6)];
+        let source = |dev: &str| source_on(dev, 9, 101.3e6, 180e3, -18.0);
+        // One front end: the mirror of 101.3 MHz about 100.8 MHz lands on the row and is offered.
+        let same = predict_artifacts(100.3e6, 180e3, -48.0, &[source("hackrf:A")], &los);
+        assert_eq!(same.first().map(|p| p.kind), Some(ArtifactKind::Image));
+        // Identical geometry, source seen only on the other front end: nothing is claimed.
+        assert!(
+            predict_artifacts(100.3e6, 180e3, -48.0, &[source("hackrf:B")], &los).is_empty(),
+            "device A's LO can never mirror a signal that only device B saw"
+        );
+    }
+
+    /// T-302: harmonics and intermod products come from the same non-linearity, so they are
+    /// confined to one chain too.
+    #[test]
+    fn a_harmonic_and_an_intermod_product_are_confined_to_one_chain() {
+        // Harmonic: 2 x 50.0 MHz = 100.0 MHz, at twice the source's width, 30 dB down.
+        let los = [lo_on("hackrf:A", 60.0e6)];
+        let h = |dev: &str| {
+            predict_artifacts(
+                100.0e6,
+                360e3,
+                -48.0,
+                &[source_on(dev, 3, 50.0e6, 180e3, -18.0)],
+                &los,
+            )
+        };
+        assert_eq!(
+            h("hackrf:A").first().map(|p| p.kind),
+            Some(ArtifactKind::Harmonic)
+        );
+        assert!(
+            h("hackrf:B").is_empty(),
+            "device A does not generate harmonics of a signal it never received"
+        );
+
+        // Intermod: 2 f1 - f2 needs both tones in the same mixer as the product.
+        let los = [lo_on("hackrf:A", 100.2e6)];
+        let s1 = source_on("hackrf:A", 1, 100.0e6, 180e3, -20.0);
+        let both_here = [s1.clone(), source_on("hackrf:A", 2, 100.4e6, 180e3, -22.0)];
+        let one_elsewhere = [s1, source_on("hackrf:B", 2, 100.4e6, 180e3, -22.0)];
+        assert_eq!(
+            predict_artifacts(99.6e6, 540e3, -55.0, &both_here, &los)
+                .first()
+                .map(|p| p.kind),
+            Some(ArtifactKind::Intermod)
+        );
+        assert!(
+            predict_artifacts(99.6e6, 540e3, -55.0, &one_elsewhere, &los).is_empty(),
+            "two tones that never met in one mixer cannot have produced this row"
+        );
+    }
+
+    /// T-302: one device with a switched antenna bank has several RF paths, so the port is part of
+    /// the key — but only when both sides recorded one, so a front end that never switches
+    /// antennas keeps attributing its own images exactly as before.
+    #[test]
+    fn a_port_is_part_of_the_chain_only_when_both_sides_recorded_one() {
+        let chain = |port: Option<&str>| ReceiveChain {
+            device_id: "hackrf:A".into(),
+            antenna_port: port.map(Into::into),
+        };
+        let fires = |src: Option<&str>, tuned: Option<&str>| {
+            let source = ArtifactSource {
+                emitter_id: eid(9),
+                f_center_hz: 101.3e6,
+                bandwidth_hz: 180e3,
+                level_dbfs: -18.0,
+                chains: vec![chain(src)],
+            };
+            let los = [TunedLo {
+                chain: chain(tuned),
+                lo_hz: 100.8e6,
+            }];
+            !predict_artifacts(100.3e6, 180e3, -48.0, &[source], &los).is_empty()
+        };
+        assert!(fires(Some("A1"), Some("A1")), "one path sees its own image");
+        assert!(
+            !fires(Some("A1"), Some("A2")),
+            "a signal entering another port was not in the mixer while this one was selected"
+        );
+        assert!(fires(None, None), "no port recorded either side: unchanged");
+        assert!(
+            fires(Some("A1"), None),
+            "an unrecorded port is unknown, not a different path"
+        );
+    }
+
     /// How much of a captured band the geometric predictor is willing to claim — the *prior width*
     /// of the rule, before the presence, flag and guard tests. Modelled on the 2026-09-15 capture:
     /// 99.6–102.0 MHz, one tune at 100.8 MHz, 32 confirmed sources (the cap) 30 dB above the
@@ -1024,14 +1249,9 @@ mod tests {
     #[test]
     fn artifact_predictions_claim_only_a_small_share_of_the_captured_band() {
         let sources: Vec<ArtifactSource> = (0..32u8)
-            .map(|k| ArtifactSource {
-                emitter_id: eid(k + 1),
-                f_center_hz: 99.65e6 + f64::from(k) * 73e3,
-                bandwidth_hz: 180e3,
-                level_dbfs: -18.0,
-            })
+            .map(|k| source_on("A", k + 1, 99.65e6 + f64::from(k) * 73e3, 180e3, -18.0))
             .collect();
-        let los = [100.8e6];
+        let los = [lo_on("A", 100.8e6)];
         let step = 2_000.0;
         let mut covered = [0usize; 2];
         for (i, measured_bw) in [12.5e3, 180e3].into_iter().enumerate() {
@@ -1047,12 +1267,7 @@ mod tests {
         let real: Vec<ArtifactSource> = [99.75e6, 101.45e6]
             .into_iter()
             .enumerate()
-            .map(|(k, f)| ArtifactSource {
-                emitter_id: eid(k as u8 + 1),
-                f_center_hz: f,
-                bandwidth_hz: 180e3,
-                level_dbfs: -18.0,
-            })
+            .map(|(k, f)| source_on("A", k as u8 + 1, f, 180e3, -18.0))
             .collect();
         let mut real_covered = 0usize;
         let mut f = 99.6e6;

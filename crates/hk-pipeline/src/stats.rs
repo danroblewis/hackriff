@@ -319,6 +319,30 @@ counter_group!(
         /// Calls whose end was **observed**, by a silence timeout on the granted channel. The
         /// rest carry `t_end = NULL`, which the model defines as "still open, or never observed".
         cc_calls_closed,
+        /// T-297: characterising chains attached ([`crate::chains::sweep`]).
+        ///
+        /// Counted **apart from** `attached`, which has always meant a chain attached to
+        /// demodulate, decode or record a candidate. A chain that only measures a region and
+        /// writes evidence about it is not one of those, and several suites pin `attached`
+        /// exactly; giving the measuring chains their own pair keeps those assertions literally
+        /// true instead of quietly inflating them.
+        sweep_attached,
+        /// Characterising chains that finished.
+        sweep_detached,
+        /// Sweep-characterisation windows examined. One pass is one channelised window of a
+        /// candidate region and one two-lag sweep test on its strongest frame.
+        sweep_passes,
+        /// Regions a sweep rate was measured for and written to their emitter's features.
+        sweep_characterised,
+        /// Regions examined that were **not** characterised: the two lags did not both peak and
+        /// agree, so nothing is claimed about them. Not a failure — a carrier, a wideband burst
+        /// and a 2-FSK burst all land here by design.
+        sweep_uncharacterised,
+        /// Sweep chains the concurrency cap refused to attach.
+        sweep_admission_refused,
+        /// Characterisations measured but not written: no inventory emitter covered the region
+        /// within the bounded wait, so the measurement had nothing to be evidence about.
+        sweep_no_emitter,
         /// Chain errors (demod, repository).
         errors,
     }

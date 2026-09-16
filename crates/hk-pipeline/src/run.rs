@@ -1655,6 +1655,14 @@ impl RunSummary {
             c("/chains/errors") + c("/chains/attach_errors")
         ));
         line(format!(
+            "characterise: {} sweep chain(s), {} window(s) examined, {} characterised, {} left \
+             alone",
+            c("/chains/sweep_attached"),
+            c("/chains/sweep_passes"),
+            c("/chains/sweep_characterised"),
+            c("/chains/sweep_uncharacterised")
+        ));
+        line(format!(
             "trunking:    {} CC confirmed, {} TSBK(s), {} grant(s) mapped / {} unmapped / {} \
              outside window; {} followed ({} refused, {} silent), {} call(s) ({} closed on \
              silence)",

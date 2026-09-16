@@ -17,3 +17,6 @@ mod blind;
 
 #[path = "acceptance/t255_lora_chirp.rs"]
 mod t255_lora_chirp;
+
+#[path = "acceptance/t297_chirp_characterisation.rs"]
+mod t297_chirp_characterisation;

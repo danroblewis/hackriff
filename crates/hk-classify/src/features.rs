@@ -45,7 +45,45 @@ use num_complex::{Complex32, Complex64};
 /// restores `am` to +0.02 ± 0.03 and `cw` to +0.04 ± 0.01 and separates VSB-AM at −0.78 ± 0.13.
 /// `symmetry` also **abstains where there is no carrier to measure it about**
 /// ([`CARRIER_MIN_FRACTION`]), instead of reporting the noise it used to.
-pub const FEATURES_VERSION: u32 = 3;
+///
+/// **4 (T-298):** `if_local_bimodality` and `if_local_modality` added — the level structure of the
+/// instantaneous frequency measured **about its local trend** ([`IF_LOCAL_WINDOW`]) rather than
+/// about the whole record's mean.
+///
+/// `if_bimodality` and `if_modality` ask whether the instantaneous frequency sits at discrete
+/// levels, which is what separates a keyed carrier from an angle modulation. Both are statistics of
+/// the histogram over the **entire** snippet, so both answer "no" whenever the levels themselves
+/// move, and a keyed carrier's levels move for two ordinary reasons: the carrier drifts, and a long
+/// record accumulates enough slow wander that the levels smear into each other. Measured on the dev
+/// grid, the held-out chirped-carrier 2-FSK reads `if_modality` 1.04 ± 0.20 — one mode, i.e. *no*
+/// level structure at all — where the same snippet detrended reads exactly 2.00 ± 0.00.
+///
+/// That is a defect of the reference the statistic is measured against, not of the waveform, and it
+/// is the same class of defect as the two `symmetry` revisions above: a quantity defined relative to
+/// the carrier was being measured relative to something else. An FSK keyed on a carrier that drifts
+/// is still keying discrete levels — about its own carrier, which is linear across a short window
+/// even when it is not across the record.
+///
+/// Measured on the dev grid at 20–30 dB (median over windows, mean ± sd over 72 snippets per
+/// class), the local pair separates exactly where the global pair does not:
+///
+/// | class | `if_local_bimodality` | `if_local_modality` |
+/// |---|---|---|
+/// | `wfm` | 0.51 ± 0.04 | 1.62 ± 0.51 |
+/// | `nbfm` | 0.41 ± 0.03 | 1.40 ± 0.57 |
+/// | `am` | 0.31 ± 0.02 | 1.07 ± 0.25 |
+/// | `2fsk` | 0.82 ± 0.04 | 2.00 ± 0.00 |
+/// | `4fsk` | 0.56 ± 0.02 | 3.93 ± 0.25 |
+/// | held-out chirped-FSK | **0.74 ± 0.11** | 2.00 ± 0.00 |
+/// | held-out 8-FSK | 0.52 ± 0.01 | **4.47 ± 1.33** |
+///
+/// The two held-out FSK generators are each separated from `wfm` by one of the two dimensions and
+/// not by the other, which is why both are added rather than either alone: Sarle's coefficient is a
+/// *two*-mode statistic and falls back towards the uniform value as levels are added (8-FSK 0.52,
+/// 4-FSK 0.56), while the mode count is what survives that and fails instead when the levels are
+/// only two. Neither is a gate — both are density dimensions, so what they change is how far a
+/// snippet sits from `wfm`, not what any rule is allowed to conclude.
+pub const FEATURES_VERSION: u32 = 4;
 
 /// Bins guarded either side of the carrier when measuring `symmetry`: the **main-lobe half-width
 /// of the analysis window**, which [`spectral_features`] configures as [`WindowKind::Hann`].
@@ -95,6 +133,21 @@ pub const DEROTATE_MIN_COHERENCE: f64 = 0.3;
 /// noise". Widening the window to its neighbourhood keeps the comparison honest.
 pub const MIN_SHAPE_BINS: usize = 16;
 
+/// Window over which the instantaneous frequency's level structure is measured **about the
+/// carrier's local trend**, in samples (`if_local_bimodality`, `if_local_modality`).
+///
+/// This is not a new free parameter: 512 is the longest window [`ramp_linearity`] already fits a
+/// straight line over, so `features@N` has asserted since version 1 that a carrier is linear across
+/// it. The two requirements that decide the length meet there. The window has to be **long enough**
+/// that a fourth central moment is stable, because Sarle's coefficient is built from the third and
+/// fourth moments; and **short enough** that a drifting carrier really is a straight line across it.
+///
+/// It is also measured to be insensitive over the range where both hold, which is what says the
+/// length is not doing the work: at 256 samples the same dev grid gives `wfm` 0.49 against the
+/// held-out chirped-FSK's 0.71, and at 512 it gives 0.51 against 0.74 — the separation is the
+/// same either way.
+pub const IF_LOCAL_WINDOW: usize = 512;
+
 /// Names of `features@N`, in vector order. The density files key on these names, so the order may
 /// grow but never change meaning within a version.
 pub const FEATURE_NAMES: &[&str] = &[
@@ -126,6 +179,8 @@ pub const FEATURE_NAMES: &[&str] = &[
     "blind_fsk",
     "blind_bpsk",
     "blind_qpsk",
+    "if_local_bimodality",
+    "if_local_modality",
 ];
 
 /// The inputs a feature vector is computed from.
@@ -410,6 +465,14 @@ fn frequency_features(f: &mut Features, x: &[Complex64], input: &FeatureInput<'_
     // while the per-sample estimate is noisy enough at the gates' SNRs to hide it (at 25 dB the
     // per-sample IF noise is comparable to a chirp's per-window excursion).
     f.set("if_slope_r2", ramp_linearity(&smooth(&fi, 8)));
+    // The same level-structure question as `if_bimodality`/`if_modality`, asked about the carrier's
+    // own local trend instead of the whole record's mean (T-298). Measured on the raw instantaneous
+    // frequency, not the smoothed one: smoothing is what the ramp fit needs to see a slow sweep
+    // through per-sample noise, and it would blur the level transitions this is counting.
+    if let Some((bimodal, modes)) = local_level_structure(&fi) {
+        f.set("if_local_bimodality", bimodal);
+        f.set("if_local_modality", modes);
+    }
 }
 
 /// Normalised cumulants Ĉ20, Ĉ40, Ĉ42 and the sample kurtosis.
@@ -836,6 +899,39 @@ fn modality(v: &[f64]) -> usize {
 /// Several lengths are needed because the window has to sit **inside** one sweep: a window longer
 /// than the chirp's period spans a sawtooth and fits no line at all, and the sweep rate is not
 /// known before the signal is classified.
+/// Level structure of the instantaneous frequency **about its local trend**: the median over
+/// consecutive [`IF_LOCAL_WINDOW`]-sample windows of Sarle's bimodality coefficient and of the
+/// prominence mode count, each measured after that window's own best-fit straight line is removed.
+///
+/// `(bimodality, modality)`, or `None` when the sequence does not hold one whole window — an
+/// abstention, as everywhere else in this module, rather than a value invented from a part-window.
+///
+/// The median across windows, not the mean, for the reason [`window_r2`] takes one: a snippet may
+/// contain a gap, a retune or an interferer, and one ruined window must not decide the feature.
+fn local_level_structure(fi: &[f64]) -> Option<(f64, f64)> {
+    let mut bimodal = Vec::new();
+    let mut modes = Vec::new();
+    for chunk in fi.chunks(IF_LOCAL_WINDOW) {
+        if chunk.len() < IF_LOCAL_WINDOW {
+            break;
+        }
+        let d = detrend(chunk);
+        bimodal.push(bimodality(&d));
+        modes.push(modality(&d) as f64);
+    }
+    (!bimodal.is_empty()).then(|| (median_of(&bimodal), median_of(&modes)))
+}
+
+/// `v` with its own best-fit straight line removed.
+fn detrend(v: &[f64]) -> Vec<f64> {
+    let t: Vec<f64> = (0..v.len()).map(|i| i as f64).collect();
+    let (slope, intercept) = least_squares(&t, v);
+    v.iter()
+        .enumerate()
+        .map(|(i, y)| y - (slope * i as f64 + intercept))
+        .collect()
+}
+
 fn ramp_linearity(fi: &[f64]) -> f64 {
     [128usize, 256, 512]
         .into_iter()
@@ -947,6 +1043,42 @@ mod tests {
             "a chirp ramps linearly"
         );
         assert!(of(Class::Fsk2, 30.0, 11).get("if_slope_r2").unwrap() < 0.6);
+    }
+
+    /// T-298: the level structure of the instantaneous frequency measured about its **local** trend
+    /// separates a swept or a multi-tone FSK carrier from a wideband angle modulation, where the
+    /// whole-record statistics beside it do not.
+    ///
+    /// Averaged over dev seeds rather than asserted on one, because these are distributional
+    /// statements about a generator and a single seed would pin noise.
+    #[test]
+    fn local_level_structure_separates_swept_and_multi_tone_fsk_from_wideband_fm() {
+        let mean = |class: Class, name: &str| {
+            let v: Vec<f64> = (0..8u64)
+                .filter_map(|seed| of(class, 25.0, seed).get(name))
+                .collect();
+            assert!(!v.is_empty(), "{} has no {name}", class.label());
+            v.iter().sum::<f64>() / v.len() as f64
+        };
+        // The whole-record statistic cannot see the chirped carrier's two tones at all: the levels
+        // themselves move, so it reads a single mode — fewer than wideband FM shows.
+        let global = mean(Class::ChirpedFsk, "if_modality");
+        assert!(
+            global < 1.5,
+            "chirped-FSK reads {global} modes over the record"
+        );
+        // About the local trend they are there, and more sharply two-valued than `wfm` ever is.
+        let chirped = mean(Class::ChirpedFsk, "if_local_bimodality");
+        let wfm = mean(Class::Wfm, "if_local_bimodality");
+        assert!(chirped > wfm + 0.1, "chirped-FSK {chirped} vs wfm {wfm}");
+        // Sarle's coefficient is a *two*-mode statistic, so it does not separate 8-FSK; the mode
+        // count does. That is why both dimensions are carried rather than either alone.
+        let eight = mean(Class::Fsk8, "if_local_modality");
+        let wfm_modes = mean(Class::Wfm, "if_local_modality");
+        assert!(
+            eight > wfm_modes + 1.0,
+            "8-FSK {eight} modes vs wfm {wfm_modes}"
+        );
     }
 
     #[test]
