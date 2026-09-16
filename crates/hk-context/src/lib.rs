@@ -13,6 +13,8 @@
 //!   [`feeds::FeedFetcher`] seam and the [`feeds::gpsjam`] adapter (T-020).
 //! - [`anomaly`]: noise-floor episodes → `Anomaly(noise-floor-rise)` lifecycle (T-020).
 //! - [`correlate`]: Anomaly × cached events → ranked Explanations (T-020).
+//! - [`watch`]: the selection-scoped region watch (T-166): new activity inside a watched extent
+//!   raises an alert, unless the T-219 relationship rules say the row defers to another one.
 //! - [`geo`], [`utc`]: site/distance and UTC date helpers.
 
 pub mod anomaly;
@@ -28,6 +30,7 @@ pub mod utc;
 pub mod occupancy; // T-118 (engine), T-119 (baseline/novelty/score/site), T-122 (alarm)
 pub mod report; // T-121
 pub mod signature; // T-201 (ADR-0016 §5): C18 feature aggregation and signature matching
+pub mod watch; // T-166 (ADR-0013 §4.9 gap 9): selection-scoped region watch
 
 pub use anomaly::{
     EpisodeClass, EpisodeExtent, EpisodeSignal, FloorAnomalies, FloorAnomalyConfig,
@@ -44,6 +47,10 @@ pub use feeds::{
 pub use geo::Site;
 pub use known_status::{PART15_FAMILIES, PriorMatch, is_service_family, match_known_status};
 pub use priors::BandPlanFamilyPriors;
+pub use watch::{
+    StandingRelation, WatchActivity, WatchDecision, WatchRegion, WatchSkip, WatchSkipReason,
+    armed_regions, deferring_relation, evaluate as evaluate_watch,
+};
 
 #[cfg(test)]
 mod tests {

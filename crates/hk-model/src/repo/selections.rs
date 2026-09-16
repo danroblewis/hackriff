@@ -37,6 +37,21 @@ pub const SELECTION_LINK_REF_MAX: usize = 128;
 /// Most selections [`Repository::selections`] returns.
 pub const SELECTIONS_MAX: usize = 10_000;
 
+/// A selection's region watch (T-166, ADR-0013 §4.9 gap 9): "alert on new activity" over this
+/// selection's extent.
+///
+/// **Armed or not, and nothing else.** There is deliberately no user threshold here. What counts
+/// as activity is *measured* — a first sighting in the inventory, filtered by the T-219
+/// relationship rules — not a level the user dials in, the same stance the rest of the system
+/// takes towards estimated parameters. Turning the watch off (`enabled: false`, or clearing it
+/// with `null`) is the whole control surface, and it never deletes an alert already raised.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectionWatch {
+    /// Armed. Disarming stops new alerts; past alerts keep their rows, reasoning and history.
+    pub enabled: bool,
+}
+
 const ENSURE_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS selection (
     selection_id BLOB    PRIMARY KEY CHECK (length(selection_id) = 16),
@@ -103,6 +118,10 @@ pub struct Selection {
     pub tags: Vec<String>,
     /// Actions taken on it, oldest first.
     pub links: Vec<SelectionLink>,
+    /// T-166: the region watch, when the user armed one; `None` = not watched. Absent in rows
+    /// written before T-166, which read back unwatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<SelectionWatch>,
     /// When it was created.
     pub created_at: Timestamp,
     /// When it last changed.
@@ -127,9 +146,15 @@ impl Selection {
             notes: None,
             tags: Vec::new(),
             links: Vec::new(),
+            watch: None,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Whether a region watch is armed on this selection (T-166).
+    pub fn watching(&self) -> bool {
+        self.watch.is_some_and(|w| w.enabled)
     }
 
     /// Checks the limits in the module docs.

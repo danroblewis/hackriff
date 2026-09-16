@@ -1376,7 +1376,7 @@ fn selections_crud_and_links_answer_as_documented() {
     );
     assert_eq!(st, 201, "{s}");
     for field in [
-        "id", "name", "f_lo", "f_hi", "t_lo", "t_hi", "notes", "tags", "links", "created",
+        "id", "name", "f_lo", "f_hi", "t_lo", "t_hi", "notes", "tags", "watch", "links", "created",
         "updated",
     ] {
         assert!(s.get(field).is_some(), "selection missing {field}: {s}");
@@ -1406,6 +1406,87 @@ fn selections_crud_and_links_answer_as_documented() {
     );
     assert_eq!(st, 201, "{linked}");
     assert_eq!(linked["links"].as_array().unwrap().len(), 1, "{linked}");
+
+    // T-166 (ADR-0013 §4.9 gap 9): the region watch is armed and disarmed on the selection, and
+    // its report discloses both the alerts it raised and the activity it did not alert on.
+    let (st, unwatched) = get(addr, &format!("/api/selections/{id}/watch"));
+    assert_eq!(st, 200, "{unwatched}");
+    for field in [
+        "selection_id",
+        "watch",
+        "armed",
+        "alerts",
+        "suppressed",
+        "alerted_total",
+        "suppressed_total",
+    ] {
+        assert!(
+            unwatched.get(field).is_some(),
+            "watch report missing {field}: {unwatched}"
+        );
+    }
+    assert!(
+        unwatched["watch"].is_null(),
+        "no watch until armed: {unwatched}"
+    );
+    assert_eq!(unwatched["armed"], false, "{unwatched}");
+    assert!(
+        is_array(&unwatched["alerts"]) && is_array(&unwatched["suppressed"]),
+        "{unwatched}"
+    );
+
+    let (st, armed) = put(
+        addr,
+        &format!("/api/selections/{id}"),
+        r#"{"watch": {"enabled": true}}"#,
+    );
+    assert_eq!(
+        (st, armed["watch"]["enabled"].as_bool()),
+        (200, Some(true)),
+        "{armed}"
+    );
+    let (st, report) = get(addr, &format!("/api/selections/{id}/watch"));
+    assert_eq!(
+        (st, report["armed"].as_bool()),
+        (200, Some(true)),
+        "{report}"
+    );
+
+    // Reversible, and never an automatic action: disarming clears the watch and keeps everything
+    // else about the selection, including any alert already raised.
+    let (st, off) = put(addr, &format!("/api/selections/{id}"), r#"{"watch": null}"#);
+    assert_eq!(st, 200, "{off}");
+    assert!(off["watch"].is_null(), "disarming clears the watch: {off}");
+    assert_eq!(off["name"].as_str(), Some("renamed band"), "{off}");
+    let (st, report) = get(addr, &format!("/api/selections/{id}/watch"));
+    assert_eq!(
+        (st, report["armed"].as_bool()),
+        (200, Some(false)),
+        "{report}"
+    );
+
+    // There is no threshold to set: the watch takes an `enabled` flag and nothing else.
+    for bad in [
+        r#"{"watch": {"enabled": "yes"}}"#,
+        r#"{"watch": {"bogus": true}}"#,
+        r#"{"watch": {"enabled": true, "min_snr_db": 12}}"#,
+        r#"{"watch": true}"#,
+    ] {
+        let (st, v) = put(addr, &format!("/api/selections/{id}"), bad);
+        assert_eq!(st, 400, "{bad}: {v}");
+    }
+    let unknown = SelectionId::new();
+    let (st, v) = get(addr, &format!("/api/selections/{unknown}/watch"));
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
+    let (st, _) = call(
+        addr,
+        "POST",
+        &format!("/api/selections/{id}/watch"),
+        Some(&format!("Bearer {TOKEN}")),
+        Some("{}"),
+    );
+    assert_eq!(st, 405);
+
     let (st, deleted) = delete(addr, &format!("/api/selections/{id}"));
     assert_eq!((st, deleted["deleted"]["id"].as_str()), (200, Some(id)));
     let (st, missing) = get(addr, &format!("/api/selections/{id}"));
