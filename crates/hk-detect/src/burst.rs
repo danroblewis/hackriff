@@ -167,6 +167,11 @@ pub struct BurstDetector {
     noise_len: usize,
     since_refresh: usize,
     scratch: Vec<f64>,
+    /// Window powers of the last `local.len()` windows that were **not** inside a burst (T-295).
+    local: Vec<f64>,
+    local_pos: usize,
+    local_fill: usize,
+    local_sum: f64,
     sigma2: Option<f64>,
     active: Option<Active>,
     ring: Vec<Complex<i8>>,
@@ -188,6 +193,7 @@ impl BurstDetector {
             hist: vec![(0, 0); cfg.sub_blocks],
             noise: vec![0.0; cfg.noise_windows],
             scratch: vec![0.0; cfg.noise_windows],
+            local: Vec::new(),
             tokens: cfg.rate_burst,
             cfg,
             survey_id,
@@ -214,6 +220,9 @@ impl BurstDetector {
             noise_pos: 0,
             noise_len: 0,
             since_refresh: 0,
+            local_pos: 0,
+            local_fill: 0,
+            local_sum: 0.0,
             sigma2: None,
             active: None,
             ring: Vec::new(),
@@ -266,6 +275,15 @@ impl BurstDetector {
             self.thr_on = mean_threshold(self.w_len as f64, pfa);
             self.thr_sub = mean_threshold(self.s_len as f64, c.extent_pfa);
             self.med_factor = mean_quantile(self.w_len as f64, 0.5);
+            // T-295: the local-reference span is exactly the longest burst this detector will
+            // report, so a steady emitter is always inside the reference while a reportable burst
+            // never is. It is derived, not a parameter of its own.
+            let local = (self.max_samples as usize)
+                .div_ceil(self.w_len.max(1))
+                .max(NOISE_FIRST);
+            if self.local.len() != local {
+                self.local = vec![0.0; local];
+            }
             let fft_len = ((fs / c.target_bin_hz).max(16.0) as usize)
                 .next_power_of_two()
                 .min(c.max_fft_len.max(16));
@@ -291,6 +309,7 @@ impl BurstDetector {
                 c.max_duration_s * 1e3,
                 c.noise_windows,
             );
+            self.version.push_str(&format!(";ref={local}"));
         }
         self.prov = Some(prov.clone());
         self.seg_start = time.sample_index;
@@ -303,6 +322,9 @@ impl BurstDetector {
         self.noise_pos = 0;
         self.noise_len = 0;
         self.since_refresh = 0;
+        self.local_pos = 0;
+        self.local_fill = 0;
+        self.local_sum = 0.0;
         self.sigma2 = None;
     }
 
@@ -410,11 +432,30 @@ impl BurstDetector {
             }
         }
         let Some(s2) = self.sigma2 else { return };
-        let sub_level = self.thr_sub * s2 * s as f64;
+        // T-295: the onset and extent tests measure against the louder of the noise estimate and
+        // what the band was ALREADY doing. σ² says how loud noise is; it does not say how loud
+        // this band was a millisecond ago, and the designed false-alarm rate only holds when
+        // nothing else is on. A steady emitter that lifts the wideband power to just under the
+        // onset threshold makes ordinary fluctuations cross it constantly: on T-255's scene a
+        // 21 ms FSK burst and a 132 ms LoRa packet — both the STFT path's business, both far
+        // longer than `max_duration_s` — produced six crossings in the first 53 ms against a
+        // designed 0.01/s, each emitted with a coarse width spanning every emitter in the window.
+        // The reference is the mean of the last `local.len()` windows that were not inside a
+        // burst, so it holds what the band was already doing and no burst can mask itself.
+        let reference = self.local_reference(s2);
+        // Windows inside a *reportable* burst are held out so a burst cannot mask itself. Windows
+        // inside one already past `max_duration_s` are not: that emission belongs to the STFT path
+        // and is exactly the standing occupancy the reference exists to track. Holding those out
+        // froze the reference at its pre-emission value for the whole of a long signal, and the
+        // moment the long burst closed the stale reference let the same signal cross again.
+        if (k + 1) % nb as u64 == 0 && self.active.is_none_or(|a| a.long) {
+            self.push_local(win as f64);
+        }
+        let sub_level = self.thr_sub * reference * s as f64;
         let hot = sub.0 as f64 > sub_level;
         match self.active.as_mut() {
             None => {
-                if (win as f64) <= self.thr_on * s2 * self.w_len as f64 {
+                if (win as f64) <= self.thr_on * reference * self.w_len as f64 {
                     return;
                 }
                 // Oldest to newest sub-block of the onset window.
@@ -566,6 +607,32 @@ impl BurstDetector {
             merged_boxes: 1,
             inconclusive: false,
         });
+    }
+
+    /// The onset/extent reference per sample (T-295): the louder of the noise estimate and the
+    /// mean power of the last `local.len()` windows that were not inside a burst. Before any such
+    /// window it is the noise estimate alone, so a stream that opens on a burst is unaffected.
+    fn local_reference(&self, s2: f64) -> f64 {
+        if self.local_fill == 0 {
+            return s2;
+        }
+        s2.max(self.local_sum / self.local_fill as f64 / self.w_len as f64)
+    }
+
+    /// Records one window that was not inside a burst (O(1): a running sum over a small ring).
+    fn push_local(&mut self, win: f64) {
+        let cap = self.local.len();
+        if cap == 0 {
+            return;
+        }
+        if self.local_fill == cap {
+            self.local_sum -= self.local[self.local_pos];
+        } else {
+            self.local_fill += 1;
+        }
+        self.local[self.local_pos] = win;
+        self.local_sum += win;
+        self.local_pos = (self.local_pos + 1) % cap;
     }
 
     /// `(centre offset from tune, 99 % bandwidth)` Hz from a periodogram of the burst's first

@@ -5489,7 +5489,7 @@ tasks:
     milestone: M3
     title: 'hk_dsp::chirp is measured but unwired: nothing reads IQ to characterise a
       swept region, so the system detects chirps as regions and claims nothing about them'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-294
