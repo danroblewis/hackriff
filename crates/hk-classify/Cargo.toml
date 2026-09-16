@@ -1,12 +1,23 @@
 [package]
 name = "hk-classify"
-description = "hackriff C15 modulation classifier (ADR-0016): the classical cascade lands in T-199; T-211 pre-adds the crate over the hk-model classification contracts"
+description = "hackriff C15 modulation classifier (ADR-0016): classical feature tree with class-conditional densities, chi-square open set and C17 prior fusion"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 # The contract types live in hk_model::classify so the repository can store and rank them without
-# a dependency cycle; this crate re-exports them and will hold the implementation.
+# a dependency cycle; this crate re-exports them and holds the implementation. T-199 adds the
+# estimation inputs (C13 ParameterSet, C14 SymbolParameters) and the spectral helpers.
 [dependencies]
 hk-model.workspace = true
+hk-dsp.workspace = true
+hk-estimate.workspace = true
+num-complex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# T-199 OTA evaluation: the real HackRF SigMF fixtures (blind: truth only in assertions).
+hk-core.workspace = true
+hk-e2e = { path = "../../tests/e2e" }
