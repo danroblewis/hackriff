@@ -6918,7 +6918,7 @@ tasks:
     milestone: M2-hardening
     title: 'The UI gate never runs anywhere authoritative: no Node in CI, and it self-skips locally when
       node is absent'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-353
