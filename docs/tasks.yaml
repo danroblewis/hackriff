@@ -3565,7 +3565,7 @@ tasks:
   - id: T-221
     milestone: MAUTO
     title: "DESIGN: Listen as a decode pipeline with an audio sink (retire the special-cased Listen path; audio and digital decoders share one recipe/output model and one Outputs dock)"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-220]
     parallel_group: MAUTOD
@@ -3896,7 +3896,7 @@ tasks:
   - id: T-241
     milestone: M2-hardening
     title: "Occupancy rows and baselines stored BEFORE the T-196 floor fix may under-report busy channels: decide whether to invalidate, recompute, or accept them"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-196]
     parallel_group: CONTEXT
