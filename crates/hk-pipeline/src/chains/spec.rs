@@ -6,13 +6,17 @@
 //! Adding a decoder is a manifest plus a spec entry; nothing is recompiled and capture never
 //! restarts.
 //!
-//! Node lists are validated into one of three shapes ([`ChainShape`]):
+//! Node lists are validated into one of four shapes ([`ChainShape`]):
 //! - `[record?] analog-auto` — C19 auto mode (estimate → mode → WFM + RDS); writes content, so
 //!   `requires_content` must be set. A short probe window runs mode selection first; the chain
 //!   continues only when the mode is accepted (`accept_modes`, `require_pilot`);
 //! - `[record?] fsk-bursts` — C13/C14 blind estimate, C20 demod per burst, C21 framing; content
 //!   fails closed unless the emitter is classified;
-//! - `[record?] ddc? plugin` — DDC to the plugin's rate, then a subprocess decoder (ADR-0003).
+//! - `[record?] ddc? plugin` — DDC to the plugin's rate, then a subprocess decoder (ADR-0003);
+//! - `trunk-cc` — C23 control-channel hunt (T-287, [`crate::chains::trunk`]). **Metadata only**,
+//!   and the validator enforces it: a `trunk-cc` spec that sets `requires_content` or carries a
+//!   `record` node is refused, so the hunt can never become a content chain and the fail-closed
+//!   class a 12.5 kHz LMR band derives (`metadata-only`) never has anything of its to refuse.
 //!
 //! **Channel priors.** A spec with `raster_hz` snaps a candidate's centre to the band's channel
 //! raster and widens it to the node's channel bandwidth, and at most one chain runs per channel.
@@ -38,6 +42,19 @@ pub enum Trigger {
     /// signals are too short to detect at survey resolution, e.g. 1090 MHz squitters); detached
     /// when the window moves away or the stream ends.
     Coverage,
+    /// The tuned window **overlaps** the spec's band, and the chain then decides for itself, from
+    /// measured frequency-channel occupancy, whether there is anything to work on (T-287).
+    ///
+    /// This is the FCO-driven trigger C23 needs and the one [`Coverage`](Self::Coverage) cannot
+    /// be: a hunt band is wider than any window (851–869 MHz against 20 MHz at best), so
+    /// [`ChainSpec::covered_by`]'s containment never fires, and the band is a *prior about where
+    /// control channels live*, never a frequency to tune to. The band decides only whether to look
+    /// at all; which channels are worth a demodulation is decided by occupancy the chain measures
+    /// over its own dwell, and confirmation by frame sync plus CRC after that.
+    ///
+    /// **Admission control** (the thing T-267 noted an FCO trigger would otherwise lack) is stated
+    /// in [`NodeSpec::TrunkCc`] and bounded there; one chain per spec runs at a time.
+    Occupancy,
 }
 
 fn default_probe_s() -> f64 {
@@ -104,6 +121,31 @@ pub enum NodeSpec {
         /// 30 s).
         #[serde(default)]
         settle_s: f64,
+    },
+    /// C23 control-channel hunt over the tuned window's channel raster (T-287).
+    ///
+    /// Every field here is an **admission bound**, not a tuning knob: the detection thresholds are
+    /// a priori and live in `hk_detect::trunk` (occupancy floor `MIN_CC_FCO`, sync tolerance, the
+    /// sync and CRC counts), where a run cannot reach them. These four bound what one hunt is
+    /// allowed to *spend*:
+    ///
+    /// - `window_s` — samples held per pass, so the chain's memory is one window, not a stream;
+    /// - `period_s` — least stream time between passes, so a long dwell does not re-sweep
+    ///   continuously;
+    /// - `max_channels` — most raster channels measured for occupancy in one pass;
+    /// - `max_demods` — most candidates demodulated in one pass. This is the bound that matters:
+    ///   candidacy is cheap and demodulation is not, and on a busy LMR band many channels are
+    ///   continuously occupied. Above the cap the highest-FCO candidates are taken (ties by
+    ///   distance from the tuned centre), which is deterministic and blind.
+    TrunkCc {
+        /// Samples collected per hunt pass, s.
+        window_s: f64,
+        /// Most raster channels measured for occupancy in one pass.
+        max_channels: usize,
+        /// Most candidates demodulated in one pass.
+        max_demods: usize,
+        /// Least stream time between passes, s.
+        period_s: f64,
     },
 }
 
@@ -185,6 +227,17 @@ pub enum ChainShape {
         /// Settle, s.
         settle_s: f64,
     },
+    /// C23 control-channel hunt (T-287). Metadata only.
+    TrunkCc {
+        /// Samples per pass, s.
+        window_s: f64,
+        /// Most raster channels measured per pass.
+        max_channels: usize,
+        /// Most candidates demodulated per pass.
+        max_demods: usize,
+        /// Least stream time between passes, s.
+        period_s: f64,
+    },
 }
 
 impl ChainSpec {
@@ -262,6 +315,42 @@ impl ChainSpec {
                 })
             }
             [
+                NodeSpec::TrunkCc {
+                    window_s,
+                    max_channels,
+                    max_demods,
+                    period_s,
+                },
+            ] => {
+                // The class gate, resolved structurally rather than worked around. A 12.5 kHz LMR
+                // band derives no positive content prior, so `class::band_class` falls through to
+                // the fail-closed `metadata-only`, and under gating that class refuses every chain
+                // with `requires_content` and every recording. The hunt is unaffected because what
+                // it writes — that a control channel exists at a frequency — is metadata, which
+                // `hk_model::content` says is never gated. Making that a validation rule rather
+                // than a convention means no spec can quietly turn the hunt into a content chain.
+                if self.requires_content {
+                    return Err(
+                        "trunk-cc is metadata-only: it must not set requires_content".into(),
+                    );
+                }
+                if self.record().is_some() {
+                    return Err("trunk-cc is metadata-only: it must not carry a record node".into());
+                }
+                if !(*window_s > 0.0 && *period_s >= 0.0) {
+                    return Err("trunk-cc needs window_s > 0 and period_s >= 0".into());
+                }
+                if *max_channels == 0 || *max_demods == 0 {
+                    return Err("trunk-cc needs max_channels, max_demods >= 1".into());
+                }
+                Ok(ChainShape::TrunkCc {
+                    window_s: *window_s,
+                    max_channels: *max_channels,
+                    max_demods: *max_demods,
+                    period_s: *period_s,
+                })
+            }
+            [
                 rest @ ..,
                 NodeSpec::Plugin {
                     manifest,
@@ -289,7 +378,8 @@ impl ChainSpec {
                 })
             }
             _ => Err(
-                "node list must be [record] analog-auto | [record] fsk-bursts | [record] [ddc] plugin"
+                "node list must be [record] analog-auto | [record] fsk-bursts | \
+                 [record] [ddc] plugin | trunk-cc"
                     .into(),
             ),
         }
@@ -299,6 +389,11 @@ impl ChainSpec {
     pub fn validate(&self) -> Result<(), String> {
         if self.trigger == Trigger::Coverage && self.freq_hz.is_empty() {
             return Err("a coverage chain needs freq_hz".into());
+        }
+        if self.trigger == Trigger::Occupancy
+            && (self.freq_hz.is_empty() || self.raster_hz.is_none())
+        {
+            return Err("an occupancy chain needs freq_hz and raster_hz".into());
         }
         if self.freq_hz.iter().any(|r| r[0] >= r[1]) {
             return Err("freq_hz ranges must be [lo, hi] with lo < hi".into());
@@ -340,6 +435,15 @@ impl ChainSpec {
             .iter()
             .any(|r| r[0] >= center_hz - usable_hz / 2.0 && r[1] <= center_hz + usable_hz / 2.0)
     }
+
+    /// An [`Trigger::Occupancy`] spec's band **overlaps** the window `[center ± usable/2]`.
+    ///
+    /// The opposite containment to [`covered_by`](Self::covered_by), and deliberately so: a hunt
+    /// band is wider than any window the radio can hold at once, so containment would never fire.
+    pub fn overlaps_window(&self, center_hz: f64, usable_hz: f64) -> bool {
+        let (lo, hi) = (center_hz - usable_hz / 2.0, center_hz + usable_hz / 2.0);
+        self.freq_hz.iter().any(|r| r[0] < hi && r[1] > lo)
+    }
 }
 
 /// The first `ConfirmedTrack` spec matching a candidate.
@@ -377,6 +481,17 @@ pub const BUILTIN_CHAINS: &str = r#"[
       { "node": "ddc", "output_rate_hz": 2.4e6, "bandwidth_hz": 2.0e6 },
       { "node": "plugin", "manifest": "plugins/readsb/manifest.json",
         "tail_pad_samples": 131072, "settle_s": 5.0 }
+    ]
+  },
+  {
+    "id": "trunk-cc-hunt",
+    "trigger": "occupancy",
+    "freq_hz": [[450.0e6, 470.0e6], [769.0e6, 775.0e6], [799.0e6, 805.0e6],
+                [851.0e6, 869.0e6], [935.0e6, 940.0e6]],
+    "raster_hz": 12.5e3,
+    "nodes": [
+      { "node": "trunk-cc", "window_s": 0.5, "max_channels": 64, "max_demods": 8,
+        "period_s": 10.0 }
     ]
   },
   {
@@ -508,6 +623,93 @@ mod tests {
         let jp = wfm(FmRegion::Japan);
         assert!(jp.matches(80.0e6, 80.1e6, Some(false)));
         assert!(!jp.matches(100.0e6, 100.1e6, Some(false)));
+    }
+
+    /// T-287: the hunt is in the **built-in** registry, so a normal run carries it, and the
+    /// contract refuses to let it become a content chain.
+    #[test]
+    fn the_trunk_cc_hunt_is_built_in_metadata_only_and_band_gated() {
+        let specs = builtin_chains();
+        let hunt = specs
+            .iter()
+            .find(|s| s.id == "trunk-cc-hunt")
+            .expect("the hunt ships in the built-in registry, not only in a hand-written plan");
+        hunt.validate().unwrap();
+        assert_eq!(hunt.trigger, Trigger::Occupancy);
+        assert!(!hunt.requires_content, "the hunt writes metadata only");
+        assert!(hunt.record().is_none());
+        assert_eq!(hunt.raster_hz, Some(12_500.0));
+        assert!(matches!(hunt.shape(), Ok(ChainShape::TrunkCc { .. })));
+        // 800 MHz public safety. The band is 18 MHz wide and the window is 500 kHz, so
+        // `covered_by`'s containment can never fire — which is the whole reason the trigger
+        // exists rather than reusing `coverage`.
+        assert!(hunt.overlaps_window(851.0125e6, 500e3));
+        assert!(!hunt.covered_by(851.0125e6, 500e3));
+        // A window straddling the lower edge still counts: the hunt sweeps what it can see.
+        assert!(hunt.overlaps_window(850.9e6, 500e3));
+        // Bands where nothing trunked lives are left alone, so an FM, 433 MHz or 1090 MHz run is
+        // not made to carry a hunt it would only ever find nothing in.
+        assert!(!hunt.overlaps_window(100e6, 2e6));
+        assert!(!hunt.overlaps_window(433.92e6, 2e6));
+        assert!(!hunt.overlaps_window(1090e6, 2.4e6));
+        assert!(!hunt.overlaps_window(152.36e6, 2e6));
+    }
+
+    #[test]
+    fn a_trunk_cc_spec_may_never_become_a_content_chain() {
+        let node = serde_json::json!({ "node": "trunk-cc", "window_s": 0.5,
+            "max_channels": 8, "max_demods": 2, "period_s": 1.0 });
+        let spec = |patch: serde_json::Value| -> ChainSpec {
+            let mut v = serde_json::json!({ "id": "t", "trigger": "occupancy",
+                "freq_hz": [[851e6, 869e6]], "raster_hz": 12500.0, "nodes": [node.clone()] });
+            for (k, val) in patch.as_object().unwrap() {
+                v[k.as_str()] = val.clone();
+            }
+            serde_json::from_value(v).unwrap()
+        };
+        spec(serde_json::json!({})).validate().unwrap();
+        assert!(
+            spec(serde_json::json!({ "requires_content": true }))
+                .validate()
+                .is_err(),
+            "the hunt is metadata-only by contract, not by convention"
+        );
+        assert!(
+            spec(serde_json::json!({ "nodes": [
+                { "node": "record", "pre_s": 0.1, "post_s": 0.1 }, node.clone()] }))
+            .validate()
+            .is_err(),
+            "a record node writes IQ, which is content"
+        );
+        // An occupancy chain without a raster has nothing to sweep.
+        assert!(
+            spec(serde_json::json!({ "raster_hz": null }))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            spec(serde_json::json!({ "freq_hz": [] }))
+                .validate()
+                .is_err(),
+            "a hunt with no band prior would hunt everywhere"
+        );
+        // Admission bounds must actually bound.
+        assert!(
+            spec(
+                serde_json::json!({ "nodes": [{ "node": "trunk-cc", "window_s": 0.5,
+                "max_channels": 0, "max_demods": 2, "period_s": 1.0 }] })
+            )
+            .validate()
+            .is_err()
+        );
+        assert!(
+            spec(
+                serde_json::json!({ "nodes": [{ "node": "trunk-cc", "window_s": 0.0,
+                "max_channels": 8, "max_demods": 2, "period_s": 1.0 }] })
+            )
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]

@@ -8,7 +8,8 @@
 //!   its recorder, forwards member boxes (with a backlog for boxes that arrived before the
 //!   confirmation), detaches on track close / merge / coverage loss, and reaps finished threads.
 //! - Chain bodies: [`analog`] (C19 auto mode + RDS), [`fsk`] (C13/C14/C20/C21), [`plugin`]
-//!   (DDC + subprocess decoder), [`record`] (pre-trigger SigMF, C25).
+//!   (DDC + subprocess decoder), [`record`] (pre-trigger SigMF, C25), [`trunk`] (C23
+//!   control-channel hunt, T-287; metadata only).
 //!
 //! **Claims at attach (T-037b).** Every chain and recorder registers its gate cursor on the
 //! control thread when it is attached, at the first sample it will read, and hands it to its
@@ -31,6 +32,7 @@ pub(crate) mod plugin;
 pub(crate) mod record;
 pub mod spec;
 pub mod taps;
+pub(crate) mod trunk;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -347,7 +349,8 @@ fn chain_start(shape: &ChainShape, cand: &Candidate, fs: f64) -> u64 {
     let pre_s = match shape {
         ChainShape::Analog { pre_s, .. } => *pre_s,
         ChainShape::Fsk { pad_s, .. } => *pad_s,
-        ChainShape::Plugin { .. } => 0.0,
+        // The hunt reads forward from where it attached: there is no trigger box to precede.
+        ChainShape::Plugin { .. } | ChainShape::TrunkCc { .. } => 0.0,
     };
     cand.first_sample.saturating_sub((pre_s * fs) as u64)
 }
@@ -489,6 +492,8 @@ impl ChainManager {
             .register(chain_start(&shape, &cand, self.shared.fs));
         // On a raster the receiver must lock inside this channel, not a neighbour's.
         let channel_tolerance_hz = spec.raster_hz.map_or(f64::INFINITY, |r| 0.5 * r);
+        // T-287: the hunt's grid. `validate` refuses an occupancy spec without one.
+        let raster_hz = spec.raster_hz.unwrap_or(0.0);
         let spawned = thread::Builder::new()
             .name(format!("hk-chain-{}-{id}", spec.id))
             .spawn(move || {
@@ -542,6 +547,24 @@ impl ChainManager {
                         &manifest,
                         tail_pad_samples,
                         settle_s,
+                        cursor,
+                    ),
+                    ChainShape::TrunkCc {
+                        window_s,
+                        max_channels,
+                        max_demods,
+                        period_s,
+                    } => trunk::run(
+                        shared,
+                        rx,
+                        cand,
+                        trunk::TrunkCcNode {
+                            window_s,
+                            max_channels,
+                            max_demods,
+                            period_s,
+                            raster_hz,
+                        },
                         cursor,
                     ),
                 }
@@ -732,7 +755,8 @@ impl ChainManager {
         }
     }
 
-    /// Attaches coverage chains whose band the window covers; detaches those it no longer does.
+    /// Attaches tune-driven chains — [`Trigger::Coverage`] whose band the window covers, and
+    /// [`Trigger::Occupancy`] whose band it overlaps — and detaches those it no longer does.
     /// Acknowledges the tune it evaluated (`Counters::coverage_seq`).
     pub fn poll_coverage(&mut self) {
         let counters = Arc::clone(&self.shared.counters);
@@ -751,14 +775,30 @@ impl ChainManager {
             .shared
             .specs
             .iter()
-            .filter(|s| s.trigger == Trigger::Coverage)
+            .filter(|s| matches!(s.trigger, Trigger::Coverage | Trigger::Occupancy))
             .cloned()
             .collect();
         for spec in specs {
-            let covered = spec.covered_by(center, rate);
-            match (covered, self.coverage.get(&spec.id).copied()) {
+            // A coverage chain wants its band *inside* the window (it decodes a known channel); an
+            // occupancy chain wants only an *overlap*, because its band is a prior about where to
+            // hunt and is wider than any window. The band it is handed is therefore what the radio
+            // can actually see, not the allocation — the hunt sweeps the window's own raster and is
+            // never told a frequency.
+            let (active, band) = match spec.trigger {
+                Trigger::Occupancy => {
+                    let usable = 0.8 * rate;
+                    (
+                        spec.overlaps_window(center, usable),
+                        [center - usable / 2.0, center + usable / 2.0],
+                    )
+                }
+                _ => (
+                    spec.covered_by(center, rate),
+                    spec.freq_hz.first().copied().unwrap_or([center, center]),
+                ),
+            };
+            match (active, self.coverage.get(&spec.id).copied()) {
                 (true, None) => {
-                    let band = spec.freq_hz[0];
                     let at = self.shared.ring.oldest_sample().unwrap_or(0);
                     let cand = Candidate {
                         track: None,
@@ -901,8 +941,15 @@ mod tests {
             tail_pad_samples: 0,
             settle_s: 0.0,
         };
+        let trunk = ChainShape::TrunkCc {
+            window_s: 0.5,
+            max_channels: 64,
+            max_demods: 8,
+            period_s: 10.0,
+        };
         assert_eq!(chain_start(&analog, &cand, fs), 500_000);
         assert_eq!(chain_start(&fsk, &cand, fs), 980_000);
         assert_eq!(chain_start(&plugin, &cand, fs), 1_000_000);
+        assert_eq!(chain_start(&trunk, &cand, fs), 1_000_000);
     }
 }
