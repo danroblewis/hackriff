@@ -2527,3 +2527,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Bundle discipline held:** the panel is its own lazy chunk (5.4 KB), loaded on first signal focus, with the shared inspector code factored into a common lazy chunk. Initial eager JS 33.1 KB gzip against a 45 KB budget; CSS 34.5 KB against 40 KB.
   - **Tests:** 15 new unit tests, full UI suite 22/22 files, typecheck and build clean, smoke passed at 1440 and 400 px. The mock fixture has an empty inventory, so the agent additionally drove the real chunk in a live browser with synthetic state to confirm the empty state, the scope and RDS box, and the reused inspector all mount.
   - **docs/15 section 7 status: all six delivered** - T-190 analyze stub, T-191 band-edge override, T-192 right-click menu, T-193 yellow confirmed boxes, T-194 multi-band and timeline select, T-195 output panels. T-207 (classification display) remains, blocked on T-201.
+- **B0.530 T-195 merged and green (c80ea25).** UI typecheck clean, 22/22 test files, build clean, workspace lint clean, 46 GB free. docs/15 section 7 is fully delivered.
+  - **MUI still open:** T-160 (running), plus T-161 to T-166 and T-168 - all backend API gaps for the Decode workbench plots, stream openers and region watch.
+  - **Not launched deliberately:** T-168 is docs-only and would otherwise fit the free UI capacity, but it edits docs/api.md, which T-160 and T-218 are both editing right now; a three-way conflict in one file costs more than it saves.
+  - **Rust cap full:** T-229, T-160, T-213, T-218.
