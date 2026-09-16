@@ -5430,7 +5430,7 @@ tasks:
     milestone: M2-hardening
     title: 'Species merging: a chirp wide instantaneous footprint bridges to neighbours in
       the connected-component labeller, so one 394 kHz box swallowed three emitter species'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-255
