@@ -5462,7 +5462,7 @@ tasks:
     title: 'The synthetic psk-qam grid is ~15 N0 from its own constellation before any
       receiver touches it: an oracle over period, phase and roll-off cannot get below
       12.35%% EVM where a clean control reaches 1.29%%'
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: M3A
@@ -5512,6 +5512,34 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: false
+  - id: T-298
+    milestone: M3
+    title: 'Confidently-wrong is no longer zero: 5 of 396 held-out inputs get a family
+      that is not their own (4x chirped-FSK, 1x 8-FSK called analog)'
+    status: todo
+    priority: high
+    deps:
+    - T-296
+    parallel_group: M3A
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-296 (2026-09-16), which reported it rather than tuning it away'
+    acceptance: 'BOTH wrong-label figures stay UNDER their floors (0.0032 vs 0.02 overall,
+      0.0333 vs 0.05 worst-bin), so the M3 gate passes - but the invariant that held all
+      night is broken and must not ride in silently on a milestone closure. T-296
+      established it is a REVEALED gap, not a caused one: analog waveforms are
+      bit-identical to main and analog open set is unchanged, while chirped-FSK own
+      recentring scatter collapsed from +/-0.180 to +/-0.005 symbol rates. The OLD argmax
+      bug was randomising that generator and ACCIDENTALLY holding it away from analog.
+      So a real weakness was being masked by a defect. Close it: chirped-FSK and 8-FSK
+      must not be called analog. Do NOT tune a threshold to hide it again, and do not
+      move any floor - restoring confidently-wrong to zero must come from the features or
+      the densities telling a swept or multi-tone FSK carrier from an analog one'
+    area: crates/hk-classify (features, densities)
+    needs: none
+    model: opus
+    effort: high
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
