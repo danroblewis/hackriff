@@ -1,13 +1,29 @@
-// The two edge navigators (T-340), one parallel to each waterfall axis.
+// The two edge navigators (T-340, corrected by T-367), one parallel to each waterfall axis.
 //
-// **The user's invariant** (CLAUDE.md, "Time, the waterfall, and the live view"): *time runs down
-// the waterfall and frequency across it, so the time navigator is a vertical bar on the side (an
-// overview of the retained capture window) and the frequency navigator is a horizontal bar along
-// the bottom (spanning the whole surveyed / device-available spectrum, setting the centre). Each
-// navigator pans and zooms its own axis; a dragged region on either zooms the main view to it. The
-// frequency navigator shows every currently-active capture window as a lit segment.*
+// **The user's invariant** (CLAUDE.md, "Time, the waterfall, and the live view"): *each waterfall
+// axis has an edge navigator parallel to it, **and the two control DIFFERENT axes**. The left
+// vertical bar is the TIME navigator: it selects the time range and shows a compressed history
+// waterfall **of the currently-selected frequency range only** — it never changes frequency. The
+// bottom horizontal bar is the FREQUENCY navigator: it sets the centre and span across the whole
+// device-available spectrum — it never scrubs time. Each pans and zooms only its own axis.*
 //
-// Three properties this file exists to hold, each with a test:
+// T-367 fixed two divergences from that:
+//
+//  - **The time bar's picture was of no frequency range at all.** It asked `/api/timeline` for an
+//    overview without `f_lo`/`f_hi`, and that route answers a `null` grid with no region — so the
+//    vertical bar, whose whole content is "what has been happening *here* over the retained
+//    window", drew an empty canvas. It now asks over the range the main view is on
+//    ([`ui/src/navigators.ts`]'s `timelineRequest`) and re-asks when that range moves, so the
+//    picture follows the frequency selection without the bar ever *setting* one.
+//  - **Each bar's gestures are now confined to its own axis by construction, not by inspection.**
+//    Every time gesture resolves to a [`TimeTarget`] and is applied by [`applyTimeTarget`], which
+//    writes the `time` cursor and nothing else; every frequency gesture resolves to a [`FreqZoom`]
+//    and is applied by [`applyFreqZoom`], which writes the `live` slice and nothing else. The other
+//    axis's slice therefore comes out of a gesture **bit-identical** (same object), which is what
+//    `navigators.test.ts` asserts, alongside a source split: `mountTimeNav` names no frequency
+//    writer and `mountFreqNav` names no time writer.
+//
+// Four properties this file exists to hold, each with a test:
 //
 //  1. **A navigator never moves the radio.** Panning and zooming either bar changes what is drawn.
 //     Moving the front end is a device action (T-343): it can stop and re-plumb the running
@@ -24,6 +40,10 @@
 //  3. **The lit segments are the reported windows.** `nav.windows` comes from `/api/navigation`'s
 //     `windows` list. One segment appears on this server because one window is reported, not
 //     because one is assumed; the same code draws N when N are reported (docs/api.md, `windows`).
+//  4. **Each bar touches one axis.** The vertical bar's overview is scoped to the selected
+//     frequency range and its gestures move only the time cursor; the horizontal bar's content is
+//     the survey across the spectrum and its gestures move only the frequency view. Neither reads
+//     the other's gesture, and neither writes the other's slice.
 //
 // Everything below is placement, gesture and styling. Which states are achievable, which windows
 // are active and what the capture window spans are all backend answers (`ui/src/navigators.ts` is
@@ -34,10 +54,13 @@ import {
   detailLabel, snapState, snapTimeCell, type DetailSource, type HistoryTier, type NavigationGrid,
 } from "../../navigation";
 import {
-  activeWindows, litSegments, placeOn, regionFromDrag, spanOf, spectrumExtent, timeExtent,
-  type Range,
+  activeWindows, bandKey, litSegments, placeOn, regionFromDrag, spanOf, spectrumExtent, timeExtent,
+  timelineRequest, type Band, type Range,
 } from "../../navigators";
-import { captureWindow, durationText, overviewShade, type CaptureWindow, type OverviewResponse, type TimelineResponse } from "../capture/timeline";
+import {
+  captureWindow, currentSpan, durationText, overviewShade,
+  type CaptureWindow, type OverviewResponse, type TimelineResponse,
+} from "../capture/timeline";
 import type { AppContext } from "../context";
 import { h } from "../dom";
 import { startPoll } from "../net";
@@ -58,6 +81,11 @@ export const DRAG_PX = 6;
  * to one. Time runs down, so the long axis is the column count. */
 const TIME_COLUMNS = 160;
 const TIME_ROWS = 6;
+
+/** How long the selected frequency range must hold still before the overview is re-asked for it
+ * (T-367). A drag moves the view on every pointer event; this coalesces the storm into one request
+ * without the bar lagging behind a settled selection. */
+export const BAND_SETTLE_MS = 250;
 
 // ---------------------------------------------------------------------------
 // Frequency navigator — pure decisions
@@ -112,12 +140,80 @@ export function freqZoomTarget(
   };
 }
 
+/** The store, as both navigators take it. */
+type AppStore = AppContext["store"];
+
+/**
+ * Applies what a **frequency** gesture resolved to.
+ *
+ * Every write here lands in the `live` slice (plus the toast, which belongs to no axis). Nothing in
+ * this function can reach the time cursor, which is why a horizontal drag leaves `state.time` the
+ * same object it was — the "bit-identical other axis" control in `navigators.test.ts`.
+ */
+export function applyFreqZoom(store: AppStore, target: FreqZoom): void {
+  if (target.kind === "view") {
+    store.set(setLiveView(target.view));
+    store.set(toast(`Zoomed to ${fmtEdges(target.view.loHz, target.view.hiHz)} MHz · ${detailLabel(target.source)}`));
+  } else if (target.kind === "offer") {
+    store.set(setRetuneOffer({ centerHz: target.centerHz, view: target.view }));
+    store.set(toast(`Outside the tuned window — ${retuneLabel(target.centerHz)} to see it (${detailLabel(target.source)}).`));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Time navigator — pure decisions
 // ---------------------------------------------------------------------------
 
 /** What a region dragged on the time navigator resolves to: review the span ending at `tS`. */
 export interface TimeZoom { tS: number; spanS: number; tier: HistoryTier | null }
+
+/** The time cursor a gesture on the vertical bar resolves to — a time and a span, never a
+ * frequency. The type is the constraint: there is no shape here that could move the other axis. */
+export type TimeTarget = { live: true } | { live: false; tS: number; spanS: number | null };
+
+/** The reviewed instant and span a cursor is at, with the live edge standing in for "now". */
+type TimeCursorNow = { live: boolean; tS: number; spanS: number | null };
+
+const cursorAt = (ext: Range, c: TimeCursorNow) => (c.live ? ext.hi : c.tS);
+
+/** Narrowest span a time zoom resolves to. A view floor, not a claim about resolution: which cells
+ * can answer a span is `snapTimeCell`'s answer, and it errs coarser (T-334). */
+export const MIN_ZOOM_S = 1e-3;
+
+/**
+ * The cursor a **pan** of `deltaFrac` of the bar moves to: the reviewed instant slides along the
+ * capture window, keeping whatever span is being reviewed, and reaching the newest edge is *live*.
+ */
+export function timePanTarget(ext: Range, cur: TimeCursorNow, deltaFrac: number): TimeTarget {
+  const d = Number.isFinite(deltaFrac) ? deltaFrac * spanOf(ext) : 0;
+  const next = Math.min(ext.hi, Math.max(ext.lo, cursorAt(ext, cur) + d));
+  return next >= ext.hi ? { live: true } : { live: false, tS: next, spanS: cur.live ? null : cur.spanS };
+}
+
+/**
+ * The cursor a **wheel** zoom of `factor` (> 1 zooms in) moves to: the reviewed *span* shrinks or
+ * grows about the cursor, bounded by the capture window and never below `MIN_ZOOM_S`.
+ *
+ * With no span being reviewed yet, the first notch takes a fraction of the window rather than a
+ * duration: a constant here would be a span nobody asked for.
+ */
+export function timeWheelTarget(ext: Range, cur: TimeCursorNow, factor: number): TimeTarget {
+  if (!(factor > 0) || !Number.isFinite(factor)) return cur.live ? { live: true } : { live: false, tS: cur.tS, spanS: cur.spanS };
+  const span = (cur.live ? 0 : (cur.spanS ?? 0)) || spanOf(ext) / 8;
+  const next = Math.min(spanOf(ext), Math.max(MIN_ZOOM_S, span / factor));
+  return { live: false, tS: Math.min(ext.hi, Math.max(ext.lo + next, cursorAt(ext, cur))), spanS: next };
+}
+
+/**
+ * Applies what a **time** gesture resolved to — the one store write the vertical bar makes.
+ *
+ * `goLive` and `reviewAt` patch the `time` key and only that (`app/capture/slice.ts`), so a
+ * vertical drag leaves `state.live` the same object it was: the frequency axis cannot move under a
+ * time gesture, and the test asserts that by object identity rather than by eye.
+ */
+export function applyTimeTarget(store: AppStore, t: TimeTarget): void {
+  store.set(t.live ? goLive : reviewAt(t.tS, t.spanS));
+}
 
 /**
  * The time zoom a dragged region asks for, and the pyramid tier that would answer it.
@@ -292,14 +388,7 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
       if (!done) return;
       const g = s.live.centerHz !== null && s.live.bandwidthHz !== null && s.live.bins !== null
         ? { centerHz: s.live.centerHz, bandwidthHz: s.live.bandwidthHz, bins: s.live.bins } : null;
-      const target = freqZoomTarget(s.navGrid.grid ?? { frequency: null, time: null }, g, region, mayRetune(s.device));
-      if (target.kind === "view") {
-        store.set(setLiveView(target.view));
-        store.set(toast(`Zoomed to ${fmtEdges(target.view.loHz, target.view.hiHz)} MHz · ${detailLabel(target.source)}`));
-      } else if (target.kind === "offer") {
-        store.set(setRetuneOffer({ centerHz: target.centerHz, view: target.view }));
-        store.set(toast(`Outside the tuned window — ${retuneLabel(target.centerHz)} to see it (${detailLabel(target.source)}).`));
-      }
+      applyFreqZoom(store, freqZoomTarget(s.navGrid.grid ?? { frequency: null, time: null }, g, region, mayRetune(s.device)));
     },
   });
   let panOverflow = 0;
@@ -341,7 +430,7 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
 
   const canvas = h("canvas", {
     class: "tn-overview", role: "img",
-    "aria-label": "Overview of the retained capture window",
+    "aria-label": "Overview of the retained capture window, for the selected frequency range",
   }) as HTMLCanvasElement;
   const marker = h("div", { class: "tn-view", title: "The time span on screen — drag to move it" });
   const draft = h("div", { class: "tn-draft", hidden: true });
@@ -353,6 +442,17 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
   // the bar then draws nothing rather than inventing a span.
   let win: CaptureWindow | null = null;
   const extent = (): Range | null => timeExtent(win);
+
+  // The frequency range this bar's overview is *of* (T-367): the range the main view is on, never
+  // the whole spectrum. Reading it is not setting it — no gesture below writes a frequency, and the
+  // bar follows the horizontal axis rather than steering it.
+  const selectedBand = (): Band | null => {
+    const s = store.get();
+    return currentSpan({ live: s.live.view, device: s.device });
+  };
+  /** The band the drawn picture was actually asked for, so the readout cannot claim a range the
+   * canvas is not showing (a poll in flight when the selection moves). */
+  let drawn: Band | null = null;
 
   const rowsOnScreen = () => Math.max(1, Math.round(track.clientHeight || 256));
 
@@ -391,7 +491,10 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
     const ext = extent();
     const t = store.get().time;
     if (!ext) { marker.hidden = true; track.title = "No capture window on this server"; return; }
-    track.title = `Capture window: ${durationText(spanOf(ext))} of retained IQ`;
+    // Both halves of what this bar is, said together: how long it spans, and which frequencies the
+    // picture on it is of. The second half is the T-367 correction made visible.
+    track.title = `Capture window: ${durationText(spanOf(ext))} of retained IQ · ${
+      drawn ? `${fmtEdges(drawn.loHz, drawn.hiHz)} MHz` : "no frequency range selected"}`;
     // Live follows the newest edge; reviewing marks the span the waterfall is showing.
     const tHi = t.live ? ext.hi : t.tS;
     const spanS = t.live ? 0 : (t.spanS ?? 0);
@@ -407,16 +510,14 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
       return r.height > 0 ? Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) : 1;
     },
     onMarker: (e) => !marker.hidden && (e.target === marker || marker.contains(e.target as Node)),
-    // Panning the time bar moves the reviewed instant. It touches the store's time cursor and
-    // nothing else: capture, the ring and detection are always-on (CLAUDE.md, "Pause freezes the
-    // view, not the capture"), and no time gesture has ever had a path to a device route.
+    // Panning the time bar moves the reviewed instant, and only that. It touches the store's time
+    // cursor and nothing else: capture, the ring and detection are always-on (CLAUDE.md, "Pause
+    // freezes the view, not the capture"), no time gesture has ever had a path to a device route,
+    // and — T-367 — none has a path to the frequency view either.
     onPan: (df) => {
       const ext = extent();
-      const t = store.get().time;
       if (!ext) return;
-      const cur = t.live ? ext.hi : t.tS;
-      const next = Math.min(ext.hi, Math.max(ext.lo, cur + df * spanOf(ext)));
-      store.set(next >= ext.hi ? goLive : reviewAt(next, t.live ? null : (t.spanS ?? null)));
+      applyTimeTarget(store, timePanTarget(ext, cursorNow(), df));
     },
     onPanEnd: () => { /* a time pan settles where it is: nothing to offer, nothing to command */ },
     onRegion: (a, b, done) => {
@@ -428,7 +529,7 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
       if (!done || !region) return;
       const z = timeZoomTarget(store.get().navGrid.grid ?? { frequency: null, time: null }, region, rowsOnScreen());
       if (!z) return;
-      store.set(reviewAt(z.tS, z.spanS));
+      applyTimeTarget(store, { live: false, tS: z.tS, spanS: z.spanS });
       store.set(toast(`Zoomed to ${timeDetailText(z)}`));
     },
   });
@@ -436,23 +537,49 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
   // Wheel zooms the reviewed span about the pointer, on the time axis only.
   track.addEventListener("wheel", (e) => {
     const ext = extent();
-    const t = store.get().time;
     if (!ext || e.deltaY === 0) return;
     e.preventDefault();
-    const cur = t.live ? ext.hi : t.tS;
-    const span = (t.live ? 0 : (t.spanS ?? 0)) || spanOf(ext) / 8;
-    const next = Math.min(spanOf(ext), Math.max(1e-3, span / ax.wheelFactor(e.deltaY, e.deltaMode)));
-    store.set(reviewAt(Math.min(ext.hi, Math.max(ext.lo + next, cur)), next));
+    applyTimeTarget(store, timeWheelTarget(ext, cursorNow(), ax.wheelFactor(e.deltaY, e.deltaMode)));
   }, { passive: false });
+
+  /** The time cursor as the gesture functions take it; `tS` is unused while live. */
+  function cursorNow() {
+    const t = store.get().time;
+    return t.live ? { live: true, tS: 0, spanS: null } : { live: false, tS: t.tS, spanS: t.spanS ?? null };
+  }
 
   store.select((s) => s.time, render, { immediate: true });
 
-  startPoll(async () => {
-    const tl = await client.get<TimelineResponse>(`/api/timeline?columns=${TIME_COLUMNS}&rows=${TIME_ROWS}`).catch(() => null);
+  // ---- the picture: the capture window folded over the SELECTED FREQUENCY RANGE (T-367) ----
+  //
+  // Before this the request carried no `f_lo`/`f_hi`, and `/api/timeline` answers a `null` grid
+  // with no region — so the bar drew nothing at all. It now asks over the range the main view is
+  // on, and re-asks when that range moves, which is the property: *the time navigator's overview
+  // changes when the selected frequency range changes*.
+  //
+  // `seq` is the ordering guard. A band change and the 60 s poll can be in flight together, and
+  // drawing whichever answered last would put one frequency range's energy on a bar labelled with
+  // another's — the same class of lie as an unscoped overview.
+  let seq = 0, settle = 0;
+  const fetchOverview = async () => {
+    const band = selectedBand();
+    const mine = ++seq;
+    const tl = await client.get<TimelineResponse>(timelineRequest(band, TIME_COLUMNS, TIME_ROWS)).catch(() => null);
+    if (mine !== seq) return;
     win = captureWindow(tl);
+    drawn = tl?.grid ? band : null;
     renderOverview(tl?.grid ?? null);
     render();
-  }, 60_000);
+  };
+
+  // Follow the frequency selection. Coalesced: a frequency pan moves the view every pointer event,
+  // and one request per event would ask the pyramid to re-fold the window a hundred times a drag.
+  store.select((s) => bandKey(currentSpan({ live: s.live.view, device: s.device })), () => {
+    clearTimeout(settle);
+    settle = window.setTimeout(() => { void fetchOverview(); }, BAND_SETTLE_MS);
+  });
+
+  startPoll(fetchOverview, 60_000);
 }
 
 export const navigatorMounts = { freqnav: mountFreqNav, timenav: mountTimeNav };

@@ -494,6 +494,8 @@ This is **absent-means-not-measured** (T-297: no field is written for a region t
 
 Query parameters (all optional): `f_lo`&`f_hi` (Hz, given together — the band to draw), `columns` (1…4096, default 96), `rows` (1…512, default 1). **There is no `t0`/`t1`:** the time extent is not the caller's to give, and that is the whole point of the route.
 
+The asymmetry is deliberate and it is the route's shape: **the window is the server's, the band is the caller's.** `window` is the same span whatever `f_lo`/`f_hi` say, and `grid` is that window folded over the band asked for. So the two callers that draw a time axis — the capture band and the **time navigator** (T-367) — each pass the frequency range *their* view is on, and get the retained capture for that range rather than for the whole spectrum. With no band there is no `region` and no `grid`: a picture of "everything" is a different measurement, not a default (see the control in `the_timeline_spans_the_capture_window_and_draws_it`).
+
 ```jsonc
 {
   "window": { "horizon": "iq-ring", "enabled": true, "reason": null,
