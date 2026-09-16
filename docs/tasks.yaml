@@ -3859,7 +3859,7 @@ tasks:
   - id: T-239
     milestone: M2-hardening
     title: "Scheduler leaves the recording almost uncovered in t057: 12,000 of 14,519,977 samples, so 'no emitter at the station' fails 1-in-14 on the unmodified baseline"
-    status: review
+    status: done
     commit: 07b308e
     priority: high
     deps: []
