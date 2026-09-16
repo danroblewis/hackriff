@@ -2476,3 +2476,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **The four:** decoded-capture flush wait; a consistent stats snapshot for the hot-edit discontinuity counters; sample-clock pacing (or queue-depth assertion) for the dense-burst writer; dedupe by sample index and measured level rather than frame arrival.
   - **Rule kept:** no threshold loosened, no retry added, and where a conversion exposes a real product bug the product is fixed and reported.
   - **T-228 launches when a slot frees;** T-199, T-217, the T-219 fix round and the running check hold all four.
+- **B0.516 Main fully green with T-226 merged (9cef80c).** Unit suite 1455/1455 with the follow_hops pin in place; lint clean; acceptance 29/29 and acceptance_m2 8/8 from the prior run in the same merge; 37 GB free.
+  - **Queue:** T-228 (consolidated pin conversion) launches at the next free slot; T-218, T-212 and T-213 wait for T-199 to release hk-classify.
