@@ -3804,6 +3804,21 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+  - id: T-237
+    milestone: M2-hardening
+    title: "Detector raises a marginal whole-window false alarm on synthetic noise fill (obw 2.8125 MHz = 120 of 128 bins), and T-180's test skip for it has silently become a no-op"
+    status: todo
+    priority: high
+    deps: [T-231]
+    parallel_group: DETECT
+    use_cases: []
+    found_by: "T-231 (2026-09-15): reproduced once in 40 loaded runs after exonerating the mock device; the box sat 1.4 MHz outside the recording, on pure synthetic noise fill, so it is detector-side"
+    acceptance: "root cause of the whole-window detection on noise fill identified (CFAR reference window degenerating when nearly every bin is 'signal', or the noise-floor estimate collapsing on flat synthetic noise) and fixed in hk-detect; SEPARATELY, establish why T-180's skip for this case became a no-op and make it either effective again or unnecessary - a skip that silently stops skipping is worse than no skip, so add a test that fails if it regresses to a no-op; mock_device passes 20/20 under 6 CPU burners; no detector threshold loosened and no retry added"
+    area: crates/hk-detect, tests/e2e mock_device, whatever T-180 touched for the skip
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
