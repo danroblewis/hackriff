@@ -6483,7 +6483,8 @@ tasks:
     milestone: M2-hardening
     title: Each waterfall axis gets an edge navigator, and the frequency one lights every active capture
       window
-    status: in-progress
+    status: done
+    commit: 28d0779
     priority: normal
     deps:
     - T-334
@@ -7006,6 +7007,33 @@ tasks:
       herring (a class: unrestricted log line belonging to a different test in the same file whose output
       interleaved) that would have misled a guess. Do NOT weaken an expectation you cannot show is stale.
       T-357''s CI gate is HELD on this - again - and it is not being merged with targets quarantined'
+  - id: T-362
+    milestone: M2-hardening
+    title: 'Presence boxes drift then jump: T-261 recomputes them on the 1 s poll while the waterfall scrolls
+      every frame'
+    status: in-progress
+    priority: high
+    deps:
+    - T-337
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'USER BUG from live testing, 2026-09-16, and a SHARPENING of the CLAUDE.md one-shared-time-axis
+      invariant rather than a regression against it. The .c-presence-box divs in the centre view drift and
+      then jump, because T-261 recomputes their top/height ONLY on the roughly 1 s data poll while the WebGL2
+      waterfall (ui/src/waterfall.ts, scrolling texture ring plus shader head) scrolls EVERY ANIMATION FRAME.
+      T-337 already made placement a pure function of absolute capture time - the mapping is correct - but
+      it is only EVALUATED at poll rate, so between polls the box sits still while rows scroll under it
+      and then jumps when the poll catches up. THE FIX THE USER APPROVED AND PREFERS: render the boxes IN
+      THE WEBGL CANVAS, in the same render pass, driven by the SAME head/time-origin mapping as the waterfall,
+      so they physically cannot desync - a structural guarantee rather than a discipline. Preserve interactivity
+      via canvas hit-testing or a thin interaction layer that RE-LAYS-OUT EVERY FRAME from the identical
+      mapping. ACCEPTANCE: a box stays pinned to its signal energy as new rows scroll in, with no per-poll
+      jump, LIVE AND WHILE PAUSED OR ZOOMED. Fold into docs/14 and ADR-0017 as an extension of T-337''s
+      shared-axis rule to the box overlay. Note T-337''s own finding: the client previously had FIVE time
+      mappings and the nominal rows-per-second error grew LINEARLY WITH AGE (a box 400 rows back sat about
+      40 rows off, roughly 5 percent of canvas) - so the per-frame evaluation must use axis.rowsBackAt over
+      the rows'' OWN timestamps, never a nominal rate'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
