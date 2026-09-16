@@ -41,7 +41,7 @@ This cheaply moves wideband infrastructure out of the "unknown" pile (workflow s
   - The code search suits the GPU (estimate).
 
 ## Platform constraints
-- **Bandwidth.** 20 Msps, ~15–18 MHz usable (docs/01 §7.3). 20 MHz LTE/NR and Wi-Fi are captured only partially; Wi-Fi 6E is above 6 GHz (docs/04 §1.2). Partial-band CP correlation should weaken rather than fail (estimate; spike).
+- **Bandwidth.** 20 Msps, ~15–18 MHz usable (docs/01 §7.3). 20 MHz LTE/NR and Wi-Fi are captured only partially; Wi-Fi 6E is above 6 GHz (docs/04 §1.2). Partial-band CP correlation should weaken rather than fail (estimate; spike). **2.4 GHz Wi-Fi OFDM decode is mostly out of reach on this front end** — a 20 MHz channel has no guard band against the 20 Msps ceiling, on top of the partial-band and 8-bit issues above — so full-frame Wi-Fi decode stays a stretch goal, not a baseline expectation; 802.15.4/Zigbee's narrower DSSS channels (row below) are the 2.4 GHz case that does fit. Capability statement, unverified until measured — `docs/02 §2.3`.
 - **Dynamic range.** 8-bit, no preselector. Cellular downlinks set gain and create IMD (docs/02 §1.7). Instantaneous dynamic range is set by the strongest in-window signal, which limits below-noise DSSS detection (docs/02 §1.2).
 - **Frequency error.** 1 ppm at 1.575 GHz ≈ 1.6 kHz of extra GNSS search (derived from docs/04 §10.1). GNSS needs an active antenna on bias-tee.
 - **Compute.** Low–medium per event (docs/06).

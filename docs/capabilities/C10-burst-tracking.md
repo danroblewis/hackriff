@@ -22,6 +22,7 @@ Links individual Detections over time into **Tracks/Emissions**: one emitter wit
 
 ## Platform constraints
 - **One ≤20 MHz window:** hop sets wider than the IBW are only partly observed. Bluetooth Classic (1600 hops/s over 79 MHz) needs ~80 MHz and cannot be followed. `docs/04 §4.7`.
+- **BLE advertising is the exception to the 2.4 GHz hopping problem.** Its three advertising channels are *fixed*, not hopped — 2402/2426/2480 MHz, 1 Msps GFSK — so each fits inside one ≤20 MHz window and its short bursts (no stable carrier, no persistent presence between adverts) are a clean real-world instance of the burst/time-extent model (ADR-0017). A BLE *connection*'s 37 data channels do hop and reduce to the same problem as classic Bluetooth. **Capability statement, unverified until measured** — see `docs/02 §2.3 "Receiver-capability note: 2.4 GHz and 902–928 MHz ISM"`.
 - **Sweep-sourced detections are sparse and aliased in time** (each 20 MHz chunk seen a few ms per ~0.75 s sweep). Periods shorter than the revisit time are unmeasurable; use dwell data. `docs/01 §1.6 "Firmware, `hackrf_sweep`, and host tools"`, `docs/04 §3.8 "Sweep-based survey vs. real-time IBW"`.
 - **Timestamp accuracy:** sample-counter time from C03 is fine within a dwell; across retunes, and against external events, use C06 GNSS time. The HackRF One has no TCXO (ppm unverified), which blurs f_c association over temperature. `docs/01 §1.2 "Specifications"`.
 - Half-duplex, single radio: the scheduler (C04) creates observation gaps that must be modelled.

@@ -37,6 +37,7 @@ Blindly converts a channelized digital emission into soft symbols and hard bits,
 ## Platform constraints
 - Low–medium cost per channel (docs/06 §2). Robustness is "medium (burst length, SNR)" (docs/04 §12 #11).
 - All channels come from one ≤20 MHz half-duplex window; bursts outside it are missed (docs/04 §3.8).
+- **BLE advertising (1 Msps GFSK, fixed 2402/2426/2480 MHz channels) is a good 2.4 GHz fit for this family demod path** — plain GFSK, no carrier lock needed, well inside the window — unlike 2.4 GHz Wi-Fi (OFDM, C16, mostly out of reach at 20 Msps) or classic Bluetooth (79-channel hopping, C10, needs ~80 MHz). Capability statement, unverified until measured — `docs/02 §2.3`.
 - HackRF One has no TCXO (docs/01 §1.2), so CFO and sample-clock drift must be tracked, not assumed. CFO comes from C13/C05.
 - 8-bit ADC with ~6 bits effective (docs/01 §1.3). Strong neighbours cut SNR and degrade high-order QAM first.
 - Snippets can be processed off the real-time path. Continuous streams (control channels, AIS) need a native real-time implementation. Python is research only.

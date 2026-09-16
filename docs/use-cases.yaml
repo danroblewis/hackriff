@@ -4628,7 +4628,7 @@ use_cases:
   hardware_fit: native
   accessory: null
   fit_flags: null
-  fit_note: null
+  fit_note: '2.4 GHz and 902–928 MHz ISM are the canonical case this capability targets: Wi-Fi OFDM decode and classic-Bluetooth hop-following are mostly out of reach on the HackRF''s 20 Msps/8-bit front end (BLE advertising decodes; docs/02 §2.3, unverified capability note), so duty-cycle/occupancy statistics rather than full decode are the native fit at those bands.'
   test_tier: offline-synth
 - id: AWARE-043
   theme: Spectrum Situational Awareness, Interference & Anomalies
