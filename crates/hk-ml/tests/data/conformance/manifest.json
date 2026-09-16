@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "model": {
+    "id": "hk-conformance",
+    "version": "1.0.0",
+    "sha8": "7768a0ec"
+  },
+  "sha256": "7768a0ec62d9a0dc9e86356295f005f6c7c1167c4e870c390e9099dce3e64547",
+  "task": "family-class",
+  "consumer": "hk-ml/conformance",
+  "taxonomy": "hk-mod@1",
+  "family": "fsk",
+  "labels": [
+    "2fsk",
+    "gfsk",
+    "msk",
+    "4fsk"
+  ],
+  "open_set": {
+    "method": "energy",
+    "temperature": 1.0,
+    "threshold": -2.0,
+    "calibrated_on": "none@conformance-fixture"
+  },
+  "precision": "fp32",
+  "metrics_ref": null,
+  "enable_evidence": null
+}

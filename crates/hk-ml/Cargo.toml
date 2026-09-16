@@ -1,33 +1,49 @@
 [package]
 name = "hk-ml"
-description = "hackriff C38 ML runtime contract (ADR-0016 §6): Prediction, provider trait and the CPU reference. Stub: T-203 lands ONNX loading, batching, shadow mode and the conformance suite"
+description = "hackriff C38 ML runtime (ADR-0016 §6): model registry, batching host, shadow mode, ONNX providers and the provider conformance suite"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-# No inference engine is a dependency yet, and none is in the default build when T-203 adds one:
-# ADR-0016 §6 puts tract (pure Rust) behind the CPU reference and ort + CoreML behind the opt-in
-# `ml-coreml` feature. The stub compiles with the data model and serde alone, so CI, the Jetson
-# cross build and every other crate's build time are unaffected until a provider actually lands.
+# The registry, the batching host, the CFAR gate and shadow mode are engine-agnostic: they are
+# written against `MlProvider`, so they build and are tested with no inference engine at all.
+# An engine is a feature (T-203 bake-off, ADR-0016 §6): `ml-onnx` = tract (pure Rust CPU
+# reference), `ml-coreml` = ort + CoreML EP on the Mac.
 [dependencies]
 hk-model.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# Only the `ml-mlp` weights loader needs it (manifest sha256 verification); the default build
-# still pulls nothing new.
-sha2 = { workspace = true, optional = true }
+# The registry verifies every model file's sha256 against its manifest before it is loaded, so the
+# `id@version#sha8` on a Prediction is measured from the bytes that ran rather than declared.
+sha2.workspace = true
+# T-203: the pure-Rust CPU reference (ADR-0016 §6). Default-on: the conformance suite is the only
+# thing that lets a provider decide anything (ADR-0007), and a suite that CI does not run is not a
+# gate. Pinned below 0.23, which needs rustc 1.91 (workspace rust-version is 1.85).
+tract-onnx = { version = "0.22.4", optional = true }
+# T-203: ONNX Runtime with the CoreML execution provider, Mac acceleration behind the opt-in
+# `ml-coreml` feature. It downloads a prebuilt binary at build time, which is why it is not in the
+# default build or in CI. rc.13+ needs rustc 1.88.
+ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = [
+    "std",
+    "ndarray",
+    "download-binaries",
+    "copy-dylibs",
+    "coreml",
+] }
 
 [features]
-default = []
+default = ["ml-onnx"]
 # T-204: the dependency-free reference MLP over a `hk-mlp@1` weights file. It is NOT an ONNX
 # runtime and never claims conformance — it exists so the per-family DL stage can run in shadow
-# mode before T-203's bake-off picks an engine. Adds sha2 only.
-ml-mlp = ["dep:sha2"]
-# T-203: ONNX Runtime + CoreML execution provider on the Mac, after the day-1 bake-off
-# (ADR-0016 §6). Declared here so the feature name is fixed by the contract; it adds no
-# dependency yet and no provider answers to it.
-ml-coreml = []
+# mode. It needs no dependency of its own.
+ml-mlp = []
+# T-203: `tract-onnx`, the CPU reference provider. Pure Rust, loads ONNX at runtime, no native
+# library and no build-time download.
+ml-onnx = ["dep:tract-onnx"]
+# T-203: ONNX Runtime + CoreML execution provider on the Mac (ADR-0016 §6). Opt-in: see the
+# bake-off result recorded in `src/ort_provider.rs`.
+ml-coreml = ["dep:ort", "ml-onnx"]
 # T-216 (deferred with the Jetson phase): ONNX Runtime + TensorRT execution provider.
 ml-trt = []
