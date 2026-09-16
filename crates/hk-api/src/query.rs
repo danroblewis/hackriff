@@ -17,9 +17,10 @@
 use hk_model::attention::baseline::SiteKey;
 use hk_model::ids::SiteId;
 use hk_model::{
-    AnnotationAuthor, AnnotationTarget, ArtifactKind, FreqRange, IdentityAccess, IdentityScheme,
-    InventoryEntry, InventoryIdentity, InventoryQuery, KnownStatus, LifecycleAuthor,
-    LifecycleState, RelationVisibility, RepoError, Repository, StatusAuthor, TimeRange, Timestamp,
+    AnnotationAuthor, AnnotationTarget, ArtifactKind, Demodulation, FreqRange, IdentityAccess,
+    IdentityScheme, InventoryEntry, InventoryIdentity, InventoryQuery, KnownStatus,
+    LifecycleAuthor, LifecycleState, RelationVisibility, RepoError, Repository, StatusAuthor,
+    TimeRange, Timestamp,
 };
 use hk_store::history::{
     FORMAT_VERSION, FilterSummary, FrontEndState, Geometry, HistoryStat, OriginField, OriginFilter,
@@ -700,6 +701,11 @@ fn reason_is_identity_free(author: StatusAuthor) -> bool {
 /// currently-linked tracks ([`Repository::emitter_latest_measurement`]); both `null` when no
 /// detection is linked yet (e.g. an emitter seen only through a decode sighting).
 ///
+/// T-163 (ADR-0013 gap 7a): `estimated_params` is the emitter's latest [`hk_model::EstimatedParams`]
+/// (symbol rate, modulation, deviation, CFO, bandwidth), from its latest demodulation session
+/// ([`Repository::latest_demodulation_for_emitter`]); `null` when none has run yet, and on a
+/// withheld-identity row, always — see [`estimated_params_json`].
+///
 /// T-078: `state` filters by lifecycle (`candidate`, `confirmed`, `deleted`, comma-separated; by
 /// default candidates and confirmed entries, never deleted ones). Each row carries `state`,
 /// `lifecycle` (the latest change: state, previous, author `auto`/`user`, actor, reason, `t_s`; or
@@ -775,6 +781,29 @@ fn classification_json(r: &hk_model::RecordedClassification) -> Value {
         "top": d.map(|d| d.top(5)),
         "entropy_norm": d.map(|d| d.entropy_norm),
         "flags": d.map(|d| &d.flags),
+    })
+}
+
+/// T-163 (ADR-0013 gap 7a) `estimated_params` object: one field per [`hk_model::EstimatedParams`]
+/// measurement, plus `modulation` (the demodulation's `mode`, e.g. `wfm`, `2fsk`) and provenance.
+/// A field the estimator never measured for this signal (e.g. `symbol_rate_hz` on an analog FM
+/// station) is `null`, exactly like the stored [`hk_model::EstimatedParams`] — never a fabricated
+/// default. `t_s` and `source_session` match `/api/inventory/{id}/decode`'s `at`/`source_session`
+/// convention: the session's end time, and the demodulation's own id.
+fn estimated_params_json(d: &Demodulation) -> Value {
+    let p = &d.params;
+    json!({
+        "modulation": d.mode,
+        "symbol_rate_hz": p.symbol_rate_hz,
+        "mod_order": p.mod_order,
+        "deviation_hz": p.deviation_hz,
+        "cfo_hz": p.cfo_hz,
+        "bandwidth_hz": p.bandwidth_hz,
+        "roll_off": p.roll_off,
+        "pilot_hz": p.pilot_hz,
+        "t_s": ts_s(d.time.end),
+        "source_session": d.id.to_string(),
+        "source_recording": d.recording_ref.map(|r| r.to_string()),
     })
 }
 
@@ -870,6 +899,19 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
             (Some(c), Some(l)) if *c != l => Some(classification_json(&l)),
             _ => None,
         };
+        // T-163 (ADR-0013 gap 7a): the emitter's latest blind-estimated parameters (C13/C14), for
+        // the Decode workbench's "Use" suggestions. `null` with no demodulation session recorded
+        // yet. On a withheld-identity row this reads `null` too, whatever storage holds: these
+        // are DSP measurements, not identity data, but serving them only when unwithheld keeps
+        // this route's answer on a withheld row indistinguishable from "nothing measured yet"
+        // (the same rule `/api/inventory/{id}/decode`, T-159/T-036, applies to decodes), so a
+        // withheld identity is never confirmed indirectly by a new field appearing or not.
+        let estimated_params = if withheld {
+            None
+        } else {
+            repo.latest_demodulation_for_emitter(e.id)?
+                .map(|d| estimated_params_json(&d))
+        };
         let freq = e.freq();
         let mut row = json!({
             "state": entry.lifecycle,
@@ -896,6 +938,7 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
             "classification": current.as_ref().map(classification_json),
             "latest_classification": latest_classification,
             "classifications": e.classifications.len(),
+            "estimated_params": estimated_params,
             "identity_scheme": scheme,
             "identity_class": class,
             "withheld": withheld,
