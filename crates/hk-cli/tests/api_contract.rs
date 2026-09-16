@@ -359,6 +359,84 @@ fn signature_match_route_answers_as_documented() {
     stop_server(serving);
 }
 
+/// T-247 (ADR-0016 §2/§9): `GET /api/inventory/{id}/classification` answers as `docs/api.md`
+/// documents it. The route serves the parts of a classification too large for an inventory row —
+/// both distributions, the prior, the provenance and the reason codes — and, like every other
+/// per-emitter read, it explains without ever naming.
+#[test]
+fn inventory_classification_route_answers_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    // An unparsable or unknown id is a 404 — never a 200 that could be probed for which ids exist.
+    let (st, v) = get(addr, "/api/inventory/not-a-uuid/classification");
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
+    let unknown = EmitterId::new();
+    let (st, v) = get(addr, &format!("/api/inventory/{unknown}/classification"));
+    assert_eq!(st, 404, "{v}");
+
+    // A real emitter from the fixture. Both fields may be `null` on a fresh server — nothing has
+    // classified it yet, which is not an error and is not a classification of `unknown`.
+    let (st, inv) = get(addr, "/api/inventory");
+    assert_eq!(st, 200, "{inv}");
+    if let Some(row) = inv["emitters"].as_array().and_then(|r| r.first()) {
+        let id = row["id"].as_str().expect("an inventory row has an id");
+        let (st, v) = get(addr, &format!("/api/inventory/{id}/classification"));
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["emitter"], id, "{v}");
+        for field in ["classification", "latest"] {
+            assert!(
+                v[field].is_null() || v[field].is_object(),
+                "{field} is a Classification or null: {v}"
+            );
+            let Some(c) = v[field].as_object() else {
+                continue;
+            };
+            // The full ADR-0016 §2 contract, not the inventory row's summary.
+            for required in [
+                "posterior",
+                "likelihood",
+                "family",
+                "confidence",
+                "open_set_score",
+                "entropy_norm",
+                "coarse",
+                "taxonomy",
+                "stage",
+                "provenance",
+                "flags",
+                "reasons",
+            ] {
+                assert!(c.contains_key(required), "{field} missing {required}: {v}");
+            }
+            // Both distributions are served, and `unknown` is a label in them like any other.
+            for dist in ["posterior", "likelihood"] {
+                let labels = c[dist].as_array().unwrap_or_else(|| panic!("{dist}: {v}"));
+                assert!(!labels.is_empty(), "{dist} is empty: {v}");
+                for l in labels {
+                    assert!(l["label"].is_string(), "{l}");
+                    assert!(l["p"].is_number(), "{l}");
+                }
+            }
+            assert!(c["provenance"]["rules"].is_string(), "{v}");
+            assert!(is_array(&c["reasons"]), "{v}");
+            // A classification explains; it never names.
+            for forbidden in ["identity", "known_status", "lifecycle"] {
+                assert!(c.get(forbidden).is_none(), "{forbidden} leaked: {v}");
+            }
+        }
+    }
+
+    // GET only.
+    let (st, _) = post(
+        addr,
+        &format!("/api/inventory/{unknown}/classification"),
+        "{}",
+    );
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
 /// T-202 (ADR-0016 §5): `/api/clusters` answers as `docs/api.md` documents it. A cluster is a
 /// *type* above emitters and is evidence, never identity, so the shape carries what the group
 /// measured like (with its uncertainty) and nothing that could name it.

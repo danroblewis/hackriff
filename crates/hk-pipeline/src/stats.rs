@@ -220,6 +220,8 @@ counter_group!(
         fsk_boxes_missed,
         /// CRC-valid frames.
         crc_valid,
+        /// T-247: M3 classification rows the C15 cascade wrote (`crate::classify`).
+        classifications,
         /// SigMF recordings written.
         recordings,
         /// Recordings refused by the content class.

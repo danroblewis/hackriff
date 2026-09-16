@@ -13,16 +13,28 @@
 //! turn `2fsk` into `fsk` — a regression for every reader that expects the chain's label, and for
 //! the M0/M1 acceptance suites that assert it.
 //!
-//! So [`should_record`] holds the classifier back whenever a **better-informed producer** (a user,
-//! a decoder, a lock-verified verifier, or a demodulator chain) has already put a known `hk-mod@1`
-//! family on the emitter. The classification is still computed and returned to the caller; it is
-//! the *arbitration* that is left alone. Where nothing else has spoken — an emitter carrying only
-//! track shape, or nothing at all, which is the unknown-signal case this milestone is for — the
-//! row is written and wins over shape, exactly as ADR-0016 §2 ranks it.
+//! So [`should_record`] holds the classifier back in the one case where writing would *demote* a
+//! better-informed producer: a **tie at rank 3**, where "latest among equals" would hand the family
+//! to whoever wrote last. Where nothing else has spoken — an emitter carrying only track shape, or
+//! nothing at all, which is the unknown-signal case this milestone is for — the row is written and
+//! wins over shape, exactly as ADR-0016 §2 ranks it.
 //!
-//! The lasting fix is for locked chain labels to be written at [`ArbRank::LockVerified`] (rank 2),
-//! which ADR-0016 §2 already specifies; then this guard becomes unnecessary. That is a follow-up:
-//! it changes what `/api/inventory` reports for every demodulated emitter.
+//! **A row that cannot take over is always recorded** (T-247). When the current classification sits
+//! at rank 0–2 (a user, a decoder, or a lock-verified chain or verifier) the classifier's rank-3
+//! row can never become the emitter's family however late it is appended, so suppressing it would
+//! discard a measurement for no arbitration benefit — and would leave the emitter with no
+//! posterior, no open-set score and no `unknown`, which is exactly the vacuum T-247 closed. Such a
+//! row is appended and served as `latest_classification` (`docs/api.md`), beside the family the
+//! better-informed producer keeps. This is evidence *about* an emitter, never a change *to* one —
+//! the rule [`crate::characterise`] follows for matches and clusters.
+//!
+//! That is why [`record_locked_chain_label`] exists. ADR-0016 §2 puts a demodulator chain that
+//! **locked** at [`ArbRank::LockVerified`] (rank 2), but a chain writing through the legacy path
+//! records no lock, so its row derives rank 3 ([`hk_model::classify::ArbRank::legacy`]) and ties
+//! with the classifier. A chain that knows it locked writes its rank explicitly — the follow-up
+//! `hk_model::Repository::append_classification_ranked` names this module as its owner — and the
+//! tie disappears: the chain keeps `2fsk` at rank 2, and the classifier's `fsk` posterior is
+//! recorded at rank 3 without ever displacing it.
 
 use hk_classify::{Classifier, ClassifyRequest, SymbolEstimator};
 use hk_dsp::{InputInfo, IqSample};
@@ -37,10 +49,15 @@ pub fn should_record(current: Option<&RecordedClassification>) -> bool {
     let Some(r) = current else {
         return true;
     };
-    if r.arb_rank > ArbRank::Classifier {
-        // Track shape only: the classifier outranks it (ADR-0016 §2).
+    if r.arb_rank != ArbRank::Classifier {
+        // Arbitration is already settled without us, in one direction or the other: a row at rank
+        // 0-2 (user, decoder, lock-verified) keeps the family however late this one is appended,
+        // and track shape at rank 4 loses to it (T-183, ADR-0016 §2). Either way this row cannot
+        // demote anyone, so the measurement is recorded rather than thrown away.
         return true;
     }
+    // A tie at rank 3, where "latest among equals" decides: only here could writing take the
+    // family off a better-informed producer.
     match r.stage {
         // Our own earlier rows (or a DL stage's) may be superseded: that is a re-classification,
         // not a demotion.
@@ -112,6 +129,74 @@ pub fn record(
     Ok(true)
 }
 
+/// **The pipeline's single C15 call site** (T-247): classifies one detection box and appends the
+/// result to `emitter`. Returns the classification and whether a row was written (`None` when the
+/// cascade abstained upstream — see [`classify_box`]).
+///
+/// # Where this runs, and what bounds its cost
+///
+/// On a **chain writer thread** (`crate::chains::fsk`), off the ring, the DSP readers and the audio
+/// chains, where `crate::family::explain_emitter` and [`crate::characterise`] already run
+/// (ADR-0007; ADR-0016 §4, "Placement"). The chain already owns its own copy of the samples, so
+/// nothing here touches the ring; only the [`record`] call takes the repository lock the caller
+/// already holds.
+///
+/// Its cost is bounded by construction, as [`crate::characterise`] states its own:
+///
+/// - **At most one classification per emitter per chain write.** A chain classifies the single
+///   most-evidence burst it demodulated, once, at detach — not one per burst and not one per
+///   flush.
+/// - **Per call:** one snippet extraction over that one burst, one C13 parameter estimate, one C14
+///   symbol window capped at `hk_classify::symbols`' own sample ceiling, one `features@1` vector
+///   (≤ 24 dimensions), `O(families)` density evaluations, and one row insert. No FFT beyond that
+///   single snippet, no ring or sample-buffer access, and no I/O beyond the repository the caller
+///   already holds.
+#[allow(clippy::too_many_arguments)]
+pub fn classify_and_record<T: IqSample>(
+    repo: &mut Repository,
+    emitter: EmitterId,
+    classifier: &Classifier,
+    c14: &mut SymbolEstimator,
+    info: InputInfo<'_>,
+    iq: &[T],
+    request: &SnippetRequest,
+    t: Timestamp,
+) -> Result<Option<(Classification, bool)>, RepoError> {
+    let Some(classification) = classify_box(classifier, c14, info, iq, request, t) else {
+        return Ok(None);
+    };
+    let written = record(repo, emitter, &classification)?;
+    Ok(Some((classification, written)))
+}
+
+/// Re-appends a demodulator chain's own label at [`ArbRank::LockVerified`] (rank 2), the rank
+/// ADR-0016 §2 gives a chain that **locked** — a recovered clock plus CRC-valid framing, not a
+/// pre-sync guess. Returns whether a row was written.
+///
+/// A chain writing through the legacy path records no lock, so its row derives rank 3
+/// ([`hk_model::classify::ArbRank::legacy`]) and **ties** with the classifier, where "latest among
+/// equals" would let a later rank-3 row take the family off it. Stating the rank removes the tie:
+/// the chain keeps `2fsk` as the emitter's family, and [`classify_and_record`] may then record the
+/// C15 posterior at rank 3 without ever displacing it (see the module docs).
+///
+/// The row is the chain's **own** classification, re-appended at its proper rank — nothing is
+/// invented here and no label changes. Does nothing (`false`) when the emitter's current
+/// classification is not a rank-3 chain row, so a second call after promotion is a no-op.
+pub fn record_locked_chain_label(
+    repo: &mut Repository,
+    emitter: EmitterId,
+) -> Result<bool, RepoError> {
+    let id = repo.live_emitter_id(emitter)?;
+    let Some(r) = repo.current_classification(id)? else {
+        return Ok(false);
+    };
+    if r.stage != Stage::Chain || r.arb_rank != ArbRank::Classifier {
+        return Ok(false);
+    }
+    repo.append_classification_ranked(id, &r.classification, Stage::Chain, ArbRank::LockVerified)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,25 +233,27 @@ mod tests {
             Stage::TrackShape,
             ArbRank::TrackShape
         ))));
-        // A demodulator chain, a decoder, a verifier or a user owns the family: it does not.
+        // The one case writing would demote someone: an unlocked chain label at the classifier's
+        // own rank, where "latest among equals" decides.
+        assert!(
+            !should_record(Some(&recorded("wfm", Stage::Chain, ArbRank::Classifier))),
+            "a rank-3 chain label must keep the emitter's family"
+        );
+        // T-247: a producer the classifier cannot outrank keeps the family whatever is appended
+        // after it, so the measurement is recorded as evidence rather than discarded. These rows
+        // become `latest_classification` beside the family their producer keeps.
         for (family, stage, rank) in [
-            ("wfm", Stage::Chain, ArbRank::Classifier),
             ("2fsk", Stage::Chain, ArbRank::LockVerified),
             ("fsk", Stage::Verifier, ArbRank::LockVerified),
             ("bpsk", Stage::User, ArbRank::User),
+            // A decoder's service label is not a modulation at all.
+            ("adsb", Stage::Decoder, ArbRank::Decoder),
         ] {
             assert!(
-                !should_record(Some(&recorded(family, stage, rank))),
-                "{family} from {stage:?} must keep the emitter's family"
+                should_record(Some(&recorded(family, stage, rank))),
+                "{family} from {stage:?} outranks the classifier, so recording cannot demote it"
             );
         }
-        // A decoder's service label is not a modulation, so the tree may still say what the
-        // modulation is.
-        assert!(should_record(Some(&recorded(
-            "adsb",
-            Stage::Decoder,
-            ArbRank::Decoder
-        ))));
         // Its own earlier row is superseded, not protected.
         assert!(should_record(Some(&recorded(
             "fsk",
