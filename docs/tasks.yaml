@@ -7042,7 +7042,7 @@ tasks:
     milestone: M3
     title: 'ModelHost and HostStats have no reference outside hk-ml: the counters T-283 just made coherent
       have no production reader'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-283
