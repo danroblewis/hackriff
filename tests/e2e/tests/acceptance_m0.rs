@@ -23,6 +23,9 @@ mod aware_036;
 #[path = "acceptance/signal_062.rs"]
 mod signal_062;
 
+#[path = "acceptance/fm_band_2026_09_15.rs"]
+mod fm_band_2026_09_15;
+
 #[path = "acceptance/aware_006.rs"]
 mod aware_006;
 
