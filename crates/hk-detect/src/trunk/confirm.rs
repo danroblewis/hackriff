@@ -332,6 +332,50 @@ impl CcConfirmer {
         out
     }
 
+    /// The CRC-valid blocks in `dibits`, sync-aligned, for [`super::tsbk`] to decode (T-268).
+    ///
+    /// This yields **bytes, not evidence**. A block is 12 bytes that passed a CRC behind a frame
+    /// sync; it is not a [`CcEvidence`] and cannot become one, so the type-level rule T-267
+    /// established still holds: [`Self::confirm`] remains the only source of a [`ConfirmedCc`]
+    /// anywhere in the workspace. Decoding what a control channel *said* is a separate question
+    /// from whether it is one, and the caller has to have answered the second question first.
+    pub fn crc_valid_blocks(&self, dibits: &[u8]) -> Vec<[u8; BLOCK_BYTES]> {
+        let mut out = Vec::new();
+        if dibits.len() < FRAME_DIBITS {
+            return out;
+        }
+        let last = dibits.len() - FRAME_DIBITS;
+        let mut i = 0;
+        while i <= last {
+            let mut miss = 0u32;
+            for (k, &want) in P25_FRAME_SYNC_DIBITS.iter().enumerate() {
+                if dibits[i + k] != want {
+                    miss += 1;
+                    if miss > self.cfg.sync_tolerance {
+                        break;
+                    }
+                }
+            }
+            if miss > self.cfg.sync_tolerance {
+                i += 1;
+                continue;
+            }
+            let start = i + P25_FRAME_SYNC_DIBITS.len();
+            let bytes = pack_dibits(&dibits[start..start + BLOCK_DIBITS]);
+            if self.crc.compute(&bytes, 0, BLOCK_BYTES * 8) == 0 {
+                let mut block = [0u8; BLOCK_BYTES];
+                block.copy_from_slice(&bytes);
+                out.push(block);
+                // A frame that checked out is a frame: resume after it rather than re-examining
+                // every symbol inside it, so one frame cannot yield two overlapping "blocks".
+                i = start + BLOCK_DIBITS;
+                continue;
+            }
+            i += 1;
+        }
+        out
+    }
+
     /// Confirms `candidate` from its demodulated symbols, or returns `None`.
     ///
     /// `Some` requires **both** gates: at least `min_sync_hits` frame syncs and at least

@@ -48,7 +48,107 @@ TRUNK_CC_DEFAULTS: dict[str, Any] = {
     "noise_dbfs": -40.0,
     "calibration_k_db": -70.0,
     "start_utc": DEFAULT_START_UTC,
+    # --- TSBK content (T-268). OFF by default, so ``trunk_control_channel`` stays exactly the
+    # T-267 scene: the branch below consumes no randomness when it is off, so the recording is
+    # byte-for-byte what it was. ``trunk_tsbk_control_channel`` turns it on.
+    "tsbk": False,
+    # The band plan the control channel announces. 851.00625 MHz base / 6.25 kHz spacing is an
+    # 800 MHz public-safety plan; both encode exactly (base is a whole number of 5 Hz steps,
+    # spacing a whole number of 125 Hz steps).
+    "tsbk_iden": 1,
+    "tsbk_base_hz": 851.00625e6,
+    "tsbk_spacing_hz": 6250.0,
+    "tsbk_tx_offset_hz": -45e6,
+    "tsbk_bandwidth_hz": 12500.0,
+    # The voice frequency a grant must resolve to. The CHANNEL NUMBER is derived from it, not the
+    # other way round, so the truth is a frequency chosen first and the decoder has to arrive at
+    # it through the band plan rather than through arithmetic the fixture also did.
+    "grant_target_hz": 851.7375e6,
+    "grant_talkgroup": 1234,
+    "grant_source": 5678,
+    # A grant naming an identifier the control channel NEVER announces. Resolving it through the
+    # announced identifier would give a perfectly plausible 800 MHz frequency, which is exactly
+    # the C23 pitfall; it must come out unmapped instead.
+    "unannounced_iden": 7,
+    "unannounced_channel": 300,
 }
+
+#: The same scene with TSBK content switched on (T-268).
+TRUNK_TSBK_DEFAULTS: dict[str, Any] = {**TRUNK_CC_DEFAULTS, "tsbk": True}
+
+
+def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dict[str, Any]], dict[str, Any]]:
+    """The control channel's outbound message stream, and the truth describing it.
+
+    The cycle carries, in order: an identifier update, a grant that resolves through it, the same
+    identifier update again (a band-plan entry is only trustworthy once it has been repeated), a
+    grant update for the same channel, a grant naming an identifier that is never announced, and a
+    message this decoder does not read. Repeating the cycle makes every one of those appear several
+    times in any window long enough to confirm the channel at all.
+    """
+    iden = int(p["tsbk_iden"])
+    base_hz, spacing_hz = float(p["tsbk_base_hz"]), float(p["tsbk_spacing_hz"])
+    target_hz = float(p["grant_target_hz"])
+    steps = (target_hz - base_hz) / spacing_hz
+    if steps != int(steps) or not 0 <= steps <= 0xFFF:
+        raise ValueError(f"grant_target_hz {target_hz} is not a channel of this band plan")
+    channel = int(steps)
+    tg, src = int(p["grant_talkgroup"]), int(p["grant_source"])
+    u_iden, u_chan = int(p["unannounced_iden"]), int(p["unannounced_channel"])
+    if u_iden == iden:
+        raise ValueError("the unannounced identifier must differ from the announced one")
+
+    iden_args = tk.iden_up_args(iden, base_hz, spacing_hz,
+                                tx_offset_hz=float(p["tsbk_tx_offset_hz"]),
+                                bandwidth_hz=float(p["tsbk_bandwidth_hz"]))
+    iden_block = tk.tsbk(tk.TSBK_OP_IDEN_UP, iden_args)
+    chan16 = tk.channel_number(iden, channel)
+    u_chan16 = tk.channel_number(u_iden, u_chan)
+    cycle = [
+        ("iden-up", iden_block),
+        ("grant", tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT, tk.grant_args(chan16, tg, source=src))),
+        ("iden-up", iden_block),
+        ("grant-update", tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT_UPDATE, tk.grant_args(chan16, tg))),
+        ("grant-unannounced",
+         tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT, tk.grant_args(u_chan16, tg + 1, source=src))),
+        # An opcode this decoder does not read (RFSS status broadcast), so the stream is not made
+        # only of messages it happens to understand.
+        ("other", tk.tsbk(0x3A, bytes(8))),
+    ]
+    dibits = tk.frames_from_blocks([b for _, b in cycle], n_frames)
+    frames = [{"index": i, "kind": cycle[i % len(cycle)][0],
+               "block_hex": cycle[i % len(cycle)][1].hex()} for i in range(n_frames)]
+    counts = {kind: sum(1 for i in range(n_frames) if cycle[i % len(cycle)][0] == kind)
+              for kind, _ in cycle}
+    truth = {
+        "iden": iden,
+        "base_hz": base_hz,
+        "spacing_hz": spacing_hz,
+        "tx_offset_hz": float(p["tsbk_tx_offset_hz"]),
+        "bandwidth_hz": float(p["tsbk_bandwidth_hz"]),
+        "grant_channel": channel,
+        "grant_channel_16bit": chan16,
+        "grant_target_hz": target_hz,
+        "grant_talkgroup": tg,
+        "grant_source": src,
+        "unannounced_iden": u_iden,
+        "unannounced_channel": u_chan,
+        "unannounced_channel_16bit": u_chan16,
+        # What a decoder that fell back to the announced identifier would produce. Nothing may
+        # ever report this frequency.
+        "wrong_frequency_if_misresolved_hz": base_hz + spacing_hz * u_chan,
+        "frames_per_cycle": len(cycle),
+        "counts": counts,
+        "expected": {
+            "protocol": "p25-phase1",
+            "iden_admitted": True,
+            "grant_maps_to_target": True,
+            "unannounced_grant": "unmapped-channel",
+        },
+        "coding": "none (no trellis, no interleaving, no status symbols; CRC-16/CCITT-FALSE, "
+                  "not the augmented CRC-CCITT real P25 uses)",
+    }
+    return dibits, frames, truth
 
 
 def _n(p: dict[str, Any]) -> int:
@@ -110,7 +210,11 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
 
     # --- The control channel: continuous C4FM, real frame sync, CRC-valid blocks.
     frames_needed = int(math.ceil(n * rate / fs / tk.FRAME_DIBITS)) + 1
-    cc_dibits, cc_frames = tk.control_channel_dibits(scene.rng("cc"), frames_needed)
+    tsbk_truth: dict[str, Any] | None = None
+    if bool(p["tsbk"]):
+        cc_dibits, cc_frames, tsbk_truth = _tsbk_stream(p, frames_needed)
+    else:
+        cc_dibits, cc_frames = tk.control_channel_dibits(scene.rng("cc"), frames_needed)
     cc_ch = int(p["cc_channel"])
     cc_off, cc_power = place_c4fm(cc_ch, cc_dibits, float(p["cc_snr_db"]), float(p["cc_cfo_hz"]))
     cc_f = cap.center_hz + cc_off
@@ -128,6 +232,7 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
             n_frames=len(cc_frames),
             frames=cc_frames[:8],
             sync_hex=tk.P25_FRAME_SYNC_HEX,
+            carries_tsbk=tsbk_truth is not None,
         ),
     )
 
@@ -213,4 +318,6 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         "n_nbfm_bursts": n_bursts,
         "frame": tk.CC_FRAME_SPEC,
     }
+    if tsbk_truth is not None:
+        scene.scenario_truth["trunking"]["tsbk"] = tsbk_truth
     return [scene], {}

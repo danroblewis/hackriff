@@ -41,6 +41,7 @@ SMALL: dict[str, dict] = {
     "pocsag_pagers": {},
     "acars_message": {"prekey_s": 0.02, "text": "TEST"},
     "trunk_control_channel": {"duration_s": 0.2},
+    "trunk_tsbk_control_channel": {"duration_s": 0.2},
     "lora_ism_burst": {"duration_s": 0.15, "sf": 7, "first_packet_s": 0.02,
                        "packet_period_s": 0.06, "fsk_period_s": 0.05},
 }
@@ -357,6 +358,64 @@ def test_fsk_bursts_demodulate_to_truth_bits_with_valid_crc(tmp_path, impaired):
 def st_floor(meta):
     [(_, fl)] = truths(meta, role="floor")
     return fl["expected_floor_dbfs"]
+
+
+def test_tsbk_fields_encode_the_published_worked_example():
+    """The generator's TSBK packing, checked against a third party's numbers rather than ours.
+
+    A published example resolves identifier 3, channel 1554 on a system whose base-frequency field
+    is 0x09157562 to 771.718750 MHz. Encoding that band plan here must reproduce the field values
+    the example shows, and the channel arithmetic must reproduce its frequency -- which is what
+    makes "base is in units of 5 Hz" and "spacing is in units of 125 Hz" claims someone else can
+    check, instead of a convention this repo agreed with itself.
+    """
+    from hkpy.synth import trunking as tk
+
+    base_hz, spacing_hz = 762_006_250.0, 6_250.0
+    args = tk.iden_up_args(3, base_hz, spacing_hz)
+    v = int.from_bytes(args, "big")
+    assert (v >> 60) & 0xF == 3, "identifier is the top 4 bits"
+    assert (v >> 32) & 0x3FF == 50, "spacing field: 6250 Hz / 125 Hz"
+    assert v & 0xFFFF_FFFF == 0x0915_7562, "base field: 762006250 Hz / 5 Hz"
+    assert base_hz + spacing_hz * 1554 == 771_718_750.0
+
+    chan16 = tk.channel_number(3, 1554)
+    assert chan16 >> 12 == 3 and chan16 & 0xFFF == 1554
+
+    block = tk.tsbk(tk.TSBK_OP_IDEN_UP, args)
+    assert len(block) == tk.TSBK_BYTES
+    assert block[0] & 0x3F == tk.TSBK_OP_IDEN_UP and block[1] == 0
+    assert block[2:10] == args
+    assert fsk_mod.crc16_ccitt_false(block[:10]) == int.from_bytes(block[10:], "big")
+
+
+def test_tsbk_scene_grant_channel_derives_from_the_target_frequency(tmp_path):
+    """The scene's truth is a frequency chosen first; the channel number follows from it."""
+    manifest = gen(tmp_path, "trunk_tsbk_control_channel")
+    _, meta, _ = load(manifest)
+    t = scenario_truth(meta)["trunking"]["tsbk"]
+    assert t["base_hz"] + t["spacing_hz"] * t["grant_channel"] == t["grant_target_hz"]
+    assert t["grant_channel_16bit"] == (t["iden"] << 12) | t["grant_channel"]
+    assert t["unannounced_channel_16bit"] >> 12 == t["unannounced_iden"]
+    # The trap frequency is a real, plausible frequency -- that is what makes it a trap.
+    assert t["wrong_frequency_if_misresolved_hz"] != t["grant_target_hz"]
+    assert 851e6 < t["wrong_frequency_if_misresolved_hz"] < 869e6
+    # Both grants and both announcements actually occur.
+    assert t["counts"]["iden-up"] >= 2 and t["counts"]["grant"] >= 1
+    assert t["counts"]["grant-unannounced"] >= 1
+
+
+def test_trunk_scene_without_tsbk_is_unchanged_by_the_tsbk_branch(tmp_path):
+    """T-267's fixture must be byte-identical: the new branch consumes no randomness when off."""
+    def iq_bytes(manifest):
+        man = json.loads(manifest.read_text())
+        return sigmf.data_path(manifest.parent / man["recordings"][0]).read_bytes()
+
+    a = gen(tmp_path / "a", "trunk_control_channel", seed=5)
+    b = gen(tmp_path / "b", "trunk_control_channel", seed=5)
+    assert iq_bytes(a) == iq_bytes(b)
+    _, meta, _ = load(a)
+    assert "tsbk" not in scenario_truth(meta)["trunking"]
 
 
 def test_crc_reference_vectors():

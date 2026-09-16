@@ -48,9 +48,10 @@
 //!
 //! # Metadata only (M4)
 //!
-//! The chain writes a [`TrunkSystem`] row — a protocol (still `Unknown`; naming it is T-268), the
-//! measured control-channel frequency, and times — and nothing else. No demodulated audio, no
-//! payload, no recording, no stream. That is what lets it run under the fail-closed
+//! The chain writes a [`TrunkSystem`] row — a protocol, the measured control-channel frequency and
+//! times — plus, since T-268, the band plan its identifier updates announced and the grants it
+//! issued. All of it metadata: no demodulated audio, no voice frames, no message payload, no
+//! recording, no stream, and nothing decrypted. That is what lets it run under the fail-closed
 //! `metadata-only` class a 12.5 kHz LMR band derives, and the validator in
 //! [`super::spec`] refuses any `trunk-cc` spec that sets `requires_content` or carries a record
 //! node, so it stays true.
@@ -62,11 +63,15 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use hk_core::{Discontinuity, ProvenanceHandle};
 use hk_demod::fsk::{C4fmConfig, C4fmDemod};
 use hk_detect::trunk::{
-    CcCandidate, CcConfirmer, MIN_CC_FCO, RASTER_TOLERANCE_HZ, best_lmr_raster,
+    CcCandidate, CcConfirmer, ChannelMap, Grant, MIN_CC_FCO, RASTER_TOLERANCE_HZ, Resolved,
+    best_lmr_raster, protocol_of, scan_blocks,
 };
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
-use hk_model::{SampleTime, Timestamp, TrunkSystem};
+use hk_model::{
+    GrantEvent, GrantKind, SampleTime, Timestamp, TrunkProtocol, TrunkSystem, TrunkSystemId,
+};
 use num_complex::{Complex, Complex32};
+use serde_json::json;
 
 use super::{ChainMsg, ChainReader, Next};
 use crate::events::Candidate;
@@ -94,6 +99,80 @@ const DEMOD_SPS: f64 = 10.0;
 
 /// Fraction of the sample rate the sweep treats as usable (the window's flat middle).
 const USABLE_FRACTION: f64 = 0.8;
+
+/// A control channel this chain has already written, and the band plan decoded off it.
+///
+/// The map lives here, across passes, because that is what gives a channel-table entry an **age**:
+/// an identifier decoded in one pass is still the thing a grant three passes later is resolved
+/// through, and [`ChannelMap::resolve`] refuses when that gap grows past
+/// [`hk_detect::trunk::IDEN_MAX_AGE_S`] rather than mapping to what the identifier used to mean.
+struct KnownCc {
+    system: TrunkSystem,
+    map: ChannelMap,
+}
+
+/// The `grant_event` a decoded grant produces, resolved through `map` as of `t`.
+///
+/// Split out and pure so the refusal paths can be tested without a pipeline. The rule it encodes
+/// is C23's stale-IDEN pitfall: a channel number the band plan cannot account for becomes an
+/// [`GrantKind::UnmappedChannel`] event carrying **no frequency** and the reason it has none —
+/// never a frequency borrowed from some other identifier.
+///
+/// Encryption is left [`hk_model::Encryption::Unknown`] on every event. The grant's service-options
+/// byte does carry an indication, but reading it belongs to T-270, and T-266 makes "nothing said"
+/// the only honest state until something does say.
+fn grant_event(system: TrunkSystemId, g: &Grant, map: &ChannelMap, t: Timestamp) -> GrantEvent {
+    let opcode = if g.update {
+        "grp-vch-grant-update"
+    } else {
+        "grp-vch-grant"
+    };
+    let mut ev = GrantEvent::new(
+        system,
+        if g.update {
+            GrantKind::GrantUpdate
+        } else {
+            GrantKind::Grant
+        },
+        t,
+    );
+    ev.talkgroup = Some(g.talkgroup.to_string());
+    ev.unit_id = (g.source != 0).then(|| g.source.to_string());
+    ev.channel = Some(g.channel.to_string());
+    match map.resolve(g.channel, t) {
+        Resolved::Mapped {
+            f_hz,
+            iden,
+            channel_number,
+            decoded_at,
+        } => {
+            ev.f_hz = Some(f_hz);
+            ev.detail = json!({
+                "opcode": opcode,
+                "iden": iden,
+                "channel_number": channel_number,
+                "mapping": "base + spacing * channel",
+                "iden_decoded_at_ns": decoded_at.as_unix_nanos(),
+            });
+        }
+        Resolved::Unmapped(why) => {
+            ev.kind = GrantKind::UnmappedChannel;
+            ev.f_hz = None;
+            let mut detail = json!({
+                "opcode": opcode,
+                "iden": g.iden(),
+                "channel_number": g.channel_number(),
+                "reason": why.reason(),
+            });
+            if let hk_detect::trunk::Unmapped::Stale { age_s, max_age_s } = why {
+                detail["iden_age_s"] = json!(age_s);
+                detail["iden_max_age_s"] = json!(max_age_s);
+            }
+            ev.detail = detail;
+        }
+    }
+    ev
+}
 
 /// What one hunt may spend. Built from [`super::spec::ChainShape::TrunkCc`] plus the spec's
 /// raster; see the module docs for the bound each field carries.
@@ -133,7 +212,7 @@ pub(crate) fn run(
     let mut passes = 0u64;
     // Control channels this chain has already written, by rounded frequency: a repeat sighting
     // updates `last_seen` rather than minting a second system for the same channel.
-    let mut known: HashMap<i64, TrunkSystem> = HashMap::new();
+    let mut known: HashMap<i64, KnownCc> = HashMap::new();
     let (mut detach, mut closed) = (false, false);
     loop {
         match rx.try_recv() {
@@ -199,7 +278,7 @@ fn hunt(
     base: u64,
     t_start: Timestamp,
     prov: &ProvenanceHandle,
-    known: &mut HashMap<i64, TrunkSystem>,
+    known: &mut HashMap<i64, KnownCc>,
 ) {
     let c = &shared.counters.chains;
     let fs = prov.tune.sample_rate_hz;
@@ -328,31 +407,87 @@ fn hunt(
                 ev.pattern()
             );
         }
-        // Metadata only: a protocol (still `Unknown` — confirming a control channel is not naming
-        // it, which is T-268), the measured frequency, and when it was heard.
+        // ---- Decode (T-268): what the control channel SAID. `confirm` above decided *that* it is
+        // one; this reads the blocks that confirmation already CRC-checked. Nothing here can
+        // manufacture a `ConfirmedCc` — `crc_valid_blocks` yields bytes, not evidence.
         let key = cc.cc_freq_hz().round() as i64;
-        let system = match known.get(&key) {
-            Some(s) => {
-                let mut s = s.clone();
-                s.last_seen = t_end;
-                s.updated_at = t_end;
-                s
-            }
-            None => TrunkSystem::new(cc.protocol(), Some(cc.cc_freq_hz()), t_end),
-        };
-        let stored = {
-            let mut repo = shared.repo();
-            repo.put_trunk_system(&system)
-        };
-        match stored {
+        let is_new = !known.contains_key(&key);
+        let k = known.entry(key).or_insert_with(|| KnownCc {
+            system: TrunkSystem::new(cc.protocol(), Some(cc.cc_freq_hz()), t_end),
+            map: ChannelMap::new(),
+        });
+        k.system.last_seen = t_end;
+        k.system.updated_at = t_end;
+
+        let scan = scan_blocks(confirmer.crc_valid_blocks(&symbols.dibits).iter());
+        add(&c.cc_tsbks, scan.blocks as u64);
+        add(&c.cc_iden_ups, scan.iden_ups.len() as u64);
+        // An identifier enters the band plan only once agreeing announcements corroborate it, so
+        // `observe` returns an entry at most once per identifier — which is what keeps the
+        // append-only channel table one row per thing actually learned.
+        let new_entries: Vec<_> = scan
+            .iden_ups
+            .iter()
+            .filter_map(|i| k.map.observe(i, t_end))
+            .collect();
+        // Naming the protocol is gated on that same corroboration, so opcode-shaped luck in random
+        // blocks cannot name a system (2^-64; `hk_detect::trunk::tsbk`).
+        let named = protocol_of(&k.map);
+        if named != TrunkProtocol::Unknown {
+            k.system.protocol = named;
+        }
+        let system_id = k.system.id;
+        let events: Vec<GrantEvent> = scan
+            .grants
+            .iter()
+            .map(|g| grant_event(system_id, g, &k.map, t_end))
+            .collect();
+        if crate::debug_enabled() && (scan.blocks > 0 || !events.is_empty()) {
+            eprintln!(
+                "hk-pipeline: trunk-cc decoded {} TSBK(s): {} iden-up ({} admitted, {} in plan), \
+                 {} grant(s), {} unhandled, protocol {:?}",
+                scan.blocks,
+                scan.iden_ups.len(),
+                new_entries.len(),
+                k.map.admitted(),
+                events.len(),
+                scan.unhandled,
+                k.system.protocol
+            );
+        }
+
+        // Metadata only: a protocol, the measured frequency, when it was heard, the band plan it
+        // announced and the grants it issued. No audio, no payload, no recording.
+        let mut repo = shared.repo();
+        match repo.put_trunk_system(&k.system) {
             Ok(()) => {
-                if known.insert(key, system).is_none() {
+                if is_new {
                     inc(&c.cc_systems);
                 }
             }
             Err(e) => {
                 inc(&c.errors);
                 eprintln!("hk-pipeline: trunk-cc write: {e}");
+                continue;
+            }
+        }
+        for entry in &new_entries {
+            match repo.append_channel_plan(system_id, entry) {
+                Ok(()) => inc(&c.cc_iden_admitted),
+                Err(e) => {
+                    inc(&c.errors);
+                    eprintln!("hk-pipeline: trunk-cc channel plan: {e}");
+                }
+            }
+        }
+        for ev in &events {
+            match repo.append_grant(ev) {
+                Ok(_) if ev.f_hz.is_some() => inc(&c.cc_grants_mapped),
+                Ok(_) => inc(&c.cc_grants_unmapped),
+                Err(e) => {
+                    inc(&c.errors);
+                    eprintln!("hk-pipeline: trunk-cc grant: {e}");
+                }
             }
         }
     }
@@ -428,6 +563,7 @@ fn median(v: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hk_detect::trunk::IDEN_MAX_AGE_S;
 
     /// A tone at `offset_hz` present for `duty` of the window, over noise.
     fn scene(n: usize, fs: f64, emissions: &[(f64, f64)]) -> Vec<Complex<i8>> {
@@ -472,6 +608,98 @@ mod tests {
             at(-5)
         );
         assert!(at(7) < MIN_CC_FCO, "empty channel: fco {:.3}", at(7));
+    }
+
+    /// The age half of C23's stale-IDEN pitfall, at the row it produces (T-268).
+    ///
+    /// The e2e suite proves the *unknown*-identifier refusal blind through the device; this proves
+    /// the *aged* one, which turns on a ten-minute threshold no two-second fixture can stage
+    /// honestly. Same band plan, same grant, same code path — only the clock moves — and the
+    /// frequency it used to resolve to must stop being reported rather than quietly go on being
+    /// reported.
+    #[test]
+    fn a_stale_band_plan_reports_an_unmapped_channel_instead_of_the_frequency_it_used_to_mean() {
+        let plan = iden_up(1, 170_201_250, 50);
+        let mut map = ChannelMap::new();
+        let t0 = Timestamp::UNIX_EPOCH.saturating_add_nanos(1_000_000_000);
+        map.observe(&plan, t0);
+        map.observe(&plan, t0);
+        let g = Grant {
+            update: false,
+            channel: (1 << 12) | 117,
+            talkgroup: 1234,
+            source: 5678,
+        };
+        let system = TrunkSystemId::new();
+
+        // Fresh, the plan maps — so the refusal below is about the age, not a broken map.
+        let fresh = grant_event(system, &g, &map, t0);
+        assert_eq!(fresh.kind, GrantKind::Grant);
+        let was = fresh.f_hz.expect("a fresh plan resolves the channel");
+        assert!((was - 851_737_500.0).abs() < 1e-6, "resolved to {was} Hz");
+        fresh.validate().expect("a writable row");
+
+        // The same plan, the same grant, past the limit.
+        let later = t0.saturating_add_nanos(((IDEN_MAX_AGE_S + 1.0) * 1e9) as i64);
+        let stale = grant_event(system, &g, &map, later);
+        assert_eq!(
+            stale.kind,
+            GrantKind::UnmappedChannel,
+            "a stale table must be reported, not used"
+        );
+        assert_eq!(
+            stale.f_hz, None,
+            "the stale table still produced a frequency ({was} Hz), which is exactly the pitfall"
+        );
+        assert_eq!(stale.detail["reason"].as_str(), Some("stale-iden"));
+        assert!(stale.detail["iden_age_s"].as_f64().unwrap() > IDEN_MAX_AGE_S);
+        assert_eq!(
+            stale.detail["iden_max_age_s"].as_f64(),
+            Some(IDEN_MAX_AGE_S)
+        );
+        // Nothing read an encryption bit, so nothing is claimed (T-266, T-270).
+        assert_eq!(stale.encryption, hk_model::Encryption::Unknown);
+        stale.validate().expect("a writable row");
+    }
+
+    /// An identifier the control channel never announced is refused the same way, and never
+    /// borrows the parameters of one it did.
+    #[test]
+    fn an_unannounced_identifier_never_borrows_another_ones_band_plan() {
+        let plan = iden_up(1, 170_201_250, 50);
+        let mut map = ChannelMap::new();
+        let t = Timestamp::UNIX_EPOCH.saturating_add_nanos(1_000_000_000);
+        map.observe(&plan, t);
+        map.observe(&plan, t);
+        let g = Grant {
+            update: false,
+            channel: (7 << 12) | 300,
+            talkgroup: 1,
+            source: 0,
+        };
+        let ev = grant_event(TrunkSystemId::new(), &g, &map, t);
+        assert_eq!(ev.kind, GrantKind::UnmappedChannel);
+        assert_eq!(ev.f_hz, None);
+        assert_eq!(ev.detail["reason"].as_str(), Some("no-iden"));
+        assert_eq!(ev.detail["iden"].as_u64(), Some(7));
+        assert_eq!(ev.unit_id, None, "a zero source unit is absent, not \"0\"");
+        ev.validate().expect("a writable row");
+    }
+
+    /// An IDEN_UP as it arrives: through the block parser, because [`IdenUp`] has no public
+    /// constructor for its raw argument bits.
+    fn iden_up(iden: u8, base_field: u32, spacing_field: u16) -> hk_detect::trunk::IdenUp {
+        let v: u64 = (u64::from(iden & 0xF) << 60)
+            | (1u64 << 50)
+            | (u64::from(spacing_field & 0x3FF) << 32)
+            | u64::from(base_field);
+        let mut block = [0u8; hk_detect::trunk::TSBK_BYTES];
+        block[0] = hk_detect::trunk::OP_IDEN_UP;
+        block[2..10].copy_from_slice(&v.to_be_bytes());
+        hk_detect::trunk::Tsbk::parse(&block)
+            .expect("a 12-byte block")
+            .iden_up()
+            .expect("an IDEN_UP")
     }
 
     #[test]

@@ -282,6 +282,20 @@ counter_group!(
         /// TrunkSystem rows written, one per distinct confirmed control channel (metadata only:
         /// a protocol, a frequency and times).
         cc_systems,
+        /// T-268: CRC-valid TSBKs decoded from confirmed control channels.
+        cc_tsbks,
+        /// Identifier updates (IDEN_UP) seen, before the agreement gate.
+        cc_iden_ups,
+        /// Channel-table entries **admitted**: an identifier corroborated by agreeing
+        /// announcements and appended to `trunk_channel_plan`. Far fewer than `cc_iden_ups`,
+        /// because a single unrepeated announcement never enters a band plan.
+        cc_iden_admitted,
+        /// Grants whose channel number resolved to a frequency.
+        cc_grants_mapped,
+        /// Grants recorded as `unmapped-channel`: an identifier never announced, or one decoded
+        /// too long ago to trust. Logged, never resolved to a plausible-looking wrong frequency
+        /// (C23's stale-IDEN pitfall).
+        cc_grants_unmapped,
         /// T-297: characterising chains attached ([`crate::chains::sweep`]).
         ///
         /// Counted **apart from** `attached`, which has always meant a chain attached to
