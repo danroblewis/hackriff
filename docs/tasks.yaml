@@ -5088,7 +5088,7 @@ tasks:
     milestone: M3
     title: 'thresholds::FEATURES_VERSION is 1 while features::FEATURES_VERSION is 3, so
       every Classification reports a feature-set version that does not exist'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: M3A
