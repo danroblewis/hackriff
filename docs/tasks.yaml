@@ -6325,7 +6325,8 @@ tasks:
     milestone: M2-hardening
     title: 'One shared time axis: every time-varying overlay must be anchored in absolute capture time and
       move with the waterfall'
-    status: in-progress
+    status: done
+    commit: cce9183
     priority: high
     deps: []
     parallel_group: UI
@@ -6477,7 +6478,7 @@ tasks:
     milestone: M2-hardening
     title: 'Setting centre from the frequency navigator is a real retune: a device action under the one-agent-at-a-time
       rule, recording device_id'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: UI
@@ -6527,7 +6528,7 @@ tasks:
     milestone: M4
     title: 'NXDN Type-C is identified but not decoded: the FSW is verified, the CAC layout is not, and a
       channel number needs a configured map anyway'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-271
@@ -6547,7 +6548,7 @@ tasks:
   - id: T-346
     milestone: M2-hardening
     title: just lint is fmt plus clippy only, so Python lint failures live on main outside every gate
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: PIPE
@@ -6600,6 +6601,65 @@ tasks:
       as mattering. Measure the actual saving available before changing anything: if the STFT must run regardless
       to keep the ring drained and the gate cursor advancing, the honest answer may be that there is nothing
       to save, and that is a fine result to record'
+  - id: T-349
+    milestone: M2-hardening
+    title: Timestamp is serde-transparent over i64, so the same response can carry nanoseconds and seconds
+      with no naming cue
+    status: todo
+    priority: high
+    deps:
+    - T-337
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'T-337 found this while auditing which records carry absolute capture time. hk_model::Timestamp
+      is #[serde(transparent)] over i64, so ANY directly-serialized hk-model struct ships raw NANOSECONDS
+      while its own envelope uses SECONDS - /api/occupancy''s interval, /api/observations record spans,
+      SignatureMatch.t and SurveyReport.generated_at all do this. Same response, values 10^9 apart, and
+      NO NAMING CUE distinguishes them: a field called t_s and a field called t sit side by side and mean
+      different units. This is a latent correctness bug, not tidiness - a client that reads one as the other
+      is off by 31 years, and nothing in the type system or the field name would catch it. Decide the rule
+      (suffix every serialized time with its unit, or serialize Timestamp as seconds everywhere, or both)
+      and apply it consistently; whichever way, the wire must be self-describing. Update docs/api.md and
+      crates/hk-cli/tests/api_contract.rs together per T-079 and assert the VALUES - a contract test that
+      checks shape would not have caught this. Check every consumer including ui/src before changing a unit
+      on the wire'
+  - id: T-350
+    milestone: M2-hardening
+    title: An inventory rows snr_db and peak_dbfs are a Detections numbers with its TimeRange stripped at
+      the API boundary
+    status: todo
+    priority: normal
+    deps:
+    - T-337
+    parallel_group: PIPE
+    model: opus
+    acceptance: 'T-337 named this: snr_db and peak_dbfs on an inventory row are a Detection''s measurements,
+      but the Detection''s TimeRange is dropped when the row is built, and detections are not a served record
+      kind at all. So the UI receives a number with no statement of WHEN it was measured, on a surface whose
+      whole invariant (T-337, user CLAUDE.md) is that every time-varying record carries absolute capture
+      time. Either carry the measurement''s own time range on the row, or serve detections as a record kind
+      so the row can reference one. Prefer the answer that keeps the measurement and its time together -
+      T-337''s finding on /api/analysis/strongest is the precedent: it now reports the time bounds of the
+      pyramid CELL the peak was measured in, not the window it searched, because the cell is what was actually
+      measured. Update docs/api.md and api_contract.rs together per T-079'
+  - id: T-351
+    milestone: M2-hardening
+    title: /api/status carries no server timestamp, and scheduler leases carry a duration with no start
+      or expiry
+    status: todo
+    priority: low
+    deps:
+    - T-337
+    parallel_group: PIPE
+    model: sonnet
+    acceptance: Two smaller gaps T-337 named while auditing time-varying records. /api/status has no server
+      timestamp at all, so a client cannot tell a fresh response from a cached one or measure its own clock
+      skew against the device. Scheduler leases carry duration_s with no start and no expiry, so a lease's
+      remaining time is not derivable from what is served - the client would have to infer it from arrival
+      time, which is exactly the inference the shared-time-axis invariant forbids. Add a server timestamp
+      to status; give leases an absolute start and expiry rather than a bare duration. Update docs/api.md
+      and api_contract.rs together per T-079, asserting values
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
