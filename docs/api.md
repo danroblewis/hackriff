@@ -168,6 +168,10 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
                            "class": null, "top": null, "entropy_norm": null, "flags": null },
       "latest_classification": null,
       "classifications": 3,
+      "estimated_params": { "modulation": "wfm", "symbol_rate_hz": null, "mod_order": null,
+                             "deviation_hz": 75000.2, "cfo_hz": -120.5, "bandwidth_hz": 181400.0,
+                             "roll_off": null, "pilot_hz": 19000.05, "t_s": 1789300920.0,
+                             "source_session": "0199…", "source_recording": null },
       "identity_scheme": "rds-pi", "identity_class": "unrestricted", "withheld": false,
       "identity_value": "A1B2",
       "snr_db": 21.4, "peak_dbfs": -18.25,
@@ -192,6 +196,8 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
 - `taxonomy` (e.g. `"hk-mod@1"`), `coarse` (`analog` / `digital` / `noise-like` / `unknown`), `class` (`{label, p, stage}` within the family, or `null` below its gate), `top` (≤ 5 posterior labels `{label, p}`, highest first, `unknown` included), `entropy_norm` (0–1) and `flags` (`prior-tiebreak`, `prior-mismatch`, `below-gate`, `suspect-input`, `dl-shadow-disagrees`). All are `null` on a row written before M3 or by a pre-M3 writer.
 
 The full classification (likelihood, prior, provenance, reasons) is not on the row; it is served per emitter by the planned `/api/inventory/{id}/classification` (T-199). `family` values on M3 rows are `hk-mod@1` families (`analog`, `fsk`, `psk-qam`, …, or `unknown`); pre-M3 rows keep their labels (`wfm`, `2fsk`, decoder and service ids).
+
+**`estimated_params` (T-163, ADR-0013 gap 7a).** The emitter's latest blind-estimated parameters (C13/C14) — symbol rate, modulation, deviation, carrier frequency offset, bandwidth — from its most recent demodulation session, for the Decode workbench's "Use" suggestions (`docs/adr/0013-ui-architecture.md` §4.6). `{"modulation", "symbol_rate_hz", "mod_order", "deviation_hz", "cfo_hz", "bandwidth_hz", "roll_off", "pilot_hz", "t_s", "source_session", "source_recording"}`. `modulation` is the session's `mode` (e.g. `wfm`, `2fsk`); every other measurement field is `null` when the estimator never measured it for this signal (e.g. `symbol_rate_hz` on an analog FM station) — **measured values only, never a fabricated default.** `t_s` is when the session ended; `source_session` is the demodulation's own id and `source_recording` the replayed recording's id, `null` live (matching `/api/inventory/{id}/decode`'s `at`/`source_session`). The whole object is `null` when no demodulation session has run for this emitter yet, and — like `/api/inventory/{id}/decode` (T-159/T-036) — also `null` on a withheld-identity row whatever storage holds, so the answer there is indistinguishable from "nothing measured yet" and never confirms a withheld identity indirectly. An emitter with no decoded identity at all (the common case for an unknown signal) is served normally.
 
 **`total` (T-171).** The number of rows the query's filters match, ignoring `cursor`/`limit`, so a UI can show a count past one page (e.g. "512 confirmed" instead of capping at "500+"). It is computed with the same filters as the list, as a single indexed `COUNT(*)` — except a `tag` filter naming a label outside the controlled vocabulary (gating hides such tags on a withheld-identity row, so matching them needs per-row checks SQL alone can't do): that path scans and gates up to 5 000 candidate rows and reports the match count found within that scan, a lower bound past the cap. That combination (a non-vocabulary tag filter over a very large inventory) is rare.
 
