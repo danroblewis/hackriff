@@ -3763,7 +3763,7 @@ tasks:
   - id: T-234
     milestone: M2-hardening
     title: "M2 gate test asserts bandit dwell in wall time: under concurrent load it sees 0 outcomes and 0 dwells and fails, though the survey report itself is correct"
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: PIPELINE
@@ -3775,6 +3775,8 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    corroborating_evidence: "full check after the T-231 merge (2026-09-15): scheduler_bandit_e2e::bandit_without_overdrive_verifies_and_bans_nothing FAILED on try 1 and passed on its nextest retry, in the same run where the unit suite was otherwise 1561/1561. That is the pin masking this exact class, and it is why the task must DELETE the override rather than rely on it."
+
   - id: T-235
     milestone: M3
     title: "Classifier: false-known 0.171 vs the 0.10 floor (one short-CP OFDM generator), and both OTA fixtures still abstain - close the simulation-to-reality gap with real-capture-derived densities"
