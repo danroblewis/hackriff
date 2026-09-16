@@ -809,6 +809,109 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         assert!(prov.get(field).is_some(), "provenance missing {field}: {v}");
     }
     assert!(is_array(&prov["steps"]), "{v}");
+
+    // T-334: span-matched resolution. These assert the `resolution` field's VALUES against the
+    // grid actually served — a field that could be renamed or dropped without failing here would
+    // be documentation, not a contract (T-315).
+    let band = format!(
+        "f_lo={}&f_hi={}",
+        FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
+        FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0
+    );
+    let now = unix_now();
+    // (a) A budget the ladder can meet: the block agrees with the grid, and reports `matched`.
+    let (st, v) = get(
+        addr,
+        &format!(
+            "/api/history?{band}&t0={}&t1={now}&max_t=600&max_f=1024",
+            now - 60.0
+        ),
+    );
+    assert_eq!(st, 200, "{v}");
+    let res = &v["resolution"];
+    assert_eq!(res["source"], json!("spectrum-history"), "{v}");
+    assert_eq!(res["requested"]["max_t"], json!(600), "{v}");
+    assert_eq!(res["requested"]["max_f"], json!(1024), "{v}");
+    assert_eq!(res["requested"]["max_cells"], json!(100_000), "{v}");
+    assert_eq!(res["served"]["nt"], v["nt"], "{v}");
+    assert_eq!(res["served"]["nf"], v["nf"], "{v}");
+    assert_eq!(
+        res["served"]["cells"].as_u64(),
+        Some(v["nt"].as_u64().unwrap() * v["nf"].as_u64().unwrap()),
+        "{v}"
+    );
+    assert_eq!(res["level"], v["level"], "{v}");
+    assert_eq!(res["t_cell_s"], v["t_cell_s"], "{v}");
+    assert_eq!(res["f_cell_hz"], v["f_cell_hz"], "{v}");
+    assert!(res["levels"].as_u64().is_some_and(|n| n >= 1), "{v}");
+    assert_eq!(res["matched"], json!(true), "{v}");
+    assert_eq!(res["over_resolved"], json!([]), "{v}");
+    let (nt_zoomed, t_cell_zoomed) = (v["nt"].as_u64().unwrap(), v["t_cell_s"].as_f64().unwrap());
+    assert!(nt_zoomed <= 600, "served more rows than max_t: {v}");
+    // The whole requested span is covered — zooming re-scales, it never truncates (invariant 4).
+    let t0_s = v["t0_s"].as_f64().unwrap();
+    assert!(t0_s <= now - 60.0 + 1e-6, "span start clipped: {v}");
+    assert!(
+        t0_s + nt_zoomed as f64 * t_cell_zoomed >= now - 1e-6,
+        "span end clipped: {v}"
+    );
+
+    // (b) The same view budget over a 24 h span: a coarser level, so the span re-scales into the
+    // same number of rows instead of being cut short.
+    let (st, wide) = get(
+        addr,
+        &format!(
+            "/api/history?{band}&t0={}&t1={now}&max_t=600",
+            now - 86_400.0
+        ),
+    );
+    assert_eq!(st, 200, "{wide}");
+    assert_eq!(wide["resolution"]["matched"], json!(true), "{wide}");
+    assert!(wide["nt"].as_u64().unwrap() <= 600, "{wide}");
+    let t_cell_wide = wide["t_cell_s"].as_f64().unwrap();
+    assert!(
+        t_cell_wide > t_cell_zoomed,
+        "a 24 h span must be served coarser than a 60 s one ({t_cell_wide} vs {t_cell_zoomed})"
+    );
+    let t0_wide = wide["t0_s"].as_f64().unwrap();
+    assert!(
+        t0_wide <= now - 86_400.0 + 1e-6,
+        "wide span start clipped: {wide}"
+    );
+    assert!(
+        t0_wide + wide["nt"].as_u64().unwrap() as f64 * t_cell_wide >= now - 1e-6,
+        "wide span end clipped: {wide}"
+    );
+
+    // (c) A budget no level can meet (the coarsest cell is 100 kHz, so 100 MHz cannot become one
+    // column): the shortfall is named, never hidden by reducing in the client.
+    let (st, over) = get(
+        addr,
+        &format!(
+            "/api/history?f_lo=100000000&f_hi=200000000&t0={}&t1={now}&max_f=1",
+            now - 3600.0
+        ),
+    );
+    assert_eq!(st, 200, "{over}");
+    assert_eq!(over["resolution"]["matched"], json!(false), "{over}");
+    assert_eq!(
+        over["resolution"]["over_resolved"],
+        json!(["max_f"]),
+        "{over}"
+    );
+    assert!(over["nf"].as_u64().unwrap() > 1, "{over}");
+    assert_eq!(
+        over["resolution"]["requested"]["max_t"],
+        Value::Null,
+        "{over}"
+    );
+
+    // (d) Bad per-axis budgets are refused, not clamped.
+    for bad in ["max_t=0", "max_f=-1", "max_t=abc", "max_f=500001"] {
+        let (st, _) = get(addr, &format!("/api/history?{band}&t0=0&t1={t1}&{bad}"));
+        assert_eq!(st, 400, "expected 400 for {bad}");
+    }
+
     let region = format!(
         "f_lo={}&f_hi={}&t0=0&t1={t1}",
         FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,

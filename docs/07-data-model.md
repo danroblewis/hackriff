@@ -330,6 +330,31 @@ The product's core question (workflow step 3). It resolves against three stores 
 
 Because measurements are immutable and interpretations are versioned, the same query re-run after a classifier upgrade yields better identities over the *same* history. Region and time are the two indexed axes throughout.
 
+### 4.1 A span request and its response (T-334, span-matched resolution)
+
+**The rule, settled by the user** (CLAUDE.md, "Time, the waterfall, and the live view", invariant 4): *data, timestamps and span-matched resolution are the backend's responsibility; time↔pixel mapping and view state are thin-client presentation.* The visible span is user-selectable from seconds to the full retention, and **zooming re-scales rather than truncates**. This is the thin-client rule applied to the **time** axis — the axis mapping is presentation; *choosing which value represents an interval* is a measurement, and it is made here, where the noise floor, the occupancy threshold and the cell shape are known.
+
+**A span request carries**, beyond the region and window (`f_lo`/`f_hi`, `t0`/`t1`):
+
+| | |
+|---|---|
+| **a product budget** | the largest response the caller can hold (`max_cells`). It bounds size; it cannot shape a grid, because 16 × 6000 and 600 × 160 satisfy it equally. |
+| **per-axis budgets** | the rows and columns the view will actually draw (`max_t`, `max_f`). These are the request stated in the view's own terms, and they are what makes the served grid match the span. |
+| **an origin filter** | optional `source`/`site` (§2.6, T-133), unchanged. |
+
+**The response carries**, beyond the cells:
+
+| | |
+|---|---|
+| **the grid geometry** | `t0_s` (the start of time row 0), `t_cell_s`, `nt`; `f_lo_hz`, `f_cell_hz`, `nf`. Row *k* starts at `t0_s + k·t_cell_s`; this is **contract, not inference** — a client reading a row's time from it is reading the grid the server described, not guessing one. `t0_s` may precede `t0`: the window is snapped *outward*, never clipped. |
+| **the resolution actually served** | which pyramid level answered, what was asked for, and — when they differ — which budget was missed. It is not always the one requested, and a caller must never have to deduce that from the cell counts. |
+| **which tier answered** | the tiered spectrum-history pyramid, or (later) a live-IQ-backed tier. The two have **different horizons** — the pyramid's retention is tiered, lossy and byte-budgeted; the IQ ring's window is short and lossless — and conflating them misreports what the device still holds. |
+| **coverage** | unchanged (§2.5, C26): unobserved is never quiet, and a gap is never filled to make a grid look complete. |
+
+**Error direction.** The pyramid's ladder is discrete (§3.2; scheme 1 steps 6.25 kHz × 1 s → 100 kHz × 1 day), so an exact match is not generally reachable. The rule is **the finest level that fits every budget**, which errs *coarser* than the view, never finer. That asymmetry is the point: a coarse cell drawn across several pixels repeats one measured value, while a finer grid reduced in the client invents the value a pixel stands for. Where no level is coarse enough, the response **says so** rather than leaving the caller to reduce silently.
+
+The wire form is `GET /api/history` (`docs/api.md`, "Span-matched resolution").
+
 ## 5. Worked examples
 
 ### 5.1 Science — natural radio noise-floor survey (SPACE-050)

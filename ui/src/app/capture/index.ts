@@ -174,7 +174,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (!span) return;
     const now = Date.now() / 1000;
     const grid = await client.get<HistoryResponse>(
-      `/api/history?f_lo=${span.loHz}&f_hi=${span.hiHz}&t0=${now - WINDOW_S}&t1=${now}&max_cells=${COLUMNS * 16}`,
+      // T-334: ask for the band's own time resolution — `max_t = COLUMNS`, one time cell per drawn
+      // bar. The old `max_cells = COLUMNS * 16` product budget bound first and pulled the *day*
+      // level (2 cells for 96 bars over 48 h), which is the "truncates rather than re-scales"
+      // failure in miniature; the axis budget pulls the hour level (48 cells) instead. `max_cells`
+      // is left at its default so the product no longer decides the time axis.
+      `/api/history?f_lo=${span.loHz}&f_hi=${span.hiHz}&t0=${now - WINDOW_S}&t1=${now}&max_t=${COLUMNS}`,
     );
     renderBand(grid);
     coverageFraction = grid.coverage_summary?.observed_fraction ?? null;

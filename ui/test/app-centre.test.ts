@@ -309,6 +309,13 @@ test("history grid → waterfall rows: max over cells, null and outside grey, ne
   assert.equal(historyMaxCells(16384, 512), 500_000);
   assert.equal(historyMaxCells(256, 512), 256 * 512);
   assert.equal(historyQuery({ loHz: -5.5, hiHz: 2000.2 }, 10, 20, 1234), "/api/history?f_lo=0&f_hi=2001&t0=10&t1=20&max_cells=1234");
+  // T-334: the view's own budgets go on the request, so the backend serves the span at a matched
+  // resolution instead of leaving the client to reduce whatever shape fits the product.
+  assert.equal(
+    historyQuery({ loHz: 0, hiHz: 1000 }, 10, 20, 1234, 512, 2048),
+    "/api/history?f_lo=0&f_hi=1000&t0=10&t1=20&max_cells=1234&max_t=512&max_f=2048",
+  );
+  assert.equal(historyQuery({ loHz: 0, hiHz: 1000 }, 10, 20, 1234, 0, 0), "/api/history?f_lo=0&f_hi=1000&t0=10&t1=20&max_cells=1234");
   assert.equal(sameCursor({ live: true }, { live: true }), true);
   assert.equal(sameCursor({ live: false, tS: 5 }, { live: false, tS: 5 }), true);
   assert.equal(sameCursor({ live: false, tS: 5 }, { live: true }), false);

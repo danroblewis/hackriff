@@ -1,8 +1,12 @@
 //! JSON for the read-only history endpoints.
 //!
-//! - `/api/history?f_lo&f_hi&t0&t1[&max_cells][&format][&stat]`: [`Pyramid::query`] (T-017) at the
-//!   finest level whose grid over the region fits in `max_cells` cells (default
-//!   [`DEFAULT_MAX_CELLS`], at most [`MAX_API_CELLS`]). Cells are row-major (time then frequency),
+//! - `/api/history?f_lo&f_hi&t0&t1[&max_cells][&max_t][&max_f][&format][&stat]`:
+//!   [`Pyramid::query`] (T-017) at the finest level whose grid over the region fits in `max_cells`
+//!   cells (default [`DEFAULT_MAX_CELLS`], at most [`MAX_API_CELLS`]) and, when given, `max_t`
+//!   time cells and `max_f` frequency cells — the view's own rows and columns (T-334). The whole
+//!   requested span is always covered: zooming re-scales the grid, it never truncates the range.
+//!   The `resolution` block reports what was actually served ([`ResolutionRequest`]). Cells are
+//!   row-major (time then frequency),
 //!   one array per statistic; unobserved cells are `null` ("not observed" is not "quiet", C26).
 //!   T-116: `floor_db`, `coverage_summary`, `scheme`/`tile_format` and richer provenance in JSON;
 //!   `format=csv` (hackrf_sweep CSV) or `format=png` (waterfall) of one `stat` ([`history_export`]).
@@ -346,9 +350,77 @@ pub fn region_history_json(h: &RegionHistory) -> Value {
     })
 }
 
+/// The resolution budgets one `/api/history` request asked for (T-334).
+///
+/// `max_cells` bounds the response's size (the product); `max_t`/`max_f` are the **view's own**
+/// budgets — the rows and columns it will draw — so a span can be asked for in the terms the view
+/// has rather than as a product that a wrongly-shaped grid can satisfy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolutionRequest {
+    /// `max_cells`: cells in the whole grid.
+    pub max_cells: usize,
+    /// `max_t`: time cells (the view's rows), when asked for.
+    pub max_t: Option<usize>,
+    /// `max_f`: frequency cells (the view's columns), when asked for.
+    pub max_f: Option<usize>,
+}
+
+/// Largest per-axis budget `/api/history` accepts. A view cannot draw more rows or columns than
+/// this, and a budget above it would only ever be met by [`MAX_API_CELLS`] instead.
+pub const MAX_API_AXIS_CELLS: usize = MAX_API_CELLS;
+
+/// The `resolution` block of `/api/history` (T-334): what was asked for, what was served, and —
+/// when they differ — on which axis, so a client never has to infer it from the grid.
+///
+/// The ladder is discrete (scheme 1: 6.25 kHz × 1 s at level 0, each step ×2 in frequency and
+/// ×60/×15/×4/×24/×7 in time), so an exact match is not generally reachable. The rule is **the
+/// finest level that fits every budget**, which errs *coarser* than the view, never finer. That
+/// direction is deliberate: a coarser cell drawn across several pixels repeats one measured value
+/// (honest, if blocky), whereas a finer grid reduced in the client invents the value a pixel
+/// stands for — a measurement made with no knowledge of the floor or of what a peak means.
+/// `over_resolved` names any budget the served grid still exceeds, which is the only case in which
+/// the client holds more cells than it can draw one-to-one.
+fn resolution_json(h: &RegionHistory, req: &ResolutionRequest, levels: usize) -> Value {
+    let cells = h.nt.saturating_mul(h.nf);
+    let mut over: Vec<&str> = Vec::new();
+    if cells > req.max_cells {
+        over.push("max_cells");
+    }
+    if req.max_t.is_some_and(|t| h.nt > t) {
+        over.push("max_t");
+    }
+    if req.max_f.is_some_and(|f| h.nf > f) {
+        over.push("max_f");
+    }
+    json!({
+        // Which tier answered. `/api/history` reads the tiered spectrum-history pyramid and only
+        // that; a tier serving live-IQ-backed detail reports its own value here rather than
+        // leaving the client to infer which it got.
+        "source": "spectrum-history",
+        "level": h.level,
+        "levels": levels,
+        "t_cell_s": h.t_cell_ns as f64 / 1e9,
+        "f_cell_hz": h.f_cell_hz,
+        "requested": {
+            "max_cells": req.max_cells,
+            "max_t": req.max_t,
+            "max_f": req.max_f,
+        },
+        "served": { "nt": h.nt, "nf": h.nf, "cells": cells },
+        "matched": over.is_empty(),
+        "over_resolved": over,
+    })
+}
+
 /// `/api/history`.
 pub fn history_json(p: &Pyramid, q: &Params) -> Result<Value, ApiError> {
-    Ok(region_history_json(&region_history(p, q)?))
+    let (h, req) = region_history(p, q)?;
+    let mut v = region_history_json(&h);
+    let levels = p.geometry().n_levels();
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("resolution".into(), resolution_json(&h, &req, levels));
+    }
+    Ok(v)
 }
 
 /// `/api/history?format=csv|png[&stat]` (T-116): `Ok(None)` when the format is JSON (the default),
@@ -368,7 +440,7 @@ pub fn history_export(
         Some(s) => HistoryStat::parse(s)
             .ok_or_else(|| bad("stat must be max, mean, p_low, p_high or floor"))?,
     };
-    let h = region_history(p, q)?;
+    let (h, _) = region_history(p, q)?;
     if format == "csv" {
         let mut out = Vec::new();
         write_sweep_csv(&h, stat, CSV_CELLS_PER_LINE, &mut out)
@@ -389,11 +461,29 @@ pub fn history_format(q: &Params) -> Result<Option<&'static str>, ApiError> {
     }
 }
 
-fn region_history(p: &Pyramid, q: &Params) -> Result<RegionHistory, ApiError> {
+fn region_history(p: &Pyramid, q: &Params) -> Result<(RegionHistory, ResolutionRequest), ApiError> {
     let r = parse_region(q)?;
     let max_cells = count(q, "max_cells", DEFAULT_MAX_CELLS, MAX_API_CELLS)?;
+    // T-334: per-axis budgets, in the terms a view has (its rows and its columns). Absent, the
+    // product budget alone chooses the level exactly as before.
+    let axis = |key: &'static str| -> Result<Option<usize>, ApiError> {
+        match param(q, key) {
+            None => Ok(None),
+            Some(_) => count(q, key, 1, MAX_API_AXIS_CELLS).map(Some),
+        }
+    };
+    let (max_t, max_f) = (axis("max_t")?, axis("max_f")?);
+    let req = ResolutionRequest {
+        max_cells,
+        max_t,
+        max_f,
+    };
     let filter = parse_origin_filter(q)?;
-    let level = choose_level(p.geometry(), &r, |nt, nf| nt * nf <= max_cells as f64)?;
+    let level = choose_level(p.geometry(), &r, |nt, nf| {
+        nt * nf <= max_cells as f64
+            && max_t.is_none_or(|t| nt <= t as f64)
+            && max_f.is_none_or(|f| nf <= f as f64)
+    })?;
     let h = p
         .query_filtered(
             &RegionQuery {
@@ -407,7 +497,7 @@ fn region_history(p: &Pyramid, q: &Params) -> Result<RegionHistory, ApiError> {
             &filter,
         )
         .map_err(|_| ApiError::new(400, "history query refused"))?;
-    Ok(h)
+    Ok((h, req))
 }
 
 /// What the spectrum history observed over one region (T-264, ADR-0017 TM-8): the coverage mask

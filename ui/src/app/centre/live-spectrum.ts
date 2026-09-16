@@ -519,7 +519,11 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     const full = ax.fullView(g), { t0, t1 } = historyWindow(tS, w.rows, livePeriodS());
     review(`reviewing ${hms(tS)} · loading history…`);
     try {
-      const grid = parseHistory(await ctx.client.get(historyQuery(full, t0, t1, historyMaxCells(w.texWidth, w.rows))));
+      // T-334: ask in this view's own terms — `max_t` rows, `max_f` texels — so the backend serves
+      // the span at a matched resolution rather than a grid this has to reduce (or truncate).
+      const grid = parseHistory(await ctx.client.get(
+        historyQuery(full, t0, t1, historyMaxCells(w.texWidth, w.rows), w.rows, w.texWidth),
+      ));
       if (seq !== reviewSeq || store.get().time.live || wf !== w) return;
       if (!grid) { review(`reviewing ${hms(tS)} · unexpected history response`); return; }
       const out = historyRows(grid, full, w.texWidth, w.rows);

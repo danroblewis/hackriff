@@ -149,6 +149,18 @@ Every row carries a **liveness** state, derived, never stored:
 
 Scrubbing the timeline sets `[t0, t1]` and **re-derives** the lists and the boxes from the same query. Recent history comes from the IQ ring (ADR-0014, 30 min on staging) for waterfall detail below the tile resolution, and from `/api/history` tiles above it; the **lists** come from the interval query, which is backed by SQLite and reaches as far back as retention allows. Scrubbing is therefore never "replay the detector" — it is one indexed range query, which is why it can be interactive.
 
+#### 2.4.1 Span-matched resolution (T-334; the user's time/waterfall invariant 4)
+
+Scrubbing and zooming set a **span**, and the user's fourth time/waterfall invariant (CLAUDE.md, 2026-09-16) rules what serving a span means: *data, timestamps and span-matched resolution are the backend's responsibility; time↔pixel mapping and view state are thin-client presentation.* The visible span runs from seconds to the full retention, the waterfall's rows-per-second is a function of it, and the backend serves history at a matched resolution from the tiered pyramid — so **zooming re-scales rather than truncates**.
+
+Three consequences for this ADR's model:
+
+1. **The window is a request parameter, not a client-side filter.** §2.1's `t0`/`t1` already work this way for the lists; the same holds for the grid behind the waterfall. Serving a shorter span at unchanged resolution, or clipping the requested range, both fail the invariant *even when the data returned is correct*.
+2. **The client never decides what a pixel's value is.** Reducing several served cells into one drawn cell is a measurement (which value stands for this interval?) made without the floor, the occupancy threshold or the cell shape. The served grid errs **coarser** than the view, so the normal operation is replication; where no level is coarse enough the response says so instead of leaving the client to reduce.
+3. **A box and the rows under it share one time mapping.** §1.2's box is `(f_lo..f_hi) × (interval ∩ window)` in **absolute capture time**, and the grid's row times are contract (`t0_s + k·t_cell_s`), not inferred from a row rate. A box that drifts out of step with the waterfall's rows is a violation of this, not a cosmetic bug.
+
+The two horizons stay distinct: the **lists** reach back over SQLite retention, the **grid** over the spectrum-history pyramid's (tiered, lossy), and the waterfall's lossless detail over the **IQ ring's** much shorter window. `resolution.source` on the response names which tier answered. Wire form: `docs/api.md` "Span-matched resolution"; data model: docs/07 §4.1.
+
 ---
 
 ## 3. Invariant 3 — Candidate / Confirmed / History
@@ -383,6 +395,8 @@ Placeholder ids **TM-1 … TM-10**, per the `CP-*` / `LP-*` precedent (ADR-0015 
 ---
 
 ## 11. Open questions (for the user)
+
+**What T-334 changed here (2026-09-16).** Span-matched resolution (§2.4.1) settles **none** of these. It bears on question 3 and on nothing else, and only by removing an argument, not by answering it: whichever window Explore defaults to, the backend serves it at a resolution matched to it, so "the viewed waterfall span" no longer costs more to serve than a fixed one. **Question 3 stays open** — invariant 4 fixes how a span is *served*, not which span Explore *chooses*. Questions 1 (scrub-back audio) and 2 (window-scoped Confirmed) are untouched: neither is about resolution.
 
 1. **Scrub-back audio (§6.5).** This ADR rules that Listen stays live-edge and that invariant 5 governs decode, not Listen. If the intent was that scrubbing back should also *play back* audio from that point, say so — it is a separate and larger piece of work, not a wording fix.
 2. **Window-scoped Candidates, always-listed Confirmed (§2.2).** Proposed, because the alternative makes quiet confirmed stations disappear. Confirm, or say that Confirmed should be window-scoped too with an "all" toggle.
