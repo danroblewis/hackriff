@@ -35,7 +35,7 @@
 //!   the device's own). The provenance `antenna_port` says what was
 //!   served: `mock:recording`, `mock:recording+noise` or `mock:noise` ([`Coverage`]); a coverage
 //!   change is a `PROVENANCE_CHANGE`, and [`MockStats::uncovered_samples`] counts noise-filled
-//!   output.
+//!   output, a partly-covered window contributing the noise-filled fraction of its samples.
 //! - **Gain:** output = served IQ × 10^((G − G_rec)/20), G = LNA + VGA + 11 dB when the amp is on
 //!   (G_rec from the recording's provenance; a recording without one is taken as captured at
 //!   [`UNRECORDED_GAINS`], LNA 24 / VGA 20 / amp off, and opens there), then rounded to int8
@@ -674,7 +674,14 @@ pub struct MockStats {
     pub clipped_components: u64,
     /// Blocks over the overload clip fraction.
     pub overload_blocks: u64,
-    /// Samples delivered under partial or no coverage (noise-filled).
+    /// Noise-filled output, in samples: every block contributes the fraction of its window the
+    /// recording did not cover (all of its samples outside coverage, none inside a window the
+    /// recorded band contains, the noise-filled share in between).
+    ///
+    /// T-239: this was every sample of any block that was not *wholly* recorded. Only the power-on
+    /// tuning ever is, so any retune read as a total loss of coverage and the figure could not
+    /// distinguish a window that missed the recording entirely from one that served nearly all of
+    /// it.
     pub uncovered_samples: u64,
     /// Times the recording was spliced again ([`MockEnd::Loop`]).
     pub loops: u64,
@@ -1202,8 +1209,29 @@ impl MockSdrSource {
                 flags |= self.mint();
             }
         }
-        if self.render.plan().coverage() != Coverage::Recorded {
-            c.uncovered.fetch_add(made as u64, Ordering::Relaxed);
+        // T-239: how much of the window was noise-filled, not merely whether any of it was.
+        // `Coverage::Recorded` needs the WHOLE window inside the recorded band, which only the
+        // power-on tuning reaches (a recording whose baseband filter is narrower than its rate
+        // never reaches it once retuned at all), so charging every sample of every `Partial` block
+        // read as a coverage collapse: a scheduled replay holding 1.86 MHz of its 2.4 MHz recorded
+        // band in view reported 12 000 covered samples in 14.5 M, 0.08 %, while in fact serving the
+        // recorded band throughout. Counting the uncovered *fraction* of each window is what the
+        // module doc promises, and is comparable across tunings and rates. A `Partial` window
+        // always noise-fills something, so it never counts zero.
+        let plan = self.render.plan();
+        let uncovered = match plan.served() {
+            None => made as u64,
+            Some((lo, hi)) => {
+                let noise = 1.0 - ((hi - lo) / plan.rate_hz).clamp(0.0, 1.0);
+                if noise <= 0.0 {
+                    0
+                } else {
+                    ((made as f64 * noise).round() as u64).max(1)
+                }
+            }
+        };
+        if uncovered > 0 {
+            c.uncovered.fetch_add(uncovered, Ordering::Relaxed);
         }
         let header = BlockHeader {
             time: SampleTime {
