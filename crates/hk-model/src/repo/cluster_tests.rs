@@ -184,6 +184,80 @@ fn aware_036_two_sessions_one_emitter_count_summed_unknown_then_known() {
     assert_eq!(classes[0].feature_set_version, Some(FEATURE_SET_VERSION));
 }
 
+/// T-336, the cross-producer half of the sighting rule. `count` totals *occurrences*, so one
+/// emission over one stretch of air is one occurrence whoever watched it — including when two
+/// producers' observations reach one entry directly (by fingerprint here), the route T-329
+/// measured counting the same five seconds twice. Both halves are asserted, because "always
+/// discount" satisfies the first alone and destroys the count: disjoint spans are two
+/// occurrences, and partial overlap counts the shared stretch once, as the larger of the two.
+#[test]
+fn one_span_two_producers_is_one_occurrence_and_disjoint_spans_are_two() {
+    let mut r = repo();
+    let rows = |r: &Repository, id: EmitterId| -> i64 {
+        r.conn
+            .query_row(
+                "SELECT count(*) FROM emitter_observation WHERE emitter_id = ?1",
+                [blob(id)],
+                |x| x.get(0),
+            )
+            .unwrap()
+    };
+
+    // THE PROPERTY. The tracker watches 3 s of a sensor and counts 4 bursts.
+    let tracker = track_sighting(fsk_fp(915.005e6), tr(0, 3), 4);
+    let a = r.record_sighting(&tracker, None).unwrap();
+    assert!(a.created);
+    let id = a.emitter_id;
+    // A second producer — its own source row, its own centre estimate — watches the same 3 s and
+    // counts the same 4 bursts. Same entry by fingerprint, and no new air time.
+    let chain = track_sighting(fsk_fp(915.0051e6), tr(0, 3), 4);
+    let b = r.record_sighting(&chain, None).unwrap();
+    assert_eq!(b.emitter_id, id);
+    assert!(
+        matches!(b.assignment, Assignment::Fingerprint { .. }),
+        "{b:?}"
+    );
+    assert_eq!(b.count_added, 0);
+    assert_eq!(r.emitter(id).unwrap().count, 4);
+    // The ledger still records who measured what: two rows, both reading 4. A row's count is
+    // what its producer measured, never what it added.
+    assert_eq!(rows(&r, id), 2);
+
+    // THE CONTROL. A later session over a disjoint span is a second occurrence and adds in full;
+    // without this, discounting everything would pass the property and destroy the count.
+    let c = r
+        .record_sighting(&track_sighting(fsk_fp(915.005e6), tr(10, 13), 4), None)
+        .unwrap();
+    assert_eq!((c.emitter_id, c.count_added), (id, 4));
+    assert_eq!(r.emitter(id).unwrap().count, 8);
+
+    // PARTIAL OVERLAP, decided by rule 1's threshold and not prorated. Sharing the majority of
+    // the shorter span (8 s of 10) is the same air: the two count once, as the larger of them
+    // (6, not 4 + 6), so only the excess adds.
+    let d = r
+        .record_sighting(&track_sighting(fsk_fp(915.005e6), tr(22, 32), 6), None)
+        .unwrap();
+    assert_eq!((d.emitter_id, d.count_added), (id, 6)); // new air: adds in full
+    let e = r
+        .record_sighting(&track_sighting(fsk_fp(915.005e6), tr(24, 34), 8), None)
+        .unwrap();
+    assert_eq!((e.emitter_id, e.count_added), (id, 2));
+    assert_eq!(r.emitter(id).unwrap().count, 16);
+
+    // Sharing less than that (2 s of 10) is new air, and counts in full — the same near-miss
+    // rule 1 makes for a touching window or a few ms of jitter on an edge.
+    let f = r
+        .record_sighting(&track_sighting(fsk_fp(915.005e6), tr(50, 60), 5), None)
+        .unwrap();
+    assert_eq!((f.emitter_id, f.count_added), (id, 5));
+    let g = r
+        .record_sighting(&track_sighting(fsk_fp(915.005e6), tr(58, 68), 6), None)
+        .unwrap();
+    assert_eq!((g.emitter_id, g.count_added), (id, 6));
+    assert_eq!(r.emitter(id).unwrap().count, 27);
+    assert_eq!(rows(&r, id), 7);
+}
+
 #[test]
 fn two_close_emitters_with_different_fingerprints_stay_apart() {
     let mut r = repo();
@@ -326,7 +400,10 @@ fn signal_062_rds_pi_names_the_station_track_emitter() {
     assert_eq!(next.emitter_id, track.emitter_id);
     let e = r.emitter(track.emitter_id).unwrap();
     assert_eq!(e.identity, Identity::Decoded(pi.identity));
-    assert_eq!((e.count, e.seen()), (3, tr(0, DAY + 60)));
+    // Two occurrences, not three (T-336): the PI was decoded at t=30, inside the minute the
+    // track already counted, so the decode names the station without counting its air again.
+    // The next day's track is a second occurrence.
+    assert_eq!((e.count, e.seen()), (2, tr(0, DAY + 60)));
     assert_eq!(
         r.query_inventory(&InventoryQuery::default())
             .unwrap()
@@ -385,7 +462,11 @@ fn merge_repoints_links_and_queries_return_only_the_survivor() {
     assert_eq!(r.emitter_merges(sid).unwrap(), vec![m]);
 
     let e = r.emitter(sid).unwrap();
-    assert_eq!((e.count, e.seen()), (6, tr(0, DAY + 60)));
+    // 4 occurrences from the identity-only writer + the track's 1. The decode that triggered the
+    // merge sits inside the track's minute, which the merge has just brought onto this entry, so
+    // it adds nothing (T-336); before that check it made a sixth occurrence out of air already
+    // counted.
+    assert_eq!((e.count, e.seen()), (5, tr(0, DAY + 60)));
     assert!(e.tags.contains("survey-2"));
     assert_eq!(r.live_emitter_id(tid).unwrap(), sid);
 
@@ -437,7 +518,8 @@ fn merge_repoints_links_and_queries_return_only_the_survivor() {
         })
         .unwrap();
     assert_eq!(up.emitter_id, sid);
-    assert_eq!(r.emitter(sid).unwrap().count, 7);
+    // A disjoint minute: a sixth occurrence, added in full.
+    assert_eq!(r.emitter(sid).unwrap().count, 6);
 
     // Two identified emitters are never merged; merged emitters cannot merge again.
     let other = r
@@ -892,18 +974,23 @@ fn remeasurement_of_the_same_iq_is_not_counted_again() {
     r.record_sighting_measured(&session(tr(5, 10), 101.3e6, &pi), &key, None)
         .unwrap();
     assert_eq!(count(&r), 3);
-    // Another producer on the same IQ counts separately.
-    r.record_sighting_measured(
-        &session(tr(0, 5), 101.3e6, &pi),
-        &MeasurementKey::new("hk-other"),
-        None,
-    )
-    .unwrap();
-    assert_eq!(count(&r), 4);
-    // Without a key only the source id deduplicates.
+    // Another producer on the same IQ is a separate *measurement* — its own ledger row, not a
+    // replay — but not a separate occurrence: it watched air the first producer already counted,
+    // so it adds nothing (T-336, the cross-producer half of the rule).
+    let other = r
+        .record_sighting_measured(
+            &session(tr(0, 5), 101.3e6, &pi),
+            &MeasurementKey::new("hk-other"),
+            None,
+        )
+        .unwrap();
+    assert_ne!(other.assignment, Assignment::Replay);
+    assert_eq!(other.count_added, 0);
+    assert_eq!(count(&r), 3);
+    // Same for an unkeyed sighting of that air: a new ledger row, no new occurrence.
     r.record_sighting(&session(tr(0, 5), 101.3e6, &pi), None)
         .unwrap();
-    assert_eq!(count(&r), 5);
+    assert_eq!(count(&r), 3);
     // Another channel, or another station's identity on this one, is not this measurement.
     let beef = claim(IdentityScheme::RdsPi, "BEEF", ContentClass::Unrestricted);
     let other_channel = r
@@ -915,7 +1002,7 @@ fn remeasurement_of_the_same_iq_is_not_counted_again() {
         .unwrap();
     assert_eq!(clash.emitter_id, other_channel.emitter_id);
     assert_ne!(clash.assignment, Assignment::Replay);
-    assert_eq!(count(&r), 5);
+    assert_eq!(count(&r), 3);
 }
 
 #[test]

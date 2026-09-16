@@ -18,8 +18,11 @@
 //!    shorter span (an instant counts if it lies inside) and whose centre is within the
 //!    fingerprint centre tolerance, unless the sighting's identity differs from that emitter's.
 //!    It adds only its count beyond the largest count already recorded there. Spans that merely
-//!    touch, a later session, another producer or another channel do not match, so a genuinely
-//!    new observation of the same emitter still counts.
+//!    touch, a later session, another producer or another channel do not match *this rule*, so
+//!    each keeps its own ledger row and resolves on through rules 2–5; what it then adds to
+//!    `count` is settled by the same overlap test without the key (see "What a sighting adds to
+//!    `count`" below), which still counts a touching window, a later session and another
+//!    channel, and no longer counts a second producer's view of air the first already counted.
 //! 2. **Identity.** A decoded identity always wins: the emitter holding it is the target. If the
 //!    sighting names an emitter context (the detection/track emitter it was decoded from) and the
 //!    identity's scheme does not share channels ([`IdentityScheme::shares_channel`]):
@@ -36,6 +39,22 @@
 //!    emitters match, the fingerprint cannot choose between them: a conflict is reported and the
 //!    best unidentified match (or a new emitter) is used.
 //! 5. **Create.** A new emitter with `known_status: unknown` (author `clusterer`).
+//!
+//! # What a sighting adds to `count` (T-209, T-329, T-336)
+//!
+//! `count` is a lifetime total of **occurrences** — times the emitter was observed to be on the
+//! air — never a tally of the writes that reached the repository (docs/07 §2.11, ADR-0017 §3).
+//! One emission over one stretch of time is **one** occurrence, however many producers saw it:
+//! overlapping observations are not counted twice, whoever observed them. So rules 2–4 add only
+//! what the emitter's ledger does not already hold over the sighting's air: **rule 1's
+//! re-measurement test with the producer key dropped** (T-336). A row of this emitter covering
+//! the same air — the same "at least half the shorter span" overlap, whoever wrote it — caps the
+//! sighting at its excess over the largest such count, and nothing adds when that is already as
+//! large. When no row does, the whole count adds, which is how a second session after a silence
+//! is a second occurrence, and why rule 1's deliberate near-misses (a touching window, a few ms
+//! of jitter on an edge, another channel) still count. There is no proration in between: `count`
+//! counts occurrences, not seconds. `Resolution::count_added` reports what was actually added,
+//! which a sighting's own `count` never tells you.
 //!
 //! # Same emission (T-082)
 //!
