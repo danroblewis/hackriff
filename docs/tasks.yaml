@@ -2922,7 +2922,8 @@ tasks:
   - id: T-182
     milestone: M2-hardening
     title: "Deterministic decoded-capture roll/evict test: wait for the async recorder flush (or a synchronous flush hook) instead of reading the tail immediately"
-    status: todo
+    status: cancelled
+    superseded_by: T-228
     deps: []
     parallel_group: M2E
     use_cases: []
@@ -3156,7 +3157,8 @@ tasks:
   - id: T-197
     milestone: M2-hardening
     title: "recipe_runtime hot-edit test flaky under load: discontinuities - source_discontinuities != 1 (stats counters possibly read non-atomically while the source loops)"
-    status: todo
+    status: cancelled
+    superseded_by: T-228
     priority: low
     deps: []
     parallel_group: PIPELINE
@@ -3601,7 +3603,8 @@ tasks:
   - id: T-225
     milestone: M2-hardening
     title: "T-112 dense-burst writer test asserts dropped == 0 at a fixed paced decode rate, so it fails under suite-wide CPU contention (pinned heavy-serial + retry meanwhile)"
-    status: todo
+    status: cancelled
+    superseded_by: T-228
     priority: low
     deps: []
     parallel_group: PIPELINE
@@ -3632,7 +3635,8 @@ tasks:
   - id: T-227
     milestone: M2-hardening
     title: "follow_hops dedupe keeps the wrong copy under load: the cross-channel merge window is arrival-ordered, so a delayed strong frame lets the weak copy survive and the message is tagged with the wrong channel"
-    status: todo
+    status: cancelled
+    superseded_by: T-228
     priority: normal
     deps: []
     parallel_group: PIPELINE
@@ -3643,6 +3647,21 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: false
+  - id: T-228
+    milestone: M2-hardening
+    title: "Consolidated flaky-pin fix: convert wall-clock and arrival-order assertions to sample-clock or queue-depth terms, removing each nextest pin as its test is fixed (supersedes T-182, T-197, T-225, T-227)"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPELINE
+    use_cases: [SIGNAL-062]
+    found_by: "user 2026-09-15: twelve load-sensitive pins accumulated, all sharing one cause - assertions that only hold on an idle machine"
+    acceptance: "four tests converted and UNPINNED, each passing 20/20 under 6 CPU burners with its .config/nextest.toml override deleted: (a) rolls_segments_and_evicts_oldest_first_within_quota - wait for the recorder flush instead of reading before it (was T-182); (b) hot_edits_apply_at_a_chunk_boundary_without_stopping_capture_or_losing_samples - take a consistent stats snapshot so discontinuities and source_discontinuities are read together, or prove the extra discontinuity is real (was T-197); (c) a_dense_adsb_like_burst_is_stored_without_dropping_decodes - pace by sample clock or assert on queue depth rather than demanding zero drops at a wall-clock rate (was T-225); (d) one_recipe_follows_a_channel_net_ordered_tagged_deduplicated_and_gains_a_channel_mid_run - dedupe by sample index and measured level, not frame arrival order (was T-227). No threshold loosened and no retry added anywhere; where a conversion reveals a real product bug, fix the product and say so. Report each test before/after and list any remaining pin that should also be converted."
+    area: crates/hk-pipeline (decode writer, recipes runtime stats, follow_hops merge), crates/hk-store, tests, .config/nextest.toml
+    needs: none
+    model: opus
+    effort: high
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

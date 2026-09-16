@@ -2471,3 +2471,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Pinned** heavy-serial with one retry, reason recorded in .config/nextest.toml, and **filed T-227** to decide dedupe by sample index rather than arrival, then remove the pin.
   - **Acceptance 29/29 and acceptance_m2 8/8 passed** in that same run; the unit suite aborted at 1090/1455, so it is being rerun.
   - **Pin count note:** this is the twelfth load-sensitive pin. The pattern is consistent - wall-clock and arrival-order assertions that only hold on a quiet machine - and the standing offer to the user is to consolidate T-182, T-197, T-225 and now T-227 into one task.
+- **B0.515 User approved consolidating the flaky pins: T-182, T-197, T-225 and T-227 are cancelled, superseded by T-228.**
+  - **One task** converts wall-clock and arrival-order assertions to sample-clock or queue-depth terms, and REMOVES each nextest pin as its test is fixed, proving 20/20 under 6 CPU burners with the override deleted.
+  - **The four:** decoded-capture flush wait; a consistent stats snapshot for the hot-edit discontinuity counters; sample-clock pacing (or queue-depth assertion) for the dense-burst writer; dedupe by sample index and measured level rather than frame arrival.
+  - **Rule kept:** no threshold loosened, no retry added, and where a conversion exposes a real product bug the product is fixed and reported.
+  - **T-228 launches when a slot frees;** T-199, T-217, the T-219 fix round and the running check hold all four.
