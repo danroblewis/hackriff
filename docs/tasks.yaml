@@ -3190,7 +3190,9 @@ tasks:
   - id: T-199
     milestone: M3
     title: "C15 classical feature-tree modulation-family classifier (cumulants, instantaneous amplitude/phase/frequency stats, cyclic features) with open-set unknown and C17 prior fusion"
-    status: in-progress
+    status: review
+    commit: e3d09ff
+    result: "cascade landed and inert (records at rank 3, never demotes a chain/decoder/user label). ADR-0016 accuracy floors NOT met: top-1 0.754 vs 0.90, top-2 0.933 vs 0.95. Safety floors MET: wrong-label 0.000 vs 0.003, unknown recall 0.81 vs 0.80. analog 0.32 and noise-like 0.42 abstain rather than mislabel; both OTA fixtures abstain (sim-to-real gap). Chain wiring and API routes deliberately deferred - see scratchpad/t199-handoff.md. Floors deliberately NOT relaxed; gap tracked as T-230"
     priority: normal
     deps: [T-211]
     parallel_group: M3A
@@ -3468,7 +3470,8 @@ tasks:
   - id: T-217
     milestone: MUI
     title: "T-178 follow-ups: HTTP-level test that serve answers during ring allocation; count samples lost while a large ring allocates; surface the buffer-off library default; measure ring fsync cost on the Jetson"
-    status: in-progress
+    status: review
+    commit: b54a967
     priority: low
     deps: [T-178]
     parallel_group: STORE
@@ -3666,7 +3669,7 @@ tasks:
   - id: T-229
     milestone: M2-hardening
     title: "Replay/test harness leaks its temp directories: 2731 hk-replay-<pid>-<ts>-N dirs accumulated to about 12 GB and nearly breached the 20 GB disk floor"
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: PIPELINE
@@ -3677,6 +3680,21 @@ tasks:
     needs: none
     model: sonnet
     effort: medium
+    core_interface: false
+  - id: T-230
+    milestone: M3
+    title: "Close the classifier accuracy gap to the ADR-0016 floors: top-1 0.754 vs 0.90 and top-2 0.933 vs 0.95, driven by analog/noise-like abstention and a simulation-to-reality gap (both OTA fixtures abstain)"
+    status: todo
+    priority: high
+    deps: [T-199, T-213]
+    parallel_group: M3A
+    use_cases: [SIGNAL-062]
+    found_by: "T-199 report (2026-09-15): floors reported honestly as unmet rather than relaxed"
+    acceptance: "ADR-0016 floors met on the blind acceptance split WITHOUT changing them: top-1 >= 0.90 and top-2 >= 0.95 at gate+5 dB, while wrong-label stays <= 0.003 and unknown recall >= 0.80; the two OTA fixtures (fm_100p8M, the 915 MHz FSK burst at 25.4 dB) are classified rather than abstaining, or the abstention is justified with measured evidence that the signal genuinely sits outside the taxonomy; the one false-known generator (short-CP OFDM classified as analog) is fixed or excluded with a documented physical reason; analog and noise-like top-1 improved or their abstention justified. Report accuracy per class and per SNR before and after. Never loosen a floor to pass"
+    area: crates/hk-classify (features, densities, gates), py/ synth grid, tests
+    needs: none
+    model: opus
+    effort: high
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
