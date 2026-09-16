@@ -24,7 +24,19 @@
       "dropped_records": 0,
       "lost_samples": 0,
       "source_sidecar": "iq.hackriff-sidecar.json",
-      "ended": "max_s reached"
+      "ended": "max_s reached",
+      "overload": false,
+      "quantisation_limited": true,
+      "clock_source": "internal",
+      "clock_locked": true,
+      "overload_measured": {
+        "components_sampled": 20000000,
+        "at_rail": 0,
+        "rail_fraction": 0.0,
+        "near_full_scale": 0,
+        "method": "five 4 MB windows across the capture, ci8 components at |s|>=127",
+        "threshold_rail_fraction": 0.0001
+      }
     },
     "hackriff:antenna": "unknown (as attached by user; not changed)",
     "core:extensions": [
