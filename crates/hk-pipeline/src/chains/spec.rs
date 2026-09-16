@@ -6,7 +6,7 @@
 //! Adding a decoder is a manifest plus a spec entry; nothing is recompiled and capture never
 //! restarts.
 //!
-//! Node lists are validated into one of four shapes ([`ChainShape`]):
+//! Node lists are validated into one of five shapes ([`ChainShape`]):
 //! - `[record?] analog-auto` — C19 auto mode (estimate → mode → WFM + RDS); writes content, so
 //!   `requires_content` must be set. A short probe window runs mode selection first; the chain
 //!   continues only when the mode is accepted (`accept_modes`, `require_pilot`);
@@ -17,6 +17,9 @@
 //!   and the validator enforces it: a `trunk-cc` spec that sets `requires_content` or carries a
 //!   `record` node is refused, so the hunt can never become a content chain and the fail-closed
 //!   class a 12.5 kHz LMR band derives (`metadata-only`) never has anything of its to refuse.
+//! - `sweep-char` — sweep characterisation of a candidate region from its IQ (T-297,
+//!   [`crate::chains::sweep`]). **Metadata only**, enforced the same way, and the only shape on
+//!   [`Trigger::EveryTrack`]: it attaches *beside* the decode chain rather than instead of it.
 //!
 //! **Channel priors.** A spec with `raster_hz` snaps a candidate's centre to the band's channel
 //! raster and widens it to the node's channel bandwidth, and at most one chain runs per channel.
@@ -55,6 +58,22 @@ pub enum Trigger {
     /// **Admission control** (the thing T-267 noted an FCO trigger would otherwise lack) is stated
     /// in [`NodeSpec::TrunkCc`] and bounded there; one chain per spec runs at a time.
     Occupancy,
+    /// A confirmed track, **in addition to** the one decode chain [`select_for_track`] chose for
+    /// it (T-297).
+    ///
+    /// [`ConfirmedTrack`](Self::ConfirmedTrack) is a *selection*: the first matching spec wins and
+    /// the rest never run, which is right for decoding (one receiver per emission) and wrong for
+    /// measuring. A measurement is not in competition with a decode — it asks a different question
+    /// of the same region — and the region that most needs measuring is precisely the one no
+    /// decoder claimed. Measured on T-255's SF9 scene: the swept region matches `fsk-bursts`, never
+    /// reaches its four member detections, and closes `unmatched` with **no chain at all**, so a
+    /// spec ordered after `fsk-bursts` would never be reached for it and one ordered before would
+    /// take every bursty track away from it.
+    ///
+    /// A chain on this trigger must therefore be cheap and must write only evidence. Its admission
+    /// is stated in its node spec and bounded there ([`NodeSpec::SweepChar`]), and the manager caps
+    /// how many run at once.
+    EveryTrack,
 }
 
 fn default_probe_s() -> f64 {
@@ -147,6 +166,30 @@ pub enum NodeSpec {
         /// Least stream time between passes, s.
         period_s: f64,
     },
+    /// Sweep characterisation of a candidate region from its IQ (T-297,
+    /// [`crate::chains::sweep`]).
+    ///
+    /// Every field here is an **admission bound**, not a tuning knob: what decides whether a region
+    /// sweeps lives in `hk_dsp::chirp` with the measurement behind it (`SWEEP_MIN_PAPR`,
+    /// `SWEEP_MAX_DISAGREEMENT`), where a run cannot reach it. These bound what one
+    /// characterisation is allowed to *spend*:
+    ///
+    /// - `window_s` — samples held per pass, so the chain's memory is one window, not a stream;
+    /// - `frame_s` — the analysis frame the two-lag test runs on (T-294 measured 4.096 ms);
+    /// - `max_passes` — most windows examined before the chain gives up on this region. The chain
+    ///   also stops at the **first** characterisation, so this bounds the miss case, not the hit;
+    /// - `max_chains` — most characterising chains alive at once across the run. This is the bound
+    ///   that matters: the trigger is per confirmed track, and a busy band has many.
+    SweepChar {
+        /// Samples collected per pass, s.
+        window_s: f64,
+        /// Analysis frame the sweep test runs on, s.
+        frame_s: f64,
+        /// Most windows examined per region.
+        max_passes: u64,
+        /// Most characterising chains alive at once.
+        max_chains: usize,
+    },
 }
 
 fn one() -> u32 {
@@ -237,6 +280,17 @@ pub enum ChainShape {
         max_demods: usize,
         /// Least stream time between passes, s.
         period_s: f64,
+    },
+    /// Sweep characterisation (T-297). Metadata only.
+    Sweep {
+        /// Samples per pass, s.
+        window_s: f64,
+        /// Analysis frame, s.
+        frame_s: f64,
+        /// Most windows examined per region.
+        max_passes: u64,
+        /// Most characterising chains alive at once.
+        max_chains: usize,
     },
 }
 
@@ -351,6 +405,41 @@ impl ChainSpec {
                 })
             }
             [
+                NodeSpec::SweepChar {
+                    window_s,
+                    frame_s,
+                    max_passes,
+                    max_chains,
+                },
+            ] => {
+                // Metadata only, enforced structurally for the same reason `trunk-cc` is: what a
+                // characterisation writes is a measured number about a region, which
+                // `hk_model::content` says is never gated. A spec must not be able to quietly turn
+                // a measuring chain into one that records or demodulates.
+                if self.requires_content {
+                    return Err(
+                        "sweep-char is metadata-only: it must not set requires_content".into(),
+                    );
+                }
+                if self.record().is_some() {
+                    return Err(
+                        "sweep-char is metadata-only: it must not carry a record node".into(),
+                    );
+                }
+                if !(*window_s > 0.0 && *frame_s > 0.0 && *frame_s <= *window_s) {
+                    return Err("sweep-char needs 0 < frame_s <= window_s".into());
+                }
+                if *max_passes == 0 || *max_chains == 0 {
+                    return Err("sweep-char needs max_passes, max_chains >= 1".into());
+                }
+                Ok(ChainShape::Sweep {
+                    window_s: *window_s,
+                    frame_s: *frame_s,
+                    max_passes: *max_passes,
+                    max_chains: *max_chains,
+                })
+            }
+            [
                 rest @ ..,
                 NodeSpec::Plugin {
                     manifest,
@@ -379,7 +468,7 @@ impl ChainSpec {
             }
             _ => Err(
                 "node list must be [record] analog-auto | [record] fsk-bursts | \
-                 [record] [ddc] plugin | trunk-cc"
+                 [record] [ddc] plugin | trunk-cc | sweep-char"
                     .into(),
             ),
         }
@@ -492,6 +581,15 @@ pub const BUILTIN_CHAINS: &str = r#"[
     "nodes": [
       { "node": "trunk-cc", "window_s": 0.5, "max_channels": 64, "max_demods": 8,
         "period_s": 10.0 }
+    ]
+  },
+  {
+    "id": "sweep-char",
+    "trigger": "every-track",
+    "bandwidth_hz": [2e3, 2e6],
+    "nodes": [
+      { "node": "sweep-char", "window_s": 0.2, "frame_s": 0.004096, "max_passes": 2,
+        "max_chains": 4 }
     ]
   },
   {
@@ -710,6 +808,94 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    /// T-297: the characteriser ships in the **built-in** registry, so a normal run carries it,
+    /// and it attaches *beside* a decode chain rather than competing with one.
+    #[test]
+    fn the_sweep_characteriser_is_built_in_and_never_competes_with_a_decode_chain() {
+        let specs = builtin_chains();
+        let sweep = specs
+            .iter()
+            .find(|s| s.id == "sweep-char")
+            .expect("the characteriser ships in the built-in registry, not only in a plan");
+        sweep.validate().unwrap();
+        assert_eq!(sweep.trigger, Trigger::EveryTrack);
+        assert!(!sweep.requires_content, "it measures and writes evidence");
+        assert!(sweep.record().is_none());
+        assert!(matches!(sweep.shape(), Ok(ChainShape::Sweep { .. })));
+
+        // The whole point of the trigger: selection is untouched, so no existing run's choice of
+        // decode chain changes. `select_for_track` only ever considers `ConfirmedTrack` specs.
+        assert!(
+            !specs
+                .iter()
+                .any(|s| s.trigger == Trigger::ConfirmedTrack && s.id == "sweep-char")
+        );
+        assert_eq!(
+            select_for_track(&specs, 433.96e6, 433.99e6, Some(true))
+                .unwrap()
+                .id,
+            "fsk-bursts"
+        );
+        assert_eq!(
+            select_for_track(&specs, 101.2055e6, 101.2195e6, Some(true))
+                .unwrap()
+                .id,
+            "wfm-rds"
+        );
+
+        // The region T-255 measures and no decode chain reaches: `fsk-bursts` matches it but needs
+        // four member detections, and the swept track closes with three. The characteriser's
+        // priors must cover it, or the capability still has no caller where it is needed most.
+        assert!(sweep.matches(903.0347e6, 903.1617e6, Some(true)));
+        // And the 2-FSK burst beside it, so the run has a control that is examined and declined.
+        assert!(sweep.matches(902.9267e6, 902.9534e6, Some(true)));
+    }
+
+    #[test]
+    fn a_sweep_char_spec_may_never_become_a_content_chain() {
+        let node = serde_json::json!({ "node": "sweep-char", "window_s": 0.2,
+            "frame_s": 0.004096, "max_passes": 2, "max_chains": 4 });
+        let spec = |patch: serde_json::Value| -> ChainSpec {
+            let mut v = serde_json::json!({ "id": "s", "trigger": "every-track",
+                "nodes": [node.clone()] });
+            for (k, val) in patch.as_object().unwrap() {
+                v[k.as_str()] = val.clone();
+            }
+            serde_json::from_value(v).unwrap()
+        };
+        spec(serde_json::json!({})).validate().unwrap();
+        assert!(
+            spec(serde_json::json!({ "requires_content": true }))
+                .validate()
+                .is_err(),
+            "a characterisation is a measured number, not content"
+        );
+        assert!(
+            spec(serde_json::json!({ "nodes": [
+                { "node": "record", "pre_s": 0.1, "post_s": 0.1 }, node.clone()] }))
+            .validate()
+            .is_err(),
+            "a record node writes IQ, which is content"
+        );
+        // The admission bounds must actually bound.
+        for bad in [
+            serde_json::json!({ "node": "sweep-char", "window_s": 0.2, "frame_s": 0.004096,
+                "max_passes": 0, "max_chains": 4 }),
+            serde_json::json!({ "node": "sweep-char", "window_s": 0.2, "frame_s": 0.004096,
+                "max_passes": 2, "max_chains": 0 }),
+            // A frame longer than the window can never be filled.
+            serde_json::json!({ "node": "sweep-char", "window_s": 0.002, "frame_s": 0.004096,
+                "max_passes": 2, "max_chains": 4 }),
+        ] {
+            assert!(
+                spec(serde_json::json!({ "nodes": [bad] }))
+                    .validate()
+                    .is_err(),
+                "an unbounded characteriser is not admissible"
+            );
+        }
     }
 
     #[test]

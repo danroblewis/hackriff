@@ -119,6 +119,25 @@ pub fn characterise(
     let Some(obs) = observation(repo, id, suspect)? else {
         return Ok(None);
     };
+    characterise_with(repo, id, obs, t).map(Some)
+}
+
+/// [`characterise`] for an observation a producer measured itself, rather than one read back off
+/// the emitter's fingerprint and classification.
+///
+/// The fold, the snapshot and the match/cluster step are identical — this is the *same* call site,
+/// entered with fields the caller measured. It exists because some measurements are not in the
+/// fingerprint and cannot be: a sweep rate is measured from the IQ by a chain
+/// ([`crate::chains::sweep`], T-297), and nothing the detector writes could carry it (ADR-0017
+/// §1.3(b)). What it writes obeys the same rule as every other path through here — evidence about
+/// an emitter, never a change to one.
+pub fn characterise_with(
+    repo: &mut Repository,
+    emitter: EmitterId,
+    obs: FeatureObservation,
+    t: Timestamp,
+) -> Result<Characterised, RepoError> {
+    let id = repo.live_emitter_id(emitter)?;
     let mut features = repo
         .emitter_features(id)?
         .unwrap_or_else(|| EmissionFeatures::new(String::new(), id, t));
@@ -134,11 +153,11 @@ pub fn characterise(
     // must be current first.
     let signature_match = match_emitter(repo, id, t)?;
     let cluster = assign_emitter(repo, id, t)?;
-    Ok(Some(Characterised {
+    Ok(Characterised {
         features,
         signature_match,
         cluster,
-    }))
+    })
 }
 
 #[cfg(test)]
