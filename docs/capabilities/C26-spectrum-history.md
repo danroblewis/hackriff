@@ -49,7 +49,7 @@ Keeps a compressed, multi-resolution record of power spectra over months, from s
 ## Pitfalls
 - **Averaging erases bursts.** Never downsample with mean alone.
 - **Sweeps under-sample bursts:** sub-ms dwell per step gives ~0.7% POI for a 5 ms burst (docs/04 §3.8). Don't present absence as "no activity".
-- **Front-end changes look like events:** gain-table or filter changes create steps. Store provenance per tile so C30 can rule them out first.
+- **Front-end changes look like events:** gain-table or filter changes create steps. Store provenance per tile so C30 can rule them out first. **The antenna-port bias tee is one of them (T-332, tile format 5):** the DC powers an external LNA, so the floor moves the instant it arrives. `FrontEndState`/`ProvenanceSummary` carry the three-valued state and a switch is a `ProvenanceStep::BIAS_TEE`, reported as a `bias-tee` step — so the change is *explained to the operator*, never silently dropped. Tiles written before T-332 read `unknown`, which is what they are; `unknown` is never read as `off` (T-325), and a transition to or from it is a change of knowledge that explains nothing on its own.
 - **IMD and spurs pollute long-term maxima** in cities (docs/04 §10.3–10.4). Record the spur-mask version.
 - **Clock errors** (no GNSS fix, RTC drift) break joins with feeds and hour-of-week baselines.
 - **Schema drift** across tiers and releases: version the tile format.

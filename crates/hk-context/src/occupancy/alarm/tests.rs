@@ -619,6 +619,106 @@ fn alarm_dismissal_expires_on_sample_clock() {
     );
 }
 
+/// T-332: a bias-tee switch is a self-inflicted change of the receive chain — the DC powers an
+/// external antenna LNA, so the floor moves the instant it arrives — and the alarm path **explains**
+/// it rather than suppressing it: the anomaly is still recorded, with the switch named as its
+/// cause. T-303 set the precedent for the antenna port; this is the same argument for the tee.
+///
+/// The three runs differ **only** in the step, so the step is what is under test:
+/// - `off→on`: the change is accounted for. No novelty alarm; a self-inflicted anomaly whose
+///   explanation reads `bias-tee: bias tee off→on`, so the operator sees what caused it.
+/// - **control**, no step at all: the alarm raises, and nothing mentions a bias tee — the fix
+///   cannot pass by explaining everything away.
+/// - `unknown→on`: the source merely started reporting the state. `Unknown` is not `Off` (T-325),
+///   so this says nothing about whether the DC moved; claiming it explains the rise would be a
+///   false explanation. The alarm raises exactly as in the control, and the step is written beside
+///   it as a possible contributor — disclosed, not credited.
+#[test]
+fn alarm_explains_a_bias_tee_switch_and_only_annotates_an_unknown_transition() {
+    let bias_step = |detail: &str| DeviceStep {
+        t: add_s(at(1), -60.0),
+        kind: ProvenanceStepKind::BiasTee,
+        freq: None,
+        gain_delta_db: None,
+        detail: detail.into(),
+    };
+    // Two intervals of the same 20 dB-above-baseline level; the switch falls in the second.
+    let run = |step: Option<DeviceStep>| {
+        let mut rig = Rig::new();
+        let mut acts = Vec::new();
+        for i in 0..2 {
+            let mut s = snap(
+                rig.site,
+                i,
+                vec![input(AlarmKind::LevelAboveBaseline, 2e8, 0, 1.0)],
+            );
+            s.steps = step.clone().into_iter().collect();
+            acts.extend(rig.run(&s, None));
+        }
+        (rig, acts)
+    };
+    let reasons = |rig: &Rig| {
+        rig.alarms()
+            .into_iter()
+            .flat_map(|r| latest_explanations(&rig.repo, r.anomaly.id).unwrap())
+            .filter_map(|e| match e.cause {
+                Cause::SelfInflicted { reason } => Some(reason),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let (rig, acts) = run(Some(bias_step("bias tee off→on")));
+    assert_eq!(
+        (raises(&acts), explained_count(&acts)),
+        (0, 1),
+        "a switch is self-inflicted, not novel: {acts:?}"
+    );
+    // The step's window reaches one interval either side of it, so both are suppressed; the
+    // anomaly is written once (`Explained` is not re-emitted while it stands).
+    assert_eq!(
+        rig.engine
+            .suppressions()
+            .total(Suppression::ProvenanceExplained),
+        2
+    );
+    // Explained, not silent: the anomaly is on the record and names the cause.
+    let rows = rig.alarms();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].alarm.as_ref().unwrap().state, AlarmState::Explained);
+    assert_eq!(reasons(&rig), vec!["bias-tee: bias tee off→on".to_string()]);
+
+    let (control, acts) = run(None);
+    assert_eq!(
+        (raises(&acts), explained_count(&acts)),
+        (1, 0),
+        "no step, no explanation: {acts:?}"
+    );
+    assert!(reasons(&control).is_empty(), "{:?}", reasons(&control));
+
+    let unknown = bias_step("bias tee unknown→on");
+    let (rig, acts) = run(Some(unknown.clone()));
+    assert_eq!(
+        (raises(&acts), explained_count(&acts)),
+        (1, 0),
+        "learning the state is not a switch: {acts:?}"
+    );
+    let contributors = acts
+        .iter()
+        .find_map(|a| match a {
+            AlarmAction::Raise { contributors, .. } => Some(contributors.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(contributors, vec![unknown]);
+    let r = reasons(&rig);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(
+        r[0].starts_with("possible contributor, bias-tee: bias tee unknown→on"),
+        "disclosed beside the alarm, never crediting it: {r:?}"
+    );
+}
+
 fn explained_count(actions: &[AlarmAction]) -> usize {
     actions
         .iter()

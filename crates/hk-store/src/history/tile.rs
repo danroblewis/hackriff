@@ -1,7 +1,7 @@
 //! In-memory tile accumulators: level-0 frame folding and level-to-level rollup.
 
 use hk_model::attention::baseline::SiteKey;
-use hk_model::{CalibrationStateId, SpurMaskId, TileKey, Timestamp};
+use hk_model::{BiasTee, CalibrationStateId, SpurMaskId, TileKey, Timestamp};
 
 use super::config::{HistogramConfig, LevelGeometry};
 use super::frame::{FrameInput, FrontEnd, GainState, PortTag};
@@ -122,6 +122,10 @@ pub struct FrontEndState {
     pub gain: Option<GainState>,
     /// Calibration in force.
     pub calibration: Option<CalibrationStateId>,
+    /// Antenna-port bias-tee state (T-332): the DC powers an external LNA, so it is part of the
+    /// receive chain exactly as the gain state is. Compared by **equality** and three-valued —
+    /// [`BiasTee::Unknown`] is its own state, never [`BiasTee::Off`] (T-325).
+    pub bias_tee: BiasTee,
     /// Gain table, filter, spur mask.
     pub front_end: FrontEnd,
 }
@@ -132,6 +136,7 @@ impl FrontEndState {
         Self {
             gain: f.gain,
             calibration: f.calibration,
+            bias_tee: f.bias_tee,
             front_end: f.front_end,
         }
     }
@@ -153,6 +158,9 @@ impl FrontEndState {
         }
         if self.front_end.spur_mask != to.front_end.spur_mask {
             c |= ProvenanceStep::SPUR_MASK;
+        }
+        if self.bias_tee != to.bias_tee {
+            c |= ProvenanceStep::BIAS_TEE;
         }
         c
     }
@@ -184,6 +192,9 @@ impl ProvenanceStep {
     pub const FILTER: u8 = 8;
     /// Spur-mask version changed.
     pub const SPUR_MASK: u8 = 16;
+    /// Antenna-port bias-tee state changed (T-332), including to or from
+    /// [`BiasTee::Unknown`].
+    pub const BIAS_TEE: u8 = 32;
 
     /// Names of the changed fields.
     pub fn change_names(&self) -> Vec<&'static str> {
@@ -193,6 +204,7 @@ impl ProvenanceStep {
             (Self::GAIN_TABLE, "gain_table"),
             (Self::FILTER, "filter"),
             (Self::SPUR_MASK, "spur_mask"),
+            (Self::BIAS_TEE, "bias_tee"),
         ]
         .into_iter()
         .filter(|(f, _)| self.changed & f != 0)
@@ -242,6 +254,13 @@ pub struct ProvenanceSummary {
     pub spur_mask: Option<SpurMaskId>,
     /// More than one spur mask contributed.
     pub spur_mask_mixed: bool,
+    /// Antenna-port bias-tee state of the first frame (T-332). [`BiasTee::Unknown`] is a value, not
+    /// an absence: it says the frames' source could not report the state, never that the DC was
+    /// off. Tiles written before T-332 read as `Unknown`, which is what they are.
+    pub bias_tee: BiasTee,
+    /// More than one bias-tee state contributed, so this tile pools two receive chains and a level
+    /// step inside it may be the DC rather than the air. The [`Self::steps`] say when.
+    pub bias_tee_mixed: bool,
     /// Gamma shape `n_c` of the level-0 cell values (T-116; drives the floor bias correction).
     pub cell_shape: Option<f32>,
     /// Shapes differing by more than [`SHAPE_TOLERANCE`] contributed (no corrected floor).
@@ -462,12 +481,14 @@ impl ProvenanceSummary {
             self.gain_table = state.front_end.gain_table;
             self.filter = state.front_end.filter;
             self.spur_mask = state.front_end.spur_mask;
+            self.bias_tee = state.bias_tee;
             self.cell_shape = cell_shape;
         } else {
             self.calibration_mixed |= self.calibration != state.calibration;
             self.gain_table_mixed |= self.gain_table != state.front_end.gain_table;
             self.filter_mixed |= self.filter != state.front_end.filter;
             self.spur_mask_mixed |= self.spur_mask != state.front_end.spur_mask;
+            self.bias_tee_mixed |= self.bias_tee != state.bias_tee;
             self.cell_shape_mixed |= !same_shape(self.cell_shape, cell_shape);
         }
         self.frames += 1;
@@ -528,6 +549,14 @@ impl ProvenanceSummary {
             o.spur_mask_mixed,
             first,
         );
+        // Not `fold_tag`: the bias tee is a plain three-valued state, and `Unknown` is one of the
+        // three rather than an absence (T-325), so it has no `Option` to wrap.
+        if first {
+            self.bias_tee = o.bias_tee;
+            self.bias_tee_mixed = o.bias_tee_mixed;
+        } else if o.bias_tee_mixed || self.bias_tee != o.bias_tee {
+            self.bias_tee_mixed = true;
+        }
         if first {
             self.cell_shape = o.cell_shape;
             self.cell_shape_mixed = o.cell_shape_mixed;
