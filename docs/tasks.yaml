@@ -3410,7 +3410,7 @@ tasks:
   - id: T-213
     milestone: M3
     title: "M3 evaluation harness: dev vs acceptance seed split, per-SNR accuracy/unknown-rate reports, OTA labels only from CRC-valid decodes"
-    status: review
+    status: done
     commit: 001940d
     priority: normal
     deps: [T-211]
