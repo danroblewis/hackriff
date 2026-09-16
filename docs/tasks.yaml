@@ -6488,6 +6488,14 @@ tasks:
       already landed the home for the tier answer: resolution.source ships as ''spectrum-history''
       with the documented meaning that a live-IQ-backed tier reports its own value there, so this
       extends that enum rather than re-opening the contract'
+    blocked_axis_from_t343_2026_09_16: 'T-343 settled the sequencing and found what T-341 still needs.
+      The achievable (centre, span) grid did NOT fall out of T-343''s work: /api/control/state already
+      reports frequency_ranges_hz and sample_rates_hz, but SourceCapabilities HAS NO TUNING STEP,
+      so the grid is two of its three axes. T-341 must add the step at the SOURCE LAYER, device-generic
+      - an addition to the capabilities contract, not a re-opening of T-343''s. T-343''s contract
+      (device, device_busy, DeviceAction) is stable under it. Also available now: resolution.source
+      from T-334 is the declared home for which tier answered, so T-341 extends that enum rather than
+      inventing a field'
 
   - id: T-342
     milestone: M2-hardening
@@ -6514,7 +6522,8 @@ tasks:
     milestone: M2-hardening
     title: 'Setting centre from the frequency navigator is a real retune: a device action under the one-agent-at-a-time
       rule, recording device_id'
-    status: in-progress
+    status: done
+    commit: 936c377
     priority: high
     deps: []
     parallel_group: UI
@@ -6643,7 +6652,8 @@ tasks:
     milestone: M2-hardening
     title: Timestamp is serde-transparent over i64, so the same response can carry nanoseconds and seconds
       with no naming cue
-    status: in-progress
+    status: done
+    commit: 1f03e2e
     priority: high
     deps:
     - T-337
@@ -6741,6 +6751,65 @@ tasks:
       must stay green and is currently UNVERIFIED because nothing has been pushed - so whatever is changed
       here cannot be confirmed until a push happens, and that limitation should be stated rather than assumed
       away'
+  - id: T-354
+    milestone: M2-hardening
+    title: Stream-contract JSON records carry t as nanoseconds declared only by the document, not by the
+      name
+    status: todo
+    priority: normal
+    deps:
+    - T-349
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'T-349 established the units law - Unix seconds is the default, bare and _s mean seconds,
+      _ns means integer nanoseconds, no third unit - and left exactly one named exception rather than widening
+      silently. docs/stream-contract.md section 5.1''s JSON record envelope (message, dropped, frame, status,
+      edit) carries t as i64 Unix ns under a BARE NAME, which the law would spell t_ns, and it reaches the
+      HTTP API verbatim through /api/captures/{id}/frames and POST /api/inspector/parse. Renaming it is
+      a STREAM-CONTRACT VERSION BUMP, not an API change: it touches hk-stream, ui/src/frame-inspector.ts,
+      ui/src/app/decode/plots.ts and status-feed.ts, api_contract.rs around line 4158 (which round-trips
+      that ns value into a SECONDS query param - check that carefully), and the py/ examples. Decide whether
+      to rename with a serde alias or to leave it as a contract-declared exception; either way STATE IT
+      in docs/stream-contract.md section 5.1 the way docs/api.md now states the law. Note the binary record
+      headers are genuinely i64 ns and exact - that is the one place ns is real rather than illusory, and
+      it does not move'
+  - id: T-355
+    milestone: M2-hardening
+    title: 'Frequency fields are inconsistently suffixed: FreqRange says lo_hz but several envelopes answer
+      bare f_lo'
+    status: todo
+    priority: low
+    deps:
+    - T-349
+    parallel_group: PIPE
+    model: sonnet
+    acceptance: T-349's unit detector has to exempt these names by hand, which is the tell. FreqRange serialises
+      lo_hz and hi_hz, but /api/observations, /api/observations/coverage and /api/occupancy answer bare
+      f_lo and f_hi. Harmless TODAY because hertz is the only frequency unit in play - but that is exactly
+      the argument that was true of time until a second unit appeared, and the cost of the asymmetry is
+      already being paid in the detector's exemption list. Suffix them with serde aliases the way T-349
+      did, and remove the exemptions so the detector covers frequencies too. Update docs/api.md and api_contract.rs
+      together per T-079, asserting values
+  - id: T-356
+    milestone: M2-hardening
+    title: 'Cross-process device exclusion is unverified: two hk serve runs against one HackRF have never
+      been tried'
+    status: todo
+    priority: normal
+    deps:
+    - T-343
+    parallel_group: PIPE
+    model: opus
+    acceptance: 'T-343 built a DeviceGate that serialises device actions IN PROCESS and answers 409 device_busy
+      within 250 ms. It stated plainly what that does not cover: cross-process exclusion is the USB open
+      itself, and nobody has tested it. THE CAPTURE THAT WOULD SETTLE IT: two hk serve --device hackrf runs
+      started back to back against the attached HackRF One, checking the second reports a clean device-in-use
+      rather than a libusb error or a half-opened stream. HARDWARE, USER-TRIGGERED - the user''s demo holds
+      the device on :8899, and CLAUDE.md''s rule is one agent at a time with the coordinator handing out
+      access explicitly. Do not open the device without that. If the second process does NOT fail cleanly,
+      that is a real defect: a half-opened stream would produce frames nobody can attribute, and the provenance
+      work (T-302, T-303, T-304, T-305, T-325) all assumes a device is opened once or not at all'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
