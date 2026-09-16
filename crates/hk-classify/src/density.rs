@@ -103,7 +103,19 @@ pub struct FamilyScore {
     pub m: f64,
     /// Relative evidence for ranking: `exp(−K_REF·m/2)`, comparable across classes that scored on
     /// different numbers of dimensions.
+    ///
+    /// It **underflows to exactly 0** for any poor fit, which is fine for a ranking (the winner is
+    /// never the underflowing one) but destroys a comparison between two poor fits. Use
+    /// [`FamilyScore::log_evidence`] where their *ratio* matters.
     pub evidence: f64,
+    /// `ln(evidence)`, kept unexponentiated so two classes can be compared however badly both fit.
+    ///
+    /// A ratio taken from [`FamilyScore::evidence`] is `0/0` once both underflow; a difference of
+    /// logs is exact over the whole range. The within-family class call
+    /// ([`crate::tree::class_guess`]) needs that, because a class whose evidence underflowed would
+    /// otherwise get probability exactly zero — an unrecoverable score no later stage can move
+    /// (T-243).
+    pub log_evidence: f64,
     /// Calibrated in-distribution plausibility, 0–1: 1 for anything fitting at least as well as
     /// the class's dev 95th percentile, falling away beyond it. The open-set score is
     /// `1 − max plausibility`.
@@ -220,11 +232,13 @@ impl DensityModel {
         // five classes span the widest feature space, took a third of the PSK/QAM and OOK
         // snippets). A tight class has to earn its win, and pays for its own width.
         let log_density = -0.5 * m - a.ln_sigma / a.weight;
+        let log_evidence = K_REF * log_density;
         Some(FamilyScore {
             d2: a.d2,
             k: a.k,
             m,
-            evidence: (K_REF * log_density).exp(),
+            evidence: log_evidence.exp(),
+            log_evidence,
             plausibility: (chi2_sf(a.d2, dof) / reference).min(1.0),
             class: c.class.clone(),
             worst: a.worst,
