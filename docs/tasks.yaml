@@ -3015,7 +3015,7 @@ tasks:
   - id: T-188
     milestone: M2-hardening
     title: "Listen-centre flake under CPU load: acceptance_m0 listen.rs:224 listen channel at 101.352 MHz, >50 kHz from truth (2/10 burn runs in T-183)"
-    status: review
+    status: done
     commit: 88235e9
     priority: normal
     deps: []
