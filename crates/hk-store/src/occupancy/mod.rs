@@ -501,6 +501,7 @@ mod tests {
             obw_hz: Some(15_000.0),
             unit: PowerUnit::Dbfs,
             calibration: None,
+            bias_tee: hk_model::BiasTee::Unknown,
             confidence: None,
             revisit_biased: false,
             fco_window: Some(TimeRange::new(t(start_s), t(start_s + len_s))),
@@ -572,6 +573,52 @@ mod tests {
         lq.limit = 3;
         let got = s2.query(&lq).unwrap();
         assert!(got.truncated && got.rows.len() == 3);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// T-359 **migration**, through the real line log: rows stored before the bias-tee field
+    /// existed still read, still compare with each other, and are never promoted to `off`.
+    ///
+    /// A pre-T-359 row's bytes are exactly an `Unknown` row's bytes — the field is omitted while
+    /// unknown, `calibration`'s precedent — so the legacy segment written here is the legacy
+    /// format, not an imitation of it. The **control** is an `on` row in the same segment: the
+    /// field is written, read back as `on`, and does not leak into its neighbours.
+    #[test]
+    fn occupancy_store_rows_without_a_bias_tee_read_unknown_never_off() {
+        use hk_model::BiasTee;
+
+        let dir = tmp("bias");
+        let mut s = OccupancyStore::open(&dir, OccupancyStoreConfig::default()).unwrap();
+        let day0 = 20_050 * 86_400;
+        let legacy = row(day0 + 900, 900, 16_000);
+        assert_eq!(legacy.bias_tee, BiasTee::Unknown);
+        let line = encode_line(&legacy).unwrap();
+        assert!(
+            !line.contains("bias_tee"),
+            "an unknown state stays off the wire: {line}"
+        );
+        let mut powered = row(day0 + 1800, 900, 16_004);
+        powered.bias_tee = BiasTee::On;
+        assert_eq!(s.append(&[legacy.clone(), powered.clone()]).unwrap(), 2);
+
+        let got = s
+            .query(&q(SeriesInterval::Min15, day0, day0 + 86_400))
+            .unwrap();
+        assert_eq!(got.rows, vec![legacy, powered]);
+        assert_eq!(got.rows[0].bias_tee, BiasTee::Unknown);
+        assert_ne!(
+            got.rows[0].bias_tee,
+            BiasTee::Off,
+            "nothing recorded the state; reading it as off would claim comparability"
+        );
+        assert_eq!(got.rows[1].bias_tee, BiasTee::On);
+        // Two legacy rows still carry the same state, so they still compare with each other.
+        assert_eq!(
+            decode_line(encode_line(&got.rows[0]).unwrap().trim_end())
+                .unwrap()
+                .bias_tee,
+            got.rows[0].bias_tee
+        );
         fs::remove_dir_all(dir).ok();
     }
 

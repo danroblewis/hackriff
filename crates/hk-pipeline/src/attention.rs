@@ -188,27 +188,6 @@ fn mature_pool_fcos(sub: &SubjectBaseline, slot: HourOfWeek) -> Vec<f64> {
         .collect()
 }
 
-/// The bias-tee state a fold from an occupancy row is keyed under (T-333).
-///
-/// [`hk_model::BiasTee::Unknown`], and stated once here rather than spelt at each fold, because the
-/// **occupancy row** still cannot say what the DC was doing. Unknown is the honest value — and it is
-/// the value every baseline already on disk carries, so folding under it changes nothing today and
-/// orphans nothing.
-///
-/// This is not a service-lifetime constant like the receive chain: a bias tee is switched **during**
-/// a run, so the state belongs to the measurement, not to the service.
-///
-/// **T-332 laid the carrier**: `FrameInput::bias_tee` → `FrontEndState::bias_tee` →
-/// `ProvenanceSummary::bias_tee` / `bias_tee_mixed` (tile format 5), and a switch is now a
-/// `ProvenanceStep::BIAS_TEE` the report lists as a `bias-tee` step. The remaining hop is
-/// **T-359**: `hk_context::occupancy::engine::VisitSample` reads its `gain_key` from
-/// `grid.provenance.dominant_gain_key()` at the same point it can read `grid.provenance.bias_tee`,
-/// and carrying that into `SubjectContext` / `OccupancyStat` is what replaces this constant with
-/// the row's own value. Until then the key, its file format and its migration are in place and the
-/// cohorts separate the moment a caller supplies `Off` or `On` — as `Baselines::observe` already
-/// does for any caller.
-const FOLD_BIAS_TEE: hk_model::BiasTee = hk_model::BiasTee::Unknown;
-
 /// The time a row's visits represent, s (as [`from_occupancy_stat`] weighs a fold).
 pub(crate) fn represented_s(stat: &OccupancyStat) -> f64 {
     let interval_s = stat.interval.duration_ns() as f64 / 1e9;
@@ -766,8 +745,15 @@ impl AttentionService {
         key
     }
 
-    /// Folds one prepared observation under the current site.
-    pub fn observe(&self, cal: CalKey, obs: &IntervalObservation) -> Option<FoldOutcome> {
+    /// Folds one prepared observation under the current site, keyed on the antenna-port `bias`
+    /// state it was measured under (T-359; [`hk_model::BiasTee::Unknown`] when the caller has no
+    /// row to read it from — never `Off`).
+    pub fn observe(
+        &self,
+        cal: CalKey,
+        bias: hk_model::BiasTee,
+        obs: &IntervalObservation,
+    ) -> Option<FoldOutcome> {
         let (site, offset) = {
             let mut sites = lock(&self.sites);
             let site = sites.tick(obs.t);
@@ -778,7 +764,7 @@ impl AttentionService {
         };
         let out = {
             let mut b = lock(&self.baselines);
-            let out = b.observe(site, offset, cal, self.chain, FOLD_BIAS_TEE, obs);
+            let out = b.observe(site, offset, cal, self.chain, bias, obs);
             self.sync_baseline_gauges(&b);
             if let Ok(n) = b.flush(obs.t, false) {
                 self.bump(|c| {
@@ -821,16 +807,17 @@ impl AttentionService {
 
     /// One channel row's fold with the alarm context (T-131).
     fn fold_row(&self, stat: &OccupancyStat, gain: u32) -> Option<IntervalFold> {
-        let (site, cal, obs) = from_occupancy_stat(stat, gain)?;
+        // T-359: the row's own bias-tee state keys the fold. A row measured with the DC on the
+        // antenna port is not comparable with one measured without it (T-333), and `Unknown` is
+        // its own cohort rather than a synonym for `Off`.
+        let (site, cal, bias, obs) = from_occupancy_stat(stat, gain)?;
         let offset = lock(&self.sites).utc_offset_min(site);
         let (out, pool_fcos, pool) = {
             let mut b = lock(&self.baselines);
-            let out = b
-                .observe(site, offset, cal, self.chain, FOLD_BIAS_TEE, &obs)
-                .ok();
+            let out = b.observe(site, offset, cal, self.chain, bias, &obs).ok();
             self.sync_baseline_gauges(&b);
             let sub = b
-                .key(site, cal, self.chain, FOLD_BIAS_TEE)
+                .key(site, cal, self.chain, bias)
                 .and_then(|key| b.engines().find(|e| e.state.key == key))
                 .and_then(|e| e.state.subjects.get(&obs.subject));
             let slot = HourOfWeek::of(obs.t, offset);
@@ -992,10 +979,13 @@ impl AttentionService {
             if r.interval.duration_ns() > COMPARE_ROW_MAX_NS {
                 continue;
             }
-            let Some((_, cal, obs)) = from_occupancy_stat(r, 0) else {
+            // T-359: the row's own bias-tee state, so a comparison reads the cohort the row would
+            // have folded into — a row measured under a different state finds no baseline here
+            // rather than being scored against an incomparable one.
+            let Some((_, cal, bias, obs)) = from_occupancy_stat(r, 0) else {
                 continue;
             };
-            let Some(key) = b.key(site, cal, self.chain, FOLD_BIAS_TEE) else {
+            let Some(key) = b.key(site, cal, self.chain, bias) else {
                 continue;
             };
             let Some(e) = b.engines().find(|e| e.state.key == key) else {
@@ -2019,7 +2009,7 @@ pub(crate) mod tests {
                         0,
                         CalKey::Uncalibrated,
                         ChainKey::Unknown,
-                        FOLD_BIAS_TEE,
+                        hk_model::BiasTee::Unknown,
                         &obs,
                     )
                     .unwrap();
@@ -2746,9 +2736,20 @@ pub(crate) mod tests {
             provenance_explained: false,
         };
         for h in 0..30 {
-            s.observe(CalKey::Uncalibrated, &fold(h, 0.0)).unwrap();
+            s.observe(
+                CalKey::Uncalibrated,
+                hk_model::BiasTee::Unknown,
+                &fold(h, 0.0),
+            )
+            .unwrap();
         }
-        let out = s.observe(CalKey::Uncalibrated, &fold(30, 0.8)).unwrap();
+        let out = s
+            .observe(
+                CalKey::Uncalibrated,
+                hk_model::BiasTee::Unknown,
+                &fold(30, 0.8),
+            )
+            .unwrap();
         assert_eq!(out.novelty.novelty, 1.0);
         let b = s.baselines_json(Some(id)).unwrap();
         assert_eq!(b["baselines"][0]["subjects"], 1);

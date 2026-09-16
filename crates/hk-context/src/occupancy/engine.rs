@@ -48,7 +48,7 @@ use hk_model::attention::occupancy::{
 };
 use hk_model::frames::PowerUnit;
 use hk_model::ids::CalibrationStateId;
-use hk_model::{FreqRange, TimeRange, Timestamp};
+use hk_model::{BiasTee, FreqRange, TimeRange, Timestamp};
 use hk_store::{RegionHistory, RegionQuery, Resolution};
 
 use super::channels::DetectionExtent;
@@ -446,6 +446,14 @@ pub struct VisitSample {
     /// Front-end gain-state key of the grid the visit was read from (the dominant gain state of
     /// its tiles; 0 = unknown), T-132.
     pub gain_key: u32,
+    /// Antenna-port bias-tee state of the grid the visit was read from (T-359).
+    ///
+    /// [`BiasTee::Unknown`] when the grid's tiles pooled more than one state
+    /// (`ProvenanceSummary::bias_tee_mixed`) as well as when the source could not report one: in
+    /// both cases no single state can be attributed to the visit, and claiming one would put a
+    /// measurement of two receive chains into one cohort — the masking T-333 refuses. Never `Off`
+    /// by default (T-325).
+    pub bias_tee: BiasTee,
 }
 
 /// The gain-state key most of `samples`' observed time was under (0 when none is known): an
@@ -458,6 +466,36 @@ pub fn dominant_gain_key<'a>(samples: impl IntoIterator<Item = &'a VisitSample>)
         }
     }
     by.into_iter().max_by_key(|(_, d)| *d).map_or(0, |(k, _)| k)
+}
+
+/// The bias-tee state of `samples` when **every** one of them agrees, else [`BiasTee::Unknown`]
+/// (T-359): the state an occupancy row was measured under.
+///
+/// Unanimity, not a majority, and deliberately unlike [`dominant_gain_key`]: a row that straddles a
+/// switch was measured under two receive chains, and labelling it with the longer one would fold a
+/// mixture into a pure cohort — exactly the pooling T-333 refuses, where a 12 dB rise scores 1.000
+/// against its own cohort and 0.000 against the pooled one. `Unknown` says no single state can be
+/// attributed to the row, which is true of a straddling row and of a row from a source that cannot
+/// report; it never means off. An empty sample set is `Unknown` for the same reason.
+pub fn interval_bias_tee<'a>(samples: impl IntoIterator<Item = &'a VisitSample>) -> BiasTee {
+    let mut seen: Option<BiasTee> = None;
+    for s in samples {
+        match seen {
+            Some(b) if b != s.bias_tee => return BiasTee::Unknown,
+            _ => seen = Some(s.bias_tee),
+        }
+    }
+    seen.unwrap_or(BiasTee::Unknown)
+}
+
+/// The bias-tee state to attribute to visits read from `p`: its state, or [`BiasTee::Unknown`] when
+/// its tiles pooled more than one (T-359).
+pub fn grid_bias_tee(p: &hk_store::ProvenanceSummary) -> BiasTee {
+    if p.bias_tee_mixed {
+        BiasTee::Unknown
+    } else {
+        p.bias_tee
+    }
 }
 
 impl VisitSample {
@@ -605,6 +643,7 @@ pub fn evaluate(
             floor_source,
             floor_suspect,
             gain_key: grid.provenance.dominant_gain_key(),
+            bias_tee: grid_bias_tee(&grid.provenance),
         });
     }
     (out, Some(thr))
@@ -662,6 +701,9 @@ pub struct WindowEstimate {
     pub floor_db: Option<f64>,
     /// Most common floor source.
     pub floor_source: Option<FloorSource>,
+    /// The bias-tee state every visit of the window agreed on, else [`BiasTee::Unknown`]
+    /// ([`interval_bias_tee`], T-359).
+    pub bias_tee: BiasTee,
     /// Any visit's floor was suspect.
     pub floor_suspect: Option<bool>,
     /// Median / 90th percentile level of the occupied `fco` visits (activity-independent, not
@@ -832,6 +874,9 @@ pub fn estimate(
         guard_clamped: sel.iter().any(|s| s.guard_clamped),
         floor_db: median_finite(sel.iter().map(|s| f64::from(s.floor_db))),
         floor_source,
+        // T-359: over every visit of the window, of any tier — the row's measurement context is
+        // what the front end was doing while it was measured, not what the clean visits were.
+        bias_tee: interval_bias_tee(sel.iter().copied()),
         floor_suspect: (!sel.is_empty()).then(|| sel.iter().any(|s| s.floor_suspect)),
         level_occupied_p50_db: quantile_finite(occupied_levels.iter().copied(), 0.5),
         level_occupied_p90_db: quantile_finite(occupied_levels.iter().copied(), 0.9),
@@ -1003,6 +1048,9 @@ pub fn stat(
         obw_hz: ctx.obw_hz,
         unit: ctx.unit,
         calibration: ctx.calibration,
+        // T-359: from the visits the row was estimated over, not from the caller — a bias tee is
+        // switched during a run, so it belongs to the measurement.
+        bias_tee: e.bias_tee,
         confidence: e.confidence,
         revisit_biased: false,
         fco_window: Some(e.window),
@@ -1094,6 +1142,7 @@ mod tests {
             floor_source: FloorSource::History,
             floor_suspect: false,
             gain_key: 0,
+            bias_tee: BiasTee::Unknown,
         }
     }
 
@@ -1883,5 +1932,70 @@ mod tests {
         b.dur_ns = 30_000_000_000;
         let e = estimate(&[a, b], span(0.0, 120.0), ConfidenceLevel::P95);
         assert!((e.fco_all_visits.unwrap() - 30.0 / 31.0).abs() < 1e-9);
+    }
+
+    /// T-359: a row's bias-tee state is what **every** visit of its window agreed on. A window's
+    /// visits can come from several history reads (the chunks tiling an interval), so a switch
+    /// between two chunks reaches this as two pure sets, not as one mixed grid — and the row must
+    /// then claim neither state, not the longer-held one, because it was measured under two
+    /// receive chains (T-333: pooling them masks a real rise rather than raising a false alarm).
+    ///
+    /// The **control** is a window all of whose visits agree: it keeps its state, including
+    /// `Unknown`, so the rule cannot pass by always answering unknown.
+    #[test]
+    fn occupancy_row_bias_tee_needs_every_visit_to_agree() {
+        let with = |t: f64, bias: BiasTee, dur_ns: i64| VisitSample {
+            bias_tee: bias,
+            dur_ns,
+            ..sample(t, Tier::BackgroundSweep, false, false)
+        };
+        // Control: one state throughout, at each of the three values.
+        for held in [BiasTee::Off, BiasTee::On, BiasTee::Unknown] {
+            let s: Vec<VisitSample> = (0..10).map(|k| with(f64::from(k), held, 1)).collect();
+            assert_eq!(interval_bias_tee(&s), held, "{held:?}");
+            assert_eq!(
+                estimate(&s, span(0.0, 20.0), ConfidenceLevel::P95).bias_tee,
+                held
+            );
+        }
+        // A switch between chunks: 9 s of `Off` and 1 s of `On` is not an `Off` row.
+        let mut s: Vec<VisitSample> = (0..9)
+            .map(|k| with(f64::from(k), BiasTee::Off, 1_000_000_000))
+            .collect();
+        s.push(with(9.0, BiasTee::On, 1_000_000_000));
+        assert_eq!(interval_bias_tee(&s), BiasTee::Unknown);
+        assert_eq!(
+            estimate(&s, span(0.0, 20.0), ConfidenceLevel::P95).bias_tee,
+            BiasTee::Unknown,
+            "a majority is not agreement"
+        );
+        // Learning the state, or losing it, is the same kind of disagreement (T-332).
+        let mixed = [with(0.0, BiasTee::Unknown, 1), with(1.0, BiasTee::On, 1)];
+        assert_eq!(interval_bias_tee(&mixed), BiasTee::Unknown);
+        // Nothing observed states nothing — and never `Off`.
+        assert_eq!(interval_bias_tee(&[]), BiasTee::Unknown);
+    }
+
+    /// T-359: a grid whose tiles pooled more than one state attributes none to its visits. The
+    /// **control** is an unmixed grid, whose state (including `Unknown`) is carried as it is.
+    #[test]
+    fn occupancy_visit_bias_tee_is_unknown_when_the_grid_pooled_two_states() {
+        for held in [BiasTee::Off, BiasTee::On, BiasTee::Unknown] {
+            let p = hk_store::ProvenanceSummary {
+                bias_tee: held,
+                bias_tee_mixed: false,
+                ..Default::default()
+            };
+            assert_eq!(grid_bias_tee(&p), held, "{held:?}");
+            let mixed = hk_store::ProvenanceSummary {
+                bias_tee_mixed: true,
+                ..p
+            };
+            assert_eq!(
+                grid_bias_tee(&mixed),
+                BiasTee::Unknown,
+                "{held:?} pooled with another state"
+            );
+        }
     }
 }
