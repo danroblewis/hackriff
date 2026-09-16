@@ -3807,7 +3807,7 @@ tasks:
   - id: T-237
     milestone: M2-hardening
     title: "Detector raises a marginal whole-window false alarm on synthetic noise fill (obw 2.8125 MHz = 120 of 128 bins), and T-180's test skip for it has silently become a no-op"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-231]
     parallel_group: DETECT
