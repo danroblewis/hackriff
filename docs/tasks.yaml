@@ -7136,6 +7136,83 @@ tasks:
       Prove non-vacuity the T-287/T-297 way: construct the state the clause forbids and show the assertion
       catching it. If that cannot be done until shadow is real, say so and sequence this behind T-365 rather
       than landing a test that cannot fail'
+  - id: T-367
+    milestone: M2-hardening
+    title: 'The two edge navigators control the wrong axes: the vertical must be time-for-this-frequency-range,
+      the horizontal frequency-across-the-survey'
+    status: todo
+    priority: high
+    deps:
+    - T-340
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'USER BUG plus a CLAUDE.md sharpening, 2026-09-16, and it is a defect in T-340 which merged
+      the same day. THE RULE: time runs down the waterfall and frequency across it, so the LEFT VERTICAL
+      BAR IS THE TIME NAVIGATOR - it selects the time range and shows a compressed history waterfall OF
+      THE CURRENTLY-SELECTED FREQUENCY RANGE ONLY, not the whole spectrum, and it NEVER CHANGES FREQUENCY.
+      The BOTTOM HORIZONTAL BAR IS THE FREQUENCY NAVIGATOR - it sets centre and span across the whole device-available
+      spectrum and shows the most-recent sample or occupancy across that range, and it NEVER SCRUBS TIME.
+      Each pans and zooms only its own axis; a dragged region on either zooms the main view along that axis.
+      The user names the failure explicitly: WIRING BOTH BARS TO SCRUB TIME IS A BUG. Two concrete changes
+      from what T-340 built: the time navigator''s overview must be scoped to the selected frequency range
+      rather than the whole retained capture, and each bar''s gestures must touch only its own axis. T-341''s
+      grid and T-338''s timeline window are already on the wire; T-343''s device path still owns centre-setting,
+      which remains a real retune and must not become implicit. Keep T-340''s controls: no pan may reach
+      a device route, and no RF constant or signal logic may enter ui/src. Fold into docs/14 and ADR-0017'
+  - id: T-368
+    milestone: M2-hardening
+    title: 'Grey must mean genuinely unobserved: the waterfall needs a backend coverage map derived from
+      the tune history'
+    status: todo
+    priority: normal
+    deps:
+    - T-341
+    - T-338
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'USER INVARIANT 2026-09-16, and the user marks it as the data-model plus UI item to sequence
+      after the two visible bugs. The view renders whatever samples ACTUALLY EXIST for the current time-and-frequency
+      selection, and greys ONLY cells that were truly never observed - never a fixed-size grey placeholder.
+      Switching to Live for a frequency range BACKFILLS FROM HISTORY (the ring, or the spectrum-history
+      pyramid) instead of starting black as if the device had just powered on. THE BACKEND REQUIREMENT:
+      keep a COVERAGE MAP derived from the SDR configuration and tune history - for each interval, which
+      centre, span, rate and DEVICE was active - so observed-versus-unobserved is COMPUTED FROM WHAT WAS
+      ACTUALLY SAMPLED rather than assumed, and the frequency navigator''s survey view is built from that
+      same coverage. The user ties it to an existing principle: config changes are provenance the data model
+      must record, per model receiver capabilities explicitly. This lands on work already done: T-302/T-303/T-304/T-305
+      made device_id load-bearing for device-local physics, T-325 added bias-tee state, T-332 made a switch
+      a provenance step, and T-341 reports the achievable grid - a tune history is the same family of fact.
+      It is also the honest half of T-341''s rule: that ticket stops the view CLAIMING detail it never captured,
+      and this one lets it SHOW what it did capture rather than a placeholder. Fold into docs/07, docs/14
+      and ADR-0017'
+  - id: T-369
+    milestone: M2-hardening
+    title: 'Overlapping boxes are an error signal: re-analyse the region rather than ranking competitors,
+      and make dedup collapse in the SERVED path'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3B
+    core_interface: true
+    model: opus
+    acceptance: 'USER INVARIANT and live-testing report, 2026-09-16. Confirmed and Candidate regions SHOULD
+      NOT OVERLAP in time-frequency: real emissions essentially never do, and two truly overlapping signals
+      would not demodulate (FM and the like break). SO OVERLAPPING BOXES ARE PROOF THE ANALYSIS IS WRONG,
+      with at least one true signal somewhere inside the union. The system must DETECT THE OVERLAP AND AUTOMATICALLY
+      RE-ANALYSE THAT REGION to resolve it to the real signal or signals, rather than leaving competing
+      boxes stacked. Confirmed still suppresses overlapping Candidates and overlapping Candidates still
+      compete by evidence, but THE RESOLUTION IS ACTIVE RE-ANALYSIS, NOT JUST RANKING. Candidates are expected
+      to CHURN - created and deleted continuously as this runs - so churn is not itself a defect. AND THE
+      PART THE USER SEES TODAY: ensure dedup actually collapses IN THE SERVED PATH, because the user still
+      sees overlaps live. That last clause is the sharp one - T-219''s overlap resolution and T-309''s clustering
+      both exist, so establish FIRST whether the collapse is failing to happen or failing to reach the wire,
+      and say which. Related and measured: T-316 took real-air false alarms from 875 detections and 5 candidate
+      emitters to 2 and 1, so some historical overlap was noise the detector has since stopped producing;
+      T-309 found clustering refused joins on observation statistics; T-336 fixed cross-producer double
+      counting. Re-measure against the current tree rather than inheriting any of those numbers. Fold into
+      docs/07, docs/14 and ADR-0017'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
