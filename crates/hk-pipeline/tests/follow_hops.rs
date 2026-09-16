@@ -241,6 +241,7 @@ impl Block for Burst {
         };
         let fast = 1.0 / (0.001 * self.rate);
         let slow = 1.0 / (0.2 * self.rate);
+        let down = 1.0 / (0.01 * self.rate);
         let warm = (0.05 * self.rate) as u64;
         for (k, z) in x.iter().enumerate() {
             let p = f64::from(z.norm_sqr());
@@ -265,7 +266,16 @@ impl Block for Burst {
                     self.len = 0;
                     self.peak = self.avg;
                 } else {
-                    self.floor += slow * (self.avg - self.floor);
+                    // The floor follows the level down fast (10 ms) and up slowly (0.2 s). A lane
+                    // that starts inside a burst - the mid-run channel add, or the pipeline start -
+                    // seeds `floor` from burst energy, and recovering that at the slow rate leaves
+                    // the trigger (30x floor) high for about a second: the next burst's rise
+                    // crossing lands a couple of ms late, the length reads that much short and the
+                    // code comes out one low (T-245: channel D's 104 ms burst measured 101.8 ms,
+                    // below the 102 ms 12/13 boundary). Falling fast recovers in about 30 ms;
+                    // rising stays slow so a burst never lifts the floor into its own trigger.
+                    let alpha = if self.avg < self.floor { down } else { slow };
+                    self.floor += alpha * (self.avg - self.floor);
                 }
                 continue;
             }
@@ -543,7 +553,8 @@ fn one_recipe_follows_a_channel_net_ordered_tagged_deduplicated_and_gains_a_chan
     run.finish();
 
     // The test's own burst detector needs a settling window after its lane starts before its
-    // length measurement means anything: `warm` (50 ms) and then the floor's 0.2 s time constant.
+    // length measurement means anything: `warm` (50 ms) and then the floor's recovery (T-245:
+    // about 30 ms, the fast-down side of its floor tracker; it was a second before that).
     // A lane that starts within that window of one of its bursts folds the burst into its floor
     // estimate, fires late and reads the burst short (T-228: channel D's 104 ms burst read as
     // 96 ms right after the mid-run add). Measure the window on the sample clock from when each
