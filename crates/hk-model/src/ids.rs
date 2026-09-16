@@ -113,6 +113,12 @@ define_ids! {
     /// A survey site (ADR-0012 §3.5): a discrete place the device was parked, the key of
     /// occupancy baselines for a moving device. Aggregate, user-renamable.
     SiteId;
+    /// A trunked system (§2.28, T-266): one system/site as a control channel describes it. Its
+    /// natural key `(protocol, system_id, site_id)` is only known once the control channel has
+    /// been decoded, so the row gets an id of its own from the moment it is found.
+    TrunkSystemId;
+    /// A followed call (§2.29, T-266). Metadata only — a call record never holds audio.
+    CallRecordId;
 }
 
 #[cfg(test)]

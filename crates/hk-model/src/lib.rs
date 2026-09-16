@@ -63,6 +63,7 @@ pub mod repo;
 pub mod sigmf;
 pub mod signature; // T-218 (ADR-0016 §5)
 pub mod time;
+pub mod trunking; // T-266 (C23 trunking metadata; metadata only, no call audio)
 
 pub use calibration::{
     CalibrationMethod, CalibrationState, GainSetting, PowerCalPoint, SpurMask, SpurRule,
@@ -97,9 +98,9 @@ pub use frames::{
 };
 pub use hash::{ContentHash, canonical_json};
 pub use ids::{
-    AnnotationId, AnomalyId, BitstreamId, BookmarkId, CalibrationStateId, DecodeId, DemodulationId,
-    DetectionId, EmitterId, ExplanationId, ExternalEventId, ProvenanceId, RecordingId, ScanPlanId,
-    SelectionId, SpurMaskId, SurveyId, TrackId,
+    AnnotationId, AnomalyId, BitstreamId, BookmarkId, CalibrationStateId, CallRecordId, DecodeId,
+    DemodulationId, DetectionId, EmitterId, ExplanationId, ExternalEventId, ProvenanceId,
+    RecordingId, ScanPlanId, SelectionId, SpurMaskId, SurveyId, TrackId, TrunkSystemId,
 };
 pub use plan::{
     GainTableEntry, PlanRegion, ScanPlan, ScanPolicy, Schedule, Survey, SurveyState, SurveySummary,
@@ -134,3 +135,8 @@ pub use signature::{
     SignatureKind, SignatureMatch, SignatureProvenance, SignatureRef, fold_field,
 };
 pub use time::{SampleTime, Timestamp, TimestampMethod};
+pub use trunking::{
+    CALL_REASONS_MAX, CallRecord, ChannelPlanEntry, Encryption, EncryptionEvidence, GrantEvent,
+    GrantKind, InvalidTrunking, LabelSource, MAX_SLOT, NeighbourSite, P25_ALGID_CLEAR,
+    TRUNK_LABEL_MAX, TRUNK_TEXT_MAX, Talkgroup, TrunkProtocol, TrunkSystem,
+};

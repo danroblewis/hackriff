@@ -88,6 +88,7 @@ mod signatures; // T-201
 pub mod sites; // T-119
 #[cfg(test)]
 mod tests;
+mod trunking; // T-266 C23 trunking metadata
 mod user_band; // T-191
 mod verification;
 
@@ -134,6 +135,10 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0009_signature.sql"), // T-218 C18 signature storage
     include_str!("migrations/0010_emission_features.sql"), // T-201 C18 measured features
     include_str!("migrations/0011_signature_cluster.sql"), // T-202 C18 clusters of unknowns
+    // 0012 is reserved by ADR-0017 §9 (TM-5) for `idx_emitter_observation_time`, so T-266 took
+    // 0013. This array, not the file name, decides what runs and in what order: a later 0012
+    // simply appends after this entry, and databases migrate correctly either way.
+    include_str!("migrations/0013_trunking.sql"), // T-266 C23 trunking metadata (no call audio)
 ];
 
 /// Schema version this build creates and understands.
