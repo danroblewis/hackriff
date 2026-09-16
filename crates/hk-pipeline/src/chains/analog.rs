@@ -491,8 +491,12 @@ fn identify(
             .inventory
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if inv.chain_emitter(&mut repo, cand.track, e).is_err() {
+        // Named, not just counted (T-293/T-319): a chain_emitter failure here silently loses the
+        // fold, the T-078 confirmation review and the T-219 overlap resolution, and a bare count
+        // trains everyone to ignore it.
+        if let Err(err) = inv.chain_emitter(&mut repo, cand.track, e) {
             inc(&c.errors);
+            eprintln!("hk-pipeline: analog chain emitter: {err}");
         }
     }
     Identified::Written(emitter, stored)
@@ -796,8 +800,12 @@ fn collect_and_write(
                     .inventory
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if inv.chain_emitter(&mut repo, cand.track, e).is_err() {
+                // Named, not just counted (T-293/T-319): a chain_emitter failure here silently
+                // loses the fold, the T-078 confirmation review and the T-219 overlap resolution,
+                // and a bare count trains everyone to ignore it.
+                if let Err(err) = inv.chain_emitter(&mut repo, cand.track, e) {
                     inc(&c.errors);
+                    eprintln!("hk-pipeline: analog chain emitter: {err}");
                 }
             }
         }

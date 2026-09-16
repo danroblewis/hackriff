@@ -215,11 +215,12 @@ pub(crate) fn store_and_explain(
         .inventory
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if inv
-        .chain_emitter(&mut repo, None, stored.emitter_id)
-        .is_err()
-    {
+    // Named, not just counted (T-293/T-319): a chain_emitter failure here silently loses the
+    // fold, the T-078 confirmation review and the T-219 overlap resolution, and a bare count
+    // trains everyone to ignore it.
+    if let Err(err) = inv.chain_emitter(&mut repo, None, stored.emitter_id) {
         crate::stats::inc(&shared.counters.chains.errors);
+        eprintln!("hk-pipeline: refine chain emitter: {err}");
     }
     Some(stored.emitter_id)
 }
