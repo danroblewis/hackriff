@@ -59,6 +59,10 @@ acceptance *args:
 acceptance-m2 *args:
     HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_m2 {{args}}
 
+# M3 classification acceptance suite (T-206, the M3 exit gate, ADR-0016 §7): blind accuracy over the full synthetic acceptance grid against the five a-priori floors (top-1, top-2, wrong-label, unknown recall, false-known), reported per family and per SNR bin, plus blind scenes through the mock SDR for classification, signature match and clustering of repeated unknowns. ~1700 classified snippets, so it is kept apart from `acceptance` for wall time. Extra args go to cargo test.
+acceptance-m3 *args:
+    HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_m3 {{args}}
+
 test-py:
     cd py && uv run --locked pytest
 
