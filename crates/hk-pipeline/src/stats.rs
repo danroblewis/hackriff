@@ -286,6 +286,16 @@ counter_group!(
         cc_tsbks,
         /// Identifier updates (IDEN_UP) seen, before the agreement gate.
         cc_iden_ups,
+        /// T-271: CRC-valid DMR CSBKs decoded from confirmed control channels. The DMR twin of
+        /// `cc_tsbks`, counted apart from it because they are different framings on different
+        /// systems and summing them would hide which protocol a run actually found.
+        cc_csbks,
+        /// T-271: DMR Tier III grants decoded. **Every one of these is also counted in
+        /// `cc_grants_unmapped`**, and that is the point rather than a bookkeeping accident: DMR
+        /// announces no channel parameters this build could corroborate, so a logical channel
+        /// number has no on-air base or step to resolve through and no frequency is ever produced
+        /// for one. The grant itself — talkgroup, radio, channel, timeslot — is fully recorded.
+        cc_dmr_grants,
         /// Channel-table entries **admitted**: an identifier corroborated by agreeing
         /// announcements and appended to `trunk_channel_plan`. Far fewer than `cc_iden_ups`,
         /// because a single unrepeated announcement never enters a band plan.
@@ -938,6 +948,12 @@ impl Counters {
             "history": self.history.to_json(),
             "spectrum": self.spectrum.to_json(),
             "chains": self.chains.to_json(),
+            // T-271: what this build can and cannot follow, and why. Present in **every** run,
+            // including one that found nothing — which is exactly the run where it matters, because
+            // a trunked system whose control traffic cannot be followed and a band with no traffic
+            // at all otherwise produce the same empty picture. Static, from
+            // `hk_detect::trunk::support`: a statement about the build, not about an observation.
+            "trunking": { "support": hk_detect::trunk::support_json() },
             "listen": self.listen.status_json(),
             "taps": taps,
             "iq": self.iq.to_json(),

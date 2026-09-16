@@ -23,6 +23,14 @@
 //!   carrying the verified service-options encryption bit produces a call flagged `encrypted`,
 //!   while a channel announced only by a grant update — late entry, no header — records `unknown`
 //!   and never `clear`. Both refuse a voice path, nothing is decrypted, and `recordings == 0`.
+//! - [`t271_dmr`] proves the hunt is **not P25-only**, and that a second protocol's refusal is as
+//!   honest as its decode: a DMR Tier III control channel is found blind by its own framing and
+//!   named from corroborated CSBKs, its grants are fully decoded, and **none of them resolves to a
+//!   frequency** — because DMR announces no channel parameters this build could corroborate — while
+//!   real traffic sits exactly where an assumed band plan would have put them. It also asserts the
+//!   run **reports** the systems no control-channel decoder can reach at all (Capacity Plus's
+//!   moving rest channel, NXDN Type-D's distributed trunking), since otherwise they are
+//!   indistinguishable from empty spectrum.
 
 // The shared harness modules carry helpers only the other suites use.
 #![allow(dead_code)]
@@ -47,3 +55,6 @@ mod t269_follow;
 
 #[path = "acceptance/t270_encryption.rs"]
 mod t270_encryption;
+
+#[path = "acceptance/t271_dmr.rs"]
+mod t271_dmr;

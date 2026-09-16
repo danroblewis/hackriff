@@ -24,6 +24,9 @@ hk-estimate.workspace = true
 hk-model.workspace = true
 # T-006: ci8 clip counting (`clip`).
 num-complex.workspace = true
+# T-271: the trunking protocol-support table is reported as JSON in the run summary, so a system
+# this build cannot follow says so rather than producing a silence.
+serde_json.workspace = true
 # T-058: feature `cpu-mt` (ADR-0010 ledger row: rayon).
 rayon = { version = "1.12", optional = true }
 

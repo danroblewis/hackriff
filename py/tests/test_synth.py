@@ -43,6 +43,7 @@ SMALL: dict[str, dict] = {
     "trunk_control_channel": {"duration_s": 0.2},
     "trunk_tsbk_control_channel": {"duration_s": 0.2},
     "trunk_encrypted_control_channel": {"duration_s": 0.2},
+    "trunk_dmr_control_channel": {"duration_s": 0.2},
     "lora_ism_burst": {"duration_s": 0.15, "sf": 7, "first_packet_s": 0.02,
                        "packet_period_s": 0.06, "fsk_period_s": 0.05},
 }
@@ -1204,3 +1205,89 @@ def test_lora_scene_separates_stable_from_swept_and_persistent_from_ephemeral(tm
     assert set(species) == {"cw", "fsk-burst", "lora-packet"}
     boxes = sorted(species.values())
     assert all(boxes[i][1] < boxes[i + 1][0] for i in range(2)), species
+
+
+def test_dmr_csbk_block_layout_and_masked_crc():
+    """T-271: a CSBK's fields sum to 96 bits, and its CRC carries the DMR mask.
+
+    The mask is the verified half. An unmasked CRC-CCITT is a perfectly valid CRC and the wrong
+    one for DMR, so it must not check out -- that is what the assertion below is for.
+    """
+    from hkpy.synth import trunking as tk
+
+    payload = tk.dmr_grant_payload(5, 1, 2468, 1357, flags=0b101)
+    assert len(payload) == 8
+    block = tk.csbk(tk.CSBKO_BTV_GRANT, payload)
+    assert len(block) == tk.CSBK_BYTES
+    assert block[0] & 0x3F == tk.CSBKO_BTV_GRANT and block[1] == 0
+    assert block[2:10] == payload
+    stored = int.from_bytes(block[10:], "big")
+    assert stored == tk.crc16_ccitt_zero(block[:10]) ^ tk.CSBK_CRC_MASK
+    assert stored != tk.crc16_ccitt_zero(block[:10]), "the mask was not applied"
+
+    # The grant field split, read back by hand: LPCN(12) TS(1) flags(3) target(24) source(24).
+    v = int.from_bytes(payload, "big")
+    assert v >> 52 == 5
+    assert (v >> 51) & 1 == 1
+    assert (v >> 48) & 7 == 0b101
+    assert (v >> 24) & 0xFF_FFFF == 2468
+    assert v & 0xFF_FFFF == 1357
+
+
+def test_dmr_syncs_are_outer_symbols_only_and_exact_complements():
+    """The sync constants verified by arithmetic rather than by recitation (T-271).
+
+    Two published hex words must reproduce two documented properties of DMR's sync patterns: every
+    symbol is an outer one, and the base-station data and voice syncs are exact dibit complements.
+    A transcription error survives neither.
+    """
+    from hkpy.synth import trunking as tk
+
+    level = {0b01: 3, 0b00: 1, 0b10: -1, 0b11: -3}
+    data = tk.dmr_sync_dibits()
+    voice = tk.dmr_sync_dibits(voice=True)
+    assert len(data) == 24 and len(voice) == 24
+    for d in list(data) + list(voice):
+        assert abs(level[int(d)]) == 3, "a DMR sync never uses an inner symbol"
+    for a, b in zip(data, voice):
+        assert level[int(a)] == -level[int(b)], "the two BS syncs are not complements"
+
+
+def test_dmr_scene_baits_the_trap_it_asks_the_decoder_to_refuse(tmp_path):
+    """T-271: the granted LPCN is derived from a frequency that carries real traffic.
+
+    A DMR Tier III grant names a logical channel and nothing else, and no on-air channel-parameter
+    announcement could be corroborated -- so the number resolves to nothing. This scene only proves
+    that refusal if refusing *costs* something, which is why the frequency an assumed 12.5 kHz band
+    plan would produce is (a) inside the window the radio holds and (b) carrying keyings.
+    """
+    from hkpy.synth import trunking as tk
+
+    manifest = gen(tmp_path, "trunk_dmr_control_channel")
+    _, meta, _ = load(manifest)
+    t = scenario_truth(meta)["trunking"]
+    d = t["dmr"]
+
+    # The LPCN follows from the trap frequency, never the other way round.
+    assert (d["assumed_base_hz"] + d["assumed_spacing_hz"] * d["grant_lpcn"]
+            == d["wrong_frequency_if_lpcn_assumed_hz"])
+    # Inside the window, so a guessing decoder could have followed it.
+    assert abs(d["trap_offset_hz"]) < 0.4 * d["sample_rate_hz"]
+    # And carrying traffic, so it would have been rewarded with a convincing call record.
+    keyings = d["trap_keyings_s"]
+    assert keyings, "the trap channel carries no traffic, so refusing costs nothing"
+    tol_s = 1.0 / d["sample_rate_hz"]
+    for a, b in keyings[:-1]:
+        assert abs((b - a) - d["trap_on_s"]) <= tol_s
+
+    # Both timeslots are exercised and the two grants name different logical channels, so a
+    # decoder cannot satisfy an assertion with the wrong one.
+    assert d["second_lpcn"] != d["grant_lpcn"]
+    assert {d["grant_timeslot"], d["second_timeslot"]} == {0, 1}
+    assert d["counts"]["btv-grant"] >= 1 and d["counts"]["p-grant"] >= 1
+    assert d["counts"]["c-aloha"] >= 1, "nothing corroborates the system as trunked"
+    assert d["counts"]["other"] >= 1, "the stream is only messages the decoder understands"
+
+    # The decoy is still there and still unconfirmable -- now under two framings, not one.
+    assert t["continuous_decoy"]["expected_confirmed"] is False
+    assert t["control_channel"]["sync_hex"] == tk.DMR_BS_DATA_SYNC_HEX

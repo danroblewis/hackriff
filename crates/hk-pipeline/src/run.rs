@@ -1666,11 +1666,12 @@ impl RunSummary {
             c("/chains/sweep_uncharacterised")
         ));
         line(format!(
-            "trunking:    {} CC confirmed, {} TSBK(s), {} grant(s) mapped / {} unmapped / {} \
-             outside window; {} followed ({} refused, {} silent), {} call(s) ({} closed on \
-             silence)",
+            "trunking:    {} CC confirmed, {} TSBK(s) + {} CSBK(s), {} grant(s) mapped / {} \
+             unmapped / {} outside window; {} followed ({} refused, {} silent), {} call(s) ({} \
+             closed on silence)",
             c("/chains/cc_confirmed"),
             c("/chains/cc_tsbks"),
+            c("/chains/cc_csbks"),
             c("/chains/cc_grants_mapped"),
             c("/chains/cc_grants_unmapped"),
             c("/chains/cc_grants_outside_window"),
@@ -1680,6 +1681,21 @@ impl RunSummary {
             c("/chains/cc_calls"),
             c("/chains/cc_calls_closed"),
         ));
+        // T-271. Printed unconditionally, and that is deliberate: a run that found nothing is
+        // exactly the run where a person needs to know that some trunked systems cannot be found at
+        // all by a control-channel decoder. Naming them is the difference between an answer and a
+        // silence that reads as "there is nothing here".
+        line(format!(
+            "trunk gaps:  {}",
+            hk_detect::trunk::unsupported_text()
+        ));
+        if c("/chains/cc_dmr_grants") > 0 {
+            line(format!(
+                "             {} DMR grant(s) decoded, none resolved to a frequency: DMR Tier III \
+                 announces no channel parameters this build could corroborate",
+                c("/chains/cc_dmr_grants")
+            ));
+        }
         line(format!(
             "decodes:     {} demodulations, {} decodes ({} content withheld), {} CRC-valid; plugins {} decodes, {} records dropped, {} restarts",
             c("/chains/demodulations"),
