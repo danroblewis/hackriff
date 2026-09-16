@@ -5902,7 +5902,7 @@ tasks:
     milestone: M2-hardening
     title: 'Keying baselines is not end-to-end: occupancy reads history unfiltered, so front ends are already
       averaged in the level-0 cells before a baseline sees them'
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-303
@@ -7278,7 +7278,7 @@ tasks:
   - id: T-371
     title: A baselines/slots row does not name its bias-tee cohort
     milestone: M4
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CTX
     deps: [T-359]
@@ -7436,7 +7436,7 @@ tasks:
     title: A level-0 cell's occupancy was decided at ingest against a floor every front end feeds,
       so a per-chain read can still inherit another chain's threshold
     milestone: M4
-    status: todo
+    status: in-progress
     priority: medium
     parallel_group: PIPE
     deps: [T-314]
