@@ -35,6 +35,7 @@
 
 pub mod chains;
 pub mod class;
+pub mod classify; // T-199
 pub mod compute;
 pub mod config;
 pub mod control;

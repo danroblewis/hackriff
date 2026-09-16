@@ -31,6 +31,12 @@ opt-level = 3
 [profile.dev.package.hk-dsp]
 opt-level = 2
 
+# T-199: the classifier's evaluation sweeps generate and classify hundreds of synthetic snippets
+# per run (filters, IDFTs, moments). Unoptimised they take minutes; at opt-level 2 they take
+# seconds, like the other DSP crates above.
+[profile.dev.package.hk-classify]
+opt-level = 2
+
 [profile.dev.package.hk-core]
 opt-level = 2
 
