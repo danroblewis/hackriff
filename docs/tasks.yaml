@@ -4051,7 +4051,7 @@ tasks:
     milestone: M3
     title: 'M3 gate blocker: open-set abstention on analog (recall 0.528) and psk-qam
       (0.458) against the 0.80 floor; aggregate false-known 0.2222 against 0.10'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: M3A
@@ -4139,6 +4139,12 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    target_2026_09_16: 'User-set, a priori, NOT to be loosened after measuring: the
+      ~82 near-duplicate candidates around one FM signal must resolve to ~4-7 real
+      signals within ~2-10 s of continuous re-detection. Detection is fast, continuous
+      and self-cleaning (CLAUDE.md invariant 4). Report the achieved count and time on
+      the user''s own 99.6 MHz scene AND on the 902-928 MHz ISM burst scene (T-254).'
+
   - id: T-251
     milestone: M2-hardening
     title: 'Candidates never decay or get re-verified: seen-counts accumulate forever
@@ -4167,6 +4173,12 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+    invariant_2026_09_16: 'CLAUDE.md invariant 4: NO unbounded seen-count accumulators
+      and no ghost candidates for signals that have stopped. Note the framing shift: a
+      persisting signal''s box GROWS along the time axis, so a growing time extent is
+      the accumulator correctly modelled - the raw count was pathological only because
+      it had nowhere to live. This work and T-253''s model are one design; coordinate.'
+
   - id: T-252
     milestone: MUI
     title: 'RDS should surface as an accumulated PS / RadioText / PI / clock view, not
@@ -4193,37 +4205,75 @@ tasks:
     core_interface: false
   - id: T-253
     milestone: MUI
-    title: 'DESIGN (user sign-off required, do NOT build): signals as time-bounded
-      events; Explore inventory scoped to the viewed waterfall window; all-time
-      catalogue moved to a separate history surface'
-    status: todo
-    priority: normal
+    title: 'ADR: signals as time-frequency regions with a time extent; Explore scoped
+      to the viewed waterfall window; all-time catalogue as a separate history surface'
+    status: in-progress
+    priority: high
     deps: []
     parallel_group: MUI-DESIGN
     use_cases:
     - AWARE-053
-    found_by: 'user, live Explore testing 2026-09-16: the inventory answers "what has
-      EVER been seen here" but is presented as "what is here NOW", so ghosts of dead
-      signals pile up as live candidates'
-    acceptance: 'DESIGN ONLY - no code, and no silent implementation. Produce an ADR
-      covering: (1) a time extent (start / end / ongoing) on the emitter and detection
-      model in docs/07, with ephemeral bursts and chirps FIRST-CLASS - a 10-second chirp
-      is a signal, a one-off burst is a signal; no carrier, no stable frequency, no
-      permanence required; (2) Explore Candidates/Confirmed scoped to the visible
-      waterfall window, with scrub back/forward replaying recent IQ-ring history (ring
-      is 30 min on staging); (3) the durable all-time inventory as a SEPARATE history
-      surface cataloguing past events with their timespans. The user''s proposed model
-      to confirm: Candidate = hypothesis about energy in the current time window;
-      Confirmed = a verified emitter carrying its own time-presence track; History =
-      durable catalogue of all events including one-offs. Say plainly what this costs:
-      it touches ADR-0016 arbitration and the cluster contract, not only the UI. Fold
-      the agreed direction into docs/07, docs/14 and docs/15. STOP at the ADR and hand
-      it to the user for sign-off'
-    area: docs/adr (new), docs/07-data-model.md, docs/14-ui-rewrite.md, docs/15-decoder-synthesis.md
-    needs: user sign-off before any implementation
+    found_by: 'user, live Explore testing 2026-09-16; MODEL SETTLED by the user and
+      written into CLAUDE.md as "Signal & inventory model (invariants, from the user
+      2026-09-16)" - six invariants that hold across milestones'
+    acceptance: 'the model is SETTLED, so the ADR RECORDS it rather than proposing it;
+      what the user signs off is the IMPLEMENTATION PLAN and its staging, not the model.
+      Cover all six invariants from CLAUDE.md: (1) a signal is a time-frequency region
+      with centre, width AND time extent - ephemeral bursts and chirps first-class, no
+      carrier or stable frequency required; (2) Explore Candidate/Confirmed reflect only
+      the viewed waterfall window, each region drawing a box, past events on the timeline
+      scrubber, scrubbing re-deriving the lists from the IQ ring; (3) Candidate =
+      hypothesis about energy in the window, Confirmed = verified emitter with its own
+      time-presence track, History = durable catalogue of every event including one-offs;
+      (4) detection fast, continuous and self-cleaning - merge near-duplicates, decay and
+      expire when a region goes quiet, NO unbounded seen-count accumulators, a persisting
+      signal''s box GROWS along the time axis; (5) decode operates on a captured region
+      and EXTENDS with it - live decoding extends the time extent and decodes only the
+      newly-arrived part, never re-decoding what is done. TWO CONFLICTS TO RESOLVE
+      EXPLICITLY, not discover later: (a) invariant 5 contradicts Listen as designed in
+      T-221/ADR-0011 section 8, which skips to the live edge and treats latency as a
+      contract for audio but only a statistic for decoding - an incremental
+      extend-and-decode has a different lifecycle; say which wins where; (b) a growing
+      box IS the seen-count accumulator correctly modelled, so T-251''s decay work and
+      this model are one design - state how they compose. Also state what this costs in
+      ADR-0016 arbitration and the cluster contract, which it touches. Fold the recorded
+      model into docs/07 (time-extent detection model) and docs/14 (MUI scrub, boxes,
+      history surface). STOP at the ADR plus a staged implementation plan and hand it to
+      the user'
+    area: docs/adr (new), docs/07-data-model.md, docs/14-ui-rewrite.md
+    needs: user sign-off on the staged plan before implementation
     model: opus
     effort: medium
     core_interface: true
+
+  - id: T-254
+    milestone: M2-hardening
+    title: 'Burst acceptance scene over 902-928 MHz (915 ISM) through the IQ ring: the
+      canonical short-burst playground as a blind fixture'
+    status: todo
+    priority: normal
+    deps:
+    - T-250
+    parallel_group: PIPE
+    use_cases:
+    - SIGNAL-062
+    - AWARE-053
+    found_by: 'user 2026-09-16, CLAUDE.md invariant 1: the 902-928 MHz / 915 MHz ISM
+      band (rtl_433 sensors, remotes, LoRa) is the canonical playground - short bursts
+      everywhere - and a good acceptance fixture via the IQ ring'
+    acceptance: 'a blind acceptance scene over 902-928 MHz driven through the mock SDR
+      from the IQ ring, with hidden truth in the assertions only: short bursts are
+      detected as time-frequency regions with a real time extent (start/stop), each is
+      ONE emitter rather than skirt fragments, and ephemeral one-offs are catalogued as
+      past events rather than left as live candidates. Ties to the user''s earlier field
+      observation of intermittent DATA-like bursts near 100.3 MHz - check that case too
+      once burst detection is verified. Thresholds set a priori; never look a frequency
+      up and tune to it'
+    area: tests/e2e, fixtures (SigMF metadata only - never commit fixture data)
+    needs: a 902-928 MHz capture via the IQ ring (HackRF, receive-only)
+    model: opus
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
