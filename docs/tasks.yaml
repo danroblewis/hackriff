@@ -7043,7 +7043,8 @@ tasks:
     milestone: M3
     title: 'ModelHost and HostStats have no reference outside hk-ml: the counters T-283 just made coherent
       have no production reader'
-    status: in-progress
+    status: done
+    commit: 5b6fee1
     priority: normal
     deps:
     - T-283
@@ -7092,6 +7093,49 @@ tasks:
       at a pooled fit the FOUR dimensions hold the open set better (0.9242 vs 0.9000) at the same burst
       recall, so if pooled fitting is adopted the four-dimension expansion should be re-evaluated in the
       same breath rather than staying refused on a protocol that no longer applies'
+  - id: T-365
+    milestone: M3
+    title: T-203 is marked done but ADR-0016 section 10 assigns it a store and three routes that do not
+      exist
+    status: todo
+    priority: normal
+    deps:
+    - T-363
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    acceptance: 'T-363 found this while establishing that the model host is dormant by design. ADR-0016
+      section 10 assigns hk-store/src/ml/** and hk-api/src/ml.rs to T-203; section 6 puts shadow records
+      in hk-store ml/shadow/ and section 9 serves GET /api/ml/shadow, GET /api/ml/models and PUT /api/ml/models/{id}/mode.
+      NONE OF IT EXISTS - no hk-store/src/ml/, no hk-api/src/ml.rs, no /api/ml rows in docs/api.md, and
+      MemoryShadowSink is the only ShadowSink in the tree - while T-203 reads status: done. So an ADR assigns
+      work to a completed ticket, which means either the ticket was closed early or the ADR is stale, and
+      a reader cannot tell which. EITHER build them or amend section 10 to move them to whichever ticket
+      makes shadow real. This is the concrete third item in T-363''s enable condition: the host stays correctly
+      dormant until a durable hk-store-backed ShadowSink exists, because wiring observe now would record
+      into a buffer nobody drains. Do not mark anything done that is not; the board''s value is that status
+      means something'
+  - id: T-366
+    milestone: M3
+    title: ADR-0016 section 7s ML exit-gate row is asserted nowhere, so it is vacuously satisfiable
+    status: todo
+    priority: normal
+    deps:
+    - T-363
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    acceptance: 'T-363''s second finding. ADR-0016 section 7 carries an ML row in the M3 exit gate - shadow
+      changes no Classification row, each active family has enable evidence, zero ring sample drops with
+      ML on - and tests/e2e/tests/acceptance/m3_*.rs contains NO ML ASSERTION AT ALL. So the row passes
+      because nothing checks it. THAT IS THE SAME SHAPE AS T-206''s two vacuous gate dimensions, which this
+      project already paid to find once. Note the honest complication: with the host dormant (T-363) two
+      of the three clauses are trivially true today and the third is unreachable, so a test written now
+      would itself be near-vacuous - which is exactly the trap. The useful form is a test that FAILS THE
+      DAY ML BECOMES ACTIVE WITHOUT ITS EVIDENCE, rather than one that passes today because nothing is on.
+      Prove non-vacuity the T-287/T-297 way: construct the state the clause forbids and show the assertion
+      catching it. If that cannot be done until shadow is real, say so and sequence this behind T-365 rather
+      than landing a test that cannot fail'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
