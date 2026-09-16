@@ -85,4 +85,25 @@ fn main() {
         report.summary.wrong_label_rate_at_gate,
         report.summary.held_out_unknown_recall,
     );
+    for c in &report.coverage {
+        match (c.unknown_recall, c.false_known_rate) {
+            (Some(recall), Some(false_known)) => eprintln!(
+                "[T-244] open set {:<11} n {:>3}, unknown recall {recall:.3}, false-known {false_known:.3}  [{}]",
+                c.family,
+                c.n_ood,
+                c.generators.join(", ")
+            ),
+            _ => eprintln!(
+                "[T-244] open set {:<11} UNMEASURED: no out-of-taxonomy generator reached it",
+                c.family
+            ),
+        }
+    }
+    // **A missing negative fails the run** (T-244). The reports are written first, so the evidence
+    // of what was and was not measured is on disk either way; what must not happen is this exiting
+    // 0 with an unknown-recall figure that two families never contributed to.
+    if let Err(gap) = report.require_open_set_coverage() {
+        eprintln!("[T-244] FAILED: {gap}");
+        std::process::exit(1);
+    }
 }

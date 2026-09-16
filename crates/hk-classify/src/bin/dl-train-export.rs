@@ -107,10 +107,13 @@ fn main() {
         );
     }
 
-    // Out-of-taxonomy generators, labelled by the family they most resemble: the open set is
-    // measured against what would actually be routed into each model, not against noise.
+    // Out-of-taxonomy generators, labelled by the family whose boundary they test
+    // (`probes_family`, T-244): the open set is measured against what would actually be routed
+    // into each model, not against noise. Routing by `nearest_family` instead — which is `None`
+    // for a generator that belongs to no family — exported no `ood` rows at all for `analog`,
+    // `psk-qam` and `pulsed`, and dropped three of the six generators entirely.
     for class in Class::HELD_OUT {
-        let Some(family) = class.nearest_family() else {
+        let Some(family) = class.probes_family() else {
             continue;
         };
         let gate = thresholds_of(family)

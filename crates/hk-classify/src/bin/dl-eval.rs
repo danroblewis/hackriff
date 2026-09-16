@@ -78,6 +78,10 @@ struct FamilyResult {
     model: String,
     n_id: usize,
     n_ood: usize,
+    /// Whether any out-of-taxonomy negative reached this family at all. `false` makes every
+    /// open-set number below meaningless (they are `NaN`), and is a gap in the held-out set rather
+    /// than a property of the model (T-244).
+    open_set_measured: bool,
     classical_auroc: f64,
     dl_auroc: f64,
     classical_false_known: f64,
@@ -155,7 +159,12 @@ fn main() {
 
     for class in Class::TAXONOMY.iter().chain(Class::HELD_OUT) {
         let truth_family = class.family();
-        let routed = truth_family.or_else(|| class.nearest_family());
+        // A taxonomy class is routed to its own family; a held-out generator to the family whose
+        // boundary it tests (`probes_family`, T-244). Routing the negatives by `nearest_family`
+        // instead gave `analog` and `psk-qam` no negatives at all — their AUROC and false-known
+        // rate were NaN, i.e. never measured — and silently skipped the three generators that
+        // belong to no family.
+        let routed = truth_family.or_else(|| class.probes_family());
         let Some(routed) = routed else { continue };
         if !stage.families().any(|f| f == routed) {
             continue;
@@ -358,6 +367,7 @@ fn main() {
             model: manifests[family].model.to_string(),
             n_id: id.len(),
             n_ood: ood.len(),
+            open_set_measured: !ood.is_empty(),
             classical_auroc,
             dl_auroc,
             classical_false_known: classical_fk,

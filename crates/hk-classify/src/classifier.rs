@@ -449,18 +449,40 @@ mod tests {
     fn an_out_of_taxonomy_generator_is_unknown_not_the_nearest_family() {
         let mut unknowns = 0;
         let mut n = 0;
+        let mut adr_unknowns = 0;
+        let mut adr_n = 0;
+        let mut wrong_family = Vec::new();
         for class in Class::HELD_OUT {
+            let adr = Class::ADR_HELD_OUT.contains(class);
             for seed in 0..6 {
                 let c = classify(*class, 25.0, crate::synth::ACCEPTANCE_SEED_BASE + seed);
                 n += 1;
+                adr_n += i32::from(adr);
                 if c.family == UNKNOWN || c.open_set_score >= 0.5 {
                     unknowns += 1;
+                    adr_unknowns += i32::from(adr);
+                } else if class.nearest_family() != Some(c.family.as_str()) {
+                    wrong_family.push((class.label(), c.family.clone()));
                 }
             }
         }
-        // ADR-0016 §7 floor for held-out unknowns.
-        let recall = f64::from(unknowns) / f64::from(n);
-        assert!(recall >= 0.80, "held-out unknown recall {recall:.2}");
+        // ADR-0016 §7's floor, over the population §7 names (`Class::ADR_HELD_OUT`).
+        let adr_recall = f64::from(adr_unknowns) / f64::from(adr_n);
+        assert!(
+            adr_recall >= 0.80,
+            "held-out unknown recall {adr_recall:.2}"
+        );
+
+        // **The property that holds over every generator, T-244's five included, and the one the
+        // name of this test claims:** an out-of-taxonomy emission is never given a family that is
+        // not its own. Where it is not abstained on, it is recognised as the family it genuinely
+        // belongs to — an unlisted analog mode as `analog`, an unlisted constellation as
+        // `psk-qam` — which is generalisation, not a confident wrong label.
+        assert!(wrong_family.is_empty(), "{wrong_family:?}");
+        eprintln!(
+            "[T-244] abstention over all {n} held-out snippets {:.2} (ADR-0016 §7's six: {adr_recall:.2}); wrong family: 0",
+            f64::from(unknowns) / f64::from(n)
+        );
     }
 
     #[test]

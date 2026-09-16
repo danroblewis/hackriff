@@ -26,18 +26,20 @@
 //! [`crate::eval::EvalReport::record`] scores the answer afterwards (docs/10 §3.2: never look a
 //! frequency, or a class, up and then tune to it).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 
 use num_complex::Complex32;
 use serde::{Deserialize, Serialize};
 
 use hk_model::CrcStatus;
-use hk_model::classify::{Classification, TaxonomyRef};
+use hk_model::classify::{Classification, TaxonomyRef, UNKNOWN};
 
 use crate::density::DENSITY_VERSION;
 use crate::eval::EvalReport;
-use crate::synth::{ACCEPTANCE_SEED_BASE, Class, DEV_SEEDS, SynthConfig, generate};
+use crate::synth::{
+    ACCEPTANCE_SEED_BASE, Class, DEV_SEEDS, SynthConfig, generate, open_set_families,
+};
 use crate::thresholds::{FEATURES_VERSION, RULES_VERSION, THRESHOLDS_VERSION, thresholds_of};
 
 // ---------------------------------------------------------------------------------------------
@@ -360,6 +362,81 @@ pub struct ClassRow {
     pub wrong: f64,
 }
 
+// ---------------------------------------------------------------------------------------------
+// Open-set coverage: which families actually had a negative, and which only look like they did.
+// ---------------------------------------------------------------------------------------------
+
+/// One family's **open-set coverage**: how many out-of-taxonomy negatives were routed to it
+/// ([`Class::probes_family`]) and what the classifier did with them.
+///
+/// The rates are [`Option`] on purpose. A family no negative reached has *no* false-known rate, and
+/// writing `0.0` there — which is what the aggregate figures did before T-244 — publishes a perfect
+/// score for something that was never run. `None` serialises as `null` and cannot be read as a
+/// pass.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FamilyCoverage {
+    /// `hk-mod@1` family.
+    pub family: String,
+    /// Out-of-taxonomy snippets routed to this family. Zero means **unmeasured**.
+    pub n_ood: usize,
+    /// The held-out generators that produced them (labels), for tracing a number to a waveform.
+    pub generators: Vec<String>,
+    /// Share of them the classifier abstained on, or `None` when nothing was measured. Scored by
+    /// the same rule as [`Summary::held_out_unknown_recall`] (`family == "unknown"`), so the rows
+    /// here decompose that aggregate rather than restating it differently.
+    pub unknown_recall: Option<f64>,
+    /// Share given *some* family instead, or `None` when nothing was measured.
+    pub false_known_rate: Option<f64>,
+}
+
+impl FamilyCoverage {
+    /// A family nothing was measured for: the shape a coverage gap takes in the report.
+    pub fn unmeasured(family: &str) -> Self {
+        Self {
+            family: family.to_owned(),
+            n_ood: 0,
+            generators: Vec::new(),
+            unknown_recall: None,
+            false_known_rate: None,
+        }
+    }
+
+    /// Whether any out-of-taxonomy snippet actually reached this family.
+    pub fn measured(&self) -> bool {
+        self.n_ood > 0
+    }
+}
+
+/// Families whose open set no out-of-taxonomy generator reached: the gate would otherwise report
+/// coverage it never tested.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoverageGap {
+    /// The unmeasured families, sorted.
+    pub families: Vec<String>,
+}
+
+impl fmt::Display for CoverageGap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "no out-of-taxonomy generator reached {}: their open set (unknown recall, false-known \
+             rate, AUROC) is UNMEASURED, not good — add a generator whose `probes_family` names \
+             each of them (ADR-0016 §7, T-244)",
+            self.families.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for CoverageGap {}
+
+/// Running tally of one family's out-of-taxonomy negatives.
+#[derive(Clone, Debug, Default)]
+struct OodTally {
+    n: usize,
+    unknown: usize,
+    generators: BTreeSet<&'static str>,
+}
+
 /// Summary figures a gate check reads directly, computed the same way every time (ADR-0016 §7:
 /// never one SNR-averaged number reported alone — this is a convenience index into `rows`/
 /// `class_rows`, not a replacement for them).
@@ -383,6 +460,11 @@ pub struct Summary {
     pub held_out_unknown_recall: f64,
     /// False-known rate over the `held-out` source: given *some* family instead of abstaining.
     pub held_out_false_known_rate: f64,
+    /// Families with **no** out-of-taxonomy negative in this run. The two figures above are
+    /// averages over whatever negatives existed, so they say nothing at all about these families;
+    /// a non-empty list here means the run cannot support an open-set claim about them
+    /// ([`Report::require_open_set_coverage`]).
+    pub unmeasured_open_set_families: Vec<String>,
 }
 
 /// A full evaluation report: reproducibility metadata plus every condition (ADR-0016 §7's blind
@@ -396,13 +478,21 @@ pub struct Report {
     pub rows: Vec<Row>,
     /// Every within-family-class `source × family × class × SNR bin` row.
     pub class_rows: Vec<ClassRow>,
+    /// Per-family open-set coverage: one row for **every** measurable family, including those no
+    /// negative reached (`n_ood: 0`, rates `null`).
+    pub coverage: Vec<FamilyCoverage>,
     /// Convenience summary, computed from `rows`/`class_rows` by the same rules every time.
     pub summary: Summary,
 }
 
 impl Report {
-    /// Builds a report from an [`EvalReport`]'s accumulated cells plus `run`'s metadata.
-    pub fn build(eval: &EvalReport, run: RunMeta) -> Self {
+    /// Builds a report from an [`EvalReport`]'s accumulated cells, `run`'s metadata and the
+    /// per-family open-set coverage the run accumulated.
+    ///
+    /// Every family in [`open_set_families`] gets a row whether or not `coverage` mentions it, so
+    /// a caller that measured nothing produces a report that says so — the check
+    /// ([`Report::require_open_set_coverage`]) fails closed rather than passing by omission.
+    pub fn build(eval: &EvalReport, run: RunMeta, coverage: Vec<FamilyCoverage>) -> Self {
         let rows: Vec<Row> = eval
             .cells()
             .map(|(source, family, bin, cell)| Row {
@@ -448,6 +538,28 @@ impl Report {
             .map(|(_, _, _, cell)| cell.wrong_rate())
             .fold(0.0, f64::max);
 
+        // One row per measurable family, taken from what was measured where that exists and marked
+        // unmeasured where it does not. Anything the caller supplied for a family outside the list
+        // is kept rather than dropped, so an extra measurement can never disappear silently.
+        let mut supplied: BTreeMap<String, FamilyCoverage> = coverage
+            .into_iter()
+            .map(|c| (c.family.clone(), c))
+            .collect();
+        let mut coverage: Vec<FamilyCoverage> = open_set_families()
+            .into_iter()
+            .map(|f| {
+                supplied
+                    .remove(f)
+                    .unwrap_or_else(|| FamilyCoverage::unmeasured(f))
+            })
+            .collect();
+        coverage.extend(supplied.into_values());
+        let unmeasured_open_set_families: Vec<String> = coverage
+            .iter()
+            .filter(|c| !c.measured())
+            .map(|c| c.family.clone())
+            .collect();
+
         let summary = Summary {
             n_total,
             known_top1_at_gate_plus5: strong.top1_rate(),
@@ -457,13 +569,36 @@ impl Report {
             worst_bin_wrong_rate,
             held_out_unknown_recall: held_out.unknown_rate(),
             held_out_false_known_rate: held_out.wrong_rate(),
+            unmeasured_open_set_families,
         };
 
         Self {
             run,
             rows,
             class_rows,
+            coverage,
             summary,
+        }
+    }
+
+    /// **Fails when a family's open set was never exercised** (T-244).
+    ///
+    /// The aggregate held-out figures are averages over whatever negatives happened to exist. If no
+    /// generator routes to a family, that family contributes nothing to them, and the aggregate
+    /// still reads like a result — which is how `analog` and `psk-qam` came to have an
+    /// unknown-recall number the M3 gate would have published without ever testing for it. A gate
+    /// run calls this and refuses to report rather than averaging over a hole.
+    pub fn require_open_set_coverage(&self) -> Result<(), CoverageGap> {
+        let families: Vec<String> = self
+            .coverage
+            .iter()
+            .filter(|c| !c.measured())
+            .map(|c| c.family.clone())
+            .collect();
+        if families.is_empty() {
+            Ok(())
+        } else {
+            Err(CoverageGap { families })
         }
     }
 
@@ -481,10 +616,13 @@ impl Report {
              | wrong-label rate overall | {:.3} |\n\
              | worst per-bin wrong-label rate | {:.3} |\n\
              | held-out unknown recall | {:.3} |\n\
-             | held-out false-known rate | {:.3} |\n\n\
-             ## Family rows\n\n\
-             | source | family | SNR bin dB | n | top-1 | top-2 | unknown | wrong |\n\
-             |---|---|---:|---:|---:|---:|---:|---:|\n",
+             | held-out false-known rate | {:.3} |\n\
+             | families with an UNMEASURED open set | {} |\n\n\
+             ## Open-set coverage, per family\n\n\
+             The two held-out figures above are averages over whatever negatives existed. A family \
+             with no negative contributes nothing to them and is **unmeasured**, never good.\n\n\
+             | family | OOD n | unknown recall | false-known | generators |\n\
+             |---|---:|---:|---:|---|\n",
             self.run.grid,
             self.run.commit,
             self.run.taxonomy,
@@ -501,6 +639,26 @@ impl Report {
             self.summary.worst_bin_wrong_rate,
             self.summary.held_out_unknown_recall,
             self.summary.held_out_false_known_rate,
+            self.summary.unmeasured_open_set_families.len(),
+        );
+        for c in &self.coverage {
+            match (c.unknown_recall, c.false_known_rate) {
+                (Some(recall), Some(false_known)) => out.push_str(&format!(
+                    "| {} | {} | {recall:.3} | {false_known:.3} | {} |\n",
+                    c.family,
+                    c.n_ood,
+                    c.generators.join(", ")
+                )),
+                _ => out.push_str(&format!(
+                    "| {} | 0 | UNMEASURED | UNMEASURED | none |\n",
+                    c.family
+                )),
+            }
+        }
+        out.push_str(
+            "\n## Family rows\n\n\
+             | source | family | SNR bin dB | n | top-1 | top-2 | unknown | wrong |\n\
+             |---|---|---:|---:|---:|---:|---:|---:|\n",
         );
         for r in &self.rows {
             out.push_str(&format!(
@@ -570,6 +728,7 @@ pub struct Harness {
     grid: GridSize,
     guard: SeedGuard,
     report: EvalReport,
+    open_set: BTreeMap<&'static str, OodTally>,
 }
 
 impl Harness {
@@ -579,6 +738,7 @@ impl Harness {
             grid,
             guard: SeedGuard::new(Split::Acceptance),
             report: EvalReport::new(5.0),
+            open_set: BTreeMap::new(),
         }
     }
 
@@ -627,6 +787,12 @@ impl Harness {
             }
         }
         for class in Class::HELD_OUT {
+            // Which family's boundary this negative tests. `probes_family` is total over the
+            // held-out set by construction (`crate::synth`), so a new generator cannot be added
+            // without saying what it is a negative for.
+            let probed = class
+                .probes_family()
+                .expect("every held-out generator probes a family");
             for &offset in [0.0_f64, 5.0, 10.0].iter() {
                 let snr = 20.0 + offset;
                 for _ in 0..self.grid.trials() {
@@ -635,6 +801,14 @@ impl Harness {
                     let s = generate(*class, &SynthConfig::new(snr, seed));
                     let c = classify(&blind(&s, snr));
                     self.report.record("held-out", None, offset, &c);
+                    // Scored by the same rule as the aggregate (`family == unknown`), so these
+                    // rows decompose the headline figure instead of restating it differently.
+                    let tally = self.open_set.entry(probed).or_default();
+                    tally.n += 1;
+                    if c.family == UNKNOWN {
+                        tally.unknown += 1;
+                    }
+                    tally.generators.insert(class.label());
                 }
             }
         }
@@ -658,10 +832,22 @@ impl Harness {
         &self.report
     }
 
-    /// Finishes the run: a serialisable [`Report`] with reproducibility metadata.
+    /// Finishes the run: a serialisable [`Report`] with reproducibility metadata and per-family
+    /// open-set coverage.
     pub fn finish(self) -> Report {
         let run = RunMeta::capture(self.grid, &self.guard);
-        Report::build(&self.report, run)
+        let coverage: Vec<FamilyCoverage> = self
+            .open_set
+            .iter()
+            .map(|(family, t)| FamilyCoverage {
+                family: (*family).to_owned(),
+                n_ood: t.n,
+                generators: t.generators.iter().map(|g| (*g).to_owned()).collect(),
+                unknown_recall: Some(t.unknown as f64 / t.n as f64),
+                false_known_rate: Some((t.n - t.unknown) as f64 / t.n as f64),
+            })
+            .collect();
+        Report::build(&self.report, run, coverage)
     }
 }
 
@@ -913,7 +1099,7 @@ mod tests {
         );
         let guard = SeedGuard::new(Split::Acceptance);
         let run = RunMeta::capture(GridSize::Small, &guard);
-        let report = Report::build(&r, run);
+        let report = Report::build(&r, run, vec![]);
 
         let json = serde_json::to_string_pretty(&report).expect("serialise");
         let back: Report = serde_json::from_str(&json).expect("round-trip");
@@ -922,5 +1108,126 @@ mod tests {
         let md = report.markdown();
         assert!(md.contains("## Summary"));
         assert!(md.contains("| source | family | SNR bin dB |"));
+    }
+
+    // -- Open-set coverage (T-244) -------------------------------------------------------------
+
+    /// **The defect this exists to prevent.** A family no out-of-taxonomy negative reached has no
+    /// false-known rate and no unknown recall. Reporting `0.0` and `1.0` for it — which is what an
+    /// average over an empty set, or an absent row, amounts to — publishes a perfect score for a
+    /// test that never ran.
+    #[test]
+    fn a_family_with_no_negatives_is_flagged_unmeasured_and_fails_the_check() {
+        let mut r = EvalReport::new(5.0);
+        r.record(
+            "held-out",
+            None,
+            20.0,
+            &stub(UNKNOWN, &[(UNKNOWN, 0.9), ("fsk", 0.1)]),
+        );
+        let run = RunMeta::capture(GridSize::Small, &SeedGuard::new(Split::Acceptance));
+        let measured_one = vec![FamilyCoverage {
+            family: "fsk".to_owned(),
+            n_ood: 1,
+            generators: vec!["held-out:8fsk".to_owned()],
+            unknown_recall: Some(1.0),
+            false_known_rate: Some(0.0),
+        }];
+        let report = Report::build(&r, run.clone(), measured_one);
+
+        // Every measurable family gets a row, whether or not it was measured: a gap is stated, not
+        // left out.
+        let listed: Vec<&str> = report.coverage.iter().map(|c| c.family.as_str()).collect();
+        assert_eq!(listed, open_set_families());
+
+        let gap = report
+            .require_open_set_coverage()
+            .expect_err("families with no negative must fail the check");
+        assert!(gap.families.contains(&"analog".to_owned()), "{gap}");
+        assert!(!gap.families.contains(&"fsk".to_owned()), "{gap}");
+        assert_eq!(gap.families, report.summary.unmeasured_open_set_families);
+        assert!(gap.to_string().contains("UNMEASURED"));
+
+        // `null`, never `0.0`: the JSON cannot be read as a passing rate.
+        let analog = report
+            .coverage
+            .iter()
+            .find(|c| c.family == "analog")
+            .expect("listed");
+        assert_eq!((analog.n_ood, analog.unknown_recall), (0, None));
+        assert_eq!(analog.false_known_rate, None);
+        let json = serde_json::to_string(&report).expect("serialise");
+        assert!(json.contains("\"unmeasured_open_set_families\":[\"analog\""));
+        assert!(report.markdown().contains("| analog | 0 | UNMEASURED"));
+
+        // A report built with no coverage at all fails closed, rather than passing by omission.
+        let nothing = Report::build(&r, run, vec![]);
+        assert_eq!(
+            nothing
+                .require_open_set_coverage()
+                .unwrap_err()
+                .families
+                .len(),
+            open_set_families().len()
+        );
+    }
+
+    /// The runtime half: a real grid run reaches every family, so the loud check passes because
+    /// the negatives exist and not because nothing was looked for.
+    #[test]
+    fn a_real_harness_run_measures_the_open_set_of_every_family() {
+        use crate::{Classifier, ClassifyRequest, SymbolEstimator};
+
+        let classifier = Classifier::new();
+        let mut c14 = SymbolEstimator::new();
+        let mut harness = Harness::new(GridSize::Small);
+        harness
+            .run_synthetic(|s| {
+                let symbols = c14.from_samples(
+                    s.symbol_samples,
+                    s.symbol_sample_rate_hz,
+                    s.obw_hz,
+                    s.snr_db,
+                );
+                let mut req =
+                    ClassifyRequest::new(s.samples, s.sample_rate_hz, Timestamp::UNIX_EPOCH);
+                req.obw_hz = s.obw_hz;
+                req.snr_db = s.snr_db;
+                req.symbols = symbols.as_ref();
+                req.symbol_samples = Some(s.symbol_samples);
+                req.symbol_sample_rate_hz = Some(s.symbol_sample_rate_hz);
+                classifier.classify(&req)
+            })
+            .expect("seed separation held");
+        let report = harness.finish();
+
+        report
+            .require_open_set_coverage()
+            .expect("every family must have an out-of-taxonomy negative");
+        assert!(report.summary.unmeasured_open_set_families.is_empty());
+        for c in &report.coverage {
+            assert!(c.measured() && !c.generators.is_empty(), "{}", c.family);
+            assert!(c.unknown_recall.is_some(), "{}", c.family);
+        }
+
+        // The per-family rows **decompose** the headline figure rather than restating it by some
+        // other rule: same snippets, same split.
+        let n_ood: usize = report.coverage.iter().map(|c| c.n_ood).sum();
+        let n_held_out: usize = report
+            .rows
+            .iter()
+            .filter(|r| r.source == "held-out")
+            .map(|r| r.n)
+            .sum();
+        assert_eq!(n_ood, n_held_out);
+        let unknown: f64 = report
+            .coverage
+            .iter()
+            .map(|c| c.unknown_recall.unwrap_or(0.0) * c.n_ood as f64)
+            .sum();
+        assert!(
+            (unknown / n_ood as f64 - report.summary.held_out_unknown_recall).abs() < 1e-9,
+            "per-family coverage does not sum to the aggregate"
+        );
     }
 }

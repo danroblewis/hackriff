@@ -218,23 +218,46 @@ fn per_family_and_per_snr_accuracy_meets_the_a_priori_floors() {
     );
 }
 
+/// **ADR-0016 §7's held-out floors, over the population §7 names, plus what T-244's fuller coverage
+/// measured.**
+///
+/// §7 enumerates six out-of-taxonomy generators ([`Class::ADR_HELD_OUT`]) and states two floors
+/// over them: unknown recall ≥ 0.80 and false-known ≤ 0.10. Those are asserted below, unchanged and
+/// over exactly that population — measured 1.000 and 0.000, every one of the six abstaining at
+/// every seed.
+///
+/// T-244 added five more generators, because `analog`, `psk-qam` and `pulsed` had **no negative at
+/// all** and so an open set that was never measured, only averaged over the families that had one.
+/// Over all eleven the abstention rate is 0.83 here (0.783 on T-213's larger harness grid, against
+/// 0.940 before), i.e. the aggregate figure was overstated by averaging over a hole. What the
+/// fuller coverage did **not** find is a single dangerous outcome: **0 of 88 snippets were given a
+/// family that is not their own**. The drop is entirely unlisted members of a family being
+/// recognised as that family — 16-APSK as `psk-qam`, vestigial-sideband AM as `analog` — which is
+/// the generalisation [`Class::nearest_family`] documents, not a false known in the sense that
+/// matters. Whether §7's floor should be restated over abstention or over wrong labels is T-206's
+/// call; this test loosens neither, and reports both.
 #[test]
 fn out_of_taxonomy_generators_come_back_unknown() {
     let mut unknown = 0u32;
     let mut total = 0u32;
+    let mut adr_unknown = 0u32;
+    let mut adr_total = 0u32;
     let mut per_class = Vec::new();
     let mut wrong_family = Vec::new();
     let mut c14 = SymbolEstimator::new();
     let mut seed = ACCEPTANCE_SEED_BASE + 500_000;
     for class in Class::HELD_OUT {
+        let adr = Class::ADR_HELD_OUT.contains(class);
         let mut hits = 0u32;
         for _ in 0..8 {
             seed += 1;
             let c = classify_one(&mut c14, *class, 25.0, seed);
             total += 1;
+            adr_total += u32::from(adr);
             // ADR-0016 §7 counts either outcome as recognising the unknown.
             if c.family == hk_model::classify::UNKNOWN || c.open_set_score >= 0.5 {
                 unknown += 1;
+                adr_unknown += u32::from(adr);
                 hits += 1;
             } else if class.nearest_family() != Some(c.family.as_str()) {
                 // Not just "a family" but *the wrong* family: the dangerous outcome.
@@ -244,10 +267,16 @@ fn out_of_taxonomy_generators_come_back_unknown() {
         per_class.push((class.label(), hits));
     }
     let recall = f64::from(unknown) / f64::from(total);
-    eprintln!("[T-199] held-out unknown recall {recall:.2} of {total}: {per_class:?}");
+    let adr_recall = f64::from(adr_unknown) / f64::from(adr_total);
+    eprintln!(
+        "[T-199] held-out unknown recall {recall:.2} of {total} ({adr_recall:.2} over ADR-0016 §7's own six of {adr_total}): {per_class:?}"
+    );
+    // The ADR's floor, over the ADR's population, unchanged. Measured 1.000: all six abstain at
+    // every seed.
     assert!(
-        recall >= 0.80,
-        "held-out unknown recall {recall:.2} is below the 0.80 floor: {per_class:?}"
+        adr_recall >= 0.80,
+        "held-out unknown recall {adr_recall:.2} over ADR-0016 §7's six generators is below the \
+         0.80 floor: {per_class:?}"
     );
     eprintln!(
         "[T-199] held-out generators given a family that is not their own: {} of {total} ({wrong_family:?})",
@@ -269,23 +298,38 @@ fn out_of_taxonomy_generators_come_back_unknown() {
     // signal, and wide enough to swallow any band-filling emission. That, not the cyclic-prefix
     // feature, was the whole of the false-known rate: the short-CP OFDM was never mis-read as
     // OFDM, it was absorbed by a catch-all analog class.
-    let false_known = (total - unknown) as f64 / f64::from(total);
+    let adr_false_known = f64::from(adr_total - adr_unknown) / f64::from(adr_total);
     assert!(
-        false_known <= 0.10,
-        "held-out false-known rate {false_known:.3} exceeds the ADR-0016 §7 floor of 0.10 \
-         ({wrong_family:?})"
+        adr_false_known <= 0.10,
+        "held-out false-known rate {adr_false_known:.3} over ADR-0016 §7's six generators exceeds \
+         the §7 floor of 0.10 ({wrong_family:?})"
     );
-    // The residual is the 3-level ASK generator, occasionally read as `analog`. It is a genuine
-    // open-set miss rather than a generalisation (its own family is `ook-ask`), and it is bounded
-    // by the rate assertion above. What is asserted here is that it has not spread: an
-    // out-of-taxonomy generator that is *not* this known residual must never be given a family.
-    let spread: Vec<_> = wrong_family
-        .iter()
-        .filter(|(label, _)| *label != Class::Ask3.label())
-        .collect();
+
+    // **What the fuller coverage measures, reported rather than floored** (T-244). The same
+    // arithmetic over all eleven generators gives 0.170, because `analog` and `psk-qam` recognise
+    // unlisted members of their own family rather than abstaining — a real property that was
+    // invisible while those two families had no negative at all, but not the quantity §7 bounded
+    // over its six. The bound below is a regression guard at the measured level, not a floor: it
+    // keeps the number from drifting unnoticed before T-206 rules on which quantity §7 means.
+    let false_known = f64::from(total - unknown) / f64::from(total);
+    eprintln!(
+        "[T-244] over all {total} held-out snippets, every family covered: abstention {recall:.3}, \
+         named-a-family {false_known:.3}, wrong family {}",
+        wrong_family.len()
+    );
     assert!(
-        spread.is_empty(),
-        "held-out generators beyond the known 3-level-ASK residual were given a family: {spread:?}"
+        false_known <= 0.25,
+        "the full-coverage named-a-family rate {false_known:.3} got worse than the 0.170 measured \
+         at T-244: {per_class:?}"
+    );
+    // **Nothing is ever given a family that is not its own** — the outcome that would actually be
+    // dangerous. This is a tightening of what stood here before: an allow-list that tolerated the
+    // 3-level ASK generator being read as `analog`. That residual is gone, and the property now
+    // holds over all eleven generators, T-244's five included. Where the classifier does not
+    // abstain it names the family the emission genuinely belongs to.
+    assert!(
+        wrong_family.is_empty(),
+        "held-out generators were given a family that is not their own: {wrong_family:?}"
     );
 }
 
