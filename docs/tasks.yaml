@@ -6919,7 +6919,8 @@ tasks:
     milestone: M2-hardening
     title: 'The UI gate never runs anywhere authoritative: no Node in CI, and it self-skips locally when
       node is absent'
-    status: in-progress
+    status: done
+    commit: dde8098
     priority: normal
     deps:
     - T-353
@@ -7013,7 +7014,8 @@ tasks:
     milestone: M2-hardening
     title: 'Presence boxes drift then jump: T-261 recomputes them on the 1 s poll while the waterfall scrolls
       every frame'
-    status: in-progress
+    status: done
+    commit: 041a67f
     priority: high
     deps:
     - T-337
