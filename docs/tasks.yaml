@@ -3799,7 +3799,8 @@ tasks:
   - id: T-236
     milestone: M2-hardening
     title: "hk-api Server::shutdown() joins only its accept-loop thread: per-connection threads are detached and never joined, so a stopped server can still be touching files"
-    status: in-progress
+    status: done
+    commit: 3f04d4d
     priority: normal
     deps: [T-232]
     parallel_group: API
