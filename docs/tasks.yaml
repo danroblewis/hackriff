@@ -4963,6 +4963,37 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+  - id: T-287
+    milestone: M4
+    title: 'Wire control-channel hunting as a running pipeline chain: T-267 proved the
+      capability blind through the device but there is no in-process hook for
+      arbitrary-channel IQ, so nothing calls it during a normal run'
+    status: todo
+    priority: high
+    deps:
+    - T-267
+    parallel_group: M4A
+    use_cases: []
+    found_by: 'T-267 (2026-09-16), which reported the deviation rather than claiming the
+      acceptance clause: everything it needed sits behind pub(crate) Shared, and wiring a
+      hook requires new NodeSpec/ChainShape variants - a chain-contract change it would
+      not smuggle into a task marked core_interface: false'
+    acceptance: 'the CC hunt runs during a normal pipeline run rather than only when a
+      test drives the device interface directly. This is the FOURTH capability-with-no-
+      caller found in one night (T-242 signature matching, T-247 classify_box/record,
+      T-267 here) - treat the pattern as the finding: a capability that nothing calls is
+      indistinguishable from an absent one, and its tests pass either way. Add the
+      NodeSpec/ChainShape variants in chains/spec.rs + chains/mod.rs, an FCO-driven
+      trigger WITH admission control (T-267 notes there is none), and resolve the
+      restricted-band class gate that bites on 12.5 kHz LMR. State the cost on the
+      capture and audio threads as T-242 and T-247 did for their seams. Prove it is not
+      vacuous: a normal mock-SDR run must produce a confirmed CC row, not merely a test
+      that calls the confirmer'
+    area: crates/hk-pipeline (chains/spec.rs, chains/mod.rs), crates/hk-detect/src/trunk
+    needs: none
+    model: opus
+    effort: high
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
