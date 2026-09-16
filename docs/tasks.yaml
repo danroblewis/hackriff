@@ -3896,7 +3896,7 @@ tasks:
   - id: T-241
     milestone: M2-hardening
     title: "Occupancy rows and baselines stored BEFORE the T-196 floor fix may under-report busy channels: decide whether to invalidate, recompute, or accept them"
-    status: in-progress
+    status: done
     priority: normal
     deps: [T-196]
     parallel_group: CONTEXT
@@ -3911,7 +3911,7 @@ tasks:
   - id: T-242
     milestone: M3
     title: "Wire signature matching into the pipeline: nothing calls match_emitter(), so the route serves nothing and the M3 gate would pass vacuously on that dimension"
-    status: in-progress
+    status: done
     priority: high
     deps: [T-201, T-202]
     parallel_group: M3B
