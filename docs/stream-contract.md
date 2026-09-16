@@ -513,6 +513,50 @@ Some streams exist only because a consumer asked for them, e.g. listening to one
   - Audio payloads are content: under a class that forbids content the egress gate withholds them (§6), as for any audio stream.
   - The listen opener refuses earlier, before a ring read; see `hk_pipeline::chains::listen` for the rule. Restricted bands are refused whatever the source class. Unclassified content (a fail-closed `metadata-only` source without a user classification rule) is refused.
 
+### 12.3 IQ profile (T-165, ADR-0013 §4.9 gap 8)
+
+`open/iq?emitter=<id>` or `open/iq?f_lo=<Hz>&f_hi=<Hz>` (§12.1): the requested band's raw
+channelised samples, un-demodulated. `hk_stream::iq` (profile), `hk_pipeline::chains::iq`
+(producer, `IqTapOpener`/`PipelineHandle::iq_service`).
+
+- **Header:**
+  - `kind: "iq"`, `datatype: "cf32_le"` (complex `f32` LE, re then im), `sample_rate_hz` the
+    channel DDC's own output rate (§14.4's `iq` port datatype, reused here for a channel that
+    isn't a recipe pipeline node);
+  - `center_hz`/`bandwidth_hz`: the requested band (its midpoint and width, not necessarily where
+    an emitter's measurement rounds to);
+  - `emitter_id` when an emitter was requested.
+- **Data records** (type 1):
+  - payload: one `re, im` `f32` LE pair per baseband sample of the channel;
+  - `sample_index`: channel samples since the stream start (its own counter, independent of the
+    DDC's internal position, which restarts at a retune — see below);
+  - `t`: time of the first sample, mapped from the raw ring chunk's own time anchor through the
+    tuned sample rate (not extrapolated from a fixed start time and nominal output rate, so it
+    stays correct across a retune that changes the output rate).
+  - A gap (a retune the DDC must rebuild around, or a live source skipping ahead to stay off an
+    unbounded backlog) flags the next record `DISCONTINUITY`. A `seq` gap is loss (§5.3, §7).
+- **No status records.** Unlike Listen, there is nothing estimated (level, squelch, AGC) to
+  report; per-chain counters (samples, CPU, backlog, latency) are on `/api/status`
+  `chain_stats[]` like any other on-demand chain (§12.1).
+- **Where the channelisation runs.** One dedicated thread per open request, reading the shared
+  ring exactly like a Listen chain (never the capture thread), running a `hk_dsp::Ddc` over the
+  requested band and publishing its output directly — no demodulation, no probe. It exists, and
+  the DDC runs, only while a consumer is attached; the run's on-demand chain budget (§12.1,
+  T-071) admits it as a `Tap`-kind chain (a raw sample stream, not a demodulation chain — the
+  same bucket burst taps use), costed from the tuned sample rate the DDC's input-rate filter
+  stage must run at (not the requested channel's own, lower, output rate, since that stage's cost
+  doesn't fall with decimation).
+- **Bounds.** The requested band is capped at `hk_stream::iq::MAX_IQ_SPAN_HZ` (2 MHz) and must lie
+  inside the tuned window (`409 outside-window`); a band the channeliser cannot realise at the
+  tuned rate is `422 unrealisable`.
+- **Gating (fail closed).** Raw IQ is content — more directly than demodulated audio, since it
+  carries the RF envelope besides, not just what a demodulator extracted from it. `kind: "iq"` is
+  one of `StreamKind::payload_is_content`'s kinds (§6), so the egress gate withholds the payload
+  under a class that forbids content exactly as for `bits`/`symbols`/`audio`; the opener also
+  gates before any ring read, using the same `hk_pipeline::chains::listen::listen_class` rule
+  Listen and burst content already apply (restricted bands and restricted source classes refused
+  whatever else is true; unclassified content fails closed).
+
 ## 13. External programs: TCP stream server, discovery, burst bits and symbols (T-060)
 
 Workflow steps 6–7: demodulated outputs leave hackriff for pluggable consumers. Nothing in §3–§7

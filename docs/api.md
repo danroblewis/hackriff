@@ -57,7 +57,9 @@ Never returns content, only stream *metadata*: every offered stream's header fie
       "kind": "audio", "datatype": "ri16_le", "sample_rate_hz": 48000,
       "params": ["emitter", "detection", "f_lo", "f_hi"], "records": "…" },
     { "name": "bits", "ws_path": "/ws/open/bits", "tcp_target": "open/bits", "kind": "bits", "...": "…" },
-    { "name": "symbols", "ws_path": "/ws/open/symbols", "tcp_target": "open/symbols", "kind": "symbols", "...": "…" }
+    { "name": "symbols", "ws_path": "/ws/open/symbols", "tcp_target": "open/symbols", "kind": "symbols", "...": "…" },
+    { "name": "iq", "ws_path": "/ws/open/iq", "tcp_target": "open/iq", "kind": "iq", "datatype": "cf32_le",
+      "params": ["emitter", "f_lo", "f_hi"], "records": "…" }
   ],
   "tcp": { "addr": "127.0.0.1:8788",
            "handshake": "<tcp_target>?token=<token>[&param=value...]\\n",
@@ -539,11 +541,11 @@ Full framing, header fields, binary record layout, drop markers, backpressure an
 | Method | Path | Auth | Response |
 |---|---|---|---|
 | GET | `/ws/{stream_id}` | token (header or `?token=`) | Upgrades to WebSocket and bridges the named always-on stream (§10) |
-| GET | `/ws/open/{name}` | token | Upgrades and opens an on-demand stream (§12): `listen`, `bits`, `symbols`, with query parameters per opener |
+| GET | `/ws/open/{name}` | token | Upgrades and opens an on-demand stream (§12): `listen`, `bits`, `symbols`, `iq`, with query parameters per opener |
 
 **`GET /ws/{stream_id}`** (e.g. `spectrum/live`): the header JSON is the first **text** message, verbatim; every later record is one message — text (NDJSON line) for `messages` streams, binary (32-byte record header + payload) for every binary kind. Refusals never upgrade the connection and are plain HTTP: `401` (bad/missing token, checked before the upgrade), `403` (a `own-key-decrypted` stream — those are Unix-socket-only and never served over the bridge), `404` (unknown `stream_id`), `410` (stream finished), `426` (not a valid WebSocket upgrade request), `503` (consumer cap reached).
 
-**`GET /ws/open/{name}?<params>`**: e.g. `listen?emitter=<id>` or `listen?f_lo=<Hz>&f_hi=<Hz>` (mode and parameters are always estimated — there is no `mode` parameter), `bits`/`symbols` (optionally `emitter=`/`detection=`/`f_lo=&f_hi=`). Unlike `/ws/{id}`, a **refusal completes the upgrade** (browsers cannot read an HTTP error body on a failed upgrade): one text message `{"type": "refused", "status", "code", "reason", "content_class"?}`, then the socket closes with code `4000 + status` (e.g. `4403` a legal/class refusal, `4404` unknown opener/target, `4409` outside the tuned window or mid-replumb, `4503` at the listener/chain/CPU budget). A refusal never carries content. On success the connection is bridged exactly like `/ws/{stream_id}` above (header text message, then records) as a **remote** consumer, so an `own-key-decrypted` target is refused the same way. **Listen** additionally streams periodic **status** records (binary, type 3: `level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `latency_ms`, …).
+**`GET /ws/open/{name}?<params>`**: e.g. `listen?emitter=<id>` or `listen?f_lo=<Hz>&f_hi=<Hz>` (mode and parameters are always estimated — there is no `mode` parameter), `bits`/`symbols` (optionally `emitter=`/`detection=`/`f_lo=&f_hi=`), `iq?emitter=<id>` or `iq?f_lo=<Hz>&f_hi=<Hz>` (T-165, ADR-0013 §4.9 gap 8: raw channelised IQ, `cf32_le`, stream-contract §12.3 — no mode or parameter either, there is nothing to demodulate). Unlike `/ws/{id}`, a **refusal completes the upgrade** (browsers cannot read an HTTP error body on a failed upgrade): one text message `{"type": "refused", "status", "code", "reason", "content_class"?}`, then the socket closes with code `4000 + status` (e.g. `4403` a legal/class refusal, `4404` unknown opener/target, `4409` outside the tuned window or mid-replumb, `4503` at the listener/chain/CPU budget). A refusal never carries content. On success the connection is bridged exactly like `/ws/{stream_id}` above (header text message, then records) as a **remote** consumer, so an `own-key-decrypted` target is refused the same way. **Listen** additionally streams periodic **status** records (binary, type 3: `level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `latency_ms`, …).
 
 ### `hk` stream-tail
 
@@ -569,6 +571,20 @@ printf 'open/bits?token=%s\n' "$HK_TOKEN" | nc 127.0.0.1 8788 | xxd | head -40
 ```
 
 Python clients (standard library only): `py/examples/` (`hkstream.py`, `hk_bits.py`, `hk_audio_wav.py`), documented in `py/README.md`.
+
+### `open/iq` — on-demand channelised IQ (T-165, ADR-0013 §4.9 gap 8)
+
+The UI's inventory row "Stream out" action, and any external tool (GNU Radio, a Python script) that wants a signal's own raw samples rather than a demodulation. `GET /ws/open/iq?<params>` / TCP `open/iq?<params>&token=…`, modelled on `listen`/`bits`/`symbols` (§12.1) but with nothing estimated or demodulated:
+
+- **Target**: `emitter=<id>` (the inventory entry's measured centre and bandwidth) or `f_lo=<Hz>&f_hi=<Hz>` (an explicit band). Exactly one; any other parameter (`mode`, `detection`, …) is refused `400` — there is nothing to estimate.
+- **Profile** (stream-contract §12.3): `kind: "iq"`, `datatype: "cf32_le"` (`re, im` `f32` LE pairs), `sample_rate_hz` the channel DDC's own output rate, `center_hz`/`bandwidth_hz` the requested band, `emitter_id` when the target was an emitter. One binary data record per processed chunk; a gap (a retune skip, a live-source backlog skip) is flagged `DISCONTINUITY`.
+- **Bounds.** The requested band must be at most 2 MHz wide (`hk_stream::iq::MAX_IQ_SPAN_HZ`) and inside the tuned window. The channel runs on its own thread reading the shared ring at its own pace (exactly like a Listen chain), computed **only while a consumer is attached** — no chain, no DDC, until the socket opens, and it never blocks or slows capture: a live source skips forward instead of growing a backlog, and a slow consumer is dropped by the publisher (§7), never the pipeline. It shares the run's on-demand chain budget (T-071, `/api/status` `budget`) as a burst-tap-kind chain, costed like a Listen chain from the tuned sample rate (the DDC's input-rate filter stage, not how much the channel itself decimates).
+- **Gating.** Raw IQ is content — more directly than demodulated audio, since it carries the RF envelope besides — so it is gated exactly like `bits`/`listen`: the legal gate (`hk_pipeline::chains::listen::listen_class`, the same rule Listen and burst content already use) runs before any ring read, and the stream's `kind: "iq"` is one of the profile's content-bearing kinds, so the egress gate withholds the payload (`GATED`, header-only) on any stream whose class forbids it regardless.
+- **Refusals**: `400` bad request (unknown parameter, no `emitter`/`f_lo`+`f_hi`, span over 2 MHz), `403` legal gate, `404` unknown emitter, `409 outside-window` (the band is not inside the tuned window), `410`/`503` segment ended/replumbing, `422 unrealisable` (the channeliser cannot down-convert the band at the tuned rate), `503 busy` (chain budget).
+
+```sh
+printf 'open/iq?f_lo=%s&f_hi=%s&token=%s\n' 101190000 101410000 "$HK_TOKEN" | nc 127.0.0.1 8788 > station.cf32
+```
 
 ## Inspector (T-089, SIGNAL-062)
 

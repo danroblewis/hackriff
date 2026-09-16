@@ -2543,6 +2543,191 @@ fn stage_tap_sync_search_view_answers_as_documented() {
     stop_server(serving);
 }
 
+/// Retries the `/ws/open/iq` handshake (the run may be mid-replumb, 503 `replumbing`, right after
+/// start): returns the connection *after* its header message, plus the parsed header.
+fn wait_for_iq(addr: SocketAddr, query: &str) -> (Ws, Value) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut ws = connect_ws(addr, &format!("/ws/open/iq?{query}&token={TOKEN}")).unwrap();
+        match ws.read().unwrap() {
+            Message::Text(t) if t.contains("\"type\":\"refused\"") => {
+                let v: Value = serde_json::from_str(t.as_str()).unwrap();
+                assert!(
+                    Instant::now() < deadline,
+                    "open/iq kept refusing on {query}: {v}"
+                );
+                assert!(
+                    matches!(v["status"].as_u64(), Some(503 | 409)),
+                    "unexpected refusal while waiting for {query}: {v}"
+                );
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Message::Text(t) => {
+                let header: Value = serde_json::from_str(t.as_str()).unwrap();
+                assert_eq!(header["schema"], json!("hackriff.stream"), "{header}");
+                return (ws, header);
+            }
+            other => panic!("unexpected first message: {other:?}"),
+        }
+    }
+}
+
+/// One binary data record (type 1: 32-byte header + `cf32_le` payload) within a bounded read
+/// budget. `re,im` `f32` LE pairs, so the payload is always a multiple of 8 bytes.
+fn read_one_iq_record(ws: &mut Ws) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "no iq data record arrived");
+        if let Message::Binary(b) = ws.read().unwrap() {
+            assert!(
+                b.len() >= 32,
+                "shorter than the 32-byte record header: {}",
+                b.len()
+            );
+            assert_eq!(b[0], 1, "expected a data record (type 1): {}", b[0]);
+            assert_eq!(
+                (b.len() - 32) % 8,
+                0,
+                "cf32_le payload must be a whole number of re,im f32 pairs: {}",
+                b.len()
+            );
+            return;
+        }
+    }
+}
+
+/// T-165 (ADR-0013 §4.9 gap 8): `open/iq?emitter=<id>` and `open/iq?f_lo=&f_hi=` serve the
+/// requested band's raw channelised samples (`kind: iq`, `cf32_le`), both bound forms, and are
+/// refused as documented: an unknown emitter (404), a band outside the tuned window (409), a
+/// span over the streaming ceiling or an unrecognised parameter (400), and no token (401 before
+/// the upgrade). The served IQ actually carrying the requested channel's own tone (not silence,
+/// not some other channel) is proved at the DSP/wiring level by
+/// `hk_pipeline::chains::iq::tests::the_ddc_carries_the_in_band_tone_and_rejects_the_out_of_band_one`
+/// (the same DDC construction this opener uses); this test only checks the wiring and shapes the
+/// UI's "Stream out" action relies on, the T-160/T-162 convention.
+#[test]
+fn open_iq_answers_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    // Discovery (`GET /api/streams`): the opener is listed with its shape.
+    let (st, v) = get(addr, "/api/streams");
+    assert_eq!(st, 200, "{v}");
+    let entry = v["on_demand"]
+        .as_array()
+        .and_then(|a| a.iter().find(|o| o["name"] == json!("iq")))
+        .unwrap_or_else(|| panic!("no iq opener in discovery: {v}"))
+        .clone();
+    assert_eq!(entry["ws_path"], json!("/ws/open/iq"), "{entry}");
+    assert_eq!(entry["tcp_target"], json!("open/iq"), "{entry}");
+    assert_eq!(entry["kind"], json!("iq"), "{entry}");
+    assert_eq!(entry["datatype"], json!("cf32_le"), "{entry}");
+    let params = entry["params"].as_array().unwrap();
+    for p in ["emitter", "f_lo", "f_hi"] {
+        assert!(
+            params.iter().any(|x| x == p),
+            "iq opener params missing {p}: {entry}"
+        );
+    }
+    assert!(
+        !params.iter().any(|x| x == "detection" || x == "mode"),
+        "raw IQ takes no mode/detection: {entry}"
+    );
+
+    // f_lo/f_hi form, centred on the known station.
+    let (f_lo, f_hi) = (STATION_HZ - 100e3, STATION_HZ + 100e3);
+    let (mut ws, header) = wait_for_iq(addr, &format!("f_lo={f_lo}&f_hi={f_hi}"));
+    assert_eq!(header["kind"], json!("iq"), "{header}");
+    assert_eq!(header["datatype"], json!("cf32_le"), "{header}");
+    assert!(
+        (header["center_hz"].as_f64().unwrap() - STATION_HZ).abs() < 1.0,
+        "{header}"
+    );
+    assert!(
+        (header["bandwidth_hz"].as_f64().unwrap() - (f_hi - f_lo)).abs() < 1.0,
+        "{header}"
+    );
+    assert!(header["sample_rate_hz"].as_f64().unwrap() > 0.0, "{header}");
+    assert!(
+        header.get("emitter_id").is_none_or(Value::is_null),
+        "{header}"
+    );
+    read_one_iq_record(&mut ws);
+    let _ = ws.close(None);
+
+    // emitter form: the same station, found blind (vision step 4), targeted by its inventory id.
+    let emitter_id = {
+        let mut found = None;
+        wait_for(
+            "the station to appear so its emitter id is known",
+            Duration::from_secs(60),
+            || {
+                let (st, v) = get(addr, "/api/inventory");
+                if st != 200 {
+                    return false;
+                }
+                found = v["entries"]
+                    .as_array()
+                    .and_then(|a| {
+                        a.iter().find(|e| {
+                            e["f_center_hz"]
+                                .as_f64()
+                                .is_some_and(|f| (f - STATION_HZ).abs() < 50e3)
+                        })
+                    })
+                    .and_then(|e| e["id"].as_str())
+                    .map(str::to_owned);
+                found.is_some()
+            },
+        );
+        found.unwrap()
+    };
+    let (mut ws, header) = wait_for_iq(addr, &format!("emitter={emitter_id}"));
+    assert_eq!(header["kind"], json!("iq"), "{header}");
+    assert_eq!(header["emitter_id"], json!(emitter_id), "{header}");
+    read_one_iq_record(&mut ws);
+    let _ = ws.close(None);
+
+    // Refusals, each completing the upgrade with a `{"type":"refused",...}` text message first.
+    let refusal = |query: &str| -> Value {
+        let mut ws = connect_ws(addr, &format!("/ws/open/iq?{query}&token={TOKEN}")).unwrap();
+        let Message::Text(t) = ws.read().unwrap() else {
+            panic!("refusal first ({query})")
+        };
+        let v: Value = serde_json::from_str(t.as_str()).unwrap();
+        assert_eq!(v["type"], json!("refused"), "{query}: {v}");
+        v
+    };
+    // No target.
+    assert_eq!(refusal("")["status"], json!(400));
+    // An unrecognised parameter: no mode, there is nothing to demodulate.
+    assert_eq!(refusal("f_lo=1e6&f_hi=2e6&mode=am")["status"], json!(400));
+    // Unknown emitter.
+    assert_eq!(
+        refusal(&format!("emitter={}", EmitterId::new()))["status"],
+        json!(404)
+    );
+    // Outside the tuned window (the fixture is tuned near 100.8 MHz).
+    assert_eq!(
+        refusal("f_lo=200000000&f_hi=200100000")["status"],
+        json!(409)
+    );
+    // Wider than the streaming ceiling (2 MHz), even though it would fit inside the tuned window.
+    let (wide_lo, wide_hi) = (FIXTURE_CENTER_HZ - 1.1e6, FIXTURE_CENTER_HZ + 1.1e6);
+    assert_eq!(
+        refusal(&format!("f_lo={wide_lo}&f_hi={wide_hi}"))["status"],
+        json!(400)
+    );
+
+    // No token: refused before the upgrade (unlike an opener refusal, a plain HTTP status).
+    let err = connect_ws(addr, &format!("/ws/open/iq?f_lo={f_lo}&f_hi={f_hi}")).unwrap_err();
+    match err {
+        tungstenite::Error::Http(resp) => assert_eq!(resp.status().as_u16(), 401),
+        e => panic!("expected an HTTP 401 refusal, got {e}"),
+    }
+
+    stop_server(serving);
+}
+
 // T-089 inspector
 
 /// T-089: `POST /api/inspector/parse` evaluates a draft field map (the RDS worked recipe's) over

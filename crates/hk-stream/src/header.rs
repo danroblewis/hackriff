@@ -383,6 +383,24 @@ mod tests {
         assert!(StreamKind::ALL.contains(&StreamKind::SyncSearch));
     }
 
+    /// T-165 (ADR-0013 gap 8): raw channelised IQ (`open/iq`) is content exactly like `bits`,
+    /// never metadata — T-162's finding (a caller-shaped view over withheld content is an
+    /// oracle) applies even more directly here, since IQ carries the RF envelope besides
+    /// whatever a demodulator would extract from it. `payload_is_content` is the one property
+    /// `gate::binary_payload_permitted` (§6, the egress enforcement point) checks before a
+    /// class's `permits_content`, so this is what actually gates every `iq` binary record the
+    /// same way it gates `bits`, regardless of how the header's class was decided.
+    #[test]
+    fn iq_payload_is_content_exactly_like_bits() {
+        assert!(StreamKind::Iq.payload_is_content());
+        assert!(StreamKind::Bits.payload_is_content());
+        assert!(
+            !StreamKind::Spectrum.payload_is_content(),
+            "not metadata-shaped like spectrum"
+        );
+        assert_eq!(StreamKind::Iq.as_str(), "iq");
+    }
+
     #[test]
     fn spectrum_bins_are_dc_centred_and_ascending() {
         let mut h = StreamHeader::new("s", StreamKind::Spectrum, ContentClass::Unrestricted, "t");
