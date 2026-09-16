@@ -14,6 +14,8 @@
 //! - [`stft`]: [`StftProcessor`] → [`SpectrumFrame`] over blocks/ring chunks, and
 //!   [`DualResolution`].
 //! - [`sk`]: the spectral-kurtosis estimator and its variance.
+//! - [`chirp`]: sweep-rate estimation inside one analysis frame (T-294), the measurement behind
+//!   ADR-0017 §1.3's split between a representational limit and an observability one.
 //! - [`persistence`]: the DPX-style decaying histogram.
 //! - [`synth`]: deterministic synthetic IQ for tests and benchmarks.
 //!
@@ -30,6 +32,7 @@
 #[cfg(all(feature = "accelerate", target_os = "macos"))]
 pub mod accelerate;
 pub mod channelizer;
+pub mod chirp;
 pub mod compute;
 pub mod conformance;
 pub mod ddc;
@@ -53,6 +56,7 @@ pub use channelizer::{
     ChannelHeader, ChannelSamples, ChannelTime, ChannelizerError, DEFAULT_CHANNEL_RESET_ON, Pfb,
     PfbBackend, PfbConfig, PfbOutput,
 };
+pub use chirp::{ChirpRate, SweepTest, chirp_rate, linear_sweep};
 pub use ddc::{Ddc, DdcBlock, DdcError, DdcKernel, DdcPlan, DdcSpec, ResampleKind};
 pub use fft::{CpuFft, FftBackend};
 pub use filter::{DesignError, FirDesign, LowpassSpec, design_lowpass, pfb_prototype};

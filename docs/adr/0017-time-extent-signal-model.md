@@ -79,9 +79,32 @@ A persisting signal's box grows because its open interval's `t_end` advances wit
 
 ### 1.3 Honest limitation — chirps
 
-A **chirp is representable but not yet drawable as a chirp.** The model gives one `(f_lo, f_hi)` per detection and per interval, so a 10-second chirp's box is the **bounding box of its sweep**, with the per-detection ladder underneath it. That is correct and it is first-class — a 10-second chirp is one signal with a 10-second extent — but the box is a rectangle where the truth is a diagonal.
+**Three different limits hide under "a chirp is drawn as a box", and they do not bite in the same places.** This section used to name only the first, which made the whole thing read as though a swept emission were merely un-drawable. T-255 and T-294 measured where each one applies.
 
-Making the box a **polyline `f(t)`** (an ordered centre track per interval) is a later refinement. It is named here so it is not discovered later, and it is **explicitly out of the plan in §9**. `Track`'s `hop_set` and `body` are where it would go.
+**(a) Representational — always.** The model gives one `(f_lo, f_hi)` per detection and per interval, so a 10-second chirp's box is the **bounding box of its sweep**, with the per-detection ladder underneath it. That is correct and it is first-class — a 10-second chirp is one signal with a 10-second extent — but the box is a rectangle where the truth is a diagonal. Making the box a **polyline `f(t)`** (an ordered centre track per interval) is a later refinement. It is named here so it is not discovered later, and it is **explicitly out of the plan in §9**. `Track`'s `hop_set` and `body` are where it would go.
+
+**(b) The analysis frame — whenever a sweep completes inside one frame.** The detector does not see the IQ; it sees `K` averaged periodograms. The cost of the rectangle is exactly `symbol_duration / analysis_frame`, so it **grows with the spreading factor**, and at the standard US915 uplink rate it is total. T-255 measured this blind, through the mock device:
+
+| | SF9/125 kHz (US915 uplink DR) | SF12/125 kHz |
+|---|---|---|
+| frames per symbol | **1.0** | 8.0 |
+| detected centre spread / channel | 0.44 | **0.84** |
+| box vs instantaneous occupancy | **4×** | 32× |
+| verdict | sweep **hulled** into one rectangle | sweep **resolved** into a ladder |
+
+At SF9, `T_sym = 2⁹/125 kHz = 4.096 ms` and the detection frame at 500 kS/s is `K·N/fs = 4·512/500 kHz = 4.096 ms`. Exactly one. Inside a frame the emission covers its **whole** channel, so a frame-based box cannot be narrower than the channel and there is no ladder underneath it to resolve: the rectangle is forced, not chosen. **At and below one frame per symbol this is an observability limit of the detector's input, not a representational one** — the polyline of (a) would recover nothing here, because the centre track it wants to draw is not present in that product.
+
+**(c) Genuine observability — only below about −3 dB in the channel.** It would be easy, and wrong, to stop at (b) and rule that "swept emissions below one frame are detected as regions but can never be characterised as chirps". T-294 measured that claim and it is **false**. The IQ in the ring is not the spectrum frame: a lag-product (delay-multiply) estimator reading **one 4.096 ms frame** recovers the sweep rate to 1.6 % and separates a LoRa SF9 chirp from the three species T-255's scene puts beside it — a band-limited wideband burst, a steady carrier and a 2-FSK burst — at **96–99.5 %, against 0–2.2 % on the controls, from +18 dB down to −3 dB in the channel**. It falls to 27.8 % at −6 dB and 0.5 % at −9 dB. T-255's scene runs its chirp at 12 dB. `hk_dsp::chirp` is that measurement, carrying the four-species table and the SNR floor as its own tests.
+
+**What the system may therefore claim today.** Nothing characterises a detection as a chirp: `hk-classify` is not wired into the pipeline, so a swept emission is reported as a **region with a box and no modulation claim**. That is correct and it stays correct. But the reason it is correct is (a) and (b) — a representation and a choice of which product is read — and **not** (c). The distinction is the whole point of this amendment: the rule that a system must not claim a measurement it did not make has a mirror image, that it must not record a limit its own measurements refute. Characterising these regions is a **wiring** question — which product a characteriser reads — not a physical one.
+
+**Why not simply use a finer frame.** Three reasons, each measured rather than argued:
+
+1. **The frame at 500 kS/s is already the finest this geometry produces.** `detection_resolution` takes `fft_len = next_pow2(fs / 5 kHz)` clamped to 512..4096 and `K = round(fs · 2.5 ms / fft_len)` clamped to 4..10. At 500 kS/s both land **on their floors** (128 → 512, and 2.44 → 4). A finer frame means moving the clamps, not tuning within them.
+2. **The cost is not CPU, it is the false-alarm design.** Halving the frame means `K = 2`. The STFT does the same work on the same samples, so there is **no change on the capture thread and none in the DSP thread's transform budget** — but detection runs at 0 % overlap precisely so that the floor tracker's `n_avg_effective` *is* `K`, and the detector's `Gamma(n)` thresholds hold their design Pfa only for `n ≥ 4` (`hk-pipeline/src/config.rs`). The finer frame is paid for in stated false-alarm rate, which is the one currency this change may not spend.
+3. **It never ends.** Each step down in spreading factor halves `T_sym` *and* doubles the chirp rate, so the frame required recedes for ever (SF7 is 1.024 ms). The estimator in (c) moves the other way: a faster sweep puts its lag-product tone in a **higher** bin and is easier to measure, not harder. Chasing this with the frame is chasing an asymptote; reading the IQ is not.
+
+**Assertable, not prose.** T-255's fixture carries `sweep_polyline`, so which limit applies is computed from truth rather than from the spreading factor. `tests/e2e/tests/acceptance/t255_lora_chirp.rs` reads the run's own frame from `detection_resolution` at the fixture's sample rate, measures the emission's frequency excursion inside one such frame from the polyline, and asserts both the boundary — a symbol that fits inside one frame sweeps most of its channel there, one spanning four or more frames sweeps a fraction — and its consequence in the system's own output: **a box may not be narrower than the excursion it contains**.
 
 ---
 
@@ -327,7 +350,7 @@ Placeholder ids **TM-1 … TM-10**, per the `CP-*` / `LP-*` precedent (ADR-0015 
 - **T-254** *is* TM-9's fixture and can be captured any time; the assertions land with TM-9.
 - **T-252** (RDS readout) is unaffected, except that §6.4 tells it a gap in RDS beside live audio is correct behaviour, not a bug to chase.
 
-**Explicitly not in this plan:** chirp polylines (§1.3); scrub-back audio (§6.5); any change to `ConfirmPolicy`'s use of occurrences; any ADR-0016 contract change (§7).
+**Explicitly not in this plan:** chirp polylines (§1.3(a) — and note §1.3(b): for a sweep that completes inside one analysis frame a polyline would recover nothing, so this exclusion costs less than it appears to); scrub-back audio (§6.5); any change to `ConfirmPolicy`'s use of occurrences; any ADR-0016 contract change (§7).
 
 ---
 
@@ -359,7 +382,7 @@ Placeholder ids **TM-1 … TM-10**, per the `CP-*` / `LP-*` precedent (ADR-0015 
 2. **Window-scoped Candidates, always-listed Confirmed (§2.2).** Proposed, because the alternative makes quiet confirmed stations disappear. Confirm, or say that Confirmed should be window-scoped too with an "all" toggle.
 3. **The default Explore window.** The viewed waterfall span (proposed — it matches "what is on screen"), or a fixed recent window independent of zoom?
 4. ~~**`idle_gap`.** Derived from the detector's revisit period (proposed), or a per-band setting?~~ **Answered in TM-5 (T-262): revisit-derived**, `idle_gap = clamp(2 × revisit_period, 1 s, 60 s)` (`hk_model::presence::IdleGap`, docs/07 §2.27). A gap shorter than the revisit period is **not evidence of absence** — the receiver was not listening — so the gap has to come from how often it looked; the factor 2 (two consecutive missed revisits), the 1 s floor (the tracker's `max_transition_gap_s`) and the 60 s ceiling (its `idle_timeout_s`) are each taken from a rule that already exists, so none is a dial. **A chatty 915 MHz ISM burst source therefore reads as fifty intervals, not one, deliberately** — fifty events on *one* emitter, "50 events, 1.0 s on air", each burst's box its own height. Periodicity is `EmissionFeatures`' job (§7.2). A per-band gap is worse on three counts: it has no measurement behind it, it makes the same sensor count differently for no reason but its band, and one wide enough to make ISM "one interval" re-creates this ADR's own hull pathology — a span that is 99.97 % silence presented as time on air — one level further down, where it is harder to see. Revisit the *factor*, not the shape, if TM-9 measures against it.
-5. **Chirp polylines (§1.3).** Accept bounding boxes for now (proposed), or is a swept box needed for the science use cases sooner?
+5. **Chirp polylines (§1.3).** ~~Accept bounding boxes for now (proposed), or is a swept box needed for the science use cases sooner?~~ **Reframed by T-294, and the interesting half is no longer about drawing.** A polyline is still the §1.3(a) refinement and is still out of §9. What T-294 changes is the second half: for a sweep that completes inside one analysis frame — SF9/125 kHz, the standard US915 uplink rate — a polyline would recover nothing, because the centre track is not in the detector's input at all (§1.3(b)). What *does* recover it is a chirp-rate estimator reading the ring, measured good to −3 dB in the channel (§1.3(c), `hk_dsp::chirp`). So the open decision is not "boxes or polylines" but **whether a characteriser should read IQ for candidate swept regions**, and when. That is a wiring decision for the milestone that wires classification into the pipeline, not a drawing one.
 
 ---
 
