@@ -4697,7 +4697,7 @@ tasks:
   - id: T-271
     milestone: M4
     title: 'M4 DMR Tier III / Capacity Plus, SmartNet/EDACS and NXDN Type-C control decode'
-    status: in-progress
+    status: todo
     priority: normal
     deps:
     - T-268
