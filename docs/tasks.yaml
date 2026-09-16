@@ -3396,7 +3396,8 @@ tasks:
   - id: T-212
     milestone: M3
     title: "C17 family priors for classification fusion per ADR-0016 (priors never scale unknown; lambda0 >= 0.1; 10:1 evidence cannot be flipped by priors)"
-    status: in-progress
+    status: done
+    commit: 4a839c3
     priority: normal
     deps: [T-211]
     parallel_group: M3P
