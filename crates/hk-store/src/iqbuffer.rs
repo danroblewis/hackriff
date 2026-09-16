@@ -999,6 +999,12 @@ pub struct IqBufferStatus {
     /// Samples written but discarded because the fsync meant to make them durable failed: they are
     /// never indexed, sealed, exported or recovered, and the ring rewrites their span.
     pub poisoned_samples: u64,
+    /// Samples captured while the ring was still opening in the background (T-217): capture is
+    /// never buffered until allocation finishes, so a large quota's first minutes hold no IQ. Set
+    /// by the feeder ([`hk_pipeline::iqbuffer`]), which sees these blocks before the ring exists;
+    /// this crate always reports 0 here and the pipeline overlays the real count. Persists once the
+    /// ring opens (`allocation` moves past `"allocating"`), so the gap stays explained.
+    pub allocation_skipped_samples: u64,
     /// The last write error.
     pub error: Option<String>,
 }
@@ -1051,6 +1057,7 @@ impl IqBufferStatus {
             failed_samples: 0,
             sync_errors: 0,
             poisoned_samples: 0,
+            allocation_skipped_samples: 0,
             error: None,
         }
     }
@@ -1833,6 +1840,8 @@ impl IqBuffer {
             failed_samples: c.failed_samples,
             sync_errors: c.sync_errors,
             poisoned_samples: c.poisoned_samples,
+            // Overlaid by the pipeline's feeder (this crate never sees allocation-window blocks).
+            allocation_skipped_samples: 0,
             error: st.error.clone(),
         }
     }

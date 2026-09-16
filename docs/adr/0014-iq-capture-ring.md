@@ -145,7 +145,7 @@ Stream indices and sample-clock times restart when a process restarts. A replaye
 ### Tests keep rings small
 
 The default quota is 4.8 GB, allocated up front. So (fix round, replacing a nextest setup script):
-- `PipelineConfig::new` leaves the buffer **off**; only the `hk`/`hackriffd` composition (`config_for`) turns it on from the environment and flags;
+- `PipelineConfig::new` leaves the buffer **off** (`IqBufferConfig { enabled: Some(false), .. }`); only the `hk`/`hackriffd` composition (`config_for`) turns it on, from `IqBufferConfig::from_env()` and then the flags. `IqBufferConfig::default()` on its own (a caller that builds one directly, not through `PipelineConfig::new`) is a different, permissive default: `enabled: None` (buffers unless the run is a lossless replay) at the 2 min retention (T-217, `docs/api.md` "Configuration");
 - every test that buffers sets an explicit small quota (`IqBufferConfig { max_bytes: Some(..) }` or `--iq-buffer-max`), so plain `cargo test` and nextest need no environment or experimental features.
 
 ## Consequences
@@ -164,4 +164,4 @@ The default quota is 4.8 GB, allocated up front. So (fix round, replacing a next
 ## Unverified
 
 - Whether `F_PREALLOCATE` reserves space on APFS until written. It returns success and reported free space drops, but behaviour under snapshots is unmeasured.
-- The fsync cost on the Jetson's eMMC or NVMe at 20 Msps.
+- **The fsync cost on the Jetson's eMMC or NVMe at 20 Msps (T-217): deferred until the hardware exists.** The checkpoint path (`fdatasync` the ring, then the journal, every 1 s / slot fill / segment end) is the same code the dev Mac measured (this ADR's "Measured" notes), but eMMC/NVMe fsync latency differs enough from APFS that the Mac numbers do not stand in for it. No Jetson is in hand (`CLAUDE.md` "Needs the user"), so this is not something to simulate or estimate from the Mac; it is a HIL (T5) measurement once T-026's Jetson purchase lands, not a T-217 deliverable.

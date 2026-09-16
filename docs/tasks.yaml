@@ -2582,7 +2582,7 @@ tasks:
   - id: T-160
     milestone: MUI
     title: "MUI API gap 4: stage tap view=spectrum for MPX/subcarrier plots"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -3127,7 +3127,7 @@ tasks:
   - id: T-195
     milestone: MUI
     title: "MUI per-signal output panels in the freed right panel: packet inspector for digital, waveform/audio scope + RDS text for FM/AM; one panel per confirmed signal with an active output"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-192, T-159]
     parallel_group: MUI-X1
@@ -3190,7 +3190,7 @@ tasks:
   - id: T-199
     milestone: M3
     title: "C15 classical feature-tree modulation-family classifier (cumulants, instantaneous amplitude/phase/frequency stats, cyclic features) with open-set unknown and C17 prior fusion"
-    status: review
+    status: done
     commit: e3d09ff
     result: "cascade landed and inert (records at rank 3, never demotes a chain/decoder/user label). ADR-0016 accuracy floors NOT met: top-1 0.754 vs 0.90, top-2 0.933 vs 0.95. Safety floors MET: wrong-label 0.000 vs 0.003, unknown recall 0.81 vs 0.80. analog 0.32 and noise-like 0.42 abstain rather than mislabel; both OTA fixtures abstain (sim-to-real gap). Chain wiring and API routes deliberately deferred - see scratchpad/t199-handoff.md. Floors deliberately NOT relaxed; gap tracked as T-230"
     priority: normal
@@ -3409,7 +3409,7 @@ tasks:
   - id: T-213
     milestone: M3
     title: "M3 evaluation harness: dev vs acceptance seed split, per-SNR accuracy/unknown-rate reports, OTA labels only from CRC-valid decodes"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-211]
     parallel_group: M3V
@@ -3470,7 +3470,7 @@ tasks:
   - id: T-217
     milestone: MUI
     title: "T-178 follow-ups: HTTP-level test that serve answers during ring allocation; count samples lost while a large ring allocates; surface the buffer-off library default; measure ring fsync cost on the Jetson"
-    status: review
+    status: done
     commit: b54a967
     priority: low
     deps: [T-178]
@@ -3486,7 +3486,7 @@ tasks:
   - id: T-218
     milestone: M3
     title: "M3 contracts skeleton remainder that T-211 left out: fuse() + prior invariants, hk_model::signature module, hk-ml stub crate, EvalReport type, /api/taxonomy route, datasets migration, and the Fingerprint family_of gate (an M2 behaviour change: it would merge fsk/2fsk emitters)"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-211]
     parallel_group: M3K
@@ -3654,7 +3654,8 @@ tasks:
   - id: T-228
     milestone: M2-hardening
     title: "Consolidated flaky-pin fix: convert wall-clock and arrival-order assertions to sample-clock or queue-depth terms, removing each nextest pin as its test is fixed (supersedes T-182, T-197, T-225, T-227)"
-    status: in-progress
+    status: done
+    commit: 38403e1
     priority: normal
     deps: []
     parallel_group: PIPELINE
@@ -3681,6 +3682,8 @@ tasks:
     model: sonnet
     effort: medium
     core_interface: false
+    measured_rate: "coordinator measurement 2026-09-15 18:15: temp regrew from 52 to 125 hk-replay dirs and 5.1 GB in about 20 minutes with five agents running tests - roughly 15 GB/hour, which would reach the 20 GB disk floor in under two hours. The manual sweep is being repeated to buy headroom; this is the rate the fix has to eliminate."
+
   - id: T-230
     milestone: M3
     title: "Close the classifier accuracy gap to the ADR-0016 floors: top-1 0.754 vs 0.90 and top-2 0.933 vs 0.95, driven by analog/noise-like abstention and a simulation-to-reality gap (both OTA fixtures abstain)"

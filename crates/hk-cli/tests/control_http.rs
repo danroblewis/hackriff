@@ -341,6 +341,7 @@ fn a_replayed_recording_refuses_device_settings_but_accepts_display_settings() {
         listen: Default::default(),
         compute: Default::default(),
         iq_buffer: Default::default(),
+        iq_buffer_hooks: None,
     })
     .unwrap();
     assert!(live_control.is_none());

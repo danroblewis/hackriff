@@ -1,0 +1,2948 @@
+{
+  "version": 1,
+  "taxonomy": "hk-mod@1",
+  "features_version": 1,
+  "fitted_on": "hk-classify synth dev grid: seeds 0..60, gate+{0,5,10,15} dB, 5040 snippets",
+  "classes": [
+    {
+      "class": "am",
+      "family": "analog",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 51.07775571514265,
+          "sigma": 87.53621124558158,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.27163300234934895,
+          "sigma": 0.061869598980807385,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 17.312251907237393,
+          "sigma": 10.545685633052287,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 30.487763723179945,
+          "sigma": 18.687189047461835,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 1.1756065332088474,
+          "sigma": 0.6731546461247271,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.801141019940842,
+          "sigma": 0.29313494822673236,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.4594949375270444,
+          "sigma": 0.100469312282659,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.05180623391129768,
+          "sigma": 0.026354814274948297,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.8573495231739263,
+          "sigma": 0.06858796185391411,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.2367993630051432,
+          "sigma": 0.3341615019126046,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.34988453768853167,
+          "sigma": 0.6137583053593734,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.3661315614502836,
+          "sigma": 0.6025529184362232,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.8011410199408422,
+          "sigma": 0.2931349482267326,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.40402482912636273,
+          "sigma": 0.10795350388613974,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.0530356929161603,
+          "sigma": 0.049866764295744666,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 2.612603495873897,
+          "sigma": 16.27042963144148,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.4270985906253647,
+          "sigma": 0.33847315249092474,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": 0.0361019498713532,
+          "sigma": 0.4321406087560479,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 22.668692923109326,
+          "sigma": 5.121200666503959,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9168145208257119,
+          "sigma": 0.08938395117341114,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.016046032628167322,
+          "sigma": 0.0171631387143681,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 3.0465487317884667,
+      "n": 240
+    },
+    {
+      "class": "nbfm",
+      "family": "analog",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 26.12255218799014,
+          "sigma": 41.14913875067299,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.19857585003968087,
+          "sigma": 0.11140109841330954,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 12.626258057188886,
+          "sigma": 12.627280686329843,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 22.533717072442652,
+          "sigma": 22.973210182017024,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.729202921770159,
+          "sigma": 0.6734607032540401,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.5277340204423788,
+          "sigma": 0.39347612915046526,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.33544116162442794,
+          "sigma": 0.18982377422639712,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.03427184477841801,
+          "sigma": 0.030506437263126986,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.9045575612167505,
+          "sigma": 0.07650352370231726,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.04432354377618182,
+          "sigma": 0.052312204523439966,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.0461352329045258,
+          "sigma": 0.03749973438427815,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.4769557204711768,
+          "sigma": 0.39868223200287195,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.5277340204423788,
+          "sigma": 0.39347612915046526,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.36357444624266383,
+          "sigma": 0.09678018637354671,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0208333333333333,
+          "sigma": 0.16986129381140924,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.22320713291800215,
+          "sigma": 0.3319970223370249,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 6.960018770687911,
+          "sigma": 16.619653514545373,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.3684342015656956,
+          "sigma": 0.2413020129663503,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": -0.21751019677792136,
+          "sigma": 0.4237657102782128,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 16.54114481471922,
+          "sigma": 6.332651562299764,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 1.0868429319665447,
+          "sigma": 0.2116991931890437,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.08743484742453862,
+          "sigma": 0.1356532912481912,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 2.2022848977747933,
+      "n": 240
+    },
+    {
+      "class": "wfm",
+      "family": "analog",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 6.387123336975323,
+          "sigma": 1.704306593751532,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.07552045344904558,
+          "sigma": 0.04564807249577445,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 0.6596860824625312,
+          "sigma": 0.5092041402249261,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 1.187775020018394,
+          "sigma": 0.9073001709730758,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.18463700873281505,
+          "sigma": 0.04444168755319357,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.0809901265984512,
+          "sigma": 0.08709123352964807,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.1257889501651648,
+          "sigma": 0.07620624832661836,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.0005867607939431141,
+          "sigma": 0.002684675741483198,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.995092848373235,
+          "sigma": 0.0796074278698588,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.02697167495052579,
+          "sigma": 0.0365026050800684,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.019372878354458414,
+          "sigma": 0.020229597384130774,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.9210642329947432,
+          "sigma": 0.08814779349397658,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.0809901265984514,
+          "sigma": 0.08709123352964808,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.3705198859253562,
+          "sigma": 0.0485010374099951,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.010554896106932296,
+          "sigma": 0.00801083869152418,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.15443014317726644,
+          "sigma": 0.04597839156386148,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.16989527309379004,
+          "sigma": 0.10770028181416437,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": 0.00824441806452205,
+          "sigma": 0.4497580576002876,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 26.639515383802756,
+          "sigma": 5.868078464871903,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.6480623798583053,
+          "sigma": 0.1590970471889924,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.284437773570248,
+          "sigma": 0.16719772160747026,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.8220862429013993,
+      "n": 240
+    },
+    {
+      "class": "ssb",
+      "family": "analog",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 29.715891292861258,
+          "sigma": 48.40727100013633,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.3054473553870149,
+          "sigma": 0.024435788430961194,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 25.884566271408683,
+          "sigma": 9.750497163094678,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 44.90597050730494,
+          "sigma": 17.381391853374936,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 1.4136582071175872,
+          "sigma": 0.4796835019474111,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.9592200798379595,
+          "sigma": 0.15673760638703677,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.5156283509554784,
+          "sigma": 0.04125026807643827,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.06721556184041565,
+          "sigma": 0.005377244947233252,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.8243365875675018,
+          "sigma": 0.06594692700540014,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.025997576937950937,
+          "sigma": 0.048789381447625485,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.043384242196093235,
+          "sigma": 0.05258796855858533,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.04382627956180186,
+          "sigma": 0.06278120406912417,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.9592200798379593,
+          "sigma": 0.15673760638703674,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.4228357594160387,
+          "sigma": 0.13531248067944007,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.03372722283787866,
+          "sigma": 0.009970092828025764,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 10.649382509824477,
+          "sigma": 24.20706210917513,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.6385785286161422,
+          "sigma": 0.34506625946784825,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": -0.030694108324725914,
+          "sigma": 0.3130062399988315,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 18.96779669854558,
+          "sigma": 5.390327041701699,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9768523023218992,
+          "sigma": 0.07814818418575194,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.023600885802562366,
+          "sigma": 0.03755064331145343,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 2.2688334565699515,
+      "n": 240
+    },
+    {
+      "class": "cw",
+      "family": "analog",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 1.7201065769065487,
+          "sigma": 0.2738204407445435,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.3057761387107467,
+          "sigma": 0.024462091096859737,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 30.56644345876401,
+          "sigma": 9.376568513304932,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 52.57732166219921,
+          "sigma": 15.854184204441662,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 1.5931331915032168,
+          "sigma": 0.29634444860074394,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.9614423596407389,
+          "sigma": 0.1569153887712591,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.5151771988752781,
+          "sigma": 0.04121417591002225,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.06690949760235623,
+          "sigma": 0.005352759808188499,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.8249965427774145,
+          "sigma": 0.06599972342219317,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.01048763754255824,
+          "sigma": 0.005833284228373469,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.03693570710398184,
+          "sigma": 0.012350633485478872,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.03870151632535308,
+          "sigma": 0.08019445233388386,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.9614423596407389,
+          "sigma": 0.1569153887712591,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.4768435857716019,
+          "sigma": 0.09694635456696996,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.03321036126304369,
+          "sigma": 0.008506504243598782,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 11.341866374860937,
+          "sigma": 37.17090395323843,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.6928770463467906,
+          "sigma": 0.3366200889221357,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": 0.07342594120577832,
+          "sigma": 0.3889965642727383,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 15.864754698348293,
+          "sigma": 7.948511676495629,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9647451199562388,
+          "sigma": 0.07717960959649911,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.008938239761841089,
+          "sigma": 0.003693892755049033,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 3.045716832777768,
+      "n": 240
+    },
+    {
+      "class": "ook",
+      "family": "ook-ask",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 23.037240497309632,
+          "sigma": 8.657810659526454,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.18986046195646114,
+          "sigma": 0.015990244832979086,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 16.544069329588844,
+          "sigma": 5.0359537932681775,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 29.32596659087345,
+          "sigma": 9.510676173402102,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.02371450174179196,
+          "sigma": 0.012303923515085094,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 2.059290171138622,
+          "sigma": 0.16474321369108974,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.8878144333849419,
+          "sigma": 0.07102515467079536,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.4561313177818705,
+          "sigma": 0.03649050542254964,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.5198217208921629,
+          "sigma": 0.04158573767137304,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.5741109840868824,
+          "sigma": 0.3535251263587537,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.7722333865518954,
+          "sigma": 0.4385451399404295,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.3947725158151979,
+          "sigma": 0.37941504259111475,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 2.059290171138622,
+          "sigma": 0.16474321369108974,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.10937711726822866,
+          "sigma": 0.02740680307006131,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.02450241633789748,
+          "sigma": 0.0071115626089858445,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.018087890248212654,
+          "sigma": 0.009464773871651228,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.1406104121401833,
+          "sigma": 0.030062419954686285,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": 0.10175534742514089,
+          "sigma": 0.7759778715916279,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 28.852062245943973,
+          "sigma": 2.3081649796755177,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9496087966431179,
+          "sigma": 0.07596870373144944,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.01884379976316623,
+          "sigma": 0.009500139971424347,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.343718600389748,
+      "n": 240
+    },
+    {
+      "class": "ask4",
+      "family": "ook-ask",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 26.61290985986218,
+          "sigma": 10.086667559879446,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.21403601102925604,
+          "sigma": 0.017122880882340482,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 0.02618820128634851,
+          "sigma": 0.01536267611423274,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 0.03993507955125605,
+          "sigma": 0.023276780914620456,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.00885264285650766,
+          "sigma": 0.00548860499510114,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.5371433007507707,
+          "sigma": 0.12297146406006165,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.42346630659001555,
+          "sigma": 0.033877304527201245,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.024392265193370156,
+          "sigma": 0.006640984334170226,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.8270027624309397,
+          "sigma": 0.06616022099447517,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.766127457676877,
+          "sigma": 0.30537899488883374,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 1.2146735508862696,
+          "sigma": 0.4493723301008027,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -1.1426757431311476,
+          "sigma": 0.3544145744225851,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.5371433007507704,
+          "sigma": 0.12297146406006164,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.21082844499062134,
+          "sigma": 0.01686627559924971,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.017387440996649437,
+          "sigma": 0.005611431002578969,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.018294742483896412,
+          "sigma": 0.009403586161126465,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.16057863067714992,
+          "sigma": 0.012846290454171993,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": -0.11058219205238656,
+          "sigma": 0.4507031417676019,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 24.7076770174833,
+          "sigma": 1.9766141613986639,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9190893278858088,
+          "sigma": 0.0735271462308647,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.00633055331775543,
+          "sigma": 0.0037223526685816006,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.6559571414893133,
+      "n": 240
+    },
+    {
+      "class": "2fsk",
+      "family": "fsk",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 14.163870084565199,
+          "sigma": 7.217195254886664,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.038420818632024706,
+          "sigma": 0.012860615418040343,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 11.7853046057937,
+          "sigma": 3.208249710609284,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 20.27967942402008,
+          "sigma": 5.279795592423167,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.18562385711786175,
+          "sigma": 0.06273403475274326,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.0173889294917233,
+          "sigma": 0.08139111435933787,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.06262329665735954,
+          "sigma": 0.022240470319080725,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.0,
+          "sigma": 0.001,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.0029420550205424547,
+          "sigma": 0.002122433475310187,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.004760427242084361,
+          "sigma": 0.003895752219738737,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.9826242121501948,
+          "sigma": 0.07860993697201558,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.0173889294917233,
+          "sigma": 0.08139111435933787,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.841315423811782,
+          "sigma": 0.06730523390494257,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 2.0,
+          "sigma": 0.16,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.09559882658568782,
+          "sigma": 0.04444426377753008,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.24111027861621445,
+          "sigma": 0.019288822289297156,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.4798518548017576,
+          "sigma": 0.03838814838414061,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": -0.0008593397902779526,
+          "sigma": 0.029456273475818712,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 15.716845855164427,
+          "sigma": 1.5027231564843224,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9299943079699985,
+          "sigma": 0.07439954463759989,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.1369396643509579,
+          "sigma": 0.06866425115247318,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.41566297231295,
+      "n": 240
+    },
+    {
+      "class": "gfsk",
+      "family": "fsk",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 40.609436387870566,
+          "sigma": 43.46759917911226,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.06086493455443301,
+          "sigma": 0.022023667832083538,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 7.361007457737693,
+          "sigma": 2.8305791096978985,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 12.881022890542075,
+          "sigma": 4.902039710701133,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.1053352925873497,
+          "sigma": 0.037385298041420524,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.0712595518697439,
+          "sigma": 0.08570076414957951,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.1256703626901879,
+          "sigma": 0.05129889205855041,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.0,
+          "sigma": 0.001,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.9999984653161449,
+          "sigma": 0.07999987722529159,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.017711239412129726,
+          "sigma": 0.009759620130269804,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.01408714042378534,
+          "sigma": 0.007818684030928825,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.9291489894410848,
+          "sigma": 0.0743319191552868,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.0712595518697439,
+          "sigma": 0.08570076414957951,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.748665619510218,
+          "sigma": 0.059893249560817444,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 2.0,
+          "sigma": 0.16,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.13711623867028797,
+          "sigma": 0.07246132760116544,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.2674735887870731,
+          "sigma": 0.02139788710296585,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.8875490876761442,
+          "sigma": 0.07100392701409153,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": -0.07125365506563765,
+          "sigma": 0.08998104193822726,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 1.9604182016041698,
+          "sigma": 0.2793987182393343,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9015686354136686,
+          "sigma": 0.07212549083309348,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.031013111505532678,
+          "sigma": 0.02797101692725723,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.5888802231033814,
+      "n": 240
+    },
+    {
+      "class": "msk",
+      "family": "fsk",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 106.43253184516804,
+          "sigma": 55.11677143925427,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.030324540143065615,
+          "sigma": 0.011066891837079765,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 5.9750351339673635,
+          "sigma": 1.2032489831023894,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 10.708366456986353,
+          "sigma": 2.845584595823838,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.09368913351534157,
+          "sigma": 0.029509325473873554,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.0114952088105322,
+          "sigma": 0.08091961670484259,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.05066559276371958,
+          "sigma": 0.018319408276884202,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.0,
+          "sigma": 0.001,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.016555511215360454,
+          "sigma": 0.009026856105361003,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.007968086698642525,
+          "sigma": 0.00760635457610474,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.9888600207550042,
+          "sigma": 0.07910880166040034,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.0114952088105322,
+          "sigma": 0.08091961670484259,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.7781056985599718,
+          "sigma": 0.06224845588479774,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 2.0,
+          "sigma": 0.16,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.08908203959339286,
+          "sigma": 0.036132417225664126,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.20697189796639587,
+          "sigma": 0.01655775183731167,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.742488309348967,
+          "sigma": 0.05939906474791736,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": 0.034492686384604024,
+          "sigma": 0.0414540092419829,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 4.833543066217605,
+          "sigma": 0.38668344529740845,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9484455771551669,
+          "sigma": 0.07587564617241335,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.031575447723383006,
+          "sigma": 0.019902679240365425,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.4166606185324362,
+      "n": 240
+    },
+    {
+      "class": "4fsk",
+      "family": "fsk",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 18.830035041397423,
+          "sigma": 12.922647697506767,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.02594893962677365,
+          "sigma": 0.010445806447719714,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 11.678607447739004,
+          "sigma": 5.846027802917518,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 20.513979706107378,
+          "sigma": 11.340828765143842,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.14743539130178382,
+          "sigma": 0.04975673402770831,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.008378806323528,
+          "sigma": 0.08067030450588224,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.042377997123152,
+          "sigma": 0.01773240805396936,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.0,
+          "sigma": 0.001,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.01851144146328857,
+          "sigma": 0.011090025230844618,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.009515522896818606,
+          "sigma": 0.00571236266852669,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.9920863433483936,
+          "sigma": 0.07936690746787149,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.0083788063235277,
+          "sigma": 0.08067030450588222,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.553900655945059,
+          "sigma": 0.04431205247560472,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 4.0,
+          "sigma": 0.32,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.10150188080657631,
+          "sigma": 0.05581106812492392,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.19162878860935098,
+          "sigma": 0.015330303088748078,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.6077443463255121,
+          "sigma": 0.04861954770604097,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": -0.019390578970344973,
+          "sigma": 0.07106997149096674,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 3.7410102258200957,
+          "sigma": 0.6818553031620812,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 1.005581492292328,
+          "sigma": 0.08044651938338625,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.022026116868551486,
+          "sigma": 0.015176138659835976,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.4351243881462088,
+      "n": 240
+    },
+    {
+      "class": "bpsk",
+      "family": "psk-qam",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 38.28514026614006,
+          "sigma": 13.752915523051096,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.23952437730485868,
+          "sigma": 0.019161950184388696,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 8.925587496904466,
+          "sigma": 2.864725917002314,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 15.81597523025161,
+          "sigma": 5.176646990437464,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.02950941477526224,
+          "sigma": 0.027997620292451324,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.4049492283227172,
+          "sigma": 0.11239593826581738,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.40212895568358203,
+          "sigma": 0.032170316454686564,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.07974345201555151,
+          "sigma": 0.012649976764190033,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.8488024350317173,
+          "sigma": 0.06790419480253738,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.0640279919350585,
+          "sigma": 0.1698935497901036,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.10242010068968575,
+          "sigma": 0.2922114895690256,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.6278939077793834,
+          "sigma": 0.1617687454305581,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.404949228322717,
+          "sigma": 0.11239593826581736,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.32736676634427136,
+          "sigma": 0.16084293762054885,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.06734314544847958,
+          "sigma": 0.03928234809008161,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.0646723899365854,
+          "sigma": 0.03812609970386379,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.8554436018888351,
+          "sigma": 0.10407064221320556,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": -0.007563663225563897,
+          "sigma": 0.05793032197035616,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 2.0616538262745,
+          "sigma": 1.7865927646063826,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9639886872525114,
+          "sigma": 0.07711909498020092,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.03328377993273848,
+          "sigma": 0.026930647998142484,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 2.173048160788565,
+      "n": 240
+    },
+    {
+      "class": "qpsk",
+      "family": "psk-qam",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 44.24965272465071,
+          "sigma": 14.787220445280319,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.18839021182198454,
+          "sigma": 0.015071216945758763,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 11.064483462792682,
+          "sigma": 3.123821297645675,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 19.494743508120827,
+          "sigma": 5.959691280757088,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.10015267388780216,
+          "sigma": 0.03326118873180903,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.2256799492578192,
+          "sigma": 0.09805439594062554,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.28876089839128916,
+          "sigma": 0.023100871871303132,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.03587093308778391,
+          "sigma": 0.0030531320254915994,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.9252979844485372,
+          "sigma": 0.07402383875588298,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.02999288738086057,
+          "sigma": 0.016613168010399887,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.038683957846697,
+          "sigma": 0.07944847071601818,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.7754944713979999,
+          "sigma": 0.06203955771183999,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.2256799492578192,
+          "sigma": 0.09805439594062554,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.33125898086046157,
+          "sigma": 0.030834252406508843,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0375,
+          "sigma": 0.1903805921686266,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.08048026067098056,
+          "sigma": 0.04087502604127157,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.19899280444783482,
+          "sigma": 0.015919424355826786,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.8696604159997287,
+          "sigma": 0.08616682380357647,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": -0.013143265890696804,
+          "sigma": 0.04642759388654964,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 2.2728452556753465,
+          "sigma": 0.977121875221397,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9674804825930862,
+          "sigma": 0.0773984386074469,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.018438468469149382,
+          "sigma": 0.012925466722937,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.8112066301037346,
+      "n": 240
+    },
+    {
+      "class": "8psk",
+      "family": "psk-qam",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 38.02557877271809,
+          "sigma": 14.30259870652309,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.17881896184575707,
+          "sigma": 0.014305516947660565,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 8.66353947466025,
+          "sigma": 2.4845491226673353,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 15.504356526888728,
+          "sigma": 4.896316383371837,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.10129208766465085,
+          "sigma": 0.05727496358063562,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.2307039898328334,
+          "sigma": 0.09845631918662667,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.28293008182902,
+          "sigma": 0.022634406546321602,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.02325352977286679,
+          "sigma": 0.0031366455092690345,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.9318567116840596,
+          "sigma": 0.07454853693472477,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.028967021680386458,
+          "sigma": 0.018472997183481842,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.03591625170907997,
+          "sigma": 0.02023197069486602,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.7704749282553691,
+          "sigma": 0.061637994260429534,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.2307039898328334,
+          "sigma": 0.09845631918662667,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.2544125428781005,
+          "sigma": 0.02107337198534053,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.10115449363007382,
+          "sigma": 0.04175255941269737,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.23509359860751378,
+          "sigma": 0.29451289283772975,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.8667677437165949,
+          "sigma": 0.07987065922371352,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": -0.01797814777213671,
+          "sigma": 0.0490043080401606,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 2.071782556807422,
+          "sigma": 0.4133154120016556,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9809643144520694,
+          "sigma": 0.07847714515616555,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.028778116036354565,
+          "sigma": 0.02417460400599453,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.618167806475974,
+      "n": 240
+    },
+    {
+      "class": "qam16",
+      "family": "psk-qam",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 20.038899416050842,
+          "sigma": 6.861252660644308,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.22384162091882548,
+          "sigma": 0.01790732967350604,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 10.182123326871848,
+          "sigma": 2.8954772647119285,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 18.07927445120036,
+          "sigma": 5.594484747279964,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.09845747515624428,
+          "sigma": 0.03951564190870504,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.486165737120828,
+          "sigma": 0.11889325896966624,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.40478214119105516,
+          "sigma": 0.032382571295284414,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.04103719050542256,
+          "sigma": 0.003735722968011323,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.863589881317782,
+          "sigma": 0.06908719050542256,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.031778382159646935,
+          "sigma": 0.01763193479477082,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.06035089668036684,
+          "sigma": 0.06320685404047048,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.5151537182217791,
+          "sigma": 0.04121229745774233,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.4861657371208277,
+          "sigma": 0.11889325896966621,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.22219461486942063,
+          "sigma": 0.017775569189553652,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.0966253432792453,
+          "sigma": 0.04107088448428108,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.20955388758044055,
+          "sigma": 0.01702925790401605,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.8673474067398795,
+          "sigma": 0.08177886303033188,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": -0.02655589485260825,
+          "sigma": 0.04590252759332802,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 2.1763737228371025,
+          "sigma": 1.0619811078279628,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9906836369132038,
+          "sigma": 0.0792546909530563,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.027167587835251434,
+          "sigma": 0.022920700455786494,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.6635808906445035,
+      "n": 240
+    },
+    {
+      "class": "qam64",
+      "family": "psk-qam",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 16.93447284615422,
+          "sigma": 4.991672030309703,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.23631374793297513,
+          "sigma": 0.01890509983463801,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 9.789870265327504,
+          "sigma": 3.08511689773717,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 17.415408426628616,
+          "sigma": 5.758973342671625,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.10400781614222458,
+          "sigma": 0.03220842436627385,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.5397934844561658,
+          "sigma": 0.12318347875649327,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.42114367669079766,
+          "sigma": 0.033691494135263816,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.05078780437896459,
+          "sigma": 0.004221420758294526,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.8631133619807657,
+          "sigma": 0.06904906895846126,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.03220658366803163,
+          "sigma": 0.016328514544899832,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.05522734760828677,
+          "sigma": 0.02823860396266074,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.46150928904436317,
+          "sigma": 0.03692074312354905,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.539793484456166,
+          "sigma": 0.12318347875649328,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.21213884327111585,
+          "sigma": 0.01697110746168927,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.08306311691161285,
+          "sigma": 0.03275501937104315,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.20706648881970774,
+          "sigma": 0.01656531910557662,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.8732394544460907,
+          "sigma": 0.07455162177488849,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": -0.005226374016358072,
+          "sigma": 0.05582132647208902,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 2.3862890189749337,
+          "sigma": 1.0139909249688581,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9738740391330966,
+          "sigma": 0.07790992313064772,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.024499565872733078,
+          "sigma": 0.012856889076664012,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.493347581207074,
+      "n": 240
+    },
+    {
+      "class": "ofdm",
+      "family": "ofdm",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 2.136514427872408,
+          "sigma": 0.19087442002364874,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.3086508614826944,
+          "sigma": 0.024692068918615553,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 28.932115770829828,
+          "sigma": 8.19635203685665,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 50.92359885555493,
+          "sigma": 15.546291111220478,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 1.5195938509798745,
+          "sigma": 0.12156750807838997,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.9828464475348884,
+          "sigma": 0.15862771580279109,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.5193015788640056,
+          "sigma": 0.04154412630912045,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.06678110758463542,
+          "sigma": 0.0053424886067708335,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.8237215677897135,
+          "sigma": 0.06589772542317708,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.011416295799089,
+          "sigma": 0.005980503497808204,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.03228716796219238,
+          "sigma": 0.01759464824503702,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.01731950167021127,
+          "sigma": 0.014431118503417904,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.9828464475348884,
+          "sigma": 0.15862771580279109,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.43524796139809324,
+          "sigma": 0.03481983691184746,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.024917128544632294,
+          "sigma": 0.006532863856126908,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.2418508728754959,
+          "sigma": 0.01934806983003967,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.5850788436481756,
+          "sigma": 0.09320035535917091,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": 0.019113925507455918,
+          "sigma": 0.23477597355544688,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 3.695803726513595,
+          "sigma": 0.2956642981210876,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.8606042537677543,
+          "sigma": 0.06884834030142034,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.1810417437755176,
+          "sigma": 0.014483339502041408,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 0.8254674809521312,
+      "n": 240
+    },
+    {
+      "class": "chirp",
+      "family": "css",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 102.42265297743717,
+          "sigma": 23.832651913704282,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.20160167434024576,
+          "sigma": 0.01612813394721966,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 13.83310502061126,
+          "sigma": 1.1066484016489009,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 26.615945292929666,
+          "sigma": 2.1292756234343733,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.2110732812393242,
+          "sigma": 0.016885862499145938,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.2212567218055972,
+          "sigma": 0.10550024957870811,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.2968953984457084,
+          "sigma": 0.045180127999076926,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.04942321465111523,
+          "sigma": 0.01043422316134148,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.9048797830980145,
+          "sigma": 0.07239038264784116,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.012955320959308516,
+          "sigma": 0.015293226226480171,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.015129117439587222,
+          "sigma": 0.012258988263722723,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.7791440267924414,
+          "sigma": 0.10550229601834912,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.2212567218055967,
+          "sigma": 0.10550024957870811,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.4505785754838237,
+          "sigma": 0.06548299491009263,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.8354652143289718,
+          "sigma": 0.15113768859915735,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.22051719799439065,
+          "sigma": 0.03234343014952957,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.6990352186398131,
+          "sigma": 0.15529154549052213,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": 0.0071431964980251395,
+          "sigma": 0.3040891225110337,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 3.525725892581856,
+          "sigma": 0.7176503244733606,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.8053251221547748,
+          "sigma": 0.06442600977238198,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.008310116735795561,
+          "sigma": 0.0034887184776542317,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.7147230737950707,
+      "n": 240
+    },
+    {
+      "class": "ppm",
+      "family": "pulsed",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 135.19141965386453,
+          "sigma": 10.815313572309163,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.48059302609385524,
+          "sigma": 0.03844744208750842,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 19.884422857437308,
+          "sigma": 6.4492367663793795,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 35.95502302598667,
+          "sigma": 12.534014094964256,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.061449473199948125,
+          "sigma": 0.04834927957104713,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 3.1038609947505233,
+          "sigma": 0.24830887958004189,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 1.085058490721824,
+          "sigma": 0.08680467925774592,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.4500570390832823,
+          "sigma": 0.07809460942369342,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.4187551156128503,
+          "sigma": 0.03350040924902802,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.30705893889620134,
+          "sigma": 0.3151929115808146,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.4268061693277654,
+          "sigma": 0.3869291495988694,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": 0.9106431753316323,
+          "sigma": 0.30045222396334653,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 3.103860994750522,
+          "sigma": 0.24830887958004177,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.07960394260717649,
+          "sigma": 0.03153817316456467,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.0389383892286091,
+          "sigma": 0.011794543569344191,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.045124592750264654,
+          "sigma": 0.03021616444144802,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.40779786743259805,
+          "sigma": 0.0574113502286015,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": -0.007552544768244526,
+          "sigma": 0.40524889206510145,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 21.608995294761943,
+          "sigma": 1.8578589198113389,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 1.4669182061055457,
+          "sigma": 0.11735345648844366,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.019289480182909394,
+          "sigma": 0.010905186085083628,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 2.042019182183641,
+      "n": 240
+    },
+    {
+      "class": "pulse",
+      "family": "pulsed",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 34.38884024890506,
+          "sigma": 2.751107219912405,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 2.1828585191452357,
+          "sigma": 0.610596609694042,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 34.69860611022502,
+          "sigma": 8.999647864379886,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 62.37881443049032,
+          "sigma": 18.289637819780552,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 1.307051312293497,
+          "sigma": 0.41225722188268543,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 17.836692636877,
+          "sigma": 2.05523158549461,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 2.4334799072257,
+          "sigma": 0.6672378726035167,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.3368865966796875,
+          "sigma": 0.19715201924869738,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.38400293986002604,
+          "sigma": 0.2207322392610253,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.1947185806129648,
+          "sigma": 0.2844324233186523,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 1.980825850493635,
+          "sigma": 3.4698981150472603,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": 15.718212598653798,
+          "sigma": 1.9976252326455353,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 17.836692636877,
+          "sigma": 2.0552315854946106,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.3351546278222156,
+          "sigma": 0.1538199403908291,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.05283051202957482,
+          "sigma": 0.033958206681128075,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.2654013655485959,
+          "sigma": 0.09247066028272434,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.1303150815887227,
+          "sigma": 0.0765478129449177,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": 0.02597211303828939,
+          "sigma": 0.7913741836042947,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 26.30062194696878,
+          "sigma": 3.455547587855069,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.6225167942363059,
+          "sigma": 0.09920006641536704,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.18530950830195658,
+          "sigma": 0.014824760664156528,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.744519080276848,
+      "n": 240
+    },
+    {
+      "class": "noise-like",
+      "family": "noise-like",
+      "dims": [
+        {
+          "feature": "gamma_max",
+          "mean": 4.700588748504499,
+          "sigma": 0.6519521802515296,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_aa",
+          "mean": 0.30951530779009306,
+          "sigma": 0.024761224623207446,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_ap",
+          "mean": 20.802829201134067,
+          "sigma": 3.2874353687774702,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_dp",
+          "mean": 36.43508251409474,
+          "sigma": 6.236977089024078,
+          "weight": 1.0
+        },
+        {
+          "feature": "sigma_af",
+          "mean": 0.507969385105917,
+          "sigma": 0.08556750845630884,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42_a",
+          "mean": 1.992141609081744,
+          "sigma": 0.15937132872653953,
+          "weight": 1.0
+        },
+        {
+          "feature": "env_cv",
+          "mean": 0.5215981012398179,
+          "sigma": 0.04172784809918543,
+          "weight": 1.0
+        },
+        {
+          "feature": "low_fraction",
+          "mean": 0.06847861673828523,
+          "sigma": 0.0054782893390628185,
+          "weight": 1.0
+        },
+        {
+          "feature": "duty",
+          "mean": 0.822548086760794,
+          "sigma": 0.06580384694086353,
+          "weight": 1.0
+        },
+        {
+          "feature": "c20_norm",
+          "mean": 0.017195718411651937,
+          "sigma": 0.009029865187915887,
+          "weight": 1.0
+        },
+        {
+          "feature": "c40_norm",
+          "mean": 0.05215573423703297,
+          "sigma": 0.027692455878219793,
+          "weight": 1.0
+        },
+        {
+          "feature": "c42_norm",
+          "mean": -0.008235282371655871,
+          "sigma": 0.01959808292370494,
+          "weight": 1.0
+        },
+        {
+          "feature": "mu42",
+          "mean": 1.992141609081744,
+          "sigma": 0.15937132872653953,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_bimodality",
+          "mean": 0.16264345875704253,
+          "sigma": 0.013011476700563403,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_modality",
+          "mean": 1.0,
+          "sigma": 0.08,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_slope_r2",
+          "mean": 0.045137196499390395,
+          "sigma": 0.009573784932904788,
+          "weight": 1.0
+        },
+        {
+          "feature": "if_std_norm",
+          "mean": 0.22163591273293934,
+          "sigma": 0.02947613305534182,
+          "weight": 1.0
+        },
+        {
+          "feature": "flatness",
+          "mean": 0.7924700170759225,
+          "sigma": 0.10482765612293618,
+          "weight": 1.0
+        },
+        {
+          "feature": "symmetry",
+          "mean": 0.1788479494081817,
+          "sigma": 0.299118617897531,
+          "weight": 1.0
+        },
+        {
+          "feature": "carrier_line_db",
+          "mean": 2.943171640255742,
+          "sigma": 0.5665502885425123,
+          "weight": 1.0
+        },
+        {
+          "feature": "sk_mean",
+          "mean": 0.9964511511426063,
+          "sigma": 0.07971609209140851,
+          "weight": 1.0
+        },
+        {
+          "feature": "cp_corr",
+          "mean": 0.010558372910947248,
+          "sigma": 0.004845318192152958,
+          "weight": 1.0
+        }
+      ],
+      "m_p95": 1.0448886597262084,
+      "n": 240
+    }
+  ]
+}

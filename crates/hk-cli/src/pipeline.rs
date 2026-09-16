@@ -320,6 +320,20 @@ impl IqBufferArgs {
     }
 }
 
+/// Test-only override of the IQ capture ring's allocation ([`hk_store::iqbuffer::IqBufferHooks`]):
+/// lets an hk-cli test mock a large ring's allocation (T-217) instead of actually preallocating
+/// it, without weakening the trait object requirements (`Send + Sync`, no `Debug`) for
+/// [`LiveOptions`] and [`ServeOptions`], which otherwise derive `Debug`. The CLI binaries never
+/// set this: `hk_store::iqbuffer::OsHooks` (the real allocator) is always used when it is `None`.
+#[derive(Clone)]
+pub struct IqBufferHooksOverride(pub Arc<dyn hk_store::iqbuffer::IqBufferHooks>);
+
+impl std::fmt::Debug for IqBufferHooksOverride {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("IqBufferHooksOverride(..)")
+    }
+}
+
 /// The highest sample rate a device can be configured to, Hz.
 pub fn max_rate_hz(caps: &SourceCapabilities) -> Option<f64> {
     use hk_core::source::SampleRates;
@@ -1283,6 +1297,8 @@ pub struct LiveOptions {
     pub compute: ComputeArgs,
     /// Rolling IQ capture buffer retention and cap (T-157).
     pub iq_buffer: IqBufferArgs,
+    /// Test-only override of the ring's allocation (T-217); `None` uses the real allocator.
+    pub iq_buffer_hooks: Option<IqBufferHooksOverride>,
 }
 
 /// A running live pipeline.
@@ -1325,6 +1341,9 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
     opts.compute.apply(&mut cfg.settings);
     opts.iq_buffer
         .apply(&mut cfg.iq_buffer, max_rate_hz(live.control.capabilities()));
+    if let Some(h) = &opts.iq_buffer_hooks {
+        cfg.iq_buffer_hooks = Some(Arc::clone(&h.0));
+    }
     cfg.source_class = class;
     // A radio cannot pause: never lossless (Pipeline::start would refuse it anyway).
     cfg.lossless = false;
@@ -1446,6 +1465,7 @@ pub fn run_live(args: &RunArgs) -> anyhow::Result<RunSummary> {
             spectrum_rows_per_s: None,
             compute: args.compute.clone(),
             iq_buffer: IqBufferArgs::default(),
+            iq_buffer_hooks: None,
         },
         &registry,
     )?;
@@ -1517,6 +1537,7 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
                 spectrum_rows_per_s: None,
                 compute: args.compute.clone(),
                 iq_buffer: args.iq_buffer.clone(),
+                iq_buffer_hooks: None,
             },
             &registry,
         )?;
@@ -2096,6 +2117,7 @@ mod tests {
                     retention_s: None,
                     max_bytes: Some(16 << 20),
                 },
+                iq_buffer_hooks: None,
             },
             &StreamRegistry::new(),
         )
