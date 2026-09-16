@@ -336,6 +336,23 @@ impl RowEvidence {
     }
 }
 
+/// Whether any presence interval of `a` overlaps one of `b` (both sorted by start, as
+/// [`RowEvidence::spans`] is). Two rows whose intervals never overlap were **observed over
+/// different windows**; see [`distinguishing_evidence`].
+fn spans_overlap(a: &[(i64, i64)], b: &[(i64, i64)]) -> bool {
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i].1 < b[j].0 {
+            i += 1;
+        } else if b[j].1 < a[i].0 {
+            j += 1;
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
 /// Share of the **narrower** of two bands that the two have in common, 0–1. `0` when they do not
 /// overlap; `1` when the narrower lies inside the wider.
 pub fn overlap_fraction(a: FreqRange, b: FreqRange) -> f64 {
@@ -405,7 +422,10 @@ pub fn rank_score(snr_db: Option<f64>, duty_cycle: Option<f64>, suspect_fraction
 /// 1. two different decoded identities (e.g. different RDS PI) — always blocks;
 /// 2. measured bandwidths further apart than `tol.bandwidth_ratio` — checked on the measurement
 ///    itself, so it holds for a row with no fingerprint (or one of an older feature-set version);
-/// 3. a [`Fingerprint::compare`] distance beyond `tol`;
+/// 3. a [`Fingerprint::compare`] distance beyond `tol` — excluding the centre always, and
+///    excluding `duty_cycle` / `burst_length_s` / `period_s` when the two rows' presence intervals
+///    are disjoint, because those are statistics of the window each row was watched over rather
+///    than properties of the emission (T-250);
 /// 4. −3 dB extents that do not overlap, with centres separated by more than the summed
 ///    measurement uncertainty.
 pub fn distinguishing_evidence(
@@ -435,9 +455,32 @@ pub fn distinguishing_evidence(
         // distinguishing evidence — including the centre term here would make the guard reject
         // exactly the offset duplicates of one station that T-219 exists to collapse (two readings
         // 60 kHz apart on a 180 kHz station are one emission, and the centre tolerance is 45 kHz).
+        let mut base = x.clone();
         let mut aligned = y.clone();
         aligned.f_center_hz = x.f_center_hz;
-        if !x.compare(&aligned, tol).within {
+        // T-250: **and except the time-sampling features, when the two rows were not observed over
+        // the same window.** `duty_cycle`, `burst_length_s` and `period_s` are statistics of the
+        // span each row happened to be watched over, not properties of the emission. When the two
+        // rows' presence intervals are disjoint (ADR-0017 §1.1: a signal that stops and returns
+        // appends a *new* interval to the same emitter) the two figures measure different windows
+        // and are not comparable, so they cannot be distinguishing evidence — for the same reason
+        // the centre is not. Measured on the user's 2026-09-16 staging scene: one 377 kHz station
+        // seen over 94–399 s and again over 471–530 s reported burst lengths of 0.68 s and 0.37 s,
+        // 1.86x apart, and that alone split it into two inventory rows 492 Hz apart.
+        //
+        // Deliberately narrow: while the intervals **do** overlap, the two rows watched the same
+        // window, the figures are comparable, and they still separate two emissions sharing a
+        // channel and a bandwidth (the ISM case) exactly as before.
+        let same_window =
+            a.spans.is_empty() || b.spans.is_empty() || spans_overlap(&a.spans, &b.spans);
+        if !same_window {
+            for f in [&mut base, &mut aligned] {
+                f.duty_cycle = None;
+                f.burst_length_s = None;
+                f.period_s = None;
+            }
+        }
+        if !base.compare(&aligned, tol).within {
             return Some("fingerprint distance beyond tolerance");
         }
     }
@@ -901,6 +944,62 @@ mod tests {
             (wide[0].error_hz - 3_000.0).abs() < 1.0,
             "{}",
             wide[0].error_hz
+        );
+    }
+
+    /// A WFM station's fingerprint as the two staging rows recorded it.
+    fn wfm(f: f64, bw: f64, duty: f64, burst: f64) -> Fingerprint {
+        Fingerprint {
+            duty_cycle: Some(duty),
+            burst_length_s: Some(burst),
+            ..Fingerprint::new(f, bw)
+        }
+    }
+
+    /// The two rows of the user's 2026-09-16 staging scene, as measured.
+    fn staging_pair() -> (RowEvidence, RowEvidence) {
+        let mut a = row(99_814_800.0, 377_500.0);
+        a.fingerprint = Some(wfm(99_813_751.0, 379_559.7, 0.4952, 0.6821));
+        let mut b = row(99_815_100.0, 377_600.0);
+        b.emitter_id = eid(2);
+        b.fingerprint = Some(wfm(99_813_258.8, 380_477.3, 0.3720, 0.3648));
+        (a, b)
+    }
+
+    /// T-250, the user's own 99.8 MHz scene: one 377 kHz station seen over 94–399 s and again over
+    /// 471–530 s became **two** inventory rows 492 Hz apart. Their bands overlap essentially
+    /// exactly, and nothing about the emission differed — only the burst length each observation
+    /// window happened to measure (0.68 s vs 0.37 s, 1.86x apart), which the guard was reading as
+    /// evidence that these were two different signals.
+    #[test]
+    fn t250_one_station_seen_in_two_disjoint_windows_is_not_told_apart_by_its_burst_length() {
+        let (mut a, mut b) = staging_pair();
+        a.spans = vec![(94_124_800_000, 399_494_399_999)];
+        b.spans = vec![(471_025_066_666, 530_355_200_000)];
+        assert!(
+            bands_compete(a.freq(), b.freq()),
+            "the two bands overlap almost exactly, so the rows do compete"
+        );
+        assert_eq!(
+            distinguishing_evidence(&a, &b, &Tolerances::default()),
+            None,
+            "two disjoint observation windows of one station measure different duty and burst \
+             figures; that is not evidence of two emissions"
+        );
+    }
+
+    /// The narrowing that keeps T-250 honest. While the two rows were watched over the **same**
+    /// window their duty cycle and burst length *are* comparable, and they still tell apart two
+    /// emissions sharing a channel and a bandwidth — the ISM case, where a chatty sensor and a
+    /// continuous carrier differ in nothing else.
+    #[test]
+    fn t250_duty_and_burst_still_separate_two_emissions_watched_over_the_same_window() {
+        let (mut a, mut b) = staging_pair();
+        a.spans = vec![(0, 500_000_000_000)];
+        b.spans = vec![(100_000_000_000, 400_000_000_000)];
+        assert_eq!(
+            distinguishing_evidence(&a, &b, &Tolerances::default()),
+            Some("fingerprint distance beyond tolerance"),
         );
     }
 

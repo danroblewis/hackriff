@@ -1059,6 +1059,18 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     );
     let (st, v) = get(addr, "/api/inventory?relations=bogus");
     assert_eq!(st, 400, "{v}");
+    // T-250 (ADR-0017 §2.1): `t0`/`t1` are accepted together and select on presence-interval
+    // overlap, so a window in which nothing was ever on the air lists nothing — however wide the
+    // rows' first-seen/last-seen hulls are.
+    let (st, v) = get(addr, "/api/inventory?t0=0&t1=1");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        v["total"].as_u64(),
+        Some(0),
+        "nothing was on the air in 1970: {v}"
+    );
+    let (st, v) = get(addr, "/api/inventory?t0=5&t1=1");
+    assert_eq!(st, 400, "t1 must not precede t0: {v}");
 
     // /api/analysis/strongest (T-079): the station is the (or a) strongest thing in its own band.
     let (f_lo, f_hi) = (STATION_HZ - 100e3, STATION_HZ + 100e3);
