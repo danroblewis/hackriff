@@ -2409,3 +2409,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
     4. no test covers the live ready-timeout branch;
     5. decide whether the readsb manifest should set `ready_timeout_ms`, since the wrapper allows 20 s while a live chain bounds at 5 s.
   - **Nit recorded:** after a live ready-timeout the chain stops reading the ring, so up to the timeout of live samples lap into `lost_samples`. That matches the pre-existing 15 s Running wait, so it is not new, but it is worth stating in the contract.
+- **B0.503 Full check green after the T-223 merge (3d9e5a3).** Lint clean; 1438/1438 tests; acceptance 29/29; 40 GB free.
+  - **Merging T-205** (dataset export) with its own check.
+  - **T-224 queued** behind the cap: T-199, T-188 and T-219 plus this check.
