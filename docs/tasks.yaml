@@ -3720,6 +3720,21 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+  - id: T-232
+    milestone: M2-hardening
+    title: "Temp-dir leak persists after T-229: one full suite run grew hk-replay dirs 30 -> 56, and 56 of 57 were dead-pid orphans carrying ring.ci8 files"
+    status: todo
+    priority: high
+    deps: [T-229]
+    parallel_group: PIPELINE
+    use_cases: []
+    found_by: "coordinator verification 2026-09-15 after merging T-229: measured before/after a full suite run rather than trusting the fix's own tests"
+    acceptance: "CONFIRM the cause before fixing - two hypotheses, neither established: (a) a MERGE-ORDER GAP - of the 8 files calling temp_data_dir, only crates/hk-cli/tests/iq_buffer_allocation_http.rs (added by T-217, developed in parallel with T-229) lacks TempDataDirGuard, and it deliberately creates rings, matching the ring.ci8 in the orphans; (b) a second path - one pid left 25+ dirs, which a single test cannot explain but a cargo test binary running many tests in one process can, so a guarded call site may not be firing (process killed, helper not taking the guard, or the guard dropped after the harness forked). Then: every temp_data_dir call site holds a guard (assert it with a test that greps or a compile-time pattern); a full suite run leaves NO net new dirs once the sweep age is accounted for; and decide explicitly whether T-229's 1-hour sweep age means fresh leftovers are a BOUNDED lag (acceptable, document it) or an unbounded leak (not). Measure before and after a full suite run, not just targeted tests"
+    area: crates/hk-cli (pipeline.rs temp_data_dir, iq_buffer_allocation_http.rs), tests/e2e
+    needs: none
+    model: sonnet
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

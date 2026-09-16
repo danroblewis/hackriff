@@ -2553,3 +2553,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Resolution argued from physics, not taste:** at the 240 kHz MPX rate the bin width is about 58.6 Hz, over 100x finer than the 19 kHz gaps between the pilot, stereo and RDS subcarriers.
   - **Proof it is useful, not merely well-formed:** `resolves_pilot_stereo_and_rds_subcarriers` synthesises an MPX-like signal and asserts each of 19/38/57 kHz resolves within 5 bins and stands more than 10 dB above the median bin.
   - **Tests:** 309/309 across hk-pipeline, hk-stream and hk-api; api_contract 26/26; fmt and clippy clean. Full check running.
+- **B0.536 Filed T-232 (high): the temp leak survives T-229, with evidence and two competing hypotheses.**
+  - **Measured, not assumed:** a full suite run took hk-replay dirs from 30 to 56; 56 of 57 were dead-pid orphans; one pid left 25+ dirs of 11-24 MB, each containing a ring.ci8.
+  - **Hypothesis (a), a merge-order gap:** of 8 files calling `temp_data_dir`, only `iq_buffer_allocation_http.rs` lacks the guard. T-217 added that file while T-229 was being written in parallel, so T-229's sweep of call sites never saw it - and it deliberately creates rings, which matches the orphan contents.
+  - **Hypothesis (b), a second path:** one pid leaving 25+ dirs cannot be a single test; it fits a `cargo test` binary running many tests in one process, so a guarded site may not be firing.
+  - **Neither is established.** The ticket requires confirming the cause before fixing, and requires the verification to be a full suite run measured before and after, which is what caught this.
+  - **Also to settle:** whether the 1-hour sweep age makes fresh leftovers a bounded lag (fine, document it) or an unbounded leak (not fine).
