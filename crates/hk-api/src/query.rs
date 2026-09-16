@@ -613,6 +613,14 @@ pub fn floor_json(product: &FloorProduct, q: &Params) -> Result<Value, ApiError>
 /// a live row, history cells carry no per-bin skirt to fit a box to, so the reported box is a fixed
 /// [`STRONGEST_BOX_HALF_HZ`] half-width around the strongest cell's centre, clamped to
 /// `[f_lo, f_hi)`. `{"found": false}` when nothing was observed in the window.
+///
+/// **Every answer carries absolute capture time** (T-337, the user's "one shared time axis"
+/// invariant: every time-varying record the backend serves carries the time the client must place
+/// it at, so nothing is inferred from a request parameter or from when the response arrived).
+/// `window: {t0_s, t1_s}` is the window actually searched — present on `found: false` too, so
+/// "nothing in the last 5 s" and "nothing in the last 300 s" are distinguishable — and a found box
+/// carries its own `t_start_s`/`t_end_s`/`duration_s`: the time extent of the pyramid cell the peak
+/// was measured in, which is the box's *time* exactly as `f_lo_hz`/`f_hi_hz` are its frequency.
 pub fn strongest_json(p: &Pyramid, q: &Params, now: Timestamp) -> Result<Value, ApiError> {
     let (f_lo, f_hi) = (num(q, "f_lo")?, num(q, "f_hi")?);
     if !(f_lo >= 0.0 && f_hi > f_lo && f_hi <= 1e12) {
@@ -646,25 +654,37 @@ pub fn strongest_json(p: &Pyramid, q: &Params, now: Timestamp) -> Result<Value, 
             resolution: Resolution::Level(level),
         })
         .map_err(|_| ApiError::new(400, "history query refused"))?;
-    let mut best: Option<(f32, usize)> = None;
+    let mut best: Option<(f32, usize, usize)> = None;
     for (i, c) in h.cells.iter().enumerate() {
-        if c.observed() && best.is_none_or(|(bv, _)| c.max_db > bv) {
-            best = Some((c.max_db, i % h.nf));
+        if c.observed() && best.is_none_or(|(bv, _, _)| c.max_db > bv) {
+            best = Some((c.max_db, i / h.nf, i % h.nf));
         }
     }
+    // The window searched, always reported: a client places the answer from the response, never
+    // from its own request or from when the reply arrived (T-337).
+    let window = json!({"t0_s": ts_s(Timestamp::from_unix_nanos(t0_ns)), "t1_s": ts_s(Timestamp::from_unix_nanos(t1_ns))});
     Ok(match best {
-        None => json!({ "found": false }),
-        Some((max_db, f)) => {
+        None => json!({ "found": false, "window": window }),
+        Some((max_db, t, f)) => {
             let freq = h.freq_of(f);
             let center = 0.5 * (freq.lo_hz + freq.hi_hz);
             let lo = (center - STRONGEST_BOX_HALF_HZ).max(f_lo);
             let hi = (center + STRONGEST_BOX_HALF_HZ).min(f_hi);
+            // The box's time extent is the cell the peak was measured in, not the whole window:
+            // `t0_s + k·t_cell_s` is the pyramid's own grid contract (T-334, docs/07 §4.1).
+            let t_cell_s = h.t_cell_ns as f64 / 1e9;
+            let t_start_s = ts_s(h.time_of(0)) + t as f64 * t_cell_s;
             json!({
                 "found": true,
                 "f_center_hz": center,
                 "f_lo_hz": lo,
                 "f_hi_hz": hi,
                 "max_db": max_db,
+                "t_start_s": t_start_s,
+                "t_end_s": t_start_s + t_cell_s,
+                "duration_s": t_cell_s,
+                "t_cell_s": t_cell_s,
+                "window": window,
             })
         }
     })

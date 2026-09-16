@@ -271,14 +271,44 @@ fn analysis_strongest_finds_a_signal_in_band_and_reports_not_found_outside_it() 
     );
     assert!(v["max_db"].as_f64().is_some());
 
-    // Nothing observed outside the recorded band.
+    // T-337: the box carries absolute capture time, asserted by exact value — this call's `now` is
+    // explicit, so the window searched is known to the second and the answer must state it.
+    let now_s = (T0 + 15 * S) as f64 / 1e9;
+    assert_eq!(
+        v["window"],
+        json!({"t0_s": now_s - 300.0, "t1_s": now_s}),
+        "the window actually searched, not the client's own request: {v}"
+    );
+    let (t_start, t_end, cell) = (
+        v["t_start_s"].as_f64().unwrap(),
+        v["t_end_s"].as_f64().unwrap(),
+        v["t_cell_s"].as_f64().unwrap(),
+    );
+    assert_eq!(v["duration_s"].as_f64().unwrap(), cell);
+    assert_eq!(t_end - t_start, cell, "the extent is exactly one cell: {v}");
+    assert!(
+        t_start >= now_s - 300.0 - cell && t_end <= now_s + cell,
+        "the cell the peak was measured in lies in the window searched: {v}"
+    );
+    // And it is a *cell*, not the whole window: a box that claimed the whole 300 s would be a
+    // client's inference dressed up as a measurement.
+    assert!(
+        cell < 300.0,
+        "the box's time is the cell's, not the window's: {v}"
+    );
+
+    // Nothing observed outside the recorded band — and the window searched is still reported, so a
+    // client can tell "nothing in the last 5 s" from "nothing in the last 300 s" (T-337).
     let empty = hk_api::query::strongest_json(
         &pyramid,
         &params(&[("f_lo", "1e9"), ("f_hi", "1.0001e9")]),
         ts(T0 + 15 * S),
     )
     .unwrap();
-    assert_eq!(empty, json!({ "found": false }));
+    assert_eq!(
+        empty,
+        json!({ "found": false, "window": {"t0_s": now_s - 5.0, "t1_s": now_s} })
+    );
 
     // Validation.
     assert_eq!(

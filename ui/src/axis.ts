@@ -153,16 +153,84 @@ export function yHit(y: number, specFrac: number, rows: number): YHit {
 }
 
 /**
- * The vertical span [top, bottom] (fractions of the canvas) of a time range on the waterfall,
- * given the newest row's time and the row period; null when the range has scrolled off (or is
- * not yet on screen).
+ * The one canonical time→screen mapping (T-337, the user's "one shared time axis" invariant):
+ * absolute capture time (Unix s) → rows-back, fractional, 0 = the newest drawn row.
+ *
+ * It is supplied by whatever holds the rows — `Waterfall.rowsBackAt`, which inverts the very
+ * per-row capture times `timeAt` reads back, so it is the exact inverse of `timeAt` at every
+ * integer row. **It is never a nominal rate.** A rows-per-second figure (the spectrum header's
+ * declared `sample_rate_hz`, a configured `rows_per_s`) describes how fast rows are *produced*,
+ * not where the ones on screen sit: a gated row, a dropped run or a backlog-skipped frame
+ * advances capture time without advancing the ring, and on a gated stream the declared rate is
+ * deliberately up to 10 % above the actual row rate (`hk_pipeline::class::RowPlan::declared_hz`).
+ * Dividing an age by such a rate therefore drifts against the rows, linearly with age — which the
+ * user names as a violation of the invariant, not a cosmetic bug.
  */
-export function timeSpanY(tLo: number, tHi: number, newestT: number, rowPeriodS: number, specFrac: number, rows: number): [number, number] | null {
-  if (![tLo, tHi, newestT].every(Number.isFinite) || !(rowPeriodS > 0)) return null;
-  const backNew = (newestT - tHi) / rowPeriodS, backOld = (newestT - tLo) / rowPeriodS;
+export type RowsBackAt = (tS: number) => number;
+
+/** A row's absolute capture time (Unix s), `rowsBack` rows before the newest drawn row; NaN when
+ * that row carries none (`Waterfall.timeAt`). Times decrease as `rowsBack` grows. */
+export type TimeAt = (rowsBack: number) => number;
+
+/**
+ * The canonical mapping, built by inverting the rows' own capture times: absolute capture time →
+ * rows-back, fractional. `n` is how many rows-back carry a time (a contiguous run from the newest).
+ *
+ * **A row's time is the first sample of its span**, not its midpoint or its end: that is the
+ * contract for both sources of it — a spectrum record's `t` is the timestamp of the first element
+ * (`docs/stream-contract.md` §5.2, produced from `SpectrumFrame.t.sample_index`, the frame's
+ * `frame_start`), and a review grid's row *k* starts at `t0_s + k·t_cell_s` (`docs/api.md`,
+ * span-matched resolution). So row *k* covers capture time `[timeAt(k), timeAt(k−1))`, and the
+ * boundary drawn at position *k* — between rows *k−1* and *k* — is at `timeAt(k−1)`. Position 0 is
+ * the live edge, one row's duration past the newest row's start.
+ *
+ * Inverting *that* is what makes the mapping exact: an emission occupying exactly row *k* (capture
+ * time `[timeAt(k), timeAt(k−1))`) places at exactly `[k, k+1]` — on the energy, not a row above
+ * it. Interpolation inside a row is linear in its own duration; a time off either end extrapolates
+ * from the nearest boundary pair (negative past the live edge, `> n` past the oldest row), so an
+ * overlay crossing an edge still places the part of it that is on screen. Binary search, since the
+ * boundaries descend. NaN until two rows carry a time — one row gives no duration to interpolate.
+ */
+export function rowsBackAt(timeAt: TimeAt, n: number, tS: number): number {
+  if (!Number.isFinite(tS) || !(n > 1)) return NaN;
+  const u = (j: number) => (j === 0 ? 2 * timeAt(0) - timeAt(1) : timeAt(j - 1));
+  const between = (j: number) => {
+    const a = u(j), d = a - u(j + 1); // the row's own duration, > 0 for a sane clock
+    return d > 0 ? j + (a - tS) / d : j;
+  };
+  if (tS >= u(0)) return between(0); // past the live edge: negative
+  if (tS <= u(n)) return between(n - 1); // older than the oldest row's start
+  let lo = 0, hi = n; // u(lo) > tS > u(hi); bisect to adjacent boundaries
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (u(mid) > tS) lo = mid; else hi = mid;
+  }
+  return between(lo);
+}
+
+/** Rows-back → vertical fraction of the **waterfall pane**; the exact inverse of [[yHit]]'s
+ * `rowsBack`, clamped to the pane. */
+export const rowFrac = (back: number, rows: number): number => Math.min(rows, Math.max(0, back)) / rows;
+
+/**
+ * The vertical span [top, bottom] of a time range as fractions of the **waterfall pane**, placed
+ * through `rowsBackAt` — the same mapping the rows themselves were drawn with — so an overlay sits
+ * on, and scrolls with, the exact energy it describes. Null when the range has scrolled off the
+ * rows held (or is not yet on screen).
+ */
+export function timeSpanRows(tLo: number, tHi: number, rowsBackAt: RowsBackAt, rows: number): [number, number] | null {
+  if (!Number.isFinite(tLo) || !Number.isFinite(tHi)) return null;
+  const backNew = rowsBackAt(tHi), backOld = rowsBackAt(tLo);
+  if (!Number.isFinite(backNew) || !Number.isFinite(backOld)) return null;
   if (backNew >= rows || backOld < -1) return null;
-  const y = (back: number) => specFrac + (Math.min(rows, Math.max(0, back)) / rows) * (1 - specFrac);
-  return [y(backNew), y(backOld)];
+  return [rowFrac(backNew, rows), rowFrac(backOld, rows)];
+}
+
+/** [[timeSpanRows]] as fractions of the whole canvas, for overlays drawn across trace and
+ * waterfall (the top `specFrac` is the spectrum trace, which has no time axis). */
+export function timeSpanY(tLo: number, tHi: number, rowsBackAt: RowsBackAt, specFrac: number, rows: number): [number, number] | null {
+  const r = timeSpanRows(tLo, tHi, rowsBackAt, rows);
+  return r && [specFrac + r[0] * (1 - specFrac), specFrac + r[1] * (1 - specFrac)];
 }
 
 /** Evenly spaced "nice" ticks inside a view (1/2/5 × 10^k Hz steps). */

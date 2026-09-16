@@ -116,9 +116,15 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   const geom = () => geometryOfLive(store.get().live);
   const livePeriodS = () => { const s = store.get(); return 1 / Math.max(1e-3, s.live.rowRateHz ?? s.device.rowsPerS ?? 25); };
   const rowPeriodS = () => reviewPeriodS ?? livePeriodS();
+  // The one canonical time axis for this view (T-337): `timeAt`/`rowsBackAt` are the waterfall's
+  // own per-row capture times and their exact inverse, so rows, presence boxes, selections and the
+  // drag draft are all laid out through the same mapping and move together. `rowPeriodS` rides
+  // along as a *duration* only (the time-scale label, the newest row's half-open end cap).
   const clock = (): RowClock | null => {
     const w = wf;
-    return w ? { specFrac: w.specFrac, rows: w.rows, timeAt: (n) => w.timeAt(n), rowPeriodS: rowPeriodS() } : null;
+    return w
+      ? { specFrac: w.specFrac, rows: w.rows, timeAt: (n) => w.timeAt(n), rowsBackAt: (t) => w.rowsBackAt(t), rowPeriodS: rowPeriodS() }
+      : null;
   };
 
   // ---- overlays (coalesced to one render per animation frame) ----
@@ -132,7 +138,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     specLayer.style.height = `${specPct}%`;
     wfLayer.style.top = `${specPct}%`;
     badge.style.top = `calc(${specPct}% + 8px)`;
-    scale.textContent = wf ? timeScaleText(wf.rows, rowPeriodS()) : "";
+    scale.textContent = wf ? timeScaleText(wf.rows, rowPeriodS(), wf) : "";
     if (!v || !g) {
       for (const e of bracketEls.values()) e.remove();
       bracketEls.clear();
@@ -204,10 +210,15 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       layer.push(e);
     }
     // Selections come straight from the shared SelectionStore (T-194); `data-id` (T-192) lets the
-    // context menu (menu/) resolve which selection a right-click/long-press landed on.
-    for (const b of selectionBoxes(s.selections.list, v, focusSel)) {
+    // context menu (menu/) resolve which selection a right-click/long-press landed on. A selection
+    // with a time extent is placed through the same row clock as the rows and the presence boxes
+    // (T-337), so it scrolls with the energy it selected; one without stays full height.
+    for (const b of selectionBoxes(s.selections.list, v, focusSel, undefined, rc)) {
       const e = h("div", { class: `c-sel${b.active ? " active" : ""}${b.pending ? " pending" : ""}`, "data-id": b.id });
       place(e, b);
+      e.style.top = `${b.topPct}%`;
+      e.style.bottom = "auto";
+      e.style.height = `${b.heightPct}%`;
       layer.push(e);
     }
     const fr = focusSig ? s.inventory.rows[focusSig] : undefined;

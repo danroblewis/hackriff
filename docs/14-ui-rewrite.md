@@ -104,6 +104,23 @@ What that fixes, and what MUI must therefore not do:
 
 **Known debt, not an exemption.** The capture band's activity bars still take the max over every frequency cell and normalise against the response's own range, in the client. "Strongest in a band" is precisely what `GET /api/analysis/strongest` exists to keep in the backend, and the pyramid cannot serve it here — its coarsest cell is 100 kHz, so no `max_f` collapses a megahertz-wide band to one column. A band-collapsed *activity-vs-time* series is the backend product that would close it; it does not exist yet and is filed as a follow-up, not waved through.
 
+### One shared time axis (T-337)
+
+The user's **first** time/waterfall invariant, and the one the boxes above depend on: *everything time-varying is laid out through one mapping between absolute capture time and screen position, and moves together — waterfall rows, every signal box, selections, the time cursor, the scrubber playhead.* An overlay is anchored in capture time, never at a fixed screen coordinate. **A box drifting out of step with the waterfall's rows-per-second is a violation of this, not a cosmetic bug** (the user's own words).
+
+**The mapping is the rows' own timestamps, inverted.** Each spectrum record arrives with an absolute capture time and a sample index; the waterfall keeps the time with the row; `axis.rowsBackAt` inverts that array. Because a record's `t` is its **first** sample, row *k* covers `[t(k), t(k−1))`, and an emission filling exactly row *k* places on exactly row *k* — `ui/src/axis.ts`, `ui/src/waterfall.ts`.
+
+**What MUI must therefore not do:**
+
+- **Never place anything by a rows-per-second.** The spectrum header's `sample_rate_hz` is a *declared* rate, deliberately up to 10 % above the actual row rate on a gated stream (`RowPlan::declared_hz`), and rows are not evenly spaced in time anyway — a gated row, a dropped run or a backlog-skipped frame advances capture time without advancing the ring. Both errors grow linearly with age, so a box drawn that way walks down the screen away from its energy. A declared period is fine as a *duration* (how long one row stands for: the "↓ 20 s" label's fallback, the newest row's half-open end cap); it is never a placement.
+- **One mapping per view, not five.** Before T-337 this surface had five: the shader's ring index for the rows, a nominal rate for the presence boxes, the exact per-row lookup for hover and drag, wall clock for the scrubber, and a column index for the activity bars. Rows and boxes disagreed by construction, and a region dragged out of the waterfall and drawn back did not land where it was dragged. Rows, presence boxes, timed selections and the drag draft now all go through `RowClock` (`ui/src/app/centre/overlays.ts`).
+- **Never fabricate a placement.** A record whose span has scrolled off the rows held draws nothing, rather than a box clamped to a height it never had — the same rule `presenceBoxes` already applied, now applied to selections too.
+- **Measure the axis label, don't assert it.** "↓ 20 s" is the span the rows on screen actually cover, not `rows × declared period`.
+
+**Still screen-anchored, deliberately:** the focused Confirmed row's full-height yellow band box (T-193's drag-to-adjust edges live on it) is a *frequency* tool and spans both panes by design; every other row draws the time-placed presence box instead (ADR-0017 TM-4).
+
+**Known debt, named:** the capture timeline (`ui/src/app/capture/`) still maps positions with `Date.now()` over a hard-coded 48 h `WINDOW_S`, and the Explore Candidate query still derives its window from a nominal row rate (`ui/src/app/explore/inventory.ts`). Both are the timeline's axis rather than the waterfall's, and both belong to T-338 (the timeline is the capture window, sized from what the backend reports) — filed, not fixed here.
+
 ### History surface (workflow #3)
 
 A **separate surface**, not a tab of Explore: the durable catalogue of every event, one-offs included, browsable by region and time (`GET /api/events`, and `GET /api/inventory/{id}/presence` for one emitter's track).

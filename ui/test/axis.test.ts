@@ -85,12 +85,35 @@ test("drag selection math: frequency extent, spectrum/waterfall rows, time span"
   assert.deepEqual(ax.yHit(0.35, 0.35, 512), { area: "waterfall", rowsBack: 0 });
   assert.deepEqual(ax.yHit(0.675, 0.35, 512), { area: "waterfall", rowsBack: 256 });
   assert.deepEqual(ax.yHit(1, 0.35, 512), { area: "waterfall", rowsBack: 511 });
-  const span = ax.timeSpanY(90, 100, 100, 0.04, 0.35, 512)!;
-  near(span[0], 0.35, 1e-12, "newest edge at the top of the waterfall");
-  near(span[1], 0.35 + (250 / 512) * 0.65, 1e-12, "older edge 250 rows down");
-  assert.deepEqual(ax.timeSpanY(0, 10, 10 + 600 * 0.04, 0.04, 0.35, 512), null, "scrolled off");
-  assert.equal(ax.timeSpanY(0, 95, 100, 0.04, 0.35, 512)![1], 1, "older edge below the screen clamps to the bottom");
-  assert.equal(ax.timeSpanY(0, 50, 100, 0.04, 0.35, 512), null, "newer edge 1250 rows back: off screen");
+  // T-337: `timeSpanY` places through the rows' own capture times, so these use the same clock the
+  // waterfall would — 512 rows at 0.04 s, newest at t = 100 (or t = 10 for the scrolled-off case).
+  const clock = (newestT: number) => {
+    const timeAt = (n: number) => (n >= 0 && n < 512 ? newestT - n * 0.04 : NaN);
+    return (t: number) => ax.rowsBackAt(timeAt, 512, t);
+  };
+  const span = ax.timeSpanY(90, 100, clock(100), 0.35, 512)!;
+  // t = 100 is the newest row's *start*, i.e. the boundary one row down (a row's time is its first
+  // sample, T-337), and t = 90 is 250 rows older than that.
+  near(span[0], 0.35 + (1 / 512) * 0.65, 1e-12, "newest edge just below the top of the waterfall");
+  near(span[1], 0.35 + (251 / 512) * 0.65, 1e-12, "older edge 250 rows further down");
+  assert.deepEqual(ax.timeSpanY(0, 10, clock(10 + 600 * 0.04), 0.35, 512), null, "scrolled off");
+  assert.equal(ax.timeSpanY(0, 95, clock(100), 0.35, 512)![1], 1, "older edge below the screen clamps to the bottom");
+  assert.equal(ax.timeSpanY(0, 50, clock(100), 0.35, 512), null, "newer edge 1250 rows back: off screen");
+});
+
+test("T-337: rowsBackAt inverts the rows' own capture times, and is never a rows-per-second", () => {
+  // Uneven rows (a dropped run between rows 2 and 3): the ring did not advance while time did.
+  const times = [500, 499.9, 499.8, 497.0, 496.9, 496.8];
+  const timeAt = (n: number) => (n >= 0 && n < times.length ? times[Math.floor(n)] : NaN);
+  const back = (t: number) => ax.rowsBackAt(timeAt, times.length, t);
+  // A row's time is its first sample, so row k covers [times[k], times[k-1]) and times[k] is the
+  // boundary at position k+1 — row k's bottom. An emission filling row k places at exactly [k, k+1].
+  for (let k = 0; k < times.length; k++) near(back(timeAt(k)), k + 1, 1e-9, `row ${k}'s start is its bottom edge`);
+  near(back(500.1), 0, 1e-9, "the live edge, one row's duration past the newest row's start");
+  near(back(498.4), 3.5, 1e-9, "half way through the gap row is half way down it");
+  assert.ok(back(500.15) < 0 && back(496.0) > times.length, "extrapolates off both ends");
+  assert.ok(Number.isNaN(ax.rowsBackAt(timeAt, 0, 500)), "no rows, no mapping");
+  assert.ok(Number.isNaN(ax.rowsBackAt(timeAt, 1, 500)), "one row gives no duration to interpolate in");
 });
 
 test("ticks are round multiples inside the view; labels resolve their step", () => {

@@ -43,6 +43,21 @@ function iv(t0: number, t1: number, open = true): Presence {
 }
 const near = (a: number, b: number, eps = 1e-9) => assert.ok(Math.abs(a - b) <= eps, `${a} ≉ ${b}`);
 
+/**
+ * A [[RowClock]] over an explicit list of row capture times, newest first — the same construction
+ * `Waterfall` makes over the timestamps the backend served with each row (`Waterfall.timeAt` /
+ * `Waterfall.rowsBackAt`, both over `axis.rowsBackAt`). `declaredHz` is the *declared* row rate the
+ * spectrum header carries, which is free to disagree with the times: that disagreement is the
+ * whole point of T-337.
+ */
+function rowClock(times: readonly number[], declaredHz = 25, rows = 512, specFrac = 0.35): RowClock {
+  const timeAt = (n: number) => (n >= 0 && n < rows && n < times.length ? times[Math.floor(n)] : NaN);
+  return { specFrac, rows, timeAt, rowsBackAt: (t) => ax.rowsBackAt(timeAt, Math.min(times.length, rows), t), rowPeriodS: 1 / declaredHz };
+}
+
+/** Row times, newest first, at a steady `periodS`. */
+const steady = (newestT: number, n: number, periodS: number) => Array.from({ length: n }, (_, k) => newestT - k * periodS);
+
 test("placeExtent maps Hz to percent of the view, clamps to it, and widens to the minimum", () => {
   const p = placeExtent(V, 99_500_000, 100_000_000)!;
   near(p.leftPct, 25); near(p.widthPct, 25);
@@ -108,7 +123,7 @@ test("confirmedBands: an override (an in-progress drag) replaces the row's band 
 });
 
 test("presenceBoxes (T-261, ADR-0017 TM-4): centre/width from f_lo/f_hi, time extent from presence.last_interval, growth is a plain redraw", () => {
-  const clock: RowClock = { specFrac: 0.35, rows: 512, timeAt: (n) => 1000 - n * 0.04, rowPeriodS: 0.04 }; // newest row (rowsBack 0) at t=1000
+  const clock = rowClock(steady(1000, 512, 0.04), 25); // newest row (rowsBack 0) at t=1000
   // 5 s ago .. now (still open): near the live edge (top of the waterfall), a few rows tall.
   const a = row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1000, true));
   const boxes = presenceBoxes([a], V, clock, null);
@@ -116,16 +131,19 @@ test("presenceBoxes (T-261, ADR-0017 TM-4): centre/width from f_lo/f_hi, time ex
   const [b] = boxes;
   assert.equal(b.id, "a"); assert.equal(b.state, "confirmed"); assert.equal(b.open, true); assert.equal(b.chirp, false);
   near(b.leftPct, 45); near(b.widthPct, 10); // same frequency placement as placeExtent/confirmedBands
-  const expected = ax.timeSpanY(995, 1000, 1000, 0.04, 0.35, 512)!;
+  const expected = ax.timeSpanY(995, 1000, clock.rowsBackAt, 0.35, 512)!;
   near(b.topPct, expected[0] * 100); near(b.heightPct, (expected[1] - expected[0]) * 100);
+  // `t_end_s` is the newest row's own start time, which is the boundary below it: the emission
+  // covered row 1 and not row 0, so the box starts one row down, not at the top of the pane.
+  near(b.topPct, (0.35 + (1 / 512) * 0.65) * 100, 1e-9);
   // The next poll's t_end_s advanced (still open, more evidence arrived): the SAME box, redrawn,
   // is taller — nothing here is animated, it is only a fresh call with the API's new numbers.
-  const grown = presenceBoxes([row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1004, true))], V, { ...clock, timeAt: (n) => 1004 - n * 0.04 }, null);
+  const grown = presenceBoxes([row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1004, true))], V, rowClock(steady(1004, 512, 0.04), 25), null);
   assert.ok(grown[0].heightPct > b.heightPct, "the open interval's box grew");
 });
 
 test("presenceBoxes: never fabricates a box — no interval, no presence at all, or the focused row (kept on the full-height bracket instead)", () => {
-  const clock: RowClock = { specFrac: 0.35, rows: 512, timeAt: (n) => 1000 - n * 0.04, rowPeriodS: 0.04 };
+  const clock = rowClock(steady(1000, 512, 0.04), 25);
   const noPresence = row("a", 99_900_000, 100_100_000); // pre-T-284 fixture: presence undefined
   const noInterval: Row = { ...row("b", 99_900_000, 100_100_000), presence: { intervals: 0, on_air_s: 0, last_interval: null, liveness: "absent", ended_t_s: null } };
   const focused = row("c", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1000));
@@ -137,12 +155,118 @@ test("presenceBoxes: never fabricates a box — no interval, no presence at all,
 });
 
 test("presenceBoxes: a row classified as css/chirp is flagged so the box is labelled a bounding box, not a swept polyline (ADR-0017 §1.3)", () => {
-  const clock: RowClock = { specFrac: 0.35, rows: 512, timeAt: (n) => 1000 - n * 0.04, rowPeriodS: 0.04 };
+  const clock = rowClock(steady(1000, 512, 0.04), 25);
   const chirp = row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1000), "css");
   const fm = row("b", 100_400_000, 100_410_000, "confirmed", 1, null, iv(995, 1000), "wfm-broadcast");
   const boxes = presenceBoxes([chirp, fm], V, clock, null);
   assert.equal(boxes.find((x) => x.id === "a")!.chirp, true);
   assert.equal(boxes.find((x) => x.id === "b")!.chirp, false);
+});
+
+// ---- T-337: one shared time axis ----------------------------------------------------------
+//
+// The user's invariant (CLAUDE.md, "Time, the waterfall, and the live view"): for the current view
+// there is ONE canonical mapping between absolute capture time and screen position, and everything
+// time-varying is laid out through it and moves together. These test the invariant, not the
+// rendering: a box's placement must be a *pure function of its capture time* under the very mapping
+// the waterfall rows use, so a box and a row that share a capture time land in the same place.
+//
+// The rows-per-second the backend *declares* is not that mapping, and the clocks below say why:
+//   - a gated spectrum stream declares a rate deliberately up to 10 % above the actual row rate
+//     (`hk_pipeline::class::RowPlan::declared_hz`);
+//   - a gated row, a dropped run or a backlog-skipped frame advances capture time without
+//     advancing the ring, so rows are not evenly spaced in time at all.
+// A presence test ("a box was drawn") passes under either mapping. These fail under the wrong one.
+
+test("T-337 invariant: the row clock is the one mapping — a row's start time lands on that row's own bottom boundary, however uneven the rows are", () => {
+  // 40 ms rows with a 1.2 s gap after row 9 (a dropped/gated run: capture time advanced, the ring
+  // did not) and a slower stretch after that. Nothing here is a multiple of any single period.
+  const times = [1000, 999.96, 999.92, 999.88, 999.84, 999.8, 999.76, 999.72, 999.68, 999.64, 998.44, 998.33, 998.2, 998.02, 997.5];
+  const c = rowClock(times, 25);
+  // A row's time is the FIRST sample of its span, so row k covers [times[k], times[k-1]) and
+  // times[k] is the boundary at position k+1 — the bottom of row k, the top of row k+1.
+  for (let k = 0; k < times.length; k++) near(c.rowsBackAt(c.timeAt(k)), k + 1, 1e-9);
+  // Inside row 10's own duration (times[10]..times[9]): the fraction of it still to come.
+  near(c.rowsBackAt(0.5 * (times[10] + times[9])), 10.5);
+  // Off either end it extrapolates from the nearest boundary pair rather than lying about a row.
+  near(c.rowsBackAt(1000.04), 0, 1e-9); // the live edge: one row's duration past the newest row's start
+  assert.ok(c.rowsBackAt(1000.06) < 0, "past the live edge is negative rows-back");
+  assert.ok(c.rowsBackAt(997.0) > times.length - 1, "older than the oldest row held is past the last row");
+  assert.ok(Number.isNaN(c.rowsBackAt(NaN)) && Number.isNaN(rowClock([], 25).rowsBackAt(1000)), "no rows, no answer");
+  assert.ok(Number.isNaN(rowClock([1000], 25).rowsBackAt(1000)), "one row gives no duration to place anything in");
+});
+
+test("T-337 invariant: a box spanning exactly row k lands exactly on row k — the pixels yHit gives that row", () => {
+  const times = [1000, 999.96, 999.92, 998.72, 998.68, 998.64, 998.6, 997.4]; // two dropped runs
+  const c = rowClock(times, 25);
+  for (let k = 1; k < times.length; k++) {
+    // A signal present for exactly row k: its own capture time up to the next-newer row's.
+    const r = row(`r${k}`, 99_900_000, 100_100_000, "confirmed", 1, null, iv(times[k], times[k - 1], false));
+    const [b] = presenceBoxes([r], V, c, null);
+    // The canvas fractions row k occupies, straight off the row index — the waterfall's own layout.
+    const top = c.specFrac + (k / c.rows) * (1 - c.specFrac), bottom = c.specFrac + ((k + 1) / c.rows) * (1 - c.specFrac);
+    near(b.topPct, top * 100, 1e-9);
+    near(b.topPct + b.heightPct, bottom * 100, 1e-9);
+    // And the round trip through yHit: the box's own top pixel hit-tests as row k.
+    const hit = ax.yHit(top + 1e-9, c.specFrac, c.rows);
+    assert.equal(hit.area === "waterfall" && hit.rowsBack, k);
+  }
+});
+
+test("T-337 invariant: placement is a pure function of capture time — the declared row rate cannot move a box", () => {
+  const times = steady(1000, 64, 0.04);
+  const interval = iv(999.2, 1000, true);
+  const r = row("a", 99_900_000, 100_100_000, "confirmed", 1, null, interval);
+  // Three wildly different *declared* rates over identical rows: identical boxes.
+  const boxes = [25, 27.5, 4].map((hz) => presenceBoxes([r], V, rowClock(times, hz), null)[0]);
+  for (const b of boxes.slice(1)) {
+    near(b.topPct, boxes[0].topPct, 1e-12);
+    near(b.heightPct, boxes[0].heightPct, 1e-12);
+  }
+});
+
+test("T-337 drift: a gated stream's declared rate is 10 % fast, and placing a box by it walks the box off its energy", () => {
+  // `RowPlan::declared_hz = min(row_rate_hz * 1.1, 50)` on a class that forbids content, so a UI
+  // reading `sample_rate_hz` as a row clock thinks rows are 10 % closer together than they are.
+  const actualHz = 25, declaredHz = actualHz * 1.1;
+  const times = steady(1000, 512, 1 / actualHz);
+  const c = rowClock(times, declaredHz);
+  // A one-row-long emission 400 rows back (16 s of capture): the box must sit on row 400.
+  const r = row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(times[400], times[399], false));
+  const [b] = presenceBoxes([r], V, c, null);
+  near(b.topPct, (c.specFrac + (400 / c.rows) * (1 - c.specFrac)) * 100, 1e-9);
+  // What the declared rate would have said: the age of the box ÷ a 10 % short row period.
+  const wrongBack = (times[0] - times[400]) * declaredHz;
+  assert.ok(wrongBack - 400 > 39, `the declared rate misplaces it by ${wrongBack - 400} rows`);
+  assert.ok(Math.abs(b.topPct - (c.specFrac + (wrongBack / c.rows) * (1 - c.specFrac)) * 100) > 4,
+    "and that is >4 % of the canvas — visible drift, growing with age, not a rounding nit");
+});
+
+test("T-337: selections with a time extent are laid out on the same axis, and the drag→draw round trip is the identity", () => {
+  const times = [1000, 999.96, 998.6, 998.56, 998.52, 997.1]; // a dropped run between rows 1 and 2
+  const c = rowClock(times, 25, 16); // a 16-row waterfall, so a few rows is a real drag distance
+  // Drag from row 4 to row 1 (fractions of the canvas inside the waterfall pane).
+  const yOf = (k: number) => c.specFrac + ((k + 0.5) / c.rows) * (1 - c.specFrac);
+  const sel = dragSelection(V, { x: 0.45, y: yOf(4) }, { x: 0.55, y: yOf(1) }, 1000, c)!;
+  assert.equal(sel.t_lo, times[4], "the older edge is row 4's own capture time");
+  assert.equal(sel.t_hi, times[0], "the newer edge closes row 1 at row 0's capture time, not at a nominal period past it");
+  // Drawing it back through the same axis lands on exactly rows 1..4, uneven rows and all.
+  const [b] = selectionBoxes([{ id: "s", f_lo: sel.f_lo, f_hi: sel.f_hi, t_lo: sel.t_lo, t_hi: sel.t_hi }], V, null, new Set(), c);
+  near(b.topPct, (1 / c.rows) * 100, 1e-9);
+  near(b.topPct + b.heightPct, (5 / c.rows) * 100, 1e-9);
+  assert.deepEqual(ax.yHit(c.specFrac + (b.topPct / 100 + 1e-9) * (1 - c.specFrac), c.specFrac, c.rows), { area: "waterfall", rowsBack: 1 });
+  // A selection with no time extent is full height — "any time", honestly drawn, not placed at 0.
+  const [u] = selectionBoxes([{ id: "u", f_lo: 99_500_000, f_hi: 99_600_000 }], V, null, new Set(), c);
+  assert.equal(u.topPct, 0); assert.equal(u.heightPct, 100);
+  // And one whose span has scrolled off the rows held draws nothing rather than a clamped box.
+  assert.deepEqual(selectionBoxes([{ id: "o", f_lo: 99_500_000, f_hi: 99_600_000, t_lo: 10, t_hi: 11 }], V, null, new Set(), c), []);
+});
+
+test("T-337: the time-scale label measures the rows on screen instead of asserting rows × declared period", () => {
+  // 512 rows declared at 25/s would read "↓ 20 s"; only 100 rows have arrived, over 8 s of capture.
+  const c = rowClock(steady(1000, 100, 0.08), 25);
+  assert.equal(timeScaleText(c.rows, c.rowPeriodS, c), "↓ 8 s");
+  assert.equal(timeScaleText(512, 0.04), "↓ 20 s", "no clock yet: the declared span is the only thing there is to say");
 });
 
 test("bandEdgeHit: within EDGE_HIT_PX of the drawn left/right edge, else null", () => {
@@ -197,6 +321,7 @@ test("selection boxes: in view, focused active, pending flagged", () => {
   const boxes = selectionBoxes(list, V, "s3", new Set(["s1"]));
   assert.deepEqual(boxes.map((b) => [b.id, b.active, b.pending]), [["s1", false, true], ["s3", true, false]]);
   near(boxes[0].leftPct, 0); near(boxes[0].widthPct, 25);
+  assert.deepEqual(boxes.map((b) => [b.topPct, b.heightPct]), [[0, 100], [0, 100]]); // no clock, no time extent: full height
 });
 
 test("DC mask: observation-log notch for this tune, else the documented ±15 kHz assumption", () => {
@@ -236,8 +361,9 @@ test("hover readout: bin centre, level, not observed, row time", () => {
 test("drag: 6 px threshold; frequency-only selection, timed within the waterfall, clamped at 0 Hz", () => {
   assert.equal(isDrag(3, 4), false);
   assert.equal(isDrag(6, 0), true);
-  const times = (n: number) => (n < 100 ? 1000 - n * 0.04 : NaN); // 100 rows received so far
-  const clock: RowClock = { specFrac: 0.35, rows: 512, timeAt: times, rowPeriodS: 0.04 };
+  const rowTimes = steady(1000, 100, 0.04); // 100 rows received so far
+  const times = (n: number) => (n < 100 ? rowTimes[n] : NaN);
+  const clock = rowClock(rowTimes, 25);
   const f = dragSelection(V, { x: 0.5, y: 0.1 }, { x: 0.25, y: 0.1 }, 400, clock)!;
   assert.deepEqual([f.f_lo, f.f_hi, f.t_lo], [99_500_000, 100_000_000, undefined]);
   assert.equal(f.name, regionName(99_500_000, 100_000_000));
@@ -245,7 +371,8 @@ test("drag: 6 px threshold; frequency-only selection, timed within the waterfall
   // Both ends in the waterfall, 0.3 × 400 px of vertical travel; far end below the received rows → oldest.
   const t = dragSelection(V, { x: 0.25, y: 0.4 }, { x: 0.5, y: 0.7 }, 400, clock)!;
   const nearRow = ax.yHit(0.4, 0.35, 512) as { rowsBack: number };
-  assert.equal(t.t_hi, times(nearRow.rowsBack) + 0.04);
+  // T-337: the newer edge closes at the *next* row's own capture time, not a declared period past it.
+  assert.equal(t.t_hi, times(nearRow.rowsBack - 1));
   assert.equal(t.t_lo, times(99));
   assert.equal(dragSelection(V, { x: 0.3, y: 0.5 }, { x: 0.3, y: 0.9 }, 400, clock), null); // no width
   const low: ax.View = { loHz: -1_000_000, hiHz: 1_000_000 };

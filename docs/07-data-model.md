@@ -355,6 +355,28 @@ Because measurements are immutable and interpretations are versioned, the same q
 
 The wire form is `GET /api/history` (`docs/api.md`, "Span-matched resolution").
 
+### 4.2 What every time-varying record carries (T-337, one shared time axis)
+
+**The rule, settled by the user** (CLAUDE.md, "Time, the waterfall, and the live view", invariant 1): *for the current view there is a single canonical mapping between absolute capture time and screen position, and everything time-varying is laid out through it and moves together.* §4.1 settled the **resolution** half of the thin-client line; this settles the **timestamp** half, and it is a constraint on the data model, not only on the wire:
+
+> **Every record that varies in time carries the absolute capture time it happened at.** A record whose time a reader has to *infer* — from arrival order, from a sequence number, from an index into a buffer, from a declared rate, from when a response arrived — is a modelling defect, because inference is how an overlay drifts away from the data it describes.
+
+This is why the model shapes below are what they are, and none of them is optional:
+
+| Object (§2) | The time it carries |
+|---|---|
+| **SpectrumFrame / Sweep** | `t` — and, on the wire, the sample index beside it. A frame's `t` is its **first** sample (`SpectrumFrame.t.sample_index` is the STFT's `frame_start`), with `sample_count` giving its span: a frame is an interval, not an instant. |
+| **Detection** | `time: TimeRange` — a detection is a time–frequency *region* (§1 invariant 1), so a start and a stop, never a bare "seen at". |
+| **Track / presence interval** | `t_start`, `t_end`, `open`, and a **backend-computed** `duration_s` on the wire: a client never derives a timespan from two fields it was handed. |
+| **Emitter** | `first_seen`/`last_seen` as a **hull**, explicitly not an extent — the extent lives on the intervals. |
+| **SpectrumTile** | `t_start`, `t_end`, `level`; a cell's time is `t0_s + k·t_cell_s` (§4.1), stated, not counted. |
+| **Selection** | `t_lo`/`t_hi`, or null — a *deliberately* timeless region is representable, and distinguishable from a missing timestamp. |
+| **Provenance** | the time the settings it records were in force, so a detection's gain state and overload flags are pinned to when it was measured. |
+
+**A declared rate is never a substitute.** A rows-per-second figure — a stream header's `sample_rate_hz`, a configured `spectrum_rows_per_s` — describes production, not the records in hand. It is wrong in two directions that both grow linearly with age: a gated stream declares a rate deliberately above the actual one (`RowPlan::declared_hz`, ×1.1), and gated, dropped or skipped records advance capture time without advancing any buffer. Sample index and timestamp are the clock; the rate is a hint about throughput.
+
+The wire form and the client's obligations are `docs/api.md`, "One shared time axis"; the UI consequences are docs/14; the signal-model consequences are ADR-0017 §2.4.2.
+
 ## 5. Worked examples
 
 ### 5.1 Science — natural radio noise-floor survey (SPACE-050)

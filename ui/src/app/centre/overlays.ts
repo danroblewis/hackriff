@@ -182,14 +182,16 @@ export interface PresenceBox extends Span {
 /** One box per Candidate/Confirmed row whose `presence.last_interval` intersects the waterfall
  * (docs/api.md `presence`, T-284): frequency from `f_lo_hz`/`f_hi_hz` exactly as [[bracketLayout]]
  * places it, time extent from [[ax.timeSpanY]] over the interval's own `t_start_s`/`t_end_s` — both
- * read off the API response, never recomputed. A row with no interval intersecting the request's
+ * read off the API response, never recomputed — placed through [[RowClock.rowsBackAt]], the same
+ * mapping the rows were drawn with (T-337), so the box scrolls with its energy rather than at a
+ * nominal rows-per-second. A row with no interval intersecting the request's
  * window (`last_interval: null`, or no `presence` at all on a pre-T-284 fixture) draws nothing: no
  * zero-width or zero-duration box is ever fabricated. A row whose interval has scrolled off the
  * waterfall's own history (`timeSpanY` null) likewise draws nothing, rather than a box clamped to a
  * height it never had. */
 export function presenceBoxes(rows: readonly Row[], v: ax.View, clock: RowClock, focusedId: string | null): PresenceBox[] {
   const out: PresenceBox[] = [];
-  const newestT = clock.timeAt(0);
+  const rowsBackAt = (t: number) => clock.rowsBackAt(t);
   for (const r of rows) {
     if (r.state !== "candidate" && r.state !== "confirmed") continue;
     if (r.id === focusedId) continue; // keeps its full-height bracket/band instead (T-193)
@@ -197,7 +199,7 @@ export function presenceBoxes(rows: readonly Row[], v: ax.View, clock: RowClock,
     if (!iv) continue;
     const span = placeExtent(v, r.f_lo_hz, r.f_hi_hz, MIN_BRACKET_FRAC);
     if (!span) continue;
-    const ys = ax.timeSpanY(iv.t_start_s, iv.t_end_s, newestT, clock.rowPeriodS, clock.specFrac, clock.rows);
+    const ys = ax.timeSpanY(iv.t_start_s, iv.t_end_s, rowsBackAt, clock.specFrac, clock.rows);
     if (!ys) continue;
     const [topFrac, bottomFrac] = ys;
     out.push({
@@ -208,15 +210,39 @@ export function presenceBoxes(rows: readonly Row[], v: ax.View, clock: RowClock,
   return out;
 }
 
-export interface SelBox extends Span { id: string; active: boolean; pending: boolean }
+export interface SelBox extends Span {
+  id: string; active: boolean; pending: boolean;
+  /** Vertical extent (percent of the canvas). Full height for a selection with no time extent. */
+  topPct: number; heightPct: number;
+}
 
-/** Frequency boxes for selections in view; `pending` marks ones created here and not yet listed. */
-export function selectionBoxes(list: readonly Pick<Selection, "id" | "f_lo" | "f_hi">[], v: ax.View, focusedId: string | null,
-  pending: { has(id: string): boolean } = new Set()): SelBox[] {
+/**
+ * Boxes for selections in view; `pending` marks ones created here and not yet listed.
+ *
+ * A selection carrying a time extent (`t_lo`/`t_hi`, absolute capture time from
+ * `GET /api/selections` — the same times [[dragSelection]] read off the rows when it was drawn) is
+ * placed through `clock.rowsBackAt`, the mapping the rows themselves were drawn with (T-337), so it
+ * sits on and scrolls with the energy it selected. Without a clock, or with no time extent (a
+ * frequency-only selection, `t_lo`/`t_hi` null), it stays full height — the honest rendering of
+ * "any time". A timed selection whose span has scrolled off the rows held draws nothing rather than
+ * a box clamped to a height it never had, exactly as [[presenceBoxes]] does.
+ */
+export function selectionBoxes(list: readonly Pick<Selection, "id" | "f_lo" | "f_hi" | "t_lo" | "t_hi">[], v: ax.View, focusedId: string | null,
+  pending: { has(id: string): boolean } = new Set(), clock: RowClock | null = null): SelBox[] {
   const out: SelBox[] = [];
   for (const s of list) {
     const p = placeExtent(v, s.f_lo, s.f_hi, 0.002);
-    if (p) out.push({ ...p, id: s.id, active: s.id === focusedId, pending: pending.has(s.id) });
+    if (!p) continue;
+    let topPct = 0, heightPct = 100;
+    if (clock && typeof s.t_lo === "number" && typeof s.t_hi === "number") {
+      // Fractions of the **waterfall pane**, not the canvas: `.c-sel` is drawn inside the waterfall
+      // layer, which already starts at `specFrac`, and the spectrum trace has no time axis to sit on.
+      const ys = ax.timeSpanRows(s.t_lo, s.t_hi, (t) => clock.rowsBackAt(t), clock.rows);
+      if (!ys) continue;
+      topPct = ys[0] * 100;
+      heightPct = (ys[1] - ys[0]) * 100;
+    }
+    out.push({ ...p, id: s.id, active: s.id === focusedId, pending: pending.has(s.id), topPct, heightPct });
   }
   return out;
 }
@@ -285,8 +311,28 @@ export const addModeActive = (toggleOn: boolean, shiftKey: boolean): boolean => 
 /** A pointer position as fractions (0..1) of the live element. */
 export interface DragPoint { x: number; y: number }
 
-/** What a drag needs of the waterfall to add a time extent. */
-export interface RowClock { specFrac: number; rows: number; timeAt(rowsBack: number): number; rowPeriodS: number }
+/**
+ * The waterfall's own time axis — **the one canonical mapping** every time-varying overlay is laid
+ * out through (T-337, the user's "one shared time axis" invariant). `timeAt` reads a row's absolute
+ * capture time (the backend's own per-record timestamp, `hk-stream` binary record header offset 16,
+ * or a review grid's `t0_s + k·t_cell_s`); `rowsBackAt` is its exact inverse. Placement must use
+ * these and nothing else, so an overlay sits on the energy it describes.
+ *
+ * `rowPeriodS` is the **declared** row period (`1 / sample_rate_hz` of the spectrum header, or the
+ * review grid's `t_cell_s`). It is a *duration* — how long one row stands for — used to label the
+ * time scale and to close the newest row's half-open interval. It is **not** a placement mapping:
+ * the declared rate describes row production, not the rows on screen, and on a gated stream it is
+ * deliberately up to 10 % above the actual row rate (`hk_pipeline::class::RowPlan::declared_hz`),
+ * while gated rows, dropped runs and backlog-skipped frames advance capture time without advancing
+ * the ring. Placing an overlay by it drifts against the rows, linearly with age.
+ */
+export interface RowClock {
+  specFrac: number;
+  rows: number;
+  timeAt(rowsBack: number): number;
+  rowsBackAt(tS: number): number;
+  rowPeriodS: number;
+}
 
 /** "100.25–100.40 MHz": a default selection name, resolved to a twentieth of its width. */
 export function regionName(loHz: number, hiHz: number): string {
@@ -311,7 +357,16 @@ export function dragSelection(v: ax.View, a: DragPoint, b: DragPoint, heightPx: 
       let far = Math.max(ha.rowsBack, hb.rowsBack);
       while (far > near && !Number.isFinite(clock.timeAt(far))) far--; // below the rows received: the oldest
       const newer = clock.timeAt(near), older = clock.timeAt(far);
-      if (Number.isFinite(newer) && Number.isFinite(older)) { out.t_lo = older; out.t_hi = newer + clock.rowPeriodS; }
+      // `t_hi` closes the newest selected row's half-open interval, and it must close it at the
+      // *next* row's own capture time where there is one (T-337): then drawing the selection back
+      // through `rowsBackAt` lands on exactly the rows that were dragged over — the round trip is
+      // the identity. Only past the live edge, where there is no next row, does the declared row
+      // period stand in for the row's duration.
+      const next = near > 0 ? clock.timeAt(near - 1) : NaN;
+      if (Number.isFinite(newer) && Number.isFinite(older)) {
+        out.t_lo = older;
+        out.t_hi = Number.isFinite(next) ? next : newer + clock.rowPeriodS;
+      }
     }
   }
   return validateSelection(out) ? null : out;
@@ -341,9 +396,21 @@ export function clickTarget(rows: readonly Row[], sels: readonly Pick<Selection,
   return best ? { kind: "selection", id: best.id } : null;
 }
 
-/** "↓ 20 s": how far back the waterfall reaches. */
-export function timeScaleText(rows: number, rowPeriodS: number): string {
-  const s = rows * rowPeriodS;
+/**
+ * "↓ 20 s": how far back the waterfall reaches — **measured** off the rows on screen (the newest
+ * row's capture time minus the oldest's, plus the oldest row's own duration) whenever a clock is
+ * available, so the label describes the same axis the boxes are placed on (T-337). `rows ×
+ * rowPeriodS` is only the fallback before any row has arrived: it is what the axis *would* span if
+ * every declared row arrived, which is exactly the assumption the placement mapping no longer makes.
+ */
+export function timeScaleText(rows: number, rowPeriodS: number, clock?: Pick<RowClock, "timeAt"> | null): string {
+  let s = rows * rowPeriodS;
+  if (clock) {
+    const newest = clock.timeAt(0);
+    let oldest = NaN, k = 0;
+    for (; k < rows; k++) { const t = clock.timeAt(k); if (!Number.isFinite(t)) break; oldest = t; }
+    if (Number.isFinite(newest) && Number.isFinite(oldest) && k > 1) s = newest - oldest + rowPeriodS;
+  }
   if (!(s > 0) || !Number.isFinite(s)) return "";
   return `↓ ${s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`}`;
 }
