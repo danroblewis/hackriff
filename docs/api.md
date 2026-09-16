@@ -143,7 +143,7 @@ Same region parameters as `/api/history`, `max_steps` in place of `max_cells`.
 
 ### `GET /api/inventory` — signal inventory (T-018, T-078, AWARE-053/AWARE-042)
 
-Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given together), `t0`&`t1` (Unix s, given together; a row matches when one of its **presence intervals** overlaps the window, *not* merely when its `first_seen`/`last_seen` hull straddles it — a signal seen once at 09:00 and once at 17:00 is not "on the air" all afternoon. A row carrying no interval at all, from a legacy writer, still answers from its hull. ADR-0017 §2.1), `state` (comma-separated `candidate`/`confirmed`/`deleted`; **default: candidate and confirmed — deleted entries are listed only when `deleted` is explicitly asked for**), `status` (comma-separated `known`/`unexpected-here`/`unknown`), `tag`, `scheme` (identity scheme), `family`, `relations` (`shown` default / `all`; T-219, below), `cursor` (row offset, ≤ 1 000 000), `limit` (default 100, max 500).
+Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given together), `t0`&`t1` (Unix s, given together; a row matches when one of its **presence intervals** overlaps the window, *not* merely when its `first_seen`/`last_seen` hull straddles it — a signal seen once at 09:00 and once at 17:00 is not "on the air" all afternoon. A row carrying no interval at all, from a legacy writer, still answers from its hull. ADR-0017 §2.1. The same window also scopes each row's `presence` and `family_in_window`, below, so the list and the liveness it renders can never disagree), `state` (comma-separated `candidate`/`confirmed`/`deleted`; **default: candidate and confirmed — deleted entries are listed only when `deleted` is explicitly asked for**), `status` (comma-separated `known`/`unexpected-here`/`unknown`), `tag`, `scheme` (identity scheme), `family`, `relations` (`shown` default / `all`; T-219, below), `cursor` (row offset, ≤ 1 000 000), `limit` (default 100, max 500).
 
 ```jsonc
 {
@@ -160,10 +160,14 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
       "user_band": null,
       "f_center_hz": 101300000.0, "bandwidth_hz": 150000.0, "f_lo_hz": 101225000.0, "f_hi_hz": 101375000.0,
       "first_seen_s": 1789300800.0, "last_seen_s": 1789300920.0, "count": 42,
+      "presence": { "intervals": 2, "on_air_s": 364.0,
+                    "last_interval": { "t_start_s": 1789300871.0, "t_end_s": 1789300920.0, "open": true },
+                    "liveness": "live", "ended_t_s": null },
       "known_status": "known",
       "status": { "status": "known", "author": "prior", "t_s": 1789300810.0,
                   "reason": "on FM broadcast allocation", "prior_ref": "band-plan/us-fm@1", "reason_withheld": false },
       "tags": [], "tags_withheld": false, "family": "wfm-broadcast",
+      "family_in_window": "wfm-broadcast",   // only when t0/t1 were given; null = nothing in the window said so
       "classification": { "family": "wfm-broadcast", "confidence": 0.9, "open_set_score": 0.1,
                            "model_version": "…", "t_s": 1789300820.0,
                            "taxonomy": null, "stage": "chain", "arb_rank": 3, "coarse": null,
@@ -186,6 +190,20 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
 ```
 
 `identity_value` is present only when the row's identity is in clear (`withheld: false`); on a withheld row a status/lifecycle reason from an author who may have seen the identity is itself withheld (`reason_withheld: true`, `reason: null`). Never included: decode content, fingerprints, links. No frequency lookup ever runs before detection — the inventory is populated purely from blind measurement (vision step 4); the band-plan/licence database only supplies `explanations` and `status`, ranked, never a starting point.
+
+**`presence` (T-284, ADR-0017 TM-2/§2.3).** **When** this emitter was on the air, seen through the request's window — the object a caller reads instead of `first_seen_s`/`last_seen_s`, which are the *hull* of the presence track and never its extent (a signal seen once at 09:00 and once at 17:00 has an eight-hour hull that is 99.99 % silence; never render it as a duration). `{"intervals", "on_air_s", "last_interval": {"t_start_s", "t_end_s", "open"} | null, "liveness", "ended_t_s"}`:
+
+- **`intervals`** — how many presence intervals intersect the window; **`on_air_s`** — time on air *inside* it, Σ of each interval's intersection with the window. Together they are the honest rendering: *"17 events, 4.2 s on air"*. `on_air_s` is what a live list **ranks by**, in place of the lifetime `count`.
+- **`last_interval`** — the latest interval intersecting the window, or `null` when none does. It is the box drawn across trace and waterfall.
+- **`liveness`** — `live` (an interval intersecting the window is open at the live edge), `ended` (its latest in-window interval is closed) or `absent` (no interval intersects; a Candidate in that state is simply not listed, a Confirmed catalogue entry is). **`ended_t_s`** is when it stopped, set exactly when `liveness` is `ended` and `null` otherwise — *"ended 4 minutes ago"*.
+- **Nothing here reads `count`.** `count` is a lifetime History total and is excluded from every liveness decision and from live-list ranking (ADR-0017 §5) — it was the only column that could hold "this is still here", which is why it grew to 582 500/h. The open interval's advancing `t_end` is where that belongs. The interval's own `count` is deliberately not on the wire.
+- **Scope.** With `t0`/`t1`, the window is exactly that range and `open` is derived against `t1` — a caller's `t1` *is* its own live edge — so scrubbing back re-derives the liveness a row had at that time rather than marking every past window `ended`. Without `t0`/`t1` the window is all of time up to now, against the wall clock: Explore's Confirmed list is deliberately not time-filtered and still has to render liveness. Interval closure uses the conservative 60 s idle gap (`hk_model::presence::IdleGap`), since the API does not know the scheduler's revisit period and a shorter gap would claim an absence nobody observed.
+
+**`family_in_window` (T-284, ADR-0017 §7.1).** The **same arbitration ladder** (`arb_rank` 0 user > 1 decoder > 2 lock-verified > 3 classifier > 4 track shape, latest among equals) run over **only the classification rows whose `t` falls inside `[t0, t1]`**. The ladder is unchanged and no ADR-0016 contract moves; only its *input set* gains a time predicate, so this is an additive projection.
+
+- **`family` stays all-time and is never restricted.** Identity evidence is time-invariant — a CRC-valid decode from yesterday still says what the thing *is* — so `family`, `classification.family` and the `family` filter keep agreeing exactly as before.
+- **`null` means the window holds no classification row.** Render `family` marked *(from earlier)*: the honest *"this is an FM station, but nothing in the last 30 s re-evidenced that"*, instead of silently asserting a stale classification. It never falls back to the all-time answer, and a fingerprint family carries no time so it never answers here.
+- **The key is present only when `t0`/`t1` were given**, which is what keeps `null` ("a window was asked about and re-evidenced nothing") distinguishable from absent ("no window was asked about, so the question has no meaning"). A client sending no window renders `family` plain.
 
 **`snr_db` / `peak_dbfs` (T-158).** The emitter's latest measurement: the peak SNR (`snr_peak_db`) and absolute peak level (`peak_level_dbfs`) of the newest (highest start time) detection linked to it, read directly off the stored `Detection` — no separate computation. "Linked" follows the same track a row's sighting created: a detection counted through one of the emitter's currently-linked tracks (the common case — sightings are almost always offered as tracks), or linked to the emitter directly. Both fields are `null` together when the emitter has no linked detection yet (e.g. an identity-only sighting from a decode, or a brand-new candidate before its track is offered). They are never derived from `recurrence` or any other summary field.
 

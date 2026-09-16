@@ -18,9 +18,9 @@ use hk_model::attention::baseline::SiteKey;
 use hk_model::ids::SiteId;
 use hk_model::{
     AnnotationAuthor, AnnotationTarget, ArtifactKind, Demodulation, FreqRange, IdentityAccess,
-    IdentityScheme, InventoryEntry, InventoryIdentity, InventoryQuery, KnownStatus,
-    LifecycleAuthor, LifecycleState, RelationVisibility, RepoError, Repository, StatusAuthor,
-    TimeRange, Timestamp,
+    IdentityScheme, IdleGap, InventoryEntry, InventoryIdentity, InventoryQuery, KnownStatus,
+    LifecycleAuthor, LifecycleState, Presence, RelationVisibility, RepoError, Repository,
+    StatusAuthor, TimeRange, Timestamp,
 };
 use hk_store::history::{
     FORMAT_VERSION, FilterSummary, FrontEndState, Geometry, HistoryStat, OriginField, OriginFilter,
@@ -724,7 +724,11 @@ pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> 
     let total = repo.count_inventory(&query).map_err(failed)?;
     let mut entries = Vec::with_capacity(page.entries.len());
     for entry in &page.entries {
-        entries.push(inventory_entry_json(repo, entry).map_err(failed)?);
+        // ADR-0017 TM-2: the query's own window scopes each row's `presence` and
+        // `family_in_window`. The rows themselves are already selected by the same window, in the
+        // same predicate (`InventoryQuery::time`, interval overlap), so the list and the liveness
+        // it renders can never disagree.
+        entries.push(inventory_entry_json_in_window(repo, entry, query.time).map_err(failed)?);
     }
     Ok(json!({
         "entries": entries,
@@ -807,7 +811,92 @@ fn estimated_params_json(d: &Demodulation) -> Value {
     })
 }
 
+/// Stand-in for "since the beginning" when a request gave no `t0`. Half of `i64::MIN` (about 146
+/// years before the epoch) so no arithmetic on the bound can overflow.
+const ALL_TIME_START_NS: i64 = i64::MIN / 2;
+
+/// The window an inventory row's `presence` and `family_in_window` are derived over, and the live
+/// edge `open` is read against (ADR-0017 TM-2).
+///
+/// - **A caller that gave `t0`/`t1` asked about that window, and its `t1` is its own live edge** —
+///   TM-3's Explore sends `t1 = now`. Closure is therefore derived against `t1` rather than the
+///   wall clock, which is what makes scrubbing re-derive exactly the liveness a row had at that
+///   time (ADR-0017 §2.4) instead of marking every past window `ended`.
+/// - **A caller that gave no window asked about all of time up to now.** That is Explore's
+///   Confirmed list, which is deliberately *not* time-filtered (§2.2, T-260) and still has to
+///   render liveness, so `presence` is served there too — against the wall clock.
+///
+/// The idle gap is [`IdleGap::conservative`]: hk-api does not know the scheduler's revisit period,
+/// and an unknown revisit takes the 60 s end of `IdleGap`'s rule, never a shorter gap — a shorter
+/// gap would claim an absence that was not observed (T-262, ADR-0017 §11 q4).
+fn presence_window(window: Option<TimeRange>) -> (TimeRange, Timestamp) {
+    match window {
+        Some(w) => (w, w.end),
+        None => {
+            let now = Timestamp::now();
+            (
+                TimeRange::new(Timestamp::from_unix_nanos(ALL_TIME_START_NS), now),
+                now,
+            )
+        }
+    }
+}
+
+/// ADR-0017 TM-2 `presence` object: **when** this emitter was on the air, seen through the
+/// request's window. Every field is derived from presence-interval boundaries
+/// ([`hk_model::presence`]); **none is derived from `count`**, which is a lifetime History total
+/// excluded from every liveness decision and from live-list ranking (ADR-0017 §5).
+///
+/// - `intervals` — how many presence intervals intersect the window ("17 events").
+/// - `on_air_s` — time on air *inside* the window: Σ of each interval's intersection with it.
+///   This is what a live list ranks by, in place of the lifetime `count`.
+/// - `last_interval` — the latest interval intersecting the window (`t_start_s`, `t_end_s`,
+///   `open`), or `null` when none does. It is the box the waterfall draws (TM-4).
+/// - `liveness` — `live` / `ended` / `absent` (§2.3).
+/// - `ended_t_s` — when it stopped, for `ended` only; `null` while live or absent. This is the
+///   "ended 4 minutes ago" the product previously could not say.
+///
+/// The interval's `count` is deliberately **not** on the wire: nothing in a live list may rank by
+/// it, and the row's lifetime `count` already carries it for History.
+fn presence_json(p: &Presence) -> Value {
+    json!({
+        "intervals": p.intervals,
+        "on_air_s": p.on_air_s,
+        "last_interval": p.last_interval.map(|i| json!({
+            "t_start_s": ts_s(i.time.start),
+            "t_end_s": ts_s(i.time.end),
+            "open": i.open,
+        })),
+        "liveness": p.liveness.as_str(),
+        "ended_t_s": p.ended_t.map(ts_s),
+    })
+}
+
 pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result<Value, RepoError> {
+    inventory_entry_json_in_window(repo, entry, None)
+}
+
+/// [`inventory_entry_json`] with the request's time window, which adds ADR-0017 TM-2's two
+/// window-scoped projections. Both are **additive**: every existing field keeps its name, its
+/// meaning and its all-time scope.
+///
+/// - **`presence`** ([`presence_json`]) is served on every row, windowed or not — Explore's
+///   Confirmed list is unwindowed and still renders liveness.
+/// - **`family_in_window`** is served **only when a window was given**, which is what keeps
+///   "the window holds no classification row" (`null`) distinguishable from "no window was asked
+///   about" (the key is absent). Without a window the question has no meaning, and answering it
+///   with the all-time family would silently assert the very staleness this field exists to
+///   disclose.
+///
+/// Neither is identity-gated, and both are served uniformly on withheld rows: they are timing and
+/// family data of exactly the class `recurrence` and `family` already carry unconditionally, and
+/// because the fields appear on every row alike their presence can never signal that a row's
+/// identity was withheld (the T-159/T-163 rule those gated fields exist under).
+pub fn inventory_entry_json_in_window(
+    repo: &Repository,
+    entry: &InventoryEntry,
+    window: Option<TimeRange>,
+) -> Result<Value, RepoError> {
     {
         let e = &entry.emitter;
         let (scheme, value, class, withheld) = match &entry.identity {
@@ -928,6 +1017,19 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
                 None => None,
             }
         };
+        // ADR-0017 TM-2: when this emitter was on the air, through the request's window. The
+        // emitter's own `first_seen`/`last_seen` are a *hull* and never an extent, so this — not
+        // they — is what a caller reads for "is it on air, and for how long".
+        let (span, now) = presence_window(window);
+        let presence = presence_json(&repo.presence(e.id, span, IdleGap::conservative(), now)?);
+        // ADR-0017 §7.1: the same arbitration ladder over the rows inside the window. `family`
+        // above stays the all-time answer — identity evidence is time-invariant — and this says
+        // whether anything *in these minutes* re-evidenced it. `null` when nothing did, so a
+        // view-scoped client can show `family` marked "(from earlier)" instead of asserting it.
+        let family_in_window = window
+            .map(|w| repo.current_classification_in_window(e.id, w))
+            .transpose()?
+            .map(|c| c.map(|c| c.classification.family));
         let freq = e.freq();
         let mut row = json!({
             "state": entry.lifecycle,
@@ -944,6 +1046,10 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
             "first_seen_s": ts_s(e.first_seen),
             "last_seen_s": ts_s(e.last_seen),
             "count": e.count,
+            // ADR-0017 TM-2: the presence track through the request's window — intervals, time on
+            // air inside it, the latest interval, and liveness. `count` above is a lifetime total
+            // for History and takes no part in any of it.
+            "presence": presence,
             "known_status": e.known_status,
             "status": status,
             "tags": e.tags,
@@ -967,6 +1073,11 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
             // row, its detections, tracks and history are all kept and the claim is reversible.
             "relation": relation,
         });
+        // ADR-0017 §7.1: present only when the request named a window — see the function docs for
+        // why absent and `null` must stay different answers.
+        if let Some(f) = family_in_window {
+            row["family_in_window"] = json!(f);
+        }
         if let Some(v) = value {
             row["identity_value"] = json!(v);
         }

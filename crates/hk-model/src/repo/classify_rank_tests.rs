@@ -564,3 +564,51 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }
+
+/// **T-284 (ADR-0017 §7.1): the same ladder, a narrower input set.**
+///
+/// `current_classification` is arbitration over *all* rows and stays exactly that — identity
+/// evidence is time-invariant, and a CRC-valid decode from yesterday still says what the thing
+/// is. `current_classification_in_window` re-runs the **identical** rank order over only the rows
+/// inside the window, and reads not-measured when the window holds none. No rank moves, no
+/// tolerance widens, and nothing falls back to the all-time answer.
+#[test]
+fn the_window_projection_reruns_the_same_ladder_over_a_narrower_input_set() {
+    let mut r = Repository::open_in_memory().unwrap();
+    let id = r
+        .record_sighting(&track(99.8e6, tr(0.0, 600.0)), None)
+        .unwrap()
+        .emitter_id;
+
+    // Early: a decoder (rank 1) said what this is. Much later: only a classifier (rank 3).
+    Writer::LegacyDecoder.write(&mut r, id, 10.0);
+    Writer::M3(ArbRank::Classifier).write(&mut r, id, 500.0);
+
+    let family = |c: Option<RecordedClassification>| c.map(|c| c.classification.family);
+    let in_window =
+        |r: &Repository, w: TimeRange| family(r.current_classification_in_window(id, w).unwrap());
+
+    // All-time: the decoder outranks the later classifier, as it always did.
+    assert_eq!(
+        family(r.current_classification(id).unwrap()),
+        Some("readsb".into())
+    );
+    // A window holding both rows gives the same answer, by the same ladder — not by recency.
+    assert_eq!(in_window(&r, tr(0.0, 600.0)), Some("readsb".into()));
+    // A window holding only the classifier row: the ladder is unchanged, its input set is not.
+    assert_eq!(in_window(&r, tr(100.0, 600.0)), Some("psk-qam".into()));
+    // A window holding no classification row reads not-measured — never the all-time answer, and
+    // never the fingerprint family, which carries no time and so cannot be in any window.
+    assert_eq!(in_window(&r, tr(520.0, 600.0)), None);
+    assert!(
+        r.emitter(id).unwrap().fingerprint["family"].is_null(),
+        "sanity: this row's family comes from classifications alone"
+    );
+
+    // And `family` itself is untouched by every one of those questions.
+    assert_eq!(
+        family(r.current_classification(id).unwrap()),
+        Some("readsb".into()),
+        "the all-time arbitration is not restricted, projected or overwritten"
+    );
+}
