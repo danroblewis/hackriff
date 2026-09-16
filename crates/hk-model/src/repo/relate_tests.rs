@@ -55,10 +55,15 @@ fn scene() -> (Repository, SurveyId) {
     (r, id)
 }
 
-/// A front-end state tuned to `lo`.
+/// A front-end state tuned to `lo`, on the single default device.
 fn prov(r: &mut Repository, lo: f64) -> ProvenanceId {
+    prov_on(r, "test", None, lo)
+}
+
+/// A front-end state on a named device and antenna port, tuned to `lo`.
+fn prov_on(r: &mut Repository, device: &str, port: Option<&str>, lo: f64) -> ProvenanceId {
     r.intern_provenance(&Provenance {
-        device_id: "test".into(),
+        device_id: device.into(),
         tune: Tune {
             center_hz: lo,
             sample_rate_hz: 2.4e6,
@@ -70,7 +75,7 @@ fn prov(r: &mut Repository, lo: f64) -> ProvenanceId {
         overload: false,
         quantisation_limited: false,
         temperature_c: None,
-        antenna_port: None,
+        antenna_port: port.map(Into::into),
         clock_source: ClockSource::Internal,
         clock_locked: true,
         calibration_state_ref: None,
@@ -586,6 +591,85 @@ fn t219_a_narrow_burst_on_a_predicted_image_frequency_is_not_attributed_to_a_wid
         "the arithmetic alone never attributes a narrow burst to a wideband station"
     );
     assert!(shown(&r).contains(&burst));
+}
+
+/// The image scene of `t219_an_image_is_attributed_to_its_source_and_a_real_neighbour_is_not`,
+/// with the source and the row being explained measured on **named front ends**. Everything else —
+/// the geometry, the levels, the widths, the presence window and the detector's own
+/// `image_candidate` flag — is identical whichever devices are named, so the receive chain is the
+/// only variable between the two runs below. Both front ends are even tuned to the *same* centre.
+fn image_scene(source_dev: &str, target_dev: &str) -> (Repository, EmitterId, EmitterId) {
+    let (mut r, sv) = scene();
+    let ps = prov_on(&mut r, source_dev, None, 100.8e6);
+    let pt = prov_on(&mut r, target_dev, None, 100.8e6);
+    let source = station(&mut r, sv, ps, 101.3e6, 180e3, 180e3, 26.0, -18.0, tr(0, 5));
+    confirm(&mut r, source, t(5));
+    let image = station_flagged(
+        &mut r,
+        sv,
+        pt,
+        100.3e6,
+        180e3,
+        180e3,
+        8.0,
+        -48.0,
+        tr(1, 4),
+        DetectionFlags {
+            image_candidate: true,
+            ..DetectionFlags::default()
+        },
+    );
+    (r, source, image)
+}
+
+/// T-302 (blind): an image is a property of **one receive chain**. Two front ends are two mixers
+/// with two LOs, so a signal arriving at device B's antenna can never manufacture anything in
+/// device A's output — and claiming otherwise is not a near-miss but a confident, plausible-looking
+/// statement about physics that cannot happen.
+///
+/// The scene makes the false attribution maximally tempting: both front ends are tuned to the same
+/// 100.800 MHz, 2 x 100.800 - 101.300 = 100.300 MHz **exactly**, the row is 30 dB down, its width
+/// matches the mechanism, it is present only while the source is, and the detector itself flagged
+/// it `image_candidate`. Every test the rule applies passes except the receive chain.
+///
+/// Both halves are required. The single-device control proves the fix is a device predicate rather
+/// than a silent disabling of T-219: without it, "no claim" would also be the answer of a rule that
+/// had stopped working altogether. Which row is the image, and that one of them is an image at all,
+/// lives only in these assertions.
+#[test]
+fn t302_an_image_is_never_attributed_across_two_front_ends() {
+    // Control: one front end, one mixer. The mirror is attributed, as T-219 requires.
+    let (mut r, source, image) = image_scene("hackrf:A", "hackrf:A");
+    let out = r
+        .resolve_overlaps(image, "test/overlap@1", t(5), &tol())
+        .unwrap();
+    assert_eq!(out.artifacts.len(), 1, "{out:?}");
+    let rel = r.emitter_relations(image).unwrap();
+    assert_eq!(rel[0].kind, RelationKind::ArtifactOf);
+    assert_eq!(rel[0].artifact, Some(ArtifactKind::Image));
+    assert_eq!(rel[0].source_id, source);
+    assert!(!shown(&r).contains(&image));
+
+    // The same geometry, with the source seen only on the *other* front end.
+    let (mut r, _source, image) = image_scene("hackrf:B", "hackrf:A");
+    let out = r
+        .resolve_overlaps(image, "test/overlap@1", t(5), &tol())
+        .unwrap();
+    assert!(
+        out.artifacts.is_empty(),
+        "device A's LO cannot mirror an emitter only device B received: {out:?}"
+    );
+    assert!(
+        !r.emitter_relations(image)
+            .unwrap()
+            .iter()
+            .any(|x| x.kind == RelationKind::ArtifactOf),
+        "no artifact relation is ever claimed across two receive chains"
+    );
+    assert!(
+        shown(&r).contains(&image),
+        "and the row stays listed as the independent emission it is"
+    );
 }
 
 /// A relationship row is append-only: the table refuses an update or a delete, so a losing
