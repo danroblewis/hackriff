@@ -335,3 +335,204 @@ fn aware_053_blind_off_allocation_station_is_unexpected_here_with_prior_ref() {
         "[{AWARE_053}] query_inventory status filter"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// T-242: a normal run writes the C18 evidence (features, signature match, cluster membership).
+
+use hk_e2e::blind::{matches_truth, truth_emissions};
+use hk_e2e::{SynthRequest, synth_or_skip};
+use hk_model::signature::cluster::ClusterState;
+use hk_model::{MatchOutcome, Repository};
+use serde_json::json;
+
+use crate::blind::{center_tol_hz, replay_config};
+
+const T242: &str = "T-242";
+
+/// One unpaced session of `meta` through the mock SDR into `dir`.
+fn session(dir: &std::path::Path, meta: &std::path::Path) {
+    let (cfg, replay) = replay_config(dir, meta, json!({}), hk_core::Pacing::Unpaced);
+    finish(crate::blind::start(cfg, replay));
+}
+
+/// The inventory entry matching one of `fx`'s **private** truth emissions — how the test says
+/// which produced emitter is which, after the run. Nothing is looked up to make it happen.
+fn found(r: &Repository, fx: &hk_e2e::Fixture) -> Option<EmitterId> {
+    let truth = truth_emissions(fx);
+    inventory(r, InventoryQuery::default())
+        .into_iter()
+        .find(|e| {
+            truth.iter().any(|t| {
+                matches_truth(
+                    t,
+                    0.0,
+                    e.emitter.f_center_hz,
+                    e.emitter.bandwidth_hz,
+                    center_tol_hz(t),
+                )
+            })
+        })
+        .map(|e| e.emitter.id)
+}
+
+/// **T-242 (AWARE-053): the C18 evidence is written by a normal run, not only by its own unit
+/// tests.** Without this the M3 exit gate would report signature-match and clustering coverage
+/// that nothing exercised.
+///
+/// Blind end to end. The sensor is found by detection and characterised from what the run
+/// measured; the catalogue entry that later explains it is **minted from that measurement** by
+/// promoting its own cluster (ADR-0016 §5's product path), never written from the fixture's truth.
+/// Truth is read only to say which produced emitter is which, after the runs — no frequency is
+/// looked up and nothing is tuned to.
+///
+/// - A repeated emission (four sessions of the same kind of sensor, each its own capture)
+///   accumulates a features aggregate, a visible cluster and a real match.
+/// - A one-off carrier is **not** forced into that cluster and is never confidently identified.
+#[test]
+fn aware_053_t242_a_repeated_emission_accumulates_a_match_and_a_cluster_a_one_off_does_not() {
+    let mut outs = Vec::new();
+    for seed in [2421_u64, 2422, 2423, 2424] {
+        outs.push(synth_or_skip!(
+            SynthRequest::new("fsk_burst_train")
+                .seed(seed)
+                .param("snr_db", 20.0)
+                .param("duration_s", 2.4)
+        ));
+    }
+    let dir = TempDir::new("a053x");
+    for out in &outs[..3] {
+        session(&dir.0, &out.fixture(0).unwrap().meta_path);
+    }
+
+    let fx = outs[0].fixture(0).unwrap();
+    let r = repo(&dir.0);
+    let sensor = found(&r, &fx)
+        .unwrap_or_else(|| panic!("[{T242}] the repeated sensor was not found blind"));
+
+    // It accumulated across observations: one aggregate, folded from every re-measurement.
+    let features = repo_features(&r, sensor);
+    assert!(
+        features.observations >= 3,
+        "[{T242}] the aggregate folded {} observations over three sessions",
+        features.observations
+    );
+
+    // ...and it measures like something seen before: its own cluster, visible on recurrence.
+    let cluster_id = repo_cluster(&r, sensor);
+    let state = r.cluster(&cluster_id).unwrap().state;
+    assert_eq!(
+        state,
+        ClusterState::Active,
+        "[{T242}] one emitter seen again and again makes its cluster visible"
+    );
+
+    // The catalogue is empty, so the run recorded that it had nothing to say — a row, not silence.
+    let m = r
+        .current_signature_match(sensor)
+        .unwrap()
+        .unwrap_or_else(|| panic!("[{T242}] a normal run wrote no match row at all"));
+    assert_eq!(
+        m.outcome,
+        MatchOutcome::None,
+        "[{T242}] nothing catalogued yet: {m:?}"
+    );
+    // The row names the snapshot it was computed from. It is not necessarily the *latest* one:
+    // T-201 appends only when the verdict changes, so an unchanging "nothing to say" keeps the
+    // snapshot it was first said about rather than filling the log with identical rows.
+    let snapshots = r.emitter_features_history(sensor, 100).unwrap();
+    assert!(
+        m.features_ref
+            .as_deref()
+            .is_some_and(|f| snapshots.iter().any(|s| s.id == f)),
+        "[{T242}] the match names a real measurement of this emitter: {:?} of {:?}",
+        m.features_ref,
+        snapshots.iter().map(|s| &s.id).collect::<Vec<_>>()
+    );
+    let t_now = r.emitter(sensor).unwrap().last_seen;
+    // What the run had already decided about this emitter *before* any catalogue existed. The
+    // blind framer has by now claimed a structural identity from its CRC-valid decodes — that is
+    // the decoder's doing, and minting a signature from the measurement must not disturb it.
+    let identity_before = r.emitter(sensor).unwrap().identity.clone();
+    let status_before = r.emitter(sensor).unwrap().known_status;
+    drop(r);
+
+    // Mint a catalogue entry the only blind way there is: from what this device measured.
+    let mut rw = repo(&dir.0);
+    let minted = rw
+        .promote_cluster(&cluster_id, "t242-acceptance", t_now)
+        .unwrap_or_else(|e| panic!("[{T242}] minting a signature from the measurement: {e}"));
+    drop(rw);
+
+    // A fourth session of the same kind of sensor is now explained by it.
+    session(&dir.0, &outs[3].fixture(0).unwrap().meta_path);
+    let r = repo(&dir.0);
+    let sensor = r.live_emitter_id(sensor).unwrap();
+    let m = r
+        .current_signature_match(sensor)
+        .unwrap()
+        .unwrap_or_else(|| panic!("[{T242}] no match after the catalogue was minted"));
+    assert_ne!(
+        m.outcome,
+        MatchOutcome::None,
+        "[{T242}] the minted entry explains the sensor: {m:?}"
+    );
+    assert_eq!(
+        m.top().map(|c| c.signature.id.as_str()),
+        Some(minted.id.as_str()),
+        "[{T242}] and it is ranked first: {m:?}"
+    );
+    // Still evidence, never identity: a match that now explains this emitter changed neither what
+    // names it nor its status against priors.
+    assert_eq!(
+        r.emitter(sensor).unwrap().identity,
+        identity_before,
+        "[{T242}] a match must not touch the emitter's identity"
+    );
+    assert_eq!(
+        r.emitter(sensor).unwrap().known_status,
+        status_before,
+        "[{T242}] a match must not set known_status"
+    );
+    drop(r);
+
+    // --- The one-off: a single carrier, seen once, with the catalogue now non-empty.
+    let tone = synth_or_skip!(SynthRequest::new("tone").seed(242).param("duration_s", 1.0));
+    let tfx = tone.fixture(0).unwrap();
+    session(&dir.0, &tfx.meta_path);
+    let r = repo(&dir.0);
+    let once =
+        found(&r, &tfx).unwrap_or_else(|| panic!("[{T242}] the one-off carrier was not found"));
+    let sensor = r.live_emitter_id(sensor).unwrap();
+    assert_ne!(once, sensor, "[{T242}] two different emissions");
+    assert_ne!(
+        r.emitter_cluster_id(once).unwrap().as_deref(),
+        Some(cluster_id.as_str()),
+        "[{T242}] a one-off is never folded into the repeated sensor's type"
+    );
+    if let Some(m) = r.current_signature_match(once).unwrap() {
+        assert_ne!(
+            m.outcome,
+            MatchOutcome::Full,
+            "[{T242}] an unknown one-off is never confidently identified: {m:?}"
+        );
+    }
+    assert_eq!(
+        r.emitter(once).unwrap().identity,
+        hk_model::Identity::Unknown,
+        "[{T242}] and nothing named it"
+    );
+}
+
+/// The emitter's features snapshot, or a failure naming what the run did not write.
+fn repo_features(r: &Repository, id: EmitterId) -> hk_model::EmissionFeatures {
+    r.emitter_features(id)
+        .unwrap()
+        .unwrap_or_else(|| panic!("[{T242}] a normal run characterised nothing for {id}"))
+}
+
+/// The emitter's cluster, or a failure naming what the run did not write.
+fn repo_cluster(r: &Repository, id: EmitterId) -> String {
+    r.emitter_cluster_id(id)
+        .unwrap()
+        .unwrap_or_else(|| panic!("[{T242}] the repeated sensor was placed in no cluster"))
+}
