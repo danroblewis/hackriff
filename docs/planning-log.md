@@ -2775,3 +2775,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Shadow means shadow,** proven by test: identical inputs must produce identical PUBLISHED results with the stage on and off. Open-set must not come from raw softmax. Training fits dev seeds only, with the harness guard refusing acceptance seeds.
   - **It must declare its enabling margin BEFORE measuring,** and recommend honestly - including recommending shadow-only or dropping the stage if it does not beat the classical cascade within a family. Four changes have been reverted this session for producing confident wrong answers; a DL stage that raises confidence on a wrong call is worse than no stage.
   - **Default build stays light:** no inference runtime in the default feature set, and it must say what is gated behind which cargo feature.
+- **B0.585 Full check green after the T-162 merge (7952f7f).** Lint clean; 1606/1606 tests; acceptance 31/31; 41 GB free.
+  - **Merging T-239** (coverage counter definition). Its own author declined to claim its 20/20 proved a fix, so this check confirms NO REGRESSION rather than confirming a repair.
