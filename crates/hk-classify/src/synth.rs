@@ -244,6 +244,13 @@ pub struct SynthSignal {
     /// Occupied bandwidth **measured** from the generated samples (never the design value): what
     /// C13 would hand the classifier.
     pub obw_hz: f64,
+    /// The same emission at **C14's** geometry ([`crate::symbols::SYMBOL_SAMPLES_PER_OBW`]), for
+    /// blind symbol estimation (T-238). This is not a second waveform: it is the same filtered,
+    /// recentred samples decimated less far, because a symbol clock is not visible at the
+    /// classifier's 2 samples per OBW99. See [`crate::symbols`].
+    pub symbol_samples: Vec<Complex32>,
+    /// Sample rate of [`SynthSignal::symbol_samples`], Hz.
+    pub symbol_sample_rate_hz: f64,
     /// What was generated (truth: for assertions and fitting only).
     pub class: Class,
     /// In-band SNR it was generated at, dB.
@@ -379,13 +386,34 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
         samples = channel_filter(&samples, cutoff);
     }
     let obw_hz = measured_obw(&samples, fs);
-    // Resample to the analysis geometry the pipeline actually delivers ([`SAMPLES_PER_OBW`]).
-    // Decimation alone is enough, and is alias-free by construction: this only ever engages when
-    // OBW99 is below a quarter of the rate, which is exactly when the channel filter above has
-    // already cut everything beyond ±0.75 × OBW99 — comfortably inside the new Nyquist limit.
+    // Decimation alone is enough below, and is alias-free by construction: it only ever engages
+    // when OBW99 is below a quarter of the rate, which is exactly when the channel filter above
+    // has already cut everything beyond ±0.75 × OBW99 — comfortably inside the new Nyquist limit.
     // The floor on the output length keeps the feature vector measurable (the shape features need
     // several FFT segments, and `cp_corr` needs four times its longest lag).
     let max_decim = (samples.len() / 2048).max(1);
+    // **C14's view, taken before the analysis decimation throws the symbol clock away** (T-238).
+    // A symbol rate is, for most classes, within a small factor of the occupied bandwidth, so at
+    // [`SAMPLES_PER_OBW`] = 2 a symbol period is about two samples and sits past the top of C14's
+    // own search range: there is no cyclic line left to find. Production does not reuse the
+    // classifier's snippet for C14 either — `BlindEstimator::prepare` re-normalises to
+    // `symbols::SYMBOL_SAMPLES_PER_OBW` — so the dev grid must hand C14 the same geometry, taken
+    // from the same filtered, recentred waveform rather than generated separately.
+    let symbol_decim = ((fs / (crate::symbols::SYMBOL_SAMPLES_PER_OBW * obw_hz)).floor() as usize)
+        .clamp(1, max_decim);
+    let (symbol_samples, symbol_sample_rate_hz) = if symbol_decim > 1 {
+        (
+            samples
+                .iter()
+                .step_by(symbol_decim)
+                .copied()
+                .collect::<Vec<_>>(),
+            fs / symbol_decim as f64,
+        )
+    } else {
+        (samples.clone(), fs)
+    };
+    // Resample to the analysis geometry the pipeline actually delivers ([`SAMPLES_PER_OBW`]).
     let decim = ((fs / (SAMPLES_PER_OBW * obw_hz)).floor() as usize).clamp(1, max_decim);
     let (samples, fs) = if decim > 1 {
         (
@@ -402,6 +430,8 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
         samples,
         sample_rate_hz: fs,
         obw_hz,
+        symbol_samples,
+        symbol_sample_rate_hz,
         class,
         snr_db: cfg.snr_db,
     }

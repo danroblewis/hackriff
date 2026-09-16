@@ -49,8 +49,13 @@ pub const NOISE_MIN_FLATNESS: f64 = 0.45;
 /// out: noise has no line.
 pub const NOISE_MAX_CARRIER_DB: f64 = 14.0;
 
-/// Cyclic-line significance above which a noise-like emission is ruled out: noise has no cycle.
-pub const NOISE_MAX_CYCLIC_DB: f64 = 8.0;
+// There was a `NOISE_MAX_CYCLIC_DB = 8.0` here, "cyclic-line significance above which a noise-like
+// emission is ruled out: noise has no cycle". It is gone rather than retuned (T-238): once C14
+// actually ran and `cyclic_db` stopped abstaining, the dev grid showed band-limited Gaussian noise
+// itself at 11.5 dB and every taxonomy class between 11.3 and 59.2 dB, with the analog classes
+// (ssb 38.2, am 34.9) *above* the digital ones (2fsk 26.3, ofdm 12.3). No threshold on this feature
+// separates the cases it was written to separate, so it is not a gate at any value. `cyclic_db`
+// remains a fitted density dimension, where a per-class mean and sigma can use it honestly.
 
 /// Envelope kurtosis (μ₄₂ of the instantaneous amplitude) above which the envelope is
 /// Rayleigh-like rather than that of an angle modulation: a constant envelope gives 1, Gaussian
@@ -80,7 +85,6 @@ pub fn admissible(features: &Features) -> Vec<Admissibility> {
     let env_cv = get("env_cv");
     let flatness = get("flatness");
     let carrier_db = get("carrier_line_db");
-    let cyclic_db = get("cyclic_db");
     let cp = get("cp_corr");
     let slope = get("if_slope_r2");
     let duty = get("duty");
@@ -91,16 +95,29 @@ pub fn admissible(features: &Features) -> Vec<Admissibility> {
 
     let mut out = Vec::new();
     // Analog spans almost every envelope and spectrum shape its digital neighbours use, so it is
-    // ruled out only by evidence of things an analog emission cannot have: a symbol clock, a guard
-    // interval, discrete frequency levels — or the Rayleigh envelope of a band-filling noise-like
-    // emission, which no AM, FM, SSB or CW signal has (a constant-envelope angle modulation sits
-    // near μ₄₂ ≈ 1, Gaussian noise at 2).
+    // ruled out only by evidence of things an analog emission cannot have: a guard interval,
+    // discrete frequency levels — or the Rayleigh envelope of a band-filling noise-like emission,
+    // which no AM, FM, SSB or CW signal has (a constant-envelope angle modulation sits near
+    // μ₄₂ ≈ 1, Gaussian noise at 2).
     //
     // Without these, analog is a catch-all: five broad classes covering enough of the feature
     // space to absorb high-order QAM, band noise and out-of-taxonomy signals that should come back
     // `unknown`.
-    out.push(match (cyclic_db, cp, mu42_a) {
-        (Some(c), _, _) if c > NOISE_MAX_CYCLIC_DB => deny("analog", "symbol_clock"),
+    //
+    // **A cyclic line is not one of them** (T-238). This arm used to deny analog a "symbol_clock"
+    // whenever `cyclic_db` exceeded 8 dB, and it was dormant from the day it was written, because
+    // nothing ever passed a C14 estimate in and the feature always abstained. Measuring it refutes
+    // the premise outright: on the dev grid at 25 dB, C14's whitened line significance is 38.2 dB
+    // for `ssb`, 34.9 for `am` and 25.5 for `nbfm`, against 26.3 for `2fsk`, 29.3 for `bpsk` and
+    // 12.3 for `ofdm` — the analog range *contains* the digital one, and every class in the
+    // taxonomy clears 8 dB (the minimum anywhere is 11.3). A strong cyclic line is real structure,
+    // not evidence of keying: broadcast FM has a 19 kHz stereo pilot, and a keyed carrier has its
+    // keying. Left live, this denied `analog` to 100 % of inputs and cost 0.25 of top-1 outright.
+    //
+    // So `cyclic_db` belongs to the densities, which fit a per-class mean and sigma for it, and not
+    // to a hard gate that no threshold can make correct. Removing the arm keeps the behaviour the
+    // tree has always actually had; it loosens nothing.
+    out.push(match (cp, mu42_a) {
         // A repeated guard interval only rules analog out when the emission also **fills its band**
         // (the condition [`coarse_hint`] already applies, for the same reason: any smoothly
         // modulated carrier repeats itself somewhat, and broadcast FM in particular scores a
@@ -117,7 +134,7 @@ pub fn admissible(features: &Features) -> Vec<Admissibility> {
         // its own band: this arm still denied `analog` to between half and seven eighths of the
         // `wfm` snippets, which is the whole of the residual `analog` abstention (measured: wfm
         // top-1 0.58 at gate+5, with `analog` admissible in only 0.12-0.50 of trials).
-        (_, Some(c), _)
+        (Some(c), _)
             if c >= OFDM_MIN_CP_CORR
                 && flatness.is_some_and(|f| f >= OFDM_MIN_FLATNESS)
                 && (mu42_a.is_some_and(|k| k > NOISE_LIKE_MIN_MU42)
@@ -125,7 +142,7 @@ pub fn admissible(features: &Features) -> Vec<Admissibility> {
         {
             deny("analog", "guard_interval")
         }
-        (_, _, Some(k))
+        (_, Some(k))
             if k > NOISE_LIKE_MIN_MU42
                 && flatness.is_some_and(|f| f >= NOISE_MIN_FLATNESS)
                 && carrier_db.is_some_and(|c| c < NOISE_MAX_CARRIER_DB) =>
@@ -162,10 +179,14 @@ pub fn admissible(features: &Features) -> Vec<Admissibility> {
         Some(v) if v > PULSED_MAX_DUTY => deny("pulsed", "continuous_envelope"),
         _ => allow("pulsed"),
     });
-    out.push(match (flatness, carrier_db, cyclic_db) {
-        (Some(f), _, _) if f < NOISE_MIN_FLATNESS => deny("noise-like", "not_flat"),
-        (_, Some(c), _) if c > NOISE_MAX_CARRIER_DB => deny("noise-like", "carrier_line"),
-        (_, _, Some(c)) if c > NOISE_MAX_CYCLIC_DB => deny("noise-like", "cyclic_line"),
+    // The `cyclic_db > 8 dB` arm that used to sit here is gone for the same measured reason as the
+    // analog one above (T-238): band-limited Gaussian noise itself reads 11.5 dB on the dev grid
+    // and the held-out noise burst 11.3, so the arm denied `noise-like` to every input including
+    // noise. What separates noise from a modulated carrier is its flat spectrum and absent carrier
+    // line, which is what the two arms below test.
+    out.push(match (flatness, carrier_db) {
+        (Some(f), _) if f < NOISE_MIN_FLATNESS => deny("noise-like", "not_flat"),
+        (_, Some(c)) if c > NOISE_MAX_CARRIER_DB => deny("noise-like", "carrier_line"),
         _ => allow("noise-like"),
     });
     out
@@ -175,7 +196,6 @@ pub fn admissible(features: &Features) -> Vec<Admissibility> {
 /// taxonomy). "Digital, unknown order" below the gates is the C15 card's required behaviour, so a
 /// snippet with digital structure reports `digital` even when its family is `unknown`.
 pub fn coarse_hint(features: &Features) -> Coarse {
-    let cyclic = features.get("cyclic_db").unwrap_or(f64::NEG_INFINITY);
     let modality = features.get("if_modality").unwrap_or(1.0);
     let cp = features.get("cp_corr").unwrap_or(0.0);
     let flatness = features.get("flatness");
@@ -194,7 +214,6 @@ pub fn coarse_hint(features: &Features) -> Coarse {
     // envelope (~1). Without a measured envelope the hint is left as it was.
     let noise_like = flatness.is_some_and(|f| f >= NOISE_MIN_FLATNESS)
         && carrier <= NOISE_MAX_CARRIER_DB
-        && cyclic <= NOISE_MAX_CYCLIC_DB
         && cp < OFDM_MIN_CP_CORR
         && mu42_a.is_none_or(|k| k > NOISE_LIKE_MIN_MU42);
     if noise_like {
@@ -213,10 +232,9 @@ pub fn coarse_hint(features: &Features) -> Coarse {
     // smoothly modulated carrier repeats itself somewhat, and broadcast FM in particular scores a
     // prominent short-lag correlation without being digital at all.
     let guard_interval = cp >= OFDM_MIN_CP_CORR && flatness.is_some_and(|f| f >= OFDM_MIN_FLATNESS);
-    let digital = cyclic > NOISE_MAX_CYCLIC_DB
-        || discrete_levels
-        || guard_interval
-        || (low > 0.15 && env_cv > ASK_MIN_ENV_CV);
+    // A cyclic line is deliberately not a term here (T-238): it is present on every class in the
+    // taxonomy, analog included, so it would hint `digital` for everything. See `admissible`.
+    let digital = discrete_levels || guard_interval || (low > 0.15 && env_cv > ASK_MIN_ENV_CV);
     if digital {
         return Coarse::Digital;
     }

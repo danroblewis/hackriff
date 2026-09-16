@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use hk_classify::density::DensityModel;
 use hk_classify::features::{FeatureInput, features};
 use hk_classify::harness::{SeedGuard, Split};
+use hk_classify::symbols::SymbolEstimator;
 use hk_classify::synth::{Class, DEV_SEEDS, SynthConfig, generate};
 use hk_classify::thresholds::thresholds_of;
 
@@ -71,6 +72,11 @@ fn main() {
 fn fit(guard: &mut SeedGuard, steps: &[f64], label: &str) -> DensityModel {
     let mut labelled = Vec::new();
     let mut cells = 0usize;
+    // C14 runs here for the same reason it runs in the pipeline: without it the six symbol-derived
+    // dimensions of `features@1` abstain, and a dimension that abstains during fitting is dropped
+    // from every class's density (`MIN_PRESENCE`) — so it could never be scored on at classify
+    // time either. Fitting and classifying must measure the same things (T-238).
+    let mut c14 = SymbolEstimator::new();
     for class in Class::TAXONOMY {
         let family = class.family().expect("a taxonomy class has a family");
         let gate = thresholds_of(family)
@@ -81,12 +87,18 @@ fn fit(guard: &mut SeedGuard, steps: &[f64], label: &str) -> DensityModel {
             for seed in DEV_SEEDS.start..(DEV_SEEDS.start + SEEDS_PER_CLASS) {
                 guard.require(seed);
                 let s = generate(*class, &SynthConfig::new(snr, seed));
+                let symbols = c14.from_samples(
+                    &s.symbol_samples,
+                    s.symbol_sample_rate_hz,
+                    Some(s.obw_hz),
+                    Some(snr),
+                );
                 let f = features(&FeatureInput {
                     samples: &s.samples,
                     sample_rate_hz: s.sample_rate_hz,
                     obw_hz: Some(s.obw_hz),
                     snr_db: Some(snr),
-                    symbols: None,
+                    symbols: symbols.as_ref(),
                 });
                 labelled.push((class.label().to_owned(), family.to_owned(), f));
                 cells += 1;

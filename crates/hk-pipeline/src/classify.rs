@@ -24,7 +24,7 @@
 //! which ADR-0016 §2 already specifies; then this guard becomes unnecessary. That is a follow-up:
 //! it changes what `/api/inventory` reports for every demodulated emitter.
 
-use hk_classify::{Classifier, ClassifyRequest};
+use hk_classify::{Classifier, ClassifyRequest, SymbolEstimator};
 use hk_dsp::{InputInfo, IqSample};
 use hk_estimate::{Hints, ParamEstimator, SnippetExtractor, SnippetRequest};
 use hk_model::classify::{ArbRank, Classification, Stage, TaxonomyRef, family_of};
@@ -52,13 +52,24 @@ pub fn should_record(current: Option<&RecordedClassification>) -> bool {
     }
 }
 
-/// Runs the feature tree over one detection box, through the same C13 chain the demodulators use:
-/// snippet → parameters → CFO-corrected, power-normalised snippet → classification.
+/// Runs the cascade over one detection box, through the same C13 chain the demodulators use:
+/// snippet → parameters → C14 symbol estimate → CFO-corrected, power-normalised snippet →
+/// classification.
+///
+/// **C14 runs here** (T-238), once per classification event, on this CPU call site — off the ring
+/// and DSP real-time threads, where the feature vector and `family::explain_emitter` already run
+/// (ADR-0007; ADR-0016 §4, "Placement"). Its cost is bounded by construction: it analyses this one
+/// snippet, cut to the detection extent, at a fixed 6 samples per OBW99, and reports its own
+/// `cost_us`. `c14` is threaded in rather than built per call so its FFT plans are cached across
+/// events. Without it the six symbol-derived dimensions of `features@1` abstain and the row carries
+/// `no_symbol_estimate`; where C14 genuinely cannot estimate, they still abstain
+/// ([`hk_classify::symbols`]) rather than being given a fabricated value.
 ///
 /// `None` when the box cannot be extracted or C13 could not measure enough to normalise it (an
 /// abstention upstream, not a classification of `unknown`).
 pub fn classify_box<T: IqSample>(
     classifier: &Classifier,
+    c14: &mut SymbolEstimator,
     info: InputInfo<'_>,
     iq: &[T],
     request: &SnippetRequest,
@@ -67,6 +78,7 @@ pub fn classify_box<T: IqSample>(
     let mut extractor = SnippetExtractor::new(Default::default());
     let snippet = extractor.extract(info, iq, request).ok()?;
     let params = ParamEstimator::new(Default::default()).estimate(&snippet, &Hints::default());
+    let symbols = c14.from_snippet(&snippet, &params);
     let normalised =
         hk_estimate::normalise::normalise(&snippet, &params, &Default::default()).ok()?;
     let mut req = ClassifyRequest::new(&normalised.samples, normalised.sample_rate_hz, t);
@@ -75,6 +87,7 @@ pub fn classify_box<T: IqSample>(
         .snr_extent_db
         .value()
         .or_else(|| params.snr_box_db.value());
+    req.symbols = symbols.as_ref();
     req.suspect.clipped = params.flags.clipped;
     req.suspect.spur = params.flags.overload;
     Some(classifier.classify(&req))
