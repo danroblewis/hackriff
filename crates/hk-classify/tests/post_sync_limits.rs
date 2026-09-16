@@ -188,12 +188,15 @@ fn symbol_samples(x: &[Complex64], sps: f64) -> Option<Vec<Complex64>> {
         })
         .max_by(|a, b| a.1.norm().total_cmp(&b.1.norm()))?;
     let tau = -line.arg() / std::f64::consts::TAU * sps;
-    let guard = (2.0 * sps).ceil() as usize;
+    // Whole symbol periods, as `verify::symbol_samples` skips them (T-291): this module exists to
+    // measure what the verifier measures, so it has to sample where the verifier samples.
+    let edge = (2.0 * sps).ceil();
+    let skip = ((edge - tau) / sps).ceil().max(0.0);
     let mut out = Vec::new();
     let mut k = 0usize;
     loop {
-        let t = tau + k as f64 * sps + guard as f64;
-        if t + 1.0 >= filtered.len() as f64 - guard as f64 {
+        let t = tau + (skip + k as f64) * sps;
+        if t + 1.0 >= filtered.len() as f64 - edge {
             break;
         }
         let i = t.floor().max(0.0) as usize;

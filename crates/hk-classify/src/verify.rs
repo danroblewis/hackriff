@@ -481,12 +481,25 @@ fn symbol_samples(x: &[Complex64], sps: f64) -> Option<Vec<Complex64>> {
         })
         .max_by(|a, b| a.1.norm().total_cmp(&b.1.norm()))?;
     let tau = -line.arg() / std::f64::consts::TAU * sps;
-    let guard = (2.0 * sps).ceil() as usize;
+    // The matched filter's edge transient, in samples: not part of the emission.
+    let edge = (2.0 * sps).ceil();
+    // **The sampling grid's origin is the symbol phase `tau`, so the transient has to be skipped
+    // in whole symbol periods** (T-291). Adding it in samples — `tau + k*sps + ceil(2*sps)`, which
+    // is what this did — displaces *every* symbol in the record by `edge mod sps`: a constant
+    // timing error of up to a full symbol, since `sps` is `sample_rate / (C14 symbol rate)` and is
+    // an integer essentially never.
+    //
+    // Measured on a clean control at 30 dB, where 1 N₀ is 3.16 % EVM: 12.4 % at sps 6.1, 12.2 % at
+    // 6.2, 8.4 % at 6.3, 10.4 % at 6.73 — and 1.5 % once the guard is aligned, at every one of
+    // them. The error tracks `edge mod sps` exactly, which is what identifies it: it is zero at
+    // sps 6.0 (guard 12 = 2 symbols) and *also* at sps 6.5 (guard 13 = 2 symbols), so "the period
+    // happened to be an integer" is not the explanation — being a whole number of symbols is.
+    let skip = ((edge - tau) / sps).ceil().max(0.0);
     let mut out = Vec::new();
     let mut k = 0usize;
     loop {
-        let t = tau + k as f64 * sps + guard as f64;
-        if t + 1.0 >= filtered.len() as f64 - guard as f64 {
+        let t = tau + (skip + k as f64) * sps;
+        if t + 1.0 >= filtered.len() as f64 - edge {
             break;
         }
         // Linear interpolation: the symbol instant is not on the sample grid.
@@ -1037,5 +1050,113 @@ mod tests {
             "clamped odds ratio {odds} is not 19:1"
         );
         assert!(out.dist.iter().all(|lp| lp.p <= MAX_CONFIDENCE));
+    }
+
+    /// The root-raised-cosine pulse at `t` **symbols** from its centre, for a control waveform whose
+    /// symbols sit at exact fractional positions (unlike `synth`, which rounds them to a sample).
+    fn rrc_at(t: f64, alpha: f64) -> f64 {
+        if t.abs() < 1e-9 {
+            return 1.0 - alpha + 4.0 * alpha / std::f64::consts::PI;
+        }
+        let denom = 1.0 - (4.0 * alpha * t).powi(2);
+        if denom.abs() < 1e-9 {
+            let a = std::f64::consts::PI / (4.0 * alpha);
+            return alpha / 2.0_f64.sqrt()
+                * ((1.0 + 2.0 / std::f64::consts::PI) * a.sin()
+                    + (1.0 - 2.0 / std::f64::consts::PI) * a.cos());
+        }
+        let pt = std::f64::consts::PI * t;
+        ((pt * (1.0 - alpha)).sin() + 4.0 * alpha * t * (pt * (1.0 + alpha)).cos()) / (pt * denom)
+    }
+
+    /// **The eye is sampled on the symbol instants, at every samples-per-symbol** (T-291).
+    ///
+    /// [`symbol_samples`] skips the matched filter's edge transient before it starts sampling. That
+    /// transient is a number of *samples*, but the grid it is added to is anchored on the **symbol
+    /// phase** `tau` — so it has to be advanced to a whole number of symbol periods. Adding it in
+    /// samples, which is what this did, displaced every symbol in the record by `edge mod sps`.
+    ///
+    /// `sps` is `sample_rate / (C14 symbol rate)`, so it is an integer essentially never, and the
+    /// error is invisible to any test that happens to use an integer one. This drives a *clean*
+    /// QPSK control — no CFO, no quantisation, no channel filter, symbols at exact fractional
+    /// positions — through the real function at three non-integer `sps`, so the only thing it can
+    /// measure is the sampling grid.
+    ///
+    /// At 30 dB a correctly synchronised member sits near 1 N₀ (measured 0.2). Before the fix these
+    /// read 15.4, 7.0 and 11.0 N₀ — the constellation smeared into a ring, which is the mechanism
+    /// T-286 attributed to residual carrier frequency offset and T-246 to the psk-qam ALRT. The
+    /// bound below is a-priori: "within a small multiple of the noise it was given", with the
+    /// failure mode an order of magnitude the other side of it.
+    #[test]
+    fn the_eye_is_sampled_on_the_symbol_instants_at_any_samples_per_symbol() {
+        const SNR_DB: f64 = 30.0;
+        const ALPHA: f64 = 0.35;
+        const N_SYM: usize = 400;
+        const SPAN: f64 = 6.0;
+        let n0 = 10f64.powf(-SNR_DB / 10.0);
+
+        for sps in [6.1_f64, 6.3, 6.733] {
+            // A deterministic QPSK waveform: every symbol's pulse evaluated at its exact position.
+            let mut state = 0x2545_F491_4F6C_DD1D_u64 ^ (sps.to_bits());
+            let mut next = move || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state >> 11
+            };
+            let n = (N_SYM as f64 * sps).ceil() as usize;
+            let mut x = vec![Complex64::new(0.0, 0.0); n];
+            for k in 0..N_SYM {
+                let a =
+                    std::f64::consts::TAU * (next() % 4) as f64 / 4.0 + std::f64::consts::FRAC_PI_4;
+                let s = Complex64::new(a.cos(), a.sin());
+                let centre = k as f64 * sps;
+                let lo = (centre - SPAN * sps).ceil().max(0.0) as usize;
+                let hi = ((centre + SPAN * sps).floor() as usize).min(n.saturating_sub(1));
+                for (i, out) in x.iter_mut().enumerate().take(hi + 1).skip(lo) {
+                    *out += s * rrc_at((i as f64 - centre) / sps, ALPHA);
+                }
+            }
+            let p = x.iter().map(Complex64::norm_sqr).sum::<f64>() / x.len() as f64;
+            let g = 1.0 / p.sqrt();
+            let sigma = (n0 / 2.0).sqrt();
+            for s in x.iter_mut() {
+                // Box-Muller, from the same stream.
+                let u1 = ((next() % 1_000_000) as f64 + 1.0) / 1_000_001.0;
+                let u2 = (next() % 1_000_000) as f64 / 1_000_000.0;
+                let r = (-2.0 * u1.ln()).sqrt();
+                let t = std::f64::consts::TAU * u2;
+                *s = *s * g + Complex64::new(r * t.cos() * sigma, r * t.sin() * sigma);
+            }
+
+            let y = symbol_samples(&x, sps).expect("the control is long enough to sample");
+
+            // Mean squared distance to the nearest QPSK point, in N₀, after the same fourth-power
+            // phase alignment the ALRT uses.
+            let points = constellation("qpsk").expect("qpsk has a constellation");
+            let sum: Complex64 = y.iter().map(|s| s.powu(4)).sum();
+            let theta = sum.arg() / 4.0;
+            let rot = Complex64::new(theta.cos(), -theta.sin());
+            let scale = (1.0 - n0).max(0.1).sqrt();
+            let resid = y
+                .iter()
+                .map(|s| {
+                    let r = *s * rot;
+                    points
+                        .iter()
+                        .map(|p| (r - *p * scale).norm_sqr())
+                        .fold(f64::INFINITY, f64::min)
+                })
+                .sum::<f64>()
+                / y.len() as f64
+                / n0;
+            assert!(
+                resid < 3.0,
+                "sps {sps}: a clean QPSK control recovers at {resid:.2} N₀, so the eye is not \
+                 being sampled on the symbol instants (guard {} mod sps = {:.3} samples)",
+                (2.0 * sps).ceil(),
+                (2.0 * sps).ceil() % sps
+            );
+        }
     }
 }
