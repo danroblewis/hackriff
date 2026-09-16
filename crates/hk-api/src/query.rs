@@ -912,6 +912,22 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
             repo.latest_demodulation_for_emitter(e.id)?
                 .map(|d| estimated_params_json(&d))
         };
+        // T-202 (ADR-0016 §5): the C18 cluster of unknown emissions this row belongs to — "I have
+        // seen this before". Only a *visible* cluster is named: a pending one has too few members
+        // to be more than a guess. On a withheld-identity row it reads `null` whatever storage
+        // holds, exactly as `estimated_params` and `/api/inventory/{id}/decode` do (T-159/T-163),
+        // so cluster membership can never confirm a withheld identity indirectly.
+        let cluster_id = if withheld {
+            None
+        } else {
+            match repo.emitter_cluster_id(e.id)? {
+                Some(id) => repo
+                    .cluster_opt(&id)?
+                    .filter(|c| c.state.visible())
+                    .map(|c| c.id),
+                None => None,
+            }
+        };
         let freq = e.freq();
         let mut row = json!({
             "state": entry.lifecycle,
@@ -939,6 +955,9 @@ pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result
             "latest_classification": latest_classification,
             "classifications": e.classifications.len(),
             "estimated_params": estimated_params,
+            // T-202 (ADR-0016 §5): C18 cluster membership — evidence that this emission measures
+            // like others, never an identity, a family or a status.
+            "cluster_id": cluster_id,
             "identity_scheme": scheme,
             "identity_class": class,
             "withheld": withheld,

@@ -34,6 +34,7 @@
 //! | `/api/datasets[/<id>]` | GET, POST | token (header only for mutating) | T-205 labelled-capture dataset export (CRC-valid decodes and user labels) ([`crate::datasets`]) |
 //! | `/api/taxonomy` | GET | token | T-218 the modulation taxonomy `hk-mod@1` and `thresholds@1`, as data ([`crate::taxonomy`]). Reference data, never a measurement |
 //! | `/api/signatures/match` | GET | token | T-201 an emitter's C18 signature match and its history ([`crate::signatures`]). Ranked evidence, never an identity |
+//! | `/api/clusters[/<id>[/promote]]` | GET, POST | token (header only for mutating) | T-202 C18 clusters of unknown emissions — "the same thing I saw before" ([`crate::clusters`]). A *type* above emitters; evidence, never an identity |
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
@@ -142,6 +143,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/taxonomy"),
     // T-201 C18 signature matches (ADR-0016 §5)
     ("GET", "/api/signatures/match"),
+    // T-202 C18 clusters of unknown emissions (ADR-0016 §5)
+    ("GET", "/api/clusters"),
+    ("GET", "/api/clusters/{id}"),
+    ("POST", "/api/clusters/{id}/promote"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
@@ -871,6 +876,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::selections::route(state, &ctl))
         .or_else(|| crate::decode::route(state, &ctl)) // T-159; before inventory::route (see its docs)
         .or_else(|| crate::signatures::route(state, &ctl)) // T-201 C18 signature matches
+        .or_else(|| crate::clusters::route(state, &ctl)) // T-202 C18 clusters of unknowns
         .or_else(|| crate::inventory::route(state, &ctl))
         .or_else(|| crate::outputs::route(state, &ctl))
         .or_else(|| crate::analyze::route(state, &ctl)) // T-190

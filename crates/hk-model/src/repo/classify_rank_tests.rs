@@ -469,11 +469,15 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
         // T-218: nor the 0009 signature tables. Every later migration's objects have to go, or
         // replaying them onto this file fails on the first `CREATE TABLE`.
         // T-201: nor the 0010 measured-features table.
+        // T-202: nor the 0011 cluster tables (children first: they reference each other).
         conn.execute_batch(
             "DROP TABLE IF EXISTS emitter_relation; \
              DROP TABLE IF EXISTS signature_match; \
              DROP TABLE IF EXISTS signature; \
-             DROP TABLE IF EXISTS emission_features",
+             DROP TABLE IF EXISTS emission_features; \
+             DROP TABLE IF EXISTS cluster_event; \
+             DROP TABLE IF EXISTS emitter_cluster; \
+             DROP TABLE IF EXISTS signature_cluster",
         )
         .unwrap();
         const BEFORE_0007: i64 = 6;

@@ -67,6 +67,7 @@ mod classify_rank_tests;
 mod cluster;
 #[cfg(test)]
 mod cluster_tests;
+mod clusters; // T-202 C18 clusters of unknown emissions
 mod gating;
 mod interpret;
 mod inventory;
@@ -132,6 +133,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0008_emitter_relation.sql"), // T-219 C40 signal relationships
     include_str!("migrations/0009_signature.sql"), // T-218 C18 signature storage
     include_str!("migrations/0010_emission_features.sql"), // T-201 C18 measured features
+    include_str!("migrations/0011_signature_cluster.sql"), // T-202 C18 clusters of unknowns
 ];
 
 /// Schema version this build creates and understands.

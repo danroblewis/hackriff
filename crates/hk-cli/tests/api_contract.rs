@@ -359,6 +359,70 @@ fn signature_match_route_answers_as_documented() {
     stop_server(serving);
 }
 
+/// T-202 (ADR-0016 §5): `/api/clusters` answers as `docs/api.md` documents it. A cluster is a
+/// *type* above emitters and is evidence, never identity, so the shape carries what the group
+/// measured like (with its uncertainty) and nothing that could name it.
+#[test]
+fn cluster_routes_answer_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+    const UNKNOWN: &str = "cluster:01999999-0000-7000-8000-000000000000";
+
+    // The list is always answerable, and empty on a fresh server (clusters are built from
+    // measurement, never seeded).
+    let (st, v) = get(addr, "/api/clusters");
+    assert_eq!(st, 200, "{v}");
+    assert!(is_array(&v["clusters"]), "{v}");
+    for c in v["clusters"].as_array().unwrap() {
+        for field in [
+            "id",
+            "state",
+            "members",
+            "member_ids",
+            "created_at_s",
+            "updated_at_s",
+            "observations",
+            "suspect_fraction",
+            "centroid",
+            "events",
+        ] {
+            assert!(c.get(field).is_some(), "cluster missing {field}: {c}");
+        }
+        // Only visible clusters are served: a pending group is still a guess.
+        let state = c["state"].as_str().unwrap_or_default();
+        assert!(["active", "promoted"].contains(&state), "state: {state}");
+        assert!(is_array(&c["member_ids"]), "{c}");
+        assert!(is_array(&c["centroid"]), "{c}");
+        for f in c["centroid"].as_array().unwrap() {
+            assert!(f["field"].is_string(), "{f}");
+            assert!(f["sigma"].is_number(), "{f}");
+            assert!(f["n"].is_number(), "{f}");
+        }
+        // A cluster never carries an identity, a status or a lifecycle.
+        for forbidden in ["identity", "known_status", "lifecycle", "family"] {
+            assert!(c.get(forbidden).is_none(), "{forbidden} leaked: {c}");
+        }
+    }
+
+    // An unknown or unparsable id is a 404 — never a 200 that could be probed.
+    let (st, v) = get(addr, &format!("/api/clusters/{UNKNOWN}"));
+    assert_eq!(st, 404, "{v}");
+    assert_eq!(v["code"], "not_found", "{v}");
+    let (st, v) = get(addr, "/api/clusters/not%20a%20cluster");
+    assert_eq!(st, 404, "{v}");
+
+    // Promote is POST-only and refuses an unknown cluster (503 when the server has no audit log).
+    let (st, v) = post(addr, &format!("/api/clusters/{UNKNOWN}/promote"), "{}");
+    assert!(st == 404 || st == 503, "{st}: {v}");
+    let (st, _) = get(addr, &format!("/api/clusters/{UNKNOWN}/promote"));
+    assert_eq!(st, 405);
+    let (st, _) = post(addr, "/api/clusters", "{}");
+    assert_eq!(st, 405);
+    let (st, _) = put(addr, "/api/clusters", "{}");
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
 #[test]
 fn discovery_history_floor_status_and_control_state_have_the_documented_shape() {
     let (_dir_guard, serving, addr) = start_server();
@@ -723,6 +787,8 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         // T-211: arbitrated classification and a differing latest row (present, possibly null).
         "classification",
         "latest_classification",
+        // T-202: the C18 cluster of unknowns this row belongs to (present, possibly null).
+        "cluster_id",
     ] {
         assert!(
             row.get(field).is_some(),
