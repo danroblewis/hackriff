@@ -4199,7 +4199,7 @@ tasks:
     milestone: MUI
     title: 'RDS should surface as an accumulated PS / RadioText / PI / clock view, not
       a per-frame packet stream'
-    status: in-progress
+    status: done
     priority: normal
     deps: []
     parallel_group: MUI-X3
@@ -4723,6 +4723,29 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: false
+  - id: T-279
+    milestone: M1
+    title: 'rds.recipe.json has no group-4A Clock-Time node, so RDS clock (CT) can
+      never be served'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: RECIPE
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-252 (2026-09-16) while building the accumulated RDS panel: it reported
+      the gap rather than deriving a clock in the UI, and left the Clock row reading
+      "not decoded by this recipe"'
+    acceptance: 'add a group-4A (Clock-Time) node to rds.recipe.json emitting a clock
+      output, so the accumulated RDS view can show CT from decoded data. The decoded
+      time is evidence about the broadcast, never the device clock and never used to set
+      or correct one. A station that never sends 4A must still read as not-yet-received
+      rather than as a wrong or default time (the T-207/T-164 rule)'
+    area: recipes/rds.recipe.json, crates/hk-pipeline (recipe outputs), ui/src/app/explore/output-panel.ts
+    needs: none
+    model: sonnet
+    effort: low
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
