@@ -23,7 +23,7 @@ use super::{RepoError, Repository, blob, bodies, int};
 use crate::ids::EmitterId;
 use crate::signature::cluster::{
     ClusterEvent, ClusterEventKind, ClusterState, EmitterClusterLink, SignatureCluster,
-    is_cluster_id,
+    is_cluster_field, is_cluster_id,
 };
 use crate::signature::{
     FeatValue, FieldExpect, FieldSpec, Signature, SignatureKind, SignatureProvenance, SignatureRef,
@@ -48,7 +48,24 @@ fn emitter_of(b: [u8; 16]) -> EmitterId {
 impl Repository {
     /// Inserts or updates one cluster's current state. Validated first: a stored cluster that
     /// breaks its own contract would mis-assign every later emitter.
+    ///
+    /// A centroid carrying a field that has since left
+    /// [`crate::signature::cluster::CLUSTER_FIELDS`] is **pruned** rather than rejected (T-309):
+    /// the store outlives the field set, and a cluster written under the old one must stay
+    /// writable. Nothing is lost — the distance already ignores such a field, and the repair pass
+    /// rebuilds centroids from their members.
     pub fn put_cluster(&mut self, c: &SignatureCluster) -> Result<(), RepoError> {
+        let pruned = c
+            .centroid
+            .fields
+            .keys()
+            .any(|n| !is_cluster_field(n))
+            .then(|| {
+                let mut p = c.clone();
+                p.centroid.prune();
+                p
+            });
+        let c = pruned.as_ref().unwrap_or(c);
         c.validate().map_err(|e| RepoError::Invalid(e.0))?;
         self.conn.execute(
             "INSERT INTO signature_cluster (cluster_id, state, merged_into, signature_id, \
@@ -441,7 +458,13 @@ impl Repository {
 
 /// Fields whose agreement a promoted signature *requires*, when the cluster measured them: the
 /// discriminating ones from the C18 card (symbol rate + deviation + sync word identify most
-/// LMR/ISM protocols; periodicity and length separate sensor families).
+/// LMR/ISM protocols).
+///
+/// `period_s` and `burst_length_s` were here for the C18 card's "periodicity and length separate
+/// sensor families", and are gone with T-309: they are observation statistics, no longer
+/// [`crate::signature::cluster::CLUSTER_FIELDS`], and so can never appear in a centroid for this
+/// list to find. Removing them changes no promotion outcome; leaving them would have implied a
+/// centroid could still be promoted on evidence it is no longer allowed to hold.
 const DISCRIMINATING: &[&str] = &[
     field::FAMILY,
     field::SYMBOL_RATE_HZ,
@@ -450,8 +473,6 @@ const DISCRIMINATING: &[&str] = &[
     field::LINE_CODE,
     field::SYNC_WORD,
     field::PREAMBLE,
-    field::PERIOD_S,
-    field::BURST_LENGTH_S,
     field::COMB_SPACING_HZ,
     field::PRI_S,
 ];

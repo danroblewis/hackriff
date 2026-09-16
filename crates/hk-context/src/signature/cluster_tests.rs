@@ -7,15 +7,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use hk_model::signature::cluster::{
-    ClusterState, EmitterClusterLink, SignatureCluster, new_cluster_id,
+    ClusterState, EmitterClusterLink, SignatureCluster, is_cluster_field, new_cluster_id,
 };
-use hk_model::signature::field;
+use hk_model::signature::{Z_CONFLICT, default_tolerance, field};
 use hk_model::{
     EmissionFeatures, EmitterId, Feat, Fingerprint, LinkTarget, Repository, Sighting, TimeRange,
     Timestamp, TrackId,
 };
 
-use super::cluster::{Assignment, Separated, assign_emitter, comparable, compare, promote, repair};
+use super::cluster::{
+    Assignment, CLUSTER_EPSILON, CLUSTER_MIN_SHARED_FIELDS, Separated, assign_emitter, comparable,
+    compare, promote, repair,
+};
+use super::matcher::MATCH_MIN_DISCRIMINATING;
 
 const DAY: i64 = 86_400;
 
@@ -101,7 +105,7 @@ fn a_thin_measurement_joins_nothing_however_well_its_one_field_agrees() {
     let full = fields_of(&[
         (field::SYMBOL_RATE_HZ, num(4800.0, 5.0)),
         (field::DEVIATION_HZ, num(9600.0, 50.0)),
-        (field::PERIOD_S, num(0.12, 0.001)),
+        (field::LEVELS, num(2.0, 0.0)),
         (field::OBW_HZ, num(36e3, 500.0)),
     ]);
 
@@ -126,7 +130,7 @@ fn a_thin_measurement_joins_nothing_however_well_its_one_field_agrees() {
     let three = fields_of(&[
         (field::SYMBOL_RATE_HZ, num(4800.0, 5.0)),
         (field::DEVIATION_HZ, num(9600.0, 50.0)),
-        (field::PERIOD_S, num(0.12, 0.001)),
+        (field::LEVELS, num(2.0, 0.0)),
     ]);
     assert!(compare(&full, &three).is_ok(), "three fields is enough");
 }
@@ -144,7 +148,7 @@ fn one_conflicting_field_separates_even_when_it_is_the_only_thing_shared() {
     ]);
     let b = fields_of(&[
         (field::FAMILY, Feat::text("psk-qam", "classifier")),
-        (field::PERIOD_S, num(0.12, 0.001)),
+        (field::LEVELS, num(4.0, 0.0)),
     ]);
     match compare(&a, &b) {
         Err(Separated::Conflict { field: f, .. }) => assert_eq!(f, field::FAMILY),
@@ -154,10 +158,8 @@ fn one_conflicting_field_separates_even_when_it_is_the_only_thing_shared() {
     // A rich, otherwise-perfect agreement with one contradiction: the RMS would have hidden it.
     let base = [
         (field::SYMBOL_RATE_HZ, num(4800.0, 5.0)),
-        (field::PERIOD_S, num(0.12, 0.001)),
+        (field::DEVIATION_HZ, num(9600.0, 50.0)),
         (field::OBW_HZ, num(36e3, 500.0)),
-        (field::DUTY_CYCLE, num(0.15, 0.005)),
-        (field::BURST_LENGTH_S, num(0.018, 0.0005)),
     ];
     let mut with_two_levels = base.to_vec();
     with_two_levels.push((field::LEVELS, num(2.0, 0.0)));
@@ -179,12 +181,12 @@ fn one_conflicting_field_separates_even_when_it_is_the_only_thing_shared() {
     let a = fields_of(&[
         (field::SYNC_WORD, Feat::bits("1100110011001100", "framer")),
         (field::SYMBOL_RATE_HZ, num(4800.0, 5.0)),
-        (field::PERIOD_S, num(0.12, 0.001)),
+        (field::OBW_HZ, num(36e3, 500.0)),
     ]);
     let b = fields_of(&[
         (field::SYNC_WORD, Feat::bits("1010000111010101", "framer")),
         (field::SYMBOL_RATE_HZ, num(4800.0, 5.0)),
-        (field::PERIOD_S, num(0.12, 0.001)),
+        (field::OBW_HZ, num(36e3, 500.0)),
     ]);
     assert!(
         matches!(compare(&a, &b), Err(Separated::Conflict { .. })),
@@ -198,7 +200,7 @@ fn one_conflicting_field_separates_even_when_it_is_the_only_thing_shared() {
 #[test]
 fn measurement_uncertainty_widens_the_distance_it_never_tightens_it() {
     let shared = [
-        (field::PERIOD_S, num(0.12, 0.001)),
+        (field::SYMBOL_RATE_HZ, num(4800.0, 5.0)),
         (field::OBW_HZ, num(36e3, 500.0)),
     ];
 
@@ -226,6 +228,219 @@ fn measurement_uncertainty_widens_the_distance_it_never_tightens_it() {
             Err(Separated::TooFar { .. })
         ),
         "a well-measured difference is a difference"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-309: the clustering distance compares the emission, never the look.
+// ---------------------------------------------------------------------------------------------
+
+/// What one emitter *is*: identical in both looks, because it is one emitter.
+fn an_emission() -> Vec<(&'static str, Feat)> {
+    vec![
+        (field::FAMILY, Feat::text("fsk", "classifier")),
+        (field::SYMBOL_RATE_HZ, num(4800.0, 10.0)),
+        (field::DEVIATION_HZ, num(9600.0, 100.0)),
+        (field::OBW_HZ, num(36e3, 500.0)),
+    ]
+}
+
+/// The tolerance-normalised distance of one numeric field, by the same arithmetic
+/// [`super::cluster::compare`] uses. Used to show a test has teeth.
+fn z_of(name: &str, a: &Feat, b: &Feat) -> f64 {
+    let (x, y) = (a.value.num().unwrap(), b.value.num().unwrap());
+    let scale = (x.abs() + y.abs()) / 2.0;
+    let tolerance = default_tolerance(name) * scale;
+    let effective = (tolerance * tolerance + a.sigma * a.sigma + b.sigma * b.sigma).sqrt();
+    (x - y).abs() / effective
+}
+
+/// **Half one: one emitter watched for two different durations must join itself.**
+///
+/// This is the user's reported symptom, at the clustering layer: near-duplicate readings of one
+/// signal that refuse to merge. The two readings agree on everything the *emission* is and differ
+/// only in how long each look lasted, which is precisely what `period_s`, `duty_cycle` and
+/// `burst_length_s` measure.
+#[test]
+fn t309_one_emitter_watched_for_two_different_durations_joins_one_cluster() {
+    // A long watch and a short one. The burst-length pair is the one T-250/T-262 actually measured
+    // on the user's staging database: one station seen over 305 s and then over 59 s reported
+    // medians of 0.68 s and 0.37 s.
+    let long_watch = [
+        (field::PERIOD_S, num(2.90, 0.02)),
+        (field::DUTY_CYCLE, num(0.62, 0.01)),
+        (field::BURST_LENGTH_S, num(0.68, 0.01)),
+    ];
+    let short_watch = [
+        (field::PERIOD_S, num(1.10, 0.02)),
+        (field::DUTY_CYCLE, num(0.24, 0.01)),
+        (field::BURST_LENGTH_S, num(0.37, 0.01)),
+    ];
+
+    // Teeth. The two looks genuinely disagree by the distance's own arithmetic — every one of the
+    // three is beyond ε, and at least one is a flat conflict, which on its own refuses a join
+    // however much else agrees. Without this the test could pass by the looks happening to match.
+    let mut conflicts = 0;
+    for ((name, a), (_, b)) in long_watch.iter().zip(short_watch.iter()) {
+        let z = z_of(name, a, b);
+        assert!(
+            z > CLUSTER_EPSILON,
+            "{name}: the two looks agree (z {z:.2})"
+        );
+        if z > Z_CONFLICT {
+            conflicts += 1;
+        }
+    }
+    assert!(
+        conflicts > 0,
+        "no look statistic conflicts, so this test would pass even if they were compared"
+    );
+
+    let long = [an_emission().as_slice(), long_watch.as_slice()].concat();
+    let short = [an_emission().as_slice(), short_watch.as_slice()].concat();
+    let close = compare(&fields_of(&long), &fields_of(&short))
+        .expect("one emitter watched two ways must join itself");
+    assert_eq!(close.shared, 4, "only the emission is compared: {close:?}");
+    assert!(close.z_rms < 1e-9, "the emission agrees exactly: {close:?}");
+
+    // And through the store, on two disjoint presence intervals — the shape ADR-0017 §1.1
+    // describes, where a signal stops and comes back.
+    let mut r = Repository::open_in_memory().unwrap();
+    let watched_long = an_emitter(&mut r, 99.6035e6, (0, 305), 19);
+    let watched_short = an_emitter(&mut r, 99.6319e6, (4000, 4059), 6);
+    store_features(&mut r, watched_long, "features:long", t(310), &long);
+    store_features(&mut r, watched_short, "features:short", t(4060), &short);
+    assign_emitter(&mut r, watched_long, t(320))
+        .unwrap()
+        .unwrap();
+    let joined = assign_emitter(&mut r, watched_short, t(4070))
+        .unwrap()
+        .unwrap();
+    assert_eq!(joined.reason, "joined", "{joined:?}");
+    assert_eq!(
+        r.emitter_cluster_id(watched_short).unwrap(),
+        r.emitter_cluster_id(watched_long).unwrap(),
+        "two looks at one type must be one cluster"
+    );
+}
+
+/// **Half two: two genuinely different emitters must still separate.**
+///
+/// The control against "everything merges", which would satisfy half one on its own. Both are
+/// given **identical** look statistics, so nothing about how they were watched can separate them
+/// — and, under the old field set, those matching statistics actively pulled the pair together.
+#[test]
+fn t309_two_different_emitters_watched_identically_still_separate() {
+    let look = [
+        (field::PERIOD_S, num(0.50, 0.005)),
+        (field::DUTY_CYCLE, num(0.30, 0.005)),
+        (field::BURST_LENGTH_S, num(0.050, 0.001)),
+    ];
+    let with_look = |mut f: Vec<(&'static str, Feat)>| {
+        f.extend_from_slice(&look);
+        f
+    };
+
+    // A flat contradiction in what the emission *is*: a quarter of the deviation.
+    let other_device = vec![
+        (field::FAMILY, Feat::text("fsk", "classifier")),
+        (field::SYMBOL_RATE_HZ, num(4800.0, 10.0)),
+        (field::DEVIATION_HZ, num(2400.0, 25.0)),
+        (field::OBW_HZ, num(36e3, 500.0)),
+    ];
+    match compare(
+        &fields_of(&with_look(an_emission())),
+        &fields_of(&with_look(other_device.clone())),
+    ) {
+        Err(Separated::Conflict { field: f, .. }) => assert_eq!(f, field::DEVIATION_HZ),
+        other => panic!("9600 Hz deviation is not 2400 Hz: {other:?}"),
+    }
+
+    // And a subtler one, well measured: the same family, rate and deviation, a different width.
+    // No single field conflicts here — it separates on the distance alone.
+    let narrower = vec![
+        (field::FAMILY, Feat::text("fsk", "classifier")),
+        (field::SYMBOL_RATE_HZ, num(4800.0, 10.0)),
+        (field::DEVIATION_HZ, num(9600.0, 100.0)),
+        (field::OBW_HZ, num(20e3, 300.0)),
+    ];
+    let bare = compare(&fields_of(&an_emission()), &fields_of(&narrower));
+    assert!(
+        matches!(bare, Err(Separated::TooFar { .. })),
+        "a well-measured width difference is a difference: {bare:?}"
+    );
+
+    // **The excluded fields cannot manufacture a merge.** Adding three perfectly agreeing look
+    // statistics to both sides — which would have dragged the RMS down when they were compared —
+    // leaves the verdict bit-for-bit identical.
+    assert_eq!(
+        compare(
+            &fields_of(&with_look(an_emission())),
+            &fields_of(&with_look(narrower.clone()))
+        ),
+        bare,
+        "agreeing look statistics changed the verdict"
+    );
+
+    // Through the store: three distinct device types, three clusters, none shared.
+    let mut r = Repository::open_in_memory().unwrap();
+    let mut clusters = BTreeSet::new();
+    for (i, f) in [an_emission(), other_device, narrower]
+        .into_iter()
+        .enumerate()
+    {
+        let e = an_emitter(&mut r, 433.0e6 + 1e6 * i as f64, (0, 60), 4);
+        store_features(&mut r, e, &format!("features:{i}"), t(10), &with_look(f));
+        assign_emitter(&mut r, e, t(20)).unwrap().unwrap();
+        clusters.insert(r.emitter_cluster_id(e).unwrap().unwrap());
+    }
+    assert_eq!(
+        clusters.len(),
+        3,
+        "three device types must not share a cluster"
+    );
+}
+
+/// [`CLUSTER_MIN_SHARED_FIELDS`] is the **matcher's** evidence floor, not a fraction of the field
+/// set, so retiring three fields does not move it.
+///
+/// It also records what retiring them costs in reach, which is the tightest consequence of T-309:
+/// a purely analogue emitter measures exactly three clustering fields and so sits precisely on the
+/// floor. That is enough, and nothing more may be removed without it clustering nothing at all.
+#[test]
+fn t309_the_shared_field_floor_is_the_matchers_and_does_not_move_with_the_field_set() {
+    assert_eq!(
+        CLUSTER_MIN_SHARED_FIELDS, MATCH_MIN_DISCRIMINATING as usize,
+        "the floor is the matcher's 'three agreeing fields', which is an amount of evidence and \
+         not a function of how many fields the clusterer happens to compare"
+    );
+
+    // Everything `super::features` can produce from a Fingerprint plus a classification, which is
+    // all a real run ever has, intersected with what clustering still compares.
+    let reachable: Vec<&str> = [
+        field::OBW_HZ,
+        field::FAMILY,
+        field::CLASS,
+        field::SYMBOL_RATE_HZ,
+        field::DEVIATION_HZ,
+        field::PERIOD_S,
+        field::DUTY_CYCLE,
+        field::BURST_LENGTH_S,
+        field::HOP_RASTER_HZ,
+        field::HOP_COUNT,
+    ]
+    .into_iter()
+    .filter(|f| is_cluster_field(f))
+    .collect();
+    assert_eq!(reachable.len(), 7, "{reachable:?}");
+
+    // The analogue floor case: no symbol rate, no deviation, no hopping.
+    let analogue = [field::FAMILY, field::OBW_HZ, field::CLASS];
+    assert!(analogue.iter().all(|f| is_cluster_field(f)));
+    assert_eq!(
+        analogue.len(),
+        CLUSTER_MIN_SHARED_FIELDS,
+        "an analogue emitter sits exactly on the shared-field floor"
     );
 }
 
@@ -391,14 +606,14 @@ fn an_emitter_between_two_incompatible_clusters_is_left_unassigned() {
     let mut r = Repository::open_in_memory().unwrap();
     // Two clusters, deliberately seeded far enough apart to conflict with each other.
     let mut seeded = Vec::new();
-    for (i, period) in [0.10_f64, 0.30].into_iter().enumerate() {
+    for (i, deviation) in [9600.0_f64, 2400.0].into_iter().enumerate() {
         let c = SignatureCluster::new(new_cluster_id(), t(0));
         let mut c = c;
         c.centroid.fold_member(
             &fields_of(&[
                 (field::SYMBOL_RATE_HZ, num(4800.0, 5.0)),
                 (field::OBW_HZ, num(36e3, 200.0)),
-                (field::PERIOD_S, num(period, period * 0.001)),
+                (field::DEVIATION_HZ, num(deviation, deviation * 0.001)),
             ]),
             0.0,
         );
@@ -415,7 +630,7 @@ fn an_emitter_between_two_incompatible_clusters_is_left_unassigned() {
         "the two seeds must genuinely disagree for this test to mean anything"
     );
 
-    // Something sitting between them, with a period sigma wide enough to reach both.
+    // Something sitting between them, with a deviation sigma wide enough to reach both.
     let e = an_emitter(&mut r, 433.92e6, (0, 1), 3);
     store_features(
         &mut r,
@@ -425,7 +640,7 @@ fn an_emitter_between_two_incompatible_clusters_is_left_unassigned() {
         &[
             (field::SYMBOL_RATE_HZ, num(4800.0, 5.0)),
             (field::OBW_HZ, num(36e3, 200.0)),
-            (field::PERIOD_S, num(0.20, 0.12)),
+            (field::DEVIATION_HZ, num(6000.0, 4000.0)),
         ],
     );
     let a = assign_emitter(&mut r, e, t(20)).unwrap().unwrap();
