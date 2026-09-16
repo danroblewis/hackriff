@@ -4377,7 +4377,7 @@ tasks:
     milestone: M2-hardening
     title: 'Capability model has no way to say "above the receiver ceiling": hardware_fit
       lacks an out-of-band value, and two facts about GNSS/X-band are unrecorded'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: DOCS
@@ -4533,7 +4533,7 @@ tasks:
   - id: T-266
     milestone: M4
     title: 'M4 trunking data model: TrunkSystem, CallRecord, GrantEvent, with a three-state encryption column'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: M4A
