@@ -1266,6 +1266,7 @@ fn inband_flicker_inside_a_continuous_station_is_a_fragment_not_an_emitter() {
             chunk > 0,
         );
         r.detection.snr_mean_db = 17.0;
+        r.detection.snr_peak_db = 17.0;
         // As the detector reports a WFM station: its threshold-crossing (pixel) box, every bin
         // above threshold in any frame of the record, is wider than its 99 % OBW.
         r.f_lo_hz = station - 204e3;
@@ -1284,6 +1285,7 @@ fn inband_flicker_inside_a_continuous_station_is_a_fragment_not_an_emitter() {
                 false,
             );
             r.detection.snr_mean_db = snr;
+            r.detection.snr_peak_db = snr;
             recs.push(r);
         }
     }
@@ -1404,6 +1406,7 @@ fn weak_narrowband_emitter_one_channel_off_a_wfm_station_keeps_its_own_entry() {
             chunk > 0,
         );
         r.detection.snr_mean_db = 17.0;
+        r.detection.snr_peak_db = 17.0;
         r.f_lo_hz = station - 205e3;
         r.f_hi_hz = station + 203e3;
         recs.push(r);
@@ -1426,6 +1429,7 @@ fn weak_narrowband_emitter_one_channel_off_a_wfm_station_keeps_its_own_entry() {
                 chunk > 0,
             );
             r.detection.snr_mean_db = 8.0;
+            r.detection.snr_peak_db = 8.0;
             recs.push(r);
         }
     }
@@ -1442,6 +1446,7 @@ fn weak_narrowband_emitter_one_channel_off_a_wfm_station_keeps_its_own_entry() {
             false,
         );
         r.detection.snr_mean_db = 8.0;
+        r.detection.snr_peak_db = 8.0;
         recs.push(r);
     }
     recs.sort_by_key(|r| r.frames.end);

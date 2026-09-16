@@ -109,6 +109,10 @@ struct Part {
     marginal: bool,
     confirmed: bool,
     snr_db: f64,
+    /// Peak `P/floor` of the detection, dB. Kept beside the mean because the mean is taken over
+    /// the whole occupied band, so it falls as an emission widens (T-280); only the peak compares
+    /// like with like across widths.
+    snr_peak_db: f64,
 }
 
 impl Part {
@@ -133,6 +137,7 @@ struct Group {
     continues: u32,
     transitions: u32,
     snr_db: f64,
+    snr_peak_db: f64,
 }
 
 impl Group {
@@ -153,9 +158,11 @@ impl Group {
             continues: 0,
             transitions: 0,
             snr_db: p.snr_db,
+            snr_peak_db: p.snr_peak_db,
         };
         for p in parts {
             g.snr_db = g.snr_db.max(p.snr_db);
+            g.snr_peak_db = g.snr_peak_db.max(p.snr_peak_db);
             g.t0 = g.t0.min(p.t0);
             g.t1 = g.t1.max(p.t1);
             g.lo = g.lo.min(p.lo);
@@ -244,6 +251,7 @@ struct Slot {
     shape_head: usize,
     /// Sum and count of linked groups' SNR, dB (hop raster weights).
     snr_sum: f64,
+    snr_peak_sum: f64,
     snr_n: u64,
 }
 
@@ -295,6 +303,7 @@ impl Slot {
             shape_len: 0,
             shape_head: 0,
             snr_sum: 0.0,
+            snr_peak_sum: 0.0,
             snr_n: 0,
         }
     }
@@ -320,8 +329,14 @@ struct SplitEntry {
 const CLOSED_HOSTS: usize = 32;
 /// On-air share of its observed span a track needs to host in-band fragments (T-101).
 const HOST_DUTY: f64 = 0.9;
-/// A fragment's mean detection SNR is at least this far below its host's, dB (T-101): skirt
+/// A fragment's peak detection SNR is at least this far below its host's, dB (T-101): skirt
 /// flicker sits near threshold, while a neighbouring emitter of comparable strength stays its own.
+///
+/// T-280: compared on the **peak**, not the mean. `snr_mean_db` averages over the whole occupied
+/// band, so it falls as an emission widens — exactly the emissions that must act as hosts. On the
+/// 2026-09-15 FM capture the station's mean is 7.3 dB against its skirt fragments' 4.7 dB (2.6 dB
+/// apart, under this margin, so the rule never fired) while the peaks are 14.3 dB against 5.9 dB
+/// (8.5 dB apart). The margin itself is unchanged.
 const FRAGMENT_SNR_MARGIN_DB: f64 = 6.0;
 
 /// A continuous track's band, SNR and on-air span, for the in-band fragment rule (T-101).
@@ -330,14 +345,17 @@ struct HostSpan {
     lo: f64,
     hi: f64,
     bw: f64,
-    snr_db: f64,
+    snr_peak_db: f64,
     t_first: i64,
     t_last_end: i64,
 }
 
 /// Mean detection SNR of the groups linked to `s`, dB.
-fn slot_snr(s: &Slot) -> Option<f64> {
-    (s.snr_n > 0).then(|| s.snr_sum / s.snr_n as f64)
+/// Mean **peak** SNR of the slot's linked groups, dB (T-280): the width-independent strength used
+/// by the in-band fragment rule. The mean-over-band figure (`snr_sum`) stays on the slot for the
+/// track summary and the T-084 hop channel gate; only this comparison uses the peak.
+fn slot_snr_peak(s: &Slot) -> Option<f64> {
+    (s.snr_n > 0).then(|| s.snr_peak_sum / s.snr_n as f64)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -699,6 +717,7 @@ impl Tracker {
             marginal: f.marginal,
             confirmed: r.candidate.is_confirmed(),
             snr_db: d.snr_mean_db,
+            snr_peak_db: d.snr_peak_db,
         };
         self.now = self.now.max(t1);
         if self.pending.len() >= PENDING_CAPACITY {
@@ -1194,14 +1213,14 @@ impl Tracker {
         if ratio <= 0.0 || s.bursts == 0 {
             return false;
         }
-        let Some(s_snr) = slot_snr(s) else {
+        let Some(s_snr) = slot_snr_peak(s) else {
             return false;
         };
         let fits = |h: &HostSpan| {
             h.bw >= ratio * s.bw
                 && h.lo <= s.fc
                 && s.fc <= h.hi
-                && h.snr_db >= s_snr + FRAGMENT_SNR_MARGIN_DB
+                && h.snr_peak_db >= s_snr + FRAGMENT_SNR_MARGIN_DB
                 && h.t_first <= s.t_first
                 && h.t_last_end >= s.t_last_end
         };
@@ -1227,14 +1246,14 @@ impl Tracker {
         } else {
             (end - h.t_first).max(1)
         };
-        let snr_db = slot_snr(h)?;
+        let snr_peak_db = slot_snr_peak(h)?;
         let tol = self.cfg.freq_tolerance_bins * h.bin_hz;
         let (below, above) = (h.px_lo_off.max(0.5 * h.bw), h.px_hi_off.max(0.5 * h.bw));
         (h.on_ns as f64 >= HOST_DUTY * span as f64).then_some(HostSpan {
             lo: h.fc - below - tol,
             hi: h.fc + above + tol,
             bw: below + above,
-            snr_db,
+            snr_peak_db,
             t_first: h.t_first,
             t_last_end: end,
         })
@@ -1429,6 +1448,7 @@ impl Tracker {
             s.shape_n += 1;
             s.bin_hz = s.bin_hz.min(g.bin_hz);
             s.snr_sum += g.snr_db;
+            s.snr_peak_sum += g.snr_peak_db;
             s.snr_n += 1;
         }
         let c = s.cur.as_mut().expect("burst applied");
@@ -2155,6 +2175,11 @@ impl Tracker {
             } else {
                 0.0
             },
+            snr_peak_db: if parent.snr_n > 0 {
+                parent.snr_peak_sum / parent.snr_n as f64
+            } else {
+                0.0
+            },
         };
         let j = self.open(&g, out);
         {
@@ -2163,6 +2188,7 @@ impl Tracker {
             c.shape_n = go.len() as u64;
             if parent.snr_n > 0 {
                 c.snr_sum = g.snr_db;
+                c.snr_peak_sum = g.snr_peak_db;
                 c.snr_n = 1;
             }
         }
@@ -2241,6 +2267,7 @@ impl Tracker {
             t.confirmed += f.confirmed;
             t.segments += f.segments;
             t.snr_sum += f.snr_sum;
+            t.snr_peak_sum += f.snr_peak_sum;
             t.snr_n += f.snr_n;
             if t.cur.is_none() {
                 t.cur = f.cur;
