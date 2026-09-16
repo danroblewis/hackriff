@@ -3784,7 +3784,7 @@ tasks:
   - id: T-235
     milestone: M3
     title: "Classifier: false-known 0.171 vs the 0.10 floor (one short-CP OFDM generator), and both OTA fixtures still abstain - close the simulation-to-reality gap with real-capture-derived densities"
-    status: review
+    status: done
     commit: 859b5bf
     outcome: "false-known 0.1713 -> 0.0833 (floor 0.10) MET; unknown recall 0.8287 -> 0.9167; top-2 0.9802 -> 0.9861; wrong-label at gate 0.0026 -> 0.0; top-1 0.9147 -> 0.9067, still above the 0.90 floor. Nothing loosened - the open-set guard was TIGHTENED from an allow-list that bounded no rate to the ADR numeric 0.10. OTA fixtures still abstain, justified with measured structural evidence (both classify with no_symbol_estimate, so six discriminating dimensions abstain because C14 never runs in this path) - that satisfies the acceptance-s or-justified branch, and the remaining lever is T-238, not generator tuning"
     priority: high
