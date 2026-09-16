@@ -7165,7 +7165,7 @@ tasks:
     milestone: M2-hardening
     title: 'Grey must mean genuinely unobserved: the waterfall needs a backend coverage map derived from
       the tune history'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-341
