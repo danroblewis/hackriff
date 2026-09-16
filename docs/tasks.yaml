@@ -2716,7 +2716,7 @@ tasks:
   - id: T-168
     milestone: MUI
     title: "MUI API gap 11-12: document follow_hops in docs/api.md; per-node recipe docs for the Decode step guide"
-    status: in-progress
+    status: done
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
