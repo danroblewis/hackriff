@@ -18,6 +18,11 @@
 //!    test below now guards the pin rather than the defect. Pinning it did *not* remove the window
 //!    dependence (10.16 → 9.40 dB mean movement), which is the part of T-310's account T-327
 //!    overturned: the geometry was a real defect but not the mechanism. Finding 1 is.
+//! 3. **A short burst puts the four line significances off *together*, not one at a time.** That is
+//!    why T-328 re-measured T-310's four-dimension expansion with the geometry pinned and still
+//!    left it unshipped: `density`'s second-largest-|z| term (T-248) withholds a claim on exactly
+//!    that pattern, so four dimensions reject genuine short bursts from their own class. The
+//!    fourth test below pins the pattern; the end-to-end figures are on `symbol_features`.
 //!
 //! Asserted on **means over dev seeds**, never on one seed: these are distributional statements
 //! about a generator, and a single seed would pin noise. The full per-class table is printed rather
@@ -35,6 +40,9 @@ const FRACTIONS: [usize; 4] = [8, 4, 2, 1];
 
 /// Dev seeds per cell. Enough for a mean that is not one waveform; small enough to stay quick.
 const SEEDS: u64 = 4;
+
+/// Dev seeds for the T-328 test below, which needs a per-class **sd** and not only a mean.
+const SPREAD_SEEDS: u64 = 8;
 
 /// SNR the structural claims are asserted at: comfortably above every family gate, so nothing here
 /// is a statement about a marginal detection.
@@ -218,5 +226,130 @@ fn the_rate_search_band_does_not_move_with_the_window() {
     assert!(
         checked >= 4 * Class::TAXONOMY.len(),
         "only {checked} pairs ran"
+    );
+}
+
+/// The four line significances of one class, at one window fraction, over the spread seeds.
+fn per_method(c14: &mut SymbolEstimator, class: Class, den: usize) -> Vec<[f64; 4]> {
+    (DEV_SEEDS.start..DEV_SEEDS.start + SPREAD_SEEDS)
+        .filter_map(|seed| estimate(c14, class, seed, SNR_DB, den))
+        .map(|p| {
+            let mut v = [f64::NEG_INFINITY; 4];
+            for l in &p.lines {
+                v[l.method as usize] = l.significance_db;
+            }
+            v
+        })
+        .filter(|v| v.iter().all(|x| x.is_finite()))
+        .collect()
+}
+
+/// **T-328: carrying the four line significances as four dimensions would put all four of them off
+/// at once on a short burst, which is exactly the signature that withholds a claim.**
+///
+/// T-310 measured a large discrimination win for the expansion and refused to take it, on the
+/// grounds that it made the burst case worse; T-327 pinned C14's geometry so the measurement is no
+/// longer confounded; T-328 re-measured it and **still** refused. The full end-to-end figures are
+/// on [`hk_classify::features`]'s `symbol_features`. This pins the mechanism, which is the part a
+/// later reader would otherwise re-derive wrongly — "four dimensions each better behaved than one"
+/// is true per dimension and beside the point.
+///
+/// [`hk_classify::density`] scores membership as a **conjunction**: the mean squared z over ~27
+/// dimensions *and* the second-largest |z| against the class's dev `z2_p99` (T-248, which exists
+/// because a genuine member routinely has **one** wild dimension and essentially never two). So a
+/// statistic that contributes one off dimension is survivable and one that contributes several at
+/// once is not — and the four line significances move **together** when the window shortens,
+/// because they are four periodograms of four feature series of the *same* truncated record.
+///
+/// Counted here as: fit each of the four on full windows over the dev seeds, then count how many of
+/// them sit more than 2 sd from that mean on the same class's N/8 burst. The median over the
+/// taxonomy is at least two, so the second-largest |z| is off too.
+///
+/// Asserted on the median over 21 classes, never on one class: the claim is that this is the normal
+/// case for the taxonomy, not that some class does it.
+#[test]
+fn a_short_burst_puts_all_four_cyclic_line_dimensions_off_at_once() {
+    /// How far from its full-window mean a significance must sit to count as an off dimension.
+    const OFF_SD: f64 = 2.0;
+    /// Floor on the fitted sd, dB. `density::fit` shrinks every sigma towards the feature's own
+    /// scale for the same reason: one over-clean cell must not manufacture a large z. No dB
+    /// measurement on this path is repeatable to better than about half a decibel.
+    const SD_FLOOR_DB: f64 = 0.5;
+
+    let mut c14 = SymbolEstimator::new();
+    eprintln!(
+        "\n=========== T-328: how many of the four line significances are off on an N/8 burst ==========="
+    );
+    eprintln!("  {:<11} {:>10} {:>10}", "class", "off of 4", "|z| of max");
+    let mut counts: Vec<f64> = Vec::new();
+    let mut max_z: Vec<f64> = Vec::new();
+    for class in Class::TAXONOMY {
+        let full = per_method(&mut c14, *class, 1);
+        let burst = per_method(&mut c14, *class, 8);
+        if full.len() < 4 || burst.is_empty() {
+            continue;
+        }
+        let n = full.len() as f64;
+        let mean: Vec<f64> = (0..4)
+            .map(|i| full.iter().map(|v| v[i]).sum::<f64>() / n)
+            .collect();
+        let sd: Vec<f64> = (0..4)
+            .map(|i| {
+                let var =
+                    full.iter().map(|v| (v[i] - mean[i]).powi(2)).sum::<f64>() / (n - 1.0).max(1.0);
+                var.sqrt().max(SD_FLOOR_DB)
+            })
+            .collect();
+        // The shipped statistic, for the same class, measured the same way: the max of the four
+        // against the full-window distribution of that max.
+        let fmax: Vec<f64> = full
+            .iter()
+            .map(|v| v.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+            .collect();
+        let mmean = fmax.iter().sum::<f64>() / n;
+        let msd = (fmax.iter().map(|v| (v - mmean).powi(2)).sum::<f64>() / (n - 1.0).max(1.0))
+            .sqrt()
+            .max(SD_FLOOR_DB);
+
+        let off = burst
+            .iter()
+            .map(|b| {
+                (0..4)
+                    .filter(|&i| (b[i] - mean[i]).abs() > OFF_SD * sd[i])
+                    .count() as f64
+            })
+            .sum::<f64>()
+            / burst.len() as f64;
+        let z = burst
+            .iter()
+            .map(|b| {
+                let m = b.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                ((m - mmean) / msd).abs()
+            })
+            .sum::<f64>()
+            / burst.len() as f64;
+        eprintln!("  {:<11} {off:>10.2} {z:>10.2}", class.label());
+        counts.push(off);
+        max_z.push(z);
+    }
+    assert!(
+        counts.len() >= Class::TAXONOMY.len() - 1,
+        "only {} classes produced an estimate at both lengths",
+        counts.len()
+    );
+    counts.sort_by(f64::total_cmp);
+    let median = counts[counts.len() / 2];
+    max_z.sort_by(f64::total_cmp);
+    eprintln!(
+        "  median over the taxonomy: {median:.2} of 4 dimensions off; the shipped max sits at \
+         |z| = {:.2}",
+        max_z[max_z.len() / 2]
+    );
+    assert!(
+        median >= 2.0,
+        "an N/8 burst puts a median of only {median:.2} of the four line significances more than \
+         {OFF_SD} sd from their full-window mean. The T-328 refusal rests on two or more being off \
+         at once — density's second-largest-|z| tail term. If this stops holding, re-run the \
+         end-to-end measurement on symbol_features before concluding the expansion is safe."
     );
 }

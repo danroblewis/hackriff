@@ -6181,7 +6181,8 @@ tasks:
     milestone: M3
     title: Carrying the four cyclic line significances as separate dimensions nearly doubles class separation,
       but only after the window dependence is fixed at source
-    status: in-progress
+    status: done
+    commit: 117c031
     priority: normal
     deps:
     - T-327
@@ -7042,7 +7043,7 @@ tasks:
     milestone: M3
     title: 'ModelHost and HostStats have no reference outside hk-ml: the counters T-283 just made coherent
       have no production reader'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-283
@@ -7064,6 +7065,33 @@ tasks:
       reachable only from its own tests. If it is meant to be wired, prove non-vacuity as a falsifiable
       pair the way T-287 and T-297 did: remove the wiring and a test fails, remove the host and a different
       test fails'
+  - id: T-364
+    milestone: M3
+    title: The classifier rejects 39% of genuine short bursts from their own class, and the fix costs open-set
+      recall at the floor
+    status: todo
+    priority: high
+    deps:
+    - T-328
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    acceptance: 'T-328 measured this while refusing the four-dimension expansion, and it is the larger finding:
+      the SHIPPED classifier rejects 39.4% of genuine N/8 bursts from their own class, against 11.9% of
+      the same classes'' full windows (n = 840, 21 classes x four SNRs, densities fitted on full windows
+      over dev seeds, bursts scored on disjoint dev seeds). CLAUDE.md makes ephemeral emissions FIRST-CLASS
+      - a signal is a time-frequency region, not a persistent carrier, and 902-928 MHz ISM bursts are the
+      canonical playground - so this is a live capability gap on exactly the signals the project cares most
+      about. THE FIX IS IDENTIFIED AND PRICED: fitting the densities over POOLED window lengths takes N/8
+      unknown from 39.4% to 12.1% (single dimension) or 56.4% to 11.9% (four dimensions), but costs held-out
+      unknown recall 0.9606 -> 0.9000 and 0.9697 -> 0.9242 respectively, and 0.8788/0.8727 on N/8 negatives
+      - AT OR THROUGH ADR-0016 section 7''s 0.90 floor. THIS IS A PRODUCT DECISION, NOT A TUNING ONE: it
+      trades open-set honesty against burst recall, and the user''s standing rule is that floors do not
+      move to accommodate a capability. Measure the trade properly across seeds and SNRs, present BOTH curves,
+      and let the user choose - do NOT pick for them and do NOT move the floor. Note T-328''s ordering reversal:
+      at a pooled fit the FOUR dimensions hold the open set better (0.9242 vs 0.9000) at the same burst
+      recall, so if pooled fitting is adopted the four-dimension expansion should be re-evaluated in the
+      same breath rather than staying refused on a protocol that no longer applies'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
