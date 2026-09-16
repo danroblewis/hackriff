@@ -357,6 +357,23 @@ Because measurements are immutable and interpretations are versioned, the same q
 
 The wire form is `GET /api/history` (`docs/api.md`, "Span-matched resolution").
 
+#### 4.1.1 The capture window, and the overview drawn on it (T-338; the user's time/waterfall invariant 2)
+
+**The rule, settled by the user:** *the timeline is the capture window, and it is a visualization.* The scrubbable capture-history timeline spans **exactly the configured recording/retention duration** — no more, no less — grows and shrinks when that duration is reconfigured, and is itself a **compressed "sideways" overview waterfall** of the retained capture, never an empty box.
+
+**The horizon is a first-class field, because there are two of them.** §4.1's table already says the pyramid's retention and the IQ ring's window (§3.2, §3.3, [ADR-0014](adr/0014-iq-capture-ring.md)) are different lengths. Invariant 2 says which one the scrubber is: the **ring's**. A scrubber sized from the longer, lossy one offers times the ring has already overwritten — it promises capture that no longer exists, and it looks right while it does. So the capture window is served as its own object (`GET /api/timeline`), and it names its horizon rather than leaving it to be assumed:
+
+| | |
+|---|---|
+| **the span** | the **configured** retention, not what the ring currently holds. A ring part-way through filling is a mostly-empty capture window of the full length; a band sized to its contents would grow under the user as it filled. |
+| **the live edge** | the ring's newest sample, falling back to the history's newest frame while the ring is empty. Never wall clock — a replay runs on its own clock (§4.2), and a band anchored to `now` places its capture in the future. |
+| **what is held** | reported *beside* the span, inside it, so the difference between "the window" and "the IQ that is still there" is drawn rather than inferred. |
+| **absence** | no ring, no retention or no live edge is `null` — **unknown**, never a default span. |
+
+**The picture on it is a measurement, and the pyramid alone cannot make it.** §4.1's error direction assumes one level can serve the view. A sideways band is fine in time and coarse in frequency at once, and the ladder **couples its axes**: the tier whose cells are coarse enough in frequency for a thin strip's few rows (100 kHz) has one-day time cells. The tier is therefore chosen from the *time* axis and its grid folded onto exactly the cells the band draws, in the backend — the same rule as §4.1, applied where a single level cannot reach. Only statistics that **fold exactly** survive it: max of max-holds, max of peak occupancy, summed frames, mean coverage over equal-duration cells. A percentile (`p_low`, `floor`) cannot be folded from cell values, so it is not offered rather than approximated. The grid's own observed range is served too, because choosing a dynamic range is a measurement as well.
+
+The wire form is `GET /api/timeline` (`docs/api.md`, "The capture window, and the overview drawn on it").
+
 ### 4.2 What every time-varying record carries (T-337, one shared time axis)
 
 **The rule, settled by the user** (CLAUDE.md, "Time, the waterfall, and the live view", invariant 1): *for the current view there is a single canonical mapping between absolute capture time and screen position, and everything time-varying is laid out through it and moves together.* §4.1 settled the **resolution** half of the thin-client line; this settles the **timestamp** half, and it is a constraint on the data model, not only on the wire:

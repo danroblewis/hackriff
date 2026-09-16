@@ -140,6 +140,22 @@ pub fn parse_region(q: &Params) -> Result<Region, ApiError> {
     })
 }
 
+/// Parses `f_lo`/`f_hi` (Hz) alone, for a route whose **time** extent is not the caller's to give
+/// (T-338). `None` when neither is present; an error when only one is, or when they do not order.
+pub(crate) fn parse_freq_only(q: &Params) -> Result<Option<FreqRange>, ApiError> {
+    match (param(q, "f_lo"), param(q, "f_hi")) {
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => Err(bad("give f_lo and f_hi together, or neither")),
+        (Some(_), Some(_)) => {
+            let (f_lo, f_hi) = (num(q, "f_lo")?, num(q, "f_hi")?);
+            if !(f_lo >= 0.0 && f_hi > f_lo && f_hi <= 1e12) {
+                return Err(bad("need 0 <= f_lo < f_hi"));
+            }
+            Ok(Some(FreqRange::new(f_lo, f_hi)))
+        }
+    }
+}
+
 /// `(nt, nf)` of level `l`'s grid over `r` (the pyramid's own rule).
 fn dims(geom: &Geometry, l: usize, r: &Region) -> (f64, f64) {
     let g = &geom.levels[l];
@@ -539,6 +555,83 @@ fn region_history(p: &Pyramid, q: &Params) -> Result<(RegionHistory, ResolutionR
         )
         .map_err(|_| ApiError::new(400, "history query refused"))?;
     Ok((h, req))
+}
+
+/// One timeline overview read (T-338): the compressed grid, and the pyramid tier it came from.
+pub(crate) struct OverviewRead {
+    /// The grid, laid on the requested window rather than on the tier's cell boundaries.
+    pub grid: hk_store::Overview,
+    /// Pyramid level read.
+    pub level: u8,
+    /// That level's time cell, s.
+    pub src_t_cell_s: f64,
+    /// That level's frequency cell, Hz.
+    pub src_f_cell_hz: f64,
+}
+
+/// The pyramid tier that answers a timeline overview (T-338).
+///
+/// The rule is the **coarsest tier whose time cells are no larger than one drawn column**: reading
+/// finer than the picture buys nothing and costs cells, and reading coarser while a finer tier
+/// would fit throws away detail the timeline is there to show. When no tier is fine enough (a
+/// window of seconds asked for in ~100 columns is finer than the 1 s floor of the ladder), the
+/// finest tier that fits the budget answers and its cells **replicate** across columns — T-334's
+/// safe direction, and `resolution.t_cell_s` says so rather than hiding it.
+fn overview_level(geom: &Geometry, r: &Region, columns: usize) -> Result<u8, ApiError> {
+    let out_t_ns = ((r.t1_ns - r.t0_ns) as f64 / columns.max(1) as f64).max(1.0);
+    let fits = |l: usize| {
+        let (nt, nf) = dims(geom, l, r);
+        nt * nf <= MAX_API_CELLS as f64
+    };
+    // Levels run finest first, so iterate in reverse to take the coarsest adequate tier.
+    if let Some(l) = (0..geom.n_levels())
+        .rev()
+        .find(|&l| (geom.levels[l].t_cell_ns as f64) <= out_t_ns && fits(l))
+    {
+        return Ok(l as u8);
+    }
+    (0..geom.n_levels())
+        .find(|&l| fits(l))
+        .map(|l| l as u8)
+        .ok_or_else(|| {
+            ApiError::new(
+                400,
+                "capture window too large for the cell budget even at the coarsest level",
+            )
+        })
+}
+
+/// Reads the compressed overview of one window (T-338): the pyramid at [`overview_level`], folded
+/// by [`hk_store::RegionHistory::overview`] onto exactly `columns × rows` cells over the window.
+///
+/// The fold is here rather than in the client because choosing which measured value stands for a
+/// drawn cell is a measurement (T-334), and because no single pyramid tier can be fine in time and
+/// coarse in frequency at once — the ladder couples its axes, and a thin sideways strip needs
+/// exactly that combination.
+pub(crate) fn overview_read(
+    p: &Pyramid,
+    r: &Region,
+    columns: usize,
+    rows: usize,
+) -> Result<OverviewRead, ApiError> {
+    let level = overview_level(p.geometry(), r, columns)?;
+    let time = TimeRange::new(
+        Timestamp::from_unix_nanos(r.t0_ns),
+        Timestamp::from_unix_nanos(r.t1_ns),
+    );
+    let h = p
+        .query(&RegionQuery {
+            freq: r.freq,
+            time,
+            resolution: Resolution::Level(level),
+        })
+        .map_err(|_| ApiError::new(400, "history query refused"))?;
+    Ok(OverviewRead {
+        grid: h.overview(time, r.freq, columns, rows),
+        level: h.level,
+        src_t_cell_s: h.t_cell_ns as f64 / 1e9,
+        src_f_cell_hz: h.f_cell_hz,
+    })
 }
 
 /// What the spectrum history observed over one region (T-264, ADR-0017 TM-8): the coverage mask

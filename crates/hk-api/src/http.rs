@@ -9,6 +9,7 @@
 //! |---|---|---|---|
 //! | `/api/streams` | GET | token | Discovery (T-060): offered streams (id, kind, class, geometry, format), on-demand openers, the TCP stream address. Never content. |
 //! | `/api/history?f_lo&f_hi&t0&t1[&max_cells][&format][&stat]` | GET | token | T-017 region-over-time grid ([`crate::query`]); T-116 `format=csv` (hackrf_sweep) / `format=png` (waterfall) |
+//! | `/api/timeline?[f_lo&f_hi][&columns][&rows]` | GET | token | T-338 the capture window (the IQ ring's retention, **not** the history horizon) and the compressed overview waterfall drawn on it ([`crate::timeline`]) |
 //! | `/api/floor?f_lo&f_hi&t0&t1[&max_steps]` | GET | token | T-021 floor vs time ([`crate::query`]) |
 //! | `/api/inventory?[f_lo&f_hi][&t0&t1][&state][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]); `state` = T-078 lifecycle |
 //! | `/api/inventory/<id>[/promote\|/band]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-078 one entry, promote a candidate, delete; T-191 set/clear the user band ([`crate::inventory`]) |
@@ -116,6 +117,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/analysis/strongest"),
     // T-341: the achievable (centre, span) grid, and which tier answers for a requested state
     ("GET", "/api/navigation"),
+    // T-338: the capture window (the IQ ring's retention, not the history horizon) and the
+    // compressed overview waterfall drawn on it
+    ("GET", "/api/timeline"),
     ("GET", "/api/status"),
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
@@ -932,6 +936,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         | "/api/events"
         | "/api/analysis/strongest"
         | "/api/navigation"
+        | "/api/timeline"
         | "/api/report"
         | "/api/status"
         | "/api/taxonomy"
@@ -972,6 +977,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         // T-341: the backend owns which capture states are realizable; the client snaps against
         // this grid rather than deciding for itself what the front end can do.
         "/api/navigation" => crate::navigation::navigation_json(state, &req.query),
+        // T-338: the scrubber's span is the IQ ring's retention — the capture window — and the
+        // band it draws is a measurement made here, not a reduction made in the client.
+        "/api/timeline" => crate::timeline::timeline_json(state, &req.query),
         "/api/status" => state
             .status
             .as_ref()

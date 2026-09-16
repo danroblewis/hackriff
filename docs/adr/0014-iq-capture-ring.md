@@ -127,6 +127,8 @@ Stream indices and sample-clock times restart when a process restarts. A replaye
 - an index range selects in the current run;
 - a time range may match only one run, otherwise `409 conflict` (never spliced across a restart).
 
+**This ring owns the capture window, and the scrubber is sized from it (T-338).** `retention_s`, `t0` and `t1` here are the *only* statement of how far back capture reaches; the spectrum-history pyramid's retention is a different horizon, deliberately longer and lossy ([ADR-0017](0017-time-extent-signal-model.md) §2.4.4, the user's time/waterfall invariant 2). `GET /api/timeline` reads this status and serves the window as its own object — the **configured** `retention_s` as the span, with what the ring currently holds (`t0..t1`) reported inside it, so a scrubber never offers a time the ring has already overwritten. Anything sizing a time axis from another horizon is a bug against that invariant, not a variation.
+
 **Clip reads.** A clip plans its reads under the mutex and reads outside it. After each read it re-checks that the floor has not passed the read's start. Data overwritten meanwhile fails the clip (`404 not_found`) instead of exporting another slot's bytes.
 
 **New status fields:**

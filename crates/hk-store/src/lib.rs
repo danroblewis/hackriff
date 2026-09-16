@@ -26,8 +26,9 @@ pub mod occupancy; // T-118
 
 pub use history::{
     CellStats, ChannelSummary, FilterSummary, FrameInput, FrameOrigin, GainState, HistogramConfig,
-    IngestOutcome, LevelConfig, OriginField, OriginFilter, ProvenanceSummary, Pyramid,
-    PyramidConfig, PyramidStats, RegionHistory, RegionQuery, Resolution, StoreError,
+    IngestOutcome, LevelConfig, OriginField, OriginFilter, Overview, OverviewCell,
+    ProvenanceSummary, Pyramid, PyramidConfig, PyramidStats, RegionHistory, RegionQuery,
+    Resolution, StoreError,
 };
 pub use radiometry::{
     FloorFlags, FloorIngest, FloorIngestQueue, FloorProduct, FloorProductConfig, FloorProductStats,

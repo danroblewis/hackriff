@@ -37,6 +37,7 @@
 | GET | `/api/inventory/{id}/presence` | token | `t0`, `t1`? (Unix s, together) | T-264 one emitter's presence track: every interval with its own timespan (below) | 400 invalid window, 404 not_found, 503 unavailable |
 | GET | `/api/analysis/strongest` | token | `f_lo`, `f_hi` (Hz), `window_s`? (default 5, max 300) | T-079 strongest observed signal in the band over the recent window (below) | 400 invalid region/window, 404 no history store |
 | GET | `/api/navigation` | token | `center_hz`+`span_hz`? (together; `span_hz` > 0), `t_cell_s`? | T-341 the achievable `(centre, span)` grid and the history tiers; with a requested state, the nearest realizable one and its live-IQ/overview claim (below) | 400 a non-finite number, or `center_hz`/`span_hz` given apart |
+| GET | `/api/timeline` | token | `f_lo`+`f_hi`? (Hz, together), `columns`? (1…4096, default 96), `rows`? (1…512, default 1). **No `t0`/`t1`** — the time extent is the ring's, not the caller's | T-338 the capture window (the IQ ring's configured retention) and the compressed overview waterfall drawn on it (below) | 400 unknown parameter, a half-given band, or a column/row budget out of range; 404 no spectrum history on this server |
 | GET | `/api/status` | token | – | Pipeline counters (opaque, per-build; never content) | 401, 404 no status on this server |
 
 None of these are audited (`GET` requests never are). All are capped in result size as noted per route.
@@ -130,7 +131,7 @@ A `nt × nf` grid (row-major, time then frequency) of the finest pyramid level w
 
 **`resolution`** reports what was asked for and what was served, so nothing has to be deduced from the grid:
 
-- `source` — which tier answered, as a **detail claim** (T-334's field; T-341 made it a three-value enum, see [Live-IQ detail versus overview](#live-iq-detail-versus-overview-t-341) below). Never `"live-iq"` here: this route reads the tiered spectrum-history pyramid and only that. Its horizon is the **pyramid's** retention (tiered, lossy, byte-budgeted), *not* the IQ ring's window — `GET /api/iqbuffer` reports that one, and the two are different lengths. `"survey-overview"` when the served span could not have fitted one capture window, `"spectrum-history"` otherwise.
+- `source` — which tier answered, as a **detail claim** (T-334's field; T-341 made it a three-value enum, see [Live-IQ detail versus overview](#live-iq-detail-versus-overview-t-341) below). Never `"live-iq"` here: this route reads the tiered spectrum-history pyramid and only that. Its horizon is the **pyramid's** retention (tiered, lossy, byte-budgeted), *not* the IQ ring's window — `GET /api/iqbuffer` reports that one and `GET /api/timeline` sizes the scrubber from it, and the two are different lengths. `"survey-overview"` when the served span could not have fitted one capture window, `"spectrum-history"` otherwise.
 - `live` — `true` only when `source` is `"live-iq"`, so a client styles the distinction without parsing the enum. Always `false` here.
 - `statement` — the claim in words, rendered by the backend, for a client that shows it rather than styling it.
 - `served_span_hz` / `max_live_span_hz` — the span actually served (`nf · f_cell_hz`) and the widest instantaneous bandwidth this run can produce; the two numbers `source` was decided from. `max_live_span_hz` is `null` when nothing here can say, and then `source` is `"survey-overview"` — the weaker claim, because not knowing the window is not evidence that a span fits inside it.
@@ -449,7 +450,7 @@ This is **absent-means-not-measured** (T-297: no field is written for a region t
 - `max_live_span_hz` — the widest span that is still **one** capture window. Wider is survey overview by definition, whatever the pyramid can draw there.
 - `current` — the tuned state, so a client can mark where it is on the grid.
 
-**`time`** — the retained window and the pyramid's **discrete** resolution tiers, or `null` with no spectrum history on this server. Time resolution is a ladder, not a slider: a view asking for a finer cell than `min_t_cell_s` cannot be served one. `max_age_s` is `null` when a level sets no age of its own — *no age limit*, not *kept forever* (the byte budget still bounds it). `latest_s` is the newest capture time the **history** has reached; the capture-ring window that sizes the scrubber is a different horizon and a different length (`GET /api/iqbuffer`).
+**`time`** — the retained window and the pyramid's **discrete** resolution tiers, or `null` with no spectrum history on this server. Time resolution is a ladder, not a slider: a view asking for a finer cell than `min_t_cell_s` cannot be served one. `max_age_s` is `null` when a level sets no age of its own — *no age limit*, not *kept forever* (the byte budget still bounds it). `latest_s` is the newest capture time the **history** has reached; the capture-ring window that sizes the scrubber is a different horizon and a different length (`GET /api/timeline`, over `GET /api/iqbuffer`).
 
 **`resolved`** — present only when `center_hz` and `span_hz` are given together. The nearest realizable state, and the detail claim that comes with it.
 
@@ -478,6 +479,65 @@ This is **absent-means-not-measured** (T-297: no field is written for a region t
 | span | **down** to an achievable rate | A span is clamped into the rate capability, so a view is never told it can have a window the device cannot open. |
 | time cell | **coarser**, never finer (T-334's rule) | A coarse cell repeated across pixels shows a measured value; a fine grid reduced in the client invents one. |
 | the claim itself | to the **weaker** claim | `live-iq` > `spectrum-history` > `survey-overview`. A surface that cannot establish the stronger claim makes the weaker one. Under-claiming costs a styling cue; over-claiming is the lie the invariant forbids. |
+
+### `GET /api/timeline` — the capture window, and the overview drawn on it (T-338)
+
+Query parameters (all optional): `f_lo`&`f_hi` (Hz, given together — the band to draw), `columns` (1…4096, default 96), `rows` (1…512, default 1). **There is no `t0`/`t1`:** the time extent is not the caller's to give, and that is the whole point of the route.
+
+```jsonc
+{
+  "window": { "horizon": "iq-ring", "enabled": true, "reason": null,
+              "retention_s": 120.0,
+              "t0_s": 1789300800.0, "t1_s": 1789300920.0, "span_s": 120.0,
+              "buffered": { "t0_s": 1789300890.0, "t1_s": 1789300920.0, "span_s": 30.0 } },
+  "region": { "lo_hz": 99600000.0, "hi_hz": 102000000.0 },
+  "grid": { "nt": 96, "nf": 4, "t0_s": 1789300800.0, "t_cell_s": 1.25,
+            "f_lo_hz": 99600000.0, "f_cell_hz": 600000.0,
+            "max_db": [ -102.4, null, "…" ], "occupancy_max": [ 0.5, null, "…" ],
+            "coverage": [ 1.0, 0.0, "…" ], "frames": [ 25, 0, "…" ],
+            "cells": 384, "observed_cells": 96,
+            "range_db": { "lo": -138.2, "hi": -91.0 } },
+  "resolution": { "source": "spectrum-history", "live": false, "statement": "…",
+                  "horizon": "iq-ring",
+                  "served_span_hz": 2400000.0, "max_live_span_hz": 20000000.0,
+                  "level": 0, "levels": 5,
+                  "t_cell_s": 1.25, "f_cell_hz": 600000.0,
+                  "src_t_cell_s": 1.0, "src_f_cell_hz": 6250.0,
+                  "requested": { "columns": 96, "rows": 4 },
+                  "served": { "nt": 96, "nf": 4, "cells": 384 },
+                  "reduced_from": { "nt": 120, "nf": 384 },
+                  "matched": true, "over_resolved": [] }
+}
+```
+
+**The rule, from the user** (CLAUDE.md, "Time, the waterfall, and the live view", invariant 2): *the timeline is the capture window, and it is a visualization.* The scrubbable capture-history timeline spans **exactly the configured recording/retention duration** — no more, no less — grows and shrinks when that duration is reconfigured, and is itself a **compressed "sideways" overview waterfall** of the retained capture, never an empty box.
+
+#### The horizon is the ring's, and it is named
+
+Two retention horizons run on this server and they are **deliberately different lengths**: the IQ capture ring ([ADR-0014](adr/0014-iq-capture-ring.md); `--iq-retention`, minutes, lossless) and the tiered spectrum-history pyramid (lossy, byte-budgeted, days). A scrubber sized from the longer one lets the user scrub to a time the ring has already overwritten — it **promises capture that no longer exists**, and it looks right while it does so. `window` is therefore the ring's, and `window.horizon` (`"iq-ring"`) says which, so nothing downstream has to assume it.
+
+- `retention_s` is the **configured** window and is the band's span exactly; `t1_s` is the live edge of capture and `t0_s = t1_s − retention_s`. `span_s` equals `retention_s` by construction, and is served so a client never computes it.
+- `buffered` is what the ring currently *holds*, and sits **inside** the band. It never resizes it: a ring ten seconds into a ninety-second retention is a mostly-empty ninety-second capture window, not a ten-second one, and a band sized to what it holds would grow under the user as the ring filled. `null` when the ring holds nothing.
+- The live edge is the ring's newest sample, falling back to the spectrum history's newest frame while the ring is still empty. Never wall-clock: a replay or time-compressed scene runs on its own clock (T-125), and a band anchored to `now` would place its capture in the future.
+- With no ring, no retention, or no live edge, `t0_s`/`t1_s`/`span_s` are `null` and `reason` says why. **A missing capture window is drawn as unknown, never as a default span.**
+- `GET /api/navigation`'s `time.latest_s` is the **history** horizon and is not used here. `GET /api/iqbuffer` reports the same ring status in full (segments, quota, eviction); this route is the window alone, plus the picture on it.
+
+#### The overview is a measurement, so it is made here
+
+The band is a data display, so something must decide what each drawn cell shows — and by T-334's rule, *mapping a time to a pixel is presentation, choosing which value represents an interval is a measurement.* The pyramid alone cannot serve this particular picture: its ladder **couples the axes**, so the tier whose cells are coarse enough in frequency for a thin strip's few rows (100 kHz) has one-day time cells. No single level is fine in time and coarse in frequency at once.
+
+So the tier is chosen from the **time** axis — the coarsest tier whose cells are no larger than one drawn column — and its grid is folded onto exactly `columns × rows` cells laid on the capture window (`hk_store::RegionHistory::overview`). Two consequences:
+
+- The grid **is** the window. Cell 0 starts at `window.t0_s` and cells are `span_s / columns` by `(hi_hz − lo_hz) / rows` — sizes no pyramid tier has.
+- `matched` is always `true` and `over_resolved` always `[]`, unlike `/api/history`: because the fold happens here, the client is never handed more cells than it can draw. `reduced_from` reports the source grid it was folded from, and `src_t_cell_s`/`src_f_cell_hz` the tier's own cells. When `src_t_cell_s` exceeds `t_cell_s`, one measured value **repeats** across columns — T-334's safe direction, stated rather than hidden.
+
+**Only statistics that fold exactly are carried.** The max of max-holds *is* the max-hold; the max of `occupancy_max` is the peak occupancy; `frames` sum; `coverage` is a mean over source cells of equal duration, i.e. the output cell's observed fraction. A percentile (`p_low_db`, `floor_db`) cannot be folded from cell values at all, so it is **not offered** rather than approximated. `range_db` is the grid's own observed range of `max_db` — picking a colour scale from whatever numbers you happen to hold is a measurement too — and is `null` when nothing was observed.
+
+`null` in `max_db`/`occupancy_max` is **not observed**, never quiet (C26). `observed_cells` counts the cells something was folded into.
+
+#### The detail claim
+
+`resolution` is T-334's block with T-341's three-valued `source` ([Live-IQ detail versus overview](#live-iq-detail-versus-overview-t-341)). The timeline's *horizon* is the ring's; its *pixels* are the pyramid's, so it claims `"spectrum-history"` — or `"survey-overview"` for a span no single capture window could hold — and **never `"live-iq"`**, exactly as `/api/history` does not. `resolution.horizon` repeats `"iq-ring"` beside it, because those are two different questions with two different answers: *which retention does this picture span* and *which tier drew it*.
 
 ### `GET /api/status` — pipeline counters (T-027)
 

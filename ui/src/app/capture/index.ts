@@ -1,8 +1,13 @@
-// Capture timeline mount (ADR-0013 §3.3, §4.4, §8). Owner: T-150. Always-on, scrubbable activity
-// band over `GET /api/history`; the time cursor drives T-152's review render and T-151's inventory
-// queries. API GAP 1 (no rolling-buffer status/clip-export route yet): shows an honest coverage
-// summary instead of invented buffered-hours/quota numbers, and "Record IQ" is the interim label
-// for "Export clip from the buffer" (it records forward from now, not from the retained past).
+// Capture timeline mount (ADR-0013 §3.3, §4.4, §8). Owner: T-150. Always-on, scrubbable capture
+// band; the time cursor drives T-152's review render and T-151's inventory queries. "Record IQ" is
+// the interim label for "Export clip from the buffer" (it records forward from now, not from the
+// retained past).
+//
+// T-338 — the band is `GET /api/timeline`: its **span** is the IQ ring's configured retention (the
+// capture window, ADR-0014), and its **content** is a compressed sideways overview waterfall the
+// backend measured and folded. Neither is decided here. Before this, the span was a hard-coded 48 h
+// and the content a client-side max over every frequency cell of `/api/history` — a scrubber that
+// offered times the ring had overwritten, filled with a reduction the client had no business making.
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
 import { startPoll } from "../net";
@@ -10,16 +15,19 @@ import { selectionStoreFor } from "../explore/selections";
 import { focusSelection } from "../explore/slice";
 import { goLive, reviewAt, toast, type AppState } from "../state";
 import {
-  DRAG_PX, WINDOW_S, agoText, coverageText, currentSpan, eventMarkTitle, eventMarks, pctForAgo, reduceActivity,
-  ringSpan, scrubDataNote, scrubToTime, selectionSpans, timeRegionName, timeWindowFromScrub,
-  type CoverageGap, type EventRow, type HistoryGrid, type RingStatus,
+  DRAG_PX, agoText, bufferedSpan, captureWindow, coverageText, currentSpan, durationText, eventMarkTitle,
+  eventMarks, observedFraction, overviewShade, pctForAgo, scrubDataNote, scrubToTime, selectionSpans, timeRegionName,
+  timeWindowFromScrub, type CaptureWindow, type CoverageGap, type EventRow, type OverviewResponse,
+  type TimelineResponse,
 } from "./timeline";
 
-const COLUMNS = 96;
-const SVG_NS = "http://www.w3.org/2000/svg";
-const svgRect = () => document.createElementNS(SVG_NS, "rect");
+/** Columns and frequency rows the band asks the backend to fold the capture window onto: the cells
+ * it will draw, one to one. The backend serves exactly this shape (docs/api.md `/api/timeline`), so
+ * nothing is reduced or interpolated here. */
+const COLUMNS = 192;
+const ROWS = 16;
 
-interface HistoryResponse extends HistoryGrid {
+interface HistoryResponse {
   coverage_summary?: { observed_fraction: number; gaps?: CoverageGap[] };
 }
 interface RecordSession { id: string; active: boolean; elapsed_s: number; max_s: number }
@@ -36,11 +44,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     h("span", {}, "Capture · always recording"),
     h("em", { class: "cap-note" }, noteB, noteRest, " ", recordBtn));
 
-  const svg = document.createElementNS(SVG_NS, "svg");
-  svg.setAttribute("viewBox", "0 0 600 60");
-  svg.setAttribute("preserveAspectRatio", "none");
-  svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", "Activity over the retained history");
+  // The band is itself a data display (the user's invariant): a compressed sideways overview
+  // waterfall of the retained capture, time along the long axis. It is drawn at the served grid's
+  // own cell count and stretched up by CSS — upscaling repeats a measured value across pixels,
+  // which is the honest direction; smoothing is off so the browser never invents one between them.
+  const canvas = h("canvas", { class: "cap-overview", role: "img", "aria-label": "Overview of the retained capture window" }) as HTMLCanvasElement;
   const selLayer = h("div", { class: "cap-sel-layer" });
   // T-263 (ADR-0017 TM-7): the past events a user scrubs *to*, and the IQ ring that still backs a
   // scrub-back (ADR-0014). Both are placed from timespans the API served; neither is drawn at all
@@ -49,9 +57,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const ringTrack = h("div", { class: "cap-ring", hidden: true });
   const playhead = h("div", { class: "playhead" });
   const livePill = h("button", { class: "live-pill", type: "button" }, "● LIVE");
-  const band = h("div", { class: "cap-band" }, svg, marksLayer, ringTrack, selLayer, playhead, livePill);
+  const band = h("div", { class: "cap-band" }, canvas, marksLayer, ringTrack, selLayer, playhead, livePill);
 
   el.replaceChildren(head, band);
+
+  // The capture window the whole band is laid out on, from the backend. `null` = not answered, or
+  // this server has no capture window: the band then scrubs nothing rather than inventing a span.
+  let win: CaptureWindow | null = null;
 
   // ---- scrub / LIVE ----
   let dragging = false, downX = 0, downPct = 0;
@@ -60,7 +72,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     return r.width > 0 ? ((e.clientX - r.left) / r.width) * 100 : 100;
   };
   const scrub = (e: PointerEvent) => {
-    const res = scrubToTime(pctFromEvent(e), Date.now() / 1000);
+    if (!win) return;
+    // The live edge is the capture clock's, not the browser's: a replay runs on its own clock, and
+    // anchoring the band to `Date.now()` would place its capture in the future.
+    const res = scrubToTime(pctFromEvent(e), win.t1S, win.spanS);
     store.set(res.live ? goLive : reviewAt(res.tS));
   };
   band.addEventListener("pointerdown", (e) => {
@@ -81,7 +96,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // ---- time-window select (T-194): a deliberate drag sets t_lo/t_hi on the focused selection, or
   // makes a new one over the current view span. ----
   function commitTimeWindow(pctA: number, pctB: number) {
-    const w = timeWindowFromScrub(pctA, pctB, Date.now() / 1000);
+    if (!win) return;
+    const w = timeWindowFromScrub(pctA, pctB, win.t1S, win.spanS);
     if (!w) return;
     const shared = selectionStoreFor(ctx);
     const focus = store.get().focus;
@@ -98,8 +114,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
   }
 
   const renderSelSpans = () => {
-    const now = Date.now() / 1000, focus = store.get().focus;
-    selLayer.replaceChildren(...selectionSpans(store.get().selections.list, now).map((sp) => {
+    const focus = store.get().focus;
+    if (!win) { selLayer.replaceChildren(); return; }
+    selLayer.replaceChildren(...selectionSpans(store.get().selections.list, win.t1S, win.spanS).map((sp) => {
       const e = h("div", { class: `cap-sel${focus.kind === "selection" && focus.id === sp.id ? " active" : ""}` });
       e.style.left = `${sp.leftPct}%`;
       e.style.width = `${sp.widthPct}%`;
@@ -112,38 +129,36 @@ function mount(el: HTMLElement, ctx: AppContext) {
   let coverageFraction: number | null = null;
   // `null` = not answered yet, which is "unknown" and never "nothing" (T-164/T-207/T-284).
   let coverageGaps: CoverageGap[] | null = null;
-  let ring: RingStatus | null = null;
   let eventRows: EventRow[] | null = null;
 
   const renderNote = () => {
     const t = store.get().time;
     band.classList.toggle("reviewing", !t.live);
-    if (t.live) {
+    if (t.live || !win) {
       noteB.textContent = "viewing live";
       playhead.style.left = "100%";
     } else {
-      const agoS = Math.max(0, Date.now() / 1000 - t.tS);
+      const agoS = Math.max(0, win.t1S - t.tS);
       noteB.textContent = `reviewing ${agoText(agoS)} ago`;
-      playhead.style.left = `${pctForAgo(agoS)}%`;
+      playhead.style.left = `${pctForAgo(agoS, win.spanS)}%`;
     }
     // T-263: what the scrubbed window is actually backed by. "Nothing was on the air" and "no data
     // for this window" are different claims, and the note says which one applies.
-    const data = t.live ? "" : scrubDataNote(t.tS, false, ring, coverageGaps);
-    noteRest.textContent = ` · ${coverageText(coverageFraction)}${data ? ` · ${data}` : ""} · press LIVE to return`;
+    const data = t.live ? "" : scrubDataNote(t.tS, false, win, coverageGaps);
+    noteRest.textContent = ` · ${coverageText(coverageFraction, win?.spanS ?? null)}${data ? ` · ${data}` : ""} · press LIVE to return`;
   };
   store.select((s) => s.time, renderNote, { immediate: true });
 
-  // T-263: past events and the retained ring. A mark is one timespan a row reported; it carries no
-  // liveness, because a `recurrence` appearance never measured one (see timeline.ts).
+  // T-263: past events and what the ring holds. A mark is one timespan a row reported; it carries
+  // no liveness, because a `recurrence` appearance never measured one (see timeline.ts).
   const renderMarks = () => {
-    const now = Date.now() / 1000;
-    marksLayer.replaceChildren(...(eventRows === null ? [] : eventMarks(eventRows, now).map((m) => {
-      const e = h("div", { class: `cap-mark ${m.state}`, title: eventMarkTitle(m, now) });
+    marksLayer.replaceChildren(...(eventRows === null || win === null ? [] : eventMarks(eventRows, win.t1S, win.spanS).map((m) => {
+      const e = h("div", { class: `cap-mark ${m.state}`, title: eventMarkTitle(m, win!.t1S) });
       e.style.left = `${m.leftPct}%`;
       e.style.width = `${m.widthPct}%`;
       return e;
     })));
-    const rs = ringSpan(ring, now);
+    const rs = bufferedSpan(win);
     ringTrack.hidden = rs === null;
     if (rs) {
       ringTrack.style.left = `${rs.leftPct}%`;
@@ -151,52 +166,71 @@ function mount(el: HTMLElement, ctx: AppContext) {
     }
   };
 
-  // ---- activity band (GET /api/history, §4.4) ----
-  const renderBand = (grid: HistoryGrid) => {
-    const cols = reduceActivity(grid, COLUMNS);
-    const W = 600, H = 60, gap = 1.5, bw = W / COLUMNS - gap;
-    svg.replaceChildren(...cols.map((v, i) => {
-      const r = svgRect();
-      r.setAttribute("x", String(i * (bw + gap)));
-      const height = v === null ? 3 : Math.max(2, v * (H - 8));
-      r.setAttribute("y", String(H - height));
-      r.setAttribute("width", String(bw));
-      r.setAttribute("height", String(height));
-      r.setAttribute("rx", "1");
-      r.setAttribute("fill", v === null ? "var(--line)" : "var(--teal)");
-      r.setAttribute("fill-opacity", v === null ? "0.4" : String(0.35 + 0.55 * v));
-      return r;
-    }));
+  // ---- the overview waterfall (GET /api/timeline) ----
+  // One canvas pixel per served cell, time across, frequency up. Nothing is reduced here: the grid
+  // arrives at exactly the shape asked for, and `overviewShade` normalises against the range the
+  // backend measured rather than against the numbers that happen to be in hand.
+  const renderBand = (grid: OverviewResponse | null) => {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    if (!grid || grid.nt <= 0 || grid.nf <= 0) {
+      canvas.width = 1;
+      canvas.height = 1;
+      ctx.clearRect(0, 0, 1, 1);
+      return;
+    }
+    canvas.width = grid.nt;
+    canvas.height = grid.nf;
+    const img = ctx.createImageData(grid.nt, grid.nf);
+    for (let t = 0; t < grid.nt; t++) {
+      for (let f = 0; f < grid.nf; f++) {
+        const v = overviewShade(grid, t * grid.nf + f);
+        // Frequency runs up the short axis, so row 0 of the grid is the bottom of the canvas.
+        const p = ((grid.nf - 1 - f) * grid.nt + t) * 4;
+        if (v === null) {
+          // Not observed: grey, and never the colour scale's low end — a gap is not a quiet band.
+          img.data[p] = img.data[p + 1] = img.data[p + 2] = 110;
+          img.data[p + 3] = 70;
+        } else {
+          img.data[p] = Math.round(20 + 40 * v);
+          img.data[p + 1] = Math.round(120 + 110 * v);
+          img.data[p + 2] = Math.round(130 + 90 * v);
+          img.data[p + 3] = Math.round(70 + 185 * v);
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
   };
 
   startPoll(async () => {
     const span = spanOf(store.get());
-    if (!span) return;
-    const now = Date.now() / 1000;
-    const grid = await client.get<HistoryResponse>(
-      // T-334: ask for the band's own time resolution — `max_t = COLUMNS`, one time cell per drawn
-      // bar. The old `max_cells = COLUMNS * 16` product budget bound first and pulled the *day*
-      // level (2 cells for 96 bars over 48 h), which is the "truncates rather than re-scales"
-      // failure in miniature; the axis budget pulls the hour level (48 cells) instead. `max_cells`
-      // is left at its default so the product no longer decides the time axis.
-      `/api/history?f_lo=${span.loHz}&f_hi=${span.hiHz}&t0=${now - WINDOW_S}&t1=${now}&max_t=${COLUMNS}`,
-    );
-    renderBand(grid);
-    coverageFraction = grid.coverage_summary?.observed_fraction ?? null;
-    coverageGaps = grid.coverage_summary?.gaps ?? null;
-    // T-263: the ring's own span, and the events over the retained window. Each is asked for
-    // separately and fails separately — a server with no buffer answers 503, and that leaves `ring`
-    // null, which reads as "IQ coverage unknown" rather than as "the ring holds nothing".
-    ring = await client.get<RingStatus>("/api/iqbuffer").catch(() => null);
-    const inv = await client
-      .get<{ entries: EventRow[] }>(
-        `/api/inventory?f_lo=${span.loHz}&f_hi=${span.hiHz}&t0=${now - WINDOW_S}&t1=${now}&limit=200`,
-      )
-      .catch(() => null);
-    if (inv) eventRows = inv.entries;
+    // The capture window is asked for even with nothing tuned: the band can say how long it spans
+    // before it can say what was in it.
+    const q = span ? `?f_lo=${span.loHz}&f_hi=${span.hiHz}&columns=${COLUMNS}&rows=${ROWS}` : "";
+    const tl = await client.get<TimelineResponse>(`/api/timeline${q}`).catch(() => null);
+    win = captureWindow(tl);
+    renderBand(tl?.grid ?? null);
+    coverageFraction = observedFraction(tl?.grid);
+    if (win && span) {
+      // T-263: gaps and the events over the capture window — both asked for over the window the
+      // backend just reported, so the marks and the band can never disagree about what it spans.
+      const hist = await client
+        .get<HistoryResponse>(`/api/history?f_lo=${span.loHz}&f_hi=${span.hiHz}&t0=${win.t0S}&t1=${win.t1S}&max_t=${COLUMNS}`)
+        .catch(() => null);
+      coverageGaps = hist?.coverage_summary?.gaps ?? null;
+      const inv = await client
+        .get<{ entries: EventRow[] }>(
+          `/api/inventory?f_lo=${span.loHz}&f_hi=${span.hiHz}&t0=${win.t0S}&t1=${win.t1S}&limit=200`,
+        )
+        .catch(() => null);
+      if (inv) eventRows = inv.entries;
+    }
     renderMarks();
     renderNote();
     renderSelSpans();
+    // The band's own label says how long it is, so a reconfigured retention is visible as a
+    // different window rather than as the same box holding different data.
+    band.title = win ? `Capture window: ${durationText(win.spanS)} of retained IQ` : "No capture window on this server";
   }, 60_000);
 
   // ---- Record IQ (GAP 1 interim for "Export clip from the buffer") ----
