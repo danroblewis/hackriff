@@ -4110,7 +4110,7 @@ tasks:
     title: 'Candidate dedup/merge is not collapsing skirt fragments in the served path:
       82 candidates around one FM signal, two at the SAME frequency (99.6378), plus
       Confirmed dupes 99.8166/99.8173'
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: PIPE
@@ -4484,6 +4484,13 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+    dedup_route_from_t250_2026_09_16: 'T-250 measured that the users Confirmed
+      duplicates are ONE station that stopped and came back - disjoint presence
+      intervals (94-399 s, then 471-530 s) where the return minted a second row instead
+      of reviving the first. So interval close/revive is not only a model improvement,
+      it is one of the two honest routes to the dedup target. Co-onset evidence on
+      overlapping intervals is the other. Neither is a tolerance change.'
+
   - id: T-263
     milestone: MUI
     title: 'ADR-0017 TM-7: past events mark the timeline scrubber, and scrubbing re-derives the live lists from the IQ ring'
@@ -4746,6 +4753,58 @@ tasks:
     needs: none
     model: sonnet
     effort: low
+    core_interface: false
+  - id: T-280
+    milestone: M2-hardening
+    title: 'Bandwidth estimates swing 12-125 kHz for one station, so skirt fragments
+      never reach the overlap guard - the honest route to the dedup target'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPE
+    use_cases:
+    - AWARE-053
+    found_by: 'T-250 (2026-09-16), measured on a snapshot of the live staging database:
+      fragments fail at bands_compete before any guard runs - 99.6583 vs 99.6932 overlaps
+      0.83 of the narrower band but only 0.55 of the wider against a 0.60 floor, and the
+      rest are 0.42, 0.23, 0.10'
+    acceptance: 'improve the bandwidth estimate for a signal observed through its skirts
+      so fragments of one emitter agree on a width and the existing overlap rules can
+      fire. DO NOT widen OVERLAP_MIN_FRACTION or bandwidth_ratio: T-250 established that
+      hitting the ~4-7 target that way breaks the invariant protecting a narrow emission
+      inside a wide one - a 12.5 kHz subcarrier in a 180 kHz station has the same
+      signature as these fragments, and that case must keep working. Report the achieved
+      candidate count and the settle time end to end, which T-250 did not measure. The
+      users a-priori target stands: ~82 near-duplicates to ~4-7 real signals in ~2-10 s'
+    area: crates/hk-estimate (bandwidth), crates/hk-detect (extent)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
+  - id: T-281
+    milestone: M2-hardening
+    title: 'Audit features that measure the OBSERVATION rather than the signal:
+      burst_length varies with watch duration, sigma_ap with snippet length'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: M3A
+    use_cases:
+    - SIGNAL-062
+    found_by: 'coordinator 2026-09-16: three instances in one night - T-240 found
+      sigma_ap/sigma_dp accumulate with observation length (95.5 at 4k samples vs 252.3
+      at 381k), T-250 found burst_length differing 0.68 s vs 0.37 s between two rows of
+      the SAME station purely because one was watched 19 times and the other 6'
+    acceptance: 'audit every fingerprint and classification feature for dependence on how
+      long or how often the signal was watched rather than on the emission. For each,
+      either normalise it so it is a property of the signal, or mark it explicitly as an
+      observation statistic that must never be used as distinguishing evidence between
+      two rows. Report the full list with which category each falls into. This is a
+      measurement-honesty audit, not a tuning exercise: no threshold moves'
+    area: crates/hk-context (signature features), crates/hk-classify (instantaneous statistics)
+    needs: none
+    model: opus
+    effort: medium
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
