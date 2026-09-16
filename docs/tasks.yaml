@@ -4026,6 +4026,18 @@ tasks:
       estimate removes constant phase but not residual carrier FREQUENCY offset, which
       smears the constellation into a ring. So this ticket is likely closed by carrier
       recovery rather than by reworking psk_qam_loglikelihoods.'
+    remeasured_by_t291_2026_09_16: 'NOT CLOSED, and the attribution above is WRONG.
+      T-291 ablated the generator: with lo_offset_hz = 0 - no carrier offset at all - the
+      residual is unchanged (QPSK 16.29 vs 16.08 N0 at 30 dB), and a control waveform with
+      zero CFO reproduces the whole pathology. After T-291 fixed a real symbol-sampling
+      defect in verify::symbol_samples the monotone behaviour is UNCHANGED: bpsk {bpsk 5,
+      qam64 29}, qpsk {qam64 36}, qam16 {qam64 33}, pi4-dqpsk {8psk 3, qam64 29}, apsk16
+      {qam64 36}, genuine QPSK residual 7.849 N0 against T-286''s 7.6. The cause is that
+      the SYNTHETIC GRID distorts psk-qam waveforms before any receiver sees them: an
+      exhaustive oracle over sps +-2%, tau over a full symbol and three roll-offs cannot
+      get the shipped grid below 12.35% EVM while reaching 1.29% on a clean control. So
+      this ticket is blocked on T-294, not on carrier recovery, and the ALRT derivation is
+      still not implicated.'
 
   - id: T-247
     milestone: M3
@@ -5188,7 +5200,7 @@ tasks:
     milestone: M3
     title: 'M3 open set is short by ONE snippet (0.8990 vs 0.90): carrier recovery or a
       symbol-rate estimate C14 will trust on a near-constant-envelope constellation'
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-286
@@ -5217,6 +5229,64 @@ tasks:
       fixes a real measurement defect (residual CFO) rather than widening what the
       classifier trusts. Keeping M3 red at 0.8990 until a genuine fix crosses 0.90 is
       correct - do not round, do not loosen. The C14 rate-trust option is NOT taken.'
+    outcome_2026_09_16: 'DONE as a REFUTATION plus a real fix. (1) The route''s premise is
+      wrong - residual CFO is NOT the cause. With lo_offset_hz = 0 the QPSK residual is
+      unchanged (16.29 vs 16.08 N0 at 30 dB, EVM 12.8 vs 12.7%), and a control waveform
+      with zero carrier offset reproduces the whole pathology. 8-bit quantisation and IQ
+      imbalance were ablated too; neither matters. So there was nothing for carrier
+      recovery to remove. (2) A REAL product-side defect was found and fixed in
+      verify::symbol_samples: it skipped the matched filter''s edge transient in SAMPLES on
+      a grid anchored to the SYMBOL PHASE, displacing every symbol in the record by
+      (guard mod sps) - up to a full symbol, since sps = sample_rate / C14 rate is an
+      integer essentially never. On a clean control EVM tracks that quantity exactly: 12.4%
+      at sps 6.1, 12.2% at 6.2, 8.4% at 6.3, 10.4% at 6.73, and 1.5% at 6.0 AND at 6.5
+      (guard 13 = exactly 2 symbols), which is what rules out "integer sps" as the
+      explanation. The fix returns every sps to ~1.45%. Pinned by a new unit test in
+      verify.rs; all 69 hk-classify tests pass. (3) The gate is UNCHANGED at 0.8990 /
+      0.1010 and could not have moved - the verifier re-ranks class WITHIN a family and
+      never touches the family, which is what unknown recall is computed from. No floor
+      constant moved; wrong-label 0.0000; 0 of 396 held-out inputs given a family that is
+      not their own. (4) T-246 is NOT closed: re-measured after the fix and still monotone
+      in constellation size. Its cause is relocated to T-293. (5) The 40-snippet residue is
+      untouched and carrier recovery reaches NONE of it - 13 of 40 (16-APSK) have no symbol
+      clock at all, and the 27 psk-qam snippets are blocked by T-294.'
+
+  - id: T-294
+    milestone: M3
+    title: 'The synthetic psk-qam grid distorts its own waveforms, so no synchronisation
+      can recover them and the M3 open set is partly measuring the harness'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-291 (2026-09-16), by ablation and control rather than by inference. An
+      exhaustive ORACLE over symbol period (+-2%), timing phase (a full symbol) and
+      roll-off (0.25/0.35/0.45) cannot get the shipped grid below 12.35% EVM at 30 dB -
+      bpsk 13.68, qpsk 12.35, qam16 14.42, pi4-dqpsk 12.49, apsk16 14.73 - while the SAME
+      oracle reaches 1.29% on a clean control, and C14''s rate is exact (best sps / C14 sps
+      = 1.0000). 1 N0 is 3.16% EVM at 30 dB, so the grid sits ~15 N0 from its own
+      constellation BEFORE any receiver touches it, and no carrier or clock recovery can
+      repair that. Not CFO, not 8-bit quantisation, not IQ imbalance - all three ablated
+      and none of them matters. The harness channel filter accounts for part of it (control
+      1.29 -> 7.34% EVM) but widening its cutoff 4x changes nothing (7.35%), so it is not
+      merely too narrow and at least one more distortion is still unidentified'
+    acceptance: 'Find what distorts the generated psk-qam waveform and fix it, with a
+      control that recovers near 1 N0 through the same path. THE CONSEQUENCE IS THE POINT:
+      the psk-qam densities are FITTED on distorted constellations and the held-out
+      pi/4-DQPSK and 16-APSK are distorted the same way, which is why they are
+      indistinguishable from qpsk/qam16 - 27 of the 40-snippet open-set residue is psk-qam.
+      So the M3 open-set number may be measuring the harness rather than the classifier.
+      Refit both density files on the dev grid afterwards (fit-densities, dev seeds only)
+      and re-measure the gate. NO FLOOR CONSTANT MOVES and confidently-wrong stays at zero.
+      Report before/after honestly in both directions - a fix that makes the gate WORSE is
+      still the right change, and saying so is the deliverable'
+    area: crates/hk-classify/src/synth.rs (shaped_linear, channel_filter, decimation), crates/hk-classify/data/densities-*.json
+    needs: none
+    model: fable
+    effort: high
+    core_interface: false
 
   - id: T-292
     milestone: M3
