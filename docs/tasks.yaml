@@ -4464,7 +4464,7 @@ tasks:
   - id: T-261
     milestone: MUI
     title: 'ADR-0017 TM-4: each identified region draws a box (centre/width/time) in the waterfall, growing along the time axis while the signal continues'
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-260
