@@ -166,6 +166,35 @@ impl Repository {
         )
     }
 
+    /// The emitter's latest demodulation session (its live id and emitters merged into it), by
+    /// session end time — the source of the [`crate::decode::EstimatedParams`] served on `GET
+    /// /api/inventory/{id}` (T-163, ADR-0013 gap 7a). `None` when no demodulation session has
+    /// ever run for this emitter. Follows merges like `refined_tuning`/`decodes_for_identity`: a
+    /// session written under an emitter later merged into `emitter` is still found.
+    ///
+    /// Blind DSP measurement (symbol rate, deviation, CFO, bandwidth), never identity data, so
+    /// unlike a decode read this needs no identity gating here — the caller (`hk_api::query`)
+    /// decides whether a withheld-identity row shows it.
+    pub fn latest_demodulation_for_emitter(
+        &self,
+        emitter: EmitterId,
+    ) -> Result<Option<Demodulation>, RepoError> {
+        let id = self.live_emitter_id(emitter)?;
+        Ok(bodies::<Demodulation, _>(
+            &self.conn,
+            "WITH RECURSIVE absorbed(id) AS ( \
+                 SELECT ?1 \
+                 UNION SELECT e.emitter_id FROM emitter e JOIN absorbed a ON e.merged_into = a.id \
+             ) \
+             SELECT body FROM demodulation \
+             WHERE emitter_id IN (SELECT id FROM absorbed) \
+             ORDER BY t_end DESC, demod_id DESC LIMIT 1",
+            params![blob(id)],
+        )?
+        .into_iter()
+        .next())
+    }
+
     /// Appends a decode. Refuses `content: Some` under a class that does not permit content
     /// ([`RepoError::GatedContent`]); the metadata-only decode is accepted.
     pub fn insert_decode(&mut self, d: &Decode) -> Result<(), RepoError> {

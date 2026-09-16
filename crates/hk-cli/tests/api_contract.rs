@@ -7,8 +7,8 @@
 //! seconds, not instant).
 //!
 //! Coverage: `/api/streams`, `/api/history`, `/api/floor`, `/api/inventory` (including the T-078
-//! `state`/`lifecycle`/`recurrence` fields), `/api/inventory/{id}[/promote\|/decode]` (T-078,
-//! T-159),
+//! `state`/`lifecycle`/`recurrence` and T-163 `estimated_params` fields),
+//! `/api/inventory/{id}[/promote\|/decode]` (T-078, T-159, T-163),
 //! `/api/analysis/strongest` (T-079), `/api/status`, `/api/control/*`, `/api/bookmarks[/<id>]`,
 //! `/api/selections[/<id>[/links]]`, `/api/outputs[...]`, `/ws/<id>` (spectrum header),
 //! `/ws/open/listen` (audio header + PCM data records on the 101.3 MHz station), and auth/CORS
@@ -902,11 +902,39 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
         "recurrence",
         "classification",
         "latest_classification",
+        "estimated_params",
     ] {
         assert!(
             row.get(field).is_some(),
             "inventory entry missing {field}: {row}"
         );
+    }
+    // T-163: the emitter's latest blind-estimated parameters, or `null` before any demodulation
+    // session has run. Shape only, like the decode fields below: whether the composed pipeline's
+    // analog chain has demodulated this station yet by now is not deterministic on a fixture.
+    // The `null`-vs-populated distinction and its measured-values-only rule are covered against a
+    // controlled seeded repository in `crates/hk-api/tests/estimated_params_api.rs`.
+    let p = &row["estimated_params"];
+    assert!(p.is_null() || p.is_object(), "{row}");
+    if p.is_object() {
+        assert!(p["modulation"].is_string(), "{row}");
+        assert!(p["t_s"].is_f64(), "{row}");
+        assert!(p["source_session"].is_string(), "{row}");
+        for field in [
+            "symbol_rate_hz",
+            "mod_order",
+            "deviation_hz",
+            "cfo_hz",
+            "bandwidth_hz",
+            "roll_off",
+            "pilot_hz",
+            "source_recording",
+        ] {
+            assert!(
+                p.get(field).is_some(),
+                "estimated_params missing {field}: {row}"
+            );
+        }
     }
     let (st, v) = get(addr, "/api/inventory/not-a-uuid");
     assert_eq!(st, 404, "{v}");
