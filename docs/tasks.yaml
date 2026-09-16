@@ -3613,7 +3613,7 @@ tasks:
   - id: T-226
     milestone: M2-hardening
     title: "T-188 review follow-ups: refinement still reports locked from a stale measurement when validate is SKIPPED by budget exhaustion; acquire discards an over-step centre correction while track clamps it; an off-raster probe that no longer validates can stop the chain so T-186 never identifies"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-188]
     parallel_group: DEMOD

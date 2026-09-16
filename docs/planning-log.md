@@ -2432,3 +2432,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Follow-up 1 (the same bug, different route):** when validate is SKIPPED by `max_evaluations` or the 20 s time budget - exactly what CPU load causes - the code still reports locked from a stale measurement. T-226 gates `locked` on validation having happened.
   - **Follow-up 2:** acquire discards an over-one-step centre correction while track clamps the same quantity, so the -52.9 kHz correction that caused this bug is still never applied. T-188 stops it being trusted; it does not reach the right centre.
   - **Follow-up 3:** an off-raster probe that no longer validates sets `accepted=false` and stops the chain, so T-186 identification never happens; consider a fallback rather than dropping.
+- **B0.508 Full check green after the T-188 merge (0a62660).** Lint clean; 1448/1448 tests; acceptance 29/29; acceptance_m2 8/8; 38 GB free.
+  - **Identification and Listen unaffected:** signal_062 and the M2 suite pass, so the stricter lock rule did not cost a legitimate lock.
+  - **T-226 launched** into the freed slot: the same false positive on the budget-skipped path, plus the acquire/track correction inconsistency and the off-raster probe fallback.
