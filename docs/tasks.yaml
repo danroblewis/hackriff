@@ -4274,6 +4274,64 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+  - id: T-255
+    milestone: M2-hardening
+    title: 'Synthetic LoRa scenario in the py/ synth tooling: deterministic up-chirps
+      with known SF/BW/CR/payload as hidden ground truth, as a burst/chirp acceptance
+      fixture'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: SYNTH
+    use_cases:
+    - SIGNAL-062
+    - AWARE-053
+    found_by: 'user 2026-09-16, fixture direction: exercises chirp detection plus
+      region-extending decode without hardware'
+    acceptance: 'a deterministic LoRa scenario in the py/ synth tooling, seeded and
+      reproducible, generating up-chirps with known spreading factor, bandwidth, coding
+      rate and payload. **The parameters are HIDDEN ground truth: they live in the
+      assertions only, never in a lookup the system reads.** The scene exercises (a)
+      chirp detection - a chirp is a signal with a time extent and no stable frequency,
+      CLAUDE.md invariant 1 - and (b) region-extending decode, CLAUDE.md invariant 5,
+      where live decoding extends the region and decodes only the newly-arrived part.
+      LoRa here is **915 MHz US ISM (902-928), NOT 2.4 GHz** - there is a 2.4 GHz LoRa
+      variant and this is not it. No hardware: the fixture is generated, never captured,
+      and nothing under fixtures/ is committed. SEQUENCING: the chirp-detection half can
+      land now; the region-extending-decode half depends on T-253''s staged plan, so
+      assert what exists and say plainly what is deferred rather than asserting less
+      than the task asks'
+    area: py/ (synth scenarios), tests/e2e for the acceptance scene
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-256
+    milestone: M2-hardening
+    title: 'Receiver-capability note: 2.4 GHz is a detection/occupancy target, not a
+      decode one, on a HackRF - except BLE advertising'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: DOCS
+    use_cases:
+    - AWARE-042
+    found_by: 'user 2026-09-16, fixture direction'
+    acceptance: 'record in the receiver-capability model (docs/02 hardware + the
+      relevant capability cards, and docs/06 hardware_fit where use cases are tagged)
+      that on a HackRF: **2.4 GHz decode is mostly out of reach** - WiFi 20 MHz OFDM
+      sits at the 20 Msps ceiling and classic Bluetooth hops too fast to follow - so
+      2.4 GHz and 902-928 ISM are **detection and occupancy** targets. **The exception
+      is BLE advertising**: fixed channels at 2402 / 2426 / 2480 MHz, 1 Msps GFSK,
+      short bursts - a feasible decode AND a good burst example for the time-extent
+      model. Tag affected use cases'' hardware_fit accordingly rather than leaving them
+      reading as fully supported. Mark anything unverified as unverified; this is a
+      capability statement, not a measurement, unless you measure it'
+    area: docs/02-sdr-landscape.md, docs/capabilities, docs/06 hardware_fit tags, use-cases.yaml
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
