@@ -4919,7 +4919,9 @@ fn report_route_serves_document_and_exports() {
     assert_eq!(st, 200, "{v}");
     for field in [
         "schema",
-        "generated_at",
+        // T-349: the unit is in the name. `nanosecond_and_second_fields_in_one_response_agree…`
+        // asserts its value; this only pins the field's presence under its declared name.
+        "generated_at_ns",
         "region",
         "span",
         "site",
@@ -5076,4 +5078,380 @@ fn anomalies_routes_answer_documented_shapes() {
         "stream offered: {v}"
     );
     stop_server(serving);
+}
+
+// ---------------------------------------------------------------------------
+// T-349: every absolute time on the wire declares its unit in its own name.
+//
+// `docs/api.md` "Conventions": times are Unix seconds by default, and a field that departs from
+// that default says so with an `_ns` suffix. `hk_model::Timestamp` is `#[serde(transparent)]` over
+// `i64` nanoseconds, so any hk-model struct serialized straight into a response used to ship raw
+// nanoseconds under a name that looked exactly like the seconds beside it in the same body —
+// values 10^9 apart, and nothing in the type system or the field name to tell them apart. These
+// tests assert the VALUES, not the shape: a shape assertion passes either way, which is precisely
+// why the defect survived this long.
+// ---------------------------------------------------------------------------
+
+/// Plausible absolute capture times as Unix **seconds**: 2001-09-09 … 2286-11-20.
+const BAND_S: (f64, f64) = (1e9, 1e10);
+/// The same instants as Unix **nanoseconds**.
+const BAND_NS: (f64, f64) = (1e18, 1e19);
+
+/// Field names whose epoch-magnitude number provably is not a time. Each one is here because it is
+/// a count or an identifier that can reach 10^9, not because it is inconvenient.
+const NOT_A_TIME: &[&str] = &[
+    // Frequencies (a 1–10 GHz tune lands squarely in the seconds band).
+    "f_lo",
+    "f_hi",
+    "center",
+    // Byte budgets and counters.
+    "min_free_bytes",
+    "bytes",
+    "capacity_bytes",
+    // Opaque numeric identifiers.
+    "geometry",
+    "id",
+    "sample_index",
+    "seq",
+];
+
+fn looks_like_a_time(key: &str) -> bool {
+    !(key.ends_with("_hz") || key.contains("hz") || NOT_A_TIME.contains(&key))
+}
+
+/// Collects every numeric leaf that looks like an absolute Unix time but whose name does not agree
+/// with the magnitude it carries.
+fn scan_times(v: &Value, path: &str, key: &str, out: &mut Vec<String>) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m {
+                scan_times(x, &format!("{path}.{k}"), k, out);
+            }
+        }
+        Value::Array(a) => {
+            // Three entries is enough to catch a systematic unit error, and keeps a 10 000-row
+            // page from dominating the run.
+            for (i, x) in a.iter().enumerate().take(3) {
+                scan_times(x, &format!("{path}[{i}]"), key, out);
+            }
+        }
+        Value::Number(n) => {
+            let Some(x) = n.as_f64() else { return };
+            if !looks_like_a_time(key) {
+                return;
+            }
+            let (looks_s, looks_ns) = (
+                (BAND_S.0..BAND_S.1).contains(&x),
+                (BAND_NS.0..BAND_NS.1).contains(&x),
+            );
+            let named_ns = key.ends_with("_ns");
+            match (looks_s, looks_ns, named_ns) {
+                // Seconds under a bare or `_s` name, and nanoseconds under an `_ns` name: the law.
+                (true, _, false) | (_, true, true) => {}
+                (true, _, true) => out.push(format!(
+                    "{path} = {x} is named `_ns` but carries Unix SECONDS (out by 10^9)"
+                )),
+                (_, true, false) => out.push(format!(
+                    "{path} = {x} carries Unix NANOSECONDS under a name that reads as seconds \
+                     (a client reading it as seconds is out by ~31 years); name it `…_ns`"
+                )),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The routes this sweep can reach on a fresh server, with parameters that actually return data.
+fn time_law_routes(now: f64, emitter: Option<&str>) -> Vec<String> {
+    let (t0, t1) = (now - 3600.0, now + 3600.0);
+    // Wide box for the paged/listing routes; the fixture's own band for the ones with
+    // band \u00d7 span budgets (occupancy `span`, coverage channel tiling).
+    let bx = format!("f_lo=0&f_hi=6000000000&t0={t0}&t1={t1}");
+    let narrow = format!(
+        "f_lo={}&f_hi={}&t0={t0}&t1={t1}",
+        FIXTURE_CENTER_HZ - 1.2e6,
+        FIXTURE_CENTER_HZ + 1.2e6
+    );
+    let mut r: Vec<String> = [
+        "/api/status",
+        "/api/streams",
+        "/api/inventory",
+        "/api/selections",
+        "/api/bookmarks",
+        "/api/blocks",
+        "/api/iqbuffer",
+        "/api/clusters",
+        "/api/candidates",
+        "/api/sites",
+        "/api/sites/current",
+        "/api/scheduler/arms",
+        "/api/scheduler/leases",
+        "/api/datasets",
+        "/api/captures",
+        "/api/recipes",
+        "/api/pipelines",
+        "/api/outputs",
+        "/api/control/state",
+        "/api/attention/weights",
+        "/api/taxonomy",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    r.extend([
+        format!("/api/observations?{bx}"),
+        format!("/api/observations/coverage?{narrow}&channel_hz=250000&tau_s=0.01&min_gap_s=0.001"),
+        format!("/api/occupancy?{narrow}&interval=span"),
+        format!("/api/occupancy?{bx}"),
+        format!("/api/report?{narrow}"),
+        format!("/api/report?{bx}"),
+        format!("/api/history?{bx}&nf=16&nt=8"),
+        format!("/api/floor?{bx}"),
+        format!("/api/events?{bx}"),
+        format!("/api/anomalies?{bx}"),
+        format!("/api/scheduler?{bx}"),
+        format!("/api/analysis/strongest?f_lo=99e6&f_hi=102e6&window_s=60&now={now}"),
+        "/api/channels?f_lo=0&f_hi=6000000000".to_string(),
+    ]);
+    if let Some(id) = emitter {
+        r.extend([
+            format!("/api/inventory/{id}"),
+            format!("/api/inventory/{id}/classification"),
+            format!("/api/inventory/{id}/presence"),
+            format!("/api/signatures/match?emitter={id}"),
+        ]);
+    }
+    r
+}
+
+/// T-349: sweep every reachable route and hold its JSON to the units convention by value. This is
+/// the net that catches the *next* field someone adds, not just the ones T-349 renamed.
+#[test]
+fn every_serialized_time_declares_its_unit() {
+    let (_g, serving, addr) = start_server();
+    // Let the run detect something, so the inventory/occupancy/report bodies are not all empty:
+    // an empty array satisfies any assertion about its contents.
+    let mut emitter: Option<String> = None;
+    wait_for("an inventory row", Duration::from_secs(90), || {
+        let (st, v) = get(addr, "/api/inventory");
+        if st != 200 {
+            return false;
+        }
+        emitter = v["entries"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|e| e["id"].as_str())
+            .map(str::to_string);
+        emitter.is_some()
+    });
+    let mut bad: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for r in time_law_routes(unix_now(), emitter.as_deref()) {
+        let (st, v) = get(addr, &r);
+        assert_eq!(st, 200, "{r} answered {st}: {v}");
+        checked += 1;
+        scan_times(&v, &r, "", &mut bad);
+    }
+    stop_server(serving);
+    assert!(checked >= 30, "swept only {checked} routes");
+    assert!(
+        bad.is_empty(),
+        "{} field(s) carry an absolute time their name misdeclares:\n  {}",
+        bad.len(),
+        bad.join("\n  ")
+    );
+}
+
+/// T-349: the routes the defect was found on, asserted by value against the run's own clock.
+///
+/// The naming sweep above proves each field's magnitude matches its suffix. This proves the
+/// stronger thing: that the `_ns` field and the seconds field **in the same response** are the
+/// same instant once the declared units are applied. A response where `span.start_ns` were
+/// silently seconds would pass a shape check, pass an "is a number" check, and fail here.
+///
+/// Times here are on the **sample clock** the captured blocks carry (a replay reports the
+/// recording's time), not the wall clock, so the window comes from the run's counters.
+#[test]
+fn nanosecond_and_second_fields_in_one_response_agree_once_their_units_are_applied() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (_g, serving, addr) = start_server();
+    let counters = serving.handle.counters();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let wait = |f: &dyn Fn() -> bool| {
+        while !f() {
+            assert!(Instant::now() < deadline, "the mock never streamed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait(&|| counters.stream_time_ns.load(Relaxed) > 0);
+    let first = counters.stream_time_ns.load(Relaxed);
+    wait(&|| counters.stream_time_ns.load(Relaxed) >= first + 1_500_000_000);
+    let center = f64::from_bits(counters.tune_center_bits.load(Relaxed));
+    let (f_lo, f_hi) = (center - 1.2e6, center + 1.2e6);
+
+    // ---- /api/report: `generated_at_ns` and `span` are nanoseconds; `observed_s` stays seconds.
+    let (t0, t1) = (first as f64 * 1e-9 - 1.0, first as f64 * 1e-9 + 600.0);
+    let bx = format!("f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}");
+    let (st, v) = get(addr, &format!("/api/report?{bx}"));
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        v.get("generated_at").is_none(),
+        "report still ships unitless `generated_at`: {v}"
+    );
+    let gen_ns = v["generated_at_ns"].as_i64().expect("generated_at_ns");
+    assert!(
+        (BAND_NS.0..BAND_NS.1).contains(&(gen_ns as f64)),
+        "generated_at_ns = {gen_ns} is not a nanosecond-magnitude Unix time"
+    );
+    // The same instant the run's own counter reports, read as nanoseconds. Read as seconds it
+    // would be some 56 billion years out, and every shape assertion would still pass.
+    assert!(
+        (gen_ns - first).abs() < 60_000_000_000,
+        "generated_at_ns = {gen_ns} is not the stream clock ({first}) in nanoseconds"
+    );
+    let sp = &v["span"];
+    assert!(sp.get("start").is_none(), "report span unitless: {sp}");
+    assert_eq!(
+        (sp["start_ns"].as_i64(), sp["end_ns"].as_i64()),
+        (Some((t0 * 1e9) as i64), Some((t1 * 1e9) as i64)),
+        "report span must echo the requested window in nanoseconds: {sp}"
+    );
+    let observed_s = v["coverage"]["observed_s"].as_f64().unwrap_or(-1.0);
+    assert!(
+        (0.0..1e6).contains(&observed_s),
+        "coverage.observed_s must stay a duration in seconds beside the ns span: {v}"
+    );
+    for row in v["occupancy"]["bands"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .chain(
+            v["occupancy"]["channels"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter(),
+        )
+        .take(4)
+    {
+        let Some(iv) = row.get("interval").filter(|x| !x.is_null()) else {
+            continue;
+        };
+        assert!(
+            iv.get("start").is_none(),
+            "occupancy interval unitless: {iv}"
+        );
+        let a = iv["start_ns"].as_i64().unwrap_or_else(|| panic!("{row}"));
+        assert!(
+            (BAND_NS.0..BAND_NS.1).contains(&(a as f64)),
+            "interval.start_ns = {a} is not nanoseconds: {row}"
+        );
+        assert!(
+            row["observed_s"].as_f64().unwrap_or(0.0) < 1e6,
+            "observed_s must be a duration in seconds, not an epoch: {row}"
+        );
+    }
+
+    // ---- /api/signatures/match: `t_ns` when the catalogue has anything to say (empty on a fresh
+    // server is the normal case, so this is conditional by design, not by convenience).
+    let (st, inv) = get(addr, "/api/inventory");
+    assert_eq!(st, 200, "{inv}");
+    if let Some(id) = inv["entries"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|e| e["id"].as_str())
+    {
+        let (st, v) = get(addr, &format!("/api/signatures/match?emitter={id}"));
+        assert_eq!(st, 200, "{v}");
+        for m in std::iter::once(&v["match"]).chain(v["history"].as_array().into_iter().flatten()) {
+            if m.is_null() {
+                continue;
+            }
+            assert!(m.get("t").is_none(), "SignatureMatch still ships `t`: {m}");
+            let t = m["t_ns"].as_i64().expect("t_ns");
+            assert!(
+                (BAND_NS.0..BAND_NS.1).contains(&(t as f64)),
+                "SignatureMatch.t_ns = {t} is not nanoseconds"
+            );
+        }
+    }
+
+    // ---- The observation log. Its open interactive record closes when the run ends; the API
+    // keeps serving the log afterwards (the same sequence as
+    // `observation_coverage_reports_interactive_tuning_without_a_scheduler`).
+    let Serving { server, handle, .. } = serving;
+    handle.stop();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let _ = tx.send(handle.wait());
+    });
+    rx.recv_timeout(Duration::from_secs(30))
+        .expect("the run stopped")
+        .expect("the run finished cleanly");
+    let _ = waiter.join();
+    let end = counters.stream_time_ns.load(Relaxed);
+    let (t0, t1) = (first as f64 * 1e-9 - 1.0, end as f64 * 1e-9 + 1.0);
+    let q = format!(
+        "f_lo={}&f_hi={}&t0={t0}&t1={t1}",
+        center + 100e3,
+        center + 112.5e3
+    );
+
+    // The envelope echoes the window in seconds; the records inside carry `TimeRange`s in
+    // nanoseconds. Both describe the same window, and the response now says which is which.
+    let (st, v) = get(addr, &format!("/api/observations?{q}&tier=interactive"));
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        (v["t0"].as_f64().unwrap() - t0).abs() < 1.0
+            && (v["t1"].as_f64().unwrap() - t1).abs() < 1.0,
+        "envelope must echo the requested seconds window: {v}"
+    );
+    let recs = v["records"].as_array().cloned().unwrap_or_default();
+    assert!(!recs.is_empty(), "no observation records to check: {v}");
+    let mut checked = 0usize;
+    for rec in recs.iter().take(5) {
+        for field in ["span", "planned", "observed"] {
+            let Some(tr) = rec.get(field).filter(|x| !x.is_null()) else {
+                continue;
+            };
+            assert!(
+                tr.get("start").is_none() && tr.get("end").is_none(),
+                "{field} still serializes unitless `start`/`end`: {tr}"
+            );
+            let (a, b) = (
+                tr["start_ns"].as_i64().unwrap_or_else(|| panic!("{tr}")),
+                tr["end_ns"].as_i64().unwrap_or_else(|| panic!("{tr}")),
+            );
+            assert!(b >= a, "{field} ends before it starts: {tr}");
+            // The load-bearing assertion: read as nanoseconds it lands inside the window this same
+            // response reports in seconds. Read as seconds it would be ~31 years out per 10^9.
+            let start_s = a as f64 / 1e9;
+            assert!(
+                (t0 - 120.0..t1 + 120.0).contains(&start_s),
+                "{field}.start_ns = {a}; as seconds that is {start_s}, outside [{t0}, {t1}]: {rec}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 2, "no record time ranges were checked");
+
+    // `totals.span` (ns) against the same response's envelope (s).
+    let (st, v) = get(
+        addr,
+        &format!("/api/observations/coverage?{q}&min_gap_s=0.001"),
+    );
+    assert_eq!(st, 200, "{v}");
+    let span = &v["totals"]["span"];
+    assert!(span.get("start").is_none(), "totals.span unitless: {span}");
+    let (a, b) = (
+        span["start_ns"].as_i64().unwrap(),
+        span["end_ns"].as_i64().unwrap(),
+    );
+    assert!(
+        ((a as f64 / 1e9) - t0).abs() < 1.0 && ((b as f64 / 1e9) - t1).abs() < 1.0,
+        "totals.span_ns must be the window the envelope reports in seconds: {v}"
+    );
+    drop(server);
 }

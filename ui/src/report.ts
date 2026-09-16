@@ -8,7 +8,8 @@ import { fmtT } from "./history";
 // ---- Wire types (docs/api.md "Survey reports"; `hk_model::attention::report::SurveyReport") ----
 
 export interface FreqRange { lo_hz: number; hi_hz: number }
-export interface TimeRangeNs { start: number; end: number } // Timestamp = Unix nanoseconds
+/** A `TimeRange`: Unix **nanoseconds**, and the wire says so in the field names (T-349). */
+export interface TimeRangeNs { start_ns: number; end_ns: number }
 
 export interface OccupancyRow {
   schema?: number;
@@ -29,8 +30,8 @@ export interface OccupancyRow {
 export interface TopEmitter {
   emitter_id: string;
   freq: FreqRange;
-  first_seen: number; // Timestamp ns
-  last_seen: number; // Timestamp ns
+  first_seen_ns: number;
+  last_seen_ns: number;
   sightings: number;
   lifecycle: "candidate" | "confirmed";
   fco: number | null;
@@ -69,11 +70,11 @@ export interface ReportCoverage {
   statement: string;
 }
 
-export interface ProvenanceStep { t: number; kind: string; freq?: FreqRange; detail: string }
+export interface ProvenanceStep { t_ns: number; kind: string; freq?: FreqRange; detail: string }
 
 export interface SurveyReport {
   schema: number;
-  generated_at: number; // Timestamp ns
+  generated_at_ns: number;
   region: FreqRange;
   span: TimeRangeNs;
   site: unknown;
