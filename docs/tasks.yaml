@@ -6892,7 +6892,8 @@ tasks:
     milestone: M2-hardening
     title: CI acceptance job runs the whole hk-e2e crate, not just acceptance - drift by accretion, and
       the first push will feel it
-    status: in-progress
+    status: done
+    commit: 52560e9
     priority: high
     deps:
     - T-353
@@ -6982,7 +6983,8 @@ tasks:
     milestone: M2-hardening
     title: A second stale content-class expectation in an ungated target, and T-360s sweep pattern was too
       narrow to catch it
-    status: in-progress
+    status: done
+    commit: ff1b520
     priority: high
     deps:
     - T-360
