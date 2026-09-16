@@ -27,6 +27,7 @@ Computes ITU-style occupancy statistics (FCO/FBO/SRO) per channel and band, lear
 - **Sweep revisit:** 0–6 GHz in ~0.75 s with sub-ms dwell per step. Sweep occupancy captures persistent emitters; bursty FCO needs dwell data or statistical treatment. `docs/04 §3.8`, `docs/01 §1.6 "Firmware, `hackrf_sweep`, and host tools"`.
 - **One radio, half-duplex:** revisit intervals are irregular (the scheduler), so track n_revisits and gaps explicitly.
 - **8-bit, no preselector:** IMD and spurs inflate occupancy in cities. Exclude or weight flagged detections. `docs/02 §1.7 "Overload and intermodulation in urban RF"`.
+- **2.4 GHz and 902–928 MHz ISM are exactly where this capability, not C16/C20 decode, carries the use case.** Wi-Fi's 20 MHz OFDM channels sit at the HackRF's 20 Msps ceiling and classic Bluetooth's 1600 hops/s outrun the IBW, so channel-busy/duty-cycle/burst-length statistics (AWARE-042) are the honest target at those bands, not full protocol decode — BLE advertising is the one 2.4 GHz decode exception (C10). **Capability statement, unverified until measured** — `docs/02 §2.3`.
 - **Handheld:** the device moves, so baselines must be keyed by site; the ITU ≥24 h assumption fits a parked device, not a walk.
 - **Storage:** a 4096-bin float32 spectrogram at 30 lines/s is ~0.5 MB/s before compression; aggregate to occupancy counts early. `docs/02 §3.1 "Throughput math"`.
 
