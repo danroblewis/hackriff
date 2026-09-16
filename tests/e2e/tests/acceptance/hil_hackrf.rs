@@ -35,7 +35,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hk_cli::pipeline::{LiveArgs, LiveSource, open_live, temp_data_dir};
+use hk_cli::pipeline::{LiveArgs, LiveSource, TempDataDirGuard, open_live, temp_data_dir};
 use hk_cli::serve::{ServeOptions, ServeSource, Serving, start};
 use hk_dsp::welch::{WelchConfig, welch};
 use hk_stream::record::parse_status_record;
@@ -410,6 +410,7 @@ fn hil_blind_fm_survey_on_the_hackrf() {
 
     // 2. The whole pipeline over the device, blind.
     let dir = temp_data_dir();
+    let _guard = TempDataDirGuard::new(dir.clone());
     let Serving {
         server,
         handle,
@@ -796,7 +797,6 @@ fn hil_blind_fm_survey_on_the_hackrf() {
             summary.errors
         ),
     );
-    let _ = std::fs::remove_dir_all(&dir);
 
     eprintln!("[{TAG}] device {hw}; LNA {LNA_DB} / VGA {VGA_DB} / amp {AMP}");
     for (test, outcome, detail) in &res.0 {
