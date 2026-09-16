@@ -15,6 +15,20 @@ export interface HistoryGrid { nf: number; nt: number; max_db: readonly (number 
  * chronological order: each column is the max `max_db` over its share of time rows and every
  * frequency bin, normalised 0–1 against the grid's own observed range. `null` means no cell in
  * that share of the grid was observed — an unobserved gap, drawn grey (C26), never quiet.
+ *
+ * T-334 — **the time axis is no longer reduced here.** The band asks for `max_t = columns`, so the
+ * backend serves one time cell per drawn column (or fewer, when the pyramid ladder has nothing
+ * finer) and the `t0…t1` loop below **replicates** a served cell across columns rather than
+ * choosing which of several values a column stands for. It only reduces when the response reports
+ * `resolution.over_resolved` containing `"max_t"`.
+ *
+ * **The frequency collapse and the normalisation are still client-side measurements, and they are
+ * known debt, not an exemption.** "Max over the band" is the same operation that
+ * `GET /api/analysis/strongest` exists to keep in the backend, and the min/max normalisation
+ * decides the band's dynamic range from whatever happened to be in the response. The pyramid
+ * cannot serve them: its coarsest cell is 100 kHz, so no `max_f` collapses a megahertz-wide band
+ * to one column, and a band-collapsed activity-vs-time series is a backend product that does not
+ * exist yet (filed as follow-up; see docs/14 "Span-matched resolution").
  */
 export function reduceActivity(grid: HistoryGrid, columns: number): (number | null)[] {
   const { nf, nt, max_db } = grid;

@@ -24,7 +24,7 @@
 | Method | Path | Auth | Query | Response | Errors |
 |---|---|---|---|---|---|
 | GET | `/api/streams` | token | – | Discovery document (T-060, below) | 401 |
-| GET | `/api/history` | token | `f_lo`, `f_hi` (Hz), `t0`, `t1` (Unix s), `max_cells`? (default 100 000, max 500 000), `format`? (`json` default, `csv`, `png`), `stat`? (csv/png: `max`, `mean`, `p_low`, `p_high`, `floor`), `source`? (16 hex digits or `unknown`), `site`? (`unassigned`, `mobile`, a site id or `unknown`) | T-017 region-over-time grid (below); T-116 hackrf_sweep CSV or PNG waterfall; T-133 source/site filter | 400 invalid region/cells/format/stat/source/site, 404 no history store on this server |
+| GET | `/api/history` | token | `f_lo`, `f_hi` (Hz), `t0`, `t1` (Unix s), `max_cells`? (default 100 000, max 500 000), `max_t`?/`max_f`? (per-axis cell budgets, 1…500 000 — T-334), `format`? (`json` default, `csv`, `png`), `stat`? (csv/png: `max`, `mean`, `p_low`, `p_high`, `floor`), `source`? (16 hex digits or `unknown`), `site`? (`unassigned`, `mobile`, a site id or `unknown`) | T-017 region-over-time grid (below); T-334 `resolution` block; T-116 hackrf_sweep CSV or PNG waterfall; T-133 source/site filter | 400 invalid region/cells/format/stat/source/site, 404 no history store on this server |
 | GET | `/api/floor` | token | `f_lo`, `f_hi`, `t0`, `t1`, `max_steps`? (default 1024, max 20 000) | T-021 calibrated floor-vs-time series (below) | 400, 404 no floor product |
 | GET | `/api/inventory` | token | see below | T-018/T-078 signal inventory, one page (below) | 400 invalid filter, 404 no inventory store |
 | GET | `/api/inventory/{id}` | token | – | One inventory entry (T-078, same shape as a list row) | 404 not_found, 503 unavailable |
@@ -100,9 +100,38 @@ A `nt × nf` grid (row-major, time then frequency) of the finest pyramid level w
                   "origins": [ { "source": "8a1f0c3b5d2e4f60", "site": "unassigned", "frames": 12000 } ],
                   "other_origin_frames": 0 },
   "tiles_read": 4,
-  "filter": null
+  "filter": null,
+  "resolution": { "source": "spectrum-history", "level": 0, "levels": 5,
+                  "t_cell_s": 0.1, "f_cell_hz": 3125.0,
+                  "requested": { "max_cells": 100000, "max_t": 600, "max_f": 1024 },
+                  "served": { "nt": 1200, "nf": 384, "cells": 460800 },
+                  "matched": false, "over_resolved": ["max_cells", "max_t"] }
 }
 ```
+
+#### Span-matched resolution (T-334)
+
+**The rule, from the user (CLAUDE.md, "Time, the waterfall, and the live view", invariant 4).** *Data, timestamps and span-matched resolution are the backend's responsibility; time↔pixel mapping and view state are thin-client presentation.* The visible span is user-selectable from seconds to the full retention, and **zooming re-scales rather than truncates**: whatever span a view asks for is served whole, at a resolution matched to it, so the client never downsamples, never interpolates between the cells it was given, and never infers a timestamp. This is the thin-client rule (§"UI decision logic moved server-side") applied to the **time** axis: mapping a time to a pixel is presentation; *choosing which value represents an interval* is a measurement, and measurements are made here.
+
+**Asking in the view's own terms.** `max_cells` bounds the response (a product), which a grid of the wrong shape can satisfy — 16 rows × 6000 columns meets the same budget as 600 × 160. `max_t` and `max_f` are the **rows and columns the view will draw**. The level chosen is the finest whose grid over the region satisfies every budget given.
+
+**The whole span is always covered.** `[t0, t1)` is snapped *outward* to cell boundaries and returned entire; there is no clipping and no row budget that drops the oldest rows. A region that exceeds `max_cells` even at the coarsest level is `400` — a refusal, never a silently shortened answer.
+
+**Row times are contract, not inference.** `t0_s` is the start of time row 0 and every row is exactly `t_cell_s` long, so row *k* starts at `t0_s + k·t_cell_s` and column *j* covers `[f_lo_hz + j·f_cell_hz, f_lo_hz + (j+1)·f_cell_hz)`. `t0_s` may precede the requested `t0` (outward snapping). A client computing a row's time from those fields is reading the grid the server described, not guessing one.
+
+**`resolution`** reports what was asked for and what was served, so nothing has to be deduced from the grid:
+
+- `source` — which tier answered. Always `"spectrum-history"` here: this route reads the tiered spectrum-history pyramid and only that. Its horizon is the **pyramid's** retention (tiered, lossy, byte-budgeted), *not* the IQ ring's window — `GET /api/iqbuffer` reports that one, and the two are different lengths. A tier serving live-IQ-backed detail reports its own value in this field rather than leaving a client to infer which it got.
+- `level` / `levels` — the pyramid level served, and how many the scheme has (scheme 1: 6.25 kHz × 1 s at level 0, then ×2 in frequency and ×60/×15/×4/×24/×7 in time, to 100 kHz × 1 day at level 4).
+- `t_cell_s` / `f_cell_hz` — that level's cell size; the same values as the top-level fields, repeated here so the block is self-contained.
+- `requested` — `max_cells` (always, defaulted) and `max_t`/`max_f` (`null` when not given).
+- `served` — the grid's `nt`, `nf` and their product.
+- `matched` — `true` when the served grid meets every budget asked for; the same condition as `over_resolved` being empty.
+- `over_resolved` — the budgets the served grid still exceeds, any of `"max_cells"`, `"max_t"`, `"max_f"`; `[]` when all were met.
+
+**Error direction, and why it is that way.** The ladder is discrete, so an exact match is not generally reachable. The rule is *the finest level that fits every budget*, which errs **coarser than the view, never finer**. Drawing a coarse cell across several pixels repeats one measured value — blocky, but every pixel shows something that was measured. Reducing a finer grid in the client does the opposite: it invents the value a pixel stands for, decided with no knowledge of the noise floor, occupancy or what a peak means, and produces a picture that disagrees with the backend's own view of the same span. Fewer cells than asked for is therefore the *safe* outcome and is reported as `matched`; the client replicates and must not interpolate.
+
+`over_resolved` is the unsafe case, and it is named rather than hidden. It arises when no level is coarse enough — a `max_f` finer than 100 kHz cells can give over a wide band, or a span whose coarsest grid still exceeds `max_cells`. The client then holds more cells than it can draw one-to-one, and any single value it picks per pixel is **its own measurement**: the field exists so it can say so, narrow the span, or raise the budget, instead of reducing silently.
 
 T-116 additions (all additive):
 

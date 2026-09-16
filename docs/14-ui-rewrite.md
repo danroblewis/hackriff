@@ -90,6 +90,20 @@ Each in-window row draws a **box** spanning the spectrum trace and the waterfall
 - Scrubbing sets `[t0, t1]` and **re-derives** the lists and the boxes from the same query — one indexed range query, not a detector replay, which is why it stays interactive.
 - Waterfall detail below the tile resolution comes from the IQ ring ([ADR-0014](adr/0014-iq-capture-ring.md), 30 min on staging); above it, from `/api/history` tiles. The **lists** come from the interval query and reach as far back as retention allows.
 
+### Span-matched resolution (T-334)
+
+From the user's fourth time/waterfall invariant (CLAUDE.md): **time is zoomable, and the waterfall scales to the selected span.** The visible span runs from seconds to the full retention; the waterfall's rows-per-second is a function of that span; and the backend serves history at a resolution matching it, from the tiered spectrum-history pyramid — **so zooming re-scales rather than truncates.** Data, timestamps and span-matched resolution are the backend's; time↔pixel mapping and view state are MUI's, exactly as pixel↔Hz mapping already is.
+
+What that fixes, and what MUI must therefore not do:
+
+- **Ask in the view's own terms.** The request states `max_t` (rows to draw) and `max_f` (texels across), not only a `max_cells` product. A product budget is satisfied by a grid of any shape, which is how the capture band came to draw 96 bars over 48 h from **two** day-resolution cells: the product bound before the time axis did. Stating the axis budget pulls the hour level instead. (`GET /api/history`, docs/api.md "Span-matched resolution".)
+- **Never downsample, never interpolate.** Where a drawn cell covers more than one served cell, the client is choosing which value represents an interval — a measurement, made without the floor, the occupancy threshold or the cell shape, producing a picture that disagrees with the backend's own view of the same span. The served grid errs *coarser* than the view, so the normal operation is **replication** (one measured value drawn across several pixels), never reduction and never a smoothed interpolation between cells.
+- **Never infer a timestamp.** Row *k*'s time is `t0_s + k·t_cell_s` from the served grid — the contract the response states, not a count of rows against a wall clock or a nominal row rate. This is the same discipline as invariant 1: boxes and rows share one mapping from absolute capture time, so a box cannot drift out of step with the energy it describes.
+- **Never truncate to fit.** Dropping the oldest rows of a response to fit a texture is a silent shortening of the span the user asked to see. The budget goes on the request; a response that could not meet it says so (`resolution.over_resolved`), and MUI surfaces that rather than quietly cutting.
+- **Say which horizon.** `GET /api/history` reaches back over the **spectrum-history pyramid's** retention — tiered, lossy, byte-budgeted. The scrubbable capture timeline is sized from the **IQ ring's** window (`GET /api/iqbuffer`), which is shorter and lossless. Invariant 2 exists because those two are different lengths; `resolution.source` names which tier answered so the view can tell live-IQ-backed detail from survey overview.
+
+**Known debt, not an exemption.** The capture band's activity bars still take the max over every frequency cell and normalise against the response's own range, in the client. "Strongest in a band" is precisely what `GET /api/analysis/strongest` exists to keep in the backend, and the pyramid cannot serve it here — its coarsest cell is 100 kHz, so no `max_f` collapses a megahertz-wide band to one column. A band-collapsed *activity-vs-time* series is the backend product that would close it; it does not exist yet and is filed as a follow-up, not waved through.
+
 ### History surface (workflow #3)
 
 A **separate surface**, not a tab of Explore: the durable catalogue of every event, one-offs included, browsable by region and time (`GET /api/events`, and `GET /api/inventory/{id}/presence` for one emitter's track).

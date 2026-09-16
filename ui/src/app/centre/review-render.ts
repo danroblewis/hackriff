@@ -1,8 +1,18 @@
 // Review render (T-152; ADR-0013 §3.3, §4.3). While the capture timeline reviews a past instant,
 // the waterfall shows `GET /api/history` over the live band instead of live rows. This module is
-// pure: the query, the response check, and the grid → texture-row mapping. The mapping takes the max
-// of the served `max_db` cells under each texel; `null` cells become UNOBSERVED_DB, drawn grey and
-// never as quiet. Values are the server's, only resampled for display.
+// pure: the query, the response check, and the grid → texture-row mapping.
+//
+// T-334 — span-matched resolution (CLAUDE.md "Time, the waterfall, and the live view", invariant
+// 4). The request now states the view's own budgets: `max_t` = the rows it will draw, `max_f` =
+// the texels across. The backend picks the pyramid level, and it errs coarser than the view, so
+// the mapping below normally **replicates** one served cell across several texels/rows rather than
+// reducing several into one. Deciding which of several values stands for a pixel would be a
+// measurement, and measurements belong in the backend; `resolution.over_resolved` is where the
+// server says it could not meet a budget, and that is the only case where the loop reduces.
+//
+// Row times are read from the grid the server described (`t0_s` is row 0's start, every row is
+// `t_cell_s` long — docs/api.md "Row times are contract, not inference"), never guessed from a
+// row rate or a wall clock.
 import type * as ax from "../../axis";
 import { UNOBSERVED_DB } from "../../waterfall";
 import type { TimeCursor } from "../capture/slice";
@@ -25,11 +35,20 @@ export function historyWindow(tS: number, rows: number, rowPeriodS: number): { t
 export const historyMaxCells = (texW: number, rows: number) =>
   Math.min(500_000, Math.min(2048, Math.max(1, texW)) * Math.max(1, rows));
 
-export function historyQuery(full: ax.View, t0: number, t1: number, maxCells: number): string {
+/**
+ * The query for a span. `maxCells` still bounds the response; `maxT`/`maxF` (T-334) are the rows
+ * and texels this view will draw, so the backend serves the span at a resolution matched to it
+ * instead of returning a grid of some other shape that happens to fit the same product.
+ */
+export function historyQuery(
+  full: ax.View, t0: number, t1: number, maxCells: number, maxT?: number, maxF?: number,
+): string {
   const q = new URLSearchParams({
     f_lo: String(Math.max(0, Math.floor(full.loHz))), f_hi: String(Math.ceil(full.hiHz)),
     t0: String(t0), t1: String(t1), max_cells: String(Math.floor(maxCells)),
   });
+  if (maxT !== undefined && maxT >= 1) q.set("max_t", String(Math.floor(maxT)));
+  if (maxF !== undefined && maxF >= 1) q.set("max_f", String(Math.floor(maxF)));
   return `/api/history?${q}`;
 }
 
@@ -45,10 +64,16 @@ export function parseHistory(body: unknown): HistoryGrid | null {
 }
 
 /**
- * Texture rows (oldest first, the newest `maxRows` only) for a grid over the displayed band `full`:
- * texel j covers `full.loHz + [j, j+1)·(full span / texW)` and takes the max of the observed cells
- * it overlaps (at least the cell under it); none observed, or outside the grid → UNOBSERVED_DB.
- * `times[k]` is row k's start time.
+ * Texture rows (oldest first) for a grid over the displayed band `full`: texel j covers
+ * `full.loHz + [j, j+1)·(full span / texW)` and takes the max of the observed cells it overlaps (at
+ * least the cell under it); none observed, or outside the grid → UNOBSERVED_DB. `times[k]` is row
+ * k's start time, from the served grid's own `t0_s`/`t_cell_s`.
+ *
+ * The `newest maxRows only` clamp is a texture guard, not a view policy: with `max_t = maxRows` on
+ * the request (T-334) the server returns `nt ≤ maxRows` and it never fires. It can only fire when
+ * the response says `resolution.over_resolved` includes `"max_t"` — the server could not serve the
+ * span at this view's resolution — and dropping the oldest rows there is a visible truncation of
+ * the requested span, which is why the request states the budget instead of relying on this.
  */
 export function historyRows(grid: HistoryGrid, full: ax.View, texW: number, maxRows: number): { rows: Float32Array[]; times: number[] } {
   const { nf, nt, f_lo_hz: f0, f_cell_hz: fc, max_db: cells } = grid;

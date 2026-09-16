@@ -91,10 +91,15 @@ export class HistoryTab {
     const t0 = fromUtcInput(this.t0.value), t1 = fromUtcInput(this.t1.value);
     if (![fLo, fHi, t0, t1].every(Number.isFinite) || fHi <= fLo || t1 <= t0) { this.info.textContent = "set f lo, f hi, from and to"; return; }
     const maxF = Math.max(64, Math.floor((this.heat.clientWidth || 400) * Math.min(devicePixelRatio || 1, 2)));
+    const maxT = Math.max(16, Math.floor((this.heat.clientHeight || 140) * Math.min(devicePixelRatio || 1, 2)));
     const q = `f_lo=${fLo}&f_hi=${fHi}&t0=${t0}&t1=${t1}`;
     this.info.textContent = "loading…";
     const [h1, f] = await Promise.allSettled([
-      this.client.get<HistoryResp>(`/api/history?${q}&max_cells=${Math.min(500000, maxF * 400)}`),
+      // T-334: `max_f` is the heat-map's own pixel width and `max_t` its height, so the grid comes
+      // back shaped for what is drawn instead of a product that any shape can satisfy.
+      this.client.get<HistoryResp>(
+        `/api/history?${q}&max_cells=${Math.min(500000, maxF * 400)}&max_f=${maxF}&max_t=${maxT}`,
+      ),
       this.client.get<FloorResp>(`/api/floor?${q}&max_steps=${Math.max(16, Math.floor(maxF / 2))}`),
     ]);
     const msgs: string[] = [];
