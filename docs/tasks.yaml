@@ -6302,7 +6302,7 @@ tasks:
     milestone: M2-hardening
     title: The final arm of resolve counts within a producer and never asks whether another producer already
       counted the span
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-329
@@ -6324,7 +6324,7 @@ tasks:
     milestone: M2-hardening
     title: 'One shared time axis: every time-varying overlay must be anchored in absolute capture time and
       move with the waterfall'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: UI
@@ -6367,7 +6367,7 @@ tasks:
   - id: T-339
     milestone: M2-hardening
     title: 'Pause freezes the view, never the capture: the ring and detection stay always-on'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: UI
