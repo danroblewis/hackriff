@@ -6264,7 +6264,7 @@ tasks:
     milestone: M2-hardening
     title: Baselines should refuse or disclose comparisons across differing bias-tee state, and treat unknown
       as incomparable
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-325
