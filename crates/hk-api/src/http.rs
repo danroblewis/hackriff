@@ -150,6 +150,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/recipes"),
     ("POST", "/api/recipes"),
     ("POST", "/api/recipes/validate"),
+    // T-164 recipes ranked against an emitter's measured parameters
+    ("GET", "/api/recipes/match"),
     ("GET", "/api/recipes/{id}"),
     ("DELETE", "/api/recipes/{id}"),
     ("GET", "/api/recipes/{id}/versions/{version}"),

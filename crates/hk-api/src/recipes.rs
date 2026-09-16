@@ -8,6 +8,7 @@
 //! | GET | `/api/blocks` | `{"blocks": [BlockDescriptor]}` |
 //! | GET, POST | `/api/recipes` | `{"recipes": [...]}` / save as `latest + 1` (201) |
 //! | POST | `/api/recipes/validate` | `{valid, errors, warnings, edges}` |
+//! | GET | `/api/recipes/match?emitter=<id>` | recipes ranked against that emitter's *measured* parameters, with reasons |
 //! | GET, DELETE | `/api/recipes/{id}` | the latest document / every user version deleted |
 //! | GET | `/api/recipes/{id}/versions/{version}` | one saved version |
 //! | GET, POST | `/api/pipelines` | `{"pipelines": [...]}` / start (201; `503 busy` at the chain budget) |
@@ -20,9 +21,30 @@
 //! A validation failure answers `400 invalid` with `errors: [{path, message}]` and `warnings`.
 //! Mutating routes are audited like every other; `POST /api/recipes/validate` saves nothing and
 //! is not audited.
+//!
+//! `validate` and `match` are fixed sub-paths of `/api/recipes/`, so (as for `validate` since
+//! T-088) a recipe whose id is literally `match` is not addressable at `/api/recipes/match`.
+//!
+//! # Matching (T-164, ADR-0013 §4.9 gap 7b)
+//!
+//! `GET /api/recipes/match?emitter=<id>` ranks the recipe store against **what was measured on
+//! one emitter** — the classified modulation family, the detected or demodulated bandwidth, the
+//! estimated symbol rate, a duty-cycle-derived burstiness and measured feature tokens such as a
+//! locked 19 kHz pilot. All the arithmetic is [`hk_recipe::matching`]; this module only gathers
+//! the measurements from the repository and shapes the answer.
+//!
+//! **It never looks a frequency up to decide the order.** A recipe's `freq_hz` is a band-plan
+//! prior, and carries no weight in the score: it survives only as a tie-break between candidates
+//! the measurements cannot separate, the rule T-212 established for C17 classification priors. A
+//! parameter nothing has measured is scored as *no evidence*, never as agreement (T-163 serves
+//! those as `null` precisely so this holds), and an emission that fits nothing gets an empty
+//! ranking rather than a forced top choice. Nothing here tunes anything or starts a pipeline.
 
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard, PoisonError};
 
+use hk_model::{EmitterId, IdentityAccess, InventoryIdentity, RepoError, Repository};
+use hk_recipe::matching::{self, MeasuredSignal};
+use hk_recipe::{Entry, MatchHints};
 use serde_json::{Map, Value, json};
 
 use crate::control::{
@@ -103,6 +125,8 @@ enum Action {
     List,
     Save,
     Validate,
+    /// Rank recipes against an emitter's measured parameters (T-164).
+    Match,
     Get(String),
     Version(String, u32),
     Delete(String),
@@ -123,6 +147,7 @@ impl Action {
             Self::List => "recipes_list",
             Self::Save => "recipe_save",
             Self::Validate => "recipe_validate",
+            Self::Match => "recipes_match",
             Self::Get(_) | Self::Version(..) => "recipe_get",
             Self::Delete(_) => "recipe_delete",
             Self::Pipelines => "pipelines_list",
@@ -141,6 +166,7 @@ impl Action {
             self,
             Self::Blocks
                 | Self::Validate
+                | Self::Match
                 | Self::List
                 | Self::Get(_)
                 | Self::Version(..)
@@ -178,6 +204,7 @@ fn resolve(method: &str, path: &str) -> Option<Result<Action, Option<&'static st
             );
         }
         "/api/recipes/validate" => return by(&[("POST", Action::Validate)], "POST"),
+        "/api/recipes/match" => return by(&[("GET", Action::Match)], "GET"),
         "/api/pipelines" => {
             return by(
                 &[("GET", Action::Pipelines), ("POST", Action::Start)],
@@ -260,6 +287,22 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
             },
         );
     }
+    if action == Action::Match {
+        // The emitter is a query parameter, which `resolve` (path only) never sees.
+        let emitter = req
+            .query
+            .iter()
+            .find(|(k, _)| k == "emitter")
+            .map(|(_, v)| v.clone());
+        return Some(dispatch(
+            state,
+            req,
+            action.name(),
+            false,
+            |s| match_read(s, emitter.as_deref()),
+            |_, _| Err(Fail::new(500, "failed", "not a mutating action")),
+        ));
+    }
     Some(dispatch(
         state,
         req,
@@ -275,6 +318,161 @@ fn control(state: &ApiState) -> Result<&Arc<dyn RecipeControl>, Fail> {
         .recipes
         .as_ref()
         .ok_or_else(|| Fail::new(503, "unavailable", "no recipe runtime on this server"))
+}
+
+fn store(state: &ApiState) -> Result<MutexGuard<'_, Repository>, Fail> {
+    state
+        .inventory
+        .as_ref()
+        .map(|r| r.lock().unwrap_or_else(PoisonError::into_inner))
+        .ok_or_else(|| Fail::new(503, "unavailable", "no signal inventory on this server"))
+}
+
+fn repo_fail(e: RepoError) -> Fail {
+    match e {
+        RepoError::Invalid(m) => Fail::invalid(m),
+        RepoError::NotFound { .. } => Fail::new(404, "not_found", "no such inventory entry"),
+        other => Fail::new(500, "failed", format!("inventory store: {other}")),
+    }
+}
+
+/// Every recipe the runtime knows, as ranking entries. A recipe whose `match` block is missing or
+/// unreadable still competes, with no declared expectations — [`matching::rank`] then rules it out
+/// for having nothing to rank it by, rather than this route silently dropping it.
+fn entries(state: &ApiState) -> Result<Vec<Entry>, Fail> {
+    let listed = control(state)?
+        .call(RecipeCall::ListRecipes)
+        .map_err(|f| Fail::new(f.status, f.code, f.message))?;
+    let rows = listed
+        .get("recipes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(rows
+        .iter()
+        .filter_map(|r| {
+            Some(Entry {
+                id: r.get("id")?.as_str()?.to_owned(),
+                version: r.get("version").and_then(Value::as_u64).unwrap_or(1) as u32,
+                name: r
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                hints: r
+                    .get("match")
+                    .cloned()
+                    .and_then(|m| serde_json::from_value::<MatchHints>(m).ok())
+                    .unwrap_or_default(),
+            })
+        })
+        .collect())
+}
+
+/// What has actually been measured on one emitter, and an echo of it for the response.
+///
+/// Every field comes from a measurement: the classified family (falling back to the mode the
+/// demodulator locked), the bandwidth the demodulator filtered to (falling back to the detected
+/// extent), the estimated symbol rate, burstiness derived from a measured duty cycle, and feature
+/// tokens the estimator evidenced. A measurement that was never taken stays `None` and is scored
+/// as no evidence — nothing substitutes a default (T-163).
+///
+/// **Withheld identities** (T-036/T-163): an emitter whose identity is withheld from
+/// [`IdentityAccess::Standard`] contributes no demodulation session, exactly as its
+/// `estimated_params` read `null` on `/api/inventory/{id}`. Its detection-level measurements are
+/// used, since `/api/inventory` already serves those in clear on the same row, so this route adds
+/// no way to tell a withheld emitter from one nothing has demodulated yet.
+fn measured_signal(
+    repo: &Repository,
+    id: EmitterId,
+) -> Result<(EmitterId, MeasuredSignal, Value), Fail> {
+    let live = repo.live_emitter_id(id).map_err(repo_fail)?;
+    let entry = repo
+        .emitter_with_access(live, IdentityAccess::Standard)
+        .map_err(repo_fail)?;
+    let withheld = matches!(entry.identity, InventoryIdentity::Withheld { .. });
+    let session = if withheld {
+        None
+    } else {
+        repo.latest_demodulation_for_emitter(live)
+            .map_err(repo_fail)?
+    };
+    // Burstiness comes from a measured duty cycle — and only a measured one. `Recurrence` reports
+    // `duty_cycle = on_air_s / span_s`, where an appearance whose duty cycle was never measured
+    // adds nothing to `on_air_s` ("unknown duty is not evidence of continuity"). A zero
+    // `on_air_s` therefore means *nothing was measured*, not that the emitter is silent, and
+    // reading that 0.0 as "bursty" would hand a bare carrier the burstiness of a pager burst —
+    // the unmeasured-as-evidence mistake this route exists to avoid.
+    let recurrence = repo.emitter_recurrence(live, 0).map_err(repo_fail)?;
+    let duty = recurrence.duty_cycle.filter(|_| recurrence.on_air_s > 0.0);
+
+    let params = session.as_ref().map(|d| &d.params);
+    let classified = entry.family.clone();
+    let family = classified
+        .clone()
+        .or_else(|| session.as_ref().map(|d| d.mode.clone()));
+    let family_source = match (&classified, &family) {
+        (Some(_), _) => Some("classification"),
+        (None, Some(_)) => Some("demodulation"),
+        (None, None) => None,
+    };
+    let demodulated_bw = params.and_then(|p| p.bandwidth_hz);
+    let bandwidth_source = if demodulated_bw.is_some() {
+        "demodulation"
+    } else {
+        "detection"
+    };
+
+    let measured = MeasuredSignal {
+        family,
+        f_center_hz: Some(entry.emitter.f_center_hz),
+        bandwidth_hz: demodulated_bw.or(Some(entry.emitter.bandwidth_hz)),
+        symbol_rate_bd: params.and_then(|p| p.symbol_rate_hz),
+        bursty: duty.map(matching::bursty_from_duty),
+        features: params
+            .map(matching::features_from_params)
+            .unwrap_or_default(),
+    };
+    let echo = json!({
+        "family": measured.family,
+        "family_source": family_source,
+        "f_center_hz": entry.emitter.f_center_hz,
+        "bandwidth_hz": measured.bandwidth_hz,
+        "bandwidth_source": bandwidth_source,
+        "symbol_rate_bd": measured.symbol_rate_bd,
+        "bursty": measured.bursty,
+        "duty_cycle": duty,
+        "features": measured.features,
+        "session": session.as_ref().map(|d| d.id.to_string()),
+    });
+    Ok((live, measured, echo))
+}
+
+/// `GET /api/recipes/match?emitter=<id>`.
+fn match_read(state: &ApiState, emitter: Option<&str>) -> Result<Value, Fail> {
+    let Some(raw) = emitter else {
+        return Err(Fail::invalid("emitter is required"));
+    };
+    // Like `/api/signatures/match`: an unparsable id is a 404, never a 200 that could be probed
+    // for which ids exist.
+    let id: EmitterId = raw
+        .parse()
+        .map_err(|_| Fail::new(404, "not_found", "no such inventory entry"))?;
+    // Ask the recipe runtime before taking the inventory lock: never hold one across the other.
+    let entries = entries(state)?;
+    let (live, measured, echo) = {
+        let repo = store(state)?;
+        measured_signal(&repo, id)?
+    };
+    let ranked = matching::rank(&entries, &measured);
+    Ok(json!({
+        "emitter": live.to_string(),
+        "measured": echo,
+        "outcome": ranked.outcome.as_str(),
+        "reasons": ranked.reasons,
+        "recipes": ranked.candidates,
+        "ruled_out": ranked.ruled_out,
+    }))
 }
 
 fn read(state: &ApiState, action: &Action) -> Result<Value, Fail> {
@@ -414,6 +612,15 @@ mod tests {
             resolve("GET", "/api/recipes/validate"),
             Some(Err(Some("POST")))
         );
+        // T-164: a fixed sub-path, so it is never read as the recipe id "match".
+        assert_eq!(
+            resolve("GET", "/api/recipes/match"),
+            Some(Ok(Action::Match))
+        );
+        assert_eq!(
+            resolve("POST", "/api/recipes/match"),
+            Some(Err(Some("GET")))
+        );
         assert_eq!(
             resolve("GET", "/api/recipes/rds/versions/2"),
             Some(Ok(Action::Version("rds".into(), 2)))
@@ -457,7 +664,7 @@ mod tests {
                     || p.starts_with("/api/pipelines")
             })
             .collect();
-        assert_eq!(listed.len(), 15);
+        assert_eq!(listed.len(), 16);
         for (method, path) in listed {
             let concrete = path.replace("{id}", "x1").replace("{version}", "3");
             assert!(

@@ -386,6 +386,80 @@ fn crc_valid_rate(status: &Value) -> (f64, f64, f64) {
     (ok, bad, ok / (ok + bad).max(1.0))
 }
 
+// --- T-164: recipe matching on the blindly-found station ---------------------------------------
+
+/// T-164 (ADR-0013 gap 7b): `GET /api/recipes/match?emitter=` ranks the RDS recipe top for the FM
+/// station, **blind**. The station is found by matching the inventory against the fixture's
+/// private truth — no frequency is looked up and none is configured — and the ranking that comes
+/// back is driven by what the pipeline measured on it, with the reasons cited per field.
+#[test]
+fn signal_062_recipe_match_ranks_rds_top_for_the_blindly_found_station() {
+    let Some((meta, fx)) = private_truth(FM_FIXTURE) else {
+        return;
+    };
+    let truth = station(&fx);
+    let s = serve(&meta, "t164-match");
+    let (emitter, _, _) = found_blind(s.addr(), &truth, 0.0);
+
+    // The measurements accumulate as the run proceeds, so wait for the ranking to settle.
+    let deadline = Instant::now() + LIMIT;
+    let v = loop {
+        let (code, v) = s.call(
+            "GET",
+            &format!("/api/recipes/match?emitter={emitter}"),
+            None,
+        );
+        assert_eq!(code, 200, "[{TAG}] {v}");
+        if v["recipes"][0]["id"] == json!("rds") {
+            break v;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "[{TAG}] rds never ranked top. measured {} offered {} ruled out {}",
+            v["measured"],
+            v["recipes"],
+            v["ruled_out"]
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    };
+
+    let best = &v["recipes"][0];
+    eprintln!(
+        "[{TAG}] blind recipe match: rds {} ({}), measured {}",
+        best["score"], best["outcome"], v["measured"]
+    );
+    assert!(
+        best["score"].as_f64().unwrap() >= 0.6,
+        "[{TAG}] ranked top but weakly: {best}"
+    );
+    assert!(
+        ["fit", "partial"].contains(&best["outcome"].as_str().unwrap_or_default()),
+        "[{TAG}] {best}"
+    );
+
+    // The reasons say which measurements put it there, field by field.
+    let reasons = best["reasons"].as_array().unwrap();
+    assert!(!reasons.is_empty(), "[{TAG}] {best}");
+    let verdict = |field: &str| {
+        reasons
+            .iter()
+            .find(|r| r["field"] == json!(field))
+            .unwrap_or_else(|| panic!("[{TAG}] no reason for {field}: {best}"))["verdict"]
+            .clone()
+    };
+    assert_eq!(verdict("bandwidth_hz"), json!("agree"), "[{TAG}] {best}");
+    // Whatever was measured, nothing unmeasured was ever counted as agreement.
+    for r in reasons {
+        if r["verdict"] == json!("unmeasured") {
+            assert_eq!(r["earned"], json!(0.0), "[{TAG}] {r}");
+        }
+    }
+    // The ranking read the measurement, not the band plan: the frequency contributes no score.
+    assert!(!v["measured"]["bandwidth_hz"].is_null(), "[{TAG}] {v}");
+
+    s.finish();
+}
+
 // --- Real fixture: truth + oracle + hot edit and save ------------------------------------------
 
 #[test]
