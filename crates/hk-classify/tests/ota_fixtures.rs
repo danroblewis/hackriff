@@ -300,7 +300,27 @@ fn ism_915_burst_capture_classifies_as_fsk_or_abstains() {
     let iq = read_ci8(&data, 12_000_000);
     let cf = to_cf32(&iq);
 
-    // Find the strongest burst blind: the 2 ms window with the most peaked spectrum.
+    // Find the strongest burst blind: the 2 ms window with the most peaked spectrum, **excluding
+    // the receiver's own DC offset** (T-240).
+    //
+    // Skipping DC is not a truth lookup and does not make this test less blind: the excluded band
+    // is defined purely by the tuned centre in `provenance` — offset zero — and a direct-conversion
+    // front end always puts its LO leakage and ADC offset exactly there. The product's real
+    // detection path already refuses such a box (`hk_detect::rules::spur_decision` returns
+    // `SpurReason::Dc`); it is only this test's hand-rolled search that had no such rule.
+    //
+    // Without it this test was not measuring the classifier at all. The DC artefact wins
+    // peak/median outright — it is a 24 kHz, 37 dB line with a phase residual of 0.14 rad, i.e. an
+    // unmodulated carrier — so the "strongest burst" was the same artefact in every window
+    // (identical features to three decimals at 274, 276, 278, 280, 282, 586 and 654 ms), and this
+    // fixture's own truth list annotates that region `role: artefact, kind: dc-offset`. The real
+    // FHSS hops sit megahertz away (912.1-912.3, 916.3-916.5, 917.5-917.7, 919.9-920.0 MHz).
+    // Three tasks in a row (T-230, T-235, T-238) read the resulting abstention as a sim-to-real
+    // density gap; it was a detector selecting an artefact.
+    const DC_GUARD_HZ: f64 = 60e3;
+    /// A real emission here is an FHSS channel, not a bare line: the narrowest truth-annotated
+    /// burst is ~130 kHz wide.
+    const MIN_BURST_HZ: f64 = 50e3;
     let window = (0.002 * fs) as usize;
     let mut best = (f64::NEG_INFINITY, 0usize, 0.0, 0.0);
     let mut start = 0;
@@ -318,13 +338,26 @@ fn ism_915_burst_capture_classifies_as_fsk_or_abstains() {
             let mut sorted = psd.clone();
             sorted.sort_by(f64::total_cmp);
             let median = sorted[sorted.len() / 2].max(1e-30);
-            let peak = psd.iter().copied().fold(0.0_f64, f64::max);
-            let contrast = 10.0 * (peak / median).log10();
-            if contrast > best.0 {
-                let (lo, hi) = hk_classify::features::occupied_band(&psd);
-                let centre = 0.5 * (s.bin_offset_hz(lo) + s.bin_offset_hz(hi));
+            let away_from_dc = |i: usize| s.bin_offset_hz(i).abs() >= DC_GUARD_HZ;
+            // The strongest bin that is not the DC artefact, then its own −20 dB contour.
+            let peak_bin = (0..psd.len())
+                .filter(|i| away_from_dc(*i))
+                .max_by(|a, b| psd[*a].total_cmp(&psd[*b]));
+            if let Some(peak_bin) = peak_bin {
+                let floor = psd[peak_bin] / 100.0;
+                let (mut lo, mut hi) = (peak_bin, peak_bin);
+                while lo > 0 && psd[lo - 1] >= floor && away_from_dc(lo - 1) {
+                    lo -= 1;
+                }
+                while hi + 1 < psd.len() && psd[hi + 1] >= floor && away_from_dc(hi + 1) {
+                    hi += 1;
+                }
                 let bw = (hi - lo + 1) as f64 * s.bin_width_hz();
-                best = (contrast, start, centre, bw);
+                let contrast = 10.0 * (psd[peak_bin] / median).log10();
+                if bw >= MIN_BURST_HZ && contrast > best.0 {
+                    let centre = 0.5 * (s.bin_offset_hz(lo) + s.bin_offset_hz(hi));
+                    best = (contrast, start, centre, bw);
+                }
             }
         }
         start += window;
