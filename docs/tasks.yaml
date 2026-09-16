@@ -4881,7 +4881,7 @@ tasks:
     milestone: MUI
     title: 'ADR-0017 TM-2 remainder: the presence / liveness / family_in_window object
       never landed, so TM-3 cannot render liveness or sort by in-window on-air time'
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: TIME
