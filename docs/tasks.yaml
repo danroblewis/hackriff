@@ -4743,7 +4743,7 @@ tasks:
   - id: T-274
     milestone: M5
     title: 'M5 GNSS observables cluster (C36): L1 is NOT blindly detectable, so this is the documented exception to blind-first'
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-258
@@ -5395,7 +5395,8 @@ tasks:
     milestone: M2-hardening
     title: 'Run summary reports "2 errors" on the chains line in the M4 acceptance scene
       with no error printed - unexplained FSK-chain behaviour on NBFM bursts'
-    status: in-progress
+    status: done
+    commit: be9be78
     priority: normal
     deps: []
     parallel_group: PIPE
@@ -5945,6 +5946,25 @@ tasks:
       does not. Capture the same line at two or three different tuner centres and assert which it does.
       Hardware capture is USER-TRIGGERED - do not touch the HackRF while the users demo holds it. Until
       then the annotation stays as it is, with the limitation recorded'
+  - id: T-319
+    milestone: M2-hardening
+    title: Three more silent chain_emitter swallows would produce the same unnameable error count T-293
+      just spent a session diagnosing
+    status: todo
+    priority: normal
+    deps:
+    - T-293
+    parallel_group: PIPE
+    model: sonnet
+    acceptance: 'T-293 found chains/fsk.rs:319 incrementing chains.errors with no message - the reason nothing
+      printed and the reason an unexplained 2 sat in the M4 summary long enough to be read as noise. It
+      fixed that site and named the error like its siblings do. THREE MORE REMAIN with the identical shape:
+      analog.rs:495, analog.rs:800 and refine.rs:222 all swallow a chain_emitter failure silently. They
+      have not fired in any scene run so far, which is exactly why they are worth fixing now rather than
+      after a session is spent re-deriving the same diagnosis from a bare count. Make each name its error
+      the way fsk.rs now does. This is not about adding logging volume: a counter that cannot say what it
+      counted trains everyone to ignore the count, which is the failure T-293 exists to record. No behaviour
+      change beyond the message; no threshold moves'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
