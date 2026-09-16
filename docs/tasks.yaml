@@ -3279,7 +3279,9 @@ tasks:
   - id: T-204
     milestone: M3
     title: "C15 per-family DL stage with open-set (energy OOD or OpenMax), trained on synthetic impairments, inference via T-203 in shadow mode first"
-    status: in-progress
+    status: done
+    commit: 7b7dccc
+    outcome: "SHADOW-ONLY, nothing enabled, on the agent-s own recommendation: large sim-to-sim gains (analog +0.455 to +0.540, psk-qam +0.653 to +0.669, fsk +0.280 to +0.291) but open-set WORSE than classical on fsk (AUROC 0.326 vs 0.824, false-known 1.000 vs 0.325) - confidently wrong exactly where abstention matters, with no OTA labels behind the gains"
     priority: normal
     deps: [T-199, T-203, T-213]
     parallel_group: M3C
@@ -3929,6 +3931,21 @@ tasks:
     found_by: "T-200 (2026-09-15): its verifier moved gfsk 0.000 -> 0.333/0.417 but left bpsk/qpsk at 0.000 -> 0.000, and traced the cause to the tree's cumulant class call assigning bpsk exactly zero prior - so no downstream stage can recover it"
     acceptance: "the cumulant class call in tree.rs gives bpsk a non-zero prior where the evidence warrants it, so bpsk is nameable at all; measured bpsk/qpsk class top-1 improves from 0.000 at the SNRs T-200 tested (15/20/25 dB), reported per class and per SNR from T-213's harness; every floor holds unchanged (top-1 >= 0.90, top-2 >= 0.95, wrong-label <= 0.003, unknown recall >= 0.80, false-known <= 0.10); NO confident wrong answers - confidently-wrong (p >= 0.9) must stay at zero for these pairs, as T-200 measured; if the cumulant features genuinely cannot separate bpsk from qpsk at these SNRs, say so with numbers and recommend where it belongs instead (the DL stage, or accepting the abstention)"
     area: crates/hk-classify/src/tree.rs (cumulant class call), densities
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-244
+    milestone: M3
+    title: "OOD coverage gap: no out-of-distribution generator routes to analog or psk-qam, so their open-set behaviour is unmeasured - the M3 gate would report unknown-recall it never tested for two families"
+    status: todo
+    priority: high
+    deps: [T-204, T-213]
+    parallel_group: M3V
+    use_cases: [SIGNAL-062]
+    found_by: "T-204 (2026-09-15): measured open-set per family and found fsk and ook-ask covered but analog and psk-qam unmeasured because no OOD generator routes there"
+    acceptance: "the synthetic grid includes out-of-distribution generators that route to analog and psk-qam, so open-set AUROC and false-known are MEASURED for every family rather than only the two that happen to have OOD sources; T-213's harness reports per-family open-set coverage and FAILS LOUDLY if a family has no OOD samples, rather than reporting a silent zero; re-measure T-204's shadow comparison with the full coverage and report whether its shadow-only recommendation still holds; no floor loosened"
+    area: py/ synth grid (OOD generators), crates/hk-classify/src/harness.rs, tests
     needs: none
     model: opus
     effort: medium
