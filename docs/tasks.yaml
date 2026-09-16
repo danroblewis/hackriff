@@ -3770,7 +3770,8 @@ tasks:
   - id: T-234
     milestone: M2-hardening
     title: "M2 gate test asserts bandit dwell in wall time: under concurrent load it sees 0 outcomes and 0 dwells and fails, though the survey report itself is correct"
-    status: in-progress
+    status: review
+    commit: 1b91d04
     priority: high
     deps: []
     parallel_group: PIPELINE
