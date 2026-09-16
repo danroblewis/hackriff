@@ -62,12 +62,62 @@
 //!
 //! # Metadata only
 //!
-//! Nothing here touches audio, voice frames or message payloads, and nothing here decrypts
-//! anything. A grant's service-options byte carries an encryption indication that **T-270** owns;
-//! this module deliberately does not read it, so every event it produces states
-//! [`hk_model::Encryption::Unknown`] — the fail-closed state T-266 built, never "clear".
+//! Nothing here touches audio, voice frames or message payloads, and **nothing here decrypts
+//! anything**. Reading an algorithm *identifier* is not decryption: no key schedule, no keystream,
+//! no cipher of any kind appears in this crate, and none may.
+//!
+//! # Encryption (T-270): what may say "clear", and what may only say "encrypted"
+//!
+//! T-266 made the mistake unconstructible — [`hk_model::Encryption`] has no `Default`, its two
+//! claiming variants each require evidence, and `Unknown` carries none. This module is what finally
+//! *reads* an encryption indication, and it does so asymmetrically, which is the whole design:
+//!
+//! - **A service-options bit may only ever raise to `Encrypted`.** `P = 1` becomes
+//!   [`hk_model::Encryption::Encrypted`]; `P = 0` becomes **`Unknown`**, not `Clear`. Two reasons,
+//!   and either alone would be enough. First, the bit is a *grant-time announcement about a call
+//!   that has not started*; the authoritative per-call statement is the ALGID in the call's own
+//!   header, and a call granted clear can be keyed encrypted. Second, it makes the failure mode of
+//!   a mis-read bit position harmless: a false `Encrypted` costs audio nobody hears, while a false
+//!   `Clear` opens a voice path on protected traffic. The error that is merely annoying is the one
+//!   this module is allowed to make.
+//! - **Only a verified ALGID may say `clear`.** [`algid_encryption`] is the single path in the
+//!   workspace that can produce [`hk_model::Encryption::Clear`] from a decode, and only for the one
+//!   octet that means it ([`hk_model::P25_ALGID_CLEAR`]).
+//!
+//! So `clear` is reachable by evidence and by nothing else, and every path that lacks evidence —
+//! a grant update, a P = 0 grant, a block that never parsed, a call joined in progress — stays
+//! `Unknown`.
+//!
+//! # What is verified here, and by whom
+//!
+//! - **Service options is argument byte 0 of a grant.** *Verified* against op25's own TSBK
+//!   handling, which extracts it from the same place: `opts = (tsbk >> 72) & 0xff` over a 96-bit
+//!   block is the byte immediately after the 8-bit header and 8-bit MFID — exactly the first
+//!   argument byte this module reads.
+//! - **The encryption bit is `0x40`.** *Verified* three independent ways: SDRTrunk's
+//!   `ServiceOptions.java` names it `ENCRYPTION_FLAG = 0x40` behind `isEncrypted()`; dsd-fme
+//!   documents the same test as `svc & 0x40`; and a TIA-102.AABC-B-referenced field description
+//!   gives bit 6 as "protected". Three sources, one mask.
+//! - **ALGID values.** *Verified*: SDRTrunk's `Encryption.java` enumerates `0x80` UNENCRYPTED,
+//!   `0x81` DES_OFB, `0x84` AES_256, `0xAA` MOTOROLA_ADP; a published ALGID table agrees; op25
+//!   tests encryption as `algid != 0x80`; and docs/04 §8.3 states the same four. Four sources.
+//! - **A grant update carries no service options.** *Verified* from op25's source: the standard
+//!   opcode `0x02` argument field is `ch1/ga1/ch2/ga2`, four 16-bit fields filling all 64 bits,
+//!   with no service-options octet and no source address. This is why late entry is `Unknown` by
+//!   *protocol* rather than by convention — there is no bit to read.
+//! - **UNVERIFIED — every other service-options bit.** Emergency (`0x80`), duplex (`0x20`), mode
+//!   (`0x10`) and priority (`0x07`) are corroborated less well or not at all, and M4 has nowhere to
+//!   put them. They are therefore **not decoded into anything**: the raw octet is recorded verbatim
+//!   so a later task can revisit it, and nothing maps through it. T-268's discipline.
+//! - **UNVERIFIED — the `0x02` argument layout as this decoder reads it.** T-268 decodes a grant
+//!   update with the *grant* layout, which the op25 finding above shows is not the standard one.
+//!   Changing it is T-268's simplification to revisit (alongside the trellis, interleaving, status
+//!   symbols and the augmented CRC), not this task's; what matters here is that no encryption claim
+//!   is made from it, and none is.
 
-use hk_model::{ChannelPlanEntry, Timestamp, TrunkProtocol};
+use hk_model::{
+    ChannelPlanEntry, Encryption, EncryptionEvidence, P25_ALGID_CLEAR, Timestamp, TrunkProtocol,
+};
 
 // ---------------------------------------------------------------------------------------------
 // Opcodes (verified)
@@ -212,9 +262,11 @@ impl Tsbk {
     /// Layout of the 64 argument bits, which sum to exactly 64: service options (8), channel (16),
     /// group address (16), source address (24).
     ///
-    /// The service-options byte is **not** interpreted. Its encryption indication belongs to
-    /// T-270, and reading it here would be the one thing T-266 forbids structurally: deciding an
-    /// encryption state without the evidence to name. Every grant leaves here stating nothing.
+    /// The service-options octet is read **only for a plain grant**. A grant update carries no such
+    /// field — its standard argument layout is four 16-bit channel/group fields (see the module
+    /// docs) — so [`Grant::service_options`] is `None` for one, and the encryption state it can
+    /// state is therefore `Unknown`. That is the late-entry case, and it is a fact about the
+    /// protocol rather than a policy this decoder applies on top of it.
     pub fn grant(&self) -> Option<Grant> {
         let update = match self.opcode {
             OP_GRP_VCH_GRANT => false,
@@ -229,6 +281,9 @@ impl Tsbk {
             channel: self.bits(8, 16) as u16,
             talkgroup: self.bits(24, 16) as u16,
             source: self.bits(40, 24) as u32,
+            // Read from the one opcode that carries it. A grant update has no service-options
+            // octet at all, so there is nothing to read and nothing is claimed.
+            service_options: (!update).then(|| ServiceOptions(self.bits(0, 8) as u8)),
         })
     }
 }
@@ -282,6 +337,104 @@ impl IdenUp {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Encryption indications (T-270). Nothing here decrypts; these read identifiers and flags.
+// ---------------------------------------------------------------------------------------------
+
+/// The encryption ("protected") bit of a grant's service-options octet.
+///
+/// *Verified* three independent ways — SDRTrunk's `ENCRYPTION_FLAG = 0x40`, dsd-fme's `svc & 0x40`,
+/// and a TIA-102.AABC-B-referenced description giving bit 6 as "protected". See the module docs.
+pub const SVC_ENCRYPTED: u8 = 0x40;
+
+/// A grant's service-options octet.
+///
+/// Only the encryption bit is interpreted. The rest of the octet is carried verbatim and mapped
+/// through to nothing at all: emergency, duplex, mode and priority are either less well
+/// corroborated or have nowhere to go in a metadata-only milestone, and T-268's rule is that an
+/// uncorroborated field is recorded rather than acted on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServiceOptions(pub u8);
+
+impl ServiceOptions {
+    /// The octet as received, so a row can record what was actually on the air.
+    pub const fn raw(self) -> u8 {
+        self.0
+    }
+
+    /// Whether the **verified** encryption bit is set.
+    pub const fn is_encrypted(self) -> bool {
+        self.0 & SVC_ENCRYPTED != 0
+    }
+
+    /// What this octet is entitled to say about encryption.
+    ///
+    /// Set, it says `Encrypted`. Clear, it says **nothing** — see the module docs for why a
+    /// grant-time "not protected" is not allowed to license audio.
+    pub fn encryption(self) -> Encryption {
+        if self.is_encrypted() {
+            Encryption::from_service_options(true)
+        } else {
+            Encryption::Unknown
+        }
+    }
+}
+
+/// The four P25 algorithm identifiers this project names, all *verified* (see the module docs).
+///
+/// The table is deliberately **not** exhaustive and is not a gate: an identifier missing from it is
+/// still an algorithm, and [`algid_encryption`] treats it as one. Naming is a courtesy for a row a
+/// person will read, never the thing that decides whether traffic is protected.
+pub const P25_ALGIDS: [(u8, &str); 4] = [
+    (P25_ALGID_CLEAR, "clear"),
+    (0x81, "DES-OFB"),
+    (0x84, "AES-256"),
+    (0xAA, "ADP"),
+];
+
+/// The name of a P25 ALGID, when it is one of the four this project names.
+pub fn algid_name(algid: u8) -> Option<&'static str> {
+    P25_ALGIDS
+        .iter()
+        .find(|&&(v, _)| v == algid)
+        .map(|&(_, n)| n)
+}
+
+/// Reads a P25 ALGID octet, and an optional key id, into an encryption state.
+///
+/// **This is the only path in the workspace that can decode a `Clear` state**, and only for
+/// [`P25_ALGID_CLEAR`]. Every other octet — named in [`P25_ALGIDS`] or not — is an algorithm, so an
+/// unrecognised value comes back `Encrypted` carrying the byte rather than dropped or defaulted:
+/// an algorithm nobody has a name for is still evidence of encryption, and is arguably the more
+/// interesting find.
+///
+/// Reading an identifier is not decryption. Nothing here derives a key or touches a payload.
+pub fn algid_encryption(algid: u8, key_id: Option<u16>) -> Encryption {
+    match Encryption::from_algid(algid) {
+        Encryption::Clear {
+            evidence, algid, ..
+        } => Encryption::Clear {
+            evidence,
+            algid,
+            key_id,
+        },
+        Encryption::Encrypted {
+            evidence, algid, ..
+        } => Encryption::Encrypted {
+            evidence,
+            algid,
+            key_id,
+        },
+        Encryption::Unknown => Encryption::Unknown,
+    }
+}
+
+/// Whether an encryption state was decided by an ALGID octet — the authoritative per-call
+/// statement, as opposed to a grant-time announcement.
+pub fn is_algid_evidence(enc: Encryption) -> bool {
+    enc.evidence() == Some(EncryptionEvidence::Algid)
+}
+
 /// A voice channel grant, carrying a channel number and no frequency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Grant {
@@ -293,6 +446,9 @@ pub struct Grant {
     pub talkgroup: u16,
     /// Source (unit) address.
     pub source: u32,
+    /// The service-options octet, when this opcode carries one. `None` for a grant update, which
+    /// has no such field — the protocol reason late entry cannot state an encryption state.
+    pub service_options: Option<ServiceOptions>,
 }
 
 impl Grant {
@@ -303,6 +459,16 @@ impl Grant {
     /// The channel within that table (low 12 bits). *Verified split.*
     pub fn channel_number(&self) -> u16 {
         self.channel & 0x0FFF
+    }
+
+    /// What this grant is entitled to say about encryption.
+    ///
+    /// `Encrypted` when the verified bit is set; **`Unknown` in every other case**, including a
+    /// grant update (no field to read) and a plain grant with the bit clear. There is no branch
+    /// here that reaches `Clear` — that needs an ALGID, and a grant does not carry one.
+    pub fn encryption(&self) -> Encryption {
+        self.service_options
+            .map_or(Encryption::Unknown, ServiceOptions::encryption)
     }
 }
 
@@ -794,6 +960,96 @@ mod tests {
             scan.unhandled, 1,
             "an opcode this decoder does not read is counted"
         );
+    }
+
+    /// The encryption bit, at the grant that carries it (T-270).
+    ///
+    /// The asymmetry is the assertion: a set bit says `Encrypted`, and a clear bit says **nothing**
+    /// rather than `Clear`. There is no input to this function that produces `Clear`.
+    #[test]
+    fn a_grants_service_options_may_say_encrypted_but_never_clear() {
+        let channel = (1u16 << 12) | 5;
+        let grant_with = |svc: u8| {
+            Tsbk::parse(&tsbk(OP_GRP_VCH_GRANT, grant_args(svc, channel, 100, 7)))
+                .unwrap()
+                .grant()
+                .expect("a grant")
+        };
+
+        // The verified bit, set: encrypted, and the evidence names what said so.
+        let enc = grant_with(SVC_ENCRYPTED).encryption();
+        assert!(enc.is_encrypted());
+        assert_eq!(enc.evidence(), Some(EncryptionEvidence::ServiceOptions));
+        assert_eq!(enc.algid(), None, "a grant carries no ALGID");
+
+        // The same bit clear — and, crucially, with other bits set, so this is not passing merely
+        // because the octet was zero. Nothing said, so nothing is claimed.
+        for svc in [0x00, 0x80, 0x20, 0x10, 0x07, 0xBF] {
+            let g = grant_with(svc);
+            assert_eq!(
+                g.encryption(),
+                Encryption::Unknown,
+                "service options {svc:#04x} claimed an encryption state"
+            );
+            assert!(!g.encryption().is_clear(), "{svc:#04x} reached `clear`");
+            // The octet is still recorded verbatim, so nothing is lost by not interpreting it.
+            assert_eq!(g.service_options.map(ServiceOptions::raw), Some(svc));
+        }
+    }
+
+    /// Late entry, as a fact about the protocol: a grant update carries no service-options octet,
+    /// so there is nothing to read and the state is `Unknown` — not `clear`, however ordinary the
+    /// traffic it announces looks.
+    #[test]
+    fn a_grant_update_carries_no_service_options_so_late_entry_is_unknown() {
+        let channel = (1u16 << 12) | 5;
+        // Even with the encryption bit set in the bytes, an update must not read one: the field is
+        // not there in the real message, so this decoder must not invent it in either direction.
+        let upd = Tsbk::parse(&tsbk(
+            OP_GRP_VCH_GRANT_UPDATE,
+            grant_args(SVC_ENCRYPTED, channel, 100, 0),
+        ))
+        .unwrap()
+        .grant()
+        .expect("a grant update");
+        assert!(upd.update);
+        assert_eq!(upd.service_options, None, "an update has no such octet");
+        assert_eq!(upd.encryption(), Encryption::Unknown);
+        assert!(!upd.encryption().is_clear());
+    }
+
+    /// The ALGID table: the only path that may say `clear`, and the one octet that earns it.
+    #[test]
+    fn only_algid_0x80_reads_as_clear_and_every_other_octet_is_an_algorithm() {
+        let clear = algid_encryption(P25_ALGID_CLEAR, None);
+        assert!(clear.is_clear());
+        assert_eq!(clear.evidence(), Some(EncryptionEvidence::Algid));
+        assert_eq!(clear.algid(), Some(P25_ALGID_CLEAR));
+        assert_eq!(algid_name(P25_ALGID_CLEAR), Some("clear"));
+
+        // The three named algorithms, and the key id carried through.
+        for (algid, name) in [(0x81u8, "DES-OFB"), (0x84, "AES-256"), (0xAA, "ADP")] {
+            let enc = algid_encryption(algid, Some(0x1234));
+            assert!(enc.is_encrypted(), "{name} did not read as encrypted");
+            assert_eq!(enc.algid(), Some(algid));
+            assert_eq!(enc.key_id(), Some(0x1234));
+            assert_eq!(algid_name(algid), Some(name));
+        }
+
+        // An algorithm nobody named is still an algorithm: encrypted, carrying the byte, never
+        // dropped and never clear. This is the case an "unknown means fine" bug would fail.
+        for algid in [0x00u8, 0x01, 0x83, 0x9F, 0xFF] {
+            let enc = algid_encryption(algid, None);
+            assert!(
+                enc.is_encrypted(),
+                "unrecognised ALGID {algid:#04x} did not read as encrypted"
+            );
+            assert_eq!(enc.algid(), Some(algid), "the byte must be recorded");
+            assert!(!enc.is_clear());
+        }
+        // Exactly one octet in the whole 8-bit space reads as clear.
+        let clears = (0u16..=255).filter(|&a| algid_encryption(a as u8, None).is_clear());
+        assert_eq!(clears.count(), 1, "more than one ALGID reached `clear`");
     }
 
     /// The naming rule, and the negative control that matters: random CRC-valid blocks — which is

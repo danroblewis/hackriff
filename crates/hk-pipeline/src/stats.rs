@@ -319,6 +319,14 @@ counter_group!(
         /// Calls whose end was **observed**, by a silence timeout on the granted channel. The
         /// rest carry `t_end = NULL`, which the model defines as "still open, or never observed".
         cc_calls_closed,
+        /// T-270: calls a decoded encryption indication flagged as **encrypted**. Metadata about
+        /// the call, never its content — nothing is decrypted, and no audio exists to suppress.
+        cc_calls_encrypted,
+        /// Calls the encryption check refused a voice path (`VoicePermit`): encrypted, or — just
+        /// as firmly — **unknown**. In M4 this is every followed call, because no ALGID is
+        /// reachable and nothing may say "clear" without one. The check sits where a vocoder
+        /// would, so a later audio path cannot skip it by forgetting to ask.
+        cc_voice_refused,
         /// T-297: characterising chains attached ([`crate::chains::sweep`]).
         ///
         /// Counted **apart from** `attached`, which has always meant a chain attached to
