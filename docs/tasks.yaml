@@ -3247,7 +3247,8 @@ tasks:
   - id: T-202
     milestone: M3
     title: "C18 incremental clustering of unknown emissions (the same thing I saw before) linked to inventory emitter identity"
-    status: in-progress
+    status: review
+    commit: 9ef4e42
     priority: normal
     deps: [T-201]
     parallel_group: M3B
