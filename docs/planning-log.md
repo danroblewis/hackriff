@@ -2666,3 +2666,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Its brief starts from the board audit:** T-218 already built `hk_model::signature` and migration 0009, so it must build matching ON those types rather than redefining them, and report anything it had to change. That is the T-212/T-203 staleness lesson applied before the fact rather than after.
   - **Two invariants it must enforce with tests, not comments:** a match is EVIDENCE and can never set an emitter's identity, lifecycle or family; and too few fields must yield a ranked partial rather than a confident identity, however well those fields agree. The signature database is a suggestion source, never truth - the same rule as band plans.
   - **Cap full again:** T-201, T-234, T-237, plus the running T-236 check.
+- **B0.561 Full check green after the T-236 merge (f5e9896).** Lint clean; 1565/1565 tests; acceptance 31/31; 41 GB free.
+  - **Merging T-235** (classifier floors met) with its own check.
