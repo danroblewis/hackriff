@@ -3780,6 +3780,7 @@ tasks:
     effort: medium
     core_interface: false
     corroborating_evidence: "full check after the T-231 merge (2026-09-15): scheduler_bandit_e2e::bandit_without_overdrive_verifies_and_bans_nothing FAILED on try 1 and passed on its nextest retry, in the same run where the unit suite was otherwise 1561/1561. That is the pin masking this exact class, and it is why the task must DELETE the override rather than rely on it."
+    second_defect_2026_09_15: "A SEPARATE, deterministic test bug in the same file, handed to T-234 because it owns it: bandit_on_attaches_dwells_to_the_bursty_emitter_keeps_the_floor_and_logs_reasons panics at scheduler_bandit_e2e.rs:269 with -a bandit dwell with reason Verification { test: GainStep }-. The match arm accepts only Novelty/Explore/BeaconDue and panics on anything else, but Verification is a legitimate bandit dwell reason (that run logged verifications_started 1, passed 1, failed 1). It failed on BOTH tries, so the retry did not mask it - further evidence for deleting the override. It must be reported separately from the dwell-timing work so the two causes stay distinguishable."
 
   - id: T-235
     milestone: M3
