@@ -2619,3 +2619,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-212 launched** (Sonnet): the band-plan prior table only - its entry now says explicitly not to reimplement `fuse()`, which T-218 delivered.
   - **T-234 deliberately NOT launched:** it edits the M2 scene test, and the M2 verification run must happen against unmodified code first so there is a clean comparison point.
   - **M2 verification running now** - the first genuinely quiet window since the T-218 merge.
+- **B0.551 M2 VERIFIED: acceptance_m2 8/8 in 70 s at load 18.** The flag carried since the T-218 merge is cleared - M2 remains closed, and the earlier 7/8 was scheduler starvation as diagnosed, not a regression.
+  - **The evidence is stronger than a bare pass:** it FAILED at load 22-38 with six CPU burners running and PASSED at load 18 without them. That is the starvation story confirmed by contrast, rather than assumed from a single clean run.
+  - **T-234 still stands** and is now only waiting on a slot: the bandit-dwell assertion should measure the sample clock, not wall time, so this cannot make the M2 gate unverifiable again. My task-specific reason for holding it (wanting the verification to run against unmodified code) is now satisfied.
+  - **Running:** T-231 (mock-device truthfulness), T-235 (last M3 exit-gate blocker), T-236 (shutdown joins connection threads), T-212 (band-plan priors).
