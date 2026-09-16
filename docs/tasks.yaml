@@ -3148,7 +3148,8 @@ tasks:
   - id: T-196
     milestone: M2-hardening
     title: "Occupancy span_stats FCO for a channel depends on the query band: 433.475 MHz lay inside both bands yet reported 0.073 (old band 433.2375-433.6875) vs 0.296 (fixed band 433.275-433.725), truth 0.258"
-    status: in-progress
+    status: done
+    commit: dcee6d0
     priority: normal
     deps: [T-124]
     parallel_group: CONTEXT
