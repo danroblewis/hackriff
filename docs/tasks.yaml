@@ -5584,7 +5584,7 @@ tasks:
     milestone: M3
     title: 'Image/harmonic/IMD attribution must read device_id: a fundamental seen on one front end can
       never explain an artifact seen on another'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-219
