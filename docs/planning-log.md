@@ -2465,3 +2465,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **CORRECTION to B0.510 and to what the user was told:** the 100.3 MHz image attribution is NOT trustworthy under these rules, and the subcarrier hypothesis the user raised is precisely what the broken guard would have hidden. The fix round must re-decide that case and may honestly answer "not attributed, insufficient evidence".
   - **MED 3/4:** DEFERS_SQL ignores merge resolution and liveness; the survey report and dataset export default to Shown, so suppression could silently remove evidence from reports and training data.
   - **Verified OK:** append-only triggers, M2 alarm coverage (alarms read an unfiltered path), migration 0008 numbering.
+- **B0.514 T-226 merged (a8ade21); one test failed in its check and it is NOT a T-226 regression.**
+  - **Evidence:** `one_recipe_follows_a_channel_net_...` passes 3/3 alone (1.08 s), and T-226 changed only `hk-demod/src/refine.rs` and `chains/analog.rs`, neither of which this synthetic channel-net test exercises - it runs a test-only burst decoder.
+  - **Real weakness:** the assertion requires the deduplicated copy of a message sent on two channels to be the STRONG one, but the merge window is arrival-ordered, so a delayed strong frame lets the weak copy win and the message is tagged with the wrong channel.
+  - **Pinned** heavy-serial with one retry, reason recorded in .config/nextest.toml, and **filed T-227** to decide dedupe by sample index rather than arrival, then remove the pin.
+  - **Acceptance 29/29 and acceptance_m2 8/8 passed** in that same run; the unit suite aborted at 1090/1455, so it is being rerun.
+  - **Pin count note:** this is the twelfth load-sensitive pin. The pattern is consistent - wall-clock and arrival-order assertions that only hold on a quiet machine - and the standing offer to the user is to consolidate T-182, T-197, T-225 and now T-227 into one task.
