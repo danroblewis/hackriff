@@ -4788,6 +4788,14 @@ fn attention_sites_baselines_candidates_and_weights_answer_as_documented() {
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["site"].as_str(), Some(id.as_str()), "{v}");
     assert!(is_array(&v["baselines"]) && v["slot"].is_u64(), "{v}");
+    // T-333: every listed baseline discloses the bias-tee cohort its levels belong to, always as
+    // one of the three states — never omitted, so "unknown" reads as a cohort, not as a gap.
+    for b in v["baselines"].as_array().into_iter().flatten() {
+        assert!(
+            matches!(b["bias_tee"].as_str(), Some("unknown" | "off" | "on")),
+            "{b}"
+        );
+    }
     let (st, v) = get(
         addr,
         "/api/baselines/slots?f_lo=100000000&f_hi=101000000&resolution=all-hours",

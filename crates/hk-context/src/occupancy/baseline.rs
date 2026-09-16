@@ -80,13 +80,18 @@
 //!
 //! # Keys
 //! A new calibration is a new `BaselineKey` ([`Baselines::observe`]): it starts immature, so a cal
-//! step is never novelty. `Mobile` and `Unassigned` sites never create or update a baseline.
+//! step is never novelty. `Mobile` and `Unassigned` sites never create or update a baseline. The
+//! same holds for the receive chain (T-303) and its bias-tee state (T-333): folds measured under
+//! different states are **declined the comparison** — different keys, each maturing on its own —
+//! because a disclosed-but-pooled comparison would still mask a real rise. `BiasTee::Unknown` is
+//! its own cohort, never a synonym for `Off`.
 //!
 //! All times are the sample clock (ADR-0012 §0).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, PoisonError};
 
+use hk_model::BiasTee;
 use hk_model::attention::baseline::{
     AdaptationPolicy, BaselineKey, BaselineResolution, CalKey, ChainKey, HourOfWeek,
     MATURITY_MIN_OBSERVED_S, Maturity, SiteKey, SlotStats,
@@ -1522,17 +1527,33 @@ impl Baselines {
         Ok(())
     }
 
-    /// The key a fold under `site`/`cal`/`chain` goes to; `None` for sites that do not accrue.
+    /// The key a fold under `site`/`cal`/`chain`/`bias` goes to; `None` for sites that do not
+    /// accrue.
     ///
     /// T-303: the receive chain is part of the key because a noise floor belongs to one front end.
     /// Two uncalibrated devices at one site share a [`CalKey::Uncalibrated`], so without the chain
     /// their floors average and novelty scores the mixture.
-    pub fn key(&self, site: SiteKey, cal: CalKey, chain: ChainKey) -> Option<BaselineKey> {
+    ///
+    /// T-333: so is the antenna-port bias-tee state, which completes that chain — it powers an
+    /// external LNA, so the floor and the gain structure move the instant the DC arrives. Folds
+    /// measured under different states therefore go to **different keys and are never compared**,
+    /// which is the only answer to the failure T-303 measured: pooling two incomparable cohorts
+    /// masks a real rise (1.000 against its own cohort, 0.000 against the pooled one), and a
+    /// comparison that is disclosed but still pooled still masks. Compared exactly:
+    /// [`BiasTee::Unknown`] is its own cohort and never pools with `Off`.
+    pub fn key(
+        &self,
+        site: SiteKey,
+        cal: CalKey,
+        chain: ChainKey,
+        bias: BiasTee,
+    ) -> Option<BaselineKey> {
         match site {
             SiteKey::Site(id) => Some(BaselineKey {
                 site: id,
                 cal,
                 chain,
+                bias_tee: bias,
                 scheme: self.scheme,
                 cell_factor: self.cell_factor,
             }),
@@ -1558,17 +1579,19 @@ impl Baselines {
         Ok(self.engines.get_mut(&key).expect("inserted"))
     }
 
-    /// Folds `obs` under `site`, `cal` and the receive `chain`. Mobile/unassigned: nothing accrues
-    /// and novelty is 0 (immature). A store read error is returned (the fold is not applied).
+    /// Folds `obs` under `site`, `cal`, the receive `chain` and its bias-tee state `bias` (T-333).
+    /// Mobile/unassigned: nothing accrues and novelty is 0 (immature). A store read error is
+    /// returned (the fold is not applied).
     pub fn observe(
         &mut self,
         site: SiteKey,
         utc_offset_min: i16,
         cal: CalKey,
         chain: ChainKey,
+        bias: BiasTee,
         obs: &IntervalObservation,
     ) -> Result<FoldOutcome, BaselineStoreError> {
-        let Some(key) = self.key(site, cal, chain) else {
+        let Some(key) = self.key(site, cal, chain, bias) else {
             return Ok(FoldOutcome::none(
                 obs,
                 Maturity::Immature { observed_s: 0.0 },
@@ -1887,6 +1910,7 @@ mod tests {
             site: SiteId::new(),
             cal: CalKey::Uncalibrated,
             chain: ChainKey::Unknown,
+            bias_tee: BiasTee::Unknown,
             scheme: 1,
             cell_factor: 16,
         }
@@ -2103,8 +2127,15 @@ mod tests {
         let ch = channel(0);
         for q in 0..(30 * 4) {
             let o = interval(ch, f64::from(q) / 4.0, 0.1, 10.0, &mut rng);
-            b.observe(site, 0, CalKey::Uncalibrated, ChainKey::Unknown, &o)
-                .unwrap();
+            b.observe(
+                site,
+                0,
+                CalKey::Uncalibrated,
+                ChainKey::Unknown,
+                BiasTee::Unknown,
+                &o,
+            )
+            .unwrap();
         }
         // New calibration: levels shift by +20 dB (dBFS → dBm-ish offset) and occupancy looks
         // different under the new threshold.
@@ -2112,7 +2143,9 @@ mod tests {
         for q in 0..8 {
             let mut o = interval(ch, 30.0 + f64::from(q) / 4.0, 0.5, 10.0, &mut rng);
             o.level_db = o.level_db.map(|l| l + 20.0);
-            let out = b.observe(site, 0, cal, ChainKey::Unknown, &o).unwrap();
+            let out = b
+                .observe(site, 0, cal, ChainKey::Unknown, BiasTee::Unknown, &o)
+                .unwrap();
             assert_eq!(out.novelty.novelty, 0.0);
             assert!(!out.novelty.maturity.is_mature());
             assert!(out.change_point.is_none());
@@ -2122,7 +2155,12 @@ mod tests {
         let mut o = interval(ch, 32.0, 0.5, 10.0, &mut rng);
         o.level_db = o.level_db.map(|l| l + 20.0);
         let old = b
-            .key(site, CalKey::Uncalibrated, ChainKey::Unknown)
+            .key(
+                site,
+                CalKey::Uncalibrated,
+                ChainKey::Unknown,
+                BiasTee::Unknown,
+            )
             .unwrap();
         let e = b.engines().find(|e| e.state.key == old).unwrap();
         assert!(e.novelty_of(&o).novelty > 0.9);
@@ -2171,25 +2209,37 @@ mod tests {
             let h = f64::from(q) / 4.0;
             let (oa, ob) = (quiet(h, floor_a, &mut rng), quiet(h, floor_b, &mut rng));
             // Keyed by chain: each front end folds into its own baseline.
-            worst_a = worst_a.max(split.observe(site, 0, cal, a, &oa).unwrap().novelty.novelty);
-            worst_b = worst_b.max(split.observe(site, 0, cal, b, &ob).unwrap().novelty.novelty);
+            worst_a = worst_a.max(
+                split
+                    .observe(site, 0, cal, a, BiasTee::Unknown, &oa)
+                    .unwrap()
+                    .novelty
+                    .novelty,
+            );
+            worst_b = worst_b.max(
+                split
+                    .observe(site, 0, cal, b, BiasTee::Unknown, &ob)
+                    .unwrap()
+                    .novelty
+                    .novelty,
+            );
             // Control: the pre-T-303 key, where both chains share one baseline.
             pooled
-                .observe(site, 0, cal, ChainKey::Unknown, &oa)
+                .observe(site, 0, cal, ChainKey::Unknown, BiasTee::Unknown, &oa)
                 .unwrap();
             pooled
-                .observe(site, 0, cal, ChainKey::Unknown, &ob)
+                .observe(site, 0, cal, ChainKey::Unknown, BiasTee::Unknown, &ob)
                 .unwrap();
         }
 
         // (a) The baselines did not mix: one per chain, each holding its own chain's floor.
         assert_eq!(split.engines().count(), 2, "one baseline per receive chain");
         assert_ne!(
-            split.key(site, cal, a).unwrap(),
-            split.key(site, cal, b).unwrap()
+            split.key(site, cal, a, BiasTee::Unknown).unwrap(),
+            split.key(site, cal, b, BiasTee::Unknown).unwrap()
         );
         let reference_mean = |bl: &Baselines, chain: ChainKey| {
-            let key = bl.key(site, cal, chain).unwrap();
+            let key = bl.key(site, cal, chain, BiasTee::Unknown).unwrap();
             let e = bl.engines().find(|e| e.state.key == key).expect("engine");
             let sub = e.state.subjects.get(&ch).expect("subject");
             // Index 3 of `BaselineResolution::FINEST_FIRST` is the all-hours pool.
@@ -2231,9 +2281,11 @@ mod tests {
         // distant floor is in the same pool.
         let mut risen = quiet(f64::from(DAYS * 24) + 1.0, floor_a + RISE_DB, &mut rng);
         risen.max_db = Some(floor_a + RISE_DB + 3.0);
-        let split_out = split.observe(site, 0, cal, a, &risen).unwrap();
+        let split_out = split
+            .observe(site, 0, cal, a, BiasTee::Unknown, &risen)
+            .unwrap();
         let pooled_out = pooled
-            .observe(site, 0, cal, ChainKey::Unknown, &risen)
+            .observe(site, 0, cal, ChainKey::Unknown, BiasTee::Unknown, &risen)
             .unwrap();
         println!(
             "T-303 control: a {RISE_DB} dB rise on chain A scores {:.3} (z {:?}) against its own \
@@ -2255,6 +2307,230 @@ mod tests {
         );
     }
 
+    /// T-333: a capture taken with an active antenna powered is not comparable with one taken
+    /// without it, so the two never share a baseline — and `Unknown` is a third cohort, not `Off`.
+    ///
+    /// The bias tee powers an **external LNA** on the antenna port, so the floor and the gain
+    /// structure move the instant the DC arrives; the states are genuinely different receive
+    /// chains, which is why T-331 keyed the floor tracker's context on the same fact. Hidden truth:
+    /// a device alternating a powered-LNA pass with an unpowered one, nothing changing on either
+    /// side for 30 days, and then one real 12 dB rise while the bias tee is **off**.
+    ///
+    /// Both halves, because either alone passes on a broken implementation:
+    /// - **Property:** the states do not pool, each cohort's reference is its own floor, and no
+    ///   quiet fold scores any novelty. The **pooled key folds alongside as a live control** — and
+    ///   it is not a hypothetical: `BiasTee::Unknown` is what every fold carries today, so the
+    ///   control is the pre-T-333 system, and the bug stays demonstrable rather than merely absent.
+    /// - **Control:** a run whose bias-tee state never changes stays one baseline, **matures**, and
+    ///   still scores the same 12 dB rise as novelty, so the fix cannot pass by splitting on
+    ///   everything or by having broken baselines.
+    ///
+    /// And the masking number itself, which is what makes the case: the rise scores ~1.000 against
+    /// its own cohort and ~0.000 against the pooled one. Pooling two incomparable sources does not
+    /// mainly cause false alarms — it causes a real rise to be **invisible** (T-303).
+    #[test]
+    fn baseline_bias_tee_states_do_not_pool_and_unknown_is_its_own_cohort() {
+        const DAYS: u32 = 30;
+        const RISE_DB: f64 = 12.0;
+        // Hidden generator parameters: an external LNA worth 25 dB on the antenna port.
+        let (floor_off, floor_on) = (-100.0, -75.0);
+        let site = SiteKey::Site(SiteId::new());
+        let ch = channel(0);
+        let cal = CalKey::Uncalibrated;
+        let chain = ChainKey::of_device("hackrf:one");
+        let quiet = |hours: f64, floor: f64, rng: &mut Rng| IntervalObservation {
+            subject: ch,
+            t: at(hours),
+            gain: 0,
+            level_db: Some(floor + 0.5 * rng.normal()),
+            max_db: Some(floor + 3.0),
+            occupied_weight_s: 0.0,
+            weight_s: 900.0,
+            observed_s: 900.0,
+            n_eff: 12.0,
+            suspect_fraction: 0.0,
+            provenance_explained: false,
+        };
+
+        let mut rng = Rng(0x333);
+        let mut split = Baselines::new(BaselineConfig::default(), 1, 16, None);
+        let mut pooled = Baselines::new(BaselineConfig::default(), 1, 16, None);
+        let mut steady = Baselines::new(BaselineConfig::default(), 1, 16, None);
+        let (mut worst_off, mut worst_on, mut worst_steady) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for q in 0..(DAYS * 24 * 4) {
+            let h = f64::from(q) / 4.0;
+            let powered = q % 2 == 1;
+            let (bias, floor) = if powered {
+                (BiasTee::On, floor_on)
+            } else {
+                (BiasTee::Off, floor_off)
+            };
+            let o = quiet(h, floor, &mut rng);
+            // Keyed by bias-tee state: each state folds into its own baseline.
+            let n = split
+                .observe(site, 0, cal, chain, bias, &o)
+                .unwrap()
+                .novelty
+                .novelty;
+            *(if powered {
+                &mut worst_on
+            } else {
+                &mut worst_off
+            }) = n.max(if powered { worst_on } else { worst_off });
+            // Live control: the pre-T-333 key. Every fold carries `Unknown`, which is exactly what
+            // the system does today, so both states land in one baseline.
+            pooled
+                .observe(site, 0, cal, chain, BiasTee::Unknown, &o)
+                .unwrap();
+            // Control half: one state throughout, one floor — an ordinary, healthy run.
+            worst_steady = worst_steady.max(
+                steady
+                    .observe(
+                        site,
+                        0,
+                        cal,
+                        chain,
+                        BiasTee::Off,
+                        &quiet(h, floor_off, &mut rng),
+                    )
+                    .unwrap()
+                    .novelty
+                    .novelty,
+            );
+        }
+
+        // (a) The cohorts did not mix: one baseline per state, each holding its own floor.
+        assert_eq!(
+            split.engines().count(),
+            2,
+            "one baseline per bias-tee state"
+        );
+        assert_ne!(
+            split.key(site, cal, chain, BiasTee::Off).unwrap(),
+            split.key(site, cal, chain, BiasTee::On).unwrap()
+        );
+        let reference_mean = |bl: &Baselines, bias: BiasTee| {
+            let key = bl.key(site, cal, chain, bias).unwrap();
+            let e = bl.engines().find(|e| e.state.key == key).expect("engine");
+            let sub = e.state.subjects.get(&ch).expect("subject");
+            // Index 3 of `BaselineResolution::FINEST_FIRST` is the all-hours pool.
+            let gi = gain_index(sub, 0, LevelClass::Idle).expect("an idle level series");
+            let (level, _) = pools(sub, e.slot(at(0.0)), Some(gi), BaselineCopy::Reference);
+            (level[3].mean_db().expect("a level"), level[3].std_db())
+        };
+        let (mean_off, sd_off) = reference_mean(&split, BiasTee::Off);
+        let (mean_on, sd_on) = reference_mean(&split, BiasTee::On);
+        let (mean_pooled, sd_pooled) = reference_mean(&pooled, BiasTee::Unknown);
+        println!(
+            "T-333 bias tee off/on at one site: split means {mean_off:.2} / {mean_on:.2} dB (σ \
+             {:.2} / {:.2}) against floors {floor_off} / {floor_on}; pooled mean \
+             {mean_pooled:.2} dB (σ {:.2}); worst quiet novelty off {worst_off:.3}, on \
+             {worst_on:.3}",
+            sd_off.unwrap_or(0.0),
+            sd_on.unwrap_or(0.0),
+            sd_pooled.unwrap_or(0.0),
+        );
+        assert!(
+            (mean_off - floor_off).abs() < 1.0,
+            "the unpowered floor: {mean_off}"
+        );
+        assert!(
+            (mean_on - floor_on).abs() < 1.0,
+            "the powered floor: {mean_on}"
+        );
+
+        // (b) Neither cohort raised novelty from the other's floor. Nothing changed on either side
+        // for 30 days, so no fold may score any novelty at all.
+        assert_eq!(
+            worst_off, 0.0,
+            "the unpowered cohort scored the LNA's floor"
+        );
+        assert_eq!(worst_on, 0.0, "the powered cohort scored the passive floor");
+
+        // The control's reference is the mixture, which is the bug: far from both floors, its
+        // spread the 25 dB step rather than the 0.5 dB of either state.
+        assert_eq!(pooled.engines().count(), 1, "one shared baseline");
+        assert!(
+            (mean_pooled - floor_off).abs() > 5.0 && (mean_pooled - floor_on).abs() > 5.0,
+            "pooled mean {mean_pooled} is neither floor"
+        );
+        assert!(sd_pooled.unwrap_or(0.0) > 5.0, "pooled spread is the step");
+
+        // (c) The masking number. A real 12 dB rise while the bias tee is off is plain novelty
+        // against the unpowered cohort's own floor, and disappears into the pooled reference —
+        // whose mean the risen level sits *below*. Nothing errors; the alarm simply never comes.
+        let t_after = f64::from(DAYS * 24) + 1.0;
+        let mut risen = quiet(t_after, floor_off + RISE_DB, &mut rng);
+        risen.max_db = Some(floor_off + RISE_DB + 3.0);
+        let split_out = split
+            .observe(site, 0, cal, chain, BiasTee::Off, &risen)
+            .unwrap();
+        let pooled_out = pooled
+            .observe(site, 0, cal, chain, BiasTee::Unknown, &risen)
+            .unwrap();
+        let steady_out = steady
+            .observe(site, 0, cal, chain, BiasTee::Off, &risen)
+            .unwrap();
+        println!(
+            "T-333 masking: a {RISE_DB} dB rise with the bias tee off scores {:.3} (z {:?}) \
+             against its own cohort and {:.3} (z {:?}) against the pooled one; the steady control \
+             scores {:.3}",
+            split_out.novelty.novelty,
+            split_out.novelty.level_z,
+            pooled_out.novelty.novelty,
+            pooled_out.novelty.level_z,
+            steady_out.novelty.novelty,
+        );
+        assert!(
+            split_out.novelty.novelty >= REFERENCE_LEARN_MAX_NOVELTY,
+            "the rise must still be novel against its own cohort: {:?}",
+            split_out.novelty
+        );
+        assert!(
+            pooled_out.novelty.novelty < 0.1,
+            "the pooled baseline masks it: {:?}",
+            pooled_out.novelty
+        );
+
+        // (d) Control half: a run whose bias-tee state never changes is one baseline, it **matures**,
+        // no quiet fold is novel, and the same rise is still detected. So the fix cannot pass by
+        // splitting on everything or by leaving baselines that never learn anything.
+        assert_eq!(steady.engines().count(), 1, "one state, one baseline");
+        assert_eq!(worst_steady, 0.0, "a steady quiet run scored novelty");
+        assert!(
+            steady_out.novelty.maturity.is_mature(),
+            "the steady baseline must mature: {:?}",
+            steady_out.novelty.maturity
+        );
+        assert!(
+            steady_out.novelty.novelty >= REFERENCE_LEARN_MAX_NOVELTY,
+            "the steady control must still see the rise: {:?}",
+            steady_out.novelty
+        );
+
+        // (e) `Unknown` is its own cohort, not a synonym for `Off`. The pooled run's 30 days of
+        // `Unknown` folds built exactly one baseline and it matured, so unknown-with-unknown is a
+        // working, comparable cohort — nothing is refused for being unrecorded. It simply never
+        // joins a known state: off → on → unknown is three keys, and the second `off` is the first.
+        let k = |b| split.key(site, cal, chain, b).unwrap();
+        let states = [BiasTee::Off, BiasTee::On, BiasTee::Unknown, BiasTee::Off];
+        let distinct: BTreeSet<_> = states.iter().map(|b| k(*b)).collect();
+        assert_eq!(distinct.len(), 3, "unknown never joins off or on");
+        assert!(k(BiasTee::Unknown).comparable_with(&k(BiasTee::Unknown)));
+        assert!(!k(BiasTee::Unknown).comparable_with(&k(BiasTee::Off)));
+        assert_eq!(
+            k(BiasTee::Unknown).incomparable_because(&k(BiasTee::On)),
+            Some("different bias-tee state")
+        );
+        // The pooled engine is the `Unknown` cohort, and it matured: `Unknown` folds are compared
+        // with each other normally. Refusing every unknown fold would refuse every fold there is.
+        assert!(
+            pooled_out.novelty.maturity.is_mature(),
+            "unknown-with-unknown must still compare: {:?}",
+            pooled_out.novelty.maturity
+        );
+    }
+
     #[test]
     fn baseline_moving_or_unassigned_site_builds_nothing() {
         let dir = std::env::temp_dir().join(format!("hk-t119-mobile-{}", SiteId::new()));
@@ -2265,7 +2541,14 @@ mod tests {
             let o = interval(channel(2), f64::from(q) / 4.0, 0.9, 20.0, &mut rng);
             for site in [SiteKey::Mobile, SiteKey::Unassigned] {
                 let out = b
-                    .observe(site, 0, CalKey::Uncalibrated, ChainKey::Unknown, &o)
+                    .observe(
+                        site,
+                        0,
+                        CalKey::Uncalibrated,
+                        ChainKey::Unknown,
+                        BiasTee::Unknown,
+                        &o,
+                    )
                     .unwrap();
                 assert!(!out.accrued && out.novelty.novelty == 0.0);
             }
@@ -2281,6 +2564,7 @@ mod tests {
             0,
             CalKey::Uncalibrated,
             ChainKey::Unknown,
+            BiasTee::Unknown,
             &o,
         )
         .unwrap();
@@ -3029,6 +3313,7 @@ mod tests {
                 0,
                 CalKey::Uncalibrated,
                 ChainKey::Unknown,
+                BiasTee::Unknown,
                 &occ_fold(channel(0), 0.0, 0.2, &mut rng),
             )
             .unwrap();
@@ -3049,6 +3334,7 @@ mod tests {
                         0,
                         CalKey::Uncalibrated,
                         ChainKey::Unknown,
+                        BiasTee::Unknown,
                         &o,
                     )
                     .unwrap();
@@ -3098,6 +3384,7 @@ mod tests {
                 0,
                 CalKey::Uncalibrated,
                 ChainKey::Unknown,
+                BiasTee::Unknown,
                 &occ_fold(channel(c), 0.0, 0.2, &mut rng),
             )
             .unwrap();
@@ -3125,6 +3412,7 @@ mod tests {
                 0,
                 CalKey::Uncalibrated,
                 ChainKey::Unknown,
+                BiasTee::Unknown,
                 &occ_fold(channel(0), 0.0, 0.2, &mut rng),
             )
             .unwrap();
@@ -3159,6 +3447,7 @@ mod tests {
                 0,
                 CalKey::Uncalibrated,
                 ChainKey::Unknown,
+                BiasTee::Unknown,
                 &occ_fold(channel(1), 2.0, 0.2, &mut rng),
             )
             .unwrap();
@@ -3185,20 +3474,41 @@ mod tests {
             let hours = f64::from(q) / 4.0;
             let row = leveled_row(hours, 0.0, -100.0, 2.0 + 0.3 * ((q % 5) as f64 - 2.0), 25.0);
             let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
-            b.observe(site, 0, CalKey::Uncalibrated, ChainKey::Unknown, &o)
-                .unwrap();
+            b.observe(
+                site,
+                0,
+                CalKey::Uncalibrated,
+                ChainKey::Unknown,
+                BiasTee::Unknown,
+                &o,
+            )
+            .unwrap();
         }
         let loaded = b.memory_bytes();
         b.set_memory_cap(Some(loaded));
         // An emitter 25 dB above the floor: a new occupied-level series, so the fold would grow.
         let (_, _, o) = from_occupancy_stat(&leveled_row(72.0, 0.8, -100.0, 2.0, 25.0), 0).unwrap();
         let out = b
-            .observe(site, 0, CalKey::Uncalibrated, ChainKey::Unknown, &o)
+            .observe(
+                site,
+                0,
+                CalKey::Uncalibrated,
+                ChainKey::Unknown,
+                BiasTee::Unknown,
+                &o,
+            )
             .unwrap();
         let before_learning = b.memory_bytes();
         b.set_memory_cap(None);
         let control = b
-            .observe(site, 0, CalKey::Uncalibrated, ChainKey::Unknown, &o)
+            .observe(
+                site,
+                0,
+                CalKey::Uncalibrated,
+                ChainKey::Unknown,
+                BiasTee::Unknown,
+                &o,
+            )
             .unwrap();
         println!(
             "T-132 refused fold: novelty {:.3} (level z {:?}), refused {}, memory {loaded} → \
@@ -3245,8 +3555,15 @@ mod tests {
         {
             // On disk: one fold (900 s).
             let mut b = Baselines::new(BaselineConfig::default(), 1, 16, Some(store.clone()));
-            b.observe(a, 0, CalKey::Uncalibrated, ChainKey::Unknown, &fold(0.0))
-                .unwrap();
+            b.observe(
+                a,
+                0,
+                CalKey::Uncalibrated,
+                ChainKey::Unknown,
+                BiasTee::Unknown,
+                &fold(0.0),
+            )
+            .unwrap();
             b.flush(at(0.5), true).unwrap();
         }
         let (f1, f2) = (fold(1.0), fold(2.0));
@@ -3264,11 +3581,25 @@ mod tests {
                 // While this (stale) copy is in flight: a fold loads and grows the key, then the
                 // cap unloads it (saving 1800 s).
                 let mut b = shared.lock().unwrap();
-                b.observe(a, 0, CalKey::Uncalibrated, ChainKey::Unknown, &f1)
-                    .unwrap();
+                b.observe(
+                    a,
+                    0,
+                    CalKey::Uncalibrated,
+                    ChainKey::Unknown,
+                    BiasTee::Unknown,
+                    &f1,
+                )
+                .unwrap();
                 b.set_memory_cap(Some(1));
                 let _ = b
-                    .observe(other, 0, CalKey::Uncalibrated, ChainKey::Unknown, &f2)
+                    .observe(
+                        other,
+                        0,
+                        CalKey::Uncalibrated,
+                        ChainKey::Unknown,
+                        BiasTee::Unknown,
+                        &f2,
+                    )
                     .unwrap();
                 b.set_memory_cap(None);
                 assert_eq!(observed_of(&b), None, "unloaded");
@@ -3280,8 +3611,15 @@ mod tests {
         // A later fold marks it dirty and it is written back.
         {
             let mut b = shared.lock().unwrap();
-            b.observe(a, 0, CalKey::Uncalibrated, ChainKey::Unknown, &fold(3.0))
-                .unwrap();
+            b.observe(
+                a,
+                0,
+                CalKey::Uncalibrated,
+                ChainKey::Unknown,
+                BiasTee::Unknown,
+                &fold(3.0),
+            )
+            .unwrap();
             b.flush(at(3.5), true).unwrap();
         }
         let mut fresh = Baselines::new(BaselineConfig::default(), 1, 16, Some(store));
@@ -3319,6 +3657,7 @@ mod tests {
             0,
             CalKey::Uncalibrated,
             ChainKey::Unknown,
+            BiasTee::Unknown,
             &fold,
         )
         .unwrap();
@@ -3335,6 +3674,7 @@ mod tests {
             0,
             CalKey::Uncalibrated,
             ChainKey::Unknown,
+            BiasTee::Unknown,
             &fold,
         )
         .unwrap();
@@ -3345,6 +3685,7 @@ mod tests {
             0,
             CalKey::Uncalibrated,
             ChainKey::Unknown,
+            BiasTee::Unknown,
             &fold,
         )
         .unwrap();
@@ -3353,6 +3694,7 @@ mod tests {
             0,
             CalKey::Uncalibrated,
             ChainKey::Unknown,
+            BiasTee::Unknown,
             &at_h(fold, 1.0),
         )
         .unwrap();
@@ -3369,6 +3711,7 @@ mod tests {
             0,
             CalKey::Uncalibrated,
             ChainKey::Unknown,
+            BiasTee::Unknown,
             &at_h(fold, 2.0),
         )
         .unwrap();

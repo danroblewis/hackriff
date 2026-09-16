@@ -410,6 +410,7 @@ mod tests {
                 site: crate::ids::SiteId::new(),
                 cal: crate::attention::baseline::CalKey::Uncalibrated,
                 chain: crate::attention::baseline::ChainKey::Unknown,
+                bias_tee: crate::BiasTee::Unknown,
                 scheme: 1,
                 cell_factor: 16,
             }),

@@ -50,7 +50,13 @@ pub struct Tune {
 ///
 /// There is therefore no `bool` conversion. [`BiasTee::powered`] returns `Option<bool>` so the
 /// unknown case has to be handled at every site that cares.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `Ord` is declaration order (`Unknown` < `Off` < `On`) and carries **no meaning**: it exists so
+/// the state can sit in a total ordering key — [`crate::attention::baseline::BaselineKey`], a
+/// `BTreeMap` key and an on-disk path (T-333). Comparisons of state are equality only.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum BiasTee {
     /// The source cannot say: a replayed recording or synthetic data (the file records no
