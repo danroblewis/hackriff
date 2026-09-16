@@ -89,7 +89,6 @@ pub(crate) fn run(
     product: Arc<Mutex<FloorProduct>>,
     attention: Option<Arc<AttentionService>>,
 ) -> anyhow::Result<()> {
-    let source = source_key(&shared.cfg.device_id);
     let mut welch = WelchConfig::new(shared.fft_len);
     welch.holds = false;
     welch.spectral_kurtosis = false;
@@ -120,8 +119,11 @@ pub(crate) fn run(
     let mut on_frame = |frame: &SpectrumFrame| {
         let floor = tracker.update(frame, |_| {});
         let site = frame_site(attention.as_deref(), frame.t.host_time);
+        // T-304: the source key comes from each frame's own provenance (the device that actually
+        // produced it), not the run config's device_id — a replay's segments (or, in future, a
+        // multi-source run) can carry blocks from more than one device in one run.
         let origin = FrameOrigin {
-            source,
+            source: source_key(&frame.provenance.device_id),
             site: Some(site),
         };
         let r = queue.ingest_from(&product, frame, floor, origin);

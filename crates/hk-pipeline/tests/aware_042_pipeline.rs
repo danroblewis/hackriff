@@ -26,7 +26,25 @@ fn aware_042_occupancy_window_tracks_per_channel_and_history_query() {
     let fs = fx.sample_rate;
     let dir = TempDir::new("aware042");
     let (cfg, replay) = replay_config(&dir.0, &fx.meta_path, json!({}), hk_core::Pacing::Unpaced);
-    let device_id = cfg.device_id.clone();
+    // T-304: history frames are stamped with the device that produced them (each block's own
+    // provenance), not `PipelineConfig::device_id` — this fixture's single capture carries no
+    // per-capture `hackriff:provenance` (`sigmf_replay.rs`'s fallback chain), so its blocks'
+    // provenance is the recording's global one, per `hkpy.synth.scene`'s `DEVICE_ID`.
+    let device_id = fx.meta.captures[0]
+        .provenance
+        .as_ref()
+        .or(fx.meta.global.provenance.as_ref())
+        .map(|p| p.device_id.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "sigmf:{}",
+                fx.meta
+                    .global
+                    .hw
+                    .clone()
+                    .unwrap_or_else(|| "unknown".into())
+            )
+        });
     let handle = start(cfg, replay);
     let product = handle.floor_product();
     let s = handle.wait().unwrap();
