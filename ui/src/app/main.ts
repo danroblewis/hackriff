@@ -52,6 +52,15 @@ function main() {
     import("./decode").then((m) => mountArea(m.mounts, ctx));
   }, { immediate: true });
 
+  // History surface (T-264): mounted on first switch to History mode, like Decode — the durable
+  // catalogue is a deliberate visit, not part of the initial Explore screen.
+  let historyLoaded = false;
+  store.select((s) => s.mode, (mode) => {
+    if (mode !== "history" || historyLoaded) return;
+    historyLoaded = true;
+    import("./history").then((m) => mountArea(m.mounts, ctx));
+  }, { immediate: true });
+
   // Review drawer: mounted on first open.
   let reviewLoaded = false;
   store.select((s) => s.review.open, (open) => {

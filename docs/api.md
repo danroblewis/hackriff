@@ -28,6 +28,8 @@
 | GET | `/api/floor` | token | `f_lo`, `f_hi`, `t0`, `t1`, `max_steps`? (default 1024, max 20 000) | T-021 calibrated floor-vs-time series (below) | 400, 404 no floor product |
 | GET | `/api/inventory` | token | see below | T-018/T-078 signal inventory, one page (below) | 400 invalid filter, 404 no inventory store |
 | GET | `/api/inventory/{id}` | token | – | One inventory entry (T-078, same shape as a list row) | 404 not_found, 503 unavailable |
+| GET | `/api/events` | token | `f_lo`, `f_hi` (Hz), `t0`, `t1` (Unix s) — **required**; every `/api/inventory` filter (`state`, `status`, `tag`, `scheme`, `family`, `relations`); `limit`? (default 200, max 2000), `cursor`? (event offset, ≤ 1 000 000) | T-264 the durable catalogue of events in this region over this period, with coverage (below) | 400 invalid region/filter/cursor, 404 no inventory store |
+| GET | `/api/inventory/{id}/presence` | token | `t0`, `t1`? (Unix s, together) | T-264 one emitter's presence track: every interval with its own timespan (below) | 400 invalid window, 404 not_found, 503 unavailable |
 | GET | `/api/analysis/strongest` | token | `f_lo`, `f_hi` (Hz), `window_s`? (default 5, max 300) | T-079 strongest observed signal in the band over the recent window (below) | 400 invalid region/window, 404 no history store |
 | GET | `/api/status` | token | – | Pipeline counters (opaque, per-build; never content) | 401, 404 no status on this server |
 
@@ -287,6 +289,62 @@ One row per `(decoder, frame_model)` pair the emitter's decoded identity has pro
 **Evidence rule (T-185/T-210).** A CRC-invalid frame never reaches a row: the `fields` block's `skip_invalid` drops it before parsing, so `crc.valid` is `true` for every row today. T-210 (in progress) adds bounded RDS block error correction with consensus-gated PI/PS/RT commits; **TODO(T-210):** once corrected-group provenance lands on `Decode`, add `crc.corrected` here without changing what `crc.valid` means.
 
 **User band (T-191).** Every row (list and one entry) carries `user_band`: `null`, or `{"f_lo", "f_hi", "set_at", "actor", "reason", "reason_withheld"}` — edges in Hz, `set_at` in Unix s, `actor` the token fingerprint, `reason` the user's note or `null` (withheld, with `reason_withheld: true`, on a withheld-identity row like any user-authored reason). It is a user's adjustment of the band edges (e.g. dragging a confirmed signal's box) stored **beside** the measured band: `f_center_hz`/`bandwidth_hz`/`f_lo_hz`/`f_hi_hz` stay what blind detection measured and are never overwritten. Rules for `PUT`: `f_lo` and `f_hi` finite numbers with `0 < f_lo < f_hi`; width `f_hi − f_lo` ≤ 40 MHz (`hk_model::USER_BAND_MAX_WIDTH_HZ`); and the band must overlap the measured `[f_lo_hz, f_hi_hz]` or lie within 1 MHz of it (`USER_BAND_MAX_GAP_HZ`; both limits inclusive) — an adjusted edge, not a different signal. Set and clear are both audited as `inventory_band` with `old`/`new` = `{"id", "user_band"}` and the token fingerprint as actor. The override survives restart; when two entries merge (same emission, T-082) the survivor keeps an override if either had one, the latest `set_at` winning (a tie keeps the survivor's). The pipeline never uses it for detection, tracking or entity resolution; consumers that tune to an entry (Listen, Decode, recipes' `{emitter_id}` target) still use the measured band today and may prefer `user_band` later.
+
+### `GET /api/events` — the durable catalogue of events (T-264, ADR-0017 TM-8)
+
+**The History surface's route** (product vision workflow #3: *choose a region and see what activity was seen there over time*). `/api/inventory` answers *"what emitters do I know here"* and Explore scopes it to the viewed window (T-260); this answers *"what has happened here"*, over all of the recorded past, and **the unit is the event, not the emitter**: one row per presence interval, so a one-off burst is a first-class row with its own timespan rather than a blip that never qualified as a live candidate (CLAUDE.md invariant 1). Code: `crates/hk-api/src/events.rs`.
+
+`f_lo`, `f_hi`, `t0` and `t1` are **required** — History is a question about a box. Every other `/api/inventory` filter is accepted with exactly the same meaning and selects which *emitters* are expanded (so the two surfaces can never disagree about which rows a box holds); `limit`/`cursor` page the **events**.
+
+```jsonc
+{
+  "window": { "f_lo_hz": 101.2e6, "f_hi_hz": 101.4e6, "t0_s": 1789214400.0, "t1_s": 1789300800.0 },
+  "events": [
+    { "emitter_id": "0199…", "t_start_s": 1789300871.0, "t_end_s": 1789300871.04,
+      "duration_s": 0.04, "in_window_s": 0.04, "open": false, "count": 1, "sources": 1,
+      "f_center_hz": 915200000.0 }
+  ],
+  "emitters": [
+    { "id": "0199…", "state": "candidate", "f_center_hz": 915200000.0, "bandwidth_hz": 120000.0,
+      "f_lo_hz": 915140000.0, "f_hi_hz": 915260000.0, "known_status": "unknown", "family": null,
+      "explanations": [ { "rank": 1, "service": "band-plan", "label": "ISM 902–928 MHz", "score": 0.4, "flags": [] } ],
+      "identity_scheme": null, "identity_class": null, "withheld": false,
+      "events": 1, "on_air_s": 0.04, "count": 1 }
+  ],
+  "total": 1, "limit": 200, "next_cursor": null,
+  "emitters_truncated": false, "emitters_no_interval": 0,
+  "coverage": { "source": "spectrum-history", "observed_fraction": 0.97, "cells": 76800,
+                "observed_cells": 74112, "gaps": [ { "t0_s": 1789260000.0, "t1_s": 1789260900.0 } ],
+                "gaps_truncated": false,
+                "statement": "97 % of this region was observed; 1 unobserved stretch in this period is no data, never a quiet band." },
+  "identity_access": "standard"
+}
+```
+
+- **An event is a presence interval** (`hk_model::presence`, docs/07 §2.27), derived from the append-only `emitter_observation` ledger by the same `Repository::presence_intervals` the inventory row's `presence` uses. `duration_s` is the event's own length and `in_window_s` its intersection with the request — **both computed here**, because a client must never derive a timespan from two fields it was handed. `open` is read against the window's own `t1` (a caller's `t1` *is* its live edge, exactly as on `/api/inventory`), so a past window re-derives the truth of its own moment instead of being marked ended by the wall clock. `count` on an event is the sightings its source rows summed — a History total, and never a liveness or ranking input (ADR-0017 §5).
+- **`emitters[]`** lists each emitter with at least one event in the window, once, with its ranked `explanations` — suggestions beside the measurement, never truth (vision step 4). Its `events` and `on_air_s` describe the whole window, not the current page; `count` is the lifetime total, which is exactly where a monotonic counter belongs. Identities are gated as on `/api/inventory` (`identity_value` only when in clear).
+- **Nothing here can be erased by decay** (ADR-0017 conflict (b)). What decays (T-251/TM-6) is a *candidate's confidence* — a ranking over hypotheses that writes nothing and deletes nothing; this route never reads it. A signal that stopped hours ago left Explore because it is not in the window, and its events are still catalogued here. A **deleted** emitter's events are still recorded too, and are listed with `state=deleted` like any other inventory read.
+- **`coverage` keeps three answers apart, and never collapses them.** `statement` is backend-rendered and is what a client shows beside an empty catalogue: with no spectrum history on the server, coverage is **unknown** and an empty answer is evidence of nothing; with `observed_cells: 0` it reads *no data for this period, not a quiet band*; with `gaps[]` it says how much was observed and that the gaps are no data; only a box observed throughout says an empty catalogue means nothing was on the air. Unobserved is never reported as quiet (C26), and `gaps` are the fully unobserved time runs of `/api/history`'s own grid.
+- **Bounds, disclosed rather than silent.** At most 500 emitters are expanded per answer (`emitters_truncated` when more matched the box); `total` is the events found over those emitters, and `limit`/`cursor` page them newest first. `emitters_no_interval` counts rows the box selected that carry **no presence interval at all** (a legacy writer's row, matched on its `first_seen`/`last_seen` hull): they contribute no event, because a hull is not a timespan and inventing one would fabricate a measurement — so the count is disclosed instead.
+
+### `GET /api/inventory/{id}/presence` — one emitter's presence track (T-264, ADR-0017 TM-8)
+
+The row's `presence` object is a *projection through a window* (how many intervals intersect it, time on air inside it, the latest one, liveness). This is the **track itself** — every interval with its own timespan — which History needs for one row and a live list must never carry.
+
+```jsonc
+{
+  "emitter": "0199…",
+  "window": { "t0_s": 1789214400.0, "t1_s": 1789300800.0 },   // null when none was asked for
+  "intervals": [ { "t_start_s": 1789300871.0, "t_end_s": 1789300920.0, "duration_s": 49.0,
+                   "open": true, "count": 12, "sources": 2, "f_center_hz": 101300000.0 } ],
+  "total": 1, "truncated": false,
+  "presence": { "intervals": 1, "on_air_s": 49.0,
+                "last_interval": { "t_start_s": 1789300871.0, "t_end_s": 1789300920.0, "open": true },
+                "liveness": "live", "ended_t_s": null, "silence_s": 0.0, "confidence": 1.0 }
+}
+```
+
+`t0`/`t1` (given together) scope the track and supply its live edge; without them it is all of time up to now. `intervals` is newest first, at most 5 000 (`truncated`, `total` unbounded by the cap — the cap keeps the newest, since the older end is reachable by asking about an earlier window). `presence` is the same projection `/api/inventory` serves on the row — rendered by the same code, so the two surfaces cannot disagree about one emitter's liveness or its decayed `confidence` (T-251), and a contract test asserts the two answers are equal field for field. `duration_s` is computed here for the same reason as on `/api/events`. `{id}` resolves like `/api/inventory/{id}` (a merged id resolves to its live survivor; unknown or unparsable is `404 not_found`). Unlike `/decode` and `/classification` the answer is **not identity-gated**: timing is data of exactly the class `presence` and `recurrence` already carry unconditionally on every row (T-284), and serving it uniformly is what stops its presence from signalling that a row's identity was withheld.
 
 ### `GET /api/analysis/strongest` — strongest signal in a band (T-079)
 

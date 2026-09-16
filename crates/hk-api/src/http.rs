@@ -14,6 +14,8 @@
 //! | `/api/inventory/<id>[/promote\|/band]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-078 one entry, promote a candidate, delete; T-191 set/clear the user band ([`crate::inventory`]) |
 //! | `/api/inventory/<id>/decode` | GET | token | T-159 the emitter's latest decode fields, one row per decoder/frame-model ([`crate::decode`]) |
 //! | `/api/inventory/<id>/classification` | GET | token | T-247 the emitter's full C15 classification: posterior, likelihood, prior, provenance, reasons ([`crate::classification`]) |
+//! | `/api/events?f_lo&f_hi&t0&t1[&state][&limit][&cursor]` | GET | token | T-264 (ADR-0017 TM-8) the durable catalogue of events in a region over a time range, with coverage ([`crate::events`]) |
+//! | `/api/inventory/<id>/presence[?t0&t1]` | GET | token | T-264 one emitter's presence track: every interval with its own timespan ([`crate::presence`]) |
 //! | `/api/analysis/strongest?f_lo&f_hi[&window_s]` | GET | token | T-079 strongest observed signal in a band over a recent window, from spectrum history ([`crate::query::strongest_json`]) |
 //! | `/api/observations?f_lo&f_hi&t0&t1[&tier][&cursor][&limit]` | GET | token | T-115 observation log records in a box ([`crate::observations`]) |
 //! | `/api/observations/coverage?f_lo&f_hi&t0&t1[&channel_hz][&tau_s][&min_gap_s]` | GET | token | T-115 observation totals, per-channel totals, gaps and POI ([`crate::observations`]) |
@@ -106,6 +108,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/inventory/{id}/decode"),
     // T-247 the emitter's full C15 classification (ADR-0016 §2/§9)
     ("GET", "/api/inventory/{id}/classification"),
+    // T-264 (ADR-0017 TM-8) the History surface: the durable catalogue of events, and one
+    // emitter's presence track
+    ("GET", "/api/events"),
+    ("GET", "/api/inventory/{id}/presence"),
     ("GET", "/api/analysis/strongest"),
     ("GET", "/api/status"),
     ("GET", "/api/control/state"),
@@ -886,6 +892,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::selections::route(state, &ctl))
         .or_else(|| crate::decode::route(state, &ctl)) // T-159; before inventory::route (see its docs)
         .or_else(|| crate::classification::route(state, &ctl)) // T-247; before inventory::route
+        .or_else(|| crate::presence::route(state, &ctl)) // T-264; before inventory::route
         .or_else(|| crate::signatures::route(state, &ctl)) // T-201 C18 signature matches
         .or_else(|| crate::clusters::route(state, &ctl)) // T-202 C18 clusters of unknowns
         .or_else(|| crate::inventory::route(state, &ctl))
@@ -919,6 +926,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         | "/api/history"
         | "/api/floor"
         | "/api/inventory"
+        | "/api/events"
         | "/api/analysis/strongest"
         | "/api/report"
         | "/api/status"
@@ -954,6 +962,8 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         },
         "/api/floor" => floor(state, &req),
         "/api/inventory" => inventory(state, &req),
+        // T-264 (ADR-0017 TM-8): the durable all-time catalogue, where Explore is window-scoped.
+        "/api/events" => events(state, &req),
         "/api/analysis/strongest" => strongest(state, &req),
         "/api/status" => state
             .status
@@ -1054,6 +1064,31 @@ fn inventory(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
         .lock()
         .map_err(|_| ApiError::new(500, "inventory store poisoned"))?;
     query::inventory_json(&repo, &req.query)
+}
+
+/// `/api/events` (T-264, ADR-0017 TM-8): the durable catalogue of events in a region over a time
+/// range, plus what the receiver actually observed there.
+///
+/// Reads the inventory's observation ledger, and the spectrum history when there is one — a server
+/// without history still serves the catalogue, with coverage reported as **unknown** rather than
+/// letting an empty answer read as a quiet band.
+fn events(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
+    let repo = state
+        .inventory
+        .as_ref()
+        .ok_or_else(|| ApiError::new(404, "no signal inventory on this server"))?;
+    let repo = repo
+        .lock()
+        .map_err(|_| ApiError::new(500, "inventory store poisoned"))?;
+    match &state.history {
+        Some(h) => {
+            let h = h
+                .lock()
+                .map_err(|_| ApiError::new(500, "history store poisoned"))?;
+            crate::events::events_json(&repo, Some(&h), &req.query)
+        }
+        None => crate::events::events_json(&repo, None, &req.query),
+    }
 }
 
 /// `/api/analysis/strongest` (T-079): the same spectrum-history source as `/api/history`. The

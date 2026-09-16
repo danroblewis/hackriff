@@ -44,6 +44,7 @@
 
 use hk_e2e::{SynthRequest, synth_or_skip};
 use hk_model::{Detection, FreqRange, Region};
+use hk_pipeline::config::{PipelineSettings, detection_resolution};
 
 use crate::blind::{BlindSource, blind_replay, recording_start};
 use crate::common::*;
@@ -144,6 +145,52 @@ fn median(mut values: Vec<f64>) -> f64 {
     }
     values.sort_by(f64::total_cmp);
     values[values.len() / 2]
+}
+
+/// The truth `sweep_polyline` as `[(t_s from the recording start, absolute Hz)]`.
+///
+/// This is the diagonal ADR-0017 §1.3 says the box stands in for, carried in truth by the
+/// generator so the cost of the rectangle is measurable rather than merely acknowledged.
+fn polyline_points(v: &serde_json::Value) -> Vec<(f64, f64)> {
+    v.as_array()
+        .expect("sweep_polyline is an array")
+        .iter()
+        .filter_map(|p| {
+            let p = p.as_array()?;
+            Some((p.first()?.as_f64()?, p.get(1)?.as_f64()?))
+        })
+        .collect()
+}
+
+/// How much of the channel the emission sweeps **within one analysis frame**, per frame, Hz.
+///
+/// This is the quantity that decides which of ADR-0017 §1.3's limits applies (T-294). A frame is
+/// the smallest time a frame-based detector can tell apart, so a box it draws cannot be narrower
+/// than the emission's excursion inside one: where that excursion is the whole channel the
+/// rectangle is forced and no ladder exists to resolve, and where it is a fraction the ladder is
+/// there to be found. It is read off the truth polyline, so it holds whatever `sf` happens to be.
+fn frame_excursions(pts: &[(f64, f64)], frame_s: f64) -> Vec<f64> {
+    let Some(&(t0, _)) = pts.first() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let (mut i, mut k) = (0usize, 0usize);
+    while i < pts.len() {
+        let hi = t0 + (k + 1) as f64 * frame_s;
+        let (mut lo_f, mut hi_f) = (f64::INFINITY, f64::NEG_INFINITY);
+        let start = i;
+        while i < pts.len() && pts[i].0 < hi {
+            lo_f = lo_f.min(pts[i].1);
+            hi_f = hi_f.max(pts[i].1);
+            i += 1;
+        }
+        // Only whole frames: a part frame at the packet's end under-reports its excursion.
+        if i > start && i < pts.len() {
+            out.push(hi_f - lo_f);
+        }
+        k += 1;
+    }
+    out
 }
 
 /// Detections attributed to one emitter: **centre** inside `ch` and box no wider than `max_w`.
@@ -348,6 +395,77 @@ fn chirp_acceptance(req: SynthRequest, tag: &str) {
         "[{T255}/{tag}] the chirp's detections span only {:.1} kHz of a {:.0} kHz sweep",
         (hi - lo) / 1e3,
         bw / 1e3
+    );
+
+    // ---- 3b. WHICH limit applies here (T-294), read off the truth polyline. ----
+    //
+    // ADR-0017 §1.3 used to read as one limit. It is three, and this is the one that decides
+    // between the first two: the emission's frequency excursion inside a single analysis frame.
+    // The frame is the run's own (`detection_resolution` at the fixture's rate), not a constant.
+    let (fft_len, averages) = detection_resolution(fx.sample_rate, &PipelineSettings::default());
+    let run_frame_s = (averages * fft_len) as f64 / fx.sample_rate;
+    let excursions: Vec<f64> = packets
+        .iter()
+        .flat_map(|p| {
+            frame_excursions(
+                &polyline_points(
+                    p.get("sweep_polyline")
+                        .expect("the sweep the box stands in for"),
+                ),
+                run_frame_s,
+            )
+        })
+        .collect();
+    assert!(
+        !excursions.is_empty(),
+        "[{T255}/{tag}] the polyline covers no whole analysis frame"
+    );
+    let in_frame = median(excursions.clone());
+    let frames_per_symbol = t_sym / run_frame_s;
+    eprintln!(
+        "[{T255}/{tag}] analysis frame {:.3} ms ({averages} x {fft_len} bins at {:.0} kS/s), \
+         {frames_per_symbol:.2} frames per symbol. The emission sweeps {:.1} kHz ({:.2} of the \
+         channel) inside one frame, so a frame-based box cannot be narrower than that; the \
+         detector's median box is {:.1} kHz ({:.2}).",
+        run_frame_s * 1e3,
+        fx.sample_rate / 1e3,
+        in_frame / 1e3,
+        in_frame / bw,
+        chirp_width / 1e3,
+        chirp_width / bw,
+    );
+    // The boundary, from geometry: the excursion inside a frame is about min(1, frame/T_sym) of
+    // the channel, so a symbol that fits inside one frame sweeps all of it and one spanning
+    // several sweeps a fraction. Sampling the polyline every 1 ms leaves at most a quarter of a
+    // fold unseen, hence 0.5 rather than 1.0 on the intra-frame side.
+    if frames_per_symbol <= 1.0 {
+        assert!(
+            in_frame >= 0.5 * bw,
+            "[{T255}/{tag}] the whole sweep falls inside one {:.3} ms frame, yet the polyline says \
+             it only covers {:.1} kHz of a {:.0} kHz channel there",
+            run_frame_s * 1e3,
+            in_frame / 1e3,
+            bw / 1e3
+        );
+    } else if frames_per_symbol >= 4.0 {
+        assert!(
+            in_frame <= 0.3 * bw,
+            "[{T255}/{tag}] a symbol spanning {frames_per_symbol:.1} frames should sweep a \
+             fraction of the channel in each, but the polyline says {:.2} of it",
+            in_frame / bw
+        );
+    }
+    // The consequence, in the system's own output: a box may not be narrower than the emission's
+    // excursion inside one frame. At SF9 that *forces* the rectangle — this is an observability
+    // limit at this frame, not a drawing one — and at SF12 it leaves the ladder room to exist,
+    // which is what the centre spread above then shows.
+    assert!(
+        chirp_width >= 0.8 * in_frame,
+        "[{T255}/{tag}] the median box is {:.1} kHz but the emission sweeps {:.1} kHz inside one \
+         {:.3} ms frame: a frame-based box cannot be narrower than what it contains",
+        chirp_width / 1e3,
+        in_frame / 1e3,
+        run_frame_s * 1e3
     );
 
     // ---- 4. The third species, so "bounded time extent" is not doing the work alone. ----

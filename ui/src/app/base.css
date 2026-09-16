@@ -64,7 +64,7 @@ button, input, select { font: inherit; color: inherit; }
 .bar { display: flex; align-items: center; gap: 18px; padding-inline: 16px; border-bottom: 1px solid var(--line); background: var(--panel); min-width: 0; }
 .brand { font-weight: 700; letter-spacing: 0.02em; font-size: 15px; }
 .brand span { color: var(--amber); }
-.modes { display: grid; grid-template-columns: 1fr 1fr; background: var(--ground); border: 1px solid var(--line); border-radius: 7px; padding: 2px; gap: 2px; }
+.modes { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--ground); border: 1px solid var(--line); border-radius: 7px; padding: 2px; gap: 2px; }
 .mode { border: 0; background: transparent; padding: 4px 12px; border-radius: 5px; cursor: pointer; color: var(--muted); white-space: nowrap; }
 .mode[aria-pressed="true"] { background: var(--raise); color: var(--text); }
 .device { display: flex; align-items: center; gap: 8px; color: var(--muted); white-space: nowrap; }

@@ -17,7 +17,9 @@ interface Panel { el(): HTMLElement; activate(region: ReviewSlice["region"]): vo
 const TABS: readonly { id: ReviewTab; label: string }[] = [
   { id: "alarms", label: "Alarms" },
   { id: "report", label: "Survey report" },
-  { id: "history", label: "History" },
+  // T-264 took the name "History" for the top-level catalogue surface (ADR-0017 TM-8). This tab is
+  // the region-over-time *spectrum* grid, a different question, so it says so.
+  { id: "history", label: "Spectrum grid" },
   { id: "scheduler", label: "Scheduler" },
   { id: "device", label: "Device" },
   { id: "bookmarks", label: "Bookmarks" },

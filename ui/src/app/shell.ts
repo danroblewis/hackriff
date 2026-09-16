@@ -10,6 +10,14 @@ import { cycleTheme, requestGoto, setMode, toast, toggleReview, type AppState, t
 
 export const PREFS_KEY = "hk-mui-prefs";
 
+/** The page element each mode shows. History (T-264, ADR-0017 TM-8) is a surface of its own beside
+ * Explore and Decode, because the all-time record is a different question from "what is here now". */
+export const VIEWS: Record<Mode, string> = {
+  explore: "view-explore",
+  decode: "view-decode",
+  history: "view-history",
+};
+
 /** The `device` slice from a control-state answer (pure; tested). */
 export function deviceFrom(cs: ControlState): AppState["device"] {
   const run = cs.run;
@@ -30,8 +38,7 @@ export function mountShell(ctx: AppContext) {
     b.addEventListener("click", () => store.set(setMode(b.dataset.mode as Mode))));
   store.select((s) => s.mode, (mode) => {
     document.querySelectorAll<HTMLButtonElement>(".mode[data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
-    byId("view-explore")!.hidden = mode !== "explore";
-    byId("view-decode")!.hidden = mode !== "decode";
+    for (const [m, id] of Object.entries(VIEWS)) byId(id)!.hidden = mode !== m;
   }, { immediate: true });
 
   // Theme: "system" stamps nothing (prefers-color-scheme decides); dark/light stamp data-theme.

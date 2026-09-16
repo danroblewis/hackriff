@@ -4370,6 +4370,14 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    scope_corrected_by_t294_2026_09_16: 'T-255 reported the SF9 sweep as UNOBSERVABLE.
+      T-294 measured that this is true of the PRODUCT THE DETECTOR CONSUMES (K averaged
+      periodograms, one (f_lo, f_hi) per component) and FALSE of the IQ in the ring: a
+      lag-product estimator recovers the sweep rate to 1.6%% inside ONE 4.096 ms frame,
+      calling it a sweep 99.5%% of the time at 12 dB against 0.0%% for a wideband burst.
+      The real floor is an SNR (~-3 dB), not a frame. The coordinator propagated the
+      stronger claim into T-294 ticket text.'
+
   - id: T-256
     milestone: M2-hardening
     title: 'Receiver-capability note: 2.4 GHz is a detection/occupancy target, not a
@@ -4573,7 +4581,7 @@ tasks:
   - id: T-264
     milestone: MUI
     title: 'ADR-0017 TM-8: History surface - the durable all-time catalogue, where ephemera are past events with a timespan'
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-262
@@ -4585,6 +4593,13 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    api_addition_2026_09_16: 'Added /api/events and /api/inventory/{id}/presence -
+      additive, no migration, no existing response changed. Unavoidable: the catalogue unit
+      is the EVENT while /api/inventory unit is the emitter, whose presence is a projection
+      through one window. Both routes are named by ADR-0017 TM-8 itself. SECOND task in a
+      row where UI-looking work needed the wire to answer a NEW QUESTION (T-263 needed
+      at); time-model UI tasks are core_interface by default from here.'
+
   - id: T-265
     milestone: MAUTO
     title: 'ADR-0017 TM-10: incremental decode - extending a region decodes only the newly-arrived part'
@@ -5301,7 +5316,7 @@ tasks:
     milestone: M3
     title: 'The synthetic psk-qam grid distorts its own waveforms, so no synchronisation
       can recover them and the M3 open set is partly measuring the harness'
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: M3A
@@ -5436,6 +5451,12 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    secondary_finding_from_t294_2026_09_16: 'At SF12 the ladder appears in the CENTRES
+      (spread 0.84 of the channel) while the boxes stay full-channel (0.98) - 13x wider
+      than the in-frame excursion requires. A different defect from the species merging
+      this ticket names, but the same family: a box wider than the evidence supports.
+      Noted by T-294, not fixed.'
+
   - id: T-296
     milestone: M3
     title: 'The synthetic psk-qam grid is ~15 N0 from its own constellation before any
@@ -5463,6 +5484,34 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: false
+  - id: T-297
+    milestone: M3
+    title: 'hk_dsp::chirp is measured but unwired: nothing reads IQ to characterise a
+      swept region, so the system detects chirps as regions and claims nothing about them'
+    status: todo
+    priority: normal
+    deps:
+    - T-294
+    parallel_group: PIPE
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-294 (2026-09-16), which left it unwired ON PURPOSE - a pure function with
+      its four-species table and SNR floor as its own tests, so the ADR claim is a measured
+      fact in the repo rather than an assertion'
+    acceptance: 'decide which product a characteriser reads for a candidate swept region,
+      and wire it. T-294 established the estimator works on IQ inside one analysis frame
+      (sweep rate to 1.6%%, 99.5%% called-a-sweep at 12 dB, floor ~-3 dB) while the
+      detector input cannot show it. So this is a fifth instance of the capability-with-no-
+      caller pattern IN WAITING - T-242, T-247, T-206 and T-267/T-287 were the first four -
+      except this one was left unwired deliberately and reported. Do not let it become the
+      fifth by default. State the cost on the capture and DSP threads as T-242, T-247 and
+      T-287 stated theirs, and prove non-vacuity: a normal run over a swept emission must
+      produce a chirp characterisation, not merely a test that calls the estimator'
+    area: crates/hk-dsp (chirp), crates/hk-classify or crates/hk-pipeline (the caller)
+    needs: none
+    model: opus
+    effort: medium
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
