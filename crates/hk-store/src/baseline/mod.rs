@@ -7,11 +7,13 @@
 //! `hk_context::occupancy::baseline`, which depends on this crate.
 //!
 //! # Layout and format
-//! `<root>/<site>/<cal>/<scheme>-<factor>[-<chain>].bin`, where `<cal>` is `uncalibrated` or the
-//! CalibrationState id and `<chain>` is the 16-hex receive-chain key (T-303), **absent** when the
-//! chain is unknown. A chain-less key therefore keeps the pre-T-303 name, so every baseline written
-//! before that change is still exactly where its key says it is; the first known chain to ask for
-//! one adopts it ([`BaselineStore::load`]). A file is:
+//! `<root>/<site>/<cal>/<scheme>-<factor>[-<chain>][-bias-<off|on>].bin`, where `<cal>` is
+//! `uncalibrated` or the CalibrationState id, `<chain>` is the 16-hex receive-chain key (T-303) and
+//! the bias part is the antenna-port bias-tee state (T-333). Each optional part is **absent** when
+//! that field is unknown, so a chain-less key keeps the pre-T-303 name and a bias-unknown key keeps
+//! its T-303 name: every baseline written before either change is still exactly where its key says
+//! it is. The first known chain to ask for a key adopts the chain-less file of the *same* bias-tee
+//! state; adoption never crosses the bias-tee state ([`BaselineStore::load`]). A file is:
 //! - an uncompressed header: magic `HKBL`, format version (u16), the key, `last_visit` (i64 ns,
 //!   sample clock), so eviction reads only the header;
 //! - a zstd frame of the little-endian body, sparse by slot (empty slots are not written);
@@ -30,6 +32,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use hk_model::BiasTee;
 use hk_model::attention::baseline::{BaselineKey, CalKey, ChainKey, HourOfWeek, SlotStats};
 use hk_model::attention::occupancy::ChannelKey;
 use hk_model::ids::{CalibrationStateId, SiteId};
@@ -44,8 +47,10 @@ use serde::{Deserialize, Serialize};
 /// upgraded mature baseline keeps its uncorrected (larger, so safer) between-slot spread and a
 /// persistence lift of 1 until it is re-frozen or relearns (ADR-0012 §3.3). T-303: 4 adds the
 /// receive chain to the key in the header; versions 1–3 read as [`ChainKey::Unknown`], which is
-/// what they are, and nothing about their slot statistics changes.
-pub const BASELINE_FORMAT_VERSION: u16 = 4;
+/// what they are, and nothing about their slot statistics changes. T-333: 5 adds the bias-tee
+/// state; versions 1–4 read as [`hk_model::BiasTee::Unknown`], which is what they are — nobody
+/// recorded the state, and that is not evidence the DC was off.
+pub const BASELINE_FORMAT_VERSION: u16 = 5;
 /// Default store quota (ADR-0012 §3.6).
 pub const BASELINE_QUOTA_BYTES: u64 = 1 << 30;
 /// Gain states kept per subject before it reports `mixed` (ADR-0012 §3.1).
@@ -892,6 +897,15 @@ impl W {
             self.u8(u8::from(!k.chain.is_unknown()));
             self.u64(k.chain.id().unwrap_or(0));
         }
+        if version >= 5 {
+            // T-333: the three bias-tee states as three distinct byte values, so `unknown` can
+            // never be read back as `off`.
+            self.u8(match k.bias_tee {
+                BiasTee::Unknown => 0,
+                BiasTee::Off => 1,
+                BiasTee::On => 2,
+            });
+        }
     }
 }
 
@@ -974,10 +988,23 @@ impl R<'_> {
         } else {
             ChainKey::Unknown
         };
+        // T-333: versions 1–4 predate the bias-tee state. They read as `Unknown` — nobody recorded
+        // it — and never as `Off`, which would claim the port was unpowered on no evidence.
+        let bias_tee = if version >= 5 {
+            match self.u8()? {
+                0 => BiasTee::Unknown,
+                1 => BiasTee::Off,
+                2 => BiasTee::On,
+                _ => return Err("bad bias-tee tag"),
+            }
+        } else {
+            BiasTee::Unknown
+        };
         Ok(BaselineKey {
             site,
             cal,
             chain,
+            bias_tee,
             scheme,
             cell_factor,
         })
@@ -1003,9 +1030,10 @@ fn header(key: &BaselineKey, last_visit: Timestamp, version: u16) -> Vec<u8> {
 /// Header bytes through version 3: magic, version, key, `last_visit`.
 const HEADER_LEN_V3: usize = 4 + 2 + 36 + 1 + 36 + 2 + 2 + 8;
 
-/// Header bytes at `version`. Version 4 (T-303) adds the receive chain as a fixed tag + `u64`.
+/// Header bytes at `version`. Version 4 (T-303) adds the receive chain as a fixed tag + `u64`;
+/// version 5 (T-333) adds the bias-tee state as one byte.
 const fn header_len(version: u16) -> usize {
-    HEADER_LEN_V3 + if version >= 4 { 9 } else { 0 }
+    HEADER_LEN_V3 + if version >= 4 { 9 } else { 0 } + if version >= 5 { 1 } else { 0 }
 }
 
 fn encode_body(state: &BaselineState, version: u16) -> Vec<u8> {
@@ -1347,13 +1375,24 @@ fn cal_dir(cal: CalKey) -> String {
     }
 }
 
-/// File name of `key` inside its site/cal directory (T-303). A chain-less key keeps the pre-T-303
-/// name, so existing baselines are not orphaned by the key gaining a field.
+/// File name of `key` inside its site/cal directory (T-303, T-333):
+/// `<scheme>-<factor>[-<chain>][-bias-<off|on>].bin`.
+///
+/// Each optional part is written only when that field is **known**, so a key with an unknown chain
+/// and an unknown bias-tee state keeps the pre-T-303 name and a key with a known chain and an
+/// unknown bias-tee state keeps its T-303 name. Nothing already stored is orphaned by the key
+/// gaining a field, and the two parts cannot be confused: the chain is always 16 hex digits.
 fn chain_file(key: &BaselineKey) -> String {
-    match key.chain.id() {
-        None => format!("{}-{}.bin", key.scheme, key.cell_factor),
-        Some(id) => format!("{}-{}-{id:016x}.bin", key.scheme, key.cell_factor),
+    let mut name = format!("{}-{}", key.scheme, key.cell_factor);
+    if let Some(id) = key.chain.id() {
+        name.push_str(&format!("-{id:016x}"));
     }
+    match key.bias_tee {
+        BiasTee::Unknown => {}
+        b => name.push_str(&format!("-bias-{}", b.as_str())),
+    }
+    name.push_str(".bin");
+    name
 }
 
 /// The baseline directory tree with its quota.
@@ -1445,10 +1484,22 @@ impl BaselineStore {
     /// of its own), and is never scored against the first chain's noise floor. The new file is
     /// written before the old one is removed, so a failure between the two leaves the data twice,
     /// never zero times.
+    ///
+    /// **T-333: adoption crosses the chain, never the bias-tee state.** `from` keeps this key's
+    /// `bias_tee`, so a known-bias key adopts only a chain-less file of the *same* state. A
+    /// bias-tee-unknown baseline is never adopted by an `Off` or `On` key, and this is the
+    /// difference between the two fields: T-303 could adopt because a chain-less file was evidence
+    /// of a single-front-end run, while "nobody recorded the bias tee" is evidence of nothing at
+    /// all. Adopting it would be [`hk_model::BiasTee::Unknown`] read as `Off`, and the statistics
+    /// inherited would be the very mixture the key exists to prevent — an external LNA's step
+    /// folded into a reference it was never measured under. The first `Off` or `On` fold therefore
+    /// starts a fresh baseline: immature, alarms suppressed until it holds 24 h of its own. The
+    /// error is bounded silence, never a confident wrong number, and it heals in a day.
     fn adopt(&self, key: &BaselineKey) -> Result<Option<BaselineState>, BaselineStoreError> {
         if key.chain.is_unknown() {
             return Ok(None);
         }
+        // T-333: `..*key` keeps this key's bias-tee state, so adoption never crosses it.
         let from = BaselineKey {
             chain: ChainKey::Unknown,
             ..*key
@@ -1561,6 +1612,7 @@ mod tests {
             site,
             cal: CalKey::Calibrated(CalibrationStateId::new()),
             chain: ChainKey::Unknown,
+            bias_tee: BiasTee::Unknown,
             scheme: 1,
             cell_factor: 16,
         };
@@ -1670,6 +1722,7 @@ mod tests {
             cal: CalKey::Calibrated("0a1b2c3d-4e5f-4a6b-9c7d-8e9f0a1b2c3d".parse().unwrap()),
             // The golden file is version 2, which predates the chain: it reads as `Unknown`.
             chain: ChainKey::Unknown,
+            bias_tee: BiasTee::Unknown,
             scheme: 1,
             cell_factor: 16,
         };
@@ -1749,7 +1802,7 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&GOLDEN_V2_DENSE_HEX[i..i + 2], 16).unwrap())
             .collect();
-        assert_eq!(BASELINE_FORMAT_VERSION, 4);
+        assert_eq!(BASELINE_FORMAT_VERSION, 5);
         let decoded = decode(&bytes).unwrap();
         assert_eq!(decoded, golden_state());
         let sub = &decoded.subjects[&BaselineSubject::Cell { index: 7 }];
@@ -2002,6 +2055,7 @@ mod tests {
             site,
             cal: CalKey::Uncalibrated,
             chain,
+            bias_tee: BiasTee::Unknown,
             scheme: 1,
             cell_factor: 16,
         };
@@ -2043,6 +2097,7 @@ mod tests {
             site,
             cal: CalKey::Uncalibrated,
             chain,
+            bias_tee: BiasTee::Unknown,
             scheme: 1,
             cell_factor: 16,
         };
@@ -2068,6 +2123,86 @@ mod tests {
             None,
             "a second front end never inherits the first one's floor"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T-333: the bias-tee state is part of the key, the file and the path, and **adoption never
+    /// crosses it**.
+    ///
+    /// A bias-unknown baseline keeps its pre-T-333 name, so nothing already stored is orphaned by
+    /// the key gaining a field, and it goes on serving bias-unknown folds. But an `Off` or `On` key
+    /// does **not** adopt it: "nobody recorded the bias tee" is evidence of nothing, and inheriting
+    /// those statistics would be [`BiasTee::Unknown`] read as `Off` — the very collapse T-325
+    /// removed, and the mixture the key exists to prevent. The first known state starts fresh,
+    /// immature, alarms suppressed until it holds 24 h of its own: bounded silence, never a
+    /// confident wrong number.
+    #[test]
+    fn baseline_bias_tee_is_part_of_the_key_and_is_never_adopted() {
+        let root = temp_root("bias");
+        let store = BaselineStore::open(&root).unwrap();
+        let site = SiteId::new();
+        let key = |bias_tee| BaselineKey {
+            site,
+            cal: CalKey::Uncalibrated,
+            chain: ChainKey::of_device("hackrf:a"),
+            bias_tee,
+            scheme: 1,
+            cell_factor: 16,
+        };
+        let (unknown, off, on) = (key(BiasTee::Unknown), key(BiasTee::Off), key(BiasTee::On));
+        assert_ne!(off, on, "one front end, two receive states");
+        assert_ne!(unknown, off, "unknown is not off");
+        for (a, b) in [(unknown, off), (unknown, on), (off, on)] {
+            assert_ne!(store.path_of(&a), store.path_of(&b));
+        }
+
+        // A bias-unknown key keeps the T-303 name: every baseline stored before T-333 is still
+        // exactly where its key says it is.
+        let mut old = state(site, 5);
+        old.key = unknown;
+        store.save(&old).unwrap();
+        let chain_hex = format!("{:016x}", ChainKey::of_device("hackrf:a").id().unwrap());
+        assert!(
+            store
+                .path_of(&unknown)
+                .ends_with(format!("1-16-{chain_hex}.bin")),
+            "the pre-T-333 name: {:?}",
+            store.path_of(&unknown)
+        );
+        assert_eq!(store.load(&unknown).unwrap().unwrap(), old, "still read");
+
+        // The first known state finds nothing: it never inherits an unrecorded cohort's floor.
+        for k in [off, on] {
+            assert_eq!(
+                store.load(&k).unwrap(),
+                None,
+                "a known bias-tee state must not adopt an unknown one's baseline"
+            );
+        }
+        assert!(store.path_of(&unknown).exists(), "and nothing was consumed");
+
+        // The state survives the version-5 codec, and versions before it cannot express one.
+        let mut powered = state(site, 6);
+        powered.key = on;
+        store.save(&powered).unwrap();
+        assert_eq!(decode(&encode(&powered).unwrap()).unwrap(), powered);
+        assert_eq!(
+            decode(&encode_version(&powered, 4).unwrap())
+                .unwrap()
+                .key
+                .bias_tee,
+            BiasTee::Unknown,
+            "version 4 records no bias-tee state, so it reads as unknown — never as off"
+        );
+        // Both files are listed, and their headers read back as the states they were written with.
+        let states: Vec<_> = store
+            .entries()
+            .unwrap()
+            .into_iter()
+            .map(|(k, _, _)| k.bias_tee)
+            .collect();
+        assert_eq!(states.len(), 2);
+        assert!(states.contains(&BiasTee::Unknown) && states.contains(&BiasTee::On));
         let _ = fs::remove_dir_all(root);
     }
 

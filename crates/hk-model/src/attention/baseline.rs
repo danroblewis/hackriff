@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{ValidationError, ensure, ensure_in};
+use crate::BiasTee;
 use crate::ids::{CalibrationStateId, SiteId};
 use crate::time::Timestamp;
 
@@ -282,8 +283,8 @@ impl ChainKey {
     }
 }
 
-/// Key of one baseline: site × calibration × receive chain × grid (§3.1). The 168 slots and the
-/// per-slot, per-gain-state level statistics live inside it.
+/// Key of one baseline: site × calibration × receive chain × bias-tee state × grid (§3.1). The 168
+/// slots and the per-slot, per-gain-state level statistics live inside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BaselineKey {
@@ -295,10 +296,58 @@ pub struct BaselineKey {
     /// comparable within one. Absent from the JSON when unknown (every pre-T-303 baseline).
     #[serde(default, skip_serializing_if = "ChainKey::is_unknown")]
     pub chain: ChainKey,
+    /// Antenna-port bias-tee state the levels were measured under (T-333), completing [`Self::chain`].
+    ///
+    /// The bias tee powers an **external LNA** on the antenna port, so powering it changes the
+    /// gain structure and the noise floor of the very chain [`ChainKey`] names — the same physics
+    /// T-331 keyed the floor tracker's context on. Two cohorts measured either side of a switch
+    /// are not comparable, and pooling them is a **masking** failure, not a false-alarm one: T-303
+    /// measured a real 12 dB rise scoring 1.000 against its own cohort and 0.000 against the
+    /// pooled one. So the states do not share a key and the comparison never happens.
+    ///
+    /// **Compared exactly, three-valued.** [`BiasTee::Unknown`] is its own cohort: it pools with
+    /// other unknowns (folds from one recording regime that recorded nothing are at least mutually
+    /// consistent) and never with `Off` or `On`. Reading unknown as off would reintroduce one
+    /// layer up exactly the defect T-325 removed — a capture nobody recorded the state of is not
+    /// evidence the DC was absent. Absent from the JSON when unknown, which is every baseline
+    /// stored before T-333 and every fold until the state reaches the occupancy path.
+    #[serde(default, skip_serializing_if = "BiasTee::is_unknown")]
+    pub bias_tee: BiasTee,
     /// History pyramid scheme whose level-0 grid the cells are multiples of.
     pub scheme: u16,
     /// Baseline cell = `cell_factor` × level-0 cell (default 16: 100 kHz on scheme 1).
     pub cell_factor: u16,
+}
+
+impl BaselineKey {
+    /// Whether levels under this key may be compared with levels under `other` (T-333).
+    ///
+    /// Every field must match, the bias-tee state **exactly**: `Unknown` with `Unknown` is
+    /// comparable (consistent, if unverified), `Unknown` with a known state is not. This is the
+    /// same test as `self == other` — it exists to name the property the equality is enforcing,
+    /// and so a caller that wants to say "these two are incomparable" has something to say it
+    /// with rather than re-deriving the rule.
+    pub fn comparable_with(&self, other: &BaselineKey) -> bool {
+        self == other
+    }
+
+    /// Why two keys are incomparable, for a result that must disclose it; `None` when they are the
+    /// same key. Stated as the coarsest difference first, so a caller reports one reason.
+    pub fn incomparable_because(&self, other: &BaselineKey) -> Option<&'static str> {
+        if self.site != other.site {
+            Some("different site")
+        } else if self.cal != other.cal {
+            Some("different calibration")
+        } else if self.chain != other.chain {
+            Some("different receive chain")
+        } else if self.bias_tee != other.bias_tee {
+            Some("different bias-tee state")
+        } else if (self.scheme, self.cell_factor) != (other.scheme, other.cell_factor) {
+            Some("different grid")
+        } else {
+            None
+        }
+    }
 }
 
 /// Pools a slot can fall back to, finest first (§3.2).
@@ -646,6 +695,7 @@ mod tests {
             site: SiteId::new(),
             cal: CalKey::Uncalibrated,
             chain: ChainKey::Unknown,
+            bias_tee: BiasTee::Unknown,
             scheme: 1,
             cell_factor: 16,
         };
@@ -674,5 +724,64 @@ mod tests {
         assert!(ChainKey::default().is_unknown());
         assert_eq!(ChainKey::Unknown.id(), None);
         assert_eq!(a.chain.id(), ChainKey::of_device("hackrf:a").id());
+    }
+
+    /// T-333: the bias-tee state is part of the key, compared exactly and three-valued, so a
+    /// capture with an active antenna powered is never compared with one without it — and
+    /// `Unknown` is its own cohort rather than a synonym for `Off`.
+    #[test]
+    fn bias_tee_state_is_three_cohorts_and_unknown_is_not_off() {
+        let base = BaselineKey {
+            site: SiteId::new(),
+            cal: CalKey::Uncalibrated,
+            chain: ChainKey::of_device("hackrf:a"),
+            bias_tee: BiasTee::Unknown,
+            scheme: 1,
+            cell_factor: 16,
+        };
+        let off = BaselineKey {
+            bias_tee: BiasTee::Off,
+            ..base
+        };
+        let on = BaselineKey {
+            bias_tee: BiasTee::On,
+            ..base
+        };
+        // Three states, three keys. Nothing collapses, and in particular unknown is not off.
+        assert!(!base.comparable_with(&off), "unknown is not off");
+        assert!(!base.comparable_with(&on));
+        assert!(!off.comparable_with(&on));
+        assert_eq!(
+            base.incomparable_because(&off),
+            Some("different bias-tee state")
+        );
+        // Unknown with unknown is consistent: one recording regime that recorded nothing.
+        assert!(base.comparable_with(&base));
+        assert_eq!(base.incomparable_because(&base), None);
+        assert!(off.comparable_with(&BaselineKey {
+            bias_tee: BiasTee::Off,
+            ..base
+        }));
+        // A coarser difference is reported before the bias tee, so one reason is given.
+        let elsewhere = BaselineKey {
+            site: SiteId::new(),
+            bias_tee: BiasTee::On,
+            ..base
+        };
+        assert_eq!(
+            base.incomparable_because(&elsewhere),
+            Some("different site")
+        );
+
+        // An unknown state is omitted from the JSON, so every baseline stored before T-333 reads
+        // back as exactly the key it was written under and its serialised form is unchanged.
+        let v = serde_json::to_value(base).unwrap();
+        assert!(v.get("bias_tee").is_none(), "unknown is not written: {v}");
+        assert_eq!(serde_json::from_value::<BaselineKey>(v).unwrap(), base);
+        for (k, text) in [(off, "off"), (on, "on")] {
+            let v = serde_json::to_value(k).unwrap();
+            assert_eq!(v["bias_tee"], text);
+            assert_eq!(serde_json::from_value::<BaselineKey>(v).unwrap(), k);
+        }
     }
 }

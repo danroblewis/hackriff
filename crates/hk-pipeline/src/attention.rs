@@ -188,6 +188,23 @@ fn mature_pool_fcos(sub: &SubjectBaseline, slot: HourOfWeek) -> Vec<f64> {
         .collect()
 }
 
+/// The bias-tee state a fold from an occupancy row is keyed under (T-333).
+///
+/// [`hk_model::BiasTee::Unknown`], and stated once here rather than spelt at each fold, because
+/// **nothing carries the state this far yet**: the occupancy close reads the history pyramid, whose
+/// `FrameInput` and per-tile `ProvenanceSummary` record the gain state but not the bias tee, so an
+/// `OccupancyStat` cannot say what the DC was doing. Unknown is the honest value — and it is the
+/// value every baseline already on disk carries, so folding under it changes nothing today and
+/// orphans nothing.
+///
+/// This is not a service-lifetime constant like the receive chain: a bias tee is switched **during**
+/// a run, so the state belongs to the measurement, not to the service. **T-332** is what puts it
+/// there: it makes a bias-tee switch a device provenance step, which is precisely the plumbing
+/// (`FrontEndState` → `ProvenanceSummary` → the occupancy row) this constant is waiting for. Until
+/// then the key, its file format and its migration are in place and the cohorts separate the moment
+/// a caller supplies `Off` or `On` — as `Baselines::observe` already does for any caller.
+const FOLD_BIAS_TEE: hk_model::BiasTee = hk_model::BiasTee::Unknown;
+
 /// The time a row's visits represent, s (as [`from_occupancy_stat`] weighs a fold).
 pub(crate) fn represented_s(stat: &OccupancyStat) -> f64 {
     let interval_s = stat.interval.duration_ns() as f64 / 1e9;
@@ -757,7 +774,7 @@ impl AttentionService {
         };
         let out = {
             let mut b = lock(&self.baselines);
-            let out = b.observe(site, offset, cal, self.chain, obs);
+            let out = b.observe(site, offset, cal, self.chain, FOLD_BIAS_TEE, obs);
             self.sync_baseline_gauges(&b);
             if let Ok(n) = b.flush(obs.t, false) {
                 self.bump(|c| {
@@ -804,10 +821,12 @@ impl AttentionService {
         let offset = lock(&self.sites).utc_offset_min(site);
         let (out, pool_fcos, pool) = {
             let mut b = lock(&self.baselines);
-            let out = b.observe(site, offset, cal, self.chain, &obs).ok();
+            let out = b
+                .observe(site, offset, cal, self.chain, FOLD_BIAS_TEE, &obs)
+                .ok();
             self.sync_baseline_gauges(&b);
             let sub = b
-                .key(site, cal, self.chain)
+                .key(site, cal, self.chain, FOLD_BIAS_TEE)
                 .and_then(|key| b.engines().find(|e| e.state.key == key))
                 .and_then(|e| e.state.subjects.get(&obs.subject));
             let slot = HourOfWeek::of(obs.t, offset);
@@ -972,7 +991,7 @@ impl AttentionService {
             let Some((_, cal, obs)) = from_occupancy_stat(r, 0) else {
                 continue;
             };
-            let Some(key) = b.key(site, cal, self.chain) else {
+            let Some(key) = b.key(site, cal, self.chain, FOLD_BIAS_TEE) else {
                 continue;
             };
             let Some(e) = b.engines().find(|e| e.state.key == key) else {
@@ -1689,6 +1708,9 @@ impl AttentionService {
                     "site": id.to_string(),
                     "cal": e.state.key.cal,
                     "chain": e.state.key.chain,
+                    // T-333: always present, so a reader never has to infer which cohort a
+                    // baseline belongs to. "unknown" is a cohort, not a missing value.
+                    "bias_tee": e.state.key.bias_tee.as_str(),
                     "scheme": e.state.key.scheme,
                     "cell_factor": e.state.key.cell_factor,
                     "subjects": e.state.subjects.len(),
@@ -1988,8 +2010,15 @@ pub(crate) mod tests {
                         suspect_fraction: 0.0,
                         provenance_explained: false,
                     };
-                    b.observe(site, 0, CalKey::Uncalibrated, ChainKey::Unknown, &obs)
-                        .unwrap();
+                    b.observe(
+                        site,
+                        0,
+                        CalKey::Uncalibrated,
+                        ChainKey::Unknown,
+                        FOLD_BIAS_TEE,
+                        &obs,
+                    )
+                    .unwrap();
                 }
             }
         }

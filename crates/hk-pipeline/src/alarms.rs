@@ -1929,6 +1929,7 @@ mod tests {
                     site: site_id,
                     cal: CalKey::Uncalibrated,
                     chain: ChainKey::Unknown,
+                    bias_tee: hk_model::BiasTee::Unknown,
                     scheme: 1,
                     cell_factor: 16,
                 },
