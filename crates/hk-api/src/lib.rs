@@ -36,6 +36,7 @@ pub mod clusters; // T-202
 pub mod control;
 pub mod datasets; // T-205
 pub mod decode; // T-159
+pub mod events; // T-264 (ADR-0017 TM-8): the durable catalogue behind the History surface
 pub mod http;
 pub mod inspector;
 pub mod inventory;
@@ -43,6 +44,7 @@ pub mod iqbuffer; // T-157
 pub mod live_control;
 pub mod ondemand;
 pub mod outputs;
+pub mod presence; // T-264 (ADR-0017 TM-8): one emitter's presence track
 pub mod query;
 pub mod recipes;
 pub mod selections;

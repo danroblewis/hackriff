@@ -299,13 +299,14 @@ mod tests {
         assert_eq!(resolve("GET", "/api/inventory"), None);
         let listed: Vec<_> = ROUTES
             .iter()
-            // T-159's /decode and T-247's /classification sub-paths are separate modules
-            // (`crate::decode`, `crate::classification`), each routed before this one; this table
-            // only lists paths `resolve` above itself understands.
+            // T-159's /decode, T-247's /classification and T-264's /presence sub-paths are separate
+            // modules (`crate::decode`, `crate::classification`, `crate::presence`), each routed
+            // before this one; this table only lists paths `resolve` above itself understands.
             .filter(|(_, p)| {
                 p.starts_with("/api/inventory/")
                     && !p.ends_with("/decode")
                     && !p.ends_with("/classification")
+                    && !p.ends_with("/presence")
             })
             .collect();
         assert_eq!(listed.len(), 5);
