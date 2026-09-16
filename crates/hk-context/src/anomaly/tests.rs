@@ -687,6 +687,7 @@ fn floor_event(
             vga_db: 20.0,
             amp_on: false,
             antenna_port_hash: None,
+            bias_tee: hk_model::BiasTee::Unknown,
             fft_len: 1024,
             overlap: 512,
             n_avg: 10,

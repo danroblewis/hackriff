@@ -4,7 +4,7 @@
 use std::ops::Range;
 
 use hk_core::{Discontinuity, ProvenanceHandle};
-use hk_model::SampleTime;
+use hk_model::{BiasTee, SampleTime};
 
 use super::blocks::fill_invalid;
 use super::episodes::{Engine, EventCtx, Frame, Stamp, Timing};
@@ -325,8 +325,25 @@ impl FloorConfig {
     }
 }
 
-/// The receiver state an estimate is keyed by: tune, rate, bandwidth, gains, antenna port and
-/// the spectral resolution. A change beyond tolerance starts a new segment.
+/// The receiver state an estimate is keyed by: tune, rate, bandwidth, gains, antenna port,
+/// bias-tee state and the spectral resolution. A change beyond tolerance starts a new segment.
+///
+/// **Bias tee is part of the key (T-331).** A bias tee powers an *external* LNA on the antenna
+/// port, so switching it moves this chain's noise floor the instant the DC arrives — device-local
+/// physics by the rule in `hk_core::source` (T-259/T-305), exactly like LNA/VGA/amp. It is not
+/// covered by any other field: [`hk_core::PendingControl::apply_to`] deliberately leaves [`Tune`]
+/// untouched for a bias-tee change (T-325), so `lna_db`/`vga_db`/`amp_on` are byte-identical
+/// either side of a switch; the drivers do not rewrite `antenna_port` either; and
+/// `Discontinuity::between` raises only `PROVENANCE_CHANGE` for a bias-only change, which is not
+/// in [`FLOOR_RESET_ON`]. Without this field, bias-tee-on and bias-tee-off frames would pool into
+/// one floor context — the defect T-303 fixed one layer up for `BaselineKey`.
+///
+/// Compared **exactly, three-valued**: [`BiasTee::Unknown`] is its own context and never equals
+/// `Off`. A device that cannot report, a replay whose file carries no such field, and a device
+/// reporting off are three different facts (T-325); pooling the first two with `Off` would claim
+/// comparability on no evidence.
+///
+/// [`Tune`]: hk_model::Tune
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GainKey {
     /// RF centre, Hz.
@@ -343,6 +360,9 @@ pub struct GainKey {
     pub amp_on: bool,
     /// FNV-1a hash of the antenna/filter port name (`None` when unset).
     pub antenna_port_hash: Option<u64>,
+    /// Antenna-port bias-tee state (T-331): an active antenna's LNA is part of this receive
+    /// chain. Compared exactly; `Unknown` is its own context, never `Off`.
+    pub bias_tee: BiasTee,
     /// FFT length.
     pub fft_len: usize,
     /// Segment overlap, samples.
@@ -372,6 +392,7 @@ impl GainKey {
             vga_db: p.tune.vga_db,
             amp_on: p.tune.amp_on,
             antenna_port_hash: p.antenna_port.as_deref().map(fnv1a),
+            bias_tee: p.bias_tee,
             fft_len: r.fft_len,
             overlap: r.overlap,
             n_avg: r.n_avg,
@@ -380,7 +401,9 @@ impl GainKey {
     }
 
     /// Same state within tolerance: centre within `tune_tolerance_hz`, rate and bandwidth within
-    /// 1 ppm (bandwidth ≥ 1 Hz), gains within 0.01 dB; everything else exactly.
+    /// 1 ppm (bandwidth ≥ 1 Hz), gains within 0.01 dB; everything else — antenna port, bias tee
+    /// and resolution — exactly. There is no tolerance to give a three-valued bias-tee state:
+    /// `Unknown`, `Off` and `On` are three contexts.
     pub fn matches(&self, other: &GainKey, tune_tolerance_hz: f64) -> bool {
         let near = |a: f64, b: f64, tol: f64| (a - b).abs() <= tol;
         near(self.center_hz, other.center_hz, tune_tolerance_hz)
@@ -398,6 +421,7 @@ impl GainKey {
             && near(self.vga_db, other.vga_db, 0.01)
             && self.amp_on == other.amp_on
             && self.antenna_port_hash == other.antenna_port_hash
+            && self.bias_tee == other.bias_tee
             && self.fft_len == other.fft_len
             && self.overlap == other.overlap
             && self.n_avg == other.n_avg
