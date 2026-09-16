@@ -4951,7 +4951,7 @@ tasks:
     title: 'The open-set residue is a capability gap, not a tuning gap: 16-APSK,
       pi/4-DQPSK and VSB-AM need post-sync constellation measurements the feature tree
       cannot make'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: M3A
