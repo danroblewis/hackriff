@@ -113,8 +113,13 @@ pub(crate) fn run(
     let mut marks = (shared.cfg.drive_scheduler
         && source.capabilities().kind == SourceKind::Replay)
         .then(VirtualMarks::default);
-    let hold_for_coverage =
-        shared.gate.enabled() && shared.specs.iter().any(|s| s.trigger == Trigger::Coverage);
+    // T-287: an occupancy chain attaches off the tune exactly as a coverage chain does, so it
+    // needs the same hold — capture must not run past the samples the hunt will claim.
+    let hold_for_coverage = shared.gate.enabled()
+        && shared
+            .specs
+            .iter()
+            .any(|s| matches!(s.trigger, Trigger::Coverage | Trigger::Occupancy));
     let mut last_tune: Option<(u64, u64)> = None;
     let result = loop {
         if shared.stop.load(Ordering::SeqCst) {
