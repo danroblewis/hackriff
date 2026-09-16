@@ -45,13 +45,34 @@ macro_rules! emitter_select {
 const EMITTER_INSERT_COLUMNS: &str = "emitter_id, f_center, bandwidth, first_seen, last_seen, \
      count, fingerprint, identity_scheme, identity_value, f_lo, f_hi";
 
+/// ADR-0017 §2.1 (T-250): a row is in a time window when one of its **presence intervals**
+/// overlaps it — not when its `first_seen`/`last_seen` **hull** straddles it. The hull of a signal
+/// seen once at 09:00 and once at 17:00 is eight hours of mostly silence, so the hull test matched
+/// every window in between and `GET /api/inventory?t0&t1` structurally could not answer "what was
+/// on the air in this window". `emitter_observation` is that interval set already (migration 0001).
+///
+/// Rows written by the legacy `upsert_emitter_observation` / `insert_emitter` paths carry no
+/// interval at all; for those, and only those, the hull is still the best answer available.
+/// Correlates on `emitter.emitter_id`; `?4` is t0 and `?5` is t1.
+macro_rules! presence_overlaps {
+    () => {
+        "(EXISTS (SELECT 1 FROM emitter_observation o \
+                  WHERE o.emitter_id = emitter.emitter_id \
+                    AND o.t_end >= ?4 AND o.t_start <= ?5) \
+          OR (NOT EXISTS (SELECT 1 FROM emitter_observation o2 \
+                          WHERE o2.emitter_id = emitter.emitter_id) \
+              AND last_seen >= ?4 AND first_seen <= ?5))"
+    };
+}
+
 /// The emitter region query. Parameters: f_lo min, query hi, query lo, query t0, query t1.
 pub(super) const EMITTER_REGION_SQL: &str = concat!(
     "SELECT ",
     emitter_select!(),
     " FROM emitter \
-     WHERE f_lo BETWEEN ?1 AND ?2 AND f_hi >= ?3 AND last_seen >= ?4 AND first_seen <= ?5 \
-     AND merged_into IS NULL \
+     WHERE f_lo BETWEEN ?1 AND ?2 AND f_hi >= ?3 AND ",
+    presence_overlaps!(),
+    " AND merged_into IS NULL \
      ORDER BY last_seen DESC, emitter_id"
 );
 
@@ -81,8 +102,9 @@ const EMITTER_REGION_LIMIT_SQL: &str = concat!(
     "SELECT ",
     emitter_select!(),
     " FROM emitter \
-     WHERE f_lo BETWEEN ?1 AND ?2 AND f_hi >= ?3 AND last_seen >= ?4 AND first_seen <= ?5 \
-     AND merged_into IS NULL \
+     WHERE f_lo BETWEEN ?1 AND ?2 AND f_hi >= ?3 AND ",
+    presence_overlaps!(),
+    " AND merged_into IS NULL \
      ORDER BY last_seen DESC, emitter_id LIMIT ?6"
 );
 

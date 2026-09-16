@@ -1599,7 +1599,21 @@ fn inventory_where(
         p.extend([b.f_lo_min, b.hi, b.lo].map(SqlValue::Real));
     }
     if let Some(t) = q.time {
-        sql.push_str(" AND last_seen >= ? AND first_seen <= ?");
+        // ADR-0017 §2.1 (T-250): a **presence-interval** overlap, not a `first_seen`/`last_seen`
+        // hull test. The hull of a signal seen once at 09:00 and once at 17:00 straddles every
+        // window in between, so the hull test could not answer "what was on the air in this
+        // window" — the question this filter exists to ask. Rows carrying no interval at all
+        // (legacy writers) still answer from the hull. See `repo::inventory::presence_overlaps`.
+        sql.push_str(
+            " AND (EXISTS (SELECT 1 FROM emitter_observation o \
+                           WHERE o.emitter_id = emitter.emitter_id \
+                             AND o.t_end >= ? AND o.t_start <= ?) \
+                   OR (NOT EXISTS (SELECT 1 FROM emitter_observation o2 \
+                                   WHERE o2.emitter_id = emitter.emitter_id) \
+                       AND last_seen >= ? AND first_seen <= ?))",
+        );
+        p.push(SqlValue::Integer(t.start.as_unix_nanos()));
+        p.push(SqlValue::Integer(t.end.as_unix_nanos()));
         p.push(SqlValue::Integer(t.start.as_unix_nanos()));
         p.push(SqlValue::Integer(t.end.as_unix_nanos()));
     }

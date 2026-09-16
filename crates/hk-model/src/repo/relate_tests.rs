@@ -185,6 +185,69 @@ fn station_flagged(
     id
 }
 
+/// One inventory row from a bare track sighting with an explicit fingerprint and observation span.
+/// No linked detection, so the duplicate rule ranks it on the neutral unmeasured-SNR proxy and the
+/// duty cycle decides — which is the point: these two rows differ in nothing else.
+fn sighted(
+    r: &mut Repository,
+    f: f64,
+    bw: f64,
+    duty: f64,
+    burst: f64,
+    seen: TimeRange,
+) -> EmitterId {
+    r.record_sighting(
+        &Sighting {
+            source: LinkTarget::Track(TrackId::new()),
+            seen,
+            count: 4,
+            f_center_hz: f,
+            bandwidth_hz: bw,
+            fingerprint: Some(Fingerprint {
+                duty_cycle: Some(duty),
+                burst_length_s: Some(burst),
+                ..Fingerprint::new(f, bw)
+            }),
+            identity: None,
+            context: None,
+            classification: None,
+            tags: Vec::new(),
+        },
+        None,
+    )
+    .unwrap()
+    .emitter_id
+}
+
+/// T-250, over the repository: the user's own 99.8 MHz station of 2026-09-16, seen over two
+/// **disjoint** windows (94–399 s, then 471–530 s), is one shown row and not two. Their bands
+/// overlap essentially exactly; the only thing that had separated them was the burst length each
+/// window happened to measure (0.68 s vs 0.37 s), a statistic of the watching, not of the signal.
+#[test]
+fn t250_a_station_seen_in_two_disjoint_windows_collapses_to_one_shown_row() {
+    let (mut r, _sv) = scene();
+    let first = sighted(&mut r, 99_814_800.0, 377_500.0, 0.4952, 0.6821, tr(94, 399));
+    let second = sighted(
+        &mut r,
+        99_815_100.0,
+        377_600.0,
+        0.3720,
+        0.3648,
+        tr(471, 530),
+    );
+    assert_ne!(
+        first, second,
+        "entity resolution still mints two rows here; the merge rules are what must collapse them"
+    );
+
+    let out = r
+        .resolve_overlaps(second, "test/overlap@1", t(530), &tol())
+        .unwrap();
+    assert_eq!(out.duplicates.len(), 1, "{out:?}");
+    assert_eq!(shown(&r), vec![first], "one physical station, one row");
+    assert_eq!(every(&r).len(), 2, "the deferring row is kept in full");
+}
+
 fn confirm(r: &mut Repository, id: EmitterId, at: Timestamp) {
     r.change_emitter_lifecycle(
         id,
