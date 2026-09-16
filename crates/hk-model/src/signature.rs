@@ -711,6 +711,15 @@ pub mod field {
     pub const CFO_OFFSET_HZ: &str = "cfo_offset_hz";
     /// In-band SNR, dB.
     pub const SNR_DB: &str = "snr_db";
+    /// Linear sweep rate `α`, Hz per second; signed, so a down-chirp is negative (T-294/T-297).
+    ///
+    /// Measured from the IQ by `hk_dsp::chirp`, never from a spectrum frame: for a sweep that
+    /// completes inside one analysis frame the centre track is not in the detector's input at all
+    /// (ADR-0017 §1.3(b)). Like every other field here it is **evidence about** an emission, not an
+    /// identity: it says the region sweeps at this rate, never that the region is LoRa or a radar.
+    /// A region that could not be characterised carries **no** field — absent means *not measured*,
+    /// which is why nothing writes a zero here.
+    pub const SWEEP_RATE_HZ_PER_S: &str = "sweep_rate_hz_per_s";
 }
 
 /// One measured value: a number, a bit pattern or a label.
