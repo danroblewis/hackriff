@@ -23,7 +23,7 @@ use crate::ids::EmitterId;
 use crate::region::{FreqRange, Region, TimeRange};
 use crate::relate::{
     ARTIFACT_SOURCE_MIN_SNR_DB, ArtifactKind, ArtifactPrediction, ArtifactSource, EmitterRelation,
-    RelationAuthor, RelationClaim, RelationKind, RowEvidence, bands_compete,
+    ReceiveChain, RelationAuthor, RelationClaim, RelationKind, RowEvidence, TunedLo, bands_compete,
     distinguishing_evidence, overlap_fraction, predict_artifacts, present_only_with,
 };
 use crate::time::Timestamp;
@@ -37,7 +37,7 @@ pub const MAX_ARTIFACT_SOURCES: usize = 32;
 /// Newest linked detections read per row for level, trust and tuning history.
 pub const MAX_EVIDENCE_DETECTIONS: usize = 256;
 
-/// Distinct tuning centres kept per row.
+/// Distinct (receive chain, tuning centre) pairs kept per row.
 const MAX_TUNED_LO: usize = 16;
 
 /// Candidates looked at near each frequency this emitter's own mechanisms predict, so a station
@@ -50,14 +50,22 @@ const ANY_TIME: TimeRange = TimeRange::new(
 );
 
 /// The newest linked detections of an emitter with their level, −3 dB width, suspect flags and the
-/// tuning centre they were measured under. Reaches detections exactly like
-/// `EMITTER_LATEST_DETECTION_SQL` (`repo/inventory.rs`): through the emitter's currently-linked
-/// tracks, or linked directly. Parameter `?1` is the emitter id, `?2` the row cap.
+/// tuning centre they were measured under — together with the **receive chain** that tuned it
+/// (T-302). The provenance join is already here for the LO; reading `device_id` and `antenna_port`
+/// out of the same row is what stops one front end's tuning from explaining another's measurement.
+/// The emitter table holds no device (a row can be seen by several), so the chain can only come
+/// through this detection → provenance join.
+///
+/// Reaches detections exactly like `EMITTER_LATEST_DETECTION_SQL` (`repo/inventory.rs`): through
+/// the emitter's currently-linked tracks, or linked directly. Parameter `?1` is the emitter id,
+/// `?2` the row cap.
 const EMITTER_DETECTION_EVIDENCE_SQL: &str = "\
-     SELECT snr_peak, peak_dbfs, xdb_bw, flags, lo FROM ( \
+     SELECT snr_peak, peak_dbfs, xdb_bw, flags, lo, device_id, antenna_port FROM ( \
        SELECT d.snr_peak AS snr_peak, d.peak_dbfs AS peak_dbfs, d.xdb_bw AS xdb_bw, \
               d.flags AS flags, d.t_start AS t_start, \
-              json_extract(p.canonical, '$.tune.center_hz') AS lo \
+              json_extract(p.canonical, '$.tune.center_hz') AS lo, \
+              p.device_id AS device_id, \
+              json_extract(p.canonical, '$.antenna_port') AS antenna_port \
        FROM emitter_link el \
        JOIN track_detection td ON td.track_id = el.target_id \
        JOIN detection d ON d.detection_id = td.detection_id \
@@ -66,7 +74,9 @@ const EMITTER_DETECTION_EVIDENCE_SQL: &str = "\
        UNION ALL \
        SELECT d.snr_peak AS snr_peak, d.peak_dbfs AS peak_dbfs, d.xdb_bw AS xdb_bw, \
               d.flags AS flags, d.t_start AS t_start, \
-              json_extract(p.canonical, '$.tune.center_hz') AS lo \
+              json_extract(p.canonical, '$.tune.center_hz') AS lo, \
+              p.device_id AS device_id, \
+              json_extract(p.canonical, '$.antenna_port') AS antenna_port \
        FROM emitter_link el \
        JOIN detection d ON d.detection_id = el.target_id \
        JOIN provenance p ON p.provenance_id = d.provenance_id \
@@ -328,18 +338,34 @@ fn evidence(conn: &Connection, id: EmitterId) -> Result<Option<RowEvidence>, Rep
         .as_ref()
         .and_then(Fingerprint::from_value);
 
-    type Det = (f64, f64, Option<f64>, i64, Option<f64>);
+    type Det = (
+        f64,
+        f64,
+        Option<f64>,
+        i64,
+        Option<f64>,
+        String,
+        Option<String>,
+    );
     let dets: Vec<Det> = {
         let mut stmt = conn.prepare_cached(EMITTER_DETECTION_EVIDENCE_SQL)?;
         stmt.query_map(params![blob(id), MAX_EVIDENCE_DETECTIONS as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
         })?
         .collect::<Result<_, _>>()?
     };
     let (mut snr_db, mut peak_dbfs, mut xdb_bandwidth_hz) = (None, None, None);
-    let (mut suspect, mut tuned_lo_hz) = (0usize, Vec::<f64>::new());
+    let (mut suspect, mut tuned_lo) = (0usize, Vec::<TunedLo>::new());
     let (mut image_flagged, mut imd_flagged, mut spur_flagged) = (false, false, false);
-    for (i, (snr, peak, xdb, flags, lo)) in dets.iter().enumerate() {
+    for (i, (snr, peak, xdb, flags, lo, device, port)) in dets.iter().enumerate() {
         if i == 0 {
             snr_db = Some(*snr);
             peak_dbfs = Some(*peak);
@@ -355,11 +381,22 @@ fn evidence(conn: &Connection, id: EmitterId) -> Result<Option<RowEvidence>, Rep
         image_flagged |= f.image_candidate;
         imd_flagged |= f.suspect_imd;
         spur_flagged |= f.spur_candidate;
-        if let Some(lo) = lo.filter(|v| v.is_finite())
-            && tuned_lo_hz.len() < MAX_TUNED_LO
-            && !tuned_lo_hz.iter().any(|v| (v - lo).abs() < 1.0)
-        {
-            tuned_lo_hz.push(lo);
+        // The tuning centre is never recorded without the receive chain that tuned it (T-302): an
+        // image belongs to one mixer, and a bare frequency here would let one front end's tuning
+        // mirror another front end's emitter. Chains are compared exactly when deduplicating, so
+        // every chain that measured this row keeps at least one entry.
+        if let Some(lo) = lo.filter(|v| v.is_finite()) {
+            let chain = ReceiveChain {
+                device_id: device.clone(),
+                antenna_port: port.clone(),
+            };
+            if tuned_lo.len() < MAX_TUNED_LO
+                && !tuned_lo
+                    .iter()
+                    .any(|t| t.chain == chain && (t.lo_hz - lo).abs() < 1.0)
+            {
+                tuned_lo.push(TunedLo { chain, lo_hz: lo });
+            }
         }
     }
     let suspect_fraction = if dets.is_empty() {
@@ -382,7 +419,7 @@ fn evidence(conn: &Connection, id: EmitterId) -> Result<Option<RowEvidence>, Rep
         spur_flagged,
         identity,
         fingerprint,
-        tuned_lo_hz,
+        tuned_lo,
         spans: observation_spans(conn, id)?
             .into_iter()
             .map(|s| (s.t0, s.t1))
@@ -444,12 +481,18 @@ fn artifact_sources(
         if snr < ARTIFACT_SOURCE_MIN_SNR_DB {
             continue;
         }
+        // Which receive chains actually measured this source (T-302). No device predicate belongs
+        // on the query above: a source may legitimately be seen by several front ends, and it is
+        // the *pairing* with the row being explained that has to share a chain, not the candidate
+        // list.
+        let chains = ev.chains();
         out.push((
             ArtifactSource {
                 emitter_id: id,
                 f_center_hz: ev.f_center_hz,
                 bandwidth_hz: ev.bandwidth_hz,
                 level_dbfs: level,
+                chains,
             },
             ev,
         ));
@@ -718,9 +761,9 @@ fn resolve(
         && here.snr_db.is_some_and(|s| s >= ARTIFACT_SOURCE_MIN_SNR_DB)
     {
         let mut predicted: Vec<f64> = here
-            .tuned_lo_hz
+            .tuned_lo
             .iter()
-            .map(|lo| 2.0 * lo - here.f_center_hz)
+            .map(|t| 2.0 * t.lo_hz - here.f_center_hz)
             .collect();
         predicted.extend(
             (2..=crate::relate::HARMONIC_MAX_ORDER).map(|n| f64::from(n) * here.f_center_hz),
@@ -750,7 +793,7 @@ fn resolve(
         let usable: Vec<ArtifactSource> = sources
             .iter()
             .filter(|(s, _)| s.emitter_id != target.emitter_id)
-            .map(|(s, _)| *s)
+            .map(|(s, _)| s.clone())
             .collect();
         let present = |id: EmitterId| {
             sources
@@ -763,7 +806,7 @@ fn resolve(
             target.bandwidth_hz,
             level,
             &usable,
-            &target.tuned_lo_hz,
+            &target.tuned_lo,
         )
         .into_iter()
         .find_map(|p| {
