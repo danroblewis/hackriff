@@ -353,7 +353,7 @@ pub fn assign_emitter(
     cluster
         .centroid
         .fold_member(&mine, features.suspect_fraction);
-    cluster.updated_at = t;
+    cluster.touch(t);
     repo.put_cluster(&cluster)?;
     let state = refresh_state(repo, &chosen, t)?;
 
@@ -443,7 +443,7 @@ fn refresh_state(
     };
     if next != cluster.state {
         cluster.state = next;
-        cluster.updated_at = t;
+        cluster.touch(t);
         repo.put_cluster(&cluster)?;
         if next == ClusterState::Active {
             repo.append_cluster_event(&ClusterEvent {
@@ -693,7 +693,7 @@ pub fn repair(repo: &mut Repository, t: Timestamp) -> Result<RepairReport, RepoE
             if loser.state != ClusterState::Promoted {
                 loser.state = ClusterState::Merged;
                 loser.merged_into = Some(dest.clone());
-                loser.updated_at = t;
+                loser.touch(t);
                 repo.put_cluster(&loser)?;
                 repo.append_cluster_event(&ClusterEvent {
                     cluster_id: dest.clone(),
@@ -727,7 +727,7 @@ pub fn repair(repo: &mut Repository, t: Timestamp) -> Result<RepairReport, RepoE
             }
         }
         cluster.centroid = centroid;
-        cluster.updated_at = t;
+        cluster.touch(t);
         repo.put_cluster(&cluster)?;
         refresh_state(repo, &id, t)?;
     }
