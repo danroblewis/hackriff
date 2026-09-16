@@ -784,9 +784,12 @@ impl Pipeline {
             crate::occupancy::OccupancyConfig::default(),
         );
         // T-128: one attention service for the run; never fails the run.
+        // T-303: baselines are keyed by the front end the run measures with, so a second device at
+        // the same site accrues its own noise floor instead of averaging into this one's.
         let attention = crate::attention::AttentionService::open_for_run(
             &cfg.data_dir,
             &db_path,
+            hk_model::attention::baseline::ChainKey::of_device(&cfg.device_id),
             Arc::clone(&counters),
         )
         .map_err(|e| eprintln!("attention service disabled: {e:#}"))

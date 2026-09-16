@@ -67,6 +67,7 @@ Regenerated from `use-cases.yaml`:
 
 ## Open questions
 - **Site keying (resolved, docs/06 §2.1):** C06→C12 — baselines for a portable device are keyed per location.
+- **Front-end keying (resolved, T-303):** the baseline key carries the **receive chain** as well as the site and calibration. A noise floor is a property of one chain (antenna, cable, LNA, mixer), so two front ends at one site have genuinely different floors; `CalKey::Uncalibrated` is one value for all of them, so without the chain their floors averaged and novelty fired on the mixture. Keyed on the **device**, not the antenna port: a key is a total equality key and the on-disk path, so an `Option` port would split one device's history the day a switch is fitted. A port change is sequential and already explained as a self-inflicted provenance step; two devices are concurrent, and only the key separates them. **Still open (T-307-adjacent):** the occupancy close reads history unfiltered (`Pyramid::query` = `OriginFilter::ANY`), so several front ends folding into one pyramid are already averaged in the level-0 cells before occupancy runs. The key stops baselines pooling; a per-source occupancy read is what makes it end-to-end.
 - **History input (resolved, docs/06 §2.1):** C26→C12 — baselines need spectrum history.
 - **Interestingness score location (resolved, docs/06 §5):** C12 computes the full score (using classifier entropy from C15 and decoder demand from C22); C04 consumes it.
 - Channel plans per band: from C17 band plans or learned from detections?

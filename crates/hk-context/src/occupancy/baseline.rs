@@ -88,8 +88,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, PoisonError};
 
 use hk_model::attention::baseline::{
-    AdaptationPolicy, BaselineKey, BaselineResolution, CalKey, HourOfWeek, MATURITY_MIN_OBSERVED_S,
-    Maturity, SiteKey, SlotStats,
+    AdaptationPolicy, BaselineKey, BaselineResolution, CalKey, ChainKey, HourOfWeek,
+    MATURITY_MIN_OBSERVED_S, Maturity, SiteKey, SlotStats,
 };
 use hk_model::attention::occupancy::{OccupancyStat, OccupancySubject};
 use hk_model::attention::score::NoveltyScore;
@@ -1522,12 +1522,17 @@ impl Baselines {
         Ok(())
     }
 
-    /// The key a fold under `site`/`cal` goes to; `None` for sites that do not accrue.
-    pub fn key(&self, site: SiteKey, cal: CalKey) -> Option<BaselineKey> {
+    /// The key a fold under `site`/`cal`/`chain` goes to; `None` for sites that do not accrue.
+    ///
+    /// T-303: the receive chain is part of the key because a noise floor belongs to one front end.
+    /// Two uncalibrated devices at one site share a [`CalKey::Uncalibrated`], so without the chain
+    /// their floors average and novelty scores the mixture.
+    pub fn key(&self, site: SiteKey, cal: CalKey, chain: ChainKey) -> Option<BaselineKey> {
         match site {
             SiteKey::Site(id) => Some(BaselineKey {
                 site: id,
                 cal,
+                chain,
                 scheme: self.scheme,
                 cell_factor: self.cell_factor,
             }),
@@ -1553,16 +1558,17 @@ impl Baselines {
         Ok(self.engines.get_mut(&key).expect("inserted"))
     }
 
-    /// Folds `obs` under `site` and `cal`. Mobile/unassigned: nothing accrues and novelty is 0
-    /// (immature). A store read error is returned (the fold is not applied).
+    /// Folds `obs` under `site`, `cal` and the receive `chain`. Mobile/unassigned: nothing accrues
+    /// and novelty is 0 (immature). A store read error is returned (the fold is not applied).
     pub fn observe(
         &mut self,
         site: SiteKey,
         utc_offset_min: i16,
         cal: CalKey,
+        chain: ChainKey,
         obs: &IntervalObservation,
     ) -> Result<FoldOutcome, BaselineStoreError> {
-        let Some(key) = self.key(site, cal) else {
+        let Some(key) = self.key(site, cal, chain) else {
             return Ok(FoldOutcome::none(
                 obs,
                 Maturity::Immature { observed_s: 0.0 },
@@ -1880,6 +1886,7 @@ mod tests {
         BaselineKey {
             site: SiteId::new(),
             cal: CalKey::Uncalibrated,
+            chain: ChainKey::Unknown,
             scheme: 1,
             cell_factor: 16,
         }
@@ -2096,7 +2103,8 @@ mod tests {
         let ch = channel(0);
         for q in 0..(30 * 4) {
             let o = interval(ch, f64::from(q) / 4.0, 0.1, 10.0, &mut rng);
-            b.observe(site, 0, CalKey::Uncalibrated, &o).unwrap();
+            b.observe(site, 0, CalKey::Uncalibrated, ChainKey::Unknown, &o)
+                .unwrap();
         }
         // New calibration: levels shift by +20 dB (dBFS → dBm-ish offset) and occupancy looks
         // different under the new threshold.
@@ -2104,7 +2112,7 @@ mod tests {
         for q in 0..8 {
             let mut o = interval(ch, 30.0 + f64::from(q) / 4.0, 0.5, 10.0, &mut rng);
             o.level_db = o.level_db.map(|l| l + 20.0);
-            let out = b.observe(site, 0, cal, &o).unwrap();
+            let out = b.observe(site, 0, cal, ChainKey::Unknown, &o).unwrap();
             assert_eq!(out.novelty.novelty, 0.0);
             assert!(!out.novelty.maturity.is_mature());
             assert!(out.change_point.is_none());
@@ -2113,9 +2121,138 @@ mod tests {
         // The same step under the old key would have been novel.
         let mut o = interval(ch, 32.0, 0.5, 10.0, &mut rng);
         o.level_db = o.level_db.map(|l| l + 20.0);
-        let old = b.key(site, CalKey::Uncalibrated).unwrap();
+        let old = b
+            .key(site, CalKey::Uncalibrated, ChainKey::Unknown)
+            .unwrap();
         let e = b.engines().find(|e| e.state.key == old).unwrap();
         assert!(e.novelty_of(&o).novelty > 0.9);
+    }
+
+    /// T-303: two front ends at one site, both **uncalibrated**, keep their own noise floors.
+    ///
+    /// A noise floor belongs to one receive chain, so two devices on different antennas differ
+    /// genuinely. `CalKey::Uncalibrated` is one value for both, so before the chain was part of the
+    /// key they shared a baseline and their floors averaged. Hidden truth: nothing ever changes on
+    /// either chain for 30 days, and then chain A alone rises by 12 dB. The pooled key is folded
+    /// alongside as the control, and it is what T-303 fixes: its reference is the mixture, and A's
+    /// real rise is masked by B's distant floor.
+    #[test]
+    fn baseline_two_front_ends_at_one_site_do_not_pool_their_noise_floors() {
+        const DAYS: u32 = 30;
+        const RISE_DB: f64 = 12.0;
+        // Hidden generator parameters: two chains, two floors 30 dB apart.
+        let (floor_a, floor_b) = (-100.0, -70.0);
+        let (a, b) = (
+            ChainKey::of_device("hackrf:a"),
+            ChainKey::of_device("hackrf:b"),
+        );
+        let site = SiteKey::Site(SiteId::new());
+        let ch = channel(0);
+        let cal = CalKey::Uncalibrated;
+        let quiet = |hours: f64, floor: f64, rng: &mut Rng| IntervalObservation {
+            subject: ch,
+            t: at(hours),
+            gain: 0,
+            level_db: Some(floor + 0.5 * rng.normal()),
+            max_db: Some(floor + 3.0),
+            occupied_weight_s: 0.0,
+            weight_s: 900.0,
+            observed_s: 900.0,
+            n_eff: 12.0,
+            suspect_fraction: 0.0,
+            provenance_explained: false,
+        };
+
+        let mut rng = Rng(0x303);
+        let mut split = Baselines::new(BaselineConfig::default(), 1, 16, None);
+        let mut pooled = Baselines::new(BaselineConfig::default(), 1, 16, None);
+        let (mut worst_a, mut worst_b) = (0.0_f64, 0.0_f64);
+        for q in 0..(DAYS * 24 * 4) {
+            let h = f64::from(q) / 4.0;
+            let (oa, ob) = (quiet(h, floor_a, &mut rng), quiet(h, floor_b, &mut rng));
+            // Keyed by chain: each front end folds into its own baseline.
+            worst_a = worst_a.max(split.observe(site, 0, cal, a, &oa).unwrap().novelty.novelty);
+            worst_b = worst_b.max(split.observe(site, 0, cal, b, &ob).unwrap().novelty.novelty);
+            // Control: the pre-T-303 key, where both chains share one baseline.
+            pooled
+                .observe(site, 0, cal, ChainKey::Unknown, &oa)
+                .unwrap();
+            pooled
+                .observe(site, 0, cal, ChainKey::Unknown, &ob)
+                .unwrap();
+        }
+
+        // (a) The baselines did not mix: one per chain, each holding its own chain's floor.
+        assert_eq!(split.engines().count(), 2, "one baseline per receive chain");
+        assert_ne!(
+            split.key(site, cal, a).unwrap(),
+            split.key(site, cal, b).unwrap()
+        );
+        let reference_mean = |bl: &Baselines, chain: ChainKey| {
+            let key = bl.key(site, cal, chain).unwrap();
+            let e = bl.engines().find(|e| e.state.key == key).expect("engine");
+            let sub = e.state.subjects.get(&ch).expect("subject");
+            // Index 3 of `BaselineResolution::FINEST_FIRST` is the all-hours pool.
+            let gi = gain_index(sub, 0, LevelClass::Idle).expect("an idle level series");
+            let (level, _) = pools(sub, e.slot(at(0.0)), Some(gi), BaselineCopy::Reference);
+            (level[3].mean_db().expect("a level"), level[3].std_db())
+        };
+        let (mean_a, sd_a) = reference_mean(&split, a);
+        let (mean_b, sd_b) = reference_mean(&split, b);
+        let (mean_pooled, sd_pooled) = reference_mean(&pooled, ChainKey::Unknown);
+        println!(
+            "T-303 two front ends at one site: split means {mean_a:.2} / {mean_b:.2} dB (σ \
+             {:.2} / {:.2}) against floors {floor_a} / {floor_b}; pooled mean {mean_pooled:.2} dB \
+             (σ {:.2}); worst quiet novelty A {worst_a:.3}, B {worst_b:.3}",
+            sd_a.unwrap_or(0.0),
+            sd_b.unwrap_or(0.0),
+            sd_pooled.unwrap_or(0.0),
+        );
+        assert!((mean_a - floor_a).abs() < 1.0, "A's own floor: {mean_a}");
+        assert!((mean_b - floor_b).abs() < 1.0, "B's own floor: {mean_b}");
+
+        // (b) Neither chain raised a novelty alarm from the other's floor. Nothing changed on
+        // either chain for 30 days, so no fold may score any novelty at all — not merely stay
+        // under the alarm "on" level.
+        assert_eq!(worst_a, 0.0, "chain A scored novelty from B's floor");
+        assert_eq!(worst_b, 0.0, "chain B scored novelty from A's floor");
+
+        // The control's reference is the mixture of the two floors, which is the bug: it sits far
+        // from both, and its spread is the 30 dB gap rather than the 0.5 dB of either chain.
+        assert_eq!(pooled.engines().count(), 1, "one shared baseline");
+        assert!(
+            (mean_pooled - floor_a).abs() > 5.0 && (mean_pooled - floor_b).abs() > 5.0,
+            "pooled mean {mean_pooled} is neither chain's floor"
+        );
+        assert!(sd_pooled.unwrap_or(0.0) > 5.0, "pooled spread is the gap");
+
+        // Control: detection still works **within** one chain, and the pooled key is what loses it.
+        // A real 12 dB rise on A alone is novelty against A's own floor, and is masked when B's
+        // distant floor is in the same pool.
+        let mut risen = quiet(f64::from(DAYS * 24) + 1.0, floor_a + RISE_DB, &mut rng);
+        risen.max_db = Some(floor_a + RISE_DB + 3.0);
+        let split_out = split.observe(site, 0, cal, a, &risen).unwrap();
+        let pooled_out = pooled
+            .observe(site, 0, cal, ChainKey::Unknown, &risen)
+            .unwrap();
+        println!(
+            "T-303 control: a {RISE_DB} dB rise on chain A scores {:.3} (z {:?}) against its own \
+             baseline and {:.3} (z {:?}) against the pooled one",
+            split_out.novelty.novelty,
+            split_out.novelty.level_z,
+            pooled_out.novelty.novelty,
+            pooled_out.novelty.level_z,
+        );
+        assert!(
+            split_out.novelty.novelty >= REFERENCE_LEARN_MAX_NOVELTY,
+            "A's own rise must still be novel: {:?}",
+            split_out.novelty
+        );
+        assert!(
+            pooled_out.novelty.novelty < split_out.novelty.novelty,
+            "the pooled baseline masks it: {:?}",
+            pooled_out.novelty
+        );
     }
 
     #[test]
@@ -2127,7 +2264,9 @@ mod tests {
         for q in 0..(30 * 4) {
             let o = interval(channel(2), f64::from(q) / 4.0, 0.9, 20.0, &mut rng);
             for site in [SiteKey::Mobile, SiteKey::Unassigned] {
-                let out = b.observe(site, 0, CalKey::Uncalibrated, &o).unwrap();
+                let out = b
+                    .observe(site, 0, CalKey::Uncalibrated, ChainKey::Unknown, &o)
+                    .unwrap();
                 assert!(!out.accrued && out.novelty.novelty == 0.0);
             }
         }
@@ -2137,8 +2276,14 @@ mod tests {
         // A real site does write at slot close, and reloads.
         let site = SiteId::new();
         let o = interval(channel(2), 100.0, 0.9, 20.0, &mut rng);
-        b.observe(SiteKey::Site(site), 0, CalKey::Uncalibrated, &o)
-            .unwrap();
+        b.observe(
+            SiteKey::Site(site),
+            0,
+            CalKey::Uncalibrated,
+            ChainKey::Unknown,
+            &o,
+        )
+        .unwrap();
         assert_eq!(b.flush(at(100.5), false).unwrap(), 0, "same hour");
         assert_eq!(b.flush(at(101.0), false).unwrap(), 1, "hour slot closed");
         let mut again = Baselines::new(BaselineConfig::default(), 1, 16, Some(store));
@@ -2883,6 +3028,7 @@ mod tests {
                 SiteKey::Site(SiteId::new()),
                 0,
                 CalKey::Uncalibrated,
+                ChainKey::Unknown,
                 &occ_fold(channel(0), 0.0, 0.2, &mut rng),
             )
             .unwrap();
@@ -2898,8 +3044,14 @@ mod tests {
                 for c in 0..3 {
                     let hours = f64::from(round) * 24.0 + i as f64 + c as f64 / 4.0;
                     let o = occ_fold(channel(c), hours, 0.2, &mut rng);
-                    b.observe(SiteKey::Site(*site), 0, CalKey::Uncalibrated, &o)
-                        .unwrap();
+                    b.observe(
+                        SiteKey::Site(*site),
+                        0,
+                        CalKey::Uncalibrated,
+                        ChainKey::Unknown,
+                        &o,
+                    )
+                    .unwrap();
                     max_seen = max_seen.max(b.memory_bytes());
                     assert!(b.memory_bytes() <= cap, "{} > {cap}", b.memory_bytes());
                 }
@@ -2945,6 +3097,7 @@ mod tests {
                 site,
                 0,
                 CalKey::Uncalibrated,
+                ChainKey::Unknown,
                 &occ_fold(channel(c), 0.0, 0.2, &mut rng),
             )
             .unwrap();
@@ -2971,6 +3124,7 @@ mod tests {
                 SiteKey::Site(a),
                 0,
                 CalKey::Uncalibrated,
+                ChainKey::Unknown,
                 &occ_fold(channel(0), 0.0, 0.2, &mut rng),
             )
             .unwrap();
@@ -3004,6 +3158,7 @@ mod tests {
                 SiteKey::Site(other),
                 0,
                 CalKey::Uncalibrated,
+                ChainKey::Unknown,
                 &occ_fold(channel(1), 2.0, 0.2, &mut rng),
             )
             .unwrap();
@@ -3030,16 +3185,21 @@ mod tests {
             let hours = f64::from(q) / 4.0;
             let row = leveled_row(hours, 0.0, -100.0, 2.0 + 0.3 * ((q % 5) as f64 - 2.0), 25.0);
             let (_, _, o) = from_occupancy_stat(&row, 0).unwrap();
-            b.observe(site, 0, CalKey::Uncalibrated, &o).unwrap();
+            b.observe(site, 0, CalKey::Uncalibrated, ChainKey::Unknown, &o)
+                .unwrap();
         }
         let loaded = b.memory_bytes();
         b.set_memory_cap(Some(loaded));
         // An emitter 25 dB above the floor: a new occupied-level series, so the fold would grow.
         let (_, _, o) = from_occupancy_stat(&leveled_row(72.0, 0.8, -100.0, 2.0, 25.0), 0).unwrap();
-        let out = b.observe(site, 0, CalKey::Uncalibrated, &o).unwrap();
+        let out = b
+            .observe(site, 0, CalKey::Uncalibrated, ChainKey::Unknown, &o)
+            .unwrap();
         let before_learning = b.memory_bytes();
         b.set_memory_cap(None);
-        let control = b.observe(site, 0, CalKey::Uncalibrated, &o).unwrap();
+        let control = b
+            .observe(site, 0, CalKey::Uncalibrated, ChainKey::Unknown, &o)
+            .unwrap();
         println!(
             "T-132 refused fold: novelty {:.3} (level z {:?}), refused {}, memory {loaded} → \
              {before_learning} B; uncapped control novelty {:.3}",
@@ -3085,7 +3245,8 @@ mod tests {
         {
             // On disk: one fold (900 s).
             let mut b = Baselines::new(BaselineConfig::default(), 1, 16, Some(store.clone()));
-            b.observe(a, 0, CalKey::Uncalibrated, &fold(0.0)).unwrap();
+            b.observe(a, 0, CalKey::Uncalibrated, ChainKey::Unknown, &fold(0.0))
+                .unwrap();
             b.flush(at(0.5), true).unwrap();
         }
         let (f1, f2) = (fold(1.0), fold(2.0));
@@ -3103,9 +3264,12 @@ mod tests {
                 // While this (stale) copy is in flight: a fold loads and grows the key, then the
                 // cap unloads it (saving 1800 s).
                 let mut b = shared.lock().unwrap();
-                b.observe(a, 0, CalKey::Uncalibrated, &f1).unwrap();
+                b.observe(a, 0, CalKey::Uncalibrated, ChainKey::Unknown, &f1)
+                    .unwrap();
                 b.set_memory_cap(Some(1));
-                let _ = b.observe(other, 0, CalKey::Uncalibrated, &f2).unwrap();
+                let _ = b
+                    .observe(other, 0, CalKey::Uncalibrated, ChainKey::Unknown, &f2)
+                    .unwrap();
                 b.set_memory_cap(None);
                 assert_eq!(observed_of(&b), None, "unloaded");
             }
@@ -3116,7 +3280,8 @@ mod tests {
         // A later fold marks it dirty and it is written back.
         {
             let mut b = shared.lock().unwrap();
-            b.observe(a, 0, CalKey::Uncalibrated, &fold(3.0)).unwrap();
+            b.observe(a, 0, CalKey::Uncalibrated, ChainKey::Unknown, &fold(3.0))
+                .unwrap();
             b.flush(at(3.5), true).unwrap();
         }
         let mut fresh = Baselines::new(BaselineConfig::default(), 1, 16, Some(store));
@@ -3149,8 +3314,14 @@ mod tests {
         let d1 = tmp("quota-size");
         let s1 = BaselineStore::open(&d1).unwrap();
         let mut b = Baselines::new(BaselineConfig::default(), 1, 16, Some(s1.clone()));
-        b.observe(SiteKey::Site(SiteId::new()), 0, CalKey::Uncalibrated, &fold)
-            .unwrap();
+        b.observe(
+            SiteKey::Site(SiteId::new()),
+            0,
+            CalKey::Uncalibrated,
+            ChainKey::Unknown,
+            &fold,
+        )
+        .unwrap();
         b.flush(at(0.5), true).unwrap();
         let size = s1.usage().unwrap();
         let _ = std::fs::remove_dir_all(d1);
@@ -3159,16 +3330,29 @@ mod tests {
         let store = BaselineStore::open(&d2).unwrap().with_quota(size * 3 / 2);
         let mut b = Baselines::new(BaselineConfig::default(), 1, 16, Some(store.clone()));
         let (a, bsite) = (SiteId::new(), SiteId::new());
-        b.observe(SiteKey::Site(a), 0, CalKey::Uncalibrated, &fold)
-            .unwrap();
+        b.observe(
+            SiteKey::Site(a),
+            0,
+            CalKey::Uncalibrated,
+            ChainKey::Unknown,
+            &fold,
+        )
+        .unwrap();
         assert_eq!(b.flush(at(0.5), true).unwrap(), 1);
         // A dirty again (same visit time), then B visited later: A is the oldest and evicted.
-        b.observe(SiteKey::Site(a), 0, CalKey::Uncalibrated, &fold)
-            .unwrap();
+        b.observe(
+            SiteKey::Site(a),
+            0,
+            CalKey::Uncalibrated,
+            ChainKey::Unknown,
+            &fold,
+        )
+        .unwrap();
         b.observe(
             SiteKey::Site(bsite),
             0,
             CalKey::Uncalibrated,
+            ChainKey::Unknown,
             &at_h(fold, 1.0),
         )
         .unwrap();
@@ -3184,6 +3368,7 @@ mod tests {
             SiteKey::Site(bsite),
             0,
             CalKey::Uncalibrated,
+            ChainKey::Unknown,
             &at_h(fold, 2.0),
         )
         .unwrap();
