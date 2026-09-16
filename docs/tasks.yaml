@@ -6068,7 +6068,7 @@ tasks:
     milestone: M2-hardening
     title: Bias-tee state is not in provenance, so a bias-tee left on into a passive or DC-shorted port
       is invisible
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: PIPE
