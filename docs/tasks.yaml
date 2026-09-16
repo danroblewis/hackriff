@@ -4024,7 +4024,7 @@ tasks:
     title: 'hk_pipeline::classify::classify_box and ::record have NO CALLER anywhere
       in the workspace, so a mock-SDR run writes no M3 classification row and the
       ADR-0016 floors cannot be measured end to end at all'
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: M3B
