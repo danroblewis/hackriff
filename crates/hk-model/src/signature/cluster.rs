@@ -330,6 +330,20 @@ impl SignatureCluster {
         self.centroid.folds > 0 && self.centroid.suspect_fraction < 1.0
     }
 
+    /// Records a change at measurement time `t`, never moving `updated_at` backwards (T-293).
+    ///
+    /// These timestamps are **measurement** times — the joining emitter's own `last_seen` — not
+    /// wall clock, and chains characterise on their own threads, so they arrive out of order. An
+    /// emitter whose last observation predates the one that happened to seed the cluster would
+    /// otherwise stamp `updated_at` before `created_at` and be refused outright by [`validate`],
+    /// losing the fold, the confirmation review and the overlap resolution behind it.
+    /// `updated_at` means "the latest measurement folded in", so the later time wins.
+    ///
+    /// [`validate`]: Self::validate
+    pub fn touch(&mut self, t: Timestamp) {
+        self.updated_at = self.updated_at.max(t);
+    }
+
     /// Checks every invariant a stored cluster must hold.
     pub fn validate(&self) -> Result<(), super::InvalidSignature> {
         if self.schema != SIGNATURE_SCHEMA {

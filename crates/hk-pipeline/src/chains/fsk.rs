@@ -312,11 +312,13 @@ pub(crate) fn run(
                     .inventory
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if inv
-                    .chain_emitter(&mut repo, cand.track, w.emitter_id)
-                    .is_err()
-                {
+                // Named, not just counted (T-293): this was the only chain write path that
+                // incremented the error counter silently, so a run summary reported "2 errors"
+                // with nothing to read. An error nobody can name trains everyone to ignore the
+                // count.
+                if let Err(e) = inv.chain_emitter(&mut repo, cand.track, w.emitter_id) {
                     inc(&c.errors);
+                    eprintln!("hk-pipeline: fsk chain emitter: {e}");
                 }
                 Some(w)
             }
