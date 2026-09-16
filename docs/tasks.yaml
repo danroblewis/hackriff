@@ -3213,7 +3213,7 @@ tasks:
   - id: T-200
     milestone: M3
     title: "C15 likelihood verifier (ALRT/GLRT) within the post-sync candidate set"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-199]
     parallel_group: M3A
