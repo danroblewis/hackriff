@@ -2582,7 +2582,8 @@ tasks:
   - id: T-160
     milestone: MUI
     title: "MUI API gap 4: stage tap view=spectrum for MPX/subcarrier plots"
-    status: in-progress
+    status: done
+    commit: c9f5fb4
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
