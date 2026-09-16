@@ -3787,7 +3787,7 @@ tasks:
   - id: T-233
     milestone: M3
     title: "Fingerprint family_of gate stays DEFERRED: it merges within-family pairs (bpsk/qpsk, 2fsk/gfsk, am/wfm) into one emitter; decide whether the fingerprint needs a finer discriminator before it can ever land"
-    status: todo
+    status: in-progress
     blocked_on: "needs a discriminator that separates within-family pairs; ADR-0016 lists the gate but T-218 proved it collapses distinct emitters"
     priority: normal
     deps: [T-218, T-201]
@@ -6460,7 +6460,7 @@ tasks:
     milestone: M2-hardening
     title: Navigation snaps to achievable capture states, and the view never implies detail the front end
       did not capture
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-334
