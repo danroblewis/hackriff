@@ -5647,7 +5647,8 @@ tasks:
     milestone: M2-hardening
     title: History frames take their source key from PipelineConfig::device_id, so a multi-source run would
       collapse to one source
-    status: in-progress
+    status: done
+    commit: 390c170
     priority: low
     deps:
     - T-259
