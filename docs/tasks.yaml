@@ -3784,7 +3784,9 @@ tasks:
   - id: T-235
     milestone: M3
     title: "Classifier: false-known 0.171 vs the 0.10 floor (one short-CP OFDM generator), and both OTA fixtures still abstain - close the simulation-to-reality gap with real-capture-derived densities"
-    status: in-progress
+    status: review
+    commit: 859b5bf
+    outcome: "false-known 0.1713 -> 0.0833 (floor 0.10) MET; unknown recall 0.8287 -> 0.9167; top-2 0.9802 -> 0.9861; wrong-label at gate 0.0026 -> 0.0; top-1 0.9147 -> 0.9067, still above the 0.90 floor. Nothing loosened - the open-set guard was TIGHTENED from an allow-list that bounded no rate to the ADR numeric 0.10. OTA fixtures still abstain, justified with measured structural evidence (both classify with no_symbol_estimate, so six discriminating dimensions abstain because C14 never runs in this path) - that satisfies the acceptance-s or-justified branch, and the remaining lever is T-238, not generator tuning"
     priority: high
     deps: [T-230, T-205]
     parallel_group: M3A
@@ -3826,6 +3828,21 @@ tasks:
     needs: none
     model: opus
     effort: medium
+    core_interface: false
+  - id: T-238
+    milestone: M3
+    title: "OTA fixtures abstain because C14 symbol estimation never runs in the classification path: six of the most discriminating dimensions abstain with no_symbol_estimate"
+    status: todo
+    priority: high
+    deps: [T-235]
+    parallel_group: M3A
+    use_cases: [SIGNAL-062]
+    found_by: "T-235 (2026-09-15): measured the structural cause after three generator-side approaches were tried and reverted for producing confident WRONG answers (analog at confidence 1.00 on the real FSK burst)"
+    acceptance: "C14 blind symbol estimation runs for classification inputs where it can, so symbol-derived features are available instead of abstaining; the two OTA fixtures (fm_100p8M and the 915 MHz FSK burst) are then classified correctly, or their abstention is re-justified with fresh measured evidence; every floor T-235 met still holds (false-known <= 0.10, unknown recall >= 0.80, top-1 >= 0.90, top-2 >= 0.95, wrong-label <= 0.003) on the blind acceptance split; NO confident wrong answers - T-235 reverted three approaches precisely because they produced analog at confidence 1.00 on a real FSK burst, and abstention always beats that; nothing loosened"
+    area: crates/hk-classify (feature extraction path), crates/hk-estimate (C14 invocation), crates/hk-pipeline wiring
+    needs: none
+    model: opus
+    effort: high
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
