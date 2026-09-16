@@ -521,3 +521,338 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     if tsbk_truth is not None:
         scene.scenario_truth["trunking"]["tsbk"] = tsbk_truth
     return [scene], {}
+
+
+# =============================================================================================
+# DMR Tier III (T-271)
+# =============================================================================================
+
+TRUNK_DMR_DEFAULTS: dict[str, Any] = {
+    "sample_rate": 500e3,
+    # 800 MHz, same band as the P25 scenes, so the two are directly comparable.
+    "center_hz": 851.0125e6,
+    "duration_s": 1.0,
+    "raster_hz": tk.LMR_RASTER_HZ,
+    "cc_channel": 3,
+    "decoy_channel": -5,
+    "nbfm_channels": [-2, 7, 11, -9],
+    "cc_snr_db": 20.0,
+    "decoy_snr_db": 20.0,
+    "nbfm_snr_db": 18.0,
+    "symbol_rate_bd": tk.DMR_SYMBOL_RATE_BD,
+    "fm_deviation_hz": 2500.0,
+    "audio_tone_hz": 1000.0,
+    "burst_mean_on_s": 0.08,
+    "burst_mean_off_s": 0.12,
+    "noise_dbfs": -40.0,
+    "calibration_k_db": -70.0,
+    "start_utc": DEFAULT_START_UTC,
+    # --- THE TRAP.
+    #
+    # A DMR Tier III grant names a Logical Physical Channel Number and nothing else. There is no
+    # on-air channel-parameter announcement this project could corroborate, so an LPCN resolves to
+    # NO frequency -- and a decoder that quietly assumed the obvious band plan (base = wherever the
+    # radio is tuned, step = the 12.5 kHz LMR raster) would produce one anyway.
+    #
+    # So the scene puts real, followable voice traffic exactly where that assumption points. A
+    # guessing decoder does not merely produce a wrong number: it follows the channel, finds a
+    # transmission, measures its boundaries and writes a completely convincing call record. Nothing
+    # about the run would look wrong. The frequency is chosen FIRST and the LPCN derived from it, so
+    # the trap is baited by the same arithmetic the mistake would use.
+    "trap_target_hz": 851.075e6,
+    "assumed_spacing_hz": tk.LMR_RASTER_HZ,
+    "grant_target_id": 2468,
+    "grant_source_id": 1357,
+    "grant_timeslot": 1,
+    # A second grant, on the other slot, so the two-slot TDMA attribution is exercised (C23's slot
+    # mix-up pitfall). Its LPCN is deliberately NOT the trap's.
+    "second_lpcn": 11,
+    "second_target_id": 3690,
+    "second_source_id": 2580,
+    "second_timeslot": 0,
+    # The traffic on the trap channel: repeated keyings, like T-269's followed channel, so a
+    # follower that got there would have real boundaries to measure. At 40 % duty it never reaches
+    # control-channel candidacy (MIN_CC_FCO is 0.95).
+    "trap_on_s": 0.10,
+    "trap_off_s": 0.15,
+    "trap_snr_db": 18.0,
+}
+
+
+def _dmr_stream(p: dict[str, Any], center_hz: float, n_frames: int,
+                rng: np.random.Generator) -> tuple[np.ndarray, dict[str, Any]]:
+    """The DMR control channel's outbound CSBK stream, and the truth describing it.
+
+    The cycle carries a system announcement, a broadcast voice grant onto the trap channel, a
+    private voice grant on the other timeslot, a data grant, a call release, and an opcode this
+    decoder does not name -- so the stream is not made only of messages it happens to understand.
+    """
+    trap_hz = float(p["trap_target_hz"])
+    spacing = float(p["assumed_spacing_hz"])
+    steps = (trap_hz - center_hz) / spacing
+    if steps != int(steps) or not 0 <= steps <= 0xFFF:
+        raise ValueError(f"trap_target_hz {trap_hz} is not a whole step from the tuned centre")
+    lpcn = int(steps)
+    second = int(p["second_lpcn"])
+    if second == lpcn:
+        raise ValueError("the second grant must name a different logical channel")
+
+    tg, src = int(p["grant_target_id"]), int(p["grant_source_id"])
+    ts = int(p["grant_timeslot"])
+    s_tg, s_src, s_ts = (int(p["second_target_id"]), int(p["second_source_id"]),
+                         int(p["second_timeslot"]))
+    def payload() -> bytes:
+        """Payload bytes for a message whose own fields this project does not decode.
+
+        Deliberately **not** zeros. A 4FSK receiver estimates its own level centre and outer
+        deviation from the symbol distribution, so a stream padded with zero bytes is a stream whose
+        symbols sit overwhelmingly on one inner level: the estimated centre drifts and the estimated
+        outer level collapses onto the inner pair, and the demodulator slices garbage. That is not
+        a property of DMR, it is an artefact of a lazy fixture, and a real C_ALOHA carries system
+        identity, colour code and site parameters rather than sixty-four zeros.
+        """
+        return bytes(int(v) for v in rng.integers(0, 256, 8))
+
+    cycle = [
+        ("c-aloha", tk.csbk(tk.CSBKO_C_ALOHA, payload())),
+        ("btv-grant",
+         tk.csbk(tk.CSBKO_BTV_GRANT, tk.dmr_grant_payload(lpcn, ts, tg, src))),
+        ("p-grant",
+         tk.csbk(tk.CSBKO_P_GRANT, tk.dmr_grant_payload(second, s_ts, s_tg, s_src))),
+        ("pd-grant",
+         tk.csbk(tk.CSBKO_PD_GRANT, tk.dmr_grant_payload(second, s_ts, s_tg, s_src))),
+        ("p-clear", tk.csbk(tk.CSBKO_P_CLEAR, payload())),
+        # An opcode this decoder does not name.
+        ("other", tk.csbk(0x07, payload())),
+    ]
+    dibits = tk.dmr_frames_from_blocks([b for _, b in cycle], n_frames)
+    counts = {kind: sum(1 for i in range(n_frames) if cycle[i % len(cycle)][0] == kind)
+              for kind, _ in cycle}
+    truth = {
+        "framing": "dmr-bs-data-sync",
+        "grant_lpcn": lpcn,
+        "grant_timeslot": ts,
+        "grant_target_id": tg,
+        "grant_source_id": src,
+        "second_lpcn": second,
+        "second_timeslot": s_ts,
+        "second_target_id": s_tg,
+        "second_source_id": s_src,
+        # The number nothing may ever report. Real traffic sits here, so a decoder that assumed a
+        # band plan would follow it and write a call that looks entirely right.
+        "wrong_frequency_if_lpcn_assumed_hz": trap_hz,
+        "assumed_spacing_hz": spacing,
+        "assumed_base_hz": center_hz,
+        "frames_per_cycle": len(cycle),
+        "counts": counts,
+        "expected": {
+            "protocol": "dmr-tier3",
+            "grants_decoded": True,
+            "grants_mapped": False,
+            "grant_reason": "no-channel-parameters",
+            "calls": "none: a grant with no frequency entitles no channel and no call",
+            "why": "DMR Tier III announces no channel-parameter message this project could "
+                   "corroborate, so a logical channel number has no on-air base or step to "
+                   "resolve through",
+        },
+        "coding": tk.DMR_FRAME_SPEC["coding"],
+    }
+    return dibits, truth
+
+
+def trunk_dmr_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
+    """A DMR Tier III control channel among the same traffic the P25 scenes use (T-271).
+
+    Two things have to be true at once for this scene to mean anything:
+
+    1. The hunt is **blind about the air interface**. Nothing tells it this is DMR rather than P25;
+       it must try the framings it knows and confirm on the one that matches. A decoy that is
+       continuous, on-raster and 4FSK -- and therefore a perfect candidate -- carries no framing at
+       all and must still be rejected.
+    2. The decoder must **refuse to invent a frequency**, while real traffic sits exactly where the
+       obvious guess points. See ``trap_target_hz``.
+    """
+    p = ctx.params
+    fs = float(p["sample_rate"])
+    n = _n(p)
+    scene = ctx.scene(
+        "trunk_dmr_control_channel", fs, n,
+        "hkpy.synth trunk_dmr_control_channel: a DMR Tier III control channel (BS-data frame sync "
+        "+ CSBKs with the masked CRC) carrying grants whose logical channel numbers resolve to "
+        "nothing, with real voice traffic parked where an assumed band plan would put them",
+    )
+
+    cap = scene.add_capture(0, n, float(p["center_hz"]), utc_plus(p["start_utc"], 0.0),
+                            calibration_k_db=float(p["calibration_k_db"]))
+    cap.floor_dbfs_per_hz = float(p["noise_dbfs"]) - db(fs)
+    scene.add_samples(0, complex_noise(scene.rng("noise"), n, float(p["noise_dbfs"])))
+    scene.add_floor(0, n, cap.floor_dbfs_per_hz)
+
+    raster = float(p["raster_hz"])
+    rate = float(p["symbol_rate_bd"])
+    # Carson on DMR's outer deviation plus the symbol rate.
+    dmr_bw = 2 * (1944.0 + rate / 2)
+    t_all = scene.time(0, n)
+    span_s = n / fs
+
+    def place_4fsk(off_hz: float, dibits: np.ndarray, snr_db: float, rng_name: str,
+                   deviations: dict[int, float]) -> tuple[float, int]:
+        if abs(off_hz) + dmr_bw / 2 > fs / 2:
+            raise ValueError(f"an emission at {off_hz} Hz does not fit inside the sample rate")
+        power = _power(cap, snr_db, dmr_bw)
+        iq = tk.c4fm(dibits, fs, rate, deviations=deviations)[:n]
+        phase0 = float(scene.rng(rng_name).uniform(0, 2 * math.pi))
+        scene.add_samples(0, math.sqrt(undb(power)) * iq
+                          * np.exp(1j * (2 * math.pi * off_hz * t_all[: len(iq)] + phase0)))
+        return power, len(iq)
+
+    # --- The control channel: continuous 4FSK, DMR BS-data sync, CSBKs with the masked CRC.
+    frames_needed = int(math.ceil(n * rate / fs / tk.DMR_FRAME_DIBITS)) + 1
+    cc_dibits, dmr_truth = _dmr_stream(p, cap.center_hz, frames_needed, scene.rng("csbk"))
+    cc_ch = int(p["cc_channel"])
+    cc_off = cc_ch * raster
+    cc_power, _ = place_4fsk(cc_off, cc_dibits, float(p["cc_snr_db"]), "dmr-cc",
+                             tk.DMR_DEVIATIONS_HZ)
+    cc_f = cap.center_hz + cc_off
+    scene.annotate(
+        0, n, cc_f - dmr_bw / 2, cc_f + dmr_bw / 2, "trunk-control-channel",
+        scene.emission_truth(
+            cap, cc_off, dmr_bw, cc_power,
+            kind="trunk-control-channel", modulation="4fsk", levels=4,
+            symbol_rate_bd=rate, duty_cycle=1.0, fco=1.0,
+            raster_hz=raster, raster_channel=cc_ch,
+            nominal_center_hz=cap.center_hz + cc_ch * raster,
+            is_control_channel=True, confirmable=True,
+            frame=tk.DMR_FRAME_SPEC,
+            n_frames=frames_needed,
+            sync_hex=tk.DMR_BS_DATA_SYNC_HEX,
+            protocol="dmr-tier3",
+        ),
+    )
+
+    # --- The decoy: continuous, on-raster, 4FSK, unframed. Must never be confirmed -- and now it
+    # must be rejected by BOTH framings rather than only by the one the hunt used to try.
+    n_dibits = int(math.ceil(n * rate / fs)) + 1
+    dc_ch = int(p["decoy_channel"])
+    dc_off = dc_ch * raster
+    dc_power, _ = place_4fsk(dc_off, tk.continuous_data_dibits(scene.rng("decoy"), n_dibits),
+                             float(p["decoy_snr_db"]), "decoy-phase", tk.DMR_DEVIATIONS_HZ)
+    dc_f = cap.center_hz + dc_off
+    scene.annotate(
+        0, n, dc_f - dmr_bw / 2, dc_f + dmr_bw / 2, "continuous-data",
+        scene.emission_truth(
+            cap, dc_off, dmr_bw, dc_power,
+            kind="continuous-data", modulation="4fsk", levels=4,
+            symbol_rate_bd=rate, duty_cycle=1.0, fco=1.0,
+            raster_hz=raster, raster_channel=dc_ch,
+            is_control_channel=False, confirmable=False,
+            why_not="continuous 4FSK with no frame sync and no CRC-valid block, under either "
+                    "framing: passes FCO candidacy, fails sync+CRC confirmation",
+        ),
+    )
+
+    # --- Bursty NBFM neighbours, so the control channel is found among traffic.
+    dev, tone = float(p["fm_deviation_hz"]), float(p["audio_tone_hz"])
+    nbfm_bw = 2 * (dev + tone)
+    n_bursts = 0
+    for ch in [int(c) for c in p["nbfm_channels"]]:
+        off = ch * raster
+        if abs(off) + nbfm_bw / 2 > fs / 2:
+            raise ValueError(f"nbfm channel {ch} does not fit inside the sample rate")
+        power = _power(cap, float(p["nbfm_snr_db"]), nbfm_bw)
+        amp = math.sqrt(undb(power))
+        r = scene.rng("nbfm", ch)
+        for b0, b1 in _on_off(r, span_s, float(p["burst_mean_on_s"]), float(p["burst_mean_off_s"])):
+            i0, i1 = int(round(b0 * fs)), min(n, int(round(b1 * fs)))
+            if i1 <= i0:
+                continue
+            phase0, audio_phase = (float(v) for v in r.uniform(0, 2 * math.pi, 2))
+            tt = scene.time(i0, i1 - i0)
+            phase = (phase0 + 2 * math.pi * off * tt
+                     + (dev / tone) * np.sin(2 * math.pi * tone * (tt - b0) + audio_phase))
+            scene.add_samples(i0, amp * np.exp(1j * phase))
+            f = cap.center_hz + off
+            scene.annotate(
+                i0, i1 - i0, f - nbfm_bw / 2, f + nbfm_bw / 2, "nbfm-burst",
+                scene.emission_truth(
+                    cap, off, nbfm_bw, power, kind="nbfm-burst", modulation="nbfm",
+                    deviation_hz=dev, audio_tone_hz=tone,
+                    raster_hz=raster, raster_channel=ch,
+                    is_control_channel=False, confirmable=False,
+                    burst_start_s=b0, burst_duration_s=b1 - b0,
+                ),
+            )
+            n_bursts += 1
+
+    # --- THE TRAP: real keyings on the frequency an assumed band plan would produce.
+    trap_hz = float(dmr_truth["wrong_frequency_if_lpcn_assumed_hz"])
+    trap_off = trap_hz - cap.center_hz
+    if abs(trap_off) + dmr_bw / 2 > fs / 2:
+        raise ValueError("the trap channel does not fit inside the sample rate")
+    v_power = _power(cap, float(p["trap_snr_db"]), dmr_bw)
+    v_amp = math.sqrt(undb(v_power))
+    on_s, off_s = float(p["trap_on_s"]), float(p["trap_off_s"])
+    if on_s <= 0 or off_s <= 0:
+        raise ValueError("a keying needs a positive on and off time")
+    rr = scene.rng("trap")
+    keyings: list[tuple[float, float]] = []
+    t_key = 0.0
+    while t_key < span_s:
+        i0, i1 = int(round(t_key * fs)), min(n, int(round((t_key + on_s) * fs)))
+        if i1 > i0:
+            nd = int(math.ceil((i1 - i0) * rate / fs)) + 1
+            iq = tk.c4fm(tk.continuous_data_dibits(rr, nd), fs, rate,
+                         deviations=tk.DMR_DEVIATIONS_HZ)[: i1 - i0]
+            phase0 = float(rr.uniform(0, 2 * math.pi))
+            tt = scene.time(i0, len(iq))
+            scene.add_samples(i0, v_amp * iq * np.exp(1j * (2 * math.pi * trap_off * tt + phase0)))
+            b0, b1 = i0 / fs, (i0 + len(iq)) / fs
+            keyings.append((b0, b1))
+            scene.annotate(
+                i0, len(iq), trap_hz - dmr_bw / 2, trap_hz + dmr_bw / 2, "trunk-voice-keying",
+                scene.emission_truth(
+                    cap, trap_off, dmr_bw, v_power,
+                    kind="trunk-voice-keying", modulation="4fsk", levels=4,
+                    symbol_rate_bd=rate, raster_hz=raster,
+                    raster_channel=int(round(trap_off / raster)),
+                    is_control_channel=False, confirmable=False,
+                    burst_start_s=b0, burst_duration_s=b1 - b0,
+                    trap="the frequency an ASSUMED DMR band plan would resolve the granted LPCN "
+                         "to; following this channel would produce a convincing call record that "
+                         "no message supports",
+                ),
+            )
+        t_key += on_s + off_s
+    dmr_truth.update({
+        "trap_offset_hz": trap_off,
+        "trap_keyings_s": [[a, b] for a, b in keyings],
+        "trap_on_s": on_s,
+        "trap_off_s": off_s,
+        "sample_rate_hz": fs,
+    })
+
+    scene.scenario_truth["trunking"] = {
+        "raster_hz": raster,
+        "raster_origin_hz": cap.center_hz,
+        "control_channel": {
+            "rf_center_hz": cc_f,
+            "raster_channel": cc_ch,
+            "modulation": "4fsk",
+            "symbol_rate_bd": rate,
+            "bandwidth_hz": dmr_bw,
+            "duty_cycle": 1.0,
+            "sync_hex": tk.DMR_BS_DATA_SYNC_HEX,
+            "expected_confirmed": True,
+        },
+        "continuous_decoy": {
+            "rf_center_hz": dc_f,
+            "raster_channel": dc_ch,
+            "expected_confirmed": False,
+            "why_not": "no frame sync, no CRC-valid block, under either framing",
+        },
+        "nbfm_channels": [int(c) for c in p["nbfm_channels"]],
+        "n_nbfm_bursts": n_bursts,
+        "frame": tk.DMR_FRAME_SPEC,
+        "dmr": dmr_truth,
+    }
+    return [scene], {}

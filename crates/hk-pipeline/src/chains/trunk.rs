@@ -108,8 +108,9 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use hk_core::{Discontinuity, ProvenanceHandle};
 use hk_demod::fsk::{C4fmConfig, C4fmDemod};
 use hk_detect::trunk::{
-    CcCandidate, CcConfirmer, ChannelMap, Grant, MIN_CC_FCO, RASTER_TOLERANCE_HZ, Resolved,
-    VoicePermit, best_lmr_raster, protocol_of, scan_blocks,
+    CSBK_BYTES, CcCandidate, CcConfirmer, CcFraming, ChannelMap, DmrGrant, Grant, MIN_CC_FCO,
+    RASTER_TOLERANCE_HZ, Resolved, VoicePermit, best_lmr_raster, dmr_protocol_of, protocol_of,
+    scan_blocks, scan_csbks,
 };
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
 use hk_model::{
@@ -197,6 +198,13 @@ const C23_SPAN_LIMIT_HZ: f64 = 20e6;
 
 /// Machine reason: the grant resolved to a frequency outside the dwell window (C23's span limit).
 const OUTSIDE_WINDOW: &str = "grant-outside-window";
+/// Machine reason: a DMR Tier III grant names a logical channel, and no channel-parameter
+/// announcement was decoded, so **no frequency is produced** (T-271).
+///
+/// Taken **from the decoder** rather than written out again, so the string in the row and the
+/// string the refusal is defined by cannot drift apart — the other reasons in this module are
+/// this chain's own, but this one is `hk_detect`'s statement and belongs to it.
+const NO_CHANNEL_PARAMETERS: &str = hk_detect::trunk::DmrResolved::NoChannelParameters.reason();
 /// Machine reason: the call's end was **observed**, as silence on the granted channel.
 const SILENCE_TIMEOUT: &str = "silence-timeout";
 /// Machine reason: the buffered window ran out while the channel was still active, so no end was
@@ -286,6 +294,66 @@ fn grant_event(system: TrunkSystemId, g: &Grant, map: &ChannelMap, t: Timestamp)
         ev.detail["service_options"] = json!(so.raw());
         ev.detail["service_options_encrypted"] = json!(so.is_encrypted());
     }
+    ev
+}
+
+/// The `grant_event` a decoded **DMR Tier III** grant produces (T-271).
+///
+/// Split out and pure, like [`grant_event`] and [`outside_window_event`], so its refusal can be
+/// tested without a pipeline. The refusal is the third shape in this chain of tasks, and it is worth
+/// saying how it differs from the other two:
+///
+/// - **T-268** (`unmapped-channel` / `no-iden`): the band plan *could* have resolved the channel,
+///   and the particular identifier it named was never announced. No frequency, because the table
+///   cannot account for this one.
+/// - **T-269** (`grant-outside-window`): the band plan *did* resolve it, correctly, and the radio
+///   cannot reach it. The frequency **is** reported, with how far out of reach it fell.
+/// - **Here**: there is no band plan at all, and there was never going to be one, because DMR
+///   Tier III announces no channel parameters this build could corroborate. No frequency —
+///   permanently, not this-time — and the reason says so.
+///
+/// Everything the message *did* say is recorded: the logical channel number, the timeslot (DMR is
+/// two-slot TDMA and a call without its slot is under-attributed — C23's slot mix-up pitfall), the
+/// target and source addresses, and the three payload bits whose meaning could not be corroborated,
+/// verbatim and interpreted by nothing.
+///
+/// Encryption is [`hk_model::Encryption::Unknown`], from [`DmrGrant::encryption`]: a DMR privacy
+/// indication lives in a PI header on the traffic channel, which nothing here demodulates. The call
+/// this event opens therefore reaches T-270's [`VoicePermit`] as `Unknown` and is refused, through
+/// the **same** gate a P25 call goes through.
+fn dmr_grant_event(system: TrunkSystemId, g: &DmrGrant, t: Timestamp) -> GrantEvent {
+    // `UnmappedChannel`, not a new kind: the statement is the same one the model already has a
+    // variant for — a channel number that could not be turned into a frequency — and the `reason`
+    // in the detail is what distinguishes "no identifier" from "no band plan exists".
+    let mut ev = GrantEvent::new(system, GrantKind::UnmappedChannel, t);
+    // A broadcast grant's target is a talkgroup; a private grant's is a radio. Recording a private
+    // grant's target as a talkgroup would be a small lie that a call list would repeat forever.
+    if g.is_voice() && g.csbko == hk_detect::trunk::CSBKO_BTV_GRANT {
+        ev.talkgroup = Some(g.target.to_string());
+    }
+    ev.unit_id = (g.source != 0).then(|| g.source.to_string());
+    ev.channel = Some(g.lpcn.to_string());
+    ev.slot = Some(g.timeslot);
+    ev.f_hz = None;
+    ev.encryption = g.encryption();
+    ev.detail = json!({
+        "protocol": "dmr-tier3",
+        "opcode": g.opcode_name().unwrap_or("unnamed"),
+        "csbko": g.csbko,
+        "lpcn": g.lpcn,
+        "timeslot": g.timeslot,
+        "target": g.target,
+        "source": g.source,
+        "voice": g.is_voice(),
+        "reason": NO_CHANNEL_PARAMETERS,
+        // Why this refusal is permanent rather than a gap that a longer dwell would close.
+        "unresolvable": "DMR Tier III announces no channel-parameter message this build could \
+                         corroborate, so a logical channel number has no on-air base or step to \
+                         resolve through. Assuming one would produce a plausible wrong frequency, \
+                         which is C23's stale-band-plan pitfall.",
+        // UNVERIFIED, recorded verbatim, interpreted by nothing (T-268's discipline).
+        "unverified_flag_bits": g.flags,
+    });
     ev
 }
 
@@ -508,7 +576,29 @@ fn hunt(
         let Ok(symbols) = demod.demodulate(&baseband, rate, 0.0) else {
             continue;
         };
-        let Some(cc) = confirmer.confirm(&candidate, &symbols.dibits) else {
+        // Every framing this build knows, not just P25 (T-271). Trying a second one cannot make a
+        // false confirmation likely — each carries its own ~1.4e-16-per-frame chance rate — and it
+        // is what lets a DMR control channel be found by the same blind hunt.
+        let Some(cc) = confirmer.confirm_any(&candidate, &symbols.dibits) else {
+            if crate::debug_enabled() {
+                // What each framing actually saw, so a candidate that should have confirmed can be
+                // told apart from one that correctly did not — the decoy has to fail here too.
+                for f in hk_detect::trunk::CC_FRAMINGS {
+                    let s = confirmer.scan_framing(f, &symbols.dibits);
+                    eprintln!(
+                        "hk-pipeline: trunk-cc {:.4} MHz unconfirmed under {}: trials {} sync {} \
+                         crc {}/{} ({} symbols, margin {:.3})",
+                        center_hz / 1e6,
+                        f.name(),
+                        s.trials,
+                        s.sync_hits,
+                        s.crc_valid,
+                        s.crc_checked,
+                        symbols.dibits.len(),
+                        symbols.level_margin,
+                    );
+                }
+            }
             continue;
         };
         inc(&c.cc_confirmed);
@@ -536,42 +626,86 @@ fn hunt(
         k.system.last_seen = t_end;
         k.system.updated_at = t_end;
 
-        let scan = scan_blocks(confirmer.crc_valid_blocks(&symbols.dibits).iter());
-        add(&c.cc_tsbks, scan.blocks as u64);
-        add(&c.cc_iden_ups, scan.iden_ups.len() as u64);
-        // An identifier enters the band plan only once agreeing announcements corroborate it, so
-        // `observe` returns an entry at most once per identifier — which is what keeps the
-        // append-only channel table one row per thing actually learned.
-        let new_entries: Vec<_> = scan
-            .iden_ups
-            .iter()
-            .filter_map(|i| k.map.observe(i, t_end))
-            .collect();
-        // Naming the protocol is gated on that same corroboration, so opcode-shaped luck in random
-        // blocks cannot name a system (2^-64; `hk_detect::trunk::tsbk`).
-        let named = protocol_of(&k.map);
-        if named != TrunkProtocol::Unknown {
-            k.system.protocol = named;
-        }
         let system_id = k.system.id;
-        let events: Vec<GrantEvent> = scan
-            .grants
-            .iter()
-            .map(|g| grant_event(system_id, g, &k.map, t_end))
-            .collect();
-        if crate::debug_enabled() && (scan.blocks > 0 || !events.is_empty()) {
-            eprintln!(
-                "hk-pipeline: trunk-cc decoded {} TSBK(s): {} iden-up ({} admitted, {} in plan), \
-                 {} grant(s), {} unhandled, protocol {:?}",
-                scan.blocks,
-                scan.iden_ups.len(),
-                new_entries.len(),
-                k.map.admitted(),
-                events.len(),
-                scan.unhandled,
-                k.system.protocol
-            );
-        }
+        // What the control channel said depends on what it IS, so the two decoders are kept apart
+        // rather than one being asked to read the other's blocks. Only the P25 path builds a band
+        // plan, because only P25 announces one (T-271).
+        let mut new_entries: Vec<hk_model::ChannelPlanEntry> = Vec::new();
+        let events: Vec<GrantEvent> = match cc.framing() {
+            CcFraming::P25Phase1 => {
+                let scan = scan_blocks(confirmer.crc_valid_blocks(&symbols.dibits).iter());
+                add(&c.cc_tsbks, scan.blocks as u64);
+                add(&c.cc_iden_ups, scan.iden_ups.len() as u64);
+                // An identifier enters the band plan only once agreeing announcements corroborate
+                // it, so `observe` returns an entry at most once per identifier — which is what
+                // keeps the append-only channel table one row per thing actually learned.
+                new_entries = scan
+                    .iden_ups
+                    .iter()
+                    .filter_map(|i| k.map.observe(i, t_end))
+                    .collect();
+                // Naming the protocol is gated on that same corroboration, so opcode-shaped luck in
+                // random blocks cannot name a system (2^-64; `hk_detect::trunk::tsbk`).
+                let named = protocol_of(&k.map);
+                if named != TrunkProtocol::Unknown {
+                    k.system.protocol = named;
+                }
+                let events: Vec<GrantEvent> = scan
+                    .grants
+                    .iter()
+                    .map(|g| grant_event(system_id, g, &k.map, t_end))
+                    .collect();
+                if crate::debug_enabled() && (scan.blocks > 0 || !events.is_empty()) {
+                    eprintln!(
+                        "hk-pipeline: trunk-cc decoded {} TSBK(s): {} iden-up ({} admitted, {} in \
+                         plan), {} grant(s), {} unhandled, protocol {:?}",
+                        scan.blocks,
+                        scan.iden_ups.len(),
+                        new_entries.len(),
+                        k.map.admitted(),
+                        events.len(),
+                        scan.unhandled,
+                        k.system.protocol
+                    );
+                }
+                events
+            }
+            CcFraming::DmrBsData => {
+                let blocks: Vec<[u8; CSBK_BYTES]> = confirmer
+                    .crc_valid_blocks_framing(CcFraming::DmrBsData, &symbols.dibits)
+                    .iter()
+                    .filter_map(|b| <[u8; CSBK_BYTES]>::try_from(b.as_slice()).ok())
+                    .collect();
+                let scan = scan_csbks(blocks.iter());
+                add(&c.cc_csbks, scan.blocks as u64);
+                // A DMR *sync* says "DMR air interface", which a conventional Tier II repeater also
+                // has. Naming a system `dmr-tier3` is gated on corroborated trunking messages
+                // (3.1e-17 from random blocks; `hk_detect::trunk::dmr::MIN_DMR_CSBKS`).
+                let named = dmr_protocol_of(&scan);
+                if named != TrunkProtocol::Unknown {
+                    k.system.protocol = named;
+                }
+                let events: Vec<GrantEvent> = scan
+                    .grants
+                    .iter()
+                    .map(|g| dmr_grant_event(system_id, g, t_end))
+                    .collect();
+                add(&c.cc_dmr_grants, events.len() as u64);
+                if crate::debug_enabled() && (scan.blocks > 0 || !events.is_empty()) {
+                    eprintln!(
+                        "hk-pipeline: trunk-cc decoded {} CSBK(s): {} Tier III, {} grant(s) (none \
+                         resolvable: no channel parameters are announced), {} unhandled, \
+                         protocol {:?}",
+                        scan.blocks,
+                        scan.tier3,
+                        events.len(),
+                        scan.unhandled,
+                        k.system.protocol
+                    );
+                }
+                events
+            }
+        };
 
         // Metadata only: a protocol, the measured frequency, when it was heard, the band plan it
         // announced and the grants it issued. No audio, no payload, no recording.
@@ -1285,6 +1419,98 @@ mod tests {
         assert_eq!(call.encryption, hk_model::Encryption::Unknown);
         assert!(!call.encryption.is_clear(), "unknown is never clear");
         call.validate().expect("a writable row");
+    }
+
+    /// The third refusal shape in this chain of tasks, at the row it produces (T-271).
+    ///
+    /// T-268 refuses a channel whose identifier was never announced. T-269 reports a frequency it
+    /// resolved and cannot reach. Here there is **no band plan to refuse from**: DMR Tier III
+    /// announces no channel parameters this build could corroborate, so a logical channel number
+    /// has nothing to resolve through — permanently, not this time — and the row says so while
+    /// carrying everything the message actually stated.
+    #[test]
+    fn a_dmr_grant_is_fully_decoded_and_still_carries_no_frequency() {
+        let system = TrunkSystemId::new();
+        let t = Timestamp::UNIX_EPOCH.saturating_add_nanos(1_000_000_000);
+        let g = DmrGrant {
+            csbko: hk_detect::trunk::CSBKO_BTV_GRANT,
+            lpcn: 5,
+            timeslot: 1,
+            flags: 0b101,
+            target: 2468,
+            source: 1357,
+        };
+        // What a decoder that assumed the obvious band plan would have produced: base = the tuned
+        // centre, step = the 12.5 kHz LMR raster. Computed here only to name what must not appear.
+        let plausible_but_unsupported_hz = 851.0125e6 + 12_500.0 * f64::from(g.lpcn);
+
+        let ev = dmr_grant_event(system, &g, t);
+        assert_eq!(ev.kind, GrantKind::UnmappedChannel);
+        assert_eq!(
+            ev.f_hz, None,
+            "a DMR grant produced a frequency; the assumed band plan would give \
+             {plausible_but_unsupported_hz} Hz, which no message supports"
+        );
+        // The machine reason the row carries is the decoder's own, not a second copy that could
+        // drift away from it.
+        assert_eq!(
+            ev.detail["reason"].as_str(),
+            Some(NO_CHANNEL_PARAMETERS),
+            "the chain's reason and the decoder's have diverged: {}",
+            ev.detail
+        );
+        assert_eq!(g.resolve().reason(), NO_CHANNEL_PARAMETERS);
+
+        // Everything the message DID say is recorded — dropping a grant we cannot place is the
+        // silence this milestone exists to remove.
+        assert_eq!(ev.channel.as_deref(), Some("5"));
+        assert_eq!(
+            ev.slot,
+            Some(1),
+            "a two-slot system needs its slot attributed"
+        );
+        assert_eq!(ev.talkgroup.as_deref(), Some("2468"));
+        assert_eq!(ev.unit_id.as_deref(), Some("1357"));
+        assert_eq!(ev.detail["opcode"].as_str(), Some("btv-grant"));
+        assert_eq!(ev.detail["unverified_flag_bits"].as_u64(), Some(0b101));
+        // Nothing read an encryption indication, so nothing is claimed (T-266, T-270).
+        assert_eq!(ev.encryption, hk_model::Encryption::Unknown);
+        assert!(!ev.encryption.is_clear());
+        ev.validate().expect("a writable row");
+
+        // A PRIVATE grant's target is a radio, not a talkgroup, and recording it as one would be a
+        // small lie a call list would repeat forever.
+        let private = DmrGrant {
+            csbko: hk_detect::trunk::CSBKO_P_GRANT,
+            ..g
+        };
+        let ev = dmr_grant_event(system, &private, t);
+        assert_eq!(ev.talkgroup, None);
+        assert_eq!(ev.detail["target"].as_u64(), Some(2468));
+        ev.validate().expect("a writable row");
+    }
+
+    /// A grant with no frequency entitles no channel, so the follower has nothing to do with it —
+    /// which is what keeps a DMR system from producing calls it never observed.
+    #[test]
+    fn a_grant_with_no_frequency_is_neither_followed_nor_refused_as_out_of_window() {
+        let system = TrunkSystemId::new();
+        let t = Timestamp::UNIX_EPOCH.saturating_add_nanos(1_000_000_000);
+        let g = DmrGrant {
+            csbko: hk_detect::trunk::CSBKO_BTV_GRANT,
+            lpcn: 5,
+            timeslot: 0,
+            flags: 0,
+            target: 1,
+            source: 2,
+        };
+        let ev = dmr_grant_event(system, &g, t);
+        // The follower's own admission rule, stated here as the one line that matters: a target is
+        // a distinct RESOLVED frequency, and this event has none.
+        assert!(
+            [ev.clone()].iter().filter(|e| e.f_hz.is_some()).count() == 0,
+            "an unresolved grant became a follow target"
+        );
     }
 
     #[test]

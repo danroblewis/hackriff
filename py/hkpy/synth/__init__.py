@@ -77,6 +77,12 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         "the TSBK scene plus two more granted voice channels inside the window (T-270): one "
         "granted with the service-options encryption bit set, and one announced ONLY by a grant "
         "update -- late entry, no header, so nothing ever stated its encryption state"),
+    "trunk_dmr_control_channel": ScenarioSpec(
+        trunk_scene.trunk_dmr_control_channel, trunk_scene.TRUNK_DMR_DEFAULTS, (),
+        "a DMR Tier III control channel (BS-data frame sync + CSBKs with the 0xA5A5-masked CRC) "
+        "beside the same unframed 4FSK decoy and bursty NBFM (T-271): its grants name logical "
+        "channel numbers that resolve to NO frequency, and real voice keyings sit exactly where "
+        "an assumed 12.5 kHz band plan would put them"),
     "lora_ism_burst": ScenarioSpec(
         lora_scene.lora_ism_burst, lora_scene.LORA_DEFAULTS, ("SIGNAL-062", "AWARE-053"),
         "LoRa CSS up-chirp packets in 902-928 MHz US ISM (hidden SF/BW/CR/payload) beside a "

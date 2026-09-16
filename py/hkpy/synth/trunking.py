@@ -206,6 +206,136 @@ def frames_from_blocks(blocks: list[bytes], n_frames: int) -> np.ndarray:
     return np.concatenate(out).astype(np.uint8)
 
 
+# ---------------------------------------------------------------------------------------------
+# DMR Tier III (T-271)
+# ---------------------------------------------------------------------------------------------
+#
+# A second trunking air interface, so a blind hunt has to find the right one rather than assuming
+# the only framing it knows. Field layout and constants, all verified against an independent
+# reference before use (see crates/hk-detect/src/trunk/dmr.rs for the verification notes and for
+# what could NOT be corroborated):
+#
+#   Frame sync, 48 bits: BS-sourced DATA 0xDFF57D75DF5D (what a Tier III control channel sends),
+#                        BS-sourced VOICE 0x755FD7DF75F7. Verified two ways beyond being stated:
+#                        every dibit is an OUTER symbol, and the two words are exact dibit
+#                        complements of each other.
+#   CSBK, 96 bits: LB(1) PF(1) CSBKO(6) | FID(8) | 64 payload bits | CRC-16. The widths sum to
+#                  exactly 96, which is itself the check.
+#   CSBK CRC: CRC-CCITT over the first 80 bits, XORed with the mask 0xA5A5 (verified).
+#   Grant payload, 64 bits: LPCN(12) timeslot(1) three UNVERIFIED flag bits target(24) source(24).
+#                           Sums to exactly 64; the three flag bits are the residue and their
+#                           meanings could not be corroborated, so nothing reads them.
+#
+# THE BAND PLAN IS THE POINT OF DIFFERENCE. P25 announces one (IDEN_UP), so a grant's channel
+# number resolves to a frequency from the air alone. No DMR Tier III channel-parameter announcement
+# could be corroborated, so a Logical Physical Channel Number resolves to NOTHING -- and a scene
+# built on that has to contain the trap, or it proves nothing. See ``trunk_dmr_control_channel``.
+#
+# STILL NOT STANDARDS-COMPLIANT, deliberately and in the same spirit as the P25 frames above: no
+# BPTC(196,96), no interleaving, the burst is flattened (a real DMR burst is 264 bits with the sync
+# in the MIDDLE between two 98-bit halves), no TDMA burst timing or CACH, and the CRC's INITIAL
+# VALUE is this repo's choice (0x0000) because it could not be corroborated -- the MASK is the
+# verified part, and the initial value is invisible to every claim, since it changes only which
+# 16-bit value a block carries and not the 2^-16 chance rate of the gate.
+
+#: DMR base-station DATA frame sync, 48 bits (what a Tier III TSCC transmits). MSB first.
+DMR_BS_DATA_SYNC_HEX = "dff57d75df5d"
+#: DMR base-station VOICE frame sync, 48 bits. Present only as the arithmetic that verifies the
+#: data sync: the two are exact dibit complements.
+DMR_BS_VOICE_SYNC_HEX = "755fd7df75f7"
+
+#: DMR 4FSK deviations, Hz (ETSI: outer +/-1.944 kHz, inner +/-648 Hz) -- narrower than P25 C4FM's
+#: +/-1800/+/-600, which is deliberate: the demodulator's slicer must find the levels rather than
+#: being handed the ones it already knows.
+DMR_DEVIATIONS_HZ = {0b01: 1944.0, 0b00: 648.0, 0b10: -648.0, 0b11: -1944.0}
+
+#: DMR symbol rate: 4800 Bd = 9600 bit/s, the same symbol rate as P25 C4FM.
+DMR_SYMBOL_RATE_BD = 4800.0
+
+#: CSBK size, bytes: 10 data + 2 CRC.
+CSBK_DATA_BYTES = 10
+CSBK_BYTES = 12
+#: The mask XORed into a CSBK's CRC-CCITT before transmission (verified).
+CSBK_CRC_MASK = 0xA5A5
+
+#: CSBK opcodes (verified).
+CSBKO_C_ALOHA = 0x19
+CSBKO_P_CLEAR = 0x2E
+CSBKO_P_GRANT = 0x30
+CSBKO_BTV_GRANT = 0x32
+CSBKO_PD_GRANT = 0x33
+CSBKO_TD_GRANT = 0x34
+
+#: Dibits in one DMR frame as this generator lays it out: sync + CSBK.
+DMR_FRAME_DIBITS = 24 + CSBK_BYTES * 4
+
+DMR_FRAME_SPEC: dict[str, Any] = {
+    "sync": "DMR base-station data frame sync, 48 bits, MSB first",
+    "sync_hex": DMR_BS_DATA_SYNC_HEX,
+    "block": "12 bytes: LB/PF/CSBKO(8) FID(8) 8 payload bytes, CRC-CCITT masked with 0xA5A5",
+    "symbol_rate_bd": DMR_SYMBOL_RATE_BD,
+    "modulation": "4fsk",
+    "dibit_map": {f"{k:02b}": v for k, v in DMR_DEVIATIONS_HZ.items()},
+    "frame_dibits": DMR_FRAME_DIBITS,
+    "coding": "none (no BPTC(196,96), no interleaving, burst flattened, no TDMA burst timing)",
+}
+
+
+def crc16_ccitt_zero(data: bytes) -> int:
+    """CRC-CCITT, poly 0x1021, **initial value 0x0000**, no reflection, no final XOR.
+
+    The DMR CSBK mask is applied by the caller. See the module notes: the initial value could not
+    be corroborated and is this repo's choice, which no claim depends on.
+    """
+    crc = 0x0000
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def dmr_sync_dibits(voice: bool = False) -> np.ndarray:
+    """The 24 dibits of a DMR base-station frame sync (data by default)."""
+    return bytes_to_dibits(bytes.fromhex(DMR_BS_VOICE_SYNC_HEX if voice else DMR_BS_DATA_SYNC_HEX))
+
+
+def csbk(csbko: int, payload: bytes, *, last_block: bool = False, protect: bool = False,
+         fid: int = 0) -> bytes:
+    """One 12-byte CSBK: header, 8 payload bytes, and the masked CRC over the 10 that precede it."""
+    if len(payload) != 8:
+        raise ValueError("a CSBK payload is exactly 8 bytes")
+    head = (0x80 if last_block else 0) | (0x40 if protect else 0) | (csbko & 0x3F)
+    data = bytes([head, fid & 0xFF]) + payload
+    crc = crc16_ccitt_zero(data) ^ CSBK_CRC_MASK
+    return data + crc.to_bytes(2, "big")
+
+
+def dmr_grant_payload(lpcn: int, timeslot: int, target: int, source: int, *, flags: int = 0
+                      ) -> bytes:
+    """Pack a Tier III channel-grant payload: LPCN(12) TS(1) flags(3) target(24) source(24)."""
+    if not 0 <= lpcn <= 0xFFF or timeslot not in (0, 1) or not 0 <= flags <= 7:
+        raise ValueError("a DMR grant field is out of range")
+    if not 0 <= target <= 0xFF_FFFF or not 0 <= source <= 0xFF_FFFF:
+        raise ValueError("a DMR address is 24 bits")
+    v = ((lpcn & 0xFFF) << 52) | ((timeslot & 1) << 51) | ((flags & 7) << 48) \
+        | ((target & 0xFF_FFFF) << 24) | (source & 0xFF_FFFF)
+    return v.to_bytes(8, "big")
+
+
+def dmr_frames_from_blocks(blocks: list[bytes], n_frames: int) -> np.ndarray:
+    """``n_frames`` frames of (DMR BS-data sync + CSBK), cycling through ``blocks``."""
+    sync = dmr_sync_dibits()
+    out: list[np.ndarray] = []
+    for i in range(n_frames):
+        block = blocks[i % len(blocks)]
+        if len(block) != CSBK_BYTES:
+            raise ValueError(f"a CSBK is {CSBK_BYTES} bytes, got {len(block)}")
+        out.append(sync)
+        out.append(bytes_to_dibits(block))
+    return np.concatenate(out).astype(np.uint8)
+
+
 def continuous_data_dibits(rng: np.random.Generator, n_dibits: int) -> np.ndarray:
     """Unframed continuous 4FSK traffic: the decoy a pure FCO test cannot tell from a CC.
 

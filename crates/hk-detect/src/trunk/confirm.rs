@@ -32,6 +32,7 @@
 use hk_estimate::framing::crc::BitCrc;
 use hk_model::TrunkProtocol;
 
+use super::dmr::{CSBK_BYTES, DMR_BS_DATA_SYNC_DIBITS, csbk_crc};
 use super::raster::RasterFit;
 
 /// Dibits (4FSK symbols) in the P25 Phase 1 frame sync `0x5575F5FF77FF` (docs/04 §7.3).
@@ -108,6 +109,67 @@ pub const SYNC_FALSE_ALARM_FLOOR: f64 = 1e-5;
 /// A control channel may never be confirmed from noise. This is the operational claim; the
 /// arithmetic above puts the expectation at ~1e-16 per trial, so any nonzero count is a bug.
 pub const CONFIRMED_FALSE_ALARM_MAX: u64 = 0;
+
+// ---------------------------------------------------------------------------------------------
+// Framings (T-271)
+// ---------------------------------------------------------------------------------------------
+
+/// A control-channel framing this build can confirm: a frame sync, a block length, and the CRC that
+/// block carries.
+///
+/// T-267 kept the matched pattern in [`CcEvidence::pattern`] precisely so a later task could add a
+/// second one. This is that task, and the shape it takes matters: **a framing is an air interface,
+/// not a trunking protocol.** A DMR base-station data burst is emitted by a conventional Tier II
+/// repeater and by a trunked Tier III control channel alike, so matching one says "DMR", never
+/// "trunked DMR". Naming a *protocol* stays where T-268 put it — behind corroborated control
+/// messages — and this enum deliberately has no method that yields a [`TrunkProtocol`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CcFraming {
+    /// P25 Phase 1: the 48-bit frame sync `0x5575F5FF77FF` and a 12-byte block (T-267).
+    P25Phase1,
+    /// DMR base-station **data** burst: the 48-bit sync `0xDFF57D75DF5D` and a 12-byte CSBK whose
+    /// CRC-CCITT is masked with `0xA5A5` (T-271). Simplified in the ways
+    /// [`super::dmr`] lists — no BPTC, no interleaving, the burst flattened.
+    DmrBsData,
+}
+
+/// Every framing this build looks for, in the order it tries them.
+///
+/// Order is not a priority: the gates are so far below chance (9.1e-12 per sync trial) that two
+/// framings cannot both match the same stream by accident, and the first hit wins only because
+/// something has to.
+pub const CC_FRAMINGS: [CcFraming; 2] = [CcFraming::P25Phase1, CcFraming::DmrBsData];
+
+impl CcFraming {
+    /// The name recorded in [`CcEvidence::pattern`].
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::P25Phase1 => "p25-frame-sync",
+            Self::DmrBsData => "dmr-bs-data-sync",
+        }
+    }
+
+    /// The sync dibits to correlate against.
+    pub const fn sync_dibits(self) -> &'static [u8] {
+        match self {
+            Self::P25Phase1 => &P25_FRAME_SYNC_DIBITS,
+            Self::DmrBsData => &DMR_BS_DATA_SYNC_DIBITS,
+        }
+    }
+
+    /// Bytes in the block that follows the sync.
+    pub const fn block_bytes(self) -> usize {
+        match self {
+            Self::P25Phase1 => BLOCK_BYTES,
+            Self::DmrBsData => CSBK_BYTES,
+        }
+    }
+
+    /// Dibits in one sync-plus-block frame.
+    pub const fn frame_dibits(self) -> usize {
+        self.sync_dibits().len() + self.block_bytes() * 4
+    }
+}
 
 /// Settings for [`CcConfirmer`]. `Default` is the a-priori set above.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -212,6 +274,7 @@ impl CcEvidence {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConfirmedCc {
     candidate: CcCandidate,
+    framing: CcFraming,
     evidence: CcEvidence,
 }
 
@@ -219,6 +282,11 @@ impl ConfirmedCc {
     /// The candidacy this was confirmed from.
     pub fn candidate(&self) -> &CcCandidate {
         &self.candidate
+    }
+    /// The framing that matched — i.e. which **air interface** this is, which is not the same
+    /// statement as which trunking protocol it speaks. See [`CcFraming`].
+    pub fn framing(&self) -> CcFraming {
+        self.framing
     }
     /// The framing evidence that confirmed it.
     pub fn evidence(&self) -> &CcEvidence {
@@ -274,6 +342,7 @@ impl ScanOutcome {
 pub struct CcConfirmer {
     cfg: CcConfirmConfig,
     crc: BitCrc,
+    dmr_crc: BitCrc,
 }
 
 impl Default for CcConfirmer {
@@ -289,7 +358,12 @@ impl CcConfirmer {
         // across data *and* the appended CRC leaves 0, which is the check used below.
         let crc = BitCrc::new(16, 0x1021, 0xFFFF, false, false, 0)
             .expect("CRC-16/CCITT-FALSE is a valid BitCrc");
-        Self { cfg, crc }
+        Self {
+            cfg,
+            crc,
+            // Held rather than rebuilt per block: a `BitCrc` carries a 256-entry table.
+            dmr_crc: csbk_crc(),
+        }
     }
 
     /// Settings.
@@ -297,78 +371,113 @@ impl CcConfirmer {
         &self.cfg
     }
 
-    /// Scans `dibits` for frame syncs and CRC-valid blocks, reporting what it found.
+    /// Whether `block` carries a valid CRC for `framing`.
+    ///
+    /// The two framings differ in more than a constant, which is why this is a match rather than a
+    /// parameter: P25's check is "the CRC over the data **and** the appended CRC comes to zero";
+    /// DMR's is "the CRC over the first ten bytes, masked with 0xA5A5, equals the stored two". One
+    /// shared "check the CRC" would have had to pick one and be silently wrong for the other.
+    fn crc_ok(&self, framing: CcFraming, block: &[u8]) -> bool {
+        match framing {
+            CcFraming::P25Phase1 => self.crc.compute(block, 0, BLOCK_BYTES * 8) == 0,
+            CcFraming::DmrBsData => {
+                block.len() >= CSBK_BYTES && {
+                    let want = (u16::from(block[10]) << 8) | u16::from(block[11]);
+                    self.dmr_crc.compute(&block[..10], 0, 80) as u16 == want
+                }
+            }
+        }
+    }
+
+    /// Scans `dibits` for P25 frame syncs and CRC-valid blocks (T-267's signature, unchanged).
+    pub fn scan(&self, dibits: &[u8]) -> ScanOutcome {
+        self.scan_framing(CcFraming::P25Phase1, dibits)
+    }
+
+    /// Scans `dibits` for `framing`'s frame syncs and CRC-valid blocks, reporting what it found.
     ///
     /// Every position that can hold a whole frame is a trial, so `trials` is the denominator of
     /// the false-alarm rate.
-    pub fn scan(&self, dibits: &[u8]) -> ScanOutcome {
+    pub fn scan_framing(&self, framing: CcFraming, dibits: &[u8]) -> ScanOutcome {
+        let (sync, frame) = (framing.sync_dibits(), framing.frame_dibits());
+        let block_dibits = framing.block_bytes() * 4;
         let mut out = ScanOutcome::default();
-        if dibits.len() < FRAME_DIBITS {
+        if dibits.len() < frame {
             return out;
         }
-        let last = dibits.len() - FRAME_DIBITS;
+        let last = dibits.len() - frame;
         for i in 0..=last {
             out.trials += 1;
-            let mut miss = 0u32;
-            for (k, &want) in P25_FRAME_SYNC_DIBITS.iter().enumerate() {
-                if dibits[i + k] != want {
-                    miss += 1;
-                    if miss > self.cfg.sync_tolerance {
-                        break;
-                    }
-                }
-            }
-            if miss > self.cfg.sync_tolerance {
+            if !self.sync_matches(sync, dibits, i) {
                 continue;
             }
             out.sync_hits += 1;
-            let start = i + P25_FRAME_SYNC_DIBITS.len();
-            let bytes = pack_dibits(&dibits[start..start + BLOCK_DIBITS]);
+            let start = i + sync.len();
+            let bytes = pack_dibits(&dibits[start..start + block_dibits]);
             out.crc_checked += 1;
-            if self.crc.compute(&bytes, 0, BLOCK_BYTES * 8) == 0 {
+            if self.crc_ok(framing, &bytes) {
                 out.crc_valid += 1;
             }
         }
         out
     }
 
-    /// The CRC-valid blocks in `dibits`, sync-aligned, for [`super::tsbk`] to decode (T-268).
-    ///
-    /// This yields **bytes, not evidence**. A block is 12 bytes that passed a CRC behind a frame
-    /// sync; it is not a [`CcEvidence`] and cannot become one, so the type-level rule T-267
-    /// established still holds: [`Self::confirm`] remains the only source of a [`ConfirmedCc`]
-    /// anywhere in the workspace. Decoding what a control channel *said* is a separate question
-    /// from whether it is one, and the caller has to have answered the second question first.
-    pub fn crc_valid_blocks(&self, dibits: &[u8]) -> Vec<[u8; BLOCK_BYTES]> {
-        let mut out = Vec::new();
-        if dibits.len() < FRAME_DIBITS {
-            return out;
-        }
-        let last = dibits.len() - FRAME_DIBITS;
-        let mut i = 0;
-        while i <= last {
-            let mut miss = 0u32;
-            for (k, &want) in P25_FRAME_SYNC_DIBITS.iter().enumerate() {
-                if dibits[i + k] != want {
-                    miss += 1;
-                    if miss > self.cfg.sync_tolerance {
-                        break;
-                    }
+    /// Whether `sync` matches `dibits` at `i` within the tolerance.
+    fn sync_matches(&self, sync: &[u8], dibits: &[u8], i: usize) -> bool {
+        let mut miss = 0u32;
+        for (k, &want) in sync.iter().enumerate() {
+            if dibits[i + k] != want {
+                miss += 1;
+                if miss > self.cfg.sync_tolerance {
+                    return false;
                 }
             }
-            if miss > self.cfg.sync_tolerance {
+        }
+        true
+    }
+
+    /// The CRC-valid P25 blocks in `dibits`, sync-aligned, for [`super::tsbk`] to decode (T-268).
+    pub fn crc_valid_blocks(&self, dibits: &[u8]) -> Vec<[u8; BLOCK_BYTES]> {
+        self.crc_valid_blocks_framing(CcFraming::P25Phase1, dibits)
+            .into_iter()
+            .map(|b| {
+                let mut out = [0u8; BLOCK_BYTES];
+                out.copy_from_slice(&b);
+                out
+            })
+            .collect()
+    }
+
+    /// The CRC-valid blocks in `dibits` for `framing`, sync-aligned, for a protocol decoder
+    /// ([`super::tsbk`] for P25, [`super::dmr`] for DMR).
+    ///
+    /// This yields **bytes, not evidence**. A block is bytes that passed a CRC behind a frame
+    /// sync; it is not a [`CcEvidence`] and cannot become one, so the type-level rule T-267
+    /// established still holds: [`Self::confirm_framing`] remains the only source of a
+    /// [`ConfirmedCc`] anywhere in the workspace. Decoding what a control channel *said* is a
+    /// separate question from whether it is one, and the caller has to have answered the second
+    /// question first.
+    pub fn crc_valid_blocks_framing(&self, framing: CcFraming, dibits: &[u8]) -> Vec<Vec<u8>> {
+        let (sync, frame) = (framing.sync_dibits(), framing.frame_dibits());
+        let block_dibits = framing.block_bytes() * 4;
+        let mut out = Vec::new();
+        if dibits.len() < frame {
+            return out;
+        }
+        let last = dibits.len() - frame;
+        let mut i = 0;
+        while i <= last {
+            if !self.sync_matches(sync, dibits, i) {
                 i += 1;
                 continue;
             }
-            let start = i + P25_FRAME_SYNC_DIBITS.len();
-            let bytes = pack_dibits(&dibits[start..start + BLOCK_DIBITS]);
-            if self.crc.compute(&bytes, 0, BLOCK_BYTES * 8) == 0 {
-                let mut block = [0u8; BLOCK_BYTES];
-                block.copy_from_slice(&bytes);
-                out.push(block);
+            let start = i + sync.len();
+            let bytes = pack_dibits(&dibits[start..start + block_dibits]);
+            if self.crc_ok(framing, &bytes) {
+                out.push(bytes);
                 // A frame that checked out is a frame: resume after it rather than re-examining
                 // every symbol inside it, so one frame cannot yield two overlapping "blocks".
-                i = start + BLOCK_DIBITS;
+                i = start + block_dibits;
                 continue;
             }
             i += 1;
@@ -376,26 +485,51 @@ impl CcConfirmer {
         out
     }
 
-    /// Confirms `candidate` from its demodulated symbols, or returns `None`.
+    /// Confirms `candidate` from its demodulated symbols under P25 framing (T-267's signature).
+    pub fn confirm(&self, candidate: &CcCandidate, dibits: &[u8]) -> Option<ConfirmedCc> {
+        self.confirm_framing(CcFraming::P25Phase1, candidate, dibits)
+    }
+
+    /// Confirms `candidate` from its demodulated symbols under `framing`, or returns `None`.
     ///
     /// `Some` requires **both** gates: at least `min_sync_hits` frame syncs and at least
     /// `min_crc_valid` CRC-valid blocks. Occupancy and raster fit are already baked into the
     /// existence of the `CcCandidate` and are deliberately not re-examined here — they cannot
     /// substitute for framing, which is the whole point.
-    pub fn confirm(&self, candidate: &CcCandidate, dibits: &[u8]) -> Option<ConfirmedCc> {
-        let s = self.scan(dibits);
+    pub fn confirm_framing(
+        &self,
+        framing: CcFraming,
+        candidate: &CcCandidate,
+        dibits: &[u8],
+    ) -> Option<ConfirmedCc> {
+        let s = self.scan_framing(framing, dibits);
         (s.sync_hits >= self.cfg.min_sync_hits && s.crc_valid >= self.cfg.min_crc_valid).then_some(
             ConfirmedCc {
                 candidate: *candidate,
+                framing,
                 evidence: CcEvidence {
                     sync_hits: s.sync_hits,
                     crc_checked: s.crc_checked,
                     crc_valid: s.crc_valid,
-                    pattern: "p25-frame-sync",
+                    pattern: framing.name(),
                     trials: s.trials,
                 },
             },
         )
+    }
+
+    /// Confirms `candidate` under **any** framing this build knows, returning the first that both
+    /// gates admit (T-271).
+    ///
+    /// Trying more framings cannot make a false confirmation likely: each carries its own
+    /// independent 1.4e-16-per-frame chance rate (see [`MIN_CRC_VALID`]), so two of them is 2.8e-16,
+    /// and the union bound stays astronomically below one per device lifetime. What it does cost is
+    /// one more correlation pass per candidate, which is why [`CC_FRAMINGS`] is a short fixed list
+    /// rather than an open registry.
+    pub fn confirm_any(&self, candidate: &CcCandidate, dibits: &[u8]) -> Option<ConfirmedCc> {
+        CC_FRAMINGS
+            .iter()
+            .find_map(|&f| self.confirm_framing(f, candidate, dibits))
     }
 }
 
@@ -587,6 +721,115 @@ mod tests {
         );
         let cand = candidate();
         assert!(c.confirm(&cand, &noise).is_none(), "noise confirmed a CC");
+    }
+
+    /// `n` back-to-back DMR frames: the BS-data sync + a 12-byte CSBK with its masked CRC.
+    fn dmr_stream(seed: u64, n: usize) -> Vec<u8> {
+        let mut rng = SplitMix(seed);
+        let crc = crate::trunk::dmr::csbk_crc();
+        let mut out = Vec::new();
+        for _ in 0..n {
+            out.extend_from_slice(&crate::trunk::dmr::DMR_BS_DATA_SYNC_DIBITS);
+            let mut block: Vec<u8> = (0..10).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
+            let c = crc.compute(&block, 0, 80) as u16;
+            block.extend_from_slice(&c.to_be_bytes());
+            out.extend_from_slice(&unpack_dibits(&block));
+        }
+        out
+    }
+
+    /// The second framing, confirmed the same way the first is — and the evidence says **which**
+    /// air interface matched, because that is the starting point a protocol decoder needs (T-271).
+    #[test]
+    fn a_dmr_control_channel_is_confirmed_and_names_its_own_framing() {
+        let c = CcConfirmer::default();
+        let got = c
+            .confirm_any(&candidate(), &dmr_stream(11, 8))
+            .expect("DMR sync and masked CRC both present");
+        assert_eq!(got.framing(), CcFraming::DmrBsData);
+        assert_eq!(got.evidence().pattern(), "dmr-bs-data-sync");
+        assert!(got.evidence().crc_valid() >= MIN_CRC_VALID);
+        // Confirming an air interface still does not name a trunking protocol: a conventional
+        // Tier II repeater emits the same bursts, so only decoded CSBKs may say "trunked".
+        assert_eq!(got.protocol(), TrunkProtocol::Unknown);
+    }
+
+    /// The framings do not bleed into each other: each stream confirms under its own and **only**
+    /// its own. Without this, `confirm_any` could pass by matching whatever it tried first.
+    #[test]
+    fn neither_framing_confirms_the_other_ones_control_channel() {
+        let c = CcConfirmer::default();
+        let cand = candidate();
+        let p25 = cc_stream(7, 8);
+        let dmr = dmr_stream(11, 8);
+
+        assert!(
+            c.confirm_framing(CcFraming::P25Phase1, &cand, &p25)
+                .is_some()
+        );
+        assert!(
+            c.confirm_framing(CcFraming::DmrBsData, &cand, &p25)
+                .is_none(),
+            "a P25 control channel confirmed as DMR"
+        );
+        assert!(
+            c.confirm_framing(CcFraming::DmrBsData, &cand, &dmr)
+                .is_some()
+        );
+        assert!(
+            c.confirm_framing(CcFraming::P25Phase1, &cand, &dmr)
+                .is_none(),
+            "a DMR control channel confirmed as P25"
+        );
+        // `confirm_any` picks the right one for each rather than the first in the list.
+        assert_eq!(
+            c.confirm_any(&cand, &p25).unwrap().framing(),
+            CcFraming::P25Phase1
+        );
+        assert_eq!(
+            c.confirm_any(&cand, &dmr).unwrap().framing(),
+            CcFraming::DmrBsData
+        );
+        // And the blocks handed to a protocol decoder are that framing's, not the other's.
+        assert!(
+            !c.crc_valid_blocks_framing(CcFraming::DmrBsData, &dmr)
+                .is_empty()
+        );
+        assert!(
+            c.crc_valid_blocks_framing(CcFraming::DmrBsData, &p25)
+                .is_empty()
+        );
+    }
+
+    /// Adding a framing may not add a way to confirm noise. The same pure-noise stream is scanned
+    /// under **every** framing, and none of them may find a CRC-valid block.
+    #[test]
+    fn no_framing_confirms_pure_noise() {
+        let c = CcConfirmer::default();
+        let noise = SplitMix(0xBADC0FFEE).dibits(1_000_000);
+        for f in CC_FRAMINGS {
+            let s = c.scan_framing(f, &noise);
+            eprintln!(
+                "[T-271] {} on noise: trials {} sync_hits {} crc_valid {} (rate {:.3e})",
+                f.name(),
+                s.trials,
+                s.sync_hits,
+                s.crc_valid,
+                s.sync_false_alarm_rate()
+            );
+            assert!(
+                s.sync_false_alarm_rate() <= SYNC_FALSE_ALARM_FLOOR,
+                "{} sync false-alarm rate exceeds the a-priori floor",
+                f.name()
+            );
+            assert_eq!(
+                u64::from(s.crc_valid),
+                CONFIRMED_FALSE_ALARM_MAX,
+                "{} found a CRC-valid block in noise",
+                f.name()
+            );
+        }
+        assert!(c.confirm_any(&candidate(), &noise).is_none());
     }
 
     #[test]

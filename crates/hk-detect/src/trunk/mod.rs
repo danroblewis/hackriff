@@ -19,17 +19,38 @@
 //!    [`tsbk`] because it is not a decode — it is the gate that decode feeds, and it is a type so
 //!    that a later vocoder cannot reach audio by forgetting to ask.
 
+//! 5. **A second protocol, and an honest refusal for the rest** ([`dmr`], [`support`], T-271). DMR
+//!    Tier III CSBKs decode alongside P25's TSBKs — and its grants produce **no frequency**, because
+//!    no channel-parameter announcement could be corroborated and a plausible guess is the C23
+//!    pitfall. [`support`] states, for every trunking family C23 names, what this build does and
+//!    why: Capacity Plus and NXDN Type-D have no dedicated control channel at all, and are
+//!    **reported unsupported** rather than producing a silence indistinguishable from a quiet band.
+
 pub mod confirm;
+pub mod dmr;
 pub mod raster;
+pub mod support;
 pub mod tsbk;
 pub mod voice;
 
 pub use confirm::{
-    BLOCK_BYTES, BLOCK_DIBITS, CONFIRMED_FALSE_ALARM_MAX, CcCandidate, CcConfirmConfig,
-    CcConfirmer, CcEvidence, ConfirmedCc, FRAME_DIBITS, MIN_CC_FCO, MIN_CRC_VALID, MIN_SYNC_HITS,
-    P25_FRAME_SYNC_DIBITS, SYNC_FALSE_ALARM_FLOOR, SYNC_TOLERANCE_DIBITS, ScanOutcome,
+    BLOCK_BYTES, BLOCK_DIBITS, CC_FRAMINGS, CONFIRMED_FALSE_ALARM_MAX, CcCandidate,
+    CcConfirmConfig, CcConfirmer, CcEvidence, CcFraming, ConfirmedCc, FRAME_DIBITS, MIN_CC_FCO,
+    MIN_CRC_VALID, MIN_SYNC_HITS, P25_FRAME_SYNC_DIBITS, SYNC_FALSE_ALARM_FLOOR,
+    SYNC_TOLERANCE_DIBITS, ScanOutcome,
+};
+pub use dmr::{
+    CSBK_BYTES, CSBK_CRC_MASK, CSBKO_BTV_GRANT, CSBKO_C_ALOHA, CSBKO_GRANTS, CSBKO_P_CLEAR,
+    CSBKO_P_GRANT, CSBKO_PD_GRANT, CSBKO_TD_GRANT, CSBKO_TIER3, Csbk, CsbkScan,
+    DMR_BS_DATA_SYNC_DIBITS, DMR_BS_VOICE_SYNC_DIBITS, DmrGrant, DmrPrivacyHeader, DmrResolved,
+    MAX_CSBK_PER_WINDOW, MIN_DMR_CSBKS, csbk_crc, csbk_crc_ok, csbko_name, dmr_pi_encryption,
+    dmr_protocol_of, is_voice_grant, scan_csbks,
 };
 pub use raster::{LMR_RASTERS_HZ, RASTER_TOLERANCE_HZ, RasterFit, best_lmr_raster, fit_raster};
+pub use support::{
+    SupportLevel, TRUNK_SUPPORT, TrunkSupport, support_for, support_json, unsupported,
+    unsupported_text,
+};
 pub use tsbk::{
     ChannelMap, Grant, IDEN_MAX_AGE_S, IdenUp, MAX_TSBK_PER_WINDOW, MIN_IDEN_AGREEMENTS,
     OP_GRP_VCH_GRANT, OP_GRP_VCH_GRANT_UPDATE, OP_IDEN_UP, P25_ALGIDS, Resolved, SVC_ENCRYPTED,
