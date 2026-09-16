@@ -30,7 +30,11 @@ const MAX_SCORE: f64 = 1e9;
 
 /// A POI's dwell weight is at least this fraction of the strongest queued POI's score, so a tiny
 /// weight (priority 0, interestingness 0) still gets about one dwell in 20 of the strongest's.
-const MIN_DWELL_SHARE: f64 = 0.05;
+///
+/// Public because it is also the point below which a hypothesis stops being worth re-checking:
+/// `hk_model::presence::NEGLIGIBLE_CONFIDENCE` is this number, and the re-verification horizon
+/// (T-251) is derived from it rather than chosen.
+pub const MIN_DWELL_SHARE: f64 = 0.05;
 
 /// A retune keeps the emitter at least this far from DC, Hz (beyond its half bandwidth).
 const DC_GUARD_HZ: f64 = 10e3;

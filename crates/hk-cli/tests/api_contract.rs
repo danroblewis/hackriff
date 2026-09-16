@@ -1068,6 +1068,8 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         "last_interval",
         "liveness",
         "ended_t_s",
+        "silence_s",
+        "confidence",
     ] {
         assert!(
             row["presence"].get(field).is_some(),
@@ -1093,6 +1095,32 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     assert!(
         row["presence"]["intervals"].as_u64().is_some(),
         "intervals counts the intervals intersecting the window: {row}"
+    );
+    // T-251 (ADR-0017 TM-6): `confidence` is what ranks a candidate that stopped *inside* the
+    // window below one transmitting now — the case window-scoping cannot answer, because
+    // `on_air_s` is blind to *when* inside the window the signal was on. It is a rank, never a
+    // lifetime: it removes no row, and a live row is fully confident by definition.
+    let confidence = row["presence"]["confidence"].as_f64();
+    assert!(
+        confidence.is_some_and(|c| (0.0..=1.0).contains(&c)),
+        "confidence is a 0-1 rank: {row}"
+    );
+    assert_eq!(
+        liveness == Some("live"),
+        confidence == Some(1.0),
+        "a live row is fully confident, and only a live row is: {row}"
+    );
+    if liveness == Some("absent") {
+        assert_eq!(
+            confidence,
+            Some(0.0),
+            "an absent row has no in-window hypothesis to rank: {row}"
+        );
+    }
+    assert_eq!(
+        row["presence"]["silence_s"].is_null(),
+        liveness == Some("absent"),
+        "silence_s is the time since the latest in-window interval ended: {row}"
     );
     if liveness == Some("absent") {
         assert_eq!(row["presence"]["intervals"], json!(0), "{row}");

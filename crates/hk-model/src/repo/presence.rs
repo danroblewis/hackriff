@@ -64,8 +64,10 @@ impl Repository {
     }
 
     /// The emitter's presence through one view window: intervals intersecting it, time on air
-    /// inside it, and liveness (`live` / `ended` / `absent`). Nothing here reads the emitter's
-    /// `count` (ADR-0017 §5).
+    /// inside it, liveness (`live` / `ended` / `absent`) and the hypothesis `confidence` that
+    /// ranks a stopped candidate below a transmitting one (T-251). Nothing here reads the
+    /// emitter's `count` (ADR-0017 §5), and nothing here writes: `gap` and `now` are parameters of
+    /// the reading, so the same stored rows re-derive both closure and decay.
     pub fn presence(
         &self,
         id: EmitterId,
@@ -74,6 +76,6 @@ impl Repository {
         now: Timestamp,
     ) -> Result<Presence, RepoError> {
         let intervals = self.presence_intervals(id, gap, now)?;
-        Ok(presence_in_window(&intervals, window))
+        Ok(presence_in_window(&intervals, window, gap))
     }
 }

@@ -107,8 +107,9 @@ pub use plan::{
     GainTableEntry, PlanRegion, ScanPlan, ScanPolicy, Schedule, Survey, SurveyState, SurveySummary,
 };
 pub use presence::{
-    IdleGap, Liveness, MAX_IDLE_GAP_S, MIN_IDLE_GAP_S, ObservationSpan, Presence, PresenceInterval,
-    REVISIT_FACTOR, intervals_from_spans, presence_in_window,
+    IdleGap, Liveness, MAX_IDLE_GAP_S, MIN_IDLE_GAP_S, NEGLIGIBLE_CONFIDENCE, ObservationSpan,
+    Presence, PresenceInterval, REVISIT_FACTOR, confidence_after_silence, intervals_from_spans,
+    presence_in_window, recheck_horizon_s,
 };
 pub use provenance::{ClockSource, Provenance, Tune};
 pub use recording::{

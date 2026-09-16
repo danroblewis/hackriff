@@ -28,8 +28,53 @@
 //! - **Revival appends.** A returning signal that entity resolution places on the same emitter
 //!   gets a new row, and therefore a new interval, on the same `emitter_id`.
 //!
-//! **Closing is not decay.** Decay lowers a *candidate's confidence in its hypothesis* and is
-//! T-251/TM-6's; it never deletes and never touches History (ADR-0017 §5).
+//! **Closing is not decay.** Closing is a measurement fact and it is permanent History. Decay
+//! lowers a *candidate's confidence in its hypothesis*; it never deletes and never touches
+//! History (ADR-0017 §5), and it is the next section.
+//!
+//! # Decay: confidence as a function of observed absence (T-251, ADR-0017 TM-6)
+//!
+//! **What was left for decay to own, after window-scoping.** A candidate whose signal stopped
+//! hours ago is not decayed out of the live list — it is simply **not in the window** (TM-3), and
+//! no logic here is involved. Decay owns exactly one case: **a signal that stopped *inside* the
+//! viewed window.** Its box is on screen, so it must stay listed; what it needs is an honest
+//! state and a **lower rank**, never expiry. `on_air_s` cannot supply that rank on its own,
+//! because it is blind to *when* inside the window the signal was on: a row that transmitted for
+//! the window's first five seconds and one transmitting right now for five seconds have the same
+//! `on_air_s` and therefore the same rank. [`Presence::confidence`] is the term that separates
+//! them.
+//!
+//! **The law.** Let `silence` be the time from the latest in-window interval's `t_end` to the
+//! window's live edge:
+//!
+//! ```text
+//! confidence = 1                                while the interval is open (silence ≤ idle_gap)
+//! confidence = exp(−(silence − idle_gap) / idle_gap)          once it has closed
+//! confidence = 0                                when no interval intersects the window at all
+//! ```
+//!
+//! **The time constant is the idle gap, and it is not a new number.** τ = [`IdleGap`] =
+//! `clamp(2 × revisit_period, 1 s, 60 s)`, every constant of which was already derived and
+//! measured in TM-5 (the section above). The reason it is the right τ is the same measurement
+//! argument that sets the gap in the first place: **the idle gap is one unit of *observed*
+//! absence.** A silence shorter than it is not evidence the emitter stopped — the receiver was
+//! not listening — which is why confidence is flat at 1 there and the interval reads open. Past
+//! it, the receiver can only learn "still nothing" once per gap, so the number of independent
+//! absence observations accumulated is `(silence − idle_gap) / idle_gap`, and confidence falls by
+//! `1/e` per observation. That is a likelihood shape with **no free parameter**: there is nothing
+//! here to tune to make one screenshot look right, and changing the revisit period moves the
+//! decay exactly as far as it moves closure.
+//!
+//! **What it is not.** It is not a per-tick decrement — ADR-0017 §5 calls that "the same pathology
+//! inverted", a number that moves for reasons unrelated to evidence. Nothing here is incremented
+//! or decremented by a clock: `confidence` is a pure function of interval boundaries and the view
+//! edge, recomputed on every read, so it is **reversible by construction**. A returning signal
+//! appends a new interval on the same emitter (TM-5), the latest in-window interval is open again,
+//! and confidence is 1 — no revival path, no un-expiry, and no row to resurrect, because **decay
+//! never deletes**. Nothing in this module writes.
+//!
+//! [`NEGLIGIBLE_CONFIDENCE`] is where the hypothesis stops being worth re-checking, and
+//! [`recheck_horizon_s`] turns it back into a silence — the scheduler's re-verification horizon.
 //!
 //! # The idle gap is derived from the revisit period, not set per band
 //!
@@ -107,6 +152,15 @@ pub const MIN_IDLE_GAP_S: f64 = 1.0;
 /// measurement, and this module must not re-join them.
 pub const MAX_IDLE_GAP_S: f64 = 60.0;
 
+/// Confidence below which a hypothesis is not worth spending a dwell on (0.05).
+///
+/// Not a new dial: it is the scheduler's own `MIN_DWELL_SHARE` (`hk_core::scheduler`), the share
+/// of the strongest point of interest's weight below which a POI is effectively starved of dwell
+/// slots. A hypothesis the scheduler would no longer schedule is one there is no point
+/// re-checking, so the same number bounds [`recheck_horizon_s`]. `hk-pipeline` asserts the two are
+/// equal, so this cannot drift out of step with the scheduler it is taken from.
+pub const NEGLIGIBLE_CONFIDENCE: f64 = 0.05;
+
 const NS_PER_S: f64 = 1e9;
 
 /// The silence after which a presence interval closes, derived from the revisit period.
@@ -151,6 +205,34 @@ impl Default for IdleGap {
     fn default() -> Self {
         Self::conservative()
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Decay (T-251, ADR-0017 TM-6). Derived on every read; nothing here is stored, incremented or
+// decremented, and nothing here deletes. See the module docs for the law and its time constant.
+// ---------------------------------------------------------------------------------------------
+
+/// Confidence in a candidate's hypothesis after `silence_s` of silence, under `gap`:
+/// `1` while the silence is no longer than the gap (the receiver has observed no absence at all),
+/// then `exp(−(silence − gap) / gap)` — one `1/e` per further gap of *observed* absence.
+///
+/// The time constant is the gap itself, because the gap is one unit of observed absence
+/// ([`IdleGap`]); there is no free parameter. A non-finite silence reads as no evidence of
+/// absence rather than as total absence: a missing measurement never manufactures decay.
+pub fn confidence_after_silence(silence_s: f64, gap: IdleGap) -> f64 {
+    let g = gap.as_secs_f64();
+    if !silence_s.is_finite() || g <= 0.0 || silence_s <= g {
+        return 1.0;
+    }
+    (-((silence_s - g) / g)).exp()
+}
+
+/// The silence at which [`confidence_after_silence`] reaches [`NEGLIGIBLE_CONFIDENCE`], s:
+/// `gap × (1 − ln 0.05)` ≈ `4 × gap`. Past it the hypothesis is no longer worth a dwell, so it is
+/// the scheduler's re-verification horizon — the point at which a stopped candidate stops being
+/// re-checked. Both constants in it are already-measured ones.
+pub fn recheck_horizon_s(gap: IdleGap) -> f64 {
+    gap.as_secs_f64() * (1.0 - NEGLIGIBLE_CONFIDENCE.ln())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -236,6 +318,18 @@ pub struct Presence {
     /// while live or absent. This is the "ended 4 minutes ago" the product previously could not
     /// say.
     pub ended_t: Option<Timestamp>,
+    /// Silence from the latest in-window interval's end to the window's live edge, s. `None` when
+    /// no interval intersects the window. 0 while the signal is still on the air.
+    pub silence_s: Option<f64>,
+    /// Confidence in the candidate's hypothesis, 0–1 (T-251, ADR-0017 TM-6): `1` while live,
+    /// `exp(−(silence − idle_gap) / idle_gap)` once its latest in-window interval has closed, `0`
+    /// when none intersects the window. See the module docs for the law and its time constant.
+    ///
+    /// **A rank, not a lifetime.** It orders a candidate that stopped inside the window below one
+    /// transmitting now; it never expires a row, never deletes anything and never touches
+    /// History. It is re-derived from interval boundaries on every read, so a returning signal's
+    /// new interval restores it with no revival path of its own.
+    pub confidence: f64,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -298,7 +392,16 @@ pub fn intervals_from_spans(
 /// `intervals` is [`intervals_from_spans`]' output (ordered, disjoint). Nothing here reads a
 /// count: a row with 582,500 sightings and a row with 38 whose intervals are identical are
 /// identically live and identically ranked.
-pub fn presence_in_window(intervals: &[PresenceInterval], window: TimeRange) -> Presence {
+///
+/// `gap` sets the decay time constant of [`Presence::confidence`] (T-251) and nothing else; the
+/// silence it decays over is measured to `window.end`, which **is** the caller's live edge — the
+/// same edge `open` is derived against (docs/api.md, `/api/inventory` `presence` "Scope"). A live
+/// row is confident by definition, so the two can never disagree.
+pub fn presence_in_window(
+    intervals: &[PresenceInterval],
+    window: TimeRange,
+    gap: IdleGap,
+) -> Presence {
     let (t0, t1) = (window.start.as_unix_nanos(), window.end.as_unix_nanos());
     let mut n = 0u64;
     let mut on_air_ns = 0i128;
@@ -319,6 +422,15 @@ pub fn presence_in_window(intervals: &[PresenceInterval], window: TimeRange) -> 
         (_, true) => Liveness::Live,
         (_, false) => Liveness::Ended,
     };
+    let silence_s =
+        last.map(|l| (t1.saturating_sub(l.time.end.as_unix_nanos())).max(0) as f64 / NS_PER_S);
+    // Gated on `liveness`, not on a recomputed silence, so "confident" and "live" are the same
+    // statement: an open interval is one the receiver has observed no absence for at all.
+    let confidence = match liveness {
+        Liveness::Absent => 0.0,
+        Liveness::Live => 1.0,
+        Liveness::Ended => confidence_after_silence(silence_s.unwrap_or(0.0), gap),
+    };
     Presence {
         intervals: n,
         on_air_s: on_air_ns as f64 / NS_PER_S,
@@ -326,6 +438,8 @@ pub fn presence_in_window(intervals: &[PresenceInterval], window: TimeRange) -> 
         liveness,
         ended_t: (liveness == Liveness::Ended)
             .then(|| last.expect("ended has an interval").time.end),
+        silence_s,
+        confidence,
     }
 }
 
@@ -413,8 +527,8 @@ mod tests {
         let chatty = intervals_from_spans(&[span(0.0, 10.0, 582_500)], gap, t(600.0));
         let window = TimeRange::new(t(0.0), t(600.0));
         let (a, b) = (
-            presence_in_window(&quiet, window),
-            presence_in_window(&chatty, window),
+            presence_in_window(&quiet, window, gap),
+            presence_in_window(&chatty, window, gap),
         );
         assert_eq!(a.liveness, Liveness::Ended);
         assert_eq!(a.liveness, b.liveness);
@@ -428,11 +542,13 @@ mod tests {
     fn a_window_past_the_last_interval_reads_absent() {
         let gap = IdleGap::from_revisit_s(1.0);
         let got = intervals_from_spans(&[span(0.0, 10.0, 582_500)], gap, t(600.0));
-        let p = presence_in_window(&got, TimeRange::new(t(100.0), t(600.0)));
+        let p = presence_in_window(&got, TimeRange::new(t(100.0), t(600.0)), gap);
         assert_eq!(p.liveness, Liveness::Absent);
         assert_eq!(p.intervals, 0);
         assert_eq!(p.on_air_s, 0.0);
         assert_eq!(p.ended_t, None);
+        assert_eq!(p.silence_s, None);
+        assert_eq!(p.confidence, 0.0, "no interval here, no hypothesis to rank");
     }
 
     /// On-air time is clipped to the window, so scrubbing changes it honestly.
@@ -440,10 +556,120 @@ mod tests {
     fn on_air_time_is_clipped_to_the_window() {
         let gap = IdleGap::from_revisit_s(1.0);
         let got = intervals_from_spans(&[span(0.0, 100.0, 1)], gap, t(100.0));
-        let p = presence_in_window(&got, TimeRange::new(t(90.0), t(140.0)));
+        let p = presence_in_window(&got, TimeRange::new(t(90.0), t(140.0)), gap);
         assert_eq!(p.intervals, 1);
         assert_eq!(p.on_air_s, 10.0);
         assert_eq!(p.liveness, Liveness::Live, "open at the live edge");
         assert_eq!(p.ended_t, None);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Decay (T-251, ADR-0017 TM-6)
+    // -----------------------------------------------------------------------------------------
+
+    /// The law and its time constant: flat at 1 while the receiver has observed no absence at
+    /// all, then exactly one `1/e` per further idle gap of observed absence. The constant is the
+    /// gap itself, so changing the revisit period moves the decay and nothing else does.
+    #[test]
+    fn confidence_decays_one_e_fold_per_idle_gap_of_observed_silence() {
+        let gap = IdleGap::from_revisit_s(1.0); // 2 s
+        let g = gap.as_secs_f64();
+        // Shorter than the gap is not evidence of absence: the receiver was not listening.
+        for quiet in [0.0, 0.5 * g, g] {
+            assert_eq!(confidence_after_silence(quiet, gap), 1.0, "silence {quiet}");
+        }
+        for k in 1..=4 {
+            let c = confidence_after_silence(g * (1.0 + f64::from(k)), gap);
+            assert!(
+                (c - (-f64::from(k)).exp()).abs() < 1e-12,
+                "{k} gaps of silence gave {c}"
+            );
+        }
+        // A missing measurement never manufactures decay.
+        assert_eq!(confidence_after_silence(f64::NAN, gap), 1.0);
+        // The constant *is* the gap: a receiver that revisits half as often has observed half as
+        // much absence in the same silence, and is correspondingly more confident.
+        let slow = IdleGap::from_revisit_s(2.0);
+        assert_eq!(slow.as_secs_f64(), 2.0 * g);
+        assert!(confidence_after_silence(5.0 * g, slow) > confidence_after_silence(5.0 * g, gap));
+    }
+
+    /// The re-check horizon is not chosen: it is where the law reaches the scheduler's own
+    /// dwell-share floor, so both numbers in it were already measured.
+    #[test]
+    fn the_recheck_horizon_is_where_confidence_reaches_the_dwell_share_floor() {
+        for revisit in [0.5, 1.0, 30.0] {
+            let gap = IdleGap::from_revisit_s(revisit);
+            let h = recheck_horizon_s(gap);
+            assert!(
+                (confidence_after_silence(h, gap) - NEGLIGIBLE_CONFIDENCE).abs() < 1e-12,
+                "horizon {h} s under a {} s gap",
+                gap.as_secs_f64()
+            );
+            // Always the same multiple of the gap — nothing else sets it.
+            assert!((h / gap.as_secs_f64() - 3.9957).abs() < 1e-3, "{h}");
+        }
+    }
+
+    /// **The case window-scoping cannot answer** (ADR-0017 §5). Two rows with the *same* in-window
+    /// on-air time: one transmitting now, one that stopped early inside the window. `on_air_s`
+    /// ranks them equal; confidence separates them — and the stopped row stays listed, with its
+    /// interval and its box intact.
+    #[test]
+    fn a_candidate_that_stopped_inside_the_window_ranks_below_one_transmitting_now() {
+        let gap = IdleGap::from_revisit_s(1.0); // 2 s
+        let window = TimeRange::new(t(0.0), t(20.0));
+        let stopped = intervals_from_spans(&[span(0.0, 5.0, 1)], gap, t(20.0));
+        let live = intervals_from_spans(&[span(15.0, 20.0, 1)], gap, t(20.0));
+        let (a, b) = (
+            presence_in_window(&stopped, window, gap),
+            presence_in_window(&live, window, gap),
+        );
+        assert_eq!(
+            a.on_air_s, b.on_air_s,
+            "5 s each: on_air_s cannot tell them apart"
+        );
+        assert_eq!((a.liveness, b.liveness), (Liveness::Ended, Liveness::Live));
+        assert_eq!((a.silence_s, b.silence_s), (Some(15.0), Some(0.0)));
+        assert_eq!(b.confidence, 1.0, "live is confident by definition");
+        assert!(a.confidence < b.confidence, "{a:?} vs {b:?}");
+        // Ranked lower, never expired: it happened, and its box is on screen.
+        assert_eq!(a.intervals, 1);
+        assert!(a.last_interval.is_some());
+        assert_eq!(a.ended_t, Some(t(5.0)));
+    }
+
+    /// Reversible with no revival path at all, because nothing was stored: the returning signal's
+    /// new interval on the same emitter restores confidence, and both intervals are kept.
+    #[test]
+    fn a_returning_signal_restores_confidence_and_nothing_is_deleted() {
+        let gap = IdleGap::from_revisit_s(1.0); // 2 s
+        let stopped = intervals_from_spans(&[span(0.0, 5.0, 1)], gap, t(40.0));
+        let faded = presence_in_window(&stopped, TimeRange::new(t(0.0), t(40.0)), gap);
+        assert_eq!(faded.liveness, Liveness::Ended);
+        assert!(faded.confidence < 0.01, "35 s silent: {faded:?}");
+
+        let returned =
+            intervals_from_spans(&[span(0.0, 5.0, 1), span(58.0, 60.0, 1)], gap, t(60.0));
+        let back = presence_in_window(&returned, TimeRange::new(t(0.0), t(60.0)), gap);
+        assert_eq!(back.liveness, Liveness::Live);
+        assert_eq!(back.confidence, 1.0);
+        assert_eq!(
+            back.intervals, 2,
+            "decay deletes nothing; both events stand"
+        );
+    }
+
+    /// Confidence reads interval boundaries only — never the sighting count (ADR-0017 §5).
+    #[test]
+    fn confidence_never_reads_the_sighting_count() {
+        let gap = IdleGap::from_revisit_s(1.0);
+        let window = TimeRange::new(t(0.0), t(600.0));
+        let quiet = intervals_from_spans(&[span(0.0, 10.0, 38)], gap, t(600.0));
+        let chatty = intervals_from_spans(&[span(0.0, 10.0, 582_500)], gap, t(600.0));
+        assert_eq!(
+            presence_in_window(&quiet, window, gap).confidence,
+            presence_in_window(&chatty, window, gap).confidence
+        );
     }
 }

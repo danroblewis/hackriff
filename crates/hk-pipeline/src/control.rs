@@ -282,6 +282,14 @@ impl SchedState {
                 scheduler
                     .enable_bandit(bcfg, attention.provider() as _)
                     .map_err(|e| anyhow::anyhow!("extra.bandit: {e}"))?;
+                // T-251: the scheduler's own worst-case revisit sets the idle gap, and with it how
+                // fast a stopped candidate's confidence decays and how long it stays a re-check
+                // request. It has to come from how often this receiver looks: a gap shorter than
+                // the revisit period would claim an absence nobody observed. A plan with no
+                // revisit bound yields the conservative 60 s.
+                attention.set_idle_gap(hk_model::IdleGap::from_revisit_s(
+                    scheduler.plan().revisit_bound_ns as f64 / 1e9,
+                ));
                 Some(BanditWiring {
                     attention,
                     pending: VecDeque::with_capacity(MAX_PENDING_OUTCOMES),

@@ -892,6 +892,11 @@ pub fn parse_presence_at(
 /// - `liveness` — `live` / `ended` / `absent` (§2.3).
 /// - `ended_t_s` — when it stopped, for `ended` only; `null` while live or absent. This is the
 ///   "ended 4 minutes ago" the product previously could not say.
+/// - `silence_s` / `confidence` — T-251 (TM-6): how long the row has been silent at this window's
+///   live edge, and the decayed confidence in its hypothesis. `confidence` is what ranks a
+///   candidate that stopped *inside* the window below one transmitting now — the case
+///   window-scoping cannot answer, because `on_air_s` is blind to *when* inside the window the
+///   signal was on. It is a rank, never a lifetime: it expires nothing and deletes nothing.
 ///
 /// The interval's `count` is deliberately **not** on the wire: nothing in a live list may rank by
 /// it, and the row's lifetime `count` already carries it for History.
@@ -906,6 +911,8 @@ fn presence_json(p: &Presence) -> Value {
         })),
         "liveness": p.liveness.as_str(),
         "ended_t_s": p.ended_t.map(ts_s),
+        "silence_s": p.silence_s,
+        "confidence": p.confidence,
     })
 }
 

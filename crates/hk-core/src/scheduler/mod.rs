@@ -101,8 +101,8 @@ pub use bandit::{
 pub use clock::{AnchoredClock, Clock, SyntheticClock, WallClock};
 pub use config::{HACKRF_ONE_RF_PATH_BOUNDARIES_HZ, MAX_GAIN_STEP_PAIRS, SchedulerConfig};
 pub use core::{
-    Poi, PoiNotes, RetunePlan, RetuneSkip, ScheduleStats, Scheduler, SchedulerError, TxSlotRequest,
-    UserIntent,
+    MIN_DWELL_SHARE, Poi, PoiNotes, RetunePlan, RetuneSkip, ScheduleStats, Scheduler,
+    SchedulerError, TxSlotRequest, UserIntent,
 };
 pub use plan::{
     CompiledPlan, CompiledRegion, Hop, HopKind, PlanError, PlanWarning, check_gains,
