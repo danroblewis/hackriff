@@ -304,12 +304,13 @@ pub(crate) fn listen_probe(
         if crate::debug_enabled() {
             eprintln!(
                 "hk-pipeline: listen refine ({what}) {:.4}/{:.0} kHz -> {:.4} MHz / {:.1} kHz, \
-                 locked {}, quality {:.1}, {} iterations, {} evaluations, {:.2} s",
+                 locked {} ({:?}), quality {:.1}, {} iterations, {} evaluations, {:.2} s",
                 start.center_hz / 1e6,
                 start.bandwidth_hz / 1e3,
                 o.tuning.center_hz / 1e6,
                 o.tuning.bandwidth_hz / 1e3,
                 o.locked,
+                o.stop,
                 o.quality,
                 o.iterations,
                 o.evaluations,
