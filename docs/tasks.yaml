@@ -4877,7 +4877,7 @@ tasks:
     milestone: M2-hardening
     title: 'Audit features that measure the OBSERVATION rather than the signal:
       burst_length varies with watch duration, sigma_ap with snippet length'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: M3A
