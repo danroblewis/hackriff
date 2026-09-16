@@ -5775,7 +5775,8 @@ tasks:
     milestone: M3
     title: 'cyclic_db is a density dimension in 21 of 21 classes and grows ~10*log10(N): +11 dB from watching
       the same emission 8x longer'
-    status: in-progress
+    status: done
+    commit: 0567143
     priority: normal
     deps:
     - T-281
@@ -6099,6 +6100,51 @@ tasks:
       widens the Doppler search beyond the current 5 kHz. HARDWARE CAPTURE IS USER-TRIGGERED - do not touch
       the HackRF while the user''s demo holds it, and do not enable a bias-tee without the user present,
       since the wrong port can damage hardware'
+  - id: T-327
+    milestone: M3
+    title: C14 rate-search lower edge and whitening block width scale with the record, so the analysis geometry
+      moves with the observation
+    status: todo
+    priority: high
+    deps:
+    - T-310
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    acceptance: 'T-310''s root cause, and the reason its own ticket could not be fixed in features.rs. C14''s
+      rate search sets f_min = max(rate_min_cells*fs/n, ..) and its whitening block width likewise scales
+      as fs/n, so both move with the record length: f_min is 1964.6 Hz over N/8 against 1121.7 Hz over N
+      on 2fsk. At the short window the true symbol-rate line falls BELOW the search floor and only its harmonic
+      is findable - the best line lands at 0.49x/0.42x/0.50x/0.57x for 2fsk/4fsk/gfsk/msk, which is exactly
+      the set of classes whose cyclic_db reads LOWER the longer they are watched. Pin the rate-search lower
+      edge and the whitening block width in Hz so neither scales with the record. THIS IS NOT A RESCALING
+      INSIDE features.rs: it changes significance_db for every C14 consumer - symbol-rate trust, the demod
+      path, and hk-estimate''s own tests - which is why T-310 did not attempt it. Expect to re-measure those
+      consumers and say what moved. No floor changes; if the honest fix costs the M3 gate, report the numbers
+      rather than compensating'
+  - id: T-328
+    milestone: M3
+    title: Carrying the four cyclic line significances as separate dimensions nearly doubles class separation,
+      but only after the window dependence is fixed at source
+    status: todo
+    priority: normal
+    deps:
+    - T-327
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    acceptance: 'T-310 measured this and REFUSED to ship it, correctly. Carrying the four line significances
+      as four dimensions instead of their max gives, at 20 dB and above, median pairwise d'' 7.77 against
+      3.46 at fixed length and 4.22 against 1.65 mixed; separable class pairs 0.66 -> 0.96 and 0.41 -> 0.85;
+      held-out distance to nearest class 0.21 -> 1.07. It was refused because it makes the window-dependence
+      harm WORSE: fitting on full windows and scoring the same class''s N/8 bursts, the cyclic dimensions
+      contribute mean clamped sum z^2 of 19.9 today against 55.0 with four dimensions, and four simultaneously-off
+      dimensions is precisely T-248''s second-largest-|z| signature for withholding a claim - so genuine
+      short bursts would be rejected from their own class. T-310 also did not run the gate on it, because
+      choosing it on gate numbers would have been acceptance-tuning. Revisit ONLY after T-327 pins the analysis
+      geometry, then measure the same short-burst harm again before deciding. If it still rejects genuine
+      short bursts, say so and leave it unshipped - a large discrimination win that breaks ephemeral emissions
+      is not a win, because CLAUDE.md makes those first-class'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
