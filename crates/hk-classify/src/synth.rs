@@ -28,6 +28,10 @@ use std::f64::consts::TAU;
 use hk_dsp::synth::Rng;
 use num_complex::{Complex32, Complex64};
 
+/// T-296: which stage of [`generate`] costs the `psk-qam` grid its EVM.
+#[cfg(test)]
+mod t296;
+
 /// Dev seeds: used to fit densities and set thresholds, never to report accuracy.
 pub const DEV_SEEDS: std::ops::Range<u64> = 0..600;
 
@@ -470,8 +474,12 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
     // otherwise a lowpass at ±0.75·OBW cuts away an emission that sits off centre (a CW tone at
     // 800 Hz, or SSB's 0.3–3 kHz sideband, would be filtered out entirely and the classifier would
     // be handed noise).
-    // Recentred on the measured spectral peak, exactly as C13 does, and **not** with a deliberate
-    // residual offset added. Leaving a few per cent of the bandwidth uncorrected was tried (T-235)
+    // Recentred on the emission the way C13 measures it — the carrier line where there is one, the
+    // spectral centroid where there is not — and **not** with a deliberate residual offset added.
+    // This was the strongest *bin* for every class until T-296, which is a different quantity
+    // entirely on a flat-spectrum emission and cost the psk-qam grid 38.5 N₀ before any receiver
+    // touched it — see [`recentre_offset_hz`]. Leaving a few per cent of the bandwidth uncorrected
+    // was tried (T-235)
     // to widen `symmetry`, which is the dimension a real off-centre detection box lands furthest
     // out on. It is a real effect, but as a grid-wide knob it is destructive: on a narrowband
     // emission a few per cent of the band is a large fraction of the deviation, so `nbfm`'s
@@ -479,7 +487,7 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
     // held-out unknown recall fell 0.861 -> 0.731, below the ADR-0016 floor, and the real 915 MHz
     // FSK burst came back `analog`/`nbfm` at confidence 1.00 with open-set 0.00 — a confidently
     // wrong label on a real signal, which is the one outcome this classifier may never produce.
-    let peak_offset = peak_offset_hz(&samples, fs);
+    let peak_offset = recentre_offset_hz(&samples, fs);
     if peak_offset != 0.0 {
         for (i, s) in samples.iter_mut().enumerate() {
             let ph = -TAU * peak_offset * i as f64 / fs;
@@ -1024,30 +1032,25 @@ fn gfsk(
         .collect()
 }
 
-/// Root-raised-cosine taps, unit energy.
-fn rrc(sps: f64, alpha: f64, span: usize) -> Vec<f64> {
-    let n = (2.0 * span as f64 * sps) as usize | 1;
-    let mid = (n / 2) as f64;
-    let mut h: Vec<f64> = (0..n)
-        .map(|i| {
-            let t = (i as f64 - mid) / sps;
-            if t.abs() < 1e-9 {
-                1.0 - alpha + 4.0 * alpha / std::f64::consts::PI
-            } else if (t.abs() - 1.0 / (4.0 * alpha)).abs() < 1e-6 {
-                let p = std::f64::consts::PI / (4.0 * alpha);
-                alpha / 2f64.sqrt()
-                    * ((1.0 + 2.0 / std::f64::consts::PI) * p.sin()
-                        + (1.0 - 2.0 / std::f64::consts::PI) * p.cos())
-            } else {
-                let pt = std::f64::consts::PI * t;
-                ((pt * (1.0 - alpha)).sin() + 4.0 * alpha * t * (pt * (1.0 + alpha)).cos())
-                    / (pt * (1.0 - (4.0 * alpha * t).powi(2)))
-            }
-        })
-        .collect();
-    let e: f64 = h.iter().map(|v| v * v).sum::<f64>().sqrt();
-    h.iter_mut().for_each(|v| *v /= e);
-    h
+/// Root-raised-cosine pulse span, symbol periods each side.
+const RRC_SPAN: f64 = 6.0;
+
+/// Root-raised-cosine amplitude at `t` **symbol periods** from the pulse centre.
+///
+/// A continuous function of the delay rather than a fixed tap set, because [`shaped_linear`] has to
+/// evaluate it at each symbol's *exact* instant and those are not on the sample grid (T-296).
+fn rrc_at(t: f64, alpha: f64) -> f64 {
+    use std::f64::consts::PI;
+    if t.abs() < 1e-9 {
+        return 1.0 - alpha + 4.0 * alpha / PI;
+    }
+    if (t.abs() - 1.0 / (4.0 * alpha)).abs() < 1e-6 {
+        let p = PI / (4.0 * alpha);
+        return alpha / 2f64.sqrt() * ((1.0 + 2.0 / PI) * p.sin() + (1.0 - 2.0 / PI) * p.cos());
+    }
+    let pt = PI * t;
+    ((pt * (1.0 - alpha)).sin() + 4.0 * alpha * t * (pt * (1.0 + alpha)).cos())
+        / (pt * (1.0 - (4.0 * alpha * t).powi(2)))
 }
 
 /// A constellation of `order` points, unit average power.
@@ -1072,39 +1075,47 @@ fn constellation(order: usize, k: usize) -> Complex64 {
 ///
 /// Every constellation below shares this, so they differ only in their symbol alphabet and nothing
 /// else about the waveform (roll-off, timing, length) can drift between them.
+///
+/// # Each symbol sits at its exact instant, which is not a sample (T-296)
+///
+/// This used to upsample by writing each symbol into the **nearest whole sample**,
+/// `up[(k·sps).round()]`. `sps` is `sample_rate / symbol_rate` and is an integer essentially never,
+/// so `round(k·sps) − k·sps` walks over ±0.5 sample: every symbol in the record was displaced by a
+/// different fraction of a symbol period. That is *per-symbol timing jitter*, not a timing offset —
+/// no receiver can track it and no oracle over a uniform symbol grid can undo it, because the
+/// instants are genuinely not uniformly spaced. Measured against the transmitted symbols at 30 dB
+/// it cost **2.59 % EVM** on its own where an ideal waveform reaches 0.49 %.
+///
+/// Summing the continuous pulse at each symbol's true instant costs the same arithmetic (this is
+/// tooling, not the real-time path) and removes it exactly.
 fn shaped_linear(
     n: usize,
     sps: f64,
     alpha: f64,
     mut symbol: impl FnMut(usize) -> Complex64,
 ) -> Vec<Complex64> {
-    let taps = rrc(sps, alpha, 6);
-    let symbols = (n as f64 / sps).ceil() as usize + taps.len();
+    // The symbol count the old tap-based construction drew, preserved so that only the *placement*
+    // changed here and the seed still names the same symbol sequence.
+    let taps_len = (2.0 * RRC_SPAN * sps) as usize | 1;
+    let symbols = (n as f64 / sps).ceil() as usize + taps_len;
     let syms: Vec<Complex64> = (0..symbols).map(&mut symbol).collect();
-    // Upsample by inserting symbols at the nearest sample, then filter.
-    let mut up = vec![Complex64::new(0.0, 0.0); n + taps.len()];
+    let half = RRC_SPAN * sps;
+    let mut out = vec![Complex64::new(0.0, 0.0); n];
     for (k, s) in syms.iter().enumerate() {
-        let i = (k as f64 * sps).round() as usize;
-        if i < up.len() {
-            up[i] = *s;
+        let c = k as f64 * sps;
+        if c - half >= n as f64 {
+            break;
+        }
+        let lo = (c - half).ceil().max(0.0) as usize;
+        let hi = (c + half).floor().min((n - 1) as f64);
+        if hi < lo as f64 {
+            continue;
+        }
+        for (i, o) in out.iter_mut().enumerate().take(hi as usize + 1).skip(lo) {
+            *o += *s * rrc_at((i as f64 - c) / sps, alpha);
         }
     }
-    let d = taps.len() / 2;
-    (0..n)
-        .map(|i| {
-            taps.iter()
-                .enumerate()
-                .map(|(m, w)| {
-                    let j = i + d;
-                    if j >= m && j - m < up.len() {
-                        up[j - m] * *w
-                    } else {
-                        Complex64::new(0.0, 0.0)
-                    }
-                })
-                .sum::<Complex64>()
-        })
-        .collect()
+    out
 }
 
 fn linear(rng: &mut Rng, n: usize, fs: f64, rate: f64, order: usize) -> Vec<Complex64> {
@@ -1368,9 +1379,46 @@ fn channel_filter(x: &[Complex32], cutoff: f64) -> Vec<Complex32> {
     out
 }
 
-/// Offset of the strongest spectrum bin from the centre, Hz: the harness's stand-in for C13's
-/// measured carrier offset.
-fn peak_offset_hz(samples: &[Complex32], fs: f64) -> f64 {
+/// Offset of the emission from the snippet centre, Hz: the harness's stand-in for C13's measured
+/// carrier offset. **The carrier line where there is one, the spectral centroid where there is
+/// not.**
+///
+/// # This was the strongest bin unconditionally, and that is what broke the `psk-qam` grid (T-296)
+///
+/// C13 does not use one estimator for everything: `params::finish_cfo` picks a squared line for
+/// DSB, a fourth-power line for QPSK, an FSK midpoint for FSK, and falls back to
+/// `Method::CfoCentroid` — a power-weighted centroid over the occupied band, with unclipped
+/// noise-subtracted weights — only when nothing is known about the emission. The harness took the
+/// **argmax bin** for every class, which is a different quantity entirely on an emission whose
+/// spectrum is not a line.
+///
+/// A root-raised-cosine-shaped random data stream has a spectrum that is *flat* across its
+/// passband, so its strongest bin is a coin toss among hundreds of statistically identical ones.
+/// Measured over eight seeds the argmax landed 0.24–0.39 **symbol rates** off centre on six of
+/// them. The harness then rotated the snippet by that spurious offset, so the constellation spun
+/// through a large fraction of a cycle per symbol and arrived at the classifier as a ring:
+/// **19.63 % ± 14.30 % EVM against the transmitted symbols, 38.53 N₀**, where the same waveform
+/// recentred properly reads 3.00 % ± 0.24 % (0.90 N₀). Its seed-to-seed randomness is the whole of
+/// that ±14.30 %, and it is why π/4-DQPSK was indistinguishable from `qpsk` and 16-APSK from
+/// `qam16`: the densities were fitted on smeared clouds and the held-out generators were smeared
+/// identically.
+///
+/// # Why this is not simply "use the centroid"
+///
+/// Switching every class to the centroid was measured too, and it is wrong in the other direction.
+/// For a **carrier-bearing** emission the strongest bin *is* the carrier and the argmax is exactly
+/// right, while a centroid is dragged off it by whatever the sidebands do. Nudging the carrier off
+/// centre moves `symmetry`, which is the single dimension that separates the held-out VSB-AM from
+/// `am` (T-286 measured it at z ≈ −18 there and on no other): a blanket centroid dropped VSB-AM's
+/// abstention from 25/36 to 6/36 and the `analog` open set from 0.861 to 0.583.
+///
+/// So the rule switches on **whether there is a carrier at all**, which is T-286's own measured
+/// test ([`crate::features::CARRIER_MIN_FRACTION`]: the strongest line's main lobe holding more
+/// power than the whole rest of the occupied band). That is a property of the spectrum, not of the
+/// class — the harness never looks at what it generated — and it reproduces the argmax bit-for-bit
+/// on every carrier-bearing class while giving the flat-spectrum ones a centre that means
+/// something.
+fn recentre_offset_hz(samples: &[Complex32], fs: f64) -> f64 {
     let fft_len = (samples.len() / 8).next_power_of_two().clamp(64, 2048);
     let cfg = hk_dsp::WelchConfig {
         fft_len,
@@ -1382,13 +1430,36 @@ fn peak_offset_hz(samples: &[Complex32], fs: f64) -> f64 {
     let Ok(s) = hk_dsp::welch(samples, fs, 0.0, &cfg) else {
         return 0.0;
     };
-    let peak = s
-        .psd
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.total_cmp(b))
-        .map_or(s.psd.len() / 2, |(i, _)| i);
-    s.bin_offset_hz(peak)
+    let psd: Vec<f64> = s.psd.iter().map(|v| f64::from(*v)).collect();
+    let bins = psd.len();
+    let (lo, hi) = crate::features::occupied_band(&psd);
+    // The same median noise floor `occupied_band` subtracts, and left **unclipped** for the
+    // centroid for the same reason C13 leaves it unclipped: the noise either side of the emission
+    // then averages to zero instead of dragging the centroid towards the band centre.
+    let mut sorted = psd.clone();
+    sorted.sort_by(f64::total_cmp);
+    let floor = sorted[sorted.len() / 2];
+    let strongest = (lo..=hi)
+        .max_by(|a, b| psd[*a].total_cmp(&psd[*b]))
+        .unwrap_or((lo + hi) / 2);
+    // Is there a carrier? Exactly `features::spectral_features`' test, on the same quantities.
+    let net = |i: usize| (psd[i] - floor).max(0.0);
+    let guard = crate::features::CARRIER_GUARD_BINS;
+    let lobe: f64 = (strongest.saturating_sub(guard)..=(strongest + guard).min(bins - 1))
+        .map(net)
+        .sum();
+    let band_net: f64 = (lo..=hi).map(net).sum();
+    if band_net > 0.0 && lobe / band_net > crate::features::CARRIER_MIN_FRACTION {
+        return s.bin_offset_hz(strongest);
+    }
+    let wsum: f64 = (lo..=hi).map(|i| psd[i] - floor).sum();
+    if !(wsum.is_finite() && wsum > 0.0) {
+        return 0.0;
+    }
+    (lo..=hi)
+        .map(|i| (psd[i] - floor) * s.bin_offset_hz(i))
+        .sum::<f64>()
+        / wsum
 }
 
 /// OBW99 measured from the samples: the narrowest central band holding 99 % of the power.
