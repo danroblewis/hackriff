@@ -42,6 +42,7 @@ pub mod inspector;
 pub mod inventory;
 pub mod iqbuffer; // T-157
 pub mod live_control;
+pub mod navigation; // T-341: the achievable (centre, span) grid and the live-vs-overview claim
 pub mod ondemand;
 pub mod outputs;
 pub mod presence; // T-264 (ADR-0017 TM-8): one emitter's presence track

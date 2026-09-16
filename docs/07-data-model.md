@@ -379,6 +379,51 @@ This is why the model shapes below are what they are, and none of them is option
 
 The wire form and the client's obligations are `docs/api.md`, "One shared time axis"; the UI consequences are docs/14; the signal-model consequences are ADR-0017 §2.4.2.
 
+### 4.3 The achievable capture state, and the detail claim (T-341)
+
+**The rule, settled by the user** (CLAUDE.md, "Time, the waterfall, and the live view", invariant 6): *navigation is discretized to achievable capture states, and the UI never implies detail the front end can't deliver.* §4.1 settled the resolution the backend serves and §4.2 the timestamps it carries; this settles the **third** thing a client must not decide for itself — **which states exist at all, and what the picture of one is evidence of.**
+
+It is the same rule as absent-means-not-measured (T-297: no field is written for a region that was never swept, so nothing ever writes a zero rate), expressed on the navigation surface. There, a fabricated field is a number nobody measured; here, **an interpolated pixel that looks like a measurement is a lie with a picture attached**.
+
+#### The achievable `(centre, span)` grid
+
+A capture state is a point on a three-axis grid, and the model carried only two of the axes until T-341:
+
+| Axis | Model field | Bounded by |
+|---|---|---|
+| centre bounds | `SourceCapabilities.frequency_ranges` | what the front end can tune to |
+| span | `SourceCapabilities.sample_rates` — **a live window's span *is* its sample rate** | the instantaneous bandwidth |
+| centre granularity | `SourceCapabilities.tuning_step` (**new**) | the synthesiser's own grid |
+
+`tuning_step` is **three-valued, not a number**: `Unknown`, or `Uniform { step_hz }`. This is `BiasTee`'s shape (§2.6) for `BiasTee`'s reason — a source that *cannot report* and a source that *reports a value* are different facts, and collapsing the first into a benign default is the defect this project guards against. Reading "nothing said" as 1 Hz would offer the user centres the radio cannot reach. A device driver states its own step; a SigMF replay reports `Unknown`, because a recording holds the centre it was made at and never the synthesiser grid of the device that made it.
+
+**A step is a granularity, and it promises only that.** The device lands within half a step of a requested grid point; the residual is bounded by the step by construction, and nothing downstream may read a grid point as exact beyond it.
+
+#### The detail claim
+
+Every picture of a region says which tier it came from, as a claim about **how much detail it is evidence of**, ordered `live-iq` > `spectrum-history` > `survey-overview`:
+
+| Claim | The picture is |
+|---|---|
+| **live IQ** | one capture window, at the resolution drawn. |
+| **spectrum history** | measured, reduced to a pyramid tier's cells (§4.1). Never interpolated. |
+| **survey overview** | wider than any single capture window, so stitched from separate dwells. |
+
+The test is `span ≤ the widest instantaneous bandwidth`, boundary inside: a view exactly as wide as the sample rate is one window's worth, and a hertz past it had to come from a different dwell. **A surface that cannot establish the stronger claim makes the weaker one** — not knowing the window is not evidence that a span fits inside it.
+
+#### Error direction on every axis
+
+Each axis errs in the direction where the user loses *choice* rather than *truth*:
+
+| Axis | Errs | Because the other way |
+|---|---|---|
+| centre | to a **coarser** grid than the hardware's | offers centres that do not exist while the axis claims otherwise |
+| span | **down** to an achievable rate | promises a window the device cannot open |
+| time cell | **coarser** (§4.1's rule) | invents the value a pixel stands for |
+| the claim | to the **weaker** one | over-claims detail nobody captured |
+
+The wire form is `GET /api/navigation` and `resolution.source` on `GET /api/history` (`docs/api.md`); the UI consequences are docs/14; the navigation surfaces that consume the grid are ADR-0017's Explore/History split and the edge navigators (T-340), the capture timeline (T-338).
+
 ## 5. Worked examples
 
 ### 5.1 Science — natural radio noise-floor survey (SPACE-050)

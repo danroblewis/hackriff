@@ -43,7 +43,7 @@ use num_complex::{Complex, Complex32};
 
 use super::{
     ControlMailbox, Duplex, FrequencyRange, Gains, PendingControl, SampleRates, Source,
-    SourceCapabilities, SourceControl, SourceError, SourceKind, format,
+    SourceCapabilities, SourceControl, SourceError, SourceKind, TuningStep, format,
 };
 use crate::block::{BlockHeader, Discontinuity, ProvenanceHandle};
 
@@ -855,6 +855,11 @@ fn replay_capabilities(
         kind: SourceKind::Replay,
         frequency_ranges,
         sample_rates: SampleRates::Discrete(vec![sample_rate_hz]),
+        // T-341: a recording cannot state a tuning step. It records the centre it was made at,
+        // never the synthesiser grid of the device that made it — and `controllable: false` means
+        // there is nothing to snap anyway. "Cannot report" and "reports 1 Hz" are different facts;
+        // this is the first.
+        tuning_step: TuningStep::Unknown,
         adc_bits: (meta.global.datatype.component_bytes() * 8) as u8,
         native_format: meta.global.datatype,
         duplex: Duplex::ReceiveOnly,

@@ -36,7 +36,7 @@ pub use source::{
     HackRfDeviceInfo, HackRfDriver, HackRfSource, HackRfStats, MockClock, MockEnd, MockOptions,
     MockSdrControl, MockSdrDriver, MockSdrSource, MockStats, NamedGain, OpenRequest, Pacing,
     PendingControl, Recording, ReplayOptions, SigmfReplaySource, Source, SourceCapabilities,
-    SourceControl, SourceDriver, SourceError, SourceStats, SweepCapability, SweepPlan,
+    SourceControl, SourceDriver, SourceError, SourceStats, SweepCapability, SweepPlan, TuningStep,
 };
 
 #[cfg(test)]

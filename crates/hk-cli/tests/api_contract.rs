@@ -836,7 +836,17 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     );
     assert_eq!(st, 200, "{v}");
     let res = &v["resolution"];
+    // T-341: `source` is a detail claim, not a constant. This span fits one capture window, so the
+    // grid is spectrum history — reduced from real frames, never live IQ (this route reads the
+    // pyramid and only the pyramid), and never interpolated.
     assert_eq!(res["source"], json!("spectrum-history"), "{v}");
+    assert_eq!(res["live"], json!(false), "{v}");
+    assert_eq!(res["max_live_span_hz"], json!(20e6), "{v}");
+    assert_eq!(
+        res["served_span_hz"].as_f64(),
+        Some(v["nf"].as_f64().unwrap() * v["f_cell_hz"].as_f64().unwrap()),
+        "{v}"
+    );
     assert_eq!(res["requested"]["max_t"], json!(600), "{v}");
     assert_eq!(res["requested"]["max_f"], json!(1024), "{v}");
     assert_eq!(res["requested"]["max_cells"], json!(100_000), "{v}");
@@ -900,6 +910,19 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         ),
     );
     assert_eq!(st, 200, "{over}");
+    // T-341: 100 MHz never fitted one 20 MHz window, so this picture was stitched from separate
+    // dwells. It says so rather than looking like a 100 MHz observation.
+    assert_eq!(
+        over["resolution"]["source"],
+        json!("survey-overview"),
+        "{over}"
+    );
+    assert_eq!(over["resolution"]["live"], json!(false), "{over}");
+    assert!(
+        over["resolution"]["served_span_hz"].as_f64().unwrap()
+            > over["resolution"]["max_live_span_hz"].as_f64().unwrap(),
+        "{over}"
+    );
     assert_eq!(over["resolution"]["matched"], json!(false), "{over}");
     assert_eq!(
         over["resolution"]["over_resolved"],
@@ -4285,6 +4308,164 @@ fn decoded_captures_are_recorded_listed_scrubbed_reparsed_and_replayed_as_docume
 
 /// T-079: every route in [`hk_api::ROUTES`] must appear (method and path on the same line) in
 /// `docs/api.md`, so the reference can never silently fall behind the server.
+/// T-341: **the view cannot claim detail that was never captured.**
+///
+/// The user's navigation invariant, asserted by value on the wire. Three things have to hold at
+/// once, and the third is what stops "everything is overview" passing the first two:
+///
+/// 1. the backend reports the achievable `(centre, span)` grid, including the **tuning step** —
+///    the axis `SourceCapabilities` did not have before this task;
+/// 2. a span wider than the instantaneous bandwidth answers **survey-overview**, not live;
+/// 3. a request **inside** the achievable set is still served at full fidelity and marked
+///    live-IQ-backed, with nothing snapped.
+///
+/// Values, not shape (T-315): a block that could be renamed or emptied without failing here would
+/// be documentation, not a contract.
+#[test]
+fn navigation_snaps_to_achievable_states_and_never_claims_uncaptured_detail() {
+    let (_dir_guard, serving, addr) = start_server();
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+
+    // ---- (1) the grid ----
+    let (st, v) = get(addr, "/api/navigation");
+    assert_eq!(st, 200, "{v}");
+    let f = &v["frequency"];
+    // The third axis. The mock keeps the HackRF's synthesiser grid, because a test that snaps to
+    // the mock's grid must be snapping to the grid the real device has.
+    assert_eq!(f["center_step"], json!("uniform"), "{v}");
+    assert_eq!(f["center_step_hz"], json!(step), "{v}");
+    assert_eq!(f["ranges_hz"], json!([[1e6, 6e9]]), "{v}");
+    assert_eq!(f["spans_hz"], json!({ "min": 2e6, "max": 20e6 }), "{v}");
+    assert_eq!(f["max_live_span_hz"], json!(20e6), "{v}");
+    assert_eq!(f["current"]["center_hz"], json!(FIXTURE_CENTER_HZ), "{v}");
+    assert_eq!(f["current"]["span_hz"], json!(FIXTURE_RATE_HZ), "{v}");
+    assert!(
+        f["device_id"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("mock:")),
+        "{v}"
+    );
+
+    // The time axis is a ladder of discrete tiers, strictly coarsening, and the finest one is
+    // named — a view cannot ask for a cell below it.
+    let tiers = v["time"]["tiers"].as_array().expect("tiers").clone();
+    assert!(tiers.len() >= 2, "{v}");
+    let cell = |t: &Value| t["t_cell_s"].as_f64().expect("t_cell_s");
+    for pair in tiers.windows(2) {
+        assert!(cell(&pair[1]) > cell(&pair[0]), "tiers must coarsen: {v}");
+    }
+    let finest = cell(&tiers[0]);
+    assert_eq!(v["time"]["min_t_cell_s"], json!(finest), "{v}");
+    assert_eq!(
+        v["time"]["max_t_cell_s"],
+        json!(cell(tiers.last().unwrap())),
+        "{v}"
+    );
+    assert_eq!(tiers[0]["level"], json!(0), "{v}");
+
+    // ---- (2) the honesty test: wider than the window is overview, not live ----
+    let (st, wide) = get(
+        addr,
+        &format!("/api/navigation?center_hz={FIXTURE_CENTER_HZ}&span_hz=40000000"),
+    );
+    assert_eq!(st, 200, "{wide}");
+    let r = &wide["resolved"];
+    assert_eq!(r["source"], json!("survey-overview"), "{wide}");
+    assert_eq!(r["live"], json!(false), "{wide}");
+    // The span axis clamps down to something the device could actually open...
+    assert_eq!(r["span_hz"], json!(20e6), "{wide}");
+    // ...and 100.8 MHz is not on the synthesiser grid, so the centre moves too — by less than half
+    // a step, which is all a step ever promises.
+    let snapped_center = r["center_hz"].as_f64().expect("a snapped centre");
+    assert!(
+        (snapped_center - FIXTURE_CENTER_HZ).abs() <= step / 2.0,
+        "snapped {snapped_center} is more than half a step from {FIXTURE_CENTER_HZ}: {wide}"
+    );
+    assert_eq!(
+        (snapped_center / step).round() * step,
+        snapped_center,
+        "the snapped centre must be on the grid: {wide}"
+    );
+    assert_eq!(r["matched"], json!(false), "{wide}");
+    assert_eq!(r["snapped"], json!(["center_hz", "span_hz"]), "{wide}");
+
+    // Exactly one window wide is still live: the boundary counts as inside, and one hertz past it
+    // does not. Without this pair, "wider is overview" would be satisfied by calling everything
+    // overview.
+    let on_grid = (FIXTURE_CENTER_HZ / step).round() * step;
+    let at_edge = |span: &str| {
+        let (st, v) = get(
+            addr,
+            &format!("/api/navigation?center_hz={on_grid:?}&span_hz={span}"),
+        );
+        assert_eq!(st, 200, "{v}");
+        v["resolved"]["source"].clone()
+    };
+    assert_eq!(at_edge("20000000"), json!("live-iq"));
+    assert_eq!(at_edge("20000001"), json!("survey-overview"));
+
+    // ---- (3) the control: inside the achievable set is live, at full fidelity, nothing snapped ----
+    let (st, inside) = get(
+        addr,
+        &format!("/api/navigation?center_hz={on_grid:?}&span_hz={FIXTURE_RATE_HZ}"),
+    );
+    assert_eq!(st, 200, "{inside}");
+    let r = &inside["resolved"];
+    assert_eq!(r["source"], json!("live-iq"), "{inside}");
+    assert_eq!(r["live"], json!(true), "{inside}");
+    assert_eq!(r["center_hz"], json!(on_grid), "{inside}");
+    assert_eq!(r["span_hz"], json!(FIXTURE_RATE_HZ), "{inside}");
+    assert_eq!(r["matched"], json!(true), "{inside}");
+    assert_eq!(r["snapped"], json!([]), "{inside}");
+
+    // ---- the time half of the honesty test: finer than the finest tier is refused, not faked ----
+    let (st, deep) = get(
+        addr,
+        &format!("/api/navigation?center_hz={on_grid:?}&span_hz={FIXTURE_RATE_HZ}&t_cell_s=0.001"),
+    );
+    assert_eq!(st, 200, "{deep}");
+    let r = &deep["resolved"];
+    assert_eq!(r["t_cell_s"], json!(finest), "{deep}");
+    assert!(
+        r["t_cell_s"].as_f64().unwrap() > 0.001,
+        "answered coarser than asked, never finer: {deep}"
+    );
+    assert_eq!(r["level"], json!(0), "{deep}");
+    assert_eq!(r["snapped"], json!(["t_cell_s"]), "{deep}");
+    // Asking for a history tier is asking the pyramid, so the claim drops from live-IQ to
+    // spectrum-history even though the span itself fits one window.
+    assert_eq!(r["source"], json!("spectrum-history"), "{deep}");
+
+    // A tier the ladder does have is served exactly, and nothing is reported as snapped.
+    let (_, exact) = get(
+        addr,
+        &format!(
+            "/api/navigation?center_hz={on_grid:?}&span_hz={FIXTURE_RATE_HZ}&t_cell_s={finest:?}"
+        ),
+    );
+    assert_eq!(exact["resolved"]["t_cell_s"], json!(finest), "{exact}");
+    assert_eq!(exact["resolved"]["snapped"], json!([]), "{exact}");
+
+    // ---- refusals: a half-given state is an error, never a guess ----
+    for bad in [
+        "center_hz=100000000",
+        "span_hz=2400000",
+        "center_hz=100000000&span_hz=0",
+        "center_hz=abc&span_hz=2400000",
+        "center_hz=100000000&span_hz=2400000&t_cell_s=nan",
+    ] {
+        let (st, v) = get(addr, &format!("/api/navigation?{bad}"));
+        assert_eq!(st, 400, "expected 400 for {bad}: {v}");
+    }
+
+    // The same tuning step is reported beside the rest of the device's capabilities.
+    let (_, state) = get(addr, "/api/control/state");
+    assert_eq!(state["device"]["tuning_step"], json!("uniform"), "{state}");
+    assert_eq!(state["device"]["tuning_step_hz"], json!(step), "{state}");
+
+    stop_server(serving);
+}
+
 #[test]
 fn every_route_in_the_route_table_is_documented() {
     let doc_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md");

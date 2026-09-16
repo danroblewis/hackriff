@@ -173,6 +173,20 @@ Three consequences for this ADR's model:
 
 **What this does *not* settle.** A chirp is still a bounding box (§1.3) — placing it exactly on the time axis does not make a rectangle the truth about a swept carrier. And the focused Confirmed row keeps the full-height band box of TM-4 (T-193's drag-to-adjust edges live on it), which is deliberately *not* time-placed: it is a frequency tool, and the time-extent box is drawn for every other row. Wire form and client obligations: `docs/api.md` "One shared time axis"; data model: docs/07 §4.2; UI: docs/14.
 
+#### 2.4.3 Navigation is discretized, and the window says what it is evidence of (T-341; the user's time/waterfall invariant 6)
+
+§2.4.1 settled the resolution served and §2.4.2 the timestamps carried. Both assume the window a scrub or a zoom asks for is a window that *exists*. The user's sixth invariant says it may not be, and that the view must never pretend otherwise: *navigation is discretized to achievable capture states, and the UI never implies detail the front end can't deliver … wider than the live window is **survey-history overview**, not live IQ … so a wide or deep zoom never fakes resolution the hardware did not capture.*
+
+This is the **exploration-first honesty principle** applied to navigation — the same principle that makes the known-signal database a suggester and never a source of truth, and the same rule as absent-means-not-measured (T-297). A fabricated field is a number nobody measured; **an interpolated pixel that looks like a measurement is a lie with a picture attached**.
+
+Three consequences for this ADR's model:
+
+1. **A window is a point on a grid, not a free pair of numbers.** Centre and span are bounded by the frequency ranges and the instantaneous bandwidth, and centre is granular: `SourceCapabilities.tuning_step` (T-341, docs/07 §4.3) is the third axis, and it is **three-valued** — a source that cannot state a step says so, and then nothing snaps. A region-select or navigator drag resolves to the nearest realizable point; the backend owns *which* points are realizable (`GET /api/navigation`), and the client does the arithmetic against the grid it was handed.
+2. **§1.2's box is only as good as the picture under it.** A box drawn over a region the front end never covered in one window is a box over stitched dwells. That does not make the box wrong — an emitter's interval is an interval however it was observed — but it changes what the *absence* of a box means, exactly as §2.5/C26's coverage does for an empty catalogue. The window therefore carries its own claim: `live-iq`, `spectrum-history` or `survey-overview` (`resolution.source`, T-334's field with T-341's two extra values), ordered by how much detail each is evidence of.
+3. **The weaker claim wins a tie.** A surface that cannot establish `live-iq` reports `spectrum-history`; one that cannot establish either reports `survey-overview`. Not knowing the window is not evidence that a span fits inside it. Under-claiming costs a styling cue; over-claiming is the failure the invariant names.
+
+**What this does *not* settle.** The edge navigators themselves (T-340) and the capture timeline sized from the ring (T-338) are the surfaces that consume the grid; both are filed separately. A zoom *inside* the tuned band is a display zoom over live IQ and correctly snaps to nothing — only a gesture that would become a capture state snaps. Wire form: `docs/api.md` "The achievable (centre, span) grid"; data model: docs/07 §4.3; UI: docs/14.
+
 ---
 
 ## 3. Invariant 3 — Candidate / Confirmed / History

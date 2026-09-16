@@ -27,6 +27,12 @@ export function deviceFrom(cs: ControlState): AppState["device"] {
     sampleRateHz: cs.tuning?.sample_rate_hz ?? run?.sample_rate_hz ?? null,
     rowsPerS: run?.display?.rows_per_s ?? null, recording: !!run?.recording?.active,
     deviceId: cs.device?.device_id ?? null,
+    // T-341: the centre axis of the achievable grid, straight from the device's capabilities. A
+    // `tuning_step_hz` of null is "the source cannot say" — carried through as null, never
+    // defaulted to 1 Hz, so a snap against it refuses rather than inventing a centre.
+    centerGrid: cs.device
+      ? { ranges_hz: cs.device.frequency_ranges_hz, center_step_hz: cs.device.tuning_step_hz ?? null }
+      : null,
   };
 }
 

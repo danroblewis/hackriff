@@ -1,6 +1,7 @@
 // Shell state (ADR-0013 §3.1). Owner: T-150 (shell). Top-level keys: mode, theme, conn, device,
 // nav, toast. `device` is T-150's alone (the top bar's reduction of `/api/control/state`); T-155's
 // Device tab keeps the full control state it needs in its own review slice, never here.
+import type { CenterGrid } from "../navigation";
 import type { AppState } from "./state";
 
 /** T-264 (ADR-0017 TM-8): `history` is the durable all-time catalogue (workflow #3), a surface of
@@ -21,6 +22,10 @@ export interface DeviceSlice {
    * reports no identity. A retune is a device action recorded against this id, so the UI names the
    * radio it is about to move. Null means *nothing said*, never "some default device". */
   deviceId: string | null;
+  /** The centre axis of the achievable grid (T-341): the tunable bounds and the tuning step, from
+   * `/api/control/state`'s `device`. Null before the state loads or on a run with no device; a
+   * `center_step_hz` of null means the source cannot state a step, and then **nothing snaps**. */
+  centerGrid: CenterGrid | null;
 }
 
 /** One-shot navigation requests from the top bar (Go to), consumed by T-151/T-152. */
@@ -53,7 +58,7 @@ export function parsePrefs(raw: string | null): Prefs {
 export const shellInitial = (prefs: Prefs): ShellState => ({
   mode: prefs.mode, theme: prefs.theme,
   conn: { api: "connecting", spectrum: "idle", message: "" },
-  device: { loaded: false, live: false, finished: false, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null },
+  device: { loaded: false, live: false, finished: false, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, centerGrid: null },
   nav: { gotoHz: null, seq: 0 },
   toast: { text: "", seq: 0 },
   openAlarms: 0,

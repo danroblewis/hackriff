@@ -1036,6 +1036,7 @@ mod tests {
                         max_hz: center + fs / 2.0,
                     }],
                     sample_rates: SampleRates::Discrete(vec![fs]),
+                    tuning_step: hk_core::TuningStep::Unknown,
                     adc_bits: 8,
                     native_format: Datatype::Ci8,
                     duplex: Duplex::ReceiveOnly,

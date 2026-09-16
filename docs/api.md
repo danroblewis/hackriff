@@ -36,6 +36,7 @@
 | GET | `/api/events` | token | `f_lo`, `f_hi` (Hz), `t0`, `t1` (Unix s) — **required**; every `/api/inventory` filter (`state`, `status`, `tag`, `scheme`, `family`, `relations`); `limit`? (default 200, max 2000), `cursor`? (event offset, ≤ 1 000 000) | T-264 the durable catalogue of events in this region over this period, with coverage (below) | 400 invalid region/filter/cursor, 404 no inventory store |
 | GET | `/api/inventory/{id}/presence` | token | `t0`, `t1`? (Unix s, together) | T-264 one emitter's presence track: every interval with its own timespan (below) | 400 invalid window, 404 not_found, 503 unavailable |
 | GET | `/api/analysis/strongest` | token | `f_lo`, `f_hi` (Hz), `window_s`? (default 5, max 300) | T-079 strongest observed signal in the band over the recent window (below) | 400 invalid region/window, 404 no history store |
+| GET | `/api/navigation` | token | `center_hz`+`span_hz`? (together; `span_hz` > 0), `t_cell_s`? | T-341 the achievable `(centre, span)` grid and the history tiers; with a requested state, the nearest realizable one and its live-IQ/overview claim (below) | 400 a non-finite number, or `center_hz`/`span_hz` given apart |
 | GET | `/api/status` | token | – | Pipeline counters (opaque, per-build; never content) | 401, 404 no status on this server |
 
 None of these are audited (`GET` requests never are). All are capped in result size as noted per route.
@@ -106,7 +107,10 @@ A `nt × nf` grid (row-major, time then frequency) of the finest pyramid level w
                   "other_origin_frames": 0 },
   "tiles_read": 4,
   "filter": null,
-  "resolution": { "source": "spectrum-history", "level": 0, "levels": 5,
+  "resolution": { "source": "spectrum-history", "live": false,
+                  "statement": "spectrum history: measured, reduced to this tier's cells, not live IQ",
+                  "served_span_hz": 1200000.0, "max_live_span_hz": 20000000.0,
+                  "level": 0, "levels": 5,
                   "t_cell_s": 0.1, "f_cell_hz": 3125.0,
                   "requested": { "max_cells": 100000, "max_t": 600, "max_f": 1024 },
                   "served": { "nt": 1200, "nf": 384, "cells": 460800 },
@@ -126,7 +130,10 @@ A `nt × nf` grid (row-major, time then frequency) of the finest pyramid level w
 
 **`resolution`** reports what was asked for and what was served, so nothing has to be deduced from the grid:
 
-- `source` — which tier answered. Always `"spectrum-history"` here: this route reads the tiered spectrum-history pyramid and only that. Its horizon is the **pyramid's** retention (tiered, lossy, byte-budgeted), *not* the IQ ring's window — `GET /api/iqbuffer` reports that one, and the two are different lengths. A tier serving live-IQ-backed detail reports its own value in this field rather than leaving a client to infer which it got.
+- `source` — which tier answered, as a **detail claim** (T-334's field; T-341 made it a three-value enum, see [Live-IQ detail versus overview](#live-iq-detail-versus-overview-t-341) below). Never `"live-iq"` here: this route reads the tiered spectrum-history pyramid and only that. Its horizon is the **pyramid's** retention (tiered, lossy, byte-budgeted), *not* the IQ ring's window — `GET /api/iqbuffer` reports that one, and the two are different lengths. `"survey-overview"` when the served span could not have fitted one capture window, `"spectrum-history"` otherwise.
+- `live` — `true` only when `source` is `"live-iq"`, so a client styles the distinction without parsing the enum. Always `false` here.
+- `statement` — the claim in words, rendered by the backend, for a client that shows it rather than styling it.
+- `served_span_hz` / `max_live_span_hz` — the span actually served (`nf · f_cell_hz`) and the widest instantaneous bandwidth this run can produce; the two numbers `source` was decided from. `max_live_span_hz` is `null` when nothing here can say, and then `source` is `"survey-overview"` — the weaker claim, because not knowing the window is not evidence that a span fits inside it.
 - `level` / `levels` — the pyramid level served, and how many the scheme has (scheme 1: 6.25 kHz × 1 s at level 0, then ×2 in frequency and ×60/×15/×4/×24/×7 in time, to 100 kHz × 1 day at level 4).
 - `t_cell_s` / `f_cell_hz` — that level's cell size; the same values as the top-level fields, repeated here so the block is self-contained.
 - `requested` — `max_cells` (always, defaulted) and `max_t`/`max_f` (`null` when not given).
@@ -397,6 +404,81 @@ or `{"found": false, "window": {…}}` when nothing was observed in the window. 
 - **`window`** — `t0_s`/`t1_s`, the window actually searched. Present on `found: false` too, so "nothing in the last 5 s" and "nothing in the last 300 s" are different answers. A client never reconstructs it from its own `window_s` and the moment the reply arrived: the window ends at the stream time the history has reached, which on a replay or a time-compressed scene is not the wall clock at all.
 - **`t_start_s` / `t_end_s` / `duration_s`** (found only) — the box's own time extent: the time extent of the **pyramid cell the peak was measured in**, not the whole window. `t_cell_s` repeats that cell size so the block is self-contained. Reporting the window as the box's extent would be a guess dressed as a measurement; reporting the cell says exactly when the strongest thing was strongest, to the resolution the history holds.
 
+### `GET /api/navigation` — the achievable `(centre, span)` grid (T-341)
+
+**The rule, from the user** (CLAUDE.md, "Time, the waterfall, and the live view", invariant 6):
+
+> Navigation is discretized to achievable capture states, and the UI never implies detail the front end can't deliver. Zoom/pan and region-select resolve only to **realizable** configurations and **snap to the nearest one**: in frequency, centre and span are bounded by the instantaneous bandwidth (sample rate) and the tuning step — wider than the live window is **survey-history overview**, not live IQ; in time, by the retained window bounds and the history pyramid's discrete resolution tiers. The view must distinguish **live-IQ-backed detail** from **survey-/spectrum-history overview**, so a wide or deep zoom never fakes resolution the hardware did not capture.
+
+This is **absent-means-not-measured** (T-297: no field is written for a region that was never swept, so nothing ever writes a zero rate) applied to the navigation surface: **an interpolated pixel that looks like a measurement is a lie with a picture attached.**
+
+**The split.** The backend reports the grid and owns which states are realizable; the client does the gesture, the snap arithmetic against the grid it was handed, and the styling. So this route is data, never a rendered axis — and it also answers the one question a client must not decide for itself: *for this requested state, which tier answers, and is it live IQ or overview?*
+
+```jsonc
+{
+  "frequency": {
+    "device_id": "hackrf:0000…f3c7", "driver": "hackrf-one", "controllable": true,
+    "ranges_hz": [[1000000.0, 6000000000.0]],
+    "center_step": "uniform", "center_step_hz": 28.6102294921875,
+    "spans_hz": { "min": 2000000.0, "max": 20000000.0 },
+    "max_live_span_hz": 20000000.0,
+    "current": { "center_hz": 100000000.0, "span_hz": 2400000.0 }
+  },
+  "time": {
+    "tiers": [ { "level": 0, "t_cell_s": 1.0, "f_cell_hz": 6250.0, "max_age_s": 3600.0 },
+               { "level": 1, "t_cell_s": 60.0, "f_cell_hz": 12500.0, "max_age_s": null } ],
+    "min_t_cell_s": 1.0, "max_t_cell_s": 604800.0,
+    "latest_s": 1789300920.0
+  },
+  // present only when center_hz and span_hz were given
+  "resolved": {
+    "requested": { "center_hz": 100000001.0, "span_hz": 40000000.0, "t_cell_s": null },
+    "center_hz": 99999995.02..., "span_hz": 20000000.0, "t_cell_s": null, "level": null,
+    "source": "survey-overview", "live": false,
+    "statement": "survey overview: wider than one capture window, stitched from separate dwells, not live IQ",
+    "matched": false, "snapped": ["center_hz", "span_hz"]
+  }
+}
+```
+
+**`frequency`** — the achievable `(centre, span)` grid of the live front end, or `null` on a run with no live device (a replay): there is no grid to report, and an invented one would be worse than none.
+
+- `ranges_hz` — the centre bounds, as on `/api/control/state`.
+- `spans_hz` — the span axis. **A live window's span *is* its sample rate**, so this is the rate capability: `{min, max}` for a continuous range, `{values}` for a discrete list.
+- `center_step` / `center_step_hz` — **the axis added by T-341.** Three-valued like the bias tee: `"uniform"` with a step in Hz, or `"unknown"` with `center_step_hz: null` when the source cannot say. A client must never read `"unknown"` as 1 Hz or as continuous — an unknown grid has no nearest point, so **nothing snaps**, and `resolved.center_hz` comes back `null`. HackRF One reports `30 MHz / 2^20` = 28.6102294921875 Hz, the MAX2837 fractional-N granularity; a SigMF replay reports `"unknown"`, because a recording holds the centre it was made at and never the synthesiser grid of the device that made it.
+- `max_live_span_hz` — the widest span that is still **one** capture window. Wider is survey overview by definition, whatever the pyramid can draw there.
+- `current` — the tuned state, so a client can mark where it is on the grid.
+
+**`time`** — the retained window and the pyramid's **discrete** resolution tiers, or `null` with no spectrum history on this server. Time resolution is a ladder, not a slider: a view asking for a finer cell than `min_t_cell_s` cannot be served one. `max_age_s` is `null` when a level sets no age of its own — *no age limit*, not *kept forever* (the byte budget still bounds it). `latest_s` is the newest capture time the **history** has reached; the capture-ring window that sizes the scrubber is a different horizon and a different length (`GET /api/iqbuffer`).
+
+**`resolved`** — present only when `center_hz` and `span_hz` are given together. The nearest realizable state, and the detail claim that comes with it.
+
+- `center_hz` / `span_hz` / `t_cell_s` — the snapped values, each `null` when that axis cannot be snapped (an unknown tuning step, no rate reported, no history). A `null` is never the request echoed back: echoing it would claim the device can sit exactly there.
+- `matched` / `snapped` — T-334's vocabulary, because it is the same question asked of a different grid: `snapped` names each axis that moved, and `matched` is `true` when none did.
+- `level` — the pyramid level that would answer `t_cell_s`, when one was asked for.
+- `source` / `live` / `statement` — the detail claim, below.
+
+#### Live-IQ detail versus overview (T-341)
+
+`resolution.source` on `/api/history` and `resolved.source` here are the same enum. T-334 shipped it as the constant `"spectrum-history"`, documented as the home for "which tier answered"; T-341 gives it its other two values. They are ordered by **how much detail they claim**:
+
+| `source` | Meaning |
+|---|---|
+| `"live-iq"` | Live IQ from the front end, at the resolution drawn. The span fits inside one capture window. |
+| `"spectrum-history"` | The tiered pyramid: measured, but reduced to a tier's cells rather than live IQ. Never interpolated. |
+| `"survey-overview"` | Wider than any single capture window: no live window covered this span whole, so the picture is stitched from separate dwells. |
+
+**Nothing may claim more than it can show.** The test is `span_hz <= max_live_span_hz`, with the boundary counted as *inside* — a view exactly as wide as the sample rate is one window's worth. One hertz beyond it is called overview, not nearly-live, because every extra hertz had to come from a different dwell. When no front end reports a window at all, the answer is `"survey-overview"`: not knowing the window is not evidence that the span fits inside it. `/api/history` never answers `"live-iq"`, because it reads the pyramid and only the pyramid; asking this route for a `t_cell_s` is likewise asking the pyramid, so it answers `"spectrum-history"` even for a span that would otherwise be live.
+
+**Error direction on each axis, and why it is that way:**
+
+| Axis | Errs | Because |
+|---|---|---|
+| centre | to a **coarser** grid than the hardware's, never finer | A coarser step offers fewer centres, all reachable. A finer one offers centres that do not exist, and the radio lands elsewhere while the axis claims otherwise. (HackRF: `hackrf_set_freq` accepts integer hertz, but 28 of every 29 such commands land on the same synthesiser point — a declared 1 Hz step would put 28 imaginary centres on the axis.) |
+| span | **down** to an achievable rate | A span is clamped into the rate capability, so a view is never told it can have a window the device cannot open. |
+| time cell | **coarser**, never finer (T-334's rule) | A coarse cell repeated across pixels shows a measured value; a fine grid reduced in the client invents one. |
+| the claim itself | to the **weaker** claim | `live-iq` > `spectrum-history` > `survey-overview`. A surface that cannot establish the stronger claim makes the weaker one. Under-claiming costs a styling cue; over-claiming is the lie the invariant forbids. |
+
 ### `GET /api/status` — pipeline counters (T-027)
 
 Opaque, per-build JSON object of counters (source samples, chain stats, control-loop stats under `"control"`, listen/chain admission under `"listen"`/`"budget"` when the pipeline exposes them, …). Never content, never an identity. `404` when this server has no pipeline status function attached (e.g. a bare bridge with no composed pipeline).
@@ -455,6 +537,7 @@ The five endpoints marked **(device action)** above — `center`, `rate`, `gains
 
 - **`device` on the answer and in the audit log.** A device action answers with `device: {action, id}` — `action` is `"retune"`, `"rate"`, `"gains"`, `"bias_tee"` or `"baseband_filter"`, and `id` is the front end's provenance `device_id` (e.g. `hackrf:<serial>`, `mock:<recorded id>`). The same object is written to the audit entry, whether the request succeeded or was refused, so the log always says **which device** a retune moved. `id` is `null` when the source reports no identity — "nothing said", never a placeholder. A view change (`display`, `pause`, `resume`, `record/*`, bookmarks, selections) carries **no `device` key at all**.
 - **`device.device_id` on `/api/control/state`.** The same id, so a client can name the front end a retune would move *before* it asks for one.
+- **`device.tuning_step` / `device.tuning_step_hz` on `/api/control/state` (T-341).** The centre-frequency granularity, three-valued like the bias tee: `"uniform"` with a step in Hz, or `"unknown"` with a `null` step when the source cannot say — **never read as 1 Hz and never as continuous**. It is the third axis of the achievable `(centre, span)` grid; [`GET /api/navigation`](#get-apinavigation--the-achievable-centre-span-grid-t-341) reports the whole grid, and this is the same fact beside the rest of the device's capabilities.
 - **`409 device_busy`.** Only one process can hold an SDR, and inside this server device actions serialise on one gate. A device action that cannot claim the front end within ~250 ms answers `409` with code `device_busy` and a message naming the device, the action holding it, and for how long. It does **not** race the holder to the driver, and it does not block for the length of a re-plumb. Distinct from `conflict` (the run's own state, e.g. a re-plumb in progress) and `not_live` (a replay). A client should report it, not retry into the race.
 
 **A retune is not a view control.** `POST /api/control/center` re-derives the window's content class and, when the class or sample rate changes, stops and re-plumbs the running segment — tearing down and restarting its always-on readers. Pausing, scrubbing and zooming never reach the device; this does. A client must therefore call it only for an **explicit user action** (a frequency typed and submitted, a bookmark clicked, a retune button pressed), **never as the continuation of a pan, a zoom or a drag**, and never automatically. In the web UI that rule is a type: `ui/src/app/centre/view.ts` takes a `DeviceAction` and is the only module besides the SDR control panel that names a device route; a pan that runs off the band edge leaves a *retune offer* for the user to accept.
