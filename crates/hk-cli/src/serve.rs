@@ -374,6 +374,86 @@ mod tests {
         drop(server);
     }
 
+    /// Sends a request and drops the connection without reading the response, leaving its handler
+    /// thread running (and still touching the run's data directory) when the server is stopped.
+    fn fire_and_forget(addr: SocketAddr, path: &str) {
+        let mut s = TcpStream::connect(addr).unwrap();
+        write!(
+            s,
+            "GET {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let _ = s.flush();
+    }
+
+    /// T-236: `hk_api::http::Server::shutdown` waits for its in-flight connection threads, so the
+    /// moment it returns nothing under the run's data directory is still open or being written —
+    /// `remove_dir_all` succeeds on the **first** attempt, with no retry. This is the root-cause
+    /// closure of the leak T-232 measured (every server-starting test left an orphan under load,
+    /// because a detached connection thread was still writing the audit log, the database's WAL or
+    /// the observation log while the guard walked the directory). Repeated, with unread requests
+    /// in flight and one read *after* the pipeline stopped (the shape of T-232's one residual).
+    #[test]
+    fn shutdown_releases_the_data_dir_on_the_first_removal_attempt() {
+        for i in 0..5 {
+            let dir = temp_data_dir();
+            let guard = TempDataDirGuard::new(dir.clone());
+            let path = empty_recording(&dir.join("src"));
+            let Serving {
+                mut server, handle, ..
+            } = start(&ServeOptions {
+                source: ServeSource::Replay {
+                    path,
+                    loop_replay: false,
+                    realtime: false,
+                },
+                data_dir: Some(dir.join("data")),
+                bind: "127.0.0.1:0".parse().unwrap(),
+                ui_dist: None,
+                fft_len: 1024,
+                rows_per_s: 25.0,
+                calibration: None,
+                token: Some(TOKEN.into()),
+                listen: Default::default(),
+                compute: Default::default(),
+                iq_buffer: Default::default(),
+                iq_buffer_hooks: None,
+            })
+            .unwrap();
+            let addr = server.local_addr();
+            let (status, body) = get(addr, "/api/inventory");
+            assert_eq!(status, 200, "{body}");
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            handle.stop();
+            let waiter = std::thread::spawn(move || {
+                let _ = tx.send(handle.wait());
+            });
+            rx.recv_timeout(Duration::from_secs(60))
+                .expect("the run over an empty recording finishes")
+                .expect("it finishes cleanly");
+            // The waiter drops the handle after sending, tearing the pipeline's stores down on
+            // that thread; join it so only the server's own threads are under test here.
+            let _ = waiter.join();
+
+            // Requests whose responses nobody reads: their handlers are mid-flight when shutdown
+            // runs, which is exactly the race that leaked directories.
+            for _ in 0..8 {
+                fire_and_forget(addr, "/api/inventory");
+            }
+            let (status, body) = get(addr, "/api/status");
+            assert_eq!(status, 200, "{body}");
+            server.shutdown();
+
+            assert_eq!(server.abandoned_connections(), 0, "iteration {i}");
+            std::fs::remove_dir_all(&dir).unwrap_or_else(|e| {
+                panic!("iteration {i}: the data dir was still busy on the first attempt: {e}")
+            });
+            assert!(!dir.exists());
+            drop(guard);
+        }
+    }
+
     #[test]
     fn the_live_source_without_the_driver_is_reported() {
         if HackRfDriver.available() {

@@ -117,10 +117,13 @@ fn stop_server(serving: Serving) {
     serving.handle.stop();
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = serving.handle;
-    std::thread::spawn(move || {
+    let waiter = std::thread::spawn(move || {
         let _ = tx.send(handle.wait());
+        // T-236: `handle` drops after the send, so the pipeline's stores tear down (and write) on
+        // this thread. Join it before the guard removes the data directory.
     });
     let _ = rx.recv_timeout(Duration::from_secs(30));
+    let _ = waiter.join();
     drop(serving.server);
 }
 
