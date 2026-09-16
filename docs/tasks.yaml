@@ -5204,7 +5204,7 @@ tasks:
     milestone: M2-hardening
     title: 'Analysis pass over the 2026-09-15 FM-band capture to add truth annotations,
       so it can serve as a blind acceptance fixture'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: PIPE
@@ -5653,7 +5653,7 @@ tasks:
     milestone: M2-hardening
     title: Document where the source abstraction is N-capable and where the single-device assumption actually
       lives
-    status: todo
+    status: in-progress
     priority: low
     deps:
     - T-259
