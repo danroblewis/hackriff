@@ -3389,3 +3389,54 @@ devices covering disjoint ranges must not union into a claim that one saw both.
 Fences are tight with four agents live: T-368 is explicitly barred from `hk-store/src/history/query.rs`
 and the occupancy modules, because T-314 is inside exactly that question right now, and told to stop
 short and report rather than edit if it needs something there.
+
+### B0.654 — T-317 identifies the unknown emission, and finds something worse on the way (2026-09-16)
+
+Merged at `7c3f4fb`. The repo's only genuinely blind identification exercise is closed:
+**the 100.465 MHz emission is harmonic 43 of a free-running ~2.336 MHz oscillator** — a local
+unintentional emitter, carrying no modulation at all.
+
+It could not be solved inside its own capture, and that is the interesting part. The 2026-09-13
+captures at 98 MHz / 20 Msps span 90.6–105.4 MHz, and there the emission has **siblings**: n = 43,
+44, 45 give three independent estimates of f₀ agreeing to **9 Hz (3.7 ppm)**, and the fit
+`f = n·f₀ + b` returns **b = +67 Hz**, which pins the indices — off by one would move the intercept
+by a whole 2.34 MHz. Two facts turn that from coincidence into identification: **rms width ÷ n is
+138/120/137 Hz**, so the 28 kHz *is* the fundamental's ~134 Hz of frequency noise multiplied by 43;
+and it **moves**, 41.9 kHz across four captures at 417 ppm over two days, while the real stations sit
+1.34 kHz and 56 Hz off channel.
+
+Ten hypotheses are recorded ruled out **with their measurements**, including the two that would have
+been easiest to assert instead of test: IMD between the two WFM stations (an IM3 of two 128 kHz
+carriers cannot be 28 kHz wide) and the receiver's own 8 kHz spur comb (which is real, and would need
+n = 41.75). The band plan offers exactly one row, `fm-broadcast`, and the measurement contradicts it
+on every count; the e2e comment now says plainly that letting that row name this emission would be
+DB-as-truth. **The assertion did not change** — only detection is asserted, never a service the
+measurement did not support.
+
+**The side finding is the more consequential half, and it is now T-373 at `high`.** The raw stream
+carries a periodic gain step: samples 0–895 of every 8192-sample period run 0.431 dB low, across all
+13,184 periods. It is stream-wide — on the receiver's DC line (27 dB), its reference harmonic (16 dB),
+and **in bands containing no emission at all** (23 dB). It puts a **292.969 Hz comb with ≥27
+harmonics** into amplitude, and through a channel filter into the discriminator of anything narrowband
+and weak.
+
+**Read naively it looks like a 3.41 ms TDMA frame.** An expert analyst with the whole capture in front
+of them followed it for a while and was pulled out only by a control on the receiver's own CW lines.
+That is this repo's recurring defect — a feature measuring the *observation* rather than the *signal* —
+in its most seductive form, and the acceptance suite runs on exactly these fixtures.
+
+T-373's brief therefore puts **blast radius before fix**, and demands numbers: inspection cannot find
+this, only measurement can, and "nothing shipped reads it" is a perfectly good answer if it is
+evidenced. The exclusion must be **derived from the capture**, never a hardcoded 293 Hz — a different
+sample rate moves the comb, and a magic constant would be the same mistake in a new coat. The control
+that matters is a genuine emission whose symbol rate lands near a comb harmonic and must still be
+found: an exclusion that silently eats real structure converts a visible false positive into an
+invisible false negative.
+
+Two more filed. **T-374** is a real capability gap T-317 proved by doing the work by hand: T-302
+reasons about one emitter against the device, and nothing reasons about a *family* of emitters against
+an unseen common cause. T-317's method is the specification, and per T-233 it must be able to say no —
+a fit over enough emitters will always find some f₀, so the control is unrelated emitters that must not
+be declared a family. **T-375** is the user's terminator capture, which now has a sharp question:
+conducted coupling survives a 50 Ω load and radiated does not, so it decides whether this oscillator is
+the user's own equipment or something in the room.
