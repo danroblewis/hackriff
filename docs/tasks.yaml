@@ -6732,7 +6732,8 @@ tasks:
     milestone: M2-hardening
     title: CI runs cargo fmt and clippy directly rather than just lint, so the new Python lint gate does
       not reach CI
-    status: in-progress
+    status: done
+    commit: f6d834e
     priority: normal
     deps:
     - T-346
@@ -6811,6 +6812,52 @@ tasks:
       access explicitly. Do not open the device without that. If the second process does NOT fail cleanly,
       that is a real defect: a half-opened stream would produce frames nobody can attribute, and the provenance
       work (T-302, T-303, T-304, T-305, T-325) all assumes a device is opened once or not at all'
+  - id: T-357
+    milestone: M2-hardening
+    title: CI acceptance job runs the whole hk-e2e crate, not just acceptance - drift by accretion, and
+      the first push will feel it
+    status: todo
+    priority: high
+    deps:
+    - T-353
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'T-353 found the same drift class as the lint hole, with the opposite sign: CI does MORE
+      than the recipe rather than less. .github/workflows/ci.yml''s acceptance job runs cargo test -p hk-e2e
+      --nocapture, which sweeps in EVERY target under tests/e2e/tests - acceptance_m0, m2, m3, m4, chirp,
+      plus concurrent_demod, floor_acceptance, listen_live, mock_device, outputs_record, refine, smoke,
+      spectrum_axis, stream_external - while just acceptance is only --test acceptance_m0. The milestone
+      recipes exist precisely because those suites are too slow to run alongside, and CI also applies HK_REQUIRE_FIXTURES=1
+      to all of them where the recipes do not. THIS DRIFTED BY ACCRETION: every new acceptance target silently
+      enlisted itself without anyone editing the workflow, which is why nobody noticed. PRACTICAL URGENCY:
+      CI has never run, so the first push will hit a very long and possibly failing acceptance job - this
+      is worth settling BEFORE that push rather than debugging it live. Decide what CI''s acceptance gate
+      should be, express it as a RECIPE CI calls so new targets cannot enlist themselves again, and fix
+      the job''s now-wrong comment'
+  - id: T-358
+    milestone: M2-hardening
+    title: 'The UI gate never runs anywhere authoritative: no Node in CI, and it self-skips locally when
+      node is absent'
+    status: todo
+    priority: normal
+    deps:
+    - T-353
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'T-353''s third finding. just test is test-rust test-doc test-py test-ui, but CI invokes
+      the first three DIRECTLY and installs no Node, so npm run build / typecheck / test are local-only
+      - and locally test-ui SELF-SKIPS when node is absent. So the UI gate is authoritative NOWHERE: it
+      can pass on a machine without node by doing nothing, and it never runs in CI at all. That is T-346''s
+      finding again with a different gate, and it matters more now that T-334, T-337, T-341 and T-343 have
+      all changed ui/src. Add Node plus a UI step to CI (or a recipe CI calls), and decide whether test-ui
+      should FAIL rather than skip when node is missing - a gate that silently passes when its toolchain
+      is absent is the invisible-failure shape this project keeps closing. Then finish T-353''s work by
+      converting the remaining direct cargo nextest / cargo test --doc / uv run pytest steps to recipe calls,
+      which T-353 left because calling just test would pull in this same Node gate. ALSO: reconcile CLAUDE.md''s
+      claim that CI runs just test with whatever is decided - it is not accurate today, and the coordinator
+      flagged it to the user rather than editing their file'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
