@@ -6107,7 +6107,8 @@ tasks:
     milestone: M3
     title: C14 rate-search lower edge and whitening block width scale with the record, so the analysis geometry
       moves with the observation
-    status: in-progress
+    status: done
+    commit: ac8c52d
     priority: high
     deps:
     - T-310
@@ -6200,7 +6201,8 @@ tasks:
     milestone: M2-hardening
     title: Floor context is not keyed on bias-tee state, so an active antenna and a passive one pool into
       one noise floor
-    status: in-progress
+    status: done
+    commit: b0aee72
     priority: normal
     deps:
     - T-325
@@ -6257,7 +6259,8 @@ tasks:
     milestone: M2-hardening
     title: 'The waterfall and timeline must be served at span-matched resolution: data, timestamps and resolution
       are backend, time-to-pixel mapping and view state are thin client'
-    status: in-progress
+    status: done
+    commit: db5db5a
     priority: high
     deps: []
     parallel_group: UI
@@ -6403,6 +6406,17 @@ tasks:
       on the front end), T-304 (history keyed per frame provenance), T-305 (the rule recorded at the source
       layer). Do NOT build multi-device capture - expose the window list so the navigator is N-capable by
       construction. Fold into docs/07, docs/14, ADR-0017'
+    user_detail_2026_09_16: 'Second user message adds specifics beyond the CLAUDE.md section. Each
+      navigator PANS AND ZOOMS ITS OWN AXIS, and DRAG-A-REGION zooms the main view to it. The frequency
+      navigator spans the whole surveyed / device-available spectrum and SETS CENTRE - and setting
+      centre is A REAL RETUNE, a device action, so it inherits the one-agent-at-a-time HackRF rule
+      and must record device_id (filed separately as T-343, which this depends on). The lit segments
+      per active capture window are called out again as the natural fit for multiple SDRs plus surveys.
+      THE SPLIT THE USER STATES: the backend reports the achievable (centre, span) grid and the full-spectrum
+      survey overview; the UI does the navigators, gestures, snap and styling. Note: the user referenced
+      scratchpad/brief-time-axis-view.md items 6-8, which DOES NOT EXIST in the repo - work from the
+      CLAUDE.md section and the message text, and ask the user if a fuller brief exists elsewhere'
+
   - id: T-341
     milestone: M2-hardening
     title: Navigation snaps to achievable capture states, and the view never implies detail the front end
@@ -6425,6 +6439,77 @@ tasks:
       in the navigation surface: an interpolated pixel that looks like a measurement is a lie with a picture
       attached. The backend owns which states are realizable and which tier answered - the client must not
       infer either. Fold into docs/07, docs/14, ADR-0017'
+    user_detail_2026_09_16: 'Second user message restates this as a KEY CONSTRAINT and adds the split.
+      Zoom/pan AND region-select must snap to achievable capture states only: frequency bounded by
+      instantaneous bandwidth (sample rate) and tuning step - WIDER THAN THE LIVE WINDOW IS SURVEY-HISTORY
+      OVERVIEW, NOT LIVE IQ - and time bounded by the retained window and the history-pyramid tiers.
+      The view marks live-IQ-backed detail versus survey/history overview and never fakes resolution
+      the front end did not capture. THE BACKEND REPORTS THE ACHIEVABLE (centre, span) GRID; the UI
+      does snap and styling - so the grid is a backend product, not a client heuristic. T-334 has
+      already landed the home for the tier answer: resolution.source ships as ''spectrum-history''
+      with the documented meaning that a live-IQ-backed tier reports its own value there, so this
+      extends that enum rather than re-opening the contract'
+
+  - id: T-342
+    milestone: M2-hardening
+    title: 'Band-collapsed activity-vs-time belongs in the backend: reduceActivity is the last client-side
+      measurement on the time surfaces'
+    status: todo
+    priority: normal
+    deps:
+    - T-334
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'T-334 fixed the client-side reductions it could and filed this one rather than waving it
+      through. capture/timeline.ts::reduceActivity takes max over EVERY frequency cell and normalises against
+      the response''s own range - that is a measurement (deciding which value represents a band) made with
+      no knowledge of noise floors or occupancy, which is signal logic in the UI. The pyramid cannot serve
+      it: its coarsest cell is 100 kHz, so no max_f collapses a MHz-wide band to one column. Add a band-collapsed
+      activity-vs-time series to the backend: one value per time step over a whole region, with its max-hold
+      semantics and its scale stated. /api/analysis/strongest already keeps ''strongest in a band'' server-side
+      and /api/floor already proves the shape (max_steps is a time-axis budget), so this is their sibling
+      rather than new machinery. Update docs/api.md and api_contract.rs together per T-079 and assert the
+      FIELD''s value, not the response shape'
+  - id: T-343
+    milestone: M2-hardening
+    title: 'Setting centre from the frequency navigator is a real retune: a device action under the one-agent-at-a-time
+      rule, recording device_id'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'USER DIRECTION 2026-09-16. The frequency navigator sets centre, and SETTING CENTRE IS A
+      REAL RETUNE - a device action, not a view change. Consequences that must be built in rather than discovered:
+      it inherits the HackRF one-agent-at-a-time rule (only one process can open the device, and the user''s
+      demo currently holds it on :8899); it must record device_id in provenance, which T-302/T-303/T-304/T-305
+      have already made the load-bearing key for device-local physics; and it is the one navigator gesture
+      that changes the WORLD rather than the VIEW, so it must be distinguishable in the UI from pan/zoom
+      that only change what is shown. Contrast with T-339''s invariant: pause, scrub and zoom never touch
+      the device - this one does, and that asymmetry is the point. THE SPLIT THE USER STATES: the backend
+      reports the achievable (centre, span) grid and owns the retune; the UI does gestures, snap and styling.
+      Receive-only, and never auto-retune: a gesture that would retune must be an explicit user action.
+      Fold into docs/07, docs/14, ADR-0017; coordinate with T-340 which draws the navigator and T-341 which
+      snaps the gesture'
+  - id: T-344
+    milestone: M2-hardening
+    title: 'A load-sensitive test is not in the heavy-serial group: decoded_capture failed once under a
+      three-crate parallel run'
+    status: todo
+    priority: low
+    deps: []
+    parallel_group: PIPE
+    model: sonnet
+    acceptance: 'T-331 saw hk-pipeline::decoded_capture::a_pipeline_is_recorded_automatically_* fail once
+      under a three-crate parallel run and pass alone and in every later run. .config/nextest.toml pins
+      heavy and timing-sensitive tests to a serial heavy-serial group precisely so they do not race under
+      load (T-077), and this one is not in it. Establish whether it is genuinely timing-sensitive - and
+      if so add it to the group - or whether the flake points at a real contention defect, which is what
+      T-283 is separately investigating for hk-ml. DO NOT add a nextest retry: this project has been removing
+      those, and a retry would hide exactly the kind of bug T-293 spent a session diagnosing. An honest
+      ''reproduced N times in M runs under deliberate load'' is the deliverable'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
