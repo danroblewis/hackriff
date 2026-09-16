@@ -6368,7 +6368,8 @@ tasks:
   - id: T-339
     milestone: M2-hardening
     title: 'Pause freezes the view, never the capture: the ring and detection stay always-on'
-    status: in-progress
+    status: done
+    commit: 7b204a4
     priority: high
     deps: []
     parallel_group: UI
@@ -6494,6 +6495,17 @@ tasks:
       Receive-only, and never auto-retune: a gesture that would retune must be an explicit user action.
       Fold into docs/07, docs/14, ADR-0017; coordinate with T-340 which draws the navigator and T-341 which
       snaps the gesture'
+    evidence_from_t339_2026_09_16: 'T-339''s audit found the defect this ticket must fix, with file
+      and line. gestures.ts fires hooks.overflow when accumulated pan exceeds OVERFLOW_FRAC = 0.05
+      of the view width, wired at view.ts:82 to retune, which POSTs /api/control/center. PipelineController::retune
+      tunes in place ONLY when the window class and sample rate are both unchanged; otherwise it sets
+      shared.stop.store(true) at run.rs:1398 and re-plumbs the run, tearing down and restarting the
+      segment and its always-on readers. SO A PAN LET GO SLIGHTLY TOO FAR CAN STOP AND RESTART CAPTURE.
+      A 5 percent numeric threshold inside one gesture handler is the only thing separating a view
+      change from a device command - no distinct gesture, no distinct type, no confirmation. T-339''s
+      invariant is not violated (a pan is not a pause), which is exactly why this needs its own ticket:
+      the dangerous path is the one nobody classified as dangerous'
+
   - id: T-344
     milestone: M2-hardening
     title: 'A load-sensitive test is not in the heavy-serial group: decoded_capture failed once under a
@@ -6551,6 +6563,43 @@ tasks:
       worth stating rather than assuming. Note py/ is orchestration and research only, never the real-time
       path, so the bar is tidiness rather than correctness - but an invisible failure trains everyone to
       ignore the tool that reports it, which is the T-293 lesson'
+  - id: T-347
+    milestone: M2-hardening
+    title: Pause is global run state, so one browser pausing freezes every other browsers waterfall
+    status: todo
+    priority: normal
+    deps:
+    - T-339
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'T-339 found this while proving pause never reaches the device. POST /api/control/pause
+      sets DisplaySettings.paused on the RUN, shared by every connected client - so one browser pausing
+      freezes all of them. The user''s invariant says the UI''s time window is INDEPENDENT VIEW STATE, and
+      today there are two unrelated mechanisms for what the user describes as one thing: a server-side publish-stop
+      (Pause) and a client-side time cursor (scrub). Neither touches capture, so T-339''s invariant is satisfied
+      - this is about the split being wrong, not unsafe. Suggested shape from T-339, to weigh rather than
+      adopt blindly: Pause becomes pure client view state (stop advancing the time window, keep consuming
+      the stream) and /api/control/pause is kept only as a bandwidth or CPU control, or retired. Decide
+      with T-337 and T-340''s design in view, since all three are about what is view state and what is world
+      state. Whatever is decided, ONE mechanism should serve what the user calls one thing'
+  - id: T-348
+    milestone: M2-hardening
+    title: A paused view costs the same CPU as a playing one, which matters on battery
+    status: todo
+    priority: low
+    deps:
+    - T-339
+    parallel_group: UI
+    model: sonnet
+    acceptance: 'T-339 observed that Output::row returns only AFTER the STFT has run and after the averaging
+      EMA has been updated (spectrum.rs:176-191), so pausing saves no work. This errs SAFELY - it is precisely
+      why pausing cannot slow capture, and T-339''s whole invariant rests on the pause check sitting after
+      cursor.set - so do not move the check earlier without understanding that. The point is only that a
+      handheld on battery pays full price for a frozen screen, and CLAUDE.md lists low-power operating modes
+      as mattering. Measure the actual saving available before changing anything: if the STFT must run regardless
+      to keep the ring drained and the gate cursor advancing, the honest answer may be that there is nothing
+      to save, and that is a fine result to record'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
