@@ -1,7 +1,7 @@
 // Pure formatting helpers for the Explore panels (ADR-0013 §1 thin-client rule): every string here
 // formats fields the API already serves; nothing here computes a new signal fact. Unit-tested
 // without a DOM in ui/test/app-explore-format.test.ts.
-import type { ExplanationEvidence, RefinedTuning } from "./inventory";
+import type { Classification, ExplanationEvidence, RefinedTuning } from "./inventory";
 
 /** Frequency in MHz, fixed decimals (default matches the focus panel's big frequency). */
 export function fmtMHz(hz: number, decimals = 4): string {
@@ -64,4 +64,29 @@ export function rasterText(evidence: readonly ExplanationEvidence[]): string {
 export function refinedNote(refined: RefinedTuning | null): string {
   if (!refined) return "Centre from detection; not refined yet";
   return `Refined from the ${refined.mode} output${refined.converged ? "" : " (not yet converged)"}`;
+}
+
+// ---- classification: distribution + unknown score (T-207, ADR-0016 §2) ----
+// "unknown" means *not measured*, never a fabricated value: without a Classification these read
+// as "not yet classified", not as a 0% or "unknown" family (CLAUDE.md "Product vision" §4).
+
+/** `classification.open_set_score` as a whole percentage — the mass the classifier put on "not
+ * measured well enough to name" — or `null` before anything has classified this emitter. */
+export function unknownScorePct(c: Classification | null): number | null {
+  return c ? Math.round(c.open_set_score * 100) : null;
+}
+
+/** The focus panel's prominent unknown-score line (unknown signals are the priority to surface —
+ * shown for every classified row, whatever its family, since `open_set_score` is independent of
+ * which label won). */
+export function unknownScoreText(c: Classification | null): string {
+  const pct = unknownScorePct(c);
+  return pct === null ? "Not yet classified" : `${pct}% unknown`;
+}
+
+/** The classification distribution as label/percentage pairs, highest first — read straight off
+ * `classification.top` (≤ 5 posterior labels, `unknown` included), never re-ranked or filtered
+ * here. Empty without a distribution yet. */
+export function classificationDistribution(c: Classification | null): { label: string; pct: number }[] {
+  return (c?.top ?? []).map((t) => ({ label: t.label, pct: Math.round(t.p * 100) }));
 }

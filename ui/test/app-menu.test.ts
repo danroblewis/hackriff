@@ -30,7 +30,7 @@ function makeRow(over: Partial<Row> = {}): Row {
     known_status: "known", status: null, tags: [], family: "wfm-broadcast",
     identity_scheme: null, identity_class: null, withheld: false,
     recurrence: { occurrences: 12, appearances: 3, span_s: 3600, on_air_s: 900, duty_cycle: 0.25, recent: [] },
-    classification: null, explanations: [], refined: null,
+    classification: null, explanations: [], refined: null, cluster_id: null,
     ...over,
   };
 }

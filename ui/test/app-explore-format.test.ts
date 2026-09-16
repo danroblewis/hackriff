@@ -3,8 +3,11 @@
 // fact. No DOM under node:test.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { apiErrorText, explanationWhy, fmtBandwidth, fmtMHz, fmtPct, rasterText, refinedNote } from "../src/app/explore/format";
-import type { ExplanationEvidence, RefinedTuning } from "../src/app/explore/inventory";
+import {
+  apiErrorText, classificationDistribution, explanationWhy, fmtBandwidth, fmtMHz, fmtPct, rasterText,
+  refinedNote, unknownScorePct, unknownScoreText,
+} from "../src/app/explore/format";
+import type { Classification, ExplanationEvidence, RefinedTuning } from "../src/app/explore/inventory";
 
 test("fmtMHz / fmtBandwidth / fmtPct", () => {
   assert.equal(fmtMHz(101_300_000), "101.3000");
@@ -55,4 +58,32 @@ test("refinedNote: interim text before a refinement, and a plain fact after one"
   assert.equal(refinedNote(null), "Centre from detection; not refined yet");
   assert.equal(refinedNote(refined()), "Refined from the wfm output");
   assert.equal(refinedNote(refined({ converged: false })), "Refined from the wfm output (not yet converged)");
+});
+
+// ---- T-207: unknown score + classification distribution (ADR-0016 §2) ----
+
+const classification = (over: Partial<Classification> = {}): Classification => ({
+  family: "wfm-broadcast", confidence: 0.9, open_set_score: 0.1, model_version: "v1", t_s: 0,
+  taxonomy: "hk-mod@1", stage: "chain", arb_rank: 3, coarse: "analog",
+  class: null, top: null, entropy_norm: null, flags: null,
+  ...over,
+});
+
+test("unknownScorePct / unknownScoreText: 'not yet classified' without a Classification, else the open_set_score percentage", () => {
+  assert.equal(unknownScorePct(null), null);
+  assert.equal(unknownScoreText(null), "Not yet classified");
+  assert.equal(unknownScorePct(classification({ open_set_score: 0.618 })), 62);
+  assert.equal(unknownScoreText(classification({ open_set_score: 0.618 })), "62% unknown");
+  // family being "unknown" (a real open-set result) is a different thing from no classification at
+  // all, and open_set_score is read regardless of which label won.
+  assert.equal(unknownScoreText(classification({ family: "unknown", open_set_score: 0.05 })), "5% unknown");
+});
+
+test("classificationDistribution: label/percentage pairs straight off classification.top, empty without one", () => {
+  assert.deepEqual(classificationDistribution(null), []);
+  assert.deepEqual(classificationDistribution(classification({ top: null })), []);
+  assert.deepEqual(
+    classificationDistribution(classification({ top: [{ label: "unknown", p: 0.62 }, { label: "fsk", p: 0.2 }, { label: "psk-qam", p: 0.18 }] })),
+    [{ label: "unknown", pct: 62 }, { label: "fsk", pct: 20 }, { label: "psk-qam", pct: 18 }],
+  );
 });
