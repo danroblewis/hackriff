@@ -13,6 +13,8 @@
 //!   validation. Evaluation against frames (T-089) produces
 //!   [`hk_stream::inspector::LayerTree`], the inspector's layer tree with bit/byte ranges.
 //! - [`edit`]: hot-edit planning ([`EditPlan`]): which nodes keep their state across an edit.
+//! - [`matching`]: ranking recipes against a signal's *measured* parameters ([`rank`], T-164), with
+//!   per-field reasons. Measurement decides the order; a band-plan hint may only break ties.
 //!
 //! This crate links no DSP, so the API, storage and authoring assist can validate, store and
 //! diff recipes without the block library.
@@ -35,6 +37,7 @@
 
 pub mod edit;
 pub mod fields;
+pub mod matching;
 pub mod param;
 pub mod port;
 pub mod recipe;
@@ -43,6 +46,9 @@ pub use edit::{EditPlan, NodeChange};
 pub use fields::{
     AllOf, AnyOf, BitOrder, Charset, Compare, Condition, Display, Endianness, Field, FieldMap,
     FieldMapError, FieldType, Flag, Length, LengthFrom, LengthKeyword, NotOf, Parity, Unit,
+};
+pub use matching::{
+    Candidate, Entry, MatchReason, MeasuredSignal, Outcome, Ranked, RuledOut, Verdict, rank,
 };
 pub use param::{
     BlockDescriptor, Catalogue, ParamError, ParamSchema, ParamType, Params, PortSpec, parse_hex,

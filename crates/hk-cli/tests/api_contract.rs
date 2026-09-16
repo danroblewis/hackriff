@@ -8,7 +8,7 @@
 //!
 //! Coverage: `/api/streams`, `/api/history`, `/api/floor`, `/api/inventory` (including the T-078
 //! `state`/`lifecycle`/`recurrence` and T-163 `estimated_params` fields),
-//! `/api/inventory/{id}[/promote\|/decode]` (T-078, T-159, T-163),
+//! `/api/inventory/{id}[/promote\|/decode]` (T-078, T-159, T-163), `/api/recipes/match` (T-164),
 //! `/api/analysis/strongest` (T-079), `/api/status`, `/api/control/*`, `/api/bookmarks[/<id>]`,
 //! `/api/selections[/<id>[/links]]`, `/api/outputs[...]`, `/ws/<id>` (spectrum header),
 //! `/ws/open/listen` (audio header + PCM data records on the 101.3 MHz station), and auth/CORS
@@ -418,6 +418,99 @@ fn cluster_routes_answer_as_documented() {
     let (st, _) = post(addr, "/api/clusters", "{}");
     assert_eq!(st, 405);
     let (st, _) = put(addr, "/api/clusters", "{}");
+
+/// T-164 (ADR-0013 gap 7b): `GET /api/recipes/match?emitter=<id>` answers as `docs/api.md`
+/// documents it. The answer is ranked *evidence about a measurement*, so it carries the
+/// measurements it read, a per-field reason for every candidate, and nothing it cannot justify:
+/// no candidate below the confidence floor, and no identity anywhere.
+#[test]
+fn recipe_match_route_answers_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    // `emitter` is required, and an unparsable or unknown id is a 404 — never a 200 that could be
+    // probed for which ids exist.
+    let (st, v) = get(addr, "/api/recipes/match");
+    assert_eq!(st, 400, "{v}");
+    assert_eq!(v["code"], "invalid", "{v}");
+    let (st, v) = get(addr, "/api/recipes/match?emitter=not-an-id");
+    assert_eq!(st, 404, "{v}");
+    assert_eq!(v["code"], "not_found", "{v}");
+    let unknown = EmitterId::new();
+    let (st, v) = get(addr, &format!("/api/recipes/match?emitter={unknown}"));
+    assert_eq!(st, 404, "{v}");
+
+    // A real emitter the run detected blind.
+    let (st, inv) = get(addr, "/api/inventory");
+    assert_eq!(st, 200, "{inv}");
+    if let Some(row) = inv["entries"].as_array().and_then(|r| r.first()) {
+        let id = row["id"].as_str().expect("an inventory row has an id");
+        let (st, v) = get(addr, &format!("/api/recipes/match?emitter={id}"));
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(v["emitter"], id, "{v}");
+        assert!(is_array(&v["recipes"]), "{v}");
+        assert!(is_array(&v["ruled_out"]), "{v}");
+        assert!(is_array(&v["reasons"]), "{v}");
+        let outcome = v["outcome"].as_str().unwrap_or_default();
+        assert!(["fit", "partial", "none"].contains(&outcome), "{v}");
+
+        // The measurements the ranking read, with every documented key present. An unmeasured
+        // one is null, never a fabricated default (T-163).
+        let measured = v["measured"].as_object().expect("measured object");
+        for k in [
+            "family",
+            "family_source",
+            "f_center_hz",
+            "bandwidth_hz",
+            "bandwidth_source",
+            "symbol_rate_bd",
+            "bursty",
+            "duty_cycle",
+            "features",
+        ] {
+            assert!(measured.contains_key(k), "measured.{k} missing: {v}");
+        }
+        assert!(is_array(&v["measured"]["features"]), "{v}");
+
+        for c in v["recipes"].as_array().unwrap() {
+            assert!(c["id"].is_string(), "{c}");
+            assert!(c["name"].is_string(), "{c}");
+            assert!(c["score"].is_number(), "{c}");
+            assert!(
+                ["fit", "partial", "none"].contains(&c["outcome"].as_str().unwrap_or_default()),
+                "{c}"
+            );
+            // Nothing below the confidence floor is ever offered.
+            assert!(
+                c["score"].as_f64().unwrap() >= 0.2,
+                "offered below the floor: {c}"
+            );
+            assert!(c["band_hint"].is_boolean(), "{c}");
+            assert!(is_array(&c["reasons"]), "{c}");
+            for r in c["reasons"].as_array().unwrap() {
+                assert!(r["field"].is_string(), "{r}");
+                assert!(r["detail"].is_string(), "{r}");
+                assert!(
+                    ["agree", "near", "conflict", "unmeasured"]
+                        .contains(&r["verdict"].as_str().unwrap_or_default()),
+                    "{r}"
+                );
+            }
+            // A recipe suggestion explains; it never names anything.
+            for forbidden in ["identity", "identity_value", "known_status", "lifecycle"] {
+                assert!(c.get(forbidden).is_none(), "{forbidden} leaked: {c}");
+            }
+        }
+        for r in v["ruled_out"].as_array().unwrap() {
+            assert!(r["id"].is_string(), "{r}");
+            assert!(r["reason"].is_string(), "{r}");
+            assert!(r["detail"].is_string(), "{r}");
+        }
+    }
+
+    // GET only.
+    let (st, _) = post(addr, "/api/recipes/match", "{}");
+    assert_eq!(st, 405);
+    let (st, _) = put(addr, "/api/recipes/match", "{}");
     assert_eq!(st, 405);
 
     stop_server(serving);
