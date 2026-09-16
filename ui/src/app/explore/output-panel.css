@@ -15,6 +15,11 @@
 .scope-line { fill: none; stroke: var(--teal); stroke-width: 1.25; vector-effect: non-scaling-stroke; }
 .rds-box .kv dd { text-align: left; }
 
+/* Dedicated RDS panel (T-252): same accumulated readout as the Listen scope's compact `.rds-box`,
+   just without the waveform above it — the `.kv`/`.hint`/`.mono` rules above and in explore.css/
+   base.css cover it, so nothing else is needed here. */
+.out-rds .section-h { margin-bottom: 10px; }
+
 /* Digital: the reused packet inspector (`decode/inspector.css`'s `.inspector .insp` rules apply via
    the shared `.inspector` class), narrowed from its wide 3-column workbench layout to this panel's
    single narrow column — always, not just under the workbench's <900px breakpoint. Loaded after
