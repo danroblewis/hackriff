@@ -1,0 +1,26 @@
+-- 0012 (ADR-0017 §8.3, stage TM-5): INDEX ONLY. No schema change, no data written.
+--
+-- `emitter_observation` (migration 0001) already *is* the presence-interval set: one row per
+-- sighting source, carrying `(emitter_id, t_start, t_end, count, measurement, f_center)`. What it
+-- never had was an index on time. Its two existing indexes are
+-- `idx_emitter_observation_emitter (emitter_id)` and
+-- `idx_emitter_observation_measurement (measurement, t_start)`; neither carries the time bounds.
+--
+-- Two readers now range over one emitter's observations by time, and both are on the interactive
+-- path — every waterfall scrub re-issues them:
+--   * the presence-overlap predicate of `GET /api/inventory?t0&t1` (T-250,
+--     `repo::inventory::presence_overlaps`), a correlated subquery per candidate row;
+--   * the interval reader and the disjoint-interval test of entity resolution (`repo::presence`,
+--     `repo::cluster::fingerprint_candidates`).
+--
+-- Deliberately NOT here (ADR-0017 §8.3):
+--   * no `closed_at` / `close_reason` column — closure is *derived* from `idle_gap`
+--     (docs/07 §2.27), and storing a decision made under one parameter value is the
+--     measurement-versus-interpretation mistake docs/07's first rule forbids;
+--   * no decay or confidence column — a mutable score on `emitter` would be a second `count`
+--     waiting to happen (T-251/TM-6 persists append-only, if at all).
+--
+-- Migrations 0006-0011 are untouched. 0013 (T-266 trunking) already shipped; the MIGRATIONS array
+-- in `repo/mod.rs`, not the file name, decides what runs and in what order, so this appends after
+-- it and databases at either version migrate correctly.
+CREATE INDEX idx_emitter_observation_time ON emitter_observation (emitter_id, t_start, t_end);

@@ -726,12 +726,26 @@ struct Candidate {
     identity: Option<DecodedIdentity>,
 }
 
+/// Whether any of `spans` overlaps `t` (closed intervals).
+fn span_overlaps(spans: &[Span], t: crate::region::TimeRange) -> bool {
+    let (t0, t1) = (t.start.as_unix_nanos(), t.end.as_unix_nanos());
+    spans.iter().any(|s| s.t0 <= t1 && s.t1 >= t0)
+}
+
 /// Live emitters whose fingerprint (or centre/bandwidth when none is stored) is within tolerance,
 /// best first.
+///
+/// `seen` is the offered sighting's span, when there is one. A candidate whose presence intervals
+/// (docs/07 §2.27) do not overlap it was **watched over a different window**, so the three window
+/// statistics are excluded from the comparison ([`Fingerprint::compare_across_silence`]) — this is
+/// what lets a station that stopped and came back revive on its own emitter instead of minting a
+/// second row (T-262, ADR-0017 §1.1). `None` (a caller with no sighting in hand, e.g.
+/// [`Repository::emitters_matching_fingerprint`]) compares every feature, as before.
 fn fingerprint_candidates(
     conn: &Connection,
     fp: &Fingerprint,
     tol: &Tolerances,
+    seen: Option<crate::region::TimeRange>,
 ) -> Result<Vec<Candidate>, RepoError> {
     // A candidate within tolerance has its centre within max(ppm, min, frac·BW) of ours; with
     // frac ≤ 0.5 its occupied band [f_lo, f_hi] then overlaps this window.
@@ -780,7 +794,22 @@ fn fingerprint_candidates(
             .as_ref()
             .and_then(Fingerprint::from_value)
             .unwrap_or_else(|| Fingerprint::new(f_center, bw));
-        let m = fp.compare(&other, tol);
+        // Only worth a ledger read when a window statistic is actually on both sides; otherwise
+        // the two comparisons are identical and the query would be pure cost.
+        let window_stats_compared = (fp.period_s.is_some() && other.period_s.is_some())
+            || (fp.duty_cycle.is_some() && other.duty_cycle.is_some())
+            || (fp.burst_length_s.is_some() && other.burst_length_s.is_some());
+        let disjoint = match seen {
+            Some(span) if window_stats_compared => {
+                !span_overlaps(&observation_spans(conn, eid(id))?, span)
+            }
+            _ => false,
+        };
+        let m = if disjoint {
+            fp.compare_across_silence(&other, tol)
+        } else {
+            fp.compare(&other, tol)
+        };
         if !m.within {
             continue;
         }
@@ -860,7 +889,7 @@ fn decide(
     let Some(fp) = &s.fingerprint else {
         return Ok((None, Assignment::Created));
     };
-    let mut cands = fingerprint_candidates(conn, fp, tol)?;
+    let mut cands = fingerprint_candidates(conn, fp, tol, Some(s.seen))?;
     cands.retain(|c| {
         !c.identity
             .as_ref()
@@ -1481,7 +1510,7 @@ impl Repository {
         tol: &Tolerances,
     ) -> Result<Vec<(EmitterId, f64)>, RepoError> {
         let tx = self.read_tx()?;
-        Ok(fingerprint_candidates(&tx, fingerprint, tol)?
+        Ok(fingerprint_candidates(&tx, fingerprint, tol, None)?
             .into_iter()
             .map(|c| (c.id, c.score))
             .collect())

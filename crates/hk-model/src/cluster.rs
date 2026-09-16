@@ -85,6 +85,17 @@
 //! | hop raster | ±2 % |
 //! | hop set | Jaccard overlap ≥ 0.5 (channels match within `max(raster/4, centre tol)`) |
 //!
+//! **Three of those features measure the window, not the emission** — `period`, `duty cycle` and
+//! `burst length` are statistics of however long the producer happened to watch. Two observations
+//! whose **presence intervals are disjoint** (docs/07 §2.27) were watched over different windows,
+//! so those three carry no information about whether they are the same emitter, and
+//! [`Fingerprint::compare_across_silence`] excludes them. Centre, bandwidth, family, symbol rate,
+//! deviation and the hop features still apply, so two genuinely distinct emissions stay apart.
+//! This is the same narrow exclusion `relate::distinguishing_evidence` already makes for the same
+//! measured reason (T-250), applied one layer earlier — at entity resolution, which is where a
+//! station that stops and comes back was minting a **second emitter** instead of reviving the
+//! first (T-262, ADR-0017 §1.1).
+//!
 //! Folding a new observation into a stored fingerprint takes a running mean (weight capped at 16
 //! observations, so a slowly drifting centre is followed) and keeps the latest family and hop set.
 //!
@@ -301,6 +312,37 @@ impl Fingerprint {
 
     /// Compares two fingerprints feature by feature (see the module table).
     pub fn compare(&self, other: &Fingerprint, tol: &Tolerances) -> FeatureMatch {
+        self.compare_inner(other, tol, true)
+    }
+
+    /// [`Self::compare`] for two observations whose **presence intervals do not overlap**: the
+    /// three window statistics (`period`, `duty_cycle`, `burst_length`) are excluded.
+    ///
+    /// They describe how long each side was watched, not what was transmitting. The measured case
+    /// (T-250, on the user's staging database): one FM station seen over 305 s and then over 59 s
+    /// reported median burst lengths of 0.68 s and 0.37 s — a normalised error of 1.86, enough on
+    /// its own to fail the match and mint a second inventory row for a station that had merely
+    /// stopped and come back. Everything that describes the *emission* is still compared, so this
+    /// never merges two emissions that differ in centre, bandwidth, family, symbol rate, deviation
+    /// or hop behaviour.
+    ///
+    /// **The cost, stated:** two distinct emissions that share a channel, a bandwidth and a family
+    /// and never transmit at the same time can no longer be told apart by their duty cycle alone.
+    /// That is the ISM case (T-254), and it is the same trade `distinguishing_evidence` already
+    /// accepted; while the intervals *do* overlap, the figures are comparable and still separate
+    /// them. TM-9 is where it gets measured.
+    pub fn compare_across_silence(&self, other: &Fingerprint, tol: &Tolerances) -> FeatureMatch {
+        self.compare_inner(other, tol, false)
+    }
+
+    /// [`Self::compare`]; `window_stats` includes the three features that measure the observation
+    /// window rather than the emission.
+    fn compare_inner(
+        &self,
+        other: &Fingerprint,
+        tol: &Tolerances,
+        window_stats: bool,
+    ) -> FeatureMatch {
         let mut m = Acc::default();
         let f_tol = self.center_tolerance_hz(other, tol);
         m.add(
@@ -333,16 +375,19 @@ impl Fingerprint {
         if let (Some(a), Some(b)) = (self.deviation_hz, other.deviation_hz) {
             m.add("deviation", rel(a, b) / tol.deviation_rel);
         }
-        if let (Some(a), Some(b)) = (self.period_s, other.period_s) {
-            m.add("period", rel(a, b) / tol.period_rel);
-        }
-        if let (Some(a), Some(b)) = (self.duty_cycle, other.duty_cycle) {
-            let t = tol.duty_abs.max(tol.duty_rel * a.abs().max(b.abs()));
-            m.add("duty_cycle", (a - b).abs() / t);
-        }
-        if let (Some(a), Some(b)) = (self.burst_length_s, other.burst_length_s) {
-            let t = (tol.burst_length_rel * a.abs().max(b.abs())).max(tol.burst_length_min_s);
-            m.add("burst_length", (a - b).abs() / t);
+        // The three window statistics: skipped when the two were watched over disjoint windows.
+        if window_stats {
+            if let (Some(a), Some(b)) = (self.period_s, other.period_s) {
+                m.add("period", rel(a, b) / tol.period_rel);
+            }
+            if let (Some(a), Some(b)) = (self.duty_cycle, other.duty_cycle) {
+                let t = tol.duty_abs.max(tol.duty_rel * a.abs().max(b.abs()));
+                m.add("duty_cycle", (a - b).abs() / t);
+            }
+            if let (Some(a), Some(b)) = (self.burst_length_s, other.burst_length_s) {
+                let t = (tol.burst_length_rel * a.abs().max(b.abs())).max(tol.burst_length_min_s);
+                m.add("burst_length", (a - b).abs() / t);
+            }
         }
         if self.hop_set_hz.is_empty() != other.hop_set_hz.is_empty() {
             m.gate("hop_presence");
