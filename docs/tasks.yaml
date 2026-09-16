@@ -3902,6 +3902,21 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+  - id: T-242
+    milestone: M3
+    title: "Wire signature matching into the pipeline: nothing calls match_emitter(), so the route serves nothing and the M3 gate would pass vacuously on that dimension"
+    status: todo
+    priority: high
+    deps: [T-201, T-202]
+    parallel_group: M3B
+    use_cases: [AWARE-053]
+    found_by: "T-201 report (2026-09-15): it landed matching and said plainly that there is no hk-pipeline call site yet, so matches exist only if something writes them; recorded on T-206 as a field, promoted to its own ticket so it can be scheduled rather than missed"
+    acceptance: "a pipeline call site invokes signature matching for emissions as they are observed (T-201 reports `match_emitter()` makes this a one-liner), so `GET` of an emitter's matches returns real rows on a normal run; matching runs off the capture and audio threads with its cost stated and bounded; a blind e2e test through the mock SDR shows a known emission accumulating a match and an unknown one not being forced into a match; the T-201 invariants still hold - a match never sets identity, family or lifecycle, and too few fields still yields a ranked partial; no acceptance threshold changes"
+    area: crates/hk-pipeline (call site), crates/hk-context, crates/hk-model
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
