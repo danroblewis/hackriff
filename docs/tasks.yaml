@@ -3681,6 +3681,8 @@ tasks:
     model: sonnet
     effort: medium
     core_interface: false
+    measured_rate: "coordinator measurement 2026-09-15 18:15: temp regrew from 52 to 125 hk-replay dirs and 5.1 GB in about 20 minutes with five agents running tests - roughly 15 GB/hour, which would reach the 20 GB disk floor in under two hours. The manual sweep is being repeated to buy headroom; this is the rate the fix has to eliminate."
+
   - id: T-230
     milestone: M3
     title: "Close the classifier accuracy gap to the ADR-0016 floors: top-1 0.754 vs 0.90 and top-2 0.933 vs 0.95, driven by analog/noise-like abstention and a simulation-to-reality gap (both OTA fixtures abstain)"
