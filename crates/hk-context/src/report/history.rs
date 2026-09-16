@@ -538,6 +538,18 @@ fn front_end_steps(s: &ProvenanceStep, out: &mut Vec<ReportStep>) {
             ),
         ));
     }
+    // A tile written before T-332 can carry the flag with both states unknown (the byte did not
+    // exist): there is nothing to tell the operator, so no step is listed.
+    if s.changed & ProvenanceStep::BIAS_TEE != 0 && a.bias_tee != b.bias_tee {
+        // T-332. The detail is the machine-readable part of the step: the alarm path reads the two
+        // states out of it to tell a real switch from merely learning the state (see
+        // `hk_context::occupancy::alarm::bias_tee_switch`), so keep the `bias tee a→b` shape.
+        out.push(step(
+            s.t,
+            ProvenanceStepKind::BiasTee,
+            format!("bias tee {}→{}", a.bias_tee.as_str(), b.bias_tee.as_str()),
+        ));
+    }
     if s.changed & ProvenanceStep::SPUR_MASK != 0 {
         out.push(step(
             s.t,
@@ -552,7 +564,7 @@ fn front_end_steps(s: &ProvenanceStep, out: &mut Vec<ReportStep>) {
 }
 
 /// Report provenance steps (§6.3) and warnings from a history [`ProvenanceSummary`]: every
-/// front-end step inside `span` (gain, gain table, calibration, filter/port, spur mask), a
+/// front-end step inside `span` (gain, gain table, calibration, filter/port, spur mask, bias tee), a
 /// sample-drop step when samples were lost, and warnings for overload share, mixed calibration and
 /// dropped step records.
 pub fn steps_from_summary(

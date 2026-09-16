@@ -135,8 +135,8 @@ impl Default for AlarmConfig {
     }
 }
 
-/// A device provenance step (gain, calibration, spur mask, antenna, overload, restart, drop,
-/// site) from the observation log or tile provenance.
+/// A device provenance step (gain, calibration, spur mask, antenna, bias tee, overload, restart,
+/// drop, site) from the observation log or tile provenance.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceStep {
     /// When (sample clock).
@@ -166,6 +166,25 @@ impl DeviceStep {
             detail: s.detail.clone(),
         }
     }
+}
+
+/// T-332: the two states of a `bias tee a→b` step detail, as written by
+/// `hk_context::report::steps_from_summary`.
+fn bias_tee_states(detail: &str) -> Option<(&str, &str)> {
+    detail.strip_prefix("bias tee ")?.split_once('→')
+}
+
+/// Whether a bias-tee step is a **switch** — the DC actually went on or off — rather than the
+/// source merely starting or stopping reporting it.
+///
+/// `off→on` and `on→off` are self-inflicted changes of the receive chain: an active antenna's LNA
+/// powers up and the floor moves that instant, so the step accounts for the change and the
+/// operator is shown the cause. A transition to or from `unknown` is a change of **knowledge**: the
+/// state may or may not have moved, and `unknown` is never to be read as `off` (T-325). Claiming it
+/// explains a level rise would be a false explanation, made on no evidence, so such a step is only
+/// ever a possible contributor — the alarm still raises and the step is annotated beside it.
+fn bias_tee_switch(detail: &str) -> bool {
+    bias_tee_states(detail).is_some_and(|(a, b)| a != b && a != "unknown" && b != "unknown")
 }
 
 /// Net dB change of a report gain detail, `None` unless every part is `name a→b dB`.
@@ -462,7 +481,9 @@ fn broad(
 
 /// Explain the device first, without explaining a real emitter away: a non-gain step in the
 /// window explains the change; a gain step explains it only with a known Δ, a broad matching shift
-/// across the snapshot, and no level residual beyond Δ ± tolerance on the subject's own cells.
+/// across the snapshot, and no level residual beyond Δ ± tolerance on the subject's own cells; a
+/// bias-tee step explains only a real switch, never a transition to or from unknown
+/// ([`bias_tee_switch`]).
 fn step_fit(
     input: &AlarmInput,
     step: &DeviceStep,
@@ -471,6 +492,14 @@ fn step_fit(
 ) -> StepFit {
     if !step_applies(input, step, snap.t, cfg) {
         return StepFit::Unrelated;
+    }
+    if step.kind == ProvenanceStepKind::BiasTee {
+        // T-332: a real switch explains; unknown→known (or known→unknown) only contributes.
+        return if bias_tee_switch(&step.detail) {
+            StepFit::Explains
+        } else {
+            StepFit::Contributes
+        };
     }
     if step.kind != ProvenanceStepKind::Gain {
         return StepFit::Explains;

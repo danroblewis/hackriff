@@ -1,7 +1,8 @@
-//! The tile file format. Little-endian throughout. Version 4 (T-141) is written; versions 1
-//! (T-017), 2 (T-116) and 3 (T-133) are still read, so no migration is needed: older tiles stay
-//! valid until evicted, frames of v1/v2 tiles read as of unknown source and site, and v1–v3 tiles
-//! carry no per-shape value counts.
+//! The tile file format. Little-endian throughout. Version 5 (T-332) is written; versions 1
+//! (T-017), 2 (T-116), 3 (T-133) and 4 (T-141) are still read, so no migration is needed: older
+//! tiles stay valid until evicted, frames of v1/v2 tiles read as of unknown source and site, v1–v3
+//! tiles carry no per-shape value counts, and v1–v4 tiles read with every bias-tee state
+//! `unknown` — which is exactly what they are, since nothing recorded it.
 //!
 //! ```text
 //! preamble (28 B)  magic "HKTILE\0\x01" [8] · format u16 · header_len u16 · payload_len u64 ·
@@ -22,6 +23,9 @@
 //! header (v4)      v3 header · cell shapes u8 · per shape: shape f32 · level-0 values u64 ·
 //!                  frames u64 · other_shape_values u64 (T-141; v1–v3 tiles read with every value's shape
 //!                  unrecorded, so a mixed-shape old tile gives no floor)
+//! header (v5)      v4 header · bias tee u8 (0 unknown, 1 off, 2 on) · bias tee mixed u8 (T-332);
+//!                  every step state also gains a trailing bias-tee u8 (see `state` above), so a
+//!                  v5 step records the state either side of the change. v1–v4 read as unknown.
 //! payload (v1)     observed bitmap (nt·nf bits, row-major t then f)
 //!                  per observed cell: max i16 · mean i16 · p_low i16 · p_high i16 (0.01 dB,
 //!                    i16::MIN = unknown) · occupancy u16 · occupancy_max u16 · coverage u16
@@ -50,7 +54,7 @@ use std::path::Path;
 
 use hk_model::attention::baseline::SiteKey;
 use hk_model::ids::SiteId;
-use hk_model::{CalibrationStateId, PowerUnit, SpurMaskId, TileKey, Timestamp};
+use hk_model::{BiasTee, CalibrationStateId, PowerUnit, SpurMaskId, TileKey, Timestamp};
 
 use super::config::{HistogramConfig, LevelGeometry};
 use super::frame::{FrontEnd, GainState, PortTag};
@@ -61,8 +65,8 @@ use super::tile::{
 
 const MAGIC: [u8; 8] = *b"HKTILE\0\x01";
 /// Tile file format version written (T-116: 2; T-133: 3, per-tile origins; T-141: 4, per-shape
-/// value counts). Versions 1–3 are still read.
-pub const FORMAT_VERSION: u16 = 4;
+/// value counts; T-332: 5, bias-tee state). Versions 1–4 are still read.
+pub const FORMAT_VERSION: u16 = 5;
 const PREAMBLE_LEN: usize = 28;
 const UNKNOWN_DB: i16 = i16::MIN;
 /// Largest raw payload a zstd tile may claim (bounds decompression memory).
@@ -274,7 +278,30 @@ fn put_opt_tag(buf: &mut Vec<u8>, v: Option<PortTag>) {
     buf.extend_from_slice(&v.unwrap_or_default().bytes());
 }
 
-fn put_state(buf: &mut Vec<u8>, s: &FrontEndState) {
+/// The bias-tee state as one byte. `Unknown` is 0 so a zero byte — and a v1–v4 file, which has no
+/// byte at all — reads as unknown rather than as a claim that the DC was off (T-325).
+fn bias_byte(b: BiasTee) -> u8 {
+    match b {
+        BiasTee::Unknown => 0,
+        BiasTee::Off => 1,
+        BiasTee::On => 2,
+    }
+}
+
+/// Decodes [`bias_byte`]. An unrecognised byte is refused rather than read as unknown: a corrupt
+/// file must not silently become a state.
+fn bias_from(v: u8) -> Option<BiasTee> {
+    match v {
+        0 => Some(BiasTee::Unknown),
+        1 => Some(BiasTee::Off),
+        2 => Some(BiasTee::On),
+        _ => None,
+    }
+}
+
+/// `bias` writes the T-332 trailing bias-tee byte (format 5 and the v2 source-state file); the
+/// format-2..4 writer kept for the backward-read test passes `false` so its bytes are unchanged.
+fn put_state(buf: &mut Vec<u8>, s: &FrontEndState, bias: bool) {
     let g = s.gain.unwrap_or_default();
     buf.push(u8::from(s.gain.is_some()));
     buf.extend_from_slice(&g.lna_db.to_le_bytes());
@@ -284,38 +311,53 @@ fn put_state(buf: &mut Vec<u8>, s: &FrontEndState) {
     put_opt_u32(buf, s.front_end.gain_table);
     put_opt_tag(buf, s.front_end.filter);
     put_uuid_text(buf, s.front_end.spur_mask);
+    if bias {
+        buf.push(bias_byte(s.bias_tee));
+    }
 }
 
-fn get_state(c: &mut Cur<'_>) -> Option<FrontEndState> {
+fn get_state(c: &mut Cur<'_>, bias: bool) -> Option<FrontEndState> {
     let present = c.u8()? != 0;
     let g = GainState {
         lna_db: c.f32()?,
         vga_db: c.f32()?,
         amp_on: c.u8()? != 0,
     };
+    let calibration = c.uuid_text::<CalibrationStateId>()?;
+    let front_end = FrontEnd {
+        gain_table: c.opt_u32()?,
+        filter: c.opt_tag()?,
+        spur_mask: c.uuid_text::<SpurMaskId>()?,
+    };
     Some(FrontEndState {
         gain: present.then_some(g),
-        calibration: c.uuid_text::<CalibrationStateId>()?,
-        front_end: FrontEnd {
-            gain_table: c.opt_u32()?,
-            filter: c.opt_tag()?,
-            spur_mask: c.uuid_text::<SpurMaskId>()?,
+        calibration,
+        // A state written before T-332 recorded nothing about the DC, so it is unknown.
+        bias_tee: if bias {
+            bias_from(c.u8()?)?
+        } else {
+            BiasTee::Unknown
         },
+        front_end,
     })
 }
 
 const SOURCE_STATE_MAGIC: &[u8; 4] = b"HKFS";
+/// Source-state file version written (T-126: 1; T-332: 2, the bias-tee byte). Version 1 is read.
+const SOURCE_STATE_VERSION: u8 = 2;
 
-/// The per-source front-end state file (T-126): `"HKFS" · version u8 (1) · count u32 · count ×
+/// The per-source front-end state file (T-126): `"HKFS" · version u8 · count u32 · count ×
 /// (source u64 · state · shape present u8 · shape f32) · crc32 u32` of everything before it.
+/// Version 2 (T-332) writes the bias-tee byte in each state; version 1 files are still read, with
+/// every state's bias tee unknown.
 pub(super) fn encode_source_states(states: &[(u64, FrontEndState, Option<f32>)]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(16 + states.len() * 128);
     buf.extend_from_slice(SOURCE_STATE_MAGIC);
-    buf.push(1);
+    buf.push(SOURCE_STATE_VERSION);
     buf.extend_from_slice(&(states.len() as u32).to_le_bytes());
     for (source, state, shape) in states {
         buf.extend_from_slice(&source.to_le_bytes());
-        put_state(&mut buf, state);
+        put_state(&mut buf, state, true);
         buf.push(u8::from(shape.is_some()));
         buf.extend_from_slice(&shape.unwrap_or(0.0).to_le_bytes());
     }
@@ -334,14 +376,19 @@ pub(super) fn decode_source_states(b: &[u8]) -> Option<Vec<(u64, FrontEndState, 
         b: &b[..body],
         p: 0,
     };
-    if c.take(4)? != SOURCE_STATE_MAGIC || c.u8()? != 1 {
+    if c.take(4)? != SOURCE_STATE_MAGIC {
         return None;
     }
+    let version = c.u8()?;
+    if !(1..=SOURCE_STATE_VERSION).contains(&version) {
+        return None;
+    }
+    let bias = version >= 2;
     let n = c.u32()?;
     let mut out = Vec::with_capacity(n.min(1 << 16) as usize);
     for _ in 0..n {
         let source = c.u64()?;
-        let state = get_state(&mut c)?;
+        let state = get_state(&mut c, bias)?;
         let present = c.u8()? != 0;
         let shape = c.f32()?;
         out.push((source, state, present.then_some(shape)));
@@ -410,8 +457,8 @@ fn encode_header(h: &Header, buf: &mut Vec<u8>) {
     for s in &p.steps[..n] {
         buf.extend_from_slice(&s.t.as_unix_nanos().to_le_bytes());
         buf.push(s.changed);
-        put_state(buf, &s.from);
-        put_state(buf, &s.to);
+        put_state(buf, &s.from, h.format >= 5);
+        put_state(buf, &s.to, h.format >= 5);
     }
     buf.push(match h.codec {
         PayloadCodec::Raw => 0,
@@ -444,6 +491,11 @@ fn encode_header(h: &Header, buf: &mut Vec<u8>) {
         .iter()
         .fold(0u64, |acc, &(_, v, _)| acc.saturating_add(v));
     buf.extend_from_slice(&p.other_shape_values.saturating_add(dropped).to_le_bytes());
+    if h.format < 5 {
+        return;
+    }
+    buf.push(bias_byte(p.bias_tee));
+    buf.push(u8::from(p.bias_tee_mixed));
 }
 
 fn decode_header(c: &mut Cur<'_>, format: u16) -> Option<Header> {
@@ -519,8 +571,8 @@ fn decode_header(c: &mut Cur<'_>, format: u16) -> Option<Header> {
         for _ in 0..n {
             let t = Timestamp::from_unix_nanos(c.i64()?);
             let changed = c.u8()?;
-            let from = get_state(c)?;
-            let to = get_state(c)?;
+            let from = get_state(c, format >= 5)?;
+            let to = get_state(c, format >= 5)?;
             p.steps.push(ProvenanceStep {
                 t,
                 changed,
@@ -579,6 +631,12 @@ fn decode_header(c: &mut Cur<'_>, format: u16) -> Option<Header> {
         // Before T-141 tiles did not count values per shape: a mixed old tile has no mixture.
         p.other_shape_values = p.frames;
     }
+    if format >= 5 {
+        p.bias_tee = bias_from(c.u8()?)?;
+        p.bias_tee_mixed = c.u8()? != 0;
+    }
+    // Before T-332 nothing recorded the bias tee, so v1–v4 keep the `Unknown` default: unknown is
+    // what they are, and reading it as off would claim a comparability they never evidenced.
     Some(Header {
         format,
         scheme,
