@@ -4,6 +4,8 @@
 ## Purpose
 Runs a software GNSS receiver (GNSS-SDR class) on raw L-band IQ. It produces per-satellite C/N0, nav data, pseudorange/phase and integrity flags. This serves science (TEC, scintillation, GNSS-IR) and the attack map: local jamming and spoofing **detection**, joined with gpsjam-style context. Workflow steps: 2 (scheduled L-band dwells), 3 (C/N0 history), 4 (known constellations). Spoofing *generation* is out of scope.
 
+**GPS L1 acquisition is an explicit, documented exception to this project's blind-first rule (CLAUDE.md: "Signals are always found by blind detection from RF data first").** L1 C/A sits **20-30 dB below the noise floor**: energy-domain blind detection (C09 CFAR, spectral kurtosis, cyclostationary search) cannot find it, so it must not be expected to. Recovering it requires **known-code correlation/despread against the published GPS PRN codes** — a known-signal pipeline that *leads* rather than *suggests*, unlike every other capability in this map. GNSS-SDR is the reference implementation for that correlation/tracking pipeline (SIGNAL-030). The blindly-detectable, on-mission half of GNSS stays blind-first as normal: **jamming/spoofing is a power-domain and PVT-consistency anomaly** (uniform C/N0 drop, floor rise, impossible PVT jumps, clock inconsistency — AWARE-002/AWARE-003), found without ever correlating against a PRN code.
+
 ## Interface
 - **Inputs:** L1 dwell IQ from C03 (1575.42 MHz, `docs/04 §1.2`) at ≥8 Msps (HackRF minimum recommended, `docs/01 §1.2`), decimated in-chain. C01 provenance (gain, clip count, bias-tee, clock source). Optional L5 dwell. Time/position seed from C06.
 - **Outputs (provisional objects):**
@@ -15,7 +17,7 @@ Runs a software GNSS receiver (GNSS-SDR class) on raw L-band IQ. It produces per
 
 ## Methods
 - **Recommended:** wrap GNSS-SDR as a C22 plugin over IPC; don't reimplement tracking loops.
-- **Acquisition:** FFT parallel code-phase search over the 1 ms C/A period. GNSS is below the noise floor, so energy detection fails and C09 won't "see" L1 (`docs/04 §4.9`).
+- **Acquisition:** FFT parallel code-phase search over the 1 ms C/A period. GNSS L1 is 20-30 dB below the noise floor, so energy detection fails and C09 won't "see" L1 (`docs/04 §4.9`) — see the blind-first exception in Purpose above.
 - **Jamming** (AWARE-002):
   - A uniform C/N0 drop across all SVs plus a rise in the C08 L1 floor means jamming; a single-SV drop means blockage.
   - The HackRF has **no GNSS-style front-end AGC to report** (docs/06 §5) — the docs/06 C36 "front-end AGC" claim is dropped — so use in-band power versus the calibrated C08 floor as the only available "AGC" proxy.

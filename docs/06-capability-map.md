@@ -123,12 +123,13 @@ Key points the diagram flattens: **Layer D is not a chain** — `decoder-plugins
 | Value | Rule |
 |---|---|
 | `native` | Receive-only within 1 MHz–6 GHz on HackRF One + Jetson with a normal antenna. Data-only use cases that need no radio are also `native`. |
-| `needs-accessory` | Receivable on the HackRF with a named add-on: VLF/ELF front end or soundcard (`below 1 MHz`), HF upconverter or active loop, LNB/downconverter (Ku, X, C band), directional antenna, LNA + bias-tee, filter bank/notch, GPSDO, induction coil, active GNSS antenna, dish. Name it in `accessory`. |
+| `needs-accessory` | Receivable on the HackRF with a named add-on that genuinely brings the signal into (or down to) the 1 MHz–6 GHz IF the HackRF tunes: VLF/ELF front end or soundcard (`below 1 MHz`), HF upconverter or active loop, LNB/downconverter (Ku, C band — commodity satellite-TV hardware), directional antenna, LNA + bias-tee, filter bank/notch, GPSDO, induction coil, active GNSS antenna, dish. Name it in `accessory`. This is *not* the tag for a band the HackRF simply cannot reach (see `out-of-band`). |
 | `needs-tx` | `tx: required` in the catalogue, or the summary is about transmitting. |
-| `needs-other-sdr` | Needs what a single HackRF cannot do even with accessories: phase-coherent multi-channel, >20 MHz gap-free bandwidth, ≥12-bit dynamic range as a stated requirement, full duplex, or a second simultaneous receiver. |
+| `needs-other-sdr` | Needs what a single HackRF cannot do even with accessories: phase-coherent multi-channel, >20 MHz gap-free bandwidth, ≥12-bit dynamic range as a stated requirement, full duplex, or a second simultaneous receiver — including a *different* SDR platform that tunes where the HackRF can't (e.g. a Pluto-based 10 GHz array), which is a real path around a ceiling, not `out-of-band`. |
+| `out-of-band` | The signal's native frequency sits above or below the HackRF's 1 MHz–6 GHz ceiling, and no realistic named accessory brings it into range for this device — as opposed to `needs-accessory`, where a downconverter/LNB or VLF front end genuinely does. Typical case: X-band deep-space downlinks (~8.4 GHz); there is no commodity X-band LNB market the way there is for Ku/C-band satellite TV, so "buy a downconverter" does not actually resolve it. Record what a fix *would* need in `fit_note` (frequency and why no accessory closes the gap) rather than in `accessory`, which stays `null`. |
 | `out-of-scope` | Needs a network of the user's own sensors, spacecraft-only data, non-radio instruments as the primary sensor, or is an attack on other people's systems. Using *public* remote receivers or uploading to public networks is **not** out of scope (it is `context-feeds` / `stream-output`). |
 
-When two values apply, pick the more limiting one in the order `out-of-scope` > `needs-other-sdr` > `needs-tx` > `needs-accessory` > `native`, and mention the other in `fit_note`.
+When two values apply, pick the more limiting one in the order `out-of-band` > `out-of-scope` > `needs-other-sdr` > `needs-tx` > `needs-accessory` > `native`, and mention the other in `fit_note`. `out-of-band` ranks first because it is a hard physical ceiling of this device's receiver architecture that no accessory, scope decision or TX capability changes; if a *different* SDR is named as the actual path in (per `needs-other-sdr` above), use `needs-other-sdr` instead — the frequency is reachable, just not by this hardware combination.
 
 ## 4. Coverage analysis
 
@@ -139,22 +140,25 @@ All 391 use cases are mapped in `use-cases.yaml`. The five themes were mapped in
 | Fit | Count | Share | Reading |
 |---|---:|---:|---|
 | `native` | 197 | 50% | Receive-only on HackRF One + Jetson with an ordinary antenna, or data-only. Half the catalogue works on the base device. |
-| `needs-accessory` | 109 | 28% | One named add-on unlocks it. Dominated by three clusters (below). |
+| `needs-accessory` | 106 | 27% | One named add-on unlocks it. Dominated by three clusters (below). |
 | `needs-other-sdr` | 39 | 10% | Beyond a single HackRF: phase-coherent multi-channel, >20 MHz gap-free, or full duplex. |
 | `needs-tx` | 24 | 6% | Transmitting, for the user's own links/devices under authority. |
-| `out-of-scope` | 22 | 6% | Own sensor networks, spacecraft-only data, non-radio instruments, or attacks on others (incl. jamming, RESEARCH-027). |
+| `out-of-band` | 4 | 1% | Above or below the HackRF's 1 MHz–6 GHz tuning ceiling with no realistic accessory to close the gap (T-258): X-band deep-space downlinks (SIGNAL-039, SIGNAL-040, SPACE-077) and 38–80 GHz E-band links (PROP-049). Distinct from `needs-accessory`, where a named downconverter/front-end genuinely works. |
+| `out-of-scope` | 21 | 5% | Own sensor networks, spacecraft-only data, non-radio instruments, or attacks on others (incl. jamming, RESEARCH-027). |
 
 `hardware_fit` gives the single most-limiting constraint; a separate **`fit_flags`** list carries orthogonal caveats that do not change the fit value, so the mapping stays queryable. Current flags: `marginal-hf` (HackRF HF sensitivity is poor below ~30 MHz; 27 use cases), `marginal-8bit` (8-bit dynamic range limits it in dense RF; 15), `exceeds-window` (the full signal/band is wider than one 20 MHz window, so the scheduler time-shares; 32), `metadata-only` (limited to metadata, never content; 13), `data-only` (no local radio needed; 41), `knowledge-item` (a paper/attack the device only observes receive-only; 15). A use case can carry several.
 
 **By theme** (native share tells you how self-contained each area is):
 
-| Theme | native | accessory | other-sdr | tx | out | native % |
-|---|---:|---:|---:|---:|---:|---:|
-| AWARE (spectrum awareness) | 58 | 7 | 2 | 0 | 3 | 83% |
-| SIGNAL (the long tail) | 51 | 27 | 1 | 0 | 0 | 65% |
-| RESEARCH (unknown/security/ML) | 38 | 7 | 17 | 12 | 4 | 49% |
-| PROP (propagation/sensing) | 26 | 24 | 17 | 8 | 8 | 31% |
-| SPACE (space weather/astronomy) | 24 | 44 | 2 | 4 | 7 | 30% |
+| Theme | native | accessory | other-sdr | tx | oob | out | native % |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| AWARE (spectrum awareness) | 58 | 7 | 2 | 0 | 0 | 3 | 83% |
+| SIGNAL (the long tail) | 51 | 25 | 1 | 0 | 2 | 0 | 65% |
+| RESEARCH (unknown/security/ML) | 38 | 7 | 17 | 12 | 0 | 4 | 49% |
+| PROP (propagation/sensing) | 26 | 23 | 17 | 8 | 1 | 8 | 31% |
+| SPACE (space weather/astronomy) | 24 | 44 | 2 | 4 | 1 | 6 | 30% |
+
+`oob` is `out-of-band` (T-258): SIGNAL-039/SIGNAL-040 (X-band deep-space), PROP-049 (E-band), SPACE-077 (X-band, moved from `out-of-scope` — it never matched that category's criteria, only the 6 GHz ceiling).
 
 The "attack map" theme (AWARE) is overwhelmingly native: it is mostly detection, decoding of already-supported protocols, occupancy history and correlation with external feeds. The science themes (SPACE, PROP) lean on accessories because so much of their content is below 1 MHz (VLF/soundcard), needs a dish or LNB, or needs a disciplined clock for sub-Hz Doppler. This matches the product vision: the base device is strong for spectrum awareness and the signal long tail out of the box; science is a first-class but accessory-driven expansion.
 
