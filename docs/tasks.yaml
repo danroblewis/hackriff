@@ -5430,7 +5430,7 @@ tasks:
     milestone: M2-hardening
     title: 'Species merging: a chirp wide instantaneous footprint bridges to neighbours in
       the connected-component labeller, so one 394 kHz box swallowed three emitter species'
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-255
@@ -5456,6 +5456,11 @@ tasks:
       than the in-frame excursion requires. A different defect from the species merging
       this ticket names, but the same family: a box wider than the evidence supports.
       Noted by T-294, not fixed.'
+    premise_corrected_2026_09_16: 'The ticket blamed the connected-component labeller;
+      the coordinator wrote that from T-255 report. It was the T-075 SHORT-BURST detector,
+      which never sees a component - proven by detector_version, sub-frame spans, and null
+      xdb/sk. The labeller contributed zero and errs the OTHER way (a 125 kHz emitter comes
+      out as 3-5 boxes). Fourth propagated-premise error of the night.'
 
   - id: T-296
     milestone: M3
