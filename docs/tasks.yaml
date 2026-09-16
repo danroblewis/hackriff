@@ -3896,7 +3896,8 @@ tasks:
   - id: T-241
     milestone: M2-hardening
     title: "Occupancy rows and baselines stored BEFORE the T-196 floor fix may under-report busy channels: decide whether to invalidate, recompute, or accept them"
-    status: todo
+    status: done
+    result: "Measured first, then decided (a) leave them. Every stored pre-fix row was recomputed over its own retained history with both floor rules (the pre-fix floor emulated by refusing history reads wider than the queried band, so production code was untouched): dFCO 0.0 at median, min and max over 11 subject-intervals, no busy/idle crossing, thresholds within 0.37 dB. They were unaffected because the truncation only bites below ~81 level-0 cells (min_side = radius/4) and every stored row was 308-383 cells wide or came from a 14-15 cell recording with nothing above its floor. The corpus is 15 rows in four throwaway /tmp scratch dirs; no long-lived store exists, the live demo store is post-fix, and every baselines/ dir is empty. The pathology itself reproduces on the same real history (15-40 cell band around an FM carrier: legacy fco 0.0 with upper 0.0; fixed no fco with upper 1.0 - absent, never quiet), so T-196's value is confirmed without any stored row needing repair. Consumers: baselines and alarms fold from the close's in-memory rows and never re-read the series, so no baseline can inherit a pre-fix row; stored rows reach only GET /api/occupancy?interval=15m|1h and the survey report series source, while interval=span recomputes under the current rule. Marking (option b) deferred with the reason recorded in ADR-0012 §2.9. No acceptance threshold changed."
     priority: normal
     deps: [T-196]
     parallel_group: CONTEXT
