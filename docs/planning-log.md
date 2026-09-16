@@ -2559,3 +2559,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Hypothesis (b), a second path:** one pid leaving 25+ dirs cannot be a single test; it fits a `cargo test` binary running many tests in one process, so a guarded site may not be firing.
   - **Neither is established.** The ticket requires confirming the cause before fixing, and requires the verification to be a full suite run measured before and after, which is what caught this.
   - **Also to settle:** whether the 1-hour sweep age makes fresh leftovers a bounded lag (fine, document it) or an unbounded leak (not fine).
+- **B0.537 T-232 diagnosis refined, and it overturns both of my earlier hypotheses.** The leaked directories are SPAWNED SERVER data dirs, not harness scratch dirs.
+  - **Evidence:** two pids each left exactly 25 dirs - a fixed set of tests in one cargo-test binary, not random - and the contents are a live server data dir (baselines, captures, control-audit.jsonl, hackriff.db with shm and wal, iqbuffer/ring.ci8).
+  - **Mechanism:** each test spawns `hk serve`; the CHILD creates its own temp data dir via the production default path; the child is killed at teardown, so its RAII guard never runs. A SIGKILLed process cannot clean up by construction.
+  - **Why T-229 looked correct:** its tests exercised in-process guards and never covered a killed child, so they passed while the leak continued.
+  - **Preferred fix recorded:** the PARENT owns and removes the child's data dir, rather than relying on the child to tidy up after being killed.
+  - **My earlier guesses were wrong again** (the unguarded T-217 file, and a guarded-site-not-firing theory). Four wrong causal claims today; the pattern is that I assert mechanism before collecting the cheap evidence that would settle it.
