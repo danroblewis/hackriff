@@ -470,6 +470,7 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
         // replaying them onto this file fails on the first `CREATE TABLE`.
         // T-201: nor the 0010 measured-features table.
         // T-202: nor the 0011 cluster tables (children first: they reference each other).
+        // T-266: nor the 0013 trunking tables (children first, down to `trunk_system`).
         conn.execute_batch(
             "DROP TABLE IF EXISTS emitter_relation; \
              DROP TABLE IF EXISTS signature_match; \
@@ -477,7 +478,13 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
              DROP TABLE IF EXISTS emission_features; \
              DROP TABLE IF EXISTS cluster_event; \
              DROP TABLE IF EXISTS emitter_cluster; \
-             DROP TABLE IF EXISTS signature_cluster",
+             DROP TABLE IF EXISTS signature_cluster; \
+             DROP TABLE IF EXISTS grant_event; \
+             DROP TABLE IF EXISTS call_record; \
+             DROP TABLE IF EXISTS trunk_talkgroup; \
+             DROP TABLE IF EXISTS trunk_neighbour; \
+             DROP TABLE IF EXISTS trunk_channel_plan; \
+             DROP TABLE IF EXISTS trunk_system",
         )
         .unwrap();
         const BEFORE_0007: i64 = 6;
