@@ -103,7 +103,10 @@ fmt:
 # `test`'s test-rust + test-py split: py/ is small and ruff is near-instant (~30ms empty-cache),
 # so folding it in here — rather than a separate recipe an agent could forget to run — is what
 # keeps a Python lint failure from sitting on main invisible to every gate the way T-271 found one
-# (T-346). Requires `ruff` on PATH (not currently a py/ dependency); see py/README.md.
+# (T-346). ruff is pinned in py/'s dev dependency group, so `uv run --locked` supplies it and the
+# recipe doesn't depend on a system install (T-352). CI's `test` job runs this recipe rather than
+# its own copy of the commands, so this is the one gate definition (T-353) — a check added here
+# reaches CI, and weakening it here weakens CI too.
 lint: lint-rust lint-py
 
 lint-rust:

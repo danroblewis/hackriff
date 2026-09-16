@@ -22,23 +22,28 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo fmt
-        run: cargo fmt --all --check
+      # `just` (for the lint gate below) and cargo-nextest, both prebuilt downloads via the same
+      # action and both pinned so an upstream release can't silently change CI behaviour.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.58.0,nextest@0.9.144
 
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      # uv must exist before cargo test: the hk-e2e harness generates synthetic IQ via py/.
+      # uv must exist before `just lint` — lint-py runs ruff out of py/'s locked dev group (T-352)
+      # — and before cargo test: the hk-e2e harness generates synthetic IQ via py/.
       - uses: astral-sh/setup-uv@v6
+
+      # T-353: CI calls the `just lint` recipe instead of invoking cargo fmt/clippy itself, so the
+      # gate CI enforces and the gate agents run locally are the same definition by construction.
+      # Duplicating the commands here is how the Python half of the gate went missing: T-346 added
+      # lint-py to the recipe and this workflow's private copy of it silently did not follow.
+      # Runs before the test steps: it fails fast on style, and clippy --all-targets warms the
+      # build cache the nextest step then reuses.
+      - name: just lint
+        run: just lint
 
       # T-077: cargo-nextest runs the workspace in parallel, with heavy/timing-sensitive tests
       # (tests/e2e, hk-pipeline listen/retune/lossless/refine/stream, hk-api, hk-cli, hk-core ring
-      # stress/concurrency) pinned to a serial group by .config/nextest.toml. Pinned version so a
-      # nextest release can't silently change CI behaviour.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: nextest@0.9.144
-
+      # stress/concurrency) pinned to a serial group by .config/nextest.toml.
       # hk-e2e (harness smoke tests + the M0 acceptance suite) runs in the `acceptance` job.
       - name: cargo nextest run
         env:
