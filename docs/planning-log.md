@@ -2442,3 +2442,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Live timeout branch tested:** a plugin that never signals is fed after the bound, and the counters are now non-zero for that case, which the old accounting could not express.
   - **Manifest:** `ready_timeout_ms: 5000` set deliberately, about 3x the measured 1.63 s connect under load, with the lapped-samples consequence documented in stream-contract 9.3 and 9.6.
   - **Evidence:** hk-plugins 43/43, data_path 11/11, signal_001_readsb 2/2, acceptance_m0 signal_001 3/3 under 6 burners; lint clean. Full check running.
+- **B0.510 T-219 committed (59dc92e): overlapping-candidate resolution and geometric artifact attribution. In Opus review; merges after the running T-224 check.**
+  - **Rules, all a priori:** suppression at 0.6 overlap of the narrower band with no distinguishing evidence; competition ranked by SNR x duty x trust; artifacts as image 2*f_LO-f, harmonics to n=5 and intermod a+b<=5 from confirmed sources at 20 dB SNR or better, with centre tolerance max(5 kHz, 0.25 x wider bandwidth), a 10-80 dB level window and co-presence within 1 s.
+  - **Guard:** differing decoded identities, then fingerprint distance EXCLUDING the centre term, then separated -3 dB extents. The agent excluded the centre term because including it rejected exactly the offset duplicates this task collapses; the review is checking whether that weakens the guard enough to merge genuinely distinct emitters.
+  - **Append-only** rows in `emitter_relation` (migration 0008) with no-delete triggers; every claim reversible and carrying its reasoning.
+  - **FM capture:** 17 rows became 16 shown, 1 deferring. The station was already a single row at matching tolerance, so this capture had no offset duplicates to collapse.
+  - **Guard case passes:** two stations 300 kHz apart stay two rows with zero relations.
+  - **User field case (100.3 MHz): attributed as an IMAGE of 101.303 MHz.** LO 100.8, so 2*100.8 - 101.303 = 100.297; measured 100.3386, error 41.6 kHz against an 83.2 kHz tolerance driven by the source bandwidth. Plausible, not pinpoint; reversible suggestion, never a delete.
+  - **Tests:** hk-model 154, api_contract 25, acceptance_m0 31, acceptance_m2 8, hk-pipeline 100, hk-api 45, hk-context 4; fmt and clippy clean.
