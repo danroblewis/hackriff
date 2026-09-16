@@ -3268,3 +3268,40 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **CI's test job is now one `just test` step**, which goes a level deeper than T-353: the **recipe's dependency list is itself gated**, so a member added later reaches CI with no workflow edit. Per-recipe steps would have fixed today's hole and left tomorrow's — *which is exactly how this one formed.*
   - **T-332 (`90cd0bb`) found its own ticket obsolete and said so.** T-331 already prevents the spurious rise, so the step **explains** rather than prevents — *"a suppressed alarm and an explained one look identical in a quiet log and are opposite in an investigation."* A transition to or from `Unknown` is a change of **knowledge, not of the DC**, so it `Contributes` and never `Explains`: claiming it explained a rise would be a false explanation on no evidence.
   - **T-283 (`4dce6cf`) refuted the obvious hypothesis with the failure's own evidence.** 0/20 isolated, **11/120 under load**; all 11 carried an identical `HostStats` proving no budget was missed, because a missed one would have *dropped* the request. The defect was `worker_loop` replying before taking the stats mutex. Fixed by **happens-before ordering, not a looser bound** — and the reverse-check earns it: **47 of 48 fail** against the old ordering. It declined `heavy-serial` because *"the test asserts nothing about elapsed time; serialising it would have made a genuine host defect invisible."*
+
+### B0.651 — the user's two live-visible priorities launched together (2026-09-16)
+
+The user gave three directions and ranked them: *"Prioritise 1 and 3 (visible now); 2 is data-model+UI."*
+Both are now running; T-368 (the coverage map) is held, third by their ordering and
+downstream of T-367 anyway — the frequency navigator's survey view reads the same coverage.
+
+**T-367 is a defect in T-340, which merged today.** T-340's own report described the time bar as
+moving *"the reviewed instant inside the capture window"* over the whole retained capture, and the
+frequency bar as moving *"the main view inside the tuned band"*. The user's correction is that the
+vertical bar's overview must be scoped to **the currently-selected frequency range only**, and that
+each bar touches **only its own axis** — *"wiring both bars to scrub time is a bug."* The brief
+requires the agent to verify what each bar actually does today rather than trust T-340's report,
+and to keep T-340's four earned properties green: no pan can retune (±1.0 of a 6 GHz bar through a
+spy client, zero calls), lit segments come only from the reported `windows` list, the time extent
+follows configured retention (90 s → 7200 s), and no RF constant lives in `ui/src` — that last guard
+already caught one real slip (`fmtMHz(hz, 1e6)`).
+
+**T-369's brief spends its first half on diagnosis, not fix.** Two failures wear the same face:
+the collapse never happens, or it happens and the served path re-expands it. The user's own words
+point at the second — *"the user still sees overlapping boxes live"* — but I have been wrong here
+before and said so in the brief: I told them twice that T-309's clustering would fix their 82
+duplicates, and it cannot, because `a_cluster_never_changes_anything_about_the_emitter` holds and
+duplicate rows are minted upstream by entity resolution. The brief carries that correction so the
+agent does not re-make it.
+
+The dangerous direction is merging. T-233 established that a blind test must never merge two
+genuinely distinct emitters, so the brief demands re-analysis that can also conclude *"genuinely two,
+and here is why"* (image, IMD product, one wide signal misread as several narrow), and that
+**leaves both marked contested** rather than guessing. It must also terminate: re-analysis that
+mints a fresh overlap is a loop in a live serving path, so the convergence bound is asserted by
+iteration count, not by "it finished".
+
+Four agents now — the cap. Disk 23 GB, above the 20 GB floor the user restored. File ownership is
+disjoint by construction: T-317 holds `hk-classify` + fixtures, T-359 holds `hk-context` and
+`hk-model/attention`, T-367 holds `ui/`, T-369 holds the inventory/served path and is explicitly
+fenced off the other three.
