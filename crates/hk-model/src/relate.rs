@@ -63,6 +63,12 @@ use crate::time::Timestamp;
 /// bands are different channels and nothing is claimed.
 pub const OVERLAP_MIN_FRACTION: f64 = 0.6;
 
+/// T-369: how many contested verdicts one row may accumulate for one overlapping region before the
+/// region re-analysis stops examining it. The re-analysis runs on a **live serving path**, so it is
+/// bounded explicitly: a region whose overlap cannot be resolved is left contested, both rows shown,
+/// and not re-analysed again. See [`crate::relate`] module docs and `Repository::resolve_overlaps`.
+pub const REGION_MAX_ROUNDS: usize = 3;
+
 /// Reference SNR for [`rank_score`]: a row at this SNR scores 1.0 on the SNR term.
 pub const RANK_SNR_REF_DB: f64 = 10.0;
 
@@ -429,6 +435,63 @@ impl RowEvidence {
     }
 }
 
+/// **T-369: the error signal.** Two rows draw boxes over the same time *and* the same frequency —
+/// which is what the user sees as two stacked boxes on the waterfall, and what the signal model
+/// says cannot be true of two real emissions (CLAUDE.md, "Overlap is an error signal that triggers
+/// re-analysis"): one of them is wrong, or both are fragments of one emission, and at least one
+/// true signal lies somewhere inside the union.
+///
+/// Deliberately *not* [`bands_compete`]: that asks whether two boxes are close enough to be ranked
+/// against each other, and answers **no** for the containment and near-miss geometries this test
+/// exists to catch (a 17 kHz box overlapping an 18 kHz box by 49 % of the narrower competes under
+/// neither rule, and the two are drawn stacked). Any overlap at all, over a shared window, is the
+/// error.
+pub fn boxes_overlap(a: &RowEvidence, b: &RowEvidence) -> bool {
+    a.emitter_id != b.emitter_id
+        && a.freq().overlaps(&b.freq())
+        && spans_overlap(&a.spans, &b.spans)
+}
+
+/// The uncertainty on a measured centre at `f_hz`, Hz — the clustering centre tolerance scaled to
+/// the frequency, floored at [`Tolerances::center_min_hz`]. Shared by [`distinguishing_evidence`]'s
+/// separated-extents test and [`modes`]'s gap tolerance, so "a gap too small to be evidence" means
+/// the same thing in both.
+pub fn center_uncertainty_hz(f_hz: f64, tol: &Tolerances) -> f64 {
+    (tol.center_ppm * 1e-6 * f_hz.abs()).max(tol.center_min_hz)
+}
+
+/// **T-369: what the region's own measurements say, independent of how the inventory cut them into
+/// rows.** Merges measured detection bands into contiguous **modes**: bands that overlap, or that
+/// sit closer than `gap_tol_hz` (a gap narrower than the measurement uncertainty is not evidence of
+/// two emissions), belong to one mode.
+///
+/// This is the re-analysis step that ranking cannot do. Three inventory rows cut out of one smear
+/// of energy produce **one** mode — the measurements never separated; two genuinely distinct
+/// emitters whose occupied bands happen to overlap produce **two**, because the detections that
+/// back them do separate. `bands_compete` and [`rank_score`] can only ever compare the rows to each
+/// other; this compares them to the air.
+pub fn modes(bands: &[FreqRange], gap_tol_hz: f64) -> Vec<FreqRange> {
+    let mut v: Vec<FreqRange> = bands
+        .iter()
+        .copied()
+        .filter(|b| b.lo_hz.is_finite() && b.hi_hz.is_finite() && b.hi_hz >= b.lo_hz)
+        .collect();
+    v.sort_by(|a, b| a.lo_hz.total_cmp(&b.lo_hz));
+    let tol = if gap_tol_hz.is_finite() {
+        gap_tol_hz.max(0.0)
+    } else {
+        0.0
+    };
+    let mut out: Vec<FreqRange> = Vec::new();
+    for b in v {
+        match out.last_mut() {
+            Some(m) if b.lo_hz <= m.hi_hz + tol => m.hi_hz = m.hi_hz.max(b.hi_hz),
+            _ => out.push(b),
+        }
+    }
+    out
+}
+
 /// Whether any presence interval of `a` overlaps one of `b` (both sorted by start, as
 /// [`RowEvidence::spans`] is). Two rows whose intervals never overlap were **observed over
 /// different windows**; see [`distinguishing_evidence`].
@@ -600,7 +663,7 @@ pub fn distinguishing_evidence(
     // fraction that widens `Fingerprint::center_tolerance_hz` is already accounted for by the
     // extents themselves, and folding it in again would make the test unable to separate anything.
     let f = a.f_center_hz.abs().max(b.f_center_hz.abs());
-    let uncertainty = (tol.center_ppm * 1e-6 * f).max(tol.center_min_hz);
+    let uncertainty = center_uncertainty_hz(f, tol);
     let gap = (a.f_center_hz - b.f_center_hz).abs() - 0.5 * (fa.width_hz() + fb.width_hz());
     if gap > uncertainty {
         return Some("separated -3 dB extents");

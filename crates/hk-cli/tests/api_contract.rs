@@ -1311,6 +1311,39 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     );
     let (st, v) = get(addr, "/api/inventory?relations=bogus");
     assert_eq!(st, 400, "{v}");
+    // T-369: and what is left is never two boxes drawn on top of each other. Overlap in time
+    // *and* frequency is an error signal, not a display choice: the served list is what the
+    // waterfall lays its boxes out from (`f_lo_hz`, `f_hi_hz`, `presence.last_interval`), so two
+    // stacked rows here are two stacked boxes on screen. The region re-analysis either collapses
+    // them or records why it could not; either way this list does not serve the pair.
+    let (st, shown) = get(addr, "/api/inventory?limit=500");
+    assert_eq!(st, 200, "{shown}");
+    let rows = shown["entries"].as_array().expect("entries");
+    let extent = |r: &Value| {
+        let p = &r["presence"]["last_interval"];
+        let (t0, t1) = match (p["t_start_s"].as_f64(), p["t_end_s"].as_f64()) {
+            (Some(a), Some(b)) => (a, b),
+            _ => (
+                r["first_seen_s"].as_f64().unwrap_or(f64::NAN),
+                r["last_seen_s"].as_f64().unwrap_or(f64::NAN),
+            ),
+        };
+        (
+            r["f_lo_hz"].as_f64().unwrap_or(f64::NAN),
+            r["f_hi_hz"].as_f64().unwrap_or(f64::NAN),
+            t0,
+            t1,
+        )
+    };
+    for (i, a) in rows.iter().enumerate() {
+        for b in rows.iter().skip(i + 1) {
+            let ((alo, ahi, at0, at1), (blo, bhi, bt0, bt1)) = (extent(a), extent(b));
+            assert!(
+                !(alo.max(blo) < ahi.min(bhi) && at0.max(bt0) <= at1.min(bt1)),
+                "two boxes served stacked in time and frequency: {a} vs {b}"
+            );
+        }
+    }
     // T-250 (ADR-0017 §2.1): `t0`/`t1` are accepted together and select on presence-interval
     // overlap, so a window in which nothing was ever on the air lists nothing — however wide the
     // rows' first-seen/last-seen hulls are.

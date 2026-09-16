@@ -229,11 +229,32 @@ Four distinct mechanisms, often conflated:
 | Mechanism | What it does | Where it lives |
 |---|---|---|
 | **Merge** | collapses near-duplicate rows describing one emission | `resolve_overlaps` / `emitter_relation` (T-219, T-250) |
+| **Region re-analysis** | treats a surviving overlap as proof the analysis is wrong, and resolves the region against the measurements | `resolve_overlaps` stage 4 (T-369, §4.1) |
 | **Interval close** | records that evidence stopped | derived from `t_end` + `idle_gap` (this ADR, TM-5) |
 | **Window scoping** | removes a stopped signal from the live list | the query predicate (this ADR, TM-2/TM-3) |
 | **Decay** | lowers a *hypothesis's* confidence as its evidence ages | candidate confidence (T-251, TM-6) |
 
 Only the last is decay, and it is the smallest of the four.
+
+### 4.1 Overlap is an error signal, not a ranking problem (T-369)
+
+**The user's invariant (CLAUDE.md, 2026-09-16):** Confirmed and Candidate regions should not overlap in time–frequency — real emissions essentially never do, and two truly overlapping signals would not demodulate. So **overlapping boxes are proof the analysis is wrong**, with at least one true signal somewhere inside the union, and the resolution is **active re-analysis of the region**, not ranking one box above another.
+
+**What was measured first (2026-09-16, T-369).** Two blind runs through the mock SDR, read back from a live `/api/inventory`:
+
+- The 5 s FM capture served a 9.4 kHz box wholly inside a 22.1 kHz box, both on the air together.
+- The 45 s FM capture served **three** boxes at 101.6654–101.6836, 101.6751–101.6922 and 101.6913–101.7054 MHz over the same 40 s — two overlapping pairs.
+
+Every one of those rows came back with `"relation": null` and **no `emitter_relation` row at all**, standing or revoked. So the failure was **(a) the collapse never happened**, not (b) a clean inventory that the served path re-expanded: `relations=shown` correctly hides deferring rows and there was simply nothing to hide. The cause is `bands_compete`'s 60 %-of-**both**-bands gate (`OVERLAP_MIN_FRACTION`), which the middle box misses at 49.7 % and 6 % of the narrower band — and every T-219 stage is behind that gate. The same gate is what T-219 deliberately uses to keep a narrow emission from disappearing into a wide host, so loosening it is not the fix.
+
+**Stage 4.** After the ranking stages, rows still overlapping in **time and frequency** (`boxes_overlap`) form a **region**: the connected component, closed transitively by querying each member's own overlaps, so the region — and therefore its survivor — does not depend on which row a sighting happened to touch. The region is then re-analysed **against the air rather than against the rows**: the measured `f_lo`/`f_hi` of every detection behind every member are merged into contiguous **modes** (`hk_model::relate::modes`, gap tolerance = the same centre uncertainty `distinguishing_evidence` uses).
+
+- **One mode** → the measurements never separated: the boxes are cuts of one emission. The best-supported box is kept, the others become `duplicate-of` it with `detail.verdict = "one-emission"` and the measured mode disclosed. This is the only place a claim is made without the pairwise 60 % test — and it is still made *through* `distinguishing_evidence`, so the T-233 guard is never bypassed.
+- **More than one mode, or the guard blocks** → **contested**: nothing merged, nothing hidden, both rows still listed, and the finding appended as a revoked (`active = 0`) row carrying `detail.verdict = "contested"`, `detail.blocked_by` and `detail.modes`. Merging is the dangerous direction; an overlap that cannot be resolved confidently is explained rather than guessed at.
+
+**Termination is part of the contract**, because this runs on a live serving path. The stage does not recurse, the region is bounded to 32 rows, claims are idempotent, and an unresolved region appends at most `REGION_MAX_ROUNDS` (3) contested verdicts per row before it stops writing.
+
+**Measured after:** the 45 s capture serves 0 stacked pairs (11 rows, the middle box collapsed into the region's best-supported one); the 5 s capture's containment pair is left alone and contested, blocked by `bandwidth ratio beyond tolerance` — the geometry of a subcarrier as much as of a fragment, which is exactly the case that must not be guessed.
 
 **New merge evidence the time model hands T-250 for free:** skirt fragments of one FM station have intervals that **start and stop together**; two genuinely distinct adjacent stations do not. **Co-onset/co-offset of presence intervals** is therefore a distinguishing signal that needs no bandwidth estimate — which matters, because T-250's live hypothesis is that under-estimated bandwidths stop the band-overlap rules firing at all. It fits in `emitter_relation.detail` as JSON with no schema change (migration 0008 is append-only and already carries `t`). Offered as a strengthening, not a requirement.
 
