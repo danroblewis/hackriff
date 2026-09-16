@@ -62,7 +62,9 @@ fn header_for(kind: StreamKind, class: ContentClass) -> StreamHeader {
             h.sample_rate_hz = Some(48e3);
         }
         StreamKind::Bits => h.datatype = Some("ru8".into()),
-        StreamKind::Symbols | StreamKind::SyncSearch => h.datatype = Some("rf32_le".into()),
+        StreamKind::Symbols | StreamKind::SyncSearch | StreamKind::Eye => {
+            h.datatype = Some("rf32_le".into())
+        }
         StreamKind::Spectrum => {
             h.datatype = Some("rf32_le".into());
             // A survey waterfall: within the gated row-rate cap, so it exists under every class.

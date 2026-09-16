@@ -62,7 +62,7 @@ frame := u32 length (little-endian) || payload[length]
 | `schema` | string | yes | `"hackriff.stream"` |
 | `version` | string | yes | `"1.1"` (readers accept any `1.x`) |
 | `stream_id` | string | yes | Producer-chosen name, e.g. `decodes/adsb` |
-| `kind` | string | yes | `messages`, `bits`, `symbols`, `iq`, `audio`, `spectrum` or `sync-search` (T-162, §14.4) |
+| `kind` | string | yes | `messages`, `bits`, `symbols`, `iq`, `audio`, `spectrum`, `sync-search` (T-162, §14.4) or `eye` (T-161, §14.4) |
 | `content_class` | string | yes | Ceiling class for every record (§6). A reader treats a missing or unknown value as `metadata-only`. |
 | `source` | string | yes | Producer, e.g. `hk-plugins:readsb@0.1.0` |
 | `emitter_id` | uuid | no | Emitter the whole stream belongs to |
@@ -71,7 +71,7 @@ frame := u32 length (little-endian) || payload[length]
 | `datatype` | string | iq/audio | SigMF datatype of payload elements (`ci8`, `cf32_le`, `ri16_le`, `ru8`, ...) |
 | `sample_rate_hz` | number | iq/audio | Sample, symbol or spectrum-row rate |
 | `center_hz`, `bandwidth_hz` | number | no | RF centre and bandwidth |
-| `fft_size` | integer | no | For spectrum streams; reused as the row length (candidate positions per row) for `sync-search` stage-tap streams (T-162, §14.4) |
+| `fft_size` | integer | no | For spectrum streams; reused as the row length for `sync-search` (candidate positions per row, T-162) and `eye` (trace points per row, T-161) stage-tap streams (§14.4) |
 | `dc_excluded_hz` | number | no (T-167) | For spectrum streams: half-width, Hz, of the DC/LO-leakage notch centred on `center_hz` that the producer's detector excludes (the same tolerance `GET /api/observations` `records[].window.dc_excluded` reflects). `null`/absent when the producer applies no DC mask to this stream — additive, never a guess. |
 | `framing` | object | no | docs/07 `Framing` (`payload`, `bits_per_symbol`, `symbol_rate_hz`, `schema_id`, `sync_word_hex`), for bits and symbols streams |
 | `message_schema` | string | no | Schema id of message `metadata`/`content`, e.g. `hackriff.decode/1` |
@@ -159,7 +159,7 @@ A messages publisher whose header class forbids content **cannot be created with
 
 **Own-key content is local-only.** It leaves only on an `own-key-decrypted` stream. Such streams are served on a mode-0600 Unix socket and refused to every remote consumer, per consumer, by the locality rule (§2; `gate::remote_transport_permitted`).
 
-**Binary records.** Payloads of `bits`, `symbols`, `iq`, `audio` and `sync-search` (T-162: a caller-chosen word scored against withheld bits is an oracle over them, so it is content too, unlike `spectrum`) are content. On a stream whose header class forbids content:
+**Binary records.** Payloads of `bits`, `symbols`, `iq`, `audio`, `sync-search` (T-162: a caller-chosen word scored against withheld bits is an oracle over them, so it is content too, unlike `spectrum`) and `eye` (T-161: an eye row's trace centres *are* the soft symbols in order, so one column of it is the demodulated bitstream — content for the same plain reason `symbols` is) are content. On a stream whose header class forbids content:
 - the payload is withheld;
 - a header-only `GATED` record still goes out, so timing, seq and length metadata flow;
 - `publish_binary` returns `StreamError::ContentGated`, so the misrouted producer notices.
@@ -779,8 +779,13 @@ Any output port of any node of a running pipeline can be opened as a stream on d
   - `DISCONTINUITY` is set on the first record after a chunk discontinuity, a `RESET` (hot edit) or lost ring samples.
 - **`view=spectrum`** (`iq`/`real` ports): `kind: spectrum`, `rf32_le` dBFS/Hz rows, `fft_size` declared, at most 25 rows/s, which is inside the §6 gated-spectrum cap. The rendering reduction is server-side (the UI is a thin client).
 - **`view=sync_search`** (`bits` ports only; needs `sync_word=0x…` and `sync_bits=<1..=64>`, refused 400 if missing/invalid or if the word doesn't fit in `sync_bits`, the same rule the `sync_search` block itself applies): `kind: sync-search`, `rf32_le` rows of the sync-word match score (`1 - errors/sync_bits`, so `1.0` is a perfect match) at each candidate bit position, `fft_size` reused for the row length (candidate positions per row, scaled with the bit rate so the row rate stays at most 25 rows/s, the same cap as `view=spectrum`), no RF geometry (`center_hz`/`bandwidth_hz` unset — a bit-domain row, not RF-referenced). Computed on the pipeline thread, only while a consumer is attached (T-162). **Content, not metadata** (§6): the caller supplies the word, so an ungated score would let it probe withheld bits one guess at a time; it is gated exactly like the `bits` port it reads.
+- **`view=eye`** (`iq`/`real` ports only; needs `symbol_rate_bd=<f>`, refused 400 if missing/invalid or if it does not give 2..=1024 samples per symbol on that port — below 2 there is nothing *between* the instants to draw, above 1024 the window a row buffers is unreasonable): `kind: eye`, `rf32_le` rows of the **clock-recovery eye/timing diagram**, `fft_size` reused for the row length, no RF geometry (`center_hz`/`bandwidth_hz` unset — the row's axes are time-within-a-symbol and amplitude).
+  - **Row layout.** 64 consecutive traces of 64 points, trace-major (trace `k` occupies `[64k, 64k+64)`). Trace `k` is the waveform around the `k`-th symbol instant of that row, resampled onto a grid spanning **2 symbol periods centred on the instant**: point `j` is the waveform at `(j − 32)/32` symbol periods from it. So point **32** is the symbol instant, where the eye **opens**, and points **16** and **48** are half a symbol either side, between instants, where it **closes**. The constants are fixed by this contract, so a reader needs no extra header field: traces per row = `fft_size / 64`.
+  - **The sample instants.** Estimated per row, server-side, by the classical square-law (Oerder–Meyr) non-data-aided estimate — no training sequence, no lock, no state carried between rows — and **reported**: the record's `sample_index` is the port element index of the row's **first** symbol instant, the rest following one symbol period apart. The estimate is sub-sample and the traces are folded on it at full precision; only the reported `sample_index` is rounded to the nearest port element, since it is an integer index (at most half a sample, below the trace grid's own step at 32 or more samples per symbol). That is what lets a reader line the eye up against the same port's `view=raw` tap, and what makes the diagram answer "is clock recovery sampling in the open part of the eye?" rather than merely "what does the waveform look like?".
+  - **Rate.** Whole rows are dropped once the symbol rate would push past the 25 rows/s cap (the same cap as `view=spectrum`), so a row always shows 64 *consecutive* symbols but successive rows need not be contiguous. Computed on the pipeline thread, only while a consumer is attached (T-161), at one multiply-accumulate per sample plus one fold per row.
+  - **Content, not metadata** (§6), and more plainly than `sync-search`: point 32 of every trace *is* the pre-decision soft symbol, in symbol order, so slicing that one column of a row recovers the demodulated bitstream outright — no caller-chosen probe needed. It is gated exactly like the `iq`/`real` port it is folded from.
 - **Header** adds the optional (1.2) `stage`: `{pipeline_id, node, port, port_type, edit_rev}`.
-- **Gating.** Stage payloads of `iq`/`audio`/`symbols`/`bits`/`sync-search` are content: withheld (`GATED`) under a class that forbids content, as in §6.
+- **Gating.** Stage payloads of `iq`/`audio`/`symbols`/`bits`/`sync-search`/`eye` are content: withheld (`GATED`) under a class that forbids content, as in §6.
 
 ### 14.5 Gating
 
@@ -822,7 +827,7 @@ Any output port of any node of a running pipeline can be opened as a stream on d
 Served over `/ws/open/<name>` (§12.1) and TCP `open/<name>` (§13.1), with the usual refusals: `404` unknown pipeline, node, port or capture; `409` a view the port type doesn't support; `403` gate; `503` budget.
 - `inspector?pipeline=<id>[&output=<id>]`: a pipeline's inspector output from now. The same records are offered as the always-on stream `inspector/<pipeline_id>/<output_id>` while the pipeline runs.
 - `inspector?capture=<id>[&from_frame=<n>][&field_map=<recipe_id>@<version>:<map_id>]`: replay, optionally re-parsed, of a recorded decoded stream. **Served (T-092):** frame records from frame `n` by index seek, paced to the consumer, stream id `capture/<id>`; see docs/api.md "Decoded captures".
-- `stage?pipeline=<id>&node=<node>[&port=<port>][&view=raw|spectrum]`: a stage stream (§14.4).
+- `stage?pipeline=<id>&node=<node>[&port=<port>][&view=raw|spectrum|sync_search|eye]`: a stage stream (§14.4).
 
 ## Sources
 
