@@ -3463,7 +3463,7 @@ tasks:
   - id: T-215
     milestone: M3
     title: "MAUTO seed interface from M3 (ADR-0016 + ADR-0015): search ordering by posterior, pruning only on likelihood, >= max(p_unknown, 0.2) budget reserved for open search"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-199, T-201, T-202]
     parallel_group: M3M
@@ -3911,7 +3911,7 @@ tasks:
   - id: T-242
     milestone: M3
     title: "Wire signature matching into the pipeline: nothing calls match_emitter(), so the route serves nothing and the M3 gate would pass vacuously on that dimension"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-201, T-202]
     parallel_group: M3B
@@ -3941,7 +3941,7 @@ tasks:
   - id: T-244
     milestone: M3
     title: "OOD coverage gap: no out-of-distribution generator routes to analog or psk-qam, so their open-set behaviour is unmeasured - the M3 gate would report unknown-recall it never tested for two families"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-204, T-213]
     parallel_group: M3V
