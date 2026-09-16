@@ -7,6 +7,8 @@
 //!   (T-019).
 //! - [`known_status`]: the family → allocation matcher that turns a lookup into a
 //!   [`hk_model::KnownStatus`] (T-019).
+//! - [`priors`]: `hk_model::classify::FamilyPriors` sources for ADR-0016 §3's classification-fusion
+//!   prior, built from [`band_table`] (T-212).
 //! - [`feeds`]: the feed cache (state + raw snapshots on disk, events in the repository), the
 //!   [`feeds::FeedFetcher`] seam and the [`feeds::gpsjam`] adapter (T-020).
 //! - [`anomaly`]: noise-floor episodes → `Anomaly(noise-floor-rise)` lifecycle (T-020).
@@ -19,6 +21,7 @@ pub mod correlate;
 pub mod feeds;
 pub mod geo;
 pub mod known_status;
+pub mod priors;
 pub mod utc;
 
 // ADR-0012 §11 (pre-added by T-113; the owners fill them in).
@@ -39,6 +42,7 @@ pub use feeds::{
 };
 pub use geo::Site;
 pub use known_status::{PART15_FAMILIES, PriorMatch, is_service_family, match_known_status};
+pub use priors::BandPlanFamilyPriors;
 
 #[cfg(test)]
 mod tests {
