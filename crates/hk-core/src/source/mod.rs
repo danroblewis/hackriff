@@ -22,6 +22,25 @@
 //!
 //! TX is not part of these traits. It stays gated (C37).
 //!
+//! # Device-local vs shared-air reasoning (T-259, T-302)
+//!
+//! Multiple SDRs seeing the same airwaves raises a question: which computations are
+//! device-specific, and which are about shared air?
+//!
+//! **Device-local physics** (must read the device) — images, harmonics, intermodulation
+//! distortion, noise floor, and gain state (LNA/VGA/amp) — are tied to one receive chain. These
+//! belong in the provenance object [`BlockHeader::provenance`], which carries `device_id` and
+//! antenna port (T-302: an artifact is a property of ONE receive chain, and is gated on these
+//! fields). When a detection uses device-local physics (e.g. to measure an emission's noise floor
+//! rise), it must read the provenance of the samples it examined.
+//!
+//! **Shared-air reasoning** (must NOT read the device) — deduplication, signal clustering,
+//! and identity across time — operates on the measurements and conclusions, not on which device
+//! made them. At a seam where two non-coherently stitched devices sample overlapping bands, one
+//! real emitter may appear as two detections from the two devices. The dedup/clustering layer
+//! must not assume one-to-one correspondence to devices; two detections from different devices
+//! with matching time and frequency should be merged into one emitter, not kept apart.
+//!
 //! # Device contract (T-037a; for drivers and the T-049 mock SDR)
 //!
 //! Every receiver (HackRF One, later SoapySDR devices, a mock replaying SigMF) implements the same
@@ -355,6 +374,25 @@ pub struct OpenRequest {
 }
 
 /// Opens sources of one kind of device (HackRF One, the T-049 mock, SoapySDR later).
+///
+/// # N-shaped trait: no singleton
+///
+/// `open(&self, request: &OpenRequest) -> Result<Box<dyn Source>, SourceError>` is **deliberately
+/// N-shaped**: `&self` (not `&mut self`), a fresh `Box<dyn Source>` per call, with
+/// `OpenRequest.device` selecting by serial, index, or URI. There is no singleton driver
+/// registry and no lock; the trait is ready for multiple concurrent SDRs. Each call opens one
+/// independent stream, so a caller opening two sources from the same driver or concurrently
+/// gets two separate stream handles.
+///
+/// The single-device assumption lives not in this trait, but in its **consumers**:
+/// [`hk_pipeline::SourceSlot`], [`hk_pipeline::SwitchableControl`],
+/// `hk_pipeline::config::PipelineConfig::device_id`, [`hk_pipeline::Pipeline::start`],
+/// [`hk_pipeline::capture::run`], and `hk_cli`'s `driver_for` (one driver + one device per
+/// invocation). Those consumers take one `Box<dyn Source>` and assume it is the active window.
+/// When multiple SDRs are added (a future option per ADR-0005 Consequences: "Multiple HackRFs
+/// (a survey radio + a dwell radio) are a later option the policy can grow into; the interface
+/// assumes one window now"), those consumer layers will evolve to hold multiple windows and
+/// sources in parallel; this trait's contract stays the same.
 pub trait SourceDriver: Send + Sync {
     /// Driver name, e.g. `hackrf`.
     fn name(&self) -> &'static str;

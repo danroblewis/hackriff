@@ -50,11 +50,42 @@
 //!
 //! The chain writes a [`TrunkSystem`] row — a protocol, the measured control-channel frequency and
 //! times — plus, since T-268, the band plan its identifier updates announced and the grants it
-//! issued. All of it metadata: no demodulated audio, no voice frames, no message payload, no
-//! recording, no stream, and nothing decrypted. That is what lets it run under the fail-closed
-//! `metadata-only` class a 12.5 kHz LMR band derives, and the validator in
+//! issued, plus, since T-269, the calls it followed. All of it metadata: no demodulated audio, no
+//! voice frames, no message payload, no recording, no stream, and nothing decrypted. There is no
+//! `CallAudio` in the workspace and no column that could hold one (docs/07 §2.29), so this is a
+//! property of the data model rather than a habit of this module. That is what lets it run under
+//! the fail-closed `metadata-only` class a 12.5 kHz LMR band derives, and the validator in
 //! [`super::spec`] refuses any `trunk-cc` spec that sets `requires_content` or carries a record
 //! node, so it stays true.
+//!
+//! # Following a grant (T-269)
+//!
+//! T-268 turned a grant's 16-bit channel number into a frequency. What happens next splits in two,
+//! and the split is the C23 **span limit**: a trunked system's voice channels routinely fall
+//! outside the ≤20 MHz the radio can hold at once ([`C23_SPAN_LIMIT_HZ`]).
+//!
+//! - **Inside the window:** [`follow_grants`] allocates a channelizer output on the granted
+//!   channel — a real [`Ddc`] at the LMR channel bandwidth, the stream a voice demodulator will
+//!   consume — and measures where energy on it starts and stops. Each transmission becomes a
+//!   [`CallRecord`] with boundaries that were *measured*, ended by an observed
+//!   [`SILENCE_TIMEOUT_S`], plus `call-start` / `call-end` events linking it to the grant stream.
+//! - **Outside it:** the grant becomes an [`GrantKind::OutsideWindow`] row carrying the frequency
+//!   it resolved to and how far beyond the window that is, and a `CallRecord` whose `t_end` is
+//!   NULL and whose reason says why. **It is never dropped.** A dropped grant is indistinguishable
+//!   from a system with no traffic, and that silence is what teaches a person to trust a picture
+//!   that is wrong. The refusal shows up in the run summary (`cc_grants_outside_window`), in the
+//!   grant stream, and in the call list.
+//!
+//! Boundaries are a *comparison*, so the follower measures an empty raster channel through the
+//! **same** DDC spec and compares against that: both sit on one scale by construction, and the
+//! margin then means what it says whether the granted channel is busy for a tenth of the window or
+//! all of it. With no quiet channel to measure against, it claims nothing
+//! (`cc_follow_no_reference`).
+//!
+//! Encryption is [`hk_model::Encryption::Unknown`] on every call and every event this module
+//! writes. T-270 owns the service-options bit; until something reads one, "nothing said" is the
+//! only honest state, and [`CallRecord::from_grant`] carries the grant's state verbatim so there
+//! is no branch here that could turn it into `clear`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,7 +99,8 @@ use hk_detect::trunk::{
 };
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
 use hk_model::{
-    GrantEvent, GrantKind, SampleTime, Timestamp, TrunkProtocol, TrunkSystem, TrunkSystemId,
+    CallRecord, GrantEvent, GrantKind, SampleTime, Timestamp, TrunkProtocol, TrunkSystem,
+    TrunkSystemId,
 };
 use num_complex::{Complex, Complex32};
 use serde_json::json;
@@ -98,7 +130,67 @@ const SWEEP_FFT_LEN: usize = 1024;
 const DEMOD_SPS: f64 = 10.0;
 
 /// Fraction of the sample rate the sweep treats as usable (the window's flat middle).
+///
+/// It is also what "inside the dwell window" means to the grant follower, deliberately: one notion
+/// of the window for both halves, and a grant landing in the front end's roll-off is one this
+/// receiver cannot follow honestly, so it is refused and said so rather than followed badly.
 const USABLE_FRACTION: f64 = 0.8;
+
+/// How long a granted channel must be **silent** before the call it carried is declared over, s.
+///
+/// A priori, bounded from the protocol above and from propagation below:
+///
+/// - **Upper bound, 180 ms.** A keyed P25 Phase 1 voice channel emits a Logical Link Data Unit
+///   every 180 ms (1728 bits at 9600 bit/s), back to back, and C4FM is constant-envelope — a
+///   transmitter that is still keyed is never silent at all. Half a voice frame of silence is
+///   already half a frame more than a keyed transmitter can produce.
+/// - **Lower bound, ~35 ms.** The longest silence a *keyed* transmitter can appear to have is a
+///   Rayleigh fade null. At 851 MHz (λ = 0.352 m) a null is crossed in about λ/2 ÷ v, which at a
+///   slow 5 m/s is 35 ms.
+///
+/// 90 ms — half a voice frame — sits between them with 2.6× margin below and 2× above.
+///
+/// **Too short** and a deep fade or a momentary gap splits one transmission into two calls:
+/// over-counts calls, under-states durations. **Too long** and two distinct keyings merge into one
+/// call: under-counts, over-states, and a call that really ended near the end of a buffered window
+/// is left open instead of closed.
+///
+/// **Scope, stated rather than implied:** this is the end of a *transmission*, not of a
+/// conversation. Trunk Recorder's multi-second hang-time merge — several keyings under one grant
+/// read as one call — needs a channel-hold policy this does not have, and is not attempted.
+const SILENCE_TIMEOUT_S: f64 = 0.090;
+
+/// The envelope frame a granted channel is measured in, s.
+///
+/// ~9.6 C4FM symbols at 4800 Bd: long enough that a frame's power is the channel's average rather
+/// than one symbol's, short enough to place a boundary to 2 ms. The DDC's default output rate is
+/// about 2× the channel bandwidth whatever the input rate, so a frame holds ~50 complex samples at
+/// any front-end rate, and a power estimate from 50 samples spreads by 1/√50 ≈ 0.6 dB — ten times
+/// under the [`OCCUPIED_MARGIN_DB`] it is then tested against, so the threshold is not marginal.
+const FOLLOW_FRAME_S: f64 = 0.002;
+
+/// Most occupancy a raster channel may show and still serve as the follower's noise reference.
+///
+/// The reference has to be a channel the call itself cannot move. 5 % of frames cannot shift a
+/// median, and the sweep's own margin already says those frames sat [`OCCUPIED_MARGIN_DB`] above
+/// the band floor.
+const FOLLOW_REF_MAX_FCO: f64 = 0.05;
+
+/// The instantaneous window a HackRF-class front end can hold, Hz (C23's span limit, docs/01 §7.3
+/// and `docs/capabilities/C23-trunking-follow.md` §Platform constraints). Recorded on the refusal
+/// so the row says *which* limit it hit, not merely that it hit one.
+const C23_SPAN_LIMIT_HZ: f64 = 20e6;
+
+/// Machine reason: the grant resolved to a frequency outside the dwell window (C23's span limit).
+const OUTSIDE_WINDOW: &str = "grant-outside-window";
+/// Machine reason: the call's end was **observed**, as silence on the granted channel.
+const SILENCE_TIMEOUT: &str = "silence-timeout";
+/// Machine reason: the buffered window ran out while the channel was still active, so no end was
+/// observed and `t_end` stays NULL rather than borrowing the window's edge.
+const WINDOW_ENDED: &str = "window-ended";
+/// Machine reason: the channel was already active in the window's first frame, so the call was
+/// joined in progress — and its encryption state is therefore `unknown`, never `clear`.
+const LATE_ENTRY: &str = "late-entry";
 
 /// A control channel this chain has already written, and the band plan decoded off it.
 ///
@@ -186,6 +278,8 @@ pub(crate) struct TrunkCcNode {
     pub max_demods: usize,
     /// Least stream time between passes, s.
     pub period_s: f64,
+    /// Most granted channels followed per pass (T-269).
+    pub max_follows: usize,
     /// Channel raster, Hz (the a-priori LMR grid the spec names).
     pub raster_hz: f64,
 }
@@ -490,6 +584,347 @@ fn hunt(
                 }
             }
         }
+
+        // ---- Follow (T-269): what the grants above entitle. The repository lock is released
+        // first — the following is DSP over the window already in hand, and holding a database
+        // lock across it would serialise every other writer behind a channelizer run.
+        drop(repo);
+        follow_grants(
+            shared, node, buf, base, t_start, prov, &ks, &fco, &events, system_id,
+        );
+    }
+}
+
+/// One raster channel of the buffered window, down-converted and reduced to per-frame mean power.
+///
+/// This is the **C11 allocation** a followed grant entitles: a real [`Ddc`] channel stream at the
+/// LMR channel bandwidth, the one a voice demodulator consumes. What comes back from it here is
+/// its *envelope* and nothing else — no symbols, no payload, no audio.
+struct ChannelFrames {
+    /// Mean power of each [`FOLLOW_FRAME_S`] frame, oldest first.
+    powers: Vec<f64>,
+    /// Source sample index the first output sample represents. The DDC has already removed its own
+    /// group delay from this map (`hk_dsp::ChannelTime`), so no filter-delay term enters a
+    /// boundary; what is left is under one input sample.
+    source_index: f64,
+    /// Source samples per output sample.
+    source_per_output: f64,
+    /// Output samples per frame.
+    frame_len: usize,
+}
+
+/// Allocates a channel on `offset_hz` over `buf` and measures its envelope.
+fn channel_frames(
+    buf: &[Complex<i8>],
+    base: u64,
+    t_start: Timestamp,
+    prov: &ProvenanceHandle,
+    offset_hz: f64,
+    bandwidth_hz: f64,
+) -> Option<ChannelFrames> {
+    let mut ddc = Ddc::new(
+        DdcSpec::new(offset_hz, bandwidth_hz),
+        prov.tune.sample_rate_hz,
+    )
+    .ok()?;
+    let info = InputInfo {
+        time: SampleTime {
+            sample_index: base,
+            host_time: t_start,
+        },
+        discontinuity: Discontinuity::NONE,
+        dropped_before: 0,
+        provenance: prov,
+    };
+    let blk = ddc.process(info, buf).ok()?;
+    let frame_len = ((FOLLOW_FRAME_S * blk.header.sample_rate_hz).round() as usize).max(1);
+    let powers: Vec<f64> = blk
+        .samples
+        .chunks_exact(frame_len)
+        .map(|f| f.iter().map(|z| f64::from(z.norm_sqr())).sum::<f64>() / frame_len as f64)
+        .collect();
+    (!powers.is_empty()).then_some(ChannelFrames {
+        powers,
+        source_index: blk.header.time.source_index,
+        source_per_output: blk.header.time.source_per_output,
+        frame_len,
+    })
+}
+
+/// Splits a channel's per-frame powers into transmissions: `(first frame, last occupied frame,
+/// ended)`.
+///
+/// `ended` is true **only** when `silence_frames` of contiguous silence were actually observed
+/// after the run. A run still going when the frames run out comes back unended, and the call it
+/// makes keeps `t_end = NULL` rather than borrowing the window's edge for a boundary nobody
+/// measured — the same discipline as refusing a frequency the band plan cannot account for.
+fn split_keyings(
+    powers: &[f64],
+    threshold: f64,
+    silence_frames: usize,
+) -> Vec<(usize, usize, bool)> {
+    let need = silence_frames.max(1);
+    let mut out = Vec::new();
+    let mut open: Option<(usize, usize)> = None;
+    let mut quiet = 0usize;
+    for (j, &p) in powers.iter().enumerate() {
+        if p >= threshold {
+            quiet = 0;
+            match &mut open {
+                Some((_, last)) => *last = j,
+                None => open = Some((j, j)),
+            }
+        } else if let Some((first, last)) = open {
+            quiet += 1;
+            if quiet >= need {
+                out.push((first, last, true));
+                open = None;
+                quiet = 0;
+            }
+        }
+    }
+    if let Some((first, last)) = open {
+        out.push((first, last, false));
+    }
+    out
+}
+
+/// The `outside-window` row a grant beyond the dwell gets.
+///
+/// Split out and pure so the refusal can be tested without a pipeline. It keeps the frequency the
+/// band plan resolved — the grant is not in doubt, only this receiver's reach — and says how far
+/// beyond the window it fell and against which limit, so the row is a measurement rather than a
+/// shrug.
+fn outside_window_event(
+    system: TrunkSystemId,
+    g: &GrantEvent,
+    tune_center: f64,
+    usable_hz: f64,
+    fs: f64,
+) -> GrantEvent {
+    let f = g.f_hz.unwrap_or(f64::NAN);
+    let mut ev = GrantEvent::new(system, GrantKind::OutsideWindow, g.t);
+    ev.talkgroup = g.talkgroup.clone();
+    ev.unit_id = g.unit_id.clone();
+    ev.channel = g.channel.clone();
+    ev.f_hz = g.f_hz;
+    ev.detail = json!({
+        "reason": OUTSIDE_WINDOW,
+        "granted_by": g.kind.as_str(),
+        "window_center_hz": tune_center,
+        "window_usable_hz": usable_hz,
+        "window_sample_rate_hz": fs,
+        "offset_hz": f - tune_center,
+        "beyond_usable_hz": (f - tune_center).abs() - usable_hz / 2.0,
+        "span_limit_hz": C23_SPAN_LIMIT_HZ,
+    });
+    ev
+}
+
+/// Follows the grants of one window: calls for the channels inside it, a logged refusal for the
+/// channels outside it. See the module docs.
+#[allow(clippy::too_many_arguments)]
+fn follow_grants(
+    shared: &Shared,
+    node: &TrunkCcNode,
+    buf: &[Complex<i8>],
+    base: u64,
+    t_start: Timestamp,
+    prov: &ProvenanceHandle,
+    ks: &[i64],
+    fco: &[f64],
+    events: &[GrantEvent],
+    system: TrunkSystemId,
+) {
+    let c = &shared.counters.chains;
+    let fs = prov.tune.sample_rate_hz;
+    let (tune_center, raster) = (prov.tune.center_hz, node.raster_hz);
+    if !(fs.is_finite() && fs > 0.0 && raster > 0.0) {
+        return;
+    }
+    let usable_hz = USABLE_FRACTION * fs;
+
+    // One target per distinct resolved frequency. A control channel repeats a grant and its
+    // updates many times in half a second, and that is one call, not twenty.
+    let key = |g: &GrantEvent| g.f_hz.unwrap_or(f64::NAN).round();
+    let mut targets: Vec<&GrantEvent> = Vec::new();
+    for ev in events.iter().filter(|e| e.f_hz.is_some()) {
+        match targets.iter_mut().find(|t| key(t) == key(ev)) {
+            // A plain grant represents the call better than an update: an update is how late entry
+            // joins one already in progress, and it carries no source unit.
+            Some(rep) if rep.kind == GrantKind::GrantUpdate && ev.kind == GrantKind::Grant => {
+                *rep = ev;
+            }
+            Some(_) => {}
+            None => targets.push(ev),
+        }
+    }
+    let reachable = |ev: &GrantEvent| {
+        ev.f_hz
+            .is_some_and(|f| (f - tune_center).abs() <= usable_hz / 2.0)
+    };
+    let mut inside: Vec<&GrantEvent> = targets.iter().copied().filter(|e| reachable(e)).collect();
+    let outside: Vec<&GrantEvent> = targets.iter().copied().filter(|e| !reachable(e)).collect();
+
+    // Everything written in one repository section at the end, so no lock is held across the DSP.
+    let mut writes: Vec<(CallRecord, Vec<GrantEvent>)> = Vec::new();
+
+    // ---- C23's span limit. A grant beyond the window the radio is holding is a ROW, not a
+    // silence.
+    for g in &outside {
+        let mut ev = outside_window_event(system, g, tune_center, usable_hz, fs);
+        // The call happened; this receiver could not observe it. `t_end` stays NULL, which the
+        // model defines as "still open, **or when its end was never observed**", and the reason
+        // says which — so a call list shows the traffic instead of hiding it.
+        let mut call = CallRecord::from_grant(&ev, g.kind == GrantKind::GrantUpdate);
+        call.reasons.push(OUTSIDE_WINDOW.to_owned());
+        ev.call = Some(call.id);
+        writes.push((call, vec![ev]));
+        inc(&c.cc_grants_outside_window);
+    }
+
+    // ---- The noise reference: an empty raster channel through the SAME DDC spec, so the granted
+    // channel and its floor are on one scale by construction. `k = 0` is excluded — on a HackRF
+    // the tuned centre carries a DC spike, and a reference sitting in it would read as a floor no
+    // real channel has, which would quietly cost calls rather than announce anything.
+    let reference = (!inside.is_empty())
+        .then(|| {
+            ks.iter()
+                .zip(fco)
+                .filter(|&(&k, &f)| k != 0 && f <= FOLLOW_REF_MAX_FCO)
+                .min_by(|a, b| a.1.total_cmp(b.1).then(a.0.abs().cmp(&b.0.abs())))
+                .map(|(k, _)| *k)
+        })
+        .flatten()
+        .and_then(|k| {
+            channel_frames(buf, base, t_start, prov, k as f64 * raster, raster).map(|f| (k, f))
+        });
+    let threshold = reference.as_ref().and_then(|(_, r)| {
+        let floor = median(&r.powers);
+        (floor.is_finite() && floor > 0.0).then(|| floor * 10f64.powf(OCCUPIED_MARGIN_DB / 10.0))
+    });
+    if !inside.is_empty() && threshold.is_none() {
+        // No quiet channel, or no measurable floor on one. Nothing is claimed rather than measured
+        // against a reference the call is itself sitting in.
+        inc(&c.cc_follow_no_reference);
+    }
+
+    if let (Some(threshold), Some((ref_k, _))) = (threshold, &reference) {
+        // Deterministic and blind: nearest the tuned centre first, where the front end rolls off
+        // least; ties by frequency.
+        inside.sort_by(|a, b| {
+            let (fa, fb) = (a.f_hz.unwrap_or(f64::NAN), b.f_hz.unwrap_or(f64::NAN));
+            (fa - tune_center)
+                .abs()
+                .total_cmp(&(fb - tune_center).abs())
+                .then(fa.total_cmp(&fb))
+        });
+        if inside.len() > node.max_follows {
+            add(
+                &c.cc_follow_refused,
+                (inside.len() - node.max_follows) as u64,
+            );
+            inside.truncate(node.max_follows);
+        }
+        for g in &inside {
+            let f = g.f_hz.unwrap_or(f64::NAN);
+            let Some(ch) = channel_frames(buf, base, t_start, prov, f - tune_center, raster) else {
+                inc(&c.errors);
+                continue;
+            };
+            inc(&c.cc_follows);
+            let frame_s = ch.frame_len as f64 * ch.source_per_output / fs;
+            let silence_frames = (SILENCE_TIMEOUT_S / frame_s).ceil().max(1.0) as usize;
+            let runs = split_keyings(&ch.powers, threshold, silence_frames);
+            if runs.is_empty() {
+                // Granted, and nothing was on it in this window. The grant row already records the
+                // grant; inventing a call would claim an observation nobody made.
+                inc(&c.cc_follow_silent);
+                continue;
+            }
+            let at = |frame: usize| -> Timestamp {
+                let src = ch.source_index + (frame * ch.frame_len) as f64 * ch.source_per_output;
+                t_start.saturating_add_nanos(((src - base as f64).max(0.0) * 1e9 / fs) as i64)
+            };
+            for (first, last, ended) in runs {
+                let (start, end) = (at(first), ended.then(|| at(last + 1)));
+                // Active in the window's very first frame means the transmission began before this
+                // window: late entry. C23's pitfall is that its encryption state is then UNKNOWN
+                // rather than clear, and `from_grant` carries the grant's state verbatim — nothing
+                // here reads an encryption bit, so nothing is claimed (T-266, T-270).
+                let late = first == 0 || g.kind == GrantKind::GrantUpdate;
+                let mut call = CallRecord::from_grant(g, late);
+                call.t_start = start;
+                call.t_end = end;
+                call.reasons
+                    .push(if ended { SILENCE_TIMEOUT } else { WINDOW_ENDED }.to_owned());
+                if first == 0 {
+                    call.reasons.push(LATE_ENTRY.to_owned());
+                }
+                let mut open = GrantEvent::new(system, GrantKind::CallStart, start);
+                open.call = Some(call.id);
+                open.talkgroup = g.talkgroup.clone();
+                open.unit_id = g.unit_id.clone();
+                open.channel = g.channel.clone();
+                open.f_hz = g.f_hz;
+                open.detail = json!({
+                    "reason": if late { LATE_ENTRY } else { "grant-followed" },
+                    "granted_by": g.kind.as_str(),
+                    "measured": "channel envelope, C11 DDC over the buffered window",
+                    "frame_s": frame_s,
+                    "margin_db": OCCUPIED_MARGIN_DB,
+                    "reference_raster_channel": ref_k,
+                });
+                let mut evs = vec![open];
+                if let Some(t_end) = end {
+                    let mut close = GrantEvent::new(system, GrantKind::CallEnd, t_end);
+                    close.call = Some(call.id);
+                    close.talkgroup = g.talkgroup.clone();
+                    close.channel = g.channel.clone();
+                    close.f_hz = g.f_hz;
+                    close.detail = json!({
+                        "reason": SILENCE_TIMEOUT,
+                        "silence_timeout_s": SILENCE_TIMEOUT_S,
+                    });
+                    evs.push(close);
+                }
+                writes.push((call, evs));
+            }
+        }
+    }
+
+    if writes.is_empty() {
+        return;
+    }
+    if crate::debug_enabled() {
+        eprintln!(
+            "hk-pipeline: trunk-cc followed {} of {} granted channel(s) ({} outside the \
+             {:.3} MHz window at {:.4} MHz): {} call(s)",
+            inside.len(),
+            inside.len() + outside.len(),
+            outside.len(),
+            usable_hz / 1e6,
+            tune_center / 1e6,
+            writes.len(),
+        );
+    }
+    let mut repo = shared.repo();
+    for (call, evs) in &writes {
+        if let Err(e) = repo.put_call(call) {
+            inc(&c.errors);
+            eprintln!("hk-pipeline: trunk-cc call: {e}");
+            continue;
+        }
+        inc(&c.cc_calls);
+        if call.t_end.is_some() {
+            inc(&c.cc_calls_closed);
+        }
+        for ev in evs {
+            if let Err(e) = repo.append_grant(ev) {
+                inc(&c.errors);
+                eprintln!("hk-pipeline: trunk-cc call event: {e}");
+            }
+        }
     }
 }
 
@@ -700,6 +1135,107 @@ mod tests {
             .expect("a 12-byte block")
             .iden_up()
             .expect("an IDEN_UP")
+    }
+
+    /// The silence timeout is the number its own derivation gives. Asserting the derivation rather
+    /// than the value is what stops the constant drifting to whatever makes a scene pass.
+    #[test]
+    fn the_silence_timeout_lies_between_a_fade_null_and_a_voice_frame() {
+        // Both bounds are computed from the quantities they come from rather than written down,
+        // so the derivation is the thing under test and the numbers cannot be quietly retuned.
+        //
+        // One P25 Phase 1 Logical Link Data Unit: 1728 bits at 9600 bit/s.
+        let voice_frame_s = 1728.0 / 9600.0_f64;
+        // Half a wavelength at 851 MHz, crossed at a slow 5 m/s: the longest a Rayleigh null can
+        // make a still-keyed transmitter look silent.
+        let fade_null_s = (299_792_458.0 / 851e6) / 2.0 / 5.0_f64;
+        assert!(
+            SILENCE_TIMEOUT_S > fade_null_s,
+            "shorter than a fade null ({fade_null_s:.3} s) splits one keying into two calls"
+        );
+        assert!(
+            SILENCE_TIMEOUT_S < voice_frame_s,
+            "a keyed transmitter emits a voice frame every {voice_frame_s:.3} s, so a longer \
+             timeout waits past proof that it unkeyed and merges two calls into one"
+        );
+        // And the window a pass buffers has to be able to HOLD a decision: a keying plus the
+        // silence that ends it. `window_s` in the built-in `trunk-cc-hunt` spec.
+        let pass_window_s = 0.5_f64;
+        assert!(
+            2.0 * SILENCE_TIMEOUT_S < pass_window_s,
+            "a {pass_window_s} s pass must fit a keying and the silence that closes it"
+        );
+    }
+
+    /// The frame walk: a transmission ends only when the silence after it was actually observed,
+    /// and one still going when the window runs out stays open rather than being closed at the
+    /// edge.
+    #[test]
+    fn a_keying_ends_on_observed_silence_and_an_unfinished_one_stays_open() {
+        // on 0..3 | quiet 4..9 | on 10..12 | quiet 13,14 | on 15..17
+        let mut p = vec![1.0; 18];
+        for j in [0, 1, 2, 3, 10, 11, 12, 15, 16, 17] {
+            p[j] = 100.0;
+        }
+        assert_eq!(
+            split_keyings(&p, 4.0, 3),
+            vec![(0, 3, true), (10, 17, false)],
+            "two quiet frames are not three, so the later keyings are still one unfinished run"
+        );
+        assert_eq!(
+            split_keyings(&p, 4.0, 2),
+            vec![(0, 3, true), (10, 12, true), (15, 17, false)],
+            "a shorter timeout separates them, and the last still runs off the window's end"
+        );
+        // Nothing above the threshold is no call at all, never a zero-length one.
+        assert!(split_keyings(&p, 1000.0, 2).is_empty());
+    }
+
+    /// C23's span limit at the row it produces: a grant this receiver cannot reach is REPORTED,
+    /// carrying the frequency it resolved to and how far outside the window that fell.
+    ///
+    /// The refusal is the opposite shape to T-268's: there, the band plan could not produce a
+    /// frequency, so none is reported. Here it could, the frequency is right, and what is missing
+    /// is the radio's reach — so the frequency IS reported, with the reason it was not followed.
+    /// Dropping it would make a system whose voice channels sit outside the dwell look exactly
+    /// like a system with no traffic.
+    #[test]
+    fn a_grant_beyond_the_dwell_window_is_reported_with_the_frequency_it_resolved_to() {
+        let system = TrunkSystemId::new();
+        let t = Timestamp::UNIX_EPOCH.saturating_add_nanos(1_000_000_000);
+        let (center, fs) = (851.0125e6, 500e3);
+        let usable = USABLE_FRACTION * fs;
+        let mut g = GrantEvent::new(system, GrantKind::Grant, t);
+        g.talkgroup = Some("1234".into());
+        g.channel = Some("4626".into());
+        g.f_hz = Some(851.7375e6);
+        assert!(
+            (g.f_hz.unwrap() - center).abs() > usable / 2.0,
+            "this grant has to be outside the window, or the test proves nothing"
+        );
+
+        let ev = outside_window_event(system, &g, center, usable, fs);
+        assert_eq!(ev.kind, GrantKind::OutsideWindow);
+        assert_eq!(
+            ev.f_hz, g.f_hz,
+            "the row keeps the frequency it resolved to"
+        );
+        assert_eq!(ev.channel, g.channel);
+        assert_eq!(ev.detail["reason"].as_str(), Some("grant-outside-window"));
+        assert!((ev.detail["offset_hz"].as_f64().unwrap() - 725_000.0).abs() < 1.0);
+        assert!(ev.detail["beyond_usable_hz"].as_f64().unwrap() > 0.0);
+        assert_eq!(ev.detail["span_limit_hz"].as_f64(), Some(C23_SPAN_LIMIT_HZ));
+        assert_eq!(ev.encryption, hk_model::Encryption::Unknown);
+        ev.validate().expect("a writable row");
+
+        // And the call it opens says why it has no end, rather than there being no row at all.
+        let mut call = CallRecord::from_grant(&ev, false);
+        call.reasons.push(OUTSIDE_WINDOW.to_owned());
+        assert_eq!(call.t_end, None, "its end was never observed");
+        assert_eq!(call.f_hz, g.f_hz);
+        assert_eq!(call.encryption, hk_model::Encryption::Unknown);
+        assert!(!call.encryption.is_clear(), "unknown is never clear");
+        call.validate().expect("a writable row");
     }
 
     #[test]

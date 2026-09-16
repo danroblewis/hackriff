@@ -1666,6 +1666,21 @@ impl RunSummary {
             c("/chains/sweep_uncharacterised")
         ));
         line(format!(
+            "trunking:    {} CC confirmed, {} TSBK(s), {} grant(s) mapped / {} unmapped / {} \
+             outside window; {} followed ({} refused, {} silent), {} call(s) ({} closed on \
+             silence)",
+            c("/chains/cc_confirmed"),
+            c("/chains/cc_tsbks"),
+            c("/chains/cc_grants_mapped"),
+            c("/chains/cc_grants_unmapped"),
+            c("/chains/cc_grants_outside_window"),
+            c("/chains/cc_follows"),
+            c("/chains/cc_follow_refused"),
+            c("/chains/cc_follow_silent"),
+            c("/chains/cc_calls"),
+            c("/chains/cc_calls_closed"),
+        ));
+        line(format!(
             "decodes:     {} demodulations, {} decodes ({} content withheld), {} CRC-valid; plugins {} decodes, {} records dropped, {} restarts",
             c("/chains/demodulations"),
             c("/chains/decodes"),
