@@ -5653,7 +5653,8 @@ tasks:
     milestone: M2-hardening
     title: Document where the source abstraction is N-capable and where the single-device assumption actually
       lives
-    status: in-progress
+    status: done
+    commit: 63bdb9d
     priority: low
     deps:
     - T-259
