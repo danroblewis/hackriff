@@ -648,7 +648,11 @@ mod tests {
             stage: Stage::User,
             provenance: ClassProvenance {
                 rules: "hk-ui/reclassify@1".into(),
-                features_version: 1,
+                // Determinate (T-292): this fixture stands for a row a current writer produced,
+                // not the pre-T-290 `FEATURES_VERSION_INDETERMINATE` marker. hk-store doesn't
+                // depend on hk-classify, so it can't name `hk_classify::FEATURES_VERSION`
+                // directly.
+                features_version: 2,
                 features_ref: None,
                 ml: None,
                 snr_db: Some(18.0),
