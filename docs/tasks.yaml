@@ -5968,7 +5968,7 @@ tasks:
     milestone: M2-hardening
     title: 'An unidentified continuous 28 kHz emission at 100.465339 MHz in the FM fixture: not stereo FM,
       not a receiver image'
-    status: in-progress
+    status: done
     priority: low
     deps:
     - T-289
@@ -7270,6 +7270,94 @@ tasks:
       The rule must stay claim-nothing at the boundary: a visit STRADDLING a switch is
       Unknown, not assigned by midpoint. Control: the 9:1 majority case from T-359
       still yields Unknown, i.e. this must not become a dominance rule by the back door.
+  - id: T-373
+    title: A periodic gain step at fs/8192 puts a 293 Hz comb into every fixture, and nothing excludes it
+    milestone: M2-hardening
+    status: in-progress
+    priority: high
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    deps: [T-317]
+    acceptance: |
+      T-317 found it while identifying the 100.465 MHz emission, and nearly
+      published a wrong answer because of it. The raw stream carries a PERIODIC
+      GAIN STEP: samples 0-895 of every 8192-sample period are 0.431 dB lower in
+      power than samples 896-8191, over all 13,184 periods. It is stream-wide -
+      present in wideband total power, on the receiver's own DC line (27 dB) and
+      its reference harmonic (16 dB), and in bands with NO emission at all (23 dB
+      at 100.150 MHz). The 2026-09-13 2.4 Msps capture has it too.
+      It puts a 292.969 Hz comb (= 2.4 MHz / 8192) with at least 27 harmonics into
+      amplitude, and through a channel filter into the DISCRIMINATOR of anything
+      narrowband and weak, with sinc nulls of the 896/8192 duty near harmonics 9
+      and 18. READ NAIVELY IT LOOKS LIKE A 3.41 ms TDMA FRAME - T-317 chased it as
+      one until a control on the receiver's own CW lines exposed it.
+      This is the recurring defect family in its purest form: a feature measuring
+      the OBSERVATION rather than the SIGNAL. Two jobs, in this order.
+      FIRST, establish blast radius: does any SHIPPED analysis read it today?
+      hk-classify's cyclic line dimensions (features@4, T-328) are the obvious
+      suspect, along with any symbol-rate or cyclostationarity estimator, and the
+      acceptance suite runs on exactly these fixtures. Report what is and is not
+      affected with measurements, not inspection.
+      SECOND, exclude it where it is read: periodicity and cyclostationarity
+      analysis must reject n * fs/8192 on these captures. Excluding it must be
+      DERIVED from the capture (the artefact is recorded in
+      hackriff:provenance.capture_artefact), never a hardcoded 293 Hz - a
+      different sample rate moves the comb.
+      Control that matters: a GENUINE emission whose symbol rate lands near a comb
+      harmonic must still be found. An exclusion that silently eats real structure
+      is worse than the artefact.
+      Note the source is UNIDENTIFIED - T-317 could not say whether it originates
+      in the HackRF, the host USB path, or hackrf_transfer. Identifying it is
+      welcome but not required; excluding it is.
+  - id: T-374
+    title: Nothing can say "these emitters are harmonics of one fundamental nobody can see"
+    milestone: M3
+    status: todo
+    priority: normal
+    parallel_group: M3B
+    core_interface: true
+    model: opus
+    deps: [T-317]
+    acceptance: |
+      A capability gap T-317 proved by having to do the work BY HAND across four
+      captures. T-302 gates image/harmonic/IMD attribution on the receive chain,
+      which is correct and stays - but it reasons about ONE emitter against the
+      device. Nothing reasons about a FAMILY of emitters against an unseen common
+      cause.
+      T-317's method is the specification: fit f = n * f0 over several emitters in
+      DIFFERENT bands, check the residual pins the indices (off-by-one must move
+      the intercept by a whole f0), and check the corroborating physics - rms width
+      proportional to n, because a fundamental's frequency noise multiplies with the
+      harmonic number. Line-shape correlation (T-317 measured 0.967-0.988) is
+      further evidence.
+      This is the user's "signal relationships / reflection detection" roadmap item,
+      and it is device-local reasoning under T-259/T-305: a harmonic family is a
+      property of one receive chain plus one emitter, never shared air.
+      It must be able to say NO. A fit over enough emitters will always find some f0;
+      the control is a set of unrelated real emitters that must NOT be declared a
+      family. Per T-233, evidence that can only merge is not evidence.
+  - id: T-375
+    title: 50 ohm terminator capture - is the oscillator family radiated or conducted?
+    milestone: M2-hardening
+    status: blocked
+    priority: normal
+    parallel_group: HW
+    needs: hardware
+    deps: [T-317]
+    acceptance: |
+      USER ACTION, already on the project's needs-the-user list; T-317 gives it a
+      concrete question. T-317 identified the 100.465 MHz emission as harmonic 43
+      of a free-running ~2.336 MHz oscillator, but could NOT decide whether that
+      oscillator radiates into the antenna or couples into the receive chain
+      conducted (host supply, USB). All four captures share one antenna and one
+      host, and the 20 Msps pair is quantisation-limited, so removing the amp moved
+      the family's excess no more than it moved the real stations'.
+      A capture into a 50 ohm terminator separates them: conducted coupling survives
+      the terminator, radiated does not. Record settings in SigMF as usual.
+      This decides whether the emitter is the user's own equipment (fix it) or
+      something in the room (catalogue it), and it is the honest close of T-317's
+      one open question.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
