@@ -5748,7 +5748,8 @@ tasks:
     milestone: M2-hardening
     title: C18 clustering compares period_s, duty_cycle and burst_length_s unconditionally - a single disagreeing
       burst length refuses a join however much else agrees
-    status: in-progress
+    status: done
+    commit: aa58d5c
     priority: high
     deps:
     - T-281
@@ -5966,6 +5967,48 @@ tasks:
       the way fsk.rs now does. This is not about adding logging volume: a counter that cannot say what it
       counted trains everyone to ignore the count, which is the failure T-293 exists to record. No behaviour
       change beyond the message; no threshold moves'
+  - id: T-320
+    milestone: M2-hardening
+    title: Cluster id is not surfaced in Explore, so the one signal that makes near-duplicates visible reaches
+      nobody
+    status: todo
+    priority: normal
+    deps:
+    - T-309
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'T-309 made near-duplicate detections of one emitter fall into ONE signature cluster instead
+      of each taking its own cluster id. That is the affordance which makes duplication visible - these
+      rows all measure alike - and right now its only consumer is /api/clusters. The Explore candidate list
+      does not show it, so the user sees 82 rows and no grouping. Surface cluster id in the candidate and
+      Confirmed lists so near-duplicates group visibly. Backend owns the logic per CLAUDE.md: the UI is
+      a thin client over docs/api.md, so the grouping must arrive as data, not be computed in ui/src. Update
+      docs/api.md and crates/hk-cli/tests/api_contract.rs together (T-079), and contract-test the field
+      itself rather than only the response shape - T-315 records that a shape-only assertion satisfies the
+      letter of T-079 and not its point. NOTE this does NOT collapse duplicate rows and must not pretend
+      to: a cluster sets nothing on an emitter (a_cluster_never_changes_anything_about_the_emitter). It
+      makes the duplication legible while the row-minting path is fixed separately'
+  - id: T-321
+    milestone: M2-hardening
+    title: A purely analogue emitter now sits exactly on the shared-field floor, so one field dropping out
+      stops it clustering entirely
+    status: todo
+    priority: low
+    deps:
+    - T-309
+    parallel_group: M3B
+    model: opus
+    acceptance: 'T-309 removed period_s, duty_cycle and burst_length_s from CLUSTER_FIELDS because they
+      measure the watch rather than the emission. It recorded the reach cost rather than hiding it: of the
+      ~10 cluster-eligible fields a real run produces, 7 survive, and a purely analogue emitter (family
+      + bandwidth + class) now sits EXACTLY on CLUSTER_MIN_SHARED_FIELDS = 3. That is sufficient today and
+      has no margin: if CLASS fails to measure on some run, such emitters silently stop clustering altogether
+      - no error, no signal, just no grouping. Decide whether an analogue emitter should contribute a fourth
+      MEASURED field (not a synthesised one), or whether the floor means something different for a family
+      with fewer measurable dimensions. Do NOT lower CLUSTER_MIN_SHARED_FIELDS: it is the matcher''s evidence
+      floor, equal to MATCH_MIN_DISCRIMINATING per ADR-0016 section 5, and T-309 pinned that equality with
+      a test. Fix the field supply, not the evidence bar'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
