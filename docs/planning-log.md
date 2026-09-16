@@ -2424,3 +2424,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Fix:** the validation measurement now stands for the returned tuning whether or not it locked, so an acquisition-only lock yields an unlocked outcome and Listen keeps the probe centre.
   - **Counts:** 1 failure in 32 loaded runs before; 0 in 20 after (6 burners, 20-way concurrency). One run hit the same decoy and correctly logged `locked false`, landing within 3 kHz of truth. Bound unchanged, no retry.
   - **T-224 launched** into the freed slot.
+- **B0.506 Full check green after the T-205 merge, with the dense-burst pin in place (73580bb).** Lint clean; 1447/1447 tests; acceptance 29/29; 37 GB free.
+  - **Merging T-188** (refine lock validity) with its own check; an Opus read-only review runs in parallel because it changes lock semantics on the real-time path.
