@@ -2503,3 +2503,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Both merge after the running T-219 check.**
 - **B0.522 T-195 launched** (Sonnet, UI-only, no Rust slot): per-signal output panels in the right panel that T-192 freed - the packet inspector reused for digital signals, and a waveform scope plus RDS text for FM/AM fed by T-159's decode-fields route. Both dependencies are merged.
   - **Still queued on T-199's merge:** T-218, T-212 and T-213 would otherwise branch without the classifier.
+- **B0.523 Full check green after the T-219 merge (70c642c).** Lint clean; 1474/1474 tests; acceptance 31/31 (up from 29: T-219's guard tests now enforce that a narrow signal inside a wide station stays visible and that a narrow burst on a predicted image frequency is not attributed to a wideband station); acceptance_m2 8/8; 37 GB free.
+  - **Merging T-199 (classifier) and T-217 (IQ-ring follow-ups)** together with one check.
