@@ -5950,7 +5950,8 @@ tasks:
     milestone: M2-hardening
     title: Three more silent chain_emitter swallows would produce the same unnameable error count T-293
       just spent a session diagnosing
-    status: in-progress
+    status: done
+    commit: a6bfdc1
     priority: normal
     deps:
     - T-293
