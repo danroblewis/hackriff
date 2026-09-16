@@ -361,3 +361,51 @@ fn quantisation_limited_provenance_marks_every_detection_marginal() {
     assert!(s.out.detections.iter().all(|d| d.detection.flags.marginal));
     let _ = Rules::default();
 }
+
+#[test]
+fn a_box_filling_its_own_window_is_provenance_suspect_and_a_narrow_one_is_not() {
+    // T-237: T-231 saw a detection occupying 15/16 of a 3 Msps window on pure synthetic noise
+    // fill. Whatever raised it, a box measured against a reference drawn from the very bins it
+    // fills carries no evidence that it is an emission, so the geometry alone makes it suspect.
+    // The box is still emitted with its measured extent: flagged, never hidden or trimmed.
+    let mut wide = scene_at(98e6, 21);
+    let span: Vec<f32> = vec![undb(25.0) as f32; BINS];
+    for _ in 0..10 {
+        wide.step(&span);
+    }
+    wide.finish();
+    let boxes: Vec<_> = wide
+        .out
+        .detections
+        .iter()
+        .filter(|d| d.bins.end - d.bins.start >= (BINS as f64 * 0.9) as usize)
+        .collect();
+    assert!(!boxes.is_empty(), "no whole-window box to flag");
+    for d in &boxes {
+        assert!(
+            d.detection.flags.marginal,
+            "a box spanning {} of {BINS} bins was not flagged provenance-suspect",
+            d.bins.end - d.bins.start
+        );
+        // Flagged, not suppressed or narrowed.
+        assert!(d.detection.obw_hz > 0.0);
+    }
+    // Control: a strong narrow line in the same geometry is a confident detection.
+    let mut narrow = scene_at(98e6, 22);
+    let mut p = flat(BINS);
+    add_line(&mut p, 2600, 3, 25.0);
+    for _ in 0..10 {
+        narrow.step(&p);
+    }
+    narrow.finish();
+    let near = near(
+        &narrow,
+        98e6 + (2600 - BINS / 2) as f64 * (FS / BINS as f64),
+        50e3,
+    );
+    assert!(!near.is_empty(), "the control line was not detected");
+    assert!(
+        near.iter().any(|d| !d.detection.flags.marginal),
+        "a narrow 25 dB line must not be provenance-suspect"
+    );
+}
