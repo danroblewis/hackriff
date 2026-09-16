@@ -323,11 +323,27 @@ pub struct Emitter {
     pub f_center_hz: f64,
     /// Current bandwidth, Hz.
     pub bandwidth_hz: f64,
-    /// First sighting.
+    /// First sighting — the **lower end of the hull**, never the start of a duration. See
+    /// [`Self::last_seen`].
     pub first_seen: Timestamp,
-    /// Latest sighting.
+    /// Latest sighting. With [`Self::first_seen`] this is the **hull** of the presence track
+    /// (docs/07 §2.11, ADR-0017 §1.1), **never a time extent and never to be displayed as a
+    /// duration**: an emitter that fired once at 09:00 and once at 17:00 has an eight-hour hull
+    /// and may have been on the air for twenty seconds.
+    ///
+    /// The time extent lives on the presence interval ([`crate::presence`]). Ask
+    /// `Repository::presence` for "how long was this on air" and "is it on air now"; a window
+    /// filter must test **interval overlap**, not hull overlap, or it matches every window
+    /// between two distant sightings.
     pub last_seen: Timestamp,
-    /// Sightings (detections) summarised.
+    /// Sightings (detections) summarised: a **lifetime total, valid only in History**.
+    ///
+    /// **Excluded from every liveness decision and from live-list ranking** (docs/07 §2.11,
+    /// ADR-0017 §5). It was the only column that could hold "this is still here", which is why it
+    /// was observed climbing to 582,500 per hour with nothing ageing out — the counter was not
+    /// wrong, it was homeless. What accumulates instead is the open presence interval's `t_end`;
+    /// what ranks a live list is in-window on-air time ([`crate::presence::Presence::on_air_s`]).
+    /// Its existing uses in `recurrence.occurrences` and `ConfirmPolicy` are unchanged.
     pub count: u64,
     /// Fingerprint features (C18; shape not yet pinned).
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -351,7 +367,12 @@ impl Emitter {
         FreqRange::centered(self.f_center_hz, self.bandwidth_hz)
     }
 
-    /// First-to-last-seen span.
+    /// First-to-last-seen span: the **hull** of the presence track, **never a duration**.
+    ///
+    /// This is a bounding box in time, not time on air, and it is mostly silence for anything
+    /// intermittent. Use it to bound a scan, never to say how long a signal transmitted or
+    /// whether it is transmitting now — `Repository::presence` answers both from the intervals
+    /// ([`crate::presence`], docs/07 §2.27).
     pub fn seen(&self) -> TimeRange {
         TimeRange::new(self.first_seen, self.last_seen)
     }

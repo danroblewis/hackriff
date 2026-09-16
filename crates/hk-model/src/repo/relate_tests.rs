@@ -219,12 +219,20 @@ fn sighted(
     .emitter_id
 }
 
-/// T-250, over the repository: the user's own 99.8 MHz station of 2026-09-16, seen over two
-/// **disjoint** windows (94–399 s, then 471–530 s), is one shown row and not two. Their bands
-/// overlap essentially exactly; the only thing that had separated them was the burst length each
-/// window happened to measure (0.68 s vs 0.37 s), a statistic of the watching, not of the signal.
+/// T-250's scene, now fixed one layer earlier by TM-5 (T-262): the user's own 99.8 MHz station of
+/// 2026-09-16, seen over two **disjoint** windows (94–399 s, then 471–530 s), is **one row from
+/// the start**. Their bands overlap essentially exactly; the only thing that had separated them
+/// was the burst length each window happened to measure (0.68 s vs 0.37 s), a statistic of the
+/// watching, not of the signal, and it is excluded while the two intervals are disjoint
+/// (`Fingerprint::compare_across_silence`).
+///
+/// T-250 collapsed this pair at the **merge** layer, leaving a deferring second row, and recorded
+/// that entity resolution was still minting it (ADR-0017 §1.1 left that to TM-5). Now the returning
+/// station revives its own emitter, so the duplicate never exists and there is nothing for the
+/// merge rules to hide. The merge layer keeps its own coverage in the `t219_*` tests below and in
+/// `relate::tests`.
 #[test]
-fn t250_a_station_seen_in_two_disjoint_windows_collapses_to_one_shown_row() {
+fn t262_a_station_seen_in_two_disjoint_windows_is_one_row_from_the_start() {
     let (mut r, _sv) = scene();
     let first = sighted(&mut r, 99_814_800.0, 377_500.0, 0.4952, 0.6821, tr(94, 399));
     let second = sighted(
@@ -235,17 +243,26 @@ fn t250_a_station_seen_in_two_disjoint_windows_collapses_to_one_shown_row() {
         0.3648,
         tr(471, 530),
     );
-    assert_ne!(
+    assert_eq!(
         first, second,
-        "entity resolution still mints two rows here; the merge rules are what must collapse them"
+        "the returning station revives its own emitter rather than minting a second row"
     );
+    assert_eq!(every(&r).len(), 1, "no duplicate row was ever created");
+    assert_eq!(shown(&r), vec![first], "one physical station, one row");
 
+    // Two presence intervals on that one emitter: the 72 s silence closed the first.
+    let iv = r
+        .presence_intervals(first, crate::presence::IdleGap::conservative(), t(530))
+        .unwrap();
+    assert_eq!(iv.len(), 2, "{iv:?}");
+    assert_eq!(iv[0].time, tr(94, 399));
+    assert_eq!(iv[1].time, tr(471, 530));
+
+    // And the merge layer is left with nothing to claim.
     let out = r
         .resolve_overlaps(second, "test/overlap@1", t(530), &tol())
         .unwrap();
-    assert_eq!(out.duplicates.len(), 1, "{out:?}");
-    assert_eq!(shown(&r), vec![first], "one physical station, one row");
-    assert_eq!(every(&r).len(), 2, "the deferring row is kept in full");
+    assert!(out.duplicates.is_empty(), "{out:?}");
 }
 
 fn confirm(r: &mut Repository, id: EmitterId, at: Timestamp) {

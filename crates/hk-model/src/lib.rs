@@ -55,6 +55,7 @@ pub mod frames;
 pub mod hash;
 pub mod ids;
 pub mod plan;
+pub mod presence; // T-262 (ADR-0017 TM-5): presence intervals, close and revive
 pub mod provenance;
 pub mod recording;
 pub mod region;
@@ -104,6 +105,10 @@ pub use ids::{
 };
 pub use plan::{
     GainTableEntry, PlanRegion, ScanPlan, ScanPolicy, Schedule, Survey, SurveyState, SurveySummary,
+};
+pub use presence::{
+    IdleGap, Liveness, MAX_IDLE_GAP_S, MIN_IDLE_GAP_S, ObservationSpan, Presence, PresenceInterval,
+    REVISIT_FACTOR, intervals_from_spans, presence_in_window,
 };
 pub use provenance::{ClockSource, Provenance, Tune};
 pub use recording::{

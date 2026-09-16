@@ -44,6 +44,10 @@ pub const K_REF: f64 = 8.0;
 /// Fallback for a class fitted on too few samples to take a 95th percentile.
 const DEFAULT_M_P95: f64 = 2.0;
 
+/// Fallback second-largest-|z| percentile, for a class fitted on too few samples to take one.
+/// Deliberately permissive: an unfitted class should not start rejecting its own members.
+const DEFAULT_Z2_P99: f64 = 4.0;
+
 /// One dimension of a class's density.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,6 +76,36 @@ pub struct ClassDensity {
     /// member of this class may still fit. It calibrates the open-set score (see
     /// [`DensityModel::score_class`]).
     pub m_p95: f64,
+    /// 99th percentile of the **second-largest |z|** over the class's dev samples (T-248).
+    ///
+    /// `m_p95` alone cannot reject an unlisted member of a family: `m` is a mean over ~27
+    /// dimensions, and an unlisted member matches its listed siblings on almost all of them and
+    /// differs on one to three, so the evidence that would reject it is averaged away. Measured on
+    /// the held-out generators: VSB-AM sits at m 1.536 against `am`'s m_p95 of 2.468, and
+    /// π/4-DQPSK at 1.727 against `qpsk`'s 1.998 — both comfortably inside, while sitting at z
+    /// +3.28 and −4.68 on a single dimension.
+    ///
+    /// The **largest** |z| does not work either, and the dev distribution says why: genuine members
+    /// routinely have one wild dimension (p99 of max |z| is at the [`Z_CLAMP`] of 6.0 for eleven of
+    /// the twenty-one classes), because several `features@1` dimensions are heavy-tailed. That is
+    /// the same fact [`Z_CLAMP`] exists for. The *second*-largest is the order statistic that
+    /// survives it: one wild feature is what a genuine member has, two is what a non-member has.
+    /// Measured dev p95 against held-out p95 — `am` 2.47 vs 3.58, `qpsk` 2.60 vs 4.04, `qam16`
+    /// 2.19 vs 3.06 — a consistent gap where both `m` and max |z| overlap.
+    ///
+    /// **The 99th percentile, not the 95th.** A percentile of a max-type order statistic is
+    /// exceeded by exactly that fraction of genuine members *by construction*, so a p95 tail
+    /// penalises 5 % of real signals — and because the term is combined with `min`, each of those
+    /// is a claim withheld. Measured on the acceptance grid, a p95 tail cost known-family top-1
+    /// **0.9070 → 0.8770**, through the ADR-0016 §7 floor of 0.90, to buy held-out recall
+    /// 0.7778 → 0.8788. The 99th is the operating point at which a rejection means "two dimensions
+    /// out, which a genuine member essentially never is". The percentile is a model parameter
+    /// fitted on the **dev** split, like every other number in this file.
+    ///
+    /// `0.0` means "not fitted", and [`DensityModel::score_class`] then applies no tail term at
+    /// all, so an older density file keeps its previous behaviour exactly.
+    #[serde(default)]
+    pub z2_p99: f64,
     /// Fitting samples behind it (provenance).
     pub n: usize,
 }
@@ -233,13 +267,24 @@ impl DensityModel {
         // snippets). A tight class has to earn its win, and pays for its own width.
         let log_density = -0.5 * m - a.ln_sigma / a.weight;
         let log_evidence = K_REF * log_density;
+        // The per-dimension tail term (T-248), calibrated exactly as `m_p95` is: a χ² tail
+        // normalised by the class's own dev 95th percentile, so a member as extreme as the dev p95
+        // scores 1.0 and the score falls away beyond it. It is combined with `min`, which makes
+        // membership a **conjunction** — a genuine member is typical in its mean *and* in its
+        // second-worst dimension — and guarantees the term can only ever lower a plausibility.
+        // Nothing downstream can therefore gain a claim from it (see `classifier`).
+        let tail = if c.z2_p99 > 0.0 {
+            (chi2_sf(a.z2 * a.z2, 1) / chi2_sf(c.z2_p99 * c.z2_p99, 1).max(1e-12)).min(1.0)
+        } else {
+            1.0
+        };
         Some(FamilyScore {
             d2: a.d2,
             k: a.k,
             m,
             evidence: log_evidence.exp(),
             log_evidence,
-            plausibility: (chi2_sf(a.d2, dof) / reference).min(1.0),
+            plausibility: (chi2_sf(a.d2, dof) / reference).min(1.0).min(tail),
             class: c.class.clone(),
             worst: a.worst,
         })
@@ -322,11 +367,23 @@ impl DensityModel {
                 } else {
                     DEFAULT_M_P95
                 };
+                // The same calibration for the tail statistic, on the same dev rows.
+                let mut z2s: Vec<f64> = rows
+                    .iter()
+                    .filter_map(|r| accumulate(&dims, r).map(|a| a.z2))
+                    .collect();
+                z2s.sort_by(f64::total_cmp);
+                let z2_p99 = if z2s.len() >= 20 {
+                    z2s[((z2s.len() as f64 * 0.99) as usize).min(z2s.len() - 1)].max(1.0)
+                } else {
+                    DEFAULT_Z2_P99
+                };
                 ClassDensity {
                     class,
                     family,
                     dims,
                     m_p95,
+                    z2_p99,
                     n: rows.len(),
                 }
             })
@@ -379,6 +436,10 @@ fn accumulate(dims: &[Dim], features: &Features) -> Option<Accumulated> {
     let mut ln_sigma = 0.0;
     let mut k = 0usize;
     let mut worst: Option<(String, f64)> = None;
+    // The two largest |z|, for the tail term (T-248). The second is the one that discriminates:
+    // see [`ClassDensity::z2_p95`].
+    let mut z1 = 0.0_f64;
+    let mut z2 = 0.0_f64;
     for dim in dims {
         let Some(x) = features.get(&dim.feature) else {
             continue;
@@ -388,8 +449,15 @@ fn accumulate(dims: &[Dim], features: &Features) -> Option<Accumulated> {
         ln_sigma += dim.weight * dim.sigma.ln();
         weight += dim.weight;
         k += 1;
-        if worst.as_ref().is_none_or(|(_, w)| z.abs() > *w) {
-            worst = Some((dim.feature.clone(), z.abs()));
+        let az = z.abs();
+        if az > z1 {
+            z2 = z1;
+            z1 = az;
+        } else if az > z2 {
+            z2 = az;
+        }
+        if worst.as_ref().is_none_or(|(_, w)| az > *w) {
+            worst = Some((dim.feature.clone(), az));
         }
     }
     if k < (dims.len() / 2).max(3) || weight <= 0.0 {
@@ -400,6 +468,7 @@ fn accumulate(dims: &[Dim], features: &Features) -> Option<Accumulated> {
         weight,
         ln_sigma,
         k,
+        z2,
         worst,
     })
 }
@@ -411,6 +480,8 @@ struct Accumulated {
     /// Σ w·ln σ over the dimensions used.
     ln_sigma: f64,
     k: usize,
+    /// Second-largest |z| over the dimensions used ([`ClassDensity::z2_p95`]).
+    z2: f64,
     worst: Option<(String, f64)>,
 }
 
@@ -454,6 +525,52 @@ mod tests {
                 assert!(c.n >= 20, "{class} fitted on {} samples", c.n);
             }
         }
+    }
+
+    #[test]
+    fn the_shipped_models_carry_a_fitted_tail_percentile() {
+        // `z2_p99` defaults to 0.0 ("not fitted"), which disables the tail term silently. A shipped
+        // file that lost it would quietly restore the pre-T-248 open set, so both models are
+        // checked rather than trusted.
+        for (name, model) in [
+            ("densities-1.json", DensityModel::builtin()),
+            (
+                "densities-below-gate-1.json",
+                DensityModel::builtin_below_gate(),
+            ),
+        ] {
+            for c in &model.classes {
+                assert!(
+                    c.z2_p99 > 0.0,
+                    "{name}: {} has no fitted z2_p99 — re-run \
+                     `cargo run -p hk-classify --bin fit-densities`",
+                    c.class
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_tail_term_can_only_lower_a_plausibility() {
+        // The safety property the classifier relies on (T-248): adding the tail term withholds
+        // claims, it never creates one. A vector on a class's mean has a second-largest |z| of 0,
+        // so the term is exactly 1 and nothing moves; a vector with two wild dimensions is what it
+        // is for.
+        let m = DensityModel::builtin();
+        let c = m.class("am").unwrap();
+        let on_mean = on_the_mean(&c.dims);
+        let s = m.score_class("am", &on_mean).expect("scored");
+        assert!(s.plausibility > 0.99, "{s:?}");
+        let mut two_wild = on_mean.clone();
+        for d in c.dims.iter().take(2) {
+            let i = FEATURE_NAMES.iter().position(|n| *n == d.feature).unwrap();
+            two_wild.values[i] = Some(d.mean + 6.0 * d.sigma);
+        }
+        let wild = m.score_class("am", &two_wild).expect("scored");
+        assert!(
+            wild.plausibility < s.plausibility,
+            "two wild dimensions must not stay fully plausible: {wild:?}"
+        );
     }
 
     #[test]

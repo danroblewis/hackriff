@@ -75,6 +75,9 @@ mod lifecycle;
 #[cfg(test)]
 mod lifecycle_tests;
 mod measure;
+mod presence; // T-262 (ADR-0017 TM-5) presence intervals
+#[cfg(test)]
+mod presence_tests;
 mod refined;
 mod relate; // T-219
 #[cfg(test)]
@@ -135,10 +138,11 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0009_signature.sql"), // T-218 C18 signature storage
     include_str!("migrations/0010_emission_features.sql"), // T-201 C18 measured features
     include_str!("migrations/0011_signature_cluster.sql"), // T-202 C18 clusters of unknowns
-    // 0012 is reserved by ADR-0017 §9 (TM-5) for `idx_emitter_observation_time`, so T-266 took
-    // 0013. This array, not the file name, decides what runs and in what order: a later 0012
-    // simply appends after this entry, and databases migrate correctly either way.
+    // 0012 was reserved by ADR-0017 §9 (TM-5) for `idx_emitter_observation_time`, so T-266 took
+    // 0013 first. This array, not the file name, decides what runs and in what order: 0012 simply
+    // appends after 0013 (T-262), and databases at either version migrate correctly.
     include_str!("migrations/0013_trunking.sql"), // T-266 C23 trunking metadata (no call audio)
+    include_str!("migrations/0012_observation_time_index.sql"), // T-262 ADR-0017 TM-5 (index only)
 ];
 
 /// Schema version this build creates and understands.

@@ -257,6 +257,34 @@ impl Classifier {
                     Some("low_confidence")
                 } else if open_set > t.map_or(0.5, |t| t.open_set_max) {
                     Some("open_set")
+                } else if scored
+                    .iter()
+                    .find(|(l, _)| l == label)
+                    .is_some_and(|(_, s)| 1.0 - s.plausibility > t.map_or(0.5, |t| t.open_set_max))
+                {
+                    // **The open-set score is a maximum over families; the claim is not** (T-248).
+                    //
+                    // `open_set = 1 − max_c L_c` (ADR-0016 §4.4) asks "is *any* known family
+                    // plausible?", while the family reported is the one with the highest
+                    // **evidence**. Those are different families more often than it sounds, and the
+                    // arm above then tests the claimed family's threshold against a number some
+                    // other family produced.
+                    //
+                    // Measured: the held-out 8-level FSK is claimed `fsk` with confidence 0.997 and
+                    // a reported open set of 0.000, while `fsk`'s own best class scores it at
+                    // plausibility **0.152** — m 2.187 against `4fsk`'s dev m_p95 of 1.709, i.e.
+                    // already outside the envelope of its own claimed family. The 0.000 came from a
+                    // different family fitting loosely; `fsk` won the ranking on evidence. 13 of
+                    // those 15 snippets abstain once the question is asked of the family actually
+                    // being named.
+                    //
+                    // So the family being claimed must itself be plausible, at the same threshold
+                    // §4.4 already states. This can only ever *withhold* a claim — it adds no
+                    // family, moves no mass and cannot raise a confidence — so it is a tightening
+                    // of the abstention rule, not a new decision procedure. `open_set_score` keeps
+                    // the ADR's definition unchanged; this is one more condition under which
+                    // unknown wins, alongside the gate and entropy conditions §4.4 already lists.
+                    Some("open_set_family")
                 } else if l_share < ABSTAIN_TOP_SHARE && entropy_of_likelihood > ABSTAIN_ENTROPY {
                     Some("ambiguous")
                 } else {
