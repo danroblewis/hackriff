@@ -115,15 +115,35 @@ pub struct FamilyScore {
 }
 
 const BUILTIN: &str = include_str!("../data/densities-1.json");
+const BUILTIN_BELOW_GATE: &str = include_str!("../data/densities-below-gate-1.json");
 
 impl DensityModel {
-    /// The shipped model (parsed once).
+    /// The shipped model (parsed once), fitted at and above each family's SNR gate: the one that
+    /// ranks claimable families and calibrates the open set.
     pub fn builtin() -> &'static DensityModel {
         static MODEL: OnceLock<DensityModel> = OnceLock::new();
         MODEL.get_or_init(|| {
             let m: DensityModel =
                 serde_json::from_str(BUILTIN).expect("data/densities-1.json parses");
             m.validate().expect("data/densities-1.json is valid");
+            m
+        })
+    }
+
+    /// The companion model fitted **below** each family's gate (`fit-densities` writes both).
+    ///
+    /// It answers one question only: could this snippet be a family whose SNR gate held it back?
+    /// [`crate::classifier`] turns that plausibility into `unknown` mass and never into a claim, so
+    /// this model can only make the classifier *less* confident. It exists because
+    /// [`Self::builtin`] is fitted at and above the gate, which makes scoring a family below its
+    /// own gate an extrapolation — and that is exactly where this question is asked.
+    pub fn builtin_below_gate() -> &'static DensityModel {
+        static MODEL: OnceLock<DensityModel> = OnceLock::new();
+        MODEL.get_or_init(|| {
+            let m: DensityModel = serde_json::from_str(BUILTIN_BELOW_GATE)
+                .expect("data/densities-below-gate-1.json parses");
+            m.validate()
+                .expect("data/densities-below-gate-1.json is valid");
             m
         })
     }
