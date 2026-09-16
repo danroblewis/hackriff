@@ -3457,7 +3457,7 @@ tasks:
   - id: T-214
     milestone: M3
     title: "C18 signature import from rtl_433 flex/device specs into immutable signature versions"
-    status: in-progress
+    status: done
     priority: normal
     deps: [T-201]
     parallel_group: M3B
