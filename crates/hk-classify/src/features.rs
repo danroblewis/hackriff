@@ -25,7 +25,13 @@ use hk_estimate::blind::SymbolParameters;
 use num_complex::{Complex32, Complex64};
 
 /// Feature-vector version; also [`crate::thresholds::FEATURES_VERSION`].
-pub const FEATURES_VERSION: u32 = 1;
+///
+/// **2 (T-248):** `symmetry` changed meaning — it is now sideband balance about the carrier (DC)
+/// rather than about the occupied band's own mid-point, which measured ~0 by construction for
+/// every emission including `ssb`. [`FEATURE_NAMES`] may grow within a version but a dimension may
+/// never change meaning within one, so this is a new version and the shipped densities are refitted
+/// against it.
+pub const FEATURES_VERSION: u32 = 2;
 
 /// Smallest snippet the feature tree will look at.
 pub const MIN_SAMPLES: usize = 256;
@@ -281,6 +287,39 @@ fn phase_features(f: &mut Features, x: &[Complex64]) {
         prev = p;
         phase.push(acc);
     }
+    // **These two are not length-invariant, and T-248 confirmed that cannot be fixed here.**
+    //
+    // σ_dp and σ_ap are the spread of the *unwrapped* phase residual. An angle modulator integrates
+    // its baseband, so that residual performs a random walk and its spread grows with the
+    // observation rather than being a per-sample quantity (`synth` calls σ_ap "rad/sample", which
+    // is true of `sigma_af` but never was of these two). Measured on one emission: σ_ap 95.5 over a
+    // 4 073-sample snippet against 252.3 over the 381 507-sample production capture, which drove
+    // the real FM capture to z +5.06 on this dimension alone — a third of its whole distance from
+    // `wfm`. The densities are fitted at ~4 000 samples and production classifies at 381 507, so
+    // the two are not comparable, exactly as fitting at one *rate* is not (T-235).
+    //
+    // T-240 implemented the fix (fixed window, detrended independently, median across windows),
+    // measured an open-set regression and reverted it. T-248 re-ran it with the claimed-family
+    // plausibility rule and the per-dimension tail term already in place, on the theory that those
+    // now reject a chirped carrier deliberately and the drift was no longer load-bearing. **That
+    // theory is refuted by measurement.** With the length fix in: `chirped-fsk` abstention
+    // 36/36 → 26/36, ten of them returning `analog` — a wrong *family*, not a generalisation —
+    // `fsk` open set 0.931 → 0.792, held-out recall 0.8510 → 0.8384.
+    //
+    // The obvious repair fails too, and for a physical reason worth recording. Carrying the
+    // discarded drift as its own dimension (each window's linear slope *is* its mean instantaneous
+    // frequency, so the spread of those slopes is how far the carrier wandered) leaves
+    // `chirped-fsk` at 26/36 with the same ten wrong-family calls, because the fitted
+    // `carrier_drift` of `wfm` is **0.240 ± 0.174**: a wideband angle modulation's carrier
+    // genuinely wanders as much as a chirped one does, so "the carrier moves" does not separate
+    // them. The drift was never really rejecting a chirp — it was rejecting a *long observation*,
+    // and `chirped-fsk` happens to be one.
+    //
+    // So the length dependence stands, now measured twice and with the replacement ruled out. It is
+    // a real defect for long production snippets (the FM fixture abstains because of it) and it
+    // needs a dimension that separates a swept carrier from a modulated one — `if_slope_r2` on a
+    // per-window basis, or a cyclostationary test — which is new DSP, not a rescaling. Left to its
+    // own task rather than smuggled in under an open-set ticket.
     let t: Vec<f64> = (0..phase.len()).map(|i| i as f64).collect();
     let (slope, intercept) = least_squares(&t, &phase);
     let residual: Vec<f64> = strong
@@ -383,13 +422,61 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
     if arith > 0.0 {
         f.set("flatness", (ln_mean.exp() / arith).clamp(0.0, 1.0));
     }
-    // Symmetry about the band's own mid-point: +1 lower-sideband only, −1 upper only, 0 balanced
-    // (SSB is the extreme case).
-    let mid = (lo + hi) / 2;
-    let lower: f64 = psd[lo..=mid].iter().sum();
-    let upper: f64 = psd[mid..=hi].iter().sum();
-    if lower + upper > 0.0 {
-        f.set("symmetry", (lower - upper) / (lower + upper));
+    // Sideband balance about the **carrier**: +1 lower-sideband only, −1 upper only, 0 balanced.
+    //
+    // The carrier is DC. The spectrum is DC-centred (`hk_dsp::fftshift_power`: bin N/2 is DC), and
+    // C13 recentres a snippet on its measured spectral peak before handing it here — which
+    // `crate::synth` reproduces deliberately — so for any carrier-bearing emission the carrier sits
+    // at bin N/2 by construction.
+    //
+    // This was measured about `(lo + hi) / 2`, the mid-point of the **occupied band itself**
+    // (T-248). Asymmetry about a band's own centre is ~0 by construction: the band is found by
+    // growing outwards from the peak until 99 % of the power is enclosed, so it re-centres itself
+    // on whatever it contains and cancels the very quantity the feature is named for. Measured on
+    // the dev grid at 25 dB, the old definition gave `ssb` — one sideband and no carrier, the
+    // extreme case this comment used to cite — **+0.046 ± 0.486**, and the held-out VSB-AM
+    // −0.009 ± 0.987: zero, with noise-level scatter, for the two emissions whose defining property
+    // is sideband asymmetry. The residual was driven by where `occupied_band` happened to land, and
+    // `tree::analog_classes` has been calling `ssb` off `symmetry > 0.35` on that noise.
+    //
+    // The DC bin itself is excluded from both sums: a retained carrier is not part of either
+    // sideband, and counting it would dilute the ratio by the largest line in the spectrum.
+    // The reference is the **strongest line in the band** — the carrier — with an equal number of
+    // bins `r` taken each side of it.
+    //
+    // Two earlier references were measured and are wrong for the same underlying reason, that both
+    // re-centre themselves on the power they are trying to weigh:
+    //
+    // - `(lo + hi) / 2`, the mid-point of the occupied band. The band is grown outwards from the
+    //   peak until 99 % of the power is enclosed, so its mid-point follows the power and cancels
+    //   the asymmetry. Measured on the dev grid at 25 dB it gave `ssb` — one sideband and no
+    //   carrier, the extreme case — **+0.046 ± 0.486** and the held-out VSB-AM −0.009 ± 0.987:
+    //   zero, with noise-level scatter, for the two emissions whose defining property this is.
+    // - the array's mid-point `bins / 2`. `hk_dsp::fftshift_power` documents bin `N/2` as DC, but
+    //   measured against it `am` — double-sideband by construction — read a systematic
+    //   −0.705 ± 0.009, so the carrier of a recentred snippet does not in fact land there.
+    //
+    // The peak does not self-cancel, and that is the whole point: a vestigial-sideband emission
+    // keeps its carrier exactly where it is while the retained sideband drags the power centroid
+    // away from it, so a carrier reference sees the imbalance that a centroid reference is
+    // constructed not to see. It is also independent of any FFT ordering convention, which the two
+    // rejected references were not.
+    //
+    // For a suppressed-carrier emission there is no carrier and the quantity is undefined; the
+    // strongest line is then an arbitrary bin and the answer is ~0, i.e. "balanced", which is the
+    // honest reading. `r == 0` (a band with no room one side) **abstains** rather than saturating
+    // at ±1, so `crate::density` scores the class over its other dimensions instead of being handed
+    // an invented value.
+    let centre = (lo..=hi)
+        .max_by(|a, b| psd[*a].total_cmp(&psd[*b]))
+        .unwrap_or((lo + hi) / 2);
+    let r = centre.saturating_sub(lo).min(hi.saturating_sub(centre));
+    if r > 0 {
+        let lower: f64 = psd[centre - r..centre].iter().sum();
+        let upper: f64 = psd[centre + 1..=centre + r].iter().sum();
+        if lower + upper > 0.0 {
+            f.set("symmetry", (lower - upper) / (lower + upper));
+        }
     }
     let median = median_of(band);
     let peak = band.iter().copied().fold(0.0_f64, f64::max);
