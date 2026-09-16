@@ -2544,3 +2544,6 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Recorded on T-230:** the harness numbers are the baseline, the discrepancy must be EXPLAINED before any optimisation, and the more favourable figure must not simply be adopted.
   - **Tests:** 45/45 hk-classify including 9 new (scoring maths against a known confusion matrix, per-class independence, the guard firing, OTA refusal, JSON/Markdown round-trip); fmt and clippy clean.
 - **B0.533 Full check green after the T-229 merge (5f82323).** Lint clean; 1517/1517 tests; acceptance 31/31; 47 GB free.
+- **B0.534 T-213 merged (001940d); full check green (1524/1524 tests, acceptance 31/31, lint clean, 47 GB).**
+  - **Temp-leak verification FAILED, and I am glad I measured rather than claimed.** Across one full suite run with T-229 merged, hk-replay dirs grew 30 -> 56. Inspection: 56 of 57 are dead-pid orphans, and a single pid (9183) left 25+ dirs of 11-24 MB each, every one containing a ring.ci8 - so a path that creates many dirs per process is still unguarded, not the hk-cli call sites T-229 fixed.
+  - **Open question the follow-up must settle:** T-229's sweep only removes orphans older than an hour, so fresh leftovers lingering is partly BY DESIGN. Distinguish a bounded one-hour lag (acceptable) from an unbounded leak (not) before prescribing a fix.
