@@ -2649,7 +2649,7 @@ tasks:
   - id: T-164
     milestone: MUI
     title: "MUI API gap 7b: /api/recipes/match (suggest recipes for a signal)"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
