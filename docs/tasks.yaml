@@ -4303,7 +4303,7 @@ tasks:
     title: 'Synthetic LoRa scenario in the py/ synth tooling: deterministic up-chirps
       with known SF/BW/CR/payload as hidden ground truth, as a burst/chirp acceptance
       fixture'
-    status: in-progress
+    status: done
     priority: normal
     deps: []
     parallel_group: SYNTH
@@ -5290,6 +5290,61 @@ tasks:
       M4 acceptance scene. If they are benign, make the summary say what they are rather
       than leaving a bare count; if they are real, fix them. No thresholds move'
     area: crates/hk-pipeline (chains, run summary)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-294
+    milestone: M2-hardening
+    title: 'A LoRa sweep is UNOBSERVABLE at the standard US915 rate: T_sym at SF9/125 kHz
+      is 4.096 ms, exactly one spectrum frame, so the chirp is indistinguishable from a
+      wideband burst'
+    status: todo
+    priority: high
+    deps:
+    - T-255
+    parallel_group: PIPE
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-255 (2026-09-16), measured on its own blind scene'
+    acceptance: 'ADR-0017 section 1.3 records a DRAWING limit (bounding box, not swept
+      polyline). T-255 measured that at SF9/125 kHz it is an OBSERVABILITY limit: the
+      whole sweep falls inside one 4.096 ms analysis frame, so nothing in the run
+      separates the chirp from a 125 kHz wideband burst. At SF12 (8 frames per symbol)
+      it resolves into a ladder with centre spread 0.84. The cost of the rectangle is
+      symbol_duration / analysis_frame - 4x at SF9, 32x at SF12 - and GROWS with
+      spreading factor. Decide what to do: a finer analysis frame for candidate chirp
+      regions, a dedicated chirp-rate estimator, or an explicit statement that swept
+      emissions below a frame are detected as regions but never characterised as chirps.
+      Amend ADR-0017 section 1.3 to say which limit applies where, since it reads as
+      purely representational. T-255 fixture already carries sweep_polyline, so this is
+      assertable. No thresholds move'
+    area: crates/hk-dsp (analysis frame), crates/hk-detect, docs/adr/0017
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
+  - id: T-295
+    milestone: M2-hardening
+    title: 'Species merging: a chirp wide instantaneous footprint bridges to neighbours in
+      the connected-component labeller, so one 394 kHz box swallowed three emitter species'
+    status: todo
+    priority: normal
+    deps:
+    - T-255
+    parallel_group: PIPE
+    use_cases:
+    - AWARE-053
+    found_by: 'T-255 (2026-09-16): 3 detections at SF9 and 6 at SF12 were too wide to
+      attribute to any one emitter'
+    acceptance: 'a wideband instantaneous emission must not bridge distinct neighbouring
+      emitters into one detection. Establish whether this is specific to swept carriers or
+      general to the labeller on any wide emission, then fix it. Adjacent to the dedup
+      work (T-280/T-288) but the OPPOSITE failure - there one emitter became many rows,
+      here many emitters become one box. Keep those invariants green, in particular that
+      a narrow emission inside a wide one stays its own entry. Report the
+      unattributable-box count on T-255 scene before and after'
+    area: crates/hk-detect (connected-component labelling)
     needs: none
     model: opus
     effort: medium
