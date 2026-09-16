@@ -3713,7 +3713,7 @@ tasks:
   - id: T-231
     milestone: M2-hardening
     title: "mock_device t057_scheduled_replay_keeps_every_frequency_truthful failed once: a detection 116 kHz outside the recorded band"
-    status: review
+    status: done
     commit: b125115
     priority: normal
     deps: []
