@@ -4479,7 +4479,7 @@ tasks:
   - id: T-262
     milestone: M2-hardening
     title: 'ADR-0017 TM-5: presence intervals close and revive - emitter_observation gains a time index (migration 0012) and an idle_gap rule'
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-250
@@ -4868,7 +4868,7 @@ tasks:
     milestone: MUI
     title: 'ADR-0017 TM-2 remainder: the presence / liveness / family_in_window object
       never landed, so TM-3 cannot render liveness or sort by in-window on-air time'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: TIME
@@ -4890,6 +4890,11 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+    reduced_by_t262_2026_09_16: 'T-262 landed the model and repo layers - Presence,
+      Liveness, PresenceInterval, Repository::presence and presence_intervals - so this is
+      reduced to hk-api serialization plus family_in_window. T-260 left liveness rendering
+      and sort-by-in-window-on-air-time undone for exactly this reason.'
+
   - id: T-285
     milestone: M3
     title: 'ADR-0016 section 7 states two open-set floors that are arithmetically ONE
