@@ -67,6 +67,10 @@ acceptance-m3 *args:
 acceptance-m4 *args:
     HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_m4 {{args}}
 
+# Chirp acceptance (T-255, CLAUDE.md invariant 1): LoRa up-chirps in 902-928 MHz US ISM through the mock SDR — a signal with a time extent and no stable frequency, against a steady carrier and fixed-frequency bursts as controls. Extra args go to cargo test.
+acceptance-chirp *args:
+    HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_chirp {{args}}
+
 test-py:
     cd py && uv run --locked pytest
 

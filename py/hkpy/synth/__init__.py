@@ -10,7 +10,9 @@ Scenarios (use cases): ``tone`` (building block), ``fsk_burst_train`` (AWARE-036
 (AWARE-042), ``occupancy_markov_scene`` (AWARE-042/AWARE-044/PROP-023, T-117), ``fm_broadcast_rds``
 (SIGNAL-062), ``adsb_squitter`` (SIGNAL-001), ``pocsag_pagers`` (SIGNAL-062, M1 tutorial fixture
 T-098), ``acars_message`` (SIGNAL-062, M1 tutorial fixture T-098, synthetic-only -- see
-:mod:`hkpy.synth.acars`). Every scenario also accepts the impairment parameters in
+:mod:`hkpy.synth.acars`), ``trunk_control_channel`` (C23, T-267), ``lora_ism_burst``
+(SIGNAL-062/AWARE-053, T-255: chirps with no stable frequency in 902-928 MHz US ISM -- see
+:mod:`hkpy.synth.lora_scene`). Every scenario also accepts the impairment parameters in
 :data:`hkpy.synth.impairments.IMPAIRMENT_DEFAULTS`.
 
 Truth conventions (dBFS reference, calibration constant, annotation roles) are documented in
@@ -25,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hkpy.synth import impairments, occupancy, scenarios, trunk_scene
+from hkpy.synth import impairments, lora_scene, occupancy, scenarios, trunk_scene
 from hkpy.synth.scene import GENERATOR, GENERATOR_VERSION, SUPPORTED_DATATYPES, _jsonable
 
 
@@ -64,6 +66,10 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         trunk_scene.trunk_control_channel, trunk_scene.TRUNK_CC_DEFAULTS, (),
         "continuous C4FM trunking control channel (frame sync + CRC) beside an unframed "
         "continuous 4FSK decoy and bursty NBFM, on the 12.5 kHz LMR raster"),
+    "lora_ism_burst": ScenarioSpec(
+        lora_scene.lora_ism_burst, lora_scene.LORA_DEFAULTS, ("SIGNAL-062", "AWARE-053"),
+        "LoRa CSS up-chirp packets in 902-928 MHz US ISM (hidden SF/BW/CR/payload) beside a "
+        "steady CW carrier and short fixed-frequency FSK bursts"),
 }
 
 
