@@ -31,7 +31,53 @@ use num_complex::{Complex32, Complex64};
 /// every emission including `ssb`. [`FEATURE_NAMES`] may grow within a version but a dimension may
 /// never change meaning within one, so this is a new version and the shipped densities are refitted
 /// against it.
-pub const FEATURES_VERSION: u32 = 2;
+///
+/// **3 (T-286):** `symmetry` changed meaning again, and for the same class of reason: it was
+/// measuring the carrier's own spectral leakage rather than the sidebands. Excluding a single bin
+/// at the carrier leaves the rest of its main lobe — 10–30 dB above the sidebands being compared —
+/// inside one of the two sums. Measured at 25 dB, `am` (double-sideband **by construction**, truth
+/// 0.000) read −0.712 ± 0.023 and `cw` +0.284 ± 0.026, while the held-out VSB-AM read −0.655:
+/// indistinguishable from AM on the one dimension that defines it. Guarding the window's whole
+/// main lobe ([`CARRIER_GUARD_BINS`]) and integrating both sidebands over the band's widest half
+/// restores `am` to +0.02 ± 0.03 and `cw` to +0.04 ± 0.01 and separates VSB-AM at −0.78 ± 0.13.
+/// `symmetry` also **abstains where there is no carrier to measure it about**
+/// ([`CARRIER_MIN_FRACTION`]), instead of reporting the noise it used to.
+pub const FEATURES_VERSION: u32 = 3;
+
+/// Bins guarded either side of the carrier when measuring `symmetry`: the **main-lobe half-width
+/// of the analysis window**, which [`spectral_features`] configures as [`WindowKind::Hann`].
+///
+/// A `K`-term cosine-sum window spreads a tone over a main lobe reaching `K + 1` bins either side
+/// of it. Hann is the two-term series `0.5 − 0.5·cos x`, so `K = 1` and the half-width is 2 bins.
+///
+/// This is a property of the window rather than a tuned number: it is exactly the width over which
+/// the carrier's own energy is spread, and therefore the width that has to come out before what is
+/// left can be called a sideband. The check that it is right is that it puts the two emissions
+/// whose sidebands are symmetric *by construction* — `am` and `cw` — back on their true value of
+/// zero, which no choice fitted to an out-of-taxonomy generator would do.
+pub const CARRIER_GUARD_BINS: usize = 2;
+
+/// Share of the occupied band's power (net of the noise floor) that the strongest line's main lobe
+/// must hold before `symmetry` is measured at all.
+///
+/// `symmetry` is sideband balance **about a carrier**. Where there is no carrier the strongest line
+/// is an arbitrary bin and the quantity is undefined, so the feature abstains — `crate::density`
+/// then scores the class over its other dimensions, which is this module's rule for every feature
+/// whose input is missing.
+///
+/// Reporting it anyway is not free, and the cost was measured. With the T-286 guard fix but no
+/// abstention rule, `symmetry` became tight and real for the carrier-bearing classes (`am` σ 0.032,
+/// `cw` σ 0.018) while staying pure noise for the rest (`wfm` σ 0.533, `ssb` σ 0.636, over a
+/// feature bounded to ±1). A dimension that is noise for four of the five analog classes still
+/// costs them a χ² degree of freedom and a `ln σ` penalty, and known-family top-1 fell 0.9067 →
+/// 0.8988, through the ADR-0016 §7 floor.
+///
+/// **One half, because that is what "carrier" means** — a single line holding more power than the
+/// whole rest of the emission put together — and not because of where any measured gap fell.
+/// Measured at 15–30 dB: `am` 0.95–0.96, the held-out VSB-AM 0.97–0.99, `cw` 0.58, against `ssb`
+/// 0.39, DSB-SC 0.27, `nbfm` 0.12 and `wfm` 0.09. The emission this has to keep measurable is
+/// VSB-AM, which sits at the very top of that range.
+pub const CARRIER_MIN_FRACTION: f64 = 0.5;
 
 /// Smallest snippet the feature tree will look at.
 pub const MIN_SAMPLES: usize = 256;
@@ -439,13 +485,13 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
     // is sideband asymmetry. The residual was driven by where `occupied_band` happened to land, and
     // `tree::analog_classes` has been calling `ssb` off `symmetry > 0.35` on that noise.
     //
-    // The DC bin itself is excluded from both sums: a retained carrier is not part of either
-    // sideband, and counting it would dilute the ratio by the largest line in the spectrum.
-    // The reference is the **strongest line in the band** — the carrier — with an equal number of
-    // bins `r` taken each side of it.
-    //
-    // Two earlier references were measured and are wrong for the same underlying reason, that both
-    // re-centre themselves on the power they are trying to weigh:
+    // The reference is the **strongest line in the band** — the carrier. It does not self-cancel,
+    // and that is the whole point: a vestigial-sideband emission keeps its carrier exactly where it
+    // is while the retained sideband drags the power centroid away from it, so a carrier reference
+    // sees the imbalance that a centroid reference is constructed not to see. It is also
+    // independent of any FFT ordering convention. Two earlier references were measured and are
+    // wrong for the same underlying reason, that both re-centre themselves on the power they are
+    // trying to weigh:
     //
     // - `(lo + hi) / 2`, the mid-point of the occupied band. The band is grown outwards from the
     //   peak until 99 % of the power is enclosed, so its mid-point follows the power and cancels
@@ -456,24 +502,53 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
     //   measured against it `am` — double-sideband by construction — read a systematic
     //   −0.705 ± 0.009, so the carrier of a recentred snippet does not in fact land there.
     //
-    // The peak does not self-cancel, and that is the whole point: a vestigial-sideband emission
-    // keeps its carrier exactly where it is while the retained sideband drags the power centroid
-    // away from it, so a carrier reference sees the imbalance that a centroid reference is
-    // constructed not to see. It is also independent of any FFT ordering convention, which the two
-    // rejected references were not.
+    // **The carrier's whole main lobe is guarded, not just its peak bin** (T-286). A carrier is not
+    // one bin: the window spreads it over [`CARRIER_GUARD_BINS`] either side, and a tone that does
+    // not fall exactly on a bin centre spreads asymmetrically. Excluding only the peak leaves the
+    // remainder — which for a carrier-bearing emission is 10–30 dB above the sidebands it is being
+    // compared against — inside one of the two sums, so what the feature reports is which side of
+    // its peak bin the carrier happened to straddle. Measured at 25 dB with the one-bin rule, `am`
+    // — double-sideband **by construction**, so the truth is 0.000 — read a systematic
+    // −0.712 ± 0.023, and `cw`, a keyed carrier whose sidebands are equally symmetric, +0.284 ±
+    // 0.026. Both are the leak, not the signal; and the held-out VSB-AM read −0.655, i.e.
+    // *indistinguishable from AM* on the one dimension that defines it. Guarding the main lobe
+    // returns `am` to +0.02 ± 0.03 and `cw` to +0.04 ± 0.01 — their construction truth, which is
+    // the check that the guard is a window property and not a number fitted to a generator — while
+    // VSB-AM reads −0.78 ± 0.13.
+    //
+    // The two sums span the same frequency extent, sized to the band's **widest** half. Sizing it
+    // to the narrower half (the previous rule) truncates a one-sided emission to its empty side,
+    // which is precisely the emission this feature exists to find: VSB-AM's band reaches ~23 bins
+    // above the carrier and ~7 below, so its retained sideband was integrated over 7 bins instead
+    // of 23 and the estimate scattered by ±0.26 rather than ±0.13.
     //
     // For a suppressed-carrier emission there is no carrier and the quantity is undefined; the
     // strongest line is then an arbitrary bin and the answer is ~0, i.e. "balanced", which is the
-    // honest reading. `r == 0` (a band with no room one side) **abstains** rather than saturating
-    // at ±1, so `crate::density` scores the class over its other dimensions instead of being handed
-    // an invented value.
+    // honest reading. A band with no room to guard the main lobe **abstains** rather than
+    // saturating at ±1, so `crate::density` scores the class over its other dimensions instead of
+    // being handed an invented value.
     let centre = (lo..=hi)
         .max_by(|a, b| psd[*a].total_cmp(&psd[*b]))
         .unwrap_or((lo + hi) / 2);
-    let r = centre.saturating_sub(lo).min(hi.saturating_sub(centre));
-    if r > 0 {
-        let lower: f64 = psd[centre - r..centre].iter().sum();
-        let upper: f64 = psd[centre + 1..=centre + r].iter().sum();
+    // Is there a carrier to measure a balance *about*? The main lobe's share of the occupied
+    // band's power, both net of the noise floor, answers it (see [`CARRIER_MIN_FRACTION`]).
+    let floor = median_of(&psd);
+    let net = |i: usize| (psd[i] - floor).max(0.0);
+    let lobe: f64 = (centre.saturating_sub(CARRIER_GUARD_BINS)
+        ..=(centre + CARRIER_GUARD_BINS).min(bins - 1))
+        .map(net)
+        .sum();
+    let band_net: f64 = (lo..=hi).map(net).sum();
+    let carrier_fraction = if band_net > 0.0 { lobe / band_net } else { 0.0 };
+    let half = centre.saturating_sub(lo).max(hi.saturating_sub(centre));
+    let r = half.min(centre).min(bins - 1 - centre);
+    if carrier_fraction > CARRIER_MIN_FRACTION && r > CARRIER_GUARD_BINS {
+        let lower: f64 = psd[centre - r..=centre - CARRIER_GUARD_BINS - 1]
+            .iter()
+            .sum();
+        let upper: f64 = psd[centre + CARRIER_GUARD_BINS + 1..=centre + r]
+            .iter()
+            .sum();
         if lower + upper > 0.0 {
             f.set("symmetry", (lower - upper) / (lower + upper));
         }
