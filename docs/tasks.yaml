@@ -4826,6 +4826,19 @@ tasks:
       as hosts (station mean 7.3 dB vs fragment 4.7 dB = 2.6 dB under a 6 dB margin, where
       the peaks are 14.3 vs 5.9 = 8.5 dB). Fourth instance after sigma_ap (snippet length)
       and burst_length (watch duration). Include it in the audit.'
+    fifth_instance_2026_09_16: 'T-288 measured THREE simultaneous instances on one emission, and
+      in the case T-262 explicitly scoped out. The 101.46 MHz cluster on the 2026-09-15 FM
+      capture yields ten tracks whose stored fingerprints carry bandwidth 13.1-53.8 kHz,
+      duty_cycle 0.0082-0.4592 (56x) and burst_length 0.0065-0.0429 s - all three differing
+      between rows of ONE emission. Track.bandwidth_hz is a running mean of whichever
+      threshold-crossing boxes associated (s.bw += (g.bw()-s.bw)/8), and within EVERY second the
+      same emission box widths span 3.0-15.0x, so the between-row spread is smaller than the
+      within-second spread. T-262 excludes duty_cycle / burst_length / period only when presence
+      intervals are DISJOINT; here they OVERLAP, so all three are compared and duty alone
+      (0.0099 vs 0.4592 against tol 0.115 = error 3.9) blocks the merge. The audit must cover
+      the OVERLAPPING-window case, not just the across-silence one, and must decide what a
+      fragment duty cycle even means. This is the honest route to the 16 -> 4-7 dedup target;
+      T-288 made no change rather than move a threshold.'
 
   - id: T-282
     milestone: M2-hardening
@@ -5030,7 +5043,7 @@ tasks:
     milestone: M2-hardening
     title: 'Second dedup mechanism: one station yields ten comparable-strength,
       time-overlapping tracks that entity resolution collapses only to five rows'
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-280
@@ -5057,6 +5070,47 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+    outcome_2026_09_16: 'MEASURED, NO PRODUCT CHANGE - the prescribed route does not exist.
+      Replayed the 45 s 2026-09-15 FM capture through the whole pipeline (16 rows, 25 tracks,
+      reproducing T-280 exactly) and instrumented the detector directly. (1) THE BANDWIDTH
+      ROUTE IS UNAVAILABLE: the cluster never reaches the +6 dB integration SEED - its settled
+      spectrum is 3.04-3.74 dB over the floor across 101.4328-101.4984 MHz - so NO
+      IntegratedEmitter region is ever formed over it, and its detections carry repeat=883 /
+      unconfirmed=3 and ZERO Candidate::Integrated across all 177 evaluations. Only four
+      integrated regions exist in the whole 2.4 MHz span; the nearest (101.2336-101.3789, the
+      101.3 station) stops 50 kHz short of the cluster. T-280 asserted this extent was
+      "already computed and already attached to each record" without measuring it.
+      (2) TWO PREMISES CORRECTED: widest/narrowest is 4.87x (64.0/13.1 kHz), not 3.4x - i.e.
+      ABOVE the 4.0 gate, not below it; and the 3.4x figure is the fingerprint
+      Tolerances::bandwidth_ratio (1.5), a different constant from inband_fragment_bw_ratio
+      (4.0). (3) THE REAL MECHANISM IS WIDTH INSTABILITY AT THRESHOLD, and it is a T-281
+      instance rather than a new mechanism: within EVERY single second the same emission
+      box widths span 3.0-15.0x (typically 5.0-7.5x), so the spread BETWEEN tracks is smaller
+      than the spread WITHIN one second of one emission. Track.bandwidth_hz is a running mean
+      (s.bw += (g.bw()-s.bw)/8) of whichever threshold-crossing boxes happened to associate,
+      so it measures association history, not the emission. xdb_bw is no better (mean
+      |xdb-obw| 2.5 kHz, range 4.7-75.0 kHz). (4) WHY FIVE ROWS, MEASURED: the five stored
+      fingerprints carry duty_cycle 0.0082-0.4592 (56x) and burst_length 0.0065-0.0429 s - the
+      T-281 window statistics - and T-262 does not reach them because it excludes those only
+      when presence intervals are DISJOINT; here they overlap. duty 0.0099 vs 0.4592 against
+      tol 0.115 is error 3.9, blocking the merge on its own. (5) WHY THE RELATION LAYER CLAIMS
+      NOTHING (emitter_relation empty): bands_compete needs 0.6 of BOTH bands; the ten pairs
+      give frac_wider 0.0-0.599, with two at 0.593 and 0.599 - just under the floor. Moving
+      OVERLAP_MIN_FRACTION to 0.59 is exactly the forbidden move T-250 warned about, so it was
+      not made. COUNT/SETTLE UNCHANGED: 16 rows in 99.6-102.0 MHz, settle 13.24 s STREAM time
+      (= wall clock on a live device), against the ~4-7 in ~2-10 s target; the full 45 s
+      replays in 3.87 s wall clock (debug, unpaced), which is why stream time is the honest
+      figure. The four constants are untouched and the four invariant tests are green.
+      REMAINDER: filed as the fifth T-281 instance - making width/duty/burst properties of the
+      emission in the overlapping-window case is a measurement-honesty change to the real-time
+      path and belongs with that audit, not a threshold move here.'
+    separate_defect_found_2026_09_16: 'fixtures/hackrf/capture-2026-09-15-fm-band/iq.sigmf-meta
+      (committed in f2c4dc5) is REJECTED by `hk replay`: "invalid SigMF metadata: missing field
+      `overload`". Its hackriff:provenance block lacks overload, quantisation_limited,
+      clock_source and clock_locked, which every 2026-09-13 fixture carries. The committed
+      fixture therefore cannot be replayed at all; every measurement in T-288 used a locally
+      patched copy. Needs a one-line fixture fix - not made here, as fixtures are outside this
+      task''s scope. Blocks T-289.'
   - id: T-289
     milestone: M2-hardening
     title: 'Analysis pass over the 2026-09-15 FM-band capture to add truth annotations,
