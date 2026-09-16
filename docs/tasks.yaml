@@ -6712,7 +6712,8 @@ tasks:
     milestone: M2-hardening
     title: 'lint-py is not reproducible off the lockfile: ruff resolves only because an incidental system
       install is on PATH'
-    status: in-progress
+    status: done
+    commit: 5df36f4
     priority: normal
     deps:
     - T-346
