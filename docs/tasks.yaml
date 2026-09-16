@@ -3671,7 +3671,8 @@ tasks:
   - id: T-229
     milestone: M2-hardening
     title: "Replay/test harness leaks its temp directories: 2731 hk-replay-<pid>-<ts>-N dirs accumulated to about 12 GB and nearly breached the 20 GB disk floor"
-    status: in-progress
+    status: done
+    commit: 670f39c
     priority: high
     deps: []
     parallel_group: PIPELINE
@@ -3699,6 +3700,21 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: false
+  - id: T-231
+    milestone: M2-hardening
+    title: "mock_device t057_scheduled_replay_keeps_every_frequency_truthful failed once: a detection 116 kHz outside the recorded band"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: CORE
+    use_cases: []
+    found_by: "T-229 run (2026-09-15), reported as pre-existing and unrelated to the files that task touched"
+    acceptance: "reproduce under load and decide whether the mock device can emit a frequency outside the recorded band (a real truthfulness bug in the device interface, which would undermine every blind test) or whether the detection centre is mis-mapped at a band edge; fix the cause; 20/20 under 6 CPU burners; no bound loosened and no retry added"
+    area: crates/hk-core/src/source (mock SDR), tests/e2e mock_device
+    needs: none
+    model: opus
+    effort: medium
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
