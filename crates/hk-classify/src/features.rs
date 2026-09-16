@@ -1,4 +1,4 @@
-//! The C15 feature vector, `features@1` (ADR-0016 §4.2).
+//! The C15 feature vector, `features@N` ([`FEATURES_VERSION`]; ADR-0016 §4.2).
 //!
 //! One normalised snippet (CFO-corrected, unit mean power, cut to the burst extent) plus the C13
 //! and C14 estimates give one vector of named features. **Every feature is a value or an
@@ -24,7 +24,10 @@ use hk_dsp::{WelchConfig, WindowKind, welch};
 use hk_estimate::blind::SymbolParameters;
 use num_complex::{Complex32, Complex64};
 
-/// Feature-vector version; also [`crate::thresholds::FEATURES_VERSION`].
+/// Feature-vector version, and its **single definition**:
+/// [`crate::thresholds::FEATURES_VERSION`] — the value written into
+/// [`hk_model::classify::ClassProvenance::features_version`] — re-exports this constant instead of
+/// restating it, which is what let it sit at `1` through versions 2 and 3 (T-290).
 ///
 /// **2 (T-248):** `symmetry` changed meaning — it is now sideband balance about the carrier (DC)
 /// rather than about the occupied band's own mid-point, which measured ~0 by construction for
@@ -92,7 +95,7 @@ pub const DEROTATE_MIN_COHERENCE: f64 = 0.3;
 /// noise". Widening the window to its neighbourhood keeps the comparison honest.
 pub const MIN_SHAPE_BINS: usize = 16;
 
-/// Names of `features@1`, in vector order. The density files key on these names, so the order may
+/// Names of `features@N`, in vector order. The density files key on these names, so the order may
 /// grow but never change meaning within a version.
 pub const FEATURE_NAMES: &[&str] = &[
     "gamma_max",
@@ -140,7 +143,7 @@ pub struct FeatureInput<'a> {
     pub symbols: Option<&'a SymbolParameters>,
 }
 
-/// One `features@1` vector.
+/// One `features@N` vector.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Features {
     /// Values in [`FEATURE_NAMES`] order; `None` = abstained.
@@ -188,7 +191,7 @@ impl Features {
     }
 }
 
-/// Computes `features@1` for one normalised snippet.
+/// Computes `features@N` for one normalised snippet.
 pub fn features(input: &FeatureInput<'_>) -> Features {
     let n = input.samples.len();
     if n < MIN_SAMPLES || !(input.sample_rate_hz.is_finite() && input.sample_rate_hz > 0.0) {
