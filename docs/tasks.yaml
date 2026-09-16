@@ -3727,7 +3727,8 @@ tasks:
   - id: T-232
     milestone: M2-hardening
     title: "Temp-dir leak persists after T-229: one full suite run grew hk-replay dirs 30 -> 56, and 56 of 57 were dead-pid orphans carrying ring.ci8 files"
-    status: in-progress
+    status: done
+    commit: 21fb50b
     priority: high
     deps: [T-229]
     parallel_group: PIPELINE
