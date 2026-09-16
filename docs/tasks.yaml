@@ -4697,7 +4697,7 @@ tasks:
   - id: T-271
     milestone: M4
     title: 'M4 DMR Tier III / Capacity Plus, SmartNet/EDACS and NXDN Type-C control decode'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-268
@@ -6257,7 +6257,7 @@ tasks:
     milestone: M2-hardening
     title: 'The waterfall and timeline must be served at span-matched resolution: data, timestamps and resolution
       are backend, time-to-pixel mapping and view state are thin client'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: UI
