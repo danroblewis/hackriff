@@ -229,32 +229,43 @@ fn out_of_taxonomy_generators_come_back_unknown() {
         recall >= 0.80,
         "held-out unknown recall {recall:.2} is below the 0.80 floor: {per_class:?}"
     );
-    // ADR-0016 §7 puts the false-known rate at ≤ 0.10 over these generators. One of them —
-    // OFDM with a non-standard cyclic prefix — is recognised as `ofdm`, which is the family it
-    // genuinely belongs to: the generator is held out because the dev grid excludes that prefix
-    // length, not because the answer is wrong. Generalising to it is the behaviour we want, so
-    // what is asserted here is the stronger property: a held-out generator is **never given a
-    // family that is not its own**. The ADR's literal rate (0.167 today, all of it that one
-    // generator) is T-206's to settle when it fixes the exit gate.
     eprintln!(
         "[T-199] held-out generators given a family that is not their own: {} of {total} ({wrong_family:?})",
         wrong_family.len()
     );
-    // Every held-out generator except one abstains. The exception is the OFDM with a very short
-    // cyclic prefix, which is called `analog`: its spectrum is flat and its envelope Rayleigh, so
-    // the rule that keeps analog from absorbing band-filling emissions sits right at its
-    // threshold for this generator and does not always fire. That is a real gap — it is printed
-    // above every run, it is why the ADR's ≤ 0.10 false-known rate is not met (0.17 today), and it
-    // belongs to the exit gate (T-206) together with the per-family DL stage (T-204).
+
+    // **ADR-0016 §7's false-known floor, asserted numerically (T-235).**
     //
-    // What is asserted is that the gap has not spread: no *other* generator is given a family.
+    // This used to be an allow-list instead: it permitted the OFDM-with-a-very-short-cyclic-prefix
+    // generator to be called whatever it liked and only forbade the gap from *spreading*. That
+    // tolerated a false-known rate of 0.167, well above the ADR's 0.10, which is exactly why the
+    // floor went unmet. Asserting the rate the ADR actually states is a tightening, not a
+    // loosening: the previous form placed no bound on the rate at all.
+    //
+    // What closed it was the analysis geometry. The dev grid now generates and resamples each
+    // class to the ~2 samples per OBW99 that `hk_estimate::normalise` really delivers, so the
+    // narrowband analog classes stop being fitted on band noise. `ssb` had been fitted at a
+    // measured OBW of 251 kHz and `cw` at 767 kHz — densities describing noise rather than a
+    // signal, and wide enough to swallow any band-filling emission. That, not the cyclic-prefix
+    // feature, was the whole of the false-known rate: the short-CP OFDM was never mis-read as
+    // OFDM, it was absorbed by a catch-all analog class.
+    let false_known = (total - unknown) as f64 / f64::from(total);
+    assert!(
+        false_known <= 0.10,
+        "held-out false-known rate {false_known:.3} exceeds the ADR-0016 §7 floor of 0.10 \
+         ({wrong_family:?})"
+    );
+    // The residual is the 3-level ASK generator, occasionally read as `analog`. It is a genuine
+    // open-set miss rather than a generalisation (its own family is `ook-ask`), and it is bounded
+    // by the rate assertion above. What is asserted here is that it has not spread: an
+    // out-of-taxonomy generator that is *not* this known residual must never be given a family.
     let spread: Vec<_> = wrong_family
         .iter()
-        .filter(|(label, _)| *label != Class::OfdmOddCp.label())
+        .filter(|(label, _)| *label != Class::Ask3.label())
         .collect();
     assert!(
         spread.is_empty(),
-        "held-out generators beyond the known OFDM-prefix gap were given a family: {spread:?}"
+        "held-out generators beyond the known 3-level-ASK residual were given a family: {spread:?}"
     );
 }
 

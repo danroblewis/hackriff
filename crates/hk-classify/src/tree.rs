@@ -182,11 +182,21 @@ pub fn coarse_hint(features: &Features) -> Coarse {
     let carrier = features.get("carrier_line_db").unwrap_or(0.0);
     let env_cv = features.get("env_cv").unwrap_or(0.0);
     let low = features.get("low_fraction").unwrap_or(0.0);
+    let mu42_a = features.get("mu42_a");
 
+    // The envelope term is the same one [`admissible`] uses to keep `analog` from being denied to
+    // a band-filling carrier, and it belongs here for the same reason: a spectrum that is flat and
+    // lineless is *not* enough to call an emission structureless noise, because a fully modulated
+    // carrier genuinely fills its own channel. Broadcast FM at the analysis geometry the pipeline
+    // delivers is the case that exposed it — flatness 0.62 with its carrier line right at the
+    // 14 dB threshold — and it was hinted `noise-like`, which is the one thing a modulated carrier
+    // must never be called. Noise is Rayleigh (mu42_a ~ 2); an angle modulation is constant
+    // envelope (~1). Without a measured envelope the hint is left as it was.
     let noise_like = flatness.is_some_and(|f| f >= NOISE_MIN_FLATNESS)
         && carrier <= NOISE_MAX_CARRIER_DB
         && cyclic <= NOISE_MAX_CYCLIC_DB
-        && cp < OFDM_MIN_CP_CORR;
+        && cp < OFDM_MIN_CP_CORR
+        && mu42_a.is_none_or(|k| k > NOISE_LIKE_MIN_MU42);
     if noise_like {
         return Coarse::NoiseLike;
     }
