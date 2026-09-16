@@ -564,7 +564,10 @@ fn merge_same_emission_rows(
     };
     let (into, from) = if rank(a)? <= rank(b)? { (a, b) } else { (b, a) };
     // Where the two overlap in time they counted the same bursts: that stretch counts once, as
-    // the larger of the two counts; the rest of `from` adds.
+    // the larger of the two counts; the rest of `from` adds. This is the cross-producer half of
+    // the sighting rule stated on `resolve`: one emission over one stretch of time is one
+    // occurrence, so folding a tracker's entry into a decoder's entry for the same seconds adds
+    // nothing ("overlapping observations not counted twice", docs/07 §2.11).
     let (ours, theirs) = (
         observation_spans(conn, into)?,
         observation_spans(conn, from)?,
@@ -1087,6 +1090,39 @@ fn apply_prior(
     Ok(Some(v.status))
 }
 
+/// Resolves `s` to an emitter, and adds to that emitter's `count` only the air time nothing has
+/// counted yet.
+///
+/// **What a sighting is** (T-209; settled in T-329). `count` is a lifetime total of
+/// *occurrences* — times this emitter was observed to be on the air — and not a tally of the
+/// writes that reached the repository (docs/07 §2.11, ADR-0017 §3). One emission observed over
+/// one stretch of time is **one** occurrence, however many producers saw it and however many
+/// rows they wrote. Each sighting still keeps its own `emitter_observation` row either way: the
+/// ledger records *who measured what*, `count` records *how often the emitter was there*. The
+/// two are not the same number, and a row's `count` is what its producer measured, never what it
+/// added here.
+///
+/// So `add` below is the sighting's full `s.count` only in the last arm:
+///
+/// - **replay** — the very same source row offered again: adds only its growth since,
+///   `s.count - counted`, so re-offering an open track counts no burst twice;
+/// - **re-measurement** ([`remeasured`]: same producer key, overlapping span, centre within
+///   tolerance): the same air time measured a second time by the same producer, so again only
+///   the growth. This is how one analog-chain session's early identification and its
+///   full-window write count **once** between them (T-209);
+/// - **otherwise** ([`decide`]): air time this producer has not counted, so it adds in full.
+///
+/// That last arm is deliberately scoped *within* a producer: it does not ask whether some other
+/// producer already counted the same span. Two entries that turn out to be one emission are
+/// reconciled when they **merge**, where the shared stretch is discounted instead
+/// (`merge_same_emission_rows` — "overlapping observations not counted twice", docs/07 §2.11).
+///
+/// A known gap, measured in T-329 and deliberately left there: a sighting that lands straight
+/// onto *another* producer's entry by context or fingerprint takes no such discount, so the
+/// shared stretch is counted twice (one FM station on air for one continuous 5 s capture scored
+/// 2 — once by the chain, once by the tracker watching the same 5 s). Closing it means an
+/// overlap check in this arm, which changes counting for every track sighting; it is a change to
+/// this contract, not a fix to a caller.
 fn resolve(
     conn: &Connection,
     s: &Sighting,

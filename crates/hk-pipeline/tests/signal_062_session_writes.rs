@@ -1,9 +1,11 @@
 //! T-209 (SIGNAL-062): what one analog chain session writes, through the mock SDR over the real
 //! HackRF FM capture (`fm_100p8M_2p4M_l32g30a1_t1p5_5s`, 101.3 MHz, PI 1694), replayed blind.
 //!
-//! - **One session, one sighting.** The early identification (T-186, leading 1 s window) and the
-//!   full window's RDS write are the same observation: the chain's demodulation sightings add 1
-//!   to the station's emitter, not 2. The refined tuning is stored once.
+//! - **One session, one occurrence.** The early identification (T-186, leading 1 s window) and
+//!   the full window's RDS write are the same observation, and the tracker watched the same
+//!   stretch of air: the station's emitter counts **one** occurrence for the session, not one per
+//!   producer that saw it (T-209; semantics settled in T-329, and stated on
+//!   `hk_model::repo::cluster::resolve`). The refined tuning is stored once.
 //! - **Overload gate.** The same IQ with the capture's provenance marked overloaded (a front end
 //!   in compression shows intermodulation images that can lock a pilot): no emitter is placed from
 //!   mode evidence alone, early or late. An emitter carrying a CRC-valid decoded identity still
@@ -64,20 +66,6 @@ fn ledger(dir: &std::path::Path, emitter: EmitterId) -> Vec<(String, i64, Option
     .unwrap()
 }
 
-/// What `emitter`'s count holds from demodulation sightings (the analog chain's): its count less
-/// what its other sources (tracks) counted. A re-measurement keeps its own ledger row but adds
-/// nothing, so the demodulation rows' counts are not summed.
-fn demodulation_count(dir: &std::path::Path, repo: &Repository, emitter: EmitterId) -> i64 {
-    let rows = ledger(dir, emitter);
-    eprintln!("[{SIGNAL_062}] emitter {emitter} ledger: {rows:?}");
-    let others: i64 = rows
-        .iter()
-        .filter(|r| r.0 != "demodulation")
-        .map(|r| r.1)
-        .sum();
-    repo.emitter(emitter).unwrap().count as i64 - others
-}
-
 fn pi_1694(repo: &Repository) -> Option<EmitterId> {
     inventory(
         repo,
@@ -108,14 +96,54 @@ fn signal_062_one_session_counts_one_sighting_and_stores_its_refined_tuning_once
     let repo = repo(&dir.0);
     let id = pi_1694(&repo).unwrap_or_else(|| panic!("[{SIGNAL_062}] no PI 1694 entry"));
     let e = repo.emitter(id).unwrap();
-    let counted = demodulation_count(&dir.0, &repo, id);
+    let rows = ledger(&dir.0, id);
     eprintln!(
-        "[{SIGNAL_062}] emitter {id}: count {}, demodulation sightings {counted}",
+        "[{SIGNAL_062}] emitter {id}: count {}, ledger {rows:?}",
         e.count
     );
+    // The chain wrote this session twice — the leading 1 s identification window and the full
+    // window — and both rows are kept, under its one producer key. The ledger records who
+    // measured what; it is not a tally of occurrences.
+    let chain: Vec<_> = rows.iter().filter(|r| r.0 == "demodulation").collect();
     assert_eq!(
-        counted, 1,
-        "[{SIGNAL_062}] one chain session (early + full window) is one sighting"
+        chain.len(),
+        2,
+        "[{SIGNAL_062}] the early and full-window writes both reached the ledger: {rows:?}"
+    );
+    assert_eq!(
+        chain[0].2, chain[1].2,
+        "[{SIGNAL_062}] both offered under one producer key, so the second re-measures the \
+         first rather than counting again: {chain:?}"
+    );
+    assert!(
+        chain[0]
+            .2
+            .as_deref()
+            .is_some_and(|k| k.contains("analog-chain")),
+        "[{SIGNAL_062}] that key is the analog chain's: {chain:?}"
+    );
+    // **One session, one occurrence** (T-209; semantics settled in T-329, and stated in full on
+    // `hk_model::repo::cluster::resolve`). `count` is a lifetime total of occurrences — times
+    // this emitter was observed on the air — not a tally of the writes that reached the
+    // repository (docs/07 §2.11, ADR-0017). This capture is one station, on the air continuously
+    // for its whole 5 s, seen by the chain twice (early + full window) and by the tracker once,
+    // all over that same stretch. That is ONE occurrence: the chain's full-window write resolves
+    // as a re-measurement of its early one (T-209), and the tracker's entry folds in through the
+    // same-emission merge, which discounts the shared stretch (docs/07 §2.11, "overlapping
+    // observations not counted twice").
+    //
+    // Do not re-derive this by subtraction. This assertion used to read
+    // `count - Σ(non-demodulation ledger rows) == 1`, inferring the chain's share by taking the
+    // tracker's row at face value. A row's `count` is what its producer **measured**, never what
+    // it **added**: a row that arrived by a discounted merge (or as a re-measurement) reads 1
+    // and added 0. T-316 made that difference visible here — with its false alarms gone the
+    // tracker's entry began merging in instead of landing directly on the chain's entry — and
+    // the subtraction then credited the chain with 0 for a session it had counted correctly,
+    // while the raw 2 it used to see was the shared 5 s counted twice.
+    assert_eq!(
+        e.count, 1,
+        "[{SIGNAL_062}] one session over one continuous emission is one occurrence, however \
+         many producers saw it: {rows:?}"
     );
     let tunings = repo.refined_tuning_history(id).unwrap();
     assert_eq!(
