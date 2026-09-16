@@ -292,6 +292,44 @@ fn like_emitters_join_one_cluster_and_unlike_ones_stay_apart() {
     assert_eq!(r.visible_clusters().unwrap().len(), 1);
 }
 
+/// T-293: characterisation timestamps are the emitter's **own last observation**, and chains
+/// characterise on their own threads, so an emitter can join a cluster that a later-observed
+/// emitter already seeded. Folding it in must not stamp the cluster as changing before it existed
+/// — that was refused outright by `SignatureCluster::validate`, and the whole `chain_emitter` call
+/// failed behind a bare error counter, taking the confirmation review and overlap resolution with
+/// it.
+#[test]
+fn an_emitter_observed_earlier_still_joins_a_cluster_a_later_one_seeded() {
+    let mut r = Repository::open_in_memory().unwrap();
+    let fields = sensor_fields(4800.0, 9600.0, 0.12);
+
+    // Seeded by the later-observed emitter first: the cluster's created_at is t(50).
+    let late = an_emitter(&mut r, 433.0e6, (0, 1), 3);
+    store_features(&mut r, late, "features:late", t(50), &fields);
+    assign_emitter(&mut r, late, t(50)).unwrap().unwrap();
+    let id = r.emitter_cluster_id(late).unwrap().unwrap();
+    assert_eq!(r.cluster(&id).unwrap().created_at, t(50));
+
+    // Now one whose own last observation is earlier. This used to fail the whole assignment.
+    let early = an_emitter(&mut r, 434.0e6, (0, 1), 3);
+    store_features(&mut r, early, "features:early", t(10), &fields);
+    let a = assign_emitter(&mut r, early, t(10))
+        .expect("an out-of-order measurement is not an error")
+        .unwrap();
+    assert_eq!(
+        a.cluster_id.as_deref(),
+        Some(id.as_str()),
+        "it measures like the cluster, so it joins it"
+    );
+    assert_eq!(r.cluster_members(&id).unwrap().len(), 2);
+
+    // The fold happened, and the cluster's own clock did not run backwards.
+    let c = r.cluster(&id).unwrap();
+    assert_eq!(c.centroid.folds, 2, "the earlier emitter was folded in");
+    assert_eq!(c.updated_at, t(50), "updated_at never moves backwards");
+    assert!(c.validate().is_ok(), "the stored cluster stays valid");
+}
+
 /// "The same thing I saw before" holds for one emitter seen again and again, so a single member
 /// with enough separated appearances makes its cluster visible.
 #[test]
