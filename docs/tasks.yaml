@@ -2582,7 +2582,7 @@ tasks:
   - id: T-160
     milestone: MUI
     title: "MUI API gap 4: stage tap view=spectrum for MPX/subcarrier plots"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -3409,7 +3409,7 @@ tasks:
   - id: T-213
     milestone: M3
     title: "M3 evaluation harness: dev vs acceptance seed split, per-SNR accuracy/unknown-rate reports, OTA labels only from CRC-valid decodes"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-211]
     parallel_group: M3V

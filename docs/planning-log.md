@@ -2507,3 +2507,7 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Merging T-199 (classifier) and T-217 (IQ-ring follow-ups)** together with one check.
 - **B0.524 T-199 and T-217 merged.** The classifier lands inert (rank 3, never demoting a chain, decoder or user label) with its ADR floors unmet and tracked as T-230; the IQ-ring follow-ups land with the `allocation_skipped_samples` counter and the HTTP-level allocation test.
   - **Now unblocked by T-199:** T-218, T-212, T-213 (they needed hk-classify on main).
+- **B0.525 Full check green after merging T-199 and T-217 (aa7664c).** Lint clean; 1514/1514 tests, up from 1474 as T-199's 61 classifier tests and T-217's additions landed; acceptance 31/31; 42 GB free.
+  - **T-160 launched** (Sonnet): stage tap spectrum view, so the Decode workbench can plot MPX and its 19/38/57 kHz subcarriers without the UI doing DSP.
+  - **T-213 launched** (Sonnet): the M3 evaluation harness, chosen because T-230 - the classifier accuracy gap now on M3's critical path - depends on it. Its key requirement is that dev/acceptance seed separation is ENFORCED and fails loudly, not merely documented, so nothing can be tuned on the test set.
+  - **Still queued:** T-218 (M3 contracts remainder) and T-212 (family priors), both now unblocked by T-199 landing but waiting for a slot.
