@@ -1034,6 +1034,34 @@ The user's direction (2026-09-14): the web UI will be rewritten later as a one-s
 
 Target-priority arithmetic (a click beats a selection beats the strongest-in-view; a click is boxed ±25 kHz and clamped to the current view; a selection is clamped to the 1 MHz Listen span) stayed client-side: it resolves already-known UI state (what was clicked, which selection is active, the current view bounds) rather than measuring anything about the signal itself, and the server independently enforces the 1 MHz Listen span regardless (`MAX_LISTEN_SPAN_HZ`, `hk_stream::audio::ListenTarget`). See `ui/src/listen.ts` for the full reasoning and `crates/hk-api/tests/http_api.rs` (`analysis_strongest_*`) / `crates/hk-cli/tests/api_contract.rs` for the tests.
 
+## Listen as an audio pipeline (planned, MAUTO; ADR-0011 §8, ADR-0015 §12)
+
+**Planned, not served yet. Nothing in this section changes any route today.** T-221 is a design task: it records what Listen becomes once audio is an ordinary recipe output, so the UI and external clients can see the intended end state. No row below is in `ROUTES`; when an owning task lands it moves its rows into a normal section with request/response shapes and contract tests (T-079).
+
+- **Contracts:** [ADR-0011 §8](adr/0011-decoder-workbench-contracts.md) (the `audio_out` sink block, the `audio` output kind, `input.liveness`, `refine.objective.builtin`), [ADR-0015 §12](adr/0015-decoder-synthesis-contracts.md) (the chooser, ownership, the staged migration).
+
+**What does not change, at any stage:**
+
+- `GET /ws/open/listen?emitter=|detection=|f_lo=&f_hi=` and TCP `open/listen?…` keep their names, parameters and refusal codes. There is still **no `mode` parameter** — mode and every other parameter stay estimated.
+- The audio profile (`docs/stream-contract.md` §12.2) keeps `kind: "audio"`, `datatype: "ri16_le"`, `sample_rate_hz: 48000`, `frame_samples: 960`, its type-1 data records and its type-3 status keys (`level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `latency_ms`, …). A closed squelch stays a jump in `sample_index` plus `DISCONTINUITY`.
+- Audio stays **content**: the pre-attach gate (`listen_class`) still runs before any ring read, and the egress gate still withholds payloads under a class that forbids content.
+- `/api/status` keeps reporting `listen.budget`: an audio pipeline counts as a listener, not only as a chain.
+- `GET /api/analysis/strongest` is unrelated (it picks a target) and unchanged.
+
+**Planned deltas, all additive:**
+
+| Method | Path | Planned delta |
+|---|---|---|
+| GET | `/ws/open/listen` | Implementation only: chooser → ephemeral audio pipeline → that pipeline's `audio` output. Gains an optional `pipeline=<id>` form that **attaches** to an already-running audio pipeline instead of starting one. |
+| GET | `/ws/{stream_id}` | A running audio pipeline also offers its output as the always-on stream `audio/<pipeline>/<output>`, beside `inspector/<pipeline>/<output>`. |
+| POST | `/api/pipelines` | Accepts a recipe with an `audio` output; the start runs the pre-attach content gate and is admitted against the listener budget. |
+| GET | `/api/pipelines/{id}` | `outputs[]` gains `kind: "audio"`; session-owned pipelines report `owner: "session"`. |
+| — | audio stream header | The `audio` object gains `pipeline_id`, `recipe` (`<id>@<version>`), `output_id`, `edit_rev`. Existing keys keep their names and meanings; unknown-key-tolerant readers are unaffected. |
+| — | audio status records | Keep every audio key and additionally carry the per-node `<node>.<metric>` batch (ADR-0011 §1.3) on the same tick. |
+| POST | `/api/outputs/record/start` | Unchanged in this plan (`kinds: ["audio"]` still opens its own chain). |
+
+**Staging.** The switch is flag-gated (`HK_LISTEN_PIPELINE=1`, default off) before it is defaulted on, and only for the modes that have blocks (WFM/NBFM/AM). USB/LSB/CW have no blocks and keep the existing chain. See ADR-0015 §12.9 for the numbered stages and what is observable after each.
+
 ## Route table completeness
 
 `crates/hk-api/src/http.rs::ROUTES` is the single source of truth for what answers under `/api/` and `/ws/`; `crates/hk-cli/tests/api_contract.rs::every_route_in_the_route_table_is_documented` asserts every entry in it appears (method and path together) somewhere in this file, so this document cannot silently fall behind the server.

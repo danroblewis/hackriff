@@ -538,3 +538,135 @@ Three problems, one mechanism — **competition between hypotheses over a band**
 5. **User versus decode.** A user-promoted pipeline versus a CRC-valid decode from a different pipeline — user wins (proposed, matching ADR-0016 rank 0), or the decode wins and the contradiction is flagged? Same call as ADR-0016 open question 3.
 
 *Unverified in this amendment: the 0.6 channel-overlap fraction, the 4-bit supersession margin, the SNR × duty × trust proxy for T-219, and the artifact-detection tolerances — all first guesses, to be measured against the real FM capture and the adjacent-station guard case.*
+
+## 12. Amendment — Listen as an audio pipeline (T-221, 2026-09-15, from the user)
+
+**Status:** PROVISIONAL, planning only, no code. Source: [docs/15 §10](../15-decoder-synthesis.md), written by the user after live testing. Requires [ADR-0011 §8](0011-decoder-workbench-contracts.md) (the audio sink block, the `audio` output kind, the live-edge policy). §§1–11 stand unchanged; this section says how the **existing, live-tested** Listen path becomes one of those pipelines **without ever going dark**, because the user tests live and a stage that breaks Listen is not acceptable.
+
+### 12.1 What Listen is today (the facts the plan is measured against)
+
+`crates/hk-pipeline/src/chains/listen.rs`, 1093 lines:
+
+1. **Gate** — `listen_class` runs *before any ring read*; restricted bands and restricted source classes refused whatever else is true; unclassified content fails closed.
+2. **Admission** — `max_listeners` (8) plus a CPU budget, costed at the dearer mode until the mode is known (T-066, T-071).
+3. **Probe** — `probe_s` of live IQ; a C13 estimate plus T-012 mode selection (`hk_demod::audio::probe`) choose **mode** ∈ {`wfm`, `nbfm`, `am`, `usb`, `lsb`, `cw`}, centre and bandwidth. The gate runs again on the probed channel.
+4. **Refine** — T-070's `RefinementLoop` with `WfmObjective`; writes an append-only `emitter_refined_tuning` row (provenance `refined by output analysis`); `LiveRefiner` re-refines in the background and retunes the demodulator under hysteresis.
+5. **Stream** — `AudioDemod` (squelch, AGC) → 20 ms `ri16_le` records at 48 kS/s plus type-3 status records, through a `Publisher` with a small per-consumer queue (drop-not-block, ≈ 0.6 s).
+
+Structurally: **no `/api` route at all.** It is the on-demand opener `listen` (`/ws/open/listen`, TCP `open/listen`), a `ChainKind::Listen`, **per-consumer** (session dropped → producer stops), and a source re-plumb into another class or rate **ends** the chain so the client reconnects.
+
+### 12.2 The decomposition — and the part the framing hides
+
+"Listen is just a decode pipeline with an audio sink" resolves into **three** things, not one:
+
+1. a **chooser** — probe → mode → *which recipe*, with seed parameters;
+2. an **audio pipeline** — ADR-0011 §8, the recipe whose sink is `audio_out`;
+3. an **opener** — the target-shaped, per-consumer entry point (`listen?emitter=…`) that ties a consumer to (1) + (2).
+
+Only (2) is the recipe. **(1) is what the one-line framing hides.** A recipe is a *fixed* structure, so "the user never picks the mode" has to live outside it. Name it and own it: `hk_pipeline::audio::choose` probes the live edge, then ranks the analog recipes against the **measured** family, bandwidth and features (`GET /api/recipes/match`'s rule, ADR-0011 §2.4, with T-164's zero-weight-on-frequency ranking) and returns `(recipe_id, seed params)` — or `legacy` (§12.5).
+
+That is precisely a depth-1, budget-1 instance of §3's search restricted to the analog skeletons, which is why the unification is real — and also why it only *completes* when MAUTO exists. Until then the chooser is the existing probe, wrapped, with no new estimation and no new thresholds.
+
+### 12.3 Ownership: who stops an audio pipeline
+
+A Listen chain is owned by its consumer; a recipe pipeline is a named object with a lifecycle. Both are needed, and the difference is not cosmetic:
+
+- **Ephemeral** (the opener's mode, today's semantics preserved): `/ws/open/listen?emitter=…` starts a pipeline owned by the session — it stops when the socket closes, it is never saved, and it appears in `GET /api/pipelines` with `owner: "session"` while it runs.
+- **Explicit**: `POST /api/pipelines {recipe, target}` with an `audio` output makes an ordinary named pipeline that outlives any consumer. Opening `listen?pipeline=<id>`, or the always-on `audio/<pipeline>/<output>` stream, **attaches**.
+- **Attach, don't duplicate**: an opener whose target already has a running audio pipeline attaches to it. Two browser tabs listening to one station must not build two DDCs — today they get two chains, and under the pipeline model that would also be two rows.
+
+### 12.4 The Listen API, surface by surface
+
+**Nothing is deprecated.** The opener stays the compatibility surface **permanently**, because it is what the UI dock, `py/examples/hk_audio_wav.py` and the TCP one-liners already speak, and because "start a pipeline, then open its stream" is a worse interface for the one-click case.
+
+| Surface | Fate |
+|---|---|
+| `GET /ws/open/listen?emitter=\|detection=\|f_lo=&f_hi=` | **Kept, unchanged, permanently.** Re-implemented as chooser → ephemeral audio pipeline → that pipeline's `audio` output. No parameter added or removed; still **no `mode` parameter**. |
+| TCP `open/listen?…` | Kept, identically. |
+| `GET /api/streams` → `on_demand[listen]` | Kept: same `kind`, `datatype`, `sample_rate_hz`, `params`. |
+| Audio stream header (stream contract §12.2) | **Additive only**: `pipeline_id`, `recipe`, `output_id`, `edit_rev` (ADR-0011 §8.2). Every existing key keeps its name and meaning. |
+| Status records (type 3) | Kept key-for-key; per-node metrics added alongside. |
+| Refusal codes (`4403/4404/4409/4503`; `403/404/409/503`) | Kept: the pipeline start's refusal maps onto the same codes, and the pre-attach gate still runs before any ring read (ADR-0011 §8.3). |
+| `/api/status` `listen.budget` and `budget` | Kept: audio pipelines count as listeners (ADR-0011 §8.8). |
+| `POST /api/outputs/record/start {kinds:["audio"]}` | **Unchanged in this plan.** It may later record an audio pipeline's output instead of opening its own chain; not required, not scheduled. |
+| `GET /api/analysis/strongest` | Unrelated and unchanged (it picks a *target*, not audio). |
+| **New, additive** | `POST /api/pipelines` accepts an audio recipe; `GET /api/pipelines/{id}` shows `audio` outputs; `listen?pipeline=<id>` attaches; §11.8's `GET /api/inventory/{id}/pipelines` lists the `listen`-origin row. |
+
+### 12.5 Per-mode cutover (why nothing has to break)
+
+Blocks exist, or are specified by ADR-0011 §8.4, for **WFM / NBFM / AM**. **None exist for USB / LSB / CW**, which Listen serves today. So the chooser returns either a recipe **or** `legacy`, and `legacy` runs today's chain unchanged. The migration flips modes one at a time as each recipe proves parity, and SSB/CW may legitimately stay `legacy` **forever** — that is an acceptable end state, not a failure.
+
+### 12.6 Retune and refinement
+
+- **Ownership of the closed loop does not change.** It stays `hk_pipeline`'s refinement loop over T-070's `RefinementLoop`, with the `wfm-pilot` builtin objective (ADR-0011 §8.7). What changes is only that the objective is **declared by the recipe** instead of hard-coded in the chain — and that the very same loop already serves digital recipes (`crc.error_rate → min`). Background re-refinement, hysteresis, the `emitter_refined_tuning` rows and the header/status `refinement` fields all stay exactly as they are. The emitter's **measured** `f`/`BW` are still never overwritten (§11.1).
+- **Applying a refinement** becomes an ordinary hot edit instead of the bespoke `retune_refined`: the loop writes the new centre/bandwidth into the pipeline's `input`, and the runtime re-plumbs the channel at a chunk boundary (ADR-0011 §2.3, "`input` changed"), which is what Listen's in-place retune already does by hand. Gain: refining a *digital* pipeline uses the identical mechanism.
+- **Source retune (the radio moves).** Today a re-plumb into another class or rate **ends** the chain and the client reconnects; an in-place retune keeps it. **Keep that observable behaviour through the whole migration.** The UI's `AudioSession` and every TCP client handle "stream ended"; changing it mid-migration would be a live-visible change with no test behind it. Making an audio pipeline *survive* a class-changing retune is a deliberate **non-goal** here and a candidate improvement afterwards (it needs the content-class derivation to re-run mid-pipeline). Open question 1.
+
+### 12.7 One output model, one dock, two panels
+
+The UI already has the right shape but keyed on **two different backend concepts**: `ui/src/app/dock/slice.ts` has `OutputEntry {kind: "audio" | "records"}` where an audio entry is *a socket the page opened* and a records entry is *a pipeline output*; `ui/src/app/explore/output-panel.ts` has `PanelSource = {kind: "digital", pipelineId} | {kind: "audio", outputId}` and `collectPanelSources` reconciles the two lists by hand.
+
+Under this amendment both become `{pipeline_id, output_id, kind}` and the dock lists **a pipeline's outputs**:
+
+- the **panel widget is chosen by output kind**, not by which API produced it: `audio` → waveform scope plus level/squelch/AGC meters; `messages`/`inspector` → the packet inspector (T-154 components, reused by T-195);
+- **RDS stops being a special case.** Today the audio panel's PS/RT comes from `/api/inventory/{id}/decode` — a path with no relationship to the Listen socket beside it. With ADR-0011 §8.9's recipe, PS/RT is a `messages` **sibling output of the same pipeline**, so the FM panel renders two outputs of one object. This is the concrete payoff of the whole amendment;
+- **outputs are independently subscribable**: the pipeline runs while any output has a consumer or while it is promoted, so "RDS without audio" and "audio without RDS" are both ordinary states rather than special cases;
+- `collectPanelSources` then keys on one list instead of reconciling two, and its "a decode output wins over a Listen stream" heuristic becomes §11.3's existing rank over the emitter's pipelines.
+
+### 12.8 Two corrections this amendment forces on §11
+
+1. **`output_kind` must become `output_kinds` (a set).** §11.1 gives a `CandidatePipeline` a single `output_kind`, and §11.5 says "one promoted row per `output_kind` per emitter". ADR-0011 §8.9's FM recipe has **two** outputs (audio + messages), so a single-valued field cannot describe it. Read §11.5's rule as: *no two promoted pipelines on one emitter may claim the same output kind*; a pipeline claiming `{audio, messages}` promotes for both and conflicts with any other promoted pipeline claiming either.
+2. **An audio pipeline can never confirm an emitter by itself.** Origin `listen` (§11.2) is produced by the chooser: `origin: "listen"`, `output_kinds: ["audio"]`, evidence from the live status ladder (§2.1's mirror), not from a search. Audio has no check word, so such a pipeline reaches at most `verdict: demodulated` (S1) on §3.4's ladder and can never satisfy §5.5's confirm rule (≥ 16-bit check, ≥ 3 distinct valid frames, ≥ 64 hold-out bits). **Listening to a station must never promote it to Confirmed.** Its *RDS sibling output* may, on its own decode evidence. Worth stating plainly, because this is the one place where "audio is just another decode" would be actively wrong.
+
+### 12.9 Staged migration — Listen works after every stage
+
+Ordered, each stage independently revertible, with the user live-testing between stages. **Stage 0 is not optional**: it is the safety net every later stage is checked against.
+
+| Stage | What lands | Observable after it |
+|---|---|---|
+| **0. Freeze the contract** | A conformance test asserting **today's** Listen behaviour through the mock SDR: header keys, `ri16_le`/48000/960, status keys, a closed squelch as a `sample_index` jump plus `DISCONTINUITY`, refusal codes, retune-ends. Runs against the existing implementation. | No change at all. A test that fails loudly the moment any later stage drifts. |
+| **1. Contracts** | This section plus ADR-0011 §8; `schema_version` 3 names reserved. | No change (documents only). |
+| **2. Audio blocks and the `audio` output, inert** | `squelch`, `agc`, `deemphasis`, `audio_out`; the `audio` output kind; `input.liveness`; `recipes/analog-wfm.recipe.json`. | `GET /api/blocks` lists them, and a hand-started WFM audio pipeline is audible at `audio/<pipeline>/<output>`. **Both paths exist side by side**; `/ws/open/listen` is untouched. |
+| **3. Parity harness** | The same fixture through the mock SDR into legacy Listen and into the recipe: audio compared sample-wise (or by level/SNR envelope), RDS PI/PS identical to the `hk_demod::rds` oracle, refinement converging to the same centre within T-070's tolerance, CPU within an agreed factor. | A green parity test. Still nothing user-visible. |
+| **4. Opener switch, flag-gated (default off)** | `HK_LISTEN_PIPELINE=1` makes `/ws/open/listen` run chooser → ephemeral pipeline. Stage 0's conformance test runs in **both** modes. | Identical audio and UI with the flag on; instant revert by unsetting it. **This is the stage the user live-tests.** |
+| **5. Default flip, WFM/NBFM/AM only** | The flag defaults on; SSB/CW keep `legacy` (§12.5); the legacy chain stays in the build. | Dock entries carry `pipeline_id`; audio pipelines appear in `GET /api/pipelines`; a `listen`-origin row exists once §11's table has landed. Reverting is one environment variable. |
+| **6. One output model in the UI** | Dock entries become `{pipeline_id, output_id, kind}`; the FM panel reads RDS from the sibling `messages` output. | Several outputs per signal stack in one dock; RDS text comes from the pipeline that produces the audio. |
+| **7. Retire the chain (never the opener)** | Delete `ChainKind::Listen`'s producer for the cut-over modes; map listener-budget accounting onto audio pipelines. **Only after stage 5 has been live-tested**, and only for those modes. | `/api/status` `listen.budget` still reports; `/ws/open/listen` unchanged. `chains/listen.rs` survives for SSB/CW unless those blocks land. |
+
+### 12.10 Where the framing breaks down (honest objections)
+
+1. **Mode selection is not in the pipeline** (§12.2). "Listen is just a pipeline" is really "a chooser plus a pipeline". That is fine — but the chooser must be named and owned, or "no manual mode" quietly degrades into "pick a recipe by hand", which is a product regression dressed as a refactor.
+2. **Latency is a contract for audio and a statistic for decoding** (ADR-0011 §8.5). Without `live-edge`, moving Listen onto the recipe runtime degrades live listening in a way no existing test would catch: everything still decodes, it just lags. **Highest-risk item in this plan.**
+3. **The refinement objective is not a node metric** (ADR-0011 §8.7). Two objective forms is a wart; the alternative is a worse objective.
+4. **Per-consumer versus named object** (§12.3). Two ownership modes are irreducible, and the attach-don't-duplicate rule is load-bearing rather than an optimisation.
+5. **SSB/CW have no blocks** (§12.5) and writing them well is real DSP work this amendment does not fund. A permanent legacy path for them is an acceptable outcome.
+6. **Stereo is a wire change**, not a block (ADR-0011 §8.4): `ri16_le` mono is baked into every client. Out of scope.
+7. **What should *not* be done: retiring the opener.** `/ws/open/listen` should never be deprecated. The task title says "retire the special-cased Listen path", and the *chain* is worth retiring — the *verb* is not. Keeping a target-shaped one-shot entry point is what makes the product feel like a radio rather than a build system.
+8. **And not yet: none of stages 2+ should start before M1's blocks and runtime are real.** `hk-blocks` and `hk-pipeline::recipes` are contracts with unmerged tasks; adding a second consumer of an unbuilt runtime is speculative. This is a contract now; code when the workbench runs.
+
+### 12.11 Task-id collision (for the coordinator)
+
+§11.6 and §11.9 propose ids **T-230…T-238** for the candidate-pipeline work, including "T-236 Listen as an audio-output pipeline, per T-221's plan". **Those numbers are already assigned** in `docs/tasks.yaml` to unrelated M2/M3 tasks (T-230 classifier accuracy, T-232 temp-dir leak, T-234 M2 gate dwell, T-236 `hk-api` shutdown join, T-238 OTA abstention, …), all done or blocked. §11's MAUTO ids must be re-minted when MAUTO is scheduled.
+
+This section therefore uses placeholder ids **LP-1…LP-8**, mapping onto §12.9's stages; the coordinator assigns real numbers.
+
+| Id | Task | Stage | Deps | Model |
+|---|---|---|---|---|
+| LP-1 | Listen conformance freeze through the mock SDR | 0 | – | Opus, core_interface |
+| LP-2 | Audio blocks + `audio` output kind + `input.liveness` + schema 3 | 2 | M1 runtime, LP-1 | Opus, core_interface |
+| LP-3 | `recipes/analog-wfm.recipe.json` (audio + RDS siblings) | 2 | LP-2 | Sonnet (reviewed) |
+| LP-4 | Parity harness: legacy chain versus recipe | 3 | LP-3 | Opus |
+| LP-5 | Chooser (`hk_pipeline::audio::choose`), flagged opener switch, attach-don't-duplicate | 4 | LP-4 | Opus, core_interface |
+| LP-6 | `refine.objective.builtin` + refinement applied as a hot edit | 4 | LP-2 | Opus, core_interface |
+| LP-7 | MUI: one output model across the dock and the per-signal panels | 6 | LP-5 | Sonnet |
+| LP-8 | Retire `ChainKind::Listen` for cut-over modes; listener-budget mapping | 7 | LP-5 live-tested | Opus |
+
+### 12.12 Open questions (for the user)
+
+1. **Retune behaviour.** Keep "a class-changing retune ends the audio stream and the client reconnects" (proposed — it is today's tested behaviour), or make audio pipelines survive a retune (nicer, but a live-visible change with no coverage)?
+2. **SSB/CW.** Fund `ssb_demod`/`cw_demod` blocks so every mode is a recipe, or accept a permanent legacy path for them (proposed)?
+3. **Keep the legacy chain indefinitely** as a simple, dependency-free live-audio fallback for when a recipe misbehaves, or delete it once WFM/NBFM/AM are cut over (stage 7)?
+4. **Stereo audio.** Wanted at all? It is a wire change (`channels`, interleaved `ri16_le`) plus a `stereo_decode` block, and nothing asks for it today.
+5. **Promotion.** Confirm §12.8's reading: a pipeline claims a *set* of output kinds and promotion conflicts per kind (this supersedes §11.10 open question 2's phrasing).
+
+*Unverified in this amendment: that a recipe chain reaches the current Listen path's audio quality and CPU cost (stage 3 measures it); the 0.6 s `max_backlog_s`; that `squelch`-as-a-block's zero-item chunks are indistinguishable at the UI from today's `sample_index` gaps; and whether the wrapped chooser's mode decisions match today's exactly (stage 0's test pins the behaviour it must reproduce).*

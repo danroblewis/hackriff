@@ -468,3 +468,91 @@ File ownership so T-086…T-093 run in separate worktrees without collisions. T-
 1. **PTY names.** The RDS worked example keeps PTY numeric because RDS and RBDS tables differ. Should recipes gain a region-conditional enum (`values_by_region`), or should the text block look names up?
 2. **Recipe-level JSON Schema for editors.** If the UI wants inline validation before `POST /api/recipes/validate`, generate one from `GET /api/blocks` at runtime rather than maintaining a static file.
 3. ~~**Status cadence.**~~ Settled (T-085 review): one `status` record per ~250 ms tick for the whole pipeline, every node batched as `<node>.<metric>` keys (§1.3, stream contract §14.3).
+
+## 8. Amendment — audio output: a sink block, an `audio` output kind, a live-edge policy (T-221, 2026-09-15, from the user)
+
+**Status:** PROVISIONAL, planning only, no code. Source: [docs/15 §10](../15-decoder-synthesis.md) ("Listen is just a decode pipeline with an audio sink"), written by the user after live testing. §§1–7 stand unchanged. This section adds what a recipe needs in order to *be* an audio decoder; [ADR-0015 §12](0015-decoder-synthesis-contracts.md) says how today's Listen path migrates onto it without going dark.
+
+**The change in one line.** A recipe may end in an **audio sink**, and its output is the audio stream the product already serves — so "listen to this" and "decode this" are the same kind of object, differing only in the sink.
+
+### 8.1 What is actually missing
+
+Not the stream. `kind: "audio"` already exists in the wire contract (ADR-0004, C24, stream contract §12.2), already counts as content (`StreamKind::payload_is_content`), and a `real` port opened as a **stage** stream is already carried as `kind: "audio"` (§14.4). But a stage tap is a *waveform tap*, not listenable audio: `rf32_le` at the port's own rate, with no 48 kHz/`ri16_le` conversion, no 20 ms framing, no squelch/AGC/level status records and no audio header profile. Listen's profile (§12.2) has all of that.
+
+So what is missing is **the sink and the output kind that binds a node's `real` port to the existing audio profile** — plus, less obviously, a liveness rule (§8.5).
+
+### 8.2 The `audio` output kind
+
+A fourth `outputs[]` kind beside `inspector`, `messages` and `stage` (§2.2):
+
+```jsonc
+{ "id": "audio", "kind": "audio", "from": "out",          // a node whose output port is `real`
+  "channels": "mono",                                      // the only value schema 3 accepts (§8.4)
+  "profile": { "mode": "wfm", "deemphasis_s": 75e-6 } }    // header hints; measured values win
+```
+
+- **Validation:** `from` resolves to an `audio_out` node (§8.4); at most one `audio` output per recipe (the pipeline's liveness and listener budget are per pipeline, §8.5/§8.8); `channels` is `mono`.
+- **No new stream kind, no new port type.** The stream served is the §12.2 audio profile **unchanged** in `kind` (`audio`), `datatype` (`ri16_le`), `sample_rate_hz` (48000) and `frame_samples` (960), with the same type-1 data records and type-3 status records. Stream id `audio/<pipeline>/<output>`, beside `inspector/<pipeline>/<output>`.
+- **Header, additively** (a 1.x minor stream-contract change under §1 of that document): the `audio` object gains `pipeline_id`, `recipe` (`<id>@<version>`), `output_id`, `edit_rev`. Every existing key — `mode`, `mode_confidence`, `mode_rules`, `params`, `snr_db`, `squelch`, `agc`, `deemphasis_s`, `demod`, `refinement` — keeps its name and meaning, because the UI's `AudioSession`, `py/examples/hk_audio_wav.py` and any TCP consumer already parse them.
+- **Status records** keep the §12.2 audio keys (`level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `squelched_frames`, `lost_samples`, `latency_ms`, `backlog_s`) **and** carry the §1.3 per-node `<node>.<metric>` batch on the same tick. One record, two vocabularies: the audio keys are what a dock meter reads, the node keys what the workbench reads.
+
+### 8.3 Gating: audio is content, and it is gated twice
+
+1. **Egress** (§6, unchanged): an `audio` payload is withheld (`GATED`, header only) under a class that forbids content, exactly as for `bits`/`symbols`/`iq`.
+2. **Before any ring read.** Listen refuses *before* it attaches anything (`hk_pipeline::chains::listen::listen_class`), and that rule is a property of **the target band and the source class**, not of the Listen chain — `open/iq` already reuses it (§12.3). Therefore: **a recipe declaring an `audio` output runs `listen_class` on its target at pipeline start**, and a refusal is the start's refusal, before the channel DDC exists.
+
+`output_policy` (§2.6) still clamps and can only restrict. A recipe that declares an `audio` output **and** a `content_class` that forbids content is a validation error (it would serve permanently empty audio) — the same shape of rule as §2.6's mandatory `metadata_keys`.
+
+### 8.4 Catalogue additions (group `audio`)
+
+Additive §1.5 entries; each pins its descriptor in `planned()` and is enforced by the existing drift test.
+
+| Block | Ports | Params | Wraps |
+|---|---|---|---|
+| `squelch` | real → real | `mode` (`snr`/`fm-noise`), `open_snr_db`, `hysteresis_db`, `attack_s`, `hang_s` — all hot | `hk_demod::audio` squelch (C19 §"Squelch") |
+| `agc` | real → real | `enabled`, `target_dbfs`, `max_gain_db`, `attack_s`, `decay_s`, `hang_s` — all hot | `hk_demod::audio` AGC (C19 §"AGC") |
+| `deemphasis` | real → real | `tau_s` (hot) | the existing single-pole filter (today a `fm_demod` param; both stay) |
+| `audio_out` | real → **(sink, no output port)** | `output_rate_hz` (48000), `datatype` (`ri16_le`), `frame_samples` (960), `loudness_target_dbfs` | resampler + `hk_stream::audio::encode_pcm` |
+
+- `audio_out` is the catalogue's **first sink**: an input and no outputs. §1.1's port table is unchanged; §2.2's validation learns that an `audio` output's `from` names an `audio_out`, and that a sink node may be a graph leaf.
+- **A closed squelch emits no items, not silence.** `squelch` produces zero items while closed and flags the first chunk after re-opening `DISCONTINUITY`. That is exactly how Listen expresses a gap today (a jump in `sample_index`), so wire behaviour is preserved and a long silence costs no bandwidth. Consequence for §1.4 rule 3: a block may legally emit nothing for an unbounded time; the `hold_items` latency bound governs only the open path.
+- **Deliberately not invented here.** There is **no `ssb_demod` and no `cw_demod`**, and Listen serves `usb`/`lsb`/`cw` today. Writing them properly (carrier estimate, raster snap, clarifier — C19 §"SSB carrier") is real DSP work this amendment does not fund. Their absence is exactly why the migration is **per-mode** (ADR-0015 §12.5) rather than all-at-once. **Stereo** is also out: `stereo_decode` would need a block *and* a wire change (`channels`, interleaved `ri16_le`), and no client asks for it.
+
+### 8.5 Live-edge policy — the real-time difference
+
+A recipe pipeline is a **throughput** reader: if it falls behind, the ring laps it, `lost_samples` rises and the next chunk carries `DISCONTINUITY` (§1.4 rule 4). Audio has a stronger requirement — it must **stay live**. Listen skips forward to the live edge rather than playing out a growing backlog, and holds ≈ 0.6 s of per-consumer queue.
+
+A recipe with an `audio` output therefore declares, and the runtime enforces:
+
+```jsonc
+"input": { "…": "…", "liveness": { "mode": "live-edge", "max_backlog_s": 0.6 } }
+```
+
+- **`live-edge`** (the default for an audio output): when the reader's backlog exceeds `max_backlog_s`, the runtime **seeks the reader to the live edge**, counts the skip and flags `DISCONTINUITY`.
+- **`throughput`** (the default for every other recipe, i.e. today's behaviour): never seeks.
+
+This is the single most likely way a naive port would ruin live listening: everything would still decode, it would just lag, and no existing test asserts otherwise. **Latency is a contract for audio and merely a statistic for decoding.**
+
+### 8.6 Schema version 3
+
+Output kind `audio`, `input.liveness` and `refine.objective.builtin` (§8.7) are new optional keys, and unknown fields are errors, so `schema_version` goes **2 → 3** under §2.4's rule. ADR-0015 §2.3's `refine.objective.evidence` bumps to the same 3: **one bump, three keys**, landing together or reserving each other's names.
+
+### 8.7 Refinement objectives that are not a node metric
+
+§1.3 declares `refine.objective` as `{node, metric, goal}`. Listen's actual objective (T-070, `hk_demod::refine::WfmObjective`) is not that shape: it measures 19 kHz pilot C/N₀ against MPX guard bands, an ITU 99 % occupied-bandwidth floor and an RDS validation pass, over the **channel IQ window** — not over one node's output port. Forcing it into `{node, metric}` would replace a working objective with a weaker one. So `refine.objective` gains a third form:
+
+```jsonc
+"refine": { "objective": { "builtin": "wfm-pilot" }, "tune": ["center_hz", "bandwidth_hz"] }
+```
+
+`builtin` names a registered `hk_demod::refine::Objective` (`wfm-pilot` today; the NBFM/AM audio-SNR and FSK CRC-rate objectives are T-070's hook rows). **The loop does not move**: `hk_pipeline`'s refinement loop owns it, as it already does, and one loop now serves all three forms — `{node, metric}` (`crc.error_rate → min`), `{builtin}` (`wfm-pilot`) and later `{evidence}` (ADR-0015 §2.3).
+
+### 8.8 Budget
+
+An audio-output pipeline is admitted as a **listener**, not merely as a `recipe` chain: it counts against `max_listeners` (8) as well as `max_chains`, costed like a Listen chain from the tuned sample rate (stream contract §12.1, T-066/T-071). Otherwise moving Listen onto recipes would silently delete the listener cap that protects the capture path.
+
+### 8.9 Worked example (`recipes/analog-wfm.recipe.json`, planned)
+
+`input` `iq` 240 kS/s → `fm` `fm_demod` (75 kHz deviation, 75 µs de-emphasis) → `sq` `squelch` (`fm-noise`) → `gain` `agc` → `out` `audio_out`; `refine.objective = {builtin: "wfm-pilot"}`; `outputs`: `audio` from `out` — **and**, hanging off the same `fm` node, §5's RDS chain with its `messages` outputs.
+
+That one document is the whole point of the amendment: **one pipeline, two outputs, audio and RDS as siblings**, where today they are a Listen chain and an unrelated `analog-auto` decode path that the UI reconciles by hand.
