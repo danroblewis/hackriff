@@ -3396,7 +3396,7 @@ tasks:
   - id: T-212
     milestone: M3
     title: "C17 family priors for classification fusion per ADR-0016 (priors never scale unknown; lambda0 >= 0.1; 10:1 evidence cannot be flipped by priors)"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-211]
     parallel_group: M3P
@@ -3791,7 +3791,7 @@ tasks:
   - id: T-236
     milestone: M2-hardening
     title: "hk-api Server::shutdown() joins only its accept-loop thread: per-connection threads are detached and never joined, so a stopped server can still be touching files"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-232]
     parallel_group: API
