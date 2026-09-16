@@ -20,8 +20,15 @@ export interface DeviceCaps {
   tx_capable_hardware: boolean;
 }
 
+/**
+ * Antenna-port bias-tee state from `/api/control/state` (T-325): three states, never a bool.
+ * `"unknown"` means nothing reported one — it must never be rendered as off, since a bias tee left
+ * on into a passive or DC-shorted port is a hardware hazard.
+ */
+export type BiasTeeState = "unknown" | "off" | "on";
+
 export interface Tuning {
-  center_hz: number; sample_rate_hz: number; gains: Record<string, number>; bias_tee: boolean | null;
+  center_hz: number; sample_rate_hz: number; gains: Record<string, number>; bias_tee: BiasTeeState;
   baseband_filter_hz: number | null;
 }
 export interface Display { fft_size: number; averaging: number; rows_per_s: number; paused: boolean; window: string }
@@ -147,7 +154,8 @@ export interface PanelModel {
   segment: number | null;
   rates: number[];
   gains: GainControl[];
-  biasTee: { available: boolean; on: boolean };
+  /** `unknown` renders as an indeterminate box, never as an unticked (= off) one (T-325). */
+  biasTee: { available: boolean; on: boolean; unknown: boolean };
   basebandFilter: { available: boolean; options: number[]; value: number | null };
   frequencyRanges: [number, number][];
   /** Display setting bounds (T-067): from `state.display_limits`, else [`FALLBACK_LIMITS`]. */
@@ -207,7 +215,11 @@ export function panelModel(s: ControlState, pending = false): PanelModel {
     segment: run ? run.segment : null,
     rates: rateOptions(s.device, s.tuning?.sample_rate_hz ?? run?.sample_rate_hz),
     gains: live ? gainControls(s.device, s.tuning) : [],
-    biasTee: { available: live && !!s.device!.bias_tee, on: s.tuning?.bias_tee === true },
+    biasTee: {
+      available: live && !!s.device!.bias_tee,
+      on: s.tuning?.bias_tee === "on",
+      unknown: s.tuning?.bias_tee !== "on" && s.tuning?.bias_tee !== "off",
+    },
     basebandFilter: {
       available: live && !!s.device!.baseband_filter,
       options: basebandFilterOptions(s.device?.baseband_filter ?? null, s.tuning?.baseband_filter_hz ?? undefined),

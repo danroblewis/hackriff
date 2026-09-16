@@ -110,7 +110,11 @@ fn live_serve_inventory_shows_real_fm_detections() {
     let t = lc
         .set_gains(&[NamedGain::new("lna", 32.0), NamedGain::new("vga", 30.0)])
         .expect("named gains");
-    assert_eq!(t.bias_tee, Some(false), "the HackRF has a bias tee, off");
+    assert_eq!(
+        t.bias_tee,
+        hk_model::BiasTee::Off,
+        "the HackRF has a bias tee, off"
+    );
 
     let start_t = Instant::now();
     while start_t.elapsed() < Duration::from_secs(20) {

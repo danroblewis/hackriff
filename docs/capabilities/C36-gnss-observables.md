@@ -52,7 +52,7 @@ Runs a software GNSS receiver (GNSS-SDR class) on raw L-band IQ. It produces per
 
 ## Pitfalls
 - A handheld indoors or near the body looks like jamming. Require an all-SV drop plus a floor rise.
-- A bias-tee left on into a passive or DC-shorted port. Put the bias-tee state in provenance and the UI.
+- A bias-tee left on into a passive or DC-shorted port. **Addressed by T-325:** `Provenance.bias_tee` is three-valued (`unknown`/`off`/`on`, never a bool — "nothing said" is not "off"), stamped by the source layer through the generic device contract, and surfaced on `/api/iqbuffer` segments and in the control panel. Reporting only: nothing auto-enables a bias tee.
 - Cellular or Inmarsat IMD raises the L1 floor and creates false jamming flags. Cross-check C05 gain-step tests.
 - DC spike at band centre (`docs/01 §1.3`): tune L1 off-centre.
 - Clock drift without a time aid produces false "spoofing" clock jumps.

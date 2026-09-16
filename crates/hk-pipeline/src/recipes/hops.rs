@@ -1166,6 +1166,7 @@ mod tests {
             overload: false,
             temperature_c: None,
             antenna_port: None,
+            bias_tee: hk_model::BiasTee::Unknown,
             clock_source: ClockSource::Internal,
             clock_locked: true,
             calibration_state_ref: None,

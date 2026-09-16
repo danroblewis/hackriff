@@ -869,6 +869,11 @@ pub struct SegmentStatus {
     pub device_id: String,
     /// Antenna port, if known.
     pub antenna_port: Option<String>,
+    /// Antenna-port bias-tee state under this segment's provenance (T-325): `unknown`, `off` or
+    /// `on`. `unknown` means the source could not report it — a replayed recording, say — and
+    /// must never be read as `off`: the DC may have been on the port for these samples, which is
+    /// both a hardware hazard and a reason the noise floor is not comparable with other segments.
+    pub bias_tee: hk_model::BiasTee,
     /// The front end reported overload.
     pub overload: bool,
     /// Content class of the window.
@@ -1755,6 +1760,7 @@ impl IqBuffer {
                     amp_on: p.tune.amp_on,
                     device_id: p.device_id.clone(),
                     antenna_port: p.antenna_port.clone(),
+                    bias_tee: p.bias_tee,
                     overload: p.overload,
                     content_class: g.start.content_class,
                     dropped_before: g.start.dropped_before,
@@ -2569,6 +2575,7 @@ mod tests {
             quantisation_limited: false,
             temperature_c: None,
             antenna_port: None,
+            bias_tee: hk_model::BiasTee::Unknown,
             clock_source: ClockSource::Internal,
             clock_locked: true,
             calibration_state_ref: None,

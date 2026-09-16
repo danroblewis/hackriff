@@ -1342,6 +1342,9 @@ pub struct LiveSource {
     pub info: SourceInfo,
     /// Named gains in force (quantised by the capabilities).
     pub gains: Vec<NamedGain>,
+    /// Bias-tee state the source was opened with (T-325): `Off`/`On` for a device that has a bias
+    /// tee, `Unknown` for one that has none. Never a fabricated `Off`.
+    pub bias_tee: hk_model::BiasTee,
     /// Identity (provenance `device_id`, SigMF `core:hw`).
     pub device: DeviceInfo,
 }
@@ -1404,6 +1407,15 @@ pub fn open_live(spec: &str, live: &LiveArgs) -> anyhow::Result<LiveSource> {
             start_time: clock_start.unwrap_or_else(Timestamp::now),
         },
         gains,
+        bias_tee: if caps.bias_tee {
+            if request.bias_tee {
+                hk_model::BiasTee::On
+            } else {
+                hk_model::BiasTee::Off
+            }
+        } else {
+            hk_model::BiasTee::Unknown
+        },
         device,
     })
 }
@@ -1493,7 +1505,9 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
         center_hz: live.info.center_hz,
         sample_rate_hz: fs,
         gains: live.gains.clone(),
-        bias_tee: live.control.capabilities().bias_tee.then_some(false),
+        // T-325: what the source was actually opened with, never a `false` fabricated from the
+        // mere existence of the capability.
+        bias_tee: live.bias_tee,
         // The device's own default (usually derived from the sample rate); unknown until a
         // control request sets it explicitly (T-067).
         baseband_filter_hz: None,

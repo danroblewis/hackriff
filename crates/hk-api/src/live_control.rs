@@ -39,8 +39,10 @@ pub struct LiveTuning {
     pub sample_rate_hz: f64,
     /// Named gains, one per stage set so far.
     pub gains: Vec<NamedGain>,
-    /// Bias-tee state; `None` when the device has no bias tee.
-    pub bias_tee: Option<bool>,
+    /// Bias-tee state (T-325). `Unknown` until this server has set it, so the panel never claims
+    /// the DC is off on no evidence — whether the control exists at all is the device's
+    /// `capabilities.bias_tee`, not this field.
+    pub bias_tee: hk_model::BiasTee,
     /// Baseband (anti-alias) filter bandwidth, Hz; `None` when never set explicitly (the device's
     /// default, usually derived from the sample rate) or the device has no selectable filter.
     pub baseband_filter_hz: Option<f64>,
@@ -387,7 +389,11 @@ impl LiveControl for SourceLiveControl {
         self.control
             .set_bias_tee(enabled)
             .map_err(LiveControlError::Source)?;
-        t.bias_tee = Some(enabled);
+        t.bias_tee = if enabled {
+            hk_model::BiasTee::On
+        } else {
+            hk_model::BiasTee::Off
+        };
         Ok(t.clone())
     }
 
@@ -469,7 +475,7 @@ mod tests {
             center_hz: 100.8e6,
             sample_rate_hz: 2.4e6,
             gains: vec![NamedGain::new("lna", 32.0), NamedGain::new("vga", 30.0)],
-            bias_tee: Some(false),
+            bias_tee: hk_model::BiasTee::Off,
             baseband_filter_hz: None,
         };
         (
@@ -512,7 +518,7 @@ mod tests {
             "quantised, merged by stage"
         );
         let t = lc.set_bias_tee(true).unwrap();
-        assert_eq!(t.bias_tee, Some(true));
+        assert_eq!(t.bias_tee, hk_model::BiasTee::On);
         assert_eq!(lc.tuning(), t);
         assert_eq!(
             lc.set_baseband_filter(9.5e6).unwrap_err().http_status(),

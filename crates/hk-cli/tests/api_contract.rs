@@ -664,6 +664,15 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     assert!(is_object(&v["device"]), "{v}");
     assert_eq!(v["tuning"]["center_hz"], json!(FIXTURE_CENTER_HZ));
     assert_eq!(v["tuning"]["sample_rate_hz"], json!(FIXTURE_RATE_HZ));
+    // T-325: bias-tee state is a three-state field, not a bool, and it reports what the source
+    // actually said — the mock has a bias tee and was opened with it off. Asserting the value,
+    // not just that some field is present.
+    assert_eq!(
+        v["device"]["bias_tee"],
+        json!(true),
+        "the mock device has a bias tee: {v}"
+    );
+    assert_eq!(v["tuning"]["bias_tee"], json!("off"), "{v}");
     assert!(is_object(&v["run"]), "{v}");
     assert_eq!(v["transmit"]["available"], json!(false));
     assert!(is_array(&v["routes"]), "{v}");
@@ -2349,6 +2358,10 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
         seg["device_id"].is_string() && seg["content_class"].is_string(),
         "{seg}"
     );
+    // T-325: bias-tee state rides on the segment beside antenna_port and overload as device-local
+    // trust context. The mock reports it, so assert the value rather than merely the shape: a
+    // segment that said "unknown" here would mean the state never reached the API.
+    assert_eq!(seg["bias_tee"], json!("off"), "{seg}");
 
     let (st, v) = get(addr, "/api/iqbuffer?limit=1");
     assert_eq!(st, 200, "{v}");

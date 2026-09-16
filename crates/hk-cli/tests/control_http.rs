@@ -110,7 +110,7 @@ fn the_control_api_drives_a_live_run_through_class_changes_and_rate_changes() {
                 center_hz: FM,
                 sample_rate_hz: FS,
                 gains: Vec::new(),
-                bias_tee: Some(false),
+                bias_tee: hk_model::BiasTee::Off,
                 baseband_filter_hz: None,
             },
         )

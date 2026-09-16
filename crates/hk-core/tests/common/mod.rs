@@ -84,6 +84,7 @@ pub fn provenance(device_id: &str, center_hz: f64, sample_rate_hz: f64) -> Prove
         overload: false,
         temperature_c: None,
         antenna_port: None,
+        bias_tee: hk_model::BiasTee::Unknown,
         clock_source: ClockSource::Internal,
         clock_locked: true,
         calibration_state_ref: None,

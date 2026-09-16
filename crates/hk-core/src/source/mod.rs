@@ -28,11 +28,18 @@
 //! device-specific, and which are about shared air?
 //!
 //! **Device-local physics** (must read the device) — images, harmonics, intermodulation
-//! distortion, noise floor, and gain state (LNA/VGA/amp) — are tied to one receive chain. These
-//! belong in the provenance object [`BlockHeader::provenance`], which carries `device_id` and
-//! antenna port (T-302: an artifact is a property of ONE receive chain, and is gated on these
-//! fields). When a detection uses device-local physics (e.g. to measure an emission's noise floor
-//! rise), it must read the provenance of the samples it examined.
+//! distortion, noise floor, gain state (LNA/VGA/amp), and bias-tee state (T-325) — are tied to one
+//! receive chain. These belong in the provenance object [`BlockHeader::provenance`], which carries
+//! `device_id`, antenna port and `bias_tee` (T-302: an artifact is a property of ONE receive
+//! chain, and is gated on these fields). When a detection uses device-local physics (e.g. to
+//! measure an emission's noise floor rise), it must read the provenance of the samples it
+//! examined.
+//!
+//! Bias tee sits squarely on this side: it is DC the *device* puts on its *own* antenna port, and
+//! an active antenna's LNA moves that chain's noise floor and gain structure. A source reports it
+//! as three states (`unknown`/`off`/`on`) and never infers it — **nothing here ever enables a bias
+//! tee on its own**; only an explicit [`SourceControl::set_bias_tee`] does, and the stream then
+//! reports what it was told.
 //!
 //! **Shared-air reasoning** (must NOT read the device) — deduplication, signal clustering,
 //! and identity across time — operates on the measurements and conclusions, not on which device
@@ -683,8 +690,9 @@ impl PendingControl {
         *self == Self::default()
     }
 
-    /// Applies the tuning, rate, gain and filter changes to `tune`. The bias tee has no
-    /// Provenance field; a stream tracks it itself.
+    /// Applies the tuning, rate, gain and filter changes to `tune`. The bias tee is not part of
+    /// [`Tune`]: it rides on `Provenance::bias_tee` (T-325), so each stream applies `bias_tee`
+    /// to its own state and mints new provenance when it changes.
     pub fn apply_to(&self, tune: &mut Tune) {
         if let Some(hz) = self.center_hz {
             tune.center_hz = hz;
@@ -829,6 +837,7 @@ mod tests {
             quantisation_limited: false,
             temperature_c: None,
             antenna_port: None,
+            bias_tee: hk_model::BiasTee::Unknown,
             clock_source: ClockSource::Internal,
             clock_locked: true,
             calibration_state_ref: None,

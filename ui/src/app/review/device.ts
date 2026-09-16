@@ -118,7 +118,15 @@ export class DeviceTab {
 
     this.renderGains(m.gains);
     this.biasWrap.hidden = !m.biasTee.available;
+    // T-325: an unreported bias tee shows as indeterminate, never as an unticked (= off) box —
+    // the DC may be on the port and nothing has said otherwise.
     (this.bias as HTMLInputElement).checked = m.biasTee.on;
+    (this.bias as HTMLInputElement).indeterminate = m.biasTee.unknown;
+    this.biasWrap.title = m.biasTee.unknown
+      ? "Bias-tee state unknown: the device has not reported it. Do not assume it is off."
+      : m.biasTee.on
+        ? "Bias tee on: DC is on the antenna port."
+        : "Bias tee off.";
     this.renderFilter(m.basebandFilter);
 
     if (run) {

@@ -119,7 +119,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use hk_model::sigmf::{Datatype, SigmfMeta};
-use hk_model::{Provenance, SampleTime, Timestamp, TimestampMethod, Tune};
+use hk_model::{BiasTee, Provenance, SampleTime, Timestamp, TimestampMethod, Tune};
 use num_complex::{Complex, Complex32};
 
 use self::dsp::{Feed, Plan, Render, Rng, estimate_floor_power};
@@ -898,7 +898,7 @@ pub struct MockSdrSource {
     /// T-180: receiver-noise generator (its own stream, so the render's noise fill is unchanged).
     device_rng: Rng,
     tune: Tune,
-    bias_tee: bool,
+    bias_tee: BiasTee,
     filter_explicit: bool,
     overloaded: bool,
     provenance: ProvenanceHandle,
@@ -950,7 +950,9 @@ impl MockSdrSource {
             options,
             feed,
             tune,
-            bias_tee,
+            // T-325: the mock emulates a device with a bias tee, so it reports the state it was
+            // opened with — Off/On, never Unknown.
+            bias_tee: if bias_tee { BiasTee::On } else { BiasTee::Off },
             filter_explicit,
             overloaded: false,
             pending_flags: Discontinuity::STREAM_START,
@@ -987,8 +989,8 @@ impl MockSdrSource {
         self.anchor.time_of(0, self.tune.sample_rate_hz)
     }
 
-    /// The bias tee is on (a flag only).
-    pub fn bias_tee(&self) -> bool {
+    /// The bias-tee state the mock reports (a flag only: nothing is powered) (T-325).
+    pub fn bias_tee(&self) -> BiasTee {
         self.bias_tee
     }
 
@@ -1029,6 +1031,7 @@ impl MockSdrSource {
                 || (rec.quantisation_limited && g >= 1.0),
             temperature_c: None,
             antenna_port: Some(coverage.antenna_port().into()),
+            bias_tee: self.bias_tee,
             clock_source: rec.clock_source,
             clock_locked: rec.clock_locked,
             calibration_state_ref: None,
@@ -1050,6 +1053,7 @@ impl MockSdrSource {
             return 0;
         };
         let before = self.tune.clone();
+        let bias_before = self.bias_tee;
         if let Some(hz) = change.sample_rate_hz {
             self.tune.sample_rate_hz = hz;
             if !self.filter_explicit {
@@ -1069,7 +1073,7 @@ impl MockSdrSource {
             self.tune.center_hz = hz;
         }
         if let Some(on) = change.bias_tee {
-            self.bias_tee = on;
+            self.bias_tee = if on { BiasTee::On } else { BiasTee::Off };
         }
         self.control
             .counters
@@ -1088,6 +1092,12 @@ impl MockSdrSource {
                 &self.tune,
                 self.options.transition,
             ));
+            let flags = self.mint();
+            self.pending_flags |= flags;
+        } else if self.bias_tee != bias_before {
+            // T-325: switching the bias tee changes the antenna port's DC state and, with an
+            // active antenna, the gain structure. It is a provenance change in its own right,
+            // even though `tune` is untouched.
             let flags = self.mint();
             self.pending_flags |= flags;
         }

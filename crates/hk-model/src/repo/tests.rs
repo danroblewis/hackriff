@@ -142,6 +142,7 @@ fn sample_provenance(cal: CalibrationStateId, spur: SpurMaskId) -> Provenance {
         quantisation_limited: false,
         temperature_c: Some(41.0),
         antenna_port: None,
+        bias_tee: crate::BiasTee::Unknown,
         clock_source: ClockSource::Internal,
         clock_locked: true,
         calibration_state_ref: Some(cal),
