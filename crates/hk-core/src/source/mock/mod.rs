@@ -93,7 +93,12 @@
 //! coverage edge. The band-select filter (≈ 60 dB, transition 8 % of the output rate) ends its
 //! roll-off half a transition inside any window edge the recording extends past (T-175: centred
 //! on ±rate/2 it folded recorded content just outside the window onto the opposite edge), so the
-//! outer 4 % of such a side is that dip, filled with the same noise. The filter adds about
+//! outer 4 % of such a side is that dip, filled with the same noise. Since T-231 it ends half a
+//! transition inside the recording's **own** band edge too: a recording's spectrum is periodic at
+//! its sample rate, so a roll-off straddling `centre ± rate/2` passed the alias of the opposite
+//! edge and served recorded energy at a frequency the device was never on (a recording whose
+//! baseband filter is narrower than its rate already had that margin). The band select, roll-off
+//! included, is asserted to stay inside the recorded band at every retune. The filter adds about
 //! half its length in recording samples of latency after a retune. Multi-centre recordings are
 //! refused. The rounding-noise correction assumes the recording's rounding error is white and
 //! independent of the signal (true once its floor is ≳ 0.5 code rms). It needs ≈ 15 frames
