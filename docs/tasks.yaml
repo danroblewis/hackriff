@@ -3330,6 +3330,14 @@ tasks:
     core_interface: true
     scope_audit_2026_09_15: "deps corrected 2026-09-15: T-212 was listed but is DONE (band-plan priors merged, 4a839c3), and T-235 was missing though it is the ONLY remaining blocker on this gate - the classifier meets its accuracy floors (top-1 0.915 vs 0.90, top-2 0.980 vs 0.95, floors verified unmoved and the sweep guards tightened from 0.70/0.90 to the ADR values), leaving false-known 0.171 vs 0.10 and the two abstaining OTA fixtures, which is T-235's scope."
     integration_gap_2026_09_15: "T-201 landed signature matching but there is NO hk-pipeline call site yet, so the API route serves matches only once something writes them. T-201 reports `match_emitter()` makes that a one-liner. Whoever runs this gate (or T-215) must wire it, otherwise signature match and unknown-clustering coverage in the acceptance suite will be vacuously empty rather than failing loudly."
+    gate_result_2026_09_16: 'M3 EXIT GATE FAILS - M3 DOES NOT CLOSE. The suite itself
+      is complete and correct; the verdict is the product''s, not the suite''s. unknown
+      recall 0.7778 (floor 0.80), false-known 0.2222 (floor 0.10); top-1 0.9067, top-2
+      0.9861, wrong-label 0.0008, noise-as-comm 0.000 all pass. Ruled over the FULL grid,
+      not ADR-0016 section 7''s six: those six are a category, not a denominator, and are
+      exactly the set that existed while routing used nearest_family - the hole T-244 closed.
+      The section 7 reading gives 0.9167/0.0833 (M3 would close) and is printed on every run.
+      Two blockers filed: T-247 (C15 call site missing) and T-248 (analog/psk-qam abstention).'
 
   - id: T-207
     milestone: M3
@@ -4007,6 +4015,79 @@ tasks:
       that always prefers the largest constellation. Every ADR-0016 floor holds
       unchanged; confidently-wrong must stay at zero'
     area: crates/hk-classify/src/verify.rs (psk_qam_loglikelihoods)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-247
+    milestone: M3
+    title: 'hk_pipeline::classify::classify_box and ::record have NO CALLER anywhere
+      in the workspace, so a mock-SDR run writes no M3 classification row and the
+      ADR-0016 floors cannot be measured end to end at all'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3B
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-206 (2026-09-16), the M3 exit gate: both emitters in a mock-SDR run
+      carry only chain-written "2fsk" rows with detail None, and /api/inventory/{id}/classification
+      was never landed. The grid numbers measure the classifier DIRECTLY, which is a
+      weaker claim than measuring it through the device. Same shape of vacuum T-242
+      closed for signature matching, and nobody had recorded it'
+    acceptance: 'a pipeline call site invokes classify_box -> record so a normal run
+      through the mock SDR writes real M3 classification rows, and /api/inventory/{id}/classification
+      serves them; the M3 gate can then measure section 7''s classification floors end
+      to end rather than against the classifier in isolation. Follow T-242''s pattern
+      (one seam, on the repository-lock threads, off the ring/DSP/audio chains, with
+      its cost stated). A family is written only when a classifier named one - unknown
+      means not measured. No floor changes'
+    area: crates/hk-pipeline (classify seam), crates/hk-api (inventory classification route)
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
+  - id: T-248
+    milestone: M3
+    title: 'M3 gate blocker: open-set abstention on analog (recall 0.528) and psk-qam
+      (0.458) against the 0.80 floor; aggregate false-known 0.2222 against 0.10'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-206 (2026-09-16), the M3 exit gate, ruling over the full grid'
+    acceptance: 'raise unknown recall for analog 0.528 -> >= 0.80 and psk-qam 0.458 ->
+      >= 0.80, bringing aggregate false-known 0.2222 -> <= 0.10 and unknown recall
+      0.7778 -> >= 0.80. The named offenders: VSB-AM abstains 2/36, 16-APSK 17/36,
+      pi/4-DQPSK 19/36, 8-FSK 21/36. Every other floor holds unchanged (top-1 >= 0.90,
+      top-2 >= 0.95, wrong-label <= 0.003) and confidently-wrong stays at zero. If the
+      features genuinely cannot separate an unlisted member of a family from its listed
+      members, say so with numbers and recommend where that belongs. OVERLAPS T-240
+      (sim-to-real densities) - coordinate or sequence, do not duplicate'
+    area: crates/hk-classify (open-set scoring, densities)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
+  - id: T-249
+    milestone: M3
+    title: 'Within-family class accuracy for cw and ssb is ~0 at and above gate (wrong
+      0.75-1.00) while family-level analog is fine'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: M3A
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-206 (2026-09-16), the M3 exit gate, reported alongside the verdict'
+    acceptance: 'establish why cw and ssb are named wrongly within a correct analog
+      family call, and either fix the class call or state with measured evidence that
+      these classes are not separable at this geometry and should abstain at class
+      level rather than answer wrongly. Family-level floors must not regress; no
+      confident wrong answers'
+    area: crates/hk-classify (analog class call)
     needs: none
     model: opus
     effort: medium
