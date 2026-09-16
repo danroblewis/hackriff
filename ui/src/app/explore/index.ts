@@ -216,21 +216,40 @@ function renderSelectionFocus(ctx: AppContext, s: Selection): HTMLElement {
   );
 }
 
+// Per-signal output panels (T-195): the packet inspector / audio scope + RDS content is a
+// separately-loaded chunk (it pulls in `decode/inspector.ts`, which must stay out of Explore's
+// initial bundle — ADR-0013 §1). Loaded on first signal focus, not at Explore's own mount, so a
+// session that only browses the waterfall never fetches it.
+let outputPanelsLoaded = false;
+function ensureOutputPanels(el: HTMLElement, ctx: AppContext) {
+  if (outputPanelsLoaded) return;
+  outputPanelsLoaded = true;
+  import("./output-panel").then((m) => m.mountOutputPanels(el, ctx));
+}
+
 const mountFocus: MountFn = (el, ctx) => {
+  // Owned once and re-appended on every render (never recreated), so its subscriptions/lazy-loaded
+  // content survive `el.replaceChildren` re-rendering the rest of the panel around it.
+  const outputPanelsEl = h("div", { class: "out-panels-slot" });
+
   function render() {
     const s = ctx.store.get();
     const focus = s.focus;
     if (focus.kind === "signal") {
       const row = s.inventory.rows[focus.id];
-      el.replaceChildren(row ? renderSignalFocus(ctx, row) : h("div", { class: "empty" }, "That signal is no longer in the inventory."));
+      el.replaceChildren(
+        row ? renderSignalFocus(ctx, row) : h("div", { class: "empty" }, "That signal is no longer in the inventory."),
+        outputPanelsEl,
+      );
+      ensureOutputPanels(outputPanelsEl, ctx);
       return;
     }
     if (focus.kind === "selection") {
       const sel = s.selections.list.find((x) => x.id === focus.id);
-      el.replaceChildren(sel ? renderSelectionFocus(ctx, sel) : h("div", { class: "empty" }, "Select a signal or a selection."));
+      el.replaceChildren(sel ? renderSelectionFocus(ctx, sel) : h("div", { class: "empty" }, "Select a signal or a selection."), outputPanelsEl);
       return;
     }
-    el.replaceChildren(h("div", { class: "empty" }, "Select a signal or drag a region to focus it."));
+    el.replaceChildren(h("div", { class: "empty" }, "Select a signal or drag a region to focus it."), outputPanelsEl);
   }
   ctx.store.select(
     (s) => [s.focus, s.inventory.rows, s.selections.list, s.outputs] as const,
