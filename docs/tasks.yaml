@@ -4796,6 +4796,17 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+    correction_by_t288_2026_09_16: 'T-280 report stated the settled,
+      noise-floor-referenced IntegratedEmitter extent was "already computed and already
+      attached to each record as Candidate::Integrated". T-288 instrumented the detector
+      and measured that this is FALSE for these records: the 101.46 cluster settled
+      spectrum is 3.04-3.74 dB over the floor against a +6 dB integration seed, so has_seed
+      is never true and NO IntegratedEmitter region forms over the cluster - zero
+      Candidate::Integrated across all 177 evaluations, confirmed instead by the repeat
+      rule (repeat=883). Only four integrated regions exist in the whole 2.4 MHz span and
+      the nearest stops 50 kHz short. The claim was asserted, not measured, and the
+      coordinator propagated it into T-288 brief. Anything relying on it must re-measure.'
+
   - id: T-281
     milestone: M2-hardening
     title: 'Audit features that measure the OBSERVATION rather than the signal:
@@ -4839,6 +4850,18 @@ tasks:
       the OVERLAPPING-window case, not just the across-silence one, and must decide what a
       fragment duty cycle even means. This is the honest route to the 16 -> 4-7 dedup target;
       T-288 made no change rather than move a threshold.'
+    fifth_instance_2026_09_16: 'T-288 found THREE more at once, and they are the reason
+      the 101.46 cluster will not merge. (a) Track.bandwidth_hz is a running mean
+      (s.bw += (g.bw()-s.bw)/8) of whichever threshold-crossing boxes happened to
+      associate - association history, not the emission. Within EVERY SINGLE SECOND one
+      emission box widths span 3.0-15.0x, so the spread BETWEEN tracks is smaller than the
+      spread WITHIN one second of one emission. xdb_bw is no better (mean |xdb-obw| 2.5 kHz,
+      range 4.7-75.0 kHz). (b) duty_cycle 0.0082-0.4592 (56x) and (c) burst_length
+      0.0065-0.0429 s hold the five rows apart on their own - duty 0.0099 vs 0.4592 against
+      tol 0.115 is error 3.9, blocking the merge by itself. IMPORTANT SCOPE NOTE: T-262
+      excludes those three statistics only when presence intervals are DISJOINT. Here they
+      OVERLAP, so nothing excludes them. This audit must cover the overlapping-window case,
+      not just the disjoint one.'
 
   - id: T-282
     milestone: M2-hardening
