@@ -241,6 +241,7 @@ impl DensityModel {
     /// Fits a model from labelled dev-grid vectors `(class, family, features)`: per class, every
     /// feature present in at least [`MIN_PRESENCE`] of its samples, with a shrunk sigma.
     pub fn fit(labelled: &[(String, String, Features)], fitted_on: &str) -> DensityModel {
+        let scales = feature_scales(labelled);
         let mut order: Vec<(String, String)> = Vec::new();
         for (class, family, _) in labelled {
             let key = (class.clone(), family.clone());
@@ -258,7 +259,8 @@ impl DensityModel {
                     .collect();
                 let dims: Vec<Dim> = FEATURE_NAMES
                     .iter()
-                    .filter_map(|name| {
+                    .enumerate()
+                    .filter_map(|(i, name)| {
                         let vals: Vec<f64> = rows.iter().filter_map(|r| r.get(name)).collect();
                         if (vals.len() as f64) < MIN_PRESENCE * rows.len() as f64 || vals.len() < 4
                         {
@@ -267,11 +269,24 @@ impl DensityModel {
                         let mean = vals.iter().sum::<f64>() / vals.len() as f64;
                         let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
                             / (vals.len() - 1) as f64;
-                        // Shrinkage: never trust a dimension to be tighter than 8 % of its own
-                        // scale, so one over-clean dev cell cannot make the class brittle on the
-                        // air. 8 % is the S5 rule of thumb for how far a synthetic estimate moves
-                        // on a real HackRF capture (REPORT.md §3.2), not a tuned value.
-                        let sigma = var.sqrt().max(0.08 * mean.abs()).max(1e-3);
+                        // Shrinkage: never trust a dimension to be tighter than 8 % of **the
+                        // feature's own scale**, so one over-clean dev cell cannot make the class
+                        // brittle on the air. 8 % is the S5 rule of thumb for how far a synthetic
+                        // estimate moves on a real HackRF capture (REPORT.md §3.2), not a tuned
+                        // value.
+                        //
+                        // The scale is the feature's spread **across the whole grid**
+                        // ([`feature_scales`]), not the class's own mean. Shrinking towards the
+                        // mean silently assumes every feature is a positive quantity measured in
+                        // its own units, which several of `features@1` are not: `carrier_line_db`
+                        // is a dB ratio, `symmetry` is signed and centred on zero, `flatness` and
+                        // `c42_norm` are bounded. For those, 8 % of the mean is not 8 % of
+                        // anything meaningful, and the floor collapses exactly where it was meant
+                        // to protect — measured on the real 915 MHz FSK capture, `gfsk`'s
+                        // `carrier_line_db` (mean 1.8 dB, so a 0.14 dB floor) put the burst at
+                        // z = +124, and `2fsk`'s `symmetry` (mean ~0) at z = +34, when no dB
+                        // measurement on an 8-bit front end is repeatable to 0.14 dB.
+                        let sigma = var.sqrt().max(0.08 * scales[i]).max(1e-3);
                         Some(Dim {
                             feature: (*name).to_owned(),
                             mean,
@@ -310,6 +325,35 @@ impl DensityModel {
             classes,
         }
     }
+}
+
+/// Each feature's natural scale over the whole fitting grid, in [`FEATURE_NAMES`] order: the
+/// robust spread (median absolute deviation, scaled to a Gaussian σ) of every value the feature
+/// took, across all classes.
+///
+/// This is what a per-class sigma is shrunk towards ([`DensityModel::fit`]). The MAD, rather than
+/// the standard deviation, because several features are heavy-tailed across the taxonomy
+/// (`gamma_max` spans 1.7 to 300, `mu42_a` 1.0 to 20): one extreme class would otherwise set a
+/// floor so wide that every class in that dimension stopped discriminating. A feature the grid
+/// never varies gets 0 and keeps the absolute `1e-3` floor.
+fn feature_scales(labelled: &[(String, String, Features)]) -> Vec<f64> {
+    FEATURE_NAMES
+        .iter()
+        .map(|name| {
+            let mut vals: Vec<f64> = labelled
+                .iter()
+                .filter_map(|(_, _, f)| f.get(name))
+                .collect();
+            if vals.len() < 4 {
+                return 0.0;
+            }
+            vals.sort_by(f64::total_cmp);
+            let median = vals[vals.len() / 2];
+            let mut dev: Vec<f64> = vals.iter().map(|v| (v - median).abs()).collect();
+            dev.sort_by(f64::total_cmp);
+            1.4826 * dev[dev.len() / 2]
+        })
+        .collect()
 }
 
 /// Accumulates `d²`, the total weight, the dimension count and the worst-fitting dimension over

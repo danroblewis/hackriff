@@ -163,6 +163,32 @@ fn classify_box(
             None => eprintln!("[T-230]   {family:<11} not scored (too few measured features)"),
         }
     }
+    // T-235: the whole z vector, not only its worst entry. A distance dominated by one or two
+    // content-driven dimensions is a different problem from one spread over all of them, and only
+    // the full table tells them apart. Reported, never asserted.
+    for class in [
+        "wfm",
+        "nbfm",
+        "am",
+        "2fsk",
+        "gfsk",
+        "msk",
+        "ofdm",
+        "noise-like",
+    ] {
+        let Some(c) = model.class(class) else {
+            continue;
+        };
+        let zs: Vec<String> = c
+            .dims
+            .iter()
+            .filter_map(|d| {
+                f.get(&d.feature)
+                    .map(|x| format!("{}={:+.1}", d.feature, (x - d.mean) / d.sigma))
+            })
+            .collect();
+        eprintln!("[T-235]   z/{class:<11} {}", zs.join(" "));
+    }
     Some(Classifier::new().classify(&req))
 }
 

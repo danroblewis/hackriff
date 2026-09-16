@@ -250,18 +250,67 @@ pub struct SynthSignal {
     pub snr_db: f64,
 }
 
+/// Samples per OBW99 the classifier is handed in production, from
+/// `hk_estimate::normalise::NormaliseConfig`'s defaults: `samples_per_obw` 2.0 against a
+/// `bandwidth_obw` 1.5 channel, and the rate is never allowed below `1.2 × bandwidth` — so
+/// `max(2.0, 1.8) = 2.0` times OBW99.
+///
+/// The dev grid has to land here too. It is not a detail: several `features@1` dimensions are
+/// defined **per sample** (`sigma_af` and `sigma_ap` are rad/sample, `if_std_norm` divides by
+/// OBW), so the same emission measured at 2 and at 20 samples per OBW gives completely different
+/// numbers. Fitting at one geometry and classifying at another compares nothing.
+pub const SAMPLES_PER_OBW: f64 = 2.0;
+
+/// Sample rate to generate `class` at, given the configured rate.
+///
+/// Most classes carry a bandwidth proportional to their symbol rate, so they already sit within a
+/// small factor of the analysis geometry and [`generate`]'s decimation finishes the job. The
+/// analog classes do not: their bandwidths are fixed by what they carry (a 3 kHz SSB sideband, a
+/// 2 kHz keyed tone), and at 1 Msps an SSB emission occupies 0.3 % of the snippet. The in-band SNR
+/// is then set over 3 kHz while the *snippet* holds a megahertz of noise, so the measured OBW99
+/// stops describing the emission at all — measured, `ssb` fitted at OBW 251 kHz and `cw` at
+/// 767 kHz, i.e. those two densities were fitted on band noise rather than on a signal. That is
+/// what made them catch-alls wide enough to claim a band-filling multicarrier emission, and it is
+/// the whole of the held-out false-known rate (T-235).
+///
+/// Generating them at a rate commensurate with what they actually occupy is what a receiver does:
+/// nobody analyses a 3 kHz SSB channel at 1 Msps.
+fn analysis_rate(class: Class, configured_hz: f64) -> f64 {
+    let nominal_bw: f64 = match class {
+        // A keyed carrier occupies what its **keying** occupies — a few times the 20 WPM element
+        // rate, ~150 Hz — not the 2 kHz figure the noise is scaled over. Getting this entry wrong
+        // in either direction makes `cw` a catch-all: left at 1 Msps it is fitted on band noise
+        // and claims a band-filling multicarrier emission, and given a 2 kHz-derived rate it
+        // becomes a generic on-off-keyed carrier and claims the held-out 3-level ASK generator
+        // (both measured, T-235).
+        Class::Cw => 150.0,
+        Class::Ssb => 3e3,
+        Class::Am => 9e3,
+        Class::Nbfm => 16e3,
+        // Everything else scales with its symbol rate or already fills the band.
+        _ => return configured_hz,
+    };
+    // Enough headroom for the emission and its skirts before the decimation below trims to the
+    // analysis geometry.
+    (12.0 * nominal_bw).min(configured_hz)
+}
+
 /// Generates one waveform.
 pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
     let mut rng = Rng::new(cfg.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ class as u64);
     let n = cfg.samples;
-    let fs = cfg.sample_rate_hz;
+    let fs = analysis_rate(class, cfg.sample_rate_hz);
     // Symbol rate varies with the seed so the densities never learn one rate.
     let rate = 25e3 + 75e3 * rng.unit();
     let (mut x, design_bw) = waveform(class, &mut rng, n, fs, rate);
     normalise(&mut x);
 
     // Noise at the requested in-band SNR: N₀ = σ²/fs, so σ² = P_s·fs/(BW·10^(SNR/10)).
-    let bw = design_bw.clamp(1e3, 0.9 * fs);
+    // Floor relative to the rate rather than an absolute kilohertz: a genuinely narrow emission
+    // generated at a commensurate rate (a keyed carrier's ~150 Hz of keying sidebands) would
+    // otherwise have its noise scaled over a bandwidth far wider than it occupies, which sets its
+    // SNR to something other than the requested one.
+    let bw = design_bw.clamp(0.001 * fs, 0.9 * fs);
     let sigma2 = fs / (bw * 10f64.powf(cfg.snr_db / 10.0));
     let sigma = (sigma2 / 2.0).sqrt();
     for s in x.iter_mut() {
@@ -308,6 +357,15 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
     // otherwise a lowpass at ±0.75·OBW cuts away an emission that sits off centre (a CW tone at
     // 800 Hz, or SSB's 0.3–3 kHz sideband, would be filtered out entirely and the classifier would
     // be handed noise).
+    // Recentred on the measured spectral peak, exactly as C13 does, and **not** with a deliberate
+    // residual offset added. Leaving a few per cent of the bandwidth uncorrected was tried (T-235)
+    // to widen `symmetry`, which is the dimension a real off-centre detection box lands furthest
+    // out on. It is a real effect, but as a grid-wide knob it is destructive: on a narrowband
+    // emission a few per cent of the band is a large fraction of the deviation, so `nbfm`'s
+    // instantaneous-frequency distribution smeared and its density grew into a catch-all. Measured:
+    // held-out unknown recall fell 0.861 -> 0.731, below the ADR-0016 floor, and the real 915 MHz
+    // FSK burst came back `analog`/`nbfm` at confidence 1.00 with open-set 0.00 — a confidently
+    // wrong label on a real signal, which is the one outcome this classifier may never produce.
     let peak_offset = peak_offset_hz(&samples, fs);
     if peak_offset != 0.0 {
         for (i, s) in samples.iter_mut().enumerate() {
@@ -321,6 +379,25 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
         samples = channel_filter(&samples, cutoff);
     }
     let obw_hz = measured_obw(&samples, fs);
+    // Resample to the analysis geometry the pipeline actually delivers ([`SAMPLES_PER_OBW`]).
+    // Decimation alone is enough, and is alias-free by construction: this only ever engages when
+    // OBW99 is below a quarter of the rate, which is exactly when the channel filter above has
+    // already cut everything beyond ±0.75 × OBW99 — comfortably inside the new Nyquist limit.
+    // The floor on the output length keeps the feature vector measurable (the shape features need
+    // several FFT segments, and `cp_corr` needs four times its longest lag).
+    let max_decim = (samples.len() / 2048).max(1);
+    let decim = ((fs / (SAMPLES_PER_OBW * obw_hz)).floor() as usize).clamp(1, max_decim);
+    let (samples, fs) = if decim > 1 {
+        (
+            samples.iter().step_by(decim).copied().collect::<Vec<_>>(),
+            fs / decim as f64,
+        )
+    } else {
+        (samples, fs)
+    };
+    // OBW99 in hertz does not change with the rate, but re-measuring it at the delivered rate is
+    // what C13 would report on this snippet, and it is what the classifier is handed.
+    let obw_hz = measured_obw(&samples, fs);
     SynthSignal {
         samples,
         sample_rate_hz: fs,
@@ -333,21 +410,63 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
 /// The waveform and its design bandwidth (used only to scale the noise to the requested SNR).
 fn waveform(class: Class, rng: &mut Rng, n: usize, fs: f64, rate: f64) -> (Vec<Complex64>, f64) {
     match class {
-        Class::Am => (am(rng, n, fs, 0.7), 6e3),
-        Class::Nbfm => (fm(rng, n, fs, 5e3, 3e3), 16e3),
-        Class::Wfm => (fm(rng, n, fs, 75e3, 53e3), 200e3),
+        Class::Am => (am(rng, n, fs, 0.7), 9e3),
+        Class::Nbfm => {
+            let dev = 2.5e3 + 2.5e3 * rng.unit();
+            (fm(rng, n, fs, dev, 3.4e3), 16e3)
+        }
+        Class::Wfm => wfm_multiplex(rng, n, fs),
         Class::Ssb => (ssb(rng, n, fs), 3e3),
-        Class::Cw => (cw(rng, n, fs), 2e3),
+        Class::Cw => (cw(rng, n, fs), 150.0),
         Class::Ook => (ask(rng, n, fs, rate, &[0.0, 1.0]), 2.0 * rate),
         Class::Ask4 => (ask(rng, n, fs, rate, &[0.25, 0.5, 0.75, 1.0]), 2.0 * rate),
         Class::Ask3 => (ask(rng, n, fs, rate, &[0.0, 0.5, 1.0]), 2.0 * rate),
-        Class::Fsk2 => (cpfsk(rng, n, fs, rate, 2, rate * 0.5, 0.0), 2.0 * rate),
-        Class::Gfsk => (gfsk(rng, n, fs, rate, rate * 0.35), 2.0 * rate),
-        Class::Msk => (cpfsk(rng, n, fs, rate, 2, rate * 0.25, 0.0), 1.5 * rate),
-        Class::Fsk4 => (cpfsk(rng, n, fs, rate, 4, rate * 0.5, 0.0), 3.0 * rate),
-        Class::Fsk8 => (cpfsk(rng, n, fs, rate, 8, rate * 0.5, 0.0), 5.0 * rate),
+        // The modulation index h = 2·deviation/Rs is a **free parameter of every deployed FSK
+        // system**, not a constant: ISM telemetry runs near 0.5, POCSAG and AIS near 1, older
+        // radio-telemetry well above. Fixing it at one value per class (h was exactly 1.0 for
+        // `2fsk`, 0.7 for `gfsk`) fits a density to one point of a continuum, and everything that
+        // depends on the deviation-to-rate ratio — `flatness`, `if_std_norm`, `if_bimodality`,
+        // `carrier_line_db` — then rejects a real burst anywhere else on it. The real 915 MHz
+        // sensor bursts in `fixtures/hackrf/2026-09-13` run h ≈ 0.53–0.55, which the grid did not
+        // contain at all. The range below is the deployed range, a-priori; it is not centred on
+        // any fixture.
+        Class::Fsk2 => {
+            let h = 0.4 + 1.2 * rng.unit();
+            let pre = 0.1 + 0.25 * rng.unit();
+            (
+                cpfsk(rng, n, fs, rate, 2, rate * h / 2.0, 0.0, pre),
+                rate * (1.0 + h),
+            )
+        }
+        Class::Gfsk => {
+            let h = 0.3 + 0.6 * rng.unit();
+            let bt = 0.3 + 0.3 * rng.unit();
+            let pre = 0.1 + 0.25 * rng.unit();
+            (
+                gfsk(rng, n, fs, rate, rate * h / 2.0, bt, pre),
+                rate * (1.0 + h),
+            )
+        }
+        // MSK is the h = 0.5 case by definition (ADR-0016 §1), so its index is not a free
+        // parameter and stays fixed.
+        Class::Msk => {
+            let pre = 0.1 + 0.25 * rng.unit();
+            (
+                cpfsk(rng, n, fs, rate, 2, rate * 0.25, 0.0, pre),
+                1.5 * rate,
+            )
+        }
+        Class::Fsk4 => {
+            let h = 0.4 + 1.0 * rng.unit();
+            let pre = 0.1 + 0.25 * rng.unit();
+            (
+                cpfsk(rng, n, fs, rate, 4, rate * h / 2.0, 0.0, pre),
+                rate * (1.0 + 1.5 * h),
+            )
+        }
+        Class::Fsk8 => (cpfsk(rng, n, fs, rate, 8, rate * 0.5, 0.0, 0.0), 5.0 * rate),
         Class::ChirpedFsk => (
-            cpfsk(rng, n, fs, rate, 2, rate * 0.5, 4.0 * rate / n as f64),
+            cpfsk(rng, n, fs, rate, 2, rate * 0.5, 4.0 * rate / n as f64, 0.0),
             3.0 * rate,
         ),
         Class::Bpsk => (linear(rng, n, fs, rate, 2), 1.35 * rate),
@@ -376,39 +495,153 @@ fn normalise(x: &mut [Complex64]) {
     }
 }
 
-/// Band-limited "audio": a handful of tones with random amplitudes and phases.
-fn audio(rng: &mut Rng, n: usize, fs: f64, max_hz: f64) -> Vec<f64> {
-    let tones: Vec<(f64, f64, f64)> = (0..5)
+/// Band-limited programme audio over `[lo_hz, hi_hz]`, peak-normalised to ±1: tones placed
+/// log-uniformly (so every octave is represented) with a **1/√f** amplitude weighting.
+///
+/// Real programme material — speech or music — is bass dominant, its power falling roughly 3 dB
+/// per octave above a couple of hundred hertz. That matters here far more than it looks: an angle
+/// modulator *integrates* its baseband, so it is the low-frequency energy that decides how far the
+/// carrier's phase wanders, and the phase-residual features (`sigma_ap`, `sigma_dp`) measure
+/// exactly that. The previous generator summed five equal-weight tones over the **upper** 80 % of
+/// the baseband (10.6–53 kHz for broadcast FM), whose phase residual is orders of magnitude
+/// smaller than any real transmission's: measured on `fixtures/hackrf/2026-09-13`, a real
+/// broadcast station sat at z = +494 in `sigma_ap` against `wfm` and z = +19 against `nbfm`, which
+/// was the whole of its distance from the analog family (T-235).
+///
+/// The spectrum shape is a-priori — the programme-audio spectrum, not anything measured on the
+/// fixture — and only the tone placement and a modest per-tone gain vary with the seed.
+fn audio_band(rng: &mut Rng, n: usize, fs: f64, lo_hz: f64, hi_hz: f64) -> Vec<f64> {
+    let tones: Vec<(f64, f64, f64)> = (0..8)
         .map(|_| {
-            (
-                0.2 * max_hz + 0.8 * max_hz * rng.unit(),
-                rng.unit(),
-                TAU * rng.unit(),
-            )
+            let f = lo_hz * (hi_hz / lo_hz).powf(rng.unit());
+            let a = (lo_hz / f).sqrt() * (0.5 + rng.unit());
+            (f, a, TAU * rng.unit())
         })
         .collect();
-    let norm: f64 = tones.iter().map(|(_, a, _)| a).sum::<f64>().max(1e-9);
-    (0..n)
+    let mut v: Vec<f64> = (0..n)
         .map(|i| {
             let t = i as f64 / fs;
             tones
                 .iter()
                 .map(|(f, a, p)| a * (TAU * f * t + p).cos())
                 .sum::<f64>()
-                / norm
         })
-        .collect()
+        .collect();
+    // Peak-normalised, so a caller's "deviation" really is the peak deviation.
+    let peak = v.iter().fold(0.0_f64, |m, x| m.max(x.abs())).max(1e-9);
+    for x in v.iter_mut() {
+        *x /= peak;
+    }
+    v
+}
+
+/// A broadcast-FM **multiplex**, not a bare tone-modulated carrier: mono sum, 19 kHz stereo pilot,
+/// the L−R difference as DSB-SC on 38 kHz, and an RDS-like subcarrier on 57 kHz. Returns the
+/// samples and the Carson bandwidth of what was generated.
+///
+/// This is the signal a real receiver sees, and it is what the `wfm` density has to be fitted on
+/// if a real station is to be recognised. The structure and its deviations are a-priori, from
+/// ITU-R BS.450 / EN 50067 and the project's own standards-derived generator
+/// (`py/hkpy/synth/scenarios.py::fm_broadcast_rds`): pilot at 9 % of peak deviation, RDS at
+/// 1187.5 bd biphase on the third pilot harmonic. Nothing here is fitted to a capture — the RDS
+/// bits are random, because the classifier never decodes them and only the subcarrier's spectral
+/// footprint reaches `features@1`.
+fn wfm_multiplex(rng: &mut Rng, n: usize, fs: f64) -> (Vec<Complex64>, f64) {
+    const PILOT_HZ: f64 = 19_000.0;
+    const RDS_BD: f64 = 1187.5;
+    // Broadcast audio processing, which every station runs: heavy compression and limiting, so
+    // the programme sits near **peak** deviation almost all the time instead of peaking there
+    // occasionally. It is the single thing that decides how wide the emission actually is — an
+    // uncompressed peak-normalised baseband deviates by a small fraction of its peak on average,
+    // which measured 87 kHz OBW against the 146 kHz a real station occupies, and left the real
+    // capture 18 sigma away in `sigma_af` (T-235). A-priori broadcast practice (ITU-R BS.412),
+    // not anything fitted.
+    let drive = 3.0 + 3.0 * rng.unit();
+    let left = compress(&audio_band(rng, n, fs, 50.0, 15e3), drive);
+    let right = compress(&audio_band(rng, n, fs, 50.0, 15e3), drive);
+    // Most broadcast stations run stereo; a mono one is a real and common case.
+    let stereo = rng.unit() < 0.8;
+    let mono_dev = 45e3 + 30e3 * rng.unit();
+    let pilot_dev = 0.09 * mono_dev;
+    let stereo_dev = 20e3 + 25e3 * rng.unit();
+    let rds_dev = 1.5e3 + 1.0e3 * rng.unit();
+    // Biphase RDS symbols: each bit is a half-symbol pair (+,−) or (−,+), which is what puts the
+    // subcarrier's energy either side of 57 kHz rather than on it.
+    let half = (fs / (2.0 * RDS_BD)).max(1.0);
+    let bits: Vec<bool> = (0..(n as f64 / (2.0 * half)).ceil() as usize + 2)
+        .map(|_| rng.next_u64() & 1 == 1)
+        .collect();
+    let mut mpx: Vec<f64> = (0..n)
+        .map(|i| {
+            let t = i as f64 / fs;
+            let w = TAU * PILOT_HZ * t;
+            let k = (i as f64 / half) as usize;
+            let bi = k / 2;
+            let first_half = k % 2 == 0;
+            let bb = if bits.get(bi).copied().unwrap_or(false) == first_half {
+                1.0
+            } else {
+                -1.0
+            };
+            let mut v = mono_dev * 0.5 * (left[i] + right[i]);
+            if stereo {
+                v += pilot_dev * w.sin();
+                v += stereo_dev * 0.5 * (left[i] - right[i]) * (2.0 * w).sin();
+            }
+            v + rds_dev * bb * (3.0 * w).sin()
+        })
+        .collect();
+    // The **total** peak deviation is regulated, not the sum of what each component would like:
+    // ITU-R BS.450 caps a broadcast FM carrier at 75 kHz, and a processed station runs just under
+    // it. Scaling the finished multiplex to that cap is what makes the emission the width a real
+    // station is (~180-220 kHz by Carson) and sets the instantaneous-frequency spread the
+    // `sigma_af` and `sigma_ap` features measure. Without it the components' peaks add to an
+    // arbitrary total and the deviation is whatever falls out.
+    let peak_dev = 60e3 + 15e3 * rng.unit();
+    let scale = peak_dev / mpx.iter().fold(0.0_f64, |m, v| m.max(v.abs())).max(1e-9);
+    for v in mpx.iter_mut() {
+        *v *= scale;
+    }
+    let mut phase = 0.0;
+    let x = mpx
+        .iter()
+        .map(|v| {
+            phase = (phase + TAU * v / fs) % TAU;
+            Complex64::new(phase.cos(), phase.sin())
+        })
+        .collect();
+    // Carson over the whole multiplex: the highest baseband component is the RDS subcarrier.
+    (x, (2.0 * (peak_dev + 57e3 + 2.4e3)).min(0.45 * fs))
 }
 
 fn am(rng: &mut Rng, n: usize, fs: f64, depth: f64) -> Vec<Complex64> {
-    let a = audio(rng, n, fs, 3e3);
+    let a = audio_band(rng, n, fs, 100.0, 4.5e3);
     a.iter()
         .map(|m| Complex64::new(1.0 + depth * m, 0.0))
         .collect()
 }
 
+/// Soft compression/limiting, peak-normalised: `tanh(drive·x)/tanh(drive)`. Raises the mean level
+/// towards the peak the way an audio processor does, without adding the hard-clipping harmonics a
+/// plain clip would.
+fn compress(v: &[f64], drive: f64) -> Vec<f64> {
+    let k = drive.max(1e-3);
+    let norm = k.tanh();
+    v.iter().map(|x| (k * x).tanh() / norm).collect()
+}
+
 fn fm(rng: &mut Rng, n: usize, fs: f64, deviation_hz: f64, audio_hz: f64) -> Vec<Complex64> {
-    let a = audio(rng, n, fs, audio_hz);
+    // Voice band from 300 Hz: narrowband FM carries speech, and its low end is what sets the
+    // phase excursion (see [`audio_band`]).
+    //
+    // Deliberately **not** compressed, unlike the broadcast multiplex. Voice radios do limit, but
+    // adding it here widened `nbfm` — already the broadest constant-envelope angle modulation in
+    // the taxonomy — until its density claimed the real 915 MHz 2-FSK burst outright: measured,
+    // `nbfm`'s m against that capture fell from 3.3 (abstain) to 1.7 with plausibility 1.000, and
+    // the classifier returned `analog` at confidence 1.00 on a signal that is not analog (T-235).
+    // Narrowband FM and 2-FSK are the same waveform family, so `nbfm` must stay no wider than its
+    // own physics requires.
+    let a = audio_band(rng, n, fs, 300.0, audio_hz);
     let mut phase = 0.0;
     a.iter()
         .map(|m| {
@@ -437,23 +670,35 @@ fn ssb(rng: &mut Rng, n: usize, fs: f64) -> Vec<Complex64> {
         .collect()
 }
 
+/// A Morse-keyed carrier with real timing (ITU-R M.1677): the dit is the unit, a dah is three
+/// units, elements within a letter are separated by one unit, letters by three and words by seven.
+///
+/// The **regularity** is the point. This used to key random-length symbols on and off with
+/// probability 3/4 and no inter-element spacing at all, which is slow random OOK rather than
+/// Morse. A randomly keyed carrier has a broad, seed-dependent envelope spectrum, so `gamma_max`
+/// and `sigma_aa` were fitted with enormous sigmas and `cw` became a catch-all — the class that
+/// absorbed whatever the others could not explain (T-235).
 fn cw(rng: &mut Rng, n: usize, fs: f64) -> Vec<Complex64> {
-    let dit = (0.06 * fs) as usize; // ~20 WPM
-    let mut on = Vec::with_capacity(n);
+    let unit = (0.06 * fs).max(2.0) as usize; // 20 WPM
+    let tone = (0.05 * fs).min(800.0);
+    let mut on: Vec<bool> = Vec::with_capacity(n + 8 * unit);
     while on.len() < n {
-        let symbol = if rng.next_u64() & 1 == 0 {
-            dit
-        } else {
-            3 * dit
-        };
-        let keyed = rng.next_u64() % 4 != 0;
-        for _ in 0..symbol {
-            on.push(keyed);
+        let elements = 1 + (rng.next_u64() % 4) as usize;
+        for e in 0..elements {
+            let dah = rng.next_u64() & 1 == 1;
+            let mark = (if dah { 3 } else { 1 }) * unit;
+            on.resize(on.len() + mark, true);
+            if e + 1 < elements {
+                on.resize(on.len() + unit, false); // intra-letter gap: one unit
+            }
         }
+        // Three units between letters, seven between words.
+        let gap = if rng.next_u64() % 5 == 0 { 7 } else { 3 };
+        on.resize(on.len() + gap * unit, false);
     }
     (0..n)
         .map(|i| {
-            let ph = TAU * 800.0 * i as f64 / fs;
+            let ph = TAU * tone * i as f64 / fs;
             let a = if on[i] { 1.0 } else { 0.0 };
             Complex64::new(a * ph.cos(), a * ph.sin())
         })
@@ -484,6 +729,10 @@ fn ask(rng: &mut Rng, n: usize, fs: f64, rate: f64, levels: &[f64]) -> Vec<Compl
         .collect()
 }
 
+/// Continuous-phase FSK. The parameters are the independent physical knobs of a CPFSK burst —
+/// level count, deviation, carrier drift and preamble length — so there is nothing to group here
+/// that would not just be this list behind a name.
+#[allow(clippy::too_many_arguments)]
 fn cpfsk(
     rng: &mut Rng,
     n: usize,
@@ -492,10 +741,21 @@ fn cpfsk(
     levels: usize,
     deviation_hz: f64,
     drift_hz_per_sample: f64,
+    preamble_frac: f64,
 ) -> Vec<Complex64> {
     let sps = (fs / rate).max(2.0);
-    let syms: Vec<f64> = (0..(n as f64 / sps).ceil() as usize + 1)
-        .map(|_| {
+    let count = (n as f64 / sps).ceil() as usize + 1;
+    // A real FSK burst is a packet: an alternating preamble for the receiver's clock and AGC,
+    // then a sync word, then data. The preamble keys the two outer tones at exactly half the
+    // symbol rate, which puts **discrete lines** in the spectrum where i.i.d. data puts a smooth
+    // shoulder — the difference between a peaky and a flat channel, which `carrier_line_db` and
+    // `flatness` both measure. A grid of nothing but i.i.d. symbols has no such lines at all.
+    let preamble = ((count as f64) * preamble_frac.clamp(0.0, 0.9)) as usize;
+    let syms: Vec<f64> = (0..count)
+        .map(|i| {
+            if i < preamble {
+                return if i % 2 == 0 { -1.0 } else { 1.0 };
+            }
             let l = (rng.next_u64() as usize) % levels;
             // Symmetric levels: −1, …, +1.
             2.0 * (l as f64 / (levels - 1).max(1) as f64) - 1.0
@@ -512,15 +772,30 @@ fn cpfsk(
         .collect()
 }
 
-fn gfsk(rng: &mut Rng, n: usize, fs: f64, rate: f64, deviation_hz: f64) -> Vec<Complex64> {
+fn gfsk(
+    rng: &mut Rng,
+    n: usize,
+    fs: f64,
+    rate: f64,
+    deviation_hz: f64,
+    bt: f64,
+    preamble_frac: f64,
+) -> Vec<Complex64> {
     let sps = (fs / rate).max(2.0);
-    let syms: Vec<f64> = (0..(n as f64 / sps).ceil() as usize + 1)
-        .map(|_| if rng.next_u64() & 1 == 1 { 1.0 } else { -1.0 })
+    let count = (n as f64 / sps).ceil() as usize + 1;
+    let preamble = ((count as f64) * preamble_frac.clamp(0.0, 0.9)) as usize;
+    let syms: Vec<f64> = (0..count)
+        .map(|i| {
+            if i < preamble {
+                return if i % 2 == 0 { -1.0 } else { 1.0 };
+            }
+            if rng.next_u64() & 1 == 1 { 1.0 } else { -1.0 }
+        })
         .collect();
     let nrz: Vec<f64> = (0..n).map(|i| syms[(i as f64 / sps) as usize]).collect();
-    // Gaussian pulse shaping, BT ≈ 0.5.
+    // Gaussian pulse shaping at the caller's BT.
     let span = (sps * 2.0) as usize | 1;
-    let sigma = sps * 0.5 / (TAU * 0.5);
+    let sigma = sps * 0.5 / (TAU * bt);
     let taps: Vec<f64> = (0..span)
         .map(|i| {
             let t = i as f64 - (span / 2) as f64;
@@ -879,13 +1154,20 @@ mod tests {
                 "{} is not deterministic",
                 class.label()
             );
-            // The channel filter trims its own edge transients, so the length is at most the
-            // requested one.
+            // The channel filter trims its own edge transients and the snippet is then decimated
+            // to the analysis geometry ([`SAMPLES_PER_OBW`]), so the length is at most the
+            // requested one and never below the floor that keeps the features measurable.
             assert!(
-                (cfg.samples - 128..=cfg.samples).contains(&a.samples.len()),
+                (2000..=cfg.samples).contains(&a.samples.len()),
                 "{}: {} samples",
                 class.label(),
                 a.samples.len()
+            );
+            assert!(
+                a.sample_rate_hz > 0.0 && a.sample_rate_hz <= cfg.sample_rate_hz,
+                "{}: rate {}",
+                class.label(),
+                a.sample_rate_hz
             );
             let p = a
                 .samples
