@@ -34,6 +34,61 @@
 //! - **No route into a decision.** Nothing here writes a `Classification`. The only path that
 //!   returns a prediction a consumer may act on is [`host::ModelHost::decide`], and it needs an
 //!   `active` mode, which needs enable evidence *and* a conformant provider.
+//!
+//! # This crate has no production caller, and that is the correct state (T-363)
+//!
+//! [`host::ModelHost`] is **reachable only from this crate's own tests**, the way `hk-gnss` is
+//! (T-274). `hk-classify` depends on this crate — T-204's per-family DL stage is written against
+//! [`LoadedModel`] and [`predict::Calibrator`] — but nothing anywhere constructs a [`host::ModelHost`],
+//! so [`host::HostStats`] has no production reader either. That was noticed in passing by T-283
+//! while it fixed the counters' happens-before ordering, and T-363 was funded to decide whether it
+//! is an oversight. **It is not.** Three independent things have to change before wiring this host
+//! into the pipeline would be anything but a caller with nothing to call.
+//!
+//! 1. **There is no model to host.** [`registry::ModelRegistry`] is rooted at the *user's* data
+//!    directory and has no built-ins: models are data, produced by an operator running
+//!    `py/hkpy/ml/train_amc`, never shipped in the tree. The only model file in this repository is
+//!    `tests/data/conformance/model.onnx`, a KB-sized fixture whose labels exist to compare
+//!    providers against each other and are not `hk-mod@1` classes. A host wired into
+//!    `hk-pipeline` today would resolve an empty registry on every run and every test — a
+//!    *vacuous* caller, which is worse than none, because it looks wired.
+//! 2. **No family earns a stage, and T-204 measured that rather than assuming it.** ADR-0016 §4.6
+//!    puts each family in `off` / `shadow` / `active`, and `active` needs the enable evidence on
+//!    the manifest. T-204 trained the grid and found large sim-to-sim class-accuracy gains
+//!    (analog +0.455…+0.540, psk-qam +0.653…+0.669, fsk +0.280…+0.291) sitting on top of an open
+//!    set that is *worse* than classical where it matters: on `fsk`, AUROC 0.326 against 0.824 and
+//!    a false-known rate of 1.000 against 0.325. That fails §4.6's "AUROC not lower by > 0.02" and
+//!    "false-known ≤ classical" outright, with no OTA labels behind the gains, so the stage landed
+//!    shadow-only and nothing was enabled.
+//!    That is belt-and-braces with the API's own shape: the only trained evaluator that exists is
+//!    [`MlProviderKind::CpuMlp`], which never reports itself [`MlProvider::conformant`], and
+//!    [`host::ModelHost::set_mode`] refuses `active` without a conformant provider (ADR-0007). So
+//!    [`host::ModelHost::decide`] is unreachable for it by construction, not only by policy.
+//! 3. **The shadow path's own consumer was never built.** ADR-0016 §6 puts shadow records in
+//!    hk-store (`ml/shadow/`, hourly CRC-line NDJSON with per-SNR agreement aggregates) and §9
+//!    serves them at `GET /api/ml/shadow`, alongside `GET /api/ml/models` and
+//!    `PUT /api/ml/models/{id}/mode` — the operator surface that would read [`host::HostStats`].
+//!    §10 assigns all of it to T-203; none of it landed. [`host::MemoryShadowSink`] is the only
+//!    [`host::ShadowSink`] in the tree, and it is in-memory. Wiring [`host::ModelHost::observe`]
+//!    into the pipeline now would record into a buffer nobody drains.
+//!
+//! **What would change this.** Wiring becomes correct when a model is installed in a registry
+//! (1), a family's dev evaluation clears ADR-0016 §4.6 for at least `shadow` (2), and a durable
+//! [`host::ShadowSink`] backed by hk-store exists to receive the records (3). (1) and (3) are
+//! ordinary work; (2) is an evidence question that T-204 answered "no" on the evidence available
+//! then, and only new evidence — not a new opinion — reopens it. `active` additionally requires
+//! the §4.6 enable evidence file and a conformant provider, and ADR-0016 §4.5/§7 bound what an ML
+//! stage may influence even then: within-family class only, never the family, and never the
+//! published row while it is in shadow.
+//!
+//! **What stops this rotting while it waits.** Two things, and they are deliberately different
+//! kinds. The *code* is guarded by `tests/conformance.rs`, which drives a real ONNX model through
+//! the real [`host::ModelHost`] on the real [`tract_provider`] — load, `set_mode`, `observe`,
+//! shadow record, a refused `decide`, deadline accounting, `unload` — in the **default** build, so
+//! CI runs it; the host is unwired, not untested. The *claim above* is guarded by
+//! `tests/no_production_caller.rs`, which fails the day a caller appears, so whoever wires it is
+//! told to come back here and delete this section rather than leaving it to mislead the next
+//! reader.
 
 #![deny(missing_docs)]
 
