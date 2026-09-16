@@ -6317,6 +6317,114 @@ tasks:
       to preserve is docs/07 2.11 and ADR-0017: emitter.count is a lifetime total of OCCURRENCES - times
       the emitter was observed to be on the air - and overlapping observations are not counted twice, whoever
       observed them'
+  - id: T-337
+    milestone: M2-hardening
+    title: 'One shared time axis: every time-varying overlay must be anchored in absolute capture time and
+      move with the waterfall'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'USER INVARIANT (CLAUDE.md, Time/waterfall/live-view, 2026-09-16). For the current view
+      there is ONE canonical mapping between absolute capture time (sample-index / ns) and screen position,
+      and everything time-varying is laid out through it and MOVES TOGETHER: waterfall rows, every signal
+      box, selections, the time cursor, the scrubber playhead. Overlays are anchored in capture time, NEVER
+      at fixed screen coordinates - a box must sit on, and scroll with, the exact waterfall energy it describes.
+      The user states the consequence explicitly: signal boxes drifting out of step with the waterfall''s
+      rows-per-second is a VIOLATION OF THIS INVARIANT, not a cosmetic bug. Requirement on the backend:
+      every time-varying record it serves - spectrum frames, detections, presence extents, boxes - carries
+      absolute capture time so the client can place it. Audit what is served today and name anything that
+      does not carry it. Mapping time to pixels is legitimate thin-client presentation (like pixel-to-Hz);
+      deciding WHAT time a record has is not. Fold into docs/07 (what every time-varying record carries),
+      docs/14 (MUI layout), ADR-0017. Test the invariant rather than the rendering: given a span and a set
+      of records, assert that a box''s placement is a pure function of its capture time under the same mapping
+      the rows use'
+  - id: T-338
+    milestone: M2-hardening
+    title: The timeline is the capture window and is itself a compressed overview waterfall, not an empty
+      box
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'USER INVARIANT (CLAUDE.md 2026-09-16). The scrubbable capture-history timeline spans EXACTLY
+      the configured recording/retention duration - no more (NOT the longer, lossy spectrum-history retention)
+      and no less - and grows or shrinks when that duration is reconfigured. It is itself a DATA DISPLAY:
+      a compressed sideways overview waterfall of the retained capture, time along its long axis, never
+      an empty box. Size it from the capture window the BACKEND reports (the IQ ring''s t0..t1 / retention_s
+      per ADR-0014), not from any other history horizon. Two failure modes to avoid by construction: sizing
+      it from spectrum-history retention makes the scrubber promise capture that no longer exists, and drawing
+      it empty wastes the one surface that shows where activity is worth scrubbing to. Backend must expose
+      the ring''s window and serve a compressed overview at the timeline''s own resolution - relates to
+      T-334''s span-matched resolution rule. Fold into docs/07, docs/14, ADR-0017 and ADR-0014'
+  - id: T-339
+    milestone: M2-hardening
+    title: 'Pause freezes the view, never the capture: the ring and detection stay always-on'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'USER INVARIANT (CLAUDE.md 2026-09-16). Capture, the ring and detection are ALWAYS-ON; the
+      UI''s time window is independent view state. Play follows the live edge; Pause holds a fixed time
+      range for inspection. Pausing, scrubbing or zooming NEVER stops or slows the SDR, the ring, or detection
+      - it only changes what the screen shows. Audit the current code for any path where a UI action reaches
+      the source, the scheduler or the detector: a paused view that stops capture silently loses signals
+      the user is not looking at, which is the opposite of an exploration instrument. Test it at the seam
+      rather than in the UI: with the view paused, assert the ring keeps advancing and detections keep being
+      written. Fold into docs/07, docs/14, ADR-0017; note ADR-0014 already makes the ring always-on, so
+      this may be about what the UI is ABLE to reach rather than what it does today - report which'
+  - id: T-340
+    milestone: M2-hardening
+    title: Each waterfall axis gets an edge navigator, and the frequency one lights every active capture
+      window
+    status: todo
+    priority: normal
+    deps:
+    - T-334
+    - T-337
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'USER INVARIANT (CLAUDE.md 2026-09-16). Time runs down the waterfall and frequency across
+      it, so the TIME navigator is a vertical bar on the side (an overview of the retained capture window)
+      and the FREQUENCY navigator is a horizontal bar along the bottom, spanning the whole surveyed / device-available
+      spectrum and setting the centre. Each navigator pans and zooms its own axis; a dragged region on either
+      zooms the main view to it. THE PART THAT REACHES BEYOND THE UI: the frequency navigator shows every
+      currently-active capture window as a LIT SEGMENT - the natural home for MULTIPLE SDRs (several simultaneous
+      windows) and for survey/sweep coverage. So the backend must be able to report N active capture windows,
+      not one. That lands squarely on the N-device work already done: T-259''s audit (the source layer is
+      N-shaped, the consumers are not), T-302 (artifacts gated on ReceiveChain), T-303 (baselines keyed
+      on the front end), T-304 (history keyed per frame provenance), T-305 (the rule recorded at the source
+      layer). Do NOT build multi-device capture - expose the window list so the navigator is N-capable by
+      construction. Fold into docs/07, docs/14, ADR-0017'
+  - id: T-341
+    milestone: M2-hardening
+    title: Navigation snaps to achievable capture states, and the view never implies detail the front end
+      did not capture
+    status: todo
+    priority: high
+    deps:
+    - T-334
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    acceptance: 'USER INVARIANT (CLAUDE.md 2026-09-16), and the user names it as the exploration-first honesty
+      principle applied to navigation. Zoom/pan and region-select resolve only to REALIZABLE configurations
+      and SNAP TO THE NEAREST ONE: in frequency, centre and span are bounded by the instantaneous bandwidth
+      (sample rate) and the tuning step - wider than the live window is SURVEY-HISTORY OVERVIEW, not live
+      IQ; in time, by the retained window bounds and the history pyramid''s discrete resolution tiers. The
+      view must DISTINGUISH live-IQ-backed detail from survey/spectrum-history overview, so a wide or deep
+      zoom never fakes resolution the hardware did not capture. This is the same rule as absent-means-not-measured
+      (T-297: no field is written when a region is not swept, so nothing ever writes a zero rate) expressed
+      in the navigation surface: an interpolated pixel that looks like a measurement is a lie with a picture
+      attached. The backend owns which states are realizable and which tier answered - the client must not
+      infer either. Fold into docs/07, docs/14, ADR-0017'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
