@@ -266,6 +266,11 @@ impl ShadowSink for MemoryShadowSink {
 
 /// Host counters. Every rejection has a counter: a stage that silently does nothing is worse than
 /// one that reports it is dropping work.
+///
+/// **Counters are published before the answer they describe** (T-283): once
+/// [`ModelHost::observe`] or [`ModelHost::decide`] has returned, [`ModelHost::stats`] already
+/// accounts for that request. Without that ordering a consumer could read its own outcome as not
+/// yet counted, and every read of the counters would be a race with the worker thread.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct HostStats {
     /// Requests accepted into a queue.
@@ -786,19 +791,31 @@ fn worker_loop(
 
         // Anything already past its deadline is dropped and counted; the consumer falls back to
         // the classical stage.
+        //
+        // The count is published *before* the replies go out (T-283). Answering a consumer
+        // releases it, and it may read [`ModelHost::stats`] on its very next instruction — so a
+        // counter written after the reply can be read one increment behind the answer it
+        // describes. Counting first makes "the consumer has its answer" imply "the counters
+        // account for it", which is what makes the stats a usable record of what the host did.
         let now = Instant::now();
-        let mut missed = 0_u64;
-        batch.retain(|job| {
-            if job.deadline <= now {
+        let mut late: Vec<Job> = Vec::new();
+        let kept: Vec<Job> = batch
+            .drain(..)
+            .filter_map(|job| {
+                if job.deadline <= now {
+                    late.push(job);
+                    None
+                } else {
+                    Some(job)
+                }
+            })
+            .collect();
+        batch = kept;
+        if !late.is_empty() {
+            stats.lock().expect("stats mutex").deadline_missed += late.len() as u64;
+            for job in late {
                 let _ = job.reply.send(Err(MlError::DeadlineMissed));
-                missed += 1;
-                false
-            } else {
-                true
             }
-        });
-        if missed > 0 {
-            stats.lock().expect("stats mutex").deadline_missed += missed;
         }
         if batch.is_empty() {
             if disconnected && carry.is_none() {
@@ -850,24 +867,29 @@ fn worker_loop(
         let t = Timestamp::now();
         match outputs {
             Ok(raw) if raw.len() == n => {
-                let mut inferred = 0_u64;
-                for (job, out) in batch.iter().zip(&raw) {
-                    let p = calibrator.predict(out, job.mode, latency_ms, tensors.batch_size, t);
-                    if p.is_ok() {
-                        inferred += 1;
-                    }
+                // Calibrate the whole batch, publish the count, then release the consumers —
+                // same ordering rule as the deadline drops above (T-283).
+                let answers: Vec<_> = batch
+                    .iter()
+                    .zip(&raw)
+                    .map(|(job, out)| {
+                        calibrator.predict(out, job.mode, latency_ms, tensors.batch_size, t)
+                    })
+                    .collect();
+                let inferred = answers.iter().filter(|p| p.is_ok()).count() as u64;
+                stats.lock().expect("stats mutex").inferred += inferred;
+                for (job, p) in batch.iter().zip(answers) {
                     let _ = job.reply.send(p);
                 }
-                stats.lock().expect("stats mutex").inferred += inferred;
             }
             Ok(raw) => {
+                stats.lock().expect("stats mutex").errors += 1;
                 for job in &batch {
                     let _ = job.reply.send(Err(MlError::Invalid(format!(
                         "the model returned {} outputs for a batch of {n}",
                         raw.len()
                     ))));
                 }
-                stats.lock().expect("stats mutex").errors += 1;
             }
             Err(e) => {
                 for job in &batch {
@@ -1156,6 +1178,64 @@ mod tests {
         );
         // The answer is this request's: the fake's first logit is the input's first value.
         assert_eq!(p.logits[0], 3.0);
+    }
+
+    /// T-283. The conformance suite reads `deadline_missed` on the instruction after `observe`
+    /// returns, and under four concurrent worktrees that read came back one short: the worker had
+    /// answered the consumer and had not yet taken the stats mutex. That is an ordering defect in
+    /// the host, not a timing budget in the test — nothing here has a wall-clock bound, and the
+    /// answer is always correct; only the counter was late.
+    ///
+    /// So the invariant is stated in the terms the host actually controls: after each answer the
+    /// counter for *that* answer already stands. Repeating it many times turns a window of a few
+    /// microseconds into a regression that shows up on the first loaded run rather than one run
+    /// in ten.
+    #[test]
+    fn a_counter_is_published_before_the_answer_it_counts() {
+        // A 1 ms delay keeps the loop quick: a lone request flushes at the delay, not at its
+        // deadline. Nothing in this test asserts on elapsed time.
+        let config = HostConfig {
+            max_delay: Duration::from_millis(1),
+            ..HostConfig::default()
+        };
+        let host = ModelHost::new(config, Arc::new(Fake::new(true, Duration::ZERO))).unwrap();
+        let m = manifest(false);
+        let model = host.load(&m, BYTES).unwrap();
+        let consumer = ConsumerId::new("hk-classify/dl");
+        host.set_mode(&model, &consumer, MlMode::Shadow, false)
+            .unwrap();
+
+        const ROUNDS: u64 = 200;
+        for i in 1..=ROUNDS {
+            let mut late = request("fsk", i as f32);
+            late.deadline = Instant::now() - Duration::from_millis(1);
+            assert!(host.observe(&model, &late, None).unwrap().is_none());
+            let stats = host.stats();
+            assert_eq!(
+                stats.deadline_missed, i,
+                "round {i}: the consumer has its DeadlineMissed but the counter has not caught \
+                 up — the drop must be counted before the reply is sent: {stats:?}"
+            );
+        }
+        for i in 1..=ROUNDS {
+            assert!(
+                host.observe(&model, &request("fsk", i as f32), None)
+                    .unwrap()
+                    .is_some()
+            );
+            let stats = host.stats();
+            assert_eq!(
+                stats.inferred, i,
+                "round {i}: the consumer has its prediction but the counter has not caught up — \
+                 the inference must be counted before the reply is sent: {stats:?}"
+            );
+        }
+        let stats = host.stats();
+        assert_eq!(stats.submitted, 2 * ROUNDS);
+        assert_eq!(stats.deadline_missed, ROUNDS);
+        assert_eq!(stats.inferred, ROUNDS);
+        assert_eq!(stats.dropped_queue_full, 0, "{stats:?}");
+        assert_eq!(stats.errors, 0, "{stats:?}");
     }
 
     #[test]
