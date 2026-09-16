@@ -15,6 +15,10 @@
 //!   turned into a band plan, a grant's 16-bit channel number resolved to the right frequency —
 //!   and a grant naming an identifier that was never announced reported as `unmapped-channel`
 //!   rather than resolved, through another identifier's plan, to a plausible wrong frequency.
+//! - [`t269_follow`] proves the run **acts** on those grants: a channel inside the dwell window is
+//!   followed onto a channelizer output and becomes a call with measured boundaries, and one
+//!   outside it is logged as `grant-outside-window` instead of silently dropped. Metadata only —
+//!   no audio is attempted, and every call states `unknown` encryption.
 
 // The shared harness modules carry helpers only the other suites use.
 #![allow(dead_code)]
@@ -33,3 +37,6 @@ mod t287_trunk_cc_pipeline;
 
 #[path = "acceptance/t268_tsbk.rs"]
 mod t268_tsbk;
+
+#[path = "acceptance/t269_follow.rs"]
+mod t269_follow;

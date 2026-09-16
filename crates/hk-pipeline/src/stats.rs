@@ -296,6 +296,29 @@ counter_group!(
         /// too long ago to trust. Logged, never resolved to a plausible-looking wrong frequency
         /// (C23's stale-IDEN pitfall).
         cc_grants_unmapped,
+        /// T-269: grants recorded as `outside-window`. The channel number resolved to a real
+        /// frequency, and that frequency fell outside the ≤20 MHz window the radio is holding, so
+        /// it could not be followed (C23's span limit). **Logged, never dropped** — a dropped
+        /// grant is indistinguishable from a system with no traffic.
+        cc_grants_outside_window,
+        /// Granted channels followed: one channelizer (C11) allocation each, over the window the
+        /// hunt already buffered.
+        cc_follows,
+        /// Followable grants the per-pass `max_follows` cap refused.
+        cc_follow_refused,
+        /// Passes that followed nothing because no raster channel was quiet enough to measure a
+        /// noise floor against. Boundaries are a comparison; without a reference there is nothing
+        /// to compare to, so nothing is claimed.
+        cc_follow_no_reference,
+        /// Followed channels that carried no transmission at all inside the window. The grant row
+        /// still stands; no call is invented for an observation that was not made.
+        cc_follow_silent,
+        /// `CallRecord` rows written (metadata only: who, where, when, on what channel — never
+        /// audio, never content).
+        cc_calls,
+        /// Calls whose end was **observed**, by a silence timeout on the granted channel. The
+        /// rest carry `t_end = NULL`, which the model defines as "still open, or never observed".
+        cc_calls_closed,
         /// Chain errors (demod, repository).
         errors,
     }

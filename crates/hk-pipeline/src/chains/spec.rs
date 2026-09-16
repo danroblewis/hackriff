@@ -137,6 +137,9 @@ pub enum NodeSpec {
     ///   candidacy is cheap and demodulation is not, and on a busy LMR band many channels are
     ///   continuously occupied. Above the cap the highest-FCO candidates are taken (ties by
     ///   distance from the tuned centre), which is deterministic and blind.
+    /// - `max_follows` — most **granted** channels followed in one pass (T-269). A control
+    ///   channel can issue arbitrarily many grants in one window, and each followed one costs a
+    ///   channelizer allocation; this bounds that. Refusals are counted, never silent.
     TrunkCc {
         /// Samples collected per hunt pass, s.
         window_s: f64,
@@ -146,11 +149,25 @@ pub enum NodeSpec {
         max_demods: usize,
         /// Least stream time between passes, s.
         period_s: f64,
+        /// Most granted channels followed in one pass (T-269).
+        #[serde(default = "default_max_follows")]
+        max_follows: usize,
     },
 }
 
 fn one() -> u32 {
     1
+}
+
+/// Default [`NodeSpec::TrunkCc::max_follows`]: granted channels followed in one pass.
+///
+/// A spend bound, not a threshold. It matches `max_demods` because the work is the same order —
+/// one channelizer allocation over the buffered window each — and a site with more than eight
+/// voice channels live inside one ≤20 MHz window at the same instant is past what a single
+/// half-duplex front end can honestly follow anyway. What it refuses is counted
+/// (`cc_follow_refused`), so a busier site shows up as a number rather than as silence.
+fn default_max_follows() -> usize {
+    8
 }
 
 /// A chain spec.
@@ -227,7 +244,7 @@ pub enum ChainShape {
         /// Settle, s.
         settle_s: f64,
     },
-    /// C23 control-channel hunt (T-287). Metadata only.
+    /// C23 control-channel hunt (T-287) and grant following (T-269). Metadata only.
     TrunkCc {
         /// Samples per pass, s.
         window_s: f64,
@@ -237,6 +254,8 @@ pub enum ChainShape {
         max_demods: usize,
         /// Least stream time between passes, s.
         period_s: f64,
+        /// Most granted channels followed per pass.
+        max_follows: usize,
     },
 }
 
@@ -320,6 +339,7 @@ impl ChainSpec {
                     max_channels,
                     max_demods,
                     period_s,
+                    max_follows,
                 },
             ] => {
                 // The class gate, resolved structurally rather than worked around. A 12.5 kHz LMR
@@ -340,14 +360,15 @@ impl ChainSpec {
                 if !(*window_s > 0.0 && *period_s >= 0.0) {
                     return Err("trunk-cc needs window_s > 0 and period_s >= 0".into());
                 }
-                if *max_channels == 0 || *max_demods == 0 {
-                    return Err("trunk-cc needs max_channels, max_demods >= 1".into());
+                if *max_channels == 0 || *max_demods == 0 || *max_follows == 0 {
+                    return Err("trunk-cc needs max_channels, max_demods, max_follows >= 1".into());
                 }
                 Ok(ChainShape::TrunkCc {
                     window_s: *window_s,
                     max_channels: *max_channels,
                     max_demods: *max_demods,
                     period_s: *period_s,
+                    max_follows: *max_follows,
                 })
             }
             [
@@ -491,7 +512,7 @@ pub const BUILTIN_CHAINS: &str = r#"[
     "raster_hz": 12.5e3,
     "nodes": [
       { "node": "trunk-cc", "window_s": 0.5, "max_channels": 64, "max_demods": 8,
-        "period_s": 10.0 }
+        "period_s": 10.0, "max_follows": 8 }
     ]
   },
   {
@@ -692,6 +713,21 @@ mod tests {
                 .validate()
                 .is_err(),
             "a hunt with no band prior would hunt everywhere"
+        );
+        // A follow cap is optional in a spec (T-269 added it) and defaults to something that
+        // actually follows: an old plan must not silently turn the follower off.
+        assert!(matches!(
+            spec(serde_json::json!({})).shape(),
+            Ok(ChainShape::TrunkCc { max_follows, .. }) if max_follows >= 1
+        ));
+        assert!(
+            spec(
+                serde_json::json!({ "nodes": [{ "node": "trunk-cc", "window_s": 0.5,
+                "max_channels": 8, "max_demods": 2, "period_s": 1.0, "max_follows": 0 }] })
+            )
+            .validate()
+            .is_err(),
+            "a follow cap of zero would disable following without saying so"
         );
         // Admission bounds must actually bound.
         assert!(

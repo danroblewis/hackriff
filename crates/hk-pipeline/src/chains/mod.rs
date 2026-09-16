@@ -554,6 +554,7 @@ impl ChainManager {
                         max_channels,
                         max_demods,
                         period_s,
+                        max_follows,
                     } => trunk::run(
                         shared,
                         rx,
@@ -563,6 +564,7 @@ impl ChainManager {
                             max_channels,
                             max_demods,
                             period_s,
+                            max_follows,
                             raster_hz,
                         },
                         cursor,
@@ -946,6 +948,7 @@ mod tests {
             max_channels: 64,
             max_demods: 8,
             period_s: 10.0,
+            max_follows: 8,
         };
         assert_eq!(chain_start(&analog, &cand, fs), 500_000);
         assert_eq!(chain_start(&fsk, &cand, fs), 980_000);

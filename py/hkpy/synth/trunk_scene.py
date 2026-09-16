@@ -71,6 +71,25 @@ TRUNK_CC_DEFAULTS: dict[str, Any] = {
     # the C23 pitfall; it must come out unmapped instead.
     "unannounced_iden": 7,
     "unannounced_channel": 300,
+    # --- The voice channel a grant must be FOLLOWED onto (T-269). Chosen as a frequency first,
+    # exactly like ``grant_target_hz``; its channel number is derived from the band plan above, so
+    # the decoder still has to arrive at it through the IDEN_UP messages.
+    #
+    # 851.075 MHz is +62.5 kHz from the tuned centre and so inside the window the radio is holding,
+    # while ``grant_target_hz`` at +725 kHz is outside it. One recording therefore carries BOTH
+    # C23 cases: a grant that can be followed, and a grant the <=20 MHz span limit refuses.
+    "follow_target_hz": 851.075e6,
+    "follow_talkgroup": 2468,
+    "follow_source": 1357,
+    # The traffic on that channel: repeated keyings, each far shorter than the window a hunt
+    # buffers, separated by more silence than any silence timeout shorter than a P25 voice frame.
+    # on 0.10 + off 0.15 = a 0.25 s period, so ANY 0.5 s window spans two keyings and contains at
+    # least one complete one with its closing silence -- which is what lets a follower measure a
+    # start AND an end rather than a fragment. At 40 % duty the channel never reaches control-
+    # channel candidacy (MIN_CC_FCO is 0.95), so it cannot be mistaken for a second CC.
+    "follow_on_s": 0.10,
+    "follow_off_s": 0.15,
+    "follow_snr_db": 18.0,
 }
 
 #: The same scene with TSBK content switched on (T-268).
@@ -82,18 +101,34 @@ def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dic
 
     The cycle carries, in order: an identifier update, a grant that resolves through it, the same
     identifier update again (a band-plan entry is only trustworthy once it has been repeated), a
-    grant update for the same channel, a grant naming an identifier that is never announced, and a
-    message this decoder does not read. Repeating the cycle makes every one of those appear several
-    times in any window long enough to confirm the channel at all.
+    grant update for the same channel, a grant onto a channel that is inside the tuned window
+    (T-269), a grant naming an identifier that is never announced, and a message this decoder does
+    not read. Repeating the cycle makes every one of those appear several times in any window long
+    enough to confirm the channel at all.
+
+    Two of those grants resolve to real frequencies that differ in one way that matters: one lands
+    inside the window the radio is holding and one lands outside it. A follower must follow the
+    first and refuse -- visibly -- the second.
     """
     iden = int(p["tsbk_iden"])
     base_hz, spacing_hz = float(p["tsbk_base_hz"]), float(p["tsbk_spacing_hz"])
+
+    def channel_of(hz: float, what: str) -> int:
+        """The band-plan channel number of a frequency. The FREQUENCY is the truth; this derives
+        the number a grant has to carry to name it, never the other way round."""
+        steps = (hz - base_hz) / spacing_hz
+        if steps != int(steps) or not 0 <= steps <= 0xFFF:
+            raise ValueError(f"{what} {hz} is not a channel of this band plan")
+        return int(steps)
+
     target_hz = float(p["grant_target_hz"])
-    steps = (target_hz - base_hz) / spacing_hz
-    if steps != int(steps) or not 0 <= steps <= 0xFFF:
-        raise ValueError(f"grant_target_hz {target_hz} is not a channel of this band plan")
-    channel = int(steps)
+    channel = channel_of(target_hz, "grant_target_hz")
+    follow_hz = float(p["follow_target_hz"])
+    follow_channel = channel_of(follow_hz, "follow_target_hz")
+    if follow_hz == target_hz:
+        raise ValueError("the followed channel and the out-of-window channel must differ")
     tg, src = int(p["grant_talkgroup"]), int(p["grant_source"])
+    f_tg, f_src = int(p["follow_talkgroup"]), int(p["follow_source"])
     u_iden, u_chan = int(p["unannounced_iden"]), int(p["unannounced_channel"])
     if u_iden == iden:
         raise ValueError("the unannounced identifier must differ from the announced one")
@@ -103,12 +138,15 @@ def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dic
                                 bandwidth_hz=float(p["tsbk_bandwidth_hz"]))
     iden_block = tk.tsbk(tk.TSBK_OP_IDEN_UP, iden_args)
     chan16 = tk.channel_number(iden, channel)
+    follow_chan16 = tk.channel_number(iden, follow_channel)
     u_chan16 = tk.channel_number(u_iden, u_chan)
     cycle = [
         ("iden-up", iden_block),
         ("grant", tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT, tk.grant_args(chan16, tg, source=src))),
         ("iden-up", iden_block),
         ("grant-update", tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT_UPDATE, tk.grant_args(chan16, tg))),
+        ("grant-follow",
+         tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT, tk.grant_args(follow_chan16, f_tg, source=f_src))),
         ("grant-unannounced",
          tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT, tk.grant_args(u_chan16, tg + 1, source=src))),
         # An opcode this decoder does not read (RFSS status broadcast), so the stream is not made
@@ -131,6 +169,11 @@ def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dic
         "grant_target_hz": target_hz,
         "grant_talkgroup": tg,
         "grant_source": src,
+        "follow_channel": follow_channel,
+        "follow_channel_16bit": follow_chan16,
+        "follow_target_hz": follow_hz,
+        "follow_talkgroup": f_tg,
+        "follow_source": f_src,
         "unannounced_iden": u_iden,
         "unannounced_channel": u_chan,
         "unannounced_channel_16bit": u_chan16,
@@ -289,6 +332,65 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
                 ),
             )
             n_bursts += 1
+
+    # --- The voice channel a grant is followed onto (T-269), present only when the control
+    # channel is actually issuing grants. Bursty by construction: repeated keyings with real
+    # silence between them, so a follower has boundaries to **measure** rather than a carrier that
+    # is simply always there. At 40 % duty it never reaches control-channel candidacy
+    # (MIN_CC_FCO is 0.95), so it cannot be mistaken for a second control channel.
+    if tsbk_truth is not None:
+        v_off = float(tsbk_truth["follow_target_hz"]) - cap.center_hz
+        if abs(v_off) + c4fm_bw / 2 > fs / 2:
+            raise ValueError("follow_target_hz does not fit inside the sample rate")
+        v_power = _power(cap, float(p["follow_snr_db"]), c4fm_bw)
+        v_amp = math.sqrt(undb(v_power))
+        on_s, off_s = float(p["follow_on_s"]), float(p["follow_off_s"])
+        if on_s <= 0 or off_s <= 0:
+            raise ValueError("a keying needs a positive on and off time")
+        r = scene.rng("voice")
+        keyings: list[tuple[float, float]] = []
+        t_key = 0.0
+        while t_key < span_s:
+            i0, i1 = int(round(t_key * fs)), min(n, int(round((t_key + on_s) * fs)))
+            if i1 > i0:
+                n_dibits = int(math.ceil((i1 - i0) * rate / fs)) + 1
+                iq = tk.c4fm(tk.continuous_data_dibits(r, n_dibits), fs, rate)[: i1 - i0]
+                phase0 = float(r.uniform(0, 2 * math.pi))
+                tt = scene.time(i0, len(iq))
+                scene.add_samples(
+                    i0, v_amp * iq * np.exp(1j * (2 * math.pi * v_off * tt + phase0)))
+                b0, b1 = i0 / fs, (i0 + len(iq)) / fs
+                keyings.append((b0, b1))
+                vf = cap.center_hz + v_off
+                scene.annotate(
+                    i0, len(iq), vf - c4fm_bw / 2, vf + c4fm_bw / 2, "trunk-voice-keying",
+                    scene.emission_truth(
+                        cap, v_off, c4fm_bw, v_power,
+                        kind="trunk-voice-keying", modulation="c4fm", levels=4,
+                        symbol_rate_bd=rate, raster_hz=raster,
+                        raster_channel=int(round(v_off / raster)),
+                        is_control_channel=False, confirmable=False,
+                        burst_start_s=b0, burst_duration_s=b1 - b0,
+                        granted_by_channel_16bit=tsbk_truth["follow_channel_16bit"],
+                        talkgroup=tsbk_truth["follow_talkgroup"],
+                    ),
+                )
+            t_key += on_s + off_s
+        tsbk_truth.update({
+            "follow_on_s": on_s,
+            "follow_off_s": off_s,
+            "follow_period_s": on_s + off_s,
+            "follow_snr_db": float(p["follow_snr_db"]),
+            "follow_offset_hz": v_off,
+            "follow_keyings_s": [[a, b] for a, b in keyings],
+            # Where each resolved grant falls relative to the window the radio is holding. The
+            # follow target is inside it; the T-268 target is outside, which is the C23 <=20 MHz
+            # span limit a follower must REPORT rather than drop.
+            "grant_target_offset_hz": float(tsbk_truth["grant_target_hz"]) - cap.center_hz,
+            "sample_rate_hz": fs,
+        })
+        tsbk_truth["expected"]["follow_grant"] = "followed: a call record with measured boundaries"
+        tsbk_truth["expected"]["grant_target"] = "outside-window: logged, never followed"
 
     scene.scenario_truth["trunking"] = {
         "raster_hz": raster,
