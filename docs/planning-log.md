@@ -2453,3 +2453,9 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.511 Full check green after the T-224 merge (b8d88ae).** Lint clean; 1451/1451 tests; acceptance 29/29; 34 GB free.
   - **T-217 launched** (Sonnet, T-178 IQ-ring follow-ups): chosen because it touches files no running agent is editing. T-218 and T-212/T-213 would collide with T-199's classifier work, so they stay queued.
   - **One slot kept free** for T-219's merge check once its review returns.
+- **B0.512 T-226 merged (2cbc3b5): the wrong-frequency bug is now fixed at the root, not just contained.**
+  - **Budget path closed:** `RefinementOutcome` gained `validated`, and `finish()` computes `locked = validated && ...`, so a run cut short by `max_evaluations` or the time budget - exactly what CPU load causes - can no longer report a stale measurement as a lock. Tests cover both the evaluation cap and a 1 ns time budget, and fail against reverted code.
+  - **Root cause fixed:** acquisition now CLAMPS an over-one-step centre correction and re-measures, as tracking already did, instead of discarding it. The corrected centre stands only if it locks, so a spurious lock cannot drag a good centre away.
+  - **Result:** on the real FM fixture the centre error is now **-113 Hz** (locked, validated, converged, 15 evaluations), against the roughly 52 kHz error that made Listen play the wrong frequency. The agent noted honestly that on that window the decoy only wins under load, so the deterministic toy test is the real guard.
+  - **Off-raster probes** no longer stop the chain: without a validated refinement the probe centre stands if the chain owns it, so identification still happens. T-209's overload gate untouched.
+  - **T-186 latency bound still holds;** hk-demod 39/39, hk-pipeline 17/17, e2e 9/9, lint clean. Full check running.
