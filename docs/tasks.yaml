@@ -4647,7 +4647,8 @@ tasks:
   - id: T-268
     milestone: M4
     title: 'M4 P25 Phase 1 TSBK control decode + IDEN_UP channel mapping'
-    status: in-progress
+    status: done
+    commit: 1b455fd
     priority: normal
     deps:
     - T-267
@@ -5312,11 +5313,12 @@ tasks:
       instead of whole SYMBOL PERIODS, so every symbol was sampled guard mod sps early or
       late. Gate unchanged at 0.8990 / 0.1010.'
 
-  - id: T-294
+  - id: T-301
     milestone: M3
     title: 'The synthetic psk-qam grid distorts its own waveforms, so no synchronisation
       can recover them and the M3 open set is partly measuring the harness'
     status: done
+    commit: 5c67149
     priority: high
     deps: []
     parallel_group: M3A
@@ -5348,6 +5350,18 @@ tasks:
     model: fable
     effort: high
     core_interface: false
+    id_collision_resolved_2026_09_16: 'Filed as T-294 by 0d6cd7c, then a SECOND ticket
+      (the LoRa chirp observability one) was filed under the same id by d680e81. Two status
+      flips meant for the chirp ticket - 8039ab0 launch, 2343435 merged - matched the FIRST
+      occurrence of the id and landed here instead, so this entry read done having never been
+      launched while the chirp ticket that WAS built and merged at b1810a4 read todo. T-294 stays
+      with the chirp ticket because shipped source (hk-dsp/src/chirp.rs line 1), the merge commit
+      b1810a4 and T-297 deps all cite T-294 to mean chirp; a commit message cannot be edited and
+      a source comment cannot be made retroactively true, a planning-log line can. THIS entry is
+      renumbered to T-301. Its substance was genuinely completed, by T-296 (5c67149, the psk-qam
+      grid was rotated by an arbitrary fraction of its own symbol rate) - the same defect closed
+      under a different id, which is why M3 did not close over unworked work. The done status here
+      is earned by T-296, NOT by the misapplied flip that originally set it.'
 
   - id: T-292
     milestone: M3
@@ -5401,7 +5415,8 @@ tasks:
     title: 'A LoRa sweep is UNOBSERVABLE at the standard US915 rate: T_sym at SF9/125 kHz
       is 4.096 ms, exactly one spectrum frame, so the chirp is indistinguishable from a
       wideband burst'
-    status: todo
+    status: done
+    commit: b1810a4
     priority: high
     deps:
     - T-255
@@ -5546,6 +5561,23 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+  - id: T-299
+    title: 'P25 decode has no independent oracle: the native TSBK decoder is checked only against a scene this repo also wrote'
+    milestone: M4
+    priority: medium
+    status: todo
+    deps: [T-268]
+    parallel_group: M4A
+    acceptance: 'T-268 decided BUILD over WRAP for sound reasons (no compliant CC recording exists, so wrapping would need a compliant ENCODER first, and a GPLv3 binary as a hard CI dependency would make the blind acceptance test SKIP in CI). That decision is right for the RUNTIME and leaves a real hole in VERIFICATION: the decoder and the generator were written from the same reading of the same references, so a shared misreading passes both. Close it the way C23 Testing already says to - compare against Trunk Recorder or SDRTrunk on the SAME IQ, as an ORACLE not a runtime, behind the C22 plugin boundary per ADR-0010, and gate it on hardware/off-air tier so CI never depends on it. Blocked until a real off-air P25 capture exists (user-triggered); until then record explicitly in the module header that no independent oracle has confirmed this decoder'
+  - id: T-300
+    title: 'T-267 confirmer uses CRC-16/CCITT-FALSE, but real P25 TSBKs use the AUGMENTED CRC-CCITT - on the first real capture this will look like a demodulator fault'
+    milestone: M4
+    priority: medium
+    status: todo
+    deps: [T-268]
+    parallel_group: M4A
+    core_interface: true
+    acceptance: 'T-268 verified that P25 uses the augmented CRC-CCITT (init 0, final XOR 0xFFFF) and NOT CRC-16/CCITT-FALSE, which many references repeat. T-267 uses CCITT-FALSE. T-268 deliberately did not change it, and that restraint was correct: the framing is simplified in three other ways (trellis, interleaving, status symbols), so fixing one of four buys no compliance and would only make the gap harder to see. Fix all four together or none. The DANGEROUS property is the failure mode, not the defect: with the wrong CRC essentially every real TSBK fails while the trellis reports a clean metric, so it presents as a demodulator or front-end fault and will burn a debugging session on the wrong layer. Acceptance: all four simplifications resolved together against a real capture, OR - if that stays out of reach - a test that asserts the current CRC choice is the simplified one, so the assumption is stated by the suite and cannot be silently inherited'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
