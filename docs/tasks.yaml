@@ -4352,7 +4352,7 @@ tasks:
     milestone: M2-hardening
     title: 'hk-plugin-readsb test leaves a child process alive: nextest marks it LEAK
       and `just test` exits 1 on an otherwise fully passing run'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: PIPE
