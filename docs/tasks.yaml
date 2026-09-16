@@ -5968,7 +5968,7 @@ tasks:
     milestone: M2-hardening
     title: 'An unidentified continuous 28 kHz emission at 100.465339 MHz in the FM fixture: not stereo FM,
       not a receiver image'
-    status: todo
+    status: in-progress
     priority: low
     deps:
     - T-289
