@@ -31,8 +31,12 @@
 .side-inv .chip.known { color: var(--teal); border-color: color-mix(in srgb, var(--teal) 35%, transparent); }
 .side-inv .chip.unknown { color: var(--lav); border-color: color-mix(in srgb, var(--lav) 35%, transparent); }
 .side-inv .chip.flag { color: var(--coral); border-color: color-mix(in srgb, var(--coral) 40%, transparent); }
+.side-inv .chip.cluster { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
 .side-inv .dots { display: inline-flex; gap: 2px; align-items: flex-end; height: 10px; }
 .side-inv .dots i { width: 3px; background: var(--lav); border-radius: 1px; opacity: 0.85; display: block; }
+/* T-207: the unknown/open-set score, shown next to every row's frequency so it's visible without
+   opening the focus panel (unknown signals are the priority to surface). */
+.side-inv .row .unk-badge { font-family: var(--mono); font-size: 10px; font-weight: 600; color: var(--lav); background: var(--lav-soft); padding: 1px 6px; border-radius: 8px; }
 
 /* ---- selections ---- */
 .side-sel { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
@@ -55,13 +59,26 @@
 .focus .chip.known { color: var(--teal); border-color: color-mix(in srgb, var(--teal) 35%, transparent); }
 .focus .chip.unknown { color: var(--lav); border-color: color-mix(in srgb, var(--lav) 35%, transparent); }
 .focus .chip.flag { color: var(--coral); border-color: color-mix(in srgb, var(--coral) 40%, transparent); }
+.focus .chip.cluster { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
 .focus .bigf { font-family: var(--mono); font-size: 28px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.05; margin-top: 8px; overflow-wrap: anywhere; }
 .focus .bigf small { font-size: 14px; color: var(--muted); margin-left: 4px; }
 .focus .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+/* T-207: unknown score, shown prominently right under the frequency (unknown signals are the
+   priority to surface — CLAUDE.md "Product vision" §4) — its own banner, not buried in .kv. */
+.focus .unk-score { display: flex; justify-content: space-between; align-items: baseline; margin-top: 10px; padding: 7px 10px; border-radius: 7px; background: var(--lav-soft); border: 1px solid color-mix(in srgb, var(--lav) 35%, transparent); }
+.focus .unk-score .unk-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+.focus .unk-score .unk-val { font-family: var(--mono); font-size: 15px; font-weight: 600; color: var(--lav); }
 .focus .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; }
 .focus .kv dt { color: var(--dim); font-size: 11.5px; }
 .focus .kv dd { margin: 0; font-family: var(--mono); font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .focus .kv dd.flag { color: var(--coral); }
+/* T-207: classification distribution — `classification.top`, highest first. */
+.focus .dist { display: flex; flex-direction: column; gap: 6px; }
+.focus .dist-row { display: grid; grid-template-columns: minmax(0, 72px) 1fr 34px; gap: 8px; align-items: center; font-size: 11.5px; }
+.focus .dist-label { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.focus .dist-bar { height: 6px; background: var(--ground); border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+.focus .dist-bar i { display: block; height: 100%; background: var(--lav); }
+.focus .dist-pct { text-align: right; color: var(--dim); }
 .focus .expl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .focus .expl li { display: grid; grid-template-columns: 22px 1fr; gap: 2px 8px; }
 .focus .expl .rank { font: 500 11px var(--mono); color: var(--dim); padding-top: 1px; }

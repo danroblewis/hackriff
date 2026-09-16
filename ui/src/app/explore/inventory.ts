@@ -35,7 +35,29 @@ export interface Explanation {
   status: string; prior_ref: string | null; flags: string[]; evidence: ExplanationEvidence[];
 }
 
-export interface Classification { family: string; confidence: number; open_set_score: number; model_version: string; t_s: number }
+/** One posterior label of a `Classification.top` distribution, or a within-family `class`. */
+export interface PosteriorLabel { label: string; p: number }
+
+/** `hk_model::RecordedClassification`, as `/api/inventory` serves it (T-211/T-199, ADR-0016 §2).
+ * `stage`/`arb_rank` are always set (derived for a pre-M3 row); `taxonomy`, `coarse`, `class`,
+ * `top`, `entropy_norm` and `flags` are `null` on a pre-M3 row or when nothing has scored this
+ * emitter's distribution yet. `open_set_score` is the mass the classifier put on "not measured
+ * well enough to name" — present whenever `family` is, even when `family` itself is not
+ * `"unknown"`. */
+export interface Classification {
+  family: string; confidence: number; open_set_score: number; model_version: string; t_s: number;
+  taxonomy: string | null;
+  stage: "feature-tree" | "verifier" | "dl" | "decoder" | "user" | "chain" | "track-shape" | null;
+  arb_rank: number | null;
+  coarse: "analog" | "digital" | "noise-like" | "unknown" | null;
+  /** The winning label within `family`, below its own confidence gate when `null`. */
+  class: (PosteriorLabel & { stage: string }) | null;
+  /** Up to 5 posterior labels, highest first, `unknown` included — the classification
+   * distribution the focus panel shows (T-207). */
+  top: PosteriorLabel[] | null;
+  entropy_norm: number | null;
+  flags: string[] | null;
+}
 
 /** Output-refined tuning (hk-model `RefinedTuning`, T-070), the emitter's `refined` field. */
 export interface RefinedTuning {
@@ -52,6 +74,11 @@ export interface Row extends Omit<BaseRow, "recurrence"> {
   classification: Classification | null;
   explanations: Explanation[];
   refined: RefinedTuning | null;
+  /** The C18 cluster of unknown emissions this row currently belongs to ("I have seen this
+   * before"), or `null` without one — no cluster yet, not visible (< 3 members/appearances), or
+   * a withheld-identity row (docs/api.md `cluster_id`, T-202, ADR-0016 §5). It is a *type*
+   * ("the same thing I saw before"), never an identity: sets nothing else on the row. */
+  cluster_id: string | null;
 }
 
 export interface Page { entries: Row[]; next_cursor: string | null }
@@ -146,7 +173,7 @@ export function sortInventoryRows(rows: readonly Row[], key: InventorySortKey, d
 
 // ---- row view model ----
 
-export interface Chip { cls: "known" | "unknown" | "flag"; text: string }
+export interface Chip { cls: "known" | "unknown" | "flag" | "cluster"; text: string }
 
 /** The family/flag chip(s) for a row, from already-known fields only (`family`,
  * `classification.family`, `explanations[0].flags`); "unknown" when no family is known yet. */
@@ -157,6 +184,14 @@ export function rowChips(r: Row): Chip[] {
   if (flags.includes("off-raster")) chips.push({ cls: "flag", text: "off raster" });
   else if (flags.includes("off-allocation")) chips.push({ cls: "flag", text: "off allocation" });
   return chips;
+}
+
+/** A "seen before" chip when the row currently belongs to a visible cluster (`cluster_id`, T-202):
+ * evidence that this emission *measures* like something seen before, never an identity or a
+ * family (ADR-0016 §5 "a cluster is a type, an emitter is an instance") — kept a distinct `cls`
+ * from `rowChips`' family/flag chips so it never reads as either. `null` without a cluster. */
+export function clusterChip(r: Pick<Row, "cluster_id">): Chip | null {
+  return r.cluster_id ? { cls: "cluster", text: "seen before" } : null;
 }
 
 /** "Seen" text for a row (§4.2): confirmed rows show on-air duty and count (GAP 2 interim — no

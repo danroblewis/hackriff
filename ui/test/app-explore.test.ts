@@ -9,7 +9,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { decodeActionLabel, emitterStreamAddress, recordEmitterClip, selectionSummary } from "../src/app/explore/focus";
 import {
-  clearUserBand, nextInventorySort, recurrenceDots, rowChips, rowSeenText, setUserBand, sortInventoryRows, type Row,
+  clearUserBand, clusterChip, nextInventorySort, recurrenceDots, rowChips, rowSeenText, setUserBand,
+  sortInventoryRows, type Classification, type Row,
 } from "../src/app/explore/inventory";
 import { foundInside, listenAllTargets, recordSelectionClip, type Selection } from "../src/app/explore/selections";
 import {
@@ -29,7 +30,18 @@ function makeRow(over: Partial<Row> = {}): Row {
     known_status: "known", status: null, tags: [], family: "wfm-broadcast",
     identity_scheme: null, identity_class: null, withheld: false,
     recurrence: { occurrences: 12, appearances: 3, span_s: 3600, on_air_s: 900, duty_cycle: 0.25, recent: [] },
-    classification: null, explanations: [], refined: null,
+    classification: null, explanations: [], refined: null, cluster_id: null,
+    ...over,
+  };
+}
+
+/** A full [[Classification]] fixture (T-207): the legacy fields plus every ADR-0016 field, so
+ * tests can override just the ones they care about. */
+function makeClassification(over: Partial<Classification> = {}): Classification {
+  return {
+    family: "wfm-broadcast", confidence: 0.9, open_set_score: 0.1, model_version: "v1", t_s: 0,
+    taxonomy: "hk-mod@1", stage: "chain", arb_rank: 3, coarse: "analog",
+    class: null, top: null, entropy_norm: null, flags: null,
     ...over,
   };
 }
@@ -69,11 +81,16 @@ test("rowChips: known family, unknown family, off-raster flag", () => {
   assert.deepEqual(rowChips(makeRow({ family: "wfm-broadcast" })), [{ cls: "known", text: "wfm-broadcast" }]);
   assert.deepEqual(rowChips(makeRow({ family: null, classification: null })), [{ cls: "unknown", text: "unknown" }]);
   assert.deepEqual(
-    rowChips(makeRow({ family: null, classification: { family: "wfm-broadcast", confidence: 0.9, open_set_score: 0.1, model_version: "v1", t_s: 0 } })),
+    rowChips(makeRow({ family: null, classification: makeClassification() })),
     [{ cls: "known", text: "wfm-broadcast" }],
   );
   const flagged = makeRow({ explanations: [{ rank: 1, service: "fm-broadcast", label: "FM broadcast, off raster", score: 0.7, evidence_confidence: 0.7, status_evidence_confidence: 0, status: "known", prior_ref: null, flags: ["off-raster"], evidence: [] }] });
   assert.deepEqual(rowChips(flagged), [{ cls: "known", text: "wfm-broadcast" }, { cls: "flag", text: "off raster" }]);
+});
+
+test("clusterChip: 'seen before' when the row belongs to a visible cluster, else null", () => {
+  assert.deepEqual(clusterChip(makeRow({ cluster_id: "cluster:0199abc" })), { cls: "cluster", text: "seen before" });
+  assert.equal(clusterChip(makeRow({ cluster_id: null })), null);
 });
 
 test("rowSeenText: confirmed shows on-air duty and count (GAP 2 interim); candidates show a rate", () => {
