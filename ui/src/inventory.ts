@@ -11,6 +11,21 @@ export interface Recurrence { occurrences: number; appearances: number; span_s: 
  * the measured `f_lo_hz`/`f_hi_hz`, which it never overwrites. `null` on the row when unset. */
 export interface UserBand { f_lo: number; f_hi: number; set_at: number; actor: string; reason: string | null; reason_withheld: boolean }
 
+/** The latest presence interval intersecting the request's window (docs/api.md `presence.last_interval`,
+ * T-284, ADR-0017 TM-2/§2.3): "the box the waterfall draws" (TM-4). `open`: still on the air at the
+ * window's own live edge — an advancing `t_end_s` on the next poll is what makes a box grow; nothing
+ * here is extrapolated client-side between polls. */
+export interface PresenceInterval { t_start_s: number; t_end_s: number; open: boolean }
+
+/** When this emitter was on the air, seen through the request's window (docs/api.md `presence`,
+ * T-284, ADR-0017 TM-2/§2.3) — read this instead of `first_seen_s`/`last_seen_s`, which are the
+ * *hull* of the presence track and never its extent. `last_interval` is `null` when no interval
+ * intersects the window: render nothing for it, never a fabricated zero-width/zero-duration box. */
+export interface Presence {
+  intervals: number; on_air_s: number; last_interval: PresenceInterval | null;
+  liveness: "live" | "ended" | "absent"; ended_t_s: number | null;
+}
+
 export interface Row {
   id: string; state: EntryState;
   f_center_hz: number; bandwidth_hz: number; f_lo_hz: number; f_hi_hz: number;
@@ -23,6 +38,10 @@ export interface Row {
   /** Optional so existing fixtures/tests that predate T-193 still typecheck; a server that serves
    * the field always sends `null` when unset, never omits it. */
   user_band?: UserBand | null;
+  /** Optional so fixtures/tests that predate T-284 still typecheck; a live server serves it on
+   * every row, windowed or not (docs/api.md). `undefined` is treated exactly like a row with no
+   * interval in the window — no box drawn — never a fabricated one. */
+  presence?: Presence;
 }
 interface Page { entries: Row[]; next_cursor: string | null }
 type Key = "status" | "freq" | "bw" | "family" | "identity" | "count" | "recurrence" | "tags";

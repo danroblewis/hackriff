@@ -157,6 +157,57 @@ export function dragBandEdge(v: ax.View, widthPx: number, edge: BandEdge, startL
     : { loHz: startLoHz, hiHz: Math.max(startLoHz + minW, snappedHz) };
 }
 
+// ---- Presence-interval boxes (T-261, ADR-0017 TM-4): centre/width × time-extent, drawn across
+// trace and waterfall. Growth is not animated here — it falls out of re-reading a row's
+// `presence.last_interval.t_end_s` on the next inventory poll and redrawing: an open interval's
+// `t_end_s` moves closer to the live edge (small `rowsBack`) each poll while `t_start_s` stays
+// fixed and slides further down (bigger `rowsBack`) as time passes, so the box's bottom edge grows
+// away from its (roughly) steady top edge. Nothing here extrapolates `t_end_s` between polls — the
+// extent is exactly what `/api/inventory` last served (thin-client rule). The focused row is
+// excluded: it keeps the existing full-height bracket/[[confirmedBands]] box so T-193's
+// drag-to-adjust-band edges stay where that code expects them (ADR-0017 TM-4 table). ----
+
+export interface PresenceBox extends Span {
+  id: string; state: "candidate" | "confirmed";
+  topPct: number; heightPct: number;
+  /** An interval open at the window's live edge: still on the air (docs/api.md `presence.liveness`). */
+  open: boolean;
+  /** The row's arbitrated family is Costas/chirp spread spectrum (`family === "css"`, docs/07 §2.21
+   * taxonomy `css` {chirp}) — the one case ADR-0017 §1.3 names where this rectangle is known to
+   * misrepresent the signal (a swept carrier drawn as its bounding box, not the diagonal truth). */
+  chirp: boolean;
+  label: string;
+}
+
+/** One box per Candidate/Confirmed row whose `presence.last_interval` intersects the waterfall
+ * (docs/api.md `presence`, T-284): frequency from `f_lo_hz`/`f_hi_hz` exactly as [[bracketLayout]]
+ * places it, time extent from [[ax.timeSpanY]] over the interval's own `t_start_s`/`t_end_s` — both
+ * read off the API response, never recomputed. A row with no interval intersecting the request's
+ * window (`last_interval: null`, or no `presence` at all on a pre-T-284 fixture) draws nothing: no
+ * zero-width or zero-duration box is ever fabricated. A row whose interval has scrolled off the
+ * waterfall's own history (`timeSpanY` null) likewise draws nothing, rather than a box clamped to a
+ * height it never had. */
+export function presenceBoxes(rows: readonly Row[], v: ax.View, clock: RowClock, focusedId: string | null): PresenceBox[] {
+  const out: PresenceBox[] = [];
+  const newestT = clock.timeAt(0);
+  for (const r of rows) {
+    if (r.state !== "candidate" && r.state !== "confirmed") continue;
+    if (r.id === focusedId) continue; // keeps its full-height bracket/band instead (T-193)
+    const iv = r.presence?.last_interval;
+    if (!iv) continue;
+    const span = placeExtent(v, r.f_lo_hz, r.f_hi_hz, MIN_BRACKET_FRAC);
+    if (!span) continue;
+    const ys = ax.timeSpanY(iv.t_start_s, iv.t_end_s, newestT, clock.rowPeriodS, clock.specFrac, clock.rows);
+    if (!ys) continue;
+    const [topFrac, bottomFrac] = ys;
+    out.push({
+      ...span, id: r.id, state: r.state, topPct: topFrac * 100, heightPct: (bottomFrac - topFrac) * 100,
+      open: iv.open, chirp: r.family === "css", label: ax.fmtMHz(r.f_center_hz, 1e3),
+    });
+  }
+  return out;
+}
+
 export interface SelBox extends Span { id: string; active: boolean; pending: boolean }
 
 /** Frequency boxes for selections in view; `pending` marks ones created here and not yet listed. */
