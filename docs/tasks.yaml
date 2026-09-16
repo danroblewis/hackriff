@@ -3500,8 +3500,8 @@ tasks:
   - id: T-219
     milestone: M3
     title: "Overlapping-candidate resolution: a Confirmed signal suppresses candidates overlapping its band, and overlapping candidates compete (merge or rank by evidence) so duplicate offset boxes collapse"
-    status: in-progress
-    commit: 59dc92e
+    status: done
+    commit: 25b3d01
     priority: high
     deps: []
     parallel_group: DETECT
