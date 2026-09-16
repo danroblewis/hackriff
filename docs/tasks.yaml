@@ -5353,7 +5353,7 @@ tasks:
     milestone: M3
     title: 'Test fixtures in hk-ml, hk-store and hk-api hand-write features_version: 1,
       which now reads as the indeterminate marker'
-    status: in-progress
+    status: done
     priority: low
     deps:
     - T-290
