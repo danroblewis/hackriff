@@ -5522,7 +5522,7 @@ tasks:
     milestone: M3
     title: 'Confidently-wrong is no longer zero: 5 of 396 held-out inputs get a family
       that is not their own (4x chirped-FSK, 1x 8-FSK called analog)'
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-296
