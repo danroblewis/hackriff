@@ -264,6 +264,24 @@ counter_group!(
         /// Chain rows written without their triggering detection, which was never stored within
         /// the wait (detect reader overrun, failed store).
         detection_ref_missing,
+        /// T-287: control-channel hunt passes run ([`crate::chains::trunk`]). One pass is one
+        /// occupancy sweep of the tuned window's raster plus the demodulations it admitted.
+        cc_passes,
+        /// Raster channels measured for occupancy across those passes.
+        cc_channels,
+        /// Channels that reached FCO **candidacy**: continuous, and on the raster. Candidacy is
+        /// not evidence of a control channel — C23's named pitfall is that continuous data
+        /// emitters look exactly like this.
+        cc_candidates,
+        /// Candidates actually demodulated (bounded per pass by the spec's `max_demods`).
+        cc_demods,
+        /// Candidates the per-pass admission cap refused a demodulation.
+        cc_admission_refused,
+        /// Control channels **confirmed** by frame sync *and* CRC (`CcConfirmer::confirm`).
+        cc_confirmed,
+        /// TrunkSystem rows written, one per distinct confirmed control channel (metadata only:
+        /// a protocol, a frequency and times).
+        cc_systems,
         /// Chain errors (demod, repository).
         errors,
     }

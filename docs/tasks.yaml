@@ -4315,7 +4315,7 @@ tasks:
     title: 'Synthetic LoRa scenario in the py/ synth tooling: deterministic up-chirps
       with known SF/BW/CR/payload as hidden ground truth, as a burst/chirp acceptance
       fixture'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: SYNTH
@@ -4521,7 +4521,7 @@ tasks:
   - id: T-263
     milestone: MUI
     title: 'ADR-0017 TM-7: past events mark the timeline scrubber, and scrubbing re-derives the live lists from the IQ ring'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-260
@@ -5048,7 +5048,7 @@ tasks:
     title: 'Wire control-channel hunting as a running pipeline chain: T-267 proved the
       capability blind through the device but there is no in-process hook for
       arbitrary-channel IQ, so nothing calls it during a normal run'
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-267
@@ -5310,6 +5310,30 @@ tasks:
     needs: none
     model: sonnet
     effort: low
+    core_interface: false
+  - id: T-293
+    milestone: M2-hardening
+    title: 'Run summary reports "2 errors" on the chains line in the M4 acceptance scene
+      with no error printed - unexplained FSK-chain behaviour on NBFM bursts'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPE
+    use_cases: []
+    found_by: 'T-287 (2026-09-16), which noticed it and established it was NOT its own:
+      cc_demods == 2 proves both DDCs and both process calls succeeded, and no
+      "trunk-cc write:" error printed. It reported the anomaly rather than ignoring a
+      number that did not concern its ticket'
+    acceptance: 'establish what those errors are and either fix them or explain them. A
+      run summary that reports errors nobody can name trains everyone to ignore the error
+      count - this project already spent hours tonight on a red exit that was read as
+      noise. Find which chain increments the counter and why, on the NBFM bursts in the
+      M4 acceptance scene. If they are benign, make the summary say what they are rather
+      than leaving a bare count; if they are real, fix them. No thresholds move'
+    area: crates/hk-pipeline (chains, run summary)
+    needs: none
+    model: opus
+    effort: medium
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
