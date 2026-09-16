@@ -14,7 +14,7 @@ import {
   asciiChar, cycleLeafAt, errorsByPath, frameViewFromCapture, hexBytes, nodeById,
   type FrameRecordDto, type FrameView, type LayerError, type LayerNode, type LayerTree,
 } from "../../frame-inspector";
-import { selectInspectorField, selectInspectorFrame } from "./inspector-slice";
+import { selectInspectorField, selectInspectorFrame, type InspectorSlice } from "./inspector-slice";
 import { subscribePipelineFeed, type FeedState, type FrameRecord } from "./status-feed";
 
 export const RING_CAP = 200;
@@ -162,6 +162,55 @@ export function selectedByteRange(tree: LayerTree | undefined, fieldNodeId: numb
 const COLORS: Readonly<Record<string, string>> = { uint: "b-teal", int: "b-teal", enum: "b-amber", ascii: "b-cream", bitfield: "b-lav", flag: "b-lav", bytes: "b-mut", layer: "b-mut" };
 const nodeColorClass = (n: LayerNode) => (n.error ? "b-coral" : (COLORS[n.type] ?? "b-mut"));
 
+// ---- pipeline/selection sources (T-195): the Decode workbench binds to its own pipeline picker
+// and shares one global frame/field selection (`state.inspector`), unchanged from T-154. A
+// per-signal output panel (`explore/output-panel.ts`) instead binds to one fixed pipeline and gets
+// its own independent selection, so two panels never fight over which frame is selected.
+
+export interface PipelineSource { get(): string | null; subscribe(cb: (id: string | null) => void): () => void }
+
+/** The Decode workbench's own pipeline selection (`decode.pipelineId`). */
+export function decodeSelectionPipeline(ctx: AppContext): PipelineSource {
+  return { get: () => ctx.store.get().decode.pipelineId, subscribe: (cb) => ctx.store.select((s) => s.decode.pipelineId, cb) };
+}
+
+/** A pipeline id fixed for the panel's whole lifetime (a per-signal output panel bound to one
+ * emitter's currently-running decode pipeline; T-195 never retargets a mounted panel). */
+export function fixedPipeline(id: string | null): PipelineSource {
+  return { get: () => id, subscribe: () => () => {} };
+}
+
+export interface SelectionPort {
+  get(): InspectorSlice;
+  setFrame(frameSeq: number | null): void;
+  setField(fieldNodeId: number | null): void;
+  /** Fires on any change to either field. */
+  subscribe(cb: () => void): () => void;
+}
+
+/** The Decode workbench's shared selection (`state.inspector`), as before T-195. */
+export function storeSelection(ctx: AppContext): SelectionPort {
+  return {
+    get: () => ctx.store.get().inspector,
+    setFrame: (frameSeq) => ctx.store.set(selectInspectorFrame(frameSeq)),
+    setField: (fieldNodeId) => ctx.store.set(selectInspectorField(fieldNodeId)),
+    subscribe: (cb) => ctx.store.select((s) => s.inspector, () => cb()),
+  };
+}
+
+/** An independent selection for one per-signal output panel (T-195): several panels, or a panel
+ * and the Decode workbench, never share a frame/field selection. */
+export function localSelection(): SelectionPort {
+  let sel: InspectorSlice = { frameSeq: null, fieldNodeId: null };
+  const listeners = new Set<() => void>();
+  return {
+    get: () => sel,
+    setFrame(frameSeq) { sel = { frameSeq, fieldNodeId: null }; for (const l of [...listeners]) l(); },
+    setField(fieldNodeId) { sel = { ...sel, fieldNodeId }; for (const l of [...listeners]) l(); },
+    subscribe(cb) { listeners.add(cb); return () => listeners.delete(cb); },
+  };
+}
+
 class InspectorPanel {
   private ring: RingFrame[] = [];
   private unsubscribe: () => void = () => {};
@@ -172,6 +221,7 @@ class InspectorPanel {
   private servedText = "select a pipeline in Decode";
   private byteCycle: { byte: number; id: number } | null = null;
   private nodeRows = new Map<number, HTMLElement>();
+  private disposers: (() => void)[] = [];
 
   private frameListEl: HTMLElement;
   private noteEl: HTMLElement;
@@ -180,7 +230,12 @@ class InspectorPanel {
   private flowEl: HTMLElement;
   private treeEl: HTMLElement;
 
-  constructor(el: HTMLElement, private ctx: AppContext) {
+  constructor(
+    el: HTMLElement,
+    private ctx: AppContext,
+    private pipelineSource: PipelineSource = decodeSelectionPipeline(ctx),
+    private selection: SelectionPort = storeSelection(ctx),
+  ) {
     this.frameListEl = h("div", { class: "insp-frame-list", role: "list" });
     this.noteEl = h("em", {}, this.servedText);
     this.byteNoteEl = h("em", {}, "hex · ASCII · click a byte or a field");
@@ -197,9 +252,17 @@ class InspectorPanel {
           this.hexEl, this.flowEl),
         this.treeEl),
     );
-    ctx.store.select((s) => s.decode.pipelineId, (id) => this.onPipeline(id), { immediate: true });
-    ctx.store.select((s) => s.inspector.frameSeq, () => this.renderFrameList());
-    ctx.store.select((s) => s.inspector.fieldNodeId, () => this.renderBytesAndTree());
+    this.disposers.push(this.pipelineSource.subscribe((id) => this.onPipeline(id)));
+    this.onPipeline(this.pipelineSource.get());
+    this.disposers.push(this.selection.subscribe(() => this.renderFrameList()));
+  }
+
+  /** Closes the pipeline feed subscription and store listeners. Call when a per-signal output
+   * panel is torn down (e.g. its tab is no longer shown); the Decode workbench's singleton never
+   * calls this since it lives for the page's lifetime. */
+  destroy(): void {
+    this.unsubscribe();
+    for (const d of this.disposers) d();
   }
 
   private onPipeline(id: string | null) {
@@ -208,7 +271,7 @@ class InspectorPanel {
     this.ring = [];
     this.byteCycle = null;
     this.nodeRows.clear();
-    this.ctx.store.set(selectInspectorFrame(null));
+    this.selection.setFrame(null);
     if (!id) {
       this.feedState = "closed";
       this.feedMessage = "";
@@ -243,7 +306,7 @@ class InspectorPanel {
   private onFrame(f: FrameRecord) {
     const view = frameViewFromLive(f, this.ring.length);
     this.ring = pushRingFrame(this.ring, view);
-    if (this.ctx.store.get().inspector.frameSeq === null) this.ctx.store.set(selectInspectorFrame(view.index));
+    if (this.selection.get().frameSeq === null) this.selection.setFrame(view.index);
     else this.renderFrameList();
   }
 
@@ -258,7 +321,7 @@ class InspectorPanel {
   }
 
   private renderFrameList() {
-    const rows = frameRowsVM(this.ring, this.ctx.store.get().inspector.frameSeq);
+    const rows = frameRowsVM(this.ring, this.selection.get().frameSeq);
     this.frameListEl.replaceChildren(...rows.map((r) => h(
       "div",
       {
@@ -266,8 +329,8 @@ class InspectorPanel {
         role: "listitem",
         "aria-current": String(r.selected),
         tabindex: "0",
-        onclick: () => this.ctx.store.set(selectInspectorFrame(r.seq)),
-        onkeydown: (e: Event) => { const k = (e as KeyboardEvent).key; if (k === "Enter" || k === " ") { e.preventDefault(); this.ctx.store.set(selectInspectorFrame(r.seq)); } },
+        onclick: () => this.selection.setFrame(r.seq),
+        onkeydown: (e: Event) => { const k = (e as KeyboardEvent).key; if (k === "Enter" || k === " ") { e.preventDefault(); this.selection.setFrame(r.seq); } },
       },
       h("span", { class: "t" }, r.timeText),
       h("span", { class: "c" }, r.channelText),
@@ -277,7 +340,7 @@ class InspectorPanel {
   }
 
   private renderBytesAndTree() {
-    const { frameSeq, fieldNodeId } = this.ctx.store.get().inspector;
+    const { frameSeq, fieldNodeId } = this.selection.get();
     const view = resolveSelectedFrame(this.ring, frameSeq);
     this.nodeRows.clear();
     if (!view) {
@@ -327,8 +390,8 @@ class InspectorPanel {
         class: `insp-tnode d${depth}${n.error ? " bad" : ""}`,
         tabindex: "0",
         "aria-current": String(n.id === selectedId),
-        onclick: (e: Event) => { e.stopPropagation(); this.ctx.store.set(selectInspectorField(n.id)); },
-        onkeydown: (e: Event) => { const k = (e as KeyboardEvent).key; if (k === "Enter" || k === " ") { e.preventDefault(); e.stopPropagation(); this.ctx.store.set(selectInspectorField(n.id)); } },
+        onclick: (e: Event) => { e.stopPropagation(); this.selection.setField(n.id); },
+        onkeydown: (e: Event) => { const k = (e as KeyboardEvent).key; if (k === "Enter" || k === " ") { e.preventDefault(); e.stopPropagation(); this.selection.setField(n.id); } },
       },
       h("span", { class: "nm" }, h("span", { class: `dot ${nodeColorClass(n)}` }), n.label ?? n.name),
       h("span", { class: "vv" }, n.text ?? (es?.length ? es.map((x) => x.kind).join(", ") : "")),
@@ -339,15 +402,27 @@ class InspectorPanel {
   }
 
   private onByteClick(byte: number) {
-    const view = resolveSelectedFrame(this.ring, this.ctx.store.get().inspector.frameSeq);
+    const view = resolveSelectedFrame(this.ring, this.selection.get().frameSeq);
     const tree = view?.layers;
     if (!tree) return;
     const prev = this.byteCycle && this.byteCycle.byte === byte ? this.byteCycle.id : null;
     const id = cycleLeafAt(tree, byte, prev);
     this.byteCycle = id === null ? null : { byte, id };
-    this.ctx.store.set(selectInspectorField(id));
+    this.selection.setField(id);
     if (id !== null) this.nodeRows.get(id)?.scrollIntoView({ block: "nearest" });
   }
 }
 
 export const mountInspector: MountFn = (el, ctx) => { new InspectorPanel(el, ctx); };
+
+/**
+ * Mounts a packet inspector bound to one fixed pipeline, with its own independent frame/field
+ * selection (T-195, "Added scope from docs/15 §7"): a per-signal output panel in Explore, reusing
+ * every T-154 rendering/selection helper above rather than duplicating them. Returns a cleanup
+ * function that closes the pipeline feed subscription — call it when the panel's tab is no longer
+ * shown or the panel unmounts.
+ */
+export function mountInspectorPanel(el: HTMLElement, ctx: AppContext, pipelineId: string): () => void {
+  const panel = new InspectorPanel(el, ctx, fixedPipeline(pipelineId), localSelection());
+  return () => panel.destroy();
+}
