@@ -4144,6 +4144,15 @@ tasks:
       signals within ~2-10 s of continuous re-detection. Detection is fast, continuous
       and self-cleaning (CLAUDE.md invariant 4). Report the achieved count and time on
       the user''s own 99.6 MHz scene AND on the 902-928 MHz ISM burst scene (T-254).'
+    rescoped_by_adr0017_2026_09_16: 'T-253/ADR-0017 found the likely cause and it is
+      not the merge logic: repo/inventory.rs:53 filters t0/t1 with a HULL test
+      (last_seen >= ?4 AND first_seen <= ?5), so a signal seen at 09:00 and 17:00
+      matches every window between - GET /api/inventory?t0&t1 structurally cannot answer
+      what was on air in a window. ADR-0017 stage TM-2 fixes that predicate and TM-3 has
+      the UI send the window; the 82-candidate pile-up may collapse with NO merge or
+      decay change at all. CHECK THAT FIRST and report what remains before touching
+      resolve_overlaps. The ~82 -> ~4-7 in ~2-10 s target still stands and is still not
+      loosenable.'
 
   - id: T-251
     milestone: M2-hardening
@@ -4178,6 +4187,13 @@ tasks:
       persisting signal''s box GROWS along the time axis, so a growing time extent is
       the accumulator correctly modelled - the raw count was pathological only because
       it had nowhere to live. This work and T-253''s model are one design; coordinate.'
+    rescoped_by_adr0017_2026_09_16: 'SHRINKS SUBSTANTIALLY. Once Explore is
+      window-scoped (ADR-0017 TM-3), a candidate whose signal stopped hours ago is not
+      decayed out - it is simply not in the window. Decay is left owning exactly one
+      case: a signal that stopped INSIDE the viewed window, which should still be listed
+      (its box is on screen) with an honest liveness state and a lower rank, never
+      expiry. Sequenced as ADR-0017 stage TM-6, after TM-3 and TM-5. Decay is a function
+      of time since the latest interval CLOSED, never a per-tick decrement.'
 
   - id: T-252
     milestone: MUI
@@ -4207,7 +4223,7 @@ tasks:
     milestone: MUI
     title: 'ADR: signals as time-frequency regions with a time extent; Explore scoped
       to the viewed waterfall window; all-time catalogue as a separate history surface'
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: MUI-DESIGN
@@ -4332,6 +4348,97 @@ tasks:
     model: sonnet
     effort: low
     core_interface: false
+  - id: T-257
+    milestone: M2-hardening
+    title: 'hk-plugin-readsb test leaves a child process alive: nextest marks it LEAK
+      and `just test` exits 1 on an otherwise fully passing run'
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: PIPE
+    use_cases: []
+    found_by: 'coordinator 2026-09-16, T-247 full check: 1754 tests run, 1754 passed
+      (1 leaky), acceptance 33 passed - and `just test` still exited 1. The leak is
+      hk-plugins::bin/hk-plugin-readsb tests::spawned_args_always_carry_no_fix_and_never_fix'
+    acceptance: 'the readsb child is reaped before the test returns, so a full run exits
+      0 with no LEAK line. Diagnose first - a spawned child outliving its test is a real
+      defect in the plugin host teardown, not a test-harness annoyance, and this project
+      has already been bitten by orphaned processes corrupting other measurements. Do NOT
+      silence it with a nextest leak-policy override: .config/nextest.toml currently sets
+      no leak policy and adding one would hide the class of bug, exactly the pins T-228
+      was filed to remove. Check whether the same teardown path leaks in production
+      (hk-plugins host shutdown), not only under test'
+    area: crates/hk-plugins (host teardown), plugins/readsb wrapper
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
+  - id: T-258
+    milestone: M2-hardening
+    title: 'Capability model has no way to say "above the receiver ceiling": hardware_fit
+      lacks an out-of-band value, and two facts about GNSS/X-band are unrecorded'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: DOCS
+    use_cases:
+    - SIGNAL-030
+    - SIGNAL-040
+    - SIGNAL-025
+    - SIGNAL-027
+    found_by: 'user 2026-09-16 capability targets; coordinator checked and found both
+      targets ALREADY have permanent ids - the gap is capability facts, not use cases'
+    acceptance: 'do NOT mint new use-case ids: GPS L1 is SIGNAL-030, jamming/spoofing is
+      AWARE-002/003/004/006, and the satellite tier is SIGNAL-027 (Meteor-M LRPT, 137
+      MHz, native), SIGNAL-029 (NOAA POES, native), SIGNAL-025 (GOES HRIT 1694.1 MHz,
+      needs-accessory), SIGNAL-028 (~1.7 GHz AHRPT), SIGNAL-040 (X-band). Instead:
+      (1) add an `out-of-band` hardware_fit value meaning ABOVE OR BELOW THE RECEIVER''S
+      REACH - today the vocabulary is native / needs-accessory / needs-other-sdr /
+      needs-tx / out-of-scope and ZERO entries express a capability limit, so X-band at
+      ~8 GHz reads as needs-accessory, i.e. "buy something and it works", when the
+      HackRF ceiling is 6 GHz; retag SIGNAL-040 and audit the other bands for the same
+      mislabel; (2) record on SIGNAL-030 (and the gnss-observables capability card) that
+      **L1 sits 20-30 dB BELOW the noise floor and is therefore NOT blindly detectable**
+      - recovering it is correlation/despread against known PRN codes, an EXPLICIT
+      documented exception to the project''s blind-first rule, with GNSS-SDR as the
+      reference; the blindly-detectable part is the jamming/spoofing signature (power
+      anomaly, loss-of-lock). Keep docs/05 and use-cases.yaml in sync; never renumber'
+    area: docs/use-cases.yaml, docs/05-use-cases-and-explorations.md, docs/06, docs/capabilities
+    needs: none
+    model: sonnet
+    effort: low
+    core_interface: false
+  - id: T-259
+    milestone: M2-hardening
+    title: 'Audit the source/scheduler/inventory layers for baked-in single-device
+      assumptions, so multiple concurrent SDRs stay a future option'
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: PIPE
+    use_cases: []
+    found_by: 'user 2026-09-16, CLAUDE.md hardware constraints: keep the abstraction
+      N-capable; not scheduled work'
+    acceptance: 'AUDIT AND REPORT, minimal change. Coordinator''s partial findings to
+      verify or overturn: (a) device_id is stamped AND enforced - source/conformance.rs
+      asserts a source''s reported device_id matches its provenance, so that half is
+      already load-bearing; (b) the factory boundary is N-shaped (SourceRegistry::open
+      returns a Box<dyn Source> per request, no singleton) but hk-pipeline/src/capture.rs
+      takes one `Box<dyn Source>` - a single-device assumption in the CONSUMER, not the
+      abstraction; (c) UNRESOLVED - scheduler/step.rs:176 documents "One scheduled
+      window: where the radio points", singular, and whether that is structural or just
+      naming needs reading SchedulerConfig and the bandit TierWindow/Share types.
+      THE INVARIANT THAT MATTERS: non-coherent stitching makes two front ends look like
+      one contiguous sweep, so occupancy baselines, T-219 image/harmonic attribution and
+      clustering must READ device_id, not merely have it available - a field written,
+      conformance-checked and never consulted is the same vacuum shape as T-242 and
+      T-247. Report what would have to change; change nothing structural without a
+      follow-up ticket'
+    area: crates/hk-core (source, scheduler), crates/hk-pipeline/src/capture.rs, crates/hk-context
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
