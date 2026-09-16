@@ -8,6 +8,7 @@
 
 - **Base URL.** `hk serve` binds `127.0.0.1:<port>` by default (printed at start as `http://<addr>/#token=<token>`) and prints the TCP stream server's address alongside it. Binding a non-loopback address exposes every route below to anyone who can reach that interface; there is no TLS in M0 (the cloudflared tunnel the user runs separately adds TLS).
 - **Units.** Frequencies are Hz; times are Unix seconds as JSON numbers (floats) everywhere in this document, so browsers never handle `i64` nanoseconds. (Stream *records* use `i64` nanoseconds — see the stream contract.)
+- **Absolute capture time on every time-varying record** ([One shared time axis](#one-shared-time-axis-t-337) below, T-337). Anything the client places on a time axis — a spectrum row, a presence extent, an event, a box, a selection, a floor step, a history cell — arrives with the absolute capture time it happened at. A client never derives a record's time from arrival order, a sequence number, a row index, a declared rate, or its own request parameters.
 - **Auth (bearer token).** Every `/api/*` and `/ws/*` request needs the server's token (`Token::verify`, constant-time comparison; a missing/wrong/expired token is `401` before anything about streams, the device or an id is revealed):
   - `Authorization: Bearer <token>` works everywhere.
   - `?token=<token>` works **only for `GET` requests** (browsers can't set headers on a `WebSocket` connection, so `/ws/*` and any other read needs this form to be usable from a page). A mutating request (`POST`/`PUT`/`DELETE`) carrying `?token=` instead of the header is refused `401` with a message saying so — the token must never land in a mutating URL (proxy logs, browser history).
@@ -380,10 +381,17 @@ The row's `presence` object is a *projection through a window* (how many interva
 Backend replacement for client-side peak-picking over a locally held spectrum row (see [UI decision logic moved server-side](#ui-decision-logic-moved-server-side-t-079) below): the strongest observed signal (max-hold, dB/Hz) in `[f_lo, f_hi)` over the last `window_s` seconds, read from the same spectrum-history pyramid as `/api/history`. The window ends at the stream time the history has reached (the end of its newest frame), not the wall clock, so a replay or a time-compressed scene (T-125) is queried on its own clock; before any frame it ends at the wall clock.
 
 ```jsonc
-{ "found": true, "f_center_hz": 101300000.0, "f_lo_hz": 101200000.0, "f_hi_hz": 101400000.0, "max_db": -71.2 }
+{ "found": true, "f_center_hz": 101300000.0, "f_lo_hz": 101200000.0, "f_hi_hz": 101400000.0, "max_db": -71.2,
+  "t_start_s": 1789300812.0, "t_end_s": 1789300813.0, "duration_s": 1.0, "t_cell_s": 1.0,
+  "window": { "t0_s": 1789300810.0, "t1_s": 1789300815.0 } }
 ```
 
-or `{"found": false}` when nothing was observed in the window. Unlike a live FFT row, spectrum-history cells carry no per-bin skirt to fit a box to, so the reported box is a fixed **±100 kHz** around the strongest cell's centre, clamped to `[f_lo, f_hi)` — not a measured signal bandwidth. `400` when `f_hi <= f_lo`, `f_lo`/`f_hi` are out of range, or `window_s` is not a finite number in `(0, 300]`.
+or `{"found": false, "window": {…}}` when nothing was observed in the window. Unlike a live FFT row, spectrum-history cells carry no per-bin skirt to fit a box to, so the reported box is a fixed **±100 kHz** around the strongest cell's centre, clamped to `[f_lo, f_hi)` — not a measured signal bandwidth. `400` when `f_hi <= f_lo`, `f_lo`/`f_hi` are out of range, or `window_s` is not a finite number in `(0, 300]`.
+
+**Time on the answer (T-337).** This route hands the UI a *box*, and a box has a time as much as a frequency ([One shared time axis](#one-shared-time-axis-t-337) below), so it carries one:
+
+- **`window`** — `t0_s`/`t1_s`, the window actually searched. Present on `found: false` too, so "nothing in the last 5 s" and "nothing in the last 300 s" are different answers. A client never reconstructs it from its own `window_s` and the moment the reply arrived: the window ends at the stream time the history has reached, which on a replay or a time-compressed scene is not the wall clock at all.
+- **`t_start_s` / `t_end_s` / `duration_s`** (found only) — the box's own time extent: the time extent of the **pyramid cell the peak was measured in**, not the whole window. `t_cell_s` repeats that cell size so the block is self-contained. Reporting the window as the box's extent would be a guess dressed as a measurement; reporting the cell says exactly when the strongest thing was strongest, to the resolution the history holds.
 
 ### `GET /api/status` — pipeline counters (T-027)
 
@@ -1181,6 +1189,52 @@ Streams: the `observations` stream (T-115) and the `anomalies` stream (T-122) ar
 The user's direction (2026-09-14): the web UI will be rewritten later as a one-screen exploratory UI; until then, **the backend owns all signal logic — recognition, analysis, classification, demodulation, decoding — and the UI is a thin client over this document**, so it can be replaced without backend changes. `GET /api/analysis/strongest` (above) is the first move under that rule: picking the strongest signal in a frequency range is spectrum *analysis*, not presentation, so it moved out of `ui/src/listen.ts` (`peakBinIndex`/`strongestInView`, which inspected a raw client-held FFT row) into the backend, which can look at its own measured spectrum history instead of one row the browser happened to have decoded. The UI toolbar (`ui/src/listen.ts` `installListen`) now polls this endpoint roughly once a second and caches the answer, so choosing a Listen target still runs synchronously inside the click handler (required to unlock audio playback on mobile browsers) rather than awaiting a fetch.
 
 Target-priority arithmetic (a click beats a selection beats the strongest-in-view; a click is boxed ±25 kHz and clamped to the current view; a selection is clamped to the 1 MHz Listen span) stayed client-side: it resolves already-known UI state (what was clicked, which selection is active, the current view bounds) rather than measuring anything about the signal itself, and the server independently enforces the 1 MHz Listen span regardless (`MAX_LISTEN_SPAN_HZ`, `hk_stream::audio::ListenTarget`). See `ui/src/listen.ts` for the full reasoning and `crates/hk-api/tests/http_api.rs` (`analysis_strongest_*`) / `crates/hk-cli/tests/api_contract.rs` for the tests.
+
+## One shared time axis (T-337)
+
+**The rule, from the user** (CLAUDE.md, "Time, the waterfall, and the live view", invariant 1): *for the current view there is a single canonical mapping between absolute capture time and screen position, and everything time-varying is laid out through it and moves together — waterfall rows, every signal box, selections, the time cursor, the scrubber playhead. Overlays are anchored in capture time, never at fixed screen coordinates: a box must sit on, and scroll with, the exact waterfall energy it describes.* The user states the consequence too: **signal boxes drifting out of step with the waterfall's rows-per-second is a violation of this invariant, not a cosmetic bug.**
+
+The division of labour is the same one [T-334](#span-matched-resolution-t-334) drew for resolution. **Mapping a time to a pixel is presentation** and lives in the client, like the pixel↔Hz axis mapping. **Deciding what time a record has is not**, and lives here.
+
+### The backend's obligation
+
+**Every time-varying record this document serves carries the absolute capture time the client must place it at.** Not an index, not a position in a sequence, not something to be worked out from when the response arrived. Concretely:
+
+| Record | Where its time comes from |
+|---|---|
+| Spectrum rows (the waterfall) | the binary record header's `t` (i64 ns, Unix epoch) **and** `sample_index` — [stream contract §5.2](stream-contract.md). `t` is the timestamp of the row's **first** element, and it is the capture clock: `Δt` between rows equals `Δsample_index / bandwidth_hz`. |
+| History cells | `t0_s` + `k·t_cell_s` — contract, not inference ([span-matched resolution](#span-matched-resolution-t-334)) |
+| Presence extents, events, boxes | `t_start_s`, `t_end_s`, `duration_s` — and `duration_s` is computed here, so a client never derives a timespan from two fields it was handed |
+| Inventory rows | `first_seen_s`/`last_seen_s` (a hull, never an extent) plus `presence.last_interval` (the extent); each sub-object carries its own `t_s` |
+| Selections | `t_lo`/`t_hi`, or `null` for a deliberately timeless "this band, any time" region |
+| Floor steps | per step `t_s` + `duration_s` |
+| The strongest-signal box | `window.t0_s`/`t1_s` and the cell's own `t_start_s`/`t_end_s` ([above](#get-apianalysisstrongest--strongest-signal-in-a-band-t-079)) |
+| Listen, taps, frames, IQ | the binary record header's `t` + `sample_index`, as for spectrum rows |
+
+### A declared rate is not a clock
+
+The spectrum stream header's `sample_rate_hz` is the **row rate the producer declares**. It describes how fast rows are *produced*; it does not say where the rows on a screen sit, and it must never be used to place a row or an overlay in time. Two independent reasons, both live today:
+
+- On a content-forbidding class the declared rate is deliberately **above** the actual row rate — `RowPlan::declared_hz = min(row_rate_hz × 1.1, 50)` (`hk_pipeline::class`) — because the egress gate's token bucket needs headroom. A client dividing an age by it thinks rows are 10 % closer together than they are.
+- Rows are not evenly spaced in capture time anyway. A gated row, a dropped run, or a frame the client skipped under backlog advances capture time without advancing the waterfall's ring.
+
+Both errors grow **linearly with age**, so a box drawn from a declared rate walks down the screen away from its own energy — exactly the failure the user names. The only correct mapping is the one built from the rows' own timestamps, which is why every row carries one.
+
+### Consequences for a client
+
+- Keep each row's `t` with the row, and invert *that* to place an overlay (`ui/src/axis.ts` `rowsBackAt`, `ui/src/waterfall.ts`). A row's `t` is its **first** sample, so row *k* covers `[t(k), t(k−1))` and an emission filling exactly row *k* lands on exactly row *k*.
+- One mapping per view, shared by rows, presence boxes, selections, the drag draft and the time scale. A selection dragged over rows 1–4 and then drawn back must land on rows 1–4.
+- Never fabricate a placement for a record that has scrolled off the rows held: draw nothing rather than a box clamped to a height it never had.
+
+### Contract tests
+
+`crates/hk-cli/tests/api_contract.rs` asserts the spectrum stream's record timestamps **by value**: absolute Unix-epoch nanoseconds (not an offset or a counter), monotonic, and `Δt == Δsample_index / bandwidth_hz`, with the declared row rate only bounding the observed one. `analysis_strongest_*` asserts the window and cell times by value against an explicit `now`. The client-side invariant — a box's placement is a pure function of its capture time under the same mapping the rows use — is tested in `ui/test/app-centre.test.ts` and `ui/test/axis.test.ts` over deliberately uneven row clocks and a 10 %-fast declared rate.
+
+### Known gaps (named, not fixed here)
+
+- **`snr_db`/`peak_dbfs` on an inventory row are undated.** They are the newest linked `Detection`'s numbers with its `TimeRange` stripped at the API boundary (`query.rs`), so a client cannot tell whether an SNR is two seconds or two days old. Detections are not a served record kind at all — there is no `/api/detections`.
+- **Nanoseconds leak where an hk-model struct is serialized directly.** `Timestamp` is `#[serde(transparent)]` over `i64`, so `/api/occupancy` `interval`, `/api/observations` record `span`/`planned`/`observed`, `SignatureMatch.t` and `SurveyReport.generated_at` ship raw ns while their own response envelopes use seconds. Same axis, same response, 10⁹ apart, with no naming cue.
+- **`/api/status` carries no server timestamp**, and scheduler leases carry `duration_s` with no start or expiry.
 
 ## Listen as an audio pipeline (planned, MAUTO; ADR-0011 §8, ADR-0015 §12)
 

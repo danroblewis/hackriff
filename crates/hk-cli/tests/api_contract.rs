@@ -1396,9 +1396,52 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         v["f_center_hz"].as_f64().unwrap() >= f_lo && v["f_center_hz"].as_f64().unwrap() <= f_hi,
         "{v}"
     );
-    // A quiet band well outside the fixture: nothing found.
+    // T-337: the box carries absolute capture time, checked by value — a client places it from the
+    // response, never from its own request or from when the reply arrived. The answer's own time
+    // extent is the cell the peak was measured in, and it must lie inside the window searched.
+    let num = |v: &Value, k: &str| {
+        v[k].as_f64()
+            .unwrap_or_else(|| panic!("strongest missing a numeric {k}: {v}"))
+    };
+    let (w0, w1) = (num(&v["window"], "t0_s"), num(&v["window"], "t1_s"));
+    let (ts, te, dur, cell) = (
+        num(&v, "t_start_s"),
+        num(&v, "t_end_s"),
+        num(&v, "duration_s"),
+        num(&v, "t_cell_s"),
+    );
+    assert!(
+        w1 - w0 > 4.9 && w1 - w0 < 5.1,
+        "the default 5 s window, reported as searched: {v}"
+    );
+    assert!(
+        w0 > 1.7e9 && w1 > w0,
+        "absolute Unix seconds, not an offset or a counter: {v}"
+    );
+    assert!(
+        te > ts && (te - ts - dur).abs() < 1e-9 && (dur - cell).abs() < 1e-9,
+        "the box's own extent is one pyramid cell, stated three ways that must agree: {v}"
+    );
+    assert!(
+        ts >= w0 - cell && te <= w1 + cell,
+        "the cell the peak was measured in lies in the window searched: {v}"
+    );
+    // A quiet band well outside the fixture: nothing found — but the window is still reported, so
+    // "nothing in the last 5 s" and "nothing in the last 300 s" are distinguishable (T-337).
     let (st, v) = get(addr, "/api/analysis/strongest?f_lo=1e9&f_hi=1.0001e9");
     assert_eq!((st, &v["found"]), (200, &json!(false)));
+    let (n0, n1) = (num(&v["window"], "t0_s"), num(&v["window"], "t1_s"));
+    assert!(n0 > 1.7e9 && n1 - n0 > 4.9 && n1 - n0 < 5.1, "{v}");
+    let (st, wide) = get(
+        addr,
+        "/api/analysis/strongest?f_lo=1e9&f_hi=1.0001e9&window_s=300",
+    );
+    assert_eq!((st, &wide["found"]), (200, &json!(false)));
+    let span = num(&wide["window"], "t1_s") - num(&wide["window"], "t0_s");
+    assert!(
+        span > 299.0 && span < 301.0,
+        "a longer search reports the longer window it actually searched: {wide}"
+    );
     // Validation.
     let (st, v) = get(addr, "/api/analysis/strongest?f_lo=2&f_hi=1");
     assert_eq!(st, 400, "{v}");
@@ -2718,6 +2761,57 @@ fn ws_stream_header_matches_the_stream_contract() {
         header["dc_excluded_hz"],
         json!(hk_pipeline::observe::DC_NOTCH_HALF_HZ),
         "{header}"
+    );
+
+    // T-337 (the user's "one shared time axis" invariant): every time-varying record the backend
+    // serves carries absolute capture time, so the client can place it instead of inferring it from
+    // arrival order, a sequence number, or a row count. For the waterfall's rows that is the binary
+    // record header — and it is asserted here by VALUE, not by shape (T-315), because the values are
+    // the whole contract: `t` must be a real Unix-epoch instant on the capture clock, and it must
+    // agree with `sample_index` over the declared bandwidth, which is what makes it *capture* time
+    // rather than a timestamp taken when the row happened to be encoded or to arrive.
+    let fs = header["bandwidth_hz"].as_f64().expect("bandwidth_hz");
+    let declared_hz = header["sample_rate_hz"].as_f64().expect("sample_rate_hz");
+    let mut rows: Vec<(i64, u64)> = Vec::new();
+    while rows.len() < 6 {
+        let Ok(Message::Binary(b)) = ws.read() else {
+            continue;
+        };
+        assert!(b.len() >= 32, "a binary record carries the 32-byte header");
+        if b[0] != 1 {
+            continue; // not a data record (a drop marker); its timestamp is checked by kind above
+        }
+        let t = i64::from_le_bytes(b[16..24].try_into().unwrap());
+        let sample_index = u64::from_le_bytes(b[24..32].try_into().unwrap());
+        rows.push((t, sample_index));
+    }
+    for (t, _) in &rows {
+        assert!(
+            *t > 1_700_000_000_000_000_000,
+            "row timestamps are absolute Unix nanoseconds, not an offset or a counter: {t}"
+        );
+    }
+    for w in rows.windows(2) {
+        let (t0, i0) = w[0];
+        let (t1, i1) = w[1];
+        assert!(t1 > t0 && i1 > i0, "rows advance in time and in samples");
+        // The row's time IS its sample index on the capture clock: t advances by exactly the
+        // samples between the rows over the sample rate. This is what a client anchors a box to.
+        let from_samples = (i1 - i0) as f64 / fs * 1e9;
+        let measured = (t1 - t0) as f64;
+        assert!(
+            (measured - from_samples).abs() <= 1.0 + from_samples * 1e-9,
+            "t must be sample_index on the capture clock: {measured} ns vs {from_samples} ns"
+        );
+    }
+    // And the declared row rate is NOT that clock: it is a rate the producer declares (on a gated
+    // class, deliberately above the actual row rate — `hk_pipeline::class::RowPlan::declared_hz`),
+    // so it may never be used to place a row or an overlay in time. Asserted as the documented
+    // direction: the rows never arrive faster than declared, and the gap may be real.
+    let observed_hz = (rows.len() - 1) as f64 * 1e9 / (rows[rows.len() - 1].0 - rows[0].0) as f64;
+    assert!(
+        observed_hz <= declared_hz * 1.02,
+        "declared {declared_hz} rows/s must bound the observed {observed_hz} rows/s"
     );
     let _ = ws.close(None);
 

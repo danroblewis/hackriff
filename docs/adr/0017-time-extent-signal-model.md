@@ -161,6 +161,18 @@ Three consequences for this ADR's model:
 
 The two horizons stay distinct: the **lists** reach back over SQLite retention, the **grid** over the spectrum-history pyramid's (tiered, lossy), and the waterfall's lossless detail over the **IQ ring's** much shorter window. `resolution.source` on the response names which tier answered. Wire form: `docs/api.md` "Span-matched resolution"; data model: docs/07 §4.1.
 
+#### 2.4.2 One shared time axis (T-337; the user's time/waterfall invariant 1)
+
+§2.4.1 settled the *resolution* half of the thin-client line. This settles the *timestamp* half, and it is the invariant that makes §1.2's box mean anything: *for the current view there is a single canonical mapping between absolute capture time and screen position, and everything time-varying is laid out through it and moves together — waterfall rows, every signal box, selections, the time cursor, the scrubber playhead. Overlays are anchored in capture time, never at fixed screen coordinates.* The user names the failure mode explicitly: **a box drifting out of step with the waterfall's rows-per-second is a violation of this, not a cosmetic bug.**
+
+Three consequences for this ADR's model:
+
+1. **A box's placement is a pure function of its capture time.** §1.2's box is `(f_lo..f_hi) × (interval ∩ window)` in absolute capture time, and its screen position is that interval put through the *same* mapping the rows under it went through. Nothing about a box is a screen coordinate. This is what makes a **growing** box (§5) correct without animation: `t_end` moves, the mapping does the rest, and the box's top edge stays welded to the energy that started it.
+2. **The mapping is built from the rows' own timestamps, never from a rate.** Every spectrum record carries an absolute capture time and a sample index, and a row's time is its **first** sample, so row *k* covers `[t(k), t(k−1))`. Inverting *that* is exact. A declared rows-per-second is not the same number and is wrong in two directions that grow linearly with age — a gated stream declares a rate 10 % above the actual one (`RowPlan::declared_hz`), and gated, dropped or skipped rows advance capture time without advancing the ring. §1.1's presence interval and §1.2's box would both drift under it, and the drift would look exactly like a mis-measured emission.
+3. **Every time-varying record the backend serves carries its capture time**, so the client has the data to do (1) and never has to guess. This is a constraint on the model (docs/07 §4.2), not a rendering detail: a `Detection` without a `TimeRange`, or an API row that strips one, makes the invariant unsatisfiable no matter how the client is written.
+
+**What this does *not* settle.** A chirp is still a bounding box (§1.3) — placing it exactly on the time axis does not make a rectangle the truth about a swept carrier. And the focused Confirmed row keeps the full-height band box of TM-4 (T-193's drag-to-adjust edges live on it), which is deliberately *not* time-placed: it is a frequency tool, and the time-extent box is drawn for every other row. Wire form and client obligations: `docs/api.md` "One shared time axis"; data model: docs/07 §4.2; UI: docs/14.
+
 ---
 
 ## 3. Invariant 3 — Candidate / Confirmed / History

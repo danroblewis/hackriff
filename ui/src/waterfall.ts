@@ -15,6 +15,12 @@
 //
 // T-152 (additive, MUI centre): `reset()`, `setRows()` bulk history load, `texWidth`, `lineColor`,
 // the UNOBSERVED_DB grey sentinel, and `uploadMs`/`frameMs` frame-time counters.
+//
+// T-337 (the user's "one shared time axis" invariant): every row keeps the absolute capture time
+// the backend served with it, and `timeAt`/`rowsBackAt` are the one mapping between capture time
+// and screen position that overlays place themselves through.
+
+import { rowsBackAt } from "./axis";
 
 const ROWS = 512;
 const LEVELS = 256;
@@ -91,6 +97,8 @@ export class Waterfall {
   private head = 0;
   private pending: { row: Float32Array; mark: number; t: number }[] = [];
   private times = new Float64Array(ROWS).fill(NaN);
+  private filledHead = -1;
+  private filledN = 0;
   private nextMark = 0;
   private beta: number;
   private floorEst = NaN;
@@ -154,6 +162,7 @@ export class Waterfall {
     this.pending = [];
     this.times.fill(NaN);
     this.head = 0;
+    this.filledHead = -1;
     this.nextMark = 0;
     this.latest = new Float32Array(this.texW).fill(NaN);
     gl.bindTexture(gl.TEXTURE_2D, this.wf);
@@ -222,6 +231,29 @@ export class Waterfall {
   timeAt(rowsBack: number): number {
     if (!(rowsBack >= 0 && rowsBack < ROWS)) return NaN;
     return this.times[(this.head - Math.floor(rowsBack) + ROWS) % ROWS];
+  }
+
+  /**
+   * The canonical time→screen mapping (T-337): absolute capture time (Unix s) → rows-back,
+   * fractional, and the **exact inverse of [[timeAt]]** at every integer row (`axis.rowsBackAt`).
+   * Overlays place themselves through this, so a box sits on the row whose energy it describes
+   * whatever happened to the row cadence: rows are drawn at their ring slot (the shader reads the
+   * ring head, never these times), and gated rows, dropped runs and backlog-skipped frames advance
+   * capture time without advancing the ring. A nominal rows-per-second would drift against that,
+   * linearly with age. NaN until a row carries a time.
+   */
+  rowsBackAt(tS: number): number {
+    return rowsBackAt((k) => this.timeAt(k), this.filledRows(), tS);
+  }
+
+  /** How many rows-back carry a capture time, as a contiguous run from the newest; cached per head. */
+  private filledRows(): number {
+    if (this.filledHead === this.head) return this.filledN;
+    let n = 0;
+    while (n < ROWS && Number.isFinite(this.timeAt(n))) n++;
+    this.filledHead = this.head;
+    this.filledN = n;
+    return n;
   }
 
   /** Level (dB) of the newest row at texture fraction `u` of the full band; NaN outside. */
