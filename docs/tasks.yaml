@@ -5206,7 +5206,8 @@ tasks:
     milestone: M2-hardening
     title: 'Analysis pass over the 2026-09-15 FM-band capture to add truth annotations,
       so it can serve as a blind acceptance fixture'
-    status: in-progress
+    status: done
+    commit: cd7b3db
     priority: normal
     deps: []
     parallel_group: PIPE
@@ -5880,6 +5881,70 @@ tasks:
       assertions in api_contract.rs have the same hole - a field that can be renamed or dropped without
       a test failing is documentation, not a contract. Report any others found rather than fixing them all
       here
+  - id: T-316
+    milestone: M2-hardening
+    title: On real air the pipeline fires 866 detections and 5 candidate emitters into a band measured flat
+      to 2.3 dB
+    status: todo
+    priority: high
+    deps:
+    - T-289
+    parallel_group: M3B
+    core_interface: true
+    model: opus
+    acceptance: 'T-289 measured 101.42-101.49 MHz in the 2026-09-15 FM capture as flat noise - at most 2.3
+      dB excess per 10 kHz, no pilot, nothing in any of 1648 time bins - and the pipeline emitted 866 DETECTIONS
+      and 5 CANDIDATE EMITTERS there. It also emitted 2 detections (SNR 4.4 and 5.2 dB) and a candidate
+      at 100.3 MHz, where the measured excess is 1.1 dB and the SNR is -11.5 dB. This is the same shape
+      as the 82 near-duplicate candidates the user reported from live Explore, but now on REAL AIR with
+      measured silence to check against, which no synthetic fixture provides. Find why the detector reaches
+      a candidate on noise at this SNR: start from the CFAR/threshold path and the false-alarm rate it is
+      designed for, and compare the designed rate against 866 in 45 s over 70 kHz. T-295 found exactly this
+      shape before - a short-burst onset test comparing against sigma squared alone, firing about 100/s
+      against a designed 0.01/s - so check whether that fix covers this path or only the burst one. DO NOT
+      raise a threshold to make the count smaller: establish the designed false-alarm rate, measure the
+      actual one, and fix the mechanism that differs. The fixture''s measured-absent list is the ground
+      truth to test against, and fm_band_measured_silence_is_not_catalogued already asserts the Confirmed
+      half - this is about the candidate and detection layers beneath it'
+  - id: T-317
+    milestone: M2-hardening
+    title: 'An unidentified continuous 28 kHz emission at 100.465339 MHz in the FM fixture: not stereo FM,
+      not a receiver image'
+    status: todo
+    priority: low
+    deps:
+    - T-289
+    parallel_group: PIPE
+    model: opus
+    acceptance: 'T-289 found a real, continuous emission nobody anticipated: 100.465339 MHz, about 28 kHz
+      wide, SNR 7.0 dB, present in 1646 of 1648 time bins with 50 ms block power varying under 0.5 dB. It
+      is NOT stereo FM (19 kHz pilot at +0.22 dB, i.e. absent) and NOT a receiver image (its IQ mirror at
+      101.1347 MHz is empty). It is annotated with modulation null and the acceptance test asserts detection
+      only, which is the honest shape for something unidentified. Identify it: characterise the modulation
+      from the IQ, check the band plan for what is allocated at 100.4653 MHz off-raster, and either name
+      it with evidence or record what it is not and why that exhausts the cheap hypotheses. This is exactly
+      the projects stated priority - unknown signals are the ones worth surfacing and cataloguing - and
+      it is a real-air example rather than a synthetic one'
+  - id: T-318
+    milestone: M2-hardening
+    title: The 99.99 MHz reference-harmonic artefact is identified from a single tune, so the retune test
+      that would settle it has not been run
+    status: todo
+    priority: low
+    deps:
+    - T-289
+    parallel_group: PIPE
+    model: sonnet
+    acceptance: 'T-289 made a strong evidential case that the 99.999572 MHz line is the 10th harmonic of
+      the internal 10 MHz reference rather than an off-air carrier: steady to 0.93 Hz RMS against the receivers
+      own clock (what a tone made from that clock must do, and what a carrier read through an uncalibrated
+      -6.8 ppm clock would not), on the reference harmonic, flagged ref-harmonic by the detector in 713/713
+      detections, and measured at 99.999609 MHz in a different capture at the same tuner centre. But the
+      capture is a SINGLE TUNE, and T-289 recorded that limitation rather than glossing it. The decisive
+      test is a retune: an artefact generated in the receive chain moves with the LO, an off-air carrier
+      does not. Capture the same line at two or three different tuner centres and assert which it does.
+      Hardware capture is USER-TRIGGERED - do not touch the HackRF while the users demo holds it. Until
+      then the annotation stays as it is, with the limitation recorded'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
