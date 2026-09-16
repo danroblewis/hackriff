@@ -3486,7 +3486,7 @@ tasks:
   - id: T-218
     milestone: M3
     title: "M3 contracts skeleton remainder that T-211 left out: fuse() + prior invariants, hk_model::signature module, hk-ml stub crate, EvalReport type, /api/taxonomy route, datasets migration, and the Fingerprint family_of gate (an M2 behaviour change: it would merge fsk/2fsk emitters)"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-211]
     parallel_group: M3K
