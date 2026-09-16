@@ -4765,7 +4765,7 @@ tasks:
     milestone: M2-hardening
     title: 'Bandwidth estimates swing 12-125 kHz for one station, so skirt fragments
       never reach the overlap guard - the honest route to the dedup target'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: PIPE
