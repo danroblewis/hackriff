@@ -458,8 +458,12 @@ pub(crate) fn classify_decoder_emitters(
                 continue;
             }
         }
-        if inv.chain_emitter(&mut repo, track, live).is_err() {
+        // Named, not just counted (T-293/T-319): a chain_emitter failure here silently loses the
+        // fold, the T-078 confirmation review and the T-219 overlap resolution, and a bare count
+        // trains everyone to ignore it.
+        if let Err(err) = inv.chain_emitter(&mut repo, track, live) {
             inc(&c.errors);
+            eprintln!("hk-pipeline: plugin chain emitter: {err}");
         }
     }
 }
