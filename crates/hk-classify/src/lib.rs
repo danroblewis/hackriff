@@ -43,6 +43,7 @@ pub mod density;
 pub mod eval;
 pub mod features;
 pub mod fuse;
+pub mod harness;
 pub mod openset;
 pub mod synth;
 pub mod thresholds;
@@ -55,6 +56,7 @@ pub use density::{DensityModel, FamilyScore};
 pub use eval::EvalReport;
 pub use features::{FeatureInput, Features, features};
 pub use fuse::{FamilyPriorSet, FamilyPriors, NoPriors, StaticPriors, fuse};
+pub use harness::{GridSize, Harness, OtaTruth, Report, RunMeta, SeedGuard, Split};
 pub use thresholds::{FEATURES_VERSION, RULES_VERSION, THRESHOLDS_VERSION, thresholds_of};
 
 #[cfg(test)]
