@@ -80,6 +80,16 @@ Acceptance tests prove the system **finds and explains** signals on its own. The
 - **Truth leakage.** The pipeline reads annotations, `hackriff:truth` or truth filenames, or a test passes because the fixture's label reached the system.
 - **DB-as-truth.** A test asserts a label is correct only because it matches the database entry for that frequency, with no perturbed variant.
 
+### 3.3 Temp-directory lifetime (T-229)
+
+Every replay/test-harness data directory is created by `hk_cli::pipeline::temp_data_dir()` under the system temp dir as `hk-replay-<pid>-<unix_nanos>-<n>` and holds the run's database, IQ ring (`ring.ci8`, potentially many GB) and recordings. Its lifetime:
+
+- **Created:** by `temp_data_dir()`, on every call — production (`hk serve`/`hk replay`/`hackriffd` without an explicit `--data-dir`) and test call sites alike.
+- **Removed on a normal run:** call sites wrap the directory in `hk_cli::pipeline::TempDataDirGuard`, an RAII guard. Dropping it during a normal return removes the directory recursively, tearing down the IQ ring with it.
+- **Kept on failure:** if the guard drops while its thread is unwinding from a panic (a failed `assert!`/`assert_eq!`), it leaves the directory in place instead and prints its path to stderr, so a developer can inspect the run's database, IQ ring and recordings that produced the failure. A run that is killed outright (SIGKILL, a hard abort) leaves its directory too — no Drop runs at all.
+- **Swept when stale:** `temp_data_dir()` also runs (once per process) a sweep of `hk-replay-*` orphans in the system temp dir, removing only those whose embedded pid names no currently-live process **and** whose contents are older than one hour (comfortably past this repo's slowest replay test, ~20 minutes) — reclaiming directories a crashed or killed run couldn't clean up itself. Both conditions gate every removal: a live pid is never touched regardless of age (other agents and sessions run tests on this machine concurrently), and age alone is never trusted because a dead run's pid can be reused by an unrelated live process before the sweep runs — that directory is then left behind (a rare, safe residual: it is reclaimed once the pid that reused it also exits) rather than risk removing something live.
+- **Proof:** `crates/hk-cli/tests/temp_dir_hygiene.rs` asserts a representative set of normal replay runs leaves no net new `hk-replay-*` directories, that a panicking guard keeps its directory, and that the sweep's pid-alive/age gates behave correctly — the last two against a private fixture directory the test creates and destroys itself, never the live system temp dir.
+
 ## 4. From a use-case ID to tests
 
 A use-case ID becomes one or more test cases that assert on the **data-model objects** it should produce. Every T3/T4 case loads its fixture into the mock device, lets the system survey and detect blind, and then asserts against the hidden truth list. Worked pattern (matching the [docs/07 §5](07-data-model.md) examples):

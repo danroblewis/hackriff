@@ -8,5 +8,6 @@
 @import "./dock/dock.css";
 @import "./decode/decode.css";
 @import "./decode/inspector.css";
+@import "./explore/output-panel.css";
 @import "./review/review.css";
 @import "./menu/menu.css";

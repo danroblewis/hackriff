@@ -28,8 +28,26 @@ interface Entry { ws: WebSocket; gain: GainNode; out: Output }
 export class AudioSession {
   private ctx: AudioContext | null = null;
   private entries = new Map<string, Entry>();
+  // T-195: per-signal output panels tap the raw PCM a Listen stream already received, to draw a
+  // scope — presentation only, the same samples `out.post` already sends to the speaker.
+  private sampleSubs = new Map<string, Set<(pcm: Float32Array) => void>>();
 
   constructor(private token: string, private events: AudioSessionEvents) {}
+
+  /** Subscribes to `id`'s raw PCM frames as they arrive (T-195's audio scope). Returns unsubscribe;
+   * a no-op for an id with no live stream (a late subscriber just sees nothing until the next
+   * frame). */
+  onSamples(id: string, cb: (pcm: Float32Array) => void): () => void {
+    let set = this.sampleSubs.get(id);
+    if (!set) { set = new Set(); this.sampleSubs.set(id, set); }
+    set.add(cb);
+    return () => {
+      const s = this.sampleSubs.get(id);
+      if (!s) return;
+      s.delete(cb);
+      if (s.size === 0) this.sampleSubs.delete(id);
+    };
+  }
 
   /** Opens `id`'s stream. Call synchronously inside the click handler: creating/resuming the
    * `AudioContext` here unlocks audio on mobile browsers. Replaces any existing stream for `id`. */
@@ -107,8 +125,13 @@ export class AudioSession {
       const r = parseRecord(ev.data as ArrayBuffer);
       if (!r) return;
       seq.push(r);
-      if (r.type === "pcm") out.post(r.samples);
-      else if (r.type === "status") this.events.onStatus(id, r.status);
+      if (r.type === "pcm") {
+        // Notify scope subscribers before `out.post`: the AudioWorklet output path transfers
+        // `r.samples.buffer` to the worklet thread (a zero-copy `postMessage` transfer), which
+        // detaches it in this thread — reading it after that would see a zero-length array.
+        for (const cb of this.sampleSubs.get(id) ?? []) cb(r.samples);
+        out.post(r.samples);
+      } else if (r.type === "status") this.events.onStatus(id, r.status);
     };
     ws.onclose = (ev) => {
       if (this.entries.get(id) !== entry) return;

@@ -2582,7 +2582,7 @@ tasks:
   - id: T-160
     milestone: MUI
     title: "MUI API gap 4: stage tap view=spectrum for MPX/subcarrier plots"
-    status: todo
+    status: in-progress
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []
@@ -3127,7 +3127,8 @@ tasks:
   - id: T-195
     milestone: MUI
     title: "MUI per-signal output panels in the freed right panel: packet inspector for digital, waveform/audio scope + RDS text for FM/AM; one panel per confirmed signal with an active output"
-    status: in-progress
+    status: done
+    commit: 3c4409e
     priority: normal
     deps: [T-192, T-159]
     parallel_group: MUI-X1
@@ -3409,7 +3410,8 @@ tasks:
   - id: T-213
     milestone: M3
     title: "M3 evaluation harness: dev vs acceptance seed split, per-SNR accuracy/unknown-rate reports, OTA labels only from CRC-valid decodes"
-    status: todo
+    status: done
+    commit: 001940d
     priority: normal
     deps: [T-211]
     parallel_group: M3V
@@ -3486,7 +3488,7 @@ tasks:
   - id: T-218
     milestone: M3
     title: "M3 contracts skeleton remainder that T-211 left out: fuse() + prior invariants, hk_model::signature module, hk-ml stub crate, EvalReport type, /api/taxonomy route, datasets migration, and the Fingerprint family_of gate (an M2 behaviour change: it would merge fsk/2fsk emitters)"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-211]
     parallel_group: M3K
@@ -3654,7 +3656,8 @@ tasks:
   - id: T-228
     milestone: M2-hardening
     title: "Consolidated flaky-pin fix: convert wall-clock and arrival-order assertions to sample-clock or queue-depth terms, removing each nextest pin as its test is fixed (supersedes T-182, T-197, T-225, T-227)"
-    status: in-progress
+    status: done
+    commit: 38403e1
     priority: normal
     deps: []
     parallel_group: PIPELINE
@@ -3669,7 +3672,8 @@ tasks:
   - id: T-229
     milestone: M2-hardening
     title: "Replay/test harness leaks its temp directories: 2731 hk-replay-<pid>-<ts>-N dirs accumulated to about 12 GB and nearly breached the 20 GB disk floor"
-    status: in-progress
+    status: done
+    commit: 670f39c
     priority: high
     deps: []
     parallel_group: PIPELINE
@@ -3681,6 +3685,8 @@ tasks:
     model: sonnet
     effort: medium
     core_interface: false
+    measured_rate: "coordinator measurement 2026-09-15 18:15: temp regrew from 52 to 125 hk-replay dirs and 5.1 GB in about 20 minutes with five agents running tests - roughly 15 GB/hour, which would reach the 20 GB disk floor in under two hours. The manual sweep is being repeated to buy headroom; this is the rate the fix has to eliminate."
+
   - id: T-230
     milestone: M3
     title: "Close the classifier accuracy gap to the ADR-0016 floors: top-1 0.754 vs 0.90 and top-2 0.933 vs 0.95, driven by analog/noise-like abstention and a simulation-to-reality gap (both OTA fixtures abstain)"
@@ -3695,6 +3701,23 @@ tasks:
     needs: none
     model: opus
     effort: high
+    core_interface: false
+    baseline_discrepancy: "T-213 (the harness with ENFORCED seed separation) reproduced T-199 but not exactly: top-1 0.732 vs 0.754, top-2 0.923 vs 0.923 reported as 0.933, wrong-label 0.000/0.002 vs 0.000/0.003, held-out unknown recall 0.829 vs 0.81. Two headline figures moved DOWN by about two points. Before optimising anything, explain the difference: is it a measurement change (binning, gate+5 dB selection, per-class vs per-family scoring) or were T-199 numbers optimistic because fitting touched seeds the guard now refuses? Treat the HARNESS numbers as the baseline; do not adopt whichever figure is more favourable. Report the explanation as part of the task."
+
+  - id: T-231
+    milestone: M2-hardening
+    title: "mock_device t057_scheduled_replay_keeps_every_frequency_truthful failed once: a detection 116 kHz outside the recorded band"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: CORE
+    use_cases: []
+    found_by: "T-229 run (2026-09-15), reported as pre-existing and unrelated to the files that task touched"
+    acceptance: "reproduce under load and decide whether the mock device can emit a frequency outside the recorded band (a real truthfulness bug in the device interface, which would undermine every blind test) or whether the detection centre is mis-mapped at a band edge; fix the cause; 20/20 under 6 CPU burners; no bound loosened and no retry added"
+    area: crates/hk-core/src/source (mock SDR), tests/e2e mock_device
+    needs: none
+    model: opus
+    effort: medium
     core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
