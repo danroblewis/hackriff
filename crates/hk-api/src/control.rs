@@ -1233,6 +1233,12 @@ fn caps_json(c: &SourceCapabilities, device_id: Option<&str>) -> Value {
             SampleRates::Continuous { min_hz, max_hz } => json!({ "min": min_hz, "max": max_hz }),
             SampleRates::Discrete(v) => json!({ "values": v }),
         },
+        // T-341: the third axis of the achievable (centre, span) grid. Three-valued like the bias
+        // tee — `"unknown"` with a null step is "the source cannot say", never 1 Hz and never
+        // continuous, and a client that reads it that way snaps nothing. `/api/navigation` reports
+        // the whole grid; this is the same fact beside the rest of the device's capabilities.
+        "tuning_step": c.tuning_step.as_str(),
+        "tuning_step_hz": c.tuning_step.step_hz(),
         "gain_stages": c.gain_stages.iter().map(|s| json!({
             "name": s.name, "min_db": s.min_db, "max_db": s.max_db, "step_db": s.step_db,
         })).collect::<Vec<_>>(),

@@ -137,7 +137,28 @@ A retune re-derives the window's content class and, when the class or sample rat
 - **One at a time.** Device actions serialise on one `DeviceGate`; a contended one answers `409 device_busy` naming the holder rather than racing it to the driver. The UI reports that; it never retries into the race.
 - **Never automatic.** No code path retunes without a user asking. Closed-loop refinement (`docs/14` "tune from the processed output") adjusts a *channel* inside the tuned window, not the front end.
 
-**Left to T-340 and T-341.** The frequency navigator itself (the horizontal bar showing every active capture window as a lit segment — the home for multiple SDRs and survey coverage) is T-340; snapping to achievable `(centre, span)` states is T-341, and it needs one thing the backend does not report yet: the **tuning step**. `SourceCapabilities` carries `frequency_ranges` and `sample_rates` but no step size, so the achievable grid is only two of its three axes today.
+**Left to T-340.** The frequency navigator itself — the horizontal bar showing every active capture window as a lit segment, the home for multiple SDRs and survey coverage — is T-340. The grid it snaps to landed with T-341, below.
+
+### Navigation snaps to achievable states, and the view says what it is showing (T-341)
+
+**The rule, from the user** (CLAUDE.md, "Time, the waterfall, and the live view", invariant 6): *navigation is discretized to achievable capture states, and the UI never implies detail the front end can't deliver.* Zoom/pan and region-select resolve only to **realizable** configurations and snap to the nearest one; wider than the live window is **survey-history overview, not live IQ**; the view must distinguish live-IQ-backed detail from overview.
+
+This is the exploration-first honesty principle applied to navigation — the same rule that makes the band-plan database a suggester rather than a source of truth. **An interpolated pixel that looks like a measurement is a lie with a picture attached.**
+
+**The split, stated by the user:** *"Backend reports the achievable (centre, span) grid + full-spectrum survey overview; UI does the navigators/gestures/snap/styling."* So:
+
+| Backend (`GET /api/navigation`, `hk-api/src/navigation.rs`) | Client (`ui/src/navigation.ts`) |
+|---|---|
+| which centres exist (the **tuning step**), which spans a device can open, which time cells the history holds | finding the nearest point on that grid |
+| whether a requested state is live-IQ backed or survey overview (`resolved.source`) | styling the distinction, and the gesture that produced the request |
+
+`ui/src/navigation.ts` is pure arithmetic over the grid it was handed, the same class of work as `axis.ts` — never a second opinion about what the radio can do.
+
+**The axis that was missing.** T-343 named it precisely: `/api/control/state` already reported `frequency_ranges_hz` and `sample_rates_hz`, but `SourceCapabilities` had **no tuning step**, so the achievable grid was two of its three axes. T-341 added it at the source layer, device-generic, and **three-valued** like the bias tee: `"uniform"` with a step, or `"unknown"` when the source cannot say. A HackRF One reports `30 MHz / 2²⁰` = 28.6102294921875 Hz — the MAX2837 fractional-N granularity, not the 1 Hz its USB API accepts, because 28 of every 29 such commands land the LO on the same synthesiser point and a declared 1 Hz step would draw 28 imaginary centres on the axis. A SigMF replay reports `"unknown"`, and then **nothing snaps**: an unknown grid has no nearest point, and echoing the request back would claim the device can sit exactly there.
+
+**Where the client uses it today.** `applyDeviceAction` (`ui/src/app/centre/view.ts`) snaps a retune's centre to the grid before it posts. It used to `Math.round` to a whole hertz — a number the front end does not have. Everything else the module offers is for T-340's navigators and T-338's timeline, which are the surfaces where a gesture becomes a capture state; a zoom *inside* the tuned band is a display zoom over live IQ and correctly snaps to nothing.
+
+**The live-vs-overview claim is on the wire, not inferred.** T-334 shipped `resolution.source` as the constant `"spectrum-history"`, documented as the home for "which tier answered"; T-341 gave it its other two values, `"live-iq"` and `"survey-overview"`, plus a `live` boolean and a backend-rendered `statement`. `/api/history` never claims `live-iq` — it reads the pyramid and only the pyramid — but it does say `"survey-overview"` when the span it served could not have fitted one capture window. A client styles the difference; it never decides it.
 
 ### History surface (workflow #3)
 

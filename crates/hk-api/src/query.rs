@@ -380,7 +380,27 @@ pub const MAX_API_AXIS_CELLS: usize = MAX_API_CELLS;
 /// stands for — a measurement made with no knowledge of the floor or of what a peak means.
 /// `over_resolved` names any budget the served grid still exceeds, which is the only case in which
 /// the client holds more cells than it can draw one-to-one.
-fn resolution_json(h: &RegionHistory, req: &ResolutionRequest, levels: usize) -> Value {
+///
+/// # `source`: live-IQ detail or overview (T-341)
+///
+/// T-334 shipped `source` as the constant `"spectrum-history"`, documented as the home for "which
+/// tier answered". T-341 makes it a [`DetailSource`], because the user's navigation invariant needs
+/// the view to tell **live-IQ-backed detail from survey/spectrum-history overview**.
+///
+/// `/api/history` reads the pyramid and only the pyramid, so it never claims `live-iq`. What it can
+/// say is whether the grid it served could have come from **one capture window** at all: a span
+/// wider than the widest instantaneous bandwidth (`max_live_span_hz`) was necessarily stitched from
+/// separate dwells, so it is `survey-overview`. The span compared is the one actually served
+/// (`nf · f_cell_hz`), not the one requested — the claim is about the picture drawn.
+///
+/// With no live front end to ask (`max_live_span_hz` is `None`) the answer is `survey-overview`:
+/// the weaker claim, because not knowing the window is not evidence that the span fits inside it.
+fn resolution_json(
+    h: &RegionHistory,
+    req: &ResolutionRequest,
+    levels: usize,
+    max_live_span_hz: Option<f64>,
+) -> Value {
     let cells = h.nt.saturating_mul(h.nf);
     let mut over: Vec<&str> = Vec::new();
     if cells > req.max_cells {
@@ -392,11 +412,20 @@ fn resolution_json(h: &RegionHistory, req: &ResolutionRequest, levels: usize) ->
     if req.max_f.is_some_and(|f| h.nf > f) {
         over.push("max_f");
     }
+    // Which tier answered, as a detail claim (T-334's field, T-341's enum). Never `live-iq` here:
+    // this reads the pyramid. `survey-overview` when the served span could not have fitted one
+    // capture window.
+    let served_span_hz = h.nf as f64 * h.f_cell_hz;
+    let source = match crate::navigation::live_window_verdict(served_span_hz, max_live_span_hz) {
+        crate::navigation::DetailSource::LiveIq => crate::navigation::DetailSource::SpectrumHistory,
+        other => other,
+    };
     json!({
-        // Which tier answered. `/api/history` reads the tiered spectrum-history pyramid and only
-        // that; a tier serving live-IQ-backed detail reports its own value here rather than
-        // leaving the client to infer which it got.
-        "source": "spectrum-history",
+        "source": source.as_str(),
+        "live": source.is_live(),
+        "statement": source.statement(),
+        "served_span_hz": served_span_hz,
+        "max_live_span_hz": max_live_span_hz,
         "level": h.level,
         "levels": levels,
         "t_cell_s": h.t_cell_ns as f64 / 1e9,
@@ -413,12 +442,24 @@ fn resolution_json(h: &RegionHistory, req: &ResolutionRequest, levels: usize) ->
 }
 
 /// `/api/history`.
-pub fn history_json(p: &Pyramid, q: &Params) -> Result<Value, ApiError> {
+///
+/// `max_live_span_hz` is the widest instantaneous bandwidth the run's front end can produce
+/// ([`hk_core::SourceCapabilities::max_live_span_hz`]), or `None` when there is no live front end
+/// to ask. It decides `resolution.source` only (T-341): a grid wider than one capture window is
+/// `survey-overview`, and without the figure the weaker claim is made rather than the stronger.
+pub fn history_json(
+    p: &Pyramid,
+    q: &Params,
+    max_live_span_hz: Option<f64>,
+) -> Result<Value, ApiError> {
     let (h, req) = region_history(p, q)?;
     let mut v = region_history_json(&h);
     let levels = p.geometry().n_levels();
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("resolution".into(), resolution_json(&h, &req, levels));
+        obj.insert(
+            "resolution".into(),
+            resolution_json(&h, &req, levels, max_live_span_hz),
+        );
     }
     Ok(v)
 }

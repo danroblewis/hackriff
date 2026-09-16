@@ -452,6 +452,10 @@ pub fn mock_capabilities(recording: &Recording) -> SourceCapabilities {
     };
     caps.tx_capable = false;
     caps.duplex = Duplex::ReceiveOnly;
+    // T-341: the mock keeps `hackrf_one()`'s tuning step, as it keeps its gain stages and filters.
+    // It exists to be a radio behind the device contract, so an e2e run that snaps a centre to the
+    // mock's grid must be snapping to the same grid the HackRF has, or the test proves nothing
+    // about the real device.
     caps
 }
 

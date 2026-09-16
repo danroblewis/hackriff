@@ -230,6 +230,105 @@ impl SampleRates {
     }
 }
 
+/// The granularity of the device's centre frequency: the smallest change in a commanded centre
+/// that puts the front end somewhere else (T-341).
+///
+/// **Three states, and `Unknown` is never "any frequency".** This is the third axis of the
+/// achievable `(centre, span)` grid — [`SourceCapabilities::frequency_ranges`] bound the centre,
+/// [`SourceCapabilities::sample_rates`] bound the span, and this says which centres *between* the
+/// bounds exist. Navigation snaps to that grid (the user's invariant, CLAUDE.md "Navigation is
+/// discretized to achievable capture states"), so a source that cannot state a step must say so
+/// rather than have one invented for it: reading "nothing said" as "1 Hz" would offer the user
+/// centres the radio cannot reach, which is the lie this whole rule exists to prevent. The
+/// three-state shape is [`hk_model::BiasTee`]'s, for the same reason.
+///
+/// There is deliberately no `f64` conversion. [`TuningStep::step_hz`] returns `Option<f64>`, so
+/// every site that wants a number handles the unknown case.
+///
+/// # Which way to err
+///
+/// A step **coarser** than the truth offers fewer centres, all of them reachable — the view loses
+/// choice, not honesty. A step **finer** than the truth offers centres that do not exist, and the
+/// radio silently lands somewhere else while the axis claims otherwise. So a driver that is unsure
+/// declares the coarser figure, or `Unknown`; it never rounds down to 1 Hz because the API happens
+/// to take integer hertz. (The same direction as T-334's resolution ladder: err coarser, because
+/// coarse repeats a measured value while fine invents one.)
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum TuningStep {
+    /// The source cannot say: a replayed recording (the file records the centre it was made at,
+    /// never the synthesiser grid of the device that made it), or a driver that does not know its
+    /// front end's granularity. **Never read this as 1 Hz, and never as "continuous"** — the grid
+    /// is unknown, so nothing may claim a centre is achievable. This is the default, so a source
+    /// added without thinking about it reports "nothing said" rather than a fiction.
+    #[default]
+    Unknown,
+    /// Achievable centres are `k · step_hz` for integer `k`, within the frequency ranges.
+    ///
+    /// The device lands within `step_hz / 2` of the requested centre — that residual *is* what a
+    /// step means, and it is bounded by the step by construction, so nothing downstream may read
+    /// a grid point as exact beyond it.
+    Uniform {
+        /// Grid spacing, Hz, anchored at 0 Hz. Positive and finite.
+        step_hz: f64,
+    },
+}
+
+impl TuningStep {
+    /// The grid spacing in Hz, or `None` when the source cannot say.
+    ///
+    /// `None` means **unknown, not 1 Hz and not continuous**: do not `unwrap_or(1.0)` it into a
+    /// claim that any centre is reachable.
+    pub const fn step_hz(self) -> Option<f64> {
+        match self {
+            Self::Unknown => None,
+            Self::Uniform { step_hz } => Some(step_hz),
+        }
+    }
+
+    /// The state as stored/wire text (`unknown`, `uniform`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Uniform { .. } => "uniform",
+        }
+    }
+
+    /// The nearest achievable centre to `hz`, or `None` when the step is unknown (in which case
+    /// **nothing may be snapped**: an unknown grid cannot name a nearest point).
+    ///
+    /// Ties round away from zero, as [`f64::round`] does; the choice is immaterial because both
+    /// neighbours are within `step_hz / 2`.
+    pub fn snap_hz(self, hz: f64) -> Option<f64> {
+        let step = self.step_hz()?;
+        if !step.is_finite() || step <= 0.0 || !hz.is_finite() {
+            return None;
+        }
+        Some((hz / step).round() * step)
+    }
+}
+
+/// HackRF One centre-frequency granularity, Hz: `30 MHz / 2^20` = 28.6102294921875 Hz.
+///
+/// Derived (T-341) from the upstream firmware's `max2837_set_frequency`, which is where the fine
+/// half of a HackRF tune happens — the RFFC5072 mixer LO moves on a coarse grid and the MAX2837 IF
+/// synthesiser covers the remainder, so the RF granularity is the MAX2837's:
+/// <https://github.com/greatscottgadgets/hackrf/blob/7a6b09962402836745d74e133d46a5d95102a232/firmware/common/max2837.c>.
+/// That code targets a VCO at `4/3 · f` against `PFD_FREQ_HZ = 40 MHz` with a **20-bit fractional
+/// divider**, so the VCO grid is `40 MHz / 2^20` and the RF grid is `3/4` of it: `30 MHz / 2^20`.
+///
+/// **Why not 1 Hz.** `hackrf_set_freq` takes an integer number of hertz and this driver already
+/// truncates to it ([`HackRfDevice::set_freq`]), so a 1 Hz *command* is accepted — but 28 of every
+/// 29 such commands land the LO on the same synthesiser point as their neighbour. Declaring 1 Hz
+/// would put 28 centres on the navigation grid that do not exist, which is exactly the front-end
+/// detail the UI may not imply. Declaring the synthesiser grid errs on the safe side: every
+/// declared centre is one the hardware distinguishes, and the tune lands within half a step
+/// (≤ 14.31 Hz) of it.
+///
+/// **Unverified by measurement.** The figure is read from the firmware source cited above, not
+/// from a counter on the bench; the error it bounds (≤ 14.31 Hz) is far below the finest FFT bin
+/// the UI draws, so a bench check is worth doing but gates nothing.
+pub const HACKRF_ONE_TUNING_STEP_HZ: f64 = 30.0e6 / (1u32 << 20) as f64;
+
 /// Selectable baseband (anti-alias) filter bandwidths.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BasebandFilters {
@@ -422,6 +521,10 @@ pub struct SourceCapabilities {
     pub frequency_ranges: Vec<FrequencyRange>,
     /// Supported sample rates.
     pub sample_rates: SampleRates,
+    /// Centre-frequency granularity (T-341): the third axis of the achievable `(centre, span)`
+    /// grid the navigation surface snaps to. [`TuningStep::Unknown`] when the source cannot say —
+    /// never read as 1 Hz.
+    pub tuning_step: TuningStep,
     /// ADC resolution, bits.
     pub adc_bits: u8,
     /// The device's native sample format.
@@ -463,7 +566,8 @@ pub struct SourceCapabilities {
 pub const HACKRF_ONE_RF_PATH_BOUNDARIES_HZ: [f64; 2] = [2170e6, 2740e6];
 
 impl SourceCapabilities {
-    /// HackRF One: 1 MHz–6 GHz, 2–20 Msps, 8-bit, half duplex, TX-capable hardware, LNA 0–40 dB
+    /// HackRF One: 1 MHz–6 GHz, 2–20 Msps, centres on a
+    /// [`HACKRF_ONE_TUNING_STEP_HZ`] grid, 8-bit, half duplex, TX-capable hardware, LNA 0–40 dB
     /// in 8 dB steps, VGA 0–62 dB in 2 dB steps, RF amp, MAX2837 baseband filters (1.75–28 MHz),
     /// bias tee, CLKIN, no hardware timestamps (docs/capabilities/C01).
     pub fn hackrf_one() -> Self {
@@ -477,6 +581,9 @@ impl SourceCapabilities {
             sample_rates: SampleRates::Continuous {
                 min_hz: 2e6,
                 max_hz: 20e6,
+            },
+            tuning_step: TuningStep::Uniform {
+                step_hz: HACKRF_ONE_TUNING_STEP_HZ,
             },
             adc_bits: 8,
             native_format: Datatype::Ci8,
@@ -525,6 +632,83 @@ impl SourceCapabilities {
     /// `hz` lies in one of the frequency ranges.
     pub fn supports_frequency(&self, hz: f64) -> bool {
         self.frequency_ranges.iter().any(|r| r.contains(hz))
+    }
+
+    /// The frequency range containing `hz`, else the nearest one; `None` when there are none.
+    pub fn nearest_range(&self, hz: f64) -> Option<&FrequencyRange> {
+        let distance = |r: &FrequencyRange| {
+            if r.contains(hz) {
+                0.0
+            } else if hz < r.min_hz {
+                r.min_hz - hz
+            } else {
+                hz - r.max_hz
+            }
+        };
+        self.frequency_ranges
+            .iter()
+            .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+    }
+
+    /// The nearest **achievable** centre to `hz` (T-341): the closest point of the
+    /// [`SourceCapabilities::tuning_step`] grid that lies inside a frequency range.
+    ///
+    /// `None` when the source cannot state a step ([`TuningStep::Unknown`]) or has no frequency
+    /// ranges — an unknown grid has no nearest point, and answering `hz` unchanged would claim
+    /// the device can sit exactly there. This is the backend's authority on "which states are
+    /// realizable"; the view snaps against it rather than deciding for itself.
+    ///
+    /// At a band edge the nearest grid point can fall just outside the range (`6 GHz` is not
+    /// generally a multiple of the step), so the result is walked one step **inward** — inside the
+    /// range and reachable, never outside it and merely close.
+    pub fn snap_center_hz(&self, hz: f64) -> Option<f64> {
+        let step = self.tuning_step.step_hz()?;
+        if !step.is_finite() || step <= 0.0 || !hz.is_finite() {
+            return None;
+        }
+        let range = self.nearest_range(hz)?;
+        let mut v = (hz / step).round() * step;
+        if v < range.min_hz {
+            v = (range.min_hz / step).ceil() * step;
+        }
+        if v > range.max_hz {
+            v = (range.max_hz / step).floor() * step;
+        }
+        range.contains(v).then_some(v)
+    }
+
+    /// The widest span (instantaneous bandwidth) this source can deliver as **live IQ**, Hz:
+    /// its highest sample rate. A view wider than this was never inside one capture window, so it
+    /// is survey/spectrum-history overview rather than live detail (T-341). `None` when no rate is
+    /// reported.
+    pub fn max_live_span_hz(&self) -> Option<f64> {
+        match &self.sample_rates {
+            SampleRates::Continuous { max_hz, .. } => Some(*max_hz),
+            SampleRates::Discrete(v) => v
+                .iter()
+                .copied()
+                .fold(None, |m: Option<f64>, r| Some(m.map_or(r, |m| m.max(r)))),
+        }
+    }
+
+    /// The nearest achievable span to `hz`: the sample rate closest to it, since the span of a
+    /// live window **is** the sample rate. `None` when no rate is reported.
+    ///
+    /// A continuous range answers `hz` clamped into it; a discrete list answers its nearest entry.
+    pub fn snap_span_hz(&self, hz: f64) -> Option<f64> {
+        if !hz.is_finite() {
+            return None;
+        }
+        match &self.sample_rates {
+            SampleRates::Continuous { min_hz, max_hz } => {
+                (max_hz >= min_hz).then(|| hz.clamp(*min_hz, *max_hz))
+            }
+            SampleRates::Discrete(v) => v
+                .iter()
+                .copied()
+                .filter(|r| r.is_finite())
+                .min_by(|a, b| (a - hz).abs().total_cmp(&(b - hz).abs())),
+        }
     }
 
     /// The gain stage named `name`.
@@ -873,5 +1057,85 @@ mod tests {
         provenance = next;
         assert_eq!(provenance.tune.center_hz, 433.92e6);
         assert_eq!(mailbox.take(&mut seen), None, "taken exactly once");
+    }
+
+    // ---- T-341: the tuning step, and the achievable (centre, span) grid ----
+
+    #[test]
+    fn unknown_tuning_step_is_never_read_as_a_number() {
+        // "Cannot report" and "reports 1 Hz" are different facts (the T-325 BiasTee lesson).
+        assert_eq!(TuningStep::default(), TuningStep::Unknown);
+        assert_eq!(TuningStep::Unknown.step_hz(), None);
+        assert_eq!(TuningStep::Unknown.snap_hz(100e6), None);
+        assert_eq!(TuningStep::Unknown.as_str(), "unknown");
+
+        // A replay says so, and nothing invents a grid for it.
+        let mut caps = SourceCapabilities::hackrf_one();
+        caps.tuning_step = TuningStep::Unknown;
+        assert_eq!(caps.snap_center_hz(100e6), None);
+    }
+
+    #[test]
+    fn hackrf_tuning_step_is_the_max2837_synthesiser_grid() {
+        // 30 MHz / 2^20: the RF granularity of the 20-bit fractional-N at a 40 MHz PFD with the
+        // VCO at 4/3 the RF frequency (firmware max2837.c, cited on the constant).
+        assert_eq!(HACKRF_ONE_TUNING_STEP_HZ, 28.6102294921875);
+        let caps = SourceCapabilities::hackrf_one();
+        assert_eq!(
+            caps.tuning_step,
+            TuningStep::Uniform {
+                step_hz: HACKRF_ONE_TUNING_STEP_HZ
+            }
+        );
+
+        // Err coarser, never finer: 1 Hz apart is the *same* achievable centre, so a 1 Hz grid
+        // would put 28 centres on the navigation axis that do not exist.
+        let a = caps.snap_center_hz(100_000_000.0).unwrap();
+        let b = caps.snap_center_hz(100_000_001.0).unwrap();
+        assert_eq!(a, b, "1 Hz apart snaps to one grid point");
+        // And the snap lands within half a step of what was asked for, by construction.
+        assert!((a - 100e6).abs() <= HACKRF_ONE_TUNING_STEP_HZ / 2.0 + 1e-9);
+        assert_eq!(
+            (a / HACKRF_ONE_TUNING_STEP_HZ).round() * HACKRF_ONE_TUNING_STEP_HZ,
+            a
+        );
+    }
+
+    #[test]
+    fn a_snapped_centre_is_inside_the_band_at_both_edges() {
+        let caps = SourceCapabilities::hackrf_one();
+        for want in [1e6, 6e9, 0.0, 9e9] {
+            let got = caps.snap_center_hz(want).expect("hackrf states a step");
+            assert!(
+                caps.supports_frequency(got),
+                "snapped {want} to {got}, outside 1 MHz - 6 GHz"
+            );
+        }
+        // Walked inward, not merely near: the nearest grid point to 6 GHz is above it.
+        let top = caps.snap_center_hz(6e9).unwrap();
+        assert!(top <= 6e9 && 6e9 - top < HACKRF_ONE_TUNING_STEP_HZ);
+    }
+
+    #[test]
+    fn the_span_axis_is_the_sample_rate() {
+        let caps = SourceCapabilities::hackrf_one();
+        assert_eq!(caps.max_live_span_hz(), Some(20e6));
+        assert_eq!(caps.snap_span_hz(2.4e6), Some(2.4e6));
+        assert_eq!(caps.snap_span_hz(50e6), Some(20e6), "clamped to the widest");
+        assert_eq!(
+            caps.snap_span_hz(1e3),
+            Some(2e6),
+            "clamped to the narrowest"
+        );
+
+        let mut discrete = SourceCapabilities::hackrf_one();
+        discrete.sample_rates = SampleRates::Discrete(vec![2.048e6, 8e6, 20e6]);
+        assert_eq!(discrete.max_live_span_hz(), Some(20e6));
+        assert_eq!(
+            discrete.snap_span_hz(7e6),
+            Some(8e6),
+            "nearest, not the floor"
+        );
+        assert_eq!(discrete.snap_span_hz(1.0), Some(2.048e6));
     }
 }

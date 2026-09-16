@@ -24,6 +24,7 @@
 import * as ax from "../../axis";
 import { ControlError } from "../../controls/client";
 import type { ViewHooks } from "../../controls/gestures";
+import { snapCenter } from "../../navigation";
 import type { AppContext } from "../context";
 import { toast } from "../shell-slice";
 import type { AppState } from "../state";
@@ -125,12 +126,20 @@ export const retuneLabel = (centerHz: number) => `Retune to ${(centerHz / 1e6).t
  */
 export async function applyDeviceAction(ctx: AppContext, action: DeviceAction): Promise<void> {
   const { store } = ctx;
-  if (!mayRetune(store.get().device)) { store.set(toast(NOT_LIVE_TEXT)); return; }
+  const dev = store.get().device;
+  if (!mayRetune(dev)) { store.set(toast(NOT_LIVE_TEXT)); return; }
+  // T-341: a retune goes to an **achievable** centre. `Math.round` picks a whole hertz, which the
+  // route requires, but a whole hertz is not a state the front end has: a HackRF's synthesiser
+  // moves in ~28.6 Hz steps, so 28 of every 29 rounded values land it somewhere other than the
+  // number the UI just showed. Snapping to the grid the backend reported asks for a centre the
+  // radio can actually take. When the source cannot state a step, `snapCenter` returns null and
+  // rounding is all that is left — and nothing then claims the device sits exactly there.
+  const centerHz = snapCenter(dev.centerGrid, action.centerHz) ?? Math.round(action.centerHz);
   store.set((s) => ({ live: { ...s.live, pendingView: action.want, retuneOffer: null } }));
   try {
-    await ctx.client.post("/api/control/center", { center_hz: Math.round(action.centerHz) });
+    await ctx.client.post("/api/control/center", { center_hz: centerHz });
     const on = store.get().device.deviceId;
-    store.set(toast(`Retuning ${on ? `${on} ` : ""}to ${(action.centerHz / 1e6).toFixed(4)} MHz`));
+    store.set(toast(`Retuning ${on ? `${on} ` : ""}to ${(centerHz / 1e6).toFixed(4)} MHz`));
   } catch (e) {
     store.set((s) => ({ live: { ...s.live, pendingView: null } }));
     store.set(toast(retuneErrorText(e)));

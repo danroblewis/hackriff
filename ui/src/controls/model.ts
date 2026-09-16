@@ -16,6 +16,12 @@ export interface DeviceCaps {
   controllable: boolean;
   frequency_ranges_hz: [number, number][];
   sample_rates_hz: { min: number; max: number } | { values: number[] };
+  /** Centre-frequency granularity (T-341): `"uniform"` with a step, or `"unknown"` when the source
+   * cannot say. Three-valued like the bias tee, and for the same reason — "nothing said" read as
+   * 1 Hz would offer centres the radio cannot reach. */
+  tuning_step: "uniform" | "unknown";
+  /** The step in Hz, or null when `tuning_step` is `"unknown"`. Never default it to 1. */
+  tuning_step_hz: number | null;
   gain_stages: GainStageCap[];
   bias_tee: boolean;
   baseband_filter: BasebandFilterCap | null;

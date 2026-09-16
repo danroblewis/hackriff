@@ -17,6 +17,7 @@
 //! | `/api/events?f_lo&f_hi&t0&t1[&state][&limit][&cursor]` | GET | token | T-264 (ADR-0017 TM-8) the durable catalogue of events in a region over a time range, with coverage ([`crate::events`]) |
 //! | `/api/inventory/<id>/presence[?t0&t1]` | GET | token | T-264 one emitter's presence track: every interval with its own timespan ([`crate::presence`]) |
 //! | `/api/analysis/strongest?f_lo&f_hi[&window_s]` | GET | token | T-079 strongest observed signal in a band over a recent window, from spectrum history ([`crate::query::strongest_json`]) |
+//! | `/api/navigation[?center_hz&span_hz[&t_cell_s]]` | GET | token | T-341 the achievable `(centre, span)` grid (ranges, tuning step, spans, history tiers) and, for a requested state, the nearest realizable one plus its live-IQ/overview claim ([`crate::navigation`]) |
 //! | `/api/observations?f_lo&f_hi&t0&t1[&tier][&cursor][&limit]` | GET | token | T-115 observation log records in a box ([`crate::observations`]) |
 //! | `/api/observations/coverage?f_lo&f_hi&t0&t1[&channel_hz][&tau_s][&min_gap_s]` | GET | token | T-115 observation totals, per-channel totals, gaps and POI ([`crate::observations`]) |
 //! | `/api/occupancy?f_lo&f_hi&t0&t1[&interval][&site]` | GET | token | T-118 occupancy series (FCO/FBO/SRO per learned channel and band) and the learned plan ([`crate::occupancy`]) |
@@ -113,6 +114,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/events"),
     ("GET", "/api/inventory/{id}/presence"),
     ("GET", "/api/analysis/strongest"),
+    // T-341: the achievable (centre, span) grid, and which tier answers for a requested state
+    ("GET", "/api/navigation"),
     ("GET", "/api/status"),
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
@@ -928,6 +931,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         | "/api/inventory"
         | "/api/events"
         | "/api/analysis/strongest"
+        | "/api/navigation"
         | "/api/report"
         | "/api/status"
         | "/api/taxonomy"
@@ -965,6 +969,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         // T-264 (ADR-0017 TM-8): the durable all-time catalogue, where Explore is window-scoped.
         "/api/events" => events(state, &req),
         "/api/analysis/strongest" => strongest(state, &req),
+        // T-341: the backend owns which capture states are realizable; the client snaps against
+        // this grid rather than deciding for itself what the front end can do.
+        "/api/navigation" => crate::navigation::navigation_json(state, &req.query),
         "/api/status" => state
             .status
             .as_ref()
@@ -1021,7 +1028,7 @@ fn output_file(stream: &mut TcpStream, state: &ApiState, id: &str, name: &str) {
 
 /// Runs `f` on the server's spectrum history: the history store, else the floor product's
 /// uncalibrated pyramid.
-fn with_history<T>(
+pub(crate) fn with_history<T>(
     state: &ApiState,
     f: impl FnOnce(&hk_store::Pyramid) -> Result<T, ApiError>,
 ) -> Result<T, ApiError> {
@@ -1040,8 +1047,35 @@ fn with_history<T>(
     Err(ApiError::new(404, "no spectrum history on this server"))
 }
 
+/// The widest instantaneous bandwidth this run can produce, Hz (T-341), for the live-vs-overview
+/// claim in `resolution.source`. `None` when nothing here can say — and then the **weaker** claim
+/// is made, never the stronger: not knowing the window is not evidence that a span fits inside it.
+///
+/// Two answers, in order of how much they know:
+///
+/// 1. a live front end's capabilities — its *widest* sample rate, because the span it can deliver
+///    is what the user could retune to, not only what it is set to now;
+/// 2. failing that, the running segment's own sample rate. A replay has no `live_control`, but it
+///    still has exactly one instantaneous bandwidth, and it is this. Nothing wider than it ever
+///    came from one window.
+pub(crate) fn max_live_span_hz(state: &ApiState) -> Option<f64> {
+    state
+        .live_control
+        .as_deref()
+        .and_then(|l| l.capabilities().max_live_span_hz())
+        .or_else(|| {
+            state
+                .run_control
+                .as_deref()
+                .map(|r| r.state().sample_rate_hz)
+                .filter(|hz| hz.is_finite() && *hz > 0.0)
+        })
+}
+
 fn history(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
-    with_history(state, |p| query::history_json(p, &req.query))
+    with_history(state, |p| {
+        query::history_json(p, &req.query, max_live_span_hz(state))
+    })
 }
 
 fn floor(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
