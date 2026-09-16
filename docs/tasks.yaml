@@ -3147,7 +3147,7 @@ tasks:
   - id: T-196
     milestone: M2-hardening
     title: "Occupancy span_stats FCO for a channel depends on the query band: 433.475 MHz lay inside both bands yet reported 0.073 (old band 433.2375-433.6875) vs 0.296 (fixed band 433.275-433.725), truth 0.258"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-124]
     parallel_group: CONTEXT
@@ -3855,7 +3855,7 @@ tasks:
   - id: T-239
     milestone: M2-hardening
     title: "Scheduler leaves the recording almost uncovered in t057: 12,000 of 14,519,977 samples, so 'no emitter at the station' fails 1-in-14 on the unmodified baseline"
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: CORE
