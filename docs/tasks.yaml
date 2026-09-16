@@ -6836,7 +6836,7 @@ tasks:
     milestone: M2-hardening
     title: Stream-contract JSON records carry t as nanoseconds declared only by the document, not by the
       name
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-349
@@ -6942,7 +6942,7 @@ tasks:
   - id: T-359
     milestone: M2-hardening
     title: Carry the bias-tee state to the occupancy row, so T-333 stops folding everything as Unknown
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-332
