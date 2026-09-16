@@ -287,3 +287,7 @@ A dwell on 902–928 MHz yields repeated Detections. C10 links them into a Track
 - **Own-key decryption** modelled as a C22 stage with key-source provenance — confirm.
 - **Retention/quota policy object** ownership across Recording/SpectrumTile/Detection — Phase 3.
 - **Timestamp error budget** for Provenance — Phase 4 spike (no hardware 1PPS on HackRF One).
+
+## Pending user sign-off: time-bounded signals and a view-scoped inventory (2026-09-16)
+
+User direction from live Explore testing: the inventory answers "what has EVER been seen here" but is presented as "what is here NOW", so dead signals pile up as live candidates. The reframe - signals as time-bounded events (bursts and chirps first-class, no carrier or stable frequency required), Explore scoped to the viewed waterfall window with scrub-back over the IQ ring, and the all-time catalogue moved to a separate history surface - is **designed under T-253 and awaits the user's sign-off. Do not implement it from this note.**
