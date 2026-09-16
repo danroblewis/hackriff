@@ -1,4 +1,6 @@
-// Centre live-view state (ADR-0013 §3.1). Owner: T-152. Top-level key: live.
+// Centre live-view state (ADR-0013 §3.1). Owner: T-152. Top-level keys: live, navGrid.
+import type { ActiveWindow } from "../../navigators";
+import type { NavigationGrid } from "../../navigation";
 
 /**
  * A retune a pan to the band edge has **offered** but not performed (T-343).
@@ -20,11 +22,30 @@ export interface LiveSlice {
   retuneOffer: RetuneOffer | null;
 }
 
-export interface CentreState { live: LiveSlice }
+/**
+ * What `GET /api/navigation` reported, for the edge navigators (T-340).
+ *
+ * `windows` is the **reported** list of currently-active capture windows, never derived from
+ * `grid.frequency.current`: the frequency navigator lights one segment per entry, so a list
+ * invented from a singleton would draw a window count nothing measured. `loaded` distinguishes
+ * *not asked yet* from *nothing reported*.
+ */
+export interface NavGridSlice {
+  grid: NavigationGrid | null;
+  windows: ActiveWindow[];
+  loaded: boolean;
+}
+
+export interface CentreState { live: LiveSlice; navGrid: NavGridSlice }
 
 export const centreInitial = (): CentreState => ({
   live: {
     streamId: null, centerHz: null, bandwidthHz: null, bins: null, rowRateHz: null, view: null,
     pendingView: null, retuneOffer: null,
   },
+  navGrid: { grid: null, windows: [], loaded: false },
 });
+
+/** Records a `GET /api/navigation` answer (T-340). A store write only: nothing here moves a device. */
+export const setNavigation = (grid: NavigationGrid | null, windows: ActiveWindow[]) => (): { navGrid: NavGridSlice } =>
+  ({ navGrid: { grid, windows, loaded: true } });

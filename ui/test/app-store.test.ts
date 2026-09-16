@@ -114,9 +114,13 @@ test("mode, theme, time cursor and goto actions", () => {
   s.set(cycleTheme); s.set(cycleTheme); s.set(cycleTheme);
   assert.equal(s.get().theme, "system");
   s.set(reviewAt(1_789_300_000));
-  assert.deepEqual(s.get().time, { live: false, tS: 1_789_300_000 });
+  // T-340: `spanS` is the time span a region dragged on the time navigator asked for; null here
+  // means none was asked for, never a default duration.
+  assert.deepEqual(s.get().time, { live: false, tS: 1_789_300_000, spanS: null });
+  s.set(reviewAt(1_789_300_000, 400));
+  assert.deepEqual(s.get().time, { live: false, tS: 1_789_300_000, spanS: 400 });
   s.set(reviewAt(NaN));
-  assert.deepEqual(s.get().time, { live: false, tS: 1_789_300_000 });
+  assert.deepEqual(s.get().time, { live: false, tS: 1_789_300_000, spanS: 400 });
   s.set(goLive);
   assert.deepEqual(s.get().time, { live: true });
   s.set(requestGoto(101.3e6));

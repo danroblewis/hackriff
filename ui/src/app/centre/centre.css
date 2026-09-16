@@ -70,3 +70,26 @@
 @media (max-width: 900px) {
   .specwf .c-hint { display: none; }
 }
+
+/* T-340: the two edge navigators. Scoped under .freqnav / .timenav, the slots they mount into.
+   Both are view controls — the one thing here that moves the radio is the retune offer button,
+   styled as an action (amber) exactly like the axis strip's, never as a readout. */
+.freqnav { touch-action: none; user-select: none; -webkit-user-select: none; }
+.freqnav .fn-track { position: absolute; left: 10px; right: 10px; top: 5px; height: 12px; border: 1px solid var(--line); border-radius: 3px; background: color-mix(in srgb, var(--text) 5%, transparent); cursor: crosshair; }
+.freqnav .fn-track.dragging { cursor: grabbing; }
+.freqnav .fn-lit-layer { position: absolute; inset: 0; pointer-events: none; }
+/* One lit segment per reported active capture window (docs/api.md `windows`). */
+.freqnav .fn-lit { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--teal) 55%, transparent); box-shadow: 0 0 0 1px var(--teal); }
+.freqnav .fn-view { position: absolute; top: -2px; bottom: -2px; box-sizing: border-box; border: 1px solid var(--amber); background: var(--amber-soft); cursor: grab; }
+.freqnav .fn-draft { position: absolute; top: -2px; bottom: -2px; box-sizing: border-box; border: 1px dashed var(--amber); background: var(--amber-soft); pointer-events: none; }
+.freqnav .fn-offer { position: absolute; bottom: 14px; z-index: 6; font: 600 10.5px var(--ui); letter-spacing: 0.03em; color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, var(--panel)); border: 1px solid var(--amber); padding: 2px 9px; border-radius: 12px; cursor: pointer; touch-action: manipulation; white-space: nowrap; }
+.freqnav .fn-label { position: absolute; left: 10px; right: 10px; bottom: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.timenav { touch-action: none; user-select: none; -webkit-user-select: none; }
+.timenav .tn-track { position: absolute; inset: 4px 6px; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; cursor: crosshair; }
+.timenav .tn-track.dragging { cursor: grabbing; }
+.timenav .tn-track.reviewing { box-shadow: inset 0 0 0 1px var(--amber); }
+/* Upscaled, never smoothed: repeating a measured cell across pixels is the honest direction. */
+.timenav .tn-overview { position: absolute; inset: 0; width: 100%; height: 100%; display: block; image-rendering: pixelated; }
+.timenav .tn-view { position: absolute; left: -1px; right: -1px; box-sizing: border-box; border: 1px solid var(--amber); background: var(--amber-soft); cursor: grab; }
+.timenav .tn-draft { position: absolute; left: -1px; right: -1px; box-sizing: border-box; border: 1px dashed var(--amber); background: var(--amber-soft); pointer-events: none; }

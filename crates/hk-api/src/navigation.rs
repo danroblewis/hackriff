@@ -149,6 +149,52 @@ fn frequency_json(
     })
 }
 
+/// One **currently-active capture window**: a front end that is tuned and producing IQ right now.
+///
+/// T-340: the frequency navigator lights a segment per active window, so this is the fact it
+/// draws from. `f_lo_hz`/`f_hi_hz` are the window's edges, derived here rather than in the client,
+/// because "the span of a live window *is* its sample rate" is a statement about the front end.
+fn window_json(l: &dyn crate::live_control::LiveControl) -> Value {
+    let t = l.tuning();
+    let span = t.sample_rate_hz;
+    json!({
+        // T-343's identity, so a lit segment can name the radio it belongs to. `null` is not an
+        // identity: a source that reports none leaves the field null rather than taking a
+        // placeholder that a second front end could collide with.
+        "device_id": l.device_id(),
+        "driver": l.capabilities().driver,
+        "center_hz": t.center_hz,
+        "span_hz": span,
+        "f_lo_hz": t.center_hz - span / 2.0,
+        "f_hi_hz": t.center_hz + span / 2.0,
+    })
+}
+
+/// Every currently-active capture window, as a **list**.
+///
+/// # Why a list when this server runs one front end
+///
+/// The number of front ends is a fact about the run, not a constant of the design. The source
+/// layer is already N-shaped (T-259's audit; T-302/T-303/T-304/T-305 keyed artifacts, baselines,
+/// history and the source-layer rule on the front end that produced each frame), and the user's
+/// multi-SDR direction is explicit: several simultaneous windows, or a wider one stitched from
+/// contiguous dwells. A singleton here would force the navigator to assume one window and would
+/// have to be re-shaped — and every consumer with it — the day a second chain exists.
+///
+/// So the length of this array is **measured, never assumed**: it is however many live front ends
+/// this run holds. Today [`ApiState::live_control`] is one optional handle, so the array is empty
+/// on a replay and holds one entry on a live run. **What would have to change to report N:**
+/// `ApiState::live_control` becomes a collection of handles rather than an `Option`, built one per
+/// `ReceiveChain` where the pipeline composes the run; nothing in this function or in its clients
+/// changes, because both already speak in lists.
+fn windows_json(state: &ApiState) -> Vec<Value> {
+    state
+        .live_control
+        .iter()
+        .map(|l| window_json(l.as_ref()))
+        .collect()
+}
+
 /// The `time` block: the retained window and the pyramid's **discrete** resolution tiers.
 ///
 /// The ladder is the whole point — time resolution is not a slider. A view asking for a finer cell
@@ -349,6 +395,9 @@ pub fn navigation_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> 
         }),
         // Null with no spectrum history on this server.
         "time": time_and_resolved.as_ref().map(|(t, _)| t.clone()),
+        // T-340: every currently-active capture window, one entry per live front end. A list
+        // because the count is a property of the run — see `windows_json`.
+        "windows": windows_json(state),
     });
     let resolved = match &time_and_resolved {
         Some((_, r)) => r.clone(),

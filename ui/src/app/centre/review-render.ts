@@ -23,11 +23,20 @@ export interface HistoryGrid {
 }
 
 /** Cursor equality for `store.select` (a new `{live: true}` object is the same cursor). */
-export const sameCursor = (a: TimeCursor, b: TimeCursor) => (a.live ? b.live : !b.live && a.tS === b.tS);
+export const sameCursor = (a: TimeCursor, b: TimeCursor) =>
+  (a.live ? b.live : !b.live && a.tS === b.tS && (a.spanS ?? null) === (b.spanS ?? null));
 
-/** The time window ending at `tS` that fills `rows` rows of `rowPeriodS` (at least 1 s). */
-export function historyWindow(tS: number, rows: number, rowPeriodS: number): { t0: number; t1: number } {
-  return { t0: tS - Math.max(1, rows * rowPeriodS), t1: tS };
+/**
+ * The time window ending at `tS`: `spanS` when the cursor asked for one (T-340 — a region dragged
+ * on the time navigator zooms the waterfall to exactly that span), else the span the rows on
+ * screen cover at their own period (at least 1 s).
+ *
+ * `spanS` is never defaulted here. A null span is "nothing asked for a span", and the fallback is
+ * measured from the view's own rows rather than from a constant duration.
+ */
+export function historyWindow(tS: number, rows: number, rowPeriodS: number, spanS: number | null = null): { t0: number; t1: number } {
+  const span = spanS !== null && Number.isFinite(spanS) && spanS > 0 ? spanS : Math.max(1, rows * rowPeriodS);
+  return { t0: tS - span, t1: tS };
 }
 
 /** Cell budget: about one cell per texel (≤ 2048 columns) × the ring's rows, capped as the old
