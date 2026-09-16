@@ -6837,7 +6837,8 @@ tasks:
     milestone: M2-hardening
     title: Stream-contract JSON records carry t as nanoseconds declared only by the document, not by the
       name
-    status: in-progress
+    status: done
+    commit: e433bab
     priority: normal
     deps:
     - T-349
@@ -7213,6 +7214,28 @@ tasks:
       T-309 found clustering refused joins on observation statistics; T-336 fixed cross-producer double
       counting. Re-measure against the current tree rather than inheriting any of those numbers. Fold into
       docs/07, docs/14 and ADR-0017'
+  - id: T-370
+    milestone: M2-hardening
+    title: /api/selections/{id}/watch serves nanoseconds under a bare t, and the unit sweep cannot reach
+      it
+    status: todo
+    priority: normal
+    deps:
+    - T-354
+    parallel_group: PIPE
+    core_interface: true
+    model: sonnet
+    acceptance: 'T-354 found this while closing T-349''s one named exception, and it is the law broken on
+      a LIVE ROUTE: crates/hk-api/src/selections.rs::watch_json emits alerts[].t and suppressed[].t straight
+      from WatchAlertRecord.t and WatchSkipRecord.t - both hk_model::Timestamp, i64 nanoseconds - THREE
+      LINES ABOVE a secs(l.t) call in selection_json in the same file. Rename to t_ns with #[serde(alias)],
+      per T-349''s law: Unix seconds by default, bare and _s mean seconds, _ns means integer nanoseconds,
+      no third unit. AND CLOSE THE NET''S HOLE, which is the more useful half: T-349''s every_serialized_time_declares_its_unit
+      sweep does not reach this route because it needs a SELECTION TO EXIST, and the sweep runs GETs against
+      a fresh server - the same reason it missed the stream-contract field. Extend time_law_routes to cover
+      selection-scoped routes by creating a selection first, exactly as it already does for an emitter.
+      A detector that cannot reach a route is not evidence about that route, and this is now the second
+      field it missed for that reason rather than for a listing error'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
