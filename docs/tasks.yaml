@@ -7358,6 +7358,41 @@ tasks:
       This decides whether the emitter is the user's own equipment (fix it) or
       something in the room (catalogue it), and it is the honest close of T-317's
       one open question.
+  - id: T-376
+    title: The frequency navigator has no viewport of its own, so the tuned window is 0.04% of the bar
+    milestone: M2-hardening
+    status: in-progress
+    priority: high
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-367]
+    acceptance: |
+      USER, 2026-09-16, two additions given for T-367 (already merged at 9a46489),
+      so they are FOLDED INTO T-368 which is live in the same file. Verbatim:
+      (1) BOTH the left (time) and bottom (frequency) bars need SCROLL/WHEEL-TO-ZOOM
+      on their own axis, matching the waterfall display gesture - wheel zooms, drag
+      pans, drag-a-region zooms-to-region.
+      (2) The bottom FREQUENCY bar surveys the whole device-available HackRF range
+      (1 MHz-6 GHz) but its VIEW is CENTRED ON THE CURRENT TUNE CENTRE by default -
+      so starting at centre 100.8 MHz means the bottom bar is centred around
+      100.8 MHz (not the 1-6 GHz midpoint), and you wheel-zoom out to see more of
+      the range or in to narrow it.
+      VERIFIED AGAINST THE MERGED CODE. Item 1 is largely present: both bars already
+      wheel-zoom their own axis about the pointer through the shared ax.wheelFactor,
+      so the gesture already matches the waterfall.
+      Item 2 is absent and the symptom is worse than described. The bottom bar's
+      extent is spectrumExtent() = the union of ranges_hz, i.e. the WHOLE 1 MHz-6 GHz,
+      FIXED, with no viewport of its own. A 2.4 MHz tuned window is then 0.04% of the
+      bar - not merely off-centre but invisible.
+      CONSEQUENCE FOR ITEM 1: wheel over the frequency bar currently zooms the MAIN
+      waterfall view (setLiveView), not the bar. Giving the bar its own viewport
+      redefines that gesture. Region-drag must KEEP setting centre (the device action,
+      gated, device_id recorded) and T-340's no-retune property must survive: no pan
+      or wheel may ever retune.
+      This is the same feature as T-368's coverage map seen from the other side - what
+      FILLS the bar when you wheel-zoom out toward 1-6 GHz is coverage, and without it
+      the zoomed-out bar would paint never-observed spectrum as quiet.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
