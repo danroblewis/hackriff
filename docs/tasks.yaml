@@ -3651,7 +3651,7 @@ tasks:
   - id: T-228
     milestone: M2-hardening
     title: "Consolidated flaky-pin fix: convert wall-clock and arrival-order assertions to sample-clock or queue-depth terms, removing each nextest pin as its test is fixed (supersedes T-182, T-197, T-225, T-227)"
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: PIPELINE

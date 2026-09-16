@@ -2478,3 +2478,5 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **T-228 launches when a slot frees;** T-199, T-217, the T-219 fix round and the running check hold all four.
 - **B0.516 Main fully green with T-226 merged (9cef80c).** Unit suite 1455/1455 with the follow_hops pin in place; lint clean; acceptance 29/29 and acceptance_m2 8/8 from the prior run in the same merge; 37 GB free.
   - **Queue:** T-228 (consolidated pin conversion) launches at the next free slot; T-218, T-212 and T-213 wait for T-199 to release hk-classify.
+- **B0.517 T-228 launched** (Opus, consolidated pin conversion): flush barrier for decoded-capture eviction, consistent stats snapshot for the hot-edit counters, sample-clock or queue-depth pacing for the dense-burst writer, and dedupe by sample index and level rather than arrival. Each pin is deleted as its test is fixed, proven 20/20 under 6 burners.
+  - **Cap full:** T-199, T-217, T-219 fix round and T-228; 14 build processes, load 11, 37 GB free.
