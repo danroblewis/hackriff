@@ -252,10 +252,10 @@ pub struct TrackInventory {
     /// Entries this run's sightings and chains reached, oldest first (bounded).
     run: VecDeque<EmitterId>,
     run_set: HashSet<EmitterId>,
-    /// T-242: the sighting count each entry was last characterised at, so a re-offer that
-    /// measured nothing new costs one comparison instead of a match and a clustering pass.
-    /// Bounded with [`Self::run`].
-    characterised: HashMap<EmitterId, u64>,
+    /// T-242: the `(sighting count, fingerprint observations)` each entry was last characterised
+    /// at, so a re-offer that measured nothing new costs one comparison instead of a match and a
+    /// clustering pass. Bounded with [`Self::run`].
+    characterised: HashMap<EmitterId, (u64, u64)>,
     /// T-109: open tracks whose live offer created their entry; removed when the track closes,
     /// merges or joins a hop set (every open track ends in one of those).
     provisional: HashMap<TrackId, EmitterId>,
@@ -588,9 +588,17 @@ impl TrackInventory {
     /// T-242: aggregates what this entry has measured and asks the catalogue and the clusterer
     /// about it ([`crate::characterise`], which documents where this runs and what bounds it).
     ///
-    /// Skipped when the entry's sighting count has not moved since it was last characterised: a
-    /// live re-offer of an open track (T-109) is the same measurement again, and the match log is
+    /// Skipped when nothing new has been measured since it was last characterised: a live
+    /// re-offer of an open track (T-109) is the same measurement again, and the match log is
     /// history of what was *said*, not of how often it was asked.
+    ///
+    /// "Nothing new" is the entry's `(count, fingerprint observations)` pair. It was `count`
+    /// alone until T-336, when `count` stopped being a proxy for "a measurement arrived": a
+    /// sighting over air another producer already counted adds no occurrence, so a chain's
+    /// symbol rate and deviation would reach the fingerprint and never reach this seam. The
+    /// fingerprint's observation counter moves once per folded measurement, which is exactly the
+    /// bound this skip is documented to enforce. (T-335 owns replacing the count half properly —
+    /// a merge whose overlap discount adds 0 still leaves both halves of this key unmoved.)
     fn characterise(
         &mut self,
         repo: &mut Repository,
@@ -598,10 +606,14 @@ impl TrackInventory {
         trust: Option<TrackTrust>,
     ) -> Result<(), RepoError> {
         let e = repo.emitter(id)?;
-        if self.characterised.get(&id) == Some(&e.count) {
+        let measured = (
+            e.count,
+            repo.emitter_fingerprint(id)?.map_or(0, |f| f.observations),
+        );
+        if self.characterised.get(&id) == Some(&measured) {
             return Ok(());
         }
-        self.characterised.insert(id, e.count);
+        self.characterised.insert(id, measured);
         // A sighting whose detections were mostly suspect (spur, image, IMD, clipping) is folded
         // in as suspect, so nothing is ever minted from an all-suspect emitter (C18 card).
         let suspect = trust.is_some_and(|t| t.suspect_fraction > self.policy.max_suspect_fraction);

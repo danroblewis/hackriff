@@ -500,8 +500,15 @@ fn lossless_plugin_feeding_waits_for_a_slow_plugin_instead_of_dropping() {
 fn replaying_the_same_iq_again_does_not_count_its_tracks_twice() {
     let src = TempDir::new("dedup-src");
     let meta = tone_recording(&src.0, "tone", 250e3, 2.0, 433.5e6, None);
-    // Identical samples and timestamps, another stream index: a different capture.
+    // Identical samples and timestamps, another stream index: a different capture of the same
+    // two seconds of air.
     let other = tone_recording(&src.0, "tone-other", 250e3, 2.0, 433.5e6, Some(1_000_000));
+    // The same again, an hour later: a different capture of different air.
+    let later = tone_recording(&src.0, "tone-later", 250e3, 2.0, 433.5e6, Some(2_000_000));
+    let text = std::fs::read_to_string(&later)
+        .unwrap()
+        .replace("2026-09-13T12:00:00Z", "2026-09-13T13:00:00Z");
+    std::fs::write(&later, text).unwrap();
     let dir = TempDir::new("dedup");
     let run_blind = |meta: &Path| {
         let (cfg, replay, _input) = blind_replay_config(&dir.0, meta, json!({}), Pacing::Unpaced);
@@ -525,11 +532,20 @@ fn replaying_the_same_iq_again_does_not_count_its_tracks_twice() {
         first,
         "the same capture replayed again adds no sightings"
     );
+    // T-336: a second capture of the SAME two seconds is a second observer of one occurrence,
+    // not a second occurrence — whoever observed it, overlapping air counts once.
     run_blind(&other);
     let third = counts();
+    assert_eq!(
+        third, first,
+        "another capture of the same air adds no occurrence: {first:?} → {third:?}"
+    );
+    // Air nothing has counted still counts, which is what keeps dedup from swallowing sightings.
+    run_blind(&later);
+    let fourth = counts();
     assert!(
-        third.1 > first.1,
-        "another capture with the same timestamps still counts: {first:?} → {third:?}"
+        fourth.1 > first.1,
+        "a capture of different air still counts: {first:?} → {fourth:?}"
     );
 }
 
