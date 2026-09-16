@@ -10,4 +10,5 @@ pub mod runtime; // T-088
 pub mod store; // T-088
 pub mod swap; // T-088
 pub mod tap_spectrum; // T-160
+pub mod tap_sync_search; // T-162
 pub mod taps; // T-088 // T-093

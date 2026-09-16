@@ -2326,6 +2326,157 @@ fn stage_tap_spectrum_view_answers_as_documented() {
     stop_server(serving);
 }
 
+/// T-162: stage tap `view=sync_search` (stream contract §14.4, ADR-0013 §4.9 gap 6). `view=raw`
+/// is unchanged; on a `bits` port, `view=sync_search&sync_word=0x…&sync_bits=<n>` serves a match
+/// score per candidate bit position (`kind: sync-search`, `rf32_le` rows, row length declared as
+/// `fft_size`, at most 25 rows/s) instead of raw bits; an unsupported port type is refused 409, a
+/// missing/invalid `sync_word`/`sync_bits` is refused 400, and an unknown `view` value stays 400
+/// (§14.8 opener refusals). The score itself resolving a real sync word to a clear peak is
+/// asserted at the block level (`hk_pipeline::recipes::tap_sync_search`
+/// `known_sync_word_shows_a_clear_peak_and_nothing_comparable_elsewhere`); this test only checks
+/// the wiring and shape the UI relies on.
+#[test]
+fn stage_tap_sync_search_view_answers_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+    let doc = json!({
+        "schema": "hackriff.recipe", "schema_version": 2, "id": "t162-contract", "version": 1,
+        "name": "T-162 contract",
+        "input": {"port": "iq", "sample_rate_hz": 48000.0, "bandwidth_hz": 40000.0},
+        "nodes": [
+            {"id": "fm", "block": "fm_demod", "params": {"deviation_hz": 5000}},
+            {"id": "clock", "block": "clock_recovery", "params": {"symbol_rate_bd": 1000.0}},
+            {"id": "bits", "block": "slicer"}
+        ],
+        "outputs": [{"id": "fm", "kind": "stage", "from": "fm"}],
+        "output_policy": {"content_class": "unrestricted"}
+    });
+    let target = json!({"band": {"f_lo": STATION_HZ - 20e3, "f_hi": STATION_HZ + 20e3}});
+    let (st, v) = post(
+        addr,
+        "/api/pipelines",
+        &json!({"recipe": doc, "target": target}).to_string(),
+    );
+    assert_eq!(st, 201, "{v}");
+    let pid = v["id"].as_str().unwrap().to_owned();
+
+    // Default (no view / view=raw) is unchanged: the slicer's bits port serves raw samples, with
+    // no sync-search geometry in the header.
+    let mut ws = connect_ws(
+        addr,
+        &format!("/ws/open/stage?token={TOKEN}&pipeline={pid}&node=bits"),
+    )
+    .unwrap();
+    let Message::Text(t) = ws.read().unwrap() else {
+        panic!("header first")
+    };
+    let header: Value = serde_json::from_str(t.as_str()).unwrap();
+    assert_eq!(
+        (&header["kind"], &header["datatype"]),
+        (&json!("bits"), &json!("ru8"))
+    );
+    assert!(header.get("fft_size").is_none(), "raw view: {header}");
+    let _ = ws.close(None);
+
+    // view=sync_search on the same bits port: a match-score row, not raw bits.
+    let mut ws = connect_ws(
+        addr,
+        &format!(
+            "/ws/open/stage?token={TOKEN}&pipeline={pid}&node=bits&view=sync_search&sync_word=0x2DD4&sync_bits=16"
+        ),
+    )
+    .unwrap();
+    let Message::Text(t) = ws.read().unwrap() else {
+        panic!("header first")
+    };
+    let header: Value = serde_json::from_str(t.as_str()).unwrap();
+    assert_eq!(header["kind"], json!("sync-search"), "{header}");
+    assert_eq!(header["datatype"], json!("rf32_le"), "{header}");
+    let row_len = header["fft_size"].as_u64().expect("row length declared");
+    assert!(row_len >= 256, "{header}");
+    assert!(
+        header["sample_rate_hz"].as_f64().unwrap() <= 25.0 + 1e-9,
+        "{header}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        assert!(Instant::now() < deadline, "a sync-search data record");
+        if let Message::Binary(b) = ws.read().unwrap() {
+            assert_eq!(
+                b.len(),
+                32 + 4 * row_len as usize,
+                "one match-score row of the declared length: {}",
+                b.len()
+            );
+            break;
+        }
+    }
+    let _ = ws.close(None);
+
+    // Unsupported port type (real, soft): 409 (§14.8 "a view the port type doesn't support").
+    for node in ["fm", "clock"] {
+        let mut ws = connect_ws(
+            addr,
+            &format!(
+                "/ws/open/stage?token={TOKEN}&pipeline={pid}&node={node}&view=sync_search&sync_word=0x2DD4&sync_bits=16"
+            ),
+        )
+        .unwrap();
+        let Message::Text(t) = ws.read().unwrap() else {
+            panic!("refusal first ({node})")
+        };
+        let v: Value = serde_json::from_str(t.as_str()).unwrap();
+        assert_eq!(
+            (&v["type"], &v["status"]),
+            (&json!("refused"), &json!(409)),
+            "{v}"
+        );
+    }
+
+    // Missing sync_word / sync_bits, and an invalid one of each: 400.
+    for qs in [
+        "view=sync_search",
+        "view=sync_search&sync_word=0x2DD4",
+        "view=sync_search&sync_bits=16",
+        "view=sync_search&sync_word=not-hex&sync_bits=16",
+        "view=sync_search&sync_word=0x2DD4&sync_bits=not-a-number",
+        // sync_word wider than sync_bits: refused by the same rule the block itself applies.
+        "view=sync_search&sync_word=0xFFFF&sync_bits=8",
+    ] {
+        let mut ws = connect_ws(
+            addr,
+            &format!("/ws/open/stage?token={TOKEN}&pipeline={pid}&node=bits&{qs}"),
+        )
+        .unwrap();
+        let Message::Text(t) = ws.read().unwrap() else {
+            panic!("refusal first ({qs})")
+        };
+        let v: Value = serde_json::from_str(t.as_str()).unwrap();
+        assert_eq!(
+            (&v["type"], &v["status"]),
+            (&json!("refused"), &json!(400)),
+            "{qs}: {v}"
+        );
+    }
+
+    // An unrecognised view value: still 400.
+    let mut ws = connect_ws(
+        addr,
+        &format!("/ws/open/stage?token={TOKEN}&pipeline={pid}&node=bits&view=bogus"),
+    )
+    .unwrap();
+    let Message::Text(t) = ws.read().unwrap() else {
+        panic!("refusal first")
+    };
+    let v: Value = serde_json::from_str(t.as_str()).unwrap();
+    assert_eq!(
+        (&v["type"], &v["status"]),
+        (&json!("refused"), &json!(400)),
+        "{v}"
+    );
+
+    stop_server(serving);
+}
+
 // T-089 inspector
 
 /// T-089: `POST /api/inspector/parse` evaluates a draft field map (the RDS worked recipe's) over
