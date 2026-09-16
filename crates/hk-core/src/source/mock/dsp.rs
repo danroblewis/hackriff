@@ -267,6 +267,17 @@ impl Plan {
         let w_hi = self.center_hz + self.rate_hz / 2.0;
         let lo = if lo <= w_lo + 1.0 { w_lo + guard } else { lo };
         let hi = if hi >= w_hi - 1.0 { w_hi - guard } else { hi };
+        // T-231: the same guard against the recording's **own** band edge. A recording's spectrum
+        // is periodic at its sample rate, so a transition straddling `rec_center ± rec_rate/2`
+        // passes the alias of content at the opposite edge: the device would present recorded
+        // energy at a frequency it was never tuned to (a tone 10 kHz inside one edge reading as a
+        // line 10 kHz outside the other, 25 dB down). Ending the roll-off at the recorded edge
+        // keeps every served sample truthful; the complement noise fills the strip. A recording
+        // whose baseband filter is narrower than its rate (`rec_usable_hz`) already has that
+        // margin, and passing through (above) serves the recording as captured.
+        let rec_lo = self.rec_center_hz - self.rec_rate_hz / 2.0;
+        let rec_hi = self.rec_center_hz + self.rec_rate_hz / 2.0;
+        let (lo, hi) = (lo.max(rec_lo + guard), hi.min(rec_hi - guard));
         (hi - lo > 1.0).then_some((lo, hi))
     }
 
@@ -354,6 +365,22 @@ impl Render {
         self.noise_var =
             (plan.floor_power - plan.quant_power).max(0.0) * plan.rate_hz / plan.rec_rate_hz;
         let served = plan.served();
+        // T-231 device contract: the mock never presents samples attributed to a tuning it is not
+        // on. The band select, roll-off included, stays inside the recorded band, so no alias of
+        // the recording's opposite edge reaches the output. Checked once per retune so the harness
+        // cannot lie to a test that trusts it.
+        if let Some((lo, hi)) = served
+            && !plan.passthrough()
+        {
+            let guard = 0.5 * plan.transition * plan.rate_hz;
+            let rec_lo = plan.rec_center_hz - plan.rec_rate_hz / 2.0;
+            let rec_hi = plan.rec_center_hz + plan.rec_rate_hz / 2.0;
+            assert!(
+                lo - guard >= rec_lo - 1.0 && hi + guard <= rec_hi + 1.0,
+                "mock would serve {lo}..{hi} Hz (± {guard} Hz of transition) outside the recorded \
+                 band {rec_lo}..{rec_hi} Hz"
+            );
+        }
         self.noise_only = served.is_none();
         let width = (plan.transition * plan.rate_hz / plan.rec_rate_hz).min(0.25);
         let passthrough = plan.passthrough() && pos.fract() == 0.0;
@@ -983,6 +1010,64 @@ mod tests {
         r.render(&mut VecFeed(x, 0), &mut out, 20_000).unwrap();
         let alias = power_at(&out[2_000..], -190e3, 400e3);
         assert!(alias < 1e-6, "tone folded to the lower edge: {alias:e}");
+    }
+
+    /// T-231: a recording's spectrum is periodic at its sample rate, so a band-select transition
+    /// that straddles the recording's **own** band edge passes the alias of content at the
+    /// opposite edge, and the device presents recorded energy at a frequency it was never on.
+    /// T-175 pulled the served band inside the *window* edge; the recorded band edge needs the
+    /// same guard whenever the recording has no narrower baseband filter (`usable == rate`).
+    #[test]
+    fn content_at_the_recorded_band_edge_does_not_alias_outside_it() {
+        // Recording 99.5..100.5 MHz at 1 Msps, usable == rate. A tone at 100.49 MHz sits 10 kHz
+        // inside the upper edge; sampled at 1 Msps it is indistinguishable from 99.49 MHz, which
+        // is 10 kHz *below* the recorded band.
+        let x = tone(490e3, 1e6, 1 << 16, 0.25);
+        // Window 99.2..99.6 MHz at 400 kS/s: the recorded band's lower edge (99.5 MHz) falls
+        // inside the window, so the band-select transition sits astride it.
+        let mut r = Render::new(plan(99.4e6, 400e3), 1, None);
+        let mut out = Vec::new();
+        r.render(&mut VecFeed(x, 0), &mut out, 20_000).unwrap();
+        // 99.49 MHz is +90 kHz in this window: outside the recorded band, where nothing recorded
+        // may appear.
+        let alias = power_at(&out[2_000..], 90e3, 400e3);
+        assert!(
+            alias < 1e-6,
+            "recorded content aliased below the recorded band: {alias:e}"
+        );
+    }
+
+    /// T-231: the band select, its roll-off included, never reaches outside the recorded band, with
+    /// or without a recorded baseband filter narrower than the rate. (Passing through is exempt: it
+    /// serves the recording as captured, unfiltered.)
+    #[test]
+    fn served_never_leaves_the_recorded_band() {
+        for usable in [1e6, 750e3] {
+            for center in [98.5e6, 99.4e6, 99.9e6, 100.0e6, 100.6e6, 101.5e6] {
+                for rate in [200e3, 400e3, 1e6, 2e6, 4e6] {
+                    let p = Plan {
+                        rec_usable_hz: usable,
+                        ..plan(center, rate)
+                    };
+                    let Some((lo, hi)) = p.served() else {
+                        continue;
+                    };
+                    if p.passthrough() {
+                        continue;
+                    }
+                    let guard = 0.5 * p.transition * p.rate_hz;
+                    let (rec_lo, rec_hi) = (
+                        p.rec_center_hz - p.rec_rate_hz / 2.0,
+                        p.rec_center_hz + p.rec_rate_hz / 2.0,
+                    );
+                    assert!(
+                        lo - guard >= rec_lo - 1.0 && hi + guard <= rec_hi + 1.0,
+                        "window {center} Hz at {rate} Hz (usable {usable} Hz) serves {lo}..{hi} \
+                         ± {guard} Hz, outside the recorded band {rec_lo}..{rec_hi}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
