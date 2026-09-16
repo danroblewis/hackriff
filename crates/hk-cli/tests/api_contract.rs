@@ -8,7 +8,7 @@
 //!
 //! Coverage: `/api/streams`, `/api/history`, `/api/floor`, `/api/inventory` (including the T-078
 //! `state`/`lifecycle`/`recurrence` and T-163 `estimated_params` fields),
-//! `/api/inventory/{id}[/promote\|/decode]` (T-078, T-159, T-163), `/api/recipes/match` (T-164),
+//! `/api/inventory/{id}[/promote\|/decode]` (T-078, T-159, T-163),
 //! `/api/analysis/strongest` (T-079), `/api/status`, `/api/control/*`, `/api/bookmarks[/<id>]`,
 //! `/api/selections[/<id>[/links]]`, `/api/outputs[...]`, `/ws/<id>` (spectrum header),
 //! `/ws/open/listen` (audio header + PCM data records on the 101.3 MHz station), and auth/CORS
@@ -418,6 +418,10 @@ fn cluster_routes_answer_as_documented() {
     let (st, _) = post(addr, "/api/clusters", "{}");
     assert_eq!(st, 405);
     let (st, _) = put(addr, "/api/clusters", "{}");
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
 
 /// T-164 (ADR-0013 gap 7b): `GET /api/recipes/match?emitter=<id>` answers as `docs/api.md`
 /// documents it. The answer is ranked *evidence about a measurement*, so it carries the
