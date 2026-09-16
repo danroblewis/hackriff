@@ -45,6 +45,10 @@ fn classify_one(
     req.obw_hz = Some(s.obw_hz);
     req.snr_db = Some(snr_db);
     req.symbols = symbols.as_ref();
+    // The T-200 post-sync verifier, on the same symbol-geometry view C14 measured (it re-ranks the
+    // within-family class only, so every family-level figure below is unaffected by construction).
+    req.symbol_samples = Some(&s.symbol_samples);
+    req.symbol_sample_rate_hz = Some(s.symbol_sample_rate_hz);
     Classifier::new().classify(&req)
 }
 
