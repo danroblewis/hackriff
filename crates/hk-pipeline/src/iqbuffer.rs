@@ -205,6 +205,10 @@ struct Alloc {
     /// `f64` bits of the allocated fraction.
     progress: AtomicU64,
     cancel: AtomicBool,
+    /// Samples the feeder saw before the ring finished opening (T-217): never buffered, because
+    /// there was no writer yet. Persists once the ring opens, so the status keeps explaining a gap
+    /// at the start of a large ring's history.
+    skipped: AtomicU64,
 }
 
 impl Alloc {
@@ -247,6 +251,7 @@ impl IqBufferService {
             writer: Mutex::new(None),
             progress: AtomicU64::new(0f64.to_bits()),
             cancel: AtomicBool::new(false),
+            skipped: AtomicU64::new(0),
         });
         let mut allocator = None;
         if active {
@@ -334,10 +339,13 @@ impl IqBufferService {
     /// The status: segments overlapping `[t0_s, t1_s)` (all when `None`), the newest `limit`.
     pub fn status(&self, t0_s: Option<f64>, t1_s: Option<f64>, limit: usize) -> IqBufferStatus {
         let ns = |s: f64| (s * 1e9).round() as i64;
+        let skipped = self.alloc.skipped.load(Ordering::Relaxed);
         let (reason, allocation) = match &*lock(&self.alloc.phase) {
             Phase::Ready(b) => {
                 let b = b.clone();
-                return b.status(t0_s.map(ns), t1_s.map(ns), limit);
+                let mut s = b.status(t0_s.map(ns), t1_s.map(ns), limit);
+                s.allocation_skipped_samples = skipped;
+                return s;
             }
             Phase::Allocating => (
                 "allocating the IQ capture ring in the background: capture is not buffered until \
@@ -349,6 +357,7 @@ impl IqBufferService {
         };
         let mut s = IqBufferStatus::disabled(&self.cfg, reason);
         s.allocation = allocation;
+        s.allocation_skipped_samples = skipped;
         if allocation == Some(Allocation::Allocating) {
             s.allocation_progress =
                 Some(f64::from_bits(self.alloc.progress.load(Ordering::Relaxed)));
@@ -617,6 +626,9 @@ impl IqBufferService {
                     let Some(w) = guard.as_mut() else {
                         next_index = None;
                         cursor.set(c.end_sample());
+                        self.alloc
+                            .skipped
+                            .fetch_add(c.len as u64, Ordering::Relaxed);
                         continue;
                     };
                     let t = &c.provenance.tune;
@@ -670,6 +682,10 @@ impl IqBufferService {
                     if let Some(w) = lock(&self.alloc.writer).as_mut() {
                         w.count_dropped(lost_samples);
                         dropped_before += lost_samples;
+                    } else {
+                        self.alloc
+                            .skipped
+                            .fetch_add(lost_samples, Ordering::Relaxed);
                     }
                     next_index = None;
                     cursor.set(resume_at);
