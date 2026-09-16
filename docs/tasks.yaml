@@ -4765,7 +4765,7 @@ tasks:
     milestone: M2-hardening
     title: 'Bandwidth estimates swing 12-125 kHz for one station, so skirt fragments
       never reach the overlap guard - the honest route to the dedup target'
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: PIPE
@@ -4813,6 +4813,12 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    fourth_instance_2026_09_16: 'T-280 found snr_mean_db is a band AVERAGE, so a host
+      strength FALLS as its emission widens - penalising exactly the emissions that must act
+      as hosts (station mean 7.3 dB vs fragment 4.7 dB = 2.6 dB under a 6 dB margin, where
+      the peaks are 14.3 vs 5.9 = 8.5 dB). Fourth instance after sigma_ap (snippet length)
+      and burst_length (watch duration). Include it in the audit.'
+
   - id: T-282
     milestone: M2-hardening
     title: 'Four use cases flagged uncertain by the T-258 capability audit: is a
@@ -5012,6 +5018,37 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+  - id: T-288
+    milestone: M2-hardening
+    title: 'Second dedup mechanism: one station yields ten comparable-strength,
+      time-overlapping tracks that entity resolution collapses only to five rows'
+    status: todo
+    priority: high
+    deps:
+    - T-280
+    parallel_group: PIPE
+    use_cases:
+    - AWARE-053
+    found_by: 'T-280 (2026-09-16), which isolated it after fixing the host-strength defect:
+      candidates went 20 -> 16 and the 99.55-99.80 MHz region collapsed 5 rows -> 1, but
+      101.46 MHz yields tracks with counts 261/231/112/65/58/56/51/39/8/3 at widths 18-64 kHz,
+      and 101.67 adds three more'
+    acceptance: 'NO host/fragment rule can reach these - widest/narrowest is 3.4x against the
+      4x gate, and there is no 6 dB gap between a station core and itself, so T-280''s fix is
+      not extensible to them. This needs the bandwidth route T-280 ruled out for fragments,
+      PLUS a discriminator separating a skirt island from a genuine subcarrier: widening a
+      narrow in-band emission to its host extent would break the invariant T-280 protected
+      (a 12.5 kHz subcarrier inside a 180 kHz station must stay its own entry). Keep
+      t219_a_narrow_signal_inside_a_confirmed_wide_station_stays_visible and
+      t219_two_adjacent_stations_with_separated_extents_stay_two_entries green, and do not
+      move OVERLAP_MIN_FRACTION, bandwidth_ratio, inband_fragment_bw_ratio or
+      FRAGMENT_SNR_MARGIN_DB. Report the candidate count and settle time against the user
+      a-priori target of ~4-7 signals in ~2-10 s; T-280 reached 16 in 13.24 s stream time'
+    area: crates/hk-detect, crates/hk-estimate (bandwidth), crates/hk-model (entity resolution)
+    needs: none
+    model: opus
+    effort: high
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
