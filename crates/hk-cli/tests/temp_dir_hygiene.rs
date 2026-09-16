@@ -10,6 +10,12 @@
 //!   fixture directory this file creates and destroys itself, per the task's safety rule: never
 //!   run the sweep under test against the live system temp dir, which other agents and sessions
 //!   use concurrently.
+//! - `every_temp_data_dir_call_site_is_guarded` (T-232) is a structural regression guard: it greps
+//!   every `.rs` file in the repo and fails if a `let ... = temp_data_dir()` binding isn't
+//!   followed by a `TempDataDirGuard::new` within a few lines. T-217 added a call site
+//!   (`iq_buffer_allocation_http.rs`) that skipped the guard and cleaned up with a bare
+//!   `remove_dir_all` a panic could skip entirely; this test stops that pattern from landing again
+//!   without anyone noticing during a parallel task's review.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -170,4 +176,83 @@ fn stale_orphan_sweep_removes_only_dead_pid_and_old_dirs() {
     assert!(unrelated.exists(), "not an hk-replay-* name: never touched");
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Every `.rs` file under `root`, skipping VCS/build/dependency directories.
+fn rust_files(root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            if matches!(
+                name.as_ref(),
+                "target" | ".git" | "node_modules" | ".claude"
+            ) {
+                continue;
+            }
+            rust_files(&path, out);
+        } else if name.ends_with(".rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// T-232 regression guard: every `let ... = temp_data_dir();` binding (the test-scratch-dir
+/// convention throughout this crate) must be followed within a few lines by a
+/// `TempDataDirGuard::new` construction, so a killed test or a race with a lagging background
+/// thread still leaves the directory owned by a guard that retries cleanup (or keeps it on
+/// failure) instead of leaking it silently or relying on a bare `remove_dir_all` a panic can skip.
+///
+/// Deliberately excludes `fn temp_data_dir()` itself and the two production call sites
+/// (`unwrap_or_else(temp_data_dir)` in `pipeline.rs`/`serve.rs`, matched by shape, not by file):
+/// those aren't a local `let` binding, and a real `hk serve`/`hackriffd` run without `--data-dir`
+/// owns its directory for the run's lifetime, not a test scratch dir a guard should delete.
+#[test]
+fn every_temp_data_dir_call_site_is_guarded() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    rust_files(&repo_root, &mut files);
+    assert!(
+        files.len() > 50,
+        "sanity: found suspiciously few .rs files under {}: {}",
+        repo_root.display(),
+        files.len()
+    );
+
+    const WINDOW: usize = 8;
+    let mut violations = Vec::new();
+    for path in &files {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            // Real call sites are code, not comments or doc examples quoting the pattern (this
+            // file's own doc comments above reference `= temp_data_dir()` in prose); require an
+            // actual `let ... = temp_data_dir();` statement.
+            if trimmed.starts_with("//") || !trimmed.starts_with("let ") {
+                continue;
+            }
+            if !line.contains("= temp_data_dir();") {
+                continue;
+            }
+            let guarded = lines[i..lines.len().min(i + 1 + WINDOW)]
+                .iter()
+                .any(|l| l.contains("TempDataDirGuard::new("));
+            if !guarded {
+                violations.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "temp_data_dir() call site(s) without a TempDataDirGuard within {WINDOW} lines \
+         (T-232 - a killed test or a slow background thread will leak these):\n{}",
+        violations.join("\n")
+    );
 }
