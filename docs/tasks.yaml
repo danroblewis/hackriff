@@ -6070,7 +6070,8 @@ tasks:
     milestone: M2-hardening
     title: Bias-tee state is not in provenance, so a bias-tee left on into a passive or DC-shorted port
       is invisible
-    status: in-progress
+    status: done
+    commit: 5fe0cf2
     priority: normal
     deps: []
     parallel_group: PIPE
@@ -6193,6 +6194,63 @@ tasks:
       and never lower to Clear. The VoicePermit seam already exists (hk-detect/src/trunk/voice.rs): a future
       vocoder must take one in its signature and the only way to get one is to ask. Keep that property -
       do not add a bypass for the decode path that reads the ALGID'
+  - id: T-331
+    milestone: M2-hardening
+    title: Floor context is not keyed on bias-tee state, so an active antenna and a passive one pool into
+      one noise floor
+    status: todo
+    priority: normal
+    deps:
+    - T-325
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'T-325 made bias-tee state visible and deliberately changed no scoring. hk_dsp::floor::tracker::GainKey
+      keys on gain state and an antenna_port hash but NOT bias_tee, so bias-tee-on and bias-tee-off frames
+      pool into one floor context even though an active antenna''s LNA shifts the floor. This is the same
+      shape T-303 fixed for BaselineKey, one layer down, and it is device-local physics by T-259''s rule
+      so it belongs on the reads-the-device side. Add bias_tee to the key, or state with evidence why gain
+      state already separates them and pin that with a test. Adding it changes floor CONTINUITY behaviour
+      - a switch will start a new context rather than continuing one - so say what happens to an in-flight
+      floor estimate at the moment of the switch, and make the answer safe: a floor silently restarting
+      immature is a novelty-alarm storm, and one silently continuing across the switch is the bug. Treat
+      Unknown as its own context, never as off'
+  - id: T-332
+    milestone: M2-hardening
+    title: A bias-tee switch is not a device provenance step, so switching it can raise a spurious floor-rise
+      anomaly
+    status: todo
+    priority: normal
+    deps:
+    - T-325
+    parallel_group: PIPE
+    model: opus
+    acceptance: provenance_steps in the report API already carries gain, calibration, spur-mask and antenna-port,
+      so the explain-the-device-first path can suppress a novelty alarm the operator caused. A bias-tee
+      switch is exactly such a self-inflicted change - an active antenna's LNA shifts the floor the instant
+      it powers - and it is not in that list, so switching the tee currently presents as an unexplained
+      floor rise. Add a bias-tee step. T-303 already relies on this machinery for the antenna-port case,
+      where it noted that a port change is SEQUENTIAL and the alarm path explains it as self-inflicted;
+      the same argument applies here. Do not suppress the anomaly - explain it, so the operator sees what
+      caused the change rather than seeing nothing
+  - id: T-333
+    milestone: M2-hardening
+    title: Baselines should refuse or disclose comparisons across differing bias-tee state, and treat unknown
+      as incomparable
+    status: todo
+    priority: normal
+    deps:
+    - T-325
+    - T-331
+    parallel_group: PIPE
+    model: opus
+    acceptance: 'A capture taken with an active antenna powered is not comparable with one taken without
+      it, and occupancy and floor baselines currently compare them silently. Decline the comparison, or
+      disclose it in the result - and treat Unknown as INCOMPARABLE rather than assuming off, which is the
+      whole point of T-325''s three-valued type. Sequence after T-331 since it depends on what the floor
+      key does. The failure mode to avoid is the one T-303 measured: pooling two incomparable sources does
+      not mainly cause false alarms, it causes MASKING - a real 12 dB rise scored 1.000 against its own
+      baseline and 0.000 against the pooled one'
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
