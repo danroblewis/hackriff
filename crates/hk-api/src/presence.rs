@@ -161,11 +161,15 @@ fn read(state: &ApiState, id: EmitterId, q: &[(String, String)]) -> Result<Value
         .take(MAX_PRESENCE_INTERVALS)
         .map(interval_json)
         .collect();
+    // The same idle gap the intervals above were closed under — and the one `/api/inventory` reads
+    // with — so the projection cannot contradict the track it accompanies. hk-api does not know the
+    // scheduler's revisit period, and a shorter gap would claim an absence nobody observed.
     let projected = hk_model::presence_in_window(
         &all,
         w.unwrap_or_else(|| {
             TimeRange::new(Timestamp::from_unix_nanos(i64::MIN / 2), Timestamp::now())
         }),
+        IdleGap::conservative(),
     );
     Ok(json!({
         "emitter": live.to_string(),
@@ -173,19 +177,10 @@ fn read(state: &ApiState, id: EmitterId, q: &[(String, String)]) -> Result<Value
         "intervals": listed,
         "total": total,
         "truncated": truncated,
-        // The same projection `/api/inventory` serves on the row, so the two surfaces can never
-        // disagree about liveness for one emitter.
-        "presence": json!({
-            "intervals": projected.intervals,
-            "on_air_s": projected.on_air_s,
-            "last_interval": projected.last_interval.map(|i| json!({
-                "t_start_s": ts_s(i.time.start),
-                "t_end_s": ts_s(i.time.end),
-                "open": i.open,
-            })),
-            "liveness": projected.liveness.as_str(),
-            "ended_t_s": projected.ended_t.map(ts_s),
-        }),
+        // Rendered by the same function that renders the row's own object on `/api/inventory`, so
+        // the two surfaces cannot disagree about one emitter's liveness or its decayed confidence
+        // (T-251). An invariant of construction, not of two hand-written blocks kept in step.
+        "presence": crate::query::presence_json(&projected),
     }))
 }
 

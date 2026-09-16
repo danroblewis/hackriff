@@ -16,7 +16,32 @@
 //! maximally uncertain). The band-plan allocation part of the boring prior stays 0 here (C17
 //! suggestions are not joined to tracks yet), so the prior is measured evidence only.
 //!
-//! The table is bounded ([`MAX_TRACKS`]; the least recently seen track is evicted).
+//! # Re-checking a candidate whose signal stopped (T-251, ADR-0017 TM-6)
+//!
+//! A closed track is **kept**, not dropped. Dropping it on close is what left stopped candidates
+//! never re-verified: the moment a signal stopped, its candidate left the C12 set, the bandit lost
+//! its arm, and the scheduler never went back to that frequency on its account — so nothing ever
+//! established whether the signal had really gone. A candidate whose signal stopped is precisely
+//! the one worth re-checking.
+//!
+//! So [`CandidateTable::on_closed`] records `closed_ns` instead of removing the entry, and it
+//! stays a scorer input — an arm the bandit can spend a dwell on — while its
+//! [`TrackEvidence::confidence`] decays: `1` until the silence exceeds the idle gap (below that
+//! the receiver has observed no absence at all), then one `1/e` per further gap
+//! (`hk_model::presence`). At [`hk_model::recheck_horizon_s`] — where that confidence reaches the
+//! scheduler's own `MIN_DWELL_SHARE`, about four gaps — [`CandidateTable::prune_stale`] retires
+//! it, because a dwell spent there is one taken from a candidate with live evidence.
+//!
+//! Two things this is **not**. It is not a decrementing timer: nothing is incremented or
+//! decremented, and confidence is recomputed from `closed_ns` and the clock on every read, so
+//! evidence arriving on the track clears the silence outright ([`CandidateTable::on_member`]).
+//! And retiring an entry here removes **only** a scheduler working-set row — never an emitter,
+//! a presence interval or anything in History, none of which this module can reach. A signal
+//! returning after the horizon arrives as a new track and enters the table fresh, while the
+//! inventory keeps it on the *same* emitter (T-262).
+//!
+//! The table is bounded ([`MAX_TRACKS`]; a retired-but-not-yet-pruned track is evicted first,
+//! then the least recently seen).
 
 use std::collections::{HashMap, VecDeque};
 
@@ -26,7 +51,9 @@ use hk_context::occupancy::score::{
 };
 use hk_model::attention::baseline::{BaselineResolution, Maturity};
 use hk_model::attention::score::{CandidateSubject, NoveltyScore};
-use hk_model::{FreqRange, Timestamp, TrackId};
+use hk_model::{
+    FreqRange, IdleGap, Timestamp, TrackId, confidence_after_silence, recheck_horizon_s,
+};
 
 /// Most tracks kept.
 pub const MAX_TRACKS: usize = 4096;
@@ -87,6 +114,10 @@ pub struct TrackEvidence {
     pub novelty_history: VecDeque<f64>,
     /// Latest scored novelty.
     pub last_novelty: f64,
+    /// When the track closed (sample clock), ns; `None` while evidence is still arriving. A closed
+    /// track is kept as a **re-check request** until its confidence decays past the horizon (module
+    /// docs), never dropped on close.
+    pub closed_ns: Option<i64>,
     /// `last_ns` at the latest novelty sample (a revisit adds one sample).
     history_ns: i64,
 }
@@ -108,6 +139,7 @@ impl TrackEvidence {
             trust_tested: false,
             novelty_history: VecDeque::with_capacity(MAX_NOVELTY_HISTORY),
             last_novelty: 0.0,
+            closed_ns: None,
             history_ns: i64::MIN,
         }
     }
@@ -124,6 +156,21 @@ impl TrackEvidence {
         } else {
             f64::from(self.suspect_members) / f64::from(self.members)
         }
+    }
+
+    /// Silence since the track closed, s at `now_ns`; `None` while it is still open — evidence is
+    /// still arriving, so no absence has been observed.
+    pub fn silence_s(&self, now_ns: i64) -> Option<f64> {
+        self.closed_ns
+            .map(|c| now_ns.saturating_sub(c).max(0) as f64 / 1e9)
+    }
+
+    /// Confidence in this candidate's hypothesis under `gap` (`hk_model::presence`, the same law
+    /// the inventory row reads): 1 while it is still on the air, then one `1/e` per idle gap of
+    /// observed silence once it has closed. Derived on every call; never stored.
+    pub fn confidence(&self, gap: IdleGap, now_ns: i64) -> f64 {
+        self.silence_s(now_ns)
+            .map_or(1.0, |s| confidence_after_silence(s, gap))
     }
 
     /// `(periodicity, expected interval s)`: periodicity = 1 − CV of the inter-burst intervals
@@ -188,6 +235,10 @@ pub struct CandidateTable {
     changed: bool,
     /// Newest sample-clock time seen (members, scoring passes), ns.
     now_ns: i64,
+    /// The reading's idle gap: the decay constant of a closed track's confidence and, through
+    /// `recheck_horizon_s`, how long it is kept as a re-check request. Defaults to the
+    /// conservative 60 s, which claims no absence that was not observed.
+    idle_gap: IdleGap,
 }
 
 impl CandidateTable {
@@ -206,6 +257,46 @@ impl CandidateTable {
         self.tracks.get(&track)
     }
 
+    /// Sets the reading's idle gap, from the scheduler's revisit period
+    /// (`IdleGap::from_revisit_s`). Unset, it is the conservative 60 s.
+    pub fn set_idle_gap(&mut self, gap: IdleGap) {
+        self.idle_gap = gap;
+    }
+
+    /// The idle gap in force.
+    pub fn idle_gap(&self) -> IdleGap {
+        self.idle_gap
+    }
+
+    /// Closed tracks still being re-checked (module docs).
+    pub fn stale(&self) -> usize {
+        self.tracks
+            .values()
+            .filter(|t| t.closed_ns.is_some())
+            .count()
+    }
+
+    /// Retires closed tracks past [`recheck_horizon_s`]: their confidence has decayed below the
+    /// scheduler's own dwell-share floor, so a dwell spent re-checking them is one taken from a
+    /// candidate with live evidence.
+    ///
+    /// This removes a **scheduler working-set row only**. The emitter, its presence intervals and
+    /// History are in the repository, which this module cannot reach; a signal returning later
+    /// arrives as a new track and is resolved onto the same emitter there (T-262).
+    fn prune_stale(&mut self) {
+        let horizon_ns = (recheck_horizon_s(self.idle_gap) * 1e9) as i64;
+        let now = self.now_ns;
+        let mut dropped = false;
+        self.tracks.retain(|_, t| {
+            let keep = t
+                .closed_ns
+                .is_none_or(|c| now.saturating_sub(c) <= horizon_ns);
+            dropped |= !keep && t.confirmed;
+            keep
+        });
+        self.changed |= dropped;
+    }
+
     /// Publish at the next pass (a verification group ended).
     pub fn mark_changed(&mut self) {
         self.changed = true;
@@ -220,10 +311,12 @@ impl CandidateTable {
         if self.tracks.len() < MAX_TRACKS {
             return;
         }
+        // A closed track is only a re-check request, so it goes before anything still on the air
+        // (`false` orders first, and `closed_ns.is_none()` is false for a closed one).
         if let Some(old) = self
             .tracks
             .iter()
-            .min_by_key(|(_, t)| (t.confirmed, t.last_ns))
+            .min_by_key(|(_, t)| (t.closed_ns.is_none(), t.confirmed, t.last_ns))
             .map(|(id, _)| *id)
         {
             let t = self.tracks.remove(&old);
@@ -246,6 +339,9 @@ impl CandidateTable {
         e.f_hi_hz = e.f_hi_hz.max(m.f_hi_hz);
         e.first_ns = e.first_ns.min(m.t_ns);
         e.last_ns = e.last_ns.max(m.t_ns);
+        // Evidence arrived, so whatever silence had accumulated is over. Nothing was stored, so
+        // there is nothing to undo — the same reversibility the presence intervals have.
+        e.closed_ns = None;
         if e.members == u32::MAX / 2 {
             e.members /= 2;
             e.suspect_members /= 2;
@@ -298,10 +394,15 @@ impl CandidateTable {
         self.changed = true;
     }
 
-    /// `track` closed.
+    /// `track` closed. It is **kept**, not dropped (module docs): a candidate whose signal
+    /// stopped is exactly the one worth re-checking, and dropping it here is what left stopped
+    /// candidates never re-verified. It stays a scorer input, with a decaying confidence, until
+    /// [`Self::prune_stale`] retires it at the re-check horizon.
     pub fn on_closed(&mut self, track: TrackId) {
-        if self.tracks.remove(&track).is_some_and(|t| t.confirmed) {
-            self.changed = true;
+        let now = self.now_ns;
+        if let Some(e) = self.tracks.get_mut(&track) {
+            e.closed_ns.get_or_insert(now);
+            self.changed |= e.confirmed;
         }
     }
 
@@ -321,6 +422,7 @@ impl CandidateTable {
     /// each track seen again since the last pass.
     pub fn inputs(&mut self, now_ns: i64, src: &dyn EvidenceSource) -> Vec<CandidateInput> {
         self.now_ns = self.now_ns.max(now_ns);
+        self.prune_stale();
         let new_emitter = src.new_emitter();
         let window_ns = (FirstSightingRate::WINDOW_S * 1e9) as i64;
         let mut out = Vec::with_capacity(self.tracks.len());
@@ -548,6 +650,83 @@ mod tests {
         assert_eq!(t.on_trust_tested(track_key(imd)), Some(imd));
         let c = find(&mut t);
         assert!(!hk_context::occupancy::score::score_candidate(&w, &c).needs_verification);
+    }
+
+    /// T-251 (ADR-0017 TM-6): a track that closes is **kept** as a re-check request with a
+    /// decaying confidence, and retired only at the horizon. Before this it was dropped on close,
+    /// so the scheduler lost the arm the instant the signal stopped and never went back to find
+    /// out whether it had really gone.
+    #[test]
+    fn candidates_keep_a_closed_track_as_a_recheck_request_until_the_horizon() {
+        let gap = IdleGap::from_revisit_s(1.0); // 2 s gap, ~8 s horizon
+        let mut t = CandidateTable::default();
+        assert_eq!(
+            t.idle_gap(),
+            IdleGap::conservative(),
+            "unset claims no absence it cannot show"
+        );
+        t.set_idle_gap(gap);
+        let id = TrackId::new();
+        t.on_member(id, &member(0.0, false));
+        t.on_confirmed(id, FreqRange::new(433.9e6, 433.91e6), false);
+
+        // On the air: no observed absence at all.
+        let e = t.get(id).unwrap();
+        assert_eq!(e.silence_s(ns_of(0.0)), None);
+        assert_eq!(e.confidence(gap, ns_of(0.0)), 1.0);
+
+        t.on_closed(id);
+        assert!(t.take_changed(), "a closed confirmed track republishes");
+        let e = t.get(id).unwrap();
+        assert_eq!(e.closed_ns, Some(ns_of(0.0)), "kept, not dropped");
+        assert_eq!(e.silence_s(ns_of(4.0)), Some(4.0));
+        assert!(e.confidence(gap, ns_of(4.0)) < 1.0, "and ranked lower");
+
+        // Inside the horizon it is still an arm: the scheduler can go back and look.
+        assert_eq!(
+            t.inputs(ns_of(4.0), &none()).len(),
+            1,
+            "a stopped candidate is still re-checked"
+        );
+        assert_eq!(t.stale(), 1);
+
+        // Past it the hypothesis has decayed below the dwell-share floor, so it is retired.
+        let horizon = recheck_horizon_s(gap);
+        assert!(
+            t.inputs(ns_of(horizon + 0.1), &none()).is_empty(),
+            "retired at the {horizon} s horizon"
+        );
+        assert_eq!(t.len(), 0);
+        assert!(t.take_changed(), "retiring an arm republishes too");
+    }
+
+    /// Reversible, with nothing to undo: evidence arriving on a closed track clears its silence.
+    #[test]
+    fn candidates_revive_when_evidence_returns() {
+        let gap = IdleGap::from_revisit_s(1.0);
+        let mut t = CandidateTable::default();
+        t.set_idle_gap(gap);
+        let id = TrackId::new();
+        t.on_member(id, &member(0.0, false));
+        t.on_confirmed(id, FreqRange::new(433.9e6, 433.91e6), false);
+        t.on_closed(id);
+        assert_eq!(t.stale(), 1);
+
+        t.on_member(id, &member(3.0, false));
+        assert_eq!(t.get(id).unwrap().closed_ns, None);
+        assert_eq!(t.stale(), 0);
+        assert_eq!(t.get(id).unwrap().confidence(gap, ns_of(3.0)), 1.0);
+        assert_eq!(t.inputs(ns_of(3.0), &none()).len(), 1);
+    }
+
+    /// The horizon's floor is the scheduler's own `MIN_DWELL_SHARE`, not a number of this
+    /// module's choosing. Asserted across the crate boundary so the two cannot drift apart.
+    #[test]
+    fn candidates_recheck_floor_is_the_schedulers_dwell_share() {
+        assert_eq!(
+            hk_model::NEGLIGIBLE_CONFIDENCE,
+            hk_core::scheduler::MIN_DWELL_SHARE
+        );
     }
 
     #[test]

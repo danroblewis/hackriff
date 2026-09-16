@@ -1068,6 +1068,8 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         "last_interval",
         "liveness",
         "ended_t_s",
+        "silence_s",
+        "confidence",
     ] {
         assert!(
             row["presence"].get(field).is_some(),
@@ -1093,6 +1095,32 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     assert!(
         row["presence"]["intervals"].as_u64().is_some(),
         "intervals counts the intervals intersecting the window: {row}"
+    );
+    // T-251 (ADR-0017 TM-6): `confidence` is what ranks a candidate that stopped *inside* the
+    // window below one transmitting now — the case window-scoping cannot answer, because
+    // `on_air_s` is blind to *when* inside the window the signal was on. It is a rank, never a
+    // lifetime: it removes no row, and a live row is fully confident by definition.
+    let confidence = row["presence"]["confidence"].as_f64();
+    assert!(
+        confidence.is_some_and(|c| (0.0..=1.0).contains(&c)),
+        "confidence is a 0-1 rank: {row}"
+    );
+    assert_eq!(
+        liveness == Some("live"),
+        confidence == Some(1.0),
+        "a live row is fully confident, and only a live row is: {row}"
+    );
+    if liveness == Some("absent") {
+        assert_eq!(
+            confidence,
+            Some(0.0),
+            "an absent row has no in-window hypothesis to rank: {row}"
+        );
+    }
+    assert_eq!(
+        row["presence"]["silence_s"].is_null(),
+        liveness == Some("absent"),
+        "silence_s is the time since the latest in-window interval ended: {row}"
     );
     if liveness == Some("absent") {
         assert_eq!(row["presence"]["intervals"], json!(0), "{row}");
@@ -1482,17 +1510,53 @@ fn events_and_presence_serve_the_durable_catalogue() {
             "{i}"
         );
     }
-    // The projection agrees with the row's own, so the two surfaces never disagree on liveness.
+    // The projection agrees with the row's own, so the two surfaces never disagree on liveness —
+    // or, since T-251, on the decayed confidence that ranks a stopped candidate.
     for field in [
         "intervals",
         "on_air_s",
         "last_interval",
         "liveness",
         "ended_t_s",
+        "silence_s",
+        "confidence",
     ] {
         assert!(
             track["presence"].get(field).is_some(),
             "presence projection missing {field}: {track}"
+        );
+    }
+    // Same emitter: this route and the inventory row must agree field for field — except
+    // `silence_s`, which on an unwindowed query is a reading of the live clock and so advances
+    // between two HTTP calls. Asserting bit equality there would assert the clock cannot tick; the
+    // invariant that matters is that the two surfaces agree on liveness and on the decayed rank.
+    let (st, one) = get(addr, &format!("/api/inventory/{id}"));
+    assert_eq!(st, 200, "{one}");
+    let without_silence = |p: &serde_json::Value| {
+        let mut p = p.clone();
+        p.as_object_mut()
+            .expect("presence is an object")
+            .remove("silence_s");
+        p
+    };
+    assert_eq!(
+        without_silence(&track["presence"]),
+        without_silence(&one["presence"]),
+        "the track route and the row serve the same projection: {track} vs {one}"
+    );
+    let (track_silence, row_silence) = (
+        track["presence"]["silence_s"].as_f64(),
+        one["presence"]["silence_s"].as_f64(),
+    );
+    assert_eq!(
+        track_silence.is_none(),
+        row_silence.is_none(),
+        "both surfaces say whether the row has been silent at all: {track} vs {one}"
+    );
+    if let (Some(a), Some(b)) = (track_silence, row_silence) {
+        assert!(
+            (a - b).abs() < 5.0,
+            "the same silence up to the clock ticking between two calls: {a} vs {b}"
         );
     }
     // A window scopes the track and carries its own live edge: a window before every interval

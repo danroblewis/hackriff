@@ -1366,9 +1366,17 @@ impl AttentionService {
         lock(&self.cands).table.mark_changed();
     }
 
-    /// T-128: `track` closed.
+    /// T-128: `track` closed. It stays a candidate, with a decaying confidence, until the
+    /// re-check horizon retires it (T-251; `crate::candidates` module docs).
     pub fn on_track_closed(&self, track: TrackId) {
         lock(&self.cands).table.on_closed(track);
+    }
+
+    /// T-251: the reading's idle gap, derived from the scheduler's revisit period. It sets how
+    /// fast a stopped candidate's confidence decays and how long it is kept as a re-check
+    /// request. Unset it is the conservative 60 s, which claims no absence that was not observed.
+    pub fn set_idle_gap(&self, gap: hk_model::IdleGap) {
+        lock(&self.cands).table.set_idle_gap(gap);
     }
 
     /// T-128: a trust-test verdict reached the candidate with bandit key `key`.

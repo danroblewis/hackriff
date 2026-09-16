@@ -248,6 +248,72 @@ fn liveness_and_ranking_never_read_the_sighting_count() {
     assert_eq!(stale.on_air_s, 0.0);
 }
 
+/// T-251 (ADR-0017 TM-6), through the repository: the user's own stopped-and-returned FM station
+/// reads `ended` with a decayed confidence while it is silent, and is fully confident again once
+/// it returns — with **both** presence intervals still on record. Nothing was deleted to make
+/// either reading true, and no decay state was stored between the two reads.
+#[test]
+fn a_stopped_candidate_decays_and_a_returning_one_is_confident_again() {
+    let mut r = repo();
+    let first = track_sighting(&mut r, fm_fp(99.8148e6, 377.5e3, 0.68), tr(94.0, 399.0), 19);
+    let id = r.record_sighting(&first, None).unwrap().emitter_id;
+    let gap = IdleGap::conservative(); // 60 s: the API's own reading
+
+    // On the air: confident by definition, and silence is zero.
+    let live = r.presence(id, tr(0.0, 399.0), gap, t(399.0)).unwrap();
+    assert_eq!(live.liveness, Liveness::Live);
+    assert_eq!(live.confidence, 1.0);
+    assert_eq!(live.silence_s, Some(0.0));
+
+    // Silent inside the window: still listed, still carrying its interval, ranked lower.
+    let ended = r.presence(id, tr(0.0, 639.0), gap, t(639.0)).unwrap();
+    assert_eq!(ended.liveness, Liveness::Ended);
+    assert_eq!(ended.silence_s, Some(240.0));
+    assert!(ended.confidence < live.confidence, "{ended:?}");
+    assert!(
+        (ended.confidence - confidence_after_silence(240.0, gap)).abs() < 1e-12,
+        "the row decays by the stated law and nothing else: {ended:?}"
+    );
+    assert_eq!(ended.intervals, 1, "not expired - it happened");
+
+    // The station returns (T-262: same emitter, new interval). Confidence recovers with no
+    // revival step, because it was never stored.
+    let second = track_sighting(&mut r, fm_fp(99.8151e6, 377.6e3, 0.37), tr(471.0, 530.0), 6);
+    let second = r.record_sighting(&second, None).unwrap();
+    assert_eq!(second.emitter_id, id, "revived, not duplicated");
+    let back = r.presence(id, tr(0.0, 530.0), gap, t(530.0)).unwrap();
+    assert_eq!(back.liveness, Liveness::Live);
+    assert_eq!(back.confidence, 1.0);
+    assert_eq!(back.intervals, 2, "both events kept");
+    assert_eq!(listed(&r), 1);
+
+    // Decay touched nothing on disk: the observation ledger still holds both source rows, and the
+    // whole reading re-derives from them under a different gap.
+    assert_eq!(r.observation_spans(id).unwrap().len(), 2);
+}
+
+/// Two rows with the same in-window on-air time, one live and one that stopped inside the window:
+/// `on_air_s` ranks them equal, confidence does not. This is the only case decay owns.
+#[test]
+fn confidence_separates_two_rows_that_on_air_time_ranks_equal() {
+    let mut r = repo();
+    let stopped = track_sighting(&mut r, fm_fp(88.1e6, 200e3, 0.5), tr(0.0, 100.0), 10);
+    let stopped = r.record_sighting(&stopped, None).unwrap().emitter_id;
+    let live = track_sighting(&mut r, fm_fp(97.7e6, 200e3, 0.5), tr(300.0, 400.0), 10);
+    let live = r.record_sighting(&live, None).unwrap().emitter_id;
+
+    let gap = IdleGap::conservative();
+    let window = tr(0.0, 400.0);
+    let a = r.presence(stopped, window, gap, t(400.0)).unwrap();
+    let b = r.presence(live, window, gap, t(400.0)).unwrap();
+
+    assert_eq!(a.on_air_s, b.on_air_s, "100 s each");
+    assert_eq!((a.liveness, b.liveness), (Liveness::Ended, Liveness::Live));
+    assert!(a.confidence < b.confidence, "{a:?} vs {b:?}");
+    // Both are still listed; decay is a rank, not a filter.
+    assert_eq!(listed(&r), 2);
+}
+
 /// Migration 0012 adds an index and nothing else: `emitter_observation`'s columns are exactly
 /// migration 0001's, and no `closed_at` / `close_reason` / decay column appeared.
 #[test]
