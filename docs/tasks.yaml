@@ -4573,7 +4573,7 @@ tasks:
   - id: T-264
     milestone: MUI
     title: 'ADR-0017 TM-8: History surface - the durable all-time catalogue, where ephemera are past events with a timespan'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-262
@@ -5301,7 +5301,7 @@ tasks:
     milestone: M3
     title: 'The synthetic psk-qam grid distorts its own waveforms, so no synchronisation
       can recover them and the M3 open set is partly measuring the harness'
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: M3A
