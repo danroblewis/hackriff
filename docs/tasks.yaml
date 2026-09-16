@@ -4509,7 +4509,7 @@ tasks:
   - id: T-263
     milestone: MUI
     title: 'ADR-0017 TM-7: past events mark the timeline scrubber, and scrubbing re-derives the live lists from the IQ ring'
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-260
@@ -4522,6 +4522,14 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    classification_error_2026_09_16: 'FILED WITHOUT core_interface AND THAT WAS WRONG.
+      T-263 needed an additive public API surface (`at` on /api/inventory) because t0/t1
+      both select rows AND scope presence, while Confirmed must have the scoping without
+      the selection. The task flagged it for review rather than slipping it in. Accepted:
+      additive, contract-tested, 400 on at+t0/t1, family_in_window stays absent. The
+      lesson is for task filing - anything that may need the wire to answer a new question
+      is core_interface even when it looks like UI work.'
+
   - id: T-264
     milestone: MUI
     title: 'ADR-0017 TM-8: History surface - the durable all-time catalogue, where ephemera are past events with a timespan'
