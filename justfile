@@ -63,6 +63,10 @@ acceptance-m2 *args:
 acceptance-m3 *args:
     HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_m3 {{args}}
 
+# M4 (trunking) acceptance: T-267 control-channel hunting through the mock SDR device.
+acceptance-m4 *args:
+    HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_m4 {{args}}
+
 test-py:
     cd py && uv run --locked pytest
 

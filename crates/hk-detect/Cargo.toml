@@ -18,6 +18,9 @@ parity-check = []
 [dependencies]
 hk-core.workspace = true
 hk-dsp.workspace = true
+# T-267: the repo's CRC (`framing::crc::BitCrc`) for control-channel frame confirmation, rather
+# than a second CRC implementation in the workspace.
+hk-estimate.workspace = true
 hk-model.workspace = true
 # T-006: ci8 clip counting (`clip`).
 num-complex.workspace = true

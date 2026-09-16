@@ -19,11 +19,16 @@
 //! - [`stream`]: [`publish_framed_bits`] — a gated hk-stream `bits` stream whose class is the
 //!   emitter's.
 
+pub mod c4fm;
 pub mod demod;
 pub mod receiver;
 pub mod record;
 pub mod stream;
 
+pub use c4fm::{
+    C4FM_INNER_DEVIATION_HZ, C4FM_OUTER_DEVIATION_HZ, C4FM_SYMBOL_RATE_BD, C4fmConfig, C4fmDemod,
+    C4fmError, C4fmSymbols,
+};
 pub use demod::{
     FSK_DEMOD_VERSION, FskDemod, FskDemodConfig, FskDemodError, FskDemodRequest, FskLock,
     FskSymbols, TimingSeedMethod,

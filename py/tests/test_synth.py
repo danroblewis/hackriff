@@ -39,6 +39,7 @@ SMALL: dict[str, dict] = {
     "adsb_squitter": {"duration_s": 0.1, "messages_per_aircraft": 4},
     "pocsag_pagers": {},
     "acars_message": {"prekey_s": 0.02, "text": "TEST"},
+    "trunk_control_channel": {"duration_s": 0.2},
 }
 
 

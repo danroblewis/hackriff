@@ -31,6 +31,8 @@ tungstenite.workspace = true
 hk-cli = { path = "../../crates/hk-cli" }
 # T-094 RDS recipe tutorial acceptance: the existing RDS decoder is the oracle.
 hk-demod.workspace = true
+# T-267 trunking control-channel acceptance: the candidacy/confirmation split under test.
+hk-detect.workspace = true
 # T-124 M2 acceptance: the recorded bandit vs round-robin scheduler simulator comparison.
 hk-sim = { path = "../../crates/hk-sim" }
 # T-206 M3 exit gate (tests/acceptance_m3.rs): T-213's evaluation harness and its synthetic
