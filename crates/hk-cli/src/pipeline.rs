@@ -792,6 +792,60 @@ fn alarm_control(
 /// T-122: the novelty alarm service behind the API's [`hk_api::anomalies::AnomalyControl`].
 pub struct PipelineAnomalies(pub Arc<hk_pipeline::alarms::AlarmService>);
 
+/// T-166: the same service behind the API's [`hk_api::selections::WatchControl`]. The region
+/// watches live with the alarms because they share the run's repository and the `anomalies`
+/// stream: a watch alert is an anomaly like any other.
+pub struct PipelineWatch(pub Arc<hk_pipeline::alarms::AlarmService>);
+
+impl hk_api::selections::WatchControl for PipelineWatch {
+    fn report(
+        &self,
+        id: hk_model::SelectionId,
+    ) -> Result<hk_api::selections::WatchReport, hk_api::selections::WatchFail> {
+        use hk_api::selections::{WatchAlertView, WatchFail, WatchSkipView};
+        let secs = |t: hk_model::Timestamp| t.as_unix_nanos() as f64 / 1e9;
+        let r = self.0.watch_report(id).map_err(|e| match e {
+            hk_pipeline::alarms::AlarmFail::NotFound => WatchFail::NotFound,
+            hk_pipeline::alarms::AlarmFail::Conflict(m)
+            | hk_pipeline::alarms::AlarmFail::Failed(m) => WatchFail::Failed(m),
+        })?;
+        Ok(hk_api::selections::WatchReport {
+            armed: r.armed,
+            alerts: r
+                .alerts
+                .iter()
+                .map(|a| WatchAlertView {
+                    anomaly_id: a.anomaly.to_string(),
+                    emitter: a.emitter.to_string(),
+                    f_lo: a.freq.lo_hz,
+                    f_hi: a.freq.hi_hz,
+                    t: secs(a.t),
+                    reason: a.reason.clone(),
+                })
+                .collect(),
+            skipped: r
+                .skipped
+                .iter()
+                .map(|s| WatchSkipView {
+                    emitter: s.emitter.to_string(),
+                    reason: s.reason.as_str().to_string(),
+                    relation: s.relation.as_ref().map(|x| x.kind.as_str().to_string()),
+                    artifact: s
+                        .relation
+                        .as_ref()
+                        .and_then(|x| x.artifact)
+                        .map(|k| k.as_str().to_string()),
+                    source: s.relation.as_ref().map(|x| x.source.to_string()),
+                    t: secs(s.t),
+                    explanation: s.text.clone(),
+                })
+                .collect(),
+            alerted_total: r.alerted_total,
+            suppressed_total: r.suppressed_total,
+        })
+    }
+}
+
 fn anomaly_fail(e: hk_pipeline::alarms::AlarmFail) -> hk_api::anomalies::AnomalyFail {
     use hk_api::anomalies::AnomalyFail as A;
     use hk_pipeline::alarms::AlarmFail as P;
@@ -1019,6 +1073,7 @@ pub fn serve_api(
             )
             .with_attention(Some(handle.occupancy()), handle.attention()), // T-128
         ))), // T-121
+        watch: Some(Arc::new(PipelineWatch(Arc::clone(&alarms)))),        // T-166
         anomalies: Some(Arc::new(PipelineAnomalies(alarms))),             // T-122
         iq_buffer: Some(Arc::new(PipelineIqBuffer(handle.iq_buffer()))),  // T-157
         datasets: Some(Arc::new(PipelineDatasets::new(

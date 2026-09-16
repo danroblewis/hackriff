@@ -2683,7 +2683,7 @@ tasks:
   - id: T-166
     milestone: MUI
     title: "MUI API gap 9: region Watch alerts"
-    status: in-progress
+    status: done
     deps: [T-149]
     parallel_group: MUI-API
     use_cases: []

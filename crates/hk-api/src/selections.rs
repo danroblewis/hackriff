@@ -14,6 +14,7 @@
 //! | POST | `/api/selections` | `{"name", "f_lo", "f_hi", "id"?, "t_lo"?, "t_hi"?, "notes"?, "tags"?}` | the created selection (201); 409 `conflict` when `id` exists |
 //! | GET, PUT, DELETE | `/api/selections/<id>` | update: any create field but `id` (`null` clears `t_lo`/`t_hi`/`notes`/`tags`) | the selection / `{"deleted": ...}` |
 //! | POST | `/api/selections/<id>/links` | `{"kind", "target", "note"?}` | the updated selection (201) |
+//! | GET | `/api/selections/<id>/watch` | – | the region watch's alerts and what it did not alert on (T-166) |
 //!
 //! A client may choose the `id` (any UUID) so an optimistic or offline-created selection keeps its
 //! identity when it syncs; a retried create answers 409 and the client updates instead.
@@ -23,6 +24,24 @@
 //! "target", "t", "note"}]`, oldest first, at most [`hk_model::SELECTION_LINKS_MAX`]), `created`,
 //! `updated`.
 //!
+//! # Region watch (T-166, ADR-0013 §4.9 gap 9)
+//!
+//! `watch` arms "alert on new activity" over the selection's extent: `{"enabled": true}` to arm,
+//! `{"enabled": false}` or `null` to disarm. There is deliberately no threshold to set — what
+//! counts as activity is measured, not dialled in.
+//!
+//! An armed watch raises an `Anomaly` (kind `new-emitter`, `baseline_ref` `region-watch:v1;…`)
+//! plus an `Explanation` carrying its reasoning, and a message on the `anomalies` stream, for each
+//! emission first sighted inside the extent. It never alerts on a row the T-219 relationship rules
+//! record as deferring to another one — suppressed by a Confirmed entry, a duplicate of a stronger
+//! candidate, or attributed as an image, harmonic or intermod of a confirmed source — because that
+//! row is a signal already known or the receiver's own artifact, not new activity.
+//!
+//! Alerting is never an automatic action: it tunes nothing and changes no other row, alerts are
+//! dismissed and re-opened through `/api/anomalies/{id}`, and disarming keeps every alert already
+//! raised. `GET /api/selections/<id>/watch` discloses both sides — what the watch told the user,
+//! and what it decided not to, with the relationship that stopped each one.
+//!
 //! Mutating calls need `Authorization: Bearer` (enforced by [`crate::http`] for every mutating
 //! `/api/` request) and are audited as `selection_create`, `selection_update`,
 //! `selection_delete`, `selection_link`.
@@ -30,7 +49,8 @@
 use std::sync::{MutexGuard, PoisonError};
 
 use hk_model::{
-    RepoError, Repository, Selection, SelectionId, SelectionLink, SelectionLinkKind, Timestamp,
+    RepoError, Repository, Selection, SelectionId, SelectionLink, SelectionLinkKind,
+    SelectionWatch, Timestamp,
 };
 use serde_json::{Map, Value, json};
 
@@ -48,6 +68,8 @@ enum Action {
     Update(SelectionId),
     Delete(SelectionId),
     Link(SelectionId),
+    /// T-166: the selection's region-watch report.
+    Watch(SelectionId),
 }
 
 impl Action {
@@ -59,11 +81,12 @@ impl Action {
             Self::Update(_) => "selection_update",
             Self::Delete(_) => "selection_delete",
             Self::Link(_) => "selection_link",
+            Self::Watch(_) => "selection_watch",
         }
     }
 
     fn mutating(self) -> bool {
-        !matches!(self, Self::List | Self::Get(_))
+        !matches!(self, Self::List | Self::Get(_) | Self::Watch(_))
     }
 }
 
@@ -77,20 +100,24 @@ fn resolve(method: &str, path: &str) -> Option<Result<Action, Option<&'static st
         });
     }
     let rest = path.strip_prefix("/api/selections/")?;
-    let (id, links) = match rest.strip_suffix("/links") {
-        Some(id) => (id, true),
-        None => (rest, false),
+    let (id, sub) = match (rest.strip_suffix("/links"), rest.strip_suffix("/watch")) {
+        (Some(id), _) => (id, Some("links")),
+        (_, Some(id)) => (id, Some("watch")),
+        _ => (rest, None),
     };
     let Ok(id) = id.parse::<SelectionId>() else {
         return Some(Err(None));
     };
-    Some(match (links, method) {
-        (true, "POST") => Ok(Action::Link(id)),
-        (true, _) => Err(Some("POST")),
-        (false, "GET") => Ok(Action::Get(id)),
-        (false, "PUT") => Ok(Action::Update(id)),
-        (false, "DELETE") => Ok(Action::Delete(id)),
-        (false, _) => Err(Some("GET, PUT, DELETE")),
+    Some(match (sub, method) {
+        (Some("links"), "POST") => Ok(Action::Link(id)),
+        (Some("links"), _) => Err(Some("POST")),
+        (Some("watch"), "GET") => Ok(Action::Watch(id)),
+        (Some("watch"), _) => Err(Some("GET")),
+        (Some(_), _) => return Some(Err(None)),
+        (None, "GET") => Ok(Action::Get(id)),
+        (None, "PUT") => Ok(Action::Update(id)),
+        (None, "DELETE") => Ok(Action::Delete(id)),
+        (None, _) => Err(Some("GET, PUT, DELETE")),
     })
 }
 
@@ -144,6 +171,107 @@ fn kind_text(k: SelectionLinkKind) -> Value {
     serde_json::to_value(k).unwrap_or(Value::Null)
 }
 
+/// A refused or failed region-watch call (T-166).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WatchFail {
+    /// No such selection.
+    NotFound,
+    /// Storage failure.
+    Failed(String),
+}
+
+/// One alert a region watch raised.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WatchAlertView {
+    /// The anomaly row written for it.
+    pub anomaly_id: String,
+    /// The emission.
+    pub emitter: String,
+    /// Lower edge of its measured extent, Hz.
+    pub f_lo: f64,
+    /// Upper edge, Hz.
+    pub f_hi: f64,
+    /// When, Unix seconds on the sample clock.
+    pub t: f64,
+    /// Why it counted as new activity.
+    pub reason: String,
+}
+
+/// One sighting a region watch did not alert on, and why.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WatchSkipView {
+    /// The emission.
+    pub emitter: String,
+    /// `deferred` or `already-alerted`.
+    pub reason: String,
+    /// The T-219 claim that stopped it (`suppressed-by`, `duplicate-of`, `artifact-of`).
+    pub relation: Option<String>,
+    /// The mechanism, for an `artifact-of` claim (`image`, `harmonic`, `intermod`).
+    pub artifact: Option<String>,
+    /// The row it defers to.
+    pub source: Option<String>,
+    /// When, Unix seconds on the sample clock.
+    pub t: f64,
+    /// The reasoning, including the relationship's own recorded reason.
+    pub explanation: String,
+}
+
+/// What one selection's region watch has done.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WatchReport {
+    /// Whether a watch is armed right now.
+    pub armed: bool,
+    /// Alerts raised, oldest first.
+    pub alerts: Vec<WatchAlertView>,
+    /// Sightings not alerted on, oldest first.
+    pub skipped: Vec<WatchSkipView>,
+    /// Alerts raised since the service started.
+    pub alerted_total: u64,
+    /// Sightings suppressed since the service started.
+    pub suppressed_total: u64,
+}
+
+/// The run's region watches (T-166), behind `GET /api/selections/{id}/watch`.
+pub trait WatchControl: Send + Sync {
+    /// One selection's watch report.
+    fn report(&self, id: SelectionId) -> Result<WatchReport, WatchFail>;
+}
+
+fn watch_fail(e: WatchFail) -> Fail {
+    match e {
+        WatchFail::NotFound => Fail::new(404, "not_found", "no such selection"),
+        WatchFail::Failed(m) => Fail::new(500, "failed", format!("region watch: {m}")),
+    }
+}
+
+/// A watch report as the API serves it.
+fn watch_json(id: SelectionId, watch: Option<SelectionWatch>, r: &WatchReport) -> Value {
+    json!({
+        "selection_id": id.to_string(),
+        "watch": watch,
+        "armed": r.armed,
+        "alerts": r.alerts.iter().map(|a| json!({
+            "anomaly_id": a.anomaly_id,
+            "emitter": a.emitter,
+            "f_lo": a.f_lo,
+            "f_hi": a.f_hi,
+            "t": a.t,
+            "reason": a.reason,
+        })).collect::<Vec<_>>(),
+        "suppressed": r.skipped.iter().map(|s| json!({
+            "emitter": s.emitter,
+            "reason": s.reason,
+            "relation": s.relation,
+            "artifact": s.artifact,
+            "source": s.source,
+            "t": s.t,
+            "explanation": s.explanation,
+        })).collect::<Vec<_>>(),
+        "alerted_total": r.alerted_total,
+        "suppressed_total": r.suppressed_total,
+    })
+}
+
 /// A selection as the API serves it.
 pub fn selection_json(s: &Selection) -> Value {
     json!({
@@ -155,6 +283,7 @@ pub fn selection_json(s: &Selection) -> Value {
         "t_hi": s.t_hi.map(secs),
         "notes": s.notes,
         "tags": s.tags,
+        "watch": s.watch,
         "links": s.links.iter().map(|l| json!({
             "kind": kind_text(l.kind),
             "target": l.target,
@@ -176,14 +305,48 @@ fn read(state: &ApiState, action: Action) -> Result<Value, Fail> {
             .selection(id)
             .map(|s| selection_json(&s))
             .map_err(repo_fail),
+        Action::Watch(id) => {
+            // The guard is a temporary of this statement, so the selection store is unlocked
+            // before the watch control runs: it holds the *same* repository (T-052 selections
+            // live in the run's database), and keeping the guard here would deadlock.
+            let watch = store(state)?.selection(id).map_err(repo_fail)?.watch;
+            let ctl = state.watch.as_deref().ok_or_else(|| {
+                Fail::new(503, "unavailable", "no region-watch service on this server")
+            })?;
+            let report = ctl.report(id).map_err(watch_fail)?;
+            Ok(watch_json(id, watch, &report))
+        }
         _ => Err(Fail::new(500, "failed", "not a read")),
     }
 }
 
 const CREATE_FIELDS: &[&str] = &[
-    "id", "name", "f_lo", "f_hi", "t_lo", "t_hi", "notes", "tags",
+    "id", "name", "f_lo", "f_hi", "t_lo", "t_hi", "notes", "tags", "watch",
 ];
-const UPDATE_FIELDS: &[&str] = &["name", "f_lo", "f_hi", "t_lo", "t_hi", "notes", "tags"];
+const UPDATE_FIELDS: &[&str] = &[
+    "name", "f_lo", "f_hi", "t_lo", "t_hi", "notes", "tags", "watch",
+];
+
+/// `watch`: absent leaves it alone; `null` clears it; `{"enabled": bool}` arms or disarms it.
+/// There is no threshold to set here on purpose (T-166).
+fn watch_field(body: &Map<String, Value>) -> Result<Option<Option<SelectionWatch>>, Fail> {
+    match body.get("watch") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::Object(m)) => {
+            if let Some(k) = m.keys().find(|k| k.as_str() != "enabled") {
+                return Err(Fail::invalid(format!("unknown watch field {k:?}")));
+            }
+            match m.get("enabled") {
+                Some(Value::Bool(enabled)) => Ok(Some(Some(SelectionWatch { enabled: *enabled }))),
+                _ => Err(Fail::invalid("watch.enabled must be true or false")),
+            }
+        }
+        Some(_) => Err(Fail::invalid(
+            "watch must be an object {\"enabled\": true|false}, or null to clear it",
+        )),
+    }
+}
 
 fn name(v: Option<&str>) -> Result<String, Fail> {
     let n = v.unwrap_or("").trim();
@@ -254,6 +417,9 @@ fn apply_common(body: &Map<String, Value>, s: &mut Selection) -> Result<(), Fail
     }
     if let Some(t) = tags(body)? {
         s.tags = t;
+    }
+    if let Some(w) = watch_field(body)? {
+        s.watch = w;
     }
     Ok(())
 }
@@ -336,7 +502,9 @@ fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<
                 new: json!({ "kind": kind_text(link.kind), "target": link.target, "note": link.note }),
             })
         }
-        Action::List | Action::Get(_) => Err(Fail::new(500, "failed", "not a mutating action")),
+        Action::List | Action::Get(_) | Action::Watch(_) => {
+            Err(Fail::new(500, "failed", "not a mutating action"))
+        }
     }
 }
 
@@ -370,6 +538,14 @@ mod tests {
             resolve("GET", &format!("/api/selections/{id}/links")),
             Some(Err(Some("POST")))
         );
+        assert_eq!(
+            resolve("GET", &format!("/api/selections/{id}/watch")),
+            Some(Ok(Action::Watch(id)))
+        );
+        assert_eq!(
+            resolve("POST", &format!("/api/selections/{id}/watch")),
+            Some(Err(Some("GET")))
+        );
         assert_eq!(resolve("GET", "/api/selections/nope"), Some(Err(None)));
         assert_eq!(resolve("GET", "/api/selectionsx"), None);
         assert_eq!(resolve("GET", "/api/bookmarks"), None);
@@ -381,7 +557,7 @@ mod tests {
             .iter()
             .filter(|(_, p)| p.starts_with("/api/selections"))
             .collect();
-        assert_eq!(listed.len(), 6);
+        assert_eq!(listed.len(), 7);
         for (method, path) in listed {
             let concrete = path.replace("{id}", &SelectionId::new().to_string());
             assert!(

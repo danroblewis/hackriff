@@ -116,7 +116,7 @@ pub use relate::{MAX_ARTIFACT_SOURCES, MAX_EVIDENCE_DETECTIONS, MAX_NEIGHBOURS, 
 pub use selections::{
     SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX,
     SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, Selection, SelectionLink,
-    SelectionLinkKind,
+    SelectionLinkKind, SelectionWatch,
 };
 pub use user_band::{USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand};
 pub use verification::{TrustTest, TrustVerdict};
