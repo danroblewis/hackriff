@@ -11,6 +11,10 @@
 //!   built-in chain registry and nothing configured by the test, writes the confirmed
 //!   control-channel row. Without it the first half could pass while the pipeline could never
 //!   reach the hunt at all.
+//! - [`t268_tsbk`] proves the run reads what the control channel **said**: TSBKs decoded, IDEN_UP
+//!   turned into a band plan, a grant's 16-bit channel number resolved to the right frequency —
+//!   and a grant naming an identifier that was never announced reported as `unmapped-channel`
+//!   rather than resolved, through another identifier's plan, to a plausible wrong frequency.
 
 // The shared harness modules carry helpers only the other suites use.
 #![allow(dead_code)]
@@ -26,3 +30,6 @@ mod t267_trunk_cc;
 
 #[path = "acceptance/t287_trunk_cc_pipeline.rs"]
 mod t287_trunk_cc_pipeline;
+
+#[path = "acceptance/t268_tsbk.rs"]
+mod t268_tsbk;

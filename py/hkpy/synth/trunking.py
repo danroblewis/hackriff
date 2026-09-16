@@ -95,6 +95,99 @@ def control_channel_dibits(rng: np.random.Generator, n_frames: int) -> tuple[np.
     return np.concatenate(out).astype(np.uint8), frames
 
 
+# ---------------------------------------------------------------------------------------------
+# TSBK content (T-268)
+# ---------------------------------------------------------------------------------------------
+#
+# The block above is TSBK-*shaped*; these builders fill it with real P25 Phase 1 message fields so
+# a decoder has something to read. Field layout and units, all verified against an independent
+# reference before use (see crates/hk-detect/src/trunk/tsbk.rs for the verification notes):
+#
+#   TSBK, 12 bytes: LB(1) P(1) opcode(6) | MFID(8) | 8 argument bytes | CRC-16
+#   IDEN_UP args, 64 bits: iden(4) bandwidth(9) offset-sign(1) offset-magnitude(8) spacing(10)
+#                          base(32); base in units of 5 Hz, spacing in units of 125 Hz
+#   GRP_VCH_GRANT args, 64 bits: service options(8) channel(16) group(16) source(24)
+#   A 16-bit channel number is iden(4) then channel(12); f = base + spacing x channel
+#
+# STILL NOT STANDARDS-COMPLIANT, deliberately and in the same four ways T-267 recorded: no
+# rate-1/2 trellis code, no interleaving, no status symbols, and CRC-16/CCITT-FALSE where real P25
+# uses the augmented CRC-CCITT (init 0, final XOR 0xFFFF). A real off-air capture needs all four.
+
+#: TSBK opcodes (verified).
+TSBK_OP_GRP_VCH_GRANT = 0x00
+TSBK_OP_GRP_VCH_GRANT_UPDATE = 0x02
+TSBK_OP_IDEN_UP = 0x3D
+
+#: Base-frequency unit, Hz (verified: field 0x09157562 x 5 Hz = 762,006,250 Hz).
+IDEN_BASE_UNIT_HZ = 5.0
+#: Channel-spacing unit, Hz (verified: spacing field x 125 Hz).
+IDEN_SPACING_UNIT_HZ = 125.0
+#: Transmit-offset unit, Hz. UNVERIFIED encoding; nothing maps a downlink through it.
+IDEN_OFFSET_UNIT_HZ = 250_000.0
+#: Bandwidth unit, Hz. UNVERIFIED units.
+IDEN_BANDWIDTH_UNIT_HZ = 125.0
+
+
+def tsbk(opcode: int, args: bytes, *, last_block: bool = False, protected: bool = False,
+         mfid: int = 0) -> bytes:
+    """One 12-byte TSBK: header, 8 argument bytes, and a CRC over the 10 that precede it."""
+    if len(args) != 8:
+        raise ValueError("TSBK arguments are exactly 8 bytes")
+    head = (0x80 if last_block else 0) | (0x40 if protected else 0) | (opcode & 0x3F)
+    data = bytes([head, mfid & 0xFF]) + args
+    return data + crc16_ccitt_false(data).to_bytes(TSBK_CRC_BYTES, "big")
+
+
+def iden_up_args(iden: int, base_hz: float, spacing_hz: float, *, tx_offset_hz: float = 0.0,
+                 bandwidth_hz: float = 0.0) -> bytes:
+    """Pack an IDEN_UP argument field. Raises if a value does not encode exactly."""
+    base = round(base_hz / IDEN_BASE_UNIT_HZ)
+    spacing = round(spacing_hz / IDEN_SPACING_UNIT_HZ)
+    bw = round(bandwidth_hz / IDEN_BANDWIDTH_UNIT_HZ)
+    mag = round(abs(tx_offset_hz) / IDEN_OFFSET_UNIT_HZ)
+    if base * IDEN_BASE_UNIT_HZ != base_hz:
+        raise ValueError(f"base {base_hz} Hz is not a whole number of {IDEN_BASE_UNIT_HZ} Hz steps")
+    if spacing * IDEN_SPACING_UNIT_HZ != spacing_hz:
+        raise ValueError(f"spacing {spacing_hz} Hz is not a whole number of "
+                         f"{IDEN_SPACING_UNIT_HZ} Hz steps")
+    if not 0 <= iden <= 0xF or not 0 <= spacing <= 0x3FF or not 0 <= base <= 0xFFFF_FFFF:
+        raise ValueError("an IDEN_UP field is out of range")
+    if not 0 <= bw <= 0x1FF or not 0 <= mag <= 0xFF:
+        raise ValueError("an IDEN_UP field is out of range")
+    v = ((iden & 0xF) << 60) | (bw << 51) | ((1 if tx_offset_hz >= 0 else 0) << 50) \
+        | (mag << 42) | (spacing << 32) | base
+    return v.to_bytes(8, "big")
+
+
+def grant_args(channel: int, talkgroup: int, *, source: int = 0, service_options: int = 0) -> bytes:
+    """Pack a group voice channel grant argument field."""
+    if not 0 <= channel <= 0xFFFF or not 0 <= talkgroup <= 0xFFFF:
+        raise ValueError("a grant field is out of range")
+    v = ((service_options & 0xFF) << 56) | (channel << 40) | (talkgroup << 24) \
+        | (source & 0xFF_FFFF)
+    return v.to_bytes(8, "big")
+
+
+def channel_number(iden: int, channel: int) -> int:
+    """The 16-bit channel number a grant carries: iden in the top 4 bits, channel in the low 12."""
+    if not 0 <= iden <= 0xF or not 0 <= channel <= 0xFFF:
+        raise ValueError("a channel number is iden(4) + channel(12)")
+    return (iden << 12) | channel
+
+
+def frames_from_blocks(blocks: list[bytes], n_frames: int) -> np.ndarray:
+    """``n_frames`` frames of (frame sync + block), cycling through ``blocks``."""
+    sync = sync_dibits()
+    out: list[np.ndarray] = []
+    for i in range(n_frames):
+        block = blocks[i % len(blocks)]
+        if len(block) != TSBK_BYTES:
+            raise ValueError(f"a frame block is {TSBK_BYTES} bytes, got {len(block)}")
+        out.append(sync)
+        out.append(bytes_to_dibits(block))
+    return np.concatenate(out).astype(np.uint8)
+
+
 def continuous_data_dibits(rng: np.random.Generator, n_dibits: int) -> np.ndarray:
     """Unframed continuous 4FSK traffic: the decoy a pure FCO test cannot tell from a CC.
 
