@@ -918,6 +918,7 @@ name = "hk-e2e"
 version = "0.1.0"
 dependencies = [
  "hk-api",
+ "hk-classify",
  "hk-cli",
  "hk-context",
  "hk-core",
