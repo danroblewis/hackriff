@@ -12,6 +12,7 @@ use crate::classify::{ArbRank, Classification as M3Classification, TaxonomyRef};
 use crate::cluster::RecordedClassification;
 use crate::emitter::Classification;
 use crate::ids::EmitterId;
+use crate::region::TimeRange;
 use crate::time::Timestamp;
 
 /// A row's effective rank in SQL: the stored `arb_rank`, else the legacy derivation of
@@ -156,6 +157,31 @@ fn one(
     .transpose()
 }
 
+/// [`one`] over only the rows whose `t` falls inside `window` (ADR-0017 §7.1). The `order` is
+/// passed through untouched: this adds a predicate to the *input set*, never to the ladder.
+fn one_in_window(
+    conn: &Connection,
+    id: EmitterId,
+    window: TimeRange,
+    order: &str,
+) -> Result<Option<RecordedClassification>, RepoError> {
+    conn.prepare_cached(&format!(
+        "SELECT {COLUMNS} FROM emitter_classification c WHERE c.emitter_id = ?1 \
+         AND c.t >= ?2 AND c.t <= ?3 {order}"
+    ))?
+    .query_row(
+        params![
+            blob(id),
+            window.start.as_unix_nanos(),
+            window.end.as_unix_nanos()
+        ],
+        raw,
+    )
+    .optional()?
+    .map(decode)
+    .transpose()
+}
+
 impl Repository {
     /// Appends an M3 [`M3Classification`] to an emitter's history with arbitration `rank`
     /// (ADR-0016 §2). The legacy columns carry `family`, `confidence`, `open_set_score` and
@@ -271,6 +297,30 @@ impl Repository {
         emitter_id: EmitterId,
     ) -> Result<Option<RecordedClassification>, RepoError> {
         one(&self.conn, emitter_id, FAMILY_ORDER)
+    }
+
+    /// **The same arbitration, restricted to a view window** (ADR-0017 §7.1, docs/07 §2.21): the
+    /// lowest arbitration rank, latest among equals, over only the classification rows whose `t`
+    /// falls inside `window`. `None` when the window holds no classification row at all.
+    ///
+    /// **The rank ladder is unchanged — only its input set gains a time predicate.** This is an
+    /// additive projection, not a second arbitration: [`Self::current_classification`] stays the
+    /// all-time answer that sets the emitter's `family` and that the inventory `family` filter
+    /// matches, because identity evidence is time-invariant — a CRC-valid decode from yesterday
+    /// still says what the thing *is*. What this answers is the narrower question a window-scoped
+    /// view needs: *what did evidence inside these minutes say this was?*
+    ///
+    /// `None` is the honest reading of "nothing in this window re-evidenced what this is", and it
+    /// is deliberately **not** a fallback to the all-time answer (a field never measured reads as
+    /// not-measured). A fingerprint family is not a classification row and carries no `t`, so it
+    /// never answers here either. The emitter id is taken as given (not resolved through merges),
+    /// exactly like [`Self::current_classification`].
+    pub fn current_classification_in_window(
+        &self,
+        emitter_id: EmitterId,
+        window: TimeRange,
+    ) -> Result<Option<RecordedClassification>, RepoError> {
+        one_in_window(&self.conn, emitter_id, window, FAMILY_ORDER)
     }
 
     /// An emitter's most recently appended classification, whatever its rank.

@@ -964,6 +964,8 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         "latest_classification",
         // T-202: the C18 cluster of unknowns this row belongs to (present, possibly null).
         "cluster_id",
+        // T-284 (ADR-0017 TM-2): when this row was on the air, through the request's window.
+        "presence",
     ] {
         assert!(
             row.get(field).is_some(),
@@ -1040,6 +1042,65 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
             "recurrence missing {field}: {row}"
         );
     }
+    // T-284 (ADR-0017 TM-2/§2.3): the presence object says *when* this emitter was on the air.
+    // Every field is derived from presence-interval boundaries and none from the lifetime
+    // `count`, so the contract pins the shape and the two invariants that make liveness readable:
+    // `ended_t_s` is set exactly when the row reads `ended`, and the latest in-window interval is
+    // open exactly when it reads `live`.
+    for field in [
+        "intervals",
+        "on_air_s",
+        "last_interval",
+        "liveness",
+        "ended_t_s",
+    ] {
+        assert!(
+            row["presence"].get(field).is_some(),
+            "presence missing {field}: {row}"
+        );
+    }
+    let liveness = row["presence"]["liveness"].as_str();
+    assert!(
+        matches!(liveness, Some("live" | "ended" | "absent")),
+        "liveness is live/ended/absent: {row}"
+    );
+    assert_eq!(
+        liveness == Some("ended"),
+        row["presence"]["ended_t_s"].is_number(),
+        "ended_t_s is set exactly when the row reads ended: {row}"
+    );
+    assert!(
+        row["presence"]["on_air_s"]
+            .as_f64()
+            .is_some_and(|s| s >= 0.0),
+        "on_air_s is in-window time on air: {row}"
+    );
+    assert!(
+        row["presence"]["intervals"].as_u64().is_some(),
+        "intervals counts the intervals intersecting the window: {row}"
+    );
+    if liveness == Some("absent") {
+        assert_eq!(row["presence"]["intervals"], json!(0), "{row}");
+        assert!(row["presence"]["last_interval"].is_null(), "{row}");
+    } else {
+        for field in ["t_start_s", "t_end_s"] {
+            assert!(
+                row["presence"]["last_interval"][field].is_number(),
+                "last_interval missing {field}: {row}"
+            );
+        }
+        assert_eq!(
+            row["presence"]["last_interval"]["open"].as_bool(),
+            Some(liveness == Some("live")),
+            "the latest in-window interval is open exactly when the row reads live: {row}"
+        );
+    }
+    // §7.1: this listing sent no window, so the window question is not answered at all — which is
+    // what keeps a `null` answer distinguishable from an absent one.
+    assert!(
+        row.get("family_in_window").is_none(),
+        "an unwindowed query never answers a window question: {row}"
+    );
 
     // Filters and pagination parameters are accepted.
     let (st, v) = get(addr, "/api/inventory?status=known,unknown&limit=5");
@@ -1087,6 +1148,37 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     assert!(
         unwindowed["total"].as_u64() >= windowed["total"].as_u64(),
         "an unwindowed Confirmed query never lists fewer rows than a windowed one: {unwindowed}"
+    );
+    // T-284 (ADR-0017 §7.1) — the additive family projection. `family` stays the all-time
+    // arbitration, because identity evidence is time-invariant: a CRC-valid decode from yesterday
+    // still says what the thing is. `family_in_window` re-runs the *same* ladder over only the
+    // classification rows inside the window, and is `null` when the window re-evidenced nothing —
+    // which is what lets a view-scoped client show `family` marked "(from earlier)" instead of
+    // silently asserting a stale classification. The key appears only when a window was asked
+    // about, so `null` and absent stay different answers.
+    let t1 = unix_now();
+    let (st, recent) = get(addr, &format!("/api/inventory?t0={}&t1={t1}", t1 - 3600.0));
+    assert_eq!(st, 200, "{recent}");
+    let rows = recent["entries"].as_array().expect("entries");
+    assert!(!rows.is_empty(), "the station is on the air now: {recent}");
+    for r in rows {
+        assert!(
+            r.get("family_in_window").is_some(),
+            "a windowed query always answers the window question: {r}"
+        );
+        assert!(
+            r["family_in_window"].is_null() || r["family_in_window"].is_string(),
+            "family_in_window is a family or null: {r}"
+        );
+        assert!(
+            r["family"].is_null() || r["family"].is_string(),
+            "`family` is untouched and still all-time: {r}"
+        );
+    }
+    assert!(
+        rows.iter()
+            .any(|r| r["presence"]["liveness"] != json!("absent")),
+        "something was on the air in the last hour: {recent}"
     );
 
     // /api/analysis/strongest (T-079): the station is the (or a) strongest thing in its own band.

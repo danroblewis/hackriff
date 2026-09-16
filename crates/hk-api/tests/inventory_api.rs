@@ -358,3 +358,93 @@ fn explanations_are_served_only_from_the_family_map_author() {
         .expect("emitter row");
     assert_eq!(row["explanations"][0]["service"], "fm-broadcast", "{row}");
 }
+
+/// T-284 (ADR-0017 TM-2 and §7.1): the two additive window-scoped projections.
+///
+/// `presence` is served on every row — Explore's Confirmed list is deliberately unwindowed and
+/// still has to render liveness — while `family_in_window` is served only when a window was
+/// actually asked about, so that `null` ("the window re-evidenced nothing") stays distinguishable
+/// from absent ("no window was asked about"). `family` is all-time throughout.
+#[test]
+fn tm2_presence_and_family_in_window_are_additive_window_scoped_projections() {
+    let (server, s) = serve_seeded();
+    let addr = server.local_addr();
+    let secs = |t: i64| json!(t as f64);
+
+    // --- Unwindowed: presence yes, family_in_window no. ---
+    let all = page(addr, "/api/inventory");
+    let rds = row(&all, s.rds);
+    assert!(
+        rds.get("family_in_window").is_none(),
+        "no window was asked about, so the question has no meaning: {rds}"
+    );
+    assert_eq!(rds["family"], json!("wfm"));
+    // The seed was written at T0, days before the wall clock: the station stopped, and the object
+    // can now say when — the sentence the product previously could not say.
+    assert_eq!(rds["presence"]["liveness"], json!("ended"), "{rds}");
+    assert_eq!(rds["presence"]["intervals"], json!(1), "{rds}");
+    assert_eq!(rds["presence"]["on_air_s"], json!(5.0), "{rds}");
+    assert_eq!(rds["presence"]["ended_t_s"], secs(T0 + 5), "{rds}");
+    assert_eq!(rds["presence"]["last_interval"]["t_start_s"], secs(T0));
+    assert_eq!(rds["presence"]["last_interval"]["t_end_s"], secs(T0 + 5));
+    assert_eq!(rds["presence"]["last_interval"]["open"], json!(false));
+    // None of it came from the lifetime count, which is what used to stand in for "still here".
+    assert_eq!(rds["count"], json!(5), "{rds}");
+
+    // --- A window ending at the station's own last evidence: the same row reads `live`. ---
+    // This is what makes scrubbing back re-derive the liveness a row had at that time, instead of
+    // marking every past window `ended` against the wall clock.
+    let live = page(
+        addr,
+        &format!("/api/inventory?t0={}&t1={}", T0 - 600, T0 + 5),
+    );
+    let rds = row(&live, s.rds);
+    assert_eq!(rds["presence"]["liveness"], json!("live"), "{rds}");
+    assert_eq!(rds["presence"]["ended_t_s"], Value::Null, "{rds}");
+    assert_eq!(
+        rds["presence"]["last_interval"]["open"],
+        json!(true),
+        "{rds}"
+    );
+    // The window holds the classification the seed wrote at T0+5, so it re-evidences the family.
+    assert_eq!(rds["family_in_window"], json!("wfm"), "{rds}");
+    assert_eq!(
+        rds["family"],
+        json!("wfm"),
+        "`family` is unchanged by any of it"
+    );
+
+    // On-air time is clipped to the window, so what a live list ranks by is honest.
+    let clipped = page(
+        addr,
+        &format!("/api/inventory?t0={}&t1={}", T0 + 2, T0 + 600),
+    );
+    assert_eq!(row(&clipped, s.rds)["presence"]["on_air_s"], json!(3.0));
+
+    // --- The "(from earlier)" case, which is the whole point of §7.1. ---
+    // The sensor was on the air from T0-900, but its classification was written at T0+60. A
+    // window over the start of its interval therefore intersects the signal and holds no
+    // classification row: `family` still says what it is, and `family_in_window` says — honestly
+    // — that nothing in these minutes re-evidenced it. A field never measured reads as
+    // not-measured, never as an empty family and never as the all-time answer.
+    let early = page(
+        addr,
+        &format!("/api/inventory?t0={}&t1={}", T0 - 900, T0 - 800),
+    );
+    let sensor = row(&early, s.sensor);
+    assert_eq!(sensor["family"], json!("fsk2"), "{sensor}");
+    assert!(
+        sensor.get("family_in_window").is_some(),
+        "a window was asked about, so it is answered: {sensor}"
+    );
+    assert_eq!(
+        sensor["family_in_window"],
+        Value::Null,
+        "nothing in this window re-evidenced the family: {sensor}"
+    );
+    assert_eq!(
+        sensor["presence"]["intervals"],
+        json!(1),
+        "and yet it was on the air in it: {sensor}"
+    );
+}
