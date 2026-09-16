@@ -3833,7 +3833,7 @@ tasks:
   - id: T-238
     milestone: M3
     title: "OTA fixtures abstain because C14 symbol estimation never runs in the classification path: six of the most discriminating dimensions abstain with no_symbol_estimate"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-235]
     parallel_group: M3A
