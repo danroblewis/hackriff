@@ -27,6 +27,7 @@ pub mod utc;
 // ADR-0012 §11 (pre-added by T-113; the owners fill them in).
 pub mod occupancy; // T-118 (engine), T-119 (baseline/novelty/score/site), T-122 (alarm)
 pub mod report; // T-121
+pub mod signature; // T-201 (ADR-0016 §5): C18 feature aggregation and signature matching
 
 pub use anomaly::{
     EpisodeClass, EpisodeExtent, EpisodeSignal, FloorAnomalies, FloorAnomalyConfig,

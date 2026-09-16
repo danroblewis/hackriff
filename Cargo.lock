@@ -621,6 +621,7 @@ name = "hk-context"
 version = "0.1.0"
 dependencies = [
  "h3o",
+ "hk-classify",
  "hk-core",
  "hk-dsp",
  "hk-e2e",

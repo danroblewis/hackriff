@@ -44,6 +44,7 @@ pub mod outputs;
 pub mod query;
 pub mod recipes;
 pub mod selections;
+pub mod signatures; // T-201
 pub mod taxonomy; // T-218
 pub mod tcp;
 
