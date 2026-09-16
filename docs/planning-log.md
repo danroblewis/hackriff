@@ -2412,3 +2412,8 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 - **B0.503 Full check green after the T-223 merge (3d9e5a3).** Lint clean; 1438/1438 tests; acceptance 29/29; 40 GB free.
   - **Merging T-205** (dataset export) with its own check.
   - **T-224 queued** behind the cap: T-199, T-188 and T-219 plus this check.
+- **B0.504 T-205 merged (5d37ca5, merge 8a43a2a); one test failed in its check and it is NOT a T-205 regression.**
+  - **Correction to my earlier suspicion:** `a_dense_adsb_like_burst_is_stored_without_dropping_decodes` failed once at load ~25, but it passes 3/3 quiet and 3/3 under 6 CPU burners, and T-205 added only a read-side query (`decode_evidence_for_emitter`) plus a new hk-store dataset module - no decode write-path change.
+  - **Why it is fragile:** the assertion is `dropped == 0` at a fixed paced rate, so it measures machine throughput as much as the writer.
+  - **Pinned** heavy-serial with one retry, reason documented in .config/nextest.toml, and **filed T-225** to make the assertion load-robust and then remove the pin.
+  - **Acceptance was green** in that same run (29/29).

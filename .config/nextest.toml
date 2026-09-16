@@ -131,3 +131,13 @@ retries = 1
 filter = 'test(rolls_segments_and_evicts_oldest_first_within_quota)'
 test-group = 'heavy-serial'
 retries = 1
+
+# Found flaky under load (full check after the T-205 merge, 2026-09-15, load ~25 with three agents
+# building): the T-112 dense-burst writer test asserts `dropped == 0` at a fixed paced decode rate,
+# so it is throughput-sensitive by construction. It passed 3/3 quiet and 3/3 under 6 CPU burners
+# afterwards, and T-205 added only a read-side query (no decode write-path change), so this is
+# contention, not a regression. Serialize and retry once; T-225 makes the assertion load-robust.
+[[profile.default.overrides]]
+filter = 'test(a_dense_adsb_like_burst_is_stored_without_dropping_decodes)'
+test-group = 'heavy-serial'
+retries = 1
