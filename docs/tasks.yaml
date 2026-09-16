@@ -3266,6 +3266,8 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+    scope_audit_2026_09_15: "STALE AS WRITTEN: T-218 already created the hk-ml crate - the Prediction contract, ModelManifest, MlProvider/LoadedModel traits and a CPU reference identity, with shadow-never-decides and no-family-choice tested, and no inference engine in any build. Do NOT redefine those types. What REMAINS is the model host itself: runtime load/unload, batching (delay <=20 ms, batch <=32 per ADR-0016), model@version provenance on predictions, inference gated to CFAR-surviving detections, and the provider conformance suite comparing a Mac provider against the CPU reference on a fixed model. CUDA stays deferred to T-216."
+
   - id: T-204
     milestone: M3
     title: "C15 per-family DL stage with open-set (energy OOD or OpenMax), trained on synthetic impairments, inference via T-203 in shadow mode first"
@@ -3302,7 +3304,7 @@ tasks:
     title: "M3 blind acceptance through the mock SDR: family top-k and unknown rate vs hidden truth, signature match and unknown clustering, per-SNR conditions (M3 exit gate)"
     status: todo
     priority: normal
-    deps: [T-199, T-200, T-201, T-202, T-204, T-212, T-213, T-215]
+    deps: [T-199, T-200, T-201, T-202, T-204, T-213, T-215, T-235]
     parallel_group: M3E
     use_cases: [SIGNAL-062, AWARE-053]
     found_by: "user 2026-09-15: close M2, start M3 classification (docs/11); M3 design finalises this fan-out"
@@ -3312,6 +3314,8 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
+    scope_audit_2026_09_15: "deps corrected 2026-09-15: T-212 was listed but is DONE (band-plan priors merged, 4a839c3), and T-235 was missing though it is the ONLY remaining blocker on this gate - the classifier meets its accuracy floors (top-1 0.915 vs 0.90, top-2 0.980 vs 0.95, floors verified unmoved and the sweep guards tightened from 0.70/0.90 to the ADR values), leaving false-known 0.171 vs 0.10 and the two abstaining OTA fixtures, which is T-235's scope."
+
   - id: T-207
     milestone: M3
     title: "MUI: classification distribution, unknown score, signature match and cluster id in the focus panel and inventory"
