@@ -351,6 +351,7 @@ fn main() -> anyhow::Result<()> {
                 listen,
                 compute,
                 iq_buffer,
+                iq_buffer_hooks: None,
             })?;
         }
         Command::Record {

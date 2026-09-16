@@ -435,6 +435,7 @@ fn hil_blind_fm_survey_on_the_hackrf() {
             retention_s: None,
             max_bytes: Some(256 << 20),
         },
+        iq_buffer_hooks: None,
     })
     .expect("start hk serve over the HackRF");
     let addr = server.local_addr();

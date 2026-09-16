@@ -71,6 +71,7 @@ fn start_server() -> (Serving, SocketAddr) {
             retention_s: None,
             max_bytes: Some(64 << 20),
         },
+        iq_buffer_hooks: None,
     })
     .unwrap();
     let addr = serving.server.local_addr();
@@ -1283,9 +1284,14 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
         "head_offset_bytes",
         "sync_errors",
         "poisoned_samples",
+        // T-217: samples the feeder saw before the ring finished opening, never buffered.
+        "allocation_skipped_samples",
     ] {
         assert!(v[k].is_u64(), "{k}: {v}");
     }
+    // The ring here opens well inside `ALLOCATION_WAIT`, so nothing was skipped (T-217's own
+    // allocation-window behaviour is covered by tests/iq_buffer_allocation_http.rs).
+    assert_eq!(v["allocation_skipped_samples"], json!(0), "{v}");
     assert_eq!(
         (
             &v["persisted"],

@@ -89,6 +89,8 @@ pub struct ServeOptions {
     pub compute: crate::pipeline::ComputeArgs,
     /// Rolling IQ capture buffer retention and cap (T-157).
     pub iq_buffer: crate::pipeline::IqBufferArgs,
+    /// Test-only override of the ring's allocation (T-217); `None` uses the real allocator.
+    pub iq_buffer_hooks: Option<crate::pipeline::IqBufferHooksOverride>,
 }
 
 /// The stream class for a recording (`hk_pipeline::class`).
@@ -141,6 +143,7 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
                     spectrum_rows_per_s: Some(opts.rows_per_s),
                     compute: opts.compute.clone(),
                     iq_buffer: opts.iq_buffer.clone(),
+                    iq_buffer_hooks: opts.iq_buffer_hooks.clone(),
                 },
                 &registry,
             )?;
@@ -186,6 +189,9 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
             opts.compute.apply(&mut cfg.settings);
             opts.iq_buffer
                 .apply(&mut cfg.iq_buffer, Some(replay.info.sample_rate_hz));
+            if let Some(h) = &opts.iq_buffer_hooks {
+                cfg.iq_buffer_hooks = Some(Arc::clone(&h.0));
+            }
             cfg.source_class = replay.class;
             cfg.lossless = !*realtime;
             if let Some(hw) = &replay.meta.global.hw {
@@ -339,6 +345,7 @@ mod tests {
             listen: Default::default(),
             compute: Default::default(),
             iq_buffer: Default::default(),
+            iq_buffer_hooks: None,
         })
         .unwrap();
         assert!(live_control.is_none(), "no live control over a recording");
@@ -386,6 +393,7 @@ mod tests {
             listen: Default::default(),
             compute: Default::default(),
             iq_buffer: Default::default(),
+            iq_buffer_hooks: None,
         })
         .err()
         .expect("no driver in this build");
