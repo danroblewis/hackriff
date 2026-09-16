@@ -2640,6 +2640,164 @@ fn stage_tap_sync_search_view_answers_as_documented() {
     stop_server(serving);
 }
 
+/// T-161: stage tap `view=eye` (stream contract §14.4, ADR-0013 §4.9 gap 5). `view=raw` is
+/// unchanged; on an `iq`/`real` port, `view=eye&symbol_rate_bd=<f>` serves the clock-recovery
+/// eye/timing diagram (`kind: eye`, `rf32_le` rows of 64 traces × 64 points, row length declared
+/// as `fft_size`, at most 25 rows/s, no RF geometry) instead of raw samples, with the record's
+/// `sample_index` reporting the row's first symbol instant; an unsupported port type is refused
+/// 409, a missing/invalid `symbol_rate_bd` 400, and an unknown `view` value stays 400 (§14.8
+/// opener refusals). That the eye actually **opens at the true symbol instants and closes between
+/// them** is asserted at the block level (`hk_pipeline::recipes::tap_eye`
+/// `eye_opens_at_the_true_symbol_instants_and_closes_between_them`, on a known 2-PAM signal with
+/// a hidden timing offset); this test only checks the wiring and shape the UI relies on.
+#[test]
+fn stage_tap_eye_view_answers_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+    let doc = json!({
+        "schema": "hackriff.recipe", "schema_version": 2, "id": "t161-contract", "version": 1,
+        "name": "T-161 contract",
+        "input": {"port": "iq", "sample_rate_hz": 48000.0, "bandwidth_hz": 40000.0},
+        "nodes": [
+            {"id": "fm", "block": "fm_demod", "params": {"deviation_hz": 5000}},
+            {"id": "clock", "block": "clock_recovery", "params": {"symbol_rate_bd": 1000.0}},
+            {"id": "bits", "block": "slicer"}
+        ],
+        "outputs": [{"id": "fm", "kind": "stage", "from": "fm"}],
+        "output_policy": {"content_class": "unrestricted"}
+    });
+    let target = json!({"band": {"f_lo": STATION_HZ - 20e3, "f_hi": STATION_HZ + 20e3}});
+    let (st, v) = post(
+        addr,
+        "/api/pipelines",
+        &json!({"recipe": doc, "target": target}).to_string(),
+    );
+    assert_eq!(st, 201, "{v}");
+    let pid = v["id"].as_str().unwrap().to_owned();
+
+    // Default (no view / view=raw) is unchanged: the fm node's real port serves raw samples, with
+    // no eye geometry in the header.
+    let mut ws = connect_ws(
+        addr,
+        &format!("/ws/open/stage?token={TOKEN}&pipeline={pid}&node=fm"),
+    )
+    .unwrap();
+    let Message::Text(t) = ws.read().unwrap() else {
+        panic!("header first")
+    };
+    let header: Value = serde_json::from_str(t.as_str()).unwrap();
+    assert_eq!(
+        (&header["kind"], &header["datatype"]),
+        (&json!("audio"), &json!("rf32_le"))
+    );
+    assert!(header.get("fft_size").is_none(), "raw view: {header}");
+    let _ = ws.close(None);
+
+    // view=eye on the same real port: folded traces, not raw samples. 48 kHz / 1000 Bd = 48
+    // samples per symbol, well inside the servable 2..=1024.
+    let mut ws = connect_ws(
+        addr,
+        &format!(
+            "/ws/open/stage?token={TOKEN}&pipeline={pid}&node=fm&view=eye&symbol_rate_bd=1000"
+        ),
+    )
+    .unwrap();
+    let Message::Text(t) = ws.read().unwrap() else {
+        panic!("header first")
+    };
+    let header: Value = serde_json::from_str(t.as_str()).unwrap();
+    assert_eq!(header["kind"], json!("eye"), "{header}");
+    assert_eq!(header["datatype"], json!("rf32_le"), "{header}");
+    // 64 traces of 64 points, both fixed by the contract.
+    assert_eq!(header["fft_size"], json!(4096), "{header}");
+    assert!(
+        header["sample_rate_hz"].as_f64().unwrap() <= 25.0 + 1e-9,
+        "{header}"
+    );
+    assert!(
+        header.get("center_hz").is_none() && header.get("bandwidth_hz").is_none(),
+        "an eye row's axes are symbol time and amplitude, not frequency: {header}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        assert!(Instant::now() < deadline, "an eye data record");
+        if let Message::Binary(b) = ws.read().unwrap() {
+            assert_eq!(
+                b.len(),
+                32 + 4 * 4096,
+                "one row of fft_size f32s: {}",
+                b.len()
+            );
+            break;
+        }
+    }
+    let _ = ws.close(None);
+
+    // Unsupported port type (soft, bits): 409 (§14.8 "a view the port type doesn't support"). A
+    // soft port is already one value per symbol, so there is nothing between the instants to draw.
+    for node in ["clock", "bits"] {
+        let mut ws = connect_ws(
+            addr,
+            &format!(
+                "/ws/open/stage?token={TOKEN}&pipeline={pid}&node={node}&view=eye&symbol_rate_bd=1000"
+            ),
+        )
+        .unwrap();
+        let Message::Text(t) = ws.read().unwrap() else {
+            panic!("refusal first ({node})")
+        };
+        let v: Value = serde_json::from_str(t.as_str()).unwrap();
+        assert_eq!(
+            (&v["type"], &v["status"]),
+            (&json!("refused"), &json!(409)),
+            "{v}"
+        );
+    }
+
+    // Missing or invalid symbol_rate_bd: 400.
+    for qs in [
+        "view=eye",
+        "view=eye&symbol_rate_bd=not-a-number",
+        "view=eye&symbol_rate_bd=0",
+        // 1 sample per symbol: nothing between the instants to draw.
+        "view=eye&symbol_rate_bd=48000",
+        // 48000 samples per symbol: past the window bound (decimate the port first).
+        "view=eye&symbol_rate_bd=1",
+    ] {
+        let mut ws = connect_ws(
+            addr,
+            &format!("/ws/open/stage?token={TOKEN}&pipeline={pid}&node=fm&{qs}"),
+        )
+        .unwrap();
+        let Message::Text(t) = ws.read().unwrap() else {
+            panic!("refusal first ({qs})")
+        };
+        let v: Value = serde_json::from_str(t.as_str()).unwrap();
+        assert_eq!(
+            (&v["type"], &v["status"]),
+            (&json!("refused"), &json!(400)),
+            "{qs}: {v}"
+        );
+    }
+
+    // An unrecognised view value: still 400.
+    let mut ws = connect_ws(
+        addr,
+        &format!("/ws/open/stage?token={TOKEN}&pipeline={pid}&node=fm&view=bogus"),
+    )
+    .unwrap();
+    let Message::Text(t) = ws.read().unwrap() else {
+        panic!("refusal first")
+    };
+    let v: Value = serde_json::from_str(t.as_str()).unwrap();
+    assert_eq!(
+        (&v["type"], &v["status"]),
+        (&json!("refused"), &json!(400)),
+        "{v}"
+    );
+
+    stop_server(serving);
+}
+
 /// Retries the `/ws/open/iq` handshake (the run may be mid-replumb, 503 `replumbing`, right after
 /// start): returns the connection *after* its header message, plus the parsed header.
 fn wait_for_iq(addr: SocketAddr, query: &str) -> (Ws, Value) {

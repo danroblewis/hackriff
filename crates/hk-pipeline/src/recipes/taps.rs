@@ -31,6 +31,7 @@ use hk_stream::{
 };
 use serde_json::{Map, Value};
 
+use crate::recipes::tap_eye::EyeTap;
 use crate::recipes::tap_spectrum::{self, SpectrumTap};
 use crate::recipes::tap_sync_search::SyncSearchTap;
 
@@ -364,6 +365,17 @@ pub enum TapPublisher {
         /// Encoded row scratch (pre-sized to the row length in `f32`s).
         scratch: Vec<u8>,
     },
+    /// An eye/timing diagram of an `iq`/`real` port (`view=eye`, §14.4, T-161).
+    Eye {
+        /// The publisher.
+        publisher: Publisher,
+        /// The eye engine (buffers one row's window, estimates its symbol instants, folds the
+        /// waveform around each onto the trace grid). Boxed for the same reason as the others:
+        /// its window and row are much bigger than the other variants' state.
+        engine: Box<EyeTap>,
+        /// Encoded row scratch (pre-sized to the row length in `f32`s).
+        scratch: Vec<u8>,
+    },
 }
 
 impl TapPublisher {
@@ -420,11 +432,33 @@ impl TapPublisher {
         }))
     }
 
+    /// For a `view=eye` `header` (built by
+    /// [`tap_eye::eye_header`](crate::recipes::tap_eye::eye_header)) folding an `iq`/`real` port
+    /// at `rate_hz` on `symbol_rate_bd` symbols/s. `None` if no eye can be drawn from that
+    /// combination (see [`EyeTap::new`]).
+    pub fn new_eye(
+        header: StreamHeader,
+        config: PublisherConfig,
+        rate_hz: f64,
+        symbol_rate_bd: f64,
+    ) -> Result<Option<Self>, StreamError> {
+        let Some(engine) = EyeTap::new(rate_hz, symbol_rate_bd) else {
+            return Ok(None);
+        };
+        let scratch = Vec::with_capacity(4 * engine.row_len());
+        Ok(Some(TapPublisher::Eye {
+            publisher: Publisher::new(header, config)?,
+            engine: Box::new(engine),
+            scratch,
+        }))
+    }
+
     fn handle(&self) -> PublisherHandle {
         match self {
             TapPublisher::Binary { publisher, .. }
             | TapPublisher::Spectrum { publisher, .. }
-            | TapPublisher::SyncSearch { publisher, .. } => publisher.handle(),
+            | TapPublisher::SyncSearch { publisher, .. }
+            | TapPublisher::Eye { publisher, .. } => publisher.handle(),
             TapPublisher::Frames(s) => s.handle(),
         }
     }
@@ -433,7 +467,8 @@ impl TapPublisher {
         match self {
             TapPublisher::Binary { publisher, .. }
             | TapPublisher::Spectrum { publisher, .. }
-            | TapPublisher::SyncSearch { publisher, .. } => publisher.header(),
+            | TapPublisher::SyncSearch { publisher, .. }
+            | TapPublisher::Eye { publisher, .. } => publisher.header(),
             TapPublisher::Frames(s) => s.header(),
         }
     }
@@ -610,6 +645,56 @@ impl StageTap {
                 };
                 if let PortVec::Bits(x) = &out.data {
                     engine.push(x, &mut emit);
+                }
+                0
+            }
+            TapPublisher::Eye {
+                publisher,
+                engine,
+                scratch,
+            } => {
+                if self.handle.open_consumers() == 0 {
+                    self.gap = true;
+                    // No consumer: don't buffer a window or fold a row nobody will read.
+                    engine.reset();
+                    return 0;
+                }
+                if out.data.is_empty() {
+                    self.gap |= restart;
+                    return 0;
+                }
+                if self.gap || restart {
+                    engine.reset();
+                }
+                self.gap = false;
+                let t = t_of(out.meta.source_index);
+                let mut emit = |row: &[f32], disc: bool, first_instant: f64| {
+                    tap_spectrum::encode_row(row, scratch);
+                    let flags = if disc {
+                        RecordFlags::DISCONTINUITY
+                    } else {
+                        RecordFlags::empty()
+                    };
+                    // `sample_index` is the port element index of the row's FIRST SYMBOL INSTANT
+                    // (§14.4, T-161), not the chunk start: that is how a reader gets the sample
+                    // instants the eye was folded on, and lines the eye up against `view=raw`.
+                    // The engine estimates it to sub-sample precision and folds the traces on
+                    // that; `sample_index` is an integer element index, so the wire carries it
+                    // rounded to the nearest port sample (at most half a sample, far below the
+                    // trace grid's own step at any sane samples-per-symbol).
+                    // A gated (content-forbidding class) record is published header-only by the
+                    // publisher itself; nothing to do here.
+                    let _ = publisher.publish_binary(BinaryRecord {
+                        t,
+                        sample_index: first_instant.round().max(0.0) as u64,
+                        flags,
+                        payload: scratch,
+                    });
+                };
+                match &out.data {
+                    PortVec::Real(x) => engine.push_real(x, out.meta.index as f64, &mut emit),
+                    PortVec::Iq(x) => engine.push_iq(x, out.meta.index as f64, &mut emit),
+                    _ => {}
                 }
                 0
             }

@@ -41,6 +41,12 @@ pub enum StreamKind {
     /// read back whether — and how closely — it matches). Gated exactly like the `bits` it's
     /// computed from.
     SyncSearch,
+    /// Clock-recovery eye/timing diagram: the waveform folded around each estimated symbol
+    /// instant (`view=eye`, §14.4, T-161). **Content-bearing, like `symbols`:** the centre point
+    /// of every trace *is* the pre-decision soft symbol, in symbol order, so slicing that one
+    /// column recovers the demodulated bitstream directly. Gated exactly like the `iq`/`real`
+    /// port it is folded from.
+    Eye,
 }
 
 impl StreamKind {
@@ -53,6 +59,7 @@ impl StreamKind {
         StreamKind::Audio,
         StreamKind::Spectrum,
         StreamKind::SyncSearch,
+        StreamKind::Eye,
     ];
 
     /// Binary records (everything but `messages`).
@@ -65,7 +72,8 @@ impl StreamKind {
     /// of what a viewer asks for, so it must work for every class. `sync-search` **is** content,
     /// unlike `spectrum`: the caller picks the word it correlates against, so it can be used as
     /// an oracle over withheld bits (see [`StreamKind::SyncSearch`]) and must be gated the same
-    /// as the `bits` it reads. `messages` are gated per field.
+    /// as the `bits` it reads. `eye` is content for a blunter reason still: its trace centres are
+    /// the soft symbols themselves (see [`StreamKind::Eye`]). `messages` are gated per field.
     pub const fn payload_is_content(self) -> bool {
         matches!(
             self,
@@ -74,6 +82,7 @@ impl StreamKind {
                 | StreamKind::Iq
                 | StreamKind::Audio
                 | StreamKind::SyncSearch
+                | StreamKind::Eye
         )
     }
 
@@ -87,6 +96,7 @@ impl StreamKind {
             StreamKind::Audio => "audio",
             StreamKind::Spectrum => "spectrum",
             StreamKind::SyncSearch => "sync-search",
+            StreamKind::Eye => "eye",
         }
     }
 }
@@ -381,6 +391,12 @@ mod tests {
         assert!(!StreamKind::Spectrum.payload_is_content());
         assert_eq!(StreamKind::SyncSearch.as_str(), "sync-search");
         assert!(StreamKind::ALL.contains(&StreamKind::SyncSearch));
+        // T-161: an eye row's trace centres are the soft symbols in order, so slicing one column
+        // of it reproduces the demodulated bits. It is content for the same reason `symbols` is —
+        // a plainer reason than `sync-search`'s oracle argument, and nothing like `spectrum`.
+        assert!(StreamKind::Eye.payload_is_content());
+        assert_eq!(StreamKind::Eye.as_str(), "eye");
+        assert!(StreamKind::ALL.contains(&StreamKind::Eye));
     }
 
     /// T-165 (ADR-0013 gap 8): raw channelised IQ (`open/iq`) is content exactly like `bits`,

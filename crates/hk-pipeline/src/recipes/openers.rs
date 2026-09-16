@@ -2,15 +2,17 @@
 //! T-088), registered as `/ws/open/stage`, `/ws/open/inspector` and TCP `open/stage?…`,
 //! `open/inspector?…`.
 //!
-//! - **`stage`** `?pipeline=<id>&node=<node>[&port=<port>][&view=raw|spectrum|sync_search]`: any
-//!   output port of any node of a running pipeline, opened on demand. The tap is adopted by the
-//!   pipeline thread at its next chunk boundary and removed when the session guard drops (the
+//! - **`stage`** `?pipeline=<id>&node=<node>[&port=<port>][&view=raw|spectrum|sync_search|eye]`:
+//!   any output port of any node of a running pipeline, opened on demand. The tap is adopted by
+//!   the pipeline thread at its next chunk boundary and removed when the session guard drops (the
 //!   consumer left); an untapped port costs nothing. `view=raw` (default) serves the port's own
 //!   samples; `view=spectrum` (`iq`/`real` ports only, T-160) serves a PSD instead (§14.4,
 //!   `tap_spectrum`); `view=sync_search` (`bits` ports only, T-162, needs `sync_word=0x…` and
 //!   `sync_bits=<n>`) serves the match score per candidate bit position against that word
-//!   instead (§14.4, `tap_sync_search`) — requesting a `view` on a port type it doesn't support
-//!   is refused (409).
+//!   instead (§14.4, `tap_sync_search`); `view=eye` (`iq`/`real` ports only, T-161, needs
+//!   `symbol_rate_bd=<f>`) serves the clock-recovery eye/timing diagram — the waveform folded
+//!   around every estimated symbol instant (§14.4, `tap_eye`) — requesting a `view` on a port
+//!   type it doesn't support is refused (409).
 //! - **`inspector`** `?pipeline=<id>[&output=<id>]`: the always-on frames stream of a pipeline's
 //!   `inspector` output (the first one by default), i.e. the same stream as
 //!   `/ws/inspector/<pipeline>/<output>`. `capture=` (recorded decoded streams) is T-089/T-092's
@@ -24,6 +26,7 @@ use hk_stream::{OpenRefusal, OpenRequest, OpenedStream, StreamOpener};
 use serde_json::{Value, json};
 
 use crate::recipes::runtime::RecipeRuntime;
+use crate::recipes::tap_eye;
 use crate::recipes::tap_spectrum;
 use crate::recipes::tap_sync_search;
 use crate::recipes::taps::{StageTap, TapPublisher, stage_header, tap_config};
@@ -50,11 +53,11 @@ impl RecipeRuntime {
         let pid = param(req, "pipeline")?;
         let node = param(req, "node")?;
         let view = req.param("view").unwrap_or("raw");
-        if !matches!(view, "raw" | "spectrum" | "sync_search") {
+        if !matches!(view, "raw" | "spectrum" | "sync_search" | "eye") {
             return Err(OpenRefusal::new(
                 400,
                 "bad-request",
-                format!("unknown view {view:?} (raw, spectrum, sync_search)"),
+                format!("unknown view {view:?} (raw, spectrum, sync_search, eye)"),
             ));
         }
         let ctl = self
@@ -95,6 +98,15 @@ impl RecipeRuntime {
                 409,
                 "view-unsupported",
                 "view=sync_search serves bits ports only",
+            ));
+        }
+        if view == "eye" && !matches!(info.ty, PortType::Iq | PortType::Real) {
+            // A `soft` port carries one decided value per symbol (`clock_recovery` declares its
+            // rate as the symbol rate), so there is nothing *between* the instants to draw.
+            return Err(OpenRefusal::new(
+                409,
+                "view-unsupported",
+                "view=eye serves iq/real ports only (a soft port is already one value per symbol)",
             ));
         }
         let port = sh.out_names[k].clone();
@@ -143,6 +155,28 @@ impl RecipeRuntime {
                     "sync_bits must be 1..=64 and sync_word must fit in it",
                 )
             })?;
+            (header, publisher)
+        } else if view == "eye" {
+            let bd: f64 = param(req, "symbol_rate_bd")?.parse().map_err(|_| {
+                OpenRefusal::new(400, "bad-request", "symbol_rate_bd must be a number")
+            })?;
+            let header =
+                tap_eye::eye_header(&ctl.streams_ctx, &recipe, stream_id, info.rate_hz, bd);
+            let publisher = TapPublisher::new_eye(header.clone(), tap_config(), info.rate_hz, bd)
+                .map_err(|e| OpenRefusal::new(500, "publisher", e.to_string()))?
+                .ok_or_else(|| {
+                    OpenRefusal::new(
+                        400,
+                        "bad-request",
+                        format!(
+                            "symbol_rate_bd must give {}..={} samples per symbol on this port \
+                             (rate {} Hz)",
+                            tap_eye::EYE_MIN_SPS,
+                            tap_eye::EYE_MAX_SPS,
+                            info.rate_hz
+                        ),
+                    )
+                })?;
             (header, publisher)
         } else {
             let header = stage_header(
@@ -225,9 +259,9 @@ impl StreamOpener for StageOpener {
 
     fn describe(&self) -> Value {
         json!({
-            "kind": "iq | audio | symbols | bits | messages (by port type); spectrum (view=spectrum, iq/real ports); sync-search (view=sync_search, bits ports)",
-            "params": ["pipeline", "node", "port", "view (raw | spectrum | sync_search)", "sync_word (view=sync_search: 0x… hex)", "sync_bits (view=sync_search: 1..=64)"],
-            "records": "one data record per processed chunk (frames ports: one frame record per frame; view=spectrum or view=sync_search: one row at most every 1/25 s)",
+            "kind": "iq | audio | symbols | bits | messages (by port type); spectrum (view=spectrum, iq/real ports); sync-search (view=sync_search, bits ports); eye (view=eye, iq/real ports)",
+            "params": ["pipeline", "node", "port", "view (raw | spectrum | sync_search | eye)", "sync_word (view=sync_search: 0x… hex)", "sync_bits (view=sync_search: 1..=64)", "symbol_rate_bd (view=eye: symbols/s, 2..=1024 samples per symbol)"],
+            "records": "one data record per processed chunk (frames ports: one frame record per frame; view=spectrum, view=sync_search or view=eye: one row at most every 1/25 s)",
         })
     }
 }
