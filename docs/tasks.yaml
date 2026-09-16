@@ -3579,6 +3579,21 @@ tasks:
     core_interface: false
     intermittency: "not constant: failed twice in a row at load ~14, then passed 29/29 in the full check after the T-187/T-210 merge at similar load (8ddb1a0). Treat as a start-up race whose margin depends on scheduling, not a hard break; the fix must still make it deterministic (10/10 under 6 burners), not rely on luck."
 
+  - id: T-224
+    milestone: M2-hardening
+    title: "T-223 review follow-ups: records_offered_before_ready over-counts after a plugin restart (spurious plugin_fed_before_ready failures), the ready wait ignores shared.stop/Detach, readsb stdout undrained until ready"
+    status: todo
+    priority: high
+    deps: [T-223]
+    parallel_group: PLUGINS
+    use_cases: [SIGNAL-001]
+    found_by: "Opus review of T-223 (2026-09-15), verdict ACCEPT"
+    acceptance: "(1) crates/hk-plugins host.rs:928-931 counts a DELTA of offered per process (snapshot in run_once) instead of fetch_max over a cumulative counter, so a restarted plugin no longer reports every record ever offered and the plugin_fed_before_ready == 0 assertions in acceptance/signal_001 cannot fail spuriously - test with a plugin restart mid-run; (2) the ready wait in chains/plugin.rs:264 breaks on &shared.stop like wait_for_room does, so a declaring plugin that never signals cannot hold the chain thread up to 30 s past shutdown - test a stop during the ready wait; (3) hk-plugin-readsb.rs:893 spawns pump_stdout BEFORE blocking on ready_rx so stdout cannot fill its pipe; (4) add a test for the live ready-timeout branch (plugin.rs:264-268); (5) decide and document whether plugins/readsb/manifest.json should set ready_timeout_ms, since the wrapper allows 20 s to connect while a live chain bounds at 5 s"
+    area: crates/hk-plugins (host, readsb bin), crates/hk-pipeline/src/chains/plugin.rs, plugins/readsb/manifest.json
+    needs: none
+    model: opus
+    effort: medium
+    core_interface: false
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

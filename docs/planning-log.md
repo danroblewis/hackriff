@@ -2401,3 +2401,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
   - **Splits:** every sample and manifest stamps one dev/acceptance split, so training data cannot contaminate acceptance.
   - **Small additive hk-model change:** `decode_evidence_for_emitter`, since decodes without a decoded identity (RDS groups) are unreachable via `decodes_for_identity`; it exposes nothing gated.
   - **Tests:** hk-model 140, hk-store/hk-api pass, api_contract 25/25, lint clean.
+- **B0.502 T-223 Opus review: ACCEPT.** No deadlock, no unbounded wait, no capture or audio stall: every wait is bounded (5 s live, 30 s lossless), the wait runs on the chain's own thread, a duplicate ready is idempotent, malformed lines only bump a counter, a crash leaves Backoff so the wait continues, non-declaring plugins skip the wait, and the contract doc matches the code.
+  - **Filed T-224 (high)** for the follow-ups:
+    1. `records_offered_before_ready` uses fetch_max over a cumulative counter while ready re-arms per process, so after a restart it reports every record ever offered and the `plugin_fed_before_ready == 0` assertions would fail spuriously;
+    2. the ready wait ignores `shared.stop`, so a plugin that never signals can hold the chain thread up to 30 s past shutdown;
+    3. readsb blocks on ready before spawning its stdout pump;
+    4. no test covers the live ready-timeout branch;
+    5. decide whether the readsb manifest should set `ready_timeout_ms`, since the wrapper allows 20 s while a live chain bounds at 5 s.
+  - **Nit recorded:** after a live ready-timeout the chain stops reading the ring, so up to the timeout of live samples lap into `lost_samples`. That matches the pre-existing 15 s Running wait, so it is not new, but it is worth stating in the contract.
