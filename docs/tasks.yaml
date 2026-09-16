@@ -3224,7 +3224,7 @@ tasks:
   - id: T-201
     milestone: M3
     title: "C18 fingerprint schema + editable signature database + matching (partial matches with ranked candidates)"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-211]
     parallel_group: M3B
