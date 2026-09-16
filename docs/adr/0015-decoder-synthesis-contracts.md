@@ -396,7 +396,7 @@ Scheduled only after the M3 exit (T-206). There are no Fable tasks; core-interfa
 
 ## 11. Amendment — a candidate **is** a decode pipeline (T-220, 2026-09-15, from the user)
 
-**Status:** PROVISIONAL, planning only, no code. Source: [docs/15 §10](../15-decoder-synthesis.md), written by the user after live testing. §§1–10 stand unchanged; this amendment changes *where the search's results live* and *what an inventory entry contains*. Task ids T-230+ are proposals for the coordinator, not entries in `tasks.yaml`.
+**Status:** PROVISIONAL, planning only, no code. Source: [docs/15 §10](../15-decoder-synthesis.md), written by the user after live testing. §§1–10 stand unchanged; this amendment changes *where the search's results live* and *what an inventory entry contains*. Task ids CP-1+ are proposals for the coordinator, not entries in `tasks.yaml`.
 
 **The change in one line.** An Emitter stops being "a box with one family label" and becomes **an emission plus the competing decode hypotheses for it**, each hypothesis a runnable pipeline carrying its own evidence. Confirm-by-decode promotes the winner. §5.4's attach ("append an `emitter_synthesis` row") becomes one producer among several of the same object.
 
@@ -464,7 +464,7 @@ Three problems, one mechanism — **competition between hypotheses over a band**
 
 **What needs the full model:** evidence in bits, promotion by decode, competing pipelines as first-class displayed alternatives, content-level multipath (T-222).
 
-**The constraint on T-219 so it doesn't fight this:** record grouping as **append-only rows keyed by emitter, carrying reason and score** — never by mutating or deleting the losing rows. A T-219 duplicate group then becomes, unchanged, the set of competing pipelines on one emitter (T-235).
+**The constraint on T-219 so it doesn't fight this:** record grouping as **append-only rows keyed by emitter, carrying reason and score** — never by mutating or deleting the losing rows. A T-219 duplicate group then becomes, unchanged, the set of competing pipelines on one emitter (CP-6).
 
 ### 11.5 Confirm-by-decode via promotion
 
@@ -485,11 +485,11 @@ Three problems, one mechanism — **competition between hypotheses over a band**
 - **Existing rows are untouched and not backfilled.** An emitter with no `candidate_pipeline` row reads exactly as today. `emitter_classification` is unchanged — its append-only trigger, `effective_rank_sql!`, `FAMILY_ORDER` and every inventory reader keep working, because promotion writes an ordinary rank-1 decoder row rather than a new kind of family evidence. `emitter_synthesis` (§5.4) stays the job-level audit row and gains a pointer to the pipelines its job created.
 - **Staging, so nothing breaks in M0/M1/M2 acceptance:**
   1. **T-219 (M3, now):** links, suppression, duplicate groups and artifact flags only; blind acceptance must not regress, and the adjacent-station guard is a new test.
-  2. **MAUTO wave 0 (T-230):** tables and read path land **inert** — no writer, no behaviour change, nothing reads them for a decision.
-  3. **T-232/T-233:** synthesis attaches pipelines; promotion drives `ConfirmPolicy`.
-  4. **T-235:** T-219's groups migrate onto the object (append-only row migration, no semantics change).
-  5. **T-221/T-236:** Listen becomes an audio-output pipeline. Listen is today its own chain type (`hk-pipeline/src/chains/listen.rs`, `ChainKind::Listen`) served through the generic on-demand opener (`OpenerRegistry::with("listen", …)`, `/ws/open/listen`), with **no** listen-specific hk-api route — so the opener name keeps working unchanged while the implementation moves onto a recipe.
-  6. **T-237:** the UI shows competitors and evidence ladders.
+  2. **MAUTO wave 0 (CP-1):** tables and read path land **inert** — no writer, no behaviour change, nothing reads them for a decision.
+  3. **CP-3/CP-4:** synthesis attaches pipelines; promotion drives `ConfirmPolicy`.
+  4. **CP-6:** T-219's groups migrate onto the object (append-only row migration, no semantics change).
+  5. **T-221/CP-7:** Listen becomes an audio-output pipeline. Listen is today its own chain type (`hk-pipeline/src/chains/listen.rs`, `ChainKind::Listen`) served through the generic on-demand opener (`OpenerRegistry::with("listen", …)`, `/ws/open/listen`), with **no** listen-specific hk-api route — so the opener name keeps working unchanged while the implementation moves onto a recipe.
+  6. **CP-8:** the UI shows competitors and evidence ladders.
 - **Reversal cost** is low at every step: 2–4 are additive tables plus one nullable column; dropping the feature means ignoring the rows.
 
 ### 11.7 docs/07 delta (sketch, applied by the implementing task)
@@ -513,21 +513,21 @@ Three problems, one mechanism — **competition between hypotheses over a band**
 
 `docs/api.md` and `crates/hk-cli/tests/api_contract.rs` move together (T-079 rule).
 
-### 11.9 Task graph (proposed ids T-230+; the coordinator applies them)
+### 11.9 Task graph (proposed ids CP-1+; the coordinator applies them)
 
 | Id | Task | Deps | Model | Group |
 |---|---|---|---|---|
-| T-230 | `hk-model` candidate-pipeline types + migration 0008 + repo (append-only events, rank function), landed **inert** | T-219, this amendment reviewed | Opus, core_interface | CP-0 |
-| T-231 | Ranking + supersession engine: same-hypothesis test, 4-bit margin, revive-on-new-evidence; property tests for reversibility | T-230 | Opus | CP-R |
-| T-232 | Synthesis attach writes pipelines (replaces §5.4 attach-only); `decode.candidate_pipeline_id` | T-230, M-8, M-9 | Opus, core_interface | CP-W |
-| T-233 | Promotion → `ConfirmPolicy` wiring: hold-out rule, corrected-group exclusion (T-210), one promoted row per `output_kind` | T-232 | Opus, core_interface | CP-W |
-| T-234 | Routes (§11.8) + `docs/api.md` + contract tests | T-230 | Opus, core_interface | API |
-| T-235 | Fold T-219's duplicate groups, suppressions and artifact links onto the pipeline object | T-219, T-231 | Sonnet (Opus review) | CP-R |
-| T-236 | Listen as an audio-output pipeline, per T-221's plan, on this object | T-221, T-230, T-234 | Opus | CP-A |
-| T-237 | MUI: competing-pipeline list, evidence ladder, promote/reject, duplicate-group collapse, artifact badge | T-234 | Sonnet | MUI-X |
-| T-238 | Blind acceptance: one station → one emitter with N ranked pipelines; the adjacent-station guard case; artifact attribution; promotion confirms | T-233, T-235 | Opus | CP-E |
+| CP-1 | `hk-model` candidate-pipeline types + migration 0008 + repo (append-only events, rank function), landed **inert** | T-219, this amendment reviewed | Opus, core_interface | CP-0 |
+| CP-2 | Ranking + supersession engine: same-hypothesis test, 4-bit margin, revive-on-new-evidence; property tests for reversibility | CP-1 | Opus | CP-R |
+| CP-3 | Synthesis attach writes pipelines (replaces §5.4 attach-only); `decode.candidate_pipeline_id` | CP-1, M-8, M-9 | Opus, core_interface | CP-W |
+| CP-4 | Promotion → `ConfirmPolicy` wiring: hold-out rule, corrected-group exclusion (T-210), one promoted row per `output_kind` | CP-3 | Opus, core_interface | CP-W |
+| CP-5 | Routes (§11.8) + `docs/api.md` + contract tests | CP-1 | Opus, core_interface | API |
+| CP-6 | Fold T-219's duplicate groups, suppressions and artifact links onto the pipeline object | T-219, CP-2 | Sonnet (Opus review) | CP-R |
+| CP-7 | Listen as an audio-output pipeline, per T-221's plan, on this object | T-221, CP-1, CP-5 | Opus | CP-A |
+| CP-8 | MUI: competing-pipeline list, evidence ladder, promote/reject, duplicate-group collapse, artifact badge | CP-5 | Sonnet | MUI-X |
+| CP-9 | Blind acceptance: one station → one emitter with N ranked pipelines; the adjacent-station guard case; artifact attribution; promotion confirms | CP-4, CP-6 | Opus | CP-E |
 
-**Waves** (≤ 4 Rust builders): (1) T-230; (2) T-231, T-232, T-234; (3) T-233, T-235, T-236; (4) T-237, T-238. No Fable tasks.
+**Waves** (≤ 4 Rust builders): (1) CP-1; (2) CP-2, CP-3, CP-5; (3) CP-4, CP-6, CP-7; (4) CP-8, CP-9. No Fable tasks.
 
 ### 11.10 Open questions (for the user)
 
@@ -646,7 +646,7 @@ Ordered, each stage independently revertible, with the user live-testing between
 
 ### 12.11 Task-id collision (for the coordinator)
 
-§11.6 and §11.9 propose ids **T-230…T-238** for the candidate-pipeline work, including "T-236 Listen as an audio-output pipeline, per T-221's plan". **Those numbers are already assigned** in `docs/tasks.yaml` to unrelated M2/M3 tasks (T-230 classifier accuracy, T-232 temp-dir leak, T-234 M2 gate dwell, T-236 `hk-api` shutdown join, T-238 OTA abstention, …), all done or blocked. §11's MAUTO ids must be re-minted when MAUTO is scheduled.
+§11.6 and §11.9 originally proposed ids **T-230…T-238** for the candidate-pipeline work, including "Listen as an audio-output pipeline, per T-221's plan". **Those numbers are already assigned** in `docs/tasks.yaml` to unrelated M2/M3 tasks (T-230 classifier accuracy, T-232 temp-dir leak, T-234 M2 gate dwell, T-236 `hk-api` shutdown join, T-238 OTA abstention, …), all done or blocked. §11 was therefore converted to placeholder ids **CP-1…CP-9** (coordinator, 2026-09-15), matching the LP-* style below. Neither block is minted into `tasks.yaml` while MAUTO is unscheduled; the coordinator assigns real numbers at scheduling time.
 
 This section therefore uses placeholder ids **LP-1…LP-8**, mapping onto §12.9's stages; the coordinator assigns real numbers.
 
