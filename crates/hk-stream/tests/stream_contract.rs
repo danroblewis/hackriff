@@ -388,7 +388,9 @@ fn signal_001_adsb_decodes_reach_an_external_consumer() {
         assert_eq!(m.value["crc_status"], "valid");
         assert_eq!(m.value["identity"]["scheme"], "adsb-icao");
         assert_eq!(m.value["metadata"]["icao"], decode.metadata["icao"]);
-        assert_eq!(m.value["t"], decode.t.as_unix_nanos());
+        // T-354: nanoseconds under a name that says nanoseconds, and only under that name.
+        assert_eq!(m.value["t_ns"], decode.t.as_unix_nanos());
+        assert!(m.value.get("t").is_none(), "1.2 emits only `t_ns`: {m:?}");
     }
     let _ = std::fs::remove_dir_all(dir);
 }

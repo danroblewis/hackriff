@@ -4207,9 +4207,58 @@ fn decoded_captures_are_recorded_listed_scrubbed_reparsed_and_replayed_as_docume
     assert_eq!(frames[3]["type"], json!("frame"));
     assert_eq!(frames[3]["content"]["hex"].as_str().unwrap().len(), 8);
 
-    // Time scrub: from_t resolves to a frame; to_t ends the page.
-    let t = |k: usize| frames[k]["t"].as_i64().unwrap();
+    // T-354: **two units in one body, and only the names distinguish them.** A frame record's time
+    // is nanoseconds and is named `t_ns` (stream contract 1.2); the `capture` object wrapping it
+    // reports `t_first`/`t_last` in seconds under bare names, per this API's units law (T-349).
+    // Asserted by value, not shape: a body where `t_ns` were seconds, or `t_first` nanoseconds,
+    // passes every "is a number" and key-presence check and fails only here.
+    for (k, f) in frames.iter().enumerate().take(3) {
+        assert!(
+            f.get("t").is_none(),
+            "frame {k} still ships a bare `t` that means nanoseconds: {f}"
+        );
+        let ns = f["t_ns"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("frame {k} has no `t_ns`: {f}"));
+        assert!(
+            (1e18..1e19).contains(&(ns as f64)),
+            "frames[{k}].t_ns = {ns} is not a nanosecond-magnitude Unix time (read as seconds it \
+             is 31 billion years out, and every shape assertion still passes)"
+        );
+    }
+    let cap_first = all["capture"]["t_first"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("capture.t_first: {}", all["capture"]));
+    let cap_last = all["capture"]["t_last"].as_f64().expect("capture.t_last");
+    assert!(
+        (1e9..1e10).contains(&cap_first) && (1e9..1e10).contains(&cap_last),
+        "capture.t_first/t_last are Unix SECONDS beside the frames' nanoseconds: {}",
+        all["capture"]
+    );
+    // The same instant, once each declared unit is applied: the capture's first frame time is the
+    // first frame record's own `t_ns`, and t_last is not before it.
+    let first_ns = frames[0]["t_ns"].as_i64().unwrap();
+    assert!(
+        (cap_first - first_ns as f64 / 1e9).abs() < 1.0,
+        "capture.t_first ({cap_first} s) must be the same instant as frames[0].t_ns \
+         ({first_ns} ns) once the units are applied"
+    );
+    assert!(
+        cap_last >= cap_first,
+        "capture.t_last {cap_last} precedes t_first {cap_first}"
+    );
+
+    // Time scrub: from_t resolves to a frame; to_t ends the page. `from_t`/`to_t` are seconds
+    // (bare names, T-349's law) while the record is `t_ns`, so the scrub divides by 1e9 — and the
+    // API refuses a nanosecond value here rather than reading it as a year-56-billion second.
+    let t = |k: usize| frames[k]["t_ns"].as_i64().unwrap();
     let secs = |ns: i64| format!("{:.6}", ns as f64 / 1e9);
+    let (st, v) = get(addr, &format!("/api/captures/{cid}/frames?from_t={}", t(5)));
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (400, Some("invalid")),
+        "a raw t_ns passed to the seconds parameter must be refused, not misread: {v}"
+    );
     let (st, v) = get(
         addr,
         &format!(
@@ -4272,16 +4321,16 @@ fn decoded_captures_are_recorded_listed_scrubbed_reparsed_and_replayed_as_docume
     };
     let rec: Value = serde_json::from_str(text.as_str().trim()).unwrap();
     assert_eq!(
-        // `seq` is the replay stream's own; `t`, metadata and content are the recording's.
+        // `seq` is the replay stream's own; `t_ns`, metadata and content are the recording's.
         (
             &rec["type"],
-            &rec["t"],
+            &rec["t_ns"],
             &rec["metadata"],
             &rec["content"]["hex"]
         ),
         (
             &frames[3]["type"],
-            &frames[3]["t"],
+            &frames[3]["t_ns"],
             &frames[3]["metadata"],
             &frames[3]["content"]["hex"]
         )

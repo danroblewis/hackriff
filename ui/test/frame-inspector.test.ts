@@ -193,10 +193,10 @@ test("fitClass maps fit status to a display class", () => {
 
 // ---- frame view mapping (capture page vs. inline parse) ----
 
-test("frameViewFromCapture maps a capture-page frame record, converting t from nanoseconds", () => {
+test("frameViewFromCapture maps a capture-page frame record, converting t_ns from nanoseconds", () => {
   const v = frameViewFromCapture({
     gated: false, crc_status: "valid",
-    t: 1_789_300_800_123_456_789,
+    t_ns: 1_789_300_800_123_456_789,
     metadata: { frame: 5, channel: 0, channel_hz: 101_300_000, bit_len: 32, fit: "ok" },
     content: { hex: "1348494a", layers: kindLenPayload },
   }, 0);

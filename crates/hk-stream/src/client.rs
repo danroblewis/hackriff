@@ -145,7 +145,14 @@ fn parse_message(frame: &[u8]) -> Result<Record, ClientError> {
         Some("dropped") => Ok(Record::Dropped(DropMarker {
             first_seq: u64_field("first_seq")?,
             count: u64_field("count")?,
-            t: Timestamp::from_unix_nanos(value["t"].as_i64().unwrap_or(0)),
+            // `t_ns` since 1.2 (T-354); `t` is the same nanoseconds under the 1.0/1.1 spelling,
+            // still read so a recording or an older producer parses.
+            t: Timestamp::from_unix_nanos(
+                value["t_ns"]
+                    .as_i64()
+                    .or_else(|| value["t"].as_i64())
+                    .unwrap_or(0),
+            ),
             sample_index: 0,
             gated: false,
         })),

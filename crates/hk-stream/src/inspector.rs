@@ -154,7 +154,11 @@ pub struct FrameRecord {
     pub record_type: String,
     /// Per-stream sequence number (§5.1).
     pub seq: u64,
-    /// Time of the first bit, ns since the Unix epoch (UTC).
+    /// Time of the first bit, **integer Unix nanoseconds** (UTC). On the wire since contract 1.2
+    /// this is `t_ns`, so the name carries the unit (§5.1, T-354); `t` is the 1.0/1.1 spelling of
+    /// the same nanoseconds and is still accepted, which is what lets recordings written before
+    /// the rename (§14.7 stores the byte stream itself) still parse and re-parse.
+    #[serde(rename = "t_ns", alias = "t")]
     pub t: i64,
     /// Effective class after clamping (§6).
     pub content_class: ContentClass,
@@ -712,7 +716,7 @@ mod tests {
     #[test]
     fn frame_record_wire_shape_round_trips() {
         let wire = json!({
-            "type": "frame", "seq": 41, "t": 1_789_300_800_123_456_789_i64,
+            "type": "frame", "seq": 41, "t_ns": 1_789_300_800_123_456_789_i64,
             "content_class": "unrestricted", "gated": false, "crc_status": "valid",
             "decoder": "recipe:rds@1", "frame_model": "rds",
             "metadata": {"frame": 41, "sample_index": 123_456_789, "channel": 0,
@@ -727,9 +731,25 @@ mod tests {
         assert_eq!(rec.metadata.bit_len, Some(64));
         assert_eq!(serde_json::to_value(&rec).unwrap(), wire);
 
+        // T-354: the unit is in the name, and it is the only spelling a producer writes. Asserted
+        // by value, not shape: a `t` here would be the same integer under a name that reads as
+        // seconds, which is the 31-year trap T-349 closed everywhere else.
+        assert_eq!(wire["t_ns"], json!(1_789_300_800_123_456_789_i64));
+        assert!(wire.get("t").is_none(), "1.2 producers emit only `t_ns`");
+
+        // …but the 1.0/1.1 spelling still parses, which is what lets a capture recorded before the
+        // rename (§14.7 stores the byte stream itself) be read and re-parsed. Same instant.
+        let old: FrameRecord = serde_json::from_value(json!({
+            "type": "frame", "seq": 41, "t": 1_789_300_800_123_456_789_i64,
+            "content_class": "unrestricted", "gated": false, "metadata": {}
+        }))
+        .unwrap();
+        assert_eq!(old.t, 1_789_300_800_123_456_789_i64);
+        assert_eq!(serde_json::to_value(&old).unwrap()["t_ns"], json!(old.t));
+
         // Gated: metadata reduced to an allowlist, no content. Every metadata key is optional.
         let gated: FrameRecord = serde_json::from_value(json!({
-            "type": "frame", "seq": 42, "t": 0, "content_class": "restricted-paging",
+            "type": "frame", "seq": 42, "t_ns": 0, "content_class": "restricted-paging",
             "gated": true, "metadata": {"frame": 42}
         }))
         .unwrap();

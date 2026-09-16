@@ -1,4 +1,4 @@
-# Stream-output contract (v1.1)
+# Stream-output contract (v1.2)
 
 **Status:** Engineering (T-016, T-014, T-022a, T-043, T-060). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-stream/` (contract; re-exported as `hk_api::stream`), `crates/hk-plugins/` (plugin host), `crates/hk-api/` (WebSocket bridge and read-only HTTP endpoints, §10), `hk stream-tail` (sample consumer). Revised after the T-016/T-014 review (input-class ceiling, metadata allowlist, own-key local-only, gated spectrum cap, process groups, consumer cap), again after the independent re-probe (locality enforced per consumer, metadata policy on publishers, per-row spectrum enforcement, tighter allowlist defaults), and again after T-022a shipped the WebSocket bridge (§10 mapping and auth, §11 residuals).
 
@@ -16,6 +16,11 @@ One contract serves two uses:
 
   Readers must ignore unknown fields and skip record types they don't know.
 - **A major version** changes framing or existing semantics. Readers refuse a major version they don't speak.
+- **One field was renamed in 1.2, and it is the only one (T-354).** JSON record envelopes spell the record time `t_ns`, not `t` (§5.1). A rename is not on the additive list above, so this is stated rather than slipped in:
+  - **The value did not change**, only its name: the same `i64` Unix nanoseconds, in the same place. Nothing about framing or semantics moved, so nothing warranted a major bump, which readers are required to *refuse* — a disproportionate answer to a field name.
+  - **Reading stays backward compatible.** Every reader in this contract accepts `t` wherever it accepts `t_ns` (`hk_stream::inspector::FrameRecord` carries `#[serde(alias = "t")]`; the reference reader and the capture frame index try `t_ns` then `t`). That is load-bearing, not courtesy: §14.7 stores decoded captures as the byte stream itself, so recordings written before 1.2 are still on disk and must still seek and re-parse.
+  - **Writing is not.** A 1.2 producer emits only `t_ns`. A reader written against 1.0/1.1 that requires `t` breaks — *loudly* (a missing key, not a wrong number), which is the failure this contract prefers.
+  - **Why at all.** A bare `t` holding nanoseconds is the hazard `docs/api.md`'s units convention exists to remove: nanoseconds and seconds are both plain JSON numbers 10⁹ apart, so a reader taking one for the other is out by about 31 years, and only the name can say which. These records reach the HTTP API verbatim (`GET /api/captures/{id}/frames`), where the surrounding capture object's `t_first`/`t_last` **are** seconds — two units, one body, one naming cue between them. `py/examples/hkstream.py` already called the binary header's field `t_ns`; now both halves of the contract say it.
 
 ## 2. Transports
 
@@ -60,7 +65,7 @@ frame := u32 length (little-endian) || payload[length]
 | Field | Type | Req | Meaning |
 |---|---|---|---|
 | `schema` | string | yes | `"hackriff.stream"` |
-| `version` | string | yes | `"1.1"` (readers accept any `1.x`) |
+| `version` | string | yes | `"1.2"` (readers accept any `1.x`; `hk_stream::STREAM_VERSION_MAJOR`/`_MINOR`) |
 | `stream_id` | string | yes | Producer-chosen name, e.g. `decodes/adsb` |
 | `kind` | string | yes | `messages`, `bits`, `symbols`, `iq`, `audio`, `spectrum`, `sync-search` (T-162, §14.4) or `eye` (T-161, §14.4) |
 | `content_class` | string | yes | Ceiling class for every record (§6). A reader treats a missing or unknown value as `metadata-only`. |
@@ -88,16 +93,22 @@ frame := u32 length (little-endian) || payload[length]
 Each record payload is one JSON object followed by `\n`. Strip the length prefixes and you get a valid NDJSON file.
 
 ```json
-{"type":"message","seq":12,"t":1757774400123456789,"emitter_id":"0199…","provenance_ref":"0199…",
+{"type":"message","seq":12,"t_ns":1757774400123456789,"emitter_id":"0199…","provenance_ref":"0199…",
  "content_class":"unrestricted","gated":false,"decode_id":"0199…","decoder":"readsb@0.1.0",
  "frame_model":"adsb-df17","crc_status":"valid","identity":{"scheme":"adsb-icao","value":"a1b2c3"},
  "metadata":{"icao":"a1b2c3","df":17},"content":{"callsign":"BAW123"}}
 ```
 
 **Always present:**
-- `type`, `seq`, `t`, `content_class` (the effective class after clamping, §6);
+- `type`, `seq`, `t_ns`, `content_class` (the effective class after clamping, §6);
 - `gated`;
 - `metadata`, which always flows.
+
+**`t_ns` is integer Unix nanoseconds (UTC), and the name says so.** That is the whole declaration: this document no longer relies on prose to tell a reader what unit a record's time is in, because `docs/api.md`'s units convention — Unix seconds by default, `_s` means seconds, `_ns` means integer Unix nanoseconds, no third unit — reaches these records too, verbatim, through `GET /api/captures/{id}/frames` and `POST /api/inspector/parse`. Three consequences worth stating plainly:
+
+- **Nanoseconds here are real, but only in the binary header.** §5.2's 32-byte record header carries an exact `i64`. A JSON reader's is not exact: epoch-magnitude nanoseconds are past `Number.MAX_SAFE_INTEGER` (exact nanosecond integers run out 104 days after the epoch), so `JSON.parse` has already rounded to the nearest `f64` — about ¼ µs of resolution, the same as it would have had in seconds. Divide by `1e9` and treat ¼ µs as the floor. If you need the exact instant, read the binary header or use a BigInt-aware parser.
+- **It is not `t`.** Contract 1.0 and 1.1 spelled this field `t`. Readers still accept that spelling (§1), and every recording written before 1.2 still carries it; producers emit only `t_ns`.
+- **`sample_index` beside it is not a time.** It is the stream's element counter (C03), and it is exact.
 
 **Optional fields:**
 - `emitter_id`, `provenance_ref`;
@@ -119,7 +130,7 @@ Each record is a 32-byte little-endian header followed by the payload:
 | 2 | u16 | reserved, 0 |
 | 4 | u32 | payload length. For `GATED` records this is the withheld length: lengths are metadata, and no payload bytes follow. |
 | 8 | u64 | `seq` |
-| 16 | i64 | timestamp of the first element, ns since the Unix epoch (UTC) |
+| 16 | i64 | timestamp of the first element, ns since the Unix epoch (UTC) — **exact**: a fixed-width `i64`, unlike the JSON envelope's `t_ns`, which a `JSON.parse` reader has already rounded (§5.1). This field's position, width and unit do not change. |
 | 24 | u64 | stream sample index of the first element (sample time, C03) |
 
 The payload holds whole elements of `datatype`. Producers cannot set `GATED`; only the gate sets it.
@@ -127,7 +138,7 @@ The payload holds whole elements of `datatype`. Producers cannot set `GATED`; on
 ### 5.3 Dropped marker
 
 When a consumer's queue was full, the next record that fits is preceded by a marker naming exactly the seqs that consumer missed: `first_seq` through `first_seq + count − 1`.
-- **Messages:** `{"type":"dropped","first_seq":N,"count":M,"t":<ns of first dropped>}`
+- **Messages:** `{"type":"dropped","first_seq":N,"count":M,"t_ns":<Unix ns of the first dropped record>}` (`t` before 1.2, §1)
 - **Binary:** record type 2 with `seq = first_seq`, flag `DISCONTINUITY`, and the timestamp and sample index of the first dropped record. The payload is `count` as a u64 LE.
 - **Gated (binary, gated spectrum only):** the same record with flags `GATED | DISCONTINUITY`. It reports rows **withheld by the egress gate** (§6, spectrum enforcement), not queue drops. Its timestamp and sample index are those of the next delivered row (the last delivered row at end of stream), so withheld rows contribute only their count. The reference reader returns `Record::Dropped(DropMarker { gated: true, .. })`.
 
@@ -310,7 +321,7 @@ One JSON object per line; lines longer than `max_message_bytes` are discarded an
 - Reviewed long strings and every `integer`/`number` key (up to 64 bits per record) are reported as warnings in `PluginManifest::warnings`. `PluginManifest::load` prints them to stderr, and the host copies them into the plugin's log ring.
 - **`sample_index` bound.** A restricted line's `sample_index` becomes the row's time, so it must lie within the inclusive range of input offered to that plugin instance: from the lowest record `sample_index` to the highest `sample_index + elements`. A line with an index outside that range, a non-integer index, or an index before any input is offered is dropped and counted (`sample_index_out_of_range`). Lines without `sample_index` get host arrival time.
 - **Confidence.** A restricted annotation's `confidence` is rounded to 0.01.
-- **Example paging policy (not a plugin):** `crates/hk-plugins/policies/restricted-paging.json` (`hk_plugins::EXAMPLE_RESTRICTED_PAGING_OUTPUT`). It allowlists only `capcode` (digits, at most 8), `function` (enum `0`–`3`), `baud` (enum `512`/`1200`/`2400`) and `encoding` (enum `numeric`/`alpha`/`tone`). `t` is host-stamped from `sample_index`. Message bodies, numeric pages included, are content and are never allowlisted.
+- **Example paging policy (not a plugin):** `crates/hk-plugins/policies/restricted-paging.json` (`hk_plugins::EXAMPLE_RESTRICTED_PAGING_OUTPUT`). It allowlists only `capcode` (digits, at most 8), `function` (enum `0`–`3`), `baud` (enum `512`/`1200`/`2400`) and `encoding` (enum `numeric`/`alpha`/`tone`). The record's `t_ns` is host-stamped from `sample_index`. Message bodies, numeric pages included, are content and are never allowlisted.
 
 **Logs:** plugin `log` lines and stderr are stored in the log ring only when the ceiling permits content; otherwise they are counted (`log_lines_withheld`, `stderr_lines_withheld`). Host errors about malformed lines name the field, never the offending value. `PluginMonitor::log_tail()` returns the lines tagged with the ceiling, so a control API can gate them.
 
@@ -451,7 +462,7 @@ documents the wire format and security notes from the UI's point of view.
 - **Manifest trust boundary: trusted but reviewed** (policy recorded by the coordinator). Manifests and their executables are trusted code (`plugins/README.md`). The host contains *accidental* leaks from well-meaning decoders; it does not contain a malicious executable. A manifest's class, allowlist, `max_len` budgets and `review_note`s are guardrail declarations and are reviewed like code. The defaults (§9.3) make anything beyond a small budget explicit and visible as a load warning.
 - **Residual side channels (noted, not fixed).** These remain open to a producer that modulates them deliberately, under every class:
   - **Timing and ordering:** arrival times, inter-record spacing, record order, seq gaps and drop/gated-marker counts.
-  - **Time fields:** the `t` of a restricted record carries about log2(input range) bits via an in-range `sample_index`, or host arrival time for lines without one.
+  - **Time fields:** the `t_ns` of a restricted record carries about log2(input range) bits via an in-range `sample_index`, or host arrival time for lines without one.
   - **Typed values within their bounds:** an 8-digit capcode (~26.6 bits), an enum choice, `integer`/`number` keys (64 bits, warned at load), confidence (~7 bits), `crc_status`, record and payload lengths (including the withheld length of `GATED` records).
   - **Gated spectrum:** delivered rows' `t` and `sample_index` (up to 128 bits per row at ≤ 50 rows/s), withheld-run counts, and bin values. A spectrum is metadata by rule, but a producer can modulate its bins.
   - **Ids from in-process producers:** `emitter_id`, `provenance_ref`, `decode_id` and `annotation_id` are opaque UUIDs that trusted in-process code chooses.
@@ -692,7 +703,7 @@ An inspector stream is a `messages` stream:
 One NDJSON record per frame:
 
 ```json
-{"type":"frame","seq":41,"t":1789300800123456789,"content_class":"unrestricted","gated":false,
+{"type":"frame","seq":41,"t_ns":1789300800123456789,"content_class":"unrestricted","gated":false,
  "crc_status":"valid","decoder":"recipe:rds@1","frame_model":"rds",
  "metadata":{"frame":41,"sample_index":123456789,"channel":0,"channel_hz":101300000.0,"bit_len":64,
              "recipe_version":1,"edit_rev":0,"fec_corrected_bits":0,"fit":"ok"},
@@ -704,7 +715,7 @@ One NDJSON record per frame:
 
 | Field | Meaning |
 |---|---|
-| `type`, `seq`, `t`, `content_class`, `gated` | As §5.1. `t` is the time of the frame's first bit, host-stamped from `sample_index` and the ring's time anchor. |
+| `type`, `seq`, `t_ns`, `content_class`, `gated` | As §5.1. `t_ns` is the time of the frame's first bit in integer Unix nanoseconds, host-stamped from `sample_index` and the ring's time anchor. |
 | `crc_status` | Frame check after FEC: `valid`, `invalid`, `corrected` (the check passed only after FEC corrected bits it cannot vouch for — usable, but never CRC-valid evidence: T-210), `no-crc` (the recipe has no check), `unknown`. |
 | `decoder` | `recipe:<recipe_id>@<version>` |
 | `frame_model` | The recipe id (inspector outputs) or the decode mapping's `frame_model` |
@@ -750,7 +761,7 @@ Inspector streams also carry two metadata-only record types. Readers that don't 
 
 - **`status`**, one record per ~250 ms tick for the whole pipeline, every node's block-contract status readout (ADR-0011 §1.3) batched as `<node>.<metric>` keys:
   ```json
-  {"type":"status","seq":57,"t":…,"content_class":"unrestricted","gated":false,
+  {"type":"status","seq":57,"t_ns":…,"content_class":"unrestricted","gated":false,
    "metadata":{"sync.lock":"locked","sync.snr_db":14.2,"sync.error_rate":0.012,"sync.quality":0.93,
                "sync.items_in":118750,"sync.items_out":1130,"sync.blocks_ok":4480,
                "crc.lock":"locked","crc.error_rate":0.004,"crc.items_in":1130,"crc.items_out":1130}}
@@ -758,7 +769,7 @@ Inspector streams also carry two metadata-only record types. Readers that don't 
   `metadata` is flat numbers, booleans and short tokens (`policy::metadata_is_allowlist_shaped`); no free text or content ever rides on it.
 - **`edit`**, once per applied hot edit (ADR-0011 §2.3), before the first frame of the new revision:
   ```json
-  {"type":"edit","seq":90,"t":…,"content_class":"unrestricted","gated":false,
+  {"type":"edit","seq":90,"t_ns":…,"content_class":"unrestricted","gated":false,
    "metadata":{"edit_rev":3,"recipe_version":1,"applied_at_sample":123456789,"rebuilt":1,"reset":4,"field_maps_changed":0}}
   ```
 
@@ -775,7 +786,7 @@ Any output port of any node of a running pipeline can be opened as a stream on d
 | `frames` | `messages` | – | – | frame records (§14.2) |
 
 - **Records.** §5.2 data records, one per processed chunk.
-  - `sample_index` is the port's element index; `t` comes from the chunk's time map.
+  - `sample_index` is the port's element index; the record header's timestamp (§5.2) comes from the chunk's time map.
   - `DISCONTINUITY` is set on the first record after a chunk discontinuity, a `RESET` (hot edit) or lost ring samples.
 - **`view=spectrum`** (`iq`/`real` ports): `kind: spectrum`, `rf32_le` dBFS/Hz rows, `fft_size` declared, at most 25 rows/s, which is inside the §6 gated-spectrum cap. The rendering reduction is server-side (the UI is a thin client).
 - **`view=sync_search`** (`bits` ports only; needs `sync_word=0x…` and `sync_bits=<1..=64>`, refused 400 if missing/invalid or if the word doesn't fit in `sync_bits`, the same rule the `sync_search` block itself applies): `kind: sync-search`, `rf32_le` rows of the sync-word match score (`1 - errors/sync_bits`, so `1.0` is a perfect match) at each candidate bit position, `fft_size` reused for the row length (candidate positions per row, scaled with the bit rate so the row rate stays at most 25 rows/s, the same cap as `view=spectrum`), no RF geometry (`center_hz`/`bandwidth_hz` unset — a bit-domain row, not RF-referenced). Computed on the pipeline thread, only while a consumer is attached (T-162). **Content, not metadata** (§6): the caller supplies the word, so an ungated score would let it probe withheld bits one guess at a time; it is gated exactly like the `bits` port it reads.

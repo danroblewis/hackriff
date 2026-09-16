@@ -27,11 +27,11 @@ const TREE: LayerTree = {
 };
 
 function liveFrame(seq: number, frame: number, gated = false) {
-  // `t` stays a small, exactly representable nanosecond count (frame + 0.5 s): the huge Unix-epoch
-  // nanosecond timestamps stream-contract §14.2 shows exceed float64 integer precision regardless
-  // of this UI layer, so the fixture avoids asserting on a value that was never exact on the wire.
+  // `t_ns` stays a small, exactly representable nanosecond count (frame + 0.5 s): the huge
+  // Unix-epoch nanosecond timestamps stream-contract §14.2 shows exceed float64 integer precision
+  // regardless of this UI layer, so the fixture avoids asserting on a value never exact on the wire.
   return {
-    type: "frame", seq, t: frame * 1_000_000_000 + 500_000_000, content_class: "unrestricted", gated,
+    type: "frame", seq, t_ns: frame * 1_000_000_000 + 500_000_000, content_class: "unrestricted", gated,
     crc_status: gated ? undefined : (frame % 2 === 0 ? "valid" : "invalid"), decoder: "recipe:rds@1", frame_model: "rds",
     metadata: { frame, channel: 0, channel_hz: 101_300_000, bit_len: 32, fit: gated ? undefined : "partial" },
     content: gated ? undefined : { hex: "16940a00", layers: TREE },
@@ -68,7 +68,7 @@ test("resolveSelectedFrame keeps an explicit selection while it's still in the r
 
 test("frameViewFromLive reuses frameViewFromCapture's mapping for a live inspector-stream record", () => {
   const rec = {
-    type: "frame", seq: 41, t: 41_500_000_000, content_class: "unrestricted", gated: false,
+    type: "frame", seq: 41, t_ns: 41_500_000_000, content_class: "unrestricted", gated: false,
     crc_status: "valid", decoder: "recipe:rds@1", frame_model: "rds",
     metadata: { frame: 41, channel: 0, channel_hz: 101_300_000, bit_len: 32, fit: "partial" },
     content: { hex: "16940a00", layers: TREE },

@@ -166,7 +166,7 @@ test("tallyCrcStatus and tallyChannels: sorted descending, honest 'unknown' buck
 
 test("withinWindow keeps only frames within the trailing window", () => {
   const now = 100 * 1e9;
-  const frames = [{ t: now - 70 * 1e9 }, { t: now - 30 * 1e9 }, { t: now }];
+  const frames = [{ t_ns: now - 70 * 1e9 }, { t_ns: now - 30 * 1e9 }, { t_ns: now }];
   assert.equal(withinWindow(frames, now, 60).length, 2);
 });
 
@@ -261,7 +261,7 @@ test("subscribePipelineFeed: one socket per pipeline across subscribers, closed 
 
   const sock = FakeSocket.instances[0];
   sock.header();
-  sock.send({ type: "status", t: 5_000_000_000, metadata: { "sync.lock": "locked" } });
+  sock.send({ type: "status", t_ns: 5_000_000_000, metadata: { "sync.lock": "locked" } });
   assert.equal(a.length, 1);
   assert.equal(b.length, 1, "both subscribers receive the same status record");
   assert.deepEqual(a[0], { tS: 5, values: { "sync.lock": "locked" } });
@@ -290,7 +290,7 @@ test("subscribePipelineFeed: frames reach only the `frame` handler, and resubscr
   const frames: unknown[] = [];
   const unsub = subscribePipelineFeed(ctx, "p1", { frame: (f) => frames.push(f) });
   FakeSocket.instances[0].header();
-  FakeSocket.instances[0].send({ type: "frame", seq: 1, t: 1e9, metadata: { channel: 0 } });
+  FakeSocket.instances[0].send({ type: "frame", seq: 1, t_ns: 1e9, metadata: { channel: 0 } });
   assert.equal(frames.length, 1);
   unsub();
   assert.equal(FakeSocket.instances[0].closed, true);

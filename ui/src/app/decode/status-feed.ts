@@ -75,7 +75,8 @@ function connect(ctx: AppContext, pipelineId: string, conn: Conn): void {
         return;
       }
       if (rec.type === "status") {
-        const u: StatusUpdate = { tS: Number(rec.t ?? 0) / 1e9, values: values(rec.metadata) };
+        // `t_ns` is integer Unix nanoseconds (stream-contract §5.1); the plots' axis is seconds.
+        const u: StatusUpdate = { tS: Number(rec.t_ns ?? 0) / 1e9, values: values(rec.metadata) };
         for (const h of [...conn.refs]) h.status?.(u);
       } else if (rec.type === "frame") {
         for (const h of [...conn.refs]) h.frame?.(rec as FrameRecord);

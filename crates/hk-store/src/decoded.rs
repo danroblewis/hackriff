@@ -561,7 +561,13 @@ impl CaptureWriter {
         let mut rec = Vec::with_capacity(payload.len() + 4);
         match (kind.as_str(), value.as_mut()) {
             ("frame", Some(v)) => {
-                let t = v.get("t").and_then(Value::as_i64).unwrap_or(0);
+                // `t_ns` since contract 1.2 (T-354); `t` is the same nanoseconds under the 1.0/1.1
+                // spelling, still read so recordings written before the rename stay seekable.
+                let t = v
+                    .get("t_ns")
+                    .or_else(|| v.get("t"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
                 let stripped = v
                     .get_mut("content")
                     .and_then(Value::as_object_mut)
