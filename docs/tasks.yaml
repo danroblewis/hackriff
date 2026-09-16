@@ -3776,7 +3776,7 @@ tasks:
   - id: T-235
     milestone: M3
     title: "Classifier: false-known 0.171 vs the 0.10 floor (one short-CP OFDM generator), and both OTA fixtures still abstain - close the simulation-to-reality gap with real-capture-derived densities"
-    status: todo
+    status: in-progress
     priority: high
     deps: [T-230, T-205]
     parallel_group: M3A
