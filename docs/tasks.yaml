@@ -3033,7 +3033,8 @@ tasks:
   - id: T-189
     milestone: M2-hardening
     title: "API inventory row classification field (hk-api query.rs:818) still shows latest emitter_classification row; align with T-183 family ranking (track-shape below demod/decoder/classifier)"
-    status: todo
+    status: done
+    completed_by: T-211
     priority: low
     deps: [T-183]
     parallel_group: API
@@ -3045,6 +3046,8 @@ tasks:
     model: sonnet
     effort: low
     core_interface: false
+    closure_evidence_2026_09_15: "Verified in code, not assumed: crates/hk-api/src/query.rs:893 serves classification from repo.current_classification(), the ARBITRATED row that sets family (with a T-211 comment saying so), and latest_classification is a separate field populated only when a newer lower-ranked row differs. That is exactly T-189-s requirement that classification and family can never disagree. docs/api.md and api_contract both reference the fields, satisfying the -updated together- clause. Completed by T-211 (cd82ab7) and left open on the board until this audit."
+
   - id: T-190
     milestone: MUI
     title: "Analyze / synthesize decoder stub endpoint: POST /api/analyze on a selection, emitter or ad-hoc band (optional history window) validates the target and returns 501 not_implemented until MAUTO"
