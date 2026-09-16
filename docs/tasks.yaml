@@ -3265,7 +3265,7 @@ tasks:
   - id: T-203
     milestone: M3
     title: "C38 ml-runtime Mac-first: model host with load/unload, batching, shadow mode and model@version provenance behind a conformance suite"
-    status: todo
+    status: in-progress
     priority: normal
     deps: [T-211]
     parallel_group: M3C
