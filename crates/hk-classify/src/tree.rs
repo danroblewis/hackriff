@@ -329,7 +329,11 @@ pub fn class_guess(
 fn analog_classes(features: &Features, obw_hz: Option<f64>) -> Vec<(&'static str, f64)> {
     let carrier = features.get("carrier_line_db").unwrap_or(0.0);
     let sigma_af = features.get("sigma_af").unwrap_or(0.0);
-    let symmetry = features.get("symmetry").map(f64::abs).unwrap_or(0.0);
+    // `symmetry` is sideband balance **about a carrier**, and is measured only where there is one
+    // to measure it about (T-286, [`crate::features::CARRIER_MIN_FRACTION`]). Its absence is
+    // therefore positive evidence that the carrier is suppressed — which is what `ssb` means.
+    let has_carrier = features.get("symmetry").is_some();
+    let flatness = features.get("flatness").unwrap_or(0.0);
     let low = features.get("low_fraction").unwrap_or(0.0);
     let env_cv = features.get("env_cv").unwrap_or(0.0);
     let mut v = Vec::new();
@@ -342,10 +346,18 @@ fn analog_classes(features: &Features, obw_hz: Option<f64>) -> Vec<(&'static str
             0.05
         },
     ));
-    // SSB: one sideband only, no carrier line.
+    // SSB: a suppressed carrier, one sideband, a peaky spectrum and a deeply varying envelope.
+    //
+    // It is **not** named from `symmetry`, which is what this rule used to do. That feature needs a
+    // carrier as its reference and SSB is precisely the case with none, so the rule was firing on
+    // noise — the defect T-248 recorded and left, and which bit once `symmetry` became real: `wfm`
+    // (σ 0.53 about zero, and no carrier line either) started being called `ssb`. What identifies
+    // SSB instead is what is left when the carrier is gone: `nbfm`/`wfm` are far flatter (0.48 /
+    // 0.77 against `ssb`'s 0.11) and far less amplitude-varying (env_cv 0.12 / 0.21 against 0.48),
+    // and `cw` is the keyed one (`low`).
     v.push((
         "ssb",
-        if symmetry > 0.35 && carrier < 20.0 {
+        if !has_carrier && env_cv > 0.35 && flatness < 0.35 && low < 0.15 {
             0.7
         } else {
             0.05
