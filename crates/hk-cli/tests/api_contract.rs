@@ -6462,6 +6462,243 @@ fn coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it
     stop_server(serving);
 }
 
+/// T-438: `GET /api/tiles` and `GET /api/tiles/events`, as `docs/api.md` documents them.
+///
+/// The assertions are on **values**, not shapes (T-315), and the two that matter most are the ones
+/// T-437 found broken elsewhere:
+///
+/// - **F2** — on `/api/history`, tightening the *frequency* budget 1.5× cost 34× of *time*
+///   resolution and greyed a third of the window, because a per-axis budget there selects a
+///   **level**. Here the address *is* the budget, so coarsening `level_f` moves the frequency cell
+///   and leaves the time cell bit-identical, and the band the finer tile observed is still observed
+///   at the coarser address.
+/// - **T-434** — a welded ladder is the **diagonal** of its own lattice, so `scheme=1` off the
+///   diagonal is a `404` that says so, never a snap to a level whose time cell is a day.
+#[test]
+fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell() {
+    let (_dir_guard, serving, addr) = start_server();
+    const N: u64 = 32;
+    let tile = |lf: u64, lt: u64, fi: u64, ti: u64| {
+        format!("/api/tiles?level_f={lf}&level_t={lt}&f_index={fi}&t_index={ti}&cells={N}")
+    };
+
+    // The address is resolved against the open pyramid's own geometry, so the cell sizes come back
+    // from the server rather than being assumed here. Scheme 1's floor is 6.25 kHz x 1 s.
+    let (st, probe) = get(addr, &tile(0, 0, 0, 0));
+    assert_eq!(st, 200, "{probe}");
+    let f_cell = probe["extent"]["f_cell_hz"].as_f64().unwrap();
+    let t_cell = probe["extent"]["t_cell_s"].as_f64().unwrap();
+    assert_eq!((f_cell, t_cell), (6250.0, 1.0), "{probe}");
+    assert_eq!(probe["key"]["scheme"], json!("view"), "{probe}");
+    assert_eq!(probe["key"]["device"], json!("any"), "{probe}");
+    // `any` is the union and can never wear one radio's identity (T-259/T-305, docs/16 §6.3).
+    assert_eq!(probe["key"]["device_named"], json!(false), "{probe}");
+    assert_eq!(probe["key"]["cells"], json!(N), "{probe}");
+    assert_eq!(probe["extent"]["nt"], json!(N), "{probe}");
+    assert_eq!(probe["extent"]["nf"], json!(N), "{probe}");
+    assert_eq!(probe["grid"]["cells"], json!(N * N), "{probe}");
+    assert_eq!(probe["cost"]["in_flight_limit"], json!(4), "{probe}");
+    // Tile (0, 0, 0, 0) is 0 Hz in 1970: genuinely unobserved, and that is a coverage answer.
+    assert_eq!(probe["grid"]["observed_cells"], json!(0), "{probe}");
+    assert_eq!(probe["grid"]["range_db"], Value::Null, "{probe}");
+
+    let f_index = (STATION_HZ / (f_cell * N as f64)).floor() as u64;
+    let t_index_of = |lt: u32| (unix_now() / (t_cell * (1u64 << lt) as f64 * N as f64)) as u64;
+
+    // Wait for the pyramid to hold frames under the station.
+    wait_for(
+        "the station's tile to be observed",
+        Duration::from_secs(60),
+        || {
+            get(addr, &tile(0, 0, f_index, t_index_of(0))).1["grid"]["observed_cells"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let (st, fine) = get(addr, &tile(0, 0, f_index, t_index_of(0)));
+    assert_eq!(st, 200, "{fine}");
+    // The level that ANSWERED, not the one the address implies (T-426). At the store's own floor
+    // the tile sits on scheme 1's diagonal, so the node is exact and nothing was folded.
+    assert_eq!(fine["resolution"]["answered"]["level"], json!(0), "{fine}");
+    assert_eq!(
+        fine["resolution"]["answered"]["exact_node"],
+        json!(true),
+        "{fine}"
+    );
+    assert_eq!(fine["axes"]["store_node"], json!(0), "{fine}");
+    assert_eq!(fine["resolution"]["tried"], json!([0]), "{fine}");
+    for axis in ["frequency", "time"] {
+        assert_eq!(
+            fine["resolution"]["fold"][axis]["direction"],
+            json!("exact"),
+            "{axis}: {fine}"
+        );
+        assert_eq!(
+            fine["resolution"]["fold"][axis]["replicated"],
+            json!(false),
+            "{axis}: {fine}"
+        );
+        assert_eq!(
+            fine["resolution"]["fold"][axis]["served"],
+            json!(N),
+            "{axis}: {fine}"
+        );
+    }
+    // This route reads the pyramid and only the pyramid, exactly as /api/history does. T-439 adds
+    // the growing edge; claiming live first would be the stronger claim with no evidence.
+    assert_eq!(
+        fine["resolution"]["source"],
+        json!("spectrum-history"),
+        "{fine}"
+    );
+    assert_eq!(fine["resolution"]["live"], json!(false), "{fine}");
+    // Grey is decided by the record-derived plane (T-423), and the key says whose.
+    assert_eq!(
+        fine["coverage"]["selected"]["device"],
+        json!("any"),
+        "{fine}"
+    );
+    assert_eq!(
+        fine["coverage"]["selected"]["named"],
+        json!(false),
+        "{fine}"
+    );
+    assert_eq!(
+        fine["coverage"]["selected"]["present"],
+        json!(true),
+        "{fine}"
+    );
+    // De-welding costs the percentiles (T-434): unknown on the wire, never approximated.
+    assert!(
+        fine["grid"]["percentiles"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("unknown")),
+        "{fine}"
+    );
+    assert!(fine["grid"]["p_low_db"].is_null(), "{fine}");
+    let observed_fine = fine["grid"]["observed_cells"].as_u64().unwrap();
+
+    // ---- the de-welding, on the wire: one axis's level moves only its own axis's cell ----
+    let (st, coarse_f) = get(addr, &tile(2, 0, f_index / 4, t_index_of(0)));
+    assert_eq!(st, 200, "{coarse_f}");
+    assert_eq!(
+        coarse_f["extent"]["f_cell_hz"],
+        json!(f_cell * 4.0),
+        "{coarse_f}"
+    );
+    // F2's exact failure mode: the TIME cell moved when only the FREQUENCY address was coarsened.
+    assert_eq!(coarse_f["extent"]["t_cell_s"], json!(t_cell), "{coarse_f}");
+    assert_eq!(coarse_f["grid"]["t_cell_s"], json!(t_cell), "{coarse_f}");
+    // F2's other half: a third of the window went grey. The coarser address covers the finer one's
+    // whole band, so it cannot observe less.
+    let observed_coarse = coarse_f["grid"]["observed_cells"].as_u64().unwrap();
+    assert!(
+        observed_coarse > 0,
+        "the coarser frequency address greyed a band the finer one holds: {coarse_f}"
+    );
+
+    let (st, coarse_t) = get(addr, &tile(0, 2, f_index, t_index_of(2)));
+    assert_eq!(st, 200, "{coarse_t}");
+    assert_eq!(
+        coarse_t["extent"]["t_cell_s"],
+        json!(t_cell * 4.0),
+        "{coarse_t}"
+    );
+    assert_eq!(coarse_t["extent"]["f_cell_hz"], json!(f_cell), "{coarse_t}");
+    // Off scheme 1's diagonal (fine frequency, coarse time), so this pair has no store node and is
+    // folded rather than read whole — which is the whole reason the view lattice exists.
+    assert_eq!(coarse_t["axes"]["store_node"], Value::Null, "{coarse_t}");
+    assert_eq!(
+        coarse_t["resolution"]["answered"]["exact_node"],
+        json!(false),
+        "{coarse_t}"
+    );
+    assert_eq!(
+        coarse_t["resolution"]["fold"]["time"]["direction"],
+        json!("folded"),
+        "a finer source folded onto a coarser tile invents nothing: {coarse_t}"
+    );
+    assert!(
+        coarse_t["grid"]["observed_cells"].as_u64().unwrap() > 0 && observed_fine > 0,
+        "{coarse_t}"
+    );
+
+    // ---- "no such node": a welded ladder is the DIAGONAL of its own lattice (T-434) ----
+    let (st, v) = get(
+        addr,
+        &format!("/api/tiles?scheme=1&level_f=0&level_t=3&f_index=0&t_index=0&cells={N}"),
+    );
+    assert_eq!(st, 404, "{v}");
+    assert!(
+        v["error"].as_str().is_some_and(|s| s.contains("diagonal")),
+        "the refusal must say WHY: {v}"
+    );
+    // On the diagonal the same scheme answers.
+    let (st, v) = get(
+        addr,
+        &format!(
+            "/api/tiles?scheme=1&level_f=0&level_t=0&f_index={f_index}&t_index={}&cells={N}",
+            t_index_of(0)
+        ),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["key"]["scheme"], json!("1"), "{v}");
+    assert_eq!(v["axes"]["store_node"], json!(0), "{v}");
+    // Past the end of an axis is the other "no such node", and names both extents.
+    let (st, v) = get(addr, &tile(99, 0, 0, 0));
+    assert_eq!(st, 404, "{v}");
+
+    // ---- refusals, never clamps ----
+    for bad in [
+        "/api/tiles",
+        "/api/tiles?level_f=0&level_t=0&f_index=0",
+        "/api/tiles?level_f=-1&level_t=0&f_index=0&t_index=0",
+        "/api/tiles?level_f=0&level_t=0&f_index=-1&t_index=0",
+        "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=999",
+        "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=2",
+        "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&scheme=nope",
+        "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&zoom=3",
+    ] {
+        let (st, v) = get(addr, bad);
+        assert!(
+            (400..500).contains(&st),
+            "expected a refusal for {bad}: {v}"
+        );
+    }
+    let (st, v) = post(addr, "/api/tiles", "{}");
+    assert_eq!(st, 405, "{v}");
+
+    // ---- the coarse-zoom aggregate: counts, never emitters (docs/16 §5.3) ----
+    let (st, ev) = get(
+        addr,
+        &format!(
+            "/api/tiles/events?level_f=0&level_t=0&f_index={f_index}&t_index={}&cells={N}",
+            t_index_of(0)
+        ),
+    );
+    assert_eq!(st, 200, "{ev}");
+    assert_eq!(
+        ev["counts"].as_array().unwrap().len(),
+        (N * N) as usize,
+        "{ev}"
+    );
+    assert_eq!(ev["key"]["cells"], json!(N), "{ev}");
+    assert_eq!(ev["extent"]["t_cell_s"], json!(t_cell), "{ev}");
+    assert!(ev["total"].is_u64() && ev["placed"].is_u64(), "{ev}");
+    assert!(
+        ev["placed"].as_u64().unwrap() <= ev["total"].as_u64().unwrap(),
+        "an event off the tile is counted, not clamped into it: {ev}"
+    );
+    // A tile carries no emitters, and neither does the aggregate: counts only.
+    assert!(ev["emitters"].is_null() && ev["events"].is_null(), "{ev}");
+    assert!(
+        ev["rule"].as_str().is_some_and(|s| s.contains("START")),
+        "{ev}"
+    );
+
+    stop_server(serving);
+}
+
 #[test]
 fn every_route_in_the_route_table_is_documented() {
     let doc_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md");

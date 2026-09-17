@@ -40,7 +40,7 @@ use crate::coverage::ObservedCoverage;
 /// Decoded query parameters, in request order.
 pub type Params = [(String, String)];
 
-fn param<'a>(q: &'a Params, key: &str) -> Option<&'a str> {
+pub(crate) fn param<'a>(q: &'a Params, key: &str) -> Option<&'a str> {
     q.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 use serde_json::{Value, json};
