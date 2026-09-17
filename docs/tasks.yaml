@@ -7769,6 +7769,89 @@ tasks:
       far as presence has actually been observed. Fast is the goal; inventing the
       most recent second is not. The user names the absence of extrapolation as part
       of the diagnosis, not as the thing to change.
+  - id: T-389
+    title: Confirmed presence boxes never draw unselected, and the candidate LIST disagrees with both the boxes and the API
+    milestone: M2-hardening
+    status: in-progress
+    priority: high
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-379]
+    acceptance: |
+      USER, live testing 2026-09-16, items (1) and (2) - filed together because they
+      share a suspected root cause and the same files.
+      (1) CONFIRMED presence boxes are not drawing when the signal is UNSELECTED. The
+      user sees the solid/teal confirmed box only AFTER clicking the row (when it
+      becomes the yellow selected band), never the unselected
+      .c-presence-box.confirmed - even though every confirmed row has a live
+      last_interval per the API. Verify confirmed boxes render AT ALL TIMES, and that
+      teal is actually visible against the waterfall.
+      (2) LIST vs BOXES DISAGREE: the UI shows "1 candidate" while /api/inventory
+      returns 20 candidate rows and the waterfall draws MULTIPLE dotted candidate
+      boxes. THREE different numbers. The list and the boxes it renders MUST NEVER
+      DISAGREE (docs/api.md).
+      COORDINATOR FINDINGS, as leads to verify and not conclusions:
+      - overlays.ts presenceBoxes() ALREADY emits unselected confirmed boxes and
+        skips only the FOCUSED row (`if (r.id === focusedId) continue;` - T-193 gives
+        the focused row a full-height bracket instead). That is the OPPOSITE of the
+        reported symptom, so the cause is very likely UPSTREAM of the renderer.
+      - The renderer's other early-out is `const iv = r.presence?.last_interval; if
+        (!iv) continue;`. So the question is whether rows IN THE STORE carry
+        `presence` at all. inventory.ts mentions a "`presence` projection" at two
+        places (lines ~195, ~211); if the list fetch projects presence for candidates
+        (their activity dots need it) but not for confirmed, that explains (1)
+        exactly.
+      - live-spectrum.ts draws from presenceBoxes(Object.values(s.inventory.rows)),
+        i.e. THE SAME STORE the list renders from - so a disagreement between list and
+        boxes means one of them applies a further filter. Note fetchInventoryPage is
+        PAGINATED (`onMore("candidate", !!candidate.next_cursor)`), which is a
+        candidate explanation for 20 -> fewer, but NOT for a count of 1.
+      - T-379 changed the window logic on this exact path hours earlier. CHECK FOR A
+        REGRESSION: it fixed "always empty" and may have produced "far too few". Its
+        own tests assert a window that HOLDS data renders its rows, so if this is a
+        regression those tests have a gap worth naming.
+      The rule, from the user: the list and the liveness/boxes it renders must never
+      disagree. Whatever the fix, add the invariant test - list count and box count
+      derive from one filtered collection, asserted equal.
+  - id: T-390
+    title: Candidate boxes over-split into the FM station skirts and still overlap in the SERVED path after T-369
+    milestone: M3
+    status: todo
+    priority: high
+    parallel_group: M3B
+    core_interface: true
+    model: opus
+    deps: [T-369]
+    acceptance: |
+      USER, live testing 2026-09-16, item (3). Candidate dotted boxes are offset INTO
+      THE FM STATION SKIRTS - 99.86 / 99.87 / 99.91 sitting above the confirmed 99.69,
+      and 101.37 above the confirmed 101.30 - and they OVERLAP EACH OTHER. This is the
+      over-split/overlap case T-369 and T-250 were supposed to collapse in the SERVED
+      path, and it is still visible live.
+      THE STALE-BINARY EXPLANATION IS RULED OUT. The user's demo binary was built
+      2026-09-16 18:21:42, after T-369 merged (16:53:40), T-384 (17:59:00) and T-385
+      (18:00:36). It is running current code. This is a real gap in the fix, not an
+      old process.
+      T-369 established the mechanism and its own limit: bands_compete gates every
+      T-219 stage at OVERLAP_MIN_FRACTION of BOTH bands, which is unreachable for a
+      narrow box inside a wide one and for a staircase of offsets. It fixed those two
+      geometries and reported "12 rows -> 11 shown, 2 overlapping pairs -> 0" ON ITS
+      OWN FIXTURE. The live band shows a THIRD geometry it did not cover.
+      THE PHYSICS IS THE LEAD: these are not independent emitters, they are the SKIRTS
+      of a strong WFM carrier being detected as separate signals. 99.86/99.87/99.91 are
+      170-220 kHz above a 99.69 confirmed station whose measured width is ~128 kHz, so
+      they sit on its shoulder. An over-split of one emission is not a dedup problem
+      first - it is a DETECTION/SEGMENTATION problem that dedup is being asked to clean
+      up afterwards. Establish which layer should fix it before adding more collapse.
+      T-316 is the precedent and the warning: real-air false alarms went 875 detections
+      / 5 candidate emitters -> 2 / 1 once a 75 kHz-wide, 4.6 dB stationary noise shelf
+      was accounted for, and the fix there was NOT a threshold that turned the suite
+      green - it was re-deriving 106 kHz = 2 x 53 kHz from the stereo subcarrier.
+      HOLD THE LINE FROM T-233: a blind test must never merge two genuinely distinct
+      emitters. Collapsing skirts into their parent must not also collapse a real
+      adjacent station - T-369's 200 kHz raster control exists for exactly this and
+      must stay green.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
