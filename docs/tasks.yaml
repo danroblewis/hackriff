@@ -8137,6 +8137,28 @@ tasks:
       WHAT REMAINS: the client sharing the waterfall's colormap CODE (not copying a
       scale), and THE USER'S CONFIRMATION of the truncated half of their message.
       That makes the remainder a ui-only change.
+      USER REFINEMENT 2026-09-16, and it changes the shape of this ticket: the strip
+      currently looks like it renders a SINGLE ROW (one spectrum across the frequency
+      range) STRETCHED VERTICALLY to fill the bar height. That is wrong.
+      IT SHOULD BE A PROPER MINI-WATERFALL: several TIME ROWS stacked (time down,
+      frequency across the survey range), as many rows as fit the bar's height AT THE
+      MAIN WATERFALL'S NATIVE ROW RESOLUTION - the same vertical resolution as the big
+      waterfall, just a short window of recent history. Each row is a max-hold-folded
+      spectrum of the whole survey range.
+      NET: the bottom bar is a SMALL RECENT-HISTORY SPECTROGRAM OF THE WHOLE SPECTRUM,
+      not one row scaled up. Same principle as T-411's left overview: REAL ROWS AT
+      WATERFALL RESOLUTION, NEVER ONE CELL STRETCHED.
+      THE ARCHITECTURAL CONSEQUENCE, which the coordinator is flagging rather than the
+      user: this is no longer a ui-only change. T-342 delivered the backend half as a
+      fold PER FREQUENCY CELL OVER A WINDOW - one row. A mini-waterfall needs
+      ROWS x CELLS, which is the SECOND AXIS docs/16 section 2 names as the one real gap
+      between what exists and the tile pyramid: "the pyramid is tiered in TIME and
+      coverage answers per FREQUENCY CELL over a window; the big view needs both at
+      several zoom levels".
+      So the bottom bar being a mini-waterfall makes it literally a miniature of T-408's
+      big view - which is exactly what the user said it was when they described the
+      shared pyramid. DO NOT build a private two-axis query for this bar. Read docs/16
+      first; if the answer is that this waits on the pyramid's second axis, say so.
 
   - id: T-398
     title: A strong WFM+RDS station takes ~40 s to reach Confirmed when a human sees it in under five
@@ -8623,6 +8645,37 @@ tasks:
       reordered record can never SHORTEN a box) and its rate bound. Keep the paused-view
       behaviour - no socket while paused - and T-362's rule that a box carries times, not
       screen positions.
+  - id: T-411
+    title: The left time-overview renders at the old 12px buffer size, so a few cells stretch into blocks
+    milestone: M2-hardening
+    status: todo
+    priority: high
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-391, T-338, T-334]
+    acceptance: |
+      USER 2026-09-16, ITEM (A) OF THE FOUR-PART NAVIGATOR MESSAGE - LOST TO TRUNCATION
+      AND RE-FILED AT THE USER'S REQUEST. Items (B) and (C) became T-397; (A) was
+      dropped and never became a ticket. The user asked about it "a while ago". Filed.
+      THE DEFECT: the LEFT TIME NAVIGATOR overview is badly PIXELATED because its render
+      buffer is still as thin as the old ~12 px track, so a few cells stretch across the
+      now-wider bar into meaningless blocks. T-391 widened the bar to 92 px; the buffer
+      did not follow.
+      REQUIRED: render the left time-overview at a RESOLUTION MATCHING THE WIDENED BAR -
+      enough frequency bins across its width and enough time rows - so it looks like a
+      normal waterfall over a very long time range. Lower-res than the main view is
+      fine; BLOCKY GARBAGE IS NOT.
+      Use MAX-HOLD when downsampling (same as T-397 for the bottom bar) so narrow and
+      bursty signals are not averaged away, and SHARE THE WATERFALL INTENSITY SCALING.
+      THE REFINEMENT THE USER ADDED FOR BOTH BARS: real rows at waterfall resolution,
+      NEVER ONE CELL STRETCHED. This bar shows a long time range, so its rows are folded
+      hard - but they must be ROWS, each a real fold of a real interval, not one row
+      scaled up.
+      ui-only gate WHERE POSSIBLE - but see the note in T-397: asking for R rows instead
+      of 1 may not be a client-side change, and if /api/timeline cannot serve the row
+      count this bar needs at the resolution it needs, say so rather than upsampling in
+      the client. Upsampling is how the current blockiness happened.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
