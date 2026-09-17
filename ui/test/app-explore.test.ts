@@ -13,7 +13,7 @@ import {
   signalFocus, signalFocusText,
 } from "../src/app/explore/focus";
 import {
-  clearUserBand, clusterChip, confirmedFilters, DEFAULT_ROW_RATE_HZ, emptyListText, liveEdgeS,
+  clearUserBand, CLUSTER_CHIP_TITLE, clusterChip, confirmedFilters, DEFAULT_ROW_RATE_HZ, emptyListText, liveEdgeS,
   loadInventoryRows, nextInventorySort, recurrenceDots, renderedInventory, rowChips, rowSeenText,
   setUserBand, sortInventoryRows, viewFilters, viewWindow, WAITING_FOR_WINDOW, waterfallSpanS,
   type Classification, type Row,
@@ -42,7 +42,7 @@ function makeRow(over: Partial<Row> = {}): Row {
     known_status: "known", status: null, tags: [], family: "wfm-broadcast",
     identity_scheme: null, identity_class: null, withheld: false,
     recurrence: { occurrences: 12, appearances: 3, span_s: 3600, on_air_s: 900, duty_cycle: 0.25, recent: [] },
-    classification: null, explanations: [], refined: null, cluster_id: null,
+    classification: null, explanations: [], refined: null, cluster_id: null, cluster_group: null,
     ...over,
   };
 }
@@ -100,9 +100,31 @@ test("rowChips: known family, unknown family, off-raster flag", () => {
   assert.deepEqual(rowChips(flagged), [{ cls: "known", text: "wfm-broadcast" }, { cls: "flag", text: "off raster" }]);
 });
 
-test("clusterChip: 'seen before' when the row belongs to a visible cluster, else null", () => {
-  assert.deepEqual(clusterChip(makeRow({ cluster_id: "cluster:0199abc" })), { cls: "cluster", text: "seen before" });
-  assert.equal(clusterChip(makeRow({ cluster_id: null })), null);
+test("clusterChip: names the group and says the rows measure alike — never 'duplicate' (T-320)", () => {
+  const group = { cluster_id: "cluster:0199abc", label: "199ABC", rows_in_view: 11 };
+  const many = clusterChip(makeRow({ cluster_id: group.cluster_id, cluster_group: group }));
+  // The label makes the *grouping* visible: eleven rows carrying "199ABC" are one group, which a
+  // bare "seen before" on each of eleven rows never showed.
+  assert.deepEqual(many, {
+    cls: "cluster",
+    text: "signature cluster 199ABC · 11 rows measure alike",
+    title: CLUSTER_CHIP_TITLE,
+  });
+  // The claim is what was measured, not a deduplication verdict: near-duplicate rows are minted
+  // upstream by entity resolution and a cluster sets nothing on an emitter, so the chip must not
+  // call them duplicates or suggest anything was merged or removed.
+  for (const banned of ["duplicate", "merged", "removed", "collapsed"]) {
+    assert.ok(!many!.text.toLowerCase().includes(banned), `chip says "${banned}": ${many!.text}`);
+  }
+  assert.ok(CLUSTER_CHIP_TITLE.includes("stay separate inventory rows"));
+
+  // Alone in view: the group is named, but nothing is claimed about other rows.
+  assert.deepEqual(
+    clusterChip(makeRow({ cluster_id: group.cluster_id, cluster_group: { ...group, rows_in_view: 1 } })),
+    { cls: "cluster", text: "signature cluster 199ABC · seen before", title: CLUSTER_CHIP_TITLE },
+  );
+  // The count and the label come from the server; the client computes neither.
+  assert.equal(clusterChip(makeRow({ cluster_id: null, cluster_group: null })), null);
 });
 
 test("rowSeenText: confirmed shows on-air duty and count (GAP 2 interim); candidates show a rate", () => {

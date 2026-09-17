@@ -188,7 +188,7 @@ function harness(live: boolean) {
     id: "e1", state: "confirmed", f_center_hz: 1, bandwidth_hz: 1, f_lo_hz: 1, f_hi_hz: 2,
     first_seen_s: 990, last_seen_s: 995, count: 2, known_status: "unknown", status: null,
     tags: [], family: null, identity_scheme: null, identity_class: null, withheld: false,
-    recurrence: null, classification: null, explanations: [], refined: null, cluster_id: null,
+    recurrence: null, classification: null, explanations: [], refined: null, cluster_id: null, cluster_group: null,
     presence: presence(990.0, 995.0),
   } as unknown as ExploreRow;
   store.set(setInventoryRows({ e1 }, 1));

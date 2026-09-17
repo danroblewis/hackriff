@@ -99,7 +99,8 @@ const mountInventory: MountFn = (el, ctx) => {
     const focus = ctx.store.get().focus;
     const current = focus.kind === "signal" && focus.id === r.id;
     const cluster = clusterChip(r);
-    const chips = [...rowChips(r), ...(cluster ? [cluster] : [])].map((c) => h("span", { class: `chip ${c.cls}` }, c.text));
+    const chips = [...rowChips(r), ...(cluster ? [cluster] : [])]
+      .map((c) => h("span", { class: `chip ${c.cls}`, title: c.title }, c.text));
     const dotsEl = r.state === "candidate" && recurrenceDots(r).length
       ? h("span", { class: "dots" }, ...recurrenceDots(r).map((v) => h("i", { style: `height:${2 + Math.round(v * 8)}px` })))
       : null;
@@ -269,7 +270,11 @@ function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<SignatureMatch
     : cluster === undefined || cluster === "loading" ? "Checking clusters…"
     : cluster === null ? "Cluster lookup failed."
     : clusterSummary(cluster);
-  const clusterSection = h("div", {}, h("div", { class: "section-h" }, "Cluster ", h("em", {}, "the same thing seen before")),
+  // T-320: name the cluster here too, so the panel and the list chip are visibly the same group.
+  const clusterSection = h("div", {},
+    h("div", { class: "section-h" },
+      r.cluster_group ? `Signature cluster ${r.cluster_group.label} ` : "Cluster ",
+      h("em", {}, "the same thing seen before")),
     h("p", { class: "hint" }, clusterText));
 
   // GAP 3: only the identity (not the latest decoded fields, e.g. RDS PS/PTY) is on the row, so

@@ -483,12 +483,63 @@ pub fn is_cluster_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
+/// How many id-safe characters of a cluster id's tail [`cluster_label`] keeps.
+pub const CLUSTER_LABEL_LEN: usize = 6;
+
+/// A short, stable display form of a cluster id, so a reader can see **which** group a row is in
+/// rather than only *that* it is in one (T-320).
+///
+/// It is a pure function of the id: the same cluster always reads the same label, in any list, on
+/// any front end, for as long as the id survives. Two different clusters read differently unless
+/// their ids' last [`CLUSTER_LABEL_LEN`] id-safe characters collide — about 1 in 16 M for the
+/// UUIDv7 tails [`new_cluster_id`] mints, and below 0.03 % across a page of 80 rows.
+///
+/// **It says nothing beyond membership.** A shared label means these rows *measure* alike (ADR-0016
+/// §5), never that they are one emitter, one identity or one inventory row — a cluster sets
+/// nothing on an emitter, which `a_cluster_never_changes_anything_about_the_emitter` pins. It is
+/// derived from the id alone, so it cannot vary with which front end reported a row.
+pub fn cluster_label(id: &str) -> String {
+    let tail = id.strip_prefix("cluster:").unwrap_or(id);
+    let keep: Vec<char> = tail.chars().filter(char::is_ascii_alphanumeric).collect();
+    let out: String = keep[keep.len().saturating_sub(CLUSTER_LABEL_LEN)..]
+        .iter()
+        .map(char::to_ascii_uppercase)
+        .collect();
+    if out.is_empty() { tail.to_owned() } else { out }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn t(sec: i64) -> Timestamp {
         Timestamp::from_unix_nanos(1_789_000_000_000_000_000 + sec * 1_000_000_000)
+    }
+
+    /// T-320: the label is short, upper-case, and a **pure function of the id** — the same cluster
+    /// reads the same label every time, and distinct ids read differently.
+    #[test]
+    fn a_cluster_label_is_a_stable_short_form_of_the_id_and_nothing_else() {
+        let a = new_cluster_id();
+        let b = new_cluster_id();
+        assert_eq!(cluster_label(&a), cluster_label(&a), "not a pure function");
+        assert_ne!(cluster_label(&a), cluster_label(&b), "{a} vs {b}");
+        assert_eq!(cluster_label(&a).chars().count(), CLUSTER_LABEL_LEN);
+        assert!(
+            cluster_label(&a)
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+            "{a} -> {}",
+            cluster_label(&a)
+        );
+        // The `cluster:` prefix is hex-ish itself and must never leak into a short tail's label.
+        assert_eq!(cluster_label("cluster:ab"), "AB");
+        assert_eq!(cluster_label("cluster:0123456789"), "456789");
+        // Separators are not part of the label, so two ids differing only in punctuation do not
+        // read as the same group by accident of formatting.
+        assert_eq!(cluster_label("cluster:a-b-c-d-e-f"), "ABCDEF");
+        // Degenerate input still yields something printable rather than an empty chip.
+        assert_eq!(cluster_label("cluster:---"), "---");
     }
 
     #[test]

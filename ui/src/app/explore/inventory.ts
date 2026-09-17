@@ -81,7 +81,15 @@ export interface Row extends Omit<BaseRow, "recurrence"> {
    * a withheld-identity row (docs/api.md `cluster_id`, T-202, ADR-0016 §5). It is a *type*
    * ("the same thing I saw before"), never an identity: sets nothing else on the row. */
   cluster_id: string | null;
+  /** The same membership as *grouping data* (docs/api.md `cluster_group`, T-320), or `null`
+   * exactly when `cluster_id` is. `label` is a short stable form of the id and `rows_in_view` is
+   * how many rows in this response share it — both computed by the backend, because the grouping
+   * is its claim and not the client's arithmetic. It shows duplication; it merges nothing. */
+  cluster_group: ClusterGroup | null;
 }
+
+/** docs/api.md `cluster_group` (T-320). */
+export interface ClusterGroup { cluster_id: string; label: string; rows_in_view: number }
 
 export interface Page { entries: Row[]; next_cursor: string | null }
 
@@ -473,7 +481,7 @@ export function emptyListText(s: EmptyState): string {
 
 // ---- row view model ----
 
-export interface Chip { cls: "known" | "unknown" | "flag" | "cluster"; text: string }
+export interface Chip { cls: "known" | "unknown" | "flag" | "cluster"; text: string; title?: string }
 
 /** The family/flag chip(s) for a row, from already-known fields only (`family`,
  * `classification.family`, `explanations[0].flags`); "unknown" when no family is known yet. */
@@ -486,12 +494,30 @@ export function rowChips(r: Row): Chip[] {
   return chips;
 }
 
-/** A "seen before" chip when the row currently belongs to a visible cluster (`cluster_id`, T-202):
- * evidence that this emission *measures* like something seen before, never an identity or a
- * family (ADR-0016 §5 "a cluster is a type, an emitter is an instance") — kept a distinct `cls`
- * from `rowChips`' family/flag chips so it never reads as either. `null` without a cluster. */
-export function clusterChip(r: Pick<Row, "cluster_id">): Chip | null {
-  return r.cluster_id ? { cls: "cluster", text: "seen before" } : null;
+/** Why a signature-cluster chip is not a duplicate badge, shown on hover (T-320). */
+export const CLUSTER_CHIP_TITLE =
+  "Same signature cluster: these rows measure alike. They stay separate inventory rows — "
+  + "this shows the duplication, it does not merge or remove anything.";
+
+/** The signature-cluster chip when the row currently belongs to a visible cluster (`cluster_id` /
+ * `cluster_group`, T-202/T-320): evidence that this emission *measures* like something seen
+ * before, never an identity or a family (ADR-0016 §5, "a cluster is a type, an emitter is an
+ * instance") — kept a distinct `cls` from `rowChips`' family/flag chips so it never reads as
+ * either. `null` without a cluster.
+ *
+ * **The wording is load-bearing.** The chip names the cluster (`label`) so a reader can see
+ * *which* rows group together, and says they "measure alike" — what was actually measured. It must
+ * never read "duplicate": near-duplicate rows are minted upstream by entity resolution and a
+ * cluster sets nothing on an emitter, so calling them duplicates would be a claim the data does
+ * not support. Grouping is not deduplication. Both the label and the count come from the backend
+ * (`cluster_group`); this function does no grouping of its own. */
+export function clusterChip(r: Pick<Row, "cluster_id" | "cluster_group">): Chip | null {
+  const g = r.cluster_group;
+  if (!g) return r.cluster_id ? { cls: "cluster", text: "seen before", title: CLUSTER_CHIP_TITLE } : null;
+  const text = g.rows_in_view > 1
+    ? `signature cluster ${g.label} · ${g.rows_in_view} rows measure alike`
+    : `signature cluster ${g.label} · seen before`;
+  return { cls: "cluster", text, title: CLUSTER_CHIP_TITLE };
 }
 
 /** "Seen" text for a row (§4.2): confirmed rows show on-air duty and count (GAP 2 interim — no
