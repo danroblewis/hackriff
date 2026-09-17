@@ -3927,3 +3927,72 @@ can see — not cosmetic. **T-392**: a region selected on the frequency navigato
 cover it rather than report that it is outside the window, with the distinction that makes it a
 design rather than a convenience — the same gesture means *look closer* inside the window and *go
 there* outside it — and with T-340's no-retune control on pan and wheel explicitly required to survive.
+
+### B0.665 — three merges, and the third face of the wall-clock bug (2026-09-16)
+
+**T-388** (`51d033a`) is the user's live-box fix, and their diagnosis held on every link that was
+actually on the path — detection per-frame, `t_end_s` poll-gated, no push. Two cadences they named
+were not on it (the 2 s poll is device status, the 60 s one is the frequency navigator), and the
+second real bottleneck was theirs to not know: `LIVE_OFFER_NS = 5 s`, so an open track reached
+`emitter_observation` at most every five seconds. Two lazy links in series.
+
+**The judgement I would have got wrong**: the extension predicate is deliberately **wider** than
+`live_offers_into`. That predicate decides whether to *create* a row — four bursts, settled fate — and
+therefore excludes continuous carriers, because **a WFM station is one long burst**. Binding the
+extension to it would have left exactly the signals the user is watching unextended. An extent creates
+nothing, so a row lookup is the only gate it needs.
+
+Measured worst step **1.001 s**, which is the keying period of the test tone — the observed end can
+only advance while the tone is on — not the transport. And the refusals are the good part: no record
+names a time past the last observed air, with a third of the recording still running, because *there
+is nowhere in the path for "now" to enter*; and a non-contiguous record is dropped, since bridging a
+gap would assert the emitter transmitted through the silence. ADR-0004 now carries the general rule —
+**a stream may carry a state extension, and when it does the extension is a measurement; a client may
+not interpolate towards the live edge.**
+
+**T-389** (`5a68bfb`) found the confirmed-box cause, and it was neither of the two leads I gave it.
+Confirmed rows do carry `presence`; nothing drops it. The box **draws** — but a station's
+`last_interval` extent measured **441 s against a 20.5 s waterfall**, so it spans the whole pane with
+both edges off-screen, leaving a 1 px teal line down each side. And in the spectrum pane an unselected
+confirmed row had **no marker at all**: T-193 replaced the bracket with a full-height band, T-261
+narrowed that band to the focused row, and nothing was left in between. Clicking was the only way to
+see it — exactly the report. A reminder that "the class doesn't exist" (T-362 deleted
+`.c-presence-box`) can be true while the feature is real.
+
+It also found **the third face of the wall-clock bug**: `confirmedFilters` sent `at` only while
+scrubbed, so a **live** Confirmed query named no live edge and the API scoped presence against
+`Timestamp::now()` while everything beside it ran on the capture clock. On a replay 312,021 s from
+wall time, the same three rows read `liveness=ended, open=false` without `at` and `live, open=true`
+with it. **T-379 did not regress this**, and the gap in its tests is precise: it asserts `at` for the
+scrubbed case and, for the live case, only that `t0`/`t1` are *absent* — never that a live edge is
+named.
+
+On the user's "1 vs 20": **the windowed count is right** — 13 all-time candidates against 7–8 whose
+presence touched the window. Nothing was widened. The structural fix is what lasts: both surfaces
+already read one store, which was not enough, because they read it through **two predicates**. Now one
+split into `listed` / `boxed` / `noExtent`, with `boxed ⊆ listed` asserted — the direction the user saw
+broken.
+
+**T-381** (`465d3b3`) closed the chain gap on the slots row. Its mutation check is the part to keep: it
+introduced `chain.id().unwrap_or(0)` — the collapse that does not exist in `ChainKey`'s derive until
+someone writes it — and the legacy row rendered `chain:0`, indistinguishable from a device.
+
+**Disk: 6.9 → 40 GB** across the three merges. The mechanism is now clear and worth stating once: the
+worktree targets are APFS clones, so they cost nothing while they share blocks, and **every artefact a
+cold rebuild writes breaks that sharing**. Clearing sccache at 6.9 GB was right, but it bought
+divergence — three agents recompiling from scratch converted shared blocks into private ones. Worktree
+removal is the real lever; `du` on the targets is worthless.
+
+**T-394 filed and launched** from T-382's closing observation, which is the most valuable thing it
+produced: every exclusion so far is a named frequency from one fixture's provenance, each has revealed
+the next artefact, and a fourth family at ~119.95 Hz is already visible. The general test needs no
+notch list — *a line at one frequency in channels holding nothing is the receiver's, written down or
+not*. Its brief makes the control the whole ticket: the real 19 kHz pilot and 38 kHz subcarrier must
+survive, and if a leaking subcarrier cannot be separated from a receiver line, **ship nothing** — an
+over-eager device-local test fails silently and in the direction of finding nothing.
+
+The user's **equipment self-test suite** is recorded in docs/10 and docs/11 and deliberately not
+scheduled: it may tune directly to known references because it tests the equipment rather than the
+analysis, so the no-lookup-and-tune rule does not apply — that rule protects the *analysis* from being
+handed its answer. Their message arrived truncated and the note says so, so the front half can be
+confirmed before anyone builds from it.
