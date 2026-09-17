@@ -7490,6 +7490,76 @@ tasks:
       spelling of "which device" would be a new drift surface.
       Control: an existing observation log written before this change still reads
       back, and reads Unknown - never the device that happens to be running now.
+  - id: T-379
+    title: Every UI surface must show all the data it has for the window; empty sidebars are the same bug as the black waterfall
+    milestone: M2-hardening
+    status: in-progress
+    priority: high
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-368]
+    acceptance: |
+      USER INVARIANT 2026-09-16, added to CLAUDE.md as a CROSS-CUTTING UI RULE and
+      to be folded into docs/14 + ADR-0013/ADR-0017. Verbatim:
+      "The whole UI is scoped to one (time range x frequency range) window, and must
+      display all the data it has for that window. Every surface - the waterfall,
+      both edge navigators, the inventory Candidate/Confirmed lists, the
+      output/decode panels - is a view over the current (time range, frequency
+      range) selection. WHENEVER DATA EXISTS FOR THAT WINDOW (live, the IQ ring, the
+      spectrum-history pyramid, prior surveys) IT MUST BE SHOWN; a surface may render
+      grey/empty ONLY where data genuinely does not exist. 'We have it but didn't
+      render it' is a bug - the black Live waterfall, the fixed-size grey block, and
+      the empty sidebars were all the same failure. This generalises the coverage
+      rule below to the entire UI."
+      The user names three symptoms and says they are ONE failure. T-368 closed two
+      of them (the grey block and the Live backfill, via the coverage map). THE EMPTY
+      SIDEBARS ARE STILL OPEN and are the live-visible one.
+      This is an AUDIT task before it is a fix task: enumerate every surface, and for
+      each one determine whether it can render data that exists for the current
+      window, and what it does when the window is scrubbed into history. Report the
+      census before fixing. The inventory lists are already time-scoped to the view
+      by an existing invariant, so the question is whether scrubbing RE-DERIVES them
+      from history (ring / pyramid / surveys) or merely empties them.
+      The rule has a sharp edge that must not be blunted: a surface may render empty
+      ONLY where data genuinely does not exist. T-368 built exactly the machinery for
+      answering that question honestly (hk-store coverage: Unobserved vs
+      Observed(Sampled), with state 3 unrepresentable as state 2). Empty-because-
+      unobserved and empty-because-not-fetched must be distinguishable, and the
+      second is a bug.
+      Do NOT redesign the UI - the rewrite is deferred. This is about rendering data
+      that already exists, not restyling.
+  - id: T-380
+    title: One view window, even with multiple SDRs - extra front ends widen coverage, they never split the view
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-379, T-378]
+    acceptance: |
+      USER INVARIANT 2026-09-16, CLAUDE.md, same message as T-379. Verbatim:
+      "One view window, even with multiple SDRs. The UI always presents a single
+      (time range x frequency range) window. Additional SDRs (when supported)
+      COLLECT DATA PASSIVELY IN THE BACKGROUND, widening the coverage available to
+      display; they do not add view windows or split the view. The frequency
+      navigator may show where background collection is happening (lit coverage
+      segments), but the main view stays one window over whatever data exists there,
+      FROM WHICHEVER SOURCE CAPTURED IT."
+      This settles a question the architecture had left open. The multi-SDR rule was
+      "do not bake a single-device assumption into the source layer, scheduler or
+      inventory" - which is about CAPTURE. This says the VIEW is single by design:
+      N front ends are a coverage-widening mechanism, not N panes.
+      Tension to resolve explicitly, not silently: the main view must draw from
+      whichever source captured the data, while T-259/T-305 says dedup, clustering
+      and identity must NOT read the device, and images/harmonics/IMD/noise floor
+      MUST. Drawing a cell captured by device B into a view centred on device A's
+      tune is a DISPLAY union, and it is legitimate; asserting the two devices saw
+      the same emitter is an IDENTITY claim, and it is not. Write down where that
+      line falls in ADR-0017 and hold it in the code.
+      Depends on T-378: coverage cannot say which device looked where over the long
+      horizon until observation-log spans carry a device.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
