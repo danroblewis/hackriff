@@ -7436,7 +7436,7 @@ tasks:
     title: A level-0 cell's occupancy was decided at ingest against a floor every front end feeds,
       so a per-chain read can still inherit another chain's threshold
     milestone: M4
-    status: in-progress
+    status: done
     priority: medium
     parallel_group: PIPE
     deps: [T-314]
@@ -7466,7 +7466,7 @@ tasks:
   - id: T-378
     title: Observation-log coverage has no device, so long-horizon spans are Unknown while ring spans are named
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
