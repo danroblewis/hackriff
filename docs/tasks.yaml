@@ -7165,7 +7165,7 @@ tasks:
     milestone: M2-hardening
     title: 'Grey must mean genuinely unobserved: the waterfall needs a backend coverage map derived from
       the tune history'
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-341
@@ -7400,7 +7400,7 @@ tasks:
   - id: T-376
     title: The frequency navigator has no viewport of its own, so the tuned window is 0.04% of the bar
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     core_interface: true
@@ -7463,6 +7463,33 @@ tasks:
       with the pooled control still showing the cross-chain occupancy, so the fix cannot pass by
       disabling the density rule.
 
+  - id: T-378
+    title: Observation-log coverage has no device, so long-horizon spans are Unknown while ring spans are named
+    milestone: M2-hardening
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: [T-368]
+    acceptance: |
+      T-368 built the coverage map from two histories that already existed. The IQ
+      ring journal names its device; the observation log (DwellRecord/SweepRecord)
+      does NOT, so every long-horizon coverage span reads Device::Unknown.
+      The consequence is precisely the failure T-305 exists to prevent, one step
+      removed: coverage over the retention horizon cannot answer "did THIS front
+      end look here", only "did anything". With two SDRs that is the whole question,
+      and the frequency navigator's survey strip is built from this same coverage.
+      T-368 stopped short for a good reason - two construction sites sat inside
+      T-314's fenced files (hk-pipeline/src/occupancy.rs, hk-context occupancy
+      engine, both in mod tests). Those fences are gone; T-314 merged at 3054742.
+      The fix is named in docs/07 4.4 and ADR-0017 2.4.5: add device_id with
+      serde(default) so existing logs read back Unknown, never as a device.
+      Use the SAME value the rest of the chain uses - T-314 pinned ChainKey::of_device
+      and hk_store::history::source_key as deliberately the same function. A third
+      spelling of "which device" would be a new drift surface.
+      Control: an existing observation log written before this change still reads
+      back, and reads Unknown - never the device that happens to be running now.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
