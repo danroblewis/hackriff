@@ -113,7 +113,7 @@ _RULES: tuple[tuple[str, str, str, str], ...] = (
     ("prefix", "tests/", FULL, "the hk-e2e acceptance crate"),
     ("prefix", "plugins/", FULL, "decoder manifests/wrappers the plugin host loads"),
     ("prefix", "recipes/", FULL, "pipeline recipes the suites load"),
-    ("prefix", ".config/", FULL, "nextest serial groups — how the suite runs"),
+    ("prefix", ".config/", FULL, "nextest thread cap + serial groups — how the suite runs"),
     ("exact", "Cargo.toml", FULL, "workspace manifest"),
     ("exact", "Cargo.lock", FULL, "workspace dependency lock"),
     ("prefix", "ui/", UI, "web client — thin presentation layer"),
