@@ -8944,6 +8944,15 @@ tasks:
       moves" is quoting something; that something should exist in one place.
       Low effort, high leverage: this is bookkeeping that prevents a class of silent
       misreading, not a code change.
+      SECOND INSTANCE, MEASURED (T-419, 2026-09-17): I circulated unknown recall 0.9596 /
+      false-known 0.0404 in briefs after T-311 had already moved them to 0.9520 / 0.0480.
+      T-419 caught it properly - it stashed its ENTIRE diff, re-ran on merged main, and got
+      the identical 0.9520 / 0.0480, so it could say the discrepancy predated its work
+      rather than guessing. That is the method this ticket should institutionalise: a brief
+      quoting a floor should quote ONE canonical set that is re-derivable, and an agent that
+      sees a mismatch should stash-and-measure rather than assume either side.
+      Two errors now, both mine, both in the same field.
+
   - id: T-416
     title: A real mono FM station is not recognised as WFM, and the rejection leaves no trace
     milestone: M3
@@ -9065,7 +9074,7 @@ tasks:
   - id: T-419
     title: Two coverage folds round partial coverage UP, so half-scanned spectrum reads as fully covered
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: STORE
     core_interface: true
