@@ -7376,7 +7376,7 @@ tasks:
   - id: T-372
     title: Attribute a visit's bias-tee state by switch time, not by whole read
     milestone: M4
-    status: todo
+    status: in-progress
     priority: medium
     parallel_group: CTX
     deps: [T-359]
@@ -9966,7 +9966,7 @@ tasks:
   - id: T-426
     milestone: M2-hardening
     title: /api/coverage serves no shade for the first minute of a server's life though the finer levels hold the data
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     core_interface: true
