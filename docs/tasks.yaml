@@ -8527,7 +8527,7 @@ tasks:
   - id: T-407
     title: The two navigator bars are hard to use on touch
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: UI
     deps: [T-391, T-393]
@@ -8757,7 +8757,7 @@ tasks:
   - id: T-412
     title: The time wheel zooms when it should probably scroll; frequency wheel stays zoom
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: UI
     deps: [T-376, T-393]
