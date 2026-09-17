@@ -64,6 +64,56 @@ pub enum AcquisitionEvidence {
     },
 }
 
+/// How the acquire/reject bar is set.
+///
+/// **A bare peak-to-mean ratio is not a portable setting, so it is not the default way to say
+/// this.** The statistic being thresholded is the *maximum* over the search, and the size of the
+/// search is decided by the sample rate (code-phase cells are the samples in one 1 ms code
+/// period) and the Doppler grid — not by whoever writes the number down. The same ratio that is
+/// strict over a 2046-cell profile is meaningless over a 20 000-cell one: a fixed 2.5 returns
+/// **all 32 satellites out of pure noise** at 4 Msps and above, and a dead constellation then
+/// reports as an intact one. A capability that always says "fine" is worse than one that is
+/// absent, because absence is visible.
+///
+/// So the setting a caller owns is the **error rate it will tolerate**, which is portable; the
+/// ratio is derived from it and the search's own geometry (see [`acquisition_threshold`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AcquisitionThreshold {
+    /// Probability that a noise-only search reports *this* satellite. The peak-to-mean bar is
+    /// derived per search from the cell count and non-coherent block count.
+    ///
+    /// Multiply by the codebook size for the chance of any false acquisition in one search:
+    /// `1e-4` over 32 PRNs is about one spurious satellite in 300 dwells.
+    FalseAlarm(f64),
+    /// A fixed peak-to-mean ratio, for experiments and for reproducing a published number.
+    ///
+    /// [`acquire`] **refuses** a ratio that is unsound for the geometry it is given rather than
+    /// running with it — see [`AcquireError::ThresholdUnsound`]. A wrong number that runs is
+    /// exactly the failure this type exists to prevent.
+    PeakToMean(f32),
+}
+
+impl Default for AcquisitionThreshold {
+    fn default() -> Self {
+        Self::FalseAlarm(DEFAULT_FALSE_ALARM)
+    }
+}
+
+/// Per-satellite false-alarm probability used when a caller does not state one.
+///
+/// Over a 32-PRN codebook that is ~3 × 10⁻³ per dwell for *any* spurious satellite: rare enough
+/// that a reported constellation can be believed, loose enough not to cost sensitivity — the
+/// derived bar for the production dwell (2.046 Msps, ±5 kHz in 500 Hz steps, 4 blocks) is ≈ 7.1,
+/// while a satellite 20 dB under the noise floor reaches ≈ 17.
+pub const DEFAULT_FALSE_ALARM: f64 = 1.0e-4;
+
+/// The loosest per-satellite false-alarm probability a *fixed* bar may imply and still be a
+/// detector at all: at 0.5 a noise-only search is as likely to report the satellite as not.
+///
+/// This is deliberately far looser than [`DEFAULT_FALSE_ALARM`]. The refusal is meant to catch a
+/// bar that cannot work, not to relitigate a caller's operating point.
+const UNSOUND_ABOVE_P_FA: f64 = 0.5;
+
 /// Search settings.
 #[derive(Clone, Copy, Debug)]
 pub struct AcquisitionConfig {
@@ -78,8 +128,9 @@ pub struct AcquisitionConfig {
     pub coherent_ms: usize,
     /// Coherent blocks accumulated non-coherently on top.
     pub noncoherent_blocks: usize,
-    /// Peak-to-mean ratio of the correlation profile above which a satellite counts as acquired.
-    pub threshold_ratio: f32,
+    /// How the acquire/reject bar is set. Defaults to a derived bar at
+    /// [`DEFAULT_FALSE_ALARM`], which is correct at every sample rate.
+    pub threshold: AcquisitionThreshold,
 }
 
 impl Default for AcquisitionConfig {
@@ -90,9 +141,157 @@ impl Default for AcquisitionConfig {
             doppler_step_hz: 250.0,
             coherent_ms: 1,
             noncoherent_blocks: 4,
-            threshold_ratio: 2.5,
+            threshold: AcquisitionThreshold::default(),
         }
     }
+}
+
+impl AcquisitionConfig {
+    /// Chances this search gives noise to produce the maximum that is thresholded.
+    ///
+    /// Two axes, and **both** come from the caller's rate and grid rather than anything it types:
+    ///
+    /// * **Code phase.** The profile is `samples_per_code · coherent_ms` long but repeats every
+    ///   `samples_per_code` (the replica is the code tiled), so the distinct cells are the
+    ///   samples in one 1 ms period — 2046 at the minimum rate, 4000 at 4 Msps, 20 000 at
+    ///   20 Msps.
+    /// * **Doppler.** The peak is maximised over the Doppler grid too, so every bin searched is
+    ///   another look.
+    ///
+    /// **Every cell counts as an independent look, and that is deliberate.** Neighbouring code
+    /// cells and neighbouring Doppler bins *are* correlated, so the true false-alarm rate is
+    /// lower than this model's — the count is an over-estimate, which makes the derived bar an
+    /// upper bound rather than a hopeful one. Discounting the correlation would buy a little
+    /// sensitivity for a claim that is hard to justify and fails in the direction that hurts:
+    /// an under-set bar reports satellites that are not there, and a GNSS capability that says
+    /// "fine" when the sky is empty is worse than no capability at all. Measured against the real
+    /// correlator, a discounted count came out about 5× optimistic; this one does not.
+    ///
+    /// Returns `None` when the rate cannot support acquisition at all; [`acquire`] reports that
+    /// as [`AcquireError::SampleRate`].
+    pub fn search_cells(&self) -> Option<usize> {
+        let per_ms = self.sample_rate_hz / 1000.0;
+        let samples_per_code = per_ms.round() as usize;
+        if !per_ms.is_finite()
+            || (per_ms - per_ms.round()).abs() > 1e-6
+            || samples_per_code < 2 * CODE_LENGTH
+        {
+            return None;
+        }
+        // The grid is counted, not built: a caller may reach this before `acquire` has validated
+        // the step, and a zero or non-finite step would ask for an unbounded vector.
+        if !self.doppler_grid_is_usable() {
+            return None;
+        }
+        let bins = 2 * (self.doppler_max_hz / self.doppler_step_hz).floor() as usize + 1;
+        Some(samples_per_code.saturating_mul(bins))
+    }
+
+    /// A Doppler grid that can be enumerated at all: a positive, finite step and a finite,
+    /// non-negative span.
+    fn doppler_grid_is_usable(&self) -> bool {
+        self.doppler_step_hz.is_finite()
+            && self.doppler_step_hz > 0.0
+            && self.doppler_max_hz.is_finite()
+            && self.doppler_max_hz >= 0.0
+    }
+
+    /// The peak-to-mean ratio this search will actually apply, and the reason it is that number.
+    ///
+    /// Derives it for [`AcquisitionThreshold::FalseAlarm`]; validates it for
+    /// [`AcquisitionThreshold::PeakToMean`], refusing a bar that noise clears more often than not.
+    pub fn peak_to_mean_bar(&self) -> Result<f32, AcquireError> {
+        if !self.doppler_grid_is_usable() {
+            return Err(AcquireError::Config("doppler grid must be positive"));
+        }
+        let cells = self
+            .search_cells()
+            .ok_or_else(|| AcquireError::SampleRate {
+                rate_hz: self.sample_rate_hz.round() as i64,
+                per_ms: self.sample_rate_hz / 1000.0,
+            })?;
+        let blocks = self.noncoherent_blocks.max(1);
+        match self.threshold {
+            AcquisitionThreshold::FalseAlarm(p) => {
+                if !(p.is_finite() && p > 0.0 && p < 1.0) {
+                    return Err(AcquireError::Config(
+                        "false-alarm probability must be in (0, 1)",
+                    ));
+                }
+                Ok(acquisition_threshold(cells, blocks, p))
+            }
+            AcquisitionThreshold::PeakToMean(given) => {
+                let floor = acquisition_threshold(cells, blocks, UNSOUND_ABOVE_P_FA);
+                if !given.is_finite() || given < floor {
+                    return Err(AcquireError::ThresholdUnsound {
+                        given,
+                        floor,
+                        cells,
+                        blocks,
+                        sample_rate_hz: self.sample_rate_hz.round() as i64,
+                    });
+                }
+                Ok(given)
+            }
+        }
+    }
+}
+
+/// The peak-to-mean bar for a search of `cells` cells accumulated over `blocks`
+/// non-coherent blocks, at a target per-satellite false-alarm probability `p_fa`.
+///
+/// **This has to be computed, not fixed, and getting it wrong is not subtle.** Each cell is
+/// another chance for noise to clear a fixed bar, and the cell count is the sample rate's
+/// business, not the caller's. Left at a fixed 2.5 over a 4000-cell profile, acquisition returns
+/// **all 32 satellites out of pure noise**, which would make every dwell report an intact
+/// constellation and quietly disable the jamming assessment that reads it.
+///
+/// The normalised profile cell is Gamma(`blocks`)/`blocks`, whose upper tail is **exact** for
+/// integer `k = blocks`:
+///
+/// ```text
+/// P(X > x) = e^{−k x} · Σ_{j=0}^{k−1} (k x)^j / j!
+/// ```
+///
+/// and the bar is the `x` where `cells · P(X > x) = p_fa`. Solved by bisection — the tail is
+/// monotone. T-322 used only the leading `j = k−1` term, which understates the tail; the whole
+/// sum is barely more work and removes a known bias in the optimistic direction.
+///
+/// Prefer [`AcquisitionConfig::peak_to_mean_bar`], which supplies `cells` from the search's own
+/// geometry. This form is public so the derivation can be tabulated and tested directly.
+pub fn acquisition_threshold(cells: usize, blocks: usize, p_fa: f64) -> f32 {
+    let k = blocks.max(1);
+    let kf = k as f64;
+    let n = cells.max(1) as f64;
+    let target = (p_fa.clamp(1e-12, 0.5) / n).ln();
+    // ln P(X > x), by log-sum-exp so large k·x does not overflow the polynomial.
+    let ln_tail = |x: f64| {
+        let ln_kx = (kf * x).ln();
+        let mut ln_fact = 0.0f64;
+        let mut max = f64::NEG_INFINITY;
+        let terms: Vec<f64> = (0..k)
+            .map(|j| {
+                if j > 0 {
+                    ln_fact += (j as f64).ln();
+                }
+                let t = j as f64 * ln_kx - ln_fact;
+                max = max.max(t);
+                t
+            })
+            .collect();
+        let sum: f64 = terms.iter().map(|t| (t - max).exp()).sum();
+        -kf * x + max + sum.ln()
+    };
+    let (mut lo, mut hi) = (0.0f64, 200.0f64);
+    for _ in 0..80 {
+        let mid = 0.5 * (lo + hi);
+        if ln_tail(mid) > target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (0.5 * (lo + hi)) as f32
 }
 
 /// One acquired satellite.
@@ -118,6 +317,12 @@ pub struct AcquisitionResult {
     pub acquired: Vec<SvAcquisition>,
     /// Every satellite searched, whether or not it cleared the threshold.
     pub searched: Vec<SvAcquisition>,
+    /// The peak-to-mean bar actually applied, derived or validated. Recorded because the number
+    /// is a function of the rate and grid, so "which bar was this?" is not answerable from the
+    /// config alone.
+    pub threshold_ratio: f32,
+    /// Cells the maximum was taken over — code phases × Doppler bins — which is what set the bar.
+    pub search_cells: usize,
     /// How this result was reached. Always known-code correlation.
     pub evidence: AcquisitionEvidence,
 }
@@ -151,6 +356,31 @@ pub enum AcquireError {
     /// Config out of range.
     #[error("{0}")]
     Config(&'static str),
+    /// An explicit [`AcquisitionThreshold::PeakToMean`] bar that noise clears at will.
+    ///
+    /// **Refused rather than defaulted.** A default is a value someone can override without
+    /// noticing; a refusal is a conversation. The failure this prevents is silent and *inverted*:
+    /// a too-low bar acquires the whole constellation from noise, so the dwell reports an intact
+    /// GNSS service and the jamming assessment reading it never fires.
+    #[error(
+        "peak-to-mean bar {given} is unsound for this search: at {sample_rate_hz} Hz the maximum \
+         is taken over {cells} cells in {blocks} non-coherent block(s), where noise alone \
+         clears it more often than not. The least defensible bar here is {floor:.2}. \
+         A ratio is only meaningful against a cell count the sample rate decides — set \
+         AcquisitionThreshold::FalseAlarm and let the bar be derived."
+    )]
+    ThresholdUnsound {
+        /// The ratio the caller fixed.
+        given: f32,
+        /// The bar at a per-satellite false-alarm probability of 0.5 — the coin-flip line.
+        floor: f32,
+        /// Cells searched at this rate and Doppler grid: code phases × Doppler bins.
+        cells: usize,
+        /// Non-coherent blocks accumulated.
+        blocks: usize,
+        /// The rate that decided the cell count, rounded for display.
+        sample_rate_hz: i64,
+    },
 }
 
 /// Searches `iq` for every satellite in `codebook`.
@@ -182,6 +412,11 @@ pub fn acquire(
             per_ms,
         });
     }
+
+    // The bar, before any correlating is done: derived from this search's own geometry, or — for
+    // an explicitly fixed ratio — checked against it and refused if noise would clear it.
+    let search_cells = cfg.search_cells().unwrap_or(samples_per_code);
+    let threshold_ratio = cfg.peak_to_mean_bar()?;
 
     let n = samples_per_code * cfg.coherent_ms;
     let need = n * cfg.noncoherent_blocks;
@@ -305,13 +540,15 @@ pub fn acquire(
     let mut acquired: Vec<SvAcquisition> = searched
         .iter()
         .copied()
-        .filter(|s| s.peak_ratio >= cfg.threshold_ratio)
+        .filter(|s| s.peak_ratio >= threshold_ratio)
         .collect();
     acquired.sort_by(|a, b| b.peak_ratio.total_cmp(&a.peak_ratio));
 
     Ok(AcquisitionResult {
         acquired,
         searched,
+        threshold_ratio,
+        search_cells,
         evidence: AcquisitionEvidence::KnownCodeCorrelation {
             codebook: led.codebook(),
         },
@@ -380,6 +617,184 @@ mod tests {
         let cfg = AcquisitionConfig::default();
         let err = acquire(&led, &book, &[Complex32::default(); 100], &cfg).unwrap_err();
         assert!(matches!(err, AcquireError::TooShort { .. }), "{err:?}");
+    }
+
+    /// **The defect this module's threshold type exists to make unreachable.**
+    ///
+    /// The cell count is the rate's business: 2046 at the minimum, 4000 at 4 Msps, 20 000 at
+    /// 20 Msps. A bar of 2.5 is below the coin-flip line at *every* one of them, so it is not a
+    /// detector anywhere — which is why it must not be a value anyone can hold.
+    #[test]
+    fn the_bar_rises_with_the_search_and_2_5_is_under_the_floor_at_every_rate() {
+        let mut last = 0.0f32;
+        for rate in [2_046_000.0, 4.0e6, 20.0e6] {
+            let cfg = AcquisitionConfig {
+                sample_rate_hz: rate,
+                ..Default::default()
+            };
+            let cells = cfg.search_cells().expect("an acquirable rate");
+            let bar = cfg
+                .peak_to_mean_bar()
+                .expect("the default bar is derivable");
+            let floor = acquisition_threshold(cells, cfg.noncoherent_blocks, 0.5);
+            eprintln!(
+                "{:.3} Msps: {cells} cells, derived bar {bar:.2}, coin-flip floor {floor:.2}",
+                rate / 1e6
+            );
+            assert!(
+                bar > last,
+                "the bar must rise with the rate: {last} -> {bar}"
+            );
+            assert!(
+                floor > 2.5,
+                "2.5 is above the coin-flip floor {floor} at {rate} Hz — then the old default \
+                 was not the bug T-322 measured"
+            );
+            last = bar;
+        }
+        // Stricter false alarm, higher bar; more non-coherent averaging, lower bar.
+        assert!(acquisition_threshold(4000, 4, 1e-6) > acquisition_threshold(4000, 4, 1e-3));
+        assert!(acquisition_threshold(4000, 16, 1e-3) < acquisition_threshold(4000, 4, 1e-3));
+    }
+
+    /// The tail approximation must actually hit the false-alarm rate it claims. Draws Gamma(k)/k
+    /// profiles from a deterministic generator and counts how often the maximum clears the bar.
+    #[test]
+    fn the_bar_delivers_about_the_false_alarm_rate_it_promises() {
+        const CELLS: usize = 4000;
+        const BLOCKS: usize = 4;
+        let bar = f64::from(acquisition_threshold(CELLS, BLOCKS, 1e-3));
+        let mut state = 0x243f_6a88_85a3_08d3u64;
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 11) as f64 / (1u64 << 53) as f64).max(1e-15)
+        };
+        let mut fired = 0;
+        const TRIALS: usize = 2000;
+        for _ in 0..TRIALS {
+            let mut peak = 0.0f64;
+            for _ in 0..CELLS {
+                // Gamma(k,1) as a sum of k exponentials, normalised to mean 1.
+                let g: f64 = (0..BLOCKS).map(|_| -unit().ln()).sum();
+                peak = peak.max(g / BLOCKS as f64);
+            }
+            if peak > bar {
+                fired += 1;
+            }
+        }
+        let rate = fired as f64 / TRIALS as f64;
+        assert!(
+            rate < 1e-2,
+            "{fired}/{TRIALS} noise-only profiles cleared {bar}: {rate}"
+        );
+    }
+
+    /// **The refusal.** A fixed ratio that noise clears at will is an error, not a setting — and
+    /// the same number is fine at a geometry that earns it.
+    #[test]
+    fn an_unsound_fixed_bar_is_refused_rather_than_run() {
+        let book = PrnCodebook::subset(&[1]).unwrap();
+        let led = KnownCodeLed::with_codebook(&book);
+        let cfg = AcquisitionConfig {
+            sample_rate_hz: 4.0e6,
+            threshold: AcquisitionThreshold::PeakToMean(2.5),
+            ..Default::default()
+        };
+        let iq = vec![Complex32::default(); 4000 * 4];
+        let err = acquire(&led, &book, &iq, &cfg).unwrap_err();
+        let AcquireError::ThresholdUnsound {
+            given,
+            floor,
+            cells,
+            ..
+        } = err
+        else {
+            panic!("expected a refusal, got {err:?}");
+        };
+        assert_eq!(given, 2.5);
+        assert!(
+            floor > given,
+            "floor {floor} must exceed the refused {given}"
+        );
+        assert_eq!(
+            cells,
+            4000 * 41,
+            "4000 code cells x the 41 Doppler bins searched"
+        );
+        // Printed so the message a caller would see is on the record.
+        eprintln!("{}", acquire(&led, &book, &iq, &cfg).unwrap_err());
+
+        // The same fixed form, at a bar the geometry supports, runs.
+        let sound = AcquisitionConfig {
+            threshold: AcquisitionThreshold::PeakToMean(12.0),
+            ..cfg
+        };
+        assert!(acquire(&led, &book, &iq, &sound).is_ok());
+    }
+
+    /// The refusal is about the *search*, not about the number: a bar sound at one rate can be
+    /// unsound at another, which is the whole reason a bare ratio is not portable.
+    #[test]
+    fn the_same_ratio_can_be_sound_at_one_rate_and_unsound_at_another() {
+        let at = |rate: f64, r: f32| {
+            AcquisitionConfig {
+                sample_rate_hz: rate,
+                threshold: AcquisitionThreshold::PeakToMean(r),
+                ..Default::default()
+            }
+            .peak_to_mean_bar()
+        };
+        // Pick a ratio between the two rates' floors rather than hard-coding one, so the test
+        // states the property and not a number that would drift with the derivation.
+        let floor_of = |rate: f64| {
+            let cfg = AcquisitionConfig {
+                sample_rate_hz: rate,
+                ..Default::default()
+            };
+            acquisition_threshold(cfg.search_cells().unwrap(), cfg.noncoherent_blocks, 0.5)
+        };
+        let (low, high) = (floor_of(2_046_000.0), floor_of(20.0e6));
+        assert!(high > low, "a ten-times-larger search must cost more");
+        let between = 0.5 * (low + high);
+        eprintln!("coin-flip floors: 2.046 Msps {low:.2}, 20 Msps {high:.2}; trying {between:.2}");
+        assert!(at(2_046_000.0, between).is_ok());
+        assert!(
+            at(20.0e6, between).is_err(),
+            "{between} must not survive a ten-times-larger search"
+        );
+    }
+
+    /// A false-alarm probability outside (0, 1) is a mistake, not a clamp.
+    #[test]
+    fn a_meaningless_false_alarm_rate_is_refused() {
+        for p in [0.0, 1.0, -1.0, f64::NAN] {
+            let cfg = AcquisitionConfig {
+                threshold: AcquisitionThreshold::FalseAlarm(p),
+                ..Default::default()
+            };
+            assert!(
+                matches!(cfg.peak_to_mean_bar(), Err(AcquireError::Config(_))),
+                "p_fa {p} should be refused"
+            );
+        }
+    }
+
+    /// Doppler is part of the search, so it is part of the bar: a wider grid is more chances for
+    /// noise, and the derivation must know that without being told.
+    #[test]
+    fn a_wider_doppler_search_raises_the_bar() {
+        let narrow = AcquisitionConfig {
+            doppler_max_hz: 1_000.0,
+            ..Default::default()
+        };
+        let wide = AcquisitionConfig {
+            doppler_max_hz: 10_000.0,
+            ..Default::default()
+        };
+        assert!(narrow.search_cells() < wide.search_cells());
+        assert!(narrow.peak_to_mean_bar().unwrap() < wide.peak_to_mean_bar().unwrap());
     }
 
     #[test]
