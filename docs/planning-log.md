@@ -4093,3 +4093,55 @@ rather than a number anything can supply.
 The brief's sharp edge is T-393 part (3): it describes what a frequency region-select *would do*, and
 **T-392 is in flight changing exactly that**. The agent is told to check which behaviour the build has
 when it writes the readout rather than assume, and never to promise behaviour the build lacks.
+
+### B0.668 — T-390: a centre tested against a mean, and the symptom that was not the bug (2026-09-16)
+
+Merged at `4521287`. The brief asked which layer owned the over-split — detection or dedup — and
+demanded evidence. The answer came from the **detection** table rather than the emitter table, which is
+the part I would not have thought to specify.
+
+Around the confirmed 101.2988 MHz station (continuous 1000 ms components, 140 kHz, SNR 22–26 dB) the
+detector also emits **6 ms, 1–3 bin components at SNR 3.7–7.6 dB**, *in the very frames the parent's
+full-width component is reported*. Twelve to twenty-nine dB below their parent, one to two frames
+against its 45 s. One emission's spectrum cut up — not emitters.
+
+**Dedup could not be the layer, and its refusal is a feature.** Its guard rejects this geometry
+deliberately: narrow-inside-wide gives *"bandwidth ratio beyond tolerance"*, an offset staircase gives
+*"separated −3 dB extents"* — and that refusal is exactly what protects a real subcarrier and what
+T-233 forbids loosening. Asking dedup to clean up a segmentation error would have meant weakening the
+thing standing between us and merging two genuine emitters.
+
+**The hole:** `inband_fragment` tested the fragment's **centre** for containment in the host span, but
+that span is built from the host's **mean** threshold-crossing offsets (EWMA'd). **Skirt flicker *is*
+the frames where the emission crossed threshold further out than that mean** — so the box lands astride
+the edge and its centre falls outside about as often as inside. Three measured boxes against the
+99.6994 station's mean lower crossing all reach back into the emission and all are centred outside it.
+The fix requires the fragment's **band** to overlap, with **no new constant** — the reach is the
+fragment's own measured width, which is what the doc already claimed the rule did. And the new test was
+verified to **fail** on the old rule.
+
+**The honest half is better than the fix.** The 99.86/99.87/99.91 trio the user actually reported is
+**not this bug**: that band sits 0.3 dB over its own running-median baseline, the 2026-09-13 20 Msps
+capture of the same site shows no emission at 99.9 MHz, and 99.86 is 161 kHz above the 99.69 station —
+outside any plausible WFM skirt (Carson ±128 kHz). Either a weak emission neither capture can see, or
+false alarms in the baseband-filter transition. **Settling it needs the device.** An agent that fixed
+a real defect and then said plainly that it was not the user's reported symptom is doing the job right.
+
+Two findings filed rather than folded in, and the first is the dangerous one: `relate.rs` calls
+`xdb_bandwidth_hz` the **−3 dB extent** in its module doc, in `RowEvidence::xdb_freq` and in the
+literal verdict string — but `DetectorConfig::xdb_level_db = 10.0`, so it is the **−10 dB** extent.
+Wider extents make `distinguishing_evidence` **less** likely to declare two rows separated, i.e. the
+guard is **more merge-happy than documented**, which is the T-233-dangerous direction.
+
+**T-396 launched** for the user's diff-aware `just gate`, superseding the prose rule from B0.667. Its
+governing principle is the repo's own: **classification fails closed** — anything unrecognised runs
+the full gate, never the cheapest. Three cases a naive implementation gets wrong are named: `fixtures/`
+(acceptance reads them), and the `justfile` and `.github/`, because **they are the gate** and a change
+to them must be verified by the expensive path or the gate can weaken itself.
+
+**A fourth truncated message.** Item (A) and half of (B)/(C) never arrived. (D) — no confirmation
+button, retune on release — went straight to T-392 mid-build, with the note that removing a
+confirmation makes T-340's no-retune-on-pan control *more* load-bearing, not less. (B)/(C) are filed as
+**T-397**, explicitly marked as needing confirmation before anyone builds from a fragment. I have now
+reconstructed user direction from partial messages four times today; once I inferred a frame that was
+not theirs (B0.666), and the correction cost a doc rewrite.
