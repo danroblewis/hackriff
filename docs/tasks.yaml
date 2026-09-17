@@ -9950,7 +9950,7 @@ tasks:
   - id: T-424
     milestone: CI
     title: The coordinator's every gate runs full, because two permanently-untracked user directories force fail-closed
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CI
     deps: [T-396]
@@ -11463,7 +11463,7 @@ tasks:
   - id: T-448
     milestone: M2-hardening
     title: view_pause_keeps_capture fails at 28 threads and once at 8 - a live undiagnosed defect the thread cap now hides
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     deps: [T-436, T-430]
