@@ -6027,7 +6027,7 @@ tasks:
     milestone: M2-hardening
     title: Cluster id is not surfaced in Explore, so the one signal that makes near-duplicates visible reaches
       nobody
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-309
