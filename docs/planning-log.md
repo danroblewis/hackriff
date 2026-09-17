@@ -4700,6 +4700,69 @@ limited by the quota where a dwell is limited by the age.
 argued about below its own sampling noise (T-428), and a constant written at the transmitter against a
 feature measured at the receiver (T-427).
 
+### B0.679 — the rule I specified was unachievable, and the one that works is about order (2026-09-17)
+
+**T-429** (`8cbd463`) corrected my brief twice, and both corrections were load-bearing.
+
+I specified the SNR guard as *"the expectation must not slide while the spread may widen."* T-429
+measured that **first**, and found it is not merely hard but **unachievable**: on a 21-class × 7-rung ×
+24-seed grid, **nearly every feature's expectation moves with SNR — legitimately.** The noise is part of
+the record, so a normalised cumulant is attenuated by the noise in its own normaliser, `flatness` tends
+to 1, and a line-over-floor statistic **is** an SNR by construction. Asserting flat expectation would
+have exempted ~25 of 30 features: a rubber stamp. Discovering that *before* writing the rule rather than
+after is the work.
+
+The statement both known defects actually violate is about **order**:
+
+> A feature named as a property of the signal may **move** with SNR. It may not rank two emissions of
+> one family one way at one SNR and the other way at another.
+
+A pair is **resolved** when the class means are further apart than `3·√(sd_a² + sd_b²)` — the spread of
+a difference of two **single draws**, not a standard error. That is the whole separation: a **widening
+spread** makes the pair stop being resolved and drop out (honest degradation), while a **sliding
+expectation** keeps it resolved and returns it **with the opposite sign**. Single draws also make the
+criterion independent of seed count, so seeds buy a reliable `sd` rather than sensitivity — otherwise
+the guard's strictness would be a function of how long someone let it run, which is the
+"tolerance fitted to the harness" the file's own first rule forbids.
+
+`sigma_af` shows the mechanism working: resolved at 10 dB, **unresolved at 15 because the spread
+widened**, resolved again at 20 and 30 **with the sign inverted** — the healthy case sitting between two
+resolved rungs of opposite sign. Both reproductions match the tickets' published figures to three
+decimals.
+
+The exemption list is scoped to `(feature, family, a, b)` rather than the feature, because `duty`
+inverts **1 of 28 pairs** and exempting the whole feature would discard the other 27 — and it is
+asserted as an **exact set both ways**, so a declared exemption that no longer reproduces fails *naming
+the entry to delete*. "Fixing one makes the exemption disappear from a diff" stops being a discipline
+and becomes a failing test.
+
+It also corrected my guess at the third axis: **segment count is already the length axis**, since
+`segments(n)` is a function of the record at a pinned transform. The real third axis is **front-end
+state** — LO offset, IQ imbalance, DC, clipping, gain — where the cost is not the code but **the
+fidelity of what can be varied**, and where the version that would find what T-259/T-305 actually named
+(images, IMD, spurs, all device-local) is a **HIL ladder against a stable reference emitter** that no
+synthetic grid models.
+
+Two findings fell out: `low_fraction` is **`duty`'s defect one threshold down** (0.3× the same mean, so
+a 5%-duty train that should read ~0.95 reads **0.132 at 10 dB**) → folded into T-431, which is now *fix
+the estimator at both thresholds*, not *fix a gate constant*. And the class **name** changes with SNR in
+3 of 252 sequences, including **a 16-QAM returned as `analog/ssb` at 15 dB** — a confidently-wrong
+*family* at the gate → **T-435**. T-429 deliberately did not assert that second one, for good reasons
+(it is a classifier assertion, not a feature one, and its exception list would be seed-count-fragile);
+those reasons were accepted rather than overridden.
+
+**T-372** (`09c9e4b`) answered the question its brief actually asked — *how much does this recover?* —
+and the answer is what justified landing it. Through the production path: **480 unknown visits became
+240 off / 240 on / 0 unknown**, with the loss bounded by **one time cell per switch** rather than by the
+read. The coarse fallback had been discarding a whole chunk to protect one cell. Had recovery been
+small, the coarse answer would simply have been right, and the brief said so explicitly.
+
+The part easy to get wrong and got right: **the extent compared against the switch is row-aligned**,
+over the cells the visit actually read — because a 1 s cell containing the switch pools frames from
+*both* states, so a visit that read that cell straddles the switch even when its own timestamps do not.
+And the prohibition held: a straddling extent names neither side at 9:1, 1:9, **and at
+999 999 999 ns : 1 ns in both directions**. The rule is not "a wide enough margin wins."
+
 ## Open for the user (current)
 
 Kept current by the coordinator; the planning-phase list near the top of this file is the 2026-09-13
