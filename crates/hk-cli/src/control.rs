@@ -21,7 +21,7 @@ use hk_pipeline::{
 };
 use serde_json::{Value, json};
 
-/// Display, pause and recording control over a running pipeline.
+/// Display and recording control over a running pipeline.
 pub struct PipelineRunControl(pub PipelineController);
 
 /// Window changes (centre, rate) through the pipeline: class re-derivation and re-plumbing.
@@ -46,7 +46,6 @@ fn display(d: DisplaySettings) -> DisplayState {
         fft_size: d.fft_size,
         averaging: d.averaging,
         rows_per_s: d.rows_per_s,
-        paused: d.paused,
         window: d.window.name().to_owned(),
     }
 }
@@ -124,10 +123,6 @@ impl RunControl for PipelineRunControl {
             })
             .map(display)
             .map_err(api_error)
-    }
-
-    fn set_paused(&self, paused: bool) -> Result<DisplayState, LiveControlError> {
-        Ok(display(self.0.set_paused(paused)))
     }
 
     fn start_recording(

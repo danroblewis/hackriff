@@ -17,8 +17,12 @@
 //! - **Display settings (T-050)** come from [`DisplayControl`] and apply between chunks without a
 //!   restart: FFT size and row rate rebuild the STFT (and re-offer the header at the next row);
 //!   `averaging` is an exponential moving average over published rows in linear power (1 = off,
-//!   reset at every header change or STFT reset); `paused` stops publishing (the reader keeps
-//!   reading, so capture, detection and history are unaffected).
+//!   reset at every header change or STFT reset).
+//!
+//! **This reader never stops publishing on a viewer's account (T-347).** It used to, on a run-wide
+//! `paused` flag, which meant one browser's Pause froze every other browser's waterfall. Pause is
+//! the client's own time window now ([`crate::config::DisplaySettings`] says why), so the rows go
+//! out for as long as the run does and a held view simply stops advancing over them.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -67,14 +71,6 @@ impl DisplayControl {
         *s = s.patched(patch)?;
         self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(*s)
-    }
-
-    /// Pauses or resumes publishing.
-    pub fn set_paused(&self, paused: bool) -> DisplaySettings {
-        let mut s = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
-        s.paused = paused;
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        *s
     }
 }
 
@@ -186,9 +182,6 @@ impl<'a> Output<'a> {
                     *a += alpha * (p - *a);
                 }
             }
-        }
-        if self.settings.paused {
-            return;
         }
         if self.key != Some(key) {
             if let Err(e) = self.reoffer(key) {
@@ -318,8 +311,8 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
                 }
                 if out.publisher.is_none() {
                     // Offer the stream as soon as samples arrive (clients connect before the
-                    // first row, and while paused), described by this chunk's window; a row
-                    // whose own window differs still gets a new header first.
+                    // first row), described by this chunk's window; a row whose own window
+                    // differs still gets a new header first.
                     let key = HeaderKey {
                         center_hz: chunk.provenance.tune.center_hz,
                         span_hz: fs,

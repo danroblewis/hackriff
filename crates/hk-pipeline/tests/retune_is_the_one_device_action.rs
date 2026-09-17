@@ -15,10 +15,14 @@
 //!
 //! 1. A retune across a rate boundary **does** re-plumb: the segment number advances and the
 //!    controller reports `replumbed`. This is the one legitimate world-stopper.
-//! 2. Every other controller call — display settings, pause, resume, recording start and stop, in
-//!    the loop a paused-and-scrubbed UI actually makes — leaves the segment number **exactly**
-//!    where it was and leaves the front end at exactly the window it was on. Without this half the
-//!    property could be satisfied by making the retune unreachable altogether.
+//! 2. Every other controller call — display settings, recording start and stop, in the loop a
+//!    held-and-scrubbed UI actually makes — leaves the segment number **exactly** where it was and
+//!    leaves the front end at exactly the window it was on. Without this half the property could
+//!    be satisfied by making the retune unreachable altogether.
+//!
+//! T-347 shortened that list: there is no `set_paused` to call any more. Holding the view is the
+//! client's own time window, so the *only* controller calls a paused, scrubbing, zooming session
+//! makes are the ones below.
 //!
 //! It drives a scripted receiver behind the **generic device contract** (`tests/support/radio.rs`,
 //! the same source T-339's test uses), which records every receive-side command it is given. So
@@ -81,7 +85,7 @@ fn only_a_retune_stops_the_running_segment() {
     assert!(before.live, "a fixed-window run could not retune at all");
     let device_calls_before = ctl.calls.lock().unwrap().len();
 
-    // ---- the view side: everything a paused, scrubbing, zooming UI does ----
+    // ---- the view side: everything a held, scrubbing, zooming UI does ----
     //
     // Each of these is a legitimate UI action that must never reach the front end. They run in the
     // order a session makes them, several times, so a single unlucky ordering is not what passes.
@@ -93,13 +97,11 @@ fn only_a_retune_stops_the_running_segment() {
                 ..DisplayPatch::default()
             })
             .expect("a display change is a view control");
-        assert!(controller.set_paused(true).paused);
         let target = ctl.emitted() + SETTLE_SAMPLES;
         assert!(
             ctl.wait_emitted(target, LIMIT),
-            "the source stopped being read while the view was paused (round {round})"
+            "the source stopped being read while the view was held (round {round})"
         );
-        assert!(!controller.set_paused(false).paused);
         let rec = controller
             .start_recording(Some("view-side"), Some(0.2))
             .expect("recording the tuned window is an output control, not a device action");

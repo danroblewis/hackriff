@@ -18,7 +18,7 @@
 //!   drives the radio, over every window that tiles the plan's regions. A [`LiveControl`] retune
 //!   or rate change goes through the pipeline (T-050): a window of another class or rate
 //!   re-plumbs the run with that window's class at a block boundary.
-//! - **Control API** (T-050, [`serve_api`]): display, pause, recording and bookmarks for every
+//! - **Control API** (T-050, [`serve_api`]): display, recording and bookmarks for every
 //!   served run; device settings for live runs without the scheduler. Every control request is
 //!   audited to `<data dir>/control-audit.jsonl`.
 
@@ -1061,7 +1061,7 @@ impl hk_api::attention::AttentionControl for PipelineAttention {
 }
 
 /// Starts the API server over a running pipeline: streams, history/floor, status, the inventory
-/// the pipeline writes, the control API (display, pause, recording and bookmarks, audited to
+/// the pipeline writes, the control API (display, recording and bookmarks, audited to
 /// `<data dir>/control-audit.jsonl`), and (live runs without the scheduler) the live control
 /// handle for device settings.
 pub fn serve_api(

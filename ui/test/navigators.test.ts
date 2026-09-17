@@ -24,7 +24,7 @@
 //     other's writers.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import * as ax from "../src/axis";
 import { snapState, type NavigationGrid } from "../src/navigation";
 import {
@@ -38,8 +38,8 @@ import { CMAP_GLSL, CMAP_STOPS, cmapBytes } from "../src/cmap";
 import { captureWindow, currentSpan } from "../src/app/capture/timeline";
 import {
   applyFreqZoom, applyTimeTarget, freqHoverText, freqPan, freqSelectText, freqZoomTarget,
-  goLiveFromNav, timeDetailText, timeDragText, timeHoverText, timePanTarget, timeWheelPan,
-  timeWheelTarget, timeZoomTarget,
+  goLiveFromNav, holdViewFromNav, timeDetailText, timeDragText, timeHoverText, timePanTarget,
+  timeWheelPan, timeWheelTarget, timeZoomTarget, toggleLiveFromNav,
 } from "../src/app/centre/navigators";
 import { mountPresenceStream } from "../src/app/explore/presence-stream";
 import { mounts } from "../src/app/centre";
@@ -48,7 +48,7 @@ import { centreInitial, setNavigation } from "../src/app/centre/slice";
 import { applyDeviceAction, retuneAction, setLiveView, setRetuneOffer } from "../src/app/centre/view";
 import type { AppContext } from "../src/app/context";
 import { createStore } from "../src/app/store";
-import { goLive, initialState, reviewAt } from "../src/app/state";
+import { goLive, initialState, reviewAt, setCaptureWindow } from "../src/app/state";
 
 const near = (a: number, b: number, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} ≉ ${b}`);
 
@@ -1179,7 +1179,7 @@ test("T-395: the control lives on the time navigator and no longer on the Captur
   const nav = readFileSync("src/app/centre/navigators.ts", "utf8");
   const timeMount = nav.slice(nav.indexOf("function mountTimeNav("), nav.indexOf("export const navigatorMounts"));
   assert.match(timeMount, /class: "tn-live"/, "the LIVE control is built by the TIME navigator");
-  assert.match(timeMount, /goLiveFromNav\(store\)/, "and wired to the same time-axis action");
+  assert.match(timeMount, /toggleLiveFromNav\(store\)/, "and wired to the same time-axis action");
 
   // Gone from the Capture panel — the element, its handler and its style, not merely hidden.
   const cap = readFileSync("src/app/capture/index.ts", "utf8");
@@ -1191,6 +1191,97 @@ test("T-395: the control lives on the time navigator and no longer on the Captur
   const css = readFileSync("src/app/centre/centre.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   assert.match(css, /\.timenav \.tn-live\s*\{/);
   assert.match(css, /\.timenav \.tn-live\.following\s*\{/, "it still shows which of the two states the view is in");
+});
+
+// ---------------------------------------------------------------------------
+// T-347: Pause is client view state, and it is the same mechanism as scrubbing
+// ---------------------------------------------------------------------------
+//
+// The defect: `POST /api/control/pause` set `paused` on the RUN, which every connected client
+// shares — so one browser pausing froze every other browser's waterfall. The user's invariant is
+// that the UI's time window is **independent view state**, and a view state shared between
+// browsers is not view state.
+//
+// The cross-client half is asserted where clients actually are, over two real WebSockets
+// (crates/hk-cli/tests/api_contract.rs). What this file can assert is the half the server cannot
+// see, and it is the one CLAUDE.md names as the gap contract tests do not cover: **the request the
+// client builds**. For Pause the answer is that it builds none.
+
+test("T-347: pausing writes the time cursor and issues NO request", () => {
+  const { ctx, calls } = deviceSpyCtx();
+  ctx.store.set(setCaptureWindow({ t0S: 1_600_000_000, t1S: 1_600_000_600, spanS: 600 }));
+  const liveBefore = ctx.store.get().live;
+
+  assert.equal(ctx.store.get().time.live, true, "the view starts out following");
+  holdViewFromNav(ctx.store);
+
+  // No request of any kind — not a device route, not a display route, nothing. This is the whole
+  // difference from the mechanism it replaced, which posted to a route that froze every viewer.
+  assert.deepEqual(calls, [], "Pause must reach no route at all; it is the client's own cursor");
+
+  // And what it wrote is the cursor a scrub writes: same shape, same slice, nothing else touched.
+  // `spanS: null` is "the span already on screen" — pausing changes whether the view follows, not
+  // how much of the capture it shows.
+  assert.deepEqual(ctx.store.get().time, { live: false, tS: 1_600_000_600, spanS: null });
+  assert.ok(Object.is(ctx.store.get().live, liveBefore), "pausing must not move the frequency axis");
+
+  // One mechanism: the state Pause leaves is bit-for-bit the state a scrub to the same instant
+  // leaves, compared against a store driven by `reviewAt` itself rather than a hand-written literal.
+  const ref = createStore(initialState());
+  ref.set(reviewAt(1_600_000_600, null));
+  assert.deepEqual(ctx.store.get().time, ref.get().time);
+});
+
+test("T-347: the one control toggles both ways, and resuming is the existing goLive", () => {
+  const { ctx, calls } = deviceSpyCtx();
+  ctx.store.set(setCaptureWindow({ t0S: 1_600_000_000, t1S: 1_600_000_600, spanS: 600 }));
+
+  toggleLiveFromNav(ctx.store); // following -> held
+  assert.equal(ctx.store.get().time.live, false);
+  toggleLiveFromNav(ctx.store); // held -> following
+  assert.deepEqual(ctx.store.get().time, { live: true });
+  assert.deepEqual(calls, [], "neither direction reaches a route");
+
+  // A view scrubbed into the past is already "paused": pressing the control from there follows the
+  // live edge again rather than pausing something that is not running. That is what makes it one
+  // mechanism rather than two — there is no third state for "scrubbed but not paused".
+  ctx.store.set(reviewAt(1_600_000_300, 20));
+  toggleLiveFromNav(ctx.store);
+  assert.deepEqual(ctx.store.get().time, { live: true });
+});
+
+test("T-347: with no capture time reported, pausing holds nothing rather than inventing an instant", () => {
+  const { ctx, calls } = deviceSpyCtx();
+  // No captureWindow and no stream edge: `liveEdgeS` is null, which means *unknown*.
+  holdViewFromNav(ctx.store);
+  assert.deepEqual(ctx.store.get().time, { live: true }, "the cursor must not move to a made-up time");
+  assert.match(ctx.store.get().toast.text, /nothing to hold/);
+  assert.deepEqual(calls, []);
+});
+
+/** Every `.ts` under `dir`, recursively (the same walk `app-centre.test.ts` uses for its own
+ * source-level rule). */
+function walkSrc(dir: string): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = `${dir}/${e.name}`;
+    if (e.isDirectory()) out.push(...walkSrc(p));
+    else if (e.name.endsWith(".ts")) out.push(p);
+  }
+  return out;
+}
+
+test("T-347: no file under src/ names the retired pause routes", () => {
+  const retired = ["/api/control/pause", "/api/control/resume"];
+  const callers = walkSrc("src").filter((f) => {
+    const src = readFileSync(f, "utf8")
+      // Comments explaining why the route is gone are the point, not a caller.
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "")
+      .replace(/^\s*\*.*$/gm, "");
+    return retired.some((r) => src.includes(r));
+  });
+  assert.deepEqual(callers, [], "a run-wide pause is one viewer freezing all the others");
 });
 
 // ---------------------------------------------------------------------------

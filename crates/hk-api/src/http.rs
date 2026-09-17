@@ -131,8 +131,6 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/control/bias_tee"),
     ("POST", "/api/control/baseband_filter"),
     ("POST", "/api/control/display"),
-    ("POST", "/api/control/pause"),
-    ("POST", "/api/control/resume"),
     ("POST", "/api/control/record/start"),
     ("POST", "/api/control/record/stop"),
     ("GET", "/api/bookmarks"),
@@ -292,7 +290,7 @@ pub struct ApiState {
     /// Live front-end control (T-042, [`crate::live_control`]); `None` for replays and
     /// scheduler-driven runs (device endpoints then answer 409 `not_live`).
     pub live_control: Option<Arc<dyn crate::live_control::LiveControl>>,
-    /// Display, pause and recording control of the running pipeline (T-050).
+    /// Display and recording control of the running pipeline (T-050).
     pub run_control: Option<Arc<dyn RunControl>>,
     /// Bookmark store (T-050), usually the run's database.
     pub bookmarks: Option<Arc<Mutex<Repository>>>,

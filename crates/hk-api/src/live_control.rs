@@ -26,7 +26,7 @@
 //! # Device actions (T-343)
 //!
 //! Five of this trait's operations **reach the front end**; everything else in the control API
-//! (display, pause/resume, recording, bookmarks, selections) only changes what is shown. That
+//! (display, recording, bookmarks, selections) only changes what is shown. That
 //! asymmetry is now a type, [`DeviceAction`], not a comment: `set_center`, `set_rate`,
 //! `set_gains`, `set_bias_tee` and `set_baseband_filter` each name their variant, the control
 //! API classifies its routes into the same enum (`hk_api::control`'s `Action::device_action`),
@@ -83,10 +83,11 @@ pub struct LiveTuning {
 
 /// A control operation that **reaches the front end** (T-343).
 ///
-/// This enum is the boundary between changing the world and changing the view. Pause, scrub,
-/// zoom, display settings, recording and bookmarks have no variant here because they never touch
-/// the device (T-339's invariant); the five that do each name themselves, so a reader of a call
-/// site can see it is a device action without tracing it to the driver.
+/// This enum is the boundary between changing the world and changing the view. Holding the view,
+/// scrubbing, zooming, display settings, recording and bookmarks have no variant here because they
+/// never touch the device (T-339's invariant) — and the first three reach no route at all (T-347);
+/// the five that do each name themselves, so a reader of a call site can see it is a device action
+/// without tracing it to the driver.
 ///
 /// A retune in particular is not a view change: `hk_pipeline::PipelineController::retune` tunes
 /// in place only when the window class and sample rate are both unchanged, and otherwise stops

@@ -3,8 +3,14 @@
 // panel uses) — reused unchanged; this file only renders it as the drawer's own DOM. Never writes
 // shell's `device` slice (T-150's alone); this tab keeps its own full `ControlState` locally.
 // Frequency stepping, colour scale and peak hold stay with the centre live view (T-152); this tab
-// covers gains, span (sample rate), bias tee, baseband filter, display settings and pause, plus
-// manual recording start/stop.
+// covers gains, span (sample rate), bias tee, baseband filter, display settings, plus manual
+// recording start/stop.
+//
+// T-347: there is no Pause here any more. It posted to `/api/control/pause`, which set `paused` on
+// the RUN — so one browser pressing it froze every other browser's waterfall. Holding the view is
+// per-viewer state and lives on the time navigator's LIVE control (ui/src/app/centre/navigators.ts)
+// as the client's own time cursor. This panel is the run's shared settings; the view's own window
+// is not one of them.
 import type { ControlClient } from "../../controls/client";
 import { formatFrequency } from "../../controls/freq";
 import {
@@ -40,7 +46,6 @@ export class DeviceTab {
   private readonly speed = h("select", { onchange: (e) => this.displayCall("rows_per_s", Number((e.target as HTMLSelectElement).value)) });
   private readonly window = h("select", { onchange: (e) => this.displayCall("window", (e.target as HTMLSelectElement).value) });
   private readonly avg = h("input", { type: "number", min: "1", onchange: (e) => this.onAvg(e.target as HTMLInputElement) });
-  private readonly pause = h("button", { class: "mini", type: "button", onclick: () => this.onPause() }, "Pause spectrum");
 
   private readonly recLabel = h("input", { class: "mono", placeholder: "label (optional)" });
   private readonly recMax = h("input", { type: "number", min: "0", placeholder: "max s" });
@@ -57,7 +62,7 @@ export class DeviceTab {
   private readonly displayFields = h("fieldset", { class: "rv-fieldset" },
     h("legend", {}, "Display"),
     h("label", {}, "FFT size ", this.fft), h("label", {}, "Speed ", this.speed),
-    h("label", {}, "Window ", this.window), h("label", {}, "Averaging ", this.avg), this.pause);
+    h("label", {}, "Window ", this.window), h("label", {}, "Averaging ", this.avg));
   private readonly displayReason = h("div", { class: "hint" });
 
   private readonly recFields = h("div", { class: "rv-fieldset" },
@@ -136,7 +141,6 @@ export class DeviceTab {
       if (document.activeElement !== this.speed) this.speed.value = String(d.rows_per_s);
       if (document.activeElement !== this.window) this.window.value = d.window;
       if (document.activeElement !== this.avg) (this.avg as HTMLInputElement).value = String(d.averaging);
-      this.pause.textContent = d.paused ? "Resume spectrum" : "Pause spectrum";
     }
 
     const rec = run?.recording;
@@ -208,11 +212,6 @@ export class DeviceTab {
     const n = Math.round(Number(input.value)), max = this.model?.limits.averaging_max ?? 100;
     if (n >= 1 && n <= max) this.displayCall("averaging", n);
     else this.msg.textContent = `averaging must be 1..${max} rows (1 = off)`;
-  }
-
-  private onPause() {
-    const paused = !!this.state?.run?.display.paused;
-    void this.call(paused ? "resume spectrum" : "pause spectrum", () => this.client.post(`/api/control/${paused ? "resume" : "pause"}`));
   }
 
   private onRecStart() {

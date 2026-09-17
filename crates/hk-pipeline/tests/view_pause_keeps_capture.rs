@@ -1,26 +1,37 @@
-//! T-339 — **pause freezes the view, not the capture.**
+//! T-339 / T-347 — **pause freezes the view, and it cannot freeze anything else.**
 //!
 //! The invariant (CLAUDE.md, "Time, the waterfall, and the live view"): capture, the ring and
-//! detection are always-on; the UI's time window is independent view state. Pausing never stops or
-//! slows the SDR, the ring, or detection — it only changes what the screen shows.
+//! detection are always-on; the UI's time window is **independent view state**. Pausing never stops
+//! or slows the SDR, the ring, or detection — it only changes what the screen shows.
 //!
-//! The property is asserted at the seam it lives at, not in the UI: a UI test would only prove that
-//! today's button calls no stopping function, while this proves that the one thing the pause
-//! control *does* reach — `PipelineController::set_paused`, the same call behind
-//! `POST /api/control/pause` — leaves the ring advancing and detections being written.
+//! T-339 proved the first half against the pause control that existed then: a run-wide
+//! `PipelineController::set_paused` behind `POST /api/control/pause`, which stopped the spectrum
+//! publisher for the whole run. It left the ring and detection alone, so the invariant held — but
+//! "independent view state" did not: one browser pressing Pause froze every other browser's
+//! waterfall, because a run-wide boolean cannot represent N viewers.
 //!
-//! **Why lossless (the gate is on).** The way a paused view could realistically stop capture is
-//! backpressure: a reader that stops advancing its flow-gate cursor while paused would hold the
-//! capture thread back once the writer got half a ring ahead of it (`hk_pipeline::gate`). So the run
-//! is lossless with a small ring (`ring_s = 0.5`), and each phase pushes several times the gate's
-//! slack through it. If pausing stalled the spectrum reader's cursor, the source would stop being
-//! read and `wait_emitted` below would time out.
+//! **T-347 removed the lever rather than fixing its scope.** There is no `set_paused`, no
+//! `DisplaySettings::paused` and no `/api/control/pause`; holding the view is the client's own time
+//! cursor and reaches nothing. So this test now asserts the stronger property at the same seam: the
+//! run's rows, ring, capture and detection **all keep advancing across every control a viewing
+//! session can still make**, and the frozen-row assertion that used to prove the pause was in force
+//! is inverted — rows must never stop.
 //!
-//! **The live control.** A paused phase that advances proves nothing unless an unpaused phase of
-//! the same size advances too — otherwise the test would pass on a run where nothing was happening
-//! in the first place. So phase A runs playing and phase B runs paused, over the same sample budget,
-//! and both are asserted. The frozen spectrum row count across phase B is the third leg: it proves
-//! the pause was actually in force, so "capture carried on" is not just "the pause never applied".
+//! **Why lossless (the gate is on).** The way a view could realistically stop capture is
+//! backpressure: a reader that stops advancing its flow-gate cursor would hold the capture thread
+//! back once the writer got half a ring ahead of it (`hk_pipeline::gate`). So the run is lossless
+//! with a small ring (`ring_s = 0.5`), and each phase pushes several times the gate's slack through
+//! it. If any view control stalled the spectrum reader's cursor, the source would stop being read
+//! and `wait_emitted` below would time out.
+//!
+//! **The live control.** Phase A is a plain run and phase B is the same sample budget with the
+//! display control driven the way a session drives it (T-067's FFT size, averaging, row rate and
+//! window all move). Both are asserted, so the test cannot pass on a run where nothing was
+//! happening in the first place.
+//!
+//! The cross-client half of T-347 — *two* connected browsers, one holding its view, the other still
+//! advancing — is asserted where clients actually are, over two real WebSockets:
+//! `crates/hk-cli/tests/api_contract.rs`, `one_clients_pause_never_freezes_another_clients_stream`.
 
 mod common;
 #[path = "support/radio.rs"]
@@ -31,11 +42,12 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::*;
+use hk_dsp::WindowKind;
 use hk_model::Timestamp;
 use hk_pipeline::class::window_class;
 use hk_pipeline::stats::Counters;
 use hk_pipeline::{
-    Pipeline, PipelineConfig, PipelineHandle, SourceInfo, TrackInventory, replay_plan,
+    DisplayPatch, Pipeline, PipelineConfig, PipelineHandle, SourceInfo, TrackInventory, replay_plan,
 };
 use serde_json::json;
 
@@ -48,7 +60,7 @@ const RING_S: f64 = 0.5;
 /// Samples per phase: 5 s, twenty times the gate's slack at `RING_S`, and long enough to span
 /// several detection writes (this scene produces roughly one per second of sample time).
 const PHASE_SAMPLES: u64 = 2_500_000;
-/// Samples to let in-flight rows land after a pause before the frozen window is measured.
+/// Samples to let in-flight rows land after a display change before the next window is measured.
 const SETTLE_SAMPLES: u64 = 50_000;
 
 const LIMIT: Duration = Duration::from_secs(120);
@@ -96,7 +108,7 @@ fn delta(before: Marks, after: Marks) -> Marks {
 }
 
 #[test]
-fn a_paused_view_keeps_the_ring_advancing_and_detections_being_written() {
+fn holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection() {
     let dir = TempDir::new("view-pause-keeps-capture");
     let (radio, ctl) = radio::Radio::new(CENTER, FS, 16_384, radio::tone(|_| OFFSET_HZ));
     let t0 = Timestamp::from_unix_nanos(radio::T0_NS);
@@ -145,83 +157,105 @@ fn a_paused_view_keeps_the_ring_advancing_and_detections_being_written() {
     let a = delta(a0, marks(&handle, &counters));
     eprintln!("playing: {a:?}");
 
-    // ---- pause ----
-    let display = handle.controller().set_paused(true);
-    assert!(display.paused, "the controller did not report the pause");
+    // ---- the whole remaining view-control surface, driven the way a session drives it ----
+    //
+    // T-347: this is now the complete list. A viewer can change the geometry of the published rows
+    // and nothing else — there is no control here that stops them.
+    let display = handle
+        .controller()
+        .set_display(&DisplayPatch {
+            fft_size: Some(2048),
+            averaging: Some(8),
+            rows_per_s: Some(10.0),
+            window: Some(WindowKind::FlatTop),
+        })
+        .expect("a display change is a view control");
+    assert_eq!((display.fft_size, display.averaging), (2048, 8));
     let settle = ctl.emitted() + SETTLE_SAMPLES;
     assert!(
         ctl.wait_emitted(settle, LIMIT),
-        "the source stalled right after the pause"
+        "the source stalled right after the display change"
     );
 
-    // ---- phase B: paused ----
+    // ---- phase B: the view held, the display moved ----
     let b0 = marks(&handle, &counters);
     let target = ctl.emitted() + PHASE_SAMPLES;
     assert!(
         ctl.wait_emitted(target, LIMIT),
-        "the source stopped being read while the view was paused: pausing reached the device"
+        "the source stopped being read while the view was held: a view control reached the device"
     );
     let b = delta(b0, marks(&handle, &counters));
-    eprintln!("paused:  {b:?}");
+    eprintln!("held:    {b:?}");
 
-    // The view really was frozen — without this, "capture carried on" could just mean the pause
-    // never took effect.
-    assert_eq!(
-        b.rows, 0,
-        "the view was not frozen: {} spectrum rows were published while paused",
-        b.rows
-    );
+    // **The T-347 assertion, and it is the inverse of the one that stood here.** This used to read
+    // `b.rows == 0` — proof the run-wide pause was in force. A run-wide pause is exactly what one
+    // browser must not be able to do to another, so the property is now that the rows never stop:
+    // no control a viewing session can make silences the stream every other viewer is reading.
     assert!(a.rows > 0, "the view never advanced while playing: {a:?}");
+    assert!(
+        b.rows > 0,
+        "the run's rows stopped while the view was held: a viewer still has a lever on the \
+         stream every other viewer shares ({b:?}, playing: {a:?})"
+    );
 
-    // The property: the ring, the capture thread and detection all carried on while paused, by
-    // margins comparable to the unpaused control.
+    // The property: the ring, the capture thread and detection all carried on while the view was
+    // held, by margins comparable to the phase-A control.
     assert!(
         b.captured >= PHASE_SAMPLES,
-        "capture slowed while paused: {} samples over a phase of {PHASE_SAMPLES} (playing: {})",
+        "capture slowed while the view was held: {} samples over a phase of {PHASE_SAMPLES} (playing: {})",
         b.captured,
         a.captured
     );
     assert!(
         b.ring >= PHASE_SAMPLES,
-        "the ring stopped advancing while paused: +{} (playing: +{})",
+        "the ring stopped advancing while the view was held: +{} (playing: +{})",
         b.ring,
         a.ring
     );
     assert!(
         a.detections_written > 0,
-        "no detections were written while playing, so the paused comparison is empty: {a:?}"
+        "no detections were written while playing, so the held comparison is empty: {a:?}"
     );
     assert!(
         b.detections_written > 0,
-        "detection stopped writing while the view was paused: +{} rows (playing: +{})",
+        "detection stopped writing while the view was held: +{} rows (playing: +{})",
         b.detections_written,
         a.detections_written
     );
     assert!(
         b.detections > 0,
-        "detection stopped producing records while the view was paused: +{} (playing: +{})",
+        "detection stopped producing records while the view was held: +{} (playing: +{})",
         b.detections,
         a.detections
     );
     // Without this the backpressure leg would be vacuous: a gate that never engaged could not have
-    // stalled the source whether or not a paused reader held its cursor.
+    // stalled the source whether or not a reader held its cursor.
     assert!(
         b.gate_waits > 0,
-        "the lossless gate never held a block back during the paused phase, so this run did not \
-         exercise the backpressure path a paused reader would stall: {b:?}"
+        "the lossless gate never held a block back during the held phase, so this run did not \
+         exercise the backpressure path a stalled reader would sit on: {b:?}"
     );
 
-    // ---- resume: the view starts again, which is what "freezes the view" means ----
-    assert!(!handle.controller().set_paused(false).paused);
+    // ---- and back to the run's own settings: still nothing stops ----
+    let display = handle
+        .controller()
+        .set_display(&DisplayPatch {
+            fft_size: Some(1024),
+            averaging: Some(1),
+            rows_per_s: Some(25.0),
+            window: Some(WindowKind::Hann),
+        })
+        .expect("a display change is a view control");
+    assert_eq!(display.averaging, 1);
     let c0 = marks(&handle, &counters);
     let target = ctl.emitted() + PHASE_SAMPLES;
     assert!(
         ctl.wait_emitted(target, LIMIT),
-        "the source stalled after resuming"
+        "the source stalled after the display went back"
     );
     let c = delta(c0, marks(&handle, &counters));
-    eprintln!("resumed: {c:?}");
-    assert!(c.rows > 0, "the view did not resume: {c:?}");
+    eprintln!("back:    {c:?}");
+    assert!(c.rows > 0, "the rows did not carry on: {c:?}");
 
     ctl.finish();
     let (summary, fired) = wait_guarded(handle, LIMIT);
