@@ -3690,3 +3690,47 @@ re-deriving a decode view must **not re-decode** what is already done.
 catalogue renders its own wall-clock window, and by the user's own invariant the durable all-time
 catalogue is a **separate surface** — so whether it should follow the cursor at all must be settled
 before it is "fixed" into the view window.
+
+### B0.660 — T-377 closes the chain of custody, and refuses to split the tracker that did not need it (2026-09-16)
+
+Merged at `cda205e`. `Pyramid::floors` was keyed by frequency block alone, so every front end fed one
+floor and a tile **pure in origin** could still carry an occupancy decided against another chain's
+threshold. It is now keyed `(source, f_block)` through `hk_store::history::source_key` — the same
+function `ChainKey::of_device` is, pinned by T-314's test.
+
+That completes a four-link chain where every link is deliberately the same value: T-303 keyed the
+baseline, T-314 keyed the read (and found the key had been naming one front end while measuring
+another), T-377 keys the ingest threshold. **The threshold, the measurement and the baseline key are
+now one value**, which is the property that makes the whole thing worth having.
+
+**The better half of this ticket is the tracker it did not split.** The brief asked which of the two
+needed splitting and demanded evidence, and the answer came back as a chain of five facts rather than
+an assertion: `Pipeline::start` takes a single `Source`; `replumb()` takes that *same still-open
+device* out of the slot; `Provenance::device_id` is a per-source constant at all three sources
+(`hackrf:<serial>`, `sigmf:{hw}`, `mock:<rec>`); and `source/conformance.rs` pins
+`DeviceInfo::device_id == provenance.device_id` on every block. So `source_key` is constant for a
+tracker's life, and splitting it would cost without separating anything. **The invariant is now
+written at the construction site** so a future multi-source ring cannot re-pool it unnoticed — which
+is the part that makes the refusal durable rather than merely correct today.
+
+Stored cells are handled the way I would want every migration handled: **left as written**, because
+their occupancy cannot be recomputed from the tile (the levels survive, the floor they were compared
+with does not), and **not silently credited** either. Tile format 5 → 6 **adds no bytes** — it is
+purely the marker that a v6 level-0 tile's occupancy was decided against its own front end's floor,
+and older tiles are counted on open as `tiles_pre_origin_floor`.
+
+The measured turn-around on T-314's pin: chain B beside chain A went from **excess NaN, floor suspect
+true** to **excess 0.00 dB, suspect false**, with B alone unchanged. And the dense-band control proves
+the detector was not broken to get there — one chain, an emission 20 dB over its own floor, 224 of 256
+visits occupied, floor still suspect, excess still withheld. Single-device runs are **bit-identical by
+construction**: a floor track moves only at a seal, and no seal falls between a column's pushes and
+its close, verified with a probe built to straddle exactly that boundary.
+
+**T-378 launched** as the fourth link's last gap. T-368 stopped short of it for a stated reason — two
+construction sites sat inside T-314's then-fenced files — and those fences are now gone. Until it
+lands, long-horizon coverage can answer *"did anything look here"* but not *"did **this** front end
+look here"*, which with two SDRs is the whole question, and the frequency navigator's survey strip is
+built from that same coverage. Its brief also asks a question T-368 raised and nobody has answered:
+`DwellRecord.provenance_ref` is hard-coded `None` at all three writers, so **if that reference were
+populated, would `device_id` be redundant?** Adding a second way to say "which device" when an unused
+first one exists is exactly the drift surface this chain of custody exists to prevent.
