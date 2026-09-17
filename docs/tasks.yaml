@@ -8363,6 +8363,11 @@ tasks:
       DO NOT resolve this by relaxing T-401's 4 s bound: it is a difference of two
       capture timestamps chosen against a measured 1.00 s, and loosening it to fit a
       regression would enshrine exactly what the harness exists to catch.
+      SEQUENCING (T-404, merged 3d37ccf): it refit BOTH density files and bumped
+      features@5 -> features@6. If this ticket refits after its scene change it must
+      refit ON TOP of that, not race it. T-404 also added SynthConfig::packet_preamble
+      (default true) to hk-classify synth - nowhere near the WFM bandwidth, but it is
+      the same file family.
 
   - id: T-403
     title: A station with no pilot and no identity still confirms at the end of the recording
@@ -8423,7 +8428,7 @@ tasks:
   - id: T-404
     title: Six more features measure the observation, and three of them are one defect
     milestone: M3
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M3A
     core_interface: true
