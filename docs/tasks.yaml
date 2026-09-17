@@ -4164,7 +4164,7 @@ tasks:
     milestone: M3
     title: 'Within-family class accuracy for cw and ssb is ~0 at and above gate (wrong
       0.75-1.00) while family-level analog is fine'
-    status: in-progress
+    status: done
     priority: normal
     deps: []
     parallel_group: M3A
@@ -4181,6 +4181,56 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    commit: ca40832
+    result: |
+      FIXED, and the cause was not a threshold that needed tuning - it was two
+      conjunctions that could not fire.
+      `analog_classes` was the last hand-written within-family score table in the tree.
+      `cw` required sigma_af < 0.02, written from noiseless physics (a keyed carrier has
+      essentially no frequency excursion). The IF estimator is NOISE-LIMITED: measured
+      sigma_af on that same keyed carrier is 0.170-0.207 at 10 dB, 0.068-0.092 at 15,
+      0.038-0.050 at 20 - a clean 1/sqrt(rho) law that does not reach the bound until
+      ~28 dB, 18 dB ABOVE THE GATE. So the conjunct never fired and `cw` scored the 0.05
+      floor against `am`'s 0.1, at every bin.
+      `ssb` lost an EXACT TIE. `am`'s "there is a carrier" term was carrier_line_db > 14,
+      but that feature is a CFAR strongest-line statistic (T-404), not a carrier
+      detector - a suppressed-carrier SSB emission's loudest audio tone reads 28-40 dB
+      on it. Both conjunctions fired at 0.7 and the tie broke ALPHABETICALLY. That is
+      why ssb's top-2 was 0.75/0.58 while its top-1 was 0.000: the right answer was
+      present and ranked second by nothing but its name.
+      The fix is not abstention - the evidence was already fitted and unused.
+      `psk_qam_classes` becomes `density_classes` and analog routes through the same
+      per-class densities. Measured BEFORE any change, their arg-max over the five
+      analog classes scored 168/180 on the blind seeds, cw 36/36 and ssb 36/36,
+      margins 25-60 nats.
+      The residual was entirely at 10 dB and entirely `am` read as `ssb` (at that SNR an
+      AM envelope's troughs go into the noise and its carrier stops dominating its band).
+      A margin threshold cannot cut it - wrong calls reach 11 nats, correct ones fall to
+      2.9 - so analog takes class_gate_db 0.0 -> 3.0, from a dev-only 1 dB sweep:
+      0.733 correct at 10, 0.883 at 11, 0.983 at 12, EXACT from 13 up, and exact at
+      every step above. Same margin fsk and ook-ask already carry.
+      ADR-0016 §2 guessed `wfm/nbfm/am +0; ssb/cw +5`. Wrong on both counts: the
+      per-class form was never implementable (FamilyThresholds has ONE gate per family),
+      and it named the wrong fragile class - ssb and cw are exact from 13 dB and `am` is
+      the one that needs the margin. The row now carries the measurement.
+      BINDING NUMBER: analog class wrong-label at and above the gate 0.3500 -> 0.0056
+      (1 snippet in 180). cw 1.000 -> 0.000 at +5 and +10; ssb 1.000 -> 0.083 and
+      0.917 -> 0.000.
+      Family-level numbers BIT-IDENTICAL to main: top-1 0.9345, top-2 0.9861,
+      wrong-label 0.0040 overall / 0.0026 at gate / 0.0333 worst bin. The class call
+      runs after the family is decided and writes only Classification::class, so no M3
+      floor can move.
+      Analog class top-1 0.4556 -> 0.6167. The gate bin itself now abstains, taking
+      every wrong name in it - the trade the ticket allowed: abstention costs top-1 and
+      does not cost wrong-label.
+      class_guess loses its obw_hz parameter - it existed only for the wfm/nbfm split
+      the removed table made at obw_hz > 100e3, and the densities separate those two on
+      their own (36/36, 35/36).
+      New blind regression `the_analog_class_call_is_right_or_absent_but_never_
+      confidently_wrong` pins PROPERTIES not numbers: every analog class is nameable,
+      class wrong-label <= 0.05, and below the gate the name is withheld with a reason.
+      Follow-up filed as T-422 (fsk and qam16 have the same shape of defect).
+
   - id: T-250
     milestone: M2-hardening
     title: 'Candidate dedup/merge is not collapsing skirt fragments in the served path:
@@ -7660,6 +7710,16 @@ tasks:
       That is the structural half: the group is a hand-maintained list, so every new
       timing test is a silent opt-out. Consider whether membership can be derived
       (a marker on the test, or the file) rather than remembered.
+      FIFTH INSTANCE (coordinator, 2026-09-17, T-249's merge gate): the SAME test as
+      the third instance, hk-cli::api_contract coverage_greys_only_what_was_never_
+      observed..., timed out at 60 s under four concurrent agents and then passed
+      ALONE IN 21.1 SECONDS. Note the pair: T-320 measured it at 53.2 s alone, this
+      run at 21.1 s. The isolated time varies by 2.5x, so the 60 s budget has
+      essentially no headroom on a loaded machine and the test says nothing about the
+      code when it fails. It cost a full 7-minute gate re-run to clear a diff
+      (classifier score tables) that cannot reach the spectrum-history strip at all.
+      That is the concrete cost of leaving this: every load flake makes the coordinator
+      re-run the whole gate to find out it was nothing.
 
   - id: T-384
     title: The output and decode surfaces cannot re-derive for a scrubbed window, and the decode route has no time parameter to ask with
@@ -9029,7 +9089,7 @@ tasks:
   - id: T-418
     title: A narrower selection gives no more detail, because detail must come from resolution not from an impossible capture
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     deps: [T-417]
@@ -9070,6 +9130,55 @@ tasks:
       finishing the publisher on a header-key change, plus a client that treated only
       the FIRST text message as a header. Both fixed, so every narrowing this ticket
       performs is now exercisable.
+    commit: af20ad3
+    result: |
+      FIXED. The user's report was exact, and the cause was a proxy test.
+      `freqZoomTarget` asked whether the selection lay INSIDE the tuned window and
+      returned {kind:"view"} when it did - a pure display zoom, no rate change, no
+      transform change. Inside-vs-outside gets narrowing backwards: a 200 kHz drag at
+      101.3 in a 2.4 MHz window is exactly the case that should buy detail and was the
+      case guaranteed not to.
+      Half of part 1 was ALREADY RIGHT and left alone: smallestCoveringSpan(HACKRF,
+      200e3) -> 2 000 000, the continuous-rate branch lifting the need to the 2 Msps
+      floor. It cannot do better and shouldn't. Nothing called it.
+      Two more measured before the fix: the centre landed 10.7 Hz from the target (the
+      selection sitting essentially ON DC - T-409's problem arriving as predicted), and
+      at a fixed 4096-point FFT a 200 kHz and a 20 kHz selection both got 488.3 Hz/bin.
+      RESOLUTION COMES FROM A LONGER TRANSFORM, not a narrower capture.
+      POST /api/control/display {fft_size} already accepts up to 65536 and the spectrum
+      reader rebuilds its STFT at the next chunk boundary without a restart - genuinely
+      more samples, measured not interpolated. 488 -> 122 Hz/bin for the reported case
+      (5x), 488 -> 30.5 Hz/bin for a 20 kHz selection (19x), with NO crates/ change.
+      The DDC alternative was measured and rejected FOR NOW: hk-dsp's Ddc exists but no
+      control-API surface spawns a DDC + spectrum tap and tap_spectrum's FFT is
+      hard-coded at 4096. That is a separate task crossing hk-pipeline's recipe layer.
+      OFF-DC PLACEMENT IS DERIVED, not picked: ideal is span/4, because the usable
+      half-band runs DC (0) to Nyquist (span/2) with a hazard at each end - the LO spike
+      and the anti-alias roll-off - so the midpoint is maximally far from both. Bounded
+      by (span-need)/2 and by snapCenter's up-to-half-a-step move, out of the same slack.
+      THE WINDOW IS NEVER WIDENED TO BUY THE DODGE - that would cost the resolution the
+      path exists to gain - so a selection wider than half the window reports
+      clearsDc: false and the UI says DC falls inside it. On a replay the offset is 0,
+      derived from `controllable`: no oscillator of ours, nothing to dodge.
+      HONESTY CONTROL: DetailPlan.capped is true when fft_size_max bound the answer, and
+      the readout then says bins are REPEATED to fill the pixels beyond it - which is
+      what waterfall.ts does (nearest-repeat, never interpolate), the same distinction
+      T-420 drew on the time axis. Both directions asserted.
+      The geometry test is replaced by three SELF-LIMITING reasons - `reach` (not wholly
+      inside), `narrow` (a narrower achievable window exists), `dc` (DC inside the
+      selection and a placement clears it). Self-limiting, so re-selecting the same
+      region settles. When none holds the radio is untouched and only the transform
+      moves, preserving T-392's "inside reaches nothing" rather than trading it away.
+      The display call goes AFTER the retune: a rate change re-plumbs, so sizing the FFT
+      first would rebuild it under a rate about to change.
+      T-340's control intact (no pan, no wheel reaches a device route); gesture path
+      untouched, so T-407's drag threshold and cross-axis travel are unchanged.
+      AGENT'S FLAGGED JUDGEMENT CALL: a narrow selection inside the window now always
+      retunes when a narrower achievable span exists, even for a modest 2.4 -> 2.0 MHz
+      gain, costing a real settle gap on each such drag. That follows the instruction
+      verbatim ("snaps to the narrowest achievable instantaneous window"). If it proves
+      too eager in use the fix is a THRESHOLD on `narrow`, not a change to the
+      arithmetic.
 
   - id: T-419
     title: Two coverage folds round partial coverage UP, so half-scanned spectrum reads as fully covered
@@ -9200,6 +9309,46 @@ tasks:
       an unobserved cell carries NO MEASUREMENT KEYS AT ALL.
       Pure backend. No wire change (that is step 2). Serves nothing visibly yet and
       unblocks everything below it.
+  - id: T-422
+    title: fsk and qam16 have the same class-level defect cw and ssb had - a hand-written table and a misordered density
+    milestone: M3
+    status: todo
+    priority: normal
+    parallel_group: M3A
+    deps: [T-249]
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-249 (2026-09-17), while measuring the analog class call it fixed'
+    acceptance: |
+      T-249 replaced analog's hand-written within-family score table with the fitted
+      per-class densities and took analog class wrong-label from 0.3500 to 0.0056.
+      It reported, from the same measurement run, that TWO MORE FAMILIES HAVE THE SAME
+      SHAPE OF DEFECT at class level, and they are not the same bug twice:
+        fsk/gfsk and fsk/msk - top-1 0.33-0.42, wrong-label 0.50-0.67. `fsk_classes` is
+        STILL A HAND-WRITTEN TABLE, the last one left after T-249. Expect T-249's
+        cause: a conjunction written from noiseless physics whose feature is
+        noise-limited at this geometry, or a tie broken by a feature that does not
+        measure what its name says.
+        psk-qam/qam16 - top-1 0.083, wrong-label 0.917. DIFFERENT and more interesting:
+        psk-qam ALREADY routes through the densities, so this one is MISORDERED BY THE
+        DENSITIES THEMSELVES. A fitted model getting it wrong 11 times in 12 is not a
+        threshold problem; check what the fit is conditioned on and whether qam16's
+        training geometry matches the blind seeds'.
+      DoD: for each of the three classes, state the measured cause before proposing a
+      fix, and say which DIMENSION fails to separate them (T-249's form: "carrier_line_db
+      does not distinguish a carrier from a loud tone"). Then either fix the call or
+      withhold it below a DERIVED gate with a recorded reason (T-297/T-311/T-312's rule),
+      never a confidently wrong name.
+      Family-level floors must not move: top-1 0.935, top-2 0.986, wrong-label 0.003
+      overall / 0.033 per bin, m3 unknown recall 0.9520, false-known 0.0480. A class-call
+      change writes only Classification::class and runs after the family is decided, so
+      if a floor DOES move, that is itself the finding - stash the whole diff, re-run on
+      merged main, and compare before reporting (T-419's method, T-415).
+      Pin PROPERTIES not numbers, as T-249's regression does.
+    notes: |
+      Read T-249's result field first - it is the worked example for this ticket, and
+      the two causes it found are the two hypotheses to test.
+
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
