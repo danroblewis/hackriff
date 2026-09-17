@@ -3584,3 +3584,54 @@ someone to trip over: drawing a cell captured by device B into a view centred on
 **display** union and is legitimate; asserting the two devices saw the same emitter is an **identity**
 claim and is not. It depends on T-378, since coverage cannot say which device looked where over the
 long horizon until observation-log spans carry a device.
+
+### B0.658 — T-373: the artefact was ours, and excluding it promoted another (2026-09-16)
+
+Merged at `13b29a8`. Two findings, and the second is the one that matters.
+
+**The source T-317 could not name is our own recorder.** This is the only capture of six carrying the
+8192-sample gain step, and the only one taken through hackriff's ring-reader output path. All five
+`hackrf_transfer` captures — same device, same firmware, **one of them the same band at the same rate
+and gains** — fold flat over the same period to within **0.015 dB**, against **−0.445 dB** here.
+T-317's note that the 2026-09-13 2.4 Msps capture carries it too **does not reproduce**, and the
+fixture README now says so. A merged claim corrected by the next agent's control, which is the system
+working.
+
+**The blast radius was real but narrow, and the surprise was what sits underneath.** Over 50 boxes and
+208 cyclic lines, 5 lines were within 3 bins of `n·fs/8192`, all on the 100.4653 MHz box, carried by
+**two independent method groups** — exactly the corroboration that makes a candidate convincing.
+`hk-classify`'s `cyclic_db` on that box **was** the artefact at 22.8 dB.
+
+But in the other 45 boxes the argmax was never the comb at all. It belongs to **two other
+receiver-wide artefacts**: an exact 8 kHz comb up to 38 dB (present at the same frequencies in the
+`hackrf_transfer` captures, so device or host, not ours) and a **drifting ~657 Hz family** whose 2nd
+harmonic wins most boxes at up to 32 dB and moves 1314.0 → 1309.2 Hz over 16 s.
+
+So `cyclic_db` on that box read 22.8 dB of artefact before, and reads 22.5 dB from a **different line**
+after. **Excluding one artefact promoted another.** That is T-382, at `high`. The agent was right not
+to notch the drifting family — a notch wide enough to cover the drift would eat real structure, so it
+must be identified first — and right to say so rather than quietly widening the guard.
+
+Two things about the fix I would keep as pattern. The exclusion carries the period in **samples**, so
+one record excludes 292.969 Hz at 2.4 Msps and 1220.703 Hz at 10 Msps — the brief demanded "derived,
+not hardcoded" and this is what that looks like. And **the notch width was measured, not chosen**: at
+0.5 and 1 bin the argmax walks the line's own skirt and reports the same artefact 0.47 and 1.01 bins
+over; it is gone at 2 bins in all four methods and all three windows; shipped at 4, the Blackman
+mainlobe clearance — the same number and reason as the existing `DC_GUARD_NATIVE_BINS`.
+
+The control is the best of the session: a 2-FSK emitter at **exactly comb harmonic 512** — 150 kBd at
+2.4 Msps, which is the rate `blind_real` measures on the real 915 MHz bursts, and **any rate of the
+form fs/2ᵏ lands there**. Sitting exactly on the member it keeps 150000.003 Bd as its best candidate
+and withholds trust; one native bin off it is trusted and correct again.
+
+**T-371 merged at `6073289`** alongside. Its negative control is the part worth copying: because the
+legacy row derives from the **on** run, a `powered().unwrap_or(false)` anywhere between key and wire
+fails the test **twice** — a second `off` row and no `unknown` cohort. Confirmed by mutation. It also
+found there is **no UI baselines view at all** — nothing under `ui/` fetches either route — so the row's
+only consumer today is a human reading JSON, and it declined to build a new surface. `chain` is missing
+from that route in exactly the way `bias_tee` was, filed as **T-381**.
+
+**Disk:** 16 GB at the low point. Removing two worktrees returned only 16 → 20 GB, because the targets
+are APFS clones sharing most blocks — `du` reports 42 GB each and the true unique cost is far smaller.
+Holding launches at exactly the floor rather than seeding a third worktree; the cap is a maximum, not
+a target, and every time I have treated it as a target today the disk has gone to single digits.
