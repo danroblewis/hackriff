@@ -500,7 +500,7 @@ fn t296_the_centroid_rule_across_every_generated_class() {
             let n = c.samples;
             let fs = analysis_rate(*class, c.sample_rate_hz);
             let rate = 25e3 + 75e3 * rng.unit();
-            let (mut x, _bw) = waveform(*class, &mut rng, n, fs, rate);
+            let (mut x, _bw) = waveform(*class, &mut rng, n, fs, rate, true);
             normalise(&mut x);
             let samples: Vec<Complex32> = x
                 .iter()

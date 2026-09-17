@@ -27,11 +27,14 @@
 //! tolerance, or named in that file's `OBSERVATION_STATISTICS` with the mechanism that makes it a
 //! statistic of the capture and the measurement that showed it. A new dimension that is in neither
 //! list fails the test, so the choice cannot be made silently — which is how all seven of the
-//! defects the audit (T-281) found were introduced. Sixteen of the thirty are currently exempt;
-//! seven of those were found by that test rather than by a ticket, including `c20_norm`,
-//! `c40_norm` and `c42_norm`, which share **one** defect (`C20 = mean(x²)` is a coherent sum, so
-//! its integration loss is the residual carrier offset times the record length) and will recover
-//! together.
+//! defects the audit (T-281) found were introduced. **Ten of the thirty are exempt and twenty are
+//! asserted**, after T-404 fixed all seven the guard found on its first run: `c20_norm`, `c40_norm`
+//! and `c42_norm` shared **one** defect (`C20 = mean(x²)` is a coherent sum, so its integration
+//! loss was the residual carrier offset times the record length) and recovered together under
+//! [`CUMULANT_BLOCK`]; `cp_corr`, `if_slope_r2`, `if_local_modality` and `carrier_line_db` each had
+//! their own, recorded at the constant or function that fixes it. What is still exempt is the
+//! phase-residual pair, the whole-record IF histogram pair, and the six C14 statistics, each of
+//! which names the observation it is a statistic of.
 
 use hk_dsp::{WelchConfig, WindowKind, welch};
 use hk_estimate::blind::SymbolParameters;
@@ -118,7 +121,19 @@ use num_complex::{Complex32, Complex64};
 /// The bump follows the T-286 precedent rather than setting a new rule: a feature that stops
 /// measuring the wrong thing gets a version, because a stored `features@N` vector has to identify
 /// one computation.
-pub const FEATURES_VERSION: u32 = 5;
+///
+/// **6 (T-404):** seven dimensions changed meaning at once, all of them to stop measuring the
+/// observation — the family T-313's guard found on its first run. `c20_norm`, `c40_norm` and
+/// `c42_norm` are now accumulated over [`CUMULANT_BLOCK`]-sample blocks and combined incoherently,
+/// so a coherent sum's integration loss is set by the block and not by the record. `cp_corr`
+/// reports each lag as a bias-corrected coherence, so a lag with no cyclic prefix behind it reads
+/// 0 rather than `1/sqrt(record)`. `if_slope_r2` reports the maximum over **all three** of
+/// [`RAMP_WINDOWS`] or abstains, instead of a maximum over whichever lengths happened to fit.
+/// `if_local_modality` counts modes on a kernel-smoothed histogram and averages across windows
+/// rather than reading a median of integers off a raw one. `carrier_line_db` reports the line's
+/// excess over the peak a band of pure noise would have shown at that segment count. Both density
+/// files are refitted against it.
+pub const FEATURES_VERSION: u32 = 6;
 
 /// Bins guarded either side of the carrier when measuring `symmetry`: the **main-lobe half-width
 /// of the analysis window**, which [`spectral_features`] configures as [`WindowKind::Hann`].
@@ -161,6 +176,70 @@ pub const MIN_SAMPLES: usize = 256;
 /// Phase-step coherence below which the residual carrier offset is not corrected: the estimate
 /// would be dominated by the modulation's own phase transitions rather than by the carrier.
 pub const DEROTATE_MIN_COHERENCE: f64 = 0.3;
+
+/// Samples the cumulant sums integrate over before they are combined incoherently (T-404).
+///
+/// # Why the whole record was the wrong integration length
+///
+/// `C20 = mean(x²)` and `C40`'s leading term `mean(x⁴)` are **coherent** sums. With a residual
+/// carrier offset `δ` left by [`derotate`], `x²` spins at `2δ` and `x⁴` at `4δ`, so summing over
+/// `N` samples multiplies the answer by `sinc(2δN)` — a function of the **record length**, not of
+/// the emission. That is what T-313's guard measured: one `pulse` waveform, truncation only and
+/// the de-rotation decision identical at every rung, read `c20_norm` 0.825 / 0.801 / 0.737 at N/8,
+/// N/4, N/2 and **0.079** over the full record; `c40_norm` on another read 3.20 / 3.33 / 3.59 and
+/// **16.73**; and `c42_norm`, which subtracts `|C20|²`, inherited 93 % of its own move from that
+/// term. One defect, three dimensions.
+///
+/// The offset is real and is not going away. [`derotate`] fires on every class (measured coherence
+/// 0.70–1.00 across the taxonomy), but what it removes is the **mean instantaneous frequency**,
+/// whose estimate is dominated by the modulation's own phase steps and therefore carries a
+/// standard error of about `1/sqrt(n)` rad/sample — 0.003 cycles/sample on a 3000-sample snippet,
+/// measured directly. Multiply that by the record and `C20` integrates through whole cycles.
+///
+/// # Blocks fix the integration length; they do not fix the offset
+///
+/// Summing over a **fixed** block and averaging the block magnitudes leaves each block's coherence
+/// loss at `sinc(2δL)` — a constant of the emission and the receiver, which a fitted density
+/// absorbs as its own mean — instead of a function of how long the emitter was watched. This is the
+/// same trade T-312 made for the transform length: **bias for variance, because only variance can
+/// be absorbed by a fitted density.** The alternative the exemption named, estimating `δ` to a
+/// tighter residual, is not available: for a suppressed-carrier modulation the estimators that work
+/// are maxima over a search grid whose size grows with the record, which trades this defect for a
+/// weaker version of `cp_corr`'s.
+///
+/// The price is a **noise floor** on the two magnitudes: for an emission whose true `C20` is zero,
+/// `mean|Ĉ20_b|` converges to `sqrt(π/4L)` — 0.157 for a constant-modulus constellation at this
+/// block, against the 0.996 a BPSK reads — rather than falling towards 0 as `1/sqrt(N)`. That
+/// floor is fixed by `L`, so it is the same number for every record, which is the whole point, and
+/// the fitted densities carry it.
+///
+/// # Value
+///
+/// `2δL` has to stay well under a cycle at the **shortest** record, because `δ`'s own estimation
+/// error grows as the record shrinks: at `n = 291` (an eighth of the shortest snippet in the
+/// corpus) that error is ~0.009 cycles/sample, so `2δL` is 0.6 cycles at `L = 32` and 2.4 at
+/// `L = 128`. 32 is where the coherence loss the offset costs sits inside the moment's own sampling
+/// error at every length the classifier accepts, and it still leaves eight blocks in the shortest
+/// record [`MIN_SAMPLES`] admits. Measured across the ladder, it takes `bpsk` from an erratic
+/// 0.09–0.93 to 0.992–0.997 and `am` from 0.92–1.02 to 0.997–1.000.
+pub const CUMULANT_BLOCK: usize = 32;
+
+/// Independent products a lagged correlation gets per sample of record.
+///
+/// `hk_estimate::normalise` puts the classifier's snippets at ~2 samples per OBW99, so the
+/// products `x[k+ℓ]·x[k]*` that [`cyclic_prefix_correlation`] sums are correlated over roughly one
+/// sample and `n` of them carry about `n/2` independent draws. The same bound the length-invariance
+/// guard states for [`FEATURE_NAMES`]'s per-sample statistics, used here for the null level of a
+/// correlation rather than for a tolerance.
+pub const CORRELATION_LOOKS_PER_SAMPLE: f64 = 0.5;
+
+/// Bins either side of the strongest line that [`spectral_features`] reports `carrier_line_db` over
+/// — the Hann main lobe, the same width and for the same reason as [`CARRIER_GUARD_BINS`].
+///
+/// The line's power is spread over its whole main lobe by the window, so a single bin is not the
+/// line; and the **mean** over a fixed lobe is linear in the periodogram, where a single bin picked
+/// as the maximum is an order statistic whose upward bias depends on the segment count (T-404).
+pub const CARRIER_LOBE_BINS: usize = CARRIER_GUARD_BINS * 2 + 1;
 
 /// Smallest number of spectrum bins the shape features are measured over. A narrow emission (a
 /// carrier, a CW tone) occupies one or two bins, where flatness is trivially 1 and the carrier
@@ -272,6 +351,29 @@ pub fn feature_fft_len(n: usize) -> usize {
     }
     len
 }
+
+/// Leading constant of the kernel bandwidth [`modality`] smooths its histogram with, as a multiple
+/// of `robust scale × n^(−1/5)`.
+///
+/// # Why not Silverman's 0.9
+///
+/// The rule of thumb is derived for a **unimodal** normal target, and the case it is known to
+/// over-smooth is precisely the one this feature exists to measure. For a `K`-level sample the
+/// scale that sets the bandwidth is the spread of the *whole* level set, which grows with `K` —
+/// `σ/spacing` is 0.5 for two levels, 1.12 for four and 2.29 for eight — so the rule widens the
+/// kernel exactly as the levels it must resolve get closer together. At 0.9 the four levels of a
+/// `4fsk` merge into two and the dimension stops telling it from `2fsk` at all.
+///
+/// # What sets this value
+///
+/// The finest spacing in the taxonomy, which is `8fsk`'s: eight levels across the deviation gives
+/// `σ = sqrt(21)·d` for a spacing of `2d`, so at a window of [`IF_LOCAL_WINDOW`] samples
+/// (`n^(−1/5) = 0.287`) a bandwidth of `c·σ·n^(−1/5)` stays under half the spacing while
+/// `c < 0.38`. **Nothing else is asked of it**: rejecting the histogram's own roughness is the
+/// 25 % prominence rule's job, not the kernel's, and it does it — at this bandwidth `wfm`, `bpsk`,
+/// `ook`, `chirp` and `noise-like` read exactly 1.00 modes on all eight dev seeds, while `2fsk`,
+/// `gfsk` and `msk` read exactly 2.00, `4fsk` 3.81 and the held-out `8fsk` 3.31.
+pub const KDE_BANDWIDTH: f64 = 0.30;
 
 /// Window over which the instantaneous frequency's level structure is measured **about the
 /// carrier's local trend**, in samples (`if_local_bimodality`, `if_local_modality`).
@@ -604,7 +706,11 @@ fn frequency_features(f: &mut Features, x: &[Complex64], input: &FeatureInput<'_
     // The ramp fit runs on a smoothed instantaneous frequency: a sweep is slow by construction,
     // while the per-sample estimate is noisy enough at the gates' SNRs to hide it (at 25 dB the
     // per-sample IF noise is comparable to a chirp's per-window excursion).
-    f.set("if_slope_r2", ramp_linearity(&smooth(&fi, 8)));
+    if let Some(r2) = ramp_linearity(&smooth(&fi, 8)) {
+        f.set("if_slope_r2", r2);
+    } else {
+        f.reasons.push("no_ramp_windows".into());
+    }
     // The same level-structure question as `if_bimodality`/`if_modality`, asked about the carrier's
     // own local trend instead of the whole record's mean (T-298). Measured on the raw instantaneous
     // frequency, not the smoothed one: smoothing is what the ramp fit needs to see a slow sweep
@@ -616,22 +722,46 @@ fn frequency_features(f: &mut Features, x: &[Complex64], input: &FeatureInput<'_
 }
 
 /// Normalised cumulants Ĉ20, Ĉ40, Ĉ42 and the sample kurtosis.
+///
+/// The three normalised cumulants are accumulated over [`CUMULANT_BLOCK`]-sample blocks and
+/// combined **incoherently**; see that constant for why the whole-record sum was a statistic of the
+/// record. `mu42` needs no such treatment: `mean(|x|⁴)` has no phase in it, and it is asserted
+/// length-invariant today.
 fn cumulant_features(f: &mut Features, x: &[Complex64]) {
     let n = x.len() as f64;
     let c21 = x.iter().map(|s| s.norm_sqr()).sum::<f64>() / n;
     if !(c21.is_finite() && c21 > 0.0) {
         return;
     }
-    let m2: Complex64 = x.iter().map(|s| s * s).sum::<Complex64>() / n;
-    let m4: Complex64 = x.iter().map(|s| s * s * s * s).sum::<Complex64>() / n;
     let m4_abs = x.iter().map(|s| s.norm_sqr() * s.norm_sqr()).sum::<f64>() / n;
-    let c20 = m2;
-    let c40 = m4 - 3.0 * c20 * c20;
-    let c42 = m4_abs - c20.norm_sqr() - 2.0 * c21 * c21;
-    f.set("c20_norm", c20.norm() / c21);
-    f.set("c40_norm", c40.norm() / (c21 * c21));
-    f.set("c42_norm", c42 / (c21 * c21));
     f.set("mu42", m4_abs / (c21 * c21));
+
+    // Blocks, not the record. Every block is the same length, so the coherence loss `sinc(2δL)` a
+    // residual offset δ costs the Ĉ20 sum — and `sinc(4δL)` for Ĉ40 — is the same for a 300-sample
+    // burst and a 16 000-sample one. `chunks_exact` drops a partial tail rather than letting one
+    // short block average in at a different coherence.
+    let block = CUMULANT_BLOCK.min(x.len());
+    let (mut c20, mut c40, mut c42, mut blocks) = (0.0, 0.0, 0.0, 0.0);
+    for b in x.chunks_exact(block) {
+        let bl = b.len() as f64;
+        let m2_b: Complex64 = b.iter().map(|s| s * s).sum::<Complex64>() / bl;
+        let m4_b: Complex64 = b.iter().map(|s| s * s * s * s).sum::<Complex64>() / bl;
+        let m4abs_b = b.iter().map(|s| s.norm_sqr() * s.norm_sqr()).sum::<f64>() / bl;
+        c20 += m2_b.norm();
+        c40 += (m4_b - 3.0 * m2_b * m2_b).norm();
+        // The **record's** C21 in the subtracted term, not the block's: only the |C20|² term is
+        // being taken block-wise, because only it carries the phase. Using a per-block C21 would
+        // additionally replace `2·C21²` with `2·mean(C21_b²)`, which for a keyed emission is a
+        // different quantity (Jensen) and has nothing to do with this defect.
+        c42 += m4abs_b - m2_b.norm_sqr() - 2.0 * c21 * c21;
+        blocks += 1.0;
+    }
+    if blocks <= 0.0 {
+        return;
+    }
+    f.set("c20_norm", c20 / blocks / c21);
+    f.set("c40_norm", c40 / blocks / (c21 * c21));
+    f.set("c42_norm", c42 / blocks / (c21 * c21));
 }
 
 /// Spectral flatness, symmetry, carrier line and mean spectral kurtosis over the occupied band.
@@ -659,6 +789,9 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
         f.reasons.push("no_spectrum".into());
         return;
     };
+    // Segments the periodogram averaged, at 50 % overlap. `carrier_line_db` needs it to know what a
+    // band of pure noise would have peaked at.
+    let segments = (n - fft_len) / (fft_len / 2) + 1;
     let psd: Vec<f64> = spectrum
         .psd
         .iter()
@@ -769,10 +902,33 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
             f.set("symmetry", (lower - upper) / (lower + upper));
         }
     }
+    // **The peak is reported against the peak a band of pure noise would have shown** (T-404).
+    //
+    // `10·log10(max bin / band median)` is a ratio of two order statistics, and the maximum's is the
+    // one that bites: over `B` bins of an `M`-averaged periodogram — each bin `Gamma(M)/M` — the
+    // largest sits far above the mean when `M` is small and close to it when `M` is large. That is a
+    // reading of the **segment count**, which is the one property of the record T-312's transform pin
+    // deliberately left moving, and T-313's guard measured it: a 4072-sample prefix of one 2-FSK
+    // waveform read 32.05 dB where the full 16 290 read 14.13 — 17.9 dB on a dimension that separates
+    // carrier-present from carrier-absent by about 20 — with `ofdm` and `noise-like` moving 4.4 and
+    // 2.7 dB the same way.
+    //
+    // [`null_peak_over_median_db`] is what that ratio would read on noise alone at this `M` and this
+    // many bins, and subtracting it turns the feature into a **CFAR statistic**: dB by which the
+    // strongest line exceeds what chance would have put there, which is 0 for a band with no line in
+    // it at every segment count. A carrier is 20–50 dB clear of that and loses only the few dB the
+    // correction is worth.
+    // The subtraction is in **power**, not in dB: `10·log10(1 + excess/median)` leaves a real
+    // carrier — 20–50 dB clear of the null — reading what it always did, and takes a band with no
+    // line in it to 0 dB at every segment count, where a dB subtraction would instead have dragged
+    // the carrier down by the whole correction (measured: `pulse` 27.1 dB over 16 384 samples
+    // against 22.1 over 2048, a defect swapped for its mirror image).
     let median = median_of(band);
     let peak = band.iter().copied().fold(0.0_f64, f64::max);
-    if median > 0.0 {
-        f.set("carrier_line_db", 10.0 * (peak / median).log10());
+    if median > 0.0 && peak > 0.0 {
+        let null = 10f64.powf(0.1 * null_peak_over_median_db(band.len(), segments));
+        let excess = (peak / median - null).max(0.0);
+        f.set("carrier_line_db", 10.0 * (1.0 + excess).log10());
     }
     if !spectrum.sk.is_empty() && bins == spectrum.sk.len() {
         let sk: Vec<f64> = spectrum.sk[lo..=hi].iter().map(|v| f64::from(*v)).collect();
@@ -1076,7 +1232,28 @@ fn cyclic_prefix_correlation(x: &[Complex64]) -> f64 {
                     .map(|s| s.norm_sqr())
                     .sum::<f64>()
                     .sqrt();
-            (norm > 0.0).then(|| acc.norm() / norm)
+            (norm > 0.0).then(|| {
+                let raw = acc.norm() / norm;
+                // **Subtract the null, because a correlation of more noise is smaller** (T-404).
+                //
+                // A sample coherence over `k` independent products has `E[r²] ≈ ρ² + 1/k` under
+                // the null, so the raw value of a lag with no cyclic prefix behind it is not 0 but
+                // `1/sqrt(k)` — and `k` is set by the record. For the one class that HAS a cyclic
+                // prefix the correction is negligible (ρ² ≫ 1/k); for the other twenty it is the
+                // whole reading. T-313 measured 0.535 / 0.440 / 0.110 over N/8, N/4 and the full
+                // 16 290 samples of one 2-FSK waveform, a 4.9× move on a dimension whose OFDM
+                // threshold is 0.15: a short burst of any class read a cyclic prefix it does not
+                // have.
+                //
+                // `(r² − 1/k)/(1 − 1/k)` is the standard bias-corrected magnitude-squared
+                // coherence, clamped at zero because a negative power estimate is not a
+                // correlation.
+                let k = (x.len() - lag) as f64 * CORRELATION_LOOKS_PER_SAMPLE;
+                if k <= 1.0 {
+                    return raw;
+                }
+                (((raw * raw) - 1.0 / k) / (1.0 - 1.0 / k)).max(0.0).sqrt()
+            })
         })
         .collect();
     // Interior lags only: a peak needs a neighbour on each side to stand above.
@@ -1159,6 +1336,87 @@ pub fn occupied_band(psd: &[f64]) -> (usize, usize) {
     (lo, hi)
 }
 
+/// Adjacent bins of a Hann-windowed periodogram that count as **one** independent draw.
+///
+/// A Hann window correlates neighbouring DFT bins: their amplitude correlation is 2/3, so their
+/// powers correlate at about 0.44 and a band of `B` bins carries roughly `B/2` independent looks.
+/// [`null_peak_over_median_db`] needs the independent count, not the bin count, or it would credit
+/// a smooth spectrum with twice the chances of throwing a high bin that it actually had.
+const HANN_BIN_CORRELATION: f64 = 2.0;
+
+/// The dB by which the largest of `bins` bins of an `M`-averaged periodogram **of pure noise**
+/// exceeds their median.
+///
+/// This is the null level `carrier_line_db` is reported against. Each bin of an `M`-averaged
+/// periodogram is `Gamma(M)/M`; the Wilson–Hilferty transform gives its quantile function in closed
+/// form as `Q(p) = (1 − 2/(9M) + z_p·sqrt(2/(9M)))³`, accurate to better than 1 % for `M ≥ 3`
+/// ([`FEATURE_MIN_SEGMENTS`] is 3, so this is only ever evaluated where it holds). The expected
+/// largest of `k` independent draws is taken at `p = 1 − 1/(k+1)`, the plotting position of the top
+/// order statistic, and the median at `p = 0.5`.
+///
+/// Worked, for the two ends of the corpus: at `M = 3` over 500 bins the ratio is about 8 dB, and at
+/// `M = 31` about 3 dB. **That 5 dB is the whole of the length dependence** T-313 measured on this
+/// feature, and it is a property of the estimator, not of any emission.
+fn null_peak_over_median_db(bins: usize, segments: usize) -> f64 {
+    let m = (segments.max(FEATURE_MIN_SEGMENTS)) as f64;
+    let k = (bins as f64 / HANN_BIN_CORRELATION).max(2.0);
+    let a = 2.0 / (9.0 * m);
+    let q = |z: f64| (1.0 - a + z * a.sqrt()).max(1e-6).powi(3);
+    let peak = q(normal_quantile(1.0 - 1.0 / (k + 1.0)));
+    let median = q(0.0);
+    if median <= 0.0 {
+        return 0.0;
+    }
+    10.0 * (peak / median).log10()
+}
+
+/// Standard-normal quantile, Acklam's rational approximation (absolute error < 1.15e-9).
+fn normal_quantile(p: f64) -> f64 {
+    const A: [f64; 6] = [
+        -3.969_683_028_665_376e1,
+        2.209_460_984_245_205e2,
+        -2.759_285_104_469_687e2,
+        1.383_577_518_672_69e2,
+        -3.066_479_806_614_716e1,
+        2.506_628_277_459_239e0,
+    ];
+    const B: [f64; 5] = [
+        -5.447_609_879_822_406e1,
+        1.615_858_368_580_409e2,
+        -1.556_989_798_598_866e2,
+        6.680_131_188_771_972e1,
+        -1.328_068_155_288_572e1,
+    ];
+    const C: [f64; 6] = [
+        -7.784_894_002_430_293e-3,
+        -3.223_964_580_411_365e-1,
+        -2.400_758_277_161_838e0,
+        -2.549_732_539_343_734e0,
+        4.374_664_141_464_968e0,
+        2.938_163_982_698_783e0,
+    ];
+    const D: [f64; 4] = [
+        7.784_695_709_041_462e-3,
+        3.224_671_290_700_398e-1,
+        2.445_134_137_142_996e0,
+        3.754_408_661_907_416e0,
+    ];
+    const P_LOW: f64 = 0.024_25;
+    let p = p.clamp(1e-12, 1.0 - 1e-12);
+    if p < P_LOW {
+        let q = (-2.0 * p.ln()).sqrt();
+        return (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0);
+    }
+    if p > 1.0 - P_LOW {
+        return -normal_quantile(1.0 - p);
+    }
+    let q = p - 0.5;
+    let r = q * q;
+    (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+        / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
+}
+
 /// Centred moving average over `win` samples.
 fn smooth(v: &[f64], win: usize) -> Vec<f64> {
     if win < 2 || v.len() < win {
@@ -1174,13 +1432,25 @@ fn smooth(v: &[f64], win: usize) -> Vec<f64> {
         .collect()
 }
 
+/// The sample median, **interpolated for an even count** (T-404).
+///
+/// Taking the upper of the two middle values is an upward bias that grows as the sample shrinks —
+/// at two draws it is not a median at all but a maximum, and the aggregators in this module
+/// (`if_slope_r2` over ramp windows, `if_local_*` over level windows) are handed as few as two.
+/// T-313's guard measured the consequence: one `wfm` waveform read `if_slope_r2` 0.440 over 5430
+/// samples and 0.790 over the first 678, where two windows of 256 made the "median" their larger.
 fn median_of(v: &[f64]) -> f64 {
     if v.is_empty() {
         return 0.0;
     }
     let mut s = v.to_vec();
     s.sort_by(f64::total_cmp);
-    s[s.len() / 2]
+    let mid = s.len() / 2;
+    if s.len() % 2 == 0 {
+        0.5 * (s[mid - 1] + s[mid])
+    } else {
+        s[mid]
+    }
 }
 
 fn std_dev(v: &[f64]) -> f64 {
@@ -1238,7 +1508,10 @@ fn bimodality(v: &[f64]) -> f64 {
 /// tone-modulated FM carrier has two humps at its excursion limits that a level rule counts as
 /// discrete tones, while the shallow valley between them fails the prominence test.
 fn modality(v: &[f64]) -> usize {
-    const BINS: usize = 48;
+    const BINS: usize = 128;
+    if v.len() < 8 {
+        return 1;
+    }
     let mut s = v.to_vec();
     s.sort_by(f64::total_cmp);
     let lo = s[(s.len() as f64 * 0.02) as usize];
@@ -1253,14 +1526,58 @@ fn modality(v: &[f64]) -> usize {
             hist[b as usize] += 1.0;
         }
     }
-    // 3-bin smoother: a histogram of a noisy estimate is jagged, and every jag would be a mode.
-    let h: Vec<f64> = (0..BINS)
-        .map(|i| {
-            let a = i.saturating_sub(1);
-            let b = (i + 1).min(BINS - 1);
-            hist[a..=b].iter().sum::<f64>() / (b - a + 1) as f64
-        })
-        .collect();
+    // **A kernel density, not a raw histogram** (T-404).
+    //
+    // A fixed 3-bin box over 48 bins leaves the counts jagged, and a mode count is an integer read
+    // off that jaggedness: T-313's guard measured `gfsk`, `msk` and `2fsk` reading 2 modes over the
+    // full record and **4** over a quarter of it, and `ook` 1 and 3, from windows of the *same*
+    // fixed length — the estimator inventing and losing whole modes because a histogram of fewer
+    // counts is rougher. That matters more than the rest of the family because T-298 added
+    // `if_local_modality` as the length-free *replacement* for `if_modality`, and the replacement
+    // inherited the defect through its estimator instead of through its reference.
+    //
+    // The bandwidth is Silverman's rule of thumb, `0.9 · min(sd, IQR/1.349) · n^(-1/5)`, on the
+    // robust scale — so the smoothing is set by the spread of the data and its count, not by a
+    // number chosen here, and a sample with tight well-separated levels (whose IQR-derived scale is
+    // small) is smoothed less than a diffuse one. The interquartile form is what keeps it from
+    // over-smoothing a multimodal sample, which is the failure Silverman's rule is known for.
+    let n = v.len() as f64;
+    let q1 = s[s.len() / 4];
+    let q3 = s[(3 * s.len() / 4).min(s.len() - 1)];
+    let scale = std_dev(v).min(((q3 - q1) / 1.349).max(f64::MIN_POSITIVE));
+    let bin_width = (hi - lo) / (BINS as f64 - 1.0);
+    let sigma_bins = KDE_BANDWIDTH * scale * n.powf(-0.2) / bin_width;
+    let h: Vec<f64> = if sigma_bins >= 0.5 {
+        let half = ((3.0 * sigma_bins).ceil() as usize).min(BINS - 1);
+        let taps: Vec<f64> = (0..=2 * half)
+            .map(|i| {
+                let d = (i as f64 - half as f64) / sigma_bins;
+                (-0.5 * d * d).exp()
+            })
+            .collect();
+        (0..BINS)
+            .map(|i| {
+                taps.iter()
+                    .enumerate()
+                    .map(|(t, w)| {
+                        // Reflect at the edges: a level sitting against the 2nd or 98th percentile
+                        // must not be halved by a kernel hanging off the end of the grid.
+                        let j = i as isize + t as isize - half as isize;
+                        let j = if j < 0 {
+                            (-j) as usize
+                        } else if j as usize >= BINS {
+                            2 * (BINS - 1) - j as usize
+                        } else {
+                            j as usize
+                        };
+                        w * hist[j.min(BINS - 1)]
+                    })
+                    .sum()
+            })
+            .collect()
+    } else {
+        hist.to_vec()
+    };
     let peak = h.iter().copied().fold(0.0_f64, f64::max);
     if peak <= 0.0 {
         return 1;
@@ -1303,8 +1620,18 @@ fn modality(v: &[f64]) -> usize {
 /// `(bimodality, modality)`, or `None` when the sequence does not hold one whole window — an
 /// abstention, as everywhere else in this module, rather than a value invented from a part-window.
 ///
-/// The median across windows, not the mean, for the reason [`window_r2`] takes one: a snippet may
-/// contain a gap, a retune or an interferer, and one ruined window must not decide the feature.
+/// The **bimodality** is the median across windows, for the reason [`window_r2`] takes one: a
+/// snippet may contain a gap, a retune or an interferer, and one ruined window must not decide a
+/// continuous statistic.
+///
+/// The **mode count** is the mean, and that difference is the T-404 fix. A median of integers is
+/// discontinuous in a way a median of a continuous statistic is not: an emission whose windows
+/// genuinely split between one mode and two has a median that flips whole between 1 and 2 as the
+/// window count changes parity, which is a reading of the record and not of the emission —
+/// measured on one `wfm` waveform, 1.0000 over 5430 samples against 2.0000 over the first 2715.
+/// The mean answers 1.4 for both. It is also the more efficient estimator (standard error
+/// `σ/sqrt(W)` against the median's `1.25σ/sqrt(W)`), and the exemption this replaces named
+/// exactly this: a continuous statistic rather than a count read off a histogram.
 fn local_level_structure(fi: &[f64]) -> Option<(f64, f64)> {
     let mut bimodal = Vec::new();
     let mut modes = Vec::new();
@@ -1316,7 +1643,12 @@ fn local_level_structure(fi: &[f64]) -> Option<(f64, f64)> {
         bimodal.push(bimodality(&d));
         modes.push(modality(&d) as f64);
     }
-    (!bimodal.is_empty()).then(|| (median_of(&bimodal), median_of(&modes)))
+    (!bimodal.is_empty()).then(|| {
+        (
+            median_of(&bimodal),
+            modes.iter().sum::<f64>() / modes.len() as f64,
+        )
+    })
 }
 
 /// `v` with its own best-fit straight line removed.
@@ -1329,11 +1661,28 @@ fn detrend(v: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-fn ramp_linearity(fi: &[f64]) -> f64 {
-    [128usize, 256, 512]
-        .into_iter()
-        .filter_map(|w| window_r2(fi, w))
-        .fold(0.0, f64::max)
+/// Window lengths [`ramp_linearity`] fits a line over. All three, always, or none of them.
+const RAMP_WINDOWS: [usize; 3] = [128, 256, 512];
+
+/// The best median within-window R² over [`RAMP_WINDOWS`], or `None` when the record cannot supply
+/// every one of them.
+///
+/// **The abstention is the length fix** (T-404). A maximum over whichever window lengths happened to
+/// fit is a different estimand at every record length, and it is biased in the direction that makes
+/// the defect: a shorter window of any smooth process is better approximated by a straight line, so
+/// dropping the 512-sample fit from the set can only raise the answer. T-313's guard measured one
+/// `wfm` waveform at 0.440 over 5430 samples against 0.790 over the first 678 — a wideband FM
+/// carrier looking like a linear chirp once you stop watching it — and 678 samples is exactly a
+/// record that cannot fit two 512-sample windows. Reporting the max over a two-element set as though
+/// it were the max over the three-element one is the same error as measuring a spectrum at a
+/// transform length that moves (T-312); abstaining is this module's standing answer to an input it
+/// does not have.
+fn ramp_linearity(fi: &[f64]) -> Option<f64> {
+    let mut best = f64::NEG_INFINITY;
+    for w in RAMP_WINDOWS {
+        best = best.max(window_r2(fi, w)?);
+    }
+    Some(best)
 }
 
 /// Median R² of a straight-line fit over consecutive `win`-sample windows; `None` when the
@@ -1413,15 +1762,25 @@ mod tests {
         // ...while a rotationally symmetric one averages it away.
         for class in [Class::Qpsk, Class::Psk8, Class::Qam16] {
             let c20 = of(class, 30.0, 7).get("c20_norm").unwrap();
-            assert!(c20 < 0.2, "{} |C20| {c20}", class.label());
+            // 0.4, not 0: the block-incoherent estimator has a floor of `sqrt(π/4L)` ≈ 0.157 for
+            // a constant-modulus rotationally-symmetric constellation (see [`CUMULANT_BLOCK`]),
+            // which is the price of an integration length that does not move with the record.
+            // What the dimension has to do is separate that floor from a real |C20|, and it does:
+            // 0.21 for `qpsk` against 0.996 for `bpsk`.
+            assert!(c20 < 0.4, "{} |C20| {c20}", class.label());
             assert!(c20 < bpsk, "{} must sit below BPSK", class.label());
         }
-        // The fourth-order cumulants are computed and stored, but oversampling flattens them: the
-        // classifier must not be given a threshold that assumes the textbook values.
-        let qpsk_c40 = of(Class::Qpsk, 30.0, 7).get("c40_norm").unwrap();
+        // The fourth-order cumulants keep the textbook **ordering** — BPSK 2, QPSK 1, 8PSK 0 — but
+        // not the textbook values: oversampling flattens them, and the block-incoherent sum
+        // ([`CUMULANT_BLOCK`]) adds its own floor on top. Before T-404 the whole-record sum spun
+        // QPSK's |C40| below 8PSK's on some seeds and above BPSK's on others, and the pinned number
+        // here was one of those readings. The ordering is what the dimension is for, so the
+        // ordering is what is pinned.
+        let c40 = |class| of(class, 30.0, 7).get("c40_norm").unwrap();
+        let (bpsk4, qpsk4, psk8_4) = (c40(Class::Bpsk), c40(Class::Qpsk), c40(Class::Psk8));
         assert!(
-            qpsk_c40 < 0.5,
-            "oversampled QPSK |C40| is small: {qpsk_c40}"
+            bpsk4 > qpsk4 && qpsk4 > psk8_4,
+            "|C40| orders the constellations: bpsk {bpsk4}, qpsk {qpsk4}, 8psk {psk8_4}"
         );
     }
 
@@ -1490,5 +1849,80 @@ mod tests {
         let noise = of(Class::NoiseLike, 25.0, 5);
         assert!(noise.get("flatness").unwrap() > 0.5, "noise is flat");
         assert!(of(Class::Cw, 25.0, 5).get("carrier_line_db").unwrap() > 20.0);
+    }
+
+    /// The three T-404 fixes whose **null level** is the thing that used to move.
+    ///
+    /// `tests/feature_length_invariance.rs` compares one emission at two record lengths, which is
+    /// the right question for a bias that scales with the record. It is a blunt instrument for a
+    /// *null* that scales with the record, because on a single waveform the move can hide inside
+    /// the estimator's own spread at the short end. These assert the property directly: a band, a
+    /// lag set and a window set with **nothing in them** must read the same at every record length.
+    #[test]
+    fn the_null_levels_do_not_move_with_the_record() {
+        let long = of(Class::NoiseLike, 25.0, 5);
+        let s = generate(Class::NoiseLike, &SynthConfig::new(25.0, 5));
+        let short = |take: usize| {
+            features(&FeatureInput {
+                samples: &s.samples[..take],
+                sample_rate_hz: s.sample_rate_hz,
+                obw_hz: Some(s.obw_hz),
+                snr_db: Some(25.0),
+                symbols: None,
+            })
+        };
+        let n = s.samples.len();
+        let quarter = short(n / 4);
+
+        // `cp_corr`: the bias-corrected coherence of a lag with no cyclic prefix behind it is 0 at
+        // every record length. The raw correlation was 0.886/sqrt(k), so an eighth of the record
+        // read it 2.8x higher and a short burst of any class claimed a cyclic prefix.
+        let (a, b) = (
+            long.get("cp_corr").unwrap(),
+            quarter.get("cp_corr").unwrap(),
+        );
+        assert!(
+            a < 0.10 && b < 0.10,
+            "noise has no cyclic prefix at either length: {a:.4} over {n}, {b:.4} over {}",
+            n / 4
+        );
+
+        // `carrier_line_db`: a band with no line in it reads ~0 dB whatever the segment count. The
+        // raw peak-over-median read about 8 dB at M = 3 against 3 dB at M = 31, purely because the
+        // largest of many gamma-distributed bins stands further above their median when each bin is
+        // noisier.
+        let (a, b) = (
+            long.get("carrier_line_db").unwrap(),
+            quarter.get("carrier_line_db").unwrap(),
+        );
+        assert!(
+            a.abs() < 3.0 && b.abs() < 3.0,
+            "noise has no carrier line at either length: {a:.2} dB over {n}, {b:.2} dB over {}",
+            n / 4
+        );
+        // And the correction it is reported against really does move, which is what makes the
+        // subtraction necessary rather than cosmetic.
+        assert!(
+            null_peak_over_median_db(500, 3) > null_peak_over_median_db(500, 31) + 3.0,
+            "the null peak at M = 3 ({:.2} dB) must stand well above the one at M = 31 ({:.2} dB)",
+            null_peak_over_median_db(500, 3),
+            null_peak_over_median_db(500, 31),
+        );
+
+        // `if_slope_r2`: all three of RAMP_WINDOWS or none of them. A record that cannot fit two
+        // 512-sample windows must abstain rather than report a maximum over the shorter fits,
+        // which can only read higher.
+        let short_ramp = ramp_linearity(&vec![0.0; 2 * RAMP_WINDOWS[2] - 1]);
+        assert!(short_ramp.is_none(), "one window short must abstain");
+        assert!(
+            ramp_linearity(&vec![0.0; 2 * RAMP_WINDOWS[2]]).is_some()
+                || ramp_linearity(
+                    &(0..2 * RAMP_WINDOWS[2])
+                        .map(|i| i as f64)
+                        .collect::<Vec<_>>()
+                )
+                .is_some(),
+            "exactly two of the longest window is enough"
+        );
     }
 }
