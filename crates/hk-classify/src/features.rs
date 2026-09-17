@@ -667,7 +667,20 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
 /// `cyclic_db` is the **largest of four** whitened line significances, each
 /// `10·log10(peak / local median)` of a periodogram of a different feature series
 /// (`hk_estimate::blind::lines::spectral_line`, over `LineMethod::ALL`: |x|², |d env|²,
-/// delay-multiply, |d IF|²). T-281 reasoned that a coherent line's peak grows with the record
+/// delay-multiply, |d IF|²).
+///
+/// **It can therefore also be a statistic of the capture chain, not of the observation or the
+/// signal (T-373).** A capture that modulates its own samples periodically puts a comb of lines
+/// into every channel it holds, and `cyclic_db` is a max — so one comb member winning makes this
+/// dimension a measurement of the receiver. Measured on the 100.4653 MHz box of
+/// `capture-2026-09-15-fm-band`, whose stream carries an 8192-sample gain step: of 208 reported
+/// lines over 50 narrowband boxes × 3 windows, 5 were comb harmonics, all of them on that one box,
+/// at up to 25.2 dB, and the comb was that box's top rate candidate in 2 windows of 3 — so
+/// `cyclic_db` there was the artefact's line, 22.8 dB, and not the emission's. C14 now excludes the
+/// comb (derived from the capture's own provenance and sample rate), which takes that count to
+/// 0 of 208 and moves this box's `cyclic_db` to 22.5 dB from a different line. Nothing in the
+/// fitted models moves: the artefact is in one fixture, not in the synthetic dev grid the
+/// densities are fitted on. T-281 reasoned that a coherent line's peak grows with the record
 /// while the whitened noise median does not, so the ratio should grow about `10·log10(N)`, and
 /// measured `ook` 20.17 → 31.44 dB and `bpsk` 15.32 → 25.08 dB over 8× of window on one seed at
 /// 25 dB.

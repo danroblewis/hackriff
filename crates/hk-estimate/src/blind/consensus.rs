@@ -250,6 +250,7 @@ mod tests {
 
     fn line(m: LineMethod, f: f64, s: f64) -> CyclicLine {
         CyclicLine {
+            artefact_suppressed: false,
             method: m,
             group: m.group(),
             freq_hz: Some(f),

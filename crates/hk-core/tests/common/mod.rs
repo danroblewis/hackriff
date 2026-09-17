@@ -91,6 +91,7 @@ pub fn provenance(device_id: &str, center_hz: f64, sample_rate_hz: f64) -> Prove
         spur_mask_ref: None,
         timestamp_method: TimestampMethod::Synthetic,
         timestamp_error_budget_ns: Some(0),
+        capture_artefacts: Vec::new(),
     }
 }
 

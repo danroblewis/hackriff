@@ -150,22 +150,53 @@ The annotation's `identification` block carries the evidence and the ten hypothe
 excludes; it stays `role = emission`, not `artefact`, because it is energy the receiver
 took in, not a spur the tuner synthesised.
 
-## A capture-chain artefact this fixture carries (T‑317)
+## A capture-chain artefact this fixture carries (T‑317, T‑373)
 
 The raw ci8 stream has a **periodic gain step**: samples 0–895 of every 8192-sample
 period are **0.431 dB** lower in power than samples 896–8191, flat either side of the
-step, measured over all 13,184 whole periods. It is stream-wide — it shows in the
-wideband total power, on the receiver's own DC line (27 dB) and reference harmonic
-(16 dB), and in bands with **no emission at all** (23 dB at 100.150 MHz).
+step, measured over all 13,184 whole periods (T‑373 re-measured it over 60 M samples at
+−0.445 dB). It is stream-wide — it shows in the wideband total power, on the receiver's
+own DC line (27 dB) and reference harmonic (16 dB), and in bands with **no emission at
+all** (23 dB at 100.150 MHz).
 
-It puts a comb at **292.969 Hz (= 2.4 MHz / 8192)** and at least 27 harmonics into the
-amplitude and, through a channel filter, the discriminator of anything narrowband and
-weak, with the sinc nulls of a 896/8192 duty cycle near harmonics 9 and 18. Taken at
-face value it reads as a 3.41 ms TDMA frame that is not there, and it did exactly that
-during this investigation. **Anything looking for periodicity, frame rates or
-cyclostationarity in this fixture must exclude n × 292.969 Hz.** The source is not
-identified; the 2026-09-13 2.4 Msps capture of the same device carries it too. Recorded
-in `hackriff:provenance.capture_artefact`.
+It puts a comb at **292.969 Hz (= 2.4 MHz / 8192)** and its harmonics into the amplitude
+and, through a channel filter, the discriminator of anything narrowband and weak, with
+the sinc nulls of a 896/8192 duty cycle near harmonics 9 and 18. Harmonics 1–4 measure
+14.4, 12.4, 13.1 and 12.0 dB over the envelope-spectrum median in an empty 28 kHz box at
+100.150 MHz. Taken at face value it reads as a 3.41 ms TDMA frame that is not there, and
+it did exactly that during T‑317.
+
+**It is excluded automatically now.** It is recorded in
+`hackriff:provenance.capture_artefacts` as a period in *samples*, so C14 derives the comb
+from it and the capture's own sample rate (`BlindConfig::artefact_guard_bins`,
+`hk-estimate/tests/capture_artefact.rs`) — a capture at another rate excludes another
+comb, and nothing carries 292.969 Hz as a constant.
+
+**Where it comes from (T‑373): hackriff's own recording path, not the HackRF.** This is
+the only capture of the six that carries it, and it is the only one recorded through
+hackriff's ring-reader output. All five 2026-09-13 captures — same device, same firmware,
+one of them the same band at the same rate and gains — fold flat over the same
+8192-sample period to within **0.015 dB** (2.4 Msps +0.014, 2.0 Msps −0.005, 10 Msps
+−0.004, 20 Msps −0.001 and +0.010, against −0.445 dB here), and the fs/8192 comb is
+absent from their envelope spectra. T‑317's note that the 2026-09-13 2.4 Msps capture
+carries it too **does not reproduce**. The step is also not a pure gain: E|x|, rms and
+the fourth root of E x⁴ scale by 0.958, 0.949 and 0.929, and the low window's kurtosis is
+2.69 against 2.93, so the low window is not the high window times a constant. The
+mechanism inside that path is not identified.
+
+**Two other receiver-wide cyclic lines are in this capture and are *not* excluded**, both
+measured by T‑373 and neither belonging to the fs/8192 comb:
+
+- an **8 kHz comb** (7999.55, 16000.19, 23999.74 Hz; 23 dB in an empty box), present in
+  the 2026-09-13 `hackrf_transfer` captures at the same frequencies, so it is the device
+  or the host and not our recorder;
+- a **drifting ~0.66 kHz family** — 657.03 Hz and its second harmonic 1313 Hz here,
+  moving 1314.0 → 1310.2 → 1309.2 Hz over 16 s, and 822.90/1645.80 Hz in the 2026-09-13
+  session.
+
+The second is the **strongest** cyclic line in most narrowband boxes of this capture (up
+to 32 dB) and is the argmax C14 reports once the fs/8192 comb is excluded. Neither is
+identified, and neither is safe to notch without that identification (one drifts).
 
 ## What the acceptance test asserts
 

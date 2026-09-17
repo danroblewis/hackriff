@@ -7278,7 +7278,7 @@ tasks:
   - id: T-371
     title: A baselines/slots row does not name its bias-tee cohort
     milestone: M4
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CTX
     deps: [T-359]
@@ -7312,7 +7312,7 @@ tasks:
   - id: T-373
     title: A periodic gain step at fs/8192 puts a 293 Hz comb into every fixture, and nothing excludes it
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -7560,6 +7560,77 @@ tasks:
       line falls in ADR-0017 and hold it in the code.
       Depends on T-378: coverage cannot say which device looked where over the long
       horizon until observation-log spans carry a device.
+  - id: T-381
+    title: The slots row still does not name its receive chain, the same gap T-371 just closed for the bias tee
+    milestone: M4
+    status: todo
+    priority: high
+    parallel_group: CTX
+    deps: [T-371, T-314]
+    notes: |
+      Found and reported by T-371 rather than silently folded in. BaselineKey is
+      {site, cal, chain, bias_tee, scheme, cell_factor}. /api/baselines renders cal,
+      chain, bias_tee, scheme, cell_factor. /api/baselines/slots rendered only cal,
+      and now cal + bias_tee. So `chain` is missing in precisely the same way and for
+      the same reason - and after T-314 it comes from the source's own DeviceInfo, so
+      a TWO-FRONT-END SITE PRODUCES TWO POOLS PER SUBJECT that are still
+      indistinguishable on this route.
+      scheme/cell_factor are also absent but are per-run config and do not vary within
+      a site in practice; chain does.
+      Size, per T-371: `"chain": e.state.key.chain,` plus a docs cell and a test. The
+      test file already has T-314's two-front-end pyramid helper (t314_*) directly
+      below T-371's test to build the property from.
+      Same rules as T-371: always present, never collapsed, docs/api.md + api_contract
+      together (T-079).
+  - id: T-382
+    title: A drifting ~657 Hz family is now the strongest cyclic line on most boxes, and it is not excluded
+    milestone: M3
+    status: todo
+    priority: high
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    deps: [T-373]
+    acceptance: |
+      T-373 excluded the fs/8192 comb and measured what the classifier reads INSTEAD.
+      The answer is not reassuring: in 45 of 50 boxes the cyclic argmax was never the
+      fs/8192 comb at all, but one of two OTHER receiver-wide artefacts.
+      (1) A DRIFTING ~657 Hz family whose 2nd harmonic at 1309-1314 Hz wins most boxes
+      at up to 32 dB, and MOVES: 1314.0 -> 1310.2 -> 1309.2 Hz over 16 s. T-373 did not
+      exclude it, correctly - a drifting line cannot be safely notched before it is
+      identified, because the notch would have to be wide enough to cover the drift and
+      would then eat real structure. IDENTIFY IT FIRST.
+      (2) An exact 8 kHz comb (7999.55 / 16000.19 / 23999.74 Hz, up to 38 dB), present
+      at the SAME frequencies in the 2026-09-13 hackrf_transfer captures, so it is
+      device or host rather than ours. T-317 independently found an 8 kHz spur comb at
+      tuner DC - 674 Hz + n*8 kHz and ruled it out as the 100.465 MHz emission's cause.
+      Establish whether these are the same comb.
+      THIS IS THE RECURRING DEFECT FAMILY AGAIN: hk-classify's cyclic_db on the
+      100.4653 MHz box read 22.8 dB of artefact before T-373 and reads 22.5 dB from a
+      DIFFERENT line after it. Excluding one artefact promoted another. Determine
+      whether the shipped dimension is now reading (1), and say so with numbers.
+      Do not widen T-373's notch to cover a drifting line. Identify, then decide.
+  - id: T-383
+    title: A bounded-wait plugin test fails under parallel load and is not in the heavy-serial group
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    deps: []
+    notes: |
+      Reported independently by T-373 and T-371 in the same hour.
+      hk-pipeline::data_path::a_live_chain_feeds_a_plugin_that_never_reports_ready_after_its_bounded_wait
+      failed once under parallel load ("the plugin decoded what it was fed") and passed
+      alone and on every later run. It is a bounded-wait test; with three or four other
+      agents building, the wait expires for the wrong reason.
+      Related to T-344 (a different load-sensitive test outside heavy-serial), and the
+      two should probably be fixed the same way. .config/nextest.toml already pins the
+      heavy/timing-sensitive tests to a serial group; the question is whether this test
+      belongs there or whether its bound is simply too tight to be meaningful on a
+      loaded machine - a test that asserts a timeout was reached is only as good as the
+      machine's idleness.
+      It WILL bite the coordinator's full check on a loaded machine, which is how both
+      agents met it.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

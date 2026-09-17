@@ -114,6 +114,76 @@ pub enum ClockSource {
     Gpsdo,
 }
 
+/// A periodic artefact of the **capture chain** carried by a stream, not by any emission (T-373).
+///
+/// A capture path that modulates the samples periodically — a gain step at a buffer boundary, a
+/// clock leaking into the gain structure — puts a comb of cyclic lines into *everything* the
+/// stream holds, including bands that contain no emission at all. Read naively, a comb like that
+/// is frame structure: the 8192-sample gain step T-317 found in
+/// `fixtures/hackrf/capture-2026-09-15-fm-band` is 0.43 dB deep and puts ≥ 27 harmonics of
+/// 292.969 Hz into the amplitude of every channel, and it reads as a 3.41 ms TDMA frame that is
+/// not there. It cost an expert analyst a wrong answer before a control on the receiver's own CW
+/// lines exposed it.
+///
+/// Recording it here is what lets analysis exclude it **without a magic constant**: the fundamental
+/// is derived from this record and the stream's own sample rate ([`CaptureArtefact::fundamental_hz`]),
+/// so a capture at a different rate excludes a different comb.
+///
+/// This describes the capture *state*, like the gain and the clock source, so it deduplicates with
+/// the rest of the record and does not vary frame to frame.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CaptureArtefact {
+    /// What it is, e.g. `periodic-gain-step`. Free text on purpose: the set of ways a capture
+    /// chain can stamp a period into a stream is open, and nothing keys behaviour off this — the
+    /// exclusion is driven by the **measured period** below, never by the label. A closed enum
+    /// would make a future fixture's unknown kind fail to parse the whole provenance record.
+    pub kind: String,
+    /// Period in samples of the stream this was measured in, when the artefact is locked to the
+    /// sample clock. The cyclic fundamental is then `sample_rate_hz / period_samples`, so it
+    /// **moves with the sample rate** — which is exactly why no analysis may hardcode a frequency.
+    ///
+    /// A replayed recording is the one case where it does not move: the artefact is frozen into
+    /// the stored samples, so resampling a recording scales `period_samples` and leaves the
+    /// fundamental where it was (see `MockSource`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_samples: Option<f64>,
+    /// Period in seconds, when known independently of the sample rate. Used when
+    /// [`CaptureArtefact::period_samples`] is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_s: Option<f64>,
+    /// Depth of the modulation, dB, when it is an amplitude artefact. Informational.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_db: Option<f64>,
+    /// How it was measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_by: Option<String>,
+    /// What it is, what it is not, and where else it was looked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl CaptureArtefact {
+    /// The cyclic fundamental this artefact puts into a stream sampled at `sample_rate_hz`, Hz.
+    ///
+    /// Prefers the sample-locked form `sample_rate_hz / period_samples`, because that is the
+    /// physics: the artefact is generated once per buffer of samples, so the rate carries it.
+    /// Falls back to `1 / period_s` for an artefact tied to wall time instead. `None` when neither
+    /// is recorded or the numbers are not usable.
+    pub fn fundamental_hz(&self, sample_rate_hz: f64) -> Option<f64> {
+        if let Some(p) = self.period_samples
+            && p.is_finite()
+            && p > 0.0
+            && sample_rate_hz.is_finite()
+            && sample_rate_hz > 0.0
+        {
+            return Some(sample_rate_hz / p);
+        }
+        self.period_s
+            .filter(|p| p.is_finite() && *p > 0.0)
+            .map(|p| 1.0 / p)
+    }
+}
+
 /// The trust record for a measurement (docs/07 §2.6). Immutable once written; deduplicated by
 /// value in storage.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -160,6 +230,32 @@ pub struct Provenance {
     /// One-sigma timestamp error budget, ns. `None` until characterised by the timing spike.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp_error_budget_ns: Option<u64>,
+    /// Periodic artefacts the capture chain stamps into the samples (T-373).
+    ///
+    /// Omitted from the JSON form when empty, so provenance written before this field existed
+    /// reads back as "none recorded" and its canonical JSON — and therefore its SHA-256 dedup key
+    /// — is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capture_artefacts: Vec<CaptureArtefact>,
+}
+
+impl Provenance {
+    /// Cyclic fundamentals the capture chain contributes to this stream, Hz.
+    ///
+    /// Derived from [`Provenance::capture_artefacts`] and this record's **own** sample rate, so
+    /// the same artefact excludes 292.969 Hz in a 2.4 Msps capture and 1220.703 Hz in a 10 Msps
+    /// one. Nothing downstream may hardcode either number.
+    ///
+    /// Only the fundamental is reported, never a harmonic count: a periodic artefact of period T
+    /// puts energy at *every* multiple of 1/T, falling as 1/n but never stopping, so a measured
+    /// count is a detection floor and not a physical limit. A consumer excludes every multiple
+    /// its own analysis band holds.
+    pub fn cyclic_artefacts(&self) -> Vec<f64> {
+        self.capture_artefacts
+            .iter()
+            .filter_map(|a| a.fundamental_hz(self.tune.sample_rate_hz))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -188,6 +284,7 @@ mod tests {
             spur_mask_ref: None,
             timestamp_method: TimestampMethod::HostArrival,
             timestamp_error_budget_ns: Some(2_000_000),
+            capture_artefacts: Vec::new(),
         }
     }
 
@@ -239,6 +336,94 @@ mod tests {
 
         // Re-serialising that row reproduces the stored bytes, so its dedup hash does not move.
         assert_eq!(serde_json::to_value(&read).unwrap(), stored);
+    }
+
+    /// T-373: the cyclic comb a capture artefact contributes is a function of the **capture's own
+    /// sample rate**, so the same recorded 8192-sample period excludes 292.969 Hz in a 2.4 Msps
+    /// capture and 1220.703 Hz in a 10 Msps one. Nothing downstream may carry either constant.
+    fn gain_step() -> CaptureArtefact {
+        CaptureArtefact {
+            kind: "periodic-gain-step".into(),
+            period_samples: Some(8192.0),
+            period_s: Some(8192.0 / 2.4e6),
+            step_db: Some(-0.431),
+            measured_by: Some("T-317".into()),
+            note: None,
+        }
+    }
+
+    #[test]
+    fn a_capture_artefact_fundamental_moves_with_the_sample_rate() {
+        let a = gain_step();
+        assert!((a.fundamental_hz(2.4e6).unwrap() - 292.968_75).abs() < 1e-9);
+        assert!((a.fundamental_hz(10e6).unwrap() - 1_220.703_125).abs() < 1e-9);
+        assert!((a.fundamental_hz(20e6).unwrap() - 2_441.406_25).abs() < 1e-9);
+
+        // Wall-time artefacts fall back to the recorded period; a record with neither says nothing.
+        let wall = CaptureArtefact {
+            period_samples: None,
+            period_s: Some(0.01),
+            ..gain_step()
+        };
+        assert!((wall.fundamental_hz(2.4e6).unwrap() - 100.0).abs() < 1e-9);
+        let silent = CaptureArtefact {
+            period_samples: None,
+            period_s: None,
+            ..gain_step()
+        };
+        assert_eq!(silent.fundamental_hz(2.4e6), None);
+        // Nonsense never becomes a notch.
+        let bad = CaptureArtefact {
+            period_samples: Some(0.0),
+            period_s: None,
+            ..gain_step()
+        };
+        assert_eq!(bad.fundamental_hz(2.4e6), None);
+    }
+
+    #[test]
+    fn cyclic_artefacts_use_this_records_own_rate() {
+        let mut p = sample();
+        p.capture_artefacts = vec![gain_step()];
+        p.tune.sample_rate_hz = 2.4e6;
+        assert_eq!(p.cyclic_artefacts(), vec![292.968_75]);
+        p.tune.sample_rate_hz = 10e6;
+        assert_eq!(p.cyclic_artefacts(), vec![1_220.703_125_f64]);
+    }
+
+    /// T-373 migration: every provenance row written before capture artefacts existed has no
+    /// `capture_artefacts` key, must read back as "none recorded", and must re-serialise
+    /// byte-identically so its SHA-256 dedup key does not move.
+    #[test]
+    fn provenance_without_capture_artefacts_round_trips_unchanged() {
+        let p = sample();
+        assert!(p.capture_artefacts.is_empty());
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(
+            json.get("capture_artefacts").is_none(),
+            "an empty list is omitted, not written as [] — {json}"
+        );
+        let read: Provenance = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(read, p);
+        assert_eq!(serde_json::to_value(&read).unwrap(), json);
+    }
+
+    /// The fixture's recorded form parses, including keys this struct does not model.
+    #[test]
+    fn a_recorded_capture_artefact_parses_with_unmodelled_keys() {
+        let stored = serde_json::json!({
+            "kind": "periodic-gain-step",
+            "period_samples": 8192,
+            "period_s": 0.0034133333333333333,
+            "low_window_samples": 896,
+            "step_db": -0.431,
+            "measured_by": "T-317",
+            "note": "stream-wide",
+        });
+        let a: CaptureArtefact = serde_json::from_value(stored).unwrap();
+        assert_eq!(a.kind, "periodic-gain-step");
+        assert_eq!(a.period_samples, Some(8192.0));
+        assert!((a.fundamental_hz(2.4e6).unwrap() - 292.968_75).abs() < 1e-9);
     }
 
     #[test]

@@ -37,15 +37,17 @@
         "method": "five 4 MB windows across the capture, ci8 components at |s|>=127",
         "threshold_rail_fraction": 0.0001
       },
-      "capture_artefact": {
-        "kind": "periodic-gain-step",
-        "period_samples": 8192,
-        "period_s": 0.0034133333333333333,
-        "low_window_samples": 896,
-        "step_db": -0.431,
-        "measured_by": "T-317: mean of |x|^2 over the 13184 whole 8192-sample periods of the recording, by position within the period",
-        "note": "The raw ci8 stream carries a rectangular gain step locked to an 8192-sample period: samples 0-895 of every period are 0.431 dB lower in power than samples 896-8191, flat either side of the step. It is stream-wide, not signal-specific - it shows in the wideband total power, on the receiver's own DC line (27 dB comb) and the 10 MHz reference harmonic (16 dB), and in bands with no emission at all (23 dB at 100.150 MHz). It puts a comb at 292.969 Hz (= 2.4 MHz / 8192) and its harmonics into the amplitude and, through the filter, the discriminator of anything narrowband and weak, with the sinc nulls of a 896/8192 duty cycle near harmonics 9 and 18. Anything looking for periodicity, frame rates or cyclostationarity in this fixture must exclude n * 292.969 Hz; taken at face value it reads as a 3.41 ms TDMA frame that is not there. Source not identified - it is present in the 2026-09-13 2.4 Msps capture of the same device as well."
-      }
+      "capture_artefacts": [
+        {
+          "kind": "periodic-gain-step",
+          "period_samples": 8192,
+          "period_s": 0.0034133333333333333,
+          "low_window_samples": 896,
+          "step_db": -0.431,
+          "measured_by": "T-317: mean of |x|^2 over the 13184 whole 8192-sample periods of the recording, by position within the period. T-373: re-measured over 60 M samples (-0.445 dB) and compared against the five hackrf_transfer captures of 2026-09-13.",
+          "note": "The raw ci8 stream carries a rectangular gain step locked to an 8192-sample period: samples 0-895 of every period are 0.431 dB lower in power than samples 896-8191, flat either side of the step, over all 13184 whole periods. It is stream-wide, not signal-specific - it shows in the wideband total power, on the receiver's own DC line and the reference harmonic, and in bands with no emission at all. It puts a comb at fs/8192 (292.969 Hz here) and its harmonics into the amplitude and, through the channel filter, the discriminator of anything narrowband and weak; harmonics 1-4 measure 14.4, 12.4, 13.1 and 12.0 dB over the envelope-spectrum median in an empty 28 kHz box at 100.150 MHz. Taken at face value it reads as a 3.41 ms TDMA frame that is not there, and it did exactly that during T-317. SOURCE (T-373): it is present ONLY in this capture, which was recorded through hackriff's own ring-reader output path. All five 2026-09-13 captures of the same device and firmware, recorded with hackrf_transfer - including one of this same band at this same rate and gain - fold flat to within 0.015 dB over the same 8192-sample period (2.4 Msps +0.014, 2.0 Msps -0.005, 10 Msps -0.004, 20 Msps -0.001 and +0.010, against -0.445 dB here). T-317's note that the 2026-09-13 2.4 Msps capture carries it too does not reproduce. The step is also not a pure gain: E|x|, rms and the fourth root of E x^4 scale by 0.958, 0.949 and 0.929 and the low window's kurtosis is 2.69 against 2.93, so the low window is not the high window times a constant. The mechanism inside that path is not identified."
+        }
+      ]
     },
     "hackriff:antenna": "unknown (as attached by user; not changed)",
     "core:extensions": [

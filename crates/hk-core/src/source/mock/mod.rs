@@ -1042,6 +1042,22 @@ impl MockSdrSource {
             spur_mask_ref: None,
             timestamp_method: method,
             timestamp_error_budget_ns: budget,
+            // T-373: an artefact the capture chain stamped into the recording is frozen into the
+            // stored samples, so replay carries it and pure synthetic noise does not. Its *time*
+            // period is what survives resampling, so `period_samples` is rescaled to the served
+            // rate and the cyclic fundamental stays where the recording put it.
+            capture_artefacts: if coverage == Coverage::Noise {
+                Vec::new()
+            } else {
+                let scale = self.tune.sample_rate_hz / self.recording.sample_rate_hz;
+                rec.capture_artefacts
+                    .iter()
+                    .map(|a| hk_model::CaptureArtefact {
+                        period_samples: a.period_samples.map(|p| p * scale),
+                        ..a.clone()
+                    })
+                    .collect()
+            },
         }
     }
 
