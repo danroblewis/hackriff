@@ -1497,6 +1497,18 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         v["f_center_hz"].as_f64().unwrap() >= f_lo && v["f_center_hz"].as_f64().unwrap() <= f_hi,
         "{v}"
     );
+    // T-342: `max_db` says what statistic it is and what it is relative to, in the response rather
+    // than only in the docs. "Strongest in a band" is a max-hold over a window — the same fold the
+    // band-collapsed series on `/api/timeline` carries — and a consumer must not have to infer
+    // either that or the scale.
+    assert_eq!(v["semantics"]["statistic"], json!("max-hold"), "{v}");
+    assert_eq!(v["semantics"]["scale"], json!("dbfs-per-hz"), "{v}");
+    assert!(
+        v["semantics"]["rule"]
+            .as_str()
+            .is_some_and(|s| s.contains("the max of nothing is unobserved, not zero")),
+        "{v}"
+    );
     // T-337: the box carries absolute capture time, checked by value — a client places it from the
     // response, never from its own request or from when the reply arrived. The answer's own time
     // extent is the cell the peak was measured in, and it must lie inside the window searched.
@@ -4949,6 +4961,200 @@ fn the_timeline_spans_the_capture_window_and_draws_it() {
     stop_server(serving);
 }
 
+/// T-342: **the band-collapsed activity-vs-time series is the backend's, and it says what it is.**
+///
+/// The client used to take a max over every frequency cell of a history grid and normalise it
+/// against the response's own range. Deciding which value represents a band is a *measurement* — it
+/// belongs where the levels, the floor and the coverage are known — and T-338 moved the fold here.
+/// What this test pins is the part a moved measurement still gets wrong: a served number whose
+/// **statistic and scale are unstated** is one a consumer will re-derive, or misread.
+///
+/// Three properties, all on values:
+///
+///  1. **The series is the measurement.** The band-collapsed column (`rows=1`) equals, step by
+///     step, the max over the rows of the same window at `rows=4`. A mean, a first-row pick or a
+///     mid-band sample all fail it.
+///  2. **Unobserved is not quiet.** A step nothing was folded into is `null` with zero frames —
+///     structurally different from a step that was observed and read low. Emit a floor value for
+///     the empty steps and the matched pair below stops being a pair.
+///  3. **The budget is honoured and stated.** `columns` is a time-axis budget like `/api/floor`'s
+///     `max_steps`; asking for more columns than the window has source cells never truncates the
+///     window, it replicates a measured value, and the response says which happened.
+#[test]
+fn the_band_collapsed_activity_series_is_measured_and_states_its_fold() {
+    let (lo, hi) = (
+        FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
+        FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0,
+    );
+    let band = format!("f_lo={lo}&f_hi={hi}");
+    let (_dir_guard, serving, addr) = start_server_retaining(Some(90.0));
+
+    wait_for(
+        "a capture window with retained capture drawn on it",
+        Duration::from_secs(60),
+        || {
+            let (st, got) = get(addr, &format!("/api/timeline?{band}&columns=32&rows=4"));
+            st == 200 && got["grid"]["observed_cells"].as_u64().unwrap_or(0) > 0
+        },
+    );
+    // The same window, asked for as one row: the band-collapsed series itself. The two answers must
+    // describe the **same** window for the comparison to mean anything — the live edge advances
+    // between requests — so the pair is re-taken until both report the same capture window, and the
+    // test refuses to compare otherwise rather than comparing across a moved window.
+    let pair = || {
+        let (sa, a) = get(addr, &format!("/api/timeline?{band}&columns=32&rows=4"));
+        let (sb, b) = get(addr, &format!("/api/timeline?{band}&columns=32&rows=1"));
+        assert_eq!((sa, sb), (200, 200), "{a} {b}");
+        (a, b)
+    };
+    let mut same = None;
+    for _ in 0..40 {
+        let (a, b) = pair();
+        if a["window"]["t1_s"] == b["window"]["t1_s"] && a["window"]["t0_s"] == b["window"]["t0_s"]
+        {
+            same = Some((a, b));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (rows4, rows1) = same.expect("two timeline answers over the same capture window");
+
+    let g1 = &rows1["grid"];
+    let g4 = &rows4["grid"];
+    assert_eq!(g1["nt"], json!(32), "{g1}");
+    assert_eq!(g1["nf"], json!(1), "{g1}");
+    let col = |g: &Value, k: &str| g[k].as_array().expect(k).clone();
+    let (c1, c4) = (col(g1, "max_db"), col(g4, "max_db"));
+    let f1 = col(g1, "frames");
+
+    // ---- (1) the property: the series IS the max over the band, cell by cell ----
+    let mut compared = 0;
+    for t in 0..32 {
+        let want = (0..4)
+            .filter_map(|f| c4[t * 4 + f].as_f64())
+            .fold(f64::NEG_INFINITY, f64::max);
+        match c1[t].as_f64() {
+            Some(got) => {
+                assert!(want.is_finite(), "step {t} collapsed from nothing: {g4}");
+                assert_eq!(got, want, "step {t}: the band is the max over its rows");
+                compared += 1;
+            }
+            // The converse, and it is the honesty half: a step with no observed row must not
+            // acquire a value from the collapse.
+            None => assert!(
+                !want.is_finite(),
+                "step {t} was observed at rows=4 but null at rows=1: {g1}"
+            ),
+        }
+    }
+    assert!(compared > 0, "no observed step to compare: {g1} {g4}");
+
+    // ---- the semantics: which statistic, and what it is relative to ----
+    let sem = &g1["semantics"];
+    assert_eq!(sem["fold"], json!("max-hold"), "{sem}");
+    assert_eq!(sem["series"]["max_db"]["statistic"], json!("max-hold"));
+    assert_eq!(sem["series"]["max_db"]["scale"], json!("dbfs-per-hz"));
+    assert_eq!(sem["series"]["max_db"]["unobserved"], json!("null"));
+    // Not every series is a max, and the block says so per series rather than labelling the grid.
+    assert_eq!(sem["series"]["occupancy_max"]["statistic"], json!("max"));
+    assert_eq!(sem["series"]["coverage"]["statistic"], json!("mean"));
+    assert_eq!(sem["series"]["frames"]["statistic"], json!("sum"));
+    assert_eq!(sem["series"]["coverage"]["unobserved"], json!("0"));
+    // The scale is the source grid's unit, carried — not a constant in the route.
+    assert_eq!(g1["unit"], json!("dbfs"), "{g1}");
+    for (key, phrase) in [
+        ("rule", "the max of nothing is unobserved, not zero"),
+        ("unobserved_rule", "never observed, never quiet"),
+    ] {
+        assert!(
+            sem[key].as_str().is_some_and(|s| s.contains(phrase)),
+            "{key} must state \"{phrase}\": {sem}"
+        );
+    }
+
+    // ---- (2) the control: observed-and-quiet is a different answer from never-observed ----
+    // The band spans 90 s of retention but this server has been up for a fraction of that, so the
+    // early steps are genuinely unobserved while the recent ones are measured. Both must be in
+    // hand for the pair to mean anything.
+    let unobserved: Vec<usize> = (0..32).filter(|&t| c1[t].is_null()).collect();
+    let observed: Vec<usize> = (0..32).filter(|&t| c1[t].is_f64()).collect();
+    assert!(
+        !unobserved.is_empty() && !observed.is_empty(),
+        "need both an unobserved and an observed step: {g1}"
+    );
+    let cov1 = col(g1, "coverage");
+    let occ1 = col(g1, "occupancy_max");
+    for &t in &unobserved {
+        // No field a client can read as a measured zero, and no frames to suggest one was taken.
+        assert!(occ1[t].is_null(), "step {t}: {g1}");
+        assert_eq!(cov1[t], json!(0.0), "step {t}: {g1}");
+        assert_eq!(f1[t], json!(0), "step {t}: {g1}");
+    }
+    // THE MUTATION CONTROL: null is exactly "nothing was folded in". Fill an empty step with the
+    // range's floor — the plausible-looking bug — and this equivalence breaks, because that step
+    // still has zero frames behind it.
+    for t in 0..32 {
+        assert_eq!(
+            c1[t].is_null(),
+            f1[t].as_u64() == Some(0),
+            "step {t}: a value and a frame count that disagree: {g1}"
+        );
+    }
+    // The unobserved steps are not sitting at the bottom of the scale: the scale is the observed
+    // range, measured here, and every observed value lies inside it.
+    let (rlo, rhi) = (
+        g1["range_db"]["lo"].as_f64().expect("range lo"),
+        g1["range_db"]["hi"].as_f64().expect("range hi"),
+    );
+    for &t in &observed {
+        let v = c1[t].as_f64().unwrap();
+        assert!(v >= rlo - 1e-6 && v <= rhi + 1e-6, "step {t}: {g1}");
+    }
+
+    // ---- (3) the budget: honoured exactly, and what happened to it is stated ----
+    let b = &rows1["resolution"]["budget"];
+    assert_eq!(b["time"]["requested"], json!(32), "{b}");
+    assert_eq!(b["time"]["served"], json!(32), "{b}");
+    assert_eq!(b["frequency"]["requested"], json!(1), "{b}");
+    assert_eq!(b["frequency"]["served"], json!(1), "{b}");
+    assert!(
+        b["statement"]
+            .as_str()
+            .is_some_and(|s| s.contains("never truncated") && s.contains("never invented")),
+        "{b}"
+    );
+    // More columns than the window has source cells: the window is NOT truncated to what exists,
+    // the grid is still exactly the budget, and `replicated` says the extra columns are repeats of
+    // a measured value rather than measurements of their own.
+    let (st, many) = get(addr, &format!("/api/timeline?{band}&columns=4000&rows=1"));
+    assert_eq!(st, 200, "{many}");
+    let bm = &many["resolution"]["budget"]["time"];
+    assert_eq!(bm["requested"], json!(4000), "{bm}");
+    assert_eq!(bm["served"], json!(4000), "{bm}");
+    assert_eq!(many["grid"]["nt"], json!(4000), "{bm}");
+    let src = bm["source_cells"].as_u64().expect("source_cells");
+    assert!(src < 4000, "{bm}");
+    assert_eq!(bm["replicated"], json!(true), "{bm}");
+    // The window is unchanged by the budget: the same span, drawn in more columns.
+    assert_eq!(many["window"]["span_s"], json!(90.0), "{many}");
+    let cell_s = many["grid"]["t_cell_s"].as_f64().expect("t_cell_s");
+    assert!((cell_s - 90.0 / 4000.0).abs() < 1e-9, "{many}");
+    // And replication is visible in the values: with fewer source cells than columns, adjacent
+    // observed columns must repeat.
+    let cm = col(&many["grid"], "max_db");
+    let repeats = (1..cm.len())
+        .filter(|&i| cm[i].is_f64() && cm[i] == cm[i - 1])
+        .count();
+    assert!(repeats > 0, "a replicated axis must show repeats: {bm}");
+    // The counter-case on the same server: `replicated` is measured from that request's own source
+    // grid, not a constant — a 32-column budget the source can fill reports false.
+    let src32 = b["time"]["source_cells"].as_u64().expect("source_cells");
+    assert_eq!(b["time"]["replicated"], json!(src32 < 32), "{b}");
+    assert!(src32 >= 32, "the 32-column budget should be fillable: {b}");
+
+    stop_server(serving);
+}
+
 /// T-368: **grey means genuinely unobserved.**
 ///
 /// The user's invariant: *"the view renders whatever samples are actually available for the current
@@ -5095,6 +5301,48 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
         tuned["resolution"]["grey_rule"],
         json!("grey a cell if and only if its state is \"unobserved\""),
         "{tuned}"
+    );
+    // T-342: and so is the SHADE's rule. A 0–1 number normalised against a range the response never
+    // named is a measurement the consumer cannot check or match: the strip must be able to share
+    // the waterfall's scaling, which needs the range and the scale on the wire, not just the ratio.
+    let mut shaded = Value::Null;
+    wait_for(
+        "the spectrum history to give the strip a shade to explain",
+        Duration::from_secs(60),
+        || {
+            let (st, got) = get(addr, &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=8"));
+            shaded = got;
+            st == 200 && shaded["shade"]["range_db"].is_object()
+        },
+    );
+    let sh = &shaded["shade"];
+    assert_eq!(sh["fold"], json!("max-hold"), "{shaded}");
+    assert_eq!(sh["scale"], json!("dbfs-per-hz"), "{shaded}");
+    assert_eq!(
+        sh["normalisation"],
+        json!("0 at `range_db.lo`, 1 at `range_db.hi`, linear in dB and clamped"),
+        "{shaded}"
+    );
+    let (rlo, rhi) = (
+        sh["range_db"]["lo"].as_f64().expect("shade range lo"),
+        sh["range_db"]["hi"].as_f64().expect("shade range hi"),
+    );
+    assert!(rhi >= rlo, "{shaded}");
+    // The values are the stated normalisation of the stated range, not an arbitrary ratio: every
+    // shade served lies in [0, 1].
+    let shades: Vec<f64> = shaded["any"]["cells"]
+        .as_array()
+        .expect("cells")
+        .iter()
+        .filter_map(|c| c["shade"].as_f64())
+        .collect();
+    assert!(!shades.is_empty(), "{shaded}");
+    assert!(shades.iter().all(|s| (0.0..=1.0).contains(s)), "{shaded}");
+    assert!(
+        sh["unobserved"]
+            .as_str()
+            .is_some_and(|s| s.contains("the max of nothing is")),
+        "{shaded}"
     );
 
     // ---- the backfill: going Live for a range that has history starts POPULATED, not black ----

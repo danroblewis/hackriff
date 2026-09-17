@@ -169,6 +169,98 @@ fn the_dynamic_range_served_is_the_grids_own_observed_range() {
     assert_eq!(o.observed_cells, 0);
 }
 
+// ---------------------------------------------------------------------------
+// T-342: the band-collapsed series, and the same fold on the other axis.
+
+#[test]
+fn collapsing_a_band_to_one_column_is_the_max_over_its_rows() {
+    // THE MEASUREMENT, asserted on values. `nf = 1` is the band-collapsed activity-vs-time series
+    // the client used to reduce for itself: one value per time step over a whole region. Here it is
+    // proved to be exactly the max over the rows of the same window at a finer `nf` — the reduction
+    // that used to live in `ui/src`, now made once, where the levels are known.
+    //
+    // A mean would fail this: rows -110/-40 mean to -75, and the band would report a quiet step
+    // where a strong emission was.
+    let h = grid(4, 4, |t, f| Some(-110.0 + (t * 4 + f) as f32 * 5.0));
+    let rows = h.overview(window(0, 4), FreqRange::new(0.0, 4000.0), 4, 4);
+    let band = h.overview(window(0, 4), FreqRange::new(0.0, 4000.0), 4, 1);
+    assert_eq!(band.nf, 1);
+    for t in 0..4 {
+        let want = (0..4).fold(f32::NEG_INFINITY, |m, f| m.max(at(&rows, t, f)));
+        assert_eq!(at(&band, t, 0), want, "step {t}");
+    }
+    // And the whole series' peak is the grid's peak: folding further never loses the strongest thing.
+    assert_eq!(band.range_db.unwrap().1, rows.range_db.unwrap().1);
+}
+
+#[test]
+fn collapsing_a_window_to_one_row_is_the_max_over_its_columns() {
+    // The same fold on the other axis (`nt = 1`): one max-hold per frequency cell over the whole
+    // window — the survey strip's column, and `/api/coverage`'s shade. Many time cells collapse into
+    // one, and a brief emission must survive that, which is exactly why the fold is a max.
+    let h = grid(6, 3, |t, f| {
+        Some(if t == 4 && f == 2 { -30.0 } else { -105.0 })
+    });
+    let strip = h.overview(window(0, 6), FreqRange::new(0.0, 3000.0), 1, 3);
+    assert_eq!(strip.nt, 1);
+    assert_eq!(at(&strip, 0, 0), -105.0);
+    assert_eq!(at(&strip, 0, 1), -105.0);
+    assert_eq!(
+        at(&strip, 0, 2),
+        -30.0,
+        "a one-cell burst must light its column"
+    );
+}
+
+#[test]
+fn a_collapsed_step_with_no_coverage_is_unobserved_not_quiet() {
+    // THE CONTROL. Three steps: one with energy, one **observed and quiet**, one never observed at
+    // all. The band-collapsed series must keep the last two apart — the max of nothing is unknown,
+    // not the bottom of the scale — and the difference is structural (`sources == 0`, `max_db` NaN),
+    // not a small number. Emitting a floor value for step 2 turns "the receiver was not listening"
+    // into "the band was quiet", and this assertion is what fails when it does.
+    let h = grid(3, 2, |t, _| match t {
+        0 => Some(-40.0),
+        1 => Some(-120.0), // observed, and it was quiet: a finding
+        _ => None,         // never observed: no claim either way
+    });
+    let band = h.overview(window(0, 3), FreqRange::new(0.0, 2000.0), 3, 1);
+
+    assert!(band.cells[0].observed() && at(&band, 0, 0) == -40.0);
+    // Observed and quiet: a real measurement, at the bottom of the grid's own range.
+    assert!(band.cells[1].observed());
+    assert_eq!(at(&band, 1, 0), -120.0);
+    assert_eq!(band.cells[1].frames, 4);
+    // Never observed: no value at all, and no frames to suggest one was taken.
+    assert!(!band.cells[2].observed());
+    assert!(band.cells[2].max_db.is_nan());
+    assert!(band.cells[2].occupancy_max.is_nan());
+    assert_eq!(band.cells[2].coverage, 0.0);
+    assert_eq!(band.cells[2].frames, 0);
+    // And the unobserved step is not the range's floor: the quiet step is.
+    assert_eq!(band.range_db, Some((-120.0, -40.0)));
+    assert_eq!(band.observed_cells, 2);
+}
+
+#[test]
+fn the_fold_carries_the_scale_of_the_values_it_folded() {
+    // A folded number whose scale is not carried with it is one a consumer must guess at, and a
+    // guess is how "max-hold in dBFS/Hz" becomes "a level". The unit is the source grid's, never
+    // assumed: calibrate the history and the overview says so.
+    let mut h = grid(2, 1, |_, _| Some(-90.0));
+    assert_eq!(
+        h.overview(window(0, 2), FreqRange::new(0.0, 1000.0), 2, 1)
+            .unit,
+        PowerUnit::Dbfs
+    );
+    h.unit = PowerUnit::Dbm;
+    assert_eq!(
+        h.overview(window(0, 2), FreqRange::new(0.0, 1000.0), 2, 1)
+            .unit,
+        PowerUnit::Dbm
+    );
+}
+
 #[test]
 fn every_output_cell_of_a_fully_observed_window_is_observed() {
     // No hole may be opened by the index arithmetic itself: a window whose source cells are all

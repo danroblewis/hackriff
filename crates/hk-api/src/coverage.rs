@@ -254,13 +254,33 @@ fn grid_json(g: &CoverageGrid, shades: Option<&[Option<f32>]>) -> Value {
     })
 }
 
+/// The strip's shading, and **the scale it was normalised against** (T-342).
+///
+/// The normalisation is legitimate here — it is made where the levels are known — but until T-342
+/// its denominator never reached the wire, so `0.87` was a number relative to a range the client
+/// could not name. `range_db` and `unit` are that range, served, which is also what lets a strip
+/// share the main waterfall's scaling instead of inventing a second one.
+struct StripShades {
+    /// Per cell, 0–1 over `range_db`; `None` where the history keeps no level.
+    values: Vec<Option<f32>>,
+    /// The observed range the values are relative to; `None` when nothing was observed.
+    range_db: Option<(f32, f32)>,
+    /// Scale of `range_db` (`"dbfs-per-hz"` / `"dbm-per-hz"`); `None` when no history answered at
+    /// all — an unnamed scale beats a guessed one.
+    scale: Option<&'static str>,
+}
+
 /// The level the spectrum history holds for each cell of the strip, normalised to the strip's own
 /// observed range. `None` per cell where the history has nothing.
+///
+/// The fold is a **max-hold over the whole window** — [`hk_store::RegionHistory::overview`] with
+/// `nt = 1`, the frequency-axis twin of the timeline's band-collapsed series (T-342) — so a brief
+/// emission still lights its column instead of being averaged away.
 ///
 /// This is only the *shading*: it never decides observed-versus-unobserved. A cell the radio
 /// demonstrably sampled but whose level the pyramid no longer keeps is observed with no shade, and
 /// a cell the pyramid happens to hold a value for is still grey if no tune ever covered it.
-fn shades(state: &ApiState, freq: FreqRange, window: TimeRange, cells: usize) -> Vec<Option<f32>> {
+fn shades(state: &ApiState, freq: FreqRange, window: TimeRange, cells: usize) -> StripShades {
     let region = crate::query::Region {
         freq,
         t0_ns: window.start.as_unix_nanos(),
@@ -269,20 +289,26 @@ fn shades(state: &ApiState, freq: FreqRange, window: TimeRange, cells: usize) ->
     crate::http::with_history(state, |p| {
         Ok(crate::query::overview_read(p, &region, 1, cells)?.grid)
     })
-    .map(|o| {
-        let range = o.range_db;
-        o.cells
+    .map(|o| StripShades {
+        values: o
+            .cells
             .iter()
-            .map(|c| match (range, c.observed()) {
+            .map(|c| match (o.range_db, c.observed()) {
                 (Some((lo, hi)), true) if c.max_db.is_finite() => {
                     let span = if hi > lo { hi - lo } else { 1.0 };
                     Some(((c.max_db - lo) / span).clamp(0.0, 1.0))
                 }
                 _ => None,
             })
-            .collect()
+            .collect(),
+        range_db: o.range_db,
+        scale: Some(crate::query::scale_str(o.unit)),
     })
-    .unwrap_or_else(|_| vec![None; cells])
+    .unwrap_or_else(|_| StripShades {
+        values: vec![None; cells],
+        range_db: None,
+        scale: None,
+    })
 }
 
 /// `GET /api/coverage?f_lo&f_hi[&cells][&t0&t1]`.
@@ -314,7 +340,7 @@ pub fn coverage_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     let any = hk_store::coverage::union_grid(&spans, freq, window, cells);
     let devices: Vec<Value> = hk_store::coverage::by_device(&spans, freq, window, cells)
         .iter()
-        .map(|g| grid_json(g, Some(&shades)))
+        .map(|g| grid_json(g, Some(&shades.values)))
         .collect();
 
     let source = crate::navigation::live_window_verdict(
@@ -336,7 +362,25 @@ pub fn coverage_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         "devices": devices,
         // The deliberate union, labelled `"any"` so it can never be mistaken for one radio's
         // coverage (T-259/T-305: device-local physics reads the device).
-        "any": grid_json(&any, Some(&shades)),
+        "any": grid_json(&any, Some(&shades.values)),
+        // What a `shade` **is** (T-342): the fold that produced it, the scale it is relative to,
+        // and the range that scale spans. Before this block a shade was a 0–1 number normalised
+        // against a range the response never named, so the same energy could read as two
+        // different strengths beside a waterfall drawn on a different scale.
+        "shade": {
+            "fold": "max-hold",
+            "rule": crate::query::MAX_HOLD_RULE,
+            "statistic": "max-hold over the whole window, per frequency cell",
+            "scale": shades.scale,
+            "range_db": shades.range_db.map(|(lo, hi)| json!({"lo": lo, "hi": hi})),
+            "normalisation": "0 at `range_db.lo`, 1 at `range_db.hi`, linear in dB and clamped",
+            // The constraint the survey strip shares with the timeline's series: folding many
+            // time cells into one column must never turn a never-observed cell into an observed
+            // one. An unobserved cell carries no `shade` key at all, which is stronger than a
+            // null — there is no field to misread as the bottom of the ramp.
+            "unobserved": "an unobserved cell carries no `shade` key: the max of nothing is \
+                unknown, not zero, and not the bottom of the scale",
+        },
         // Which tune histories answered, how many of each one's spans actually named the radio,
         // and whether every span it contributed did. `device_known` is **measured, not declared**
         // (T-378): a log still holding records written before devices were logged reports them as
@@ -359,6 +403,10 @@ pub fn coverage_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
             "max_live_span_hz": crate::http::max_live_span_hz(state),
             // Grey is decided here and nowhere else.
             "grey_rule": "grey a cell if and only if its state is \"unobserved\"",
+            // And the shade is measured here and nowhere else: what it means, and against what,
+            // is the `shade` block above (T-342).
+            "shade_rule": "shade is the max-hold over the window, normalised over `shade.range_db`; \
+                it never decides observed-versus-unobserved",
         },
     }))
 }
