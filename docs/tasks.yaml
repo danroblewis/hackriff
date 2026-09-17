@@ -8159,6 +8159,30 @@ tasks:
       big view - which is exactly what the user said it was when they described the
       shared pyramid. DO NOT build a private two-axis query for this bar. Read docs/16
       first; if the answer is that this waits on the pyramid's second axis, say so.
+      USER 2026-09-16, COLOURING - fold alongside the resolution / max-hold / multi-row
+      work already here. The mini-waterfall strips render in shades of CYAN/TEAL ONLY,
+      which does not match the main waterfall. They must use THE SAME COLORMAP AND THE
+      SAME SCALING as the main WebGL waterfall, so they read as small versions of the
+      real display rather than a monochrome ramp.
+      COORDINATOR FINDING - the two halves are in very different places:
+      SCALING IS ALREADY SERVED. T-342 made /api/coverage state its range_db and
+      normalisation ("0 at range_db.lo, 1 at range_db.hi, linear in dB and clamped"),
+      precisely so a strip could not be normalised against a range the response never
+      named. Use it; do not re-derive a range in the client.
+      THE PALETTE IS IN A SHADER. ui/src/waterfall.ts:73 `vec3 cmap(float x)` is GLSL -
+      six stops (near-black, deep blue, cyan, yellow, red, white) with piecewise mixes at
+      0.2 / 0.45 / 0.7 / 0.9. The navigator strips are 2D canvas. So "share the colormap"
+      means one of two real choices, and they should be weighed rather than defaulted:
+        (a) EXTRACT the stops and the mix to shared TS, have the shader and the strips
+            both consume one definition - the strips then get the palette without WebGL,
+            and a future change to the ramp moves both; or
+        (b) RENDER THE STRIPS IN WEBGL too, which shares the code by construction and
+            costs a second context per bar.
+      COPYING THE SIX STOPS INTO THE CANVAS PATH IS THE WRONG ANSWER even though it is
+      the quickest: it is the third place the same ramp would live, and the user is here
+      because two renderings already disagree.
+      A colormap is presentation, so T-340's ui/src guard does not forbid it - but the
+      SCALE must still come from the wire, which is what that guard is protecting.
 
   - id: T-398
     title: A strong WFM+RDS station takes ~40 s to reach Confirmed when a human sees it in under five
@@ -8699,6 +8723,31 @@ tasks:
       of 1 may not be a client-side change, and if /api/timeline cannot serve the row
       count this bar needs at the resolution it needs, say so rather than upsampling in
       the client. Upsampling is how the current blockiness happened.
+      USER 2026-09-16, COLOURING - fold alongside the resolution / max-hold / multi-row
+      work already here. The mini-waterfall strips render in shades of CYAN/TEAL ONLY,
+      which does not match the main waterfall. They must use THE SAME COLORMAP AND THE
+      SAME SCALING as the main WebGL waterfall, so they read as small versions of the
+      real display rather than a monochrome ramp.
+      COORDINATOR FINDING - the two halves are in very different places:
+      SCALING IS ALREADY SERVED. T-342 made /api/coverage state its range_db and
+      normalisation ("0 at range_db.lo, 1 at range_db.hi, linear in dB and clamped"),
+      precisely so a strip could not be normalised against a range the response never
+      named. Use it; do not re-derive a range in the client.
+      THE PALETTE IS IN A SHADER. ui/src/waterfall.ts:73 `vec3 cmap(float x)` is GLSL -
+      six stops (near-black, deep blue, cyan, yellow, red, white) with piecewise mixes at
+      0.2 / 0.45 / 0.7 / 0.9. The navigator strips are 2D canvas. So "share the colormap"
+      means one of two real choices, and they should be weighed rather than defaulted:
+        (a) EXTRACT the stops and the mix to shared TS, have the shader and the strips
+            both consume one definition - the strips then get the palette without WebGL,
+            and a future change to the ramp moves both; or
+        (b) RENDER THE STRIPS IN WEBGL too, which shares the code by construction and
+            costs a second context per bar.
+      COPYING THE SIX STOPS INTO THE CANVAS PATH IS THE WRONG ANSWER even though it is
+      the quickest: it is the third place the same ramp would live, and the user is here
+      because two renderings already disagree.
+      A colormap is presentation, so T-340's ui/src guard does not forbid it - but the
+      SCALE must still come from the wire, which is what that guard is protecting.
+
   - id: T-412
     title: The time wheel zooms when it should probably scroll; frequency wheel stays zoom
     milestone: M2-hardening
