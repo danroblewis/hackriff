@@ -35,7 +35,7 @@ pub use history::{
     CellStats, ChannelSummary, FilterSummary, FrameInput, FrameOrigin, GainState, HistogramConfig,
     IngestOutcome, LevelConfig, OriginField, OriginFilter, Overview, OverviewCell,
     ProvenanceSummary, Pyramid, PyramidConfig, PyramidStats, RegionHistory, RegionQuery,
-    Resolution, StoreError,
+    Resolution, StoreError, ViewLattice,
 };
 pub use radiometry::{
     FloorFlags, FloorIngest, FloorIngestQueue, FloorProduct, FloorProductConfig, FloorProductStats,

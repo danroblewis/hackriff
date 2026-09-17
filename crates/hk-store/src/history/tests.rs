@@ -16,6 +16,8 @@ use super::*;
 mod bias_tee;
 mod coverage_fold;
 mod followups;
+mod lattice;
+mod lattice_cost;
 mod maturity;
 mod mixture;
 mod origins;
@@ -67,8 +69,7 @@ fn level(f_factor: u32, t_cells_per_block: u32) -> LevelConfig {
     LevelConfig {
         f_factor,
         t_cells_per_block,
-        max_age: None,
-        byte_quota: None,
+        ..LevelConfig::default()
     }
 }
 

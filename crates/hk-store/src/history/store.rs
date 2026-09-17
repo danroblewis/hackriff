@@ -144,6 +144,8 @@ pub struct Pyramid {
     scratch: Vec<f32>,
     group_hist: Vec<u32>,
     keys: Vec<(i64, i64)>,
+    /// Scratch copy of a level's consumer list, so a fold may borrow `open`/`pool` mutably.
+    consumers: Vec<usize>,
     buf: Vec<u8>,
     payload: Vec<u8>,
     /// Front-end state and resolved cell shape of the last folded frame **per source** (step
@@ -261,6 +263,7 @@ impl Pyramid {
             scratch: Vec::new(),
             group_hist: vec![0; bins],
             keys: Vec::new(),
+            consumers: Vec::new(),
             buf: Vec::new(),
             payload: Vec::new(),
             last_state: HashMap::new(),
@@ -618,8 +621,8 @@ impl Pyramid {
                     self.update_floor(&tile);
                 }
                 let written = self.write_tile(level, &tile, true);
-                if written.is_ok() && level < self.geom.top() {
-                    self.fold_into_parent(level, &tile);
+                if written.is_ok() {
+                    self.fold_into_consumers(level, &tile);
                 }
                 self.pool[level].push(tile);
                 if let Err(e) = written {
@@ -664,33 +667,43 @@ impl Pyramid {
             .push(|f| hist_percentile(tile.hist_row(f), &hist_cfg, q));
     }
 
-    fn fold_into_parent(&mut self, level: usize, child: &Tile) {
-        let (pfb, ptb) = self
-            .geom
-            .parent(level, child.key.f_block, child.key.t_block);
-        if self.sealed[level + 1].contains_key(&(ptb, pfb)) {
-            return;
-        }
+    /// Folds a sealed tile into **every** coarser level folded from it (T-434). A ladder level has
+    /// one consumer; a lattice node has one per axis it feeds, and each gets the same sealed tile,
+    /// so the coarse levels all come from the one seal path and nothing is produced twice.
+    fn fold_into_consumers(&mut self, level: usize, child: &Tile) {
+        let mut ups = std::mem::take(&mut self.consumers);
+        ups.clear();
+        ups.extend_from_slice(self.geom.consumers(level));
         let hist_cfg = self.cfg.histogram;
         let pct = self.pct();
-        let parent = open_tile(
-            &mut self.open[level + 1],
-            &mut self.pool[level + 1],
-            &self.geom,
-            level + 1,
-            self.cfg.scheme,
-            usize::from(hist_cfg.bins),
-            pfb,
-            ptb,
-            &mut self.next_seal_ns,
-        );
-        parent.fold_child(
-            child,
-            self.geom.levels[level + 1].f_factor,
-            &hist_cfg,
-            pct,
-            &mut self.group_hist,
-        );
+        for &up in &ups {
+            let (pfb, ptb) = self
+                .geom
+                .fold_target(level, up, child.key.f_block, child.key.t_block);
+            if self.sealed[up].contains_key(&(ptb, pfb)) {
+                continue;
+            }
+            let parent = open_tile(
+                &mut self.open[up],
+                &mut self.pool[up],
+                &self.geom,
+                up,
+                self.cfg.scheme,
+                usize::from(hist_cfg.bins),
+                pfb,
+                ptb,
+                &mut self.next_seal_ns,
+            );
+            parent.fold_child(
+                child,
+                self.geom.levels[up].f_factor,
+                self.geom.levels[up].t_factor,
+                &hist_cfg,
+                pct,
+                &mut self.group_hist,
+            );
+        }
+        self.consumers = ups;
     }
 
     fn write_tile(&mut self, level: usize, tile: &Tile, sealed: bool) -> Result<(), StoreError> {
@@ -745,10 +758,14 @@ impl Pyramid {
         Ok(())
     }
 
-    /// The parent of sealed tile `(level, fb, tb)` is sealed on disk.
+    /// **Every** coarser level folded from sealed tile `(level, fb, tb)` has its covering tile
+    /// sealed on disk. Vacuously true for a level nothing is folded from — the only kind of level
+    /// whose tiles may be dropped without a coarser copy existing.
     fn covered(&self, level: usize, fb: i64, tb: i64) -> bool {
-        let (pfb, ptb) = self.geom.parent(level, fb, tb);
-        self.sealed[level + 1].contains_key(&(ptb, pfb))
+        self.geom.consumers(level).iter().all(|&up| {
+            let (pfb, ptb) = self.geom.fold_target(level, up, fb, tb);
+            self.sealed[up].contains_key(&(ptb, pfb))
+        })
     }
 
     fn evict(&mut self, level: usize, tb: i64, fb: i64) -> Result<(), StoreError> {
@@ -766,16 +783,20 @@ impl Pyramid {
         self.unprotected[level].remove(&(tb, fb));
         self.stats.tiles_evicted += 1;
         // A parent waiting for its children to go is re-checked from its first deadline.
-        if level < self.geom.top() {
-            let (pfb, ptb) = self.geom.parent(level, fb, tb);
-            if self.sealed[level + 1].contains_key(&(ptb, pfb)) {
-                let ages = self.ages(level + 1, pfb);
+        let mut ups = std::mem::take(&mut self.consumers);
+        ups.clear();
+        ups.extend_from_slice(self.geom.consumers(level));
+        for &up in &ups {
+            let (pfb, ptb) = self.geom.fold_target(level, up, fb, tb);
+            if self.sealed[up].contains_key(&(ptb, pfb)) {
+                let ages = self.ages(up, pfb);
                 if let Some(&a) = ages.deadlines.first() {
-                    let end = self.geom.block_end_ns(level + 1, ptb);
-                    self.due[level + 1].insert((end.saturating_add(a), ptb, pfb));
+                    let end = self.geom.block_end_ns(up, ptb);
+                    self.due[up].insert((end.saturating_add(a), ptb, pfb));
                 }
             }
         }
+        self.consumers = ups;
         Ok(())
     }
 
@@ -883,16 +904,20 @@ impl Pyramid {
         Ok(())
     }
 
-    /// A sealed tile one level finer lies inside tile `(level, fb, tb)`.
+    /// A sealed tile of the level this one is folded from lies inside tile `(level, fb, tb)`.
     fn has_children(&self, level: usize, fb: i64, tb: i64) -> bool {
-        if level == 0 {
-            return false;
-        }
         let g = &self.geom.levels[level];
-        let (t0, t1) = (tb * g.nt as i64, (tb + 1) * g.nt as i64);
+        let Some(down) = g.from else {
+            return false;
+        };
+        // Child tiles per parent tile in time: the parent holds `nt` time cells and one child tile
+        // spans `k` of them. Welded, k = 1 and this is the old `nt` child blocks.
+        let k = self.geom.parent_cells_per_tile(down, level);
+        let per_tile = g.nt as i64 / k;
+        let (t0, t1) = (tb * per_tile, (tb + 1) * per_tile);
         let factor = i64::from(g.f_factor);
         let (f0, f1) = (fb * factor, (fb + 1) * factor);
-        self.sealed[level - 1]
+        self.sealed[down]
             .range((t0, i64::MIN)..(t1, i64::MIN))
             .any(|(&(_, cfb), _)| (f0..f1).contains(&cfb))
     }
@@ -905,10 +930,9 @@ impl Pyramid {
         allow_protected: bool,
         visits: &mut u64,
     ) -> Option<(i64, i64)> {
-        let top = self.geom.top();
         let check = |&(tb, fb): &(i64, i64)| {
             *visits += 1;
-            if level < top && !self.covered(level, fb, tb) {
+            if !self.covered(level, fb, tb) {
                 // Parents seal in time order: later tiles are no more covered.
                 return Some(None);
             }
@@ -958,11 +982,18 @@ impl Pyramid {
                 if !self.sealed[level].contains_key(&(tb, fb)) {
                     continue;
                 }
-                if level < top && !self.covered(level, fb, tb) {
-                    let (_, ptb) = self.geom.parent(level, fb, tb);
+                if !self.covered(level, fb, tb) {
+                    // Re-check once the last consumer still missing this tile has sealed past it.
                     let at = self
                         .geom
-                        .block_end_ns(level + 1, ptb)
+                        .consumers(level)
+                        .iter()
+                        .map(|&up| {
+                            let (_, ptb) = self.geom.fold_target(level, up, fb, tb);
+                            self.geom.block_end_ns(up, ptb)
+                        })
+                        .max()
+                        .unwrap_or(i64::MIN)
                         .max(w.saturating_add(1));
                     self.due[level].insert((at, tb, fb));
                     continue;
@@ -1251,24 +1282,35 @@ impl Pyramid {
                 }
             }
         }
-        for level in 0..top {
-            let newest_parent_end = self.sealed[level + 1]
-                .last_key_value()
-                .map_or(i64::MIN, |(&(tb, _), _)| {
-                    self.geom.block_end_ns(level + 1, tb)
-                });
+        for level in 0..=top {
+            let ups: Vec<usize> = self.geom.consumers(level).to_vec();
+            if ups.is_empty() {
+                continue;
+            }
+            // Per consumer, the end of its newest sealed tile: a child past that one was sealed
+            // after the consumer last wrote, so its contribution was lost and must be re-folded.
+            let newest: Vec<i64> = ups
+                .iter()
+                .map(|&up| {
+                    self.sealed[up]
+                        .last_key_value()
+                        .map_or(i64::MIN, |(&(tb, _), _)| self.geom.block_end_ns(up, tb))
+                })
+                .collect();
             let children: Vec<(i64, i64)> = self.sealed[level]
                 .keys()
                 .rev()
                 .take_while(|&&(tb, fb)| {
-                    let (_, ptb) = self.geom.parent(level, fb, tb);
-                    self.geom.block_end_ns(level + 1, ptb) > newest_parent_end
+                    ups.iter().zip(&newest).any(|(&up, &end)| {
+                        let (_, ptb) = self.geom.fold_target(level, up, fb, tb);
+                        self.geom.block_end_ns(up, ptb) > end
+                    })
                 })
                 .copied()
                 .collect();
             for (tb, fb) in children {
                 match self.read_sealed(level, fb, tb)? {
-                    Some(child) => self.fold_into_parent(level, &child),
+                    Some(child) => self.fold_into_consumers(level, &child),
                     None => {
                         let _ = fs::remove_file(self.path(level, fb, tb));
                         if let Some(b) = self.sealed[level].remove(&(tb, fb)) {
