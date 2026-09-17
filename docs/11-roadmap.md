@@ -149,3 +149,23 @@ a frequency-reference check is a minor optional extra at most, and is not the po
 above that runs **automatically on boot-up**. The user judges it harder and has ruled it out for now:
 **do not design or build it.** It sits downstream of the manual, browser-driven field check — that one
 has to exist and be trusted first.
+
+### Full-spectrum-over-time view + the shared coverage tile pyramid (user, 2026-09-16)
+
+A large **Y = time, X = whole spectrum** view with Google-Maps-style zoom levels, mostly **grey =
+unobserved** (that grey is the point — you see where you scanned), confirmed signals highlighted, and
+filling in as more SDRs are added. Design doc: **`docs/16-coverage-tile-pyramid.md`**; task **T-408**,
+held on design sign-off rather than on capacity.
+
+It is filed **before** its consumers because the user's architectural instruction is that **one tile
+pyramid serves all three** of the big view, the bottom frequency-survey bar (T-405) and the
+iterative-scan accumulation (T-406) — *the survey bar is a miniature of the big view*. Built
+separately they would disagree visibly, on one screen, about the same spectrum.
+
+Most of the machinery exists (tiered history, `hk_store::Coverage`, the max-hold fold with stated
+semantics, the device chain of custody). **The gap is the second axis**: the pyramid is tiered in time,
+coverage answers per frequency cell over a window, and the view needs both at several zoom levels.
+
+Placement: **M5-ish**, after the current M2-hardening/M3 work, and after or alongside the
+software-acceptance field check above — but T-405 and T-406 must be built against it now rather than
+foreclosing it.
