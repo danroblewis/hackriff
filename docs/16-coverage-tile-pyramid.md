@@ -41,9 +41,21 @@ levels, which is a different indexing problem from either.
 
 1. **The big zoomable view (§1).** Tiles at several zoom levels over (time × frequency), grey where
    unobserved, confirmed emitters highlighted on top.
-2. **The bottom frequency-survey bar** (T-405). The same data at `rows = 1` — *a miniature of the big
-   view*, which is exactly how T-342 already describes `/api/timeline` with `rows = 1` relative to the
-   full overview. It should be a **projection of the pyramid, not a separate query.**
+2. **The bottom frequency-survey bar** (T-397/T-405). Originally filed as "the same data at
+   `rows = 1`". **T-397 raised it to R rows**, because one row stretched down a 64 px bar is not a
+   miniature of a spectrogram — it is a spectrum scaled up. It is now a projection of the pyramid,
+   not a separate query: `GET /api/timeline?f_lo&f_hi&columns=R&rows=N` over the survey viewport,
+   which is the *same route and the same fold* the time navigator uses, differing only in which axis
+   is collapsed. **No second axis was needed for the fold**: `RegionHistory::overview` has always
+   taken `(nt, nf)` and folds exactly on both (T-338/T-342), so §2's gap is narrower than it reads —
+   it is about **tile addressing at several zoom levels**, not about the fold.
+   - **What the survey bar still cannot get** is per-(time, frequency) *coverage*.
+     `hk_store::Coverage` answers per frequency cell over a window, so it decides a **column** grey,
+     while the history grid decides a **cell**. The bar therefore draws a measured value wherever the
+     grid holds one and falls back to the column's coverage state where it does not. That composition
+     is honest but it is the place the second axis would actually pay: a cell in an observed band that
+     the radio was tuned away from at that instant should be grey, and today it reads as
+     "sampled, level not retained".
 3. **Iterative-scan accumulation** (T-406). A sweep retains what each step saw **into the pyramid**,
    so the big view and the survey bar fill in as it runs. No private accumulator.
 
@@ -63,8 +75,18 @@ a pyramid is where they are easiest to lose.
   both axes: *the max of nothing is unknown, not zero, and not the bottom of the scale.* A tile that
   pools observed and never-observed children is **partially covered** and must say so.
 - **Folding never lowers a value.** That is what makes a peak survive downsampling — and it is
-  precisely the property the user is missing today (T-405: "yellow/red peaks not showing because
+  precisely the property the user was missing (T-405: "yellow/red peaks not showing because
   averaging washes them out").
+  - **Where that was actually broken, and it was not the fold** (T-397). Every fold on the way out
+    *was* a max: `Tile::add_value`, `Tile::fold_child` (max-of-max), `OverviewCell::fold`,
+    and both routes' `"fold": "max-hold"` declarations. What was averaged was the **input**:
+    `hk-pipeline`'s history reader set `WelchConfig::holds = false`, so `Spectrum::max_hold` was
+    empty, `FrameInput::from_dsp` set `peak: None`, and the store's
+    `frame.peak.unwrap_or(frame.psd)` substituted the Welch-averaged PSD. A history frame averages
+    `K ≈ fs / (hop · rows_per_s)` segments — order a thousand at 20 Msps — so a one-segment burst
+    lost ~10·log10(K) ≈ 30 dB before the first max ran. **A wire that declares its fold is not
+    evidence the values it folded were measurements**; `hk_pipeline::history::history_welch`'s test
+    measures it end to end instead.
 - **Device-local, never unioned by accident.** Coverage is a fact about **one front end** (T-259/T-305).
   `by_device` returns one grid per device; a union is a separate call returning `Device::Any` with
   `"named": false`, so it can never wear a radio's identity. **This matters more as SDRs are added,

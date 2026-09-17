@@ -23,7 +23,7 @@
 //    `navigators.test.ts` asserts, alongside a source split: `mountTimeNav` names no frequency
 //    writer and `mountFreqNav` names no time writer.
 //
-// Four properties this file exists to hold, each with a test:
+// Eight properties this file exists to hold, each with a test:
 //
 //  1. **No *continuous* gesture moves the radio; one discrete one does (T-392).** Panning and
 //     wheel-zooming either bar changes what is drawn and nothing else — a pan past the band edge
@@ -67,6 +67,25 @@
 //     off-centre). The wheel zooms that viewport about the pointer with the waterfall's own
 //     `wheelFactor`; an untouched viewport follows the tune, a user-framed one stays put. No wheel
 //     and no pan on either bar reaches the device — property 1 is unchanged by it.
+//  7. **(T-397, T-411) Each bar's render buffer is its own size, and both draw in the waterfall's
+//     colours.** The two strips asked the backend for grids sized by constants picked when the bars
+//     were ~12 px slivers — 160 × **6** for the time bar, and a **single row** for the frequency bar
+//     — and CSS then stretched those few cells across the widened bars. That is upsampling in the
+//     client, which is exactly what made the left overview blocky and the bottom strip one smeared
+//     spectrum. Both now ask `stripCells(px, cap)` for one cell per pixel on each axis, so every
+//     drawn cell is a cell the backend folded; where the pyramid's own tier is coarser it replicates
+//     there and `resolution` says so, which is the direction that repeats a measurement instead of
+//     interpolating one. **The bottom bar is a mini-waterfall**, not a stretched row: the same
+//     `/api/timeline` fold the left bar uses, with the axes swapped over — the left bar collapses
+//     frequency over the selected range, this one collapses nothing and lays the survey range
+//     across its width. And both paint through `ui/src/cmap.ts`, the one place the ramp lives, so a
+//     peak is yellow here and yellow in the waterfall rather than cyan here and yellow there.
+//  8. **(T-405) The frequency bar has no view box; the *undimmed* region is the tuned window.**
+//     The user removed `.fn-view` — *"I rarely slide the view within the tuned range"* — so what
+//     used to be a rectangle drawn over the reported windows is now their **complement**, shaded
+//     down (`dimSegments`). It cannot disagree with the lit windows because it is computed from
+//     them, and with no window reported the whole bar dims rather than one being assumed.
+//     Drag-to-retune (property 1) is untouched; the transient `.fn-draft` still shows it in flight.
 //
 // Everything below is placement, gesture and styling. Which states are achievable, which windows
 // are active and what the capture window spans are all backend answers (`ui/src/navigators.ts` is
@@ -77,11 +96,12 @@ import {
   detailLabel, retunePlan, snapState, snapTimeCell,
   type DetailSource, type FrequencyGrid, type HistoryTier, type NavigationGrid, type RetuneRefusal,
 } from "../../navigation";
+import { cmapBytes } from "../../cmap";
 import {
-  activeWindows, bandKey, clockRangeText, clockText, coverageRequest, litSegments, placeOn,
-  regionFromDrag, spanOf, spectrumExtent, surveyCells, surveyViewport, timeAtFraction, timeExtent,
-  timelineRequest, unobservedCount, valueAt, zoomWithin, type Band, type CoverageCell,
-  type CoverageResponse, type Range,
+  activeWindows, bandKey, clockRangeText, clockText, coverageRequest, dimSegments, litSegments,
+  placeOn, regionFromDrag, spanOf, spectrumExtent, stripCells, surveyCells, surveyViewport,
+  timeAtFraction, timeExtent, timelineRequest, unobservedCount, valueAt, zoomWithin, type Band,
+  type CoverageCell, type CoverageResponse, type Range,
 } from "../../navigators";
 import {
   captureWindow, currentSpan, durationText, overviewShade,
@@ -109,10 +129,12 @@ const fmtEdges = (lo: number, hi: number) => {
 /** Pointer travel (px) that makes a press a deliberate drag rather than a click (overlays.ts). */
 export const DRAG_PX = 6;
 
-/** Cells the time navigator asks the backend to fold the capture window onto: what it draws, one
- * to one. Time runs down, so the long axis is the column count. */
-const TIME_COLUMNS = 160;
-const TIME_ROWS = 6;
+/** The most cells either strip will ask for on either axis — the caps `GET /api/timeline` states
+ * for `columns` (time) and `rows` (frequency). Both bars now size their request from their own
+ * pixels (`stripCells`), and these only stop a very tall or very wide layout asking for more than
+ * the route will answer. */
+const MAX_TIME_COLUMNS = 4096;
+const MAX_FREQ_ROWS = 512;
 
 /** How long the selected frequency range must hold still before the overview is re-asked for it
  * (T-367). A drag moves the view on every pointer event; this coalesces the storm into one request
@@ -122,6 +144,38 @@ export const BAND_SETTLE_MS = 250;
 /** Cells the frequency navigator asks the coverage map to fold the spectrum onto (T-368): what the
  * survey strip draws, one cell to one pixel column, upscaled but never smoothed. */
 export const SURVEY_CELLS = 512;
+
+// ---------------------------------------------------------------------------
+// Painting a strip cell (T-397): one ramp, three states
+// ---------------------------------------------------------------------------
+//
+// Both bars draw the same three-valued thing and used to do it twice, with a hand-written
+// cyan-only ramp that had nothing to do with the waterfall's. They now share this, and the ramp
+// itself comes from `ui/src/cmap.ts` — the same stops the WebGL waterfall's shader is generated
+// from, so a peak is the same colour on the strip as it is in the picture beside it.
+//
+// The three states are the backend's, not this file's:
+//
+//  - **a value** — the position on the served scale (`/api/coverage`'s `shade`, normalised over
+//    `shade.range_db`; `/api/timeline`'s cell through `overviewShade`, normalised over the grid's
+//    own `range_db`). Nothing here decides what 0 and 1 mean.
+//  - **observed, no value** — the radio was here but the history keeps no level: a flat tint,
+//    distinct from both the ramp's bottom and grey.
+//  - **never observed** — grey, and only ever this. The max of nothing is unknown, not zero and not
+//    the bottom of the scale (T-368/T-397), so a fold must never turn this into a dark ramp cell.
+
+/** Writes one cell at byte offset `p`. `shade` is the served 0…1 position, or `null` when there is
+ * no level for the cell; `observed` then decides tint-versus-grey. */
+function paintCell(data: Uint8ClampedArray, p: number, shade: number | null, observed: boolean) {
+  if (shade !== null) {
+    const [r, g, b] = cmapBytes(shade);
+    data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = 255;
+  } else if (observed) {
+    data[p] = 55; data[p + 1] = 85; data[p + 2] = 95; data[p + 3] = 150;
+  } else {
+    data[p] = data[p + 1] = data[p + 2] = 110; data[p + 3] = 70;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Frequency navigator — pure decisions
@@ -500,10 +554,13 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
   // was actually sampled across the spectrum and grey only what nothing ever looked at.
   const strip = h("canvas", {
     class: "fn-survey", role: "img",
-    "aria-label": "Survey coverage across the device-available spectrum; grey is never observed",
+    "aria-label": "Recent history across the device-available spectrum: time down, frequency across; grey is never observed",
   }) as HTMLCanvasElement;
-  const litLayer = h("div", { class: "fn-lit-layer" });
-  const marker = h("div", { class: "fn-view", title: "The frequency window on screen — drag to pan it" });
+  // T-405: the dim layer, and what replaced the view box. There is no `.fn-view` rectangle any
+  // more — the bar shades everywhere the radio is *not* capturing, so the region left at full
+  // strength IS the tuned window. One less overlay, and it cannot disagree with the lit windows
+  // because it is computed as their complement (`dimSegments`).
+  const dimLayer = h("div", { class: "fn-dim-layer" });
   const draft = h("div", { class: "fn-draft", hidden: true });
   const label = h("span", { class: "fn-label" });
   // T-393: a static name for the axis this bar controls. The two bars look alike and do different
@@ -515,7 +572,7 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
   readout.hidden = true;
   const offerBtn = h("button", { class: "fn-offer", type: "button" }, "");
   offerBtn.hidden = true;
-  const track = h("div", { class: "fn-track" }, strip, litLayer, marker, draft, readout, offerBtn);
+  const track = h("div", { class: "fn-track" }, strip, dimLayer, draft, readout, offerBtn);
   el.replaceChildren(track, axisLabel, label);
 
   // T-376: the bar has a viewport of its own. `bounds` is the whole device-available spectrum as
@@ -540,13 +597,42 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
     return viewport;
   };
 
-  /** The strip the backend last served, and the extent it was served for — so a readout never
-   * describes a spectrum range the drawn pixels are not of. */
+  /** The coverage cells the backend last served, and the extent they were served for — so a readout
+   * never describes a spectrum range the drawn pixels are not of. */
   let survey: CoverageCell[] = [];
+  /** The recent-history grid over the same extent: `nt` time rows × `nf` frequency cells, `nf`
+   * matching `survey.length` so column `f` of one is column `f` of the other. `null` until asked,
+   * or when no history answered for a viewport this wide (and then the strip falls back to the
+   * single coverage row rather than inventing rows). */
+  let tl: OverviewResponse | null = null;
   /** The extent the drawn strip was asked for, so a viewport change re-asks rather than restretching
    * cells of one range across another. */
   let surveyFor = "";
+  /** Frequency cells the bar asks for: one per pixel of its own width (T-397). */
+  const surveyCellCount = () => stripCells(track.clientWidth, SURVEY_CELLS);
+  /** Time rows the bar asks for: one per pixel of its own height. */
+  const surveyRowCount = () => stripCells(track.clientHeight, MAX_TIME_COLUMNS);
 
+  /**
+   * The bottom bar as a **mini-waterfall** (T-397): time down, frequency across the survey range,
+   * as many rows as fit the bar at one row per pixel.
+   *
+   * It drew a single row stretched to the bar's full height — one spectrum scaled up, which is not a
+   * spectrogram of anything. It now draws the `nt × nf` grid `GET /api/timeline` folds over the same
+   * capture window the *time* bar spans, so the two edge navigators are two projections of one
+   * pyramid: the left bar folds that window over the selected frequency range, this one folds it
+   * over the whole survey range. Nothing is upsampled here — every row drawn is a row the backend
+   * folded, and where its own tier is coarser it replicates on that side and says so in
+   * `resolution`.
+   *
+   * **Grey still comes from the coverage map and nothing else.** `/api/coverage` answers per
+   * frequency cell over the window, so it decides a *column*; the history grid decides a *cell*.
+   * Where the grid holds a value the value is drawn — measured data is never hidden by a coverage
+   * answer about a different window. Where it holds none, the column's coverage state chooses the
+   * flat "sampled, no level" tint or grey. Per-(time, frequency) coverage is the second axis
+   * `docs/16` names as the one real gap; until it exists this is the honest composition of what is
+   * served, not a guess at it.
+   */
   const drawSurvey = () => {
     const c = strip.getContext("2d");
     if (!c) return;
@@ -557,26 +643,22 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
       c.clearRect(0, 0, 1, 1);
       return;
     }
-    strip.width = survey.length;
-    strip.height = 1;
-    const img = c.createImageData(survey.length, 1);
-    for (let i = 0; i < survey.length; i++) {
-      const cell = survey[i];
-      const p = i * 4;
-      const v = cell.state === "observed" ? cell.shade : undefined;
-      if (cell.state !== "observed") {
-        // Never observed: grey. Never the low end of the ramp — nothing looked here, which is not
-        // the same finding as looking and seeing nothing.
-        img.data[p] = img.data[p + 1] = img.data[p + 2] = 110;
-        img.data[p + 3] = 70;
-      } else if (v === null || v === undefined) {
-        // Sampled, but no level retained for it: a flat tint, distinct from grey and from the ramp.
-        img.data[p] = 55; img.data[p + 1] = 85; img.data[p + 2] = 95; img.data[p + 3] = 150;
-      } else {
-        img.data[p] = Math.round(20 + 40 * v);
-        img.data[p + 1] = Math.round(120 + 110 * v);
-        img.data[p + 2] = Math.round(130 + 90 * v);
-        img.data[p + 3] = Math.round(70 + 185 * v);
+    const nf = survey.length;
+    // Rows only when the grid is over these very cells; a mismatched grid is stale (a viewport
+    // moved under a poll) and one coverage row beats another range's rows.
+    const grid = tl && tl.nf === nf && tl.nt > 0 ? tl : null;
+    const nt = grid ? grid.nt : 1;
+    strip.width = nf;
+    strip.height = nt;
+    const img = c.createImageData(nf, nt);
+    for (let f = 0; f < nf; f++) {
+      const cell = survey[f];
+      const observed = cell.state === "observed";
+      // The column's own level, for the no-rows fallback: what the bar drew before T-397.
+      const flat = observed && cell.shade !== null && cell.shade !== undefined ? cell.shade : null;
+      for (let t = 0; t < nt; t++) {
+        const i = t * nf + f;
+        paintCell(img.data, i * 4, grid ? overviewShade(grid, i) : flat, observed);
       }
     }
     c.putImageData(img, 0, 0);
@@ -591,22 +673,25 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
   const render = () => {
     const s = store.get();
     const ext = extent();
-    // Lit segments come from the reported list. With none reported the bar says so rather than
-    // drawing the tuned state as if it were an enumeration of front ends.
-    litLayer.replaceChildren(...litSegments(s.navGrid.windows, ext).map((seg) => {
-      const e = h("div", {
-        class: "fn-lit",
-        // Label resolution comes from the window's own width, never from a frequency constant.
-        title: `Capture window${seg.deviceId ? ` on ${seg.deviceId}` : ""}: ${fmtEdges(seg.loHz, seg.hiHz)} MHz`,
-      });
+    // T-405: the inverse of what this layer used to draw. The reported capture windows are left at
+    // full strength and everything else is shaded down, so *the normal-coloured region is the
+    // current tuned window* and there is no second rectangle claiming to be it. The segments still
+    // come from the reported list — with none reported the whole bar dims, which is the honest
+    // picture of a server capturing nowhere, not an assumption that there is one window.
+    const windows = litSegments(s.navGrid.windows, ext);
+    dimLayer.replaceChildren(...dimSegments(s.navGrid.windows, ext).map((seg) => {
+      const e = h("div", { class: "fn-dim" });
       pctStyle(e, seg, false);
       return e;
     }));
-
-    const v = s.live.view;
-    const p = v ? placeOn(ext, v.loHz, v.hiHz) : null;
-    marker.hidden = !p;
-    if (p) pctStyle(marker, p, false);
+    // The windows themselves stay hoverable so the bar can still say which front end is where;
+    // nothing is painted over them.
+    track.title = windows.length === 0
+      ? ""
+      : windows
+        // Label resolution comes from the window's own width, never from a frequency constant.
+        .map((w) => `Capture window${w.deviceId ? ` on ${w.deviceId}` : ""}: ${fmtEdges(w.loHz, w.hiHz)} MHz`)
+        .join("\n");
 
     const offer = s.live.retuneOffer;
     offerBtn.hidden = !offer;
@@ -636,7 +721,12 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
 
   attachBar(track, {
     frac: (e) => ax.pointerFrac(e.clientX, track.getBoundingClientRect()),
-    onMarker: (e) => !marker.hidden && (e.target === marker || marker.contains(e.target as Node)),
+    // T-405: the view box that was the pan handle is gone, so there is nothing on this bar to grab
+    // for a pan and every press is a region select — the gesture the user kept ("drag-to-retune,
+    // transient draft only"). The pan handlers below are untouched and still reachable through
+    // `attachBar`'s contract; which gesture should drive this bar's panning is T-412/T-407's
+    // question, not this ticket's, and inventing an invisible handle here would pre-empt it.
+    onMarker: () => false,
     // Panning moves the view inside the tuned band and stops at its edges. No branch of this
     // reaches the control API, at any pan distance — that is the T-343 property, restated here.
     onPan: (df) => {
@@ -734,15 +824,32 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
   async function refreshSurvey() {
     const ext = extent();
     const key = surveyKey(ext);
-    const path = coverageRequest(ext, SURVEY_CELLS, viewWindow(store.get()));
+    const cells = surveyCellCount();
+    const path = coverageRequest(ext, cells, viewWindow(store.get()));
     if (!path) return;
-    const body = await client.get<CoverageResponse>(path).catch(() => null);
-    if (!body) return;
+    const mine = ++surveySeq;
+    // Both halves of the picture over the same extent and the same cell count, asked together: the
+    // coverage map decides grey per frequency cell, and the timeline folds the capture window onto
+    // the rows (T-397). `rows` is the timeline route's *frequency* axis, which is why it carries
+    // the cell count and `columns` carries the time rows this bar draws.
+    const band: Band | null = ext ? { loHz: ext.lo, hiHz: ext.hi } : null;
+    const [body, grid] = await Promise.all([
+      client.get<CoverageResponse>(path).catch(() => null),
+      client
+        .get<TimelineResponse>(timelineRequest(band, surveyRowCount(), Math.min(cells, MAX_FREQ_ROWS)))
+        .catch(() => null),
+    ]);
+    // An answer for a viewport the bar has already left must not repaint it.
+    if (mine !== surveySeq || !body) return;
     survey = surveyCells(body);
+    // A grid that does not answer for these cells is no grid: the strip then draws the coverage row
+    // it does have, rather than stretching another range's rows across this one.
+    tl = grid?.grid ?? null;
     surveyFor = key;
     drawSurvey();
     render();
   }
+  let surveySeq = 0;
 
   store.select((s) => s.navGrid, render, { immediate: true });
   store.select((s) => s.live.view, render);
@@ -820,6 +927,24 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
 
   const rowsOnScreen = () => Math.max(1, Math.round(track.clientHeight || 256));
 
+  /**
+   * The grid this bar asks for: **one cell per pixel of the bar, on both axes** (T-411).
+   *
+   * It asked for a fixed 160 × 6 — six frequency cells, chosen when the bar was a ~12 px track.
+   * The bar is now 80 px wide, so CSS stretched six cells across it and the "compressed history
+   * waterfall" became thirteen-pixel blocks of colour. Nothing was wrong with the data; the buffer
+   * was a thirteenth of the picture. Asking for the cells is the fix — the backend folds the
+   * pyramid onto whatever grid it is given and replicates where its own tier is coarser, which is
+   * the direction that repeats a measured value instead of inventing one between two.
+   *
+   * `columns` is the timeline route's **time** axis (the long one, running down this bar) and
+   * `rows` its **frequency** axis (across its width).
+   */
+  const gridRequest = () => ({
+    columns: stripCells(track.clientHeight, MAX_TIME_COLUMNS),
+    rows: stripCells(track.clientWidth, MAX_FREQ_ROWS),
+  });
+
   const renderOverview = (grid: OverviewResponse | null) => {
     const c = canvas.getContext("2d");
     if (!c) return;
@@ -832,21 +957,11 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
     canvas.width = grid.nf;
     canvas.height = grid.nt;
     const img = c.createImageData(grid.nf, grid.nt);
-    for (let t = 0; t < grid.nt; t++) {
-      for (let f = 0; f < grid.nf; f++) {
-        const v = overviewShade(grid, t * grid.nf + f);
-        const p = (t * grid.nf + f) * 4;
-        if (v === null) {
-          // Not observed: grey, never the colour scale's low end — a gap is not a quiet band.
-          img.data[p] = img.data[p + 1] = img.data[p + 2] = 110;
-          img.data[p + 3] = 70;
-        } else {
-          img.data[p] = Math.round(20 + 40 * v);
-          img.data[p + 1] = Math.round(120 + 110 * v);
-          img.data[p + 2] = Math.round(130 + 90 * v);
-          img.data[p + 3] = Math.round(70 + 185 * v);
-        }
-      }
+    for (let i = 0; i < grid.nt * grid.nf; i++) {
+      // A cell nothing was folded into is `null` here — never observed over this bar's own window,
+      // so grey, and never the ramp's low end. Everything else goes through the waterfall's ramp
+      // against the range the backend measured for the grid (T-397).
+      paintCell(img.data, i * 4, overviewShade(grid, i), false);
     }
     c.putImageData(img, 0, 0);
   };
@@ -960,7 +1075,8 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
   const fetchOverview = async () => {
     const band = selectedBand();
     const mine = ++seq;
-    const tl = await client.get<TimelineResponse>(timelineRequest(band, TIME_COLUMNS, TIME_ROWS)).catch(() => null);
+    const { columns, rows } = gridRequest();
+    const tl = await client.get<TimelineResponse>(timelineRequest(band, columns, rows)).catch(() => null);
     if (mine !== seq) return;
     win = captureWindow(tl);
     drawn = tl?.grid ? band : null;

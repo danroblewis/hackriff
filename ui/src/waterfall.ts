@@ -27,6 +27,7 @@
 // position now, so there is nothing to fall out of step (ui/src/timebox.ts).
 
 import { rowsBackAt } from "./axis";
+import { CMAP_GLSL } from "./cmap";
 import { boxAt, placeTimeBoxes, type TimeBox } from "./timebox";
 
 const ROWS = 512;
@@ -69,11 +70,10 @@ export function decimateRow(db: Float32Array, texW: number): Float32Array {
 const VS_FULL = `#version 300 es
 out vec2 vUv;
 void main(){ vec2 p = vec2((gl_VertexID<<1)&2, gl_VertexID&2); vUv = p; gl_Position = vec4(p*2.0-1.0,0,1); }`;
-const CMAP = `
-vec3 cmap(float x){ x = clamp(x,0.0,1.0);
-  vec3 c0=vec3(0.0,0.0,0.04), c1=vec3(0.05,0.1,0.55), c2=vec3(0.0,0.7,0.9), c3=vec3(0.95,0.9,0.1), c4=vec3(0.95,0.2,0.05), c5=vec3(1.0);
-  if(x<0.2) return mix(c0,c1,x/0.2); if(x<0.45) return mix(c1,c2,(x-0.2)/0.25);
-  if(x<0.7) return mix(c2,c3,(x-0.45)/0.25); if(x<0.9) return mix(c3,c4,(x-0.7)/0.2); return mix(c4,c5,(x-0.9)/0.1); }`;
+// T-397: the ramp is generated from `ui/src/cmap.ts`'s stops, the same array the two edge
+// navigators' 2D-canvas strips read through `cmapBytes`. It used to be written out here and nowhere
+// else, so the strips grew a second ramp that disagreed with this one.
+const CMAP = CMAP_GLSL;
 // Texels [x0, x0+n) under a pixel centred at u that spans pxU of the band (axis.ts poolWindow).
 const POOL = `
 ivec2 poolWin(float u, float pxU, int w){ float fw = float(w); float a = (u-0.5*pxU)*fw, b = (u+0.5*pxU)*fw;

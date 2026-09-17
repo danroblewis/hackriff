@@ -155,6 +155,59 @@ export function litSegments(ws: readonly ActiveWindow[], ext: Range | null): Lit
   return out;
 }
 
+/**
+ * The gaps **between** the reported active windows, as placements on `ext` (T-405).
+ *
+ * The user removed the frequency navigator's persistent view box: *"I rarely slide the view within
+ * the tuned range — shade the inactive regions slightly darker instead, so the normal-coloured
+ * region IS the current tuned window."* So the bar no longer draws a rectangle saying "here is the
+ * window"; it dims everywhere the radio is **not** looking, and what is left at full strength is
+ * the window, in the only place it could be.
+ *
+ * This is the exact complement of [[litSegments]] over the same extent, computed from the same
+ * reported windows: with none reported the whole bar is one dim span (nothing is being captured
+ * anywhere on it, which is the honest picture), and with the whole extent covered there is no dim
+ * span at all. Overlapping windows merge, so two front ends on adjacent ranges leave no seam.
+ */
+export function dimSegments(ws: readonly ActiveWindow[], ext: Range | null): Placement[] {
+  if (!finiteRange(ext)) return [];
+  // The lit spans as fractions of the bar, merged. Taken from `placeOn` so a window too narrow to
+  // draw still clears a visible span of dimming — the lit and the dim halves agree by construction.
+  const lit = litSegments(ws, ext)
+    .map((s) => [s.startPct, s.startPct + s.sizePct] as const)
+    .sort((a, b) => a[0] - b[0]);
+  const out: Placement[] = [];
+  let at = 0;
+  for (const [a, b] of lit) {
+    if (a > at) out.push({ startPct: at, sizePct: a - at });
+    at = Math.max(at, b);
+  }
+  if (at < 100) out.push({ startPct: at, sizePct: 100 - at });
+  return out.filter((p) => p.sizePct > 0);
+}
+
+/**
+ * The render buffer a navigator strip asks the backend to fold onto: **one cell per pixel of the
+ * bar**, along each axis, clamped to `max` (T-397, T-411).
+ *
+ * The bug this closes: both strips asked for a buffer sized by a constant chosen when the bars were
+ * ~12 px thin — six frequency cells for the time bar, a single row for the frequency bar. The bars
+ * were then widened, and CSS stretched those few cells across the new width. The time bar became
+ * blocks of colour with no resemblance to a waterfall, and the frequency bar became one spectrum
+ * smeared vertically. **Upsampling in the client is what made it blocky, so the fix is to ask for
+ * the cells rather than to invent them**: the backend folds the pyramid onto whatever grid is asked
+ * for, and where its own cells are coarser it replicates them there (T-334's safe direction) with
+ * `resolution` saying so.
+ *
+ * `px` is a CSS pixel count; a bar with no layout yet (0 px, before first paint) falls back to
+ * `max`, because asking for one cell would bake the blockiness back in.
+ */
+export function stripCells(px: number, max: number): number {
+  const cap = Math.max(1, Math.floor(max));
+  if (!Number.isFinite(px) || px <= 0) return cap;
+  return Math.min(cap, Math.max(1, Math.round(px)));
+}
+
 /** The value at fraction `f` (0 = `lo`) of an extent; clamped into it. */
 export function valueAt(ext: Range, f: number): number {
   const x = Math.min(1, Math.max(0, Number.isFinite(f) ? f : 0));
