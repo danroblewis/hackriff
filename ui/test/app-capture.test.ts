@@ -251,6 +251,47 @@ test("the band's span has no default: nothing can fall back to a constant window
   assert.doesNotMatch(src.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, ""), /48\s*\*\s*3600/);
 });
 
+// ---- T-342: the client measures nothing about the band ------------------------------------
+//
+// `reduceActivity` took a max over EVERY frequency cell of the history response and normalised the
+// result against that response's own range: two measurements — which value represents a band, and
+// what scale to read it on — made in `ui/src` with no knowledge of floors, occupancy or coverage.
+// Both now come from the backend (`GET /api/timeline`, `grid.max_db` at `rows=1` with
+// `grid.range_db` and `grid.semantics`). These guard the shape of that split, because the failure
+// is invisible: a re-introduced reduction renders plausibly and lies only by comparison.
+
+test("T-342: the band's values are the backend's — no fold, no normalisation, no scale of its own", () => {
+  const src = readFileSync("src/app/capture/timeline.ts", "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  // The reduction itself, and the two shapes it would come back as.
+  assert.doesNotMatch(src, /reduceActivity/, "the client-side fold is gone, not renamed");
+  assert.doesNotMatch(src, /Math\.max\(\s*\.\.\./, "a max over served values is a measurement");
+  assert.doesNotMatch(src, /Math\.min\(\s*\.\.\./, "and so is a min over them");
+  assert.doesNotMatch(src, /\.reduce\(/, "no reduction over a served array");
+  // The one division that remains is against the range the SERVER measured, and it is the only
+  // place `range_db` is read: a scale derived from anything else would be the client's own.
+  const shade = src.slice(src.indexOf("export function overviewShade"));
+  assert.match(shade, /const r = grid\.range_db/);
+  assert.match(shade, /\(v - r\.lo\) \/ span/, "the shade is served-range arithmetic, nothing more");
+  assert.ok(
+    (src.match(/range_db/g) ?? []).length === (shade.match(/range_db/g) ?? []).length + 1,
+    "range_db is read only by overviewShade (plus its own type declaration)",
+  );
+});
+
+test("T-342 THE CONTROL: an unobserved cell shades as unknown, never as the bottom of the scale", () => {
+  // The honesty half, and the one a re-introduced normalisation would break first: `null` is *not
+  // observed*, which is a different answer from *observed and at the floor*. The two must not
+  // produce the same shade, or a never-sampled band renders as a measured quiet one.
+  const range = { lo: -120, hi: -40 };
+  const quiet = overviewShade({ nt: 2, nf: 1, max_db: [-120, null], range_db: range }, 0);
+  const never = overviewShade({ nt: 2, nf: 1, max_db: [-120, null], range_db: range }, 1);
+  assert.equal(quiet, 0, "observed at the floor is a measurement, and it is the bottom of the ramp");
+  assert.equal(never, null, "never observed has no shade at all");
+  assert.notEqual(quiet, never);
+});
+
 // ---- T-386: the band's CONTENT is tagged with the band it answers about --------------------
 //
 // The panel polls once a minute and used to read the frequency span *inside* that poll, so a

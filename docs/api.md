@@ -414,10 +414,11 @@ Backend replacement for client-side peak-picking over a locally held spectrum ro
 ```jsonc
 { "found": true, "f_center_hz": 101300000.0, "f_lo_hz": 101200000.0, "f_hi_hz": 101400000.0, "max_db": -71.2,
   "t_start_s": 1789300812.0, "t_end_s": 1789300813.0, "duration_s": 1.0, "t_cell_s": 1.0,
-  "window": { "t0_s": 1789300810.0, "t1_s": 1789300815.0 } }
+  "window": { "t0_s": 1789300810.0, "t1_s": 1789300815.0 },
+  "semantics": { "statistic": "max-hold", "scale": "dbfs-per-hz", "rule": "max-hold: … the max of nothing is unobserved, not zero" } }
 ```
 
-or `{"found": false, "window": {…}}` when nothing was observed in the window. Unlike a live FFT row, spectrum-history cells carry no per-bin skirt to fit a box to, so the reported box is a fixed **±100 kHz** around the strongest cell's centre, clamped to `[f_lo, f_hi)` — not a measured signal bandwidth. `400` when `f_hi <= f_lo`, `f_lo`/`f_hi` are out of range, or `window_s` is not a finite number in `(0, 300]`.
+or `{"found": false, "window": {…}}` when nothing was observed in the window. `semantics` (T-342) states on the wire what the docs above say in prose — that `max_db` is a **max-hold**, and the scale it is in (`"dbfs-per-hz"` uncalibrated, `"dbm-per-hz"` at the antenna port) — so a consumer never has to infer either. It is the same statement the band-collapsed series on [`/api/timeline`](#the-band-collapsed-series-and-why-the-response-states-its-own-semantics-t-342) carries, which is what makes the two routes siblings rather than two different ideas of "strongest". Unlike a live FFT row, spectrum-history cells carry no per-bin skirt to fit a box to, so the reported box is a fixed **±100 kHz** around the strongest cell's centre, clamped to `[f_lo, f_hi)` — not a measured signal bandwidth. `400` when `f_hi <= f_lo`, `f_lo`/`f_hi` are out of range, or `window_s` is not a finite number in `(0, 300]`.
 
 **Time on the answer (T-337).** This route hands the UI a *box*, and a box has a time as much as a frequency ([One shared time axis](#one-shared-time-axis-t-337) below), so it carries one:
 
@@ -527,7 +528,14 @@ The asymmetry is deliberate and it is the route's shape: **the window is the ser
             "max_db": [ -102.4, null, "…" ], "occupancy_max": [ 0.5, null, "…" ],
             "coverage": [ 1.0, 0.0, "…" ], "frames": [ 25, 0, "…" ],
             "cells": 384, "observed_cells": 96,
-            "range_db": { "lo": -138.2, "hi": -91.0 } },
+            "range_db": { "lo": -138.2, "hi": -91.0 }, "unit": "dbfs",
+            "semantics": { "fold": "max-hold", "rule": "max-hold: a cell is the maximum of the source cells folded into it, … the max of nothing is unobserved, not zero",
+                           "unobserved_rule": "… null is never observed, never quiet, and is not the bottom of the scale",
+                           "series": { "max_db": { "statistic": "max-hold", "scale": "dbfs-per-hz", "unobserved": "null" },
+                                       "occupancy_max": { "statistic": "max", "scale": "fraction", "unobserved": "null" },
+                                       "coverage": { "statistic": "mean", "scale": "fraction", "unobserved": "0" },
+                                       "frames": { "statistic": "sum", "scale": "count", "unobserved": "0" } },
+                           "range_db": "the observed minimum and maximum of `max_db` over this grid, …" } },
   "resolution": { "source": "spectrum-history", "live": false, "statement": "…",
                   "horizon": "iq-ring",
                   "served_span_hz": 2400000.0, "max_live_span_hz": 20000000.0,
@@ -537,6 +545,9 @@ The asymmetry is deliberate and it is the route's shape: **the window is the ser
                   "requested": { "columns": 96, "rows": 4 },
                   "served": { "nt": 96, "nf": 4, "cells": 384 },
                   "reduced_from": { "nt": 120, "nf": 384 },
+                  "budget": { "time": { "requested": 96, "served": 96, "source_cells": 120, "replicated": false },
+                              "frequency": { "requested": 4, "served": 4, "source_cells": 384, "replicated": false },
+                              "statement": "the served grid is exactly the budget asked for: … the window is never truncated to fit it. …" },
                   "matched": true, "over_resolved": [] }
 }
 ```
@@ -565,6 +576,21 @@ So the tier is chosen from the **time** axis — the coarsest tier whose cells a
 **Only statistics that fold exactly are carried.** The max of max-holds *is* the max-hold; the max of `occupancy_max` is the peak occupancy; `frames` sum; `coverage` is a mean over source cells of equal duration, i.e. the output cell's observed fraction. A percentile (`p_low_db`, `floor_db`) cannot be folded from cell values at all, so it is **not offered** rather than approximated. `range_db` is the grid's own observed range of `max_db` — picking a colour scale from whatever numbers you happen to hold is a measurement too — and is `null` when nothing was observed.
 
 `null` in `max_db`/`occupancy_max` is **not observed**, never quiet (C26). `observed_cells` counts the cells something was folded into.
+
+#### The band-collapsed series, and why the response states its own semantics (T-342)
+
+`rows=1` (the default) is the **band-collapsed activity-vs-time series**: one value per time step over a whole region. It is the sibling of [`/api/analysis/strongest`](#get-apianalysisstrongest--strongest-signal-in-a-band-t-079) — "strongest in a band", kept server-side — laid out along a time axis the way [`/api/floor`](#get-apifloor--calibrated-floor-vs-time-t-021-space-050)'s `max_steps` lays out a floor track. The pyramid cannot serve it directly at any level: its coarsest **frequency** cell is 100 kHz, so no `max_f` collapses a MHz-wide band into one column. The fold does, and it is the same fold transposed that gives `/api/coverage` its survey-strip shade (`nt = 1`: one max-hold per frequency cell over the whole window).
+
+It is served with its semantics **on the wire**, in `grid.semantics`, because a number whose statistic and scale are unstated is one a consumer will re-derive or misread — which is exactly how this measurement came to live in `ui/src` in the first place, as a max over every frequency cell normalised against the response's own range.
+
+| Field | Says |
+|---|---|
+| `semantics.fold` / `semantics.rule` | The statistic — **max-hold** — and both its consequences: folding further never lowers a value (so a brief emission survives the collapse), and **the max of nothing is unobserved, not zero** |
+| `semantics.series.<name>` | Per series, since they are not all max-holds: `statistic` (`max-hold`, `max`, `mean`, `sum`), `scale`, and what an unobserved cell reads as |
+| `semantics.unobserved_rule` | That `null` is *never observed*, never *quiet*, and **not the bottom of the scale** |
+| `grid.unit` / `series.*.scale` | The scale of `max_db`/`range_db`, carried from the source grid rather than assumed: `"dbfs"` (uncalibrated, relative to ADC full scale) or `"dbm"` (at the antenna port), densities per Hz — `"dbfs-per-hz"` / `"dbm-per-hz"` spelled out in `scale` |
+
+**The budget is honoured exactly, and `resolution.budget` says what became of it.** `columns` is a *time-axis* budget, the same idea as `/api/floor`'s `max_steps` and not a page size: asking for more columns than the window has source cells never truncates the window. Per axis, `requested`, `served` (always equal — the fold lays the grid on the window itself), `source_cells`, and `replicated`, which is `true` when there were fewer source cells than cells asked for and one measured value therefore **repeats** across the extras — T-334's safe direction, so a neighbouring pair of equal values can be told from two measurements that agreed.
 
 #### The detail claim
 
@@ -612,9 +638,15 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
     { "kind": "iq-ring",         "spans": 37, "named_spans": 37, "device_known": true, "available": true },
     { "kind": "observation-log", "spans": 12, "named_spans": 12, "device_known": true, "available": true }
   ],
+  "shade": { "fold": "max-hold", "rule": "max-hold: a cell is the maximum of the source cells folded into it, … the max of nothing is unobserved, not zero",
+             "statistic": "max-hold over the whole window, per frequency cell",
+             "scale": "dbfs-per-hz", "range_db": { "lo": -138.2, "hi": -91.0 },
+             "normalisation": "0 at `range_db.lo`, 1 at `range_db.hi`, linear in dB and clamped",
+             "unobserved": "an unobserved cell carries no `shade` key: the max of nothing is unknown, not zero, …" },
   "resolution": { "source": "survey-overview", "live": false, "statement": "…",
                   "served_span_hz": 20000000.0, "max_live_span_hz": 20000000.0,
-                  "grey_rule": "grey a cell if and only if its state is \"unobserved\"" }
+                  "grey_rule": "grey a cell if and only if its state is \"unobserved\"",
+                  "shade_rule": "shade is the max-hold over the window, normalised over `shade.range_db`; it never decides observed-versus-unobserved" }
 }
 ```
 
@@ -629,6 +661,10 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
 The pair that gets collapsed is 2 and 3, and collapsing them is how a view comes to report "nothing here" about spectrum nothing ever looked at. So an unobserved cell carries **no `shade`, no `duty`, no `observed_s`** — not `null` ones. That is stronger than a nullable number, because there is no field a client can read as zero: the absence is structural. It is the same rule as `bias_tee: "unknown"` ≠ `"off"` — **nothing said is never permissive** — and it holds in the type as well as the JSON: `hk_store::coverage::Sampled::new` refuses to mint an observation out of a zero span count or a zero sampled duration, and hands back `Coverage::Unobserved` instead.
 
 `shade: null` on an **observed** cell is a different thing again: sampled, but the spectrum history keeps no level for it. A client draws that differently from grey and differently from the bottom of the ramp. **Grey is `state == "unobserved"` and nothing else**, which is what `resolution.grey_rule` says in the response.
+
+#### What a `shade` is, and against what (T-342)
+
+A 0–1 number normalised against a range the response never named is a measurement a consumer cannot check, match or reproduce — and a strip drawn on one scale beside a waterfall drawn on another makes the same energy read as two different strengths on one screen. So the `shade` block states the whole of it: the fold (**max-hold over the window**, one value per frequency cell — the same fold [`/api/timeline`](#the-band-collapsed-series-and-why-the-response-states-its-own-semantics-t-342) applies along the other axis, via the same `hk_store::RegionHistory::overview`), the `scale` and `range_db` the ratio is relative to, the `normalisation` itself, and the constraint that matters most here: **max-hold must not turn an unobserved cell into an observed one.** An unobserved cell carries no `shade` key at all — the max of nothing is unknown, not zero, and not the bottom of the ramp.
 
 #### Device-local, never unioned
 

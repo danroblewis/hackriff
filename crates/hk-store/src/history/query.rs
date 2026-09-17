@@ -244,6 +244,12 @@ impl OverviewCell {
 /// for: the timeline that draws it spans the capture window and nothing else.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Overview {
+    /// Unit of `max_db` and `range_db` — the source grid's, carried rather than re-derived (T-342).
+    ///
+    /// A folded value whose scale is not carried alongside it is a number a consumer has to guess
+    /// the meaning of, and "max-hold **and** the scale, stated" is the whole point of serving the
+    /// fold from here instead of reducing in the client. Densities per Hz, as in [`RegionHistory`].
+    pub unit: PowerUnit,
     /// Time cells.
     pub nt: usize,
     /// Frequency cells.
@@ -353,6 +359,17 @@ impl RegionHistory {
     /// fraction of the output cell. Nothing is invented: a percentile (`p_low_db`, `floor_db`)
     /// cannot be folded from cell values at all, so it is not offered rather than approximated.
     ///
+    /// **The fold is band-collapsing on both axes, and it is the same fold either way** (T-342).
+    /// `nf = 1` collapses a whole band to one activity-vs-time column per time step — the series
+    /// the client used to reduce for itself — and `nt = 1` collapses a whole window to one
+    /// max-hold per frequency cell, which is the survey strip's column. Neither can be had from
+    /// the pyramid alone (its coarsest frequency cell is 100 kHz, so no level collapses a
+    /// MHz-wide band to one value), and both must be honest about the same thing: **the max of
+    /// nothing is unobserved, not zero.** [`OverviewCell::UNOBSERVED`] is the only cell an empty
+    /// fold can produce, its `max_db` is `NaN` rather than a floor, and `sources == 0` is the
+    /// structural difference between *never looked* and *looked and it was quiet* — the same
+    /// distinction [`crate::Coverage::of`] refuses to let be spelled away.
+    ///
     /// The output grid is laid on `window`/`freq`, not on the source's outward-snapped grid: output
     /// cell `(t, f)` covers `[window.start + t·Δt, …)` × `[freq.lo_hz + f·Δf, …)` and takes every
     /// source cell that **overlaps** it. A source cell coarser than an output cell therefore
@@ -418,6 +435,7 @@ impl RegionHistory {
             hi_db = hi_db.max(c.max_db);
         }
         Overview {
+            unit: self.unit,
             nt,
             nf,
             t0_ns,
