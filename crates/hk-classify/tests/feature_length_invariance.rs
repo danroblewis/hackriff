@@ -42,6 +42,28 @@
 //! leaves the segment count moving, which only matters for the features that are order statistics
 //! rather than sums.
 //!
+//! # T-311 did the same for the four `blind_*` scores, and the exemption stayed
+//!
+//! Because the answer was **both**. T-281 read them as a lock/no-lock transition; measured with the
+//! preamble off, three of the four quantities underneath turned out to be MAXIMA compared against
+//! fixed thresholds — the carrier-line coherence over `n` bins, `periodicity` over 8 lags,
+//! `fisher_j` over 8 phases and 4 candidate rates — so their NULLS moved with the record and a
+//! threshold sharper than its own statistic read sampling noise as a ×10 jump. Those were fixed at
+//! source (`hk_estimate::blind`: the coherence bias-corrected, every veto ramped across its own 3σ,
+//! the OOK/FSK competition made continuous). The one condition that genuinely *is* binary — too few
+//! members in the smaller IF cluster for the Fisher ratio's denominator to exist — now makes the
+//! score **absent**, which is T-297's rule.
+//!
+//! What that fixed is the half the defect was reported on: **a class's own family score**, now flat
+//! across the ladder and asserted by [`a_classs_own_family_score_survives_truncation`]. What it did
+//! not fix, and cannot, is the half a class reads for a family it is *not* — a detector's response
+//! to a signal it was not built for. So all four stay in [`OBSERVATION_STATISTICS`], with entries
+//! that now say which half is which and give the measurement for each. **An exemption with a
+//! narrower guard beside it says more than either alone**, and it is the honest shape here: taking
+//! the names off would have required a tolerance wide enough to pass `qam16`'s `blind_qpsk` moving
+//! 0.9 → 0.18, which is a rubber stamp, and leaving them off with no assertion would have let the
+//! exemption cover the very case T-281 measured.
+//!
 //! Three of the seven — `cp_corr`, `if_slope_r2` and `carrier_line_db` — have a **null** that moved
 //! rather than a value, and on a single waveform a moving null can hide inside the estimator's own
 //! spread at the short end. `features::tests::the_null_levels_do_not_move_with_the_record` asserts
@@ -193,36 +215,59 @@ const OBSERVATION_STATISTICS: &[(&str, &str)] = &[
          its own task (T-311).",
     ),
     (
-        "blind_ook",
-        "C14's own family score. It moves DISCONTINUOUSLY with the window because the line C14 \
-         locks on changes once the record is long enough: one 2-FSK burst reads blind_fsk 0.10 at \
-         N/8, 0.44 at N/4 and 1.00 at N/2 and N (T-281, reproduced across seeds). T-311.",
-    ),
-    (
-        "blind_fsk",
-        "as blind_ook - C14's own family score, and the one the discontinuity was measured on: \
-         0.10 at N/8, 0.44 at N/4, 1.00 at N/2 and N for a single 2-FSK burst, because the cyclic \
-         line C14 locks on changes once the record is long enough. T-311.",
-    ),
-    (
-        "blind_bpsk",
-        "as blind_ook - a C14 family score, moving with the observation window because the line \
-         it is computed from does. Not separable from cyclic_db's dependence: same estimate, \
-         different projection of it. T-311.",
-    ),
-    (
-        "blind_qpsk",
-        "as blind_ook - a C14 family score, moving with the observation window because the line \
-         it is computed from does. Not separable from cyclic_db's dependence: same estimate, \
-         different projection of it. T-311.",
-    ),
-    (
         "obw_over_rs",
         "OBW99 divided by C14's symbol-rate estimate. OBW and the true Rs are both properties of \
          the emission, but the DENOMINATOR is C14's estimate, which inherits the window \
          dependence of `cyclic_db` above - when the winning line changes, Rs jumps by an integer \
          factor. Exempt as a C14 statistic, not as a feature defect: the fix is T-311's, and this \
          entry is here so that fixing it makes an exemption disappear from a diff.",
+    ),
+    (
+        "blind_ook",
+        "C14's OOK family score. NOT a defect of length any more, and the measurement says which \
+         half is which: where a class BELONGS to the family the score is now flat across the \
+         ladder (`ook` and `cw` read 1.00 at N, N/2, N/4 and N/8 on every dev seed, where `cw` \
+         used to fall to 0.00 at N/8 off nine keyings), because T-311 gave every veto a transition \
+         as wide as its own statistic's 3-sigma and made the score ABSENT below \
+         MIN_ENVELOPE_TRANSITIONS instead of a fabricated 0. What remains is the score a class \
+         reads for a family it is NOT - a detector's response to a signal it was not built for, \
+         which nothing entitles to be stable. Measured: `ppm` reads 1.00 over its full record and \
+         0.20 over its last quarter, because its off-level sits at 1.7 noise sigmas over the whole \
+         record and 3.7 over a quarter of it. PPM is framed with inter-frame gaps, so a prefix is \
+         a different on/off MIXTURE - the same confound as the packet preamble T-404 removed, \
+         except that here it is the emission rather than a synth artefact.",
+    ),
+    (
+        "blind_fsk",
+        "C14's FSK family score - the one T-281 measured the discontinuity on, at 0.10 / 0.44 / \
+         1.00 / 1.00 over N/8..N of one 2-FSK burst. That ladder does NOT reproduce once the \
+         packet preamble is off (T-404): `fsk2`, `gfsk` and `msk` read exactly 1.00 at all four \
+         rungs on every dev seed, and `fsk4` 0.82-0.93. T-311 found the real mechanism elsewhere - \
+         three of the quantities underneath are MAXIMA whose null moves with the record, each \
+         compared against a threshold that did not - and fixed it at source. What remains is \
+         off-family, as blind_ook: `ppm` at 1.0-1.2x tolerance, from the same frame/gap mixture.",
+    ),
+    (
+        "blind_bpsk",
+        "C14's BPSK family score. `bpsk` itself now reads 1.00 at all four rungs on every dev \
+         seed. Off-family it still moves: `msk` and `ssb` read 0.01-0.06 over the full record and \
+         0.15-0.20 over a half or an eighth of it. The x-squared coherence's maximum-over-bins \
+         null is now subtracted in power (T-311) so the null is 0 at every length; what is left is \
+         the x-squared line a signal of another family genuinely carries, which depends on which \
+         symbols were sent and so on which part of the record was seen. Confirmed not to be the \
+         null: estimating the continuum by the periodogram's own median rather than its mean power \
+         - a strictly better null for a shaped spectrum - changes the failure count by one \
+         comparison in 3446.",
+    ),
+    (
+        "blind_qpsk",
+        "C14's QPSK family score, and the one with the most off-family movement: `qpsk` reads 1.00 \
+         at all four rungs, while `qam16` and `qam64` move 0.9 -> 0.18 across the ladder. MEASURED \
+         to be the emission and not the estimator: a QAM's x-to-the-fourth line is a property of \
+         the symbol SEQUENCE, its coherence moves 0.33 -> 0.28 between the full record and an \
+         eighth of it - about four times the null's own spread - and the 0.2-wide ramp above the \
+         0.2 onset turns that into most of the unit interval. Widening the ramp to the \
+         coherence's own 3-sigma changes nothing, because the ramp is already wider than it.",
     ),
 ];
 
@@ -272,6 +317,21 @@ enum Looks {
     /// [`SAMPLES_PER_LOOK`]. These are the aggregators whose error falls with how many *windows*
     /// there were, not with how many samples.
     LocalWindows,
+    /// Members of the **smaller** of the two instantaneous-frequency clusters C14's FSK evidence is
+    /// formed over — the count the Fisher ratio's denominator, the occupancy, the separation and
+    /// the periodicity are every one of them estimated from.
+    ///
+    /// That count is a property of the emission's symbol rate and keying balance, neither of which
+    /// this file knows, so the tolerance uses the floor **the estimator itself enforces**
+    /// ([`hk_estimate::blind::family::MIN_CLUSTER_MEMBERS`], below which C14 refuses the candidate
+    /// and the feature is absent rather than low). Using the enforced floor rather than the actual
+    /// count is the [`MIN_SHAPE_BINS`] precedent: it keeps the tolerance from depending on the
+    /// waveform, and it is the conservative end, because every rung that reports at all held at
+    /// least that many.
+    MinorityCluster,
+    /// Envelope level changes C14's OOK evidence is formed over, bounded the same way and for the
+    /// same reason by [`hk_estimate::blind::MIN_ENVELOPE_TRANSITIONS`].
+    EnvelopeTransitions,
 }
 
 struct Rule {
@@ -548,6 +608,12 @@ impl Rule {
                 let windows = (n as f64 * duty * duty / IF_LOCAL_WINDOW as f64).max(1.0);
                 scale * self.k / windows.sqrt()
             }
+            Looks::MinorityCluster => {
+                scale * self.k / hk_estimate::blind::family::MIN_CLUSTER_MEMBERS.sqrt()
+            }
+            Looks::EnvelopeTransitions => {
+                scale * self.k / (hk_estimate::blind::MIN_ENVELOPE_TRANSITIONS as f64).sqrt()
+            }
             Looks::SpectralKurtosis => {
                 let m = segments(n).max(2.0) as u32;
                 // Two named corrections on top of the Gaussian-noise formula, both from what the
@@ -693,6 +759,173 @@ fn signal_features_survive_truncation_of_one_waveform() {
          in which case fix it, or name it in OBSERVATION_STATISTICS with what it is a statistic \
          of - or the tolerance's derivation is wrong. Do NOT widen a tolerance to the number it \
          happens to need.\n\n{}",
+        failures.len(),
+        failures.join("\n\n"),
+    );
+}
+
+/// The family a class **belongs to** scores the same however long it is watched (T-311).
+///
+/// [`OBSERVATION_STATISTICS`] exempts the four `blind_*` scores from the comparison above, and its
+/// entries say which half of them the exemption is for: off-family, where a class reads a score for
+/// a family it is not, they are a detector's response to a signal it was not built for and nothing
+/// entitles them to be stable. **That exemption must not be allowed to cover the case the defect
+/// was reported on** — T-281 measured one 2-FSK burst's own `blind_fsk` going 0.10 / 0.44 / 1.00 /
+/// 1.00 across the ladder. So this asserts that case directly, and it is why removing four names
+/// from the exempt list would have been the *weaker* result: an exemption with a narrower guard
+/// beside it says more than either alone.
+///
+/// Same waveform, same truncation, same derived tolerances as [`RULES`] — only the pairs are
+/// narrowed to the family each class is a member of.
+const SIGNATURE_FAMILIES: &[(Class, &str)] = &[
+    (Class::Ook, "blind_ook"),
+    (Class::Cw, "blind_ook"),
+    (Class::Fsk2, "blind_fsk"),
+    (Class::Gfsk, "blind_fsk"),
+    (Class::Msk, "blind_fsk"),
+    (Class::Fsk4, "blind_fsk"),
+    (Class::Bpsk, "blind_bpsk"),
+    (Class::Qpsk, "blind_qpsk"),
+];
+
+/// Tolerances for [`SIGNATURE_FAMILIES`], derived exactly as [`RULES`]'s are.
+///
+/// Each score is a **product** of gated factors, and relative errors add in quadrature, so a
+/// product of `F` comparably-noisy factors carries `sqrt(F)` times one factor's 3σ — the count is
+/// read off `hk_estimate::blind`'s scoring, not chosen. The scale is 0.5, the gap between a score
+/// that says "this family" and one that says "some other family", which is what these dimensions
+/// exist to resolve. The look counts are the floors **the estimator itself enforces** below which
+/// the feature is absent, which is the [`MIN_SHAPE_BINS`] precedent: conservative, and independent
+/// of the waveform.
+const SIGNATURE_RULES: &[Rule] = &[
+    Rule {
+        feature: "blind_ook",
+        basis: Basis::Abs(0.5),
+        looks: Looks::EnvelopeTransitions,
+        // product_of(3): an envelope-contrast ramp, the off-level veto, the FSK competition.
+        k: 2.598,
+        why: "C14's OOK evidence for a class that IS OOK-keyed. Three gated factors over the \
+              MIN_ENVELOPE_TRANSITIONS floor - a contrast between two envelope levels cannot be \
+              measured with fewer keyings, and below it the feature is absent rather than a \
+              fabricated 0 (T-311).",
+    },
+    Rule {
+        feature: "blind_fsk",
+        basis: Basis::Abs(0.5),
+        looks: Looks::MinorityCluster,
+        // product_of(7): the Fisher ramp, occupancy, separation, valley, periodicity, envelope
+        // CV, and the OOK competition.
+        k: 3.969,
+        why: "C14's FSK evidence for a class that IS frequency-keyed. Seven gated factors over the \
+              smaller of the two IF clusters, whose MIN_CLUSTER_MEMBERS floor is where the Fisher \
+              ratio's denominator stops being a measurement and the feature goes absent (T-311).",
+    },
+    Rule {
+        feature: "blind_bpsk",
+        basis: Basis::Abs(0.5),
+        looks: Looks::Samples,
+        // product_of(3): the x² coherence ramp and its two ratio vetoes.
+        k: 2.598,
+        why: "C14's BPSK evidence for a class that IS binary-phase-keyed. Three gated factors over \
+              the whole on-record, since a carrier-line coherence is formed from all of it. The \
+              coherence is a MAXIMUM over bins, whose null falls as 1/sqrt(n) and is now \
+              subtracted in power (T-311), which is what lets it be compared across records.",
+    },
+    Rule {
+        feature: "blind_qpsk",
+        basis: Basis::Abs(0.5),
+        looks: Looks::Samples,
+        // product_of(2): the x⁴ coherence ramp and its one ratio veto.
+        k: 2.121,
+        why: "C14's QPSK evidence for a class that IS quaternary-phase-keyed. Two gated factors \
+              over the whole on-record, bias-corrected against the same maximum-over-bins null as \
+              blind_bpsk.",
+    },
+];
+
+#[test]
+fn a_classs_own_family_score_survives_truncation() {
+    let mut c14 = SymbolEstimator::default();
+    let mut failures: Vec<String> = Vec::new();
+    let mut worst: Vec<(f64, String)> = Vec::new();
+    let mut compared = 0usize;
+    for (class, feature) in SIGNATURE_FAMILIES {
+        let rule = SIGNATURE_RULES
+            .iter()
+            .find(|r| r.feature == *feature)
+            .expect("every signature family has a tolerance");
+        for seed in DEV_SEEDS.start..DEV_SEEDS.start + 3 {
+            let cfg = SynthConfig {
+                packet_preamble: false,
+                ..SynthConfig::new(SNR_DB, seed)
+            };
+            let s = generate(*class, &cfg);
+            let n_full = s.samples.len();
+            let ratio = s.symbol_sample_rate_hz / s.sample_rate_hz;
+            let measure = |c14: &mut SymbolEstimator, take: usize| {
+                let sym_take = ((take as f64 * ratio) as usize).min(s.symbol_samples.len());
+                let symbols = c14.from_samples(
+                    &s.symbol_samples[..sym_take],
+                    s.symbol_sample_rate_hz,
+                    Some(s.obw_hz),
+                    Some(SNR_DB),
+                );
+                features(&FeatureInput {
+                    samples: &s.samples[..take],
+                    sample_rate_hz: s.sample_rate_hz,
+                    obw_hz: Some(s.obw_hz),
+                    snr_db: Some(SNR_DB),
+                    symbols: symbols.as_ref(),
+                })
+            };
+            let reference = measure(&mut c14, n_full);
+            let duty = reference.get("duty").unwrap_or(1.0).clamp(0.05, 1.0);
+            let Some(a) = reference.get(feature) else {
+                continue;
+            };
+            for div in PREFIX_DIVISORS {
+                let take = n_full / div;
+                if take < MIN_SAMPLES {
+                    continue;
+                }
+                // An abstention is the honest answer, never a failure: below the estimator's own
+                // floors the feature is ABSENT, which is the whole point of T-311.
+                let Some(b) = measure(&mut c14, take).get(feature) else {
+                    continue;
+                };
+                compared += 1;
+                let moved = (b - a).abs();
+                let tol = rule.tolerance(take, a, duty);
+                worst.push((
+                    moved / tol.max(f64::MIN_POSITIVE),
+                    format!("{feature} {class:?}/s{seed}/N over {div}"),
+                ));
+                if moved > tol {
+                    failures.push(format!(
+                        "{feature:<12} {class:?}/seed {seed}: N/{div} ({take} samples) reads \
+                         {b:.4} against {a:.4} over the full {n_full}; moved {moved:.4}, \
+                         tolerance {tol:.4} ({:.1}x). {}",
+                        moved / tol,
+                        rule.why,
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        compared > 40,
+        "only {compared} comparisons: the ladder collapsed"
+    );
+    worst.sort_by(|a, b| b.0.total_cmp(&a.0));
+    eprintln!("tightest own-family margins over {compared} comparisons:");
+    for (ratio, at) in worst.iter().take(8) {
+        eprintln!("  {ratio:>6.2}  {at}");
+    }
+    assert!(
+        failures.is_empty(),
+        "{} class(es) scored their OWN family differently for being watched for less time. That \
+         is the defect T-281 reported and T-311 fixed; OBSERVATION_STATISTICS covers the \
+         off-family half of these scores and must not be widened to cover this half.\n\n{}",
         failures.len(),
         failures.join("\n\n"),
     );
