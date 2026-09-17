@@ -8983,7 +8983,7 @@ tasks:
   - id: T-417
     title: A retune tears the stream down; consumers should keep receiving across it
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
