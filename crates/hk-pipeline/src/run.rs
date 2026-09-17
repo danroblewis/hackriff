@@ -672,6 +672,10 @@ struct Common {
     /// the run, not the segment: a re-plumb landing back on the same device, tune and gain is the
     /// same receiver, and re-measuring it would pay twice for an unchanged answer.
     receiver: Arc<crate::survey::ReceiverSurvey>,
+    /// T-322: the run's C36 L1 dwell service. Like the survey it lives for the run, not the
+    /// segment: the constellation overhead and the quiet in-band reference are properties of the
+    /// site and the receiver, not of a re-plumb.
+    gnss: Arc<crate::gnss::GnssDwell>,
 }
 
 impl Common {
@@ -858,6 +862,10 @@ impl Pipeline {
         let common = Common {
             iq_buffer,
             receiver: Arc::default(),
+            // T-322: the C36 L1 dwell service, configured from the plan's `extra.gnss`.
+            gnss: Arc::new(crate::gnss::GnssDwell::new(crate::gnss::gnss_config(
+                &cfg.plan,
+            )?)),
             data_dir: cfg.data_dir.clone(),
             db_path,
             survey_id: survey.id,
@@ -995,6 +1003,8 @@ fn start_segment(
     // T-127: the scheduler publishes to the API hub and serves its lease commands.
     if let Some(s) = sched.as_mut() {
         s.attach_hub(Arc::clone(&common.scheduler));
+        // T-322: C04 is asked for the recurring L1 dwell here, once the scheduler exists.
+        s.attach_gnss(Arc::clone(&common.gnss), info.start_time);
     }
     // T-115: the scheduler's observer. A source that cannot retune observes its own window.
     if let (Some(s), Some(log)) = (sched.as_mut(), &common.observations) {
@@ -1113,6 +1123,12 @@ fn start_segment(
             "hk-survey",
             Box::new(move || crate::survey::run(s, r)),
         )?);
+    }
+    {
+        // T-322: the C36 L1 dwell reader. It holds nothing until C04 grants a scheduled L1 step,
+        // so on every run whose plan does not cover L1 it reads the ring and drops it.
+        let (s, g) = (Arc::clone(&shared), Arc::clone(&common.gnss));
+        workers.push(spawn("hk-gnss", Box::new(move || crate::gnss::run(s, g)))?);
     }
     {
         let s = Arc::clone(&shared);
@@ -2030,6 +2046,12 @@ impl PipelineHandle {
     /// classifications.
     pub fn receiver_survey(&self) -> Arc<crate::survey::ReceiverSurvey> {
         Arc::clone(&self.sup.common.receiver)
+    }
+
+    /// The run's C36 L1 dwell service (T-322): what C04 granted, what acquisition found, and how
+    /// much of it reached C30.
+    pub fn gnss(&self) -> Arc<crate::gnss::GnssDwell> {
+        Arc::clone(&self.sup.common.gnss)
     }
 
     /// The newest ring sample index.

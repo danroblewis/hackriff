@@ -13,6 +13,8 @@
 //!   [`feeds::FeedFetcher`] seam and the [`feeds::gpsjam`] adapter (T-020).
 //! - [`anomaly`]: noise-floor episodes → `Anomaly(noise-floor-rise)` lifecycle (T-020).
 //! - [`correlate`]: Anomaly × cached events → ranked Explanations (T-020).
+//! - [`gnss_service`]: C36's measured GNSS-service statement reaching C30 as evidence on
+//!   blindly-opened anomalies, never as a detection (T-322, ADR-0018).
 //! - [`watch`]: the selection-scoped region watch (T-166): new activity inside a watched extent
 //!   raises an alert, unless the T-219 relationship rules say the row defers to another one.
 //! - [`geo`], [`utc`]: site/distance and UTC date helpers.
@@ -22,6 +24,7 @@ pub mod band_table;
 pub mod correlate;
 pub mod feeds;
 pub mod geo;
+pub mod gnss_service;
 pub mod known_status;
 pub mod priors;
 pub mod utc;
@@ -45,6 +48,7 @@ pub use feeds::{
     ingest_snapshot, refresh,
 };
 pub use geo::Site;
+pub use gnss_service::{GnssServiceEvidence, GnssServiceVerdict};
 pub use known_status::{PART15_FAMILIES, PriorMatch, is_service_family, match_known_status};
 pub use priors::BandPlanFamilyPriors;
 pub use watch::{
