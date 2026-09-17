@@ -6691,7 +6691,7 @@ tasks:
     milestone: M2-hardening
     title: 'A load-sensitive test is not in the heavy-serial group: decoded_capture failed once under a
       three-crate parallel run'
-    status: todo
+    status: in-progress
     priority: low
     deps: []
     parallel_group: PIPE
@@ -7674,7 +7674,7 @@ tasks:
   - id: T-383
     title: A bounded-wait plugin test fails under parallel load and is not in the heavy-serial group
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     deps: []
@@ -8670,7 +8670,7 @@ tasks:
   - id: T-409
     title: Tuning nudge buttons - move a signal off the DC spike without losing it from the band
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: UI
     core_interface: true
@@ -8979,7 +8979,7 @@ tasks:
   - id: T-415
     title: The M3 baseline quoted in briefs was wrong for several hours - known top-1 is 0.935, not 0.948
     milestone: M3
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: DOCS
     deps: [T-404, T-311]
