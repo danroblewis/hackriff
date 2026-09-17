@@ -151,7 +151,7 @@ Development runs from one long-lived coordinator session (Opus) that delegates t
 - **Parallel work uses git worktrees**, one per `parallel_group`; tasks sharing a crate serialise on it or split file ownership (see `tasks.yaml` notes). A cheaper model's output touching core interfaces is reviewed by Opus before merge. Changing an ACCEPTED ADR goes to Fable + the user.
 - **Worktree launch step (build CPU and disk, T-144).** The Mac has 28 cores, and unthrottled parallel builds oversubscribe them.
   - **Concurrency:** at most **4 Rust-building agents** run at once. The coordinator's full check counts as one.
-  - **Disk:** check `df -h /` first, and don't launch below about 20 GB free.
+  - **Disk:** check `df -h /` first, and don't launch below about 20 GB free. **`du` is meaningless here and will frighten you** — because the worktree targets are APFS clones sharing blocks with main's, `du -sh .` reports the repo at ~377 GB with each worktree target at ~96 GB against main's 82 GB, while `df` shows the true free space. **Only `df` counts.** Deleting a worktree's `target` by hand frees almost nothing for the same reason; **the real reclaim is removing the worktree after merge**, which is why that step matters. And **do not clear sccache to make room** — it frees ~8 GB and then *costs* more than that, because the cold rebuilds it forces convert shared clone blocks into private ones.
   - **First build:** each new worktree seeds its target from main with `cp -c -R -p /Users/daniellewis/hackriff/target <worktree>/target`.
     - This is an APFS clone: instant, and no extra disk.
     - `-p` keeps mtimes, so the checked-out sources rebuild only the ~11 workspace crates, not ~70 deps.
