@@ -14,6 +14,7 @@ use super::stats::{db, undb};
 use super::*;
 
 mod bias_tee;
+mod coverage_fold;
 mod followups;
 mod maturity;
 mod mixture;
