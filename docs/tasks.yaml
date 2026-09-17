@@ -8261,7 +8261,7 @@ tasks:
   - id: T-402
     title: Our own synthetic WFM is too narrow to trigger our own WFM occupancy rule
     milestone: M3
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: M3A
     deps: [T-398]
@@ -8279,7 +8279,7 @@ tasks:
   - id: T-403
     title: A station with no pilot and no identity still confirms at the end of the recording
     milestone: M3
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: M3A
     core_interface: true
