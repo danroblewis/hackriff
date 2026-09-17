@@ -6569,7 +6569,7 @@ tasks:
     milestone: M2-hardening
     title: 'Band-collapsed activity-vs-time belongs in the backend: reduceActivity is the last client-side
       measurement on the time surfaces'
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-334
@@ -8098,6 +8098,16 @@ tasks:
       and the strip must still say so - the max of nothing is not zero, it is unknown.
       Keep T-340's guard green: no RF constant or signal logic in ui/src; a colormap
       shared with the waterfall means sharing the CODE, not copying a scale.
+      T-342 UPDATE (merged 58cc961): the BACKEND HALF IS DONE. /api/coverage now
+      serves a shade block - fold, rule, scale, range_db, normalisation - and an
+      unobserved cell carries NO shade key at all, which is stronger than null. The
+      max-hold fold is the same one /api/timeline uses, transposed, and hk-store
+      pins collapsing_a_window_to_one_row_is_the_max_over_its_columns, which is the
+      burst-survives-the-collapse property item (B) needs.
+      WHAT REMAINS: the client sharing the waterfall's colormap CODE (not copying a
+      scale), and THE USER'S CONFIRMATION of the truncated half of their message.
+      That makes the remainder a ui-only change.
+
   - id: T-398
     title: A strong WFM+RDS station takes ~40 s to reach Confirmed when a human sees it in under five
     milestone: M3
