@@ -8328,13 +8328,14 @@ tasks:
     milestone: M3
     status: blocked
     blocked_on: >-
-      T-403 answering one question. The work is COMPLETE and committed (branch task-t402,
-      eb29365), gate otherwise green, milestones green - but it leaves
-      confirm_latency::t398_wfm_without_pilot_does_not_take_the_fast_route red: family
-      assignment takes 14.00 s against T-401 4.0 s budget on the now-realistic mono scene.
-      14.00 s is exactly the scene length, the same end-of-recording signature T-398 found for
-      confirmation, so it is either the defect T-403 is already fixing or a second one on the
-      family path. Merge the moment T-403 says which.
+      T-403's SECOND attempt. T-403 was merged (1aeefee) and REVERTED (0465926) the same hour:
+      its new live confirm route races T-398's pilot-lock route nondeterministically - the same
+      48 acceptance tests gave 48 passed then 47 passed / 1 failed on identical code. So T-403
+      is NOT in main. Separately, and measured on T-402's own realistic scene with T-403
+      applied: confirm is fixed (3.00 s) but FAMILY ASSIGNMENT IS 5.00 s against T-401's 4.0 s
+      budget. Per the user 2026-09-17 that residual is A REAL DEFECT TO FIX, NOT A BLOCK - it
+      is assigned to T-403, which owns both the race and the family path. T-402's own work is
+      complete and green in isolation; it lands when T-403 lands.
     priority: normal
     parallel_group: M3A
     deps: [T-398]
@@ -8751,17 +8752,10 @@ tasks:
   - id: T-412
     title: The time wheel zooms when it should probably scroll; frequency wheel stays zoom
     milestone: M2-hardening
-    status: blocked
+    status: todo
     priority: normal
     parallel_group: UI
     deps: [T-376, T-393]
-    blocked_on: >-
-      the user resending the first half of their message. It reached this session truncated and only
-      this arrived, verbatim: "; FREQUENCY axis wheel = zoom; time-span zoom is a deliberate secondary
-      gesture. UI-only where possible." The half that says what the TIME axis wheel should do INSTEAD
-      of zooming is missing, and that is the whole change - the rest is already true. Do not guess it:
-      an earlier reconstruction from a fragment (B0.666) put a framing on a suite that the user then
-      had to retract.
     notes: |
       WHAT ARRIVED, and it is actionable on its own terms once the missing half lands:
         - FREQUENCY axis wheel = ZOOM. Already true: T-376 made the frequency bar's wheel zoom its own
@@ -8783,6 +8777,27 @@ tasks:
           (a +/-1.0 drag of the whole 6 GHz bar through a spy client, calls empty). Changing what the
           wheel MEANS must not change what it can REACH.
       UI-only gate where possible.
+      THE MISSING HALF ARRIVED (user, 2026-09-17), and it is the whole change:
+      THE TIME AXIS WHEEL SHOULD PAN / SCROLL THROUGH TIME - wheel up/down moves the
+      viewed window EARLIER/LATER, keeping the DURATION/SPAN FIXED. NOT zoom.
+      Rationale, the user's: "the user scrolls through time constantly and rarely
+      resizes", so time-span zoom moves to a DELIBERATE SECONDARY GESTURE - Ctrl/Cmd +
+      wheel, or drag-select-to-zoom on the time navigator.
+      DIRECTION MATCHES THE WATERFALL TIME AXIS: scroll up = back toward OLDER.
+      FREQUENCY-AXIS WHEEL STAYS ZOOM (already true, T-376).
+      So navigators.ts:933 ("Wheel zooms the reviewed span about the pointer") becomes a
+      pan at fixed span, and timeWheelTarget's zoom moves behind the modifier. Note
+      timeWheelTarget already computes a zoom about the pointer - the secondary gesture
+      can keep that arithmetic rather than growing a second one.
+      WATCH THE EDGES: panning at fixed span into the ends of the capture window must
+      clamp without shrinking the span (a pan that silently resizes is the bug this
+      replaces, mirrored). And T-379/T-386 established the window is the capture clock's,
+      so a pan moves a capture-time window, never a wall-clock one.
+      Pinch (T-407) is the touch wheel: whatever pan/zoom split lands here, pinch and
+      wheel must resolve to the SAME arithmetic rather than forking.
+      T-340's control stays green: changing what the wheel MEANS must not change what it
+      can REACH - no wheel on either bar reaches a device route.
+
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
