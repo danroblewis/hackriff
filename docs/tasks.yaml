@@ -8670,7 +8670,7 @@ tasks:
   - id: T-409
     title: Tuning nudge buttons - move a signal off the DC spike without losing it from the band
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: UI
     core_interface: true
@@ -8720,6 +8720,48 @@ tasks:
       Control worth having: a nudge and its opposite return the tune to where it
       started (modulo one snap step), so the buttons are navigable rather than a
       one-way drift.
+    commit: 4333b47
+    result: |
+      DONE. Six buttons beside Go to, each shifting the tuned centre by a fraction of the TUNED
+      SPAN (live.bandwidthHz ?? device.sampleRateHz - never the zoom width).
+      THE 1/2-SPAN TRAP, which was the ticket's own open question, is settled by T-418's
+      derivation three hours earlier. `NudgeGeometry.landing` makes it a NUMBER: where a signal
+      currently ON DC ends up, as a fraction of the way to the window edge - 1/8 -> 0.25,
+      1/4 -> 0.50, 1/2 -> 1.00. So 1/2 lands a formerly-centred signal exactly at the band edge
+      in the anti-alias skirt: it trades one hazard for the other, the opposite of what the
+      feature exists to do.
+      The button STAYS (it is the honest stride for stepping along a band) but is marked amber
+      with a tooltip naming 1/4 as the offset that clears both, and stating the second cost:
+      only 50% of the window is kept and a formerly-centred signal sits exactly on that
+      boundary. 1/4 is marked ideal for T-418's reason - midpoint of the usable half-band,
+      maximally far from the LO spike and the roll-off.
+      CLAMPING: NONE, and the refusal is PER BUTTON. The test is `containsCenter` on the
+      REQUESTED centre - T-392's distinction kept deliberately, because snapCenter walks an
+      out-of-band request inward and would call every out-of-range centre achievable at the band
+      edge. A nudge that cannot be taken in full is disabled and says so; DOWN STILL WORKS at
+      the top of the band. The test asserts snapCenter WOULD have returned a shorter centre
+      there, so the distinction cannot be quietly undrawn later.
+      SNAP reuses T-341's snapCenter, not re-derived. snapErrorHz is carried to the tooltip
+      rather than absorbed ("the move is 8 Hz short of the advertised fraction"), and a source
+      with no stated step says "to ABOUT X MHz (this source states no tuning step, so nothing is
+      snapped)".
+      T-340's control re-asserted under the new code: a +/-1.0-and-beyond pan (incl. a 6 GHz
+      overflow) through a spy client gives an empty call list while the pan still leaves an
+      offer. A press goes through the existing gated applyDeviceAction/retuneAction with
+      "nudge" added to the DeviceAction source union; nudge.ts names NO device route so
+      app-centre.test.ts's two-callers source scan is unchanged. One POST /api/control/center,
+      no rate call. The row disables in flight and the next press is computed from the centre
+      this one asked for (pending, retired on any observed-centre change), so two quick presses
+      are two nudges, never two overlapping retunes.
+      REVERSIBILITY ASSERTED: a nudge and its opposite return to EXACTLY the starting centre
+      from an on-grid start (round-to-nearest is symmetric), within one step from off-grid.
+      AGENT'S ONE PICKED-NOT-DERIVED CONSTANT, declared: `intoSkirt` is landing >= 0.9, not
+      >= 1, because the snap moves the landing point +/- step/span either way and an exact >= 1
+      test flipped off on the real HackRF grid (14.3 Hz in 1.2 MHz). Documented edge region,
+      conservative in the right direction, stable against both roundings.
+      Gate classified `ui` on the staged merge; test-ui twice, 29/29 both times. Eager bundle
+      33.2 KB gzip, inside the 45 KB budget.
+
   - id: T-410
     title: Presence is an interval with endpoints, not an accumulation of observations - box runs to the live edge until an END is detected
     milestone: M2-hardening
@@ -8979,7 +9021,7 @@ tasks:
   - id: T-415
     title: The M3 baseline quoted in briefs was wrong for several hours - known top-1 is 0.935, not 0.948
     milestone: M3
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: DOCS
     deps: [T-404, T-311]
@@ -9012,6 +9054,32 @@ tasks:
       quoting a floor should quote ONE canonical set that is re-derivable, and an agent that
       sees a mismatch should stash-and-measure rather than assume either side.
       Two errors now, both mine, both in the same field.
+    commit: c6798c9
+    result: |
+      DONE, and the answer was NEITHER of the two failure modes the ticket posed.
+      I had framed it as "misreading, or two numbers sharing a name". It was a third:
+      T-415 checked out the exact commit T-404 merged (3d37ccf), ran `just acceptance-m3`, and
+      measured 0.9345 - on code BYTE-IDENTICAL to T-404's own branch tip (b3fac0e) for every
+      file in hk-classify and hk-estimate (`git diff b3fac0e 3d37ccf -- crates/hk-classify
+      crates/hk-estimate` is empty), with the harness deterministic to 4 dp over two runs.
+      So 0.9480 was REAL and ACCURATELY TRANSCRIBED, but it was a PRE-COMMIT measurement that
+      predated the last edit folded into its own squashed merge commit and was never re-run
+      after it. THE MERGED CODE NEVER SCORED 0.9480 - the number described a tree that never
+      became main.
+      That is a failure mode no careful reading catches, because nothing in the report is wrong.
+      The only defence is RE-DERIVING AT MERGE TIME rather than trusting a commit message's
+      figure, which is what §7.1 now tells a brief to do.
+      ADR-0016 §7.1 states ONE canonical set with a population named per figure, plus the
+      re-derivation command (`just acceptance-m3`) and the commit the values are pinned to.
+      It keeps the distinction the two failure modes need: known top-1/top-2 has NO population
+      split, while unknown-recall/false-known DOES - the full 396-snippet held-out grid is the
+      gate's ruling, and the 216-snippet reading over the six generators §7's prose enumerates
+      is recorded but NOT USED. Quoting that one as the M3 number is the population-ambiguity
+      failure mode, distinct from a stale number.
+      §7.1 also writes down T-419's stash-and-measure protocol as standing practice: stash the
+      diff, measure against the merge base, and report WHICH of the three failure modes applies
+      rather than assuming either side is right.
+      Scope stayed bookkeeping - no threshold or classifier code touched.
 
   - id: T-416
     title: A real mono FM station is not recognised as WFM, and the rejection leaves no trace
@@ -9270,7 +9338,7 @@ tasks:
   - id: T-421
     title: Per-(time, frequency) coverage rasterisation - the record answer gains a time axis
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: STORE
     core_interface: true
@@ -9309,6 +9377,53 @@ tasks:
       an unobserved cell carries NO MEASUREMENT KEYS AT ALL.
       Pure backend. No wire change (that is step 2). Serves nothing visibly yet and
       unblocks everything below it.
+    commit: 6a37221
+    result: |
+      DONE - docs/16 §7 step 1. `grid_over` lays nt x nf cells by clipping each span to every
+      row it touches and sending each cell through THE SAME `Coverage::of` with that row's own
+      duration, so the refusal (zero spans / non-positive sampled duration / non-positive window
+      -> Unobserved, never a zeroed Sampled) applies per cell verbatim. `Sampled` keeps its six
+      fields and #[non_exhaustive]; NO NEW TYPE. grid/union_grid/by_device are now the nt = 1
+      case with `one_row_is_the_column_answer_unchanged` asserting equality bit for bit. Device
+      stays in the key: by_device_over never merges two radios, union_grid_over wears
+      Device::Any with is_named() == false. One file, +804/-29, nothing else in the workspace.
+      THE FOLD IS A SUM. `coarsen` sums children's observed_ns, divides by the number of
+      FREQUENCY children, re-derives duty against the parent's own duration, and refuses a
+      factor that does not divide the grid - a fold whose children do not partition its parent
+      is not a fold.
+      T-419's control copied whole: `truth_from_level_0` computes each coarse cell from the
+      level-0 grid alone, never a parent or intermediate level.
+      `a_parent_vs_child_assertion_would_not_have_caught_this` recomputes the old best-of rule
+      and asserts best == 2 x parent at every level - the rounded-up answer satisfies "a parent
+      never exceeds its best child" AT EVERY LEVEL while being wrong by f_factor at every level.
+      Verified negatively against three reverted mutants: T-419's shape (5 new tests fail, and
+      `a_fully_watched_band_still_reads_fully_covered` PASSES - exactly the case the bug never
+      touched), f_factor shape (6), time axis collapsed / T-368's answer (9, led by the
+      motivating case).
+      ONE GUARD BEYOND THE BRIEF, and it earns its place:
+      `rasterising_directly_onto_a_coarse_grid_is_not_the_fold` MEASURES both answers on one
+      sixteenth of a band - direct 1.0, folded 0.0625. Rasterising wide still answers "did
+      anything look ANYWHERE in here", which is why the pyramid must rasterise fine and fold
+      down. Pinned by a test instead of left in a comment.
+      MOTIVATING CASE: a dwell on 100-110 MHz for the first 10 s of a 60 s window. The column
+      answer calls the band Observed for the whole window (asserted, so the before-state is in
+      the test). With six rows, row 0 is observed at duty == 1.0 AGAINST THE ROW and rows 1-5
+      are Coverage::Unobserved with sampled().is_none() - genuinely grey, carrying nothing to
+      read as a zero.
+      DUTY is the same shape one field over from T-419's occ_s/obs_s near-miss. It is re-derived
+      from the parent's own observed_ns and duration, never averaged from the children
+      (`a_folds_duty_is_re_derived_and_never_averaged_from_the_children` shows mean-of-children
+      1.0 vs the truth 5/16). A parent with any observed child keeps >= 1 ns so integer division
+      cannot manufacture grey out of arithmetic.
+      FOURTH STATE (§5.4) NOT spelled as grey and no Coverage variant added:
+      `unknown_rows_before(oldest_record)` names the rows lying wholly before the oldest
+      surviving record, where Unobserved means "we no longer know whether we looked". Only the
+      caller that read the observation log knows where that horizon is, and §5.4 says a third
+      variant is a core_interface change to make deliberately - left to step 2's wire work.
+      The journal and observation-log readers already carry whole (t0,t1) intervals per segment
+      and per hop visit, so they needed nothing: THE COLLAPSE WAS ENTIRELY IN THE FOLD.
+      Floors read on the merged tree and matched exactly - no stash-and-compare needed.
+
   - id: T-422
     title: fsk and qam16 have the same class-level defect cw and ssb had - a hand-written table and a misordered density
     milestone: M3
@@ -9349,6 +9464,109 @@ tasks:
       Read T-249's result field first - it is the worked example for this ticket, and
       the two causes it found are the two hypotheses to test.
 
+  - id: T-423
+    milestone: M2-hardening
+    title: docs/16 step 2 - coverage reaches the wire with a time axis, and the invariant gets a test home before any tile exists
+    status: in-progress
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: [T-421, T-419]
+    use_cases:
+    - AWARE-011
+    found_by: 'coordinator (2026-09-17), sweeping docs/16 §7 after T-421 landed step 1 - steps 2, 4, 5 and 7 had no tickets'
+    acceptance: |
+      docs/16 §7 STEP 2, quoted: "/api/timeline grows a per-cell coverage state; /api/coverage
+      grows a time axis. docs/api.md and crates/hk-cli/tests/api_contract.rs together, per T-079,
+      asserting the FIELD'S VALUE and not the response shape (T-315's standard)."
+      SERVES: T-405 (the survey bar stops reading "sampled, level not retained" for a cell the
+      radio was tuned away from) and T-411 (the left time navigator, the same fix on the other
+      axis). Both are already merged and both are currently wrong in this specific way, so this
+      is a user-visible correctness fix, not plumbing for later.
+      UNBLOCKS, and this is the reason to do it now rather than after the tiles: "the invariant
+      gets a test home BEFORE any tile exists, which is where it is cheapest."
+      THE WORK IS A WIRE CHANGE ONLY. T-421 landed the whole computation in
+      hk-store::coverage - `grid_over`, `coarsen` (a SUM), `at_tf`, `by_device_over`,
+      `union_grid_over`, `unknown_rows_before`. Read that module first; do not re-derive any of
+      it, and do not add a second rasteriser next to it. The readers that feed it
+      (hk-api::coverage::ring_spans / observation_spans) already carry whole (t0, t1) intervals
+      per segment and per hop visit.
+      THE FOURTH STATE IS THE CORE-INTERFACE DECISION HERE, and T-421 deliberately left it to
+      you. docs/16 §5.4 names a state distinct from observed and from unobserved: "we no longer
+      know whether we looked" - rows lying wholly before the oldest surviving record.
+      `CoverageGrid::unknown_rows_before(oldest_record)` names those rows but adds no `Coverage`
+      variant, because only the caller that read the observation log knows where the horizon is.
+      §5.4 says a third variant is a core_interface change TO MAKE DELIBERATELY. Make it here,
+      or state with reasons why the wire should carry it another way - but the wire must be able
+      to say it, and it MUST NOT be spelled as grey. Grey means measured-and-nothing-was-there;
+      forgetting is not the same claim, and collapsing them is the exact dishonesty this whole
+      feature exists to avoid.
+      DEVICE STAYS IN THE KEY. by_device_over never merges two radios and union_grid_over wears
+      Device::Any with is_named() == false. Per T-259/T-305, whether we looked is DEVICE-LOCAL;
+      do not let the route flatten it.
+      DoD: /api/timeline and /api/coverage serve per-(t, f) coverage; docs/api.md and
+      api_contract.rs updated TOGETHER (T-079); contract tests assert the VALUE of the coverage
+      field for a cell the radio was tuned away from - not merely that the field exists (T-315's
+      standard, and the failure T-315 was filed for).
+    notes: |
+      T-421's motivating case is the one to carry onto the wire: a dwell on 100-110 MHz for the
+      first 10 s of a 60 s window. The COLUMN answer calls that band Observed for the whole
+      window; with six rows, row 0 is observed at duty 1.0 against the row and rows 1-5 are
+      Unobserved with sampled().is_none(). Assert that shape through the route.
+      Copy T-419/T-421's control discipline: prove a level against LEVEL 0, never against a
+      parent. A parent-vs-child assertion can only prove the fold is a fold - the buggy max
+      satisfied it at every level while being wrong by f_factor at every level.
+      Floors (ADR-0016 §7.1, which T-415 just wrote and which is now the ONE place to quote):
+      re-derive with `just acceptance-m3` rather than trusting a number in a brief or a commit
+      message. T-415 found that T-404's 0.9480 was real, accurately transcribed, and described
+      a commit that never reached main.
+      Gate: crates/ + docs/api.md, so FULL. Run the affected suite twice (T-403).
+
+  - id: T-424
+    milestone: CI
+    title: The coordinator's every gate runs full, because two permanently-untracked user directories force fail-closed
+    status: todo
+    priority: normal
+    parallel_group: CI
+    deps: [T-396]
+    found_by: 'coordinator (2026-09-17), merging T-415 - a docs-only ADR edit classified full'
+    acceptance: |
+      MEASURED WHILE MERGING T-415. `just gate --dry-run` in the main working tree reports:
+        fixtures/hackrf/capture-2026-09-16-101p3-diag/iq.sigmf-data  [full] acceptance input
+        fixtures/hackrf/capture-2026-09-16-101p3-diag/iq.sigmf-meta  [full] acceptance input
+        tools/fm_rx.py       [full] unclassified path - the gate fails closed
+        tools/sweep_plot.py  [full] unclassified path - the gate fails closed
+      Both directories are UNTRACKED AND PERMANENT: tools/ holds the user's HackRF experiments
+      and is explicitly never committed (CLAUDE.md), and the 101p3 diagnostic capture is a
+      fixture that is never staged. The gate counts untracked files DELIBERATELY (T-396) and
+      fails closed on unclassified paths - both correct rules. Their combination in the
+      coordinator's tree is not: the diff-aware gate degrades to ALWAYS-FULL in the one place
+      it was built to save time, and it does so for files that can never be part of any merge.
+      MEASURED COST: T-415 was a single-file ADR text edit. Default classification: full
+      (lint + test + acceptance-ci, ~7 minutes). Correct classification: docs, NOTHING TO RUN.
+      T-409 was ui-only - `just test-ui`, ~10 seconds - and would also have been charged full.
+      THE FIX IS PROBABLY NOT IN THE CLASSIFIER. `just gate --staged` already gives the honest
+      answer, and for a MERGE gate it is the right source: during `git merge --no-ff
+      --no-commit` the index holds exactly the merge result versus HEAD, which is exactly what
+      is about to be committed. The default (working tree, untracked included) remains right
+      for an AGENT checking its own uncommitted work.
+      SO THE LIKELY ANSWER IS DOCUMENTATION plus possibly a `just gate-merge` alias, and the
+      ticket exists to make that a decision rather than a habit I drift into.
+      CARE REQUIRED, and this is why it is a ticket and not an edit: --staged is NARROWER than
+      the default, and T-396's own rule is that the gate must not certify its own weakening.
+      Establish and write down WHY the narrowing is sound here - the argument is that untracked
+      files cannot become part of main, while noting the one real counterexample: an untracked
+      fixture CAN change acceptance results, and a docs-only classification skips acceptance
+      entirely. Decide whether that counterexample matters (a docs-only merge skips acceptance
+      by design regardless) or whether it argues for something narrower than a blanket --staged.
+      DoD: a decided, written rule in docs/10 + CLAUDE.md for which source the coordinator's
+      per-merge gate uses and why, with the weakening argument stated explicitly rather than
+      assumed. If a recipe is added, py/tests/test_gate.py covers it.
+    notes: |
+      Do NOT "fix" this by adding tools/ or fixtures/ to a gate ignore list. fixtures/ is full
+      for a real reason - the suites read it - and the classifier having a silent ignore list is
+      precisely the shape of self-weakening T-396 wrote the fail-closed rule to prevent.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
