@@ -4164,7 +4164,7 @@ tasks:
     milestone: M3
     title: 'Within-family class accuracy for cw and ssb is ~0 at and above gate (wrong
       0.75-1.00) while family-level analog is fine'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: M3A
