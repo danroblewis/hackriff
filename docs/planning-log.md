@@ -3477,3 +3477,60 @@ out toward 1–6 GHz is the coverage map**. Without it the zoomed-out bar paints
 as quiet — the exact failure T-368 exists to prevent, and why T-367 declined to fill the bar and said
 to sequence T-368 first. The viewport makes the coverage map visible; the coverage map makes the
 viewport honest. The agent is told to report rather than silently drop it if this blows its scope.
+
+### B0.656 — T-369 and T-314 merged: two gaps that both stopped one layer short (2026-09-16)
+
+Merged at `7abf95d` and `3054742`. They arrived an hour apart and turn out to be the same shape of
+bug: a guarantee that was real, and stopped before it reached the thing it was supposed to protect.
+
+**T-369 — the diagnosis was (a), and I had guessed (b).** The user's symptom (*"the user still sees
+overlapping boxes live"*) pointed at the served path re-expanding a merge, and the brief said so while
+demanding the agent establish which. It established the opposite: every overlapping row came back
+`relation: null` with **no `emitter_relation` row at all** — not a standing claim, not a revoked one,
+empty history. The served path was innocent; there was nothing to serve.
+
+The cause is `bands_compete`, gating every T-219 stage at 60 % of **both** bands. The middle box of
+the observed staircase overlaps its neighbours by 49.7 % and 6 % of the narrower band, so suppression
+and competition are unreachable **for exactly the two geometries that stack boxes**: a narrow box
+inside a wide one, and a staircase of offsets. And that same gate is what stops a real subcarrier
+vanishing into its host, so loosening it was never available. A threshold that is correct in the
+common case and unreachable in the failing one is a good disguise.
+
+No new merge key — the evidence is the measured `f_lo`/`f_hi` behind each member, merged into
+contiguous modes, which reads the air and never the device, so T-259/T-305 holds by construction.
+Re-analysis can conclude **contested** as well as merge: nothing merged, nothing hidden, both rows
+listed, the finding recorded append-only. The containment pair gets exactly that, blocked by bandwidth
+ratio — the geometry of a subcarrier as much as of a fragment.
+
+The control is the part I would keep: two 220 kHz stations 200 kHz apart, asserting **both** that
+their bands really overlap **and** that the measurements alone merge into one mode, so only the −3 dB
+extents separate them. That is a control that could actually fail. Two real bugs fell out on the way —
+stage 3 revoking stage 4's claims every touch, and a region that depended on which row a sighting
+touched, so the same three boxes elected a different survivor per entry point. Churn, not resolution.
+**On screen: 12 rows → 11, two overlapping pairs → none.**
+
+**T-314 — answer (i), and the ticket's premise was half wrong.** The origin *does* survive to level 0,
+but per **tile**, not per cell: `ProvenanceSummary::origins` counts frames per origin, and
+`query_filtered` returns `OriginMatch::Mixed` at level 0 as **unobserved**, counted in
+`cells_excluded`. A pure tile answers its own chain; a pooled tile answers nothing. So the read-side
+filter was not the false green I feared — the cost is coverage, not accuracy.
+
+**The (ii)-shaped problem was somewhere else, and worse.** T-303's chain came from
+`PipelineConfig::device_id` — the `"sigmf-replay"` default everywhere except `hk replay` — while
+history origins come from each frame's own provenance. **The key already claimed one front end while
+measuring another**, and under a per-source read it measured nothing at all; a fixture test went to
+zero channels. The chain now comes from the source's own `DeviceInfo`, and `ChainKey::of_device` and
+`source_key` are deliberately the same function, pinned by a test, so the key and the measurement
+cannot drift apart again.
+
+The control is asserted **first**, as the precondition, and it is worth the space: pooled, two chains
+30 dB apart compound — chain A's floor under chain B's level — so **128 visits read occupied with
+nothing on the air**, and the baseline folds a 30 dB excess no emission produced.
+
+Both agents declined to over-reach, which is the habit worth naming. T-369 left the contested verdict
+unsurfaced rather than add a `RelationKind` that would break an exhaustive match it did not own.
+T-314 measured its residual, pinned it with a test that asserts the **broken** behaviour, and filed
+**T-377** rather than widening. Both are now launched: T-377 (per-origin floor tracking at ingest —
+the decision is baked into the stored cell, so no read-side filter can undo it) and **T-371**, which
+T-359 made urgent: cohorts now split, so one subject shows two indistinguishable slots rows with
+different numbers and no field saying why.
