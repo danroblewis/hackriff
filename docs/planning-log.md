@@ -4564,3 +4564,67 @@ fail-closed rule. Both rules are individually right; their combination makes the
 T-415 should have run *nothing* and would have cost seven minutes. `--staged` gives the honest answer for
 a merge gate — but narrowing a gate is precisely what T-396 says must not happen by habit, so it is
 **T-424**, a decision to write down rather than one to drift into.
+
+### B0.677 — six merges, T-402 finally lands, and a "flake" that was never one (2026-09-17)
+
+**T-402 is in** (`0c8fad1`), the longest-held branch of the session. It was complete and green in
+isolation this morning; every attempt to land it found a **different real defect underneath**, and each
+is now fixed on main rather than worked around — T-403's duty-cycle lag in the denominator, then a
+rejected mode writing nothing at all, then T-416's mono-FM confidence ladder. It needed **no rebase**:
+96 commits landed while it waited, **none touching any of its six files**. The hold was only ever
+semantic, and the red assertion was never in its own diff — T-402 regulates the synthetic fixture's peak
+deviation, which changes what the pipeline sees, which made a *different* test fail.
+
+**T-416** (`5017fe1`) — the pilot was **evidence in name and a requirement in effect**. The WFM candidate
+is raised on width alone, so the pilot never gated candidacy; the confidence ladder did. A 150 kHz mono
+station measured 149890 Hz OBW, **missed its threshold by 110 Hz**, fell to the 0.25 arm and reported
+unknown at 0.75. The envelope was perfectly constant. For *any* pilotless station between 120 and
+150 kHz the pilot was the only route to a decision. The threshold was not retuned, because it cannot be
+derived — T-316's 106 kHz comes from the L−R subcarrier and a quiet mono station is simply narrower. It
+is replaced by a structural fact about the *service*: 47 CFR 73.310(a) puts the main channel at
+50 Hz–15 kHz and L−R at 23–53 kHz, so `baseband_fraction` asks what share of the multiplex is in the
+programme channel. The control is the half that makes it a measurement: a baseband that is **not** a
+programme channel now *lowers* confidence, where width alone used to be enough — which had been calling
+a 180 kHz 4-CPFSK data link broadcast FM.
+
+**T-383** (`9e6a6ae`) dissolved its own premise, and this is the one to remember. The "load flake" was
+**never about load**. The wait that expires is the *second* one, and `shades()` folds with `nt = 1`, so
+`overview_level` reads **level 1** — whose cells exist only once a level-0 block seals, and level-0
+blocks are **aligned to the Unix epoch**. The wait is therefore *(time to the next aligned 60 s
+boundary) + seal lag*: a quantity ranging over **(2 s, 62 s]** under a fixed **60 s** bound. Six
+consecutive runs matched that formula to 0.1 s. **It fails on a completely idle machine** whenever a run
+starts in the first ~2.2 s of a wall-clock minute. Every "isolated" figure anyone quoted — 53.2 s,
+21.1 s, 5.3 s, 58.2 s — was that phase and nothing else. Two of the five instances were **stale**
+(one test deleted by ADR-0019, one already in the group since the commit that created it), and **three
+of the four were already members** — membership was never the problem, because `max-threads = 1`
+serialises the group against *itself* and does nothing about the 27 tests outside it. The rule that
+generalises now sits in `.config/nextest.toml`: **a test may not bound a quantity whose natural range it
+has not measured.**
+
+**T-422** (`5a717f1`) overturned two-thirds of my brief. All three classes showed T-249's tell — a
+healthy top-2 against a dead top-1 — but lost the ranking in three different places. `gfsk` was the hand
+table as predicted (`if_bimodality < 0.66` against measured 0.695–0.906, **a constant written at the
+transmitter against a feature measured after the receive filter**). `msk` and `qam16` were named
+**correctly by the tree** and demoted by the **verifier**: `msk` because its hypothesis fixed the
+deviation at the transmitter's `h` — the identical model with the deviation *free* beat it 22 of 22
+after the MDL charge — and `qam16` because its ALRT takes N₀ from the SNR meter, where both truths flip
+**together** and no value is right on both.
+
+**T-423** (`ed5521b`) carried coverage to the wire and found the trap: `/api/timeline` **already had a
+`grid.coverage` array, and it is not this one** — that is *frame* coverage, reading 0 both where nothing
+looked and where the byte budget evicted what it saw. Shipping on it would have looked done and been
+wrong. The §5.4 fourth state became a **value, not a variant**, for a reason worth keeping: it is a
+property of a **row**, not a cell — a discarded record takes every frequency with it, so a per-cell
+variant would permit "unknown at 100 MHz, unobserved at 101 MHz" in the same row.
+
+**And one I measured myself.** T-416's gate went red on a test it claimed to have fixed, so I measured
+clean main before blaming it: `a_retune_keeps_connected_stream_consumers_connected` fails **4 of 10 runs
+with a bit-identical gap value**, 1.32 row periods against a 1.5 threshold. Not jitter — jitter spreads.
+8 runs on the merge gave 3 failures, so T-416 neither caused nor worsened it. At 40% it fails every
+other gate, and fail-fast then cancels ~384 tests, so **one bimodal seam hides a fifth of the suite**.
+Filed as **T-425**, with lowering the threshold explicitly forbidden: T-383's rule cuts both ways.
+
+**The open question of the day is a number.** Four agents re-derived held-out unknown recall on main and
+split **two-two** — 0.9444/0.0556 against 0.9520/0.0480 — the same day T-415's §7.1 landed to end exactly
+that. **T-428** is on it, and **T-364 is blocked behind it**: T-364's whole deliverable is a trade curve
+*the user* chooses from, with both axes quoted in that figure against the 0.90 floor.
