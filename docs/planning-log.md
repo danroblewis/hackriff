@@ -4402,3 +4402,67 @@ scoping it past the `cfg(test)` blocks.
 acquisition, and `cyclic_db` before T-394), two features measuring the observation rather than the
 signal, one confirm rule evaluated only on track close, and one end detector a minute late. **Every one
 was found by a measurement someone was told to take, not by a test that was already failing.**
+
+### B0.674 — seven merges: two silent averages, two dishonest folds, and a tap that could retune (2026-09-17)
+
+**The navigator batch** (`70e0029`, T-397/T-405/T-411) found the user's washed-out peaks, and it was **one
+line**. Every fold on the way out really was a maximum — tile add, tile fold, overview fold, both wire
+declarations. The averaging was upstream: `welch.holds = false` in the history reader, so
+`Spectrum::max_hold` came back empty, `FrameInput::from_dsp` set `peak: None`, and the store's
+`frame.peak.unwrap_or(frame.psd)` **silently substituted the Welch-averaged PSD**. A history frame
+averages order a thousand segments at 20 Msps, so **a one-segment burst lost ~30 dB before the first
+`max` ever ran.** The lesson is now in `docs/16`: *a wire that declares its fold is not evidence the
+values it folded were measurements.* Its test's control is the **old configuration** — same burst lands
+18 dB lower — so the assertion is load-bearing rather than a tautology about a strong tone.
+
+The user's "cyan/teal only" diagnosed itself: the old strip ramp ran dark-teal → cyan **and stopped**,
+so it was cyan at every input. One colormap array now generates the GLSL, so shader and strips cannot
+diverge.
+
+**T-311** (`00cb81f`) — **T-281's ladder does not reproduce.** With T-404's preamble confound removed,
+`blind_fsk` reads exactly 1.00 at every truncation. The 0.10 → 1.00 step was **the preamble**, not a
+lock. The real mechanism was T-404's `cp_corr` defect in a fourth place: three of four input quantities
+are **maxima**, whose null rises as the record shrinks, each compared against a **fixed** threshold.
+Only the open set moved — and it moved because the veto constants were a **categorical fingerprint**
+(every `am` snippet read `blind_bpsk` exactly 0.30 because 0.30 meant "the c1 gate fired"), so the open
+set was leaning on a spike that measured *which branch was taken*, not the signal.
+
+**T-403** (`aa5dab9`) resolved the race I had reverted it for — and **not by ordering**. Instrumenting
+showed that at the moment route B's evidence completes the two stations are *identical to the rule*;
+route C simply has nothing yet. Waiting failed too: a chain under load reports later **in the capture**,
+so any wait long enough on an idle host is too short on a busy one. Instead **the reason strengthens** —
+a better explanation is appended with `state == previous`, so *when* stays the first transition and
+*why* becomes the best evidence reached. Arrival-independent by construction. And the family latency was
+in **the duty cycle**: `observed` was always `on_air + 0.51 s`, a fixed lag in the denominator divided by
+a growing window, so **a signal that never stops became "continuous" only once you had watched it long
+enough.**
+
+**T-407/T-412** (`1d537cf`) — the gesture work found **two ways a finger could have retuned the radio**,
+both latent until T-392 removed the confirmation step: the drag threshold was the mouse's 6 px, so a
+fat-fingered tap was a drag (and on that bar a drag is a tune); and travel was `clientX + clientY`, so a
+**stroke across a bar counted as travel along it** — a page-scroll reflex down the frequency bar
+committed a near-zero-width region. Neither was introduced by the ticket; removing the confirmation made
+them reachable, which is the risk I flagged when the user asked for it.
+
+**T-413** (`d64d18e`) **declined my rendering suggestion, and was right.** I proposed drawing a revoked
+gap with T-410's open cap. But the open cap means *not yet measured*, and a revoked gap **was** measured
+and measured empty — so reusing it spells "looked and it was quiet" as "never looked": the coverage rule
+inverted. It used hatching, and made the load-bearing half **numeric**: `duration_s` and `on_air_s` both
+subtract the revoked silence, so revoking changes how many **events** were seen and never how much
+**air** was claimed.
+
+**T-414** (`bff22fd`) — GNSS acquisition finds **0 of 32 in pure noise** where the old bar found **32 of
+32**, with the counterfactual computed from the same array so the test cannot pass vacuously. Its real
+answer was that **the bar should not be a bare ratio at all**: a peak-to-mean is a *maximum over the
+search*, and the search size is the sample rate's business — the portable thing a caller owns is the
+error rate it will tolerate.
+
+**T-408** (`5c22eb0`) designed the pyramid and found **a live bug**: `Tile::fold_child` takes the **max**
+of `obs_s` across children, so a half-observed parent reads **fully covered** — at four folds, full
+coverage on one sixteenth of the extent. **T-397's lesson on the other axis**: there the fold was a max
+and the input an average; here the input is honest and the fold rounds up. Filed as **T-419** and
+sequenced before any view work, because *a pyramid founded on a fold that rounds up paints the spectrum
+as scanned.*
+
+**The shape of the day**: the suites were green throughout all of it. Every one of these was found by a
+measurement someone was told to take.
