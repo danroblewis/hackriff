@@ -7686,7 +7686,7 @@ tasks:
   - id: T-386
     title: Three more surfaces ignore the time cursor, and the centre view dies without a stream header
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: UI
     deps: [T-379]
@@ -7882,7 +7882,7 @@ tasks:
   - id: T-392
     title: A region selected on the frequency navigator should retune to cover it, not report that it is outside the window
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: UI
     core_interface: true
@@ -7915,7 +7915,7 @@ tasks:
   - id: T-393
     title: The navigators say nothing about what they select; add labels and hover/drag readouts
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: UI
     core_interface: true
@@ -7995,7 +7995,7 @@ tasks:
   - id: T-395
     title: The Live button is a time-axis control sitting in the Capture panel; move it onto the time navigator
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: UI
     deps: [T-391]
@@ -8098,6 +8098,56 @@ tasks:
       and the strip must still say so - the max of nothing is not zero, it is unknown.
       Keep T-340's guard green: no RF constant or signal logic in ui/src; a colormap
       shared with the waterfall means sharing the CODE, not copying a scale.
+  - id: T-398
+    title: A strong WFM+RDS station takes ~40 s to reach Confirmed when a human sees it in under five
+    milestone: M3
+    status: in-progress
+    priority: high
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    deps: []
+    acceptance: |
+      USER, live testing 2026-09-16, and the user CORRECTED THEIR OWN EARLIER FRAMING:
+      the problem is NOT flicker or stability. It is TIME-TO-CONFIRM LATENCY.
+      It takes roughly 40 s for the system to decide 101.3 is FM (reach Confirmed with
+      family=wfm). It is obvious in under 5 s - a human sees it instantly, and the
+      19 kHz stereo pilot is a SUB-SECOND WFM giveaway. The earlier "40 s stable poll"
+      observation caught the tail: it was already confirmed by then.
+      THIS DIRECTLY VIOLATES A CLAUDE.md INVARIANT: "Detection is fast, continuous and
+      self-cleaning - a region's few real signals should resolve quickly (target
+      ~2-10 s)."
+      THE WORK, in order:
+      1. Replay fixtures/hackrf/capture-2026-09-16-101p3-diag/ FROM COLD START and
+         MEASURE, for the 101.3 station: time-to-first-detection, time-to-family=wfm,
+         and time-to-Confirmed. Numbers first.
+      2. Find WHICH STAGE gates the ~40 s. Named candidates: the candidate->confirmed
+         accumulation threshold or trust hysteresis; the classifier's integration
+         window; or a requirement to RDS-lock or decode CRC-valid frames before
+         confirming. Do not guess - instrument.
+      3. SEPARATE BACKEND CONFIRM TIME FROM UI DISPLAY LATENCY. T-388 fixed poll-gated
+         box growth but the inventory poll is still 5 s and LIVE_OFFER_NS is 5 s, so
+         part of any observed latency is display, not decision. Report the two
+         separately or the fix will be aimed at the wrong layer.
+      4. Make an obviously-strong, high-SNR signal confirm and classify FAST (target a
+         few seconds) WHILE KEEPING FALSE-CONFIRM PROTECTION for genuinely ambiguous
+         signals. Use cheap fast evidence - wide occupied bandwidth plus 19 kHz pilot
+         lock - to SHORT-CIRCUIT WFM confirmation.
+      DoD: a strong WFM+RDS station reaches Confirmed WFM within a few seconds of
+      appearing, asserted BLIND on time-to-confirm (not tens of seconds).
+      THE DANGER, and the reason this is core_interface: a short-circuit that confirms
+      fast is a short-circuit that can confirm WRONG fast. The accumulation threshold
+      and trust hysteresis exist to stop false confirms, and T-233's line holds - a
+      blind test must never merge two genuinely distinct emitters, and nothing may be
+      confirmed as a family the measurement did not support. The short-circuit must
+      require POSITIVE evidence (a pilot LOCK, not a pilot-shaped bump) and must fall
+      back to the slow path when that evidence is absent, not merely lower a threshold
+      for everything. Report what the false-confirm rate does on the existing M3 suite
+      (ADR-0016 section 7 floors: unknown recall >= 0.90, top-1 >= 0.90, top-2 >= 0.95,
+      wrong-label <= 0.02 overall / 0.05 per bin, false-known <= 0.10).
+      Also note the synthetic-vs-live gap the user named: M3 PASSED ON SYNTHETIC while
+      this fails live. If a synthetic WFM fixture would have caught it, say what the
+      synthetic lacks - that gap is worth more than this one fix.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

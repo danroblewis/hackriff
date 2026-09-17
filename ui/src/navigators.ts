@@ -251,6 +251,32 @@ export function timeExtent(w: CaptureWindowLike | null): Range | null {
 export const timeAtFraction = (ext: Range, f: number) => valueAt(ext, f);
 export const fractionAtTime = (ext: Range, tS: number) => fractionAt(ext, tS);
 
+// ---- reading a time back off the bar (T-393) ----
+//
+// **The clock is the capture clock, and there is no other one in reach of these functions.** Every
+// input below is an absolute capture instant that came off `GET /api/timeline`'s window (through
+// `timeExtent`), and the only arithmetic done to it is seconds → milliseconds. A readout built from
+// the browser's `Date.now()` instead is the bug found four separate times in this UI (T-379, T-384,
+// T-389, and the one T-387 had to prove it was avoiding): a replay, the mock SDR and a scrub all run
+// on a clock of their own, and a navigator that printed wall-clock time over capture data would be
+// the worst of them, because the user would read it and believe it. `ui/test/navigators.test.ts`
+// pins that with the same cursor position yielding the capture clock's answer and *not* the
+// browser's.
+//
+// Rendered in UTC, as every other capture timestamp in this UI is (`live-spectrum.ts`'s `hms`,
+// `overlays.ts`'s hover, `timeline.ts`'s `timeRegionName`): one clock, one spelling, and no
+// dependence on where the browser happens to be.
+
+/** A capture instant as clock text, `hh:mm:ssZ`. Not a duration and not "ago" — the wall time *on
+ * the capture clock* at which those samples were taken, which is what a user scrubbing for a
+ * specific past window is looking for. */
+export const clockText = (tS: number): string =>
+  Number.isFinite(tS) ? `${new Date(tS * 1000).toISOString().slice(11, 19)}Z` : "—";
+
+/** Two capture instants as one range, ordered low-to-high: "13:45:03–13:50:03Z". */
+export const clockRangeText = (loS: number, hiS: number): string =>
+  `${clockText(Math.min(loS, hiS))}–${clockText(Math.max(loS, hiS))}`;
+
 // ---- what the time navigator's overview is *of* (T-367) ----
 //
 // The user's correction: *"the left vertical bar is the TIME navigator: it selects the time range
