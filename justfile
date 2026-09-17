@@ -5,6 +5,37 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
+# THE merge gate (T-396). Looks at what actually changed, classifies it, prints the decision,
+# and runs exactly the suites that class needs — so "which tests do I run" is a property of the
+# runner, not of whichever agent happened to run it. Both CI jobs and the coordinator's
+# per-merge check call this one command, which is how a gate stays deterministic.
+#
+#   ui/ only (not crates/, not docs/api.md)   ->  test-ui
+#   crates/ or docs/api.md                    ->  lint + test + acceptance-ci
+#   docs/ only                                ->  nothing (this repo has no link checker or
+#                                                 markdown linter; the gate says so out loud)
+#   py/ only                                  ->  lint-py + test-py
+#   ANYTHING ELSE                             ->  the full gate
+#
+# That last line is the rule that makes the rest safe: classification **fails closed**. A path
+# matching no class runs the full gate, never the cheapest — the repo's own principle applied to
+# its own tooling (BiasTee::Unknown is not Off; Coverage::Unobserved is not quiet). So `fixtures/`
+# (acceptance input the suites read), the justfile and `.github/` (the gate itself — it must not
+# be able to certify its own weakening), `tests/`, `plugins/`, `.config/`, `recipes/`, `Cargo.*`
+# and every repo-root file are full, and a new top-level directory nobody classified is full too.
+# The classifier is a pure function in py/hkpy/gate.py, tested by class in py/tests/test_gate.py.
+#
+# Default source: the merge base with main (not main itself — a moved main makes unrelated files
+# look changed) plus everything uncommitted, including untracked. Override with `--base REF`,
+# `--staged`, `--worktree` or `--files a b c`; `--dry-run` prints the decision and runs nothing;
+# `--phase check|acceptance` runs half the chosen suites (how CI's two jobs split it).
+#
+# `just lint` + `just test` + `just acceptance-ci` by hand remain the periodic/milestone check.
+#
+# THE merge gate (T-396): classify the diff, print the decision, run exactly the suites it needs.
+gate *args:
+    uv run --locked --project py python -m hkpy.gate {{args}}
+
 # Build the Rust workspace (CPU path; `gpu` off)
 build:
     cargo build --workspace

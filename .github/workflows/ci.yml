@@ -12,9 +12,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 so `just gate` can find the merge base with the PR's base branch.
+      # Without the history there is no base to diff against — and the gate then fails closed
+      # to the full suite rather than guessing, so a bad checkout costs time, never coverage.
       - uses: actions/checkout@v5
         with:
           lfs: true
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -48,40 +52,35 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      # T-353: CI calls the `just lint` recipe instead of invoking cargo fmt/clippy itself, so the
-      # gate CI enforces and the gate agents run locally are the same definition by construction.
-      # Duplicating the commands here is how the Python half of the gate went missing: T-346 added
-      # lint-py to the recipe and this workflow's private copy of it silently did not follow.
-      # Runs before the test step: it fails fast on style, and clippy --all-targets warms the
-      # build cache the nextest run then reuses.
-      - name: just lint
-        run: just lint
-
-      # T-358: one recipe call, not a copy of its members. `just test` is test-rust (cargo-nextest
-      # over the workspace, hk-e2e excluded — that crate is the `acceptance` job below), test-doc
-      # (nextest runs no doctests), test-py (pytest under uv) and test-ui (the UI build, typecheck
-      # and ui/test suites). This workflow used to spell out the first three and omit the fourth,
-      # because there was no Node here; `test-ui` then self-skipped locally when node was absent, so
-      # the UI gate was authoritative nowhere while six tickets changed ui/src. It is spelled out
-      # nowhere now: the recipe's dependency list is the gate, so a member added to `just test`
-      # reaches CI without anyone remembering to edit this file — the drift T-353 and T-357 closed
-      # for lint and acceptance, in the direction that loses a check entirely.
+      # T-396: one call to the gate, which decides for itself which suites this diff needs —
+      # `just lint` + `just test` for anything touching crates/ or docs/api.md, `just test-ui`
+      # alone for a ui-only change, lint-py + test-py for a py-only one, and the full suite for
+      # anything it cannot classify. The rule lives in py/hkpy/gate.py, so CI and the agent
+      # running the gate locally reach the same verdict on the same diff by construction — the
+      # same one-definition principle T-353 applied to lint and T-357 to acceptance, now applied
+      # to the choice of which gate to run at all. `--phase check` is this job's half; the
+      # `acceptance` job below runs the other half of the *same* decision.
       #
-      # HK_E2E_REQUIRE_SYNTH lived here as a step `env:` and now lives in the test-rust recipe, for
-      # the same reason: strictness the workflow held privately is strictness local runs did not get.
+      # This replaces two steps (`just lint`, `just test`), so what they carried still holds and
+      # still lives in the recipes rather than here: `just lint` is lint-rust + lint-py (T-346's
+      # Python half cannot go missing again), the gate runs it before `just test` so style fails
+      # fast and clippy --all-targets warms the cache nextest reuses, and `just test` is
+      # test-rust + test-doc + test-py + test-ui with HK_E2E_REQUIRE_SYNTH set inside the recipe
+      # (T-358) — its membership list is the gate, so a member added there reaches CI with no
+      # edit here. T-077's serial `heavy-serial` nextest group comes from .config/nextest.toml.
       #
-      # T-077: heavy/timing-sensitive tests (tests/e2e, hk-pipeline listen/retune/lossless/refine/
-      # stream, hk-api, hk-cli, hk-core ring stress/concurrency) are pinned to a serial nextest group
-      # by .config/nextest.toml; everything else runs parallel.
-      - name: just test
-        run: just test
+      # On a push (rather than a pull request) there is no base ref, so the gate runs everything:
+      # main is the branch every other measurement is taken from, and it gets verified whole.
+      - name: just gate --phase check
+        run: just gate --phase check
 
   # The acceptance gate (T-024, T-357): the M0 vertical-slice acceptance suite (docs/11 §1.1) plus
   # the hk-e2e harness targets — mock device, Listen, recording, streaming, refinement, the C-stage
   # floor acceptance and the pipeline smoke tests — preceded by a census that fails if any hk-e2e
   # target belongs to no gate list.
   #
-  # The gate is the `just acceptance-ci` recipe, not a command line kept here. This job used to run
+  # The gate is the `just acceptance-ci` recipe (reached through `just gate`, below), not a command
+  # line kept here. This job used to run
   # `cargo test -p hk-e2e`, which auto-discovers every target in the crate, so the M0 suite it was
   # written for had quietly grown into all fourteen targets — the M2/M3/M4/chirp milestone exit
   # gates included — with nobody ever editing this file. That is T-353's drift with the sign
@@ -97,12 +96,24 @@ jobs:
   # HK_REQUIRE_FIXTURES=1 and HK_E2E_REQUIRE_SYNTH=1 itself — a missing one fails instead of
   # skipping — so this job holds no copy of that either. readsb is not installed, so only the
   # real-plugin half of SIGNAL-001 skips (logged); its pipeline + plugin-output plumbing still runs.
+  #
+  # T-396 reached it through `just gate --phase acceptance` rather than folding it into the `test`
+  # job's gate call. It stays a separate job deliberately: the two run on separate runners in
+  # parallel, so merging them would roughly double the critical path; this one needs no Node and
+  # no nextest while that one does; and "the acceptance census/harness is red" is a different
+  # signal from "a unit test is red" and deserves its own check mark. Splitting the *execution*
+  # costs nothing in consistency because the *decision* is not split — both jobs call the same
+  # classifier on the same diff and differ only in which half of its answer they run, so they
+  # cannot disagree about what changed. A ui-only or docs-only PR makes this job a fast no-op
+  # that prints why.
   acceptance:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 for the gate's merge-base lookup, as in the `test` job.
       - uses: actions/checkout@v5
         with:
           lfs: true
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -116,5 +127,5 @@ jobs:
       # uv must exist before the recipe: the hk-e2e harness generates synthetic IQ via py/.
       - uses: astral-sh/setup-uv@v6
 
-      - name: just acceptance-ci
-        run: just acceptance-ci
+      - name: just gate --phase acceptance
+        run: just gate --phase acceptance
