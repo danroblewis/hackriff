@@ -60,8 +60,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const marksLayer = h("div", { class: "cap-marks" });
   const ringTrack = h("div", { class: "cap-ring", hidden: true });
   const playhead = h("div", { class: "playhead" });
-  const livePill = h("button", { class: "live-pill", type: "button" }, "● LIVE");
-  const band = h("div", { class: "cap-band" }, canvas, marksLayer, ringTrack, selLayer, playhead, livePill);
+  // T-395: the LIVE control used to sit here, on the capture band. It moved to the **time
+  // navigator** (`centre/navigators.ts`), because following the live edge is a time-axis choice and
+  // the left bar is the time axis. Only the control moved: it dispatches the same `goLive` patch
+  // from there, so the presence push (T-388), the view window (T-379) and the live-only notes
+  // (T-387) see exactly what they saw before.
+  const band = h("div", { class: "cap-band" }, canvas, marksLayer, ringTrack, selLayer, playhead);
 
   el.replaceChildren(head, band);
 
@@ -98,7 +102,6 @@ function mount(el: HTMLElement, ctx: AppContext) {
     store.set(res.live ? goLive : reviewAt(res.tS));
   };
   band.addEventListener("pointerdown", (e) => {
-    if (e.target === livePill) return;
     dragging = true;
     downX = e.clientX;
     downPct = pctFromEvent(e);
@@ -110,7 +113,6 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (dragging && Math.abs(e.clientX - downX) >= DRAG_PX) commitTimeWindow(downPct, pctFromEvent(e));
     dragging = false;
   });
-  livePill.addEventListener("click", () => { store.set(goLive); store.set(toast("Back to live.")); });
 
   // ---- time-window select (T-194): a deliberate drag sets t_lo/t_hi on the focused selection, or
   // makes a new one over the current view span. ----
@@ -164,7 +166,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // T-263: what the scrubbed window is actually backed by. "Nothing was on the air" and "no data
     // for this window" are different claims, and the note says which one applies.
     const data = t.live ? "" : scrubDataNote(t.tS, false, win, coverageGaps);
-    noteRest.textContent = ` · ${coverageText(coverageFraction, win?.spanS ?? null)}${data ? ` · ${data}` : ""} · press LIVE to return`;
+    // T-395: LIVE is on the time navigator now, so the note points at where the control actually is.
+    noteRest.textContent = ` · ${coverageText(coverageFraction, win?.spanS ?? null)}${data ? ` · ${data}` : ""} · press LIVE on the time bar to return`;
   };
   store.select((s) => s.time, renderNote, { immediate: true });
 

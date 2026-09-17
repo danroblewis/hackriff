@@ -81,12 +81,26 @@
 .freqnav .fn-view { position: absolute; top: -2px; bottom: -2px; box-sizing: border-box; border: 1px solid var(--amber); background: var(--amber-soft); cursor: grab; }
 .freqnav .fn-draft { position: absolute; top: -2px; bottom: -2px; box-sizing: border-box; border: 1px dashed var(--amber); background: var(--amber-soft); pointer-events: none; }
 .freqnav .fn-offer { position: absolute; bottom: 14px; z-index: 6; font: 600 10.5px var(--ui); letter-spacing: 0.03em; color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, var(--panel)); border: 1px solid var(--amber); padding: 2px 9px; border-radius: 12px; cursor: pointer; touch-action: manipulation; white-space: nowrap; }
-.freqnav .fn-label { position: absolute; left: 10px; right: 10px; bottom: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.freqnav .fn-label { position: absolute; left: 52px; right: 10px; bottom: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* T-393 (1): a static name for the axis each bar controls. The two bars look alike and do different
+   things — the left one is time, the bottom one is frequency — and the user asked each to say so. */
+.freqnav .fn-axis-label { position: absolute; left: 10px; bottom: 1px; font-weight: 700; letter-spacing: 0.1em; color: var(--dim); }
+/* T-393 (3): the hover/drag readout. Only on hover or drag (`hidden` is toggled in JS), following
+   the cursor along this bar's own axis, and never a pointer target of its own. */
+.freqnav .fn-readout { position: absolute; top: 2px; z-index: 7; transform: translateX(-50%); max-width: 96%; font: 10px var(--mono); color: var(--text); background: color-mix(in srgb, var(--ground) 88%, transparent); border: 1px solid var(--line); border-radius: 3px; padding: 1px 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 
 .timenav { touch-action: none; user-select: none; -webkit-user-select: none; }
-.timenav .tn-track { position: absolute; inset: 4px 6px; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; cursor: crosshair; }
+/* T-393/T-395: the bar now carries its axis label at the top and the LIVE control at the foot, so
+   the track is inset to leave room for both rather than filling the bar edge to edge. */
+.timenav .tn-track { position: absolute; inset: 15px 6px 21px; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; cursor: crosshair; }
 .timenav .tn-track.dragging { cursor: grabbing; }
 .timenav .tn-track.reviewing { box-shadow: inset 0 0 0 1px var(--amber); }
+.timenav .tn-axis-label { position: absolute; top: 2px; left: 7px; font: 700 9.5px var(--ui); letter-spacing: 0.1em; color: var(--dim); }
+.timenav .tn-readout { position: absolute; left: 2px; right: 2px; z-index: 7; transform: translateY(-50%); font: 10px var(--mono); color: var(--text); background: color-mix(in srgb, var(--ground) 88%, transparent); border: 1px solid var(--line); border-radius: 3px; padding: 1px 3px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+/* T-395: LIVE, moved off the Capture band. Styled as the pill it replaced — coral while following,
+   amber while the view is held in the past — because it is the same control in a better place. */
+.timenav .tn-live { position: absolute; left: 6px; right: 6px; bottom: 2px; font: 600 9.5px var(--ui); letter-spacing: 0.08em; color: var(--amber); border: 1px solid color-mix(in srgb, var(--amber) 50%, transparent); background: color-mix(in srgb, var(--amber) 12%, transparent); padding: 1px 4px; border-radius: 4px; cursor: pointer; touch-action: manipulation; }
+.timenav .tn-live.following { color: var(--coral); border-color: color-mix(in srgb, var(--coral) 50%, transparent); background: color-mix(in srgb, var(--coral) 12%, transparent); }
 /* Upscaled, never smoothed: repeating a measured cell across pixels is the honest direction. */
 .timenav .tn-overview { position: absolute; inset: 0; width: 100%; height: 100%; display: block; image-rendering: pixelated; }
 .timenav .tn-view { position: absolute; left: -1px; right: -1px; box-sizing: border-box; border: 1px solid var(--amber); background: var(--amber-soft); cursor: grab; }

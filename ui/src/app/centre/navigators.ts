@@ -64,9 +64,10 @@ import {
   detailLabel, snapState, snapTimeCell, type DetailSource, type HistoryTier, type NavigationGrid,
 } from "../../navigation";
 import {
-  activeWindows, bandKey, coverageRequest, litSegments, placeOn, regionFromDrag, spanOf,
-  spectrumExtent, surveyCells, surveyViewport, timeExtent, timelineRequest, unobservedCount,
-  zoomWithin, type Band, type CoverageCell, type CoverageResponse, type Range,
+  activeWindows, bandKey, clockRangeText, clockText, coverageRequest, litSegments, placeOn,
+  regionFromDrag, spanOf, spectrumExtent, surveyCells, surveyViewport, timeAtFraction, timeExtent,
+  timelineRequest, unobservedCount, valueAt, zoomWithin, type Band, type CoverageCell,
+  type CoverageResponse, type Range,
 } from "../../navigators";
 import {
   captureWindow, currentSpan, durationText, overviewShade,
@@ -180,6 +181,70 @@ export function applyFreqZoom(store: AppStore, target: FreqZoom): void {
 }
 
 // ---------------------------------------------------------------------------
+// What the bars say under the cursor (T-393)
+// ---------------------------------------------------------------------------
+//
+// One readout per bar, on that bar's own axis, shown **only while the pointer is on it** — no
+// always-present ticks, and nothing added to the resting UI. Both are descriptions of state that is
+// already in hand (the extent the bar is laid out on, the grid `/api/navigation` reported): no
+// measurement is made here and no route is called.
+//
+// The frequency readout's rule, and the reason it is derived from `freqZoomTarget` rather than
+// written beside it: **it must describe what selecting actually does in this build.** Today a region
+// inside the tuned window is a view zoom and one outside it leaves a *retune offer* the user then
+// presses (T-343). A readout that promised a retune the code does not perform would be exactly the
+// kind of lie the honesty principle forbids, so the branch is taken from the same function the
+// gesture takes it from — the two cannot disagree.
+
+/** The resolution to print a frequency at, taken from the width being described — so no frequency
+ * constant appears here (the same rule as `fmtEdges`). */
+const resOf = (span: number) => Math.max(1, span / 100);
+
+/** "centre C · span S (sample rate) · live IQ": the capture state a selection resolves to, snapped
+ * to the achievable grid (T-341's `snapState`), and what each axis being unknown means. A live
+ * window's span *is* its sample rate (`navigation.ts`), which is why the third field can name one. */
+function configText(grid: NavigationGrid, centreHz: number, spanHz: number): string {
+  const s = snapState(grid, centreHz, spanHz);
+  const res = resOf(spanHz);
+  // A null centre is "the source states no tuning step", never "anywhere is reachable" (rule 1 in
+  // navigation.ts): nothing here may claim the device can sit exactly where the user pointed.
+  const centre = s.centerHz === null ? "centre not on any stated grid" : `centre ${ax.fmtMHz(s.centerHz, res)} MHz`;
+  const span = s.spanHz === null ? "span unknown" : `span ${ax.fmtBandwidth(s.spanHz)}`;
+  const rate = s.source === "live-iq" && s.spanHz !== null ? " (sample rate)" : "";
+  return `${centre} · ${span}${rate} · ${detailLabel(s.source)}`;
+}
+
+/**
+ * Hover on the **frequency** bar: the frequency under the cursor, and the capture state selecting
+ * there would set.
+ *
+ * `spanHz` is the width the selection would keep — a hover is a point, and a point has no width of
+ * its own to snap. With no span known the readout says only where the cursor is, rather than
+ * inventing a window around it.
+ */
+export function freqHoverText(grid: NavigationGrid, ext: Range | null, frac: number, spanHz: number | null): string {
+  if (!ext) return "";
+  const hz = valueAt(ext, frac);
+  const where = `${ax.fmtMHz(hz, resOf(spanOf(ext)))} MHz`;
+  return spanHz !== null && spanHz > 0 ? `${where} · ${configText(grid, hz, spanHz)}` : where;
+}
+
+/**
+ * Drag on the **frequency** bar: the range selected, and what selecting it does — taken from
+ * `freqZoomTarget`, so the sentence and the gesture are the same decision.
+ */
+export function freqSelectText(
+  grid: NavigationGrid, g: ax.Geometry | null, region: Range | null, live: boolean,
+): string {
+  const t = freqZoomTarget(grid, g, region, live);
+  if (!region || t.kind === "none") return "";
+  const edges = `${fmtEdges(region.lo, region.hi)} MHz`;
+  if (t.kind === "view") return `${edges} · zooms the view, the radio stays put · ${detailLabel(t.source)}`;
+  // The offer branch, said as an offer: pressing the button is what moves the front end (T-343).
+  return `${edges} · outside the tuned window — offers "${retuneLabel(t.centerHz)}" · ${configText(grid, t.centerHz, spanOf(region))}`;
+}
+
+// ---------------------------------------------------------------------------
 // Time navigator — pure decisions
 // ---------------------------------------------------------------------------
 
@@ -247,6 +312,38 @@ export function timeZoomTarget(grid: NavigationGrid, region: Range | null, rows:
   const spanS = region.hi - region.lo;
   const want = rows > 0 ? spanS / rows : spanS;
   return { tS: region.hi, spanS, tier: snapTimeCell(grid.time, want) };
+}
+
+/**
+ * Hover on the **time** bar: the clock time under the cursor, **on the capture clock**.
+ *
+ * `ext` is `GET /api/timeline`'s window, so the instant printed is an absolute capture time and the
+ * browser's clock is not reachable from here. See the note above `clockText` in `navigators.ts` for
+ * why that is stated so loudly, and `navigators.test.ts` for the assertion that pins it.
+ */
+export function timeHoverText(ext: Range | null, frac: number): string {
+  return ext ? clockText(timeAtFraction(ext, frac)) : "";
+}
+
+/** Drag on the **time** bar: the selected time range and how long it is — "find me that window
+ * twenty minutes ago" said in the terms the user is looking for. */
+export function timeDragText(ext: Range | null, a: number, b: number): string {
+  const r = regionFromDrag(ext, a, b);
+  return r ? `${clockRangeText(r.lo, r.hi)} · ${durationText(spanOf(r))}` : timeHoverText(ext, b);
+}
+
+/**
+ * What the time bar's **Live** control does (T-395, moved here from the Capture panel).
+ *
+ * Following the live edge is a *time-axis* decision — the same one a pan to the newest end of the
+ * bar makes — so the control sits on the time navigator and goes through `applyTimeTarget` like
+ * every other gesture on that bar. Moving the button moved no state: this dispatches the identical
+ * `goLive` patch the Capture panel's pill used to, which is why the presence push (T-388), the view
+ * window (T-379) and the live-only notes (T-387) are untouched by the relocation.
+ */
+export function goLiveFromNav(store: AppStore): void {
+  applyTimeTarget(store, { live: true });
+  store.set(toast("Back to live."));
 }
 
 /** The tier line beside a time zoom: which cells answer it, never a claim of live-IQ detail. */
@@ -328,10 +425,17 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
   const marker = h("div", { class: "fn-view", title: "The frequency window on screen — drag to pan it" });
   const draft = h("div", { class: "fn-draft", hidden: true });
   const label = h("span", { class: "fn-label" });
+  // T-393: a static name for the axis this bar controls. The two bars look alike and do different
+  // things, and the user asked for each to say which axis is its own.
+  const axisLabel = h("span", { class: "fn-axis-label" }, "FREQ");
+  // T-393: the hover/drag readout. Present only while the pointer is on the bar — a cursor-following
+  // line, never a row of always-on ticks.
+  const readout = h("div", { class: "fn-readout" });
+  readout.hidden = true;
   const offerBtn = h("button", { class: "fn-offer", type: "button" }, "");
   offerBtn.hidden = true;
-  const track = h("div", { class: "fn-track" }, strip, litLayer, marker, draft, offerBtn);
-  el.replaceChildren(track, label);
+  const track = h("div", { class: "fn-track" }, strip, litLayer, marker, draft, readout, offerBtn);
+  el.replaceChildren(track, axisLabel, label);
 
   // T-376: the bar has a viewport of its own. `bounds` is the whole device-available spectrum as
   // the front end reported it (the union of `ranges_hz`); `extent` is the slice of it on the bar.
@@ -341,6 +445,14 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
   let viewport: Range | null = null;
   let viewportTouched = false;
   const tuned = () => store.get().navGrid.grid?.frequency?.current ?? null;
+  /** The live window's geometry, or null when nothing is tuned. */
+  const geom = (): ax.Geometry | null => {
+    const l = store.get().live;
+    return l.centerHz !== null && l.bandwidthHz !== null && l.bins !== null
+      ? { centerHz: l.centerHz, bandwidthHz: l.bandwidthHz, bins: l.bins } : null;
+  };
+  /** T-393: the text a drag in flight is showing, and `null` when no drag owns the readout. */
+  let dragText: string | null = null;
   const extent = (): Range | null => {
     const t = tuned();
     viewport = surveyViewport(bounds(), viewport, viewportTouched, t?.center_hz, t?.span_hz);
@@ -447,9 +559,7 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
     // Panning moves the view inside the tuned band and stops at its edges. No branch of this
     // reaches the control API, at any pan distance — that is the T-343 property, restated here.
     onPan: (df) => {
-      const s = store.get(), ext = extent();
-      const g = s.live.centerHz !== null && s.live.bandwidthHz !== null && s.live.bins !== null
-        ? { centerHz: s.live.centerHz, bandwidthHz: s.live.bandwidthHz, bins: s.live.bins } : null;
+      const s = store.get(), ext = extent(), g = geom();
       if (!g || !s.live.view || !ext) return;
       const r = freqPan(g, s.live.view, ext, df);
       panOverflow = r.overflowHz;
@@ -474,13 +584,40 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
       const p = region ? placeOn(ext, region.lo, region.hi, 0) : null;
       draft.hidden = !p || done;
       if (p && !done) pctStyle(draft, p, false);
+      const g = geom();
+      // T-393: while the drag is in flight the readout says what selecting *this* region does,
+      // taken from the same `freqZoomTarget` the release will apply.
+      dragText = done ? null : freqSelectText(s.navGrid.grid ?? { frequency: null, time: null }, g, region, mayRetune(s.device));
+      showReadout(dragText ?? "", b);
       if (!done) return;
-      const g = s.live.centerHz !== null && s.live.bandwidthHz !== null && s.live.bins !== null
-        ? { centerHz: s.live.centerHz, bandwidthHz: s.live.bandwidthHz, bins: s.live.bins } : null;
       applyFreqZoom(store, freqZoomTarget(s.navGrid.grid ?? { frequency: null, time: null }, g, region, mayRetune(s.device)));
     },
   });
   let panOverflow = 0;
+
+  // ---- T-393: the hover/drag readout ----
+  //
+  // Hover says where the cursor is and **what selecting there would set** (centre / span / sample
+  // rate, snapped to the achievable grid); a drag says the range and what selecting it does. Both
+  // are shown only while the pointer is on the bar, and both are arithmetic over state already in
+  // hand — the viewport extent, and the grid `/api/navigation` reported.
+  function showReadout(text: string, frac: number) {
+    readout.textContent = text;
+    readout.hidden = !text;
+    if (!text) return;
+    // Kept inside the track so the line never hangs off the (overflow-hidden) bar.
+    readout.style.left = `${Math.min(92, Math.max(8, frac * 100))}%`;
+  }
+  track.addEventListener("pointermove", (e) => {
+    if (dragText !== null) return; // a drag in flight owns the line
+    const s = store.get(), v = s.live.view;
+    const frac = ax.pointerFrac(e.clientX, track.getBoundingClientRect());
+    showReadout(
+      freqHoverText(s.navGrid.grid ?? { frequency: null, time: null }, extent(), frac, v ? v.hiHz - v.loHz : null),
+      frac,
+    );
+  });
+  track.addEventListener("pointerleave", () => { dragText = null; readout.hidden = true; });
 
   // T-376: the wheel zooms **this bar's own viewport** about the pointer, with the same
   // `ax.wheelFactor` the waterfall uses, so the gesture matches. Zooming about the pointer pans as
@@ -565,8 +702,21 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
   }) as HTMLCanvasElement;
   const marker = h("div", { class: "tn-view", title: "The time span on screen — drag to move it" });
   const draft = h("div", { class: "tn-draft", hidden: true });
-  const track = h("div", { class: "tn-track" }, canvas, marker, draft);
-  el.replaceChildren(track);
+  // T-393: the static name of this bar's axis, and the cursor-following readout (clock time on
+  // hover, the selected range during a drag).
+  const axisLabel = h("div", { class: "tn-axis-label" }, "TIME");
+  const readout = h("div", { class: "tn-readout" });
+  readout.hidden = true;
+  // T-395: **Live** lives here, at the foot of the time navigator, because following the live edge
+  // is a time-axis choice — the same one a pan to the newest end of this bar makes. It moved off
+  // the Capture panel, whose subject is the recording, not the view's time window.
+  const liveBtn = h("button", {
+    class: "tn-live", type: "button",
+    title: "Follow the live edge. Capture, the ring and detection are always on — this moves the view, not the radio.",
+  }, "● LIVE");
+  const track = h("div", { class: "tn-track" }, canvas, marker, draft, readout);
+  el.replaceChildren(axisLabel, track, liveBtn);
+  liveBtn.addEventListener("click", () => goLiveFromNav(store));
 
   // The capture window this bar is laid out on (T-338): `GET /api/timeline`'s window, which is the
   // IQ ring's configured retention. `null` = not answered, or this server has no capture window;
@@ -621,6 +771,13 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
   const render = () => {
     const ext = extent();
     const t = store.get().time;
+    // T-395: the control shows which of the two states the view is in, exactly as the pill it
+    // replaced did, and it says so even before a capture window has been answered — whether the
+    // view is following is view state, not a fact about the server. It never disables itself:
+    // pressing LIVE while live is a harmless no-op, and a disabled control would read as "this bar
+    // cannot follow the live edge".
+    liveBtn.classList.toggle("following", t.live);
+    liveBtn.setAttribute("aria-pressed", String(t.live));
     if (!ext) { marker.hidden = true; track.title = "No capture window on this server"; return; }
     // Both halves of what this bar is, said together: how long it spans, and which frequencies the
     // picture on it is of. The second half is the T-367 correction made visible.
@@ -657,6 +814,10 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
       const p = region ? placeOn(ext, region.lo, region.hi, 0) : null;
       draft.hidden = !p || done;
       if (p && !done) pctStyle(draft, p, true);
+      // T-393: mid-drag the readout is the selected time RANGE, on the capture clock, so a user can
+      // stop the drag on the window they were looking for.
+      dragText = done ? null : timeDragText(ext, a, b);
+      showReadout(dragText ?? "", b);
       if (!done || !region) return;
       const z = timeZoomTarget(store.get().navGrid.grid ?? { frequency: null, time: null }, region, rowsOnScreen());
       if (!z) return;
@@ -664,6 +825,27 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
       store.set(toast(`Zoomed to ${timeDetailText(z)}`));
     },
   });
+
+  // ---- T-393: the hover/drag readout ----
+  //
+  // Hover prints **the clock time at the cursor**; a drag prints the selected range and its length.
+  // Both come off `timeExtent(win)` — `GET /api/timeline`'s window — so every instant shown is an
+  // absolute *capture* time. Nothing here can reach the browser's clock, which is the point.
+  let dragText: string | null = null;
+  function showReadout(text: string, frac: number) {
+    readout.textContent = text;
+    readout.hidden = !text;
+    if (!text) return;
+    // Time runs down, so the line follows the pointer on the vertical axis, kept inside the track.
+    readout.style.top = `${Math.min(94, Math.max(2, frac * 100))}%`;
+  }
+  track.addEventListener("pointermove", (e) => {
+    if (dragText !== null) return; // a drag in flight owns the line
+    const r = track.getBoundingClientRect();
+    const frac = r.height > 0 ? Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) : 1;
+    showReadout(timeHoverText(extent(), frac), frac);
+  });
+  track.addEventListener("pointerleave", () => { dragText = null; readout.hidden = true; });
 
   // Wheel zooms the reviewed span about the pointer, on the time axis only.
   track.addEventListener("wheel", (e) => {
