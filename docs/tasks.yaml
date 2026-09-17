@@ -7686,7 +7686,7 @@ tasks:
   - id: T-386
     title: Three more surfaces ignore the time cursor, and the centre view dies without a stream header
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: UI
     deps: [T-379]
