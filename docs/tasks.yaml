@@ -8096,7 +8096,7 @@ tasks:
     title: The frequency navigator survey strip must fold with max-hold and share the waterfall's intensity scaling
     milestone: M2-hardening
     status: in-progress
-    priority: normal
+    priority: high
     parallel_group: UI
     core_interface: true
     model: opus
