@@ -8353,6 +8353,94 @@ tasks:
       with the reason. Re-measure section 7; no floor moves. Expect the honest direction
       to be further small drops as more leakage is withdrawn - T-312 cost 0.008 of top-1
       and that was a GOOD result.
+  - id: T-405
+    title: The frequency navigator's view box goes; coverage shading makes the tuned window self-evident
+    milestone: M2-hardening
+    status: todo
+    priority: high
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-368, T-376, T-391]
+    acceptance: |
+      USER 2026-09-16, item (1). UI-ONLY GATE unless the max-hold half reaches the
+      backend - check with just gate.
+      REMOVE the persistent selection/view box (.fn-view): the user rarely slides the
+      view within the tuned range, so a permanent box earns no space. Replace it with
+      COVERAGE SHADING WE ALREADY HAVE: inactive / not-currently-sampled regions
+      slightly DARKER, the actively-sampled region normal colour - so the
+      normal-coloured region IS the current tuned window and no separate box is needed.
+      Keep drag-to-retune (T-392), as a TRANSIENT DRAFT only.
+      AND THE MAX-HOLD, WHICH THE USER IS REITERATING: "there are yellow/red peaks not
+      showing because averaging washes them out". VERIFY IT ACTUALLY LANDED.
+      COORDINATOR FINDING: /api/coverage already DECLARES "fold": "max-hold" with a
+      full semantics block (T-342, crates/hk-api/src/coverage.rs:371). So either the
+      declaration does not match the computation, or something AVERAGES UPSTREAM of the
+      fold - the pyramid's own cells, or the source the shade is taken over. The wire
+      says one thing and the user sees another; one of them is wrong.
+      Do not fix this by adding a second max somewhere. FIND WHERE THE AVERAGING IS and
+      assert the SERVED VALUES ARE MAXIMA, not merely that the field says so - the same
+      measured-not-declared standard T-378 used for device_known.
+      DESIGN CONSTRAINT, from the user: this bar is A MINIATURE OF THE BIG VIEW (T-408).
+      Whatever fold and shading it uses must be the pyramid's, not a bespoke one, or
+      T-408 will have to undo it. Read T-408 before choosing.
+  - id: T-406
+    title: Iterative scan mode - step the tune and retain the full-spectrum survey
+    milestone: M4
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: [T-368, T-408]
+    acceptance: |
+      USER 2026-09-16, item (2). Step the tune to the next region after sampling enough
+      per step (~10-30 s, CONFIGURABLE), and POPULATE + RETAIN the full-spectrum survey
+      so probable signals across the whole spectrum become visible.
+      Build on what exists: the ATTENTION SCHEDULER (C04, sweep-to-find-where) and the
+      COVERAGE MAP (T-368). This is not a new scheduler - it is a dwell policy over the
+      one we have, plus retention of what each step saw.
+      THE PROJECT'S OWN FINDING CONSTRAINS THE DWELL: "a HackRF sweeps 0-6 GHz in under
+      a second but MISSES SHORT BURSTS" (docs/02). 10-30 s per step is a dwell, not a
+      sweep, and the user chose it deliberately - so say what a step of that length can
+      and cannot catch, and make the number configurable rather than tuned to one band.
+      RETENTION IS THE HARD HALF, and it is shared infrastructure: what each step saw
+      must accumulate into the SAME tile pyramid the big view (T-408) and the survey bar
+      (T-405) read. Do not build a private accumulator. Max-hold downsample,
+      grey = genuinely unobserved.
+      HONESTY: a step that sampled a region for 10 s and found nothing is OBSERVED AND
+      QUIET, which is a finding. A region the sweep has not reached yet is UNOBSERVED.
+      These must stay distinguishable in the accumulation exactly as they are in
+      hk_store::Coverage - a sweep that greys what it has already cleared is useless,
+      and one that paints unreached spectrum as quiet is dishonest.
+      A retune is a device action (T-343): one capture at a time, settle gap honoured,
+      device_id recorded. And with multiple SDRs the sweep must not assume it owns the
+      radio - the scheduler already arbitrates.
+  - id: T-407
+    title: The two navigator bars are hard to use on touch
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: UI
+    deps: [T-391, T-393]
+    notes: |
+      USER 2026-09-16, item (4), from live testing: "the left + bottom scrubber bars are
+      hard to use on touch (EVERYTHING ELSE IS FINE ON MOBILE)". So this is specifically
+      the two edge navigators, not a general mobile pass.
+      Three things named: LARGER HIT TARGETS, PROPER TOUCH DRAG/PINCH, and NO ACCIDENTAL
+      PAGE SCROLL.
+      The third is the one with a real trap: preventing page scroll on a drag means
+      touch-action / preventDefault on the bars, and getting that wrong makes the whole
+      page unscrollable on a phone. Scope it to the bars themselves.
+      Pinch is the touch equivalent of the wheel zoom T-376 added, and it should resolve
+      to the SAME viewport arithmetic rather than a parallel path - one zoom, two input
+      devices. Likewise a touch drag is the existing pan; do not fork the gesture logic.
+      T-391 made both bars 92px, which is what makes a usable hit target possible at all.
+      Note T-392: region-select on the frequency bar RETUNES on release. On touch that
+      is easier to trigger accidentally than with a mouse, so check that a tap or a
+      scroll-gesture-misread cannot command the radio - T-340's control (no pan or wheel
+      reaches the device) must hold for touch input too.
+      UI-ONLY GATE.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
