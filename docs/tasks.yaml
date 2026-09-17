@@ -8806,17 +8806,12 @@ tasks:
   - id: T-413
     title: Is a detected end provisional and revocable, and if so over what silence?
     milestone: M2-hardening
-    status: blocked
-    priority: normal
+    status: todo
+    priority: high
     parallel_group: PIPE
     core_interface: true
     model: opus
     deps: [T-410]
-    blocked_on: >-
-      the user, a decision they may not know they need to make. CLAUDE.md carries the line "a detected
-      end is provisional and revocable", which T-410 satisfied only in the narrow sense and flagged
-      rather than decided (ADR-0019 section 6.1). Nobody can widen it without the user choosing what a
-      dropout is, because the two readings in the repo genuinely conflict.
     notes: |
       T-410 satisfies the line for every silence SHORTER THAN THE IDLE GAP: no END is
       emitted, so there is nothing to revoke. The question is whether it must hold for
@@ -8836,6 +8831,44 @@ tasks:
       Whatever is chosen must keep the property T-410 established: the silence is never
       CLAIMED. Drawing two boxes with a visible gap already tells the truth; joining
       them would assert continuity through air that was measured empty.
+      USER RULING 2026-09-17 - ANSWERED, UNBLOCKED:
+      YES, a detected end is REVOCABLE. Reuse the EXISTING idle-gap constant as the
+      silence tolerance - clamp(2 x revisit_period, 1 s, 60 s), the same one
+      presence/confidence already uses. NO NEW PARAMETER.
+      THE RULE: if the signal resumes within idle-gap of the detected end, NULL THE END
+      and keep the ONE interval open (same row, per T-262 revival). If the silence
+      exceeds idle-gap before it resumes, the end STANDS and a resumption is a
+      genuinely NEW interval/event.
+      This matches the unified model: assume ongoing to the live edge, a detected end
+      caps it, a resumption within tolerance re-opens it. The user may override the
+      tolerance later.
+      ONE AMBIGUITY THE IMPLEMENTER MUST RESOLVE FIRST, flagged by the coordinator
+      rather than guessed - it decides whether revocation can ever fire at all:
+      T-410 emits END only AFTER a full idle-gap of silence (presence.rs: an interval is
+      open while `now - t_end <= idle_gap`). So by the time an END exists, the silence
+      since the MEASURED end is ALREADY exactly idle-gap. Measuring the revocation
+      window from the measured end therefore makes it unreachable: any resumption after
+      an END is by construction more than idle-gap after the measured end.
+      The only reading in which the rule has effect is that the window runs from THE END
+      EVENT (the decision instant), giving:
+        silence < idle-gap        -> no END is emitted at all (already true, T-410)
+        idle-gap .. 2 x idle-gap  -> END fired, then REVOKED, one interval
+        silence > 2 x idle-gap    -> END stands, resumption is a new interval
+      Adopt that reading unless the user says otherwise, and STATE IT IN THE ADR, because
+      it means the effective join tolerance is 2 x idle-gap even though only one constant
+      exists.
+      THE PROPERTY THAT MUST SURVIVE (T-410, ADR-0017): the silence is never CLAIMED.
+      A revoked end joins one interval across a gap the receiver was LISTENING through
+      and measured empty - so the joined interval asserts presence through measured
+      silence, which is exactly what the open-cap rendering exists to avoid asserting.
+      Decide how the join is DRAWN: the honest option is that the rejoined span keeps
+      the open-cap treatment (lighter fill, broken border) over the revoked gap, so the
+      row is one interval but the silence still reads as unmeasured-through rather than
+      solid.
+      ADR-0017's ISM reading must stay green: fifty 30 s bursts are FIFTY intervals.
+      With contiguous coverage the idle gap is 1 s, so a 30 s cadence is far outside
+      2 x idle-gap and unaffected - confirm that test still passes rather than assuming.
+
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
