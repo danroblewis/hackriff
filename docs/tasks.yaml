@@ -7912,6 +7912,51 @@ tasks:
       DeviceAction. Do not relax that control to make this work; the gesture that
       retunes is region-select, which is already the one wired to the offer.
       Ties T-343 (the device action), T-367 (the axes), T-376 (the bar's viewport).
+  - id: T-393
+    title: The navigators say nothing about what they select; add labels and hover/drag readouts
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-376, T-391, T-392]
+    acceptance: |
+      USER, live testing 2026-09-16. The two edge navigators need minimal
+      labeling/readouts so people know what they are selecting.
+      (1) A small STATIC LABEL beside each bar naming what it controls (left = time,
+      bottom = frequency), so the axis is legible at a glance.
+      (2) TIME bar: ON HOVER show the clock time at the cursor; DURING A DRAG show the
+      selected time RANGE (e.g. "1:45-1:50 PM") so a user can find a specific past
+      window. A readout near the cursor, NOT always-present ticks.
+      (3) FREQUENCY bar: ON HOVER show the frequency at the cursor AND THE SDR
+      CONFIGURATION IT WOULD SET if selected there (centre / span / sample-rate,
+      snapped to the achievable grid per T-341); during a drag show the selected
+      frequency range plus the resulting config.
+      Hover-follows-cursor, minimal, appears only on hover/drag.
+      The user calls it "pure thin-client formatting over the existing pixel<->time/Hz
+      mapping" and that is right: T-341 already put snapState/detailOf in
+      ui/src/navigation.ts as pure arithmetic over the served grid, and axis mapping
+      plus formatting is exactly what CLAUDE.md allows the client to own.
+      TWO COUPLINGS THAT MUST NOT BE GOT WRONG.
+      (a) THE TIME READOUT IS ON THE CAPTURE CLOCK, NEVER THE BROWSER'S. T-379 found
+      the Candidate list querying a window from Date.now() that was 306,315 s away
+      from the capture, and T-384 found the same in three places in plots.ts. A
+      navigator that renders a wall-clock time over capture data is that bug with a
+      friendlier face - and it would be WORSE, because the user would read it and
+      believe it. Format from the same absolute capture time the waterfall lays out
+      through.
+      (b) PART (3) PROMISES WHAT T-392 DELIVERS. Showing "the config it would set if
+      selected" is dishonest while selecting there does not set it. Sequence after
+      T-392 (region-select retunes), or scope the config readout to state exactly what
+      selecting does today. Do not ship a readout that describes behaviour the build
+      does not have.
+      Keep T-340's ui/src guard green: no signal logic or RF constant in the client -
+      it forbids _db, dbfs, snr, occupancy, noise, e6, e9 and any 6+-digit literal, and
+      it already caught one real slip (fmtMHz(hz, 1e6)). A formatter that hardcodes a
+      unit scale will be caught by it, correctly.
+      Do not redesign the UI - the rewrite is deferred. Depends on T-391 because the
+      readouts need somewhere to live: the bars are ~12px tracks until it lands.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
