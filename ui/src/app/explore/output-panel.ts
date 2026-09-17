@@ -20,7 +20,7 @@ import { mountInspectorPanel } from "../decode/inspector";
 import { startPoll } from "../net";
 import type { OutputEntry } from "../state";
 import { apiErrorText, fmtMHz } from "./format";
-import { viewWindow, windowCoverage, windowKey, type Row, type ViewWindow, type WindowState } from "./inventory";
+import { viewWindow, windowCoverage, windowEmptyText, windowKey, type Row, type ViewWindow, type WindowState } from "./inventory";
 import type { WindowCoverage } from "./slice";
 
 // ---- pipelines (a minimal local shape: T-195 only needs emitter_id/state/outputs, so this module
@@ -148,13 +148,13 @@ export type DecodeView =
  *
  * Only the third is a finding. Rendering the first or second as the third turns an absence of
  * measurement into a result — the error the waterfall's grey rule exists to stop, on this surface.
+ *
+ * The first two sentences come from [[windowEmptyText]] (T-387), so this panel, the Explore lists
+ * and the packet inspector make the *same* claim in the *same* words; only the third and fourth —
+ * the ones that are about this surface's own subject — are supplied here.
  */
 export function decodeEmptyText(v: Exclude<DecodeView, { kind: "rows" }>): string {
-  if (v.kind === "error") return v.message;
-  if (v.kind === "no-window") return "Waiting for the capture window…";
-  if (v.coverage === "unobserved") return "Nothing was observed in this window — no data, not a quiet band.";
-  if (v.coverage === "observed") return "Nothing decoded in this window.";
-  return "No decode listed for this window.";
+  return windowEmptyText(v, "Nothing decoded in this window.", "No decode listed for this window.");
 }
 
 /** The `/decode` client both panels share: `AppContext["client"]` satisfies it structurally. */

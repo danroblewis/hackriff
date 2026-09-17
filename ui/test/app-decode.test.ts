@@ -22,6 +22,7 @@ import {
   applyFragment, applyParam, assistRouteFor, coerceParamValue, nextNodeId, qualityTiles, recordsPerSecond,
 } from "../src/app/decode/params";
 import { subscribePipelineFeed } from "../src/app/decode/status-feed";
+import { OUTPUTS_SUBJECT, PIPELINES_SUBJECT, STAGE_STATUS_SUBJECT, liveOnlyNote } from "../src/app/live-only";
 
 // ---- fixtures ----
 
@@ -381,4 +382,33 @@ test("inspector.css: the three-pane inspector stacks to one column with capped h
   assert.match(css, /\.insp-bytes\s*\{[^}]*max-height:\s*\d+px/);
   assert.match(css, /\.insp-tree\s*\{[^}]*max-height:\s*\d+px/);
   for (const m of css.matchAll(/min-width:\s*(\d+)px/g)) assert.ok(Number(m[1]) <= 400);
+});
+
+// ---- T-387: the three surfaces that describe THE RUN, not THE AIR, and say so ----------------
+
+test("THE PER-SURFACE DECISION: a live-only surface says it is live-only, and says it louder once scrubbed", () => {
+  // The prior question T-387 settled before touching any contract: the pipelines list, the stage
+  // status strip and the outputs dock describe the *run* — which decoder processes exist, how a
+  // node is reading now, which sockets this page holds. None has a past-window form, and none
+  // should: a socket this tab holds cannot exist in a window an hour ago. Being live-only is not
+  // the bug; *looking* windowed while being live-only is, which is the same class of lie as the
+  // focus panel's "no longer in the inventory" (T-385).
+  for (const subject of [PIPELINES_SUBJECT, STAGE_STATUS_SUBJECT, OUTPUTS_SUBJECT]) {
+    const live = liveOnlyNote(subject, false);
+    const scrubbed = liveOnlyNote(subject, true);
+    assert.match(live, /^live only — /, "the claim is made, not implied");
+    assert.ok(live.includes(subject) && scrubbed.includes(subject));
+    assert.notEqual(live, scrubbed, "the note changes when the view stops following the live edge");
+    assert.match(scrubbed, /scrubbed back; this is not that window/);
+  }
+  // Three surfaces, three subjects — the reader is told *what* is live-only, not merely that
+  // something is.
+  assert.equal(new Set([PIPELINES_SUBJECT, STAGE_STATUS_SUBJECT, OUTPUTS_SUBJECT]).size, 3);
+});
+
+test("the live-only note never depends on whether the surface is empty", () => {
+  // If it did, an empty live-only panel would read as an answer about the window — exactly the
+  // confusion the note exists to prevent. Its only inputs are the subject and Play/Pause.
+  assert.equal(liveOnlyNote(PIPELINES_SUBJECT, false), liveOnlyNote(PIPELINES_SUBJECT, false));
+  assert.equal(liveOnlyNote.length, 2);
 });

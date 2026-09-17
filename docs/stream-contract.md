@@ -481,6 +481,13 @@ documents the wire format and security notes from the UI's point of view.
 
 ### 12.1 On-demand streams
 
+**An on-demand stream is the live edge, and has no history-window form (T-387).** `/ws/open/<name>` serves a consumer that asked to start listening *now*; it takes no `t0`/`t1`, and a caller cannot ask it about a past window. This is a deliberate boundary in the contract, not an omission:
+
+- A stream's job is to carry what is being produced. A window *selects stored records*, which is a query, and queries belong to the control/query API, which owns the index that makes a time scrub a seek rather than a scan (§14.7).
+- So where a UI surface must be a view over a past window, the window goes on the **route that already has one**. The packet inspector — the one surface here whose records are data about the air — scrubs through `GET /api/captures/{id}/frames?from_t&to_t`, not through a history form on `open/inspector` (docs/api.md "Decoded captures").
+- The corollary is the honest one: a surface that *cannot* be windowed because no such data exists must **say it is live-only** rather than sit silently on the live edge looking windowed. `status` records (§14.3) are the case — decoder telemetry, stored in the capture file but indexed and served nowhere by time — so the workbench's stage-status strip, its pipelines list and the outputs dock each declare themselves live-only.
+- `open/inspector?capture=<id>&from_frame=<n>` (§14.7) is a **capture replay**, not a window: it is keyed by capture and frame and paces to the end of the recording. Replaying a recording is not the same act as asking what a window holds.
+
 Some streams exist only because a consumer asked for them, e.g. listening to one emitter. `hk_stream::ondemand` defines the transport-agnostic shape; T-060 reuses it for bits and symbols:
 - **`StreamOpener::open(&OpenRequest) -> Result<OpenedStream, OpenRefusal>`.**
   - The request holds the transport's query parameters, with `token` removed before any opener sees them.

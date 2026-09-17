@@ -1077,6 +1077,14 @@ Conventions:
 - Unchanged outputs keep their streams and consumers. Changed outputs get new streams, and removed ones finish.
 - An `edit` record marks the boundary on every inspector stream, and later frames carry the new `edit_rev`. Edits don't save: use `POST /api/pipelines/{id}/save`.
 
+**On-demand streams are the live edge, deliberately (T-387).** `/ws/open/<name>` openers (`listen`, `inspector?pipeline=`, `stage`) have **no history-window form**, and adding one would be an [ADR-0004](adr/0004-stream-output-contract.md) stream-contract change. T-387 asked whether any UI surface needs one and found none does:
+
+- The **packet inspector** is the one surface whose records are *data about the air* — frame records carry capture-clock `t_ns` and are recorded to a capture — and its past-window form already exists as `GET /api/captures/{id}/frames?from_t&to_t` (above). A route that exists beats a contract change.
+- `status` records are *telemetry of the decoder* (a node's lock/quality/error rate as it is reading now). They are stored verbatim in the capture file (stream contract §14.7) but **nothing indexes or serves them by time**, and a lock from an hour ago is not a stage's current state. The **pipelines list**, the **stage-status strip** and the **outputs dock** describe the run rather than the air, so they are honestly live-only — and the UI now *says so* on each of them rather than looking windowed. A surface that looks windowed while being live-only is the same class of error as claiming "no longer in the inventory" for a row that is merely outside the window (T-385).
+- `GET /ws/open/inspector?capture=<id>&from_frame=<n>` is a **capture replay**, not a window: it is keyed by capture and frame, paces to the end of the recording, and is capped at 4 concurrent. A scrub wants the paged HTTP route.
+
+Should a future task genuinely need decoder status by time, that is a **store + route** change (an index over `status` records), not a UI one.
+
 **Streams of a pipeline** (stream contract §14; discovery lists them under `/api/streams`):
 
 | Stream | How to open | Carries |
@@ -1187,6 +1195,7 @@ Classical, compute-only helpers (`hk_estimate::assist`) for writing a parser ove
 - `to_t` ends the page at the first frame after it (`next_from_frame: null`). Give `from_frame` or `from_t`, not both.
 - `frames` are the stored frame records in order, served fail closed like the parse route: a record whose class (or the stream's) forbids content, or that is `own-key-decrypted`, is `gated: true` without `content`.
 - `stream` is as in the parse route, with `inspector.source: {kind: "capture", capture_id, reparse: false}`.
+- **This is the packet inspector's window (T-387).** The UI's packet inspector is a view over the one (time × frequency) window like every other surface, and it reaches a past window through **this** route: `GET /api/captures` gives the `pipeline_id` → capture key, then `from_t`/`to_t` (both ends closed, on the capture clock) give the window's frames. It merges them with what its live socket received, de-duplicated, so a window straddling the live edge lists each frame once. Nothing re-decodes: these are records the pipeline already wrote, which is what the incremental-decode invariant asks for. **No stream-contract change was needed**, and none was made — see "on-demand streams are the live edge" under `/ws/open/<name>` below.
 
 **Re-parse** with a draft field map is `POST /api/captures/{id}/parse` ("Inspector" above). It uses the index too: without a field map only the requested page is read; with one, the fit pass reads the first 100 000 frames and a page past them is a second seek.
 

@@ -27,6 +27,13 @@ Workflow step 7: stream bits (and messages, audio, IQ slices) to external progra
 
   Producer-side rate limits are part of the contract for such a stream, because its rate is a function of how busy the band is rather than of how much content there is: `presence` caps both the tick period and the records per tick, and the backpressure rule below is unchanged — a slow consumer is dropped, never the survey.
 
+- **Amended (T-387): a stream carries the live edge; a *window* is a query, and belongs to the control/query API.** On-demand openers (`/ws/open/<name>`: `listen`, `inspector?pipeline=`, `stage`) take no `t0`/`t1` and will not grow one to satisfy a UI surface that has an alternative. Three rules make that a boundary rather than a gap ([stream contract §12.1](../stream-contract.md#121-on-demand-streams)):
+  - **Where a surface must show a past window, the window goes on the route that already has one.** The packet inspector is a view over the UI's one (time × frequency) window, and reaches it through `GET /api/captures/{id}/frames?from_t&to_t` — capture-keyed, indexed, paged — merging those records with what its live socket received. A route that exists beats a contract change, and the index is what makes a time scrub a seek rather than a scan.
+  - **A surface that cannot be windowed must say it is live-only.** Some records describe *the run*, not *the air*: `status` records are decoder telemetry (a node's lock, quality, error rate as it is reading now), stored verbatim in the capture file but indexed and served by time nowhere. The surfaces built on them — the pipelines list, the stage-status strip, the outputs dock — are honestly live-only, and must declare it. Sitting silently on the live edge while *looking* windowed is the same failure as presuming what was not measured: it invites the reader to take the panel for an answer about the window on screen.
+  - **Replay is not a window.** `open/inspector?capture=<id>&from_frame=<n>` replays a recording from a frame to its end; it answers "play me this recording", never "what does `[t0, t1]` hold".
+
+  This is the same honesty rule as the one above, one level up: a stream says what was measured and a client may not interpolate towards the live edge; a *surface* shows what exists for its window and must not let the live edge stand in for it.
+
 ## Consequences
 
 - External programs subscribe to a socket and get framed, self-describing streams — the "pluggable consumers" goal, with no coupling to hackriff internals.

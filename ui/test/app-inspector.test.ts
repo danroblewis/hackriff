@@ -4,13 +4,17 @@
 // under node:test (see ui/test/inventory.test.ts's note); only pure exports are tested here.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { LayerTree } from "../src/frame-inspector";
+import type { FrameView, LayerTree } from "../src/frame-inspector";
 import { cycleLeafAt, nodeById } from "../src/frame-inspector";
 import {
-  byteColorClass, byteOwner, findInspectorStream, frameRowsVM, frameViewFromLive,
-  hexRows, pushRingFrame, resolveSelectedFrame, selectedByteRange, servedAddressText,
+  byteColorClass, byteOwner, findInspectorStream, frameListEmptyText, frameRowsVM, frameViewFromLive,
+  hexRows, inspectorNoteText, loadFrameBackfill, pushRingFrame, resolveFrameList, resolveSelectedFrame,
+  selectedByteRange, servedAddressText, unplaceableFrames, windowFrames,
   type RingFrame, type StreamsResponse,
 } from "../src/app/decode/inspector";
+import { emptyListText, viewWindow, windowKey } from "../src/app/explore/inventory";
+import { decodeEmptyText } from "../src/app/explore/output-panel";
+import { WATERFALL_ROWS } from "../src/waterfall";
 
 // ---- fixture: a small RDS-shaped frame record + layer tree, shaped exactly as
 // docs/stream-contract.md §14.2's example (bytes 0x16 0x94 0x0A 0x00). ----
@@ -180,4 +184,238 @@ test("byte click -> field select lands on the same field a field click would hig
   assert.equal(nodeById(TREE, fieldId!)?.name, "group");
   // Repeat clicks on the same byte cycle through byte_index[b]; with one owner it comes back to itself.
   assert.equal(cycleLeafAt(TREE, 2, fieldId), 1);
+});
+
+// ---- T-387: the packet inspector is a view over the one window ------------------------------
+//
+// The prior question T-387 had to settle first: *should this surface re-derive at all?* Of the four
+// T-384 left on the live edge, three describe the run (pipelines list, stage status, outputs dock)
+// and are honestly live-only. This one is not: packets are **data about the air**, they carry
+// capture-clock `t_ns`, and their past-window form already exists in the pipeline's capture. So it
+// re-derives — through `GET /api/captures/{id}/frames?from_t&to_t`, a route that already had the
+// window. No stream-contract change was needed, and none was made.
+
+/** The capture clock these fixtures run on, deliberately far from any wall clock — the 3.5-day gap
+ * behind T-379 is what makes a `Date.now()` window select nothing while the capture window holds
+ * five frames. */
+const CAP_EDGE_S = 1_789_297_847;
+const SPAN_S = WATERFALL_ROWS / 25;
+
+function winState(over: {
+  view?: { loHz: number; hiHz: number } | null; rowRateHz?: number | null; edgeTS?: number | null;
+  time?: { live: boolean; tS?: number; spanS?: number | null };
+} = {}) {
+  return {
+    live: {
+      view: over.view === undefined ? { loHz: 99.6e6, hiHz: 102e6 } : over.view,
+      rowRateHz: over.rowRateHz ?? 25,
+      edgeTS: over.edgeTS === undefined ? CAP_EDGE_S : over.edgeTS,
+    },
+    device: { rowsPerS: null },
+    time: over.time ?? { live: true },
+    captureWindow: null,
+  };
+}
+
+/** A frame at `tS` on the capture clock, with the pipeline's own frame number as its id. */
+const frameAt = (index: number, tS: number): FrameView => ({ index, timeS: tS, bitLen: 32, fit: "ok" });
+const ringOf = (...views: FrameView[]): RingFrame[] => views.map((view) => ({ view, fresh: false }));
+
+/** A client that records every path, serves one capture for `p1` and the frames a test names. */
+function framesClient(
+  stored: readonly { index: number; tS: number }[],
+  opts: { coverage?: "observed" | "unobserved" | "none"; captures?: boolean } = {},
+) {
+  const paths: string[] = [];
+  const client = {
+    get: async <T,>(path: string): Promise<T> => {
+      paths.push(path);
+      if (path.startsWith("/api/coverage")) {
+        const c = opts.coverage ?? "observed";
+        return (c === "none" ? { any: { cells: [] } } : { any: { cells: [{ state: c }] } }) as T;
+      }
+      if (path === "/api/captures") {
+        return (opts.captures === false
+          ? { captures: [] }
+          : { captures: [{ id: "cap1", pipeline_id: "p1", t_last: CAP_EDGE_S }] }) as T;
+      }
+      return {
+        frames: stored.map((s) => ({
+          type: "frame", gated: false, t_ns: s.tS * 1e9, metadata: { frame: s.index, bit_len: 32, fit: "ok" },
+          content: { hex: "16940a00" },
+        })),
+      } as T;
+    },
+  };
+  return { client, paths };
+}
+
+test("THE CONTROL: a window that DOES hold frames renders them, by id, from both sources", async () => {
+  // Two frames the live socket carried, three more only the capture holds — every one inside the
+  // window. Without this control every other assertion here is satisfiable by a panel that renders
+  // nothing and explains itself beautifully.
+  const ring = ringOf(frameAt(41, CAP_EDGE_S - 2), frameAt(40, CAP_EDGE_S - 3));
+  const { client, paths } = framesClient([
+    { index: 37, tS: CAP_EDGE_S - 9 }, { index: 38, tS: CAP_EDGE_S - 7 }, { index: 39, tS: CAP_EDGE_S - 5 },
+  ]);
+  const w = { t0: CAP_EDGE_S - SPAN_S, t1: CAP_EDGE_S };
+  const backfill = await loadFrameBackfill(client, "p1", w);
+  const view = await resolveFrameList(client, winState(), ring, backfill);
+
+  assert.equal(view.kind, "frames");
+  assert.deepEqual(
+    (view as { kind: "frames"; frames: RingFrame[] }).frames.map((r) => r.view.index),
+    [41, 40, 39, 38, 37],
+    "every frame of the window, newest first, live and recorded together — by id",
+  );
+  assert.deepEqual(paths, ["/api/captures", `/api/captures/cap1/frames?from_t=${w.t0}&to_t=${w.t1}&limit=500`]);
+  assert.ok(!paths.some((p) => p.startsWith("/api/coverage")), "a non-empty window asks no coverage question");
+
+  // And the rows a list would render carry those same ids: the control reaches the view model too.
+  assert.deepEqual(
+    frameRowsVM((view as { kind: "frames"; frames: RingFrame[] }).frames, null).map((r) => r.seq),
+    [41, 40, 39, 38, 37],
+  );
+});
+
+test("THE FOURTH TIME THIS BUG WOULD HAVE BEEN FOUND: the window is the capture clock, not Date.now()", () => {
+  // T-379 (Candidate list, 306,315 s out), T-384 (three sites in plots.ts), T-389 (the Confirmed
+  // query) — the same bug three times. These frames sit on a capture clock 3.5 days from any
+  // browser instant, so a wall-clock window selects none of them while the real window selects all.
+  const ring = ringOf(frameAt(2, CAP_EDGE_S - 1), frameAt(1, CAP_EDGE_S - 4));
+  const capture = { t0: CAP_EDGE_S - SPAN_S, t1: CAP_EDGE_S };
+  const wall = { t0: Date.now() / 1000 - SPAN_S, t1: Date.now() / 1000 };
+  assert.deepEqual(windowFrames(ring, [], capture).map((r) => r.view.index), [2, 1]);
+  assert.deepEqual(windowFrames(ring, [], wall).map((r) => r.view.index), []);
+});
+
+test("NEVER WIDEN: frames outside the window are not listed, and an empty window is not refilled", () => {
+  const ring = ringOf(frameAt(9, CAP_EDGE_S - 1), frameAt(8, CAP_EDGE_S - SPAN_S - 30));
+  const w = { t0: CAP_EDGE_S - SPAN_S, t1: CAP_EDGE_S };
+  assert.deepEqual(windowFrames(ring, [], w).map((r) => r.view.index), [9], "the older frame is outside");
+  // A window entirely before every frame lists nothing rather than relaxing to the nearest frames.
+  const past = { t0: CAP_EDGE_S - 4000, t1: CAP_EDGE_S - 3000 };
+  assert.deepEqual(windowFrames(ring, [], past), []);
+});
+
+test("a window straddling the live edge lists each frame once: the recorded copy is dropped, the live one kept", () => {
+  const w = { t0: CAP_EDGE_S - SPAN_S, t1: CAP_EDGE_S };
+  const live = [{ view: frameAt(12, CAP_EDGE_S - 2), fresh: true }];
+  const stored = [frameAt(12, CAP_EDGE_S - 2), frameAt(11, CAP_EDGE_S - 6)];
+  const out = windowFrames(live, stored, w);
+  assert.deepEqual(out.map((r) => r.view.index), [12, 11]);
+  assert.equal(out[0].fresh, true, "the live record wins, so the just-arrived flash survives the merge");
+});
+
+test("a frame carrying no t_ns is never claimed for the window — it is counted and disclosed", () => {
+  const ring: RingFrame[] = [
+    { view: { index: 5, bitLen: 32, fit: "ok" }, fresh: false },
+    { view: frameAt(4, CAP_EDGE_S - 1), fresh: false },
+  ];
+  const w = { t0: CAP_EDGE_S - SPAN_S, t1: CAP_EDGE_S };
+  assert.deepEqual(windowFrames(ring, [], w).map((r) => r.view.index), [4]);
+  assert.equal(unplaceableFrames(ring), 1);
+  assert.match(
+    inspectorNoteText({ kind: "frames", frames: windowFrames(ring, [], w) }, 1, "live", "tcp://x y"),
+    /carry no time and cannot be placed/,
+  );
+});
+
+test("NO WINDOW: nothing is asked at all, and the panel says so rather than showing an unbounded ring", async () => {
+  const ring = ringOf(frameAt(3, CAP_EDGE_S - 1));
+  const { client, paths } = framesClient([]);
+  const view = await resolveFrameList(client, winState({ edgeTS: null }), ring, null);
+  assert.deepEqual(view, { kind: "no-window" });
+  assert.deepEqual(paths, [], "an invented window returns an honest zero frames, which reads as a finding");
+  assert.equal(frameListEmptyText(view), "Waiting for the capture window…");
+});
+
+test("THE GENUINELY-EMPTY CONTROL: an empty window asks about its coverage, for exactly that window", async () => {
+  const { client, paths } = framesClient([], { coverage: "unobserved" });
+  const view = await resolveFrameList(client, winState(), [], null);
+  assert.deepEqual(view, { kind: "empty", coverage: "unobserved" });
+  const cov = new URLSearchParams(paths[0].slice(paths[0].indexOf("?") + 1));
+  assert.equal(Number(cov.get("t1")), CAP_EDGE_S, "about exactly this panel's window, not another");
+  assert.equal(Number(cov.get("t0")), CAP_EDGE_S - SPAN_S);
+  assert.equal(cov.get("f_lo"), String(99.6e6));
+});
+
+test("a coverage answer that never came stays UNKNOWN rather than hardening into a measurement claim", async () => {
+  const { client } = framesClient([], { coverage: "none" });
+  assert.deepEqual(await resolveFrameList(client, winState(), [], null), { kind: "empty", coverage: null });
+});
+
+test("a pipeline with no capture leaves the live frames alone rather than emptying the window", async () => {
+  const { client } = framesClient([], { captures: false });
+  const w = { t0: CAP_EDGE_S - SPAN_S, t1: CAP_EDGE_S };
+  const backfill = await loadFrameBackfill(client, "p1", w);
+  assert.deepEqual(backfill, { w, frames: [] });
+  const ring = ringOf(frameAt(6, CAP_EDGE_S - 1));
+  const view = await resolveFrameList(client, winState(), ring, backfill);
+  assert.deepEqual((view as { kind: "frames"; frames: RingFrame[] }).frames.map((r) => r.view.index), [6]);
+});
+
+test("a backfill fetched for another window is never tallied under this one", async () => {
+  const { client } = framesClient([]);
+  const stale = { w: { t0: CAP_EDGE_S - 900, t1: CAP_EDGE_S - 800 }, frames: [frameAt(1, CAP_EDGE_S - 850)] };
+  const view = await resolveFrameList(client, winState(), [], stale);
+  assert.equal(view.kind, "empty", "the stale set belongs to a different window and is not borrowed");
+});
+
+test("scrubbing back re-derives: the same ring answers about whichever window is on screen", () => {
+  const ring = ringOf(
+    frameAt(3, CAP_EDGE_S - 1), frameAt(2, CAP_EDGE_S - 100), frameAt(1, CAP_EDGE_S - 101),
+  );
+  const live = viewWindow(winState())!;
+  const past = viewWindow(winState({ time: { live: false, tS: CAP_EDGE_S - 100, spanS: 5 } }))!;
+  assert.deepEqual(windowFrames(ring, [], live).map((r) => r.view.index), [3]);
+  assert.deepEqual(windowFrames(ring, [], past).map((r) => r.view.index), [2, 1]);
+  // And the window key changes between them, which is what makes the panel re-ask at all.
+  assert.notEqual(windowKey(winState()), windowKey(winState({ time: { live: false, tS: CAP_EDGE_S - 100, spanS: 5 } })));
+});
+
+test("THE DISTINGUISHING TEST: the four emptinesses produce four different sentences", () => {
+  const sentences = [
+    frameListEmptyText({ kind: "no-window" }),
+    frameListEmptyText({ kind: "empty", coverage: "unobserved" }),
+    frameListEmptyText({ kind: "empty", coverage: "observed" }),
+    frameListEmptyText({ kind: "empty", coverage: null }),
+  ];
+  assert.equal(new Set(sentences).size, 4, `pairwise distinct: ${JSON.stringify(sentences)}`);
+  assert.match(sentences[2], /No frames in this window\./, "only the third is a claim about the air");
+});
+
+test("ONE VOCABULARY: the two measurement claims are worded identically on every window-scoped surface", () => {
+  // `Coverage` is the backend's (T-368) and the sentences that report it must not fork per panel:
+  // "nothing ever looked here" said three slightly different ways is three vocabularies, and a
+  // reader who learned one on the sidebar would read a different meaning into the inspector's.
+  for (const v of [{ kind: "no-window" } as const, { kind: "empty", coverage: "unobserved" } as const]) {
+    assert.equal(
+      frameListEmptyText(v), decodeEmptyText(v),
+      "the packet inspector and the decode panel make the same claim in the same words",
+    );
+    assert.equal(
+      frameListEmptyText(v),
+      emptyListText(v.kind === "no-window"
+        ? { window: null, loadedAtS: 1, error: null }
+        : { window: { coverage: "unobserved" }, loadedAtS: 1, error: null }),
+      "…and so does the Candidate/Confirmed list",
+    );
+  }
+  // The third state is the one that differs, because it is the only one about this surface's subject.
+  assert.notEqual(
+    frameListEmptyText({ kind: "empty", coverage: "observed" }),
+    emptyListText({ window: { coverage: "observed" }, loadedAtS: 1, error: null }),
+  );
+});
+
+test("the note keeps three different facts apart: the window, the tap and the served address", () => {
+  const w = { t0: CAP_EDGE_S - SPAN_S, t1: CAP_EDGE_S };
+  const full = inspectorNoteText({ kind: "frames", frames: windowFrames(ringOf(frameAt(1, CAP_EDGE_S - 1)), [], w) }, 0, "live", "tcp://a b");
+  assert.equal(full, "1 frame in this window · live tap · tcp://a b");
+  // A connected tap says nothing about whether the window on screen holds frames: an empty window
+  // under a live tap must still read as empty, or the tap's state would be mistaken for an answer.
+  const empty = inspectorNoteText({ kind: "empty", coverage: "unobserved" }, 0, "live", "tcp://a b");
+  assert.match(empty, /^Nothing was observed in this window/);
+  assert.match(empty, /live tap/);
 });

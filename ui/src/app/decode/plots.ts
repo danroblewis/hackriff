@@ -6,6 +6,7 @@ import type { AppContext, MountFn } from "../context";
 import { h } from "../dom";
 import { viewWindow, windowKey, type ViewWindow } from "../explore/inventory";
 import { FLAG_GATED, openStream, type StreamSocket } from "../net";
+import { captureFor, captureFramesPath, type CaptureLite } from "./captures";
 import { findBlock, subscribeDecodeFeed, type BlockDescriptor, type DecodeFeed, type PipelineNode, type PortType } from "./pipelines";
 import { bitStripPlot, linePlot, placeholderPlot, scatterPlot, tallyPlot } from "./svg";
 import { type FrameRecord, subscribePipelineFeed } from "./status-feed";
@@ -157,30 +158,10 @@ export function capFrames(frames: readonly FrameRecord[], cap: number): FrameRec
 }
 
 // ---- the window's frames, when the live tap doesn't hold them (T-384) ----
-
-/** A `GET /api/captures` row, narrowed to the fields this module reads. */
-export interface CaptureLite { id: string; pipeline_id: string; t_last: number }
-
-/**
- * The most recently written capture of `pipelineId`, or `null`.
- *
- * A pipeline's decoded frames are recorded to a capture (`/api/captures`, stream contract §14.7),
- * so the frames of a *past* window exist even though the live tap — a socket, with no history
- * form — cannot replay them. The whole-UI window rule makes fetching them obligatory rather than
- * optional: data exists for the window, so it must be shown.
- */
-export function captureFor(captures: readonly CaptureLite[], pipelineId: string): CaptureLite | null {
-  return captures.filter((c) => c.pipeline_id === pipelineId).sort((a, b) => b.t_last - a.t_last)[0] ?? null;
-}
-
-/** Frames of one capture over exactly the view window. `from_t`/`to_t` are Unix **seconds**, the
- * same clock as `w` (docs/api.md "Scrubbing"); `limit` is the route's documented maximum, so a
- * dense window is truncated rather than widened. */
-export const CAPTURE_FRAME_LIMIT = 500;
-
-export function captureFramesPath(captureId: string, w: ViewWindow): string {
-  return `/api/captures/${encodeURIComponent(captureId)}/frames?from_t=${w.t0}&to_t=${w.t1}&limit=${CAPTURE_FRAME_LIMIT}`;
-}
+//
+// Moved to `./captures` by T-387 so the packet inspector can reach the same route through the same
+// helpers; re-exported here because this module introduced them and its tests name them.
+export { CAPTURE_FRAME_LIMIT, captureFor, captureFramesPath, type CaptureLite } from "./captures";
 
 // ---- mount ----
 

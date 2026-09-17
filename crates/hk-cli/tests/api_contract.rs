@@ -4387,6 +4387,53 @@ fn decoded_captures_are_recorded_listed_scrubbed_reparsed_and_replayed_as_docume
     assert_eq!(v["frames"].as_array().unwrap().as_slice(), &frames[5..8]);
     assert!(v["next_from_frame"].is_null(), "{v}");
 
+    // T-387: **the query the packet inspector actually sends**, and the reason that task needed no
+    // stream-contract change. `/ws/open/inspector` is an on-demand opener with no history form, so
+    // a scrubbed packet inspector cannot ask the socket for a past window — but this route already
+    // carries the window, and `docs/api.md` already names it "the right route for the packet
+    // inspector's own scrubbing". Two halves are asserted because the panel depends on both:
+    //
+    // 1. `pipeline_id` is the key that follows a pipeline to its recorded frames. The inspector is
+    //    keyed by pipeline; without this field on the listing there is no way to reach the capture,
+    //    and the surface would have had to grow a contract instead.
+    // 2. `from_t` and `to_t` **together** select exactly the window's frames. The existing
+    //    assertions above cover `from_t` alone and `from_frame` + `to_t`; the pair is what a scrub
+    //    sends, and a window that holds frames must return them rather than an empty page.
+    assert_eq!(
+        cap["pipeline_id"],
+        json!(pid),
+        "the pipeline->capture key the packet inspector follows: {cap}"
+    );
+    let (st, v) = get(
+        addr,
+        &format!(
+            "/api/captures/{cid}/frames?from_t={}&to_t={}&limit=500",
+            secs(t(5) - 1_000_000),
+            secs(t(7) + 1_000_000)
+        ),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        v["frames"].as_array().unwrap().as_slice(),
+        &frames[5..8],
+        "a from_t+to_t window that holds frames must serve exactly those frames"
+    );
+    // And the window is closed at both ends: a window strictly before every frame is empty, which
+    // is the "genuinely nothing here" the client renders as an empty state rather than widening.
+    let (st, v) = get(
+        addr,
+        &format!(
+            "/api/captures/{cid}/frames?from_t={}&to_t={}",
+            secs(t(0) - 3_600_000_000_000),
+            secs(t(0) - 3_500_000_000_000)
+        ),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        v["frames"].as_array().is_some_and(|a| a.is_empty()),
+        "a window before every frame is empty, never widened to the nearest frames: {v}"
+    );
+
     // Re-parse over the whole recording with a draft field map.
     let map = json!({"unit": "bits", "fields": [
         {"name": "hi", "type": "uint", "length": 16},
