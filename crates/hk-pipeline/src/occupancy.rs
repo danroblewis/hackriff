@@ -1361,6 +1361,7 @@ mod tests {
     use std::time::Instant;
 
     use hk_store::CellStats;
+    use hk_store::history::OriginField;
 
     use super::*;
 
@@ -2204,6 +2205,17 @@ mod tests {
         dir: &std::path::Path,
         chain: impl Fn(i64) -> Option<(&'static str, f32)>,
     ) -> hk_store::Pyramid {
+        t377_fixture(dir, |k| {
+            chain(k).map(|(d, fl)| (hk_store::history::source_key(d), fl))
+        })
+    }
+
+    /// [`t314_fixture`] by raw source key, so a second can also be folded with **no** source
+    /// stated (key 0, the [`hk_store::FrameInput::source`] default) — T-377's unknown cohort.
+    fn t377_fixture(
+        dir: &std::path::Path,
+        chain: impl Fn(i64) -> Option<(u64, f32)>,
+    ) -> hk_store::Pyramid {
         {
             let mut p = t359_pyramid(dir);
             let gain = hk_store::GainState {
@@ -2212,7 +2224,7 @@ mod tests {
                 amp_on: false,
             };
             for k in 0..T314_SECS {
-                let Some((device, floor)) = chain(k) else {
+                let Some((source, floor)) = chain(k) else {
                     continue;
                 };
                 let psd = vec![10f32.powf(floor / 10.0); 16];
@@ -2225,7 +2237,7 @@ mod tests {
                     &psd,
                 );
                 f.gain = Some(gain);
-                f.source = hk_store::history::source_key(device);
+                f.source = source;
                 p.ingest(&f).unwrap();
             }
             p.seal_through(ts(T359_T0 + T314_SECS * T_CELL)).unwrap();
@@ -2297,6 +2309,9 @@ mod tests {
         excess_db: f64,
         visits: u64,
         occupied: u64,
+        /// The row's own verdict on its floor (T-377 asserts this, not only the excess: a floor
+        /// called suspect is *why* the excess is withheld).
+        suspect: Option<bool>,
     }
 
     fn t314_measured(tag: &str, rows: &[OccupancyStat]) -> Option<T314Measured> {
@@ -2308,6 +2323,7 @@ mod tests {
                 .map_or(f64::NAN, |(l, _)| l),
             visits: r.n_revisits,
             occupied: r.n_occupied,
+            suspect: r.floor_suspect,
         };
         println!(
             "T-314 {tag}: {} row(s), level {:.2} dB/Hz, floor {:.2} dB/Hz, baseline excess \
@@ -2499,34 +2515,55 @@ mod tests {
         }
     }
 
-    /// T-314, what the read-side filter does **not** reach: a level-0 cell's stored `occupancy`
-    /// was decided at ingest against the pyramid's own tracked noise floor, which is fed by every
-    /// front end. So a tile that is pure in origin can still carry an occupancy decided against
-    /// another chain's floor, and `local_floors` reads a dense neighbourhood as a **suspect
-    /// floor** — whereupon `channel_level_excess` declines and the baseline folds nothing.
+    /// **T-377: a level-0 cell's occupancy is decided at ingest against its OWN front end's
+    /// floor.** T-314 made every occupancy *read* per-chain, but `CellStats::occupancy` was
+    /// decided when the frame was folded, against a floor the pyramid tracked per frequency block
+    /// and every front end fed. A tile pure in origin could therefore carry an occupancy decided
+    /// against another chain's floor, and no read-side filter could undo it: the decision is
+    /// baked into the stored cell. `Pyramid::floors` is now keyed `(FrameInput::source, f_block)`
+    /// — the same `source_key(device_id)` the read filter and `ChainKey` use — and a sealed tile
+    /// feeds only its own source's track.
     ///
-    /// This asserts the size of what remains: chain B's filtered row has the right level and the
-    /// right floor (the filter works), and yet **withholds** its excess, where the identical
-    /// frames ingested alone do not. Withholding is the safe direction — bounded silence, not a
-    /// wrong number, and never the other chain's value — but it is a residue of pooling upstream
-    /// of the read, and the fix belongs at ingest (per-origin floor tracking), not here.
+    /// This test is T-314's residue pin, turned around. It keeps both halves:
+    ///
+    /// - **The property:** chain B beside chain A now folds the **same excess it folds alone**,
+    ///   and its floor is no longer called suspect. Before: shared `floor_suspect = true` and
+    ///   excess `NaN` against alone's `false` / 0.00 dB — B's own noise read as an occupied
+    ///   channel because chain A's floor, 30 dB lower, was the threshold it was compared with.
+    /// - **The dense-band control:** one chain, one emission genuinely above a floor that chain
+    ///   measured itself, and the neighbourhood really is busy. Its floor is **still** called
+    ///   suspect and its excess is **still** withheld. The suspect flag is correct about a dense
+    ///   band; a fix that made it stop firing would have broken the detector instead of the
+    ///   pooling.
+    /// - **The unknown-source control:** frames that state no source (key 0) are their own
+    ///   cohort, never a named chain's. Chain A's row is bit-identical whether or not they are
+    ///   beside it, and they read their own level rather than inheriting A's floor. That is
+    ///   T-359's rule at ingest: an unattributable measurement claims nothing and contributes
+    ///   nothing, rather than joining the dominant contributor.
+    ///
+    /// Mutation: re-pooling the key (`floors.entry(tile.key.f_block)` / `floors.get(&fb)`) fails
+    /// the property while the dense-band control still passes.
     #[test]
-    fn occupancy_ingest_time_floor_is_still_pooled_across_front_ends() {
+    fn occupancy_ingest_time_floor_is_kept_per_front_end() {
         let tmp = |tag: &str| {
             let d = std::env::temp_dir()
-                .join(format!("hk-t314-{tag}-{}", hk_model::ids::SiteId::new()));
+                .join(format!("hk-t377-{tag}-{}", hk_model::ids::SiteId::new()));
             std::fs::create_dir_all(&d).unwrap();
             d
         };
         let chain = |d: &str| engine::chain_filter(ChainKey::of_device(d));
-        // Chain B's own frames, at their own times, with no other front end in the pyramid.
+        let named = |d: &str| OriginFilter {
+            source: OriginField::Is(hk_store::history::source_key(d)),
+            site: OriginField::Any,
+        };
+        // (a) The property. Chain B's own frames, at their own times, with no other front end in
+        // the pyramid; then the identical frames with chain A's tiles beside them.
         let adir = tmp("alone");
         let ap = t314_fixture(&adir, |k| {
             ((k / T314_BLOCK) % 2 == 1).then_some((T314_DEVICE_B, T314_FLOOR_B))
         });
         let alone = t314_measured("B alone ", &t314_rows(&ap, chain(T314_DEVICE_B)))
             .expect("chain B alone");
-        // The same frames, with chain A's tiles beside them.
         let sdir = tmp("shared");
         let sp = t314_fixture(&sdir, t314_alternating);
         let shared = t314_measured("B shared", &t314_rows(&sp, chain(T314_DEVICE_B)))
@@ -2535,19 +2572,114 @@ mod tests {
         assert_eq!(
             (alone.level_db, alone.floor_db),
             (shared.level_db, shared.floor_db),
-            "the filter gives chain B the same level and floor either way"
+            "the read filter gives chain B the same level and floor either way"
         );
         assert!(
-            alone.excess_db.abs() < 1.0,
-            "alone, chain B's noise is its own floor: {}",
-            alone.excess_db
-        );
-        assert!(
-            shared.excess_db.is_nan(),
-            "beside another chain, chain B withholds its excess rather than mis-stating it: {}",
+            alone.excess_db.abs() < 1.0 && shared.excess_db.abs() < 1.0,
+            "chain B's noise is its own floor, alone ({}) and beside chain A ({})",
+            alone.excess_db,
             shared.excess_db
         );
-        for (p, d) in [(ap, adir), (sp, sdir)] {
+        assert_eq!(
+            (alone.excess_db, alone.suspect),
+            (shared.excess_db, shared.suspect),
+            "beside another chain, chain B folds exactly what it folds alone"
+        );
+        assert_eq!(
+            (alone.suspect, shared.suspect),
+            (Some(false), Some(false)),
+            "and neither reading calls chain B's own quiet band dense"
+        );
+
+        // (b) The dense-band control. One chain; two seconds in sixteen are quiet, so the chain
+        // measures its own floor there, and the other fourteen carry an emission 20 dB over it.
+        // The band really is busy, so the floor really is suspect and the excess is withheld.
+        let ddir = tmp("dense");
+        let dp = t314_fixture(&ddir, |k| {
+            Some((
+                T314_DEVICE_A,
+                if k % T314_BLOCK < 2 { -100.0 } else { -80.0 },
+            ))
+        });
+        let dense =
+            t314_measured("A dense ", &t314_rows(&dp, chain(T314_DEVICE_A))).expect("dense chain");
+        assert_eq!(
+            dense.suspect,
+            Some(true),
+            "a genuinely dense band still flags its floor suspect"
+        );
+        assert!(
+            dense.occupied > 0,
+            "the dense band's emission reads as occupancy: {} of {} visits",
+            dense.occupied,
+            dense.visits
+        );
+        assert!(
+            dense.excess_db.is_nan(),
+            "and a suspect floor still withholds the excess: {}",
+            dense.excess_db
+        );
+
+        // (c) The unknown-source control. Chain A at its own floor, and frames that state NO
+        // source 30 dB above it. The unknown cohort must not fold into chain A's floor track,
+        // and must not inherit it: it reads its own level with no excess, and chain A's row is
+        // unchanged from the run where the unknown frames were never there.
+        let odir = tmp("a-only");
+        let op = t314_fixture(&odir, |k| {
+            ((k / T314_BLOCK) % 2 == 0).then_some((T314_DEVICE_A, T314_FLOOR_A))
+        });
+        let a_only =
+            t314_measured("A only  ", &t314_rows(&op, chain(T314_DEVICE_A))).expect("chain A only");
+        let udir = tmp("unknown");
+        let up = t377_fixture(&udir, |k| {
+            Some(if (k / T314_BLOCK) % 2 == 1 {
+                (0, T314_FLOOR_B)
+            } else {
+                (hk_store::history::source_key(T314_DEVICE_A), T314_FLOOR_A)
+            })
+        });
+        let a_beside = t314_measured("A |unk  ", &t314_rows(&up, named(T314_DEVICE_A)))
+            .expect("chain A beside the unknown cohort");
+        let unknown = t314_measured(
+            "unknown ",
+            &t314_rows(
+                &up,
+                OriginFilter {
+                    source: OriginField::Is(0),
+                    site: OriginField::Any,
+                },
+            ),
+        )
+        .expect("the unknown cohort");
+        assert_eq!(
+            (
+                a_only.level_db,
+                a_only.floor_db,
+                a_only.excess_db,
+                a_only.suspect
+            ),
+            (
+                a_beside.level_db,
+                a_beside.floor_db,
+                a_beside.excess_db,
+                a_beside.suspect
+            ),
+            "frames that state no source changed nothing about chain A's measurement"
+        );
+        assert!(
+            (unknown.level_db - f64::from(T314_FLOOR_B)).abs() < 1.0
+                && unknown.excess_db.abs() < 1.0,
+            "the unknown cohort reads its own level {} with no excess {}, rather than \
+             inheriting chain A's floor",
+            unknown.level_db,
+            unknown.excess_db
+        );
+        assert_eq!(
+            unknown.occupied, 0,
+            "and its own noise is not an emission on its own cohort"
+        );
+
+        for (p, d) in [(ap, adir), (sp, sdir), (dp, ddir), (op, odir), (up, udir)] {
             drop(p);
             let _ = std::fs::remove_dir_all(&d);
         }

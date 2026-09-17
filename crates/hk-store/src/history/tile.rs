@@ -405,6 +405,34 @@ impl ProvenanceSummary {
         (pass, other)
     }
 
+    /// The one source every frame in this tile came from, or `None` when that cannot be said:
+    /// the tile is empty, it pools two front ends, or some of its frames' origins were never
+    /// recorded (before format 3, or beyond [`MAX_ORIGINS`]).
+    ///
+    /// **T-377.** A tile is the unit the level-0 floor is tracked from, so this is what decides
+    /// *whose* floor it may contribute to. Sites do not divide a receive chain — a device that
+    /// moves keeps its own floor physics — so only [`Origin::source`] is compared. A tile that
+    /// cannot name one source contributes to **no** chain's floor, never to the majority
+    /// contributor: T-359's rule, one layer down from where T-314 applied it.
+    pub fn sole_source(&self) -> Option<u64> {
+        if self.frames == 0 || self.other_origin_frames > 0 {
+            return None;
+        }
+        let mut sole = None;
+        for (o, n) in &self.origins {
+            if *n == 0 {
+                continue;
+            }
+            match (o.source, sole) {
+                (None, _) => return None,
+                (Some(s), None) => sole = Some(s),
+                (Some(s), Some(t)) if s == t => {}
+                _ => return None,
+            }
+        }
+        sole
+    }
+
     /// How these frames relate to `filter`.
     pub fn origin_match(&self, filter: &OriginFilter) -> OriginMatch {
         match self.origin_frames(filter) {
@@ -767,13 +795,19 @@ impl Tile {
     }
 
     /// Closes the buffered level-0 column: exact percentiles and occupancy decisions.
-    pub fn close_column(
-        &mut self,
-        floor: Option<&[f32]>,
-        margin: f32,
-        pct: (f32, f32),
-        scratch: &mut Vec<f32>,
-    ) {
+    ///
+    /// **T-377:** every entry's threshold was resolved when it was pushed, against the floor of
+    /// *its own* frame's origin ([`super::FrameInput::source`]). The close therefore takes no
+    /// floor at all: there is no pyramid-wide floor left for it to fall back on, and so no way
+    /// for one front end's floor to decide another's occupancy. Entries whose origin has no floor
+    /// yet keep the documented cold-start fallback inside [`column_stats`].
+    ///
+    /// For **one** source this is the same number the old close-time lookup produced, so a
+    /// single-device store is unchanged: a floor track only moves when a tile seals, a level-0
+    /// tile seals at a block boundary as the last frame of its block is folded, and a column is
+    /// pushed and closed wholly inside one block (the last column closes at the seal itself,
+    /// before `update_floor` runs). No seal falls between a column's pushes and its close.
+    pub fn close_column(&mut self, margin: f32, pct: (f32, f32), scratch: &mut Vec<f32>) {
         let Some(t) = self.col_t.take() else {
             return;
         };
@@ -781,7 +815,7 @@ impl Tile {
         let mut col = std::mem::take(&mut self.col);
         col.sort_unstable_by_key(|e| e.f);
         let nf = self.nf;
-        column_stats(&col, floor, margin, pct, scratch, |f, plo, phi, occ| {
+        column_stats(&col, margin, pct, scratch, |f, plo, phi, occ| {
             let i = t * nf + f;
             self.p_lo[i] = plo;
             self.p_hi[i] = phi;
@@ -795,18 +829,13 @@ impl Tile {
     }
 
     /// The stats the open column would get if closed now: `(t, per-f (p_lo, p_hi, occ_s))`.
-    pub fn column_preview(
-        &self,
-        floor: Option<&[f32]>,
-        margin: f32,
-        pct: (f32, f32),
-    ) -> Option<ColumnPreview> {
+    pub fn column_preview(&self, margin: f32, pct: (f32, f32)) -> Option<ColumnPreview> {
         let t = self.col_t?;
         let mut col = self.col.clone();
         col.sort_unstable_by_key(|e| e.f);
         let mut out = vec![(f32::NAN, f32::NAN, 0.0); self.nf];
         let mut scratch = Vec::new();
-        column_stats(&col, floor, margin, pct, &mut scratch, |f, a, b, o| {
+        column_stats(&col, margin, pct, &mut scratch, |f, a, b, o| {
             out[f] = (a, b, o);
         });
         Some((t, out))
@@ -939,12 +968,15 @@ impl Tile {
     }
 }
 
-/// Percentiles and occupancy for a column's entries (sorted by `f`). Values without a caller
-/// threshold use `floor[f] + margin`; when the floor is unknown (cold start), the 20th percentile
-/// of every value in the column (across frequency) stands in for it.
+/// Percentiles and occupancy for a column's entries (sorted by `f`).
+///
+/// Every entry's `thr` was resolved at push time from its own frame: the caller's `floor_db`, or
+/// the frequency block's tracked floor **for that frame's origin** (T-377). An entry whose origin
+/// has no tracked floor yet (a cold start, and a *new* front end is always a cold start rather
+/// than an inheritor of whoever was folding before it) falls back to the 20th percentile of every
+/// value in the column, across frequency, plus `margin`.
 pub(crate) fn column_stats(
     col: &[ColEntry],
-    floor: Option<&[f32]>,
     margin: f32,
     pct: (f32, f32),
     scratch: &mut Vec<f32>,
@@ -953,8 +985,7 @@ pub(crate) fn column_stats(
     if col.is_empty() {
         return;
     }
-    let known = |f: u32| floor.is_some_and(|fl| fl[f as usize].is_finite());
-    let cold = if col.iter().any(|e| e.thr.is_nan() && !known(e.f)) {
+    let cold = if col.iter().any(|e| e.thr.is_nan()) {
         scratch.clear();
         scratch.extend(col.iter().map(|e| e.v));
         exact_percentile(scratch, 20.0)
@@ -972,12 +1003,7 @@ pub(crate) fn column_stats(
         scratch.extend(col[i..j].iter().map(|e| e.v));
         let plo = exact_percentile(scratch, pct.0);
         let phi = exact_percentile(scratch, pct.1);
-        let base = if known(f) {
-            floor.map_or(cold, |fl| fl[f as usize])
-        } else {
-            cold
-        };
-        let thr_default = base + margin;
+        let thr_default = cold + margin;
         let mut occ = 0.0;
         for e in &col[i..j] {
             let thr = if e.thr.is_nan() { thr_default } else { e.thr };
