@@ -111,7 +111,7 @@ pub use presence::{
     Presence, PresenceInterval, REVISIT_FACTOR, confidence_after_silence, intervals_from_spans,
     presence_in_window, recheck_horizon_s,
 };
-pub use provenance::{BiasTee, CaptureArtefact, ClockSource, Provenance, Tune};
+pub use provenance::{BiasTee, CaptureArtefact, ClockSource, CyclicComb, Provenance, Tune};
 pub use recording::{
     Annotation, AnnotationAuthor, AnnotationKind, AnnotationTarget, Recording, RecordingKind,
     RecordingSpan, RecordingTrigger, RetentionClass,

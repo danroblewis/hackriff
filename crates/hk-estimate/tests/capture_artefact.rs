@@ -87,17 +87,15 @@ fn t373_the_capture_chains_comb_is_read_as_structure_until_it_is_excluded() {
     // Derived, never written down: the capture records an 8192-sample period, and this capture
     // runs at 2.4 Msps.
     let combs = p.cyclic_artefacts();
-    assert_eq!(
-        combs.len(),
-        1,
-        "the fixture must record exactly the gain step; got {combs:?}"
-    );
-    let comb_hz = combs[0];
-    assert!(
-        (comb_hz - fs / 8192.0).abs() < 1e-9,
-        "the comb is fs/period, {comb_hz} Hz against {} Hz",
-        fs / 8192.0
-    );
+    let comb_hz = *combs
+        .iter()
+        .find(|f| (*f - fs / 8192.0).abs() < 1e-9)
+        .unwrap_or_else(|| {
+            panic!(
+                "the fixture must record the gain step at fs/8192 = {}; got {combs:?}",
+                fs / 8192.0
+            )
+        });
 
     let request = SnippetRequest {
         start_index: 0,
@@ -185,10 +183,10 @@ fn t373_the_capture_chains_comb_is_read_as_structure_until_it_is_excluded() {
     let mut on = Chain::default();
     let out = on.run(&iq, &prov, &request, &Hints::default());
     let s = out.sym.as_ref().expect("C14 ran");
-    assert_eq!(
-        s.excluded_cyclic_hz,
-        vec![comb_hz],
-        "the applied exclusion is the capture's own comb"
+    assert!(
+        s.excluded_cyclic_hz.contains(&comb_hz),
+        "the applied exclusion must include the capture's own comb: {:?}",
+        s.excluded_cyclic_hz
     );
     for l in &s.lines {
         let Some(f) = l.freq_hz else { continue };
@@ -257,6 +255,8 @@ fn artefact_provenance(fs: f64, period_samples: f64) -> ProvenanceHandle {
         period_samples: Some(period_samples),
         period_s: None,
         step_db: Some(-0.431),
+        drift_ppm: None,
+        harmonics: None,
         measured_by: Some("T-317, applied to a synthetic control by T-373".into()),
         note: None,
     }];
@@ -443,4 +443,259 @@ fn t373_a_capture_with_no_recorded_artefact_excludes_nothing() {
         .trusted_rate()
         .expect("a clean synthetic rate is trusted");
     assert!((got / rate - 1.0).abs() < 0.01, "{got} against {rate}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-382: excluding one artefact promoted another, and the next one drifts.
+// ---------------------------------------------------------------------------------------------
+
+/// T-382's measurement, on the real capture: **after T-373 the strongest cyclic line on this box
+/// was still the receiver's, and it was a different artefact.**
+///
+/// T-373 took the `fs/8192` comb to 0 of 208 reported lines and moved this box's `cyclic_db` from
+/// 22.8 dB to 22.5 dB — *from a different line*. T-382 identified that line: a free-running
+/// ~655.75 Hz amplitude modulation of the receiver's own noise contribution whose **second
+/// harmonic** dominates, present at one frequency in all 22 noise-only channels of the span and
+/// inside both WFM stations, wandering 1308.1–1314.9 Hz over the 45 s. Measured over a 44-box grid
+/// across the passband at three windows, it was the argmax in 28 of 44 boxes and the exact 8 kHz
+/// host-clock comb in 10 more; 89 of 98 rate candidates were one of the three receiver artefacts.
+///
+/// With all three recorded and excluded, that grid reports **0 of 44** boxes whose argmax is any
+/// artefact member at every window, the per-box median `cyclic_db` falls 27.4 → 14.0 dB, and the
+/// boxes still above 20 dB are the two stations' genuine 19 kHz pilot and 38 kHz subcarrier.
+///
+/// This asserts the box T-373 measured, which is the one on record.
+#[test]
+fn t382_the_line_that_replaced_the_comb_is_the_drifting_family_and_it_is_excluded() {
+    let Some((prov, iq)) = fixture() else { return };
+    let p = prov.get();
+    let combs = p.cyclic_combs();
+    // The fixture records three artefacts and two of them drift; the family is the one that
+    // drifts *far* — 2600 ppm against the host comb's 3.
+    let family = combs
+        .iter()
+        .copied()
+        .max_by(|a, b| a.drift.total_cmp(&b.drift))
+        .filter(|c| c.drift > 1e-4)
+        .expect("the fixture records the drifting family");
+    let request = SnippetRequest {
+        start_index: 0,
+        end_index: iq.len() as u64,
+        center_offset_hz: OSC_HZ - p.tune.center_hz,
+        bandwidth_hz: 28e3,
+    };
+
+    // --- Mutation check: honour only what T-373 knew about. The family comes straight back. ---
+    let mut only_t373: Provenance = p.clone();
+    only_t373
+        .capture_artefacts
+        .retain(|a| a.period_samples.is_some());
+    let before = ProvenanceHandle::new(only_t373);
+    let out = Chain::default().run(&iq, &before, &request, &Hints::default());
+    let s = out.sym.as_ref().expect("C14 ran");
+    let bin_hz = s.sample_rate_hz / s.samples.max(1) as f64;
+    let top = s
+        .lines
+        .iter()
+        .filter(|l| l.freq_hz.is_some())
+        .max_by(|a, b| a.significance_db.total_cmp(&b.significance_db))
+        .expect("a line");
+    let top_hz = top.freq_hz.expect("a frequency");
+    let n = (top_hz / family.fundamental_hz).round();
+    eprintln!(
+        "[T-382] T-373 state: cyclic_db {:.2} dB at {top_hz:.3} Hz = family harmonic {n} \
+         ({:+.3} Hz off {:.3}), bin {bin_hz:.3} Hz",
+        top.significance_db,
+        top_hz - n * family.fundamental_hz,
+        n * family.fundamental_hz
+    );
+    assert_eq!(
+        n, 2.0,
+        "the line that replaced the comb is the family's second harmonic"
+    );
+    assert!(
+        (top_hz - 2.0 * family.fundamental_hz).abs() <= 2.0 * family.fundamental_hz * family.drift,
+        "and it is inside the measured drift band"
+    );
+    let before_db = top.significance_db;
+    assert!(before_db > 20.0, "the test has no teeth: {before_db} dB");
+
+    // --- With all three recorded, nothing reported is any member of any of them. ---
+    let out = Chain::default().run(&iq, &prov, &request, &Hints::default());
+    let s = out.sym.as_ref().expect("C14 ran");
+    let mut best = f64::MIN;
+    for l in &s.lines {
+        let Some(f) = l.freq_hz else { continue };
+        best = best.max(l.significance_db);
+        for c in &combs {
+            let n = (f / c.fundamental_hz).round();
+            let inside = c.harmonics.is_none_or(|m| n <= f64::from(m));
+            let guard = ARTEFACT_GUARD_BINS * bin_hz + n * c.fundamental_hz * c.drift;
+            assert!(
+                n < 1.0 || !inside || (f - n * c.fundamental_hz).abs() > guard,
+                "{:?} still reports a capture artefact: {f} Hz = harmonic {n} of {:.3} Hz",
+                l.method,
+                c.fundamental_hz
+            );
+        }
+    }
+    eprintln!(
+        "[T-382] excluded {:?} Hz; cyclic_db {before_db:.2} -> {best:.2} dB",
+        s.excluded_cyclic_hz
+    );
+    assert!(
+        best < before_db - 8.0,
+        "excluding the family must move this dimension, not shuffle it: {before_db:.2} -> {best:.2} dB"
+    );
+    // The suppression stays visible: this box's emission has no symbol structure (T-317), and the
+    // honest answer is "the artefact outscored what was kept", not a quietly smaller number.
+    assert!(s.lines.iter().any(|l| l.artefact_suppressed));
+    assert!(s.reasons.contains(&BlindReason::CaptureArtefact));
+}
+
+/// **A flat notch cannot hold a free-running line, and that is measured rather than argued.**
+///
+/// The family wanders 2600 ppm, so its second harmonic moves ±3.4 Hz while the transform's own
+/// clearance over a 2 s window is ±2.08 Hz. Zero the recorded drift — keeping everything else,
+/// including the exclusion itself — and the artefact walks back out of the notch and is the argmax
+/// again. This is why `CaptureArtefact::drift_ppm` exists and why the two widths add.
+#[test]
+fn t382_a_guard_that_ignores_the_recorded_drift_lets_the_artefact_back() {
+    let Some((prov, iq)) = fixture() else { return };
+    let p = prov.get();
+    let mut flat: Provenance = p.clone();
+    for a in &mut flat.capture_artefacts {
+        a.drift_ppm = None;
+    }
+    let flat = ProvenanceHandle::new(flat);
+    let request = SnippetRequest {
+        start_index: 0,
+        end_index: iq.len() as u64,
+        center_offset_hz: OSC_HZ - p.tune.center_hz,
+        bandwidth_hz: 28e3,
+    };
+    let out = Chain::default().run(&iq, &flat, &request, &Hints::default());
+    let s = out.sym.as_ref().expect("C14 ran");
+    let family = p
+        .cyclic_combs()
+        .into_iter()
+        .max_by(|a, b| a.drift.total_cmp(&b.drift))
+        .filter(|c| c.drift > 1e-4)
+        .expect("the fixture records the drifting family");
+    let top = s
+        .lines
+        .iter()
+        .filter(|l| l.freq_hz.is_some())
+        .max_by(|a, b| a.significance_db.total_cmp(&b.significance_db))
+        .expect("a line");
+    let f = top.freq_hz.expect("a frequency");
+    let n = (f / family.fundamental_hz).round();
+    eprintln!(
+        "[T-382] drift zeroed: argmax {f:.3} Hz = harmonic {n} ({:+.3} Hz off), {:.2} dB",
+        f - n * family.fundamental_hz,
+        top.significance_db
+    );
+    assert_eq!(
+        n, 2.0,
+        "with the drift forgotten the family's h2 is the argmax again"
+    );
+    assert!(top.significance_db > 20.0);
+}
+
+/// T-382's control, the one that decides whether the wider notch is affordable: **a genuine
+/// emission whose symbol rate lands on the drifting family must still be found.**
+///
+/// Same shape as T-373's control and the same standard. The family's guard is wider than the
+/// comb's — ±(4 bins + n·f₀·drift) rather than ±4 bins — so the window inside which C14 must
+/// abstain is wider too, and the test asserts exactly that window and no more: outside it the
+/// genuine rate is kept, inside it C14 withholds trust *with a reason* and the emission's own rate
+/// still survives as a candidate.
+#[test]
+fn t382_a_genuine_rate_on_the_drifting_family_survives_once_it_is_outside_the_band() {
+    let fs = 300_000.0;
+    let f0 = 655.753;
+    let drift = 2600e-6;
+    let harmonic = 20.0;
+    let nominal = harmonic * f0; // 13 115 Bd, comfortably inside a narrowband box
+    let mut p: Provenance = blind_support::provenance(fs).get().clone();
+    p.capture_artefacts = vec![CaptureArtefact {
+        kind: "drifting-noise-floor-modulation".into(),
+        period_samples: None,
+        period_s: Some(1.0 / f0),
+        step_db: None,
+        drift_ppm: Some(drift * 1e6),
+        harmonics: None,
+        measured_by: Some("T-382, applied to a synthetic control".into()),
+        note: None,
+    }];
+    let prov = ProvenanceHandle::new(p);
+    let band = harmonic * f0 * drift; // ±34.1 Hz at this harmonic
+
+    let mut rng = Rng::new(0x5EED_0382);
+    let mut survived = Vec::new();
+    let mut withheld = Vec::new();
+    let mut bin_hz = f64::NAN;
+    for offset_hz in [0.0, 20.0, 60.0, 150.0, 400.0] {
+        let rate = nominal + offset_hz;
+        let sig = gen_fsk(&mut rng, rate, rate / 3.0, 4_000, fs, None, 16);
+        let obw = 1.25 * rate;
+        let e = embed(&mut rng, &sig, fs, 25.0, obw, 0.01, 0.0);
+        let req = SnippetRequest {
+            start_index: e.start as u64,
+            end_index: (e.start + e.len) as u64,
+            center_offset_hz: 0.0,
+            bandwidth_hz: 1.6 * obw,
+        };
+        let out = Chain::default().run(&e.iq, &prov, &req, &Hints::default());
+        let s = out.sym.as_ref().expect("C14 ran");
+        bin_hz = s.sample_rate_hz / s.samples.max(1) as f64;
+        assert_eq!(
+            s.excluded_cyclic_hz,
+            vec![f0],
+            "the control must be excluding the family"
+        );
+        match out.trusted_rate() {
+            Some(r) => {
+                assert!(
+                    [0.5, 1.0, 2.0]
+                        .iter()
+                        .any(|m| (r / (m * rate) - 1.0).abs() < 0.01),
+                    "trusted and wrong: {r} Bd against a genuine {rate} Bd"
+                );
+                survived.push(offset_hz);
+            }
+            None => {
+                withheld.push(offset_hz);
+                assert!(
+                    s.reasons.contains(&BlindReason::CaptureArtefact)
+                        || s.lines.iter().any(|l| l.artefact_suppressed),
+                    "an abstention inside the notch must say why: {:?}",
+                    s.reasons
+                );
+                let best = out.best_rate().expect("a candidate survives the notch");
+                assert!(
+                    [0.5, 1.0, 2.0]
+                        .iter()
+                        .any(|m| (best / (m * rate) - 1.0).abs() < 0.01),
+                    "the exclusion destroyed the emission's evidence: best {best} Bd against {rate} Bd"
+                );
+            }
+        }
+    }
+    let notch = ARTEFACT_GUARD_BINS * bin_hz + band;
+    eprintln!(
+        "[T-382] control at harmonic {harmonic}: bin {bin_hz:.2} Hz, drift band ±{band:.1} Hz, \
+         notch ±{notch:.1} Hz; kept at {survived:?} Hz, withheld at {withheld:?} Hz"
+    );
+    for offset_hz in &withheld {
+        assert!(
+            *offset_hz <= notch,
+            "the exclusion ate a genuine rate {offset_hz} Hz off the family, outside the \
+             ±{notch:.1} Hz the record and the transform can resolve"
+        );
+    }
+    assert!(
+        !survived.is_empty(),
+        "no genuine rate near the family survived at all"
+    );
 }

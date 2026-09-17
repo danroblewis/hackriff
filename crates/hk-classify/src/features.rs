@@ -680,7 +680,30 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
 /// comb (derived from the capture's own provenance and sample rate), which takes that count to
 /// 0 of 208 and moves this box's `cyclic_db` to 22.5 dB from a different line. Nothing in the
 /// fitted models moves: the artefact is in one fixture, not in the synthetic dev grid the
-/// densities are fitted on. T-281 reasoned that a coherent line's peak grows with the record
+/// densities are fitted on.
+///
+/// **Excluding one artefact promoted another, twice, and the third one drifts (T-382).** The 22.5
+/// dB T-373 measured after its fix was *also* the receiver: over a 44-box grid across that
+/// capture's passband, the argmax was an exact 8 kHz comb in 10 boxes and a free-running ~655.75
+/// Hz modulation's second harmonic in 28 more, and 89 of 98 rate candidates were one of the three
+/// receiver artefacts. T-382 identified both — the 8 kHz comb is the host's own clock grid (the
+/// same artefact T-317 had separately found in the RF spectrum, proved by two observables 12 600×
+/// apart agreeing on the receiver's clock error to 0.35 ppm) and the ~655.75 Hz family is a
+/// thermally free-running amplitude modulation of the receiver's noise contribution, wandering
+/// 2600 ppm, which is why it needed [`hk_model::CaptureArtefact::drift_ppm`] rather than a wider
+/// flat notch. With all three excluded that grid reports **0 of 44** artefact argmaxes at every
+/// window, the per-box median `cyclic_db` falls **27.4 → 14.0 dB**, and the boxes still above 20 dB
+/// are the two broadcast stations' genuine 19 kHz pilot and 38 kHz subcarrier. A fourth family
+/// spaced ~119.95 Hz is visible underneath at 13–17 dB and is not excluded.
+///
+/// **The general lesson is not "notch three combs".** On a real capture this dimension was, before
+/// T-373, a measurement of the receiver in essentially every narrowband box; each exclusion has
+/// been a named frequency derived from one fixture's provenance, and the floor it reveals is the
+/// next artefact. A dimension that is safe on real captures needs the receiver-wide test itself —
+/// a line at one frequency in channels holding nothing is the receiver's, whether or not anyone
+/// has written it down — not a longer list.
+///
+/// T-281 reasoned that a coherent line's peak grows with the record
 /// while the whitened noise median does not, so the ratio should grow about `10·log10(N)`, and
 /// measured `ook` 20.17 → 31.44 dB and `bpsk` 15.32 → 25.08 dB over 8× of window on one seed at
 /// 25 dB.

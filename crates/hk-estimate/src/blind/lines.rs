@@ -50,6 +50,7 @@ use std::collections::HashMap;
 use std::f64::consts::TAU;
 
 use hk_dsp::fft::{CpuFft, FftBackend};
+use hk_model::CyclicComb;
 use num_complex::Complex32;
 
 /// FFT plans by length.
@@ -83,29 +84,56 @@ pub(crate) struct RawLine {
 
 /// Cyclic frequencies the **capture chain** contributes, excluded from the line search (T-373).
 ///
-/// A periodic artefact of the capture path — the 8192-sample gain step T-317 found — puts a comb
-/// of lines into every channel of a stream, including channels holding nothing at all, and reads
-/// as frame structure. The combs here are derived from the capture's own provenance and its own
-/// sample rate ([`hk_model::Provenance::cyclic_artefacts`]); nothing in this module knows a
-/// frequency.
+/// A periodic artefact of the capture path — the 8192-sample gain step T-317 found, the host's
+/// 8 kHz clock grid, the free-running ~655.75 Hz noise-floor modulation T-382 identified — puts a
+/// comb of lines into every channel of a stream, including channels holding nothing at all, and
+/// reads as frame structure. The combs here are derived from the capture's own provenance and its
+/// own sample rate ([`hk_model::Provenance::cyclic_combs`]); nothing in this module knows a
+/// frequency, a drift or a harmonic count.
 ///
 /// This excludes bins from the **argmax only**. The whitening floor still sees them, which is
 /// right: they are real power in the series, just not the emission's.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Excluded<'a> {
-    /// Comb fundamentals, Hz. Every harmonic `n·f₀` (n ≥ 1) inside the search band is excluded.
-    pub combs: &'a [f64],
-    /// Half-width excluded either side of each member, Hz.
+    /// The capture's combs. Every harmonic `n·f₀` (n ≥ 1) inside the search band is excluded, up
+    /// to each comb's measured end.
+    pub combs: &'a [CyclicComb],
+    /// Half-width excluded either side of each member, Hz — the transform's own floor. A comb that
+    /// records drift widens beyond it with harmonic number; see [`Excluded::guard_for`].
     pub guard_hz: f64,
 }
 
 impl Excluded<'_> {
-    /// Whether `f` Hz falls within [`Excluded::guard_hz`] of a harmonic of any comb.
+    /// Half-width excluded either side of harmonic `n` of `c`.
+    ///
+    /// **A free-running artefact needs a guard that grows with `n`, and a locked one does not.**
+    /// A fundamental with fractional frequency noise `drift` carries `n · f₀ · drift` of it at
+    /// harmonic `n` — the same multiplication T-317 used in reverse to pin an oscillator family by
+    /// showing `rms width / n` was constant. The 2600 ppm modulation of
+    /// `capture-2026-09-15-fm-band` moves ±1.7 Hz at 655.75 Hz but ±3.4 Hz at its dominant second
+    /// harmonic, so a flat [`ARTEFACT_GUARD_NATIVE_BINS`] notch (±2.08 Hz over a 2 s window)
+    /// catches the fundamental and misses the member that actually wins the boxes.
+    ///
+    /// The two widths **add**, and that is not a margin: they answer different questions. The drift
+    /// band says where the line *is* in this window, which the record cannot pin more closely than
+    /// it was measured; [`ARTEFACT_GUARD_NATIVE_BINS`] is the transform's own mainlobe clearance
+    /// around wherever it is, which T-373 measured to be needed at 2 bins and shipped at 4 — take
+    /// the larger of the two instead and the argmax walks the skirt of a line sitting at the edge
+    /// of its band (measured: with `max` the second harmonic is *still* the argmax in 38 of 44
+    /// boxes, 2.4 Hz off centre against a 3.4 Hz half-width). A comb with no recorded drift is
+    /// notched exactly as T-373 notched it.
+    fn guard_for(&self, c: &CyclicComb, n: f64) -> f64 {
+        self.guard_hz + n * c.fundamental_hz * c.drift.max(0.0)
+    }
+
+    /// Whether `f` Hz falls within the guard of a harmonic of any comb.
     fn hits(&self, f: f64) -> bool {
         self.guard_hz > 0.0
-            && self.combs.iter().any(|&f0| {
-                let n = (f / f0).round();
-                n >= 1.0 && (f - n * f0).abs() <= self.guard_hz
+            && self.combs.iter().any(|c| {
+                let n = (f / c.fundamental_hz).round();
+                n >= 1.0
+                    && c.harmonics.is_none_or(|m| n <= f64::from(m))
+                    && (f - n * c.fundamental_hz).abs() <= self.guard_for(c, n)
             })
     }
 }
