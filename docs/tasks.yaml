@@ -5868,7 +5868,7 @@ tasks:
     milestone: M3
     title: Feature FFT length is derived from snippet length, so spectral resolution itself moves with how
       long the signal was watched
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-281
@@ -5883,7 +5883,7 @@ tasks:
   - id: T-313
     milestone: M2-hardening
     title: No regression guard stops a future feature from depending on snippet length
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-281
@@ -7641,6 +7641,14 @@ tasks:
       Fix them together, and prefer removing the wall-clock dependency to raising
       the number - T-401 is establishing the capture-clock pattern for exactly this
       reason and its shape should be reused here.
+      FOURTH INSTANCE (T-313, 2026-09-16): hk-pipeline::presence_push::
+      a_live_signals_box_tracks_the_live_edge_and_stops_when_the_emission_does
+      failed under parallel load, passed in isolation and on re-run (2090/2090).
+      presence_push.rs is NOT in the heavy-serial nextest group - a new file that
+      joined the timing-sensitive set without joining the group that protects them.
+      That is the structural half: the group is a hand-maintained list, so every new
+      timing test is a silent opt-out. Consider whether membership can be derived
+      (a marker on the test, or the file) rather than remembered.
 
   - id: T-384
     title: The output and decode surfaces cannot re-derive for a scrubbed window, and the decode route has no time parameter to ask with
@@ -8309,6 +8317,42 @@ tasks:
       to reach for before loosening a threshold.
       Report the false-confirm rate against ADR-0016 section 7 and run
       just acceptance-milestones. No floor moves.
+  - id: T-404
+    title: Six more features measure the observation, and three of them are one defect
+    milestone: M3
+    status: todo
+    priority: high
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    deps: [T-313]
+    acceptance: |
+      T-313's guard found these on its FIRST RUN, each with a measurement. They are
+      exempt by name today so the guard can pass; the exemptions are the work list.
+      ONE DEFECT, THREE DIMENSIONS: c20_norm, c40_norm, c42_norm. C20 = mean(x^2) is a
+      COHERENT SUM, so its loss is residual CFO times record length - one pulse
+      waveform reads 0.825 / 0.801 / 0.737 / 0.079 down the truncation ladder with
+      derotation identical at every rung. c40 is the same sum at 4x the offset
+      (3.20 -> 16.73). c42 subtracts |C20|^2 and so inherits it ALGEBRAICALLY: 93% of
+      its movement attributed to the C20 term on one ook waveform. Fix the coherent-sum
+      bias once and three exemptions vanish together.
+      cp_corr: a max over 11 lags, so for the 20 non-OFDM classes its NULL level falls
+      as 1/sqrt(record) - 0.535 / 0.440 / 0.110. A maximum of more samples of noise is
+      larger; that is the estimator, not the signal.
+      if_slope_r2: one wfm reads 0.440 over 5430 samples and 0.790 over the first 678.
+      A wideband FM carrier looks like a linear chirp once you stop watching it.
+      if_local_modality: nbfm 1->2, gfsk/msk/2fsk 2->4, ook 1->3 off a 48-bin histogram.
+      NOTE THE HISTORY: T-298 added this as the LENGTH-FREE REPLACEMENT for if_modality,
+      and the replacement inherited the defect through its ESTIMATOR instead of its
+      reference. A replacement is not a fix until it is measured.
+      carrier_line_db: peak-over-median, both order statistics, so biased in the segment
+      count T-312's pin leaves moving - 17.9 dB on one 2-FSK prefix, on a ~20 dB
+      dimension. T-312 knew it was leaving this residue; it is now measured.
+      DoD: each dimension either fixed (and removed from the exempt list, which is how
+      the guard reports progress) or reclassified BY NAME as an observation statistic
+      with the reason. Re-measure section 7; no floor moves. Expect the honest direction
+      to be further small drops as more leakage is withdrawn - T-312 cost 0.008 of top-1
+      and that was a GOOD result.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
