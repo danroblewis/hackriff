@@ -206,3 +206,25 @@ check that asserts it would have caught it.*
 *Superseded framing: an earlier version of this note, written from a truncated message, described this
 as an "equipment self-test" and implied frequency calibration. That framing is withdrawn by the user:
 a frequency-reference check is a minor optional extra at most, and is not the point.*
+
+### UI-only merge gate (user, 2026-09-16)
+
+A merge that changes **only** files under `ui/` and touches **neither `crates/` nor `docs/api.md`** is
+gated on **`just lint` + `just test-ui`** alone, skipping `just test` (T1-T4) and `just acceptance`.
+
+The reasoning is the thin-client architecture: all signal logic lives in the backend, the backend is
+contract-tested (T-079), and **no acceptance test drives the browser** - the e2e suites run through the
+**device interface**. So a ui-only change cannot move the Rust signal path, and running those suites
+against one proves nothing while costing minutes per iteration.
+
+**Anything touching `crates/` or `docs/api.md` is not ui-only** and keeps the full gate, because the
+API contract or the signal path may have moved. `just test` + `just acceptance` remain the
+periodic/milestone check and the gate for every backend or contract change.
+
+**The gap this leaves - and the full gate left it too.** Contract tests assert that the *server* serves
+a route correctly; nothing asserts that the *client* asks for the right thing. T-367 found the time
+navigator requesting `/api/timeline` with no band at all, drawing an empty canvas, with every suite
+green. The guard belongs in `ui/test`: **assert the request the client builds**, not only the response
+it renders. T-367 added exactly that (a regex forbidding the unscoped request shape from returning),
+and T-389 generalised it (`listed` / `boxed` / `noExtent` derived from one collection, `boxed` a strict
+subset).
