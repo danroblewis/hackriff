@@ -8181,6 +8181,29 @@ tasks:
       It was deliberately NOT chased by lowering the threshold, which would have left
       1.9 dB over the measured null - tuning to one fixture. Revisit only with more
       captures, never by moving the number.
+  - id: T-400
+    title: just gate regenerates incremental state that every agent is configured to avoid
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: CI
+    deps: [T-396]
+    notes: |
+      Found while managing a disk squeeze (13 GB free, three builders). Every agent
+      brief sets CARGO_INCREMENTAL=0 per T-144, precisely so worktree targets stay
+      close to the APFS clone they were seeded from. But `just gate` shells out to the
+      test recipes without it, so the coordinator's own per-merge check regenerates
+      target/debug/incremental - 3.6 GB in one session.
+      The waste is real but the SIZE IS MISLEADING, and that is worth recording: after
+      clearing those 3.6 GB, df did not move, because the blocks were clone-shared with
+      the three live worktree targets. du reports what a directory would cost alone;
+      on this repo it is close to meaningless. The reclaim that works is removing a
+      worktree after a merge.
+      Fix: set CARGO_INCREMENTAL=0 (and the other T-144 build flags) inside the gate's
+      own recipes so the rule lives in the runner, exactly as T-396 moved the
+      which-suites rule there. Do not set it globally in the justfile without checking
+      whether any recipe WANTS incremental - a developer building locally may.
+      Control: a gate run leaves target/debug/incremental no larger than it found it.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
