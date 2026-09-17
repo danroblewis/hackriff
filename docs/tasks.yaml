@@ -10808,7 +10808,7 @@ tasks:
   - id: T-436
     milestone: CI
     title: The suite is green at --test-threads 8 and flaky at nextest's default 28 - the coordinator's gate runs at the flaky one
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CI
     deps: [T-383]
@@ -11276,7 +11276,7 @@ tasks:
   - id: T-446
     milestone: MCANVAS
     title: After a retune the spectrum-history pyramid stops recording, permanently - the ring advances and coverage says observed, but nothing is written
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
