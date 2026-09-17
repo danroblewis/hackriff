@@ -82,16 +82,38 @@ pub fn should_record(current: Option<&RecordedClassification>) -> bool {
 /// `no_symbol_estimate`; where C14 genuinely cannot estimate, they still abstain
 /// ([`hk_classify::symbols`]) rather than being given a fabricated value.
 ///
+/// # The receiver's own cyclic lines (T-399)
+///
+/// `survey` is the run's receiver-line survey ([`crate::survey`]), and this is where it is
+/// **used** — never where it is measured. It is handed to C14 before the estimate, so the cyclic
+/// dimensions of `features@1` stop reading the receiver's own contribution as the emission's
+/// structure. The survey wants a second of the raw tuned span and this call site holds one burst,
+/// so the measurement happens once per capture state on the `hk-survey` reader and is only read
+/// here; and it is read through [`crate::survey::ReceiverSurvey::apply`], which gates it on **this
+/// window's own provenance**, so a survey never crosses a device, a retune or a gain step.
+///
+/// Before the first survey lands (its first second of capture), and for any window whose receiver
+/// state has no survey, C14 falls back to the recorded per-capture
+/// [`hk_model::Provenance::capture_artefacts`] of T-373 and T-382 alone — the status quo. Nothing
+/// here waits for a survey.
+///
+/// The exclusion is never silent whichever source it came from: the excluded frequencies are
+/// reported on the estimate (`excluded_receiver_hz`, `excluded_cyclic_hz`), a line that lost to
+/// one is marked `artefact_suppressed`, and the estimate carries `BlindReason::CaptureArtefact`.
+/// It removes lines from the **argmax only**, never from the whitening floor: that is real power.
+///
 /// `None` when the box cannot be extracted or C13 could not measure enough to normalise it (an
 /// abstention upstream, not a classification of `unknown`).
 pub fn classify_box<T: IqSample>(
     classifier: &Classifier,
     c14: &mut SymbolEstimator,
+    survey: &crate::survey::ReceiverSurvey,
     info: InputInfo<'_>,
     iq: &[T],
     request: &SnippetRequest,
     t: Timestamp,
 ) -> Option<Classification> {
+    survey.apply(c14, info.provenance.get());
     let mut extractor = SnippetExtractor::new(Default::default());
     let snippet = extractor.extract(info, iq, request).ok()?;
     let params = ParamEstimator::new(Default::default()).estimate(&snippet, &Hints::default());
@@ -151,18 +173,24 @@ pub fn record(
 ///   (≤ 24 dimensions), `O(families)` density evaluations, and one row insert. No FFT beyond that
 ///   single snippet, no ring or sample-buffer access, and no I/O beyond the repository the caller
 ///   already holds.
+/// - **The receiver-line survey is not part of that bound, and is not run here** (T-399). It costs
+///   a filter bank and a whitened periodogram per reference channel over a second or more of the
+///   raw span — 785 ms of one core on a 2 s window at 2.4 Msps, measured — which is why it is
+///   measured once per capture state on the `hk-survey` reader and only *read* at this call site,
+///   as a clone of a small line list ([`classify_box`]).
 #[allow(clippy::too_many_arguments)]
 pub fn classify_and_record<T: IqSample>(
     repo: &mut Repository,
     emitter: EmitterId,
     classifier: &Classifier,
     c14: &mut SymbolEstimator,
+    survey: &crate::survey::ReceiverSurvey,
     info: InputInfo<'_>,
     iq: &[T],
     request: &SnippetRequest,
     t: Timestamp,
 ) -> Result<Option<(Classification, bool)>, RepoError> {
-    let Some(classification) = classify_box(classifier, c14, info, iq, request, t) else {
+    let Some(classification) = classify_box(classifier, c14, survey, info, iq, request, t) else {
         return Ok(None);
     };
     let written = record(repo, emitter, &classification)?;

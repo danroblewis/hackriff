@@ -193,6 +193,67 @@ pub struct ReceiverLine {
     pub half_width_hz: f64,
 }
 
+/// The receiver state a survey describes: **the front end, its tune and its gain**.
+///
+/// One definition of "which receiver", read by two callers that must agree (T-399). The estimator
+/// asks it whether a survey applies to the window in front of it ([`ReceiverLines::applies_to`]);
+/// the pipeline's survey worker asks it whether the state has changed since it last measured, and
+/// so whether to measure again. A second spelling of the same question would drift, and a survey
+/// applied across a retune is a measurement of one receiver state charged to another.
+///
+/// [`Self::device_id`] is [`hk_model::Provenance::device_id`] — the source's own
+/// `DeviceInfo::device_id`, which is also the string `hk_model::attention::baseline::ChainKey::of_device`
+/// hashes into the run's receive chain and `hk_store::history::source_key` hashes into each
+/// frame's history origin (T-314, T-378). The same spelling throughout, never a new one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaptureState {
+    /// The front end ([`hk_model::Provenance::device_id`]).
+    pub device_id: String,
+    /// Tuned centre, Hz.
+    pub center_hz: f64,
+    /// Sample rate, Hz.
+    pub sample_rate_hz: f64,
+    /// Gain state (LNA, VGA, amp).
+    pub gain: (f64, f64, bool),
+}
+
+impl CaptureState {
+    /// The receiver state `p` was captured under.
+    pub fn of(p: &Provenance) -> Self {
+        Self {
+            device_id: p.device_id.clone(),
+            center_hz: p.tune.center_hz,
+            sample_rate_hz: p.tune.sample_rate_hz,
+            gain: (p.tune.lna_db, p.tune.vga_db, p.tune.amp_on),
+        }
+    }
+
+    /// Whether `p` was captured under this state.
+    pub fn matches(&self, p: &Provenance) -> bool {
+        Self::parts_match(
+            &self.device_id,
+            self.center_hz,
+            self.sample_rate_hz,
+            self.gain,
+            p,
+        )
+    }
+
+    /// The single comparison both callers use, over the fields either of them holds.
+    fn parts_match(
+        device_id: &str,
+        center_hz: f64,
+        sample_rate_hz: f64,
+        gain: (f64, f64, bool),
+        p: &Provenance,
+    ) -> bool {
+        p.device_id == device_id
+            && p.tune.center_hz == center_hz
+            && p.tune.sample_rate_hz == sample_rate_hz
+            && (p.tune.lna_db, p.tune.vga_db, p.tune.amp_on) == gain
+    }
+}
+
 /// Cyclic lines **measured** to belong to the receiver, with the survey that found them.
 ///
 /// Unlike [`hk_model::CaptureArtefact`] nothing here was written down in advance: every frequency
@@ -234,11 +295,26 @@ impl ReceiverLines {
     /// Device, tune and gain must all match: a retune or a gain step changes the receiver's own
     /// noise contribution and what rides on it, and a survey measured before one says nothing
     /// about after it.
+    /// The comparison is [`CaptureState`]'s, so the caller deciding *when to survey again* and the
+    /// estimator deciding *whether this survey may be used* ask the same question (T-399).
     pub fn applies_to(&self, p: &Provenance) -> bool {
-        p.device_id == self.device_id
-            && p.tune.center_hz == self.center_hz
-            && p.tune.sample_rate_hz == self.sample_rate_hz
-            && (p.tune.lna_db, p.tune.vga_db, p.tune.amp_on) == self.gain
+        CaptureState::parts_match(
+            &self.device_id,
+            self.center_hz,
+            self.sample_rate_hz,
+            self.gain,
+            p,
+        )
+    }
+
+    /// The receiver state this survey describes.
+    pub fn state(&self) -> CaptureState {
+        CaptureState {
+            device_id: self.device_id.clone(),
+            center_hz: self.center_hz,
+            sample_rate_hz: self.sample_rate_hz,
+            gain: self.gain,
+        }
     }
 
     /// Clearance added either side of every line's own measured band when searching a record

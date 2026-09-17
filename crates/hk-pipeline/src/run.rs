@@ -519,6 +519,10 @@ pub(crate) struct Shared {
     pub compute: hk_dsp::compute::Compute,
     /// T-174: the §2.6 DC-twin rule on the history grid (the occupancy engine's cells).
     pub dc_twin: hk_context::occupancy::channels::DcTwinRule,
+    /// T-399: the receiver-line survey in force (`crate::survey`), measured once per capture state
+    /// by the `hk-survey` reader and applied to every classification of a window captured under
+    /// that state.
+    pub receiver: Arc<crate::survey::ReceiverSurvey>,
 }
 
 impl Shared {
@@ -663,6 +667,11 @@ struct Common {
     scheduler: Arc<crate::control::SchedulerHub>,
     /// T-157: the rolling IQ capture buffer, fed by every segment's `hk-iqbuffer` reader.
     iq_buffer: Arc<crate::iqbuffer::IqBufferService>,
+    /// T-399: the receiver-line survey in force, measured once per capture state by every
+    /// segment's `hk-survey` reader and read by [`crate::classify::classify_box`]. It lives for
+    /// the run, not the segment: a re-plumb landing back on the same device, tune and gain is the
+    /// same receiver, and re-measuring it would pay twice for an unchanged answer.
+    receiver: Arc<crate::survey::ReceiverSurvey>,
 }
 
 impl Common {
@@ -848,6 +857,7 @@ impl Pipeline {
         ));
         let common = Common {
             iq_buffer,
+            receiver: Arc::default(),
             data_dir: cfg.data_dir.clone(),
             db_path,
             survey_id: survey.id,
@@ -1028,6 +1038,7 @@ fn start_segment(
     };
     let shared = Arc::new(Shared {
         dc_twin,
+        receiver: Arc::clone(&common.receiver),
         counters: Arc::clone(&common.counters),
         ring,
         gate,
@@ -1092,6 +1103,15 @@ fn start_segment(
         workers.push(spawn(
             "hk-spectrum",
             Box::new(move || crate::spectrum::run(s)),
+        )?);
+    }
+    {
+        // T-399: the receiver-line survey. One window per capture state, on its own thread, so
+        // nothing on the detection path waits for the second of capture it needs.
+        let (s, r) = (Arc::clone(&shared), Arc::clone(&common.receiver));
+        workers.push(spawn(
+            "hk-survey",
+            Box::new(move || crate::survey::run(s, r)),
         )?);
     }
     {
@@ -2003,6 +2023,13 @@ impl PipelineHandle {
     /// The run's rolling IQ capture buffer (T-157): status and clip export.
     pub fn iq_buffer(&self) -> Arc<crate::iqbuffer::IqBufferService> {
         Arc::clone(&self.sup.common.iq_buffer)
+    }
+
+    /// The run's receiver-line survey (T-399): what has been measured, and how often — the cadence
+    /// is once per capture state, so `counts().attempts()` never tracks the number of
+    /// classifications.
+    pub fn receiver_survey(&self) -> Arc<crate::survey::ReceiverSurvey> {
+        Arc::clone(&self.sup.common.receiver)
     }
 
     /// The newest ring sample index.

@@ -68,7 +68,7 @@ use serde::{Deserialize, Serialize};
 
 pub use consensus::{LineSupport, RateCandidate};
 pub use family::FskCentreStats;
-pub use receiver::{ReceiverLine, ReceiverLines, SurveyConfig};
+pub use receiver::{CaptureState, ReceiverLine, ReceiverLines, SurveyConfig};
 pub use transitions::{FitFailure, LsGuards, TransitionFit};
 
 use crate::dsp::{ChannelFilter, mix_into};

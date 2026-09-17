@@ -298,6 +298,9 @@ pub(crate) fn run(
                         w.emitter_id,
                         &Classifier::new(),
                         &mut c14,
+                        // T-399: the receiver-line survey measured by the `hk-survey` reader, once
+                        // for this capture state. Read here, never measured here.
+                        shared.receiver.as_ref(),
                         info,
                         iq,
                         request,
