@@ -7563,7 +7563,7 @@ tasks:
   - id: T-381
     title: The slots row still does not name its receive chain, the same gap T-371 just closed for the bias tee
     milestone: M4
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CTX
     deps: [T-371, T-314]

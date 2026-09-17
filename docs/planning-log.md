@@ -3826,3 +3826,51 @@ fix is for them to *say* they are live-only rather than silently appear scrubbed
 different, because packets are data about the air and carry capture-clock timestamps. And T-384 already
 found the honest substitute for the plots: they reach the same frames through the captures route, which
 already has the window. Ask that before extending the stream contract.
+
+### B0.663 — T-378 closes the chain; the user finds the boxes grow on a poll (2026-09-16)
+
+Merged at `2e71a9a`. The observation log names its device, so long-horizon coverage can answer
+*"did **this** front end look here"* rather than only *"did anything"*.
+
+**`provenance_ref` could not have carried it, and the reasons are worth keeping.** It is `None` at all
+three writers; resolving it needs a `Repository` join, and the observation log is a standalone
+CRC-checked line log with a **30-day** horizon while the repo it would join against has a different
+lifetime — a coverage read could have to open a database that rotated long before the log did; and
+even populated it would be a **fourth spelling** of "which device", an indirection to a `Provenance`
+row whose `device_id` is the value anyway. The brief asked the question because adding a second way to
+say something when an unused first way exists is the drift surface this chain exists to prevent, and
+the answer was better than "I added the field".
+
+The spelling cannot diverge **by construction**: `run.rs` reads `device_info()` once and derives the
+chain key from that same binding. And both e2e tests now set `PipelineConfig::device_id` to
+`"config-default:names-no-device"` and assert no record carries it — **the exact trap T-314 fell into,
+now guarded** rather than merely fixed.
+
+The honest half: records already on disk stay `Unknown` forever, so the wire **measures rather than
+declares**. `sources[]` gained `named_spans`, and `device_known` is literally `named_spans == spans`,
+so a log still holding pre-T-378 lines **discloses** them instead of claiming a device-local horizon it
+has not got. That is the same instinct as `tiles_pre_origin_floor` in T-377 — count what you cannot
+guarantee, rather than quietly extending the guarantee over it.
+
+**The user then reported from live testing: a live signal box extends UP slowly.** Their diagnosis is
+specific — detection runs per-frame and is not the bottleneck; `t_end_s` only advances on a poll; there
+is no websocket push; the cadences are 60 s / 2 s / tracker-interval. They asked for a
+presence-extension **push** over the stream contract, scoped to the live view, with paused and scrubbed
+staying poll-based, and a target of **~1 s**.
+
+**T-388 went out with two instructions beyond the ask.** First, verify the diagnosis link by link:
+they were right about the symptom and wrong about the mechanism on the navigator bars this morning,
+where the reported crossed wires turned out to be a request sent with no band at all. Second, and more
+important, the **honesty constraint**: the fix is a push and **not client-side extrapolation**, because
+a box drawn to the live edge on the assumption the signal is still there is **a claim about air nobody
+measured**. The user named the absence of extrapolation as part of the diagnosis, not as the thing to
+change, and the brief holds it that way.
+
+The control that will decide whether this lands correctly is not the latency one — it is that **a
+signal which stops must stop extending**. A push that keeps a box growing after the emission ended is
+precisely the fabrication the constraint forbids, and a latency test alone would never catch it.
+
+**T-381 launched** into the slot T-378 freed — it was blocked only by that file contention. The slots
+row still does not name its receive chain, exactly as it did not name the bias tee before T-371, and
+after T-314 the chain comes from the source's own `DeviceInfo`, so a two-front-end site produces two
+pools per subject that remain indistinguishable on that route.
