@@ -7706,7 +7706,7 @@ tasks:
   - id: T-387
     title: Four live surfaces cannot re-derive because the websocket transports have no history form
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -7915,7 +7915,7 @@ tasks:
   - id: T-393
     title: The navigators say nothing about what they select; add labels and hover/drag readouts
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: UI
     core_interface: true
@@ -7995,7 +7995,7 @@ tasks:
   - id: T-395
     title: The Live button is a time-axis control sitting in the Capture panel; move it onto the time navigator
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: UI
     deps: [T-391]
