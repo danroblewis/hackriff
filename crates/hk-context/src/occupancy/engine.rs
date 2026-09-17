@@ -516,13 +516,15 @@ pub struct VisitSample {
     /// Front-end gain-state key of the grid the visit was read from (the dominant gain state of
     /// its tiles; 0 = unknown), T-132.
     pub gain_key: u32,
-    /// Antenna-port bias-tee state of the grid the visit was read from (T-359).
+    /// Antenna-port bias-tee state the visit itself was measured under (T-359, refined by T-372).
     ///
-    /// [`BiasTee::Unknown`] when the grid's tiles pooled more than one state
-    /// (`ProvenanceSummary::bias_tee_mixed`) as well as when the source could not report one: in
-    /// both cases no single state can be attributed to the visit, and claiming one would put a
-    /// measurement of two receive chains into one cohort — the masking T-333 refuses. Never `Off`
-    /// by default (T-325).
+    /// [`BiasTee::Unknown`] when no single state can be attributed to the visit — claiming one
+    /// would put a measurement of two receive chains into one cohort, the masking T-333 refuses.
+    /// Never `Off` by default (T-325). That is the answer when the source could not report the
+    /// state, when the grid pooled two states and the switch times are not reconstructable
+    /// ([`grid_bias_tee_track`]), and when the visit's rows **straddle** a known switch — whatever
+    /// the split, since a majority is not agreement. A visit whose rows lie wholly on one side of
+    /// every switch carries that side's state, which is what T-372 recovers.
     pub bias_tee: BiasTee,
 }
 
@@ -558,14 +560,145 @@ pub fn interval_bias_tee<'a>(samples: impl IntoIterator<Item = &'a VisitSample>)
     seen.unwrap_or(BiasTee::Unknown)
 }
 
-/// The bias-tee state to attribute to visits read from `p`: its state, or [`BiasTee::Unknown`] when
-/// its tiles pooled more than one (T-359).
+/// The bias-tee state to attribute to a whole grid read from `p`: its state, or
+/// [`BiasTee::Unknown`] when its tiles pooled more than one (T-359).
+///
+/// This is the **grid-wide** label (what the report names the read under) and the fallback for
+/// per-visit attribution; [`GridBiasTee`] refines the per-visit answer using the switch times.
 pub fn grid_bias_tee(p: &hk_store::ProvenanceSummary) -> BiasTee {
     if p.bias_tee_mixed {
         BiasTee::Unknown
     } else {
         p.bias_tee
     }
+}
+
+/// One device's reconstructed bias-tee timeline over a grid: the state it started in and every
+/// switch after it, in time order (T-372).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BiasTeeTrack {
+    /// State before the first listed switch.
+    initial: BiasTee,
+    /// `(switch time ns, state from then on)`, strictly increasing.
+    switches: Vec<(i64, BiasTee)>,
+}
+
+impl BiasTeeTrack {
+    /// The state held over the whole half-open extent `[start_ns, end_ns)`, or
+    /// [`BiasTee::Unknown`] when a switch falls **strictly inside** it.
+    ///
+    /// Claim-nothing at the boundary (T-372): a straddling extent is `Unknown` whatever the split,
+    /// so 9:1 and 1:9 and 1:1 all answer the same. A switch exactly at `start_ns` is not inside —
+    /// the extent begins under the new state — and a switch at `end_ns` is not inside either,
+    /// since the extent ends before it.
+    pub fn over(&self, start_ns: i64, end_ns: i64) -> BiasTee {
+        let end = end_ns.max(start_ns.saturating_add(1));
+        let mut state = self.initial;
+        for &(t, to) in &self.switches {
+            if t <= start_ns {
+                state = to;
+            } else if t < end {
+                return BiasTee::Unknown;
+            } else {
+                break;
+            }
+        }
+        state
+    }
+
+    /// The switch times, ns.
+    pub fn switch_times(&self) -> impl Iterator<Item = i64> + '_ {
+        self.switches.iter().map(|&(t, _)| t)
+    }
+}
+
+/// How to attribute a bias-tee state to each visit read from one grid (T-372).
+#[derive(Clone, Debug, PartialEq)]
+pub enum GridBiasTee {
+    /// Every visit gets this state: the grid held one state throughout, or no timeline could be
+    /// rebuilt and the coarse T-359 answer stands.
+    Uniform(BiasTee),
+    /// The grid pooled two states **and** the switch times are known for the one device that
+    /// contributed, so each visit is attributed by its own extent.
+    Track(BiasTeeTrack),
+}
+
+impl GridBiasTee {
+    /// The state to attribute to a visit measured over `[start_ns, end_ns)`.
+    pub fn over(&self, start_ns: i64, end_ns: i64) -> BiasTee {
+        match self {
+            GridBiasTee::Uniform(b) => *b,
+            GridBiasTee::Track(t) => t.over(start_ns, end_ns),
+        }
+    }
+}
+
+/// Reconstructs the bias-tee attribution rule for a grid (T-372, refining T-359).
+///
+/// T-359 marks **every** visit of a mixed grid `Unknown`, including visits lying wholly on one
+/// side of the switch, because the state was summarised per read region rather than per time cell.
+/// The summary's [`hk_store::history::ProvenanceStep`]s carry the switch times, so the off and on stretches
+/// either side can be attributed instead — but only when the timeline is **complete and belongs to
+/// one front end**. Anything less falls back to `Uniform(Unknown)`: a half-known timeline that
+/// resolves to the likely state is worse than the coarse answer, because it looks like knowledge
+/// (T-325's rule — `Unknown` is never permissive).
+///
+/// It refuses, and falls back, when:
+/// - **steps were dropped** (`steps_dropped > 0`): an unlisted switch would make a stretch look
+///   pure that is not;
+/// - **more than one front end contributed** (more than one known `origins` source, an unknown
+///   source, or `other_origin_frames`): a step is recorded per source
+///   (`FrameInput::source`), and the bias tee is a property of the **device** that was switched
+///   (T-259/T-305), so two devices' steps are two timelines and neither describes the other's
+///   frames;
+/// - **the chain does not join up** (`from` of a step disagreeing with the previous step's `to`,
+///   a step whose `from` equals its `to` — what a pre-T-332 tile reads back as — or two steps at
+///   one instant): the reconstruction is then not trustworthy;
+/// - **the grid says mixed but the steps show no switch**, or the grid's own first-frame state
+///   appears nowhere in the timeline: the two records disagree, so neither is usable.
+pub fn grid_bias_tee_track(p: &hk_store::ProvenanceSummary) -> GridBiasTee {
+    if !p.bias_tee_mixed {
+        return GridBiasTee::Uniform(p.bias_tee);
+    }
+    let coarse = GridBiasTee::Uniform(BiasTee::Unknown);
+    if p.steps_dropped > 0 || p.other_origin_frames > 0 || p.origins.is_empty() {
+        return coarse;
+    }
+    // Device-local: one front end, named. Two sites for one source is still one device (the bias
+    // tee moved with it); an unknown source is not evidence of one device.
+    let mut sources = p.origins.iter().map(|(o, _)| o.source);
+    let Some(Some(source)) = sources.next() else {
+        return coarse;
+    };
+    if sources.any(|s| s != Some(source)) {
+        return coarse;
+    }
+    let mut initial: Option<BiasTee> = None;
+    let mut switches: Vec<(i64, BiasTee)> = Vec::new();
+    for s in p
+        .steps
+        .iter()
+        .filter(|s| s.changed & hk_store::history::ProvenanceStep::BIAS_TEE != 0)
+    {
+        if s.from.bias_tee == s.to.bias_tee {
+            return coarse;
+        }
+        let t = s.t.as_unix_nanos();
+        match switches.last() {
+            None => initial = Some(s.from.bias_tee),
+            Some(&(prev_t, prev)) if prev != s.from.bias_tee || t <= prev_t => return coarse,
+            Some(_) => {}
+        }
+        switches.push((t, s.to.bias_tee));
+    }
+    let Some(initial) = initial else {
+        // Mixed, but no switch is listed to say when: the coarse answer is the honest one.
+        return coarse;
+    };
+    if initial != p.bias_tee && !switches.iter().any(|&(_, b)| b == p.bias_tee) {
+        return coarse;
+    }
+    GridBiasTee::Track(BiasTeeTrack { initial, switches })
 }
 
 impl VisitSample {
@@ -644,6 +777,9 @@ pub fn evaluate(
     let floor_suspect = 2 * n_suspect > b - a;
     let t0_ns = grid.t_first_cell.saturating_mul(grid.t_cell_ns);
     let slack = grid.t_cell_ns;
+    // T-372: attribute each visit's bias tee by the rows it actually read, against the switch
+    // times, instead of marking every visit of a mixed grid `Unknown`.
+    let bias = grid_bias_tee_track(&grid.provenance);
     let mut out = Vec::with_capacity(input.visits.len());
     let mut above = vec![false; b - a];
     for v in input.visits {
@@ -655,6 +791,11 @@ pub fn evaluate(
         let r1 = ((e - t0_ns + grid.t_cell_ns - 1).div_euclid(grid.t_cell_ns)).max(r0 + 1);
         let (r0, r1) = (r0 as usize, (r1 as usize).min(grid.nt));
         above.iter_mut().for_each(|x| *x = false);
+        // The rows that actually carried frames: the extent the visit's numbers were measured
+        // over, and so the extent to attribute a front-end state to (T-372). Rows the grid never
+        // observed contribute nothing, so what the tee was doing during them says nothing about
+        // this visit.
+        let mut read_rows: Option<(usize, usize)> = None;
         let mut any_row = false;
         let mut level = f64::NEG_INFINITY;
         for t in r0..r1 {
@@ -662,6 +803,7 @@ pub fn evaluate(
                 continue;
             }
             any_row = true;
+            read_rows = Some(read_rows.map_or((t, t), |(lo, _)| (lo, t)));
             for (k, f) in (a..b).enumerate() {
                 let m = f64::from(grid.cell(t, f).mean_db);
                 level = level.max(m);
@@ -713,7 +855,15 @@ pub fn evaluate(
             floor_source,
             floor_suspect,
             gain_key: grid.provenance.dominant_gain_key(),
-            bias_tee: grid_bias_tee(&grid.provenance),
+            // Row-aligned, because a time cell containing a switch pooled frames from both states:
+            // a visit that read it straddles the switch even if its own [start, end) does not.
+            bias_tee: match read_rows {
+                Some((lo, hi)) => bias.over(
+                    t0_ns.saturating_add(lo as i64 * grid.t_cell_ns),
+                    t0_ns.saturating_add((hi as i64 + 1) * grid.t_cell_ns),
+                ),
+                None => BiasTee::Unknown,
+            },
         });
     }
     (out, Some(thr))
@@ -2069,5 +2219,314 @@ mod tests {
                 "{held:?} pooled with another state"
             );
         }
+    }
+
+    // ---- T-372: attribute a visit's bias-tee state by switch time, not by whole read ----
+
+    /// Seconds since the epoch as ns (the test grid's rows are 1 s from `T_GRID0`).
+    fn ns(t_s: f64) -> i64 {
+        (t_s * 1e9) as i64
+    }
+
+    /// Start of the test grid's row 0, seconds (`t_first_cell` × 1 s).
+    const T_GRID0: f64 = 1e6;
+
+    /// One bias-tee provenance step at `t_s`.
+    fn bstep(t_s: f64, from: BiasTee, to: BiasTee) -> hk_store::history::ProvenanceStep {
+        let state = |bias_tee| hk_store::history::FrontEndState {
+            bias_tee,
+            ..Default::default()
+        };
+        hk_store::history::ProvenanceStep {
+            t: Timestamp::from_unix_nanos(ns(t_s)),
+            changed: hk_store::history::ProvenanceStep::BIAS_TEE,
+            from: state(from),
+            to: state(to),
+        }
+    }
+
+    /// A mixed summary from one named front end, holding `first` at its first frame and stepping
+    /// through `steps`: the shape a chunk read gets when the tee is switched inside it.
+    fn mixed_prov(
+        first: BiasTee,
+        steps: Vec<hk_store::history::ProvenanceStep>,
+    ) -> hk_store::ProvenanceSummary {
+        hk_store::ProvenanceSummary {
+            frames: 100,
+            bias_tee: first,
+            bias_tee_mixed: true,
+            steps,
+            origins: vec![(
+                hk_store::history::Origin {
+                    source: Some(7),
+                    site: None,
+                },
+                100,
+            )],
+            ..Default::default()
+        }
+    }
+
+    fn track(p: &hk_store::ProvenanceSummary) -> BiasTeeTrack {
+        match grid_bias_tee_track(p) {
+            GridBiasTee::Track(t) => t,
+            GridBiasTee::Uniform(b) => panic!("expected a reconstructed timeline, got {b:?}"),
+        }
+    }
+
+    /// **T-372.** A visit lying wholly on one side of a switch is attributed that side's state; a
+    /// visit that **straddles** the switch claims nothing.
+    ///
+    /// **The control this ticket is written around**: the T-359 9:1 majority case must still
+    /// answer `Unknown`. It is asserted here at 9:1, at 1:9, at 1:1 and at 999999999:1 ns, because
+    /// the rule is not "the longer side wins by a wide enough margin" — it is that a straddling
+    /// extent was measured under two receive chains and names neither, whatever the split. A
+    /// refinement that resolved the lopsided case would be a dominance rule by the back door, and
+    /// an `Unknown` that quietly becomes the likely answer is worse than the coarse rule it
+    /// replaced, because it looks like knowledge (T-325).
+    #[test]
+    fn occupancy_visit_bias_tee_follows_the_switch_time_and_a_straddling_visit_claims_nothing() {
+        let sw = T_GRID0 + 50.0;
+        let tr = track(&mixed_prov(
+            BiasTee::Off,
+            vec![bstep(sw, BiasTee::Off, BiasTee::On)],
+        ));
+        assert_eq!(tr.switch_times().collect::<Vec<_>>(), vec![ns(sw)]);
+
+        // Wholly one side: the state is recovered, which is the point of the ticket.
+        assert_eq!(tr.over(ns(sw - 10.0), ns(sw - 5.0)), BiasTee::Off);
+        assert_eq!(tr.over(ns(sw + 5.0), ns(sw + 10.0)), BiasTee::On);
+        // Touching the switch is not straddling it: the half-open extent ending exactly at the
+        // switch saw only the old state, and one starting exactly at it saw only the new.
+        assert_eq!(tr.over(ns(sw - 10.0), ns(sw)), BiasTee::Off);
+        assert_eq!(tr.over(ns(sw), ns(sw + 10.0)), BiasTee::On);
+
+        // THE CONTROL. Every split straddling the switch is Unknown, including the 9:1 majority
+        // T-359 named and a 1 ns sliver of the other state.
+        let s = ns(sw);
+        for (a, b, why) in [
+            (s - 9_000_000_000, s + 1_000_000_000, "9 s off : 1 s on"),
+            (s - 1_000_000_000, s + 9_000_000_000, "1 s off : 9 s on"),
+            (s - 5_000_000_000, s + 5_000_000_000, "1 : 1"),
+            (s - 999_999_999, s + 1, "999999999 ns off : 1 ns on"),
+            (s - 1, s + 999_999_999, "1 ns off : 999999999 ns on"),
+        ] {
+            assert_eq!(
+                tr.over(a, b),
+                BiasTee::Unknown,
+                "{why} is not a row of either state: a majority is not agreement"
+            );
+        }
+
+        // Several switches: the interior stretch is recovered, an extent spanning any switch is not.
+        let tr = track(&mixed_prov(
+            BiasTee::Off,
+            vec![
+                bstep(T_GRID0 + 30.0, BiasTee::Off, BiasTee::On),
+                bstep(T_GRID0 + 60.0, BiasTee::On, BiasTee::Unknown),
+            ],
+        ));
+        assert_eq!(
+            tr.over(ns(T_GRID0 + 10.0), ns(T_GRID0 + 20.0)),
+            BiasTee::Off
+        );
+        assert_eq!(tr.over(ns(T_GRID0 + 35.0), ns(T_GRID0 + 55.0)), BiasTee::On);
+        // The tail is `Unknown` because the tee became unreportable, not because it straddles —
+        // learning and losing the state are steps of their own (T-332).
+        assert_eq!(
+            tr.over(ns(T_GRID0 + 70.0), ns(T_GRID0 + 80.0)),
+            BiasTee::Unknown
+        );
+        assert_eq!(
+            tr.over(ns(T_GRID0 + 25.0), ns(T_GRID0 + 65.0)),
+            BiasTee::Unknown,
+            "spanning both switches"
+        );
+    }
+
+    /// **T-372.** The refinement applies only where a **complete** timeline for **one front end**
+    /// can be rebuilt; everything else keeps T-359's coarse `Unknown`. The bias tee is a property
+    /// of the device that was switched (T-259/T-305), and a step is recorded per source, so two
+    /// devices in one read are two timelines and neither describes the other's frames.
+    ///
+    /// **Control**: the same steps with a single named source do reconstruct — so the refusals
+    /// below cannot pass by never reconstructing anything.
+    #[test]
+    fn occupancy_visit_bias_tee_falls_back_to_the_whole_read_unless_one_device_s_timeline_is_whole()
+    {
+        let steps = || vec![bstep(T_GRID0 + 50.0, BiasTee::Off, BiasTee::On)];
+        let base = mixed_prov(BiasTee::Off, steps());
+        // Control: this one reconstructs.
+        assert!(matches!(grid_bias_tee_track(&base), GridBiasTee::Track(_)));
+
+        let origin = |source, site| (hk_store::history::Origin { source, site }, 50u64);
+        let coarse = |p: &hk_store::ProvenanceSummary, why: &str| {
+            assert_eq!(
+                grid_bias_tee_track(p),
+                GridBiasTee::Uniform(BiasTee::Unknown),
+                "{why}"
+            );
+            // And the coarse answer is exactly T-359's.
+            assert_eq!(grid_bias_tee(p), BiasTee::Unknown, "{why}");
+        };
+
+        coarse(
+            &hk_store::ProvenanceSummary {
+                steps_dropped: 1,
+                ..base.clone()
+            },
+            "a dropped step could be an unlisted switch, which would make a stretch look pure",
+        );
+        coarse(
+            &hk_store::ProvenanceSummary {
+                origins: vec![origin(Some(7), None), origin(Some(8), None)],
+                ..base.clone()
+            },
+            "two devices are two timelines; the step names neither",
+        );
+        coarse(
+            &hk_store::ProvenanceSummary {
+                origins: vec![origin(None, None)],
+                ..base.clone()
+            },
+            "an unknown source is not evidence of a single device",
+        );
+        coarse(
+            &hk_store::ProvenanceSummary {
+                other_origin_frames: 5,
+                ..base.clone()
+            },
+            "frames from origins beyond the listed ones",
+        );
+        coarse(
+            &hk_store::ProvenanceSummary {
+                steps: vec![],
+                ..base.clone()
+            },
+            "mixed, but no step says when it switched",
+        );
+        coarse(
+            &hk_store::ProvenanceSummary {
+                steps: vec![
+                    bstep(T_GRID0 + 50.0, BiasTee::Off, BiasTee::On),
+                    bstep(T_GRID0 + 70.0, BiasTee::Off, BiasTee::On),
+                ],
+                ..base.clone()
+            },
+            "the chain does not join up: on→? recorded as off→on",
+        );
+        coarse(
+            &hk_store::ProvenanceSummary {
+                steps: vec![bstep(T_GRID0 + 50.0, BiasTee::Unknown, BiasTee::Unknown)],
+                ..base.clone()
+            },
+            "a step that changes nothing is what a pre-T-332 tile reads back as",
+        );
+        coarse(
+            &hk_store::ProvenanceSummary {
+                bias_tee: BiasTee::Unknown,
+                ..base.clone()
+            },
+            "the read's own first-frame state appears nowhere in the timeline",
+        );
+
+        // Two sites, one device: the tee moved with it, so this is still one timeline.
+        assert!(matches!(
+            grid_bias_tee_track(&hk_store::ProvenanceSummary {
+                origins: vec![
+                    origin(Some(7), Some(SiteKey::Mobile)),
+                    origin(Some(7), Some(SiteKey::Unassigned)),
+                ],
+                ..base.clone()
+            }),
+            GridBiasTee::Track(_)
+        ));
+
+        // An unmixed read never consults the steps at all: it is one state by construction.
+        for held in [BiasTee::Off, BiasTee::On, BiasTee::Unknown] {
+            assert_eq!(
+                grid_bias_tee_track(&hk_store::ProvenanceSummary {
+                    bias_tee: held,
+                    bias_tee_mixed: false,
+                    ..base.clone()
+                }),
+                GridBiasTee::Uniform(held),
+                "{held:?}"
+            );
+        }
+    }
+
+    /// **T-372, measured.** How much coverage the refinement actually recovers, end to end through
+    /// [`evaluate`]: under T-359 every one of these visits was `Unknown` because the read was mixed
+    /// somewhere. The number matters — if it recovered little, the coarse fallback would simply be
+    /// right.
+    ///
+    /// Attribution is **row-aligned**, because a 1 s time cell containing the switch pooled frames
+    /// from both states: a visit that read that cell straddles the switch even when its own
+    /// `[start, end)` does not. So a mid-cell switch costs exactly the cells it landed in, and no
+    /// more.
+    #[test]
+    fn occupancy_visit_bias_tee_recovers_every_row_but_the_one_the_switch_landed_in() {
+        let (nt, nf) = (100usize, 64usize);
+        let cfg = EngineConfig::default();
+        let mut g = grid(nt, nf, |_, _| (-100.0, -105.0, 0.0));
+        let (band, _) = whole(&g);
+        let count = |g: &RegionHistory, visits: &[Visit]| {
+            let fl = cfg.local_floors(g);
+            let (s, _) = evaluate(
+                &cfg.threshold,
+                band,
+                6250.0,
+                EvalInput {
+                    grid: g,
+                    visits,
+                    detections: &[],
+                    floors: &fl,
+                },
+            );
+            assert_eq!(s.len(), visits.len(), "every visit evaluated");
+            let n = |b: BiasTee| s.iter().filter(|v| v.bias_tee == b).count();
+            (n(BiasTee::Off), n(BiasTee::On), n(BiasTee::Unknown))
+        };
+        let rows = coverage_visits(&g, band, Tier::ScheduledPlan);
+        assert_eq!(rows.len(), nt);
+
+        // A switch on a row boundary contaminates no row: 100 of 100 rows recovered.
+        g.provenance = mixed_prov(
+            BiasTee::Off,
+            vec![bstep(T_GRID0 + 50.0, BiasTee::Off, BiasTee::On)],
+        );
+        assert_eq!(count(&g, &rows), (50, 50, 0));
+
+        // A switch 400 ms into row 50 costs that row and only that row: 99 of 100 recovered.
+        g.provenance = mixed_prov(
+            BiasTee::Off,
+            vec![bstep(T_GRID0 + 50.4, BiasTee::Off, BiasTee::On)],
+        );
+        assert_eq!(count(&g, &rows), (50, 49, 1));
+
+        // Visits ten rows long: the switch costs the one visit that contains it, 9 of 10 recovered.
+        let tens: Vec<Visit> = (0..10)
+            .map(|k| Visit {
+                observed: span(
+                    T_GRID0 + f64::from(k) * 10.0,
+                    T_GRID0 + f64::from(k + 1) * 10.0,
+                ),
+                tier: Tier::ScheduledPlan,
+                overload: false,
+            })
+            .collect();
+        assert_eq!(count(&g, &tens), (5, 4, 1));
+
+        // The control, restated where it bites: this whole read is mixed, so T-359 answers
+        // `Unknown` for every visit above — and the refinement must still answer `Unknown` for a
+        // visit that straddles, however lopsidedly. A 10 s visit holding 9 s of off and 1 s of on.
+        let lopsided = [Visit {
+            observed: span(T_GRID0 + 41.4, T_GRID0 + 51.4),
+            tier: Tier::ScheduledPlan,
+            overload: false,
+        }];
+        assert_eq!(grid_bias_tee(&g.provenance), BiasTee::Unknown);
+        assert_eq!(count(&g, &lopsided), (0, 0, 1), "9:1 is still Unknown");
     }
 }
