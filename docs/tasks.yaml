@@ -7134,17 +7134,7 @@ tasks:
     milestone: M3
     title: The classifier rejects 39% of genuine short bursts from their own class, and the fix costs open-set
       recall at the floor
-    status: blocked
-    blocked_on: |
-      T-428. This ticket's ENTIRE deliverable is a trade curve the USER must choose from, and
-      both axes are quoted in held-out unknown recall against ADR-0016 §7's 0.90 floor
-      (0.9606 -> 0.9000 single-dimension, 0.9697 -> 0.9242 four-dimension). T-428 is live on
-      whether that very figure is reproducible: four agents re-derived it on main the same day
-      and split two-two, 0.9444/0.0556 against 0.9520/0.0480.
-      Asking the user to trade open-set honesty against burst recall, against a floor, using a
-      number currently known to disagree with itself, would be asking them to decide on a
-      figure I cannot stand behind. Unblock the moment T-428 says what the number is - the
-      measurement work here is otherwise fully specified and ready.
+    status: todo
     priority: high
     deps:
     - T-328
@@ -7167,6 +7157,25 @@ tasks:
       at a pooled fit the FOUR dimensions hold the open set better (0.9242 vs 0.9000) at the same burst
       recall, so if pooled fitting is adopted the four-dimension expansion should be re-evaluated in the
       same breath rather than staying refused on a protocol that no longer applies'
+    notes: |
+      UNBLOCKED 2026-09-17 by T-428, which changed what this ticket must ask the user.
+      T-428 established that the held-out unknown-recall figure has a DRAW STANDARD DEVIATION OF
+      0.0084 across seed bases (370-381 of 396 at eight bases; 0.9343-0.9621, mean 0.9530). The
+      four-decimal figures in the acceptance text above therefore cannot be compared at four
+      decimals. ADR-0016 §7.1 now says a brief quotes ~0.95 (draw sd 0.008; a +/-0.02 move is
+      noise), and §7.2 records the failure mode.
+      THIS SHARPENS THE USER'S QUESTION RATHER THAN SOFTENING IT. "0.9606 -> 0.9000" was read as
+      "lands exactly on the 0.90 floor". Against sd 0.0084 that post-fix value is roughly ONE
+      STANDARD DEVIATION above 0.90 and a draw could put it either side - so the honest statement
+      is not "meets the floor" but "cannot be distinguished from the floor at this sample size".
+      The four-dimension variant (0.9697 -> 0.9242) sits ~2.9 sd above and IS distinguishable.
+      SO: re-measure both curves ACROSS SEED BASES, not once, and present the user a mean with a
+      spread per point. State plainly which options are distinguishable from the floor and which
+      are not. That is a different and better decision than the one the ticket originally framed,
+      and it may make T-328's ordering reversal (four dimensions holding the open set better at a
+      pooled fit) the decisive fact rather than a footnote.
+      Do NOT pick for the user and do NOT move the floor - unchanged.
+
   - id: T-365
     milestone: M3
     title: T-203 is marked done but ADR-0016 section 10 assigns it a store and three routes that do not
@@ -8638,7 +8647,7 @@ tasks:
   - id: T-406
     title: Iterative scan mode - step the tune and retain the full-spectrum survey
     milestone: M4
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -8667,6 +8676,59 @@ tasks:
       A retune is a device action (T-343): one capture at a time, settle gap honoured,
       device_id recorded. And with multiple SDRs the sweep must not assume it owns the
       radio - the scheduler already arbitrates.
+    commit: d07c75a
+    result: |
+      DONE - the user's feature (2) of four, and THE LOAD-BEARING DECISION WAS THE STEP PURPOSE,
+      not the dwell.
+      hk_core::scheduler::IterativeScan is a dwell policy over the EXISTING scheduler, not a second
+      one: a ScanPolicy::DwellOnly plan over the device's own frequency_ranges with a configurable
+      region_dwell_ns, written into extra.scheduler.region_dwell_s so the plan carries its own
+      policy through a --plan JSON round-trip and SchedulerConfig::from_plan reads it back with no
+      second code path. Default 15 s; recommended() REPORTS whether a dwell is inside the user's
+      10-30 s range rather than clamping. Hard bound 300 s (the pass is linear in the dwell).
+      Reachable as --survey-dwell SECONDS on hk run, hk replay and hackriffd.
+      WHAT docs/16 §7 STEP 6 WARNED ABOUT, and the whole ticket: a DwellOnly hop emits
+      Purpose::RegionDwell and ObservationRecorder writes ONE DwellRecord PER STEP with that step's
+      own window and interval. ONLY Purpose::Sweep aggregates across a pass. Implementing the scan
+      as long sweep hops - the obvious shortcut - would have produced exactly the coarse record the
+      design warns about, and T-421's grid_over would have rasterised it as "the whole band, the
+      whole time".
+      The record -> CoverageSpan mapping moved OUT of hk-api into hk_store::spans_from_records,
+      beside the rasteriser that consumes it, so ONE place decides what shape a record takes on the
+      grid; /api/coverage now calls it instead of keeping a copy.
+      PROVED AS ONE CHAIN, NOT PER LAYER: scheduler -> recorder -> observation log -> coverage
+      spans -> grid_over, every link production code, nothing hand-writing a record or a span.
+      THE THREE STATES: the pass rasterises as a DIAGONAL - on hop k's step, hop k is Observed
+      (a positive sampling fact, no claim about energy) and every other hop is Unobserved - while
+      the same spans collapsed to ONE ROW say the band WAS cleared over the pass. That difference
+      is exactly what the time axis buys. Rows wholly before the oldest record are the fourth state
+      via unknown_rows_before; an observed cell is never relabelled. The DC notch survives the
+      chain as two bands per dwell, never one wide one.
+      iterative_scan_device.rs runs it THROUGH THE MOCK SDR: retunes go through the existing gated
+      typed path (no second path added), every record names its device_id, coverage spreads across
+      the walked range AND STOPS THERE (one window beyond the plan edge is Unobserved, not quiet),
+      and the SHARED spectrum-history pyramid holds frames across it (140/140 cells). No private
+      accumulator; history ingest was already Purpose-agnostic and that test is now the guard
+      keeping it so.
+      THE BUDGET LINE IS MEASURED, and states the limit in the same breath as the capability:
+        401 steps x 12.0 s = a 4812.0 s pass over 5999.000 MHz (15.000 MHz per step); each band is
+        listened to 12.0 s in every 4812.0 s (duty 0.249 %). A step catches anything on the air
+        during its own dwell; it catches nothing during the other 4800.0 s, and spectrum the pass
+        has not reached is unobserved, never quiet.
+      A dwell gives ~300x more listening per visit than a 50 ms sweep hop - what makes an ISM burst
+      findable at all - and pays one-for-one in revisit latency.
+      RETENTION, DECIDED WITH REASONS AND MEASURED: observation log 30 days / 512 MiB -> 180 days /
+      2 GiB, both overridable per run. §5.4's arithmetic was marked unverified; now measured through
+      the PRODUCTION codec at 618 B/line, so a 10 s dwell writes 5.3 MB/day and 2 GiB holds ~400
+      days - THE AGE BINDS FIRST, the intended order.
+      THE FINDING §5.4 DID NOT STATE: which bound binds DEPENDS ON THE POLICY. A 50 ms-hop sweep
+      aggregates ~1500 hop visits per record and is ~2 orders denser per day, so THERE THE QUOTA
+      BINDS - raising the age alone would not have moved that horizon at all. Both numbers had to
+      move.
+      Docs: docs/16 §5.4 + §7 step 6 (marked landed), docs/api.md, ADR-0012 §1.5/§11.
+      LEFT OPEN FOR THE USER in ADR-0012 §11 open question 3, which was literally asking this:
+      whether a 2 GiB ceiling is acceptable on the device's disk.
+
   - id: T-407
     title: The two navigator bars are hard to use on touch
     milestone: M2-hardening
@@ -9789,7 +9851,7 @@ tasks:
   - id: T-425
     milestone: M2-hardening
     title: The retune seam gap is BIMODAL - 40% of runs land at 1.32 row periods against a 1.5 threshold, with a bit-identical value
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     deps: [T-417, T-383]
@@ -9847,6 +9909,59 @@ tasks:
       Read T-383's result first - it is the worked example for how to take this kind of
       measurement, and its conclusion (an epoch-aligned quantity ranging over (2, 62] under a
       60 s bound) is exactly the shape of answer to look for here.
+    commit: 695f4eb
+    result: |
+      FIXED, and the diagnosis inverted the ticket. THE SEAM WAS NEVER THE VARIABLE.
+      Row-level tracing shows the identical sample grid every run: last old-window row at sample
+      2158592, first new-window row at 2293760 carrying STREAM_START|RATE_CHANGE|GAP|
+      PROVENANCE_CHANGE, exactly 52.906667 ms later. The gap decomposes as
+          gap = hole + period_old + n x period_new
+        hole = 12.8 ms of genuinely missing capture time (settle discard + what the re-plumb
+          consumed) - ABOUT A THIRD OF A ROW, NEVER A WHOLE ONE. So "at least one row's worth of
+          time must be MISSING" was never true of this system, and the 1.5 x period bound
+          (60.2 ms) sat ABOVE the real seam of 52.9 ms.
+        period_old = 40.107 ms (96256 @ 2.4 MHz); period_new = 40.0 ms (192000 @ 4.8 MHz).
+        n = NEW-WINDOW ROWS THE CONSUMER NEVER RECEIVED. bridge::watch_peer looked for the
+          replacement publisher once per WATCH_TICK (50 ms) while the new segment fills its first
+          row in ~40 ms - a phase race, n in {0,1,2} giving 52.9 (fail), 92.9, 132.9.
+      Proved by mutation BOTH WAYS: WATCH_TICK = 1 ms makes the old assertion fail 6/6 at exactly
+      52.906667; 200 ms makes it pass 4/4. THE OLD BOUND ONLY EVER PASSED BECAUSE ROWS WERE BEING
+      DROPPED IN DELIVERY.
+      THE FINDING THAT CHANGED THE FIX: a mutation that PAPERS THE SEAM OVER COMPLETELY - every
+      row's timestamp continuing the previous cadence across segments - PASSED ON MAIN, because the
+      dropped rows forged a gap that was not there. So this was never "deterministic seam OR better
+      assertion": no assertion here means anything until the delivery loss is gone. Both were done,
+      in that order.
+      THE DELIVERY LOSS IS A PRODUCT BUG. Every retune was silently swallowing the new window's
+      first rows with NO DROP MARKER, making each retune look like a longer break in the air than
+      it was - on a surface whose entire purpose is that a break in the data must be TRUE.
+      watch_peer now waits on the registry's offer generation (a Condvar, wait_for_offer_after):
+      0.15-0.8 ms to re-subscribe instead of up to 50 ms. Peer/drain detection unchanged.
+      The assertion now bounds what is INVARIANT: the first new row begins strictly later than ONE
+      row period after the last old row. period_old is not fitted - it is the exact value a held,
+      repeated, interpolated or back-filled seam produces - and it stays a LOWER bound, since a
+      stalled consumer losing rows can only push the measurement up. No upper bound, because n has
+      no measured ceiling (one run in eight showed a 560 ms stall). Plus: no step after the seam is
+      shorter than the new window's period, so the hole cannot be squeezed back in. With both, the
+      papering mutation FAILS 4/4.
+      RATES (agent, at branch point 651335f): before 2/14 idle and 4/10 under 12-way load; after
+      0/12 and 0/12. Plus 6/6 pass in the WATCH_TICK = 1 ms configuration where the old assertion
+      failed 6/6.
+      MY 40% AND 70% READINGS WERE THE SAME COIN AT DIFFERENT LOADS - the rate is a property of the
+      MACHINE, not of the tree - so no merge moved it. T-416's drop(cr) changed re-plumb timing and
+      therefore the phase: it moved the distribution, not the cause, which is exactly why it
+      measured 2/6 then 4/4. T-383's edit was 5600 lines away in the coverage test: ruled out.
+      New guard `the_carry_over_re_subscribes_on_the_offer_not_on_the_watch_tick` bounds the
+      re-subscribe at 25 ms (half a tick, 30x the measured worst case); fails 2/3 against pre-fix
+      polling, passes 10/10 under load.
+      Coordinator verification: 12/12 passes on the merge against 7/10 FAILING on main an hour
+      earlier; full gate passed. A first gate run hit
+      the_band_collapsed_activity_series_is_measured_and_states_its_fold, which passes 6/6 isolated
+      and passed on the re-run - the load family, not this diff.
+      FOUND NOT FIXED -> T-430 (coverage per-cell test bounds inter-request latency) and the
+      tuned-in-place residue: Output::reoffer finishes the old publisher and offers the new one
+      microseconds apart, so no re-attach can win that race and ~1 row is still lost there.
+      Removing it needs consumer carry-over at the publisher - an hk-stream contract change.
 
   - id: T-426
     milestone: M2-hardening
@@ -9881,7 +9996,7 @@ tasks:
   - id: T-427
     milestone: M3
     title: pulsed/pulse is the fourth broken hand-written class table - top-1 0.000, wrong-label 1.000 at gate+5
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: M3A
     deps: [T-422]
@@ -9908,11 +10023,52 @@ tasks:
       (T-297/T-311/T-312), never a confidently wrong name. Pin properties, not numbers.
       Family floors: quote ADR-0016 §7.1 and RE-DERIVE with `just acceptance-m3` - see T-428,
       which is live on exactly this point.
+    commit: 6c860da
+    result: |
+      FIXED. `pulsed`'s table was `duty > 0.25 -> ppm 0.65 / pulse 0.35` - "a position-modulated
+      train keys twice per bit, so it is busier than a radar PRI", true AT THE TRANSMITTER. But
+      `duty` is #{a[i] > 0.5 x mean(a)} / n: a fraction over a threshold set by the snippet's OWN
+      mean envelope, and for a sparse train that mean is dominated by the OFF time, so the
+      threshold collapses toward the noise and the noise clears it.
+        class  true   10dB    15dB    20dB    25dB    30dB
+        pulse  0.050  0.655   0.538   0.200   0.143   0.051
+        ppm    0.333  0.471   0.415   0.400   0.392   0.390
+      The ranges CROSS between 15 and 20 dB and below the crossing THE ORDER IS INVERTED - the
+      5%-duty radar train reads a HIGHER duty than the 33%-duty PPM train. The 0.25 threshold was
+      right only in the 20-25 dB window where the two straddle it, which is exactly why `pulse` was
+      1.000 wrong at gate+5 (15 dB) and 1.000 correct at gate+10 (20 dB).
+      THE DIMENSION: `duty` does not distinguish a sparse pulse train from a busy one; it
+      distinguishes a HIGH-SNR snippet from a LOW-SNR one. A fifth variant of the family - here the
+      constant and the feature share a name AND units and still measure different quantities. It is
+      also the exact case T-429 was filed for an hour earlier: `duty` IS one of the 30 features the
+      observation guard covers, and passes it every run because that guard holds SNR at 25 dB.
+      THE TOP-2 TELL DOES NOT APPLY TO THIS FAMILY, and noticing that is the better half of the
+      work. `pulsed` has TWO classes, so top-2 is 1.000 BY CONSTRUCTION whenever a name is given -
+      the baseline's top-1 0.00 / top-2 1.00 looks like T-422's signature and carries no
+      information. The replacement diagnostic is the densities' own arg-max, already right 6/6 for
+      both classes at every SNR from 10 to 30 dB, on dev and blind, margins 53-70 nats: T-249's
+      shape, evidence fitted and on disk with the call site not reading it. The verifier is not
+      involved (skips `pulsed` with NoModel), so not T-422's cause 4.
+      FIX: `pulsed` routes through density_classes. No gate derived - no bin left to withhold.
+      GUARDRAIL FOUND WHILE FIXING IT: the 19:1 candidate clamp does not bound what its comments
+      claim for a SMALL family. It caps the leader at 19/(19+K-1) - 0.826 at K=5, 0.864 at K=4, but
+      0.95 AT K=2, above the 0.9 this repo calls confident. Routing `pulsed` through it unchanged
+      would have made it the one place a wrong name can return at p >= 0.9 (T-422's 0.903 hazard).
+      CLASS_MAX_P = 0.87 is read off that same arithmetic, fitted to nothing, clamping to whichever
+      bound binds; for K >= 4 the 19:1 clamp still binds and no score changes. Pinned by a new unit
+      test.
+      MOVED: pulsed/pulse at gate+5 top-1 0.000 -> 1.000, wrong 1.000 -> 0.000. Diffing the whole
+      T-206 report against stashed main gives EXACTLY ONE CHANGED LINE. ppm unchanged. Family-level
+      re-derived and bit-identical.
+      MEASURED AND FILED, NOT CHANGED -> T-431: the same inflation costs `pulse` its FAMILY at the
+      gate. At 10 dB it measures 0.630-0.680, clears PULSED_MAX_DUTY (0.60) and is denied `pulsed`
+      for continuous_envelope - a 5%-duty radar train ruled out of the pulsed family for being
+      always on. That is an admissibility gate and moving it moves a family-level number.
 
   - id: T-428
     milestone: DOCS
     title: Four agents measured the same held-out unknown recall on main and got two different answers
-    status: in-progress
+    status: done
     priority: high
     parallel_group: DOCS
     deps: [T-415]
@@ -9947,6 +10103,52 @@ tasks:
       Note that the two family figures everyone agrees on (top-1 0.9345, top-2 0.9861) are
       computed by a different path from unknown recall / false-known. Whatever this is, it is
       specific to the open-set numbers - which is a clue, not a coincidence.
+    commit: b573283
+    result: |
+      RESOLVED - and it was NONE of the three explanations I posed. A THIRD POPULATION, with both
+      figures printed by the SAME RUN of the SAME COMMAND.
+      NOT non-determinism: 9 runs on 651335f returned identical per-generator breakdowns and
+      identical aggregates, byte-identical across 4 full-binary runs. Structurally there is
+      nowhere for it to come from - the classification path takes no hk-dsp compute provider, so
+      thread count and machine load never reach it.
+      NOT main moving: the command was run on SEVEN commits spanning 2026-09-17 (41f6aa1, ca40832,
+      d7ccd59, 522f94c, 9e6a6ae, 5a717f1, 651335f), straddling both that touched hk-classify, and
+      read 0.9520 / 0.0480 at EVERY one. The branch points did not line up with the split either -
+      T-416 branched BEFORE T-249 landed and reported 0.9520, T-422 branched after and reported
+      0.9444 - which was the first sign the tree was not the variable.
+      WHAT IT IS: `just acceptance-m3` prints TWO held-out readings under the same name in one run.
+        m3_grid.rs::held_out, seeds ACCEPTANCE_SEED_BASE+700_001.. - THE GATE - 377/396 = 0.9520
+        hk_classify::harness, seeds CONTINUING the synthetic-acceptance sequence - a different 396
+          snippets, same 11 generators - 374/396 = 0.9444
+      Same denominator, different draw. Nobody misread and nobody was stale: each agent quoted
+      whichever line it scrolled to.
+      The two also SCORE differently (gate: family=="unknown" OR open_set_score>=0.5; harness:
+      family=="unknown" alone) - the obvious suspect, and NOT the cause. Instrumenting held_out()
+      to count both predicates over the gate's draw gives 377 EITHER WAY. The open_set clause
+      contributes zero; the whole 3-snippet gap is the seed range.
+      THE FOURTH DECIMAL PLACE WAS NEVER DEFENSIBLE. Re-running the gate's own draw at eight seed
+      bases: 370, 377, 377, 377, 378, 379, 380, 381 of 396 - 0.9343 to 0.9621, mean 0.9530, sd
+      0.0084. THE DISAGREEMENT THAT PRODUCED THIS TICKET IS 0.0076 - under one standard deviation
+      of the same quantity on identical code.
+      §7.1 now carries its RUN COUNT (9 runs / 4 runs per figure, plus the 7-commit sweep, stated
+      as measured rather than assumed), pins the unknown-recall row to its seed range, and says
+      explicitly that two other held-out readings are printed by the same command and neither is
+      the gate. HOW TO QUOTE IT: the gate's assertion stays exact (377/396, what CI checks); a
+      brief citing it as a do-not-regress baseline quotes ~0.95 (draw sd 0.008; a +/-0.02 move is
+      noise).
+      NEW §7.2 records this as a FOURTH failure mode, distinct from the three already there: one
+      metric name over two draws from one command, where the quantity's own sampling spread
+      exceeds the gap being argued about.
+      The stash-and-measure protocol gains its blind spot IN WRITING: it establishes which TREE was
+      measured and cannot catch reading the wrong LINE. T-422 followed it correctly and still got
+      0.9444.
+      Harness markdown Summary rows relabelled so the non-gate draw identifies itself in the output
+      - where the next agent will actually look.
+      FLAGGED, OUTSIDE SCOPE: a FIFTH draw of this same metric exists in
+      crates/hk-classify/tests/accuracy_sweep.rs:272, on its own seeds, also printed as "held-out
+      unknown recall". Not in acceptance-m3, so out of scope here, but the same trap.
+      No regression found - the floor is met at every commit measured.
+
   - id: T-429
     milestone: M3
     title: The observation guard varies ONE axis - record length - and holds SNR fixed at 25 dB, so every SNR-dependent feature is invisible to it
@@ -10012,6 +10214,88 @@ tasks:
       repo of this defect family, and the method it settled on (per-feature tolerances derived from
       what the estimator can do, exemption by name with a measurement) is the method to reuse rather
       than reinvent.
+  - id: T-430
+    milestone: M2-hardening
+    title: The per-cell coverage contract test bounds the capture time elapsing between two HTTP round-trips
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    deps: [T-423, T-425]
+    found_by: 'T-425 (2026-09-17), hit in its own gate run and measured on the base before reporting'
+    acceptance: |
+      `coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it_looked`
+      (crates/hk-cli/tests/api_contract.rs, from T-423) asserts `summed == row0_observed_s` to
+      1e-6 over a window whose row 1 begins at a LIVE EDGE READ BY A PREVIOUS HTTP CALL. So it is
+      bounding the capture time that elapses BETWEEN TWO ROUND-TRIPS - measured at 6.8 ms when it
+      failed.
+      T-425 measured it rather than assuming, and it is PRE-EXISTING: under identical load, base
+      1/10 fail and branch 3/10; idle, base 0/10 and branch 1/10. It cannot be reached by T-425's
+      change (it never opens a WebSocket, and the only production code of T-425's it executes is
+      `register()` at startup).
+      SAME CLASS AS T-383 AND T-425: a test bounding a quantity whose natural range it has not
+      measured - here, inter-request latency. T-383's rule, now in .config/nextest.toml, applies
+      directly: measure the range, then either remove the wall-clock dependence (ask for an
+      explicit window rather than one anchored on a previously-read live edge) or bound what is
+      actually invariant.
+      DoD: state the measured range of the quantity, fix accordingly, and report a before/after
+      failure rate over at least 10 runs at comparable load. Do not loosen 1e-6 to fit an
+      unmeasured spread - T-425's ticket carried the same prohibition for the same reason.
+
+  - id: T-431
+    milestone: M3
+    title: A 5%-duty radar train is denied the pulsed family for being always on, because the admissibility gate reads the same inflated duty
+    status: todo
+    priority: normal
+    parallel_group: M3A
+    deps: [T-427, T-429]
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-427 (2026-09-17), measured while fixing the class call; left alone deliberately'
+    acceptance: |
+      T-427 fixed the pulsed CLASS call and measured, but did not change, the same defect one
+      level up in the FAMILY gate.
+      `duty` is the fraction of samples above 0.5 x the snippet's own mean envelope, so for a
+      sparse train the mean is dominated by the OFF time and the noise clears the threshold.
+      T-427 measured `pulse` (true duty 0.050) reading 0.655 at 10 dB and 0.538 at 15 dB. At the
+      gate it therefore clears PULSED_MAX_DUTY (0.60) and is denied the `pulsed` family for
+      `continuous_envelope`: A 5%-DUTY RADAR TRAIN RULED OUT OF THE PULSED FAMILY FOR BEING
+      ALWAYS ON.
+      T-427 left it because this is an ADMISSIBILITY gate - moving it moves a FAMILY-level
+      number, unlike a class call which writes only Classification::class after the family is
+      decided. That makes it a different risk class and correctly a separate ticket.
+      STRONGLY RELATED TO T-429: the root cause is that `duty` tracks SNR, and the observation
+      guard holds SNR fixed at 25 dB so it cannot see that. Sequence this AFTER T-429 if T-429
+      lands first - a corrected or SNR-robust duty may dissolve this ticket entirely, and fixing
+      the gate against an uncorrected feature would be fitting a constant to a defect.
+      DoD: either the feature is made SNR-robust (preferred, and may be T-429's work) or the gate
+      is derived against the measured curve rather than the transmitter's intent. Family-level
+      floors must hold: quote ADR-0016 §7.1 and RE-DERIVE, and note §7.2 - the held-out figures
+      have a draw sd of 0.008, so a +/-0.02 move is noise, not a regression.
+      Separately noted by T-427 and out of scope here: at 30 dB `pulse` goes `unknown` on an
+      open-set score of 0.93-1.00, a different mechanism above the grid's gate+10 ceiling.
+
+  - id: T-432
+    milestone: M3
+    title: A fifth draw of held-out unknown recall lives in accuracy_sweep.rs, printed under the same name as the gate's
+    status: todo
+    priority: low
+    parallel_group: M3A
+    deps: [T-428]
+    found_by: 'T-428 (2026-09-17), found while resolving the four-agent disagreement; flagged as out of scope'
+    acceptance: |
+      T-428 established that `just acceptance-m3` prints TWO held-out readings under one name
+      (the gate's ruling 377/396 = 0.9520 and the harness report's 374/396 = 0.9444) and that
+      four agents split on exactly that. While there, it found a FIFTH draw of the same metric:
+      crates/hk-classify/tests/accuracy_sweep.rs:272, on its own seeds, also printed as
+      "held-out unknown recall".
+      It is not in acceptance-m3, which is why T-428 scoped it out. But it is the same trap, and
+      T-428's own words: someone will fall into it.
+      DoD: make it identify its own population in the output, as T-428 did for the harness
+      report's rows, or remove the print if nothing reads it. Cross-reference ADR-0016 §7.2,
+      which records this failure mode. Low effort; the value is that the next agent reading a
+      number can tell which draw it came from.
+      Do not "fix" it by making all the draws agree - they are legitimately different samples,
+      and §7.1's answer is that a brief quotes ~0.95 with the draw sd, not a fourth decimal.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
