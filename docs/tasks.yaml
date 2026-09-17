@@ -7376,7 +7376,7 @@ tasks:
   - id: T-372
     title: Attribute a visit's bias-tee state by switch time, not by whole read
     milestone: M4
-    status: in-progress
+    status: done
     priority: medium
     parallel_group: CTX
     deps: [T-359]
@@ -7391,6 +7391,41 @@ tasks:
       The rule must stay claim-nothing at the boundary: a visit STRADDLING a switch is
       Unknown, not assigned by midpoint. Control: the 9:1 majority case from T-359
       still yields Unknown, i.e. this must not become a dominance rule by the back door.
+    commit: 09c9e4b
+    result: |
+      DONE, and the measurement justified landing it. `BiasTeeTrack::over(start, end)` walks the
+      summary's BIAS_TEE steps: a switch at or before start advances the state, a switch STRICTLY
+      INSIDE returns Unknown, a switch at or after end is ignored.
+      THE PART EASY TO GET WRONG AND GOT RIGHT: the extent is ROW-ALIGNED, over the cells the visit
+      actually read, not the visit's raw [start, end). A 1 s time cell containing the switch pools
+      frames from BOTH states, so a visit that read that cell straddles the switch even when its own
+      timestamps do not. The consequence is exact - a mid-cell switch costs that cell and nothing
+      else; a cell-boundary switch costs nothing.
+      THE PROHIBITION HOLDS, asserted three ways. A straddling extent names neither side at 9:1,
+      1:9, 1:1, and at 999999999 ns : 1 ns in BOTH directions - the rule is not "a wide enough
+      margin wins". The row-level fold is untouched: interval_bias_tee still needs unanimity, so
+      T-359's own "a row straddling a switch claims neither state" passes unmodified. The
+      refinement improves the EVIDENCE under the row and never gives the row a majority verdict.
+      MEASURED RECOVERY through the production path - real frames into a real pyramid, sealed,
+      reopened, read back via evaluate_band:
+        480 visits over a 240 s read with one bias-tee switch -> 240 off, 240 on, 0 UNKNOWN.
+        T-359 gave 480 unknown.
+      With the switch 400 ms into a 1 s cell: 99 of 100 rows recovered (50 off, 49 on, 1 unknown).
+      So the loss is bounded by ONE TIME CELL PER SWITCH, not by the read - the coarse fallback was
+      discarding a whole chunk to protect one cell. This is why it was worth landing; had recovery
+      been small, the coarse answer would simply have been right, which is what the brief asked it
+      to check.
+      FAILS CLOSED to T-359's Uniform(Unknown) unless a COMPLETE timeline for a SINGLE front end can
+      be rebuilt, each refusal separately asserted: dropped steps; more than one known origin; an
+      unknown origin (a pre-format-3 tile is not evidence of one device); frames from another
+      origin; a step chain whose `from` disagrees with the previous `to`; two steps at one instant;
+      a step whose `from` equals its `to` (what a pre-T-332 tile reads back as); mixed-but-no-step;
+      and a first-frame state appearing nowhere in the timeline. Two SITES with one source still
+      reconstructs - the tee moved with the device (T-259/T-305).
+      Coordinator note: first gate run hit view_pause_keeps_capture at 2490368 samples over a phase
+      of 2500000 - BIT-IDENTICAL to what T-406 reported hours earlier on a different tree, 6/6 green
+      isolated here. Already filed as T-433's second instance. Re-run passed full.
+
   - id: T-373
     title: A periodic gain step at fs/8192 puts a 293 Hz comb into every fixture, and nothing excludes it
     milestone: M2-hardening
@@ -10152,7 +10187,7 @@ tasks:
   - id: T-429
     milestone: M3
     title: The observation guard varies ONE axis - record length - and holds SNR fixed at 25 dB, so every SNR-dependent feature is invisible to it
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -10214,6 +10249,77 @@ tasks:
       repo of this defect family, and the method it settled on (per-feature tolerances derived from
       what the estimator can do, exemption by name with a measurement) is the method to reuse rather
       than reinvent.
+    commit: 8cbd463
+    result: |
+      DONE, and IT CORRECTED MY BRIEF ON BOTH THE RULE AND THE THIRD AXIS.
+      MY FRAMING WAS UNACHIEVABLE. I specified "the expectation must not slide while the spread may
+      widen". T-429 measured that FIRST: on a 21-class x 7-rung x 24-seed grid NEARLY EVERY
+      feature's expectation moves with SNR, and legitimately - the noise is part of the record, so a
+      normalised cumulant is attenuated by the noise in its normaliser, `flatness` tends to 1, and a
+      line-over-floor statistic is an SNR by construction. Asserting flat expectation would have
+      exempted ~25 of 30 features: a rubber stamp. Finding that out before writing the rule rather
+      than after is the work.
+      THE RULE THAT WORKS IS ABOUT ORDER:
+        A feature named as a property of the signal may MOVE with SNR. It may not rank two emissions
+        of one family one way at one SNR and the other way at another.
+      A pair is RESOLVED at a rung when the class means are further apart than
+      3*sqrt(sd_a^2 + sd_b^2) - the spread of a difference of two SINGLE DRAWS, not a standard
+      error. That is the whole separation: a widening spread makes the pair STOP being resolved and
+      drop out (honest degradation); a sliding expectation keeps it resolved and returns it WITH THE
+      OPPOSITE SIGN. Single draws also make the criterion independent of seed count, so seeds buy a
+      reliable sd rather than sensitivity - otherwise the guard's strictness would be a function of
+      how long someone let it run, which is the "tolerance fitted to the harness" the file's own
+      first rule forbids. SNR_SEEDS = 24 is where the finding set stops moving (identical at 10/12/24
+      seeds and on 4-, 5- and 7-rung ladders). Ladder 10/15/20/25/30 dB, exactly what both defect
+      tables used. WITHIN-FAMILY, because that is the comparison a within-family class call makes -
+      which is also why both defects live there.
+      PROOF, by removing each entry and reproducing the ticket's own diagnosis:
+        sigma_af am/cw: resolved at 10 dB (apart +0.8609 vs 0.6261), UNRESOLVED at 15 because the
+          spread widened, resolved again at 20 (-0.0336 vs 0.0237) and 30 (-0.0152 vs 0.0058) with
+          the sign INVERTED. The healthy case sits BETWEEN two resolved rungs of opposite sign - the
+          mechanism doing exactly what it was designed for.
+        duty ppm/pulse: 0.4708 vs 0.6584 at 10 dB (apart -0.1877); 0.3905 vs 0.0511 at 30 (+0.3394).
+      Both reproduce the tickets' published figures: duty pulse 0.658/0.539/0.197/0.142/0.051 vs
+      T-427's 0.655/0.538/0.200/0.143/0.051; sigma_af cw 0.206 at 10 dB vs T-249's 0.170-0.207. The
+      stale direction is demonstrated too (a planted entry fails naming itself).
+      EXEMPTIONS SCOPED TO (feature, family, a, b), not the feature - `duty` inverts 1 of 28 pairs
+      and exempting the whole feature would discard the other 27. ASSERTED AS AN EXACT SET BOTH
+      WAYS: an undeclared inversion fails, AND a declared one that no longer reproduces fails naming
+      the entry to delete. "Fixing one makes the exemption disappear from a diff" stops being a
+      discipline and becomes a failing test - the one thing this axis does better than the length
+      axis rather than just differently.
+      Seven entries: duty ppm/pulse (T-427); sigma_af am/cw (T-249 - IF of noise is near-uniform on
+      (-pi,pi] so measured sigma_af = sqrt(emission^2 + c/rho); `am` has no excursion of its own and
+      slides 250-fold, `cw` is floored by its keying at 0.019 and slides 11-fold); low_fraction
+      ppm/pulse (NEW); and four inherent - carrier_line_db ppm/pulse, gamma_max am/cw, c42_norm
+      am/cw and am/wfm. The c42_norm entry carries an EXACT LAW: Gaussian noise contributes zero to
+      a fourth cumulant but full power to its normaliser, so the reading is attenuated by
+      (rho/(1+rho))^2 - checked on cw at 0.880/0.959/0.985/0.995/1.000 against the law's
+      0.828/0.942/0.982/0.996/1.000.
+      C14's six family scores are exempt at feature level (a family score is EVIDENCE, and evidence
+      is MEANT to grow with SNR) and C14 is not run on this axis at all - measured, not assumed:
+      with it on and off the other 24 features are bit-identical across all 1764 probe rows. 8 s
+      instead of 82 s; the whole file runs in 11.9 s.
+      WHAT ELSE IT FOUND: `low_fraction` is `duty`'s defect ONE THRESHOLD DOWN (0.3x the same mean),
+      not previously reported - a 5%-duty train that should read ~0.95 at every SNR reads 0.132 at
+      10 dB. Same mechanism, same family, same fix, same owner -> added to T-431.
+      THE THIRD AXIS, and it corrected me here too: SEGMENT COUNT IS ALREADY THE LENGTH AXIS, since
+      segments(n) is a function of the record at a pinned transform and Looks::Segments exists for
+      it; T-404's carrier_line_db note is about that axis, not a new one. The real third axis is
+      FRONT-END STATE - quantisation headroom, LO offset, IQ imbalance, DC, clipping, gain - with a
+      strong prior of findings (c20/c40_norm are explicitly offset-sensitive, and `symmetry` is a
+      sideband balance about the carrier, precisely what IQ imbalance forges). The criterion
+      transfers verbatim. The cost is not the code but the FIDELITY OF WHAT CAN BE VARIED:
+      SynthConfig models three impairments; T-213's py/hkpy/synth/amc grid adds LO ppm, phase noise,
+      blockers/IMD and ADC clipping and is meant to replace it; and the version that would find what
+      T-259/T-305 named - images, IMD, spurs, all device-local - is a HIL ladder against a stable
+      reference emitter that no synthetic grid models at all.
+      MEASURED AND DELIBERATELY NOT ASSERTED -> T-435: the class NAME changes with SNR in 3 of 252
+      sequences, all psk-qam, including a 16-QAM returned as `analog/ssb` at 15 dB - a
+      confidently-wrong FAMILY at the gate, T-422's shape. Not asserted because it is a classifier
+      assertion rather than a feature one and its exception list would be seed-count-fragile.
+      Test-only diff; no product code touched, so no floor could move.
+
   - id: T-430
     milestone: M2-hardening
     title: The per-cell coverage contract test bounds the capture time elapsing between two HTTP round-trips
@@ -10273,6 +10379,15 @@ tasks:
       have a draw sd of 0.008, so a +/-0.02 move is noise, not a regression.
       Separately noted by T-427 and out of scope here: at 30 dB `pulse` goes `unknown` on an
       open-set score of 0.93-1.00, a different mechanism above the grid's gate+10 ceiling.
+    notes: |
+      SECOND THRESHOLD, found by T-429 (2026-09-17) and not previously reported: `low_fraction`
+      is the SAME defect one threshold down - 0.3x the snippet's own mean envelope where `duty`
+      uses 0.5x. A 5%-duty train should read ~0.95 at every SNR and reads 0.132 AT 10 dB. Same
+      mechanism, same family pair (ppm/pulse), same fix, and it is now a declared exemption in
+      the SNR-order guard, so fixing the estimator must delete BOTH entries or the guard fails
+      naming the stale one.
+      So this ticket is not "fix a gate constant" - it is fix the estimator at both of its
+      thresholds, and the gate follows.
 
   - id: T-432
     milestone: M3
@@ -10390,6 +10505,45 @@ tasks:
       the scheme, and both now accumulate into it rather than into private accumulators.
       Gate: crates/ so FULL. Run the affected suite twice (T-403). Floors: ADR-0016 §7.1, and read
       §7.2 first - the held-out figures have a draw sd of 0.008, so a +/-0.02 move is noise.
+  - id: T-435
+    milestone: M3
+    title: The class NAME changes with SNR in 3 of 252 sequences, and one of them is a confidently-wrong FAMILY at the gate
+    status: todo
+    priority: normal
+    parallel_group: M3A
+    deps: [T-429, T-422]
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-429 (2026-09-17), measured while building the SNR-order guard and deliberately not asserted there'
+    acceptance: |
+      T-429 built a guard asserting that a FEATURE may not reorder two emissions across SNR. While
+      there it probed the next question up - does the CLASS NAME change with SNR? - over 21 classes
+      x 7 rungs x 12 seeds, and found 3 flips in 252 sequences, all in psk-qam:
+        qam16 <-> qam64 across 20 vs 25 dB (2 seeds);
+        ONE 16-QAM RETURNED AS `analog/ssb` AT 15 dB - exactly its family's gate - before becoming
+          qam16 at 20 dB and above.
+      THE THIRD IS THE ONE THAT MATTERS. It is not a within-family ranking wobble: it is a
+      confidently-wrong FAMILY call at the gate, which is T-422's shape (there the ALRT took N0
+      from the SNR meter and both truths flipped together). A digital QAM emission named as
+      suppressed-carrier analog voice is the kind of answer the open set exists to refuse.
+      T-429 deliberately did NOT assert it, and the reasons are good: it is a CLASSIFIER assertion
+      rather than a feature one, so it does not belong in the feature guard; its exception list
+      would be seed-count-fragile (1 flip at 6-8 seeds, 3 at 12); and the M3 acceptance grid
+      already measures per-SNR-bin wrong-label over a far larger population. Accept those reasons -
+      do not simply move the probe into the guard.
+      DoD: establish the MECHANISM of the analog/ssb flip first, as T-422 and T-249 did - state
+      which dimension carries a 16-QAM into the analog family at 15 dB and not at 20. Then decide
+      where the assertion belongs: the M3 grid, a targeted regression, or an abstention. If the
+      right answer is that the acceptance grid already covers it at a population where it does not
+      show, say so with the numbers rather than adding a test that duplicates it.
+      Floors: ADR-0016 §7.1, re-derived, and read §7.2 first - the held-out figures have a draw sd
+      of 0.008, so a +/-0.02 move is noise. The gate's RULING line is the one to quote, not the
+      T-213 report's, which is a different draw of the same quantity.
+    notes: |
+      Read T-422's result for the psk-qam verifier finding - the ALRT's N0 came from the SNR meter,
+      and sweeping only that assumption flipped qam16 from 21/21 to 0/21 while qam64 went 14/14 to
+      10/14. If these flips share that cause, this may be the same defect seen from the family side
+      rather than a new one. Check before assuming it is new.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
