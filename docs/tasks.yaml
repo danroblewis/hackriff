@@ -10829,6 +10829,16 @@ tasks:
       levels actually answered (T-426's rule: the tier that ANSWERED, not the one implied);
       coverage and honesty tier ride along; in-flight cap enforced and asserted.
     notes: |
+      SCHEDULING, verified from the dependency graph 2026-09-17: THIS TICKET IS THE FAN-OUT POINT
+      of the whole milestone. The chain is T-434 -> T-438 -> {T-439, T-440} -> {T-441, T-442} ->
+      {T-443, T-444} -> T-445, so nothing else in MCANVAS can start until T-438 lands, and the
+      moment it does, TWO tickets become startable at once.
+      The graph also caps useful parallelism at about THREE concurrent agents (two milestone
+      tickets plus the spike), never four - so one build slot will be spare for most of the
+      milestone. Per the user's directive that slot goes to backend the canvas needs or to
+      gate-health that unblocks it (T-436 is the standing candidate: the suite is green at
+      --test-threads 8 and flaky at nextest's default 28, which costs a re-run on most merges).
+      Do not let that spare slot pull in unrelated work; the freeze on non-canvas work stands.
       T-437's spike is proving the client half against a stub. Coordinate through the coordinator
       rather than guessing at its shape - if the spike wants a different addressing, that is a
       finding worth having before this hardens.
