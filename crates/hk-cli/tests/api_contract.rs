@@ -5616,6 +5616,19 @@ fn attention_sites_baselines_candidates_and_weights_answer_as_documented() {
             "{r}"
         );
     }
+    // T-381: a slots row also names the receive-chain cohort its numbers belong to, the same gap
+    // T-371 closed for the bias tee. The served value is always the tagged `ChainKey` shape —
+    // `{"kind": "unknown"}` or `{"kind": "device", "id": number}` — never absent and never a bare
+    // id that could be misread as device 0. (This server is a fresh site with no baselines, so
+    // this loop is vacuous, exactly as T-371's was; the non-vacuous assertions against real folds
+    // are in
+    // `hk_pipeline::occupancy::tests::slots_rows_name_their_receive_chain_cohort_and_legacy_reads_unknown`.)
+    for r in v["subjects"].as_array().into_iter().flatten() {
+        assert!(
+            matches!(r["chain"]["kind"].as_str(), Some("unknown" | "device")),
+            "{r}"
+        );
+    }
     let (st, _) = get(addr, "/api/baselines/slots?f_lo=100000000");
     assert_eq!(st, 400);
     let (st, v) = post(addr, "/api/baselines/refreeze", "{}");

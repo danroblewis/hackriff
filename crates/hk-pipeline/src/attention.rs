@@ -1771,6 +1771,16 @@ impl AttentionService {
                     "f_lo": lo,
                     "f_hi": hi,
                     "cal": e.state.key.cal,
+                    // T-381: the row names the receive-chain cohort its numbers belong to, the
+                    // same gap T-371 closed for the bias tee below. T-303/T-314 key (and measure)
+                    // a baseline per receive chain, so a two-front-end site legitimately holds two
+                    // pools per subject; without this field those rows are identical on the wire.
+                    // Rendered from the same expression `/api/baselines` already uses for the same
+                    // key, so the two routes cannot drift. `ChainKey`'s own `Serialize` already
+                    // never collapses `Unknown` into a device: it is the tagged
+                    // `{"kind": "unknown"}` / `{"kind": "device", "id": ...}` shape, not `.id()`,
+                    // so an unnamed chain cannot be misread as device id 0.
+                    "chain": e.state.key.chain,
                     // T-371: the row names the bias-tee cohort its numbers belong to. T-359 split
                     // the cohorts, so one subject at one slot can hold two pools with different
                     // numbers, both correct; without this field the two rows are identical on the

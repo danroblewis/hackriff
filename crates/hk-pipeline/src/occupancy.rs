@@ -2620,6 +2620,171 @@ mod tests {
         }
     }
 
+    /// **T-381: a `/api/baselines/slots` row names the receive-chain cohort its numbers belong
+    /// to** — the same gap T-371 closed for the bias tee. T-314 made a baseline's chain the
+    /// source's own `DeviceInfo`, so a two-front-end site legitimately holds two pools per
+    /// subject; the slots row carried only `cal`, so those pools served two rows identical on
+    /// the wire. The row now carries `chain`.
+    ///
+    /// Unlike `bias_tee`, which [`OccupancyStat`] carries per row (so one service could vary it
+    /// across folds), `chain` is a property of the **service**, fixed for its whole run (T-303:
+    /// "the front end whose measurements this service folds") — a source declares its identity
+    /// once, not per interval. So two chains at one site need two [`AttentionService`]s sharing
+    /// one [`hk_model::Repository`] (the site id must agree) and one on-disk baseline directory:
+    /// each checkpoints its own chain's file, and [`AttentionService::slots_json`]'s
+    /// `load_site_outside_lock` merges both into whichever instance is asked.
+    ///
+    /// Reuses [`t314_fixture`]/[`t314_alternating`]/[`t314_rows`]: two front ends 30 dB apart,
+    /// alternating on the level-0 tile block so every cell is attributable to exactly one chain.
+    ///
+    /// - **Property:** rows folded under chain A and chain B are distinguishable on the wire, by
+    ///   value — same `subject`, `f_lo`/`f_hi`, `cal` and `bias_tee`; different `chain`.
+    /// - **Control (literal legacy bytes):** a pre-T-303 [`BaselineKey`] has no `chain` field at
+    ///   all ([`ChainKey`]'s `skip_serializing_if` predates the field existing). Round-tripping a
+    ///   known-chain key through JSON with `chain` **removed, not nulled** is what such a key
+    ///   decodes to — proven first, then used (not assumed) to drive a third service literally
+    ///   opened with the chain that decode produces, through the same `ingest_interval` →
+    ///   `slots_json` path as the other two. The row must still render, as `unknown`, and never
+    ///   as some device.
+    #[test]
+    fn slots_rows_name_their_receive_chain_cohort_and_legacy_reads_unknown() {
+        use hk_model::attention::baseline::{BaselineKey, CalKey};
+
+        // The literal-bytes proof, done first: a pre-T-303 `BaselineKey` has no "chain" key in
+        // its JSON at all (not a null), and that is what decodes to `ChainKey::Unknown`.
+        let known_key = BaselineKey {
+            site: hk_model::ids::SiteId::new(),
+            cal: CalKey::Uncalibrated,
+            chain: ChainKey::of_device(T314_DEVICE_A),
+            bias_tee: hk_model::BiasTee::Unknown,
+            scheme: 1,
+            cell_factor: crate::attention::CELL_FACTOR,
+        };
+        let mut kv = serde_json::to_value(known_key).unwrap();
+        assert!(kv["chain"].is_object(), "{kv}");
+        kv.as_object_mut().unwrap().remove("chain");
+        assert!(kv.get("chain").is_none(), "removed, not nulled: {kv}");
+        let legacy_key: BaselineKey = serde_json::from_value(kv).unwrap();
+        assert_eq!(
+            legacy_key.chain,
+            ChainKey::Unknown,
+            "a pre-T-303 key, decoded, names no chain"
+        );
+
+        let tmp = |tag: &str| {
+            let d = std::env::temp_dir()
+                .join(format!("hk-t381-{tag}-{}", hk_model::ids::SiteId::new()));
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        };
+        let pdir = tmp("pyramid");
+        let p = t314_fixture(&pdir, t314_alternating);
+        let chain = |d: &str| engine::chain_filter(ChainKey::of_device(d));
+        let mut rows_a = t314_rows(&p, chain(T314_DEVICE_A));
+        let mut rows_b = t314_rows(&p, chain(T314_DEVICE_B));
+        let mut rows_legacy = t314_rows(&p, chain(T314_DEVICE_A));
+        assert!(!rows_a.is_empty() && !rows_b.is_empty() && !rows_legacy.is_empty());
+
+        let repo = Arc::new(Mutex::new(Repository::open_in_memory().unwrap()));
+        let bdir = tmp("baselines");
+        let span_end = ts(T359_T0 + T314_SECS * T_CELL);
+
+        let svc_a = crate::attention::AttentionService::open(
+            &bdir,
+            Arc::clone(&repo),
+            ChainKey::of_device(T314_DEVICE_A),
+            None,
+            Arc::new(move || span_end),
+        )
+        .unwrap();
+        svc_a
+            .set_current_site(crate::attention::SiteSelect {
+                name: Some("t381-bench".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        stamp_site(&svc_a, &mut rows_a, span_end);
+        svc_a.ingest_interval(&rows_a, 0, span_end, BTreeMap::new());
+        svc_a.checkpoint(span_end);
+
+        // Opened after A's site pin, from the same repo: the restored "current site" assignment
+        // (persisted in the shared repo) gives B the same site id without naming it again.
+        let svc_b = crate::attention::AttentionService::open(
+            &bdir,
+            Arc::clone(&repo),
+            ChainKey::of_device(T314_DEVICE_B),
+            None,
+            Arc::new(move || span_end),
+        )
+        .unwrap();
+        stamp_site(&svc_b, &mut rows_b, span_end);
+        svc_b.ingest_interval(&rows_b, 0, span_end, BTreeMap::new());
+        svc_b.checkpoint(span_end);
+
+        // The legacy service: the chain the literal-bytes proof above showed a pre-T-303 key
+        // decodes to, not a value merely left unset. Same measurement as chain A, from a source
+        // that never named itself.
+        let svc_legacy = crate::attention::AttentionService::open(
+            &bdir,
+            Arc::clone(&repo),
+            legacy_key.chain,
+            None,
+            Arc::new(move || span_end),
+        )
+        .unwrap();
+        stamp_site(&svc_legacy, &mut rows_legacy, span_end);
+        svc_legacy.ingest_interval(&rows_legacy, 0, span_end, BTreeMap::new());
+        svc_legacy.checkpoint(span_end);
+
+        let slots = svc_legacy.slots_json(None, 0.0, 1e9, None, None).unwrap();
+        let rows = slots["subjects"].as_array().unwrap();
+        let subject = &rows[0]["subject"];
+        for r in rows {
+            assert_eq!(&r["subject"], subject, "one subject: {slots}");
+            assert_eq!(r["f_lo"], rows[0]["f_lo"], "one extent: {slots}");
+            assert_eq!(r["f_hi"], rows[0]["f_hi"], "one extent: {slots}");
+            assert_eq!(r["cal"], rows[0]["cal"], "one calibration: {slots}");
+            assert_eq!(
+                r["bias_tee"], rows[0]["bias_tee"],
+                "one bias cohort: {slots}"
+            );
+        }
+        let chains: Vec<serde_json::Value> = rows.iter().map(|r| r["chain"].clone()).collect();
+        println!("T-381 slots chains for one subject: {chains:?}");
+        let device_a = serde_json::to_value(ChainKey::of_device(T314_DEVICE_A)).unwrap();
+        let device_b = serde_json::to_value(ChainKey::of_device(T314_DEVICE_B)).unwrap();
+        let unknown = serde_json::to_value(ChainKey::Unknown).unwrap();
+        assert_eq!(unknown, serde_json::json!({"kind": "unknown"}), "{unknown}");
+        assert_eq!(
+            chains.iter().filter(|c| **c == device_a).count(),
+            1,
+            "chain A's row: {slots}"
+        );
+        assert_eq!(
+            chains.iter().filter(|c| **c == device_b).count(),
+            1,
+            "chain B's row: {slots}"
+        );
+        assert_eq!(
+            chains.iter().filter(|c| **c == unknown).count(),
+            1,
+            "the legacy row renders as unknown, not blank and not a device: {slots}"
+        );
+        assert_eq!(chains.len(), 3, "three cohorts, three rows: {slots}");
+        // Never a bool, a null, or a bare number (the shape a `.id().unwrap_or(0)` collapse would
+        // produce, indistinguishable from device id 0) — always the tagged object.
+        for c in &chains {
+            assert!(
+                c.is_object() && c["kind"].is_string(),
+                "chain is always the tagged {{kind, id?}} object, never collapsed: {c}"
+            );
+        }
+
+        drop(p);
+        let _ = std::fs::remove_dir_all(&pdir);
+        let _ = std::fs::remove_dir_all(&bdir);
+    }
+
     /// **T-377: a level-0 cell's occupancy is decided at ingest against its OWN front end's
     /// floor.** T-314 made every occupancy *read* per-chain, but `CellStats::occupancy` was
     /// decided when the frame was folded, against a floor the pyramid tracked per frequency block
