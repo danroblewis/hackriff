@@ -322,7 +322,6 @@ impl Classifier {
                 &family,
                 f,
                 &self.model,
-                request.obw_hz,
                 request.symbols.and_then(|s| s.mod_index_h.value()),
             )
             .map(|g| ClassCall {
