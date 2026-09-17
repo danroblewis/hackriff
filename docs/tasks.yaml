@@ -7563,7 +7563,7 @@ tasks:
   - id: T-381
     title: The slots row still does not name its receive chain, the same gap T-371 just closed for the bias tee
     milestone: M4
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CTX
     deps: [T-371, T-314]
@@ -7738,7 +7738,7 @@ tasks:
   - id: T-388
     title: A live signal box extends UP slowly because growth is poll-gated, not detection-gated
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -7772,7 +7772,7 @@ tasks:
   - id: T-389
     title: Confirmed presence boxes never draw unselected, and the candidate LIST disagrees with both the boxes and the API
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     core_interface: true
@@ -7957,6 +7957,41 @@ tasks:
       unit scale will be caught by it, correctly.
       Do not redesign the UI - the rewrite is deferred. Depends on T-391 because the
       readouts need somewhere to live: the bars are ~12px tracks until it lands.
+  - id: T-394
+    title: A line at one frequency in channels holding nothing is the receiver's - test for that, do not keep listing notches
+    milestone: M3
+    status: todo
+    priority: high
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    deps: [T-382]
+    acceptance: |
+      T-382's own closing observation, and the most valuable thing it produced.
+      Three receiver-wide artefacts have now been found one at a time - the fs/8192
+      gain step (T-373), the 8 kHz comb and the ~655.75 Hz drifting family (T-382) -
+      and EACH EXCLUSION REVEALED THE NEXT. A fourth family spaced ~119.95 Hz
+      (1439/1559/1679/2159 Hz, 13-17 dB, plausibly mains-related) is now visible
+      underneath, unmeasured and unexcluded.
+      Every exclusion so far is a NAMED FREQUENCY from one fixture's provenance. That
+      does not generalise: a different host, a different capture, a different
+      temperature moves them, and the list grows forever while the classifier keeps
+      measuring whichever artefact is currently on top.
+      THE GENERAL TEST, in T-382's words: a line at one frequency in channels holding
+      NOTHING is the receiver's, written down or not. That is a property of the
+      measurement, not of a fixture - it needs no provenance record, no notch list, and
+      it would have caught all four families the first time each appeared.
+      Shape it as the discriminator, not as a wider notch: a candidate cyclic line that
+      appears at the SAME frequency across channels with no emission in them is
+      device-local by construction (T-259/T-305) and must not be read as signal
+      structure.
+      THE CONTROL IS THE WHOLE TICKET: a genuine emission whose cyclic structure
+      happens to appear in several channels at once - a strong station's subcarriers
+      leaking into adjacent boxes, say - must NOT be classified as receiver-wide. Build
+      it from real geometry. T-382 measured the real 19 kHz pilot and 38 kHz subcarrier
+      surviving as 6 of 44 boxes above 20 dB; those must still survive.
+      Keep the existing per-capture exclusions - they are measured and correct. This
+      replaces the STRATEGY of adding to them, not the records themselves.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
