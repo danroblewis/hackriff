@@ -99,6 +99,12 @@
 #                    (An A/B on this box is contended by construction — up to four agents
 #                    build on it by design — so treat these as the same number, not as a
 #                    12 % win.)
+#   - corroborating, from an investigation that was not looking for a thread count at all
+#     (T-257, docs/10 §3.4): nextest `LEAK` lines here are a macOS pipe(2)/FD_CLOEXEC race
+#     between concurrently SPAWNING test processes, and they scale with spawn concurrency
+#     and nothing else. 6 of 10 runs leaked at the default 28; 6 of 12 at 16; ZERO in a
+#     full 1754-test workspace run at 8, and zero in 25 hk-plugins runs at 6. A second,
+#     independently measured discontinuity in the same place.
 #   - 8            : still not zero. One 8-thread run passed 2298/2298 with no exclusions;
 #                    a later one failed once (view_pause_keeps_capture, then 0/8 isolated)
 #                    and passed 2302/2302 on the immediate re-run at the same 8. Tally:
