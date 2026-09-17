@@ -7585,7 +7585,7 @@ tasks:
   - id: T-382
     title: A drifting ~657 Hz family is now the strongest cyclic line on most boxes, and it is not excluded
     milestone: M3
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -7852,6 +7852,66 @@ tasks:
       emitters. Collapsing skirts into their parent must not also collapse a real
       adjacent station - T-369's 200 kHz raster control exists for exactly this and
       must stay green.
+  - id: T-391
+    title: The navigators sit in 12px tracks; make both as thick as the Capture panel, and make that panel collapsible
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: UI
+    deps: [T-376]
+    notes: |
+      USER, live testing 2026-09-16. Two layout tweaks, both in docs/14.
+      (1) SIZING: the two edge navigators are TOO THIN - their overview/survey renders
+      currently sit in ~12px tracks. Make the LEFT sidebar (.timenav, time) as WIDE as
+      the "Capture - Always Recording" panel is TALL, and the BOTTOM scrubber
+      (.freqnav, frequency) as TALL as that same panel - i.e. both navigators take the
+      same thickness as the Capture-Always-Recording overview strip, so they read as
+      substantial bars.
+      This is not cosmetic: T-367 scoped the time navigator's overview to the selected
+      frequency range and T-368 filled the frequency navigator's survey strip from the
+      coverage map. Both now render real data into a 12px track, so the work is there
+      and cannot be seen.
+      (2) COLLAPSIBLE: make the "Capture - Always Recording" panel collapsible via a
+      header toggle. The user is unsure it is needed but LIKES IT - KEEP IT, DO NOT
+      REMOVE IT. Collapsed state is remembered.
+      Keep the one-screen responsive layout intact. Do not redesign the UI - the
+      rewrite is deferred; this is sizing and a disclosure toggle.
+      Note if (1) and (2) interact: if the navigators are sized FROM the Capture
+      panel's dimension, collapsing that panel must not resize them. Decide and state
+      whether the thickness follows the expanded size or is captured once.
+  - id: T-392
+    title: A region selected on the frequency navigator should retune to cover it, not report that it is outside the window
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-343, T-367, T-376]
+    acceptance: |
+      USER, live testing 2026-09-16, and an extension of the CLAUDE.md navigator
+      invariant. Selecting a region on the FREQUENCY navigator (bottom bar) should
+      RETUNE THE FRONT END to cover that region, not merely show "Outside the tuned
+      window - retune to ...".
+      ON REGION-SELECT: compute the SDR config that covers the selection - centre =
+      region centre, SMALLEST sample-rate/span that covers it, SNAPPED to the
+      achievable grid (T-341's ranges_hz / center_step_hz / spans_hz /
+      max_live_span_hz) - and apply it as a RETUNE: a real device action per T-343,
+      one capture at a time, settle gap honoured, provenance and device_id recorded.
+      A region-select FULLY INSIDE the current window stays a PURE VIEW ZOOM with no
+      retune. That distinction is the whole design: the same gesture means "look
+      closer" inside the window and "go there" outside it.
+      SHOW AN ERROR ONLY when no achievable config can capture the region:
+        - centre outside the device tunable range (1 MHz - 6 GHz),
+        - span wider than the instantaneous bandwidth for one live window,
+        - or, on a replay, outside the recording extent.
+      Anything else must retune rather than refuse.
+      CONSTRAINT THAT MUST SURVIVE: T-340's control drags +/-1.0 of the full 6 GHz bar
+      through a spy client and asserts NO device call. Pan and wheel still must never
+      retune - only an explicit region-select may, and only through the gated typed
+      DeviceAction. Do not relax that control to make this work; the gesture that
+      retunes is region-select, which is already the one wired to the offer.
+      Ties T-343 (the device action), T-367 (the axes), T-376 (the bar's viewport).
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
