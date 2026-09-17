@@ -3734,3 +3734,44 @@ built from that same coverage. Its brief also asks a question T-368 raised and n
 `DwellRecord.provenance_ref` is hard-coded `None` at all three writers, so **if that reference were
 populated, would `device_id` be redundant?** Adding a second way to say "which device" when an unused
 first one exists is exactly the drift surface this chain of custody exists to prevent.
+
+### B0.661 — board hygiene: T-330 was never unblocked, and T-385 goes out because it lies to the user (2026-09-16)
+
+Two corrections worth recording because both are about honesty, one in the board and one in the UI.
+
+**T-330 is marked `blocked`, not `todo`.** It reads as unblocked — its deps are done — but its own
+acceptance text says *"when a voice-frame decode exists, wire ALGID through it"*, and no such decode
+exists. T-270 was explicit that the ALGID table is **not reachable from IQ in M4**, because an ALGID
+lives in the voice frames on the granted channel. A task whose precondition is a capability nobody has
+built is not waiting for a slot; it is waiting for a capability. Leaving it in the `todo` pool makes
+the unblocked-work census lie, and I have been reading that census every heartbeat to decide what to
+launch.
+
+**T-385 launched ahead of larger tickets** because of what it is, not how big it is. The focus panel
+caches by emitter id alone, so a row merely **outside the current window** renders as *"no longer in
+the inventory"*. That is not a missing render — it is **a false claim about the user's data**, the
+system asserting something it did not measure. It is the exploration-first principle's own failure
+mode, moved from the band plan into the UI: the band plan must never name what the measurement did
+not, and neither must a panel.
+
+The brief's centre of gravity is the control rather than the fix. Keying the cache on the window is
+three lines; the thing that makes it correct is that **an emitter which genuinely was deleted must
+still say so**. A fix that turns every absence into "outside the window" is the same bug mirrored —
+it would hide a real deletion behind a reassuring message — so the two cases must be asserted
+**observably different**, the way T-379 asserted its three emptinesses pairwise distinct.
+
+It reuses T-379's four-way emptiness rather than growing a second vocabulary, including the rule that
+makes it honest: **a coverage answer that never came stays unknown rather than hardening into a
+measurement claim.**
+
+It is fenced tightly: T-384 is live in `ui/`'s output/decode/status surfaces, so T-385 is confined to
+the focus panel and told to stop and report rather than spread. Two agents in one directory is a risk
+I took deliberately here, because the alternative was leaving a surface that tells the user their data
+was deleted when it was not, while a P25 CRC compliance ticket used the slot.
+
+Other candidates weighed and passed over: **T-300** (the P25 CRC variant) is real, but T-268
+deliberately deferred it with the right reasoning — the framing is simplified in three other ways, so
+fixing one of four buys no compliance and makes the gap harder to see; *fix all four together or
+none*. Its dangerous property is recorded and worth repeating: with the wrong CRC essentially every
+real TSBK fails **while the trellis reports a clean metric**, so it presents as a demodulator or
+front-end fault and will burn a debugging session on the wrong layer.
