@@ -321,15 +321,7 @@ pub fn class_guess(
         "ofdm" => vec![("ofdm", 0.95)],
         "css" => vec![("chirp", 0.95)],
         "dsss" => vec![("dsss", 0.95)],
-        "pulsed" => {
-            let duty = features.get("duty").unwrap_or(0.5);
-            // A position-modulated train keys twice per bit, so it is busier than a radar PRI.
-            if duty > 0.25 {
-                vec![("ppm", 0.65), ("pulse", 0.35)]
-            } else {
-                vec![("pulse", 0.65), ("ppm", 0.35)]
-            }
-        }
+        "pulsed" => density_classes("pulsed", features, model)?,
         "noise-like" => vec![("noise-like", 0.95)],
         _ => return None,
     };
@@ -404,6 +396,66 @@ pub fn class_guess(
 // The one conjunct that **did** work is kept, as [`apply_msk_index`], because the thing it reads is
 // the one piece of evidence the densities cannot see.
 
+// There was a `pulsed` two-way table in [`class_guess`] here — `duty > 0.25` scoring `ppm` 0.65
+// against `pulse` 0.35, and the other way below it, "a position-modulated train keys twice per bit,
+// so it is busier than a radar PRI". It is gone for the same measured reason as the three tables
+// above (T-427), and the defect is a **fifth** variant of the family, not a repeat of one of the
+// four: the constant and the feature share a name, share units, and still do not measure the same
+// quantity.
+//
+// Measured on the blind acceptance grid at the `pulsed` gate (10 dB) and above: `pulse` top-1
+// **0.000** with wrong-label **1.000** at gate+5, every snippet named `ppm`.
+//
+// **`duty` is not the transmitter's on-fraction.** It is
+// `#{ a[i] > 0.5 × mean(a) } / n` ([`crate::features`]) — a fraction of samples over a threshold
+// set by the snippet's **own mean envelope**. For a sparse train that mean is dominated by the
+// *off* time, so the threshold collapses towards the noise and the noise clears it. The sparser
+// the train, the worse: the synthetic `pulse` radar train is on for 10 samples in 200 (a true duty
+// of 0.050) and reads, at 10/15/20/25/30 dB, **0.655 / 0.538 / 0.200 / 0.143 / 0.051** — a monotone
+// function of SNR that reaches the truth only at 30 dB. `ppm`, on for a third of its frame (true
+// 0.333), is barely affected because its mean is already set by its own on-time: 0.471 / 0.415 /
+// 0.400 / 0.392 / 0.390.
+//
+// So the two ranges **cross between 15 and 20 dB**, and *below* the crossing the order is
+// **inverted** — the 5 %-duty radar train measures a higher duty than the 33 %-duty PPM train.
+// A threshold at 0.25 therefore names `ppm` on both classes at 10 and 15 dB and `pulse` on both at
+// 30 dB, and is only right in the 20–25 dB window where the classes happen to straddle it. The
+// dimension does not distinguish a sparse pulse train from a busy one; it distinguishes a
+// high-SNR snippet from a low-SNR one.
+//
+// The same inflation costs `pulse` its **family** at 10 dB, where the measured duty 0.630–0.680
+// clears [`PULSED_MAX_DUTY`] (0.60) and the emission is denied `pulsed` for "continuous_envelope" —
+// a 5 %-duty radar pulse train ruled out of the pulsed family for being always on. That is an
+// admissibility gate, not a class call, so T-427 left it measured and filed rather than changing it
+// under a ticket whose floors forbid moving a family-level number.
+//
+// What replaces the table is [`density_classes`], as for `analog`, `fsk` and `psk-qam`. Measured
+// before any change, as the arg-max of the shipped densities over the two `pulsed` classes:
+// **6/6 for both classes at every SNR from 10 to 30 dB on both the dev and the blind acceptance
+// seeds**, with a mean |Δ log-evidence| of 53–70 nats. As in T-249, the separating evidence was
+// already fitted and on disk; only the call site was not reading it. No class gate is derived,
+// because there is no bin left to withhold.
+
+/// Largest probability a within-family class call may report.
+///
+/// **Not a new bound — the one [`density_classes`] already claims, made structural.** Clamping
+/// every rival to within [`MAX_LOG_LR`] of the best caps the leader at `19/(19 + K − 1)` for a
+/// family of `K` classes: 0.826 over four rivals (`analog`, `psk-qam`), 0.864 over three (`fsk`) —
+/// the "stays under 0.87" the notes on [`apply_msk_index`] and the tests state as *the* reason a
+/// class call cannot be confidently wrong.
+///
+/// That reasoning has `K` silently baked into it, and `pulsed` has **two** classes: 19:1 over a
+/// single rival is **0.95**, above the 0.9 this repo calls confident everywhere else. A guarantee
+/// that holds only for the large families is not a guarantee, and T-427 would otherwise have made
+/// the two-class call the one place a wrong name could come back at p ≥ 0.9 — the exact hazard
+/// T-422 caught when the `msk` index factor briefly reached 0.903.
+///
+/// So the spread is clamped to whichever of the two bounds binds. For `K ≥ 4` that is
+/// [`MAX_LOG_LR`] and nothing changes (the ratios this cap allows are 20.1:1 and 26.8:1,
+/// both looser than 19:1); for `K = 2` this one binds at 6.69:1. It is read off the arithmetic
+/// above, not fitted to any split.
+pub const CLASS_MAX_P: f64 = 0.87;
+
 /// Half-width of the modulation-index window that names `msk`.
 ///
 /// MSK **is** `h = 0.5` (ADR-0016 §1) — that is the definition of the class, not a tuned constant.
@@ -471,10 +523,12 @@ fn apply_msk_index(scores: &mut [(&'static str, f64)], mod_index_h: Option<f64>)
 /// because the conjunction that was supposed to name `gfsk` sat below the whole family's measured
 /// range of the feature it tested (T-422, see the note above [`apply_msk_index`]).
 ///
-/// Two two-way tables remain, in [`class_guess`]: `ook-ask` (`low_fraction`) and `pulsed` (`duty`).
-/// The first measures — `ook` and `ask4` are 0.833–0.917 top-1 with **zero** wrong labels on the
-/// blind grid. The second does not: `pulse` is 0.000 top-1 with wrong 1.000 at gate+5, and it is
-/// left alone here only because it is outside T-422's three classes and wants its own measurement.
+/// **One** two-way table remains, in [`class_guess`]: `ook-ask` (`low_fraction`). It measures —
+/// `ook` and `ask4` are 0.833–0.917 top-1 with **zero** wrong labels on the blind grid — which is
+/// the only reason it is still a table. `pulsed` (`duty`) was the other, and was the fourth to be
+/// removed: `pulse` measured 0.000 top-1 with wrong 1.000 at gate+5 because at that SNR the
+/// measured `duty` of a 5 %-duty radar train is *higher* than a 33 %-duty PPM train's (T-427, see
+/// the note above [`CLASS_MAX_P`]).
 ///
 /// **Why this is the right evidence.** The densities are fitted on the dev grid at *this* analysis
 /// geometry, so each class's dimensions describe what the feature really measures on that
@@ -501,13 +555,25 @@ fn apply_msk_index(scores: &mut [(&'static str, f64)], mod_index_h: Option<f64>)
 ///   snippet measured too few dimensions to score at all, sits at the 19:1 floor — low, but still
 ///   a hypothesis the verifier and any later stage can recover. That is the failure this replaces.
 /// - **The call cannot be confidently wrong.** With four rivals at the floor the top class reaches
-///   at most `1/(1 + 4/19)` ≈ 0.83, so such a class call never reports p ≥ 0.9.
+///   at most `1/(1 + 4/19)` ≈ 0.83, so such a class call never reports p ≥ 0.9. **That is a
+///   statement about four rivals, not about the clamp** — with one rival the same 19:1 bound gives
+///   0.95 — so the spread is clamped to the tighter of `MAX_LOG_LR` and whatever keeps the leader
+///   at [`CLASS_MAX_P`]. For every family with four or more classes the first still binds and the
+///   scores are unchanged; `pulsed`, with two, is the family that needed the second (T-427).
 fn density_classes(
     family: &str,
     features: &Features,
     model: &DensityModel,
 ) -> Option<Vec<(&'static str, f64)>> {
     let classes = HK_MOD_V1.family(family)?.classes;
+    // `p_max = R / (R + (K − 1))` with every rival at the floor, so the ratio that just reaches
+    // `CLASS_MAX_P` is `CLASS_MAX_P × (K − 1) / (1 − CLASS_MAX_P)`.
+    let rivals = (classes.len().max(1) - 1) as f64;
+    let spread = if rivals > 0.0 {
+        MAX_LOG_LR.min((CLASS_MAX_P * rivals / (1.0 - CLASS_MAX_P)).ln())
+    } else {
+        MAX_LOG_LR
+    };
     let scored: Vec<(&'static str, Option<f64>)> = classes
         .iter()
         .map(|c| (*c, model.score_class(c, features).map(|s| s.log_evidence)))
@@ -525,7 +591,7 @@ fn density_classes(
         scored
             .into_iter()
             .map(|(class, ll)| {
-                let ll = ll.unwrap_or(f64::NEG_INFINITY).max(best - MAX_LOG_LR);
+                let ll = ll.unwrap_or(f64::NEG_INFINITY).max(best - spread);
                 (class, (ll - best).exp())
             })
             .collect(),
@@ -702,6 +768,53 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// The "cannot be confidently wrong" guarantee is a property of the arithmetic **for every
+    /// family size**, not only for the four- and five-class ones (T-427).
+    ///
+    /// [`MAX_LOG_LR`] caps the leader at `19/(19 + K − 1)`, which is 0.826 at `K = 5` and 0.864 at
+    /// `K = 4` but **0.95** at `K = 2` — above the 0.9 the tests here and in `accuracy_sweep` treat
+    /// as confident. [`CLASS_MAX_P`] closes that, and this pins both halves: the two-class call
+    /// stays under the line, and the larger families are untouched because 19:1 is still the
+    /// tighter of the two bounds for them.
+    #[test]
+    fn no_density_class_call_is_reported_confidently_whatever_the_family_size() {
+        for (family, class, snr, seed) in [
+            ("pulsed", Class::Pulse, 20.0, 21),
+            ("pulsed", Class::Ppm, 20.0, 22),
+            ("analog", Class::Cw, 30.0, 23),
+            ("fsk", Class::Fsk4, 30.0, 24),
+            ("psk-qam", Class::Bpsk, 30.0, 25),
+        ] {
+            let f = feats(class, snr, seed);
+            let scores = density_classes(family, &f, DensityModel::builtin())
+                .unwrap_or_else(|| panic!("{family} densities"));
+            let k = scores.len();
+            let best = scores.iter().map(|(_, s)| *s).fold(0.0_f64, f64::max);
+            let worst = scores.iter().map(|(_, s)| *s).fold(f64::MAX, f64::min);
+            assert!(best > 0.0 && worst > 0.0, "{family}: {scores:?}");
+            // The pairwise bound still holds everywhere; it is never loosened, only tightened.
+            assert!(
+                best / worst <= MAX_LOG_LR.exp() * (1.0 + 1e-9),
+                "{family} spread {:.3} exceeds 19:1: {scores:?}",
+                best / worst
+            );
+            // For four or more classes 19:1 is the binding bound, so the floor is reached exactly.
+            if k >= 4 {
+                assert!(
+                    (best / worst - MAX_LOG_LR.exp()).abs() < 1e-6,
+                    "{family} ({k} classes) should still clamp at exactly 19:1: {scores:?}"
+                );
+            }
+            let guess = normalise_classes(scores.clone()).expect("a call");
+            assert!(
+                guess.p <= CLASS_MAX_P + 1e-9,
+                "{family} ({k} classes) reported p {:.3}, above the cap: {scores:?}",
+                guess.p
+            );
+            assert!(guess.p < 0.9, "{family} reported p {:.3}", guess.p);
+        }
     }
 
     /// The modulation-index factor may reorder the `fsk` candidates; it may not widen the spread

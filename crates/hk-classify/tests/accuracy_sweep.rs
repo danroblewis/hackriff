@@ -628,3 +628,111 @@ fn the_fsk_and_psk_qam_class_calls_are_right_or_absent_but_never_confidently_wro
         eprintln!("[T-422] {family}: below the class gate, {below} calls, all class-abstaining");
     }
 }
+
+/// **The `pulsed` family names the class it found, or names none — never the wrong one** (T-427),
+/// the fourth and last of these, after `analog` (T-249) and `fsk`/`psk-qam` (T-422).
+///
+/// Measured on this blind grid before the fix, at and above the `pulsed` gate: `pulse` top-1
+/// **0.000** with wrong-label **1.000** at gate+5, every snippet named `ppm`. The tell the two
+/// earlier tickets used — a healthy top-2 under a dead top-1 — says nothing here, because the
+/// family has only **two** classes and top-2 is 1.000 by construction whenever a class is named at
+/// all. What replaces it as the diagnostic is the densities' own arg-max, and it was already
+/// right: **6/6 for both classes at every SNR from 10 to 30 dB on the dev *and* the blind seeds**,
+/// with 53–70 nats of margin.
+///
+/// The cause is a fifth variant of this family of defects, not a repeat of one of the four.
+/// `duty` is `#{ a > 0.5 × mean(a) } / n`: a fraction over a threshold set by the snippet's **own
+/// mean envelope**, which for a sparse train is dominated by the *off* time. So the noise clears
+/// the threshold, and the measured duty of the 5 %-duty `pulse` train is 0.655 / 0.538 / 0.200 /
+/// 0.143 / 0.051 at 10 / 15 / 20 / 25 / 30 dB, against `ppm`'s near-constant 0.47 / 0.42 / 0.40 /
+/// 0.39 / 0.39. The ranges **cross between 15 and 20 dB**, so the `duty > 0.25` table was inverted
+/// exactly where the classifier decides. The dimension separates high-SNR snippets from low-SNR
+/// ones, not sparse pulse trains from busy ones.
+///
+/// The assertions are properties, not today's numbers: both classes are nameable, no wrong name is
+/// reported at p ≥ 0.9 — which for a **two**-class family needed [`hk_classify::tree::CLASS_MAX_P`],
+/// since the 19:1 clamp alone permits 0.95 — and the class wrong-label rate stays bounded.
+#[test]
+fn the_pulsed_class_call_is_right_or_absent_but_never_confidently_wrong() {
+    let mut c14 = SymbolEstimator::new();
+    let mut seed = ACCEPTANCE_SEED_BASE + 800_000;
+    let t = thresholds_of("pulsed").expect("pulsed thresholds");
+    let gate = t.snr_gate_db.expect("pulsed gate");
+    let class_gate = t.class_gate_db;
+
+    let mut named = 0usize;
+    let mut right = 0usize;
+    let mut wrong = 0usize;
+    let mut confident_wrong = 0usize;
+    let mut per_class: Vec<(&str, usize, usize, usize)> = Vec::new();
+    for class in [Class::Ppm, Class::Pulse] {
+        let (mut n, mut ok, mut bad) = (0usize, 0usize, 0usize);
+        for offset in [class_gate, class_gate + 5.0, class_gate + 10.0] {
+            for _ in 0..TRIALS {
+                seed += 1;
+                let c = classify_one(&mut c14, class, gate + offset, seed);
+                c.validate().expect("contract");
+                if c.family != "pulsed" {
+                    continue; // a family-level abstention; the family floors above judge those
+                }
+                n += 1;
+                match c.class.as_ref() {
+                    Some(call) if call.label == class.label() => ok += 1,
+                    Some(call) => {
+                        bad += 1;
+                        if call.p >= 0.9 {
+                            confident_wrong += 1;
+                            eprintln!(
+                                "[T-427] {} called {} at p {:.3}",
+                                class.label(),
+                                call.label,
+                                call.p
+                            );
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+        named += n;
+        right += ok;
+        wrong += bad;
+        per_class.push((class.label(), n, ok, bad));
+    }
+    for (label, n, ok, bad) in &per_class {
+        eprintln!(
+            "[T-427] pulsed {label:<5} at/above class gate: n {n:>3}, correct {ok:>3}, wrong {bad:>3}"
+        );
+    }
+    assert!(named >= 20, "too few pulsed calls to judge: {named}");
+
+    // **Both classes are nameable.** `pulse` was at exactly zero, which no family-level floor can
+    // see: the family call was correct and the name inside it was not.
+    for (label, _, ok, _) in &per_class {
+        assert!(
+            *ok > 0,
+            "{label} was never named correctly at or above its class gate: {per_class:?}"
+        );
+    }
+
+    // **No confident wrong name.** The property that outranks accuracy, and the one that needed
+    // new arithmetic here rather than new evidence: with a single rival the 19:1 spread clamp caps
+    // the leader at 0.95, above the 0.9 this repo calls confident, so `CLASS_MAX_P` binds instead.
+    assert_eq!(
+        confident_wrong, 0,
+        "pulsed reported a wrong class at p >= 0.9: {per_class:?}"
+    );
+
+    // **The wrong-label rate stays bounded.** Measured after T-427 on this grid: 0.000, from
+    // `pulse` 1.000 at gate+5. The bound is a regression guard, not a target.
+    let wrong_rate = wrong as f64 / named as f64;
+    assert!(
+        wrong_rate <= 0.20,
+        "pulsed class wrong-label {wrong_rate:.3}: {per_class:?}"
+    );
+    assert!(
+        right as f64 / named as f64 >= 0.80,
+        "pulsed class top-1 {:.3}: {per_class:?}",
+        right as f64 / named as f64
+    );
+}
