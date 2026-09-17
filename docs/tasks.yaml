@@ -10590,7 +10590,7 @@ tasks:
       outside it, nor about four agents building on the same box. Adding a name to that list will
       not fix this one either.
   - id: T-434
-    milestone: M5
+    milestone: MCANVAS
     title: docs/16 step 4 - LevelConfig::t_factor and the view scheme, and the step where the storage cost lands
     status: in-progress
     priority: normal
@@ -10744,7 +10744,7 @@ tasks:
       6.8 ms of capture from the live edge read by a previous HTTP round-trip, the same figure T-425
       measured.
   - id: T-437
-    milestone: MUI
+    milestone: MCANVAS
     title: SPIKE - the unified full-spectrum surface - one WebGL2 canvas, de-welded axes, split panes, zoomable minimap
     status: in-progress
     priority: high
@@ -10798,6 +10798,249 @@ tasks:
       apart.
       The freeze is in force: no further polish on the separate navigator widgets. Genuine
       backend bugs behind them stay (T-347, T-348).
+  - id: T-438
+    milestone: MCANVAS
+    title: The tile route, addressed by independent (level_f, level_t) - docs/16 step 5 under de-welded axes
+    status: todo
+    priority: high
+    parallel_group: CANVAS-BE
+    core_interface: true
+    model: opus
+    deps: [T-434, T-423]
+    use_cases: [AWARE-011, AWARE-042]
+    found_by: 'MCANVAS decomposition (user directive, 2026-09-17)'
+    acceptance: |
+      docs/16 §7 step 5, re-scoped by §8. GET /api/tiles/... addressed by
+      (device, level_f, level_t, f_index, t_index) - INDEPENDENT axis levels, not one zoom.
+      Coarse levels served from the existing seal path; the finest level computed on request under
+      the chunked-lock discipline, with §5.5's in-flight cap as ingest backpressure. Plus the
+      events AGGREGATE form from §5.3 for coarse zooms.
+      WHY IT IS ONE ROUTE AND NOT TWO: §7 step 5's own reason - because the bars are projections of
+      the same pyramid, one route is what stops the panes and the minimap ever disagreeing on one
+      screen. Under §8 that argument gets stronger, not weaker: every pane, the minimap and the
+      live edge are the same surface at different levels.
+      INHERITS AND MUST NOT REBUILD: T-434's independent-level addressing; T-421's grid_over and
+      `coarsen` (a SUM, not a max); T-423's per-cell coverage and the fourth state "unknown" as a
+      VALUE with a horizon block - never spelled grey; T-426's overview_levels, where adequate is
+      a CEILING not a target and the adequate tiers are a RUN of the ladder.
+      docs/api.md and crates/hk-cli/tests/api_contract.rs move TOGETHER (T-079). Assert the FIELD'S
+      VALUE, not the response shape (T-315's standard).
+      DoD: a tile is addressable at independent f and t levels; the served response states which
+      levels actually answered (T-426's rule: the tier that ANSWERED, not the one implied);
+      coverage and honesty tier ride along; in-flight cap enforced and asserted.
+    notes: |
+      T-437's spike is proving the client half against a stub. Coordinate through the coordinator
+      rather than guessing at its shape - if the spike wants a different addressing, that is a
+      finding worth having before this hardens.
+
+  - id: T-439
+    milestone: MCANVAS
+    title: Live-edge tiles - "live" is the finest level growing where hardware is tuned, not a separate mode
+    status: todo
+    priority: high
+    parallel_group: CANVAS-BE
+    core_interface: true
+    model: opus
+    deps: [T-438]
+    use_cases: [AWARE-011]
+    found_by: 'MCANVAS decomposition (user directive, 2026-09-17)'
+    acceptance: |
+      docs/16 §8.1's leap, made real: THE LIVE VIEW IS ALSO JUST A VIEWPORT onto this surface, so
+      "live" is the finest-level growing edge where hardware is currently tuned. There is no
+      separate live-vs-history path to keep consistent, which is the whole point - the seam
+      between them is what has produced years of divergence bugs.
+      The live chain must write finest-level tiles for tuned ranges as capture proceeds, at the
+      growing edge, WITHOUT blocking the live path. T-406 established the pattern for the
+      accumulation side: a dwell step writes ONE RECORD PER STEP with its true band and interval,
+      because a coarse record spanning a pass rasterises as "the whole band, the whole time".
+      Apply the same honesty here: a tile at the live edge covers exactly what was sampled.
+      MUST NOT: block or slow capture, the ring, or detection (the always-on invariant); invent a
+      cell that was not measured; or write a partial tile that reads as complete. §5.4's fourth
+      state and T-423's "unknown" stay available and stay distinct from grey.
+      DoD: a replay through the mock SDR produces finest-level tiles at the growing edge that a
+      pane can read with no live-specific code path, and the always-on invariant is asserted (ring
+      and detections keep advancing while tiles are written).
+
+  - id: T-440
+    milestone: MCANVAS
+    title: The renderer core - one canvas, one WebGL2 context, N scissored panes, shared tile-texture LRU
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    core_interface: true
+    model: opus
+    deps: [T-438]
+    use_cases: [AWARE-011, AWARE-042]
+    found_by: 'MCANVAS decomposition (user directive, 2026-09-17)'
+    acceptance: |
+      docs/16 §8.3. ONE canvas element, ONE WebGL2 context. Split panes via gl.viewport +
+      gl.scissor, each pane carrying its own (center_f, span_f, center_t, span_t), resolving to
+      its OWN per-axis levels, drawing only the tiles inside its box.
+      THE SHARED TILE-TEXTURE LRU IS THE REASON IT MUST BE ONE CONTEXT: keyed by
+      (level_f, level_t, f_block, t_block), uploaded on demand under a budget, evicted by budget -
+      and A TILE VISIBLE IN TWO PANES UPLOADS ONCE. A per-pane context cannot share textures, so
+      the architecture follows from the requirement rather than from taste. Say what the measured
+      upload budget and eviction policy are.
+      "CONSTANT PIXEL DENSITY" MEANS UNIFORM IN-LEVEL DENSITY PER PANE - the slippy-map invariant -
+      NOT one global scale across a 6 GHz axis and a retention-window axis. Do not re-weld the
+      axes in the client after T-434 de-welded them in the store.
+      REUSE, DO NOT REINVENT: ui/src/waterfall.ts's shader and ui/src/cmap.ts's single CMAP_STOPS
+      array, which T-397 made the one source generating both the canvas bytes and the GLSL
+      precisely so shader and strips could not diverge. One renderer must not reintroduce two
+      colormaps.
+      DoD: N panes render from one context over one LRU; a tile in two panes uploads once
+      (asserted, not assumed); per-axis levels are independent; the eviction budget is measured
+      and stated.
+    notes: |
+      T-437's spike is exploring exactly this. Read its findings before starting - the spike's job
+      is to tell you what does NOT work, and a spike that reports only success has de-risked
+      nothing.
+
+  - id: T-441
+    milestone: MCANVAS
+    title: Honesty tiers and grey - the rendering rule that makes the surface trustworthy
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    core_interface: true
+    model: opus
+    deps: [T-440]
+    use_cases: [AWARE-011]
+    found_by: 'MCANVAS decomposition (user directive, 2026-09-17)'
+    acceptance: |
+      docs/16 §8.3 and §4. The three honesty tiers - live-iq, spectrum-history, survey-overview -
+      stay VISUALLY DISTINCT, so a wide or deep zoom never fakes resolution the hardware did not
+      capture. §4's rule is unchanged; the gain is that it now has ONE place to be enforced
+      instead of three.
+      GREY = GENUINELY UNOBSERVED, AND IT IS THE POINT. Across 6 GHz and a retention window most
+      of the canvas is honestly empty, and THE SHAPE OF WHAT IS NOT GREY IS THE SURVEY. This is
+      not an edge case in a renderer; it is the main information the surface carries.
+      THE FOURTH STATE IS NOT GREY. T-423 put "unknown" on the wire as a VALUE - we no longer know
+      whether we looked, for rows before the oldest surviving record - with resolution.grey_rule
+      saying in the response that it is not grey and not a level, and naming hatching (T-413) as
+      the drawing. T-413 met this trap from the other side and declined the obvious rendering for
+      exactly this reason: reusing an "unmeasured" mark for a measured-and-empty gap spells
+      "looked and it was quiet" as "never looked". Three states must be three marks.
+      DoD: the three tiers are distinguishable in a rendered frame (assert on what is drawn, not
+      on a flag); grey appears if and only if state == "unobserved"; "unknown" renders as a fourth
+      thing; and a zoom beyond live-IQ resolution shows survey-overview rather than upscaled
+      detail presented as measurement.
+
+  - id: T-442
+    milestone: MCANVAS
+    title: The pane model - split, independent pan/zoom, per-pane follow-mode and per-pane pause
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    core_interface: true
+    model: opus
+    deps: [T-440, T-347]
+    use_cases: [AWARE-011, AWARE-042]
+    found_by: 'MCANVAS decomposition (user directive, 2026-09-17)'
+    acceptance: |
+      docs/16 §8.4. PANES EXIST BECAUSE OF MULTIPLE SDRs: tuned ranges may be far apart - 100 MHz
+      and 2.4 GHz are not watchable together at any useful density - so panes split the canvas and
+      independently pan, zoom and follow-live different sections OF THE SAME SURFACE.
+      T-380'S INVARIANT SURVIVES IN A STRONGER FORM and must be preserved: there is still exactly
+      ONE thing being looked at; panes are where you look FROM, not extra things to look at.
+      Additional SDRs widen COVERAGE; they never split the subject.
+      PER-PANE FOLLOW-MODE pins a pane to the growing edge. PER-PANE PAUSE freezes that pane's view
+      ONLY - capture, ring and detection stay always-on, which is the user's standing invariant.
+      BUILD ON T-347, WHICH LANDED TODAY: it retired /api/control/pause entirely because a run-wide
+      boolean cannot represent N viewers, and made the client's `time.live` the single mechanism -
+      pausing IS entering the state scrubbing already produced, with no third state for "scrubbed
+      but not paused". Do NOT reintroduce a run-wide flag, and do not add a second pause concept
+      per pane; a pane's time window IS its pause state.
+      DoD: N panes with independent (center_f, span_f, center_t, span_t); follow-mode per pane;
+      pausing one pane provably does not affect another pane or any other viewer (assert it the way
+      T-347 did - two consumers, values not status codes); capture keeps advancing throughout.
+
+  - id: T-443
+    milestone: MCANVAS
+    title: The zoomable minimap - another viewport, with pane rectangles and per-SDR live segments
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    deps: [T-440, T-442]
+    use_cases: [AWARE-042]
+    found_by: 'MCANVAS decomposition (user directive, 2026-09-17)'
+    acceptance: |
+      docs/16 §8.3. The minimap is NOT a fifth widget - it is another viewport at a coarse level,
+      through the same context and the same LRU, overlaying rectangles for where each pane is
+      looking and lit segments for where each SDR is currently live.
+      That framing is the whole design: the old frequency navigator showed "every currently-active
+      capture window as a lit segment" and the old time navigator showed a compressed history, and
+      keeping them in step with the main view is what kept failing. As a viewport it cannot drift,
+      because it reads the same tiles at a different level.
+      DoD: the minimap renders from the shared LRU with no private fetch path; pane rectangles
+      track pane state every frame (not on a poll - T-388's box-jump was a per-poll layout against
+      a per-frame scroll); per-SDR live segments come from the same coverage the panes read.
+
+  - id: T-444
+    milestone: MCANVAS
+    title: Retune-on-pan - panning a pane to un-tuned spectrum offers or triggers a retune
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    core_interface: true
+    model: opus
+    deps: [T-442, T-343]
+    use_cases: [AWARE-011]
+    found_by: 'MCANVAS decomposition (user directive, 2026-09-17)'
+    acceptance: |
+      docs/16 §8.4. Panning a pane to an UN-TUNED frequency offers or triggers a retune, reusing
+      T-343's gated, typed DeviceAction with device_id recorded, one capture at a time, settle gap
+      honoured. NO SECOND PATH TO THE DEVICE.
+      THE CONTROL THAT MUST HOLD, and it is not optional: T-340 asserts that NO PAN and NO WHEEL
+      reaches a device route - a +/-1.0 drag of the whole 6 GHz bar through a spy client produces
+      an EMPTY call list. A pane's pan is a pan. So the retune must be a DISCRETE, EXPLICIT act
+      (T-392's region-select-on-release is the precedent the repo has already argued through), or
+      an OFFER the user accepts - not a consequence of dragging.
+      T-407 found two ways a finger could retune the radio once confirmation was removed: a 6 px
+      mouse threshold made a fat-fingered tap a drag, and travel measured as clientX + clientY
+      made a stroke ACROSS a bar count as travel ALONG it. Both were latent until the
+      confirmation step went. Read that ticket before designing the gesture.
+      Snapping: reuse T-341's snapCenter and T-418's derived off-DC placement (span/4 - the
+      midpoint of the usable half-band, maximally far from the LO spike and the anti-alias
+      roll-off). Do not re-derive either.
+      DoD: a pan alone never commands the radio (T-340's control passes verbatim); the explicit act
+      does, through the one gated path; the achievable-config snapping is reused, not reinvented.
+
+  - id: T-445
+    milestone: MCANVAS
+    title: The cutover - retire both edge scrubbers and the separate history view
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    core_interface: true
+    model: opus
+    deps: [T-441, T-442, T-443, T-444]
+    use_cases: [AWARE-011, AWARE-042]
+    found_by: 'MCANVAS decomposition (user directive, 2026-09-17)'
+    acceptance: |
+      docs/16 §8.5, and the milestone's exit. The two bespoke edge-scrubber widgets collapse into
+      canvas pan/zoom plus the minimap; the live-vs-history split disappears.
+      DO THIS LAST AND ONLY ON EVIDENCE. The user's exit criterion for the spike is that the
+      unified surface "convincingly replaces BOTH edge scrubbers AND the separate history view" -
+      so this ticket is where that claim is cashed, not where it is assumed. If any capability the
+      scrubbers provided has no home on the canvas, that is a finding: report it rather than
+      dropping the capability quietly.
+      THE DEFECT FAMILY THIS CLOSES, and each should be shown to be unreachable rather than merely
+      absent: sliver-of-data (T-420 - one texture row per served cell into a 512-row ring, 4% of
+      the pane lit), box-jump (T-388 - per-poll layout against a per-frame scroll), fill and
+      resolution (T-397/T-411), axis and colormap divergence (T-397 - a ramp that stopped at cyan,
+      and two colormaps that could drift), wheel-zoom mismatch (T-412). EVERY ONE WAS TWO
+      IMPLEMENTATIONS OF THE SAME IDEA DRIFTING APART. One renderer with one set of semantics
+      cannot disagree with itself - demonstrate that, do not just assert it.
+      Retire the code, the routes that only served it, and the tests that only tested it - but keep
+      any test that asserts a USER-VISIBLE invariant, re-pointed at the canvas. T-347's precedent:
+      it inverted an existing assertion rather than deleting it, so the old guarantee kept a guard.
+      DoD: the scrubbers and the separate history view are gone; every invariant they enforced has
+      a home on the canvas or is explicitly reported as dropped with the user's sign-off needed;
+      docs/api.md, docs/14 and ui/CONTROLS.md updated; the UI suite green.
+    notes: |
+      T-348 (a paused view costs full CPU) and any other genuine backend bug behind the old widgets
+      stay open on their own merits - they are correctness, not scrubber polish.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
