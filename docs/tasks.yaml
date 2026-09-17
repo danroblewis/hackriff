@@ -8328,14 +8328,14 @@ tasks:
     milestone: M3
     status: blocked
     blocked_on: >-
-      T-403's SECOND attempt. T-403 was merged (1aeefee) and REVERTED (0465926) the same hour:
-      its new live confirm route races T-398's pilot-lock route nondeterministically - the same
-      48 acceptance tests gave 48 passed then 47 passed / 1 failed on identical code. So T-403
-      is NOT in main. Separately, and measured on T-402's own realistic scene with T-403
-      applied: confirm is fixed (3.00 s) but FAMILY ASSIGNMENT IS 5.00 s against T-401's 4.0 s
-      budget. Per the user 2026-09-17 that residual is A REAL DEFECT TO FIX, NOT A BLOCK - it
-      is assigned to T-403, which owns both the race and the family path. T-402's own work is
-      complete and green in isolation; it lands when T-403 lands.
+      T-416, a third defect - and the LATENCY blockers are gone. With T-403 merged (aa5dab9)
+      this scene now reads family 2.00 s and confirm 2.00 s, both inside budget; the 5.00 s
+      family gap the user called a defect is fixed. What remains red is one assertion:
+      confirm_latency.rs:143 "the measurement that declined to confirm is still recorded". A
+      real 150 kHz MONO broadcast FM station is not recognised as WFM by mode selection, and a
+      REJECTED MODE WRITES NOTHING - so T-398's own standard, that short evidence leaves a log
+      rather than a promotion, fails for want of the log. Mode rules and chain records are
+      hk-demod's, which T-403 was fenced out of. Merges when T-416 lands.
     priority: normal
     parallel_group: M3A
     deps: [T-398]
@@ -8372,7 +8372,7 @@ tasks:
   - id: T-403
     title: A station with no pilot and no identity still confirms at the end of the recording
     milestone: M3
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -8931,6 +8931,42 @@ tasks:
       moves" is quoting something; that something should exist in one place.
       Low effort, high leverage: this is bookkeeping that prevents a class of silent
       misreading, not a code change.
+  - id: T-416
+    title: A real mono FM station is not recognised as WFM, and the rejection leaves no trace
+    milestone: M3
+    status: todo
+    priority: high
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    deps: [T-403]
+    acceptance: |
+      Diagnosed by T-403 and deliberately not fixed - mode rules and chain records are
+      hk-demod's, which it was fenced out of. It is the last thing holding T-402.
+      THE MEASUREMENT:
+        analog probe 101.3000 MHz: mode unknown (0.75), pilot Some(false) -> stop
+        (OBW99 Some(149890) Hz, "no rule matched confidently (OBW99 149890 Hz)")
+      A REAL 150 kHz MONO BROADCAST FM STATION IS NOT RECOGNISED AS WFM. Two things are
+      wrong and they should be weighed separately.
+      (1) THE RULE. 149890 Hz sits inside WIDEBAND_FM_OBW_HZ's [106e3, 400e3], so width
+      alone does not reject it - the mode came back `unknown` at 0.75 confidence with
+      pilot Some(false). A mono station HAS no pilot, so requiring one to call something
+      WFM makes every mono broadcaster unrecognisable. Establish whether the pilot is
+      being used as evidence FOR wfm (fine) or as a REQUIREMENT (not fine).
+      DO NOT MOVE WIDEBAND_FM_OBW_HZ: T-316 derived 106 kHz as 2 x 53 kHz from the
+      stereo subcarrier top after declining a value that turned the suite green, and
+      T-402 already established the fixture was what was wrong, not the constant.
+      (2) THE SILENCE, which is the deeper defect. A REJECTED MODE WRITES NOTHING. So
+      T-398's standard - "short evidence leaves a LOG, not a promotion", the user's own
+      instruction - fails for want of the log, and the assertion
+      confirm_latency.rs:143 ("the measurement that declined to confirm is still
+      recorded") is red. A refusal that leaves no record is indistinguishable from
+      never having looked, which is the same class as Coverage::Unobserved vs quiet and
+      BiasTee::Unknown vs off. FIX THIS EVEN IF (1) TURNS OUT TO BE CORRECT BEHAVIOUR:
+      a mode that declines should say so, with its measurement.
+      Control: a genuinely unrecognisable emission still declines, and still logs.
+      Do not make (1) pass by lowering a confidence threshold - if 0.75 is the right
+      confidence for "unknown", the question is why a 150 kHz FM carrier produces it.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
