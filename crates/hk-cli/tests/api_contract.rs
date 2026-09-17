@@ -5557,6 +5557,12 @@ fn the_band_collapsed_activity_series_is_measured_and_states_its_fold() {
 /// Values, not shape (T-315).
 #[test]
 fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked() {
+    // Measured before the server exists, so it is <= the timestamp of the first frame this run can
+    // possibly have written. T-426 reads the phase off it below; see that block for the formula.
+    let launch_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_secs_f64();
     let (_dir_guard, serving, addr) = start_server_retaining(Some(120.0));
     let (lo, hi) = (
         FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
@@ -5722,12 +5728,13 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
     // rather than 60 s because it now bounds a quantity whose range we have measured: it is two
     // orders of magnitude above it, and the point of the number is to be nowhere near the edge.
     //
-    // WHAT THIS DOES NOT ASSERT, and it is a real defect rather than a test artefact: on the
-    // default window the strip carries no shade for the first minute of a server's life EVEN
-    // THOUGH the levels below hold the data — `overview_level` takes the coarsest adequate tier
-    // and does not fall back to a finer one that is populated. That is the user's "we have it but
-    // didn't render it" failure, and it needs its own ticket (it changes `level`/`src_t_cell_s`,
-    // which `/api/timeline` documents).
+    // T-426 FIXED the defect this comment used to record as deliberately unfixed: on the default
+    // window the strip carried no shade for the first minute of a server's life even though the
+    // finer levels held the data, because the coarsest adequate tier was the only tier consulted.
+    // The value assertion for that fix is the block immediately below, on the DEFAULT window; the
+    // explicit 20 s window here stays because it is a different property — a bound on real work
+    // rather than on the clock — and because it is the control that keeps the default-window
+    // answer honest about which tier it read.
     let t1_s = tuned["window"]["t1_s"].as_f64().expect("a live edge");
     let (wt0, wt1) = (t1_s - 20.0, t1_s);
     let mut shaded = Value::Null;
@@ -5772,6 +5779,110 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
             .is_some_and(|s| s.contains("the max of nothing is")),
         "{shaded}"
     );
+    // The tier that answered, on the wire (T-426). Here it is the PREFERRED one and no fallback is
+    // involved: 20 s drawn in one row is a 20 s cell, and the coarsest tier whose cells are no
+    // larger than that is level 0 (1 s) — level 1's are 60 s. So `level` is not hard-wired to the
+    // fallback's answer; it reports whichever tier the read actually used.
+    assert_eq!(sh["level"], json!(0), "{shaded}");
+    assert_eq!(sh["src_t_cell_s"], json!(1.0), "{shaded}");
+    assert_eq!(sh["src_f_cell_hz"], json!(6250.0), "{shaded}");
+
+    // ---- T-426: the DEFAULT window is shaded in the first minute of a server's life ------------
+    //
+    // THE DEFECT, in the user's words (CLAUDE.md, 2026-09-16): *"whenever data exists for that
+    // window it must be shown; a surface may render grey/empty only where data genuinely does not
+    // exist. 'We have it but didn't render it' is a bug."* On the default capture window this
+    // route used to serve NO shade at all until the first epoch-aligned minute had sealed, while
+    // level 0 had held 1 s cells the whole time. `shades()` folds with `nt = 1`, so the tier is
+    // sized by the whole 120 s window and the coarsest ADEQUATE tier is level 1 (60 s cells) — and
+    // a level-1 cell exists only once a level-0 block seals, `seal_lag` = 2 s after an
+    // epoch-aligned boundary. T-383 measured that wait at (2 s, 62 s], six runs within 0.1 s of
+    // the formula. The old code consulted that tier and stopped.
+    //
+    // THE VALUE ASSERTED: over the default window, the strip has a real shade range and real
+    // shades — a value, not a present field (T-315). On the old code this call answers
+    // `"range_db": null` with no `shade` key on any cell.
+    //
+    // AND IT IS ASSERTED WITHOUT WAITING FOR ANYTHING, which is the half that makes it a guard at
+    // all. The 20 s window above has just proved that level 0 holds queryable cells for the last
+    // 20 s of this run; the default window is a 120 s superset of it over the same band, so the
+    // same cells must answer on the FIRST call. A `wait_for` here would be worse than useless —
+    // MEASURED, by mutation: with the fallback disabled the test PASSED in 19.5 s under a 30 s
+    // budget, because the old code does eventually shade, once the epoch-aligned minute seals.
+    // Any budget over 2 s lets the defect wait its way to green, which is how the same clock
+    // dependency spent a month being recorded as a load flake (T-320/T-383). No budget, no clock:
+    // one request, one answer, measured at 8.5–10.3 ms over four runs before the wait was removed.
+    let (st, dflt) = get(addr, &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=8"));
+    assert_eq!(st, 200, "{dflt}");
+    assert!(
+        dflt["shade"]["range_db"].is_object(),
+        "the default window must show the data the finer tier is already holding: {dflt}"
+    );
+    let ds = &dflt["shade"];
+    let (dlo, dhi) = (
+        ds["range_db"]["lo"].as_f64().expect("shade range lo"),
+        ds["range_db"]["hi"].as_f64().expect("shade range hi"),
+    );
+    assert!(dhi >= dlo, "{dflt}");
+    assert_eq!(ds["scale"], json!("dbfs-per-hz"), "{dflt}");
+    let dshades: Vec<f64> = dflt["any"]["cells"]
+        .as_array()
+        .expect("cells")
+        .iter()
+        .filter_map(|c| c["shade"].as_f64())
+        .collect();
+    assert!(
+        !dshades.is_empty(),
+        "the default window must show the data the finer tier holds: {dflt}"
+    );
+    assert!(dshades.iter().all(|s| (0.0..=1.0).contains(s)), "{dflt}");
+    // AND THE LEVEL TELLS THE TRUTH ABOUT WHICH TIER ANSWERED. Falling back silently would trade
+    // one lie for another, so `level` and `src_t_cell_s` are the fallback's own disclosure: the
+    // pair must agree with the default ladder (level 0 = 1 s cells, level 1 = 60 s), and
+    // `src_t_cell_s` must never exceed the drawn cell — a finer source is MORE resolution than the
+    // picture asked for, folded down, which is the direction that invents nothing.
+    let dlevel = ds["level"].as_u64().expect("the tier that answered");
+    let dsrc = ds["src_t_cell_s"].as_f64().expect("that tier's time cell");
+    assert_eq!(
+        dsrc,
+        match dlevel {
+            0 => 1.0,
+            1 => 60.0,
+            l => panic!("neither tier can answer a 120 s window drawn in one row: {l}: {dflt}"),
+        },
+        "{dflt}"
+    );
+    let drawn_cell_s = dflt["grid"]["t_cell_s"].as_f64().expect("the drawn cell");
+    assert!(dsrc <= drawn_cell_s, "{dflt}");
+    // THE PHASE, and it is the branch that makes the level assertion exact rather than permissive.
+    // Every frame this run wrote is at or after `launch_s`, so the earliest level-0 block that can
+    // hold any of them ends at the next epoch-aligned 60 s boundary after `launch_s`, and seals
+    // `seal_lag` = 2 s later. Until then NO level-1 cell can exist for this server and level 0 is
+    // the only tier that can answer — which is exactly the regime the defect lived in. Measuring
+    // the phase rather than assuming it is T-383's rule applied to the test's own clock. With no
+    // wait between launch and here (the whole test measures 0.61–0.69 s) the branch is taken on
+    // every run: `now − launch_s` is under a second against a first seal that is 2–62 s away. The
+    // else-branch exists only so that a machine slow enough to cross that boundary mid-test
+    // reports the honest weaker claim instead of failing for a reason that is not the code's.
+    // The strict level-1 control — the same window once a level-1 cell exists — is not here, where
+    // it could only be had by waiting out a wall-clock minute: it is
+    // `hk_api::query::tests::a_populated_finer_tier_answers_when_the_preferred_one_is_empty_and_says_so`,
+    // where the seal is explicit and the answer flips back to level 1 with no clock involved.
+    const SEAL_LAG_S: f64 = 2.0;
+    let first_seal_s = (launch_s / 60.0).floor() * 60.0 + 60.0 + SEAL_LAG_S;
+    let now_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_secs_f64();
+    if now_s < first_seal_s {
+        assert_eq!(
+            dlevel,
+            0,
+            "no level-1 cell can exist {:.1} s before the first seal, so the finer tier must have \
+             answered: {dflt}",
+            first_seal_s - now_s
+        );
+    }
 
     // ---- the backfill: going Live for a range that has history starts POPULATED, not black ----
     // The same band the coverage map says was sampled has spectrum history behind it, so the first
