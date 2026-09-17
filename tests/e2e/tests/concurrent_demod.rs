@@ -11,8 +11,12 @@
 //!   cross-correlation stays low, and a fourth Listen on the first emitter (the positive control)
 //!   correlates highly only with the stream on the station its probe chose. Per-chain CPU, latency
 //!   and drop counters are reported in `/api/status` `chain_stats` and the unified `budget`.
-//! - **Closing one stream** leaves the others running: frames keep coming, sequence numbers stay
-//!   contiguous, nothing is dropped.
+//! - **Closing one stream** leaves the others running: frames keep coming, and what each consumer
+//!   read tiles one unbroken seq range — every record's seq or a "dropped N" marker declaring
+//!   exactly the missing one. The chains themselves lose no input samples (`lost_samples == 0`,
+//!   a real invariant here: the unpaced mock is pausable, so the run is lossless and the source
+//!   back-pressures). Whether a *consumer queue* fills is not asserted at this tier — see T-433
+//!   and the performance test at the bottom of the file.
 //! - **Admission beyond the budget** (a runtime budget of 3 chains) refuses a Listen and a bits tap
 //!   with 503 `busy` and the reason, and the running streams are unaffected.
 //! - **Two FSK emitters.** Two synthetic sensors (different ids, ±120 kHz) are mixed into one
@@ -21,9 +25,13 @@
 //!   a different emitter per stream.
 //! - **Dedupe.** The FM recording IQ-shifted +150 kHz puts the station between two raster channels:
 //!   exactly one analog chain writes it (T-070 lets either neighbour take it).
-//! - **Performance** (`#[ignore]`, run in release): 3 WFM listeners and 2 FSK taps at 2.4 Msps in
-//!   real time on the three-station scene (a cf32 recording, quantised to ci8 by the capture
-//!   thread); prints per-chain CPU and latency and the load average.
+//! - **Performance** (`#[ignore]`, run in release; the T5/bench tier of docs/10 §2): 3 WFM
+//!   listeners and 2 FSK taps at 2.4 Msps in **real time** on the three-station scene (a cf32
+//!   recording, quantised to ci8 by the capture thread); prints per-chain CPU and latency and the
+//!   load average, and asserts the throughput claim itself — no chain loses input samples, no
+//!   listener skips to stay live, no consumer queue overflows, and the listeners produce a full
+//!   second of audio per second. That claim is only meaningful against a clock, so it lives here
+//!   and not in the unpaced CI-tier tests above.
 
 #[path = "acceptance/common.rs"]
 mod common;
@@ -131,6 +139,11 @@ struct Parsed {
     seqs: Vec<u64>,
     dropped: u64,
     status: Vec<Value>,
+    /// The stream as seq ranges, **in wire order**: `(first seq, count)` — one seq per record
+    /// read, and a "dropped N" marker's whole range where the publisher says it dropped N. The
+    /// contract is that these tile `first..last` with no hole and no overlap, so a gap that no
+    /// marker accounts for is loss the stream failed to declare (T-433).
+    runs: Vec<(u64, u64)>,
 }
 
 fn parse(bytes: &[u8]) -> Parsed {
@@ -144,23 +157,77 @@ fn parse(bytes: &[u8]) -> Parsed {
         match rec {
             Record::Binary(b) => {
                 p.seqs.push(b.header.seq);
+                p.runs.push((b.header.seq, 1));
                 p.data.push((b.header.t.as_unix_nanos(), b.payload));
             }
             Record::Unknown(frame) => {
                 if let Some((h, v)) = parse_status_record(&frame) {
                     p.seqs.push(h.seq);
+                    p.runs.push((h.seq, 1));
                     p.status.push(v);
                 }
             }
-            Record::Dropped(m) => p.dropped += m.count,
+            Record::Dropped(m) => {
+                p.dropped += m.count;
+                p.runs.push((m.first_seq, m.count));
+            }
             _ => {}
         }
     }
     p
 }
 
-fn contiguous(seqs: &[u64]) -> bool {
-    seqs.windows(2).all(|w| w[1] == w[0] + 1)
+/// The stream contract's loss rule (`hk_stream::publisher`): a consumer that cannot keep up loses
+/// records, but **never silently** — every gap in `seq` is preceded by a "dropped N" marker naming
+/// exactly the missing range. So what a consumer read must tile one unbroken seq range: each
+/// record's seq, and each marker's `first_seq..first_seq + count`, start where the last ended.
+///
+/// T-433: this replaced `contiguous(&p.seqs)` + `dropped == 0`, which together asserted that no
+/// consumer queue ever filled. Whether a queue fills is a property of the machine, not of the
+/// code — and doubly so here, where the mock is **unpaced**, so the chain publishes at whatever
+/// multiple of real time the box happens to manage (measured: ~4.5x, 1048 records = 21 s of audio
+/// in 4.6 s). "The sink drained 4.5x real time" is not a claim about the product. That the stream
+/// declares every record it loses is, and it holds however slow the reader is.
+fn accounted(p: &Parsed) -> Result<(), String> {
+    let mut next: Option<u64> = None;
+    for &(first, count) in &p.runs {
+        if let Some(expect) = next
+            && first != expect
+        {
+            return Err(format!(
+                "seq {first} follows {}: {} unaccounted, {} records, {} dropped and declared",
+                expect - 1,
+                first as i64 - expect as i64,
+                p.seqs.len(),
+                p.dropped
+            ));
+        }
+        next = Some(first + count);
+    }
+    Ok(())
+}
+
+/// The control for [`accounted`] (T-315): it must reject a seq gap no marker declared and accept
+/// the same gap once the stream declares it. Without this, "no unaccounted loss" would be
+/// satisfiable by a stream that published nothing at all.
+#[test]
+fn a_seq_gap_is_loss_unless_the_stream_declared_it() {
+    let check = |runs: Vec<(u64, u64)>| {
+        accounted(&Parsed {
+            runs,
+            ..Parsed::default()
+        })
+    };
+    // Three records in a row.
+    check(vec![(7, 1), (8, 1), (9, 1)]).expect("no gap");
+    // Seq 8 never arrived and nothing said so.
+    let e = check(vec![(7, 1), (9, 1)]).expect_err("an undeclared gap is loss");
+    assert!(e.contains("seq 9 follows 7"), "{e}");
+    // The same hole, declared: a marker covering 8 and 9, then the record at 10.
+    check(vec![(7, 1), (8, 2), (10, 1)]).expect("a declared gap is accounted");
+    // A marker that under-counts the hole leaves the rest unaccounted.
+    let e = check(vec![(7, 1), (8, 1), (10, 1)]).expect_err("an under-counted gap is loss");
+    assert!(e.contains("seq 10 follows 8"), "{e}");
 }
 
 /// Blindly detected emitters wide enough to be broadcast FM, widest first: `(id, centre, width)`.
@@ -376,7 +443,12 @@ fn three_fm_stations_demodulate_concurrently_each_stream_its_own_station() {
         assert!(s["records"].as_u64().unwrap() >= 300, "{s}");
         assert!(s["cpu_s"].as_f64().unwrap() > 0.0, "{s}");
         assert!(s["samples"].as_u64().unwrap() > 0, "{s}");
-        assert_eq!(s["dropped"], 0, "{s}");
+        // The chain's own losslessness, which IS a code property here: the unpaced mock is
+        // pausable, so `blind_live` runs with `lossless = true` and the source back-pressures
+        // instead of the ring overwriting. `dropped` next to it is the test's own in-process sink
+        // failing to drain an unpaced firehose — reported, not asserted (T-433; the real-time
+        // form of that claim is asserted in the performance test below).
+        assert_eq!(s["lost_samples"], 0, "{s}");
         assert_eq!(s["consumers"], 1, "{s}");
     }
 
@@ -413,8 +485,7 @@ fn three_fm_stations_demodulate_concurrently_each_stream_its_own_station() {
             p.dropped
         );
         assert!(rms(p) > 0.005, "[{TAG}] stream {i} has audio");
-        assert_eq!(p.dropped, 0);
-        assert!(contiguous(&p.seqs), "[{TAG}] stream {i} lost records");
+        accounted(p).unwrap_or_else(|e| panic!("[{TAG}] stream {i} lost records silently: {e}"));
         // The station at the stream's channel (private truth); its PI and no other.
         let (tc, tpi) = truth
             .iter()
@@ -513,12 +584,9 @@ fn three_fm_stations_demodulate_concurrently_each_stream_its_own_station() {
     });
     for (_, s) in &subs {
         let p = s.parse();
-        assert_eq!(p.dropped, 0);
-        assert!(
-            contiguous(&p.seqs),
-            "[{TAG}] {} lost records",
-            s.header.stream_id
-        );
+        accounted(&p).unwrap_or_else(|e| {
+            panic!("[{TAG}] {} lost records silently: {e}", s.header.stream_id)
+        });
     }
     assert_eq!(listen_stats(&counters).len(), 3);
     live.handle.set_listen_settings(ListenSettings::default());
@@ -924,6 +992,23 @@ fn three_wfm_listeners_and_two_fsk_taps_stay_real_time_at_2p4_msps() {
             s["lost_samples"],
             s["records"],
             s["dropped"]
+        );
+    }
+    // T-433: **this** is where `dropped == 0` belongs, and here it is asserted rather than printed.
+    // The claim "the always-on capture path does not lose samples" is a throughput/timing claim,
+    // which docs/10 §2 puts at T5/bench: it is only meaningful against a clock. This test alone
+    // paces the mock at `RealTime { speed: 1.0 }`, runs in release, and is `#[ignore]`d out of the
+    // CI gate precisely so it is measured on a box that is not carrying four concurrent builds.
+    // The CI-tier test above replays UNPACED at ~4.5x real time, where a full consumer queue
+    // measures the box's spare capacity against an arbitrary replay speed and nothing else.
+    for s in status["chain_stats"].as_array().unwrap() {
+        assert_eq!(
+            s["dropped"], 0,
+            "[{TAG}] a consumer could not keep up at real time: {s}"
+        );
+        assert_eq!(
+            s["lost_samples"], 0,
+            "[{TAG}] a chain lost input samples at real time: {s}"
         );
     }
     let skipped = get(&lc.skipped_samples) - k0;

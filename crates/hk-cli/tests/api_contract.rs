@@ -6136,6 +6136,11 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
 ///     equals the **sum** of the rows' and its `duty` is re-derived against the column's own
 ///     extent — so a column at duty ≈ 1/6 and a row at duty ≈ 1 describe the same seconds. A
 ///     parent-vs-child comparison would pass on a rounded-up fold; this cannot (T-419/T-421).
+///     The identity is asserted **exactly** on a window wholly behind the live edge (2b), where
+///     both answers see a settled log; over the live window it is asserted as a direction (the
+///     later answer cannot hold fewer seconds) plus the shape the bug would break. T-430: the
+///     live window cannot carry an exact identity, because the radio captures more of it between
+///     the two round-trips — one 16384-sample block, 6.8267 ms, at a time.
 ///  3. **The fourth state is sayable, and it is not grey.** A window before the oldest surviving
 ///     record answers `"unknown"` — *we no longer know whether we looked* — never `"unobserved"`,
 ///     which claims nothing looked. The **control** is property 1's later rows: inside the horizon
@@ -6222,6 +6227,26 @@ fn coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it
             "cell {i} is past the live edge and inside the record horizon: {g}"
         );
     }
+    // And the split runs one way. Capture reaches a row only after every earlier row, so the
+    // states down the window are `observed`* then `unobserved`* — coverage never comes back after
+    // the live edge. The boundary is row 1 or row 2 and the test does not care which: row 1 STARTS
+    // at the edge this window was built from, so whether it is grey depends on how much capture
+    // arrived while the request was in flight (see property 2).
+    let states: Vec<&str> = (0..ROWS)
+        .map(|r| cells[r * CELLS]["state"].as_str().expect("state"))
+        .collect();
+    let edge_row = states
+        .iter()
+        .position(|s| *s != "observed")
+        .expect("this window runs past the live edge, so some row is not observed");
+    assert!(
+        states[edge_row..].iter().all(|s| *s == "unobserved"),
+        "coverage does not resume after the live edge: {states:?} in {g}"
+    );
+    assert!(
+        (1..=2).contains(&edge_row),
+        "row 0 is inside capture and row 2 is a full row past the edge: {states:?} in {g}"
+    );
 
     // ---- 2. the column is the SUM of the rows, and its duty is re-derived ----
     // The control for property 1, and the answer T-405/T-411 were reading: at rows=1 the very same
@@ -6243,18 +6268,83 @@ fn coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it
     let summed: f64 = (0..ROWS)
         .filter_map(|r| cells[r * CELLS]["observed_s"].as_f64())
         .sum();
+    // T-430. This used to read `summed == row0_observed_s` to 1e-6 — "only row 0 was sampled" —
+    // and row 1 begins AT the live edge a PREVIOUS round-trip reported, so that asserted the radio
+    // captured nothing at all between two HTTP calls. MEASURED, ten idle runs: the quantity is not
+    // a latency spread but a QUANTUM. The coverage log grows one capture block at a time, so the
+    // seconds row 1 picks up are 0 or an exact multiple of 16384 / 2.4e6 s = 6.8267 ms — the
+    // 6.8 ms "inter-request latency" T-425 and T-436 both reported is that constant, not a
+    // measurement of the network. Measured range of the quantity, with ~1.5 ms of wall clock
+    // between the calls: idle, one block on 1 of 10 runs here and one on the rows-vs-column pair;
+    // under 32 CPU burners (load ~47), 1 of 20 here — the old assertion's failure — and 12 of 20
+    // on the rows-vs-column pair, which only survived because its tolerance was 0.05 rather than
+    // 1e-6. The two bounds differed in nothing but which happened to be generous.
+    // Nothing invariant says zero blocks arrive, so nothing here asserts it. What IS invariant:
+    // rows past the straddler are unobserved, so they contribute no seconds at all.
+    let row1_obs = cells[CELLS]["observed_s"].as_f64().unwrap_or(0.0);
     assert!(
-        (summed - row0_observed_s).abs() < 1e-6,
-        "only row 0 was sampled, so the rows sum to row 0: {g}"
+        (summed - (row0_observed_s + row1_obs)).abs() < 1e-6,
+        "rows {}.. are unobserved, so the rows sum to rows 0 and 1: {g}",
+        edge_row.max(2)
     );
-    assert!((col_obs - summed).abs() < 0.05, "{col} vs {g}");
+    // The column answer is asked AFTER the rows answer and the coverage log only appends, so the
+    // column can hold what the rows did not, never less. A direction, not a tolerance.
+    assert!(
+        col_obs >= summed - 1e-9,
+        "the later answer cannot have seen less capture: {col} vs {g}"
+    );
     assert!(
         (col_duty - col_obs / (t1 - t0)).abs() < 1e-6,
         "the column's duty is its seconds over its own extent: {col}"
     );
+    // The bug this window exists to catch makes the column claim the WHOLE window (duty 1.0). The
+    // bound is on the shape — one row of {ROWS} is ~0.167 — not on the request latency: reaching
+    // 0.25 would need 1.5 s of capture, 220 blocks, to arrive between the two calls.
     assert!(
         col_duty < 0.25,
         "a column covering one row of {ROWS} is ~1/{ROWS} sampled, not 1: {col}"
+    );
+
+    // ---- 2b. the same identity, asked where it can be exact ----
+    // Property 2 can only ever compare two answers taken from a moving edge. Behind the edge the
+    // log is settled — it appends at the live edge and never rewrites — so a window wholly in the
+    // past gives the rows answer and the column answer byte-identical evidence however far apart
+    // the two requests fall. `sum(rows) == column` then holds to 1e-6 instead of to a tolerance
+    // sized around a capture block, which is the claim property 2 was reaching for.
+    let (pt0, pt1) = (edge - ROW_S, edge);
+    let past = format!("f_lo={lo}&f_hi={hi}&cells={CELLS}&t0={pt0}&t1={pt1}");
+    let (st, pr) = get(addr, &format!("/api/coverage?{past}&rows={ROWS}"));
+    assert_eq!(st, 200, "{pr}");
+    let pcells = pr["any"]["cells"].as_array().expect("cells").clone();
+    assert_eq!(pcells.len(), ROWS * CELLS, "{pr}");
+    for (i, c) in pcells.iter().enumerate() {
+        assert_eq!(
+            c["state"],
+            json!("observed"),
+            "cell {i} is wholly behind the live edge: {pr}"
+        );
+    }
+    let psummed: f64 = (0..ROWS)
+        .filter_map(|r| pcells[r * CELLS]["observed_s"].as_f64())
+        .sum();
+    let (st, pcol) = get(addr, &format!("/api/coverage?{past}&rows=1"));
+    assert_eq!(st, 200, "{pcol}");
+    let p0 = &pcol["any"]["cells"].as_array().expect("cells")[0];
+    let (pcol_obs, pcol_duty) = (
+        p0["observed_s"].as_f64().expect("observed_s"),
+        p0["duty"].as_f64().expect("duty"),
+    );
+    assert!(
+        (psummed - pcol_obs).abs() < 1e-6,
+        "settled window: the column IS the sum of its rows: {pcol} vs {pr}"
+    );
+    assert!(
+        (pcol_duty - pcol_obs / (pt1 - pt0)).abs() < 1e-6,
+        "settled window: duty is seconds over the column's own extent: {pcol}"
+    );
+    assert!(
+        pcol_duty > 0.9,
+        "a window wholly inside capture is sampled throughout: {pcol}"
     );
 
     // ---- 3. the fourth state, and it is a DIFFERENT value from grey ----
