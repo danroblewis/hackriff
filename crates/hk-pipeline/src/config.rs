@@ -93,6 +93,19 @@ pub struct PipelineSettings {
     pub site: Option<[f64; 2]>,
     /// Offer confirmed tracks to the scheduler with a verification group (hackriffd).
     pub verify_pois: bool,
+    /// Observation-log age horizon, **days** (T-406, `docs/16` §5.4); `None` keeps
+    /// [`hk_store::observation::DEFAULT_MAX_AGE_NS`] (180 days).
+    ///
+    /// This is the horizon over which the coverage map can still say *"this front end was not
+    /// tuned here, then"* rather than *"we no longer know whether we looked"* — so it is the
+    /// setting an installation with a small disk lowers, knowingly trading that distinction for
+    /// space. It is never raised to cover a gap in the data: a longer horizon retains records, it
+    /// does not invent them.
+    pub observation_retention_days: Option<f64>,
+    /// Observation-log byte quota, **MiB** (T-406); `None` keeps
+    /// [`hk_store::observation::DEFAULT_MAX_BYTES`] (2 GiB). On a continuously *sweeping*
+    /// installation this is the bound that actually binds, not the age.
+    pub observation_max_mb: Option<f64>,
     /// On-demand listening limits (T-066).
     pub listen: ListenSettings,
     /// Compute providers (T-056, ADR-0007): `{"provider": "auto|cpu|cpu-mt|accelerate|gpu",
@@ -162,6 +175,8 @@ impl Default for PipelineSettings {
             classify: Vec::new(),
             site: None,
             verify_pois: true,
+            observation_retention_days: None,
+            observation_max_mb: None,
             listen: ListenSettings::default(),
             compute: hk_dsp::compute::ComputeOptions::default(),
         }

@@ -54,7 +54,9 @@
 //! # The fourth state: `"unknown"` — *we no longer know whether we looked*
 //!
 //! `docs/16` §5.4. Two horizons cross. The spectrum-history pyramid has **no age limit** (a rolling
-//! byte budget); the IQ ring holds minutes and the observation log expires at 30 days. So a cell can
+//! byte budget); the IQ ring holds minutes and the observation log expires at 180 days (T-406 —
+//! `docs/16` §5.4 raised it from 30 so the coverage record outlives the pyramid it explains). So a
+//! cell can
 //! hold a measurement whose coverage record is gone — and, more commonly, a *row* can lie before any
 //! surviving record at all. `unobserved` claims *nothing looked*, which is a claim no record
 //! supports there. Painting it grey spells "never looked" for spectrum whose records were merely
@@ -95,7 +97,7 @@
 //! | Source | Interval | Centre/span/rate | Device | Horizon |
 //! |---|---|---|---|---|
 //! | IQ ring journal (`/api/iqbuffer` segments, ADR-0014) | yes | yes | **yes** (`device_id`) | the ring's retention |
-//! | observation log (`DwellRecord`/`SweepRecord`, ADR-0012 §1) | yes | yes (`ObservedWindow`) | **yes** (`device_id`, T-378) | 30 days |
+//! | observation log (`DwellRecord`/`SweepRecord`, ADR-0012 §1) | yes | yes (`ObservedWindow`) | **yes** (`device_id`, T-378) | 180 days / 2 GiB, whichever binds (T-406) |
 //!
 //! The ring journal opens a new segment on **every** provenance change, so retunes are segment
 //! boundaries by construction — it is already a tune history. **T-378** put the same `device_id` on
@@ -111,7 +113,6 @@
 //! |---|---|---|---|
 //! | GET | `/api/coverage` | `f_lo`&`f_hi` (Hz, required), `cells`? (1…4096, default 256), `rows`? (1…4096, default 1), `t0`&`t1`? (Unix s; default the capture window) | `{region, window, grid, devices, any, horizon, sources, resolution}` |
 
-use hk_model::attention::observation::{ObservationRecord, ObservedWindow};
 use hk_model::{FreqRange, TimeRange, Timestamp};
 use hk_store::coverage::{
     Coverage, CoverageGrid, CoverageSpan, Device, MAX_COVERAGE_CELLS, MAX_COVERAGE_ROWS,
@@ -241,28 +242,19 @@ fn ring_spans(state: &ApiState, freq: FreqRange, window: TimeRange) -> Vec<Cover
         .collect()
 }
 
-/// Which front end an observation record says looked (T-378).
-///
-/// A record that names one is device-local evidence, exactly like an IQ-ring segment. A record
-/// that names none — every record written before T-378, and every record of a source that states
-/// no identity — is [`Device::Unknown`]: evidence that *something* looked, and nothing more. It is
-/// never read as the device that happens to be running now, which would invent provenance for data
-/// that has none (`BiasTee::Unknown` ≠ `off`).
-fn record_device(device_id: Option<&String>) -> Device {
-    device_id
-        .filter(|d| !d.is_empty())
-        .map_or(Device::Unknown, |d| Device::Id(d.clone()))
-}
-
 /// The tune history the observation log holds: every dwell's and every sweep hop's analysed extent
 /// over the interval it was analysed in (ADR-0012 §1).
 ///
 /// Since T-378 these records name the front end that observed, so a span from the log is
-/// device-local over the log's 30-day horizon — far beyond the IQ ring's retention — and the
-/// coverage map can answer "did *this* radio look here" over the whole of it. A record without a
-/// device stays [`Device::Unknown`] (see [`record_device`]). `ObservedWindow::covered()` already
-/// removes the DC notch, so a notched window contributes two spans and the notch stays honestly
-/// unobserved.
+/// device-local over the log's retention horizon — far beyond the IQ ring's — and the coverage map
+/// can answer "did *this* radio look here" over the whole of it. A record without a device stays
+/// [`Device::Unknown`] (`hk_store::coverage::record_device`).
+///
+/// **The record → span mapping itself lives in `hk-store`**, next to the rasteriser that consumes
+/// it ([`hk_store::spans_from_records`], T-406): it is the one place that decides what shape a
+/// record takes on the grid, and `docs/16` §7 step 6 turns on that shape being the **step's** own
+/// band and interval rather than one coarse claim over a pass. This function is the route's half:
+/// page the log, then hand the records over.
 ///
 /// Returns the spans and how many of them named a device, so the answer's `sources` row can say
 /// whether this record actually knew.
@@ -278,50 +270,8 @@ fn observation_spans(
         cursor: 0,
         limit: MAX_RECORD_LIMIT,
     });
-    let mut out = Vec::new();
-    let mut named = 0usize;
-    let mut push = |device: &Device, w: &ObservedWindow, t: TimeRange| {
-        for c in w.covered() {
-            if c.overlaps(&freq) {
-                named += usize::from(device.is_named());
-                out.push(CoverageSpan {
-                    device: device.clone(),
-                    time: t,
-                    freq: c,
-                    center_hz: w.center_hz,
-                    sample_rate_hz: w.sample_rate_hz,
-                });
-            }
-        }
-    };
-    for r in &page.records {
-        match r {
-            ObservationRecord::Dwell(d) => {
-                push(&record_device(d.device_id.as_ref()), &d.window, d.observed)
-            }
-            ObservationRecord::Sweep(s) => {
-                let device = record_device(s.device_id.as_ref());
-                let Some(g) = page.geometries.iter().find(|g| g.id == s.geometry) else {
-                    continue;
-                };
-                for v in &s.visits {
-                    let Some(w) = g.hops.get(v.hop as usize) else {
-                        continue;
-                    };
-                    let start = s
-                        .span
-                        .start
-                        .saturating_add_nanos(i64::from(v.start_ms) * 1_000_000);
-                    let end = start.saturating_add_nanos(i64::from(v.observed_ms) * 1_000_000);
-                    if end > start {
-                        push(&device, w, TimeRange::new(start, end));
-                    }
-                }
-            }
-            ObservationRecord::Geometry(_) => {}
-        }
-    }
-    (out, named)
+    let read = hk_store::spans_from_records(&page.records, &page.geometries, freq);
+    (read.spans, read.named)
 }
 
 /// The tune history behind one answer, and **how far back it reaches**.
@@ -802,6 +752,8 @@ fn window_of(state: &ApiState, q: &Params) -> Result<(TimeRange, &'static str), 
 
 #[cfg(test)]
 mod tests {
+    use hk_model::attention::observation::{ObservationRecord, ObservedWindow};
+
     use super::*;
 
     fn t(s: i64) -> Timestamp {

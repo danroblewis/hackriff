@@ -62,13 +62,20 @@ pub struct ObservationLog {
 impl ObservationLog {
     /// Opens the log under `<data_dir>/observations` and starts its writer; offers the
     /// `observations` stream through `sink`. `device_id` is the front end the records name.
+    ///
+    /// `retention` is the run's `(days, MiB)` override (T-406,
+    /// `ScanPlan.extra.pipeline.observation_retention_days` / `observation_max_mb`); `(None, None)`
+    /// keeps the defaults, which `docs/16` §5.4 sizes so the coverage record outlives the
+    /// spectrum-history pyramid it explains.
     pub(crate) fn open(
         data_dir: &Path,
         device_id: Option<String>,
         sink: Option<&StreamSink>,
+        retention: (Option<f64>, Option<f64>),
     ) -> anyhow::Result<Self> {
         Self::open_with(
-            ObservationLogConfig::new(data_dir.join("observations")),
+            ObservationLogConfig::new(data_dir.join("observations"))
+                .with_retention(retention.0, retention.1),
             device_id,
             sink,
         )

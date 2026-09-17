@@ -49,6 +49,16 @@
 //!   and the plan warns [`PlanWarning::AccessoryTrustPending`]: detection trust near notch /
 //!   filter-bank edges is pending T-028.
 //!
+//! # The iterative scan (T-406, `docs/16` §7 step 6)
+//!
+//! [`IterativeScan`] is a **dwell policy over this scheduler**, not a second one: a
+//! [`hk_model::ScanPolicy::DwellOnly`] plan over the device's tunable ranges with a long
+//! [`SchedulerConfig::region_dwell_ns`] (10–30 s, configurable). Its steps are
+//! [`Purpose::RegionDwell`], so [`observe::ObservationRecorder`] writes **one dwell record per
+//! step with that step's own band and interval** — which is what lets the coverage map rasterise
+//! the shape of what was scanned instead of one coarse claim over a whole pass.
+//! [`ScanBudget`] prices the resulting pass.
+//!
 //! # Bandit revisit policy (T-120, ADR-0012 §5)
 //!
 //! [`Scheduler::enable_bandit`] replaces the weighted-round-robin POI dwells with the
@@ -85,6 +95,7 @@ mod clock;
 mod config;
 mod core;
 mod plan;
+mod scan;
 mod step;
 mod survey;
 mod verify;
@@ -107,6 +118,10 @@ pub use core::{
 pub use plan::{
     CompiledPlan, CompiledRegion, Hop, HopKind, PlanError, PlanWarning, check_gains,
     pick_baseband_filter, pick_rate, rf_path,
+};
+pub use scan::{
+    DEFAULT_DWELL_NS, IterativeScan, MAX_DWELL_NS, RECOMMENDED_MAX_DWELL_NS,
+    RECOMMENDED_MIN_DWELL_NS, ScanBudget, is_scan_step,
 };
 pub use step::{GainSlot, PoiKey, Purpose, ScheduleStep};
 pub use survey::{MemorySurveyLog, SurveyEvent, SurveyLog};

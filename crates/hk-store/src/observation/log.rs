@@ -16,6 +16,52 @@ use super::segment::{HOUR_NS, encode_line, hour_of, list_segments, segment_path}
 /// reference (just before the first such record), so a segment decodes on its own.
 const GEOMETRIES_KEPT: usize = 32;
 
+/// Default age horizon of the log, ns — **180 days** (T-406, `docs/16` §5.4).
+///
+/// # Why it is no longer 30 days
+///
+/// `docs/16` §5.4 calls lengthening this *"the cheapest correctness purchase in the whole design"*,
+/// and names the failure it buys off. The spectrum-history pyramid has **no age limit at all** — a
+/// rolling 8 GiB byte budget — while this log expired at 30 days, so on a quiet installation the two
+/// crossed: the pyramid held measurements for spectrum whose coverage record had already been
+/// discarded. A cell like that is not `unobserved` (nothing looked) and cannot honestly be greyed;
+/// it is the **fourth state**, *we no longer know whether we looked*
+/// ([`crate::CoverageGrid::unknown_rows_before`], T-423). Every day of horizon added here is a day
+/// that state does not have to be reached for, and §5.4's recommendation is to make the coverage
+/// record the **longest** horizon rather than the middle one, because an interval-and-a-band is
+/// orders of magnitude cheaper per unit of time covered than a spectrum cell with a histogram.
+///
+/// It also decides what T-406's iterative scan is worth: *"a region the sweep cleared last week"* is
+/// distinguishable from *"a region the sweep has not reached"* only while a record survives to say
+/// so, and a survey whose pass takes hours is answering questions about weeks.
+///
+/// # The arithmetic, which is measured rather than assumed
+///
+/// §5.4's own estimate was explicitly unverified. `observation::tests::
+/// a_dwell_records_line_cost_decides_which_retention_bound_binds` measures the encoded line and
+/// derives both bounds from it, and the honest summary is that **which bound binds depends on the
+/// policy**:
+///
+/// - **Dwelling** (T-406's iterative scan) writes one line per step. At the 10 s floor of the user's
+///   range that is ~8.6 k lines/day, a few MB/day, so [`DEFAULT_MAX_BYTES`] holds roughly a year and
+///   this age bound binds first — which is the intended order.
+/// - **Sweeping** at 50 ms hops writes one aggregated record per pass or 60 s, but each carries up
+///   to ~1.5 k hop visits, so it is two orders of magnitude denser per day and the **byte** quota
+///   binds long before 180 days. Raising the age alone would not have lengthened that horizon at
+///   all; both had to move, and even so a continuous sweep keeps a byte-bounded horizon.
+///
+/// Both are settings: an installation with a small disk lowers them
+/// ([`ObservationLogConfig::with_retention`], `ScanPlan.extra.pipeline.observation_retention_days`).
+pub const DEFAULT_MAX_AGE_NS: i64 = 180 * 24 * HOUR_NS;
+
+/// Default byte quota of the log — **2 GiB** (T-406, `docs/16` §5.4).
+///
+/// Raised with [`DEFAULT_MAX_AGE_NS`], because on a sweeping installation the byte quota is the
+/// bound that actually binds (see there). It is a **ceiling reached after months**, not an
+/// allocation, and it is a quarter of the spectrum-history pyramid's own 8 GiB budget for records
+/// that cover orders of magnitude more time per byte than the cells they explain.
+pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 /// Settings of an observation log.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservationLogConfig {
@@ -26,9 +72,9 @@ pub struct ObservationLogConfig {
     /// Buffered bytes that force a flush, default 256 KiB.
     pub flush_bytes: usize,
     /// Hours ending more than this before the newest record (sample time) are deleted, ns;
-    /// default 30 days.
+    /// default [`DEFAULT_MAX_AGE_NS`] (180 days).
     pub max_age_ns: i64,
-    /// Byte quota over all segments, default 512 MiB.
+    /// Byte quota over all segments, default [`DEFAULT_MAX_BYTES`] (2 GiB).
     pub max_bytes: u64,
     /// Records the writer queue holds before producers drop, default 4096.
     pub queue_len: usize,
@@ -41,10 +87,27 @@ impl ObservationLogConfig {
             root: root.into(),
             flush_interval: Duration::from_secs(60),
             flush_bytes: 256 * 1024,
-            max_age_ns: 30 * 24 * HOUR_NS,
-            max_bytes: 512 * 1024 * 1024,
+            max_age_ns: DEFAULT_MAX_AGE_NS,
+            max_bytes: DEFAULT_MAX_BYTES,
             queue_len: 4096,
         }
+    }
+
+    /// The retention bounds overridden (T-406): an age in **days** and a quota in **MiB**, each
+    /// `None` to keep the default.
+    ///
+    /// Both defaults are ceilings sized for a device that has the disk (see [`DEFAULT_MAX_AGE_NS`]);
+    /// this is how an installation that has not says so. A non-positive or non-finite value is
+    /// ignored rather than applied, because a zero horizon would delete the coverage record the
+    /// whole map is derived from.
+    pub fn with_retention(mut self, max_age_days: Option<f64>, max_bytes_mb: Option<f64>) -> Self {
+        if let Some(d) = max_age_days.filter(|d| d.is_finite() && *d > 0.0) {
+            self.max_age_ns = (d * 24.0 * HOUR_NS as f64).min(i64::MAX as f64) as i64;
+        }
+        if let Some(mb) = max_bytes_mb.filter(|m| m.is_finite() && *m > 0.0) {
+            self.max_bytes = (mb * 1024.0 * 1024.0).min(u64::MAX as f64) as u64;
+        }
+        self
     }
 
     /// Low-power mode: flushes stretch to 5 minutes (ADR-0012 §9).

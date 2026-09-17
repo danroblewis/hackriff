@@ -79,7 +79,8 @@
 //! # The fourth state: `Unobserved` here is *"no record"*, which past the horizon is not *"never"*
 //!
 //! `docs/16` §5.4. The spectrum-history pyramid has **no age limit** (a rolling byte budget) while
-//! the observation log expires at **30 days**, so the two cross: a cell older than the record
+//! the observation log expires at [`crate::observation::DEFAULT_MAX_AGE_NS`] (**180 days** since
+//! T-406, up from 30), so the two can still cross: a cell older than the record
 //! horizon can hold a measurement whose coverage record has been discarded. A cell this module
 //! calls [`Coverage::Unobserved`] means *no surviving record covers it* — inside the horizon that is
 //! "nothing looked", and **beyond it that is "we no longer know whether we looked"**, which must not
@@ -90,6 +91,7 @@
 
 use std::collections::BTreeMap;
 
+use hk_model::attention::observation::{ObservationRecord, ObservedWindow, SweepGeometry};
 use hk_model::{FreqRange, TimeRange, Timestamp};
 
 /// Most frequency cells one [`CoverageGrid`] may hold. Each cell is a measurement, and the fold is
@@ -532,6 +534,110 @@ impl Acc {
         }
         (n, total)
     }
+}
+
+/// Which front end an observation record says looked (T-378).
+///
+/// A record that names one is device-local evidence, exactly like an IQ-ring segment. A record that
+/// names none — every record written before T-378, and every record of a source that states no
+/// identity — is [`Device::Unknown`]: evidence that *something* looked, and nothing more. It is
+/// never read as the device that happens to be running now, which would invent provenance for data
+/// that has none (`BiasTee::Unknown` ≠ `off`).
+pub fn record_device(device_id: Option<&str>) -> Device {
+    device_id
+        .filter(|d| !d.is_empty())
+        .map_or(Device::Unknown, |d| Device::Id(d.to_string()))
+}
+
+/// Coverage spans read out of observation records, and how many of them named a device.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RecordSpans {
+    /// The spans, device-local and unmerged, in record order.
+    pub spans: Vec<CoverageSpan>,
+    /// How many of `spans` carry a named [`Device::Id`] — so a caller can report `device_known`
+    /// as something **measured**, never declared (T-378).
+    pub named: usize,
+}
+
+/// The tune history an observation log holds, as coverage spans: every dwell's analysed extent over
+/// the interval it was analysed in, and every sweep hop visit's (ADR-0012 §1).
+///
+/// # One span per step, which is the whole of `docs/16` §7 step 6
+///
+/// A [`DwellRecord`](hk_model::attention::observation::DwellRecord) describes **one scheduler step** — one tuned band, one settled interval — so it
+/// becomes one span (two when a DC notch splits it) with that step's own shape. A [`SweepRecord`]
+/// aggregates a pass, but it keeps its hops: each [`HopVisit`](hk_model::attention::observation::HopVisit) names a geometry hop and an offset
+/// inside the record's span, so it too becomes a span with its **hop's** band and that visit's own
+/// interval. Neither kind ever contributes one coarse span over a whole pass, and that is exactly
+/// what [`grid_over`] needs — a rasteriser can only tell the truth about a dwell pattern if the
+/// records it reads carry the dwell's own shape. A producer that folded several steps into one
+/// record with a union band would rasterise as *the whole band, the whole time*: the overclaim this
+/// module exists to prevent, arriving through the input rather than the fold.
+///
+/// [`ObservedWindow::covered`] has already removed the DC notch, so a notched window contributes two
+/// spans and the notch stays honestly unobserved. A visit of zero observed length contributes
+/// nothing: a hop cut before it settled sampled nothing, and [`Coverage::of`] would refuse it anyway.
+///
+/// `freq` filters: a covered extent that misses the band asked about is dropped rather than folded,
+/// because coverage of somewhere else is not coverage of here. Pass
+/// [`FreqRange::new(f64::NEG_INFINITY, f64::INFINITY)`](FreqRange::new) to keep everything.
+///
+/// `geometries` are the [`SweepGeometry`] records the page's sweep records reference; a sweep record
+/// whose geometry is not among them contributes nothing, because without the geometry its hops name
+/// no band and guessing one would be inventing coverage.
+pub fn spans_from_records<'a>(
+    records: impl IntoIterator<Item = &'a ObservationRecord>,
+    geometries: &[SweepGeometry],
+    freq: FreqRange,
+) -> RecordSpans {
+    let mut out = RecordSpans::default();
+    let mut push = |device: &Device, w: &ObservedWindow, t: TimeRange| {
+        if t.duration_ns() <= 0 {
+            return;
+        }
+        for c in w.covered() {
+            if c.overlaps(&freq) {
+                out.named += usize::from(device.is_named());
+                out.spans.push(CoverageSpan {
+                    device: device.clone(),
+                    time: t,
+                    freq: c,
+                    center_hz: w.center_hz,
+                    sample_rate_hz: w.sample_rate_hz,
+                });
+            }
+        }
+    };
+    for r in records {
+        match r {
+            ObservationRecord::Dwell(d) => push(
+                &record_device(d.device_id.as_deref()),
+                &d.window,
+                d.observed,
+            ),
+            ObservationRecord::Sweep(s) => {
+                let device = record_device(s.device_id.as_deref());
+                let Some(g) = geometries.iter().find(|g| g.id == s.geometry) else {
+                    continue;
+                };
+                for v in &s.visits {
+                    let Some(w) = g.hops.get(v.hop as usize) else {
+                        continue;
+                    };
+                    let start = s
+                        .span
+                        .start
+                        .saturating_add_nanos(i64::from(v.start_ms) * 1_000_000);
+                    let end = start.saturating_add_nanos(i64::from(v.observed_ms) * 1_000_000);
+                    if end > start {
+                        push(&device, w, TimeRange::new(start, end));
+                    }
+                }
+            }
+            ObservationRecord::Geometry(_) => {}
+        }
+    }
+    out
 }
 
 /// Folds `spans` into one device's coverage grid over `freq` × `window`, collapsed on time.

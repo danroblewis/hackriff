@@ -37,6 +37,17 @@ enum Command {
         /// Drive the attention scheduler over the replay (virtual tuning).
         #[arg(long)]
         schedule: bool,
+        /// Iterative scan (T-406): step the tune across everything the source can tune, dwelling
+        /// this many seconds per step (10-30 s is what the survey is sized for). Requires
+        /// --schedule (nothing steps the tune without it); conflicts with --plan, which can carry
+        /// the same policy itself.
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            conflicts_with = "plan",
+            requires = "schedule"
+        )]
+        survey_dwell: Option<f64>,
         /// Offline feed cache directory for anomaly correlation.
         #[arg(long)]
         feeds: Option<PathBuf>,
@@ -79,6 +90,17 @@ enum Command {
         /// Drive the attention scheduler (it retunes the radio over the plan).
         #[arg(long)]
         schedule: bool,
+        /// Iterative scan (T-406): step the tune across everything the source can tune, dwelling
+        /// this many seconds per step (10-30 s is what the survey is sized for). Requires
+        /// --schedule (nothing steps the tune without it); conflicts with --plan, which can carry
+        /// the same policy itself.
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            conflicts_with = "plan",
+            requires = "schedule"
+        )]
+        survey_dwell: Option<f64>,
         /// Offline feed cache directory for anomaly correlation.
         #[arg(long)]
         feeds: Option<PathBuf>,
@@ -251,6 +273,7 @@ fn main() -> anyhow::Result<()> {
             serve,
             paced,
             schedule,
+            survey_dwell,
             feeds,
             calibration,
             info,
@@ -270,6 +293,7 @@ fn main() -> anyhow::Result<()> {
                 serve,
                 paced,
                 schedule,
+                survey_dwell_s: survey_dwell,
                 feeds,
                 ui_dist: default_ui_dist(ui_dist),
                 calibration,
@@ -285,6 +309,7 @@ fn main() -> anyhow::Result<()> {
             plan,
             serve,
             schedule,
+            survey_dwell,
             feeds,
             calibration,
             json,
@@ -300,6 +325,7 @@ fn main() -> anyhow::Result<()> {
                 plan,
                 serve,
                 schedule,
+                survey_dwell_s: survey_dwell,
                 feeds,
                 ui_dist: default_ui_dist(ui_dist),
                 calibration,
