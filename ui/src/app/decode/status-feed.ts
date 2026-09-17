@@ -2,6 +2,24 @@
 // pipeline, reference-counted across subscribers, so the workbench (T-153: status -> quality tiles)
 // and the packet inspector (T-154: frames) never open two sockets to the same pipeline.
 // Owner: T-153, implemented here. T-154 subscribes with `{frame}` and never opens its own socket.
+//
+// **This transport is the live edge, by design, and the two record types it carries are treated
+// differently downstream (T-387).**
+//
+// - `frame` records are *data about the air*: each carries its own capture-clock `t_ns`, and the
+//   pipeline's frames are recorded to a capture. So the packet inspector does **not** treat this
+//   socket as its window — it filters what arrives here to the view window and fetches the rest
+//   from `GET /api/captures/{id}/frames?from_t&to_t`. This socket is one source of the window's
+//   frames, never the definition of it.
+// - `status` records are *telemetry of the decoder* — a node's lock, quality and error rate as it
+//   is reading now. They are stored verbatim in the capture file (stream contract §14.7) but
+//   nothing indexes or serves them by time, and a lock from an hour ago is not this stage's state.
+//   The stage strip that renders them is therefore **live-only and says so** (`app/live-only.ts`).
+//
+// `/ws/open/<name>` is an **on-demand opener** and has no history form. T-387 deliberately left it
+// that way: the one surface that needed a past window had an existing windowed route to reach it
+// through, and growing a history form on an opener would be an ADR-0004 stream-contract change made
+// to serve a surface that did not need it.
 import type { AppContext } from "../context";
 import { backoffMs, openStream, type StreamSocket } from "../net";
 

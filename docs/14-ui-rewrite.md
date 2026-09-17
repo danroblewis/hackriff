@@ -328,6 +328,74 @@ would shorten a box, or that would bridge a silence between two separate stretch
 side, the rate is capped at 32 records per 250 ms tick — 128/s — whatever the band is doing;
 what a tick leaves out simply grows on the poll as before.
 
+### The last four surfaces: three are live-only and now say so, one had a route already (T-387)
+
+T-384 wired the output and decode panels to the window and left **four** surfaces on the live edge
+with a stated reason: the **packet inspector**, the **status feed**, the **pipelines list** and the
+**outputs dock** are live WebSocket transports, and `/ws/open/inspector` / `/ws/open/stage` have no
+history form — so no caller could ask them about a past window. Adding one is an
+[ADR-0004](adr/0004-stream-output-contract.md) stream-contract change, not a UI fix, which is why
+stopping there was right.
+
+**The prior question was most of the answer: should these surfaces re-derive at all?** They do not
+all describe the same thing.
+
+| surface | verdict | why |
+|---|---|---|
+| packet inspector | **re-derives** | packets are **data about the air**: every frame record carries its own capture-clock `t_ns`, and the frames of a past window exist — the pipeline's inspector output is recorded to a capture with no request (stream contract §14.7). The whole-UI window rule bites in full. |
+| pipelines list | **live-only, and says so** | `GET /api/pipelines` answers *which decoder processes exist in this run*. A process is running or it is not; there is no past-window form of it, and none should be invented. |
+| status feed | **live-only, and says so** | `status` records are **telemetry of the decoder** — a node's lock, quality and error rate as it is reading now. They are stored verbatim in the capture file but **nothing indexes or serves them by time**, and a lock from an hour ago is not this stage's state. |
+| outputs dock | **live-only, and says so** | every entry is a stream *this page* has open, with a Mute, a Stop and a Copy address. A socket this browser tab holds cannot exist in a window an hour ago, and there would be nothing there to stop. It is session state. |
+
+**Being live-only is not the bug; *looking* windowed while being live-only is.** A panel that sits
+beside a scrubbed waterfall and silently answers about now makes a claim the reader takes for the
+window on screen — the same class of error as the focus panel's "no longer in the inventory" for a
+row that was merely outside the window (T-385), or the Confirmed list asking on the wall clock
+(T-389). So each of the three carries one shared note (`ui/src/app/live-only.ts`) naming *what* is
+live-only, and the note gets plainer the moment the view stops following the live edge — which is
+exactly when a reader would otherwise be misled. Its only inputs are the subject and Play/Pause:
+making it depend on whether the panel is empty would let an emptiness read as the window's answer.
+
+**And the contract did not change.** The one surface that needed a past window had a route with the
+window already on it: `GET /api/captures/{id}/frames?from_t&to_t` — which `docs/api.md` had already
+named "the right route for the packet inspector's own scrubbing". The inspector follows
+`GET /api/captures`' `pipeline_id` key to its capture, fetches the window, and merges those records
+with what its live socket received, de-duplicated on each frame's own time and frame number so a
+window straddling the live edge lists each frame once (the live copy wins, keeping its arrival
+flash). A route that exists beats a contract change; ADR-0004 and stream contract §12.1 now say so
+as a rule, together with its corollary — a surface that *cannot* be windowed must declare itself
+live-only rather than sit silently on the edge.
+
+Held to T-379's four obligations, and to T-388's:
+
+- **On the capture clock.** `frameInWindow` compares the frame's own `timeS` (`t_ns / 1e9`) against
+  the window. This bug has now been found four times — T-379 in the Candidate list (306,315 s out),
+  T-384 at three sites in `plots.ts`, T-389 in the live Confirmed query — and the test asserts the
+  fourth cannot happen: the same frames tally on the capture clock and vanish on the browser's.
+- **Never widened.** A window holding nothing lists nothing; the page limit truncates a dense window
+  rather than widening it; a backfill fetched for another window is never borrowed for this one.
+- **Which emptiness.** The frame list says *no window known* / *unobserved* / "No frames in this
+  window." / *coverage unknown*, from `GET /api/coverage` (`hk_store::Coverage`) for exactly its own
+  window. T-387 also collapsed the three surfaces' wording into one `windowEmptyText`: the two
+  sentences that are claims about the **measurement** are now worded identically on the Explore
+  lists, the decode panel and the inspector, and only the third — the one about the air — is each
+  surface's own. Three near-identical sentences are three vocabularies.
+- **Nothing presumed.** A frame carrying no `t_ns` cannot be placed on the time axis, so it is not
+  claimed for the window; it is counted and disclosed in the panel's note rather than dropped in
+  silence. And the note keeps three facts apart — what the window holds, what the live tap is doing,
+  where the stream is served — because a connected tap says nothing about whether the window on
+  screen holds frames.
+- **The control that makes the rest mean anything:** a window that *does* hold frames renders them,
+  asserting ids, from both sources at once. Without it every other assertion is satisfiable by a
+  panel that shows nothing and explains itself well. It is asserted twice — in the UI over the merged
+  collection and the rows it renders, and in the API contract test, where the `from_t`+`to_t` pair a
+  scrub actually sends must serve exactly the window's frames (and a window before every frame must
+  come back empty rather than widened).
+
+The live socket stays subscribed while the view is scrubbed, and its ring stays bounded by **count**
+rather than by a clock — T-384's rule: a time-trimmed buffer discards live frames while the view is
+back in the past, so returning to Live would find the list missing frames it had already received.
+
 ### History surface (workflow #3)
 
 A **separate surface**, not a tab of Explore: the durable catalogue of every event, one-offs included, browsable by region and time (`GET /api/events`, and `GET /api/inventory/{id}/presence` for one emitter's track).

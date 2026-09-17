@@ -2,6 +2,7 @@
 // Listen audio and pipeline records — with a meter/rate, Mute, Copy address and Stop.
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
+import { OUTPUTS_SUBJECT, liveOnlyNote } from "../live-only";
 import { startPoll } from "../net";
 import { toast, type OutputEntry } from "../state";
 import { getAudioSession, stopOutput } from "./api";
@@ -47,10 +48,17 @@ function entryEl(ctx: AppContext, o: OutputEntry): HTMLElement {
 }
 
 function mount(el: HTMLElement, ctx: AppContext) {
-  const label = h("div", { class: "dock-label" }, h("b", {}, "Outputs"), h("small", {}, "0 live"));
+  // T-387: **live-only, and it says so.** Every entry here is a stream *this page* has open, with a
+  // Mute, a Stop and a Copy address — a socket this browser tab holds cannot exist in a window an
+  // hour ago, and there would be nothing there to stop. The dock is session state, not a view of
+  // the air; the note says which, and says it more plainly once the view is scrubbed back.
+  const note = h("small", { class: "live-only" }, liveOnlyNote(OUTPUTS_SUBJECT, !ctx.store.get().time.live));
+  const label = h("div", { class: "dock-label" }, h("b", {}, "Outputs"), h("small", {}, "0 live"), note);
   const list = h("div", { class: "outs" });
   el.replaceChildren(label, list);
   const count = label.querySelector("small")!;
+
+  ctx.store.select((s) => s.time.live, (live) => { note.textContent = liveOnlyNote(OUTPUTS_SUBJECT, !live); });
 
   ctx.store.select((s) => s.outputs, (outputs) => {
     count.textContent = outputsCountText(outputs);

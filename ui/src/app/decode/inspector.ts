@@ -14,6 +14,11 @@ import {
   asciiChar, cycleLeafAt, errorsByPath, frameViewFromCapture, hexBytes, nodeById,
   type FrameRecordDto, type FrameView, type LayerError, type LayerNode, type LayerTree,
 } from "../../frame-inspector";
+import {
+  viewWindow, windowCoverage, windowEmptyText, windowKey,
+  type ViewWindow, type WindowEmptiness, type WindowState,
+} from "../explore/inventory";
+import { captureFor, captureFramesPath, type CaptureLite } from "./captures";
 import { selectInspectorField, selectInspectorFrame, type InspectorSlice } from "./inspector-slice";
 import { subscribePipelineFeed, type FeedState, type FrameRecord } from "./status-feed";
 
@@ -43,6 +48,165 @@ export function resolveSelectedFrame(ring: readonly RingFrame[], frameSeq: numbe
     if (found) return found.view;
   }
   return ring[0]?.view ?? null;
+}
+
+// ---- the window this panel is a view over (T-387) --------------------------------------------
+//
+// **The prior question, answered.** T-384 left four surfaces on the live edge and said why: the
+// packet inspector, status feed, pipelines list and outputs dock are live WebSocket transports, and
+// `/ws/open/inspector`/`/ws/open/stage` have no history form. T-387 asked whether each *should*
+// re-derive at all. Three describe the run rather than the air and are honestly live-only, and say
+// so (`app/live-only.ts`). This one is different: **packets are data about the air.** Every frame
+// record carries its own capture-clock `t_ns` (stream contract §5.1), and the frames of a past
+// window exist — the pipeline's inspector output is recorded to a capture with no request (§14.7).
+// So the whole-UI window rule bites here in full: the data exists for the window, therefore it must
+// be shown.
+//
+// **And it needed no contract change.** `GET /api/captures/{id}/frames?from_t=&to_t=` already
+// carries the window and already serves these exact records; `docs/api.md` names it "the right
+// route for the packet inspector's own scrubbing". A route that exists beats growing a history
+// form on an on-demand opener (ADR-0004), which is what T-384 correctly refused to do in passing.
+//
+// The live socket stays. It is bounded by **count**, never by a clock (T-384's `capFrames` rule):
+// a time-trimmed ring would discard live frames while the view is scrubbed back, so returning to
+// Live would find the list missing frames it had already received.
+
+/** A frame's key for de-duplication across the two sources: its own capture-clock time and the
+ * pipeline's own frame number, both of which a live record and its recorded copy share. */
+function frameKey(v: FrameView): string {
+  return `${v.timeS}/${v.index}`;
+}
+
+/**
+ * Whether a frame falls in the window, on the **capture clock**.
+ *
+ * `timeS` is `t_ns / 1e9` — the frame's own stamp, never the browser's. This is the bug T-379 found
+ * in the Candidate list, T-384 found at three sites in `plots.ts` and T-389 found in the live
+ * Confirmed query; on the fixture behind T-379 a browser instant sits 3.5 days from the capture
+ * clock, so a window built from `Date.now()` selects either nothing or everything and both read on
+ * screen as an answer.
+ *
+ * A frame with no `t_ns` is **not** in the window: it cannot be placed on the time axis at all, and
+ * claiming it for the window on screen would be asserting a time nobody measured. They are counted
+ * and disclosed instead of silently dropped — see [[unplaceableFrames]].
+ */
+export function frameInWindow(v: FrameView, w: ViewWindow): boolean {
+  return v.timeS !== undefined && v.timeS >= w.t0 && v.timeS <= w.t1;
+}
+
+/** Live frames carrying no `t_ns`, so no window can contain them. Reported in the panel's note
+ * rather than dropped in silence: an unplaceable frame is a gap in the record, not a non-event. */
+export function unplaceableFrames(ring: readonly RingFrame[]): number {
+  return ring.reduce((n, r) => n + (r.view.timeS === undefined ? 1 : 0), 0);
+}
+
+/**
+ * The frames of the view window: what the live socket received, plus what the pipeline's capture
+ * holds for a stretch the socket never saw, de-duplicated and newest-first.
+ *
+ * Both sources are filtered by the **same** predicate even though the route was already asked for
+ * `[t0, t1]` — `to_t` ends a page at the first frame *after* it, so the route may serve one frame
+ * past the window, and one predicate in one place is what keeps the list and the waterfall above it
+ * from disagreeing about which frames are inside.
+ *
+ * A window straddling the live edge is served by both sources, so a frame would otherwise be listed
+ * twice; [[frameKey]] drops the recorded copy and keeps the live one, which is the one carrying the
+ * `fresh` flash.
+ */
+export function windowFrames(
+  ring: readonly RingFrame[], stored: readonly FrameView[], w: ViewWindow,
+): RingFrame[] {
+  const live = ring.filter((r) => frameInWindow(r.view, w));
+  const seen = new Set(live.map((r) => frameKey(r.view)));
+  const recorded = stored
+    .filter((v) => frameInWindow(v, w) && !seen.has(frameKey(v)))
+    .map((view) => ({ view, fresh: false }));
+  return [...live, ...recorded].sort(
+    (a, b) => (b.view.timeS ?? 0) - (a.view.timeS ?? 0) || b.view.index - a.view.index,
+  );
+}
+
+/** What the frame list has for the window it asked about. */
+export type FrameListView =
+  | { kind: "frames"; frames: RingFrame[] }
+  | Exclude<WindowEmptiness, { kind: "error" }>;
+
+/**
+ * What an empty frame list says, in the vocabulary every window-scoped surface shares
+ * ([[windowEmptyText]]): *no window known* and *nothing was ever observed here* are claims about
+ * the measurement and are worded identically everywhere; only "No frames in this window." is a
+ * finding about the air, and only it may be said when the receiver really was sampling.
+ */
+export function frameListEmptyText(v: Exclude<FrameListView, { kind: "frames" }>): string {
+  return windowEmptyText(v, "No frames in this window.", "No frames listed for this window.");
+}
+
+/** The note above the frame list: what the window holds, then what the live tap is doing, then
+ * where the stream is served. The three are separated because they are three different facts — a
+ * connected tap says nothing about whether the *window on screen* holds frames. */
+export function inspectorNoteText(view: FrameListView, unplaceable: number, feed: string, served: string): string {
+  const windowPart = view.kind === "frames"
+    ? `${view.frames.length} frame${view.frames.length === 1 ? "" : "s"} in this window`
+    : frameListEmptyText(view);
+  const parts = [windowPart];
+  if (unplaceable > 0) parts.push(`${unplaceable} carry no time and cannot be placed`);
+  if (feed) parts.push(`${feed} tap`);
+  parts.push(served);
+  return parts.join(" · ");
+}
+
+/** The `GET /api/captures` + `/frames` client this panel needs; `AppContext["client"]` satisfies
+ * it structurally. */
+export interface FramesClient { get<T>(path: string): Promise<T> }
+
+/** The window's recorded frames, and the window they are of — so a stale set is never rendered
+ * under a new window. */
+export interface FrameBackfill { w: ViewWindow; frames: FrameView[] }
+
+/**
+ * Fetches the window's frames from the pipeline's own capture.
+ *
+ * **This never re-decodes.** `/api/captures/{id}/frames` serves records the pipeline already wrote,
+ * which is what CLAUDE.md's incremental-decode invariant asks for: live decoding extends a region
+ * and decodes only the newly-arrived part, so answering a scrub must be a read.
+ *
+ * Best-effort and additive: a failure, no capture store, or a pipeline with nothing recorded yields
+ * an empty set *for that window* rather than emptying the live frames — the window is still the
+ * window, and the live socket's own frames for it are still shown.
+ */
+export async function loadFrameBackfill(
+  client: FramesClient, pipelineId: string, w: ViewWindow,
+): Promise<FrameBackfill> {
+  try {
+    const list = await client.get<{ captures?: readonly CaptureLite[] }>("/api/captures");
+    const cap = captureFor(list.captures ?? [], pipelineId);
+    if (!cap) return { w, frames: [] };
+    const page = await client.get<{ frames?: readonly FrameRecordDto[] }>(captureFramesPath(cap.id, w));
+    return { w, frames: (page.frames ?? []).map((f, i) => frameViewFromCapture(f, i)) };
+  } catch {
+    return { w, frames: [] };
+  }
+}
+
+/**
+ * The frame list for the current window, and — when it is empty — which emptiness it is.
+ *
+ * Coverage is asked for only when the window came back with nothing, the one case where the
+ * difference between "this band was quiet" and "nothing ever looked here" is the whole message. An
+ * answer that never comes stays *unknown* ([[windowCoverage]] returns `null`), so a missing answer
+ * never hardens into a measurement claim.
+ */
+export async function resolveFrameList(
+  client: FramesClient, state: WindowState, ring: readonly RingFrame[], backfill: FrameBackfill | null,
+): Promise<FrameListView> {
+  const w = viewWindow(state);
+  // No window: render nothing and say so. An invented window selects an honest zero frames, and
+  // zero frames reads on screen exactly like a decoder that produced none (T-379 obligation 4).
+  if (w === null) return { kind: "no-window" };
+  const stored = backfill && backfill.w.t0 === w.t0 && backfill.w.t1 === w.t1 ? backfill.frames : [];
+  const frames = windowFrames(ring, stored, w);
+  if (frames.length > 0) return { kind: "frames", frames };
+  return { kind: "empty", coverage: await windowCoverage(client, state, w) };
 }
 
 // ---- frame list view model ----
@@ -213,9 +377,18 @@ export function localSelection(): SelectionPort {
 
 class InspectorPanel {
   private ring: RingFrame[] = [];
+  /** The window's recorded frames, for a stretch the live socket never carried (T-387). */
+  private backfill: FrameBackfill | null = null;
+  /** What the current window holds — the list, the panes and the note all read this, so they can
+   * never disagree about which frames are in the window. */
+  private view: FrameListView = { kind: "no-window" };
   private unsubscribe: () => void = () => {};
+  private unsubWindow: () => void = () => {};
   private pipelineId: string | null = null;
   private loadSeq = 0;
+  private viewSeq = 0;
+  private backfillSeq = 0;
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private feedState: FeedState = "closed";
   private feedMessage = "";
   private servedText = "select a pipeline in Decode";
@@ -255,6 +428,11 @@ class InspectorPanel {
     this.disposers.push(this.pipelineSource.subscribe((id) => this.onPipeline(id)));
     this.onPipeline(this.pipelineSource.get());
     this.disposers.push(this.selection.subscribe(() => this.renderFrameList()));
+    // Scrubbing must re-derive the list, not leave the live edge's packets on screen under a past
+    // window's heading (T-384's lesson on the RDS panel, applied here). `windowKey` changes exactly
+    // when the window does — including when the live edge advances — so a panel watching only the
+    // cursor could not go on answering about the window it was mounted in.
+    this.disposers.push(this.ctx.store.select(windowKey, () => this.onWindowChanged()));
   }
 
   /** Closes the pipeline feed subscription and store listeners. Call when a per-signal output
@@ -262,13 +440,18 @@ class InspectorPanel {
    * calls this since it lives for the page's lifetime. */
   destroy(): void {
     this.unsubscribe();
+    this.unsubWindow();
+    if (this.refreshTimer !== null) { clearTimeout(this.refreshTimer); this.refreshTimer = null; }
     for (const d of this.disposers) d();
   }
 
   private onPipeline(id: string | null) {
     this.unsubscribe();
+    this.unsubWindow();
+    this.unsubWindow = () => {};
     this.pipelineId = id;
     this.ring = [];
+    this.backfill = null;
     this.byteCycle = null;
     this.nodeRows.clear();
     this.selection.setFrame(null);
@@ -277,6 +460,7 @@ class InspectorPanel {
       this.feedMessage = "";
       this.servedText = "select a pipeline in Decode";
       this.unsubscribe = () => {};
+      this.view = { kind: "no-window" };
       this.renderAll();
       return;
     }
@@ -287,7 +471,41 @@ class InspectorPanel {
       frame: (f) => this.onFrame(f),
       state: (s, message) => { this.feedState = s; this.feedMessage = message; this.renderNote(); },
     });
+    void this.loadBackfill(id);
+    this.scheduleRefresh();
     this.renderAll();
+  }
+
+  /** The view window moved: re-fetch the window's recorded frames and re-derive the list. */
+  private onWindowChanged() {
+    if (this.pipelineId) void this.loadBackfill(this.pipelineId);
+    this.scheduleRefresh();
+  }
+
+  private async loadBackfill(pipelineId: string) {
+    const w = viewWindow(this.ctx.store.get());
+    if (w === null) { this.backfill = null; return; }
+    if (this.backfill && this.backfill.w.t0 === w.t0 && this.backfill.w.t1 === w.t1) return;
+    const seq = ++this.backfillSeq;
+    const loaded = await loadFrameBackfill(this.ctx.client, pipelineId, w);
+    if (seq !== this.backfillSeq || pipelineId !== this.pipelineId) return;
+    this.backfill = loaded;
+    this.scheduleRefresh();
+  }
+
+  /** Coalesces a burst of arriving frames into one re-derivation; the live socket can deliver
+   * faster than a list is worth re-rendering. */
+  private scheduleRefresh() {
+    if (this.refreshTimer !== null) return;
+    this.refreshTimer = setTimeout(() => { this.refreshTimer = null; void this.refresh(); }, 200);
+  }
+
+  private async refresh() {
+    const seq = ++this.viewSeq;
+    const view = await resolveFrameList(this.ctx.client, this.ctx.store.get(), this.ring, this.backfill);
+    if (seq !== this.viewSeq) return;
+    this.view = view;
+    this.renderFrameList();
   }
 
   private async loadServedAddress(id: string) {
@@ -307,7 +525,7 @@ class InspectorPanel {
     const view = frameViewFromLive(f, this.ring.length);
     this.ring = pushRingFrame(this.ring, view);
     if (this.selection.get().frameSeq === null) this.selection.setFrame(view.index);
-    else this.renderFrameList();
+    this.scheduleRefresh();
   }
 
   private renderAll() {
@@ -317,11 +535,24 @@ class InspectorPanel {
 
   private renderNote() {
     const feed = !this.pipelineId ? "" : this.feedState === "live" ? "live" : this.feedState === "reconnecting" ? `reconnecting${this.feedMessage ? ` (${this.feedMessage})` : ""}` : this.feedState === "connecting" ? "connecting…" : "closed";
-    this.noteEl.textContent = feed ? `${feed} · ${this.servedText}` : this.servedText;
+    this.noteEl.textContent = inspectorNoteText(this.view, unplaceableFrames(this.ring), feed, this.servedText);
+  }
+
+  /** The window's frames, or `[]` — the one collection the list, the hex/tree panes and the note
+   * all read (T-389's rule that two surfaces must never filter the same rows twice). */
+  private frames(): RingFrame[] {
+    return this.view.kind === "frames" ? this.view.frames : [];
   }
 
   private renderFrameList() {
-    const rows = frameRowsVM(this.ring, this.selection.get().frameSeq);
+    this.renderNote();
+    const frames = this.frames();
+    if (frames.length === 0) {
+      this.frameListEl.replaceChildren(h("p", { class: "hint" }, frameListEmptyText(this.view as Exclude<FrameListView, { kind: "frames" }>)));
+      this.renderBytesAndTree();
+      return;
+    }
+    const rows = frameRowsVM(frames, this.selection.get().frameSeq);
     this.frameListEl.replaceChildren(...rows.map((r) => h(
       "div",
       {
@@ -341,7 +572,7 @@ class InspectorPanel {
 
   private renderBytesAndTree() {
     const { frameSeq, fieldNodeId } = this.selection.get();
-    const view = resolveSelectedFrame(this.ring, frameSeq);
+    const view = resolveSelectedFrame(this.frames(), frameSeq);
     this.nodeRows.clear();
     if (!view) {
       this.hexEl.replaceChildren(h("p", { class: "hint" }, "no frames yet."));
@@ -402,7 +633,7 @@ class InspectorPanel {
   }
 
   private onByteClick(byte: number) {
-    const view = resolveSelectedFrame(this.ring, this.selection.get().frameSeq);
+    const view = resolveSelectedFrame(this.frames(), this.selection.get().frameSeq);
     const tree = view?.layers;
     if (!tree) return;
     const prev = this.byteCycle && this.byteCycle.byte === byte ? this.byteCycle.id : null;

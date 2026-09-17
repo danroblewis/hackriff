@@ -5,6 +5,7 @@
 import type { ControlClient } from "../../controls/client";
 import type { AppContext, MountFn } from "../context";
 import { h } from "../dom";
+import { PIPELINES_SUBJECT, liveOnlyNote } from "../live-only";
 import { startPoll } from "../net";
 import { toast } from "../state";
 import { selectNode, selectPipeline } from "./slice";
@@ -188,7 +189,12 @@ export const mountPipelines: MountFn = (el, ctx) => {
     const current = feed.pipelines.find((p) => p.id === d.pipelineId) ?? null;
     el.replaceChildren(
       h("div", { class: "wb-block" },
-        h("div", { class: "h" }, "Pipelines ", h("em", {}, "decoders running now")),
+        // T-387: this list is **live-only and says so**. `GET /api/pipelines` answers "which
+        // decoder processes exist in this run"; a process is running or it is not, and it has no
+        // past-window form to ask for. What made the old "decoders running now" inadequate is that
+        // it reads as a description while the view beside it may be scrubbed an hour back — the
+        // note now names the state the reader is actually in.
+        h("div", { class: "h" }, "Pipelines ", h("em", { class: "live-only" }, liveOnlyNote(PIPELINES_SUBJECT, !ctx.store.get().time.live))),
         feed.pipelines.length
           ? h("div", {}, ...feed.pipelines.map((p) => pipelineRow(p, d.pipelineId, ctx)))
           : h("div", { class: "empty" }, feed.error ? `${feed.error}` : "no pipelines running"),
@@ -207,5 +213,8 @@ export const mountPipelines: MountFn = (el, ctx) => {
 
   subscribeDecodeFeed(ctx, (f) => { feed = f; render(); });
   ctx.store.select((s) => s.decode, render);
+  // The live-only note gets louder the moment the view stops following the live edge, so it has to
+  // re-render on Play/Pause as well as on the feed.
+  ctx.store.select((s) => s.time.live, render);
   render();
 };

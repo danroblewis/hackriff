@@ -406,6 +406,45 @@ export function sortInventoryRows(rows: readonly Row[], key: InventorySortKey, d
 export interface EmptyState { window: { coverage: WindowCoverage } | null; loadedAtS: number | null; error: string | null }
 
 /**
+ * The two sentences **every** window-scoped surface says with the same words, because they are the
+ * same two claims (T-379 obligation 3, extended to the packet inspector by T-387).
+ *
+ * They are constants rather than three similar string literals for one reason: *no window known*
+ * and *nothing was ever observed here* are statements about the **measurement**, identical no
+ * matter which surface is empty. Only the third state — the one that is a finding about the air —
+ * belongs to the surface, which is why [[windowEmptyText]] takes that sentence (and the
+ * coverage-unknown one) from its caller and owns the other two itself.
+ */
+export const WAITING_FOR_WINDOW = "Waiting for the capture window…";
+export const UNOBSERVED_WINDOW = "Nothing was observed in this window — no data, not a quiet band.";
+
+/** Why a window-scoped surface has nothing to render — the shape [[windowEmptyText]] reads. */
+export type WindowEmptiness =
+  /** No window could be named, so nothing was asked. */
+  | { kind: "no-window" }
+  /** The window was asked about and held nothing; `coverage` says whether anything ever looked. */
+  | { kind: "empty"; coverage: WindowCoverage }
+  | { kind: "error"; message: string };
+
+/**
+ * The one place the four emptinesses are turned into sentences (T-387).
+ *
+ * `observed` is the caller's own finding — "Nothing on the air in this window." for the inventory
+ * lists, "Nothing decoded in this window." for a decode panel, "No frames in this window." for the
+ * packet inspector — and it is the **only** one of the four that is a claim about the air.
+ * `unknown` is what it says when the window was asked about but coverage never answered; that stays
+ * *unknown* rather than hardening into "unobserved", so a missing answer never becomes a
+ * measurement claim.
+ */
+export function windowEmptyText(v: WindowEmptiness, observed: string, unknown: string): string {
+  if (v.kind === "error") return v.message;
+  if (v.kind === "no-window") return WAITING_FOR_WINDOW;
+  if (v.coverage === "unobserved") return UNOBSERVED_WINDOW;
+  if (v.coverage === "observed") return observed;
+  return unknown;
+}
+
+/**
  * What an empty Candidate/Confirmed list says, and it must never be one sentence (T-379).
  *
  * The whole-UI window rule permits a surface to render empty **only where data genuinely does not
@@ -424,10 +463,12 @@ export interface EmptyState { window: { coverage: WindowCoverage } | null; loade
  */
 export function emptyListText(s: EmptyState): string {
   if (s.error) return s.error;
-  if (s.window === null) return s.loadedAtS === null ? "Loading…" : "Waiting for the capture window…";
-  if (s.window.coverage === "unobserved") return "Nothing was observed in this window — no data, not a quiet band.";
-  if (s.window.coverage === "observed") return "Nothing on the air in this window.";
-  return "Nothing listed for this window.";
+  if (s.window === null && s.loadedAtS === null) return "Loading…";
+  return windowEmptyText(
+    s.window === null ? { kind: "no-window" } : { kind: "empty", coverage: s.window.coverage },
+    "Nothing on the air in this window.",
+    "Nothing listed for this window.",
+  );
 }
 
 // ---- row view model ----
