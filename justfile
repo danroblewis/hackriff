@@ -36,6 +36,31 @@ default:
 gate *args:
     uv run --locked --project py python -m hkpy.gate {{args}}
 
+# THE COORDINATOR'S per-merge gate (T-424). Run it from inside `git merge --no-ff --no-commit`.
+#
+# `just gate` and `just gate-merge` answer two different questions, which is why there are two:
+#   just gate        "what is in my tree that isn't on main?"   -> an AGENT checking its own work.
+#                    Untracked counts: a `newdir/thing.rs` nobody has `git add`ed yet is still
+#                    going to be committed, so leaving it out is the one way this fails open.
+#   just gate-merge  "what will this merge put on main?"        -> the COORDINATOR, at merge.
+#                    git itself built the index from the merge, so the index IS the answer.
+#
+# Why the narrowing is sound, and it is a narrowing: untracked files are not in the merge index
+# and cannot reach main through this merge. The coordinator's checkout permanently holds
+# untracked `tools/` (the user's HackRF experiments, never committed) and diagnostic captures
+# under `fixtures/`, which forced EVERY merge gate to full for files that can never be merged.
+# And classifying untracked paths as full never protected against them anyway: the suites read
+# the WORKING TREE, so a stray file changes their result at whatever class was chosen. Fail-closed
+# on untracked buys cost, not safety, for this subject.
+#
+# The guards, so this cannot become a way of certifying a weakening:
+#   - it REQUIRES an in-progress merge (MERGE_HEAD, or SQUASH_MSG for a squash). Without one the
+#     index is not known to be a merge result, so it forces the FULL gate.
+#   - every uncommitted path it did not classify is PRINTED with the class it would have had.
+#     No ignore list, nothing silent: `fixtures/` STAGED in a merge is still full.
+gate-merge *args:
+    uv run --locked --project py python -m hkpy.gate --merge {{args}}
+
 # Build the Rust workspace (CPU path; `gpu` off)
 build:
     cargo build --workspace
