@@ -615,7 +615,11 @@ pub(crate) fn overview_semantics_json(o: &hk_store::Overview) -> Value {
         "series": {
             "max_db":        { "statistic": "max-hold", "scale": scale,      "unobserved": "null" },
             "occupancy_max": { "statistic": "max",      "scale": "fraction", "unobserved": "null" },
-            "coverage":      { "statistic": "mean",     "scale": "fraction", "unobserved": "0" },
+            // T-419: the observed fraction of the output cell's OWN extent — each source cell's
+            // coverage weighted by how much of this cell it overlaps, summed. Not a mean over
+            // source cells: the grid is fractional, so a mean let a 1 % overlap count as much as a
+            // 100 % one, and let one observed cell claim a whole collapsed column.
+            "coverage":      { "statistic": "extent-weighted-mean", "scale": "fraction", "unobserved": "0" },
             "frames":        { "statistic": "sum",      "scale": "count",    "unobserved": "0" },
         },
         "range_db": "the observed minimum and maximum of `max_db` over this grid, in the same \

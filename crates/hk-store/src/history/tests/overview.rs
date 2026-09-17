@@ -114,15 +114,119 @@ fn an_unobserved_bucket_stays_unobserved_never_quiet() {
 }
 
 #[test]
-fn coverage_is_the_mean_observed_fraction_of_the_folded_cells() {
-    // Source cells are equal-duration, so the mean of their coverage is the output cell's observed
-    // fraction — a fold that is exact rather than a chosen representative.
+fn coverage_is_the_observed_fraction_of_the_output_cells_own_extent() {
+    // The exact case, and why it stayed hidden: when the output grid is a whole coarsening of the
+    // source grid, every source cell is equal-duration *and* wholly inside one output cell, so the
+    // extent-weighted sum and the old mean-over-sources agree exactly. 0.5 and 1.0 over two equal
+    // halves is 0.75 either way.
     let mut h = grid(4, 1, |_, _| Some(-90.0));
     h.cells[0].coverage = 0.5;
     h.cells[1].coverage = 1.0;
     let o = h.overview(window(0, 4), FreqRange::new(0.0, 1000.0), 2, 1);
     assert!((o.cells[0].coverage - 0.75).abs() < 1e-6);
     assert!((o.cells[1].coverage - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn one_observed_second_does_not_report_a_collapsed_column_fully_covered() {
+    // T-419, THE DEFECT on this axis, and the case the survey bar and the left time navigator
+    // actually ask for: `nt = 1` collapses the whole window into one column. One of ten seconds was
+    // observed, the other nine never were. The old rule accumulated `coverage` and divided by
+    // `sources` — one source, coverage 1.0 — so the column reported itself **fully covered** on a
+    // tenth of its own extent. Weighted by extent it reads 0.1: the nine unobserved seconds are
+    // part of the cell, not absent from the divisor.
+    //
+    // The cell is still `observed()` — something was measured here, and `max_db` is a real
+    // max-hold — which is precisely why coverage has to carry the *how much*: "observed" and "fully
+    // observed" are different claims, and only one of them was true.
+    let h = grid(10, 1, |t, _| (t == 0).then_some(-70.0));
+    let o = h.overview(window(0, 10), FreqRange::new(0.0, 1000.0), 1, 1);
+    assert!(o.cells[0].observed());
+    assert_eq!(o.cells[0].max_db, -70.0);
+    assert!(
+        (o.cells[0].coverage - 0.1).abs() < 1e-6,
+        "one observed second of ten: {}",
+        o.cells[0].coverage
+    );
+
+    // The same on the frequency axis: one observed kilohertz of eight, collapsed to one row.
+    let h = grid(1, 8, |_, f| (f == 3).then_some(-70.0));
+    let o = h.overview(window(0, 1), FreqRange::new(0.0, 8000.0), 1, 1);
+    assert!(
+        (o.cells[0].coverage - 0.125).abs() < 1e-6,
+        "{:?}",
+        o.cells[0]
+    );
+
+    // And both at once: one cell of a 4 × 4 grid.
+    let h = grid(4, 4, |t, f| (t == 1 && f == 2).then_some(-70.0));
+    let o = h.overview(window(0, 4), FreqRange::new(0.0, 4000.0), 1, 1);
+    assert!(
+        (o.cells[0].coverage - 1.0 / 16.0).abs() < 1e-6,
+        "{:?}",
+        o.cells[0]
+    );
+}
+
+#[test]
+fn a_fractional_grid_weights_a_source_cell_by_how_much_of_the_cell_it_covers() {
+    // `overview` lays a **fractional** grid on the requested window (`t_cell = (t1 − t0)/nt`) and
+    // folds every source cell that *overlaps* an output cell, so source cells straddle output
+    // boundaries. Under the old mean a source cell overlapping by 1/3 counted as much as one
+    // overlapping wholly. Here three 1 s source cells are asked for in two 1.5 s columns:
+    //
+    //   column 0 = [0, 1.5) = all of cell 0 (w = 2/3) + half of cell 1 (w = 1/3)
+    //   column 1 = [1.5, 3)  = half of cell 1 (w = 1/3) + all of cell 2 (w = 2/3)
+    //
+    // With coverages 1.0, 0.25, 1.0 that is 0.75 and 0.75; the old mean gave 0.625 in both.
+    let mut h = grid(3, 1, |_, _| Some(-90.0));
+    h.cells[0].coverage = 1.0;
+    h.cells[1].coverage = 0.25;
+    h.cells[2].coverage = 1.0;
+    let o = h.overview(window(0, 3), FreqRange::new(0.0, 1000.0), 2, 1);
+    for (i, c) in o.cells.iter().enumerate() {
+        assert!(
+            (c.coverage - 0.75).abs() < 1e-6,
+            "column {i}: {} (the unweighted mean would say 0.625)",
+            c.coverage
+        );
+    }
+}
+
+#[test]
+fn a_fully_covered_window_stays_fully_covered_at_any_output_shape() {
+    // The honest case must cost nothing, on grids that do and do not divide evenly. A coverage fold
+    // that *under*-reports is a different lie with the same shape — it would paint scanned spectrum
+    // as unexplored, and the weights, being an exact partition of the output cell, must sum to 1.
+    let h = grid(7, 5, |_, _| Some(-80.0));
+    for (nt, nf) in [(1, 1), (2, 2), (3, 2), (7, 5), (13, 9), (64, 3)] {
+        let o = h.overview(window(0, 7), FreqRange::new(0.0, 5000.0), nt, nf);
+        for (i, c) in o.cells.iter().enumerate() {
+            assert!(
+                (c.coverage - 1.0).abs() < 1e-5,
+                "{nt}×{nf} cell {i}: coverage {}",
+                c.coverage
+            );
+        }
+    }
+}
+
+#[test]
+fn a_source_cell_coarser_than_the_output_gives_each_output_cell_its_own_coverage() {
+    // The replication direction (T-334): one source cell covering several output cells hands each
+    // of them its coverage whole, because it covers each of them whole. Weighting by extent must
+    // not turn a covering source cell into a fractional one — the weight is the fraction of the
+    // OUTPUT cell covered, never of the source cell.
+    let mut h = grid(2, 1, |_, _| Some(-90.0));
+    h.cells[0].coverage = 0.5;
+    h.cells[1].coverage = 1.0;
+    let o = h.overview(window(0, 2), FreqRange::new(0.0, 1000.0), 8, 1);
+    for t in 0..4 {
+        assert!((o.cells[t].coverage - 0.5).abs() < 1e-6, "column {t}");
+    }
+    for t in 4..8 {
+        assert!((o.cells[t].coverage - 1.0).abs() < 1e-6, "column {t}");
+    }
 }
 
 #[test]

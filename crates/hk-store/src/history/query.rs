@@ -196,7 +196,10 @@ pub struct OverviewCell {
     pub max_db: f32,
     /// Highest `occupancy_max` folded; `NaN` when none was observed.
     pub occupancy_max: f32,
-    /// Mean observed fraction of the folded cells (0 when none was observed).
+    /// Observed fraction of **this output cell's own** time–frequency extent (0 when none was
+    /// observed): each folded source cell's `coverage` weighted by the fraction of the output cell
+    /// it overlaps, summed (T-419). Never a plain mean over source cells — see
+    /// [`OverviewCell::fold`].
     pub coverage: f32,
     /// Frames behind the cell.
     pub frames: u64,
@@ -219,7 +222,27 @@ impl OverviewCell {
         self.sources > 0
     }
 
-    fn fold(&mut self, c: &CellStats) {
+    /// Folds one source cell in, `w` being the fraction of **this output cell's** extent that the
+    /// source cell overlaps (time × frequency, in `[0, 1]`).
+    ///
+    /// **Coverage is weighted by extent, not counted per source (T-419).** `overview` lays a
+    /// *fractional* grid on the requested window (`t_cell_ns = (t1 − t0)/nt`) and folds every
+    /// source cell that **overlaps** an output cell, so the old `+= coverage` then `/= sources`
+    /// was a mean that let a source cell overlapping by 1 % count as much as one overlapping by
+    /// 100 % — and, worse, let a single observed source cell inside an otherwise unobserved output
+    /// cell report the whole cell covered. It was exact only when every source cell had equal
+    /// duration *and* lay wholly inside the output cell; the first holds (one level answers one
+    /// query), the second does not. Weighting by overlap makes the divisor the **output cell's own
+    /// extent**: source cells are disjoint, so the weights sum to at most 1, and the parts of the
+    /// output cell no source cell reaches correctly count as unobserved rather than being averaged
+    /// away. Where the output grid *is* an exact coarsening of the source grid the two rules agree
+    /// exactly, which is why this is a strict fix rather than a change of meaning.
+    ///
+    /// The max-holds keep their own rule — replicating a measured value across the cells it covers
+    /// is T-334's safe direction — so only `coverage` is weighted. Folding must never *lower* a
+    /// measurement and never *raise* coverage: both rules exist for the same reason, and having
+    /// one does not give you the other.
+    fn fold(&mut self, c: &CellStats, w: f32) {
         self.max_db = if self.sources == 0 {
             c.max_db
         } else {
@@ -230,7 +253,7 @@ impl OverviewCell {
         } else {
             self.occupancy_max.max(c.occupancy_max)
         };
-        self.coverage += c.coverage;
+        self.coverage += c.coverage * w;
         self.frames += u64::from(c.frames);
         self.sources += 1;
     }
@@ -355,9 +378,12 @@ impl RegionHistory {
     ///
     /// **Every statistic folded here folds exactly**, which is why only these four are carried:
     /// the max of max-holds is the max-hold, the max of `occupancy_max` is the peak occupancy,
-    /// frames sum, and `coverage` is a mean over source cells of equal duration — the observed
-    /// fraction of the output cell. Nothing is invented: a percentile (`p_low_db`, `floor_db`)
-    /// cannot be folded from cell values at all, so it is not offered rather than approximated.
+    /// frames sum, and `coverage` is the **extent-weighted** sum of the source cells' coverage —
+    /// the observed fraction of the output cell's own extent (T-419; the grid here is fractional,
+    /// so a plain mean over source cells was exact only when they were equal-duration *and* wholly
+    /// inside the output cell, and it let one observed cell claim a whole collapsed column). See
+    /// [`OverviewCell::fold`]. Nothing is invented: a percentile (`p_low_db`, `floor_db`) cannot be
+    /// folded from cell values at all, so it is not offered rather than approximated.
     ///
     /// **The fold is band-collapsing on both axes, and it is the same fold either way** (T-342).
     /// `nf = 1` collapses a whole band to one activity-vs-time column per time step — the series
@@ -397,15 +423,21 @@ impl RegionHistory {
             let b = (((hi - origin) / step).ceil().max(0.0) as usize).min(n);
             (a.min(n), b.max(a.min(n)))
         };
+        // Fraction of output cell `i` (of `n` cells of width `step` from `origin`) that
+        // `[lo, hi)` covers. Source cells are disjoint, so these sum to at most 1 per output cell:
+        // that is what makes the weighted sum an observed fraction of the output cell's own extent
+        // rather than a mean over whichever source cells happened to touch it (T-419).
+        let weight = |lo: f64, hi: f64, origin: f64, step: f64, i: usize| -> f64 {
+            let (a, b) = (origin + i as f64 * step, origin + (i + 1) as f64 * step);
+            ((hi.min(b) - lo.max(a)).max(0.0) / step).min(1.0)
+        };
         for t in 0..self.nt {
             let cell_t0 = (self.t_first_cell + t as i64) * self.t_cell_ns;
-            let (ta, tb) = span(
+            let (s_t0, s_t1) = (
                 (cell_t0 - t0_ns) as f64,
                 (cell_t0 + self.t_cell_ns - t0_ns) as f64,
-                0.0,
-                dt,
-                nt,
             );
+            let (ta, tb) = span(s_t0, s_t1, 0.0, dt, nt);
             if ta >= tb {
                 continue;
             }
@@ -417,8 +449,16 @@ impl RegionHistory {
                 let cell_f0 = (self.f_first_cell + f as i64) as f64 * self.f_cell_hz;
                 let (fa, fb) = span(cell_f0, cell_f0 + self.f_cell_hz, f_lo, df, nf);
                 for ot in ta..tb {
+                    let wt = weight(s_t0, s_t1, 0.0, dt, ot);
+                    if wt <= 0.0 {
+                        continue;
+                    }
                     for of in fa..fb {
-                        cells[ot * nf + of].fold(src);
+                        let w = wt * weight(cell_f0, cell_f0 + self.f_cell_hz, f_lo, df, of);
+                        if w <= 0.0 {
+                            continue;
+                        }
+                        cells[ot * nf + of].fold(src, w as f32);
                     }
                 }
             }
@@ -430,7 +470,9 @@ impl RegionHistory {
                 continue;
             }
             observed_cells += 1;
-            c.coverage /= c.sources as f32;
+            // Already an observed fraction of this cell's own extent: the weights were the divisor.
+            // Clamped only against float error in the weights, never to rescue an over-claim.
+            c.coverage = c.coverage.min(1.0);
             lo_db = lo_db.min(c.max_db);
             hi_db = hi_db.max(c.max_db);
         }

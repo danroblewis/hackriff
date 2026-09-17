@@ -847,9 +847,26 @@ impl Tile {
     /// Rules: max-of-max; power mean (Σ linear mean × frames); histogram sum → percentiles;
     /// occupancy = time-weighted mean over the child's time cells, then the **maximum** over the
     /// child frequency cells (a lower bound on "any child occupied", exact for one emitter per
-    /// cell); max-occupancy = max over all child cells, so a short busy period survives; coverage =
-    /// the best-observed child frequency cell. The parent cell is overwritten, so a fold is
-    /// idempotent.
+    /// cell); max-occupancy = max over all child cells, so a short busy period survives. The parent
+    /// cell is overwritten, so a fold is idempotent.
+    ///
+    /// **Coverage folds by sum over the parent's own extent, not by best-of (T-419).** Observed
+    /// seconds are summed over the `f_factor` child frequency cells and divided by `f_factor`, so
+    /// `obs_s` stays "seconds of *this* cell observed" and `coverage = obs_s / t_cell_s` is the
+    /// fraction of the parent's whole time–frequency extent that was looked at. The old rule took
+    /// the **best**-observed child, which read a parent whose left half was covered for the full
+    /// minute and whose right half was never observed as **fully covered** — and at `f_factor = 2`
+    /// over four folds let a level-4 cell claim full coverage on one sixteenth of its frequency
+    /// extent. That is the max-hold lesson (T-397) transposed: **folding must never *raise*
+    /// coverage**, exactly as it must never *lower* a measurement. `observed_s` is foldable;
+    /// `duty` is not — a ratio can only be recomputed against the parent's own extent, never
+    /// averaged or maxed from the children's ratios.
+    ///
+    /// Occupancy is unaffected: it is a fraction **of observed time**, so it keeps its
+    /// max-over-frequency-children rule and `occ_s` is re-derived as `ratio × obs_s` against the
+    /// new `obs_s`. Coverage says how much was looked at; occupancy says what was found while
+    /// looking. The config guarantees `f_factor` divides `f_cells_per_block`, so a parent cell's
+    /// children always lie in one child tile and the group is never partial.
     pub fn fold_child(
         &mut self,
         child: &Tile,
@@ -874,7 +891,9 @@ impl Tile {
             let group_end = child.nf.min(fc + (factor - gc.rem_euclid(factor)) as usize);
             let (mut count, mut max, mut sum_lin, mut occ_max) =
                 (0u64, f32::NEG_INFINITY, 0.0, 0f32);
-            let (mut best_obs, mut best_ratio) = (0.0f64, 0.0f64);
+            // Observed seconds SUM over the child frequency cells (divided by `f_factor` below,
+            // the parent's own frequency extent); the occupancy *ratio* still takes the best child.
+            let (mut sum_obs, mut best_ratio) = (0.0f64, 0.0f64);
             let mut any_hist = false;
             for f in fc..group_end {
                 let (mut obs_f, mut occ_f) = (0.0, 0.0);
@@ -893,7 +912,7 @@ impl Tile {
                     occ_f += c;
                 }
                 if obs_f > 0.0 {
-                    best_obs = best_obs.max(obs_f);
+                    sum_obs += obs_f;
                     best_ratio = best_ratio.max(occ_f / obs_f);
                 }
                 let row = child.hist_row(f);
@@ -910,8 +929,12 @@ impl Tile {
                 self.count[i] = count.min(u64::from(u32::MAX)) as u32;
                 self.max[i] = max;
                 self.sum_lin[i] = sum_lin;
-                self.obs_s[i] = best_obs;
-                self.occ_s[i] = best_ratio * best_obs;
+                // Coverage is the observed fraction of the parent's OWN extent: a child that was
+                // never observed contributes 0 seconds and pulls the parent below 1, where the old
+                // `max` let one covered child speak for all `f_factor` of them.
+                let obs = sum_obs / f64::from(f_factor.max(1));
+                self.obs_s[i] = obs;
+                self.occ_s[i] = best_ratio * obs;
                 // A time-weighted mean never exceeds its maximum, so max-of-max alone suffices
                 // (and keeps quantisation monotone: stored max = max of stored child maxima).
                 self.occ_max[i] = occ_max;

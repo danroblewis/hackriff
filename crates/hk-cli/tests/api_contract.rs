@@ -5371,7 +5371,14 @@ fn the_band_collapsed_activity_series_is_measured_and_states_its_fold() {
     assert_eq!(sem["series"]["max_db"]["unobserved"], json!("null"));
     // Not every series is a max, and the block says so per series rather than labelling the grid.
     assert_eq!(sem["series"]["occupancy_max"]["statistic"], json!("max"));
-    assert_eq!(sem["series"]["coverage"]["statistic"], json!("mean"));
+    // T-419: coverage is weighted by how much of the output cell each source cell overlaps, not
+    // averaged over however many source cells happened to touch it. The wire must say which,
+    // because the two differ exactly where the grid is fractional — and the optimistic one paints
+    // unobserved spectrum as scanned.
+    assert_eq!(
+        sem["series"]["coverage"]["statistic"],
+        json!("extent-weighted-mean")
+    );
     assert_eq!(sem["series"]["frames"]["statistic"], json!("sum"));
     assert_eq!(sem["series"]["coverage"]["unobserved"], json!("0"));
     // The scale is the source grid's unit, carried — not a constant in the route.

@@ -29,8 +29,8 @@
 //!   tiles (cold start: the 20th percentile of the column across frequency);
 //! - **max-occupancy**: the highest level-0 cell occupancy folded in, so a short busy period is
 //!   not averaged away by rollup;
-//! - **coverage**: observed fraction of the cell's duration (gaps read as < 1, unobserved as
-//!   `frames == 0`, never as quiet).
+//! - **coverage**: observed fraction of the cell's duration — at a rolled-up level, of its whole
+//!   time–frequency extent (gaps read as < 1, unobserved as `frames == 0`, never as quiet).
 //!
 //! Every tile also keeps, per frequency cell, a fixed-bin dB histogram of all frame values over the
 //! **tile's whole duration** — exactly the histogram of the parent cell it becomes — plus a
@@ -57,7 +57,12 @@
 //! power mean of means weighted by frames; histograms summed (so a parent percentile is within one
 //! histogram step of the pooled order statistic over every contributing frame; see
 //! [`stats::hist_percentile`] for the exact bound);
-//! occupancy time-weighted in time and max across frequency; max-occupancy max-of-max. Parents live
+//! occupancy time-weighted in time and max across frequency; max-occupancy max-of-max; **coverage
+//! summed over the parent's own extent** — observed seconds added across the `f_factor` child
+//! frequency cells and divided by `f_factor`, never the best-observed child (T-419: a max there
+//! let one covered child speak for all of them, and four folds let a level-4 cell claim full
+//! coverage on a sixteenth of its frequency extent). Folding must never *lower* a measurement and
+//! never *raise* coverage. Parents live
 //! in memory until their block ends, then seal in turn. Because a child is evictable only once its
 //! parent is sealed on disk, open parents need no checkpoint: they are rebuilt from their sealed
 //! children on [`Pyramid::open`].
