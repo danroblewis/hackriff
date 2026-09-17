@@ -47,6 +47,9 @@ mod device_variants;
 #[path = "acceptance/inventory_lifecycle.rs"]
 mod inventory_lifecycle;
 
+#[path = "acceptance/latency.rs"]
+mod latency;
+
 #[path = "acceptance/confirm_latency.rs"]
 mod confirm_latency;
 
