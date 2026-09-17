@@ -4633,6 +4633,73 @@ split **two-two** — 0.9444/0.0556 against 0.9520/0.0480 — the same day T-415
 that. **T-428** is on it, and **T-364 is blocked behind it**: T-364's whole deliverable is a trade curve
 *the user* chooses from, with both axes quoted in that figure against the 0.90 floor.
 
+### B0.678 — the assertion only passed because rows were being dropped (2026-09-17)
+
+**T-425** (`695f4eb`) is the one to remember, because the diagnosis inverted the ticket. I filed it as
+"the retune seam gap is bimodal". **The seam was never the variable.** Row-level tracing shows the
+identical sample grid every run, and the gap decomposes as `hole + period_old + n × period_new`:
+
+- `hole` is **12.8 ms** of genuinely missing capture time — settle discard plus what the re-plumb
+  consumed — **about a third of a row, never a whole one**. So the assertion, *"at least one row's worth
+  of time must be MISSING at the seam"*, **was never true of this system**, and its 1.5 × period bound
+  (60.2 ms) sat *above* the real seam of 52.9 ms.
+- `n` is **new-window rows the consumer never received**: `bridge::watch_peer` looked for the
+  replacement publisher once per 50 ms tick while the new segment filled its first row in ~40 ms. A
+  phase race, `n ∈ {0,1,2}`, giving 52.9 (fail), 92.9 or 132.9.
+
+Proved by mutation **both ways** — a 1 ms tick makes the old assertion fail 6/6 at exactly 52.906667,
+a 200 ms tick makes it pass 4/4. **The old bound only ever passed *because* rows were being dropped in
+delivery.**
+
+Then the finding that changed the fix: a mutation that **papers the seam over completely** — every
+timestamp continuing the previous cadence across segments — **passed on main**, because the dropped rows
+forged a gap that was not there. So this was never "deterministic seam *or* better assertion": **no
+assertion here meant anything until the delivery loss was gone.** Both were done, in that order.
+
+And the delivery loss was a **product bug**, not a test problem: every retune silently swallowed the new
+window's first rows **with no drop marker**, making each retune look like a longer break in the air than
+it was — on a surface whose entire purpose is that a break in the data must be *true*. It also settled
+my own confusion: I measured 40% one hour and 70% the next and suspected a merge had made it worse.
+**The rate is a property of the machine, not of the tree.** T-416's `drop(cr)` changed re-plumb timing
+and therefore the phase — it moved the distribution, not the cause, which is exactly why it measured
+2/6 then 4/4.
+
+**T-428** (`b573283`) answered the four-agent baseline split, and it was **none of my three
+hypotheses**. Not non-determinism (9 runs byte-identical; the classification path takes no compute
+provider, so load never reaches it). Not main moving (7 commits spanning the day, straddling both that
+touched `hk-classify`, all reading 0.9520). It is a **third draw**: `just acceptance-m3` prints **two**
+held-out readings under the same name in one run — the gate's ruling line (377/396) and the report
+table's (374/396), same denominator, different seeds. Each agent quoted whichever line it scrolled to.
+The scoring difference between them was the obvious suspect and **not** the cause: instrumented over the
+gate's draw, both predicates give 377.
+
+**The fourth decimal place was never defensible.** Eight seed bases give 370–381 of 396 — **sd 0.0084**
+— and the disagreement that produced the ticket was **0.0076**, *under one standard deviation of the
+same quantity on identical code*. §7.1 now quotes ≈0.95 with the draw sd; §7.2 records it as a fourth
+failure mode. The stash-and-measure protocol gained its blind spot in writing: it establishes which
+*tree* was measured and cannot catch reading the wrong *line*.
+
+**T-427** (`6c860da`) found the fifth variant of the observation family, and the sharpest yet: `duty`
+thresholds against the snippet's **own** mean envelope, so for a sparse train the mean is dominated by
+the off time and the noise clears it. A **5%-duty** radar train reads **0.655 at 10 dB** against a
+**33%-duty** PPM train's 0.471 — *inverted* below 20 dB, crossing between 15 and 20, which is exactly
+why `pulse` was 1.000 wrong at gate+5 and 1.000 correct at gate+10. It also declined the top-2
+diagnostic, correctly: `pulsed` has two classes, so top-2 is 1.000 **by construction** and carries no
+information. And it found that the 19:1 candidate clamp yields **0.95 at K=2** — above what this repo
+calls confident.
+
+**T-406** (`d07c75a`) shipped the user's feature (2) of four, and the load-bearing decision was **the
+step purpose, not the dwell**: a `RegionDwell` hop writes **one record per step** with its own window
+and interval, where implementing the scan as long sweep hops would have written one coarse record per
+pass and rasterised as *"the whole band, the whole time"*. Its retention answer corrected `docs/16`
+§5.4 with a measurement — 618 B/line through the production codec — and found what §5.4 had not stated:
+**which bound binds depends on the policy**, since a 50 ms-hop sweep is ~2 orders denser per day and is
+limited by the quota where a dwell is limited by the age.
+
+**The pattern, three times in one batch:** a bound that passed for the wrong reason (T-425), a number
+argued about below its own sampling noise (T-428), and a constant written at the transmitter against a
+feature measured at the receiver (T-427).
+
 ## Open for the user (current)
 
 Kept current by the coordinator; the planning-phase list near the top of this file is the 2026-09-13
