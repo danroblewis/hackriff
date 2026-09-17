@@ -7466,7 +7466,7 @@ tasks:
   - id: T-378
     title: Observation-log coverage has no device, so long-horizon spans are Unknown while ring spans are named
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -7735,6 +7735,40 @@ tasks:
       full; distinguish empty-because-unobserved from empty-because-not-fetched via
       hk_store::Coverage; and include the control that a window which DOES hold data
       renders its rows.
+  - id: T-388
+    title: A live signal box extends UP slowly because growth is poll-gated, not detection-gated
+    milestone: M2-hardening
+    status: in-progress
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: [T-362, T-354]
+    acceptance: |
+      USER, live testing 2026-09-16. The scrolling presence boxes now follow the
+      waterfall (T-362 confirmed) - but a live signal box EXTENDS UP SLOWLY.
+      The user's diagnosis, which is specific and should be verified rather than
+      assumed: detection is NOT the bottleneck (it runs per-frame). Box growth is
+      POLL-GATED - t_end_s only advances on an inventory/presence poll, the UI does
+      not extrapolate between polls (inventory.ts), inventory/presence is poll-only
+      with NO WEBSOCKET PUSH, and the cadences are lazy: capture-overview poll 60 s,
+      session 2 s, presence committed at roughly tracker-interval granularity.
+      REQUIRED: a live signal box extends in near-real-time. Either shorten the
+      live-view presence poll materially and/or add a PRESENCE-EXTENSION PUSH over
+      the stream contract. The user prefers the push - "the live edge advances
+      continuously".
+      SCOPE: the live/following view only. PAUSED AND SCRUBBED VIEWS STAY
+      POLL-BASED - they are answering about a fixed past window, which T-379/T-384
+      just wired to the view window, and a push has nothing to add there.
+      SUCCESS: a continuing signal box's top tracks the live edge within ~1 s, not
+      tens of seconds.
+      File in docs/14 + the stream contract (ADR-0004).
+      THE HONESTY CONSTRAINT, which is why the fix is a push and not client-side
+      extrapolation: a box drawn to the live edge on the ASSUMPTION the signal is
+      still there is a claim about air nobody measured. The box may only extend as
+      far as presence has actually been observed. Fast is the goal; inventing the
+      most recent second is not. The user names the absence of extrapolation as part
+      of the diagnosis, not as the thing to change.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
