@@ -47,6 +47,7 @@ pub mod control;
 pub mod events;
 pub mod family;
 pub mod gate;
+pub mod gnss; // T-322 (ADR-0018): the C36 L1-dwell caller
 pub mod inventory;
 pub mod recipes;
 pub mod refine;
@@ -92,6 +93,7 @@ pub use config::{
 pub use control::SwitchableControl;
 pub use events::Candidate;
 pub use family::{Explanation, FamilyPrior, explain_emitter, explanations};
+pub use gnss::{GnssCounts, GnssDwell, GnssDwellConfig, GnssL1Measurement};
 pub use inventory::{CONFIRM_RULE, ConfirmPolicy, Inventory, TrackInventory};
 pub use presence::{
     MAX_EXTENSIONS_PER_TICK, PRESENCE_EXTENSION_KIND, PRESENCE_MESSAGE_SCHEMA, PRESENCE_PUSH_NS,
