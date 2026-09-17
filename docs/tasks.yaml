@@ -8699,6 +8699,41 @@ tasks:
       of 1 may not be a client-side change, and if /api/timeline cannot serve the row
       count this bar needs at the resolution it needs, say so rather than upsampling in
       the client. Upsampling is how the current blockiness happened.
+  - id: T-412
+    title: The time wheel zooms when it should probably scroll; frequency wheel stays zoom
+    milestone: M2-hardening
+    status: blocked
+    priority: normal
+    parallel_group: UI
+    deps: [T-376, T-393]
+    blocked_on: >-
+      the user resending the first half of their message. It reached this session truncated and only
+      this arrived, verbatim: "; FREQUENCY axis wheel = zoom; time-span zoom is a deliberate secondary
+      gesture. UI-only where possible." The half that says what the TIME axis wheel should do INSTEAD
+      of zooming is missing, and that is the whole change - the rest is already true. Do not guess it:
+      an earlier reconstruction from a fragment (B0.666) put a framing on a suite that the user then
+      had to retract.
+    notes: |
+      WHAT ARRIVED, and it is actionable on its own terms once the missing half lands:
+        - FREQUENCY axis wheel = ZOOM. Already true: T-376 made the frequency bar's wheel zoom its own
+          viewport about the pointer with the waterfall's own wheelFactor
+          (ui/src/app/centre/navigators.ts:705). No change needed, but it is now pinned as intended
+          rather than incidental.
+        - TIME-SPAN ZOOM IS A DELIBERATE SECONDARY GESTURE. This is the change. Today the time bar's
+          wheel ZOOMS the reviewed span about the pointer (navigators.ts:933, "Wheel zooms the
+          reviewed span about the pointer, on the time axis only") - i.e. time-span zoom is currently
+          the PRIMARY wheel gesture, which is what the user is correcting.
+      THE INFERENCE I AM NOT MAKING: the natural reading is that the time wheel should SCROLL/PAN
+      through time - wheel-as-scroll is what a vertical axis usually means - with zoom moved behind a
+      modifier or a control. That is a guess and it is not filed as the requirement. Confirm first.
+      WHEN IT LANDS, two things carry over from the navigator work already done:
+        - one zoom, several input devices: T-407 will add pinch, and pinch is the touch equivalent of
+          the wheel. Whatever the time wheel does, pinch and wheel must resolve to the SAME arithmetic
+          rather than forking the gesture logic.
+        - T-340's control must stay green: no pan and no wheel on either bar may reach a device route
+          (a +/-1.0 drag of the whole 6 GHz bar through a spy client, calls empty). Changing what the
+          wheel MEANS must not change what it can REACH.
+      UI-only gate where possible.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
