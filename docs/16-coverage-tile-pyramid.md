@@ -474,25 +474,31 @@ the composition §2's correction 3 named:
 
 A buildable sequence. Each step says what it unblocks and which consumer it serves.
 
-1. **Per-(t, f) coverage rasterisation in `hk-store`.** The record-derived answer gains a time axis:
+> **Sequence state, 2026-09-17.** Steps **1, 2, 3 and 6 have landed** (T-421, T-423, T-419, T-406).
+> Step 6 ran early because it only ever depended on step 1. The next step is **4**, which is where the
+> storage cost lands and therefore the step to measure disk on; steps **5** (the tile route) and **7**
+> (the big view client) follow it and are not yet filed. Update this line when a step lands, so the
+> state of the sequence is readable without reading the whole section.
+
+1. **Per-(t, f) coverage rasterisation in `hk-store`. LANDED (T-421, `6a37221`).** The record-derived answer gains a time axis:
    `Coverage` computed on an `(nt, nf)` grid from the same ring-journal and observation-log intervals,
    reusing `Sampled` and `Coverage::of` unchanged. Pure backend, no wire change, no new type.
    **Serves:** nothing visibly yet. **Unblocks:** everything below, and it is the only step that closes
    §2's actual gap.
-2. **Coverage on the grid routes that already exist.** `/api/timeline` grows a per-cell coverage state;
+2. **Coverage on the grid routes that already exist. LANDED (T-423, `ed5521b`).** `/api/timeline` grows a per-cell coverage state;
    `/api/coverage` grows a time axis. `docs/api.md` and `crates/hk-cli/tests/api_contract.rs` together,
    per T-079, asserting the **field's value** and not the response shape (T-315's standard).
    **Serves:** T-405 (the survey bar stops reading "sampled, level not retained" for a cell the radio
    was tuned away from) and T-411 (the left time navigator, same fix on the other axis).
    **Unblocks:** the invariant gets a test home *before* any tile exists, which is where it is cheapest.
-3. **Fix the two coverage folds** (§4): `Tile::fold_child` sums `obs_s` across frequency children
+3. **Fix the two coverage folds. LANDED (T-419, `eaef9e6`).** (§4): `Tile::fold_child` sums `obs_s` across frequency children
    instead of taking the best; `OverviewCell::fold` weights by extent, or states its exactness
    condition. Land the two guards from §4 — prove a level against level 0, and carry the input
    statistic's provenance up the ladder. **Serves:** every consumer, silently. **Unblocks:** trusting
    any coarse level at all. *Do this before building the view scheme, not after* — a pyramid founded on
    a coverage fold that rounds up will paint the spectrum as scanned, which is the one thing the user's
    feature must not do.
-4. **`LevelConfig::t_factor` and the view scheme** (§6.1, §6.2). Sealed coarse levels produced by the
+4. **`LevelConfig::t_factor` and the view scheme** (§6.1, §6.2) — **NEXT; filed as T-434.** Sealed coarse levels produced by the
    existing seal path, uniform 256 × 256 tiles, the coverage plane from step 1, the input-statistic
    provenance from step 3. No new view yet. **Serves:** nothing visible. **Unblocks:** steps 5 and 6.
    This is where the storage cost lands, so it is the step to measure disk on.

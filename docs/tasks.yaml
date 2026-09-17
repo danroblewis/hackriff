@@ -10339,6 +10339,57 @@ tasks:
       group against ITSELF within one nextest invocation and does nothing about the ~27 tests
       outside it, nor about four agents building on the same box. Adding a name to that list will
       not fix this one either.
+  - id: T-434
+    milestone: M5
+    title: docs/16 step 4 - LevelConfig::t_factor and the view scheme, and the step where the storage cost lands
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: [T-421, T-423, T-419]
+    use_cases:
+    - AWARE-011
+    found_by: 'coordinator (2026-09-17), sweeping docs/16 §7 after steps 1, 2, 3 and 6 landed'
+    acceptance: |
+      docs/16 §7 STEP 4, and the next step in the sequence. Quoted:
+        "LevelConfig::t_factor and the view scheme (§6.1, §6.2). Sealed coarse levels produced by
+         the EXISTING seal path, uniform 256 x 256 tiles, the coverage plane from step 1, the
+         input-statistic provenance from step 3. No new view yet. Serves: nothing visible.
+         Unblocks: steps 5 and 6. THIS IS WHERE THE STORAGE COST LANDS, SO IT IS THE STEP TO
+         MEASURE DISK ON."
+      Read §6.1 and §6.2 for the settled scheme before designing anything, and note that four of the
+      eight steps are already in - steps 1 (T-421), 2 (T-423), 3 (T-419) and 6 (T-406). Step 6 ran
+      early because it only ever depended on step 1.
+      WHAT YOU INHERIT, AND MUST NOT REBUILD:
+        T-421's hk_store::coverage - grid_over, coarsen (a SUM, not a max), at_tf,
+          unknown_rows_before. The fold rule is settled and proved; do not write a second one.
+        T-423's wire - per-cell coverage on /api/timeline and /api/coverage, and the fourth state
+          "unknown" as a VALUE with a horizon block, not a Coverage variant. Do not disturb that
+          distinction, and do not spell unknown as grey.
+        T-419's control discipline - PROVE A LEVEL AGAINST LEVEL 0, never against a parent. The
+          buggy max fold satisfied "a parent never exceeds its best child" AT EVERY LEVEL while
+          being wrong by f_factor at every level.
+      MEASURE THE DISK, because the step exists partly to find out. T-406 has just set the precedent
+      for how: it measured the observation log through the PRODUCTION codec at 618 B/line rather than
+      estimating, and found what §5.4 had not stated - WHICH BOUND BINDS DEPENDS ON THE POLICY (a
+      50 ms-hop sweep is ~2 orders denser per day than a dwell, so the quota binds there where the
+      age binds for a dwell). Expect the same kind of surprise here and look for it: state bytes per
+      tile and per level from a real encode, then say which retention horizon binds at which zoom.
+      If the cost is worse than §6 assumed, that is the finding - report it rather than quietly
+      choosing a smaller tile.
+      DoD: t_factor exists and is independent of the frequency factor; coarse levels come from the
+      EXISTING seal path (no second producer); the coverage plane and the input-statistic provenance
+      ride along; disk measured and reported per level. No new view - resist building one, since
+      step 5 serves the route and step 7 the client.
+    notes: |
+      Steps 5 (the tile route, GET /api/tiles/... under the chunked-lock discipline with §5.5's
+      in-flight cap) and 7 (the big view client - LRU eviction with the two pins, the LIFO
+      cancellable queue, the parent-upscaled-and-labelled fallback) are NOT yet filed. File them when
+      this lands, not before; §7's standing instruction is that T-405 and T-406 must not foreclose
+      the scheme, and both now accumulate into it rather than into private accumulators.
+      Gate: crates/ so FULL. Run the affected suite twice (T-403). Floors: ADR-0016 §7.1, and read
+      §7.2 first - the held-out figures have a draw sd of 0.008, so a +/-0.02 move is noise.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
