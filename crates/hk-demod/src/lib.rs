@@ -17,7 +17,9 @@
 //!   differential decoding, EN 50067 block sync/syndromes, 0A/0B groups → PI, scrolling PS
 //!   frames, PTY, TP/TA, block and group error rates.
 //! - [`record`]: [`write_session`] writes the Demodulation, RDS Decode rows (content class
-//!   unrestricted), the Emitter identity `rds-pi` and a label from the most frequent PS frame.
+//!   unrestricted), the Emitter identity `rds-pi` and a label from the most frequent PS frame;
+//!   [`write_declined`] writes the Demodulation alone for a probe that measured a window and
+//!   declined it, so a refusal is distinguishable from never having looked (T-416).
 //!
 //! Not yet: NBFM/AM/SSB/CW audio, squelch, AGC, CTCSS/DCS, stereo L−R audio, RDS without a
 //! pilot, RadioText.
@@ -54,7 +56,9 @@ pub use rds::{RdsConfig, RdsDecoder, RdsDemod, RdsReport};
 pub use receiver::{
     AnalogReceiver, AnalogSession, AudioBuffer, DemodError, MpxTimeMap, ReceiverConfig,
 };
-pub use record::{RecordContext, WrittenSession, rds_decodes, rds_label, write_session};
+pub use record::{
+    RecordContext, WrittenSession, rds_decodes, rds_label, write_declined, write_session,
+};
 pub use wfm::{MPX_RATE_HZ, WfmConfig, WfmDemod, WfmReport};
 
 /// Demodulator id and version recorded in `Demodulation.demod_version`.

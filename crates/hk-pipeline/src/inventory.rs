@@ -79,8 +79,8 @@ use hk_detect::TrackEvent;
 use hk_detect::track::TrackSummary;
 use hk_detect::track::inventory::{hop_set_sighting, track_sighting};
 use hk_model::{
-    EmitterId, IdentityScheme, LifecycleAuthor, LifecycleState, LinkTarget, MeasurementKey,
-    RepoError, Repository, Sighting, Timestamp, Tolerances, TrackId,
+    DemodulationId, EmitterId, EmitterLink, IdentityScheme, LifecycleAuthor, LifecycleState,
+    LinkTarget, MeasurementKey, RepoError, Repository, Sighting, Timestamp, Tolerances, TrackId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -107,6 +107,24 @@ pub const SAME_EMISSION_REASON: &str =
 /// Entries of the current run remembered for same-emission linking.
 const RUN_MEMORY: usize = 8192;
 
+/// T-416: declined measurements held per track while it waits for an entry.
+const MAX_AWAITING_PER_TRACK: usize = 8;
+
+/// T-416: files a declined chain measurement against `emitter`. A link and nothing else — no
+/// sighting, no count, no classification, no lifecycle change.
+fn attach_measurement(
+    repo: &mut Repository,
+    emitter: EmitterId,
+    demod: DemodulationId,
+    at: Timestamp,
+) -> Result<(), RepoError> {
+    repo.link_emitter(&EmitterLink {
+        emitter_id: emitter,
+        target: LinkTarget::Demodulation(demod),
+        linked_at: at,
+    })
+}
+
 /// Receives inventory-relevant results, under the repository lock.
 pub trait Inventory: Send {
     /// The run's stable capture name (content-derived, identical on every replay of the same
@@ -128,6 +146,27 @@ pub trait Inventory: Send {
         _repo: &mut Repository,
         _track: Option<TrackId>,
         _emitter: EmitterId,
+    ) -> Result<(), RepoError> {
+        Ok(())
+    }
+
+    /// T-416: a chain measured `track`'s emission and wrote Demodulation `demod` **without
+    /// promoting anything** — a probe that declined the window it measured
+    /// (`hk_demod::write_declined`). Attaches it to the track's entry, so the refusal is findable
+    /// from the thing it is about.
+    ///
+    /// **It creates nothing**, exactly as [`Self::live_trust`] creates nothing: a refusal may be
+    /// filed against an entry something else made, never conjure one. But a chain attaches on the
+    /// *tracker's* confirmation and probes about a second into an emission, which is routinely
+    /// before the inventory has offered that track a row at all — so a measurement that arrives
+    /// before the entry is **held until the track is bound** rather than dropped. Dropping it is
+    /// the defect this exists to fix: a refusal nothing can find reads as never having looked.
+    fn chain_measurement(
+        &mut self,
+        _repo: &mut Repository,
+        _track: Option<TrackId>,
+        _demod: DemodulationId,
+        _at: Timestamp,
     ) -> Result<(), RepoError> {
         Ok(())
     }
@@ -620,6 +659,10 @@ pub struct TrackInventory {
     /// reach an entry — and removed when the track ends, so a closed track publishes nothing
     /// further. Bounded like [`Self::run`].
     bound: HashMap<TrackId, EmitterId>,
+    /// T-416: declined chain measurements written for a track that had no entry yet, waiting for
+    /// [`Self::bind`]. Bounded like [`Self::bound`]: past the cap the map is cleared, which costs
+    /// a refusal its link, never a wrong one.
+    awaiting: HashMap<TrackId, Vec<(DemodulationId, Timestamp)>>,
     /// Provisional entries retracted because their track's end yielded no sighting (T-109).
     pub retracted: u64,
     /// Sightings recorded.
@@ -668,6 +711,7 @@ impl TrackInventory {
             characterised: HashMap::new(),
             provisional: HashMap::new(),
             bound: HashMap::new(),
+            awaiting: HashMap::new(),
             retracted: 0,
             sightings: 0,
             created: 0,
@@ -688,11 +732,22 @@ impl TrackInventory {
     /// the way [`Self::run`] is: past the cap the map is cleared rather than grown, and the
     /// bindings are re-learnt by the next offer or chain write. A forgotten binding costs a box a
     /// few hundred milliseconds of extension, never a wrong one.
-    fn bind(&mut self, track: TrackId, emitter: EmitterId) {
+    fn bind(
+        &mut self,
+        repo: &mut Repository,
+        track: TrackId,
+        emitter: EmitterId,
+    ) -> Result<(), RepoError> {
         if self.bound.len() >= RUN_MEMORY && !self.bound.contains_key(&track) {
             self.bound.clear();
         }
         self.bound.insert(track, emitter);
+        // T-416: this is the moment a track first has somewhere to file things, so any declined
+        // measurement that arrived before it is attached here.
+        for (demod, at) in self.awaiting.remove(&track).unwrap_or_default() {
+            attach_measurement(repo, emitter, demod, at)?;
+        }
+        Ok(())
     }
 
     /// Whether `id` may be linked to another entry of its emission: not when it carries a
@@ -879,6 +934,10 @@ impl Inventory for TrackInventory {
         match event {
             TrackEvent::Closed(summary) => {
                 let track = summary.track.id;
+                // T-416: the last chance to file a refusal this track never got an entry for. The
+                // close's own offer resolves one, and the binding goes with the track, so a
+                // measurement still waiting here is attached there or nowhere.
+                let awaiting = self.awaiting.remove(&track).unwrap_or_default();
                 // T-388: a closed track publishes no further extension. Its box stops at the last
                 // end the tracker measured, and the close's own sighting is what the next poll
                 // serves.
@@ -887,7 +946,10 @@ impl Inventory for TrackInventory {
                 match track_sighting(summary) {
                     Some(mut s) => {
                         s.classification = track_family(summary).classification(s.seen.end);
-                        self.offer(repo, &s, Some(TrackTrust::of(summary)))?;
+                        let (emitter, _) = self.offer(repo, &s, Some(TrackTrust::of(summary)))?;
+                        for (demod, at) in awaiting {
+                            attach_measurement(repo, emitter, demod, at)?;
+                        }
                     }
                     // An in-band fragment or hop-set member after all: withdraw its live entry.
                     None => {
@@ -901,6 +963,9 @@ impl Inventory for TrackInventory {
                 // Channels offered before the set formed now belong to the set's entry.
                 for &m in &h.members {
                     self.bound.remove(&m);
+                    // T-416: the member's entry is being withdrawn in favour of the set's, so
+                    // there is nothing left for a waiting refusal to be filed against.
+                    self.awaiting.remove(&m);
                     if let Some(emitter) = self.provisional.remove(&m) {
                         self.retract(repo, m, emitter, h.time.end)?;
                     }
@@ -912,6 +977,7 @@ impl Inventory for TrackInventory {
             }
             TrackEvent::Merged { from, at, .. } => {
                 self.bound.remove(from);
+                self.awaiting.remove(from);
                 if let Some(emitter) = self.provisional.remove(from) {
                     self.retract(repo, *from, emitter, *at)?;
                 }
@@ -943,7 +1009,7 @@ impl Inventory for TrackInventory {
         if created {
             self.provisional.insert(summary.track.id, emitter);
         }
-        self.bind(summary.track.id, emitter);
+        self.bind(repo, summary.track.id, emitter)?;
         Ok(())
     }
 
@@ -959,9 +1025,34 @@ impl Inventory for TrackInventory {
         // several) never fires for it and its entry comes from the chain instead. Binding only the
         // offer would have left exactly the signals the bug was reported against unextended.
         if let Some(track) = track {
-            self.bind(track, id);
+            self.bind(repo, track, id)?;
         }
         self.touch(repo, id, None)
+    }
+
+    fn chain_measurement(
+        &mut self,
+        repo: &mut Repository,
+        track: Option<TrackId>,
+        demod: DemodulationId,
+        at: Timestamp,
+    ) -> Result<(), RepoError> {
+        let Some(track) = track else {
+            return Ok(());
+        };
+        if let Some(emitter) = self.emitter_of_track(track) {
+            return attach_measurement(repo, emitter, demod, at);
+        }
+        if self.awaiting.len() >= RUN_MEMORY && !self.awaiting.contains_key(&track) {
+            self.awaiting.clear();
+        }
+        let queue = self.awaiting.entry(track).or_default();
+        // One track's refusals are bounded too: a chain that keeps declining the same emission
+        // says the same thing each time, and the entry only needs to be able to find it.
+        if queue.len() < MAX_AWAITING_PER_TRACK {
+            queue.push((demod, at));
+        }
+        Ok(())
     }
 
     fn live_trust(
@@ -1192,6 +1283,87 @@ mod tests {
         let other = channel_summary(TrackId::new(), 13, 12, Some(CloseCause::Idle));
         inv.live_track(&mut repo, &other).unwrap();
         assert_eq!(rows(&repo).len(), 1);
+    }
+
+    /// T-416: a declined chain measurement written **before** the track has an inventory row is
+    /// held and attached when one appears — and it creates nothing on its own.
+    ///
+    /// This is the ordering a live run actually has: a chain attaches on the *tracker's*
+    /// confirmation and probes about a second into an emission, while the entry arrives later.
+    /// Filing the refusal against "whatever entry exists right now" would have dropped it exactly
+    /// when it matters, which is the shape of the defect — a refusal nothing can find is
+    /// indistinguishable from never having looked.
+    #[test]
+    fn t416_a_refusal_written_before_the_entry_exists_is_attached_when_one_does() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        let track = TrackId::new();
+        let demod = DemodulationId::new();
+        let at = Timestamp::from_unix_nanos(2_000_000_000);
+
+        // Nothing has entered this emission yet.
+        inv.chain_measurement(&mut repo, Some(track), demod, at)
+            .unwrap();
+        assert!(
+            listed(&repo).is_empty(),
+            "[T-416] a refusal never conjures an inventory entry"
+        );
+
+        // The live offer makes one, and the held measurement is filed against it.
+        inv.live_track(&mut repo, &channel_summary(track, 6, 5, None))
+            .unwrap();
+        let entries = listed(&repo);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let links = repo.emitter_links(entries[0]).unwrap();
+        assert!(
+            links
+                .iter()
+                .any(|l| l.target == LinkTarget::Demodulation(demod)),
+            "[T-416] the refusal is findable from the emission it is about: {links:?}"
+        );
+
+        // And a later one goes straight there, with nothing left waiting.
+        let second = DemodulationId::new();
+        inv.chain_measurement(&mut repo, Some(track), second, at)
+            .unwrap();
+        assert!(inv.awaiting.is_empty(), "nothing is still held");
+        let links = repo.emitter_links(entries[0]).unwrap();
+        assert!(
+            links
+                .iter()
+                .any(|l| l.target == LinkTarget::Demodulation(second)),
+            "{links:?}"
+        );
+    }
+
+    /// And the close is the last chance: a track that never got a live entry still files its
+    /// refusals against the entry its close resolves.
+    #[test]
+    fn t416_a_refusal_held_by_a_track_that_never_bound_is_filed_at_its_close() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        let track = TrackId::new();
+        let demod = DemodulationId::new();
+        inv.chain_measurement(
+            &mut repo,
+            Some(track),
+            demod,
+            Timestamp::from_unix_nanos(2_000_000_000),
+        )
+        .unwrap();
+        let closed = channel_summary(track, 13, 12, Some(CloseCause::Idle));
+        inv.track_event(&mut repo, &TrackEvent::Closed(closed))
+            .unwrap();
+        let entries = listed(&repo);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(
+            repo.emitter_links(entries[0])
+                .unwrap()
+                .iter()
+                .any(|l| l.target == LinkTarget::Demodulation(demod)),
+            "[T-416] the binding goes with the track, so the close is where this must happen"
+        );
+        assert!(inv.awaiting.is_empty());
     }
 
     fn listed(repo: &Repository) -> Vec<EmitterId> {

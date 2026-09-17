@@ -19,6 +19,16 @@
 //!   channel): new rows are written and linked, the emitter's count does not grow.
 //!
 //! Nothing identity-bearing is written without an accepted PI.
+//!
+//! **A refusal is a record too (T-416).** [`write_declined`] is the counterpart of
+//! [`write_session`] for a probe that measured a window and then declined to go on with it — the
+//! mode was not one the chain accepts, or the chain wanted a subcarrier lock the emission does not
+//! carry. It writes the Demodulation and nothing else: the mode the selector arrived at, the
+//! parameters it estimated, the absent lock, and the window they were measured over. **A refusal
+//! that leaves no record is indistinguishable from never having looked** — the same distinction
+//! `Coverage::Unobserved` draws against observed-and-quiet (T-368) and `BiasTee::Unknown` against
+//! off (T-359) — so short evidence leaves a log rather than a promotion. Nothing identity-bearing,
+//! no sighting, no classification, no decode, no label: the row is evidence, not a claim.
 
 use hk_model::{
     Annotation, AnnotationAuthor, AnnotationId, AnnotationKind, AnnotationTarget, Classification,
@@ -141,6 +151,45 @@ pub fn rds_decodes(session: &AnalogSession, demod_id: DemodulationId) -> Vec<Dec
         ));
     }
     out
+}
+
+/// Records a probe that **declined** the window it measured (T-416). See the [module docs](self).
+///
+/// Writes one Demodulation carrying what was measured — mode, estimated parameters, the absent
+/// lock, and the time span — and links it to `ctx.emitter_hint` when the caller knows which
+/// inventory entry this emission is. Returns the row's id.
+///
+/// Deliberately **not** a promotion, and it cannot become one: no sighting is recorded, no
+/// classification is appended, no identity, decode or label is written. The confirmation rule's
+/// route C reads this row like any other (`ConfirmPolicy::verified_reason`) and refuses it on its
+/// own terms, because a declined session carries neither `lock_quality` nor `pilot_hz`.
+pub fn write_declined(
+    repo: &mut Repository,
+    session: &AnalogSession,
+    ctx: &RecordContext,
+) -> Result<DemodulationId, RepoError> {
+    let time = session.time_range();
+    let demod = Demodulation {
+        id: DemodulationId::new(),
+        emitter_ref: ctx.emitter_hint,
+        detection_ref: ctx.detection_ref,
+        recording_ref: ctx.recording_ref,
+        mode: session.mode.mode.as_str().into(),
+        params: session.estimated_params(),
+        lock_quality: session.wfm.as_ref().and_then(|w| w.pilot.lock_quality),
+        evm_db: None,
+        time,
+        demod_version: session.demod_version.clone(),
+    };
+    repo.insert_demodulation(&demod)?;
+    if let Some(eid) = ctx.emitter_hint {
+        repo.link_emitter(&EmitterLink {
+            emitter_id: eid,
+            target: LinkTarget::Demodulation(demod.id),
+            linked_at: time.end,
+        })?;
+    }
+    Ok(demod.id)
 }
 
 /// Writes the session's records. See the [module docs](self).
