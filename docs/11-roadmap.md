@@ -85,6 +85,7 @@ Ordered by shared-core coverage ([docs/06 §4.2](06-capability-map.md)): widen t
 | **M5** | Accessory-gated expansions | GNSS observables cluster (C36 + active antenna); HF/VLF science front ends; radiometry science (C33 + dish); Ku (LNB) | high reach but each gated on an accessory (docs/06 §4.3); sequenced by which accessory the user adds | hardware |
 | **M6** | Localization | RSSI walk-mapping (C31) first; coherent DF / passive radar (C32/C35) only with a second/coherent SDR (the generic device interface from M0b is the seam for it) | RSSI is native; the rest are `needs-other-sdr` | S7 |
 | **M7** | Device hardening + TX | on-device screen/enclosure UI, low-power tuning, TX experiments (C37, opt-in, gated behind M0b's authenticated control API) | polish and the opt-in transmit path last | S6 |
+| **M8** | Field check (software acceptance / user-simulation) | browser-driven E2E over the **live app** on real hardware + ambient AM/FM, proving the whole workflow end to end: signals appear (Candidate *and* Confirmed), they can be tuned to, **decoding works — RDS on FM is the headline**, and **no duplicate bands** appear. A curated subset of the existing e2e and unit assertions, reused where they map, run against the live app rather than the mock device. Body: [§4 below](#5-field-check-software-acceptance--user-simulation-m8). | **field confidence that the SOFTWARE works** before trusting it on novel signals. A productized HIL **T5/T6** tier: **never gates CI**. New dep: **Playwright**. *Sub-note, deferred and explicitly not now:* a lighter **power-on self-test** running automatically at boot, downstream of this manual check. | **Gate: real hardware** |
 
 ## 3. What this ordering optimises
 
@@ -101,14 +102,9 @@ Ordered by shared-core coverage ([docs/06 §4.2](06-capability-map.md)): widen t
 - M0b adds a Selection object to [docs/07](07-data-model.md) (T-052) and needs the HackRF for T-042 and the T-053 HIL run (one HackRF user at a time, receive-only).
 - The executable task breakdown for M0 is [docs/12](12-implementation-plan.md); M0 and M0b task state lives in [tasks.yaml](tasks.yaml).
 
-## Sources
+## 5. Field check (software acceptance / user-simulation) — M8
 
-- [SDR++](https://github.com/AlexandreRouma/SDRPlusPlus), [SDRangel](https://github.com/f4exb/sdrangel), [SigDigger](https://github.com/BatchDrake/SigDigger): reference control-panel conventions for T-051. The specific control sets are unverified until T-051's survey note.
-- [W3C Web Audio API](https://www.w3.org/TR/webaudio/): browser audio output for Listen (T-043).
-- [SoapySDR](https://github.com/pothosware/SoapySDR): target for later non-HackRF devices behind the generic interface (T-048).
-- Internal: [docs/06 §4.2](06-capability-map.md), [docs/10](10-test-strategy.md), [ADR-0005](adr/0005-survey-dwell-scheduler.md), [tasks.yaml](tasks.yaml) T-039, T-042..T-045, T-047..T-053.
-
-### Software acceptance / user-simulation field check (user, 2026-09-16)
+*This is the body of the **M8** row in §2. Promoted from a prose note to a numbered milestone at the user's request, 2026-09-16.*
 
 **This is not a radio test and not calibration.** It is a **software acceptance suite**: it drives the
 **live app through browser instrumentation** against real hardware and ambient AM/FM, to prove the
@@ -169,3 +165,10 @@ coverage answers per frequency cell over a window, and the view needs both at se
 Placement: **M5-ish**, after the current M2-hardening/M3 work, and after or alongside the
 software-acceptance field check above — but T-405 and T-406 must be built against it now rather than
 foreclosing it.
+
+## Sources
+
+- [SDR++](https://github.com/AlexandreRouma/SDRPlusPlus), [SDRangel](https://github.com/f4exb/sdrangel), [SigDigger](https://github.com/BatchDrake/SigDigger): reference control-panel conventions for T-051. The specific control sets are unverified until T-051's survey note.
+- [W3C Web Audio API](https://www.w3.org/TR/webaudio/): browser audio output for Listen (T-043).
+- [SoapySDR](https://github.com/pothosware/SoapySDR): target for later non-HackRF devices behind the generic interface (T-048).
+- Internal: [docs/06 §4.2](06-capability-map.md), [docs/10](10-test-strategy.md), [ADR-0005](adr/0005-survey-dwell-scheduler.md), [tasks.yaml](tasks.yaml) T-039, T-042..T-045, T-047..T-053.
