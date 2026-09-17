@@ -7817,7 +7817,7 @@ tasks:
   - id: T-390
     title: Candidate boxes over-split into the FM station skirts and still overlap in the SERVED path after T-369
     milestone: M3
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: M3B
     core_interface: true
@@ -7855,7 +7855,7 @@ tasks:
   - id: T-391
     title: The navigators sit in 12px tracks; make both as thick as the Capture panel, and make that panel collapsible
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: UI
     deps: [T-376]
@@ -7960,7 +7960,7 @@ tasks:
   - id: T-394
     title: A line at one frequency in channels holding nothing is the receiver's - test for that, do not keep listing notches
     milestone: M3
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: M3A
     core_interface: true
