@@ -7992,6 +7992,33 @@ tasks:
       surviving as 6 of 44 boxes above 20 dB; those must still survive.
       Keep the existing per-capture exclusions - they are measured and correct. This
       replaces the STRATEGY of adding to them, not the records themselves.
+  - id: T-395
+    title: The Live button is a time-axis control sitting in the Capture panel; move it onto the time navigator
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: UI
+    deps: [T-391]
+    notes: |
+      USER 2026-09-16. Move the "Live" button - which switches the timeline to the
+      most recent time and tracks incoming data - OUT of the Capture section and onto
+      the LEFT TIME NAVIGATOR bar, at its top or bottom.
+      Rationale, the user's: Live/follow-live is a TIME-AXIS control (follow the live
+      edge vs paused/scrubbed), so it belongs with the time navigator, consistent with
+      "left bar = time". T-391 just made that bar 92px, so there is now room for it.
+      THIS IS A RELOCATION, NOT A BEHAVIOUR CHANGE, and that distinction carries real
+      weight now: the `live` state drives T-388's presence-push subscription
+      (mountPresenceStream subscribes only while time.live, and a paused view opens no
+      socket at all) and T-379's viewWindow across every surface. Moving the control
+      must not move the state. Assert that the same action is dispatched from the new
+      location and that the paused/live behaviour of the presence stream is unchanged.
+      UI-ONLY GATE, per the user: just lint + just test-ui, not the full Rust suite.
+      BATCHING: the user asked for this to land in ONE merge with the other navigator
+      polish to save cost. T-391 (sizing, collapsible Capture panel) had already merged
+      at 691d330 when this arrived, so the batch is this ticket plus T-393 (labels and
+      hover/drag readouts) - launch them as a single agent in one worktree once T-392
+      lands, since T-393 part (3) describes what a region-select would do and T-392 is
+      what makes that true.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
