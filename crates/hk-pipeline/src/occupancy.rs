@@ -1982,8 +1982,7 @@ mod tests {
                 levels: vec![hk_store::LevelConfig {
                     f_factor: 1,
                     t_cells_per_block: 16,
-                    max_age: None,
-                    byte_quota: None,
+                    ..hk_store::LevelConfig::default()
                 }],
                 seal_lag: Duration::ZERO,
                 checkpoint_interval: None,

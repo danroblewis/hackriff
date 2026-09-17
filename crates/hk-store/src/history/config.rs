@@ -7,22 +7,65 @@ use hk_model::{FreqRange, PowerUnit};
 use super::StoreError;
 
 /// Most levels a scheme may have.
-pub const MAX_LEVELS: usize = 8;
+///
+/// Raised from 8 to 64 by T-434: a **ladder** needs a handful of levels, but a de-welded
+/// **lattice** (§8.2 of `docs/16`) needs one node per `(level_f, level_t)` pair, so an 8 × 8 span
+/// of the two axes is 64 nodes. The ceiling still exists — [`hk_model::TileKey::level`] is a `u8`
+/// and every per-level index in the store is a `Vec` sized once at open.
+pub const MAX_LEVELS: usize = 64;
 
-/// One level of the pyramid ladder.
+/// One level of the pyramid.
+///
+/// A level is produced by folding **one** finer level ([`Self::from`]) by a frequency factor and a
+/// time factor. A level may be folded by more than one coarser level, so the levels form a DAG:
+/// a plain ladder is the special case where every level has exactly one consumer.
+///
+/// **The two factors are independent (T-434).** Before, the next level's time cell was forced to be
+/// one whole tile of the level below, which welded the axes at the ratio
+/// `t_cells_per_block : 1` — across scheme 1's ladder frequency coarsens ×16 while time coarsens
+/// ×86 400 (`docs/16` §5.2 correction 2). [`Self::t_factor`] de-welds them, which is what lets a
+/// scheme address `level_f` and `level_t` as separate coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LevelConfig {
-    /// Frequency-cell width relative to the level below (must be 1 for level 0).
+    /// The finer level this one is folded from. `None` means the level below (`i − 1`), which is
+    /// what a plain ladder wants; level 0 has no producer and is fed by ingest. A named producer
+    /// must have a **lower index**, so one pass over the levels in index order always seals a
+    /// producer before its consumers.
+    pub from: Option<usize>,
+    /// Frequency-cell width relative to [`Self::from`] (must be 1 for level 0).
     pub f_factor: u32,
-    /// Time cells per tile. **The next level's time cell is one whole tile of this level**, so a
-    /// tile rolls up into exactly one time column of its parent.
+    /// Time-cell width relative to [`Self::from`]. `None` is the historical weld — one whole tile
+    /// of the producer, i.e. the producer's `t_cells_per_block` — so an existing ladder is
+    /// expressed unchanged and no stored tile moves.
+    ///
+    /// **A value other than the weld costs the percentiles.** A tile's histogram is kept per
+    /// frequency cell over the *whole tile*, which is exactly the parent cell's histogram only
+    /// when a child tile is one parent time cell. De-weld and it is no longer: the fold then
+    /// leaves `p_low`/`p_high` **unknown** rather than inventing a distribution it cannot see
+    /// (see [`super::tile::Tile::fold_child`]).
+    pub t_factor: Option<u32>,
+    /// Time cells per tile.
     pub t_cells_per_block: u32,
     /// Optional retention age: sealed tiles whose end is older than `watermark − max_age` are
-    /// evicted (still only once a coarser level covers them).
+    /// evicted (still only once **every** coarser level folded from it covers them).
     pub max_age: Option<Duration>,
     /// Optional byte quota for this level's sealed tiles (T-116): the oldest evictable tiles of
     /// the level go first; tiles protected by a [`RetentionOverride`] are never evicted by quota.
     pub byte_quota: Option<u64>,
+}
+
+impl Default for LevelConfig {
+    /// The level below, welded in time, ×2 in frequency, 60 time cells per tile, kept forever.
+    fn default() -> Self {
+        Self {
+            from: None,
+            f_factor: 2,
+            t_factor: None,
+            t_cells_per_block: 60,
+            max_age: None,
+            byte_quota: None,
+        }
+    }
 }
 
 /// A per-region retention override (T-116), e.g. "keep 433 MHz at 1 s for 90 days": sealed tiles
@@ -140,8 +183,7 @@ impl Default for PyramidConfig {
         let level = |f_factor, t_cells_per_block| LevelConfig {
             f_factor,
             t_cells_per_block,
-            max_age: None,
-            byte_quota: None,
+            ..LevelConfig::default()
         };
         Self {
             scheme: 1,
@@ -183,8 +225,12 @@ pub struct LevelGeometry {
     pub t_cell_ns: i64,
     /// Time cells per tile.
     pub nt: usize,
-    /// Frequency factor relative to the level below.
+    /// Frequency factor relative to [`Self::from`].
     pub f_factor: u32,
+    /// Time factor relative to [`Self::from`] (1 for level 0).
+    pub t_factor: u32,
+    /// The finer level this one is folded from; `None` for level 0, which ingest feeds.
+    pub from: Option<usize>,
 }
 
 impl LevelGeometry {
@@ -204,8 +250,11 @@ impl LevelGeometry {
 pub struct Geometry {
     /// Frequency cells per tile.
     pub nf: usize,
-    /// Per level, finest first.
+    /// Per level, finest first; every level's producer has a lower index than the level itself.
     pub levels: Vec<LevelGeometry>,
+    /// Per level, the coarser levels folded **from** it, in index order. A ladder has one entry
+    /// per level and an empty list at the top; a lattice node may feed two (one per axis).
+    consumers: Vec<Vec<usize>>,
 }
 
 impl Geometry {
@@ -214,19 +263,94 @@ impl Geometry {
         self.levels.len()
     }
 
-    /// Top (coarsest) level index.
+    /// Top (coarsest) level index — the last, which the ordering rule makes a level no other
+    /// level is folded from.
     pub fn top(&self) -> usize {
         self.levels.len() - 1
     }
 
-    /// The parent `(f_block, t_block)` at `level + 1` of tile `(f_block, t_block)` at `level`.
-    pub fn parent(&self, level: usize, f_block: i64, t_block: i64) -> (i64, i64) {
-        let up = &self.levels[level + 1];
-        let parent_cell = (f_block * self.nf as i64).div_euclid(i64::from(up.f_factor));
-        (
-            parent_cell.div_euclid(self.nf as i64),
-            t_block.div_euclid(up.nt as i64),
-        )
+    /// The coarser levels folded from `level`. Empty for a level nothing consumes, which is the
+    /// only kind of level the byte budget may evict without a coverage check.
+    pub fn consumers(&self, level: usize) -> &[usize] {
+        &self.consumers[level]
+    }
+
+    /// The distinct frequency-cell widths across the levels, finest first: the **`level_f` axis**.
+    pub fn f_axis(&self) -> Vec<f64> {
+        let mut v: Vec<f64> = self.levels.iter().map(|l| l.f_cell_hz).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).expect("cell widths are finite"));
+        v.dedup();
+        v
+    }
+
+    /// The distinct time-cell durations across the levels, finest first: the **`level_t` axis**.
+    pub fn t_axis(&self) -> Vec<i64> {
+        let mut v: Vec<i64> = self.levels.iter().map(|l| l.t_cell_ns).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// The `(level_f, level_t)` coordinates of `level` — its rank on each axis independently.
+    ///
+    /// This is the de-welded addressing (`docs/16` §8.2) read off the geometry rather than carried
+    /// beside it, so it is defined for **every** scheme. A welded ladder comes out as the
+    /// **diagonal** `(n, n)`, which is the honest statement of what a ladder is: a lattice you can
+    /// only move through by coarsening both axes at once.
+    pub fn axes_of(&self, level: usize) -> (usize, usize) {
+        let g = &self.levels[level];
+        let f = self
+            .f_axis()
+            .iter()
+            .position(|&w| w == g.f_cell_hz)
+            .unwrap_or(0);
+        let t = self
+            .t_axis()
+            .iter()
+            .position(|&d| d == g.t_cell_ns)
+            .unwrap_or(0);
+        (f, t)
+    }
+
+    /// The level serving `(level_f, level_t)`, or `None` where the scheme has no such node — which
+    /// is most of the grid for a ladder, and is the answer a route owes its caller rather than
+    /// snapping silently to a level with a different time or frequency cell.
+    pub fn level_at(&self, level_f: usize, level_t: usize) -> Option<usize> {
+        let (fa, ta) = (self.f_axis(), self.t_axis());
+        let (&f_cell, &t_cell) = (fa.get(level_f)?, ta.get(level_t)?);
+        (0..self.levels.len())
+            .find(|&l| self.levels[l].f_cell_hz == f_cell && self.levels[l].t_cell_ns == t_cell)
+    }
+
+    /// `up`'s cells are at least as coarse as `level`'s on **both** axes, so a cell of `up` is a
+    /// legitimate stand-in for a missing cell of `level`.
+    ///
+    /// In a ladder every higher index satisfies this, which is why a fallback could walk the
+    /// indexes. In a de-welded lattice it cannot: index order is not a coarseness order — node
+    /// (1, 0) outranks (0, 3) in index while being *finer* in time — and filling a missing cell
+    /// from it would answer a coarse time question with a fine time cell.
+    pub fn coarsens_or_equals(&self, level: usize, up: usize) -> bool {
+        let (a, b) = (&self.levels[level], &self.levels[up]);
+        b.f_cell_hz >= a.f_cell_hz && b.t_cell_ns >= a.t_cell_ns
+    }
+
+    /// Time cells of `up` spanned by one whole tile of `level` (`up` must be a consumer of
+    /// `level`). 1 is the welded case — a child tile is exactly one parent time column.
+    pub fn parent_cells_per_tile(&self, level: usize, up: usize) -> i64 {
+        self.levels[level].nt as i64 / i64::from(self.levels[up].t_factor)
+    }
+
+    /// The `(f_block, t_block)` at `up` that tile `(f_block, t_block)` of `level` folds into.
+    ///
+    /// Both axes are resolved through **cells**, not blocks: the old form divided `t_block` by the
+    /// parent's `nt` directly, which is only right when one child tile is one parent time cell —
+    /// exactly the weld T-434 removed.
+    pub fn fold_target(&self, level: usize, up: usize, f_block: i64, t_block: i64) -> (i64, i64) {
+        let u = &self.levels[up];
+        let nf = self.nf as i64;
+        let f_cell = (f_block * nf).div_euclid(i64::from(u.f_factor));
+        let t_cell = t_block.saturating_mul(self.parent_cells_per_tile(level, up));
+        (f_cell.div_euclid(nf), t_cell.div_euclid(u.nt as i64))
     }
 
     /// End (exclusive) of time block `t_block` at `level`, ns.
@@ -235,7 +359,118 @@ impl Geometry {
     }
 }
 
+/// Shape of a de-welded view lattice (T-434, `docs/16` §6.2/§8.2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewLattice {
+    /// Scheme id. Must differ from every other scheme in the same data directory.
+    pub scheme: u16,
+    /// Frequency cell of node (0, 0), Hz.
+    pub f_cell_hz: f64,
+    /// Time cell of node (0, 0).
+    pub t_cell: Duration,
+    /// Cells per tile on both axes — uniform, so a client's tile **count** budget and its
+    /// **byte** budget are the same statement (`docs/16` §5.5).
+    pub cells_per_block: u32,
+    /// Frequency levels, each ×2 the one before (including the finest).
+    pub f_levels: usize,
+    /// Time levels, each ×2 the one before (including the finest).
+    pub t_levels: usize,
+}
+
+impl Default for ViewLattice {
+    /// `docs/16` §6.2's proposal: 100 kHz × 128 s at the finest, 256 × 256 tiles, 8 × 8 nodes.
+    /// Frequency reaches 12.8 MHz cells (6 GHz in 469 of them) and time 4.6 h cells (30 days in
+    /// 158 rows), so the whole device range over a month is a couple of tiles either way.
+    fn default() -> Self {
+        Self {
+            scheme: 2,
+            f_cell_hz: 100_000.0,
+            t_cell: Duration::from_secs(128),
+            cells_per_block: 256,
+            f_levels: 8,
+            t_levels: 8,
+        }
+    }
+}
+
+impl ViewLattice {
+    /// Flattened level index of node `(level_f, level_t)`.
+    pub fn index(&self, level_f: usize, level_t: usize) -> usize {
+        level_f * self.t_levels + level_t
+    }
+
+    /// `(level_f, level_t)` of a flattened level index.
+    pub fn coords(&self, level: usize) -> (usize, usize) {
+        (level / self.t_levels, level % self.t_levels)
+    }
+
+    /// The level ladder — really a DAG — for this lattice.
+    ///
+    /// Every node has exactly **one** producer, so the existing seal path folds each sealed tile
+    /// into its consumers and nothing is produced twice: node `(0, j)` is the previous time level
+    /// folded ×2 in time only, and node `(i, j)` for `i > 0` is `(i − 1, j)` folded ×2 in
+    /// frequency only. Choosing time-first-then-frequency fixes a **canonical path** through the
+    /// lattice, which matters because not every plane is path-independent: max-hold, frame count,
+    /// linear-power sum, `obs_s` and `occ_max` fold the same either way, but the occupancy
+    /// *ratio* (a time-weighted mean over the child's rows, then the best over the child's
+    /// frequency cells) does not commute, so the order has to be named rather than assumed.
+    pub fn levels(&self) -> Vec<LevelConfig> {
+        let nt = self.cells_per_block;
+        let mut out = Vec::with_capacity(self.f_levels * self.t_levels);
+        for i in 0..self.f_levels {
+            for j in 0..self.t_levels {
+                out.push(if i == 0 && j == 0 {
+                    LevelConfig {
+                        from: None,
+                        f_factor: 1,
+                        t_factor: Some(1),
+                        t_cells_per_block: nt,
+                        ..LevelConfig::default()
+                    }
+                } else if i == 0 {
+                    LevelConfig {
+                        from: Some(self.index(0, j - 1)),
+                        f_factor: 1,
+                        t_factor: Some(2),
+                        t_cells_per_block: nt,
+                        ..LevelConfig::default()
+                    }
+                } else {
+                    LevelConfig {
+                        from: Some(self.index(i - 1, j)),
+                        f_factor: 2,
+                        t_factor: Some(1),
+                        t_cells_per_block: nt,
+                        ..LevelConfig::default()
+                    }
+                });
+            }
+        }
+        out
+    }
+}
+
 impl PyramidConfig {
+    /// A de-welded **view lattice**: `f_levels × t_levels` nodes whose frequency and time levels
+    /// are independent coordinates (`docs/16` §8.2), so a pane may zoom one axis without the
+    /// other. The welded ladder cannot express this — its frequency coarsens ×16 across five
+    /// levels while time coarsens ×86 400 — so the big view gets its own scheme rather than more
+    /// levels on scheme 1, and the expensive fine levels stay where they already are.
+    ///
+    /// **Percentiles are not carried above node (0, 0)**: see [`LevelConfig::t_factor`]. A view
+    /// tile answers *where have I looked, and how strong was it*; the noise-floor distribution
+    /// stays a scheme-1 question.
+    pub fn view_lattice(shape: ViewLattice) -> Self {
+        Self {
+            scheme: shape.scheme,
+            f_cell_hz: shape.f_cell_hz,
+            t_cell: shape.t_cell,
+            f_cells_per_block: shape.cells_per_block,
+            levels: shape.levels(),
+            ..Self::default()
+        }
+    }
+
     /// Checks the settings and derives the geometry.
     pub fn geometry(&self) -> Result<Geometry, StoreError> {
         let bad = |m: String| Err(StoreError::Config(m));
@@ -282,38 +517,93 @@ impl PyramidConfig {
             return bad("compression_level outside zstd's range".into());
         }
         let nf = self.f_cells_per_block as usize;
-        let mut levels = Vec::with_capacity(self.levels.len());
-        let (mut f_cell, mut t_cell) = (self.f_cell_hz, t0);
+        let mut levels: Vec<LevelGeometry> = Vec::with_capacity(self.levels.len());
+        let mut consumers: Vec<Vec<usize>> = vec![Vec::new(); self.levels.len()];
         for (i, l) in self.levels.iter().enumerate() {
             if l.t_cells_per_block == 0 {
                 return bad(format!("level {i}: t_cells_per_block must be >= 1"));
             }
-            if i == 0 && l.f_factor != 1 {
-                return bad("level 0 f_factor must be 1".into());
-            }
-            if i > 0 {
-                if l.f_factor == 0 || self.f_cells_per_block % l.f_factor != 0 {
-                    return bad(format!(
-                        "level {i}: f_factor must divide f_cells_per_block (so a parent cell's \
-                         children lie in one child tile)"
-                    ));
-                }
-                let prev: &LevelGeometry = &levels[i - 1];
-                t_cell = prev.t_block_ns();
-                f_cell *= f64::from(l.f_factor);
-            }
             let nt = l.t_cells_per_block as usize;
+            if i == 0 {
+                if l.f_factor != 1 {
+                    return bad("level 0 f_factor must be 1".into());
+                }
+                if l.from.is_some() {
+                    return bad("level 0 is fed by ingest and has no producer".into());
+                }
+                if l.t_factor.is_some_and(|t| t != 1) {
+                    return bad("level 0 t_factor must be 1".into());
+                }
+                if t0.checked_mul(nt as i64).is_none() {
+                    return bad("level 0: tile duration overflows".into());
+                }
+                levels.push(LevelGeometry {
+                    f_cell_hz: self.f_cell_hz,
+                    t_cell_ns: t0,
+                    nt,
+                    f_factor: 1,
+                    t_factor: 1,
+                    from: None,
+                });
+                continue;
+            }
+            let from = l.from.unwrap_or(i - 1);
+            if from >= i {
+                return bad(format!(
+                    "level {i}: producer {from} must have a lower index, so one seal pass in \
+                     index order folds a producer before its consumers"
+                ));
+            }
+            if l.f_factor == 0 || self.f_cells_per_block % l.f_factor != 0 {
+                return bad(format!(
+                    "level {i}: f_factor must divide f_cells_per_block (so a parent cell's \
+                     children lie in one child tile)"
+                ));
+            }
+            let prev = levels[from];
+            let t_factor = l.t_factor.unwrap_or(prev.nt as u32);
+            if t_factor == 0 {
+                return bad(format!("level {i}: t_factor must be >= 1"));
+            }
+            if prev.nt as u32 % t_factor != 0 {
+                return bad(format!(
+                    "level {i}: t_factor must divide level {from}'s t_cells_per_block (so a child \
+                     tile is a whole number of parent time cells)"
+                ));
+            }
+            // Parent time cells one producer tile spans. 1 is the weld.
+            let k = prev.nt / t_factor as usize;
+            if nt % k != 0 {
+                return bad(format!(
+                    "level {i}: one tile of level {from} spans {k} time cells here, which must \
+                     divide t_cells_per_block (so a child tile never straddles two parent tiles)"
+                ));
+            }
+            if l.f_factor == 1 && t_factor == 1 {
+                return bad(format!("level {i}: coarsens neither axis"));
+            }
+            let f_cell = prev.f_cell_hz * f64::from(l.f_factor);
+            let Some(t_cell) = prev.t_cell_ns.checked_mul(i64::from(t_factor)) else {
+                return bad(format!("level {i}: time cell overflows"));
+            };
             if t_cell.checked_mul(nt as i64).is_none() {
                 return bad(format!("level {i}: tile duration overflows"));
             }
+            consumers[from].push(i);
             levels.push(LevelGeometry {
                 f_cell_hz: f_cell,
                 t_cell_ns: t_cell,
                 nt,
                 f_factor: l.f_factor,
+                t_factor,
+                from: Some(from),
             });
         }
-        Ok(Geometry { nf, levels })
+        Ok(Geometry {
+            nf,
+            levels,
+            consumers,
+        })
     }
 }
 
@@ -342,15 +632,142 @@ mod tests {
         );
         assert_eq!(g.levels[4].t_block_ns(), 7 * 86400 * s);
         // Child tile (f 3, t 10) at L0: 6.4 MHz blocks; parent cell width 12.5 kHz.
-        assert_eq!(g.parent(0, 3, 10), (1, 0));
-        assert_eq!(g.parent(0, 2, 29), (1, 1));
-        assert_eq!(g.parent(0, -1, -1), (-1, -1));
+        assert_eq!(g.fold_target(0, 1, 3, 10), (1, 0));
+        assert_eq!(g.fold_target(0, 1, 2, 29), (1, 1));
+        assert_eq!(g.fold_target(0, 1, -1, -1), (-1, -1));
+        // The ladder is the lattice with one consumer per level and the weld still in place:
+        // every level's time factor is the producer's whole tile, so one child tile is one
+        // parent time column.
+        for l in 0..g.n_levels() {
+            let want: &[usize] = if l == g.top() { &[] } else { &[l + 1] };
+            assert_eq!(g.consumers(l), want, "level {l}");
+            if l > 0 {
+                assert_eq!(g.levels[l].t_factor, g.levels[l - 1].nt as u32);
+                assert_eq!(g.parent_cells_per_tile(l - 1, l), 1);
+            }
+        }
     }
 
     #[test]
     fn rejects_bad_factor() {
         let mut c = PyramidConfig::default();
         c.levels[1].f_factor = 3;
+        assert!(c.geometry().is_err());
+    }
+
+    /// T-434: the two axes are independent coordinates, and the flattened level index is exactly
+    /// `(level_f, level_t)`.
+    #[test]
+    fn view_lattice_de_welds_the_axes() {
+        let shape = ViewLattice::default();
+        let g = PyramidConfig::view_lattice(shape).geometry().unwrap();
+        assert_eq!(g.n_levels(), shape.f_levels * shape.t_levels);
+        let s = 1_000_000_000i64;
+        for i in 0..shape.f_levels {
+            for j in 0..shape.t_levels {
+                let l = &g.levels[shape.index(i, j)];
+                // Each axis coarsens on its own: ×2^i in frequency, ×2^j in time, independently.
+                assert_eq!(l.f_cell_hz, 100_000.0 * f64::from(1u32 << i), "({i},{j})");
+                assert_eq!(l.t_cell_ns, 128 * s * i64::from(1u32 << j), "({i},{j})");
+            }
+        }
+        // Node (0, j) is fed by folding time only; (i, j) for i > 0 by folding frequency only.
+        assert_eq!(g.levels[shape.index(0, 3)].from, Some(shape.index(0, 2)));
+        assert_eq!(g.levels[shape.index(0, 3)].f_factor, 1);
+        assert_eq!(g.levels[shape.index(0, 3)].t_factor, 2);
+        assert_eq!(g.levels[shape.index(2, 3)].from, Some(shape.index(1, 3)));
+        assert_eq!(g.levels[shape.index(2, 3)].f_factor, 2);
+        assert_eq!(g.levels[shape.index(2, 3)].t_factor, 1);
+        // A node on the finest frequency row feeds two consumers — one per axis. That is the
+        // whole point: a ladder node feeds one.
+        assert_eq!(
+            g.consumers(shape.index(0, 0)),
+            &[shape.index(0, 1), shape.index(1, 0)]
+        );
+        // A node off that row feeds only the next frequency level.
+        assert_eq!(g.consumers(shape.index(1, 0)), &[shape.index(2, 0)]);
+        // The coarsest frequency row is consumed by nothing: 8 leaves, not one top.
+        for j in 0..shape.t_levels {
+            assert!(g.consumers(shape.index(shape.f_levels - 1, j)).is_empty());
+        }
+        // A time fold puts two child tiles in one parent tile; a frequency fold, one.
+        assert_eq!(
+            g.parent_cells_per_tile(shape.index(0, 0), shape.index(0, 1)),
+            128
+        );
+        assert_eq!(
+            g.parent_cells_per_tile(shape.index(0, 0), shape.index(1, 0)),
+            256
+        );
+        assert_eq!(
+            g.fold_target(shape.index(0, 0), shape.index(0, 1), 5, 3),
+            (5, 1)
+        );
+        assert_eq!(
+            g.fold_target(shape.index(0, 0), shape.index(1, 0), 5, 3),
+            (2, 3)
+        );
+    }
+
+    /// The addressing T-438's route needs, and the shape T-437's client LRU keys on:
+    /// `(level_f, level_t, f_block, t_block)`. It is derived from the geometry, so it is defined
+    /// for a ladder too — as the diagonal.
+    #[test]
+    fn per_axis_addressing_is_a_grid_for_a_lattice_and_a_diagonal_for_a_ladder() {
+        let shape = ViewLattice::default();
+        let g = PyramidConfig::view_lattice(shape).geometry().unwrap();
+        assert_eq!(g.f_axis().len(), shape.f_levels);
+        assert_eq!(g.t_axis().len(), shape.t_levels);
+        for i in 0..shape.f_levels {
+            for j in 0..shape.t_levels {
+                // Every (level_f, level_t) exists, and round-trips through the flattened index.
+                let l = g.level_at(i, j).expect("the lattice fills its grid");
+                assert_eq!(l, shape.index(i, j), "({i},{j})");
+                assert_eq!(g.axes_of(l), (i, j));
+            }
+        }
+        assert_eq!(g.level_at(shape.f_levels, 0), None);
+
+        // A welded ladder occupies only the diagonal: asking for a coarse frequency at a fine time
+        // has no answer, and the geometry says so instead of returning a level whose time cell is
+        // a day.
+        let g = PyramidConfig::default().geometry().unwrap();
+        for l in 0..g.n_levels() {
+            assert_eq!(g.axes_of(l), (l, l), "level {l}");
+            assert_eq!(g.level_at(l, l), Some(l));
+        }
+        assert_eq!(g.level_at(3, 0), None);
+        assert_eq!(g.level_at(0, 3), None);
+    }
+
+    #[test]
+    fn rejects_a_producer_that_seals_later() {
+        let mut c = PyramidConfig::default();
+        c.levels[1].from = Some(3);
+        let e = c.geometry().unwrap_err().to_string();
+        assert!(e.contains("lower index"), "{e}");
+    }
+
+    #[test]
+    fn rejects_a_child_tile_that_straddles_two_parent_tiles() {
+        let mut c = PyramidConfig::default();
+        // L0 tiles hold 60 time cells; a t_factor of 8 does not divide 60.
+        c.levels[1].t_factor = Some(8);
+        assert!(c.geometry().is_err());
+        // 4 divides 60, but the resulting 15 parent cells per child tile must also divide L1's
+        // own t_cells_per_block (15) — it does, so this one is legal.
+        c.levels[1].t_factor = Some(4);
+        assert!(c.geometry().is_ok());
+        // 2 divides 60, giving 30 parent cells per child tile, which does not divide 15.
+        c.levels[1].t_factor = Some(2);
+        assert!(c.geometry().is_err());
+    }
+
+    #[test]
+    fn rejects_a_level_that_coarsens_nothing() {
+        let mut c = PyramidConfig::default();
+        c.levels[1].f_factor = 1;
+        c.levels[1].t_factor = Some(1);
         assert!(c.geometry().is_err());
     }
 }

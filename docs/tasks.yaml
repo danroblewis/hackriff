@@ -10458,7 +10458,7 @@ tasks:
   - id: T-430
     milestone: M2-hardening
     title: The per-cell coverage contract test bounds the capture time elapsing between two HTTP round-trips
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     deps: [T-423, T-425]
@@ -10481,11 +10481,43 @@ tasks:
       DoD: state the measured range of the quantity, fix accordingly, and report a before/after
       failure rate over at least 10 runs at comparable load. Do not loosen 1e-6 to fit an
       unmeasured spread - T-425's ticket carried the same prohibition for the same reason.
+    commit: 704cf22
+    result: |
+      FIXED, with T-433 in the same diff, and the finding is one line: ALL THREE TESTS BOUND A QUANTITY
+      THAT MOVES IN WHOLE CAPTURE BLOCKS, not a continuous spread. Every "6.8 ms latency" and every
+      "2490368 samples" reported by three agents on three trees is a CONSTANT.
+      T-430: the coverage log appends ONE 16384-SAMPLE BLOCK at a time, so row 1 reads 0 or an exact
+      multiple of 16384/2.4e6 = 6.8267 ms - never anything between. The "6.8 ms inter-request latency"
+      T-425 and T-436 both recorded IS THAT CONSTANT. Idle it fires 1/10; at load ~47 the
+      rows-vs-column site fires 12/20 and survived only because its tolerance was 0.05 rather than
+      1e-6 - the two bounds differed in nothing but which happened to be generous.
+      view_pause_keeps_capture: the phase closes when the SOURCE's emitted counter passes 2500000 and
+      wait_emitted overshoots to the next whole block (153 x 16384 = 2506752); it then asserts on the
+      CAPTURE and RING counters, which trail by the block in flight. 6752 samples of headroom, LESS
+      THAN HALF A BLOCK. One block in flight gives exactly 2490368 - the number two agents reported
+      independently. Reproduced deliberately: 3 of 48 failures, ALL THREE reading 2490368, playing
+      control at 2506752 + k x 16384 every time.
+      dropped == 0 MOVED TO THE BENCH TIER, and the counter-argument is right, which is why the CI
+      version was wrong: blind_live is Pacing::Unpaced at ~4.5x real time, so `dropped` counted the
+      test's own in-process sink failing to drain an arbitrarily accelerated stream. The ticket's
+      premise that the chain runs in real time is not true of the primary test. The claim now lives in
+      the ignored release RealTime{speed:1.0} perf test that docs/10 §2 already assigns to timing
+      claims. At CI tier the replacement is the STREAM CONTRACT: every gap in seq declared by a marker
+      naming the missing range, plus lost_samples == 0, which IS a code property here. Net 3
+      assertions removed, 8 added - and non-vacuous by evidence, since at load 81 one run published
+      dropped: 9 and PASSED because the nine records were declared.
+      RATES under deliberate load: coverage 1/20 -> 0/20; view_pause 3/48 -> 0/48; concurrent_demod
+      0/18 with one run carrying declared loss.
+      ON T-436 it sharpens rather than settles: concurrency is not the defect, it is the SAMPLING RATE
+      on defects like these. Every failure fixed here is reachable on an IDLE machine (the T-430 one
+      at 10-20% per run at zero load), so a thread cap would have made them rarer and harder to
+      diagnose - which is what happened for months. Cap to stop paying 7-12 min per false red, but
+      keep filing the defects: three were sitting under one ticket.
 
   - id: T-431
     milestone: M3
     title: A 5%-duty radar train is denied the pulsed family for being always on, because the admissibility gate reads the same inflated duty
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: M3A
     deps: [T-427, T-429]
@@ -10523,6 +10555,50 @@ tasks:
       naming the stale one.
       So this ticket is not "fix a gate constant" - it is fix the estimator at both of its
       thresholds, and the gate follows.
+    commit: 06e4b7d
+    result: |
+      FIXED THE ESTIMATOR, not the constant - which is what the ticket preferred and what the evidence
+      supported.
+      MEASURED CAUSE: `duty` and `low_fraction` both referenced their threshold to THE RECORD'S OWN
+      MEAN ENVELOPE (0.5x and 0.3x). For an emission that is mostly off, that mean is set by the OFF
+      time, so the threshold collapses toward the noise and the noise clears it. A threshold relative
+      to the record's mean is a threshold relative to HOW MUCH OF THE RECORD IS SILENCE - the very
+      quantity being reported. `pulse` (true 0.050) read 0.655 at 10 dB; `low_fraction` (true 0.950)
+      read 0.132 at 10 dB.
+      THE FIX: both fractions are now taken against the emission's own ON LEVEL - the fixed point of
+      L = mean(a | a > L/2), started at mean(a), so ITERATION 1 IS EXACTLY THE OLD ANSWER and every
+      one after is a correction. Climbs monotonically, terminates in 2-11 iterations, and settles on
+      the LOWEST on level consistent with the record ("on unless the record proves otherwise").
+      Measured over 12 seeds x 5 rungs: `pulse` 0.050 / 0.950 AT EVERY RUNG; `ppm` 0.329-0.341 (true
+      1/3); `coded-pulse` 0.175 (true 0.173); ofdm/noise-like flat to +/-0.005. Below the gate it
+      fails honestly rather than sliding - 0.502 at 5 dB, because the duty of pulses you cannot see is
+      not measurable.
+      FEATURES_VERSION 6 -> 7, both density files refitted (T-286/T-312 precedent). PULSED_MAX_DUTY
+      0.60 -> 0.40, re-derived on the CORRECTED curve: the gap runs from ppm 0.341 to the true-50%
+      keyed carriers cw/ook at 0.465, and 0.40 is its middle. 1/2 WAS REJECTED because a true-half
+      emission does not READ half (cw/ook span 0.465-0.552), so a gate at 0.50 would admit or deny the
+      same class by seed. The constant moves NO acceptance figure (suite identical at 0.40 and 0.60),
+      so it rests on the derivation rather than a score.
+      REJECTED, each on a measurement: CFAR above the noise floor (trades one SNR slide for another -
+      ppm 0.342 -> 0.565 as the threshold falls into the filter skirts); Otsu on envelope power (exact
+      on pulsed classes, useless as a feature - a two-way split of a UNIMODAL envelope is still a
+      split, so ofdm reads 0.205, BETWEEN pulse and ppm); -6 dB from a high quantile (vsb-am 0.429 ->
+      0.999); the same fixed point on the median (the mean is what lets the iteration climb out of the
+      noise basin; the median does not).
+      BOTH GUARD EXEMPTIONS DELETED - duty ppm/pulse and low_fraction ppm/pulse are gone from
+      SNR_ORDER_EXCEPTIONS; five remain, every one a statistic that IS an SNR. T-429's exact-set
+      assertion was the completion check and it passes.
+      NUMBERS, quoted against §7.2's 0.0084 draw sd, merge base and branch measured back to back
+      (T-419's method): known top-1 0.9345 -> 0.9325, top-2 unchanged, wrong-label overall 0.0040 ->
+      0.0032 (better), held-out unknown recall 0.9520 -> 0.9444. That move is -0.0076, INSIDE the
+      0.0084 draw sd and well inside the +/-0.02 noise band; every floor met. All of it is psk-qam's
+      open set (0.875 -> 0.819); every other family unchanged to 3 dp. Against that, the defect:
+      `pulse` at the pulsed gate goes top-1 0.00 / unknown 1.00 -> TOP-1 0.92, and the pulsed family
+      at that rung 0.50 -> 0.96.
+      NOT CHANGED, and it is the next instance of the family -> T-447: phase_features and derotate take
+      their Azzouz-Nandi "strong envelope" subset over the SAME 0.5 x mean(a) rule, so for a sparse
+      train that subset is mostly noise (0.63 of the record at 10 dB instead of 0.05) - sigma_ap,
+      sigma_dp and the de-rotation for `pulse` are measured over noise.
 
   - id: T-432
     milestone: M3
@@ -10549,7 +10625,7 @@ tasks:
   - id: T-433
     milestone: M2-hardening
     title: concurrent_demod asserts dropped == 0 on a real-time chain, a quantity whose range under contended CPU has never been measured
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     deps: [T-383]
@@ -10589,6 +10665,12 @@ tasks:
       group against ITSELF within one nextest invocation and does nothing about the ~27 tests
       outside it, nor about four agents building on the same box. Adding a name to that list will
       not fix this one either.
+    commit: 704cf22
+    result: |
+      CLOSED in T-430's diff. See T-430's result - the dropped == 0 assertion moved to the bench tier
+      because the CI test is UNPACED (~4.5x real time), so the quantity it bounded was the test sink's
+      ability to drain an arbitrarily accelerated stream rather than any product property.
+
   - id: T-434
     milestone: MCANVAS
     title: docs/16 step 4 - LevelConfig::t_factor and the view scheme, and the step where the storage cost lands
@@ -10746,7 +10828,7 @@ tasks:
   - id: T-437
     milestone: MCANVAS
     title: SPIKE - the unified full-spectrum surface - one WebGL2 canvas, de-welded axes, split panes, zoomable minimap
-    status: in-progress
+    status: done
     priority: high
     parallel_group: SPIKE
     core_interface: true
@@ -10798,6 +10880,49 @@ tasks:
       apart.
       The freeze is in force: no further polish on the separate navigator widgets. Genuine
       backend bugs behind them stay (T-347, T-348).
+    commit: 4282b6d
+    result: |
+      SPIKE COMPLETE. VERDICT: YES FOR THE RENDERER, NO FOR THE SYSTEM AS IT STANDS - and two of the
+      blockers are outside the renderer entirely. None of the four findings is a reason to abandon the
+      design; all four are cheaper to fix than the scrubbers were to keep.
+      Rig: headless Chrome, real WebGL2 on ANGLE Metal (M3 Ultra), 1760x1000 at DPR 2, backend on
+      :18787/:18788 against the mock SDR. 31 automated checks, all green. Never bound 8789/8899/8900;
+      never touched the real HackRF. Evidence and re-run recipe in spikes/t437-unified-surface/.
+      THE RENDERER IS THE EASY HALF BY TWO ORDERS OF MAGNITUDE: 48 panes at p95 2.2 ms, FLAT in pane
+      count (what scales is draw calls, ~450 at 48 panes, and 450 trivial quads is nothing). 7x
+      headroom inside 60 Hz, surviving a 5-10x Jetson derating.
+      THE SHARED LRU IS THE CHEAPEST PART and §8.3's claim holds exactly: 95 distinct keys -> 95
+      uploads, up to 8 panes sharing one tile, 18.68 MB resident against 149.44 MB for one cache per
+      pane. Upload 0.026 ms/tile, so SIZE THE BUDGET BY MEMORY, NOT UPLOAD TIME.
+      THE REAL COST IS TILE PRODUCTION, three orders larger: ~500 ms mean per tile in the stub (50-110 s
+      to fill a screen); even at a hypothetical 10 ms server-side, 208 tiles is 2 s. THAT is what
+      T-438/T-440 design against.
+      F1 - §6.2's V0 FLOOR IS WRONG AND RE-WELDS THE AXES. Its V0 time cell is 128 s against a 120 s IQ
+      retention window, so THE ENTIRE LIVE VIEW FITS IN ONE TIME CELL. And every realistic pane is
+      finer than 128 s, so level_t pins at 0 and the de-welding buys nothing on the axis it was
+      introduced for. Extend the ladder DOWNWARD to the store's own floor (6.25 kHz x 1 s), which is
+      what the spike ran on. THE FLOOR IS THE DECISION, NOT THE RATIO.
+      F2 - /api/history treats a per-axis budget as a LEVEL SELECTOR: same window, only max_f changed,
+      384 -> 100% observed but 256 -> 67%. Tightening the FREQUENCY budget 1.5x cost 34x of TIME
+      resolution and turned a third of the window grey. A grey-honesty violation caused by level
+      choice, which §4 does not name because §4 guards the fold and the fold is fine. /api/timeline
+      does not have it (T-426's finest-ward walk), so T-438's route is /api/timeline's engine plus
+      /api/history's t0/t1.
+      F3 - AN UNDERSIZED CLIENT TILE BUDGET MAKES THE SURFACE LIE: below budget ~ working set,
+      101-198 tiles per frame render GREY, and grey is this surface's load-bearing claim that the radio
+      never looked there. T-440/T-441 must distinguish NOT-RESIDENT from UNOBSERVED.
+      F4 - AFTER A RETUNE THE PYRAMID STOPS RECORDING, PERMANENTLY -> filed as T-446 (high).
+      KEY CORRECTION: it needs `device` and `scheme`. §6.3 already says coverage is device-local;
+      §8.3's four-part key omits it, and retrofitting a key is the expensive kind of change.
+      §8.5 OVERSTATED THE ANTI-DIVERGENCE CLAIM: pane A, pane B and the minimap at the SAME level
+      sample bit-identical pixels, but the guarantee is "same ramp, same scale, stated level", not
+      "same picture" - two viewports at different levels legitimately differ, and the minimap is nearly
+      always at a different level. The fix is to state the level per pane, not hide the difference.
+      Self-inflicted lesson it recorded: its first minimap comparison failed because a translucent
+      pane-viewport wash was drawn over the sample point - an overlay tinting a measurement, exactly
+      the defect class this surface exists to prevent, reappearing inside the spike proving it.
+      T-343 needs no change; pause/follow worked first try and T-442 needs nothing new.
+
   - id: T-438
     milestone: MCANVAS
     title: The tile route, addressed by independent (level_f, level_t) - docs/16 step 5 under de-welded axes
@@ -11155,6 +11280,43 @@ tasks:
       ticket owns the defect. Fixing the defect does not remove the state.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-pipeline` and
       `just test-one <name>` - then HAND BACK. Never `just gate`; the coordinator gates at merge.
+  - id: T-447
+    milestone: M3
+    title: phase_features and derotate take their strong-envelope subset over the same broken mean rule T-431 just fixed
+    status: todo
+    priority: normal
+    parallel_group: M3A
+    deps: [T-431]
+    use_cases: [SIGNAL-062]
+    found_by: 'T-431 (2026-09-17), measured while fixing duty and low_fraction; left alone as a wider blast radius'
+    acceptance: |
+      T-431 fixed `duty` and `low_fraction` by taking their fractions against the emission's own ON
+      LEVEL - the fixed point of L = mean(a | a > L/2) - instead of against the record's own mean
+      envelope, which for a sparse train is set by the OFF time.
+      IT THEN MEASURED THE SAME RULE ONE LAYER OVER AND LEFT IT: `phase_features` and `derotate`
+      take their Azzouz-Nandi "strong envelope" subset over the SAME 0.5 x mean(a) threshold. For a
+      sparse train that subset is mostly noise - AT 10 dB IT IS 0.63 OF THE RECORD INSTEAD OF 0.05 -
+      so sigma_ap, sigma_dp and the de-rotation for `pulse` are measured over noise.
+      T-431 left it deliberately and correctly: fixing it moves sigma_ap, sigma_dp AND EVERY
+      CUMULANT, which is a wider blast radius than a duty fix and deserves its own ticket and its
+      own before/after.
+      THE FIX IS PROBABLY ALREADY WRITTEN - T-431's on-level fixed point is the same construction,
+      and it is measured, monotone, terminating in 2-11 iterations, and reduces to the old answer at
+      iteration 1. Check that before designing anything new.
+      NOTE THE HISTORY: sigma_ap and sigma_dp are the ORIGINAL members of the observation-not-signal
+      family (T-240 - phase residual random-walks with the record). If they are now ALSO measured
+      over the wrong sample subset, that is a second, independent defect in the same two features,
+      and worth saying so plainly rather than folding it into the first.
+      Floors: ADR-0016 §7.1, read §7.2 first - the held-out figures have a 0.0084 draw sd, so a
+      +/-0.02 move is noise. Measure merge base and branch back to back (T-419's method) since this
+      one CAN move family numbers.
+      Pin properties, not figures - T-431's new test asserts a rectangular train of known duty reads
+      that duty at every rung, with the residual noise-crossing term against its closed form rather
+      than a widened tolerance. Do the same here.
+    notes: |
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-classify`,
+      `just test-crate hk-estimate`, `just test-one <name>` - then HAND BACK. Never `just gate`; the
+      coordinator gates once at merge.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

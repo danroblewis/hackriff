@@ -841,8 +841,25 @@ impl Tile {
         Some((t, out))
     }
 
-    /// Rolls a sealed child tile (one level finer) into this tile. The child becomes time column
-    /// `child.t_block − t_cell0`; each parent frequency cell aggregates `f_factor` child cells.
+    /// Rolls a sealed child tile (the level this one is folded from) into this tile. Each parent
+    /// frequency cell aggregates `f_factor` child frequency cells and each parent time cell
+    /// `t_factor` child time cells, so the child tile fills `child.nt / t_factor` consecutive time
+    /// columns starting at `child.t_block · (child.nt / t_factor) − t_cell0`.
+    ///
+    /// **The two factors are independent (T-434).** Before, the child tile *was* one parent time
+    /// column by construction — the ladder welded the time factor to `t_cells_per_block`. The weld
+    /// is now the case `t_factor == child.nt`, and it still behaves identically.
+    ///
+    /// **What the weld was buying: the percentiles.** [`Tile::hist`] is one histogram per
+    /// frequency cell over the **whole tile**, which is the parent cell's histogram only when the
+    /// child tile is exactly one parent time cell. De-weld — fold time by 2, or fold frequency
+    /// alone — and one child histogram row now spans several parent cells with no way to split it.
+    /// So when `child.nt / t_factor > 1` this fold writes **no** percentiles and accumulates **no**
+    /// histogram: `p_lo`/`p_hi` stay NaN and reach the wire as `unknown`, and every level above
+    /// inherits the same silence. Inventing a distribution by spreading the row over the columns
+    /// would be the max-hold mistake again (T-397) — a declared statistic whose inputs were not
+    /// what it claims. A pyramid that needs percentiles at every level must stay welded, which
+    /// scheme 1 does.
     ///
     /// Rules: max-of-max; power mean (Σ linear mean × frames); histogram sum → percentiles;
     /// occupancy = time-weighted mean over the child's time cells, then the **maximum** over the
@@ -867,90 +884,109 @@ impl Tile {
     /// new `obs_s`. Coverage says how much was looked at; occupancy says what was found while
     /// looking. The config guarantees `f_factor` divides `f_cells_per_block`, so a parent cell's
     /// children always lie in one child tile and the group is never partial.
+    #[allow(clippy::too_many_arguments)]
     pub fn fold_child(
         &mut self,
         child: &Tile,
         f_factor: u32,
+        t_factor: u32,
         hist_cfg: &HistogramConfig,
         pct: (f32, f32),
         group: &mut Vec<u32>,
     ) {
-        let tp = child.key.t_block - self.t_cell0;
-        if tp < 0 || tp >= self.nt as i64 {
+        let tf = (t_factor.max(1) as usize).min(child.nt);
+        debug_assert_eq!(
+            child.nt % tf,
+            0,
+            "t_factor must divide the child's time cells"
+        );
+        // Parent time columns this child tile fills. 1 is the weld, where the child's tile-wide
+        // histogram is exactly this parent cell's histogram and the percentiles survive the fold.
+        let cols = child.nt / tf;
+        let welded = cols == 1;
+        let t0 = child.key.t_block * cols as i64 - self.t_cell0;
+        if t0 < 0 || t0 + cols as i64 > self.nt as i64 {
             debug_assert!(false, "child outside parent tile");
             return;
         }
-        let tp = tp as usize;
         group.clear();
         group.resize(self.bins, 0);
         let factor = i64::from(f_factor);
-        let mut fc = 0usize;
-        while fc < child.nf {
-            let gc = child.f_cell0 + fc as i64;
-            let fp = gc.div_euclid(factor) - self.f_cell0;
-            let group_end = child.nf.min(fc + (factor - gc.rem_euclid(factor)) as usize);
-            let (mut count, mut max, mut sum_lin, mut occ_max) =
-                (0u64, f32::NEG_INFINITY, 0.0, 0f32);
-            // Observed seconds SUM over the child frequency cells (divided by `f_factor` below,
-            // the parent's own frequency extent); the occupancy *ratio* still takes the best child.
-            let (mut sum_obs, mut best_ratio) = (0.0f64, 0.0f64);
-            let mut any_hist = false;
-            for f in fc..group_end {
-                let (mut obs_f, mut occ_f) = (0.0, 0.0);
-                for t in 0..child.nt {
-                    let i = t * child.nf + f;
-                    let n = child.count[i];
-                    if n == 0 {
+        for col in 0..cols {
+            let tp = (t0 as usize) + col;
+            let (t_lo, t_hi) = (col * tf, col * tf + tf);
+            let mut fc = 0usize;
+            while fc < child.nf {
+                let gc = child.f_cell0 + fc as i64;
+                let fp = gc.div_euclid(factor) - self.f_cell0;
+                let group_end = child.nf.min(fc + (factor - gc.rem_euclid(factor)) as usize);
+                let (mut count, mut max, mut sum_lin, mut occ_max) =
+                    (0u64, f32::NEG_INFINITY, 0.0, 0f32);
+                // Observed seconds SUM over the child frequency cells (divided by `f_factor`
+                // below, the parent's own frequency extent); the occupancy *ratio* still takes
+                // the best child.
+                let (mut sum_obs, mut best_ratio) = (0.0f64, 0.0f64);
+                let mut any_hist = false;
+                for f in fc..group_end {
+                    let (mut obs_f, mut occ_f) = (0.0, 0.0);
+                    for t in t_lo..t_hi {
+                        let i = t * child.nf + f;
+                        let n = child.count[i];
+                        if n == 0 {
+                            continue;
+                        }
+                        count += u64::from(n);
+                        max = max.max(child.max[i]);
+                        sum_lin += child.sum_lin[i];
+                        occ_max = occ_max.max(child.occ_max[i]);
+                        let (o, c) = child.cell_obs(i);
+                        obs_f += o;
+                        occ_f += c;
+                    }
+                    if obs_f > 0.0 {
+                        sum_obs += obs_f;
+                        best_ratio = best_ratio.max(occ_f / obs_f);
+                    }
+                    if !welded {
                         continue;
                     }
-                    count += u64::from(n);
-                    max = max.max(child.max[i]);
-                    sum_lin += child.sum_lin[i];
-                    occ_max = occ_max.max(child.occ_max[i]);
-                    let (o, c) = child.cell_obs(i);
-                    obs_f += o;
-                    occ_f += c;
-                }
-                if obs_f > 0.0 {
-                    sum_obs += obs_f;
-                    best_ratio = best_ratio.max(occ_f / obs_f);
-                }
-                let row = child.hist_row(f);
-                if row.iter().any(|&c| c > 0) {
-                    any_hist = true;
-                    for (g, &c) in group.iter_mut().zip(row) {
-                        *g += c;
+                    let row = child.hist_row(f);
+                    if row.iter().any(|&c| c > 0) {
+                        any_hist = true;
+                        for (g, &c) in group.iter_mut().zip(row) {
+                            *g += c;
+                        }
                     }
                 }
-            }
-            if count > 0 && fp >= 0 && (fp as usize) < self.nf {
-                let fp = fp as usize;
-                let i = tp * self.nf + fp;
-                self.count[i] = count.min(u64::from(u32::MAX)) as u32;
-                self.max[i] = max;
-                self.sum_lin[i] = sum_lin;
-                // Coverage is the observed fraction of the parent's OWN extent: a child that was
-                // never observed contributes 0 seconds and pulls the parent below 1, where the old
-                // `max` let one covered child speak for all `f_factor` of them.
-                let obs = sum_obs / f64::from(f_factor.max(1));
-                self.obs_s[i] = obs;
-                self.occ_s[i] = best_ratio * obs;
-                // A time-weighted mean never exceeds its maximum, so max-of-max alone suffices
-                // (and keeps quantisation monotone: stored max = max of stored child maxima).
-                self.occ_max[i] = occ_max;
+                if count > 0 && fp >= 0 && (fp as usize) < self.nf {
+                    let fp = fp as usize;
+                    let i = tp * self.nf + fp;
+                    self.count[i] = count.min(u64::from(u32::MAX)) as u32;
+                    self.max[i] = max;
+                    self.sum_lin[i] = sum_lin;
+                    // Coverage is the observed fraction of the parent's OWN extent: a child that
+                    // was never observed contributes 0 seconds and pulls the parent below 1, where
+                    // the old `max` let one covered child speak for all `f_factor` of them.
+                    let obs = sum_obs / f64::from(f_factor.max(1));
+                    self.obs_s[i] = obs;
+                    self.occ_s[i] = best_ratio * obs;
+                    // A time-weighted mean never exceeds its maximum, so max-of-max alone suffices
+                    // (and keeps quantisation monotone: stored max = max of stored child maxima).
+                    self.occ_max[i] = occ_max;
+                    if any_hist {
+                        self.p_lo[i] = hist_percentile(group, hist_cfg, pct.0);
+                        self.p_hi[i] = hist_percentile(group, hist_cfg, pct.1);
+                        let row = &mut self.hist[fp * self.bins..(fp + 1) * self.bins];
+                        for (h, &g) in row.iter_mut().zip(group.iter()) {
+                            *h = h.saturating_add(g);
+                        }
+                    }
+                }
                 if any_hist {
-                    self.p_lo[i] = hist_percentile(group, hist_cfg, pct.0);
-                    self.p_hi[i] = hist_percentile(group, hist_cfg, pct.1);
-                    let row = &mut self.hist[fp * self.bins..(fp + 1) * self.bins];
-                    for (h, &g) in row.iter_mut().zip(group.iter()) {
-                        *h = h.saturating_add(g);
-                    }
+                    group.fill(0);
                 }
+                fc = group_end;
             }
-            if any_hist {
-                group.fill(0);
-            }
-            fc = group_end;
         }
         self.prov.merge(&child.prov);
     }

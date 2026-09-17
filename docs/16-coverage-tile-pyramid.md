@@ -408,12 +408,44 @@ of which change the plan.
 
 Three changes. None is a new subsystem; the largest is one struct field.
 
-### 6.1 `LevelConfig` gains a `t_factor`
+### 6.1 `LevelConfig` gains a `t_factor` — LANDED (T-434)
 
-Today `t_cell` of level *n+1* is forced to `t_block_ns()` of level *n*. Add a `t_factor: u32`
-alongside `f_factor`, defaulting (for scheme 1) to the finer level's `t_cells_per_block` so the
-existing ladder is expressed unchanged and no stored tile moves. With it, a square ladder becomes
-config.
+`t_cell` of level *n+1* was forced to `t_block_ns()` of level *n*. `LevelConfig` now carries
+`t_factor: Option<u32>` alongside `f_factor`, where `None` is that weld — the producer's whole
+`t_cells_per_block` — so scheme 1 is expressed unchanged and no stored tile moves.
+
+Two things came with it that §6.1 did not foresee.
+
+**A `from: Option<usize>`, because a de-welded pyramid is a DAG, not a ladder.** A node that folds
+frequency alone and a node that folds time alone both need the *same* producer, so a level names the
+finer level it is folded from rather than assuming `i − 1`. A producer must have a lower index, so one
+seal pass in index order still folds a producer before its consumers, and a sealed tile is folded into
+**every** consumer — one seal path, no second producer. `MAX_LEVELS` rises 8 → 64, because an 8 × 8
+span of the two axes is 64 nodes. A ladder is the special case where every node has exactly one
+consumer, which is why scheme 1's behaviour is bit-identical.
+
+**The weld was buying the percentiles.** A tile keeps one histogram per frequency cell over the
+*whole tile*, which is the parent cell's histogram **only** when a child tile is exactly one parent
+time cell — the weld. Fold time by 2, or fold frequency alone, and one histogram row now spans several
+parent cells with no way to split it, and a per-cell histogram is unaffordable (128 groups × 256 cells
+× 440 bins is 58 MB of accumulator per open tile). So a de-welded fold writes **no** percentiles:
+`p_low`/`p_high` stay unknown and reach the wire as `unknown`, by the same rule as `Coverage::of`
+returning `Unobserved` rather than a zeroed `Sampled`. A view tile answers *where did I look, and how
+strong was it*; the noise-floor distribution stays a scheme-1 question, and scheme 1 keeps its weld.
+
+**Addressing.** The store key stays `(scheme, level, f_block, t_block)` — `hk_model::TileKey`,
+unchanged. The per-axis coordinates are **derived from the geometry**, not carried beside it:
+`Geometry::f_axis`/`t_axis` are the distinct cell widths on each axis, `axes_of(level)` gives a
+level's `(level_f, level_t)`, and `level_at(level_f, level_t)` gives the level serving a pair, or
+`None`. So a client keyed on `(level_f, level_t, f_block, t_block)` — which is what §8.3's shared
+tile-texture LRU wants — maps onto the store exactly, and the route (§7 step 5) translates at its
+edge.
+
+This is defined for **every** scheme, which is the useful part: a welded ladder comes out as the
+**diagonal** `(n, n)` and `level_at(3, 0)` is `None`. That is the honest statement of what a ladder
+is — a lattice you can only move through by coarsening both axes at once — and it means the route
+can answer *this scheme has no such node* instead of silently serving a level whose time cell is a
+day when a second was asked for.
 
 ### 6.2 A view scheme: square ratios, uniform tiles, coarse at the bottom
 
@@ -470,17 +502,78 @@ the composition §2's correction 3 named:
   why *"fills in as more SDRs are added"* works without new concepts: another SDR is another coverage
   plane, and the union plane grows.
 
+### 6.4 What it costs on disk — measured (T-434)
+
+§7 step 4 said this is where the storage cost lands, and §5.2 accepted that cost sight-unseen. It is
+now measured, through the production codec, on a real `Pyramid` fed real frames and sealed through
+the real seal path: `crates/hk-store/src/history/tests/lattice_cost.rs`. Three findings, two of them
+things §6 did not say.
+
+**A 256 × 256 level-0 tile costs `1548 + 1.24 × cells` bytes** (least squares over five fill
+fractions, a noise floor with carriers on it, zstd level 3). A full tile is ~83 kB, not the ~918 kB
+its fourteen bytes a cell would suggest — zstd returns 11× on spectrum data. The fixed part is under
+2 % of a full tile, which is what makes §5.5's **count**-based client budget an honest proxy for
+bytes. Tile *size* is not free either: the same data in 64 × 64 tiles cost **2.30** B/cell against
+**1.26**, so §6.2's 256 × 256 is the cheaper tile as well as the uniform one.
+
+**Finding 1 — the level count is multiplicative; the bytes are not.** A welded ladder's levels shrink
+×4 a step and sum to ≈1.33 × its finest. A lattice's shrink ×2 a step *on one axis*, so it sums to
+`(Σ2⁻ⁱ)(Σ2⁻ʲ) → 4`. Measured over a 4 × 4 lattice fed the same data: the whole lattice is **4.8× its
+finest node** and **3.2× the welded ladder embedded in it as the diagonal** — the same data, folded by
+the same code, in the same run, so nothing is modelled. Sixty-four nodes cost a handful of finest
+levels, not sixty-four of them.
+
+**Finding 2 — a coarse cell costs *more* than a fine one, which §6 assumed away.** Bytes ∝ cells
+predicts a fold halves a node. It does not: level 0 came out at **2.30 B/cell** and every coarse node
+at **3.4–3.6 B/cell**, a **1.5× penalty**. A level-0 tile's neighbouring cells are a slowly varying
+noise floor sampled a second apart and zstd eats them; a folded cell is a max over children and its
+neighbours are much less alike. **Folding destroys the correlation the compressor was living on.**
+Pricing a pyramid as bytes-per-cell × cells understates it by half as much again.
+
+**Finding 3 — neither axis is the cheap one.** A pure frequency fold halves the cells and so does a
+pure time fold; the two arms of the lattice came out within 2 % of each other. There is no axis to
+materialise preferentially and none to leave to read-time folding on cost grounds.
+
+### 6.5 Which horizon binds, at which `(level_f, level_t)`
+
+Derived from the measured per-cell cost the way T-406 derived both of the observation log's bounds
+from one measured 618 B/line — and, as there, **which bound binds depends on the policy**. Policy:
+one front end dwelling continuously on a 20 MHz window, the HackRF's practical live extent.
+
+| Scheme | Finest cell | Bytes/day | 8 GiB byte budget binds after |
+|---|---|---|---|
+| Scheme 1 (welded ladder) | 6.25 kHz × 1 s | **771 MB** | **11 days** |
+| View lattice (§6.2) | 100 kHz × 128 s | **1.26 MB** | **6 842 days** |
+
+**The finding: the view lattice is so cheap that its byte budget stops being the binding horizon, and
+the observation log's 180-day age binds instead — at every `(level_f, level_t)`.** §5.4 argued the
+fourth state (`"unknown"`: a surviving measurement whose coverage record has expired) would be
+unreachable in practice, because T-406 lengthened the record until it outlived the pyramid's
+*realised* span. That was measured against scheme 1, which exhausts 8 GiB in a couple of weeks. A
+view lattice is three orders of magnitude sparser and does not fill it for years. **T-423's fourth
+state is reachable again**, on any installation that runs half a year — it is defined, on the wire,
+and now has a date. The cheap correctness purchase §5.4 recommended is a longer observation log, and
+this says how much longer it would have to be to keep the state unreachable.
+
+**The corollary, and it is the real price of de-welding.** The budget is shared, so what the lattice
+spends on coarse summaries the finest node does not get: under a ladder the finest level holds 1/1.33
+of the bytes, under the lattice 1/4.8. **The same byte budget buys the live edge about a third of the
+history it used to.** Bounded and stated, not a surprise — and for the view lattice it is moot, since
+the budget does not bind there at all. It is not moot for scheme 1, which is why scheme 1 stays a
+ladder.
+
 ## 7. What to do next, in order
 
 A buildable sequence. Each step says what it unblocks and which consumer it serves.
 
-> **Sequence state, 2026-09-17.** Steps **1, 2, 3 and 6 have landed** (T-421, T-423, T-419, T-406).
-> **§8 (the unified surface) changes what steps 4, 5 and 7 are for** — step 4's `t_factor` becomes the
-> de-welding the spike needs, and steps 5 and 7 are re-planned around T-437's outcome.
-> Step 6 ran early because it only ever depended on step 1. The next step is **4**, which is where the
-> storage cost lands and therefore the step to measure disk on; steps **5** (the tile route) and **7**
-> (the big view client) follow it and are not yet filed. Update this line when a step lands, so the
-> state of the sequence is readable without reading the whole section.
+> **Sequence state, 2026-09-17.** Steps **1, 2, 3, 4 and 6 have landed** (T-421, T-423, T-419,
+> **T-434**, T-406). **§8 (the unified surface) changes what steps 5 and 7 are for** — step 4's
+> `t_factor` was the de-welding the spike needs, and steps 5 and 7 are re-planned around T-437's
+> outcome. Step 6 ran early because it only ever depended on step 1. The next step is **5** (the tile
+> route, T-438); step **7** (the big view client) follows it. The disk cost step 4 existed to measure
+> is in **§6.4**: cheaper in total than §6 assumed, more expensive per cell, and it moves which
+> retention horizon binds. Update this line when a step lands, so the state of the sequence is
+> readable without reading the whole section.
 
 1. **Per-(t, f) coverage rasterisation in `hk-store`. LANDED (T-421, `6a37221`).** The record-derived answer gains a time axis:
    `Coverage` computed on an `(nt, nf)` grid from the same ring-journal and observation-log intervals,
@@ -500,7 +593,8 @@ A buildable sequence. Each step says what it unblocks and which consumer it serv
    any coarse level at all. *Do this before building the view scheme, not after* — a pyramid founded on
    a coverage fold that rounds up will paint the spectrum as scanned, which is the one thing the user's
    feature must not do.
-4. **`LevelConfig::t_factor` and the view scheme** (§6.1, §6.2) — **NEXT; filed as T-434.** Sealed coarse levels produced by the
+4. **`LevelConfig::t_factor` and the view scheme** (§6.1, §6.2) — **LANDED (T-434).** See §6.4 for
+   what it cost and §6.5 for what it bought. Sealed coarse levels produced by the
    existing seal path, uniform 256 × 256 tiles, the coverage plane from step 1, the input-statistic
    provenance from step 3. No new view yet. **Serves:** nothing visible. **Unblocks:** steps 5 and 6.
    This is where the storage cost lands, so it is the step to measure disk on.

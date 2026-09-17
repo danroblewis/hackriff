@@ -749,7 +749,9 @@ impl Pyramid {
             let t_start = (t_lo + ti as i64) * g.t_cell_ns;
             for fi in 0..nf {
                 let f_centre = ((c_lo + fi as i64) as f64 + 0.5) * g.f_cell_hz;
-                for l in level..=self.geom.top() {
+                for l in
+                    (level..=self.geom.top()).filter(|&l| self.geom.coarsens_or_equals(level, l))
+                {
                     let gl = &self.geom.levels[l];
                     let tc = t_start.div_euclid(gl.t_cell_ns);
                     let tb = tc.div_euclid(gl.nt as i64);

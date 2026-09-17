@@ -146,7 +146,7 @@ use std::path::PathBuf;
 pub use codec::FORMAT_VERSION;
 pub use config::{
     Geometry, HistogramConfig, LevelConfig, LevelGeometry, MAX_LEVELS, PyramidConfig,
-    RetentionOverride,
+    RetentionOverride, ViewLattice,
 };
 pub use export::{
     HistoryStat, PNG_UNOBSERVED_RGB, SweepCsvImport, SweepCsvOptions, import_sweep_csv,
