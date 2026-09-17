@@ -115,12 +115,29 @@ fn ready_manifest_with_bound(
 }
 
 /// A plan extra whose only chain is a dummy-plugin coverage chain over `center ± 0.5 MHz`.
+///
+/// `settle_s` is the **live** chain's no-progress window after the input ends
+/// (`PluginInstance::finish`): the plugin is stopped once it has gone that long without a decode,
+/// an annotation, a state change or a byte written. It is a wall-clock bound on a *subprocess*, so
+/// on a loaded host it measures the scheduler as much as the plugin — a decoder that gets no CPU
+/// for `settle_s` after EOF is indistinguishable from a dead one, and the chain counts zero
+/// decodes.
+///
+/// T-383 reproduced exactly that. Holding the dummy plugin off its input
+/// (`--start-delay-ms 20000`) against the old `settle_s = 2.0` fails
+/// `a_live_chain_feeds_a_plugin_that_never_reports_ready_after_its_bounded_wait` on
+/// `"the plugin decoded what it was fed"` — the message T-371 and T-373 both reported under
+/// parallel agent load — and passes at 30.0 with the decodes intact. 2.0 s was this file's own
+/// invention; **30 s is `PLUGIN_WAIT_STALL`, the number the chain itself already uses for "no
+/// progress means stalled"** on the lossless branch, so the two branches now answer that question
+/// the same way. It costs nothing when the plugin is healthy: `finish` returns as soon as the
+/// process stops, and this file's live tests still run in ~5 s.
 fn coverage_plan(center: f64, manifest: &Path) -> serde_json::Value {
     json!({ "pipeline": { "chains": [{
         "id": "dummy-coverage",
         "trigger": "coverage",
         "freq_hz": [[center - 0.5e6, center + 0.5e6]],
-        "nodes": [{ "node": "plugin", "manifest": manifest.to_string_lossy(), "settle_s": 2.0 }]
+        "nodes": [{ "node": "plugin", "manifest": manifest.to_string_lossy(), "settle_s": 30.0 }]
     }] } })
 }
 
