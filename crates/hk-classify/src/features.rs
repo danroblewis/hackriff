@@ -133,7 +133,18 @@ use num_complex::{Complex32, Complex64};
 /// rather than reading a median of integers off a raw one. `carrier_line_db` reports the line's
 /// excess over the peak a band of pure noise would have shown at that segment count. Both density
 /// files are refitted against it.
-pub const FEATURES_VERSION: u32 = 6;
+///
+/// **7 (T-431):** `duty` and `low_fraction` are taken against the emission's own **on** level
+/// ([`on_level`]) instead of the record's mean envelope. Both were fractions over a threshold set
+/// by `mean(a)`, which for an emission that is mostly off is set by the *off* time — so the
+/// threshold collapsed towards the noise and the reading was a statement about the SNR, not about
+/// the transmitter. The same defect at both thresholds: `pulse` (true duty 0.050) read `duty`
+/// 0.655 at 10 dB against 0.051 at 30, and `low_fraction` (true 0.950) read 0.132 at 10 dB against
+/// 0.888 at 30. Both now read the transmitter's fraction flat across 10–30 dB (`pulse` 0.050 and
+/// 0.950 at every rung, `ppm` 0.329–0.341 against a true 1/3). Every class moves, because every
+/// class's threshold moves; both density files are refitted against it, and the `pulsed`
+/// admissibility gate is re-derived on the corrected curve ([`crate::tree::PULSED_MAX_DUTY`]).
+pub const FEATURES_VERSION: u32 = 7;
 
 /// Bins guarded either side of the carrier when measuring `symmetry`: the **main-lobe half-width
 /// of the analysis window**, which [`spectral_features`] configures as [`WindowKind::Hann`].
@@ -616,6 +627,121 @@ fn derotate(x: &[Complex64]) -> Vec<Complex64> {
         .collect()
 }
 
+/// Iterations [`on_level`] may take before it reports whatever it has reached.
+///
+/// Not a convergence tolerance and not fitted: the iteration is monotone in the *count* of samples
+/// it holds above the threshold, that count is a non-negative integer that strictly decreases until
+/// the fixed point, so it terminates exactly in at most `n` steps and the cap is only a guard
+/// against a pathological record. Measured over the whole 32-class × 5-rung × 12-seed grid at
+/// 10–30 dB it converges in **2 to 11** iterations (`pulse` in 2 to 7, the most being held-out
+/// `dsb-sc` at 11); the cap is only reached by records below the gates, where a 5 dB `pulse` took
+/// 26.
+const MAX_ON_LEVEL_ITERS: usize = 64;
+
+/// The emission's own **on** level: the fixed point of `L = mean(a | a > L/2)`.
+///
+/// # Why this is not `mean(a)`
+///
+/// `duty` and `low_fraction` are fractions of the record over an envelope threshold, and a
+/// threshold has to be referenced to *something*. Until T-431 that something was the record's own
+/// mean envelope — which, for an emission that is mostly **off**, is set by the off time. The
+/// threshold then collapses towards the noise floor and the noise clears it, so the measured
+/// "fraction of the time the emission is on" is really a statement about the SNR:
+///
+/// | class | true duty | 10 dB | 15 dB | 20 dB | 25 dB | 30 dB |
+/// |---|---|---|---|---|---|---|
+/// | `pulse` | 0.050 | 0.655 | 0.538 | 0.200 | 0.143 | 0.051 |
+/// | `ppm` | 0.333 | 0.471 | 0.415 | 0.400 | 0.392 | 0.390 |
+///
+/// A 5 %-duty radar train reading 0.655 is not a wide tolerance, it is the wrong quantity: the two
+/// ranges cross between 15 and 20 dB and *below* the crossing the sparse train reads **busier** than
+/// the busy one (T-427 on `duty`, T-429 on `low_fraction`, whose 0.3× threshold is the same defect
+/// one step down — a 5 %-duty train that should read ~0.95 read 0.132 at 10 dB). A threshold
+/// relative to the record's mean is a threshold relative to how much of the record is silence,
+/// which is the very quantity being reported.
+///
+/// # What it does instead
+///
+/// Reference the threshold to the level the emission has **when it is on**, and solve for that
+/// level rather than assuming it. `L = mean(a | a > L/2)` is a fixed-point equation: the on level
+/// is the mean of the samples that clear half of it. It is started at `L = mean(a)`, which is the
+/// pre-T-431 rule, so the first iteration is exactly the old answer and every one after it is a
+/// correction.
+///
+/// **It terminates, and it terminates at the conservative end.** `mean(a | a > t) ≥ mean(a)` for
+/// any `t`, and the map is non-decreasing in `t`, so the sequence climbs monotonically and is
+/// bounded above by `max(a)`. Climbing *from below* means it settles on the **lowest** on level
+/// consistent with the record — the largest duty, i.e. "on unless the record proves otherwise",
+/// the same default as `Coverage::Unobserved` is not quiet.
+///
+/// # Measured, 12 seeds per cell, 10/15/20/25/30 dB
+///
+/// | class | true | 10 dB | 30 dB |
+/// |---|---|---|---|
+/// | `pulse` | 0.050 | 0.050 | 0.050 |
+/// | `ppm` | 0.333 | 0.339 | 0.329 |
+/// | held-out `coded-pulse` | 0.173 | 0.175 | 0.175 |
+/// | `ofdm` | 1 | 0.757 | 0.757 |
+/// | `noise-like` | 1 | 0.755 | 0.754 |
+///
+/// `ofdm` and `noise-like` read 0.76 rather than 1 because their envelope really is Rayleigh: a
+/// quarter of its samples sit under half the on level whether or not the emission ever stops, which
+/// is a fact about a sum of many subcarriers and not about the record. What matters is that the
+/// reading is flat to ±0.005 across the whole ladder.
+///
+/// # What it does when the emission is not visible
+///
+/// If the on time carries less energy than the noise (a very sparse or very weak train), `mean(a)`
+/// is the noise's mean, the first iteration cannot climb out of it, and the record reads as
+/// continuous. That is the honest failure — the duty of pulses you cannot see is not measurable —
+/// and it is **below** the operating range, not inside it: measured on `pulse`, exact at 0.050 at
+/// the 10 dB `pulsed` gate and at every rung above it, 0.502 at 5 dB and 0.659 at 0 dB. The old
+/// rule had no such edge because it was already reading the noise *inside* the operating range.
+///
+/// # What was rejected, each on a measurement over the same grid
+///
+/// - **A CFAR threshold above the noise floor**, with the floor from the supplied in-band SNR
+///   (`mean power / (1 + ρ)`). It removes the reference to the off time but replaces it with a
+///   reference to the *noise*, which vanishes as the SNR rises: the threshold falls with it until
+///   the pulse's own filter skirts clear it. `pulse` 0.071 → 0.112 and `ppm` 0.342 → 0.565 over
+///   10 → 30 dB, and every continuous class 0.53 → 1.00. It trades one SNR slide for another, and
+///   makes a feature depend on another estimator's calibration.
+/// - **Otsu's split of the envelope power.** Exact on the pulsed classes at every rung (`pulse`
+///   0.050, `coded-pulse` 0.175, `ppm` 0.267), and useless as a feature: a two-way split of a
+///   *unimodal* envelope is still a two-way split, so `ofdm` reads 0.205 and `noise-like` 0.206 —
+///   **between** `pulse` and `ppm`. It cannot tell a continuous emission from a sparse train at
+///   all, which is the one thing the admissibility gate needs. Adding a bimodality test to fall
+///   back on would have restored that, and Otsu's own η separates the pulsed classes (0.87–1.00)
+///   from the continuous ones (0.62–0.76) with held-out `noise-burst` at 0.698 sitting *under*
+///   continuous `apsk16` at 0.748 — a burst that fails a burst test, so the test would have been a
+///   fitted constant over an overlap.
+/// - **A fraction of a high quantile** (`a > 0.5 × q99`, the −6 dB-from-peak convention). Flat on
+///   the pulsed classes, but a quantile of the top of the record is set by the noise that stretches
+///   it: held-out `vsb-am` 0.429 → 0.999 over the ladder, and `ofdm` lands at 0.318, again between
+///   the two pulsed classes.
+/// - **The same fixed point on the median of the on set** rather than its mean. The mean is what
+///   lets the iteration climb out of the noise basin, because the pulses pull it; the median does
+///   not, and `pulse` reads 0.794 / 0.767 / 0.666 / 0.774 / 0.050 across the ladder — the original
+///   defect with extra steps.
+fn on_level(a: &[f64], mean_a: f64) -> f64 {
+    let mut level = mean_a;
+    let mut above = a.len() + 1;
+    for _ in 0..MAX_ON_LEVEL_ITERS {
+        let (sum, count) = a
+            .iter()
+            .filter(|v| **v > 0.5 * level)
+            .fold((0.0, 0usize), |acc, v| (acc.0 + v, acc.1 + 1));
+        // `count == above` is the fixed point: the same samples are on, so the level cannot move
+        // again. `count == 0` cannot happen from a finite positive `mean_a` but is not assumed.
+        if count == 0 || count == above {
+            break;
+        }
+        above = count;
+        level = sum / count as f64;
+    }
+    level
+}
+
 /// γ_max, σ_aa, envelope duty, low fraction and the envelope kurtosis.
 fn amplitude_features(f: &mut Features, x: &[Complex64]) {
     let a: Vec<f64> = x.iter().map(|s| s.norm()).collect();
@@ -633,13 +759,16 @@ fn amplitude_features(f: &mut Features, x: &[Complex64]) {
     if m2 > 0.0 {
         f.set("mu42_a", m4 / (m2 * m2));
     }
+    // Both envelope fractions are taken against the emission's **on** level, never the record's
+    // own mean — see [`on_level`], and T-431 for what the mean cost them.
+    let on = on_level(&a, mean_a);
     f.set(
         "low_fraction",
-        a.iter().filter(|v| **v < 0.3 * mean_a).count() as f64 / a.len() as f64,
+        a.iter().filter(|v| **v < 0.3 * on).count() as f64 / a.len() as f64,
     );
     f.set(
         "duty",
-        a.iter().filter(|v| **v > 0.5 * mean_a).count() as f64 / a.len() as f64,
+        a.iter().filter(|v| **v > 0.5 * on).count() as f64 / a.len() as f64,
     );
     // γ_max: the peak-to-mean of the spectrum of a_cn. A tone-modulated envelope (AM, OOK at a
     // fixed rate) concentrates its energy in one line; a constant envelope has none.
@@ -1961,6 +2090,84 @@ mod tests {
             eight > wfm_modes + 1.0,
             "8-FSK {eight} modes vs wfm {wfm_modes}"
         );
+    }
+
+    /// `duty` reports the **transmitter's** on-fraction, at any SNR, and `low_fraction` reports it
+    /// minus a noise-crossing term that can be written down (T-431).
+    ///
+    /// The property, not the figure: a rectangular on/off train of a *known* duty must read that
+    /// duty, and must read the same one however loudly it was heard. A number would fail on the
+    /// next honest improvement; this fails only if the pair goes back to measuring the receiver.
+    ///
+    /// The waveform is built here rather than taken from [`crate::synth`] so that the truth is a
+    /// constant of *this* test and not a property of a generator someone may retune.
+    ///
+    /// **`low_fraction` is the interesting half.** Its threshold sits 10 dB under the on level, not
+    /// 6 dB, so at a low SNR some of the off samples genuinely *are* above it and the reading is
+    /// honestly short of `1 − d`. How short is not free: the off state is circular Gaussian noise
+    /// of power `N`, so the fraction of it over the threshold is `exp(−(0.3·L)²/N)` exactly, and
+    /// the prediction is asserted rather than a tolerance widened until it passes. At `d = 0.5`
+    /// and 10 dB that term is 0.165 — a sixth of the off time — and at `d = 0.05` it is 10⁻⁸,
+    /// because in-band SNR is stated on the *average* power and a sparse train's pulses stand that
+    /// much further out of the noise. That is why `pulse` reads a flat 0.950 across the ladder
+    /// while `ook` does slide, and the slide is the physics rather than the defect this fixed.
+    #[test]
+    fn envelope_fractions_measure_the_transmitter_not_the_snr() {
+        let n = 16_384;
+        for (on, period) in [(10usize, 200usize), (50, 200), (64, 128)] {
+            let truth = on as f64 / period as f64;
+            let mut readings = Vec::new();
+            for snr_db in [10.0, 15.0, 20.0, 25.0, 30.0] {
+                // In-band SNR is average signal power over noise power, and the average power of a
+                // unit-amplitude train is its duty.
+                let noise_power = truth * 10f64.powf(-snr_db / 10.0);
+                let s = (noise_power / 2.0).sqrt();
+                let mut rng = hk_dsp::synth::Rng::new(0x7431 ^ snr_db as u64);
+                let x: Vec<Complex32> = (0..n)
+                    .map(|i| {
+                        let (gi, gq) = rng.gaussian_pair();
+                        let carrier = if i % period < on { 1.0 } else { 0.0 };
+                        Complex32::new((carrier + s * gi) as f32, (s * gq) as f32)
+                    })
+                    .collect();
+                let f = features(&FeatureInput {
+                    samples: &x,
+                    sample_rate_hz: 1e6,
+                    obw_hz: None,
+                    snr_db: Some(snr_db),
+                    symbols: None,
+                });
+                let duty = f.get("duty").unwrap();
+                let low = f.get("low_fraction").unwrap();
+                readings.push((snr_db, duty, low));
+                // Binomial spread of a proportion over n draws, plus a flat allowance for the
+                // rectangular edges. One tolerance for every rung: that is the property.
+                let tol = 4.0 * (truth * (1.0 - truth) / n as f64).sqrt() + 0.02;
+                assert!(
+                    (duty - truth).abs() <= tol,
+                    "duty {duty:.3} against a true {truth:.3} at {snr_db} dB (tolerance {tol:.3}); \
+                     readings {readings:?}"
+                );
+                // P(|n|² > (0.3·L)²) for circular Gaussian noise of power N, with L = 1 because
+                // that is the amplitude this train is built with.
+                let over_threshold = (-(0.3f64 * 0.3) / noise_power).exp();
+                let expected_low = (1.0 - truth) * (1.0 - over_threshold);
+                assert!(
+                    (low - expected_low).abs() <= tol,
+                    "low_fraction {low:.3} against a predicted {expected_low:.3} \
+                     ((1 - {truth:.3}) short by the {over_threshold:.3} of the off time that is \
+                     over the threshold) at {snr_db} dB; readings {readings:?}"
+                );
+            }
+            // And the cross-class ordering the SNR-order guard asserts, stated here within one
+            // emission: what `duty` reads at the quietest rung it reads at the loudest.
+            let (_, quiet, _) = readings[0];
+            let (_, loud, _) = readings[readings.len() - 1];
+            assert!(
+                (quiet - loud).abs() <= 0.02,
+                "10 dB reads {quiet:.3} and 30 dB reads {loud:.3} for a true duty of {truth:.3}"
+            );
+        }
     }
 
     #[test]
