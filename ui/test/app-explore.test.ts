@@ -8,7 +8,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import type { AppContext } from "../src/app/context";
-import { decodeActionLabel, emitterStreamAddress, recordEmitterClip, selectionSummary } from "../src/app/explore/focus";
+import {
+  decodeActionLabel, emitterStreamAddress, fetchEmitterLookup, recordEmitterClip, selectionSummary,
+  signalFocus, signalFocusText,
+} from "../src/app/explore/focus";
 import {
   clearUserBand, clusterChip, confirmedFilters, DEFAULT_ROW_RATE_HZ, emptyListText, liveEdgeS,
   loadInventoryRows, nextInventorySort, recurrenceDots, rowChips, rowSeenText, setUserBand,
@@ -568,6 +571,107 @@ test("a non-empty list never pays for a coverage question", async () => {
   atLiveEdge();
   await loadInventoryRows(ctx, () => {});
   assert.ok(!paths.some((p) => p.startsWith("/api/coverage")), "coverage is asked only when the answer would change what is said");
+});
+
+// ---- T-385: the focus panel's own emptiness ----
+//
+// T-379 taught the sidebar to say *which* emptiness an empty list is. The focus panel beside it
+// still had one sentence for every absence: "That signal is no longer in the inventory." For a
+// window-scoped inventory (CLAUDE.md invariant 2) the ordinary absence is having scrubbed or
+// retuned away, so that sentence was a claim about the user's data the UI had never measured —
+// exactly the failure the exploration-first rule exists to stop, applied to a panel.
+//
+// The pair of properties, and neither alone is the fix:
+//   a. a row outside the window says so, and does NOT say it was deleted;
+//   b. a row that really WAS deleted still says so — otherwise this is the same bug mirrored.
+
+test("THE DISTINGUISHING TEST: deleted, outside-the-window and unknown are different states", () => {
+  const win = { t0: 100, t1: 120, coverage: "observed" as const };
+
+  // a. The entry exists and is not deleted; it is simply not among this window's rows.
+  const away = signalFocus(undefined, win, { state: "candidate" });
+  assert.deepEqual(away, { kind: "out-of-window", coverage: "observed" });
+  assert.equal(
+    signalFocusText(away as Exclude<typeof away, { kind: "row" }>),
+    "Not in the window on screen — outside the time or frequency range you are viewing, not gone.",
+  );
+
+  // b. THE CONTROL ON THE FIX ITSELF: a real deletion is still reported as one. A fix that turned
+  // every absence into "outside the window" would hide the user's own delete behind a reassuring
+  // message — the same bug facing the other way.
+  const deleted = signalFocus(undefined, win, { state: "deleted" });
+  assert.deepEqual(deleted, { kind: "deleted" });
+  assert.equal(signalFocusText(deleted as Exclude<typeof deleted, { kind: "row" }>), "That signal was deleted from the inventory.");
+
+  // c. A 404: there is no such entry at all. Also a real absence, and its own sentence.
+  const gone = signalFocus(undefined, win, "gone");
+  assert.deepEqual(gone, { kind: "gone" });
+
+  // d. A lookup that never answered stays UNKNOWN — it never hardens into "deleted", the same rule
+  // T-379 applied to a coverage answer that never came.
+  const unchecked = signalFocus(undefined, win, "failed");
+  assert.deepEqual(unchecked, { kind: "unchecked" });
+  assert.equal(signalFocusText(unchecked as Exclude<typeof unchecked, { kind: "row" }>), "Could not check whether that signal is still listed.");
+
+  // e. Nothing is claimed while the lookup is in flight, or before a window is even known.
+  assert.deepEqual(signalFocus(undefined, win, "loading"), { kind: "checking" });
+  assert.deepEqual(signalFocus(undefined, null, "loading"), { kind: "no-window" });
+  assert.deepEqual(signalFocus(undefined, null, undefined), { kind: "no-window" });
+
+  // The property a single sentence could never satisfy: all five are pairwise different, the way
+  // T-379 asserted its three emptinesses were.
+  const texts = [
+    away, deleted, gone, unchecked,
+    signalFocus(undefined, win, "loading"), signalFocus(undefined, null, "loading"),
+  ].map((f) => signalFocusText(f as Exclude<typeof f, { kind: "row" }>));
+  assert.equal(new Set(texts).size, 6, `six distinguishable absences, got ${JSON.stringify(texts)}`);
+});
+
+test("a deletion outranks the window: it is still a deletion while the capture window is unknown", () => {
+  // An emitter's existence is not a fact about a window, so a decisive lookup is not withheld
+  // pending one. The converse — concluding "deleted" from the row's absence — is what this task
+  // removed, and there is no path to it: `signalFocus` reads only the lookup for that claim.
+  assert.deepEqual(signalFocus(undefined, null, { state: "deleted" }), { kind: "deleted" });
+  assert.deepEqual(signalFocus(undefined, null, "gone"), { kind: "gone" });
+});
+
+test("over a window nothing ever sampled, an absent signal is unobserved-here, not gone", () => {
+  // T-379's second emptiness, on this surface: where the front end never looked, the row's absence
+  // is not evidence about the row at all. And a coverage answer that never came says the least.
+  const f = signalFocus(undefined, { t0: 1, t1: 2, coverage: "unobserved" }, { state: "confirmed" });
+  assert.equal(
+    signalFocusText(f as Exclude<typeof f, { kind: "row" }>),
+    "Not in this window — nothing was observed here, so it is unobserved, not gone.",
+  );
+  const unknown = signalFocus(undefined, { t0: 1, t1: 2, coverage: null }, { state: "confirmed" });
+  assert.equal(signalFocusText(unknown as Exclude<typeof unknown, { kind: "row" }>), "Not listed for this window.");
+});
+
+test("THE CONTROL THAT MATTERS: a window that DOES hold the emitter renders it, absences unread", () => {
+  // Without this, every assertion above is satisfiable by a panel that never shows a signal and
+  // merely explains itself beautifully. A present row is rendered from the row itself — the lookup
+  // is not consulted, and cannot override what the window actually holds.
+  const row = makeRow({ id: "e1", state: "confirmed" });
+  assert.deepEqual(signalFocus(row, { t0: 100, t1: 120, coverage: "observed" }, "failed"), { kind: "row", row });
+  assert.deepEqual(signalFocus(row, null, { state: "deleted" }), { kind: "row", row }, "the row on screen wins over a stale lookup");
+});
+
+test("fetchEmitterLookup: reads the entry's own lifecycle state; a 404 is `gone`, any other failure is unknown", async () => {
+  // `GET /api/inventory/{id}` serves deleted entries too (docs/api.md), which is the only thing
+  // that can tell a deletion from an absence; nothing is inferred from the row's absence itself.
+  let asked: string | null = null;
+  const live = fakeClient({ get: (p) => { asked = p; return { id: "e 1", state: "candidate" }; } });
+  assert.deepEqual(await fetchEmitterLookup(live, "e 1"), { state: "candidate" });
+  assert.equal(asked, "/api/inventory/e%201", "the id is encoded into the path");
+
+  const del = fakeClient({ get: () => ({ id: "e1", state: "deleted" }) });
+  assert.deepEqual(await fetchEmitterLookup(del, "e1"), { state: "deleted" });
+
+  const missing = fakeClient({ get: () => { throw { status: 404, code: "not_found", message: "no such inventory entry" }; } });
+  assert.equal(await fetchEmitterLookup(missing, "e1"), "gone");
+
+  const offline = fakeClient({ get: () => { throw { status: 503, code: "unavailable", message: "no signal inventory" }; } });
+  assert.equal(await fetchEmitterLookup(offline, "e1"), "failed", "a server that could not answer never means deleted");
 });
 
 // ---- layout: actions reachable without horizontal scroll (T-148) ----
