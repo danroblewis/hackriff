@@ -5690,11 +5690,44 @@ tasks:
     title: 'T-267 confirmer uses CRC-16/CCITT-FALSE, but real P25 TSBKs use the AUGMENTED CRC-CCITT - on the first real capture this will look like a demodulator fault'
     milestone: M4
     priority: medium
-    status: in-progress
+    status: done
     deps: [T-268]
     parallel_group: M4A
     core_interface: true
     acceptance: 'T-268 verified that P25 uses the augmented CRC-CCITT (init 0, final XOR 0xFFFF) and NOT CRC-16/CCITT-FALSE, which many references repeat. T-267 uses CCITT-FALSE. T-268 deliberately did not change it, and that restraint was correct: the framing is simplified in three other ways (trellis, interleaving, status symbols), so fixing one of four buys no compliance and would only make the gap harder to see. Fix all four together or none. The DANGEROUS property is the failure mode, not the defect: with the wrong CRC essentially every real TSBK fails while the trellis reports a clean metric, so it presents as a demodulator or front-end fault and will burn a debugging session on the wrong layer. Acceptance: all four simplifications resolved together against a real capture, OR - if that stays out of reach - a test that asserts the current CRC choice is the simplified one, so the assumption is stated by the suite and cannot be silently inherited'
+    commit: 664570d
+    result: |
+      DONE - outcome 2, as the ticket anticipated, and the survey is the durable half.
+      ALL FOUR SIMPLIFICATIONS, with file and line, all in crates/hk-detect/src/trunk/:
+        1. CRC variant - confirm.rs:409 (CCITT-FALSE), mirrored py/hkpy/synth/trunking.py:76. Real is
+           the AUGMENTED CRC-CCITT (init 0, final XOR 0xFFFF) = catalogued CRC-16/GSM, check 0xCE3C.
+           Two constants. THIS IS THE TRAP: it looks like a one-line fix.
+        2. No trellis code - confirm.rs:52-56 reads the 12-byte TSBK straight off the air as 48
+           dibits. TIA-102.BAAA-A Annex A wants rate-1/2, 48 information dibits -> 98 channel dibits,
+           and NOT the (7,5) NASA code.
+        3. No deinterleaver - confirm.rs:601 packs in arrival order; real is a 98-dibit block
+           interleaver over the trellis-coded dibits.
+        4. No status symbols - confirm.rs:475 reads contiguously from the sync; real frames carry a
+           2-bit status symbol every 35 data dibits, stride 36.
+        Plus a FIFTH the ticket did not list: a compliant frame carries a 64-bit NID (NAC + DUID under
+        BCH(63,16,11)) between sync and payload, which this build neither reads nor skips.
+      THE FINDING THAT SHARPENS THE DIAGNOSIS: the failure is not statistical. The two trailers differ
+      by a constant 0xFFFF and a CRC is LINEAR in that difference, so the data bytes do not enter into
+      it - the residue is a CONSTANT 0x99F6, verified over 20000 random payloads. So it is not
+      "essentially every real TSBK fails", it is EVERY correctly-formed one, deterministically. A
+      decoder seeing a MIXTURE of pass and fail is therefore not hitting this bug.
+      Why outcome 2, checked not assumed: there is NO off-air P25 recording in the repo - fixtures/
+      holds FM, ISM, ADS-B and urban HackRF captures only, and every trunking fixture is synthetic
+      from this same simplified framing. Closing all four synthetically is ~1-2 days but would be
+      SELF-CONSISTENT BY CONSTRUCTION, since the trellis and interleaver are transcribed tables and a
+      misreading shared by encoder and decoder passes both suites while the air still fails. That is
+      T-299's hole, so outcome 1 should be scheduled as "real capture, or T-299's independent oracle".
+      Four tests under a banner that says what the failure looks like from outside: the trellis - the
+      layer anyone checks first - reports a clean metric while every TSBK fails, so it presents as a
+      demodulator or front-end fault. Non-vacuity by mutation: swapping in the augmented CRC makes the
+      test fail NAMING the assumption and takes a_real_control_channel_is_confirmed down with it,
+      which is the four-move-together property made visible.
+
   - id: T-302
     milestone: M3
     title: 'Image/harmonic/IMD attribution must read device_id: a fundamental seen on one front end can
@@ -6757,7 +6790,7 @@ tasks:
   - id: T-347
     milestone: M2-hardening
     title: Pause is global run state, so one browser pausing freezes every other browsers waterfall
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-339
@@ -6774,6 +6807,39 @@ tasks:
       the stream) and /api/control/pause is kept only as a bandwidth or CPU control, or retired. Decide
       with T-337 and T-340''s design in view, since all three are about what is view state and what is world
       state. Whatever is decided, ONE mechanism should serve what the user calls one thing'
+    commit: 3f17e0e
+    result: |
+      FIXED by RETIRING the route, not re-scoping it. A run-wide boolean cannot represent N
+      viewers, so no scoping of DisplaySettings.paused was ever going to be right. Removed, not
+      hidden: /api/control/pause and /resume (404), DisplayState.paused, DisplaySettings.paused,
+      RunControl/PipelineController/DisplayControl::set_paused, the spectrum reader's
+      publish-stop, and the Device panel button.
+      ONE MECHANISM, AND IT ALREADY EXISTED: the client's `time.live` - {live:true} or
+      {live:false, tS, spanS} - already read by the presence push, the inventory window, the
+      live-only notes and the box layout. Pausing IS entering the state scrubbing already
+      produced, so the time navigator's LIVE control became the one play/pause toggle. No third
+      state for "scrubbed but not paused", which is what makes it one mechanism rather than two
+      wearing one label.
+      IT REJECTED MY STEER toward a per-connection re-scope, and was right: that needs new
+      contract surface (consumer identity on the wire, per-consumer suspend in hk-stream) for a
+      saving T-348 says to measure first - and T-348's own finding is that the display STFT runs
+      BEFORE the publish step, so the old flag saved nothing anyway.
+      ROOM FOR T-348 WITHOUT A ROUTE: a paused client closes its stream subscription (reopening
+      on Live backfills from history, as a fresh Live view already does). If per-run cost later
+      dominates, the honest control is a server-side low-power mode keyed on NO CONSUMERS
+      ATTACHED, which the registry can already answer and which is an operator's decision.
+      THE TEST IS CROSS-CLIENT because the defect is: two WebSocket consumers, three legs on
+      values not status codes - retired routes 404 and run.display carries no `paused`; A pauses
+      (on the wire, nothing) and B's rows keep arriving with strictly advancing capture
+      timestamps; A stops draining its socket entirely and B still advances 50 rows. 4.76 s, so
+      it genuinely waited on rows.
+      view_pause_keeps_capture keeps T-339's seam and INVERTS its middle assertion: b.rows == 0
+      became b.rows > 0.
+      FLAGGED FOR THE USER: a SCRUBBED view now displays "PAUSED". The agent argues that is the
+      design statement rather than a mislabel - scrubbing IS pausing under this model - but it is
+      the one wording they might want different.
+      Verified on the merge: 2303/2303 at --test-threads 8, lint green, ui 29/29.
+
   - id: T-348
     milestone: M2-hardening
     title: A paused view costs the same CPU as a playing one, which matters on battery
@@ -7134,7 +7200,7 @@ tasks:
     milestone: M3
     title: The classifier rejects 39% of genuine short bursts from their own class, and the fix costs open-set
       recall at the floor
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-328
@@ -7175,6 +7241,36 @@ tasks:
       and it may make T-328's ordering reversal (four dimensions holding the open set better at a
       pooled fit) the decisive fact rather than a footnote.
       Do NOT pick for the user and do NOT move the floor - unchanged.
+    commit: 9ea65e5
+    result: |
+      DONE - measurement and presentation only. Nothing adopted, no floor moved, no density file
+      changed. Deliverable: docs/17-burst-recall-vs-open-set.md, four options with costs and NO
+      recommendation, for the user. Re-derivable with `just t364-curves`.
+      T-428 established the held-out figure has a DRAW SD OF 0.0084, so this was measured across eight
+      seed bases rather than once - and that changed three conclusions.
+      1. THE GAP IS ~2x THE HEADLINE. T-328 shortened only C14's window, but a genuinely short
+         emission is short in the CLASSIFIER'S SNIPPET too, where the shipped rejection is
+         70.3% +- 1.7, not 39.4%.
+      2. THE PRICED FIX IS BELOW THE FLOOR, NOT AT IT. T-328's single 0.9000 read as "lands exactly on
+         0.90". Eight draws give 0.8911 +- 0.0112: -2.3 sem, 7 of 8 draws failing. Eight draws resolve
+         the option AGAINST itself rather than leaving it ambiguous.
+      3. THE SHIPPED CLASSIFIER IS ALREADY AT THE FLOOR ON SHORT BURSTS: 0.8949 +- 0.0159, 5 of 8
+         draws below 0.90, BEFORE any change. The gate's 0.95 is a full-window number.
+      "Pooled fitting" is TWO experiments and only one was ever priced: pooling C14's window costs
+      ~0.06 recall; pooling BOTH views - what a real burst is - costs ~0.25 and is the ONLY option
+      that fixes genuine bursts (0.703 -> 0.179), nowhere near the floor.
+      THE FOUR-DIMENSION REVERSAL HOLDS AND IS DECISIVE. At the shipped protocol T-328's refusal
+      stands exactly. At a pooled fit the sign flips, and 0.9088 +- 0.0053 against 0.8911 +- 0.0112 is
+      the difference between clearing the floor and not - so the expansion is what PAYS FOR the
+      pooling and the two halves are a package.
+      Validation first: the builtin arm's eight draws are 377/379/380/377/378/370/377/381 of 396 - the
+      SAME MULTISET T-428 reported, mean 0.9530, sd 0.0084 to four decimals, so it reads ADR-0016
+      §7.2 row 1 and not one of the other two readings. It also reproduces T-328 (38.4% vs 39.4%).
+      A FOURTH OPTION the measurement surfaced and did not price: most remaining harm is OUTSIDE the
+      cyclic statistic, in the other ~20 features' own snippet-length dependence - pointing at making
+      those length-invariant (T-312/T-313's direction) rather than widening densities.
+      Both code additions inert by default: Classifier::with_models is additive and uncalled by the
+      pipeline; the cyclic-dims cargo feature is off by default and never on in CI.
 
   - id: T-365
     milestone: M3
@@ -7655,7 +7751,7 @@ tasks:
   - id: T-380
     title: One view window, even with multiple SDRs - extra front ends widen coverage, they never split the view
     milestone: M2-hardening
-    status: todo
+    status: deferred
     priority: normal
     parallel_group: UI
     core_interface: true
@@ -7683,6 +7779,18 @@ tasks:
       line falls in ADR-0017 and hold it in the code.
       Depends on T-378: coverage cannot say which device looked where over the long
       horizon until observation-log spans carry a device.
+    result: |
+      FOLDED INTO docs/16 §8 AND SUPERSEDED BY T-437 (user decision, 2026-09-17).
+      The brief states it directly: the unified surface "subsumes T-380 - fold T-380 into this
+      design". T-380's invariant is NOT dropped; it is restated in a stronger form. T-380 said
+      extra front ends widen COVERAGE and never split the VIEW. Under §8 the surface is one
+      surface and panes are VIEWPORTS ONTO IT, so there is still exactly one thing being looked
+      at - panes are where you look FROM, not additional things to look at. The multi-SDR case
+      that motivated T-380 (ranges far apart, unwatchable at one density) is what panes exist to
+      solve, and it is now §8.4 rather than a separate ticket.
+      Deferred rather than cancelled: if the T-437 spike does not prove out, this invariant still
+      needs a home and this ticket is it.
+
   - id: T-381
     title: The slots row still does not name its receive chain, the same gap T-371 just closed for the bias tee
     milestone: M4
@@ -10001,7 +10109,7 @@ tasks:
   - id: T-426
     milestone: M2-hardening
     title: /api/coverage serves no shade for the first minute of a server's life though the finer levels hold the data
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -10027,6 +10135,33 @@ tasks:
     notes: |
       T-383 named this in the coverage test's own comment so it could not be lost. The fix
       interacts with T-423's new coverage plane - read that first.
+    commit: a934419
+    result: |
+      FIXED. ADEQUATE IS A CEILING, NOT A TARGET - the reframe that makes the fix small. A tier is
+      adequate when its time cells are no larger than one drawn column AND its grid fits the cell
+      budget; every tier FINER than the coarsest adequate one satisfies both, so the adequate tiers
+      are a RUN of the ladder and the coarsest is only PREFERRED (reading finer costs cells for
+      detail the fold immediately collapses). The fallback therefore relaxes nothing - it picks a
+      different member of the set the rule already admitted. overview_level -> overview_levels
+      (candidates, preferred first); overview_read takes the first that holds anything.
+      FINER IS THE SAFE DIRECTION: T-334's warning is about src_t_cell_s LARGER than the drawn cell,
+      where one measured value repeats across columns. A finer source is the opposite - more
+      resolution than asked for, folded onto the identical grid - so it needs no warning and fakes
+      nothing. THE WALK IS ONLY EVER DOWNWARD: coarse tiles are rolled up from fine ones, so a
+      coarser tier cannot hold what a finer one lacks.
+      /api/coverage's shade block had NO tier field at all, so the fallback would have been invisible
+      exactly where the defect lived. It now carries level, src_t_cell_s, src_f_cell_hz, level_rule.
+      THE BEST PART IS A TEST THE AGENT DELETED: its first version used a 30 s budget and THE MUTANT
+      PASSED IN 19.5 s, because the old code does eventually shade once the minute seals. Any budget
+      over 2 s lets this defect wait its way to green - the same clock dependency that spent a month
+      logged as a load flake (T-320/T-383). The wait was removed entirely: one request, one answer,
+      8.5-10.3 ms over four runs, with the level asserted under a phase computed from a clock read
+      BEFORE the server starts. The control lives where no clock is involved: level 1 asserted empty,
+      level 0 answers, then seal_through and the same call flips back to level 1.
+      Coordinator verification: three runs at default concurrency each failed a DIFFERENT
+      timing-sensitive test, all green isolated, none reachable from a pub(crate) hk-api change; the
+      full suite then ran 2298/2298 with NO exclusions at --test-threads 8. That observation became
+      T-436.
 
   - id: T-427
     milestone: M3
@@ -10323,7 +10458,7 @@ tasks:
   - id: T-430
     milestone: M2-hardening
     title: The per-cell coverage contract test bounds the capture time elapsing between two HTTP round-trips
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     deps: [T-423, T-425]
@@ -10350,7 +10485,7 @@ tasks:
   - id: T-431
     milestone: M3
     title: A 5%-duty radar train is denied the pulsed family for being always on, because the admissibility gate reads the same inflated duty
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: M3A
     deps: [T-427, T-429]
@@ -10414,7 +10549,7 @@ tasks:
   - id: T-433
     milestone: M2-hardening
     title: concurrent_demod asserts dropped == 0 on a real-time chain, a quantity whose range under contended CPU has never been measured
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     deps: [T-383]
@@ -10457,7 +10592,7 @@ tasks:
   - id: T-434
     milestone: M5
     title: docs/16 step 4 - LevelConfig::t_factor and the view scheme, and the step where the storage cost lands
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -10608,6 +10743,61 @@ tasks:
       The T-430 coverage test's failure here reproduced its known signature exactly: row 1 picking up
       6.8 ms of capture from the live edge read by a previous HTTP round-trip, the same figure T-425
       measured.
+  - id: T-437
+    milestone: MUI
+    title: SPIKE - the unified full-spectrum surface - one WebGL2 canvas, de-welded axes, split panes, zoomable minimap
+    status: todo
+    priority: high
+    parallel_group: SPIKE
+    core_interface: true
+    model: opus
+    deps: [T-421, T-423, T-434]
+    use_cases:
+    - AWARE-011
+    - AWARE-042
+    found_by: 'the user, 2026-09-17 (design decision brief); folded into docs/16 §8'
+    acceptance: |
+      DE-RISKING SPIKE for the user's decision in docs/16 §8. READ §8 FIRST - it is the
+      specification and this ticket is its proof obligation.
+      RUN ON REPLAY/SYNTHETIC THROUGH THE MOCK SDR, AND IT MUST NOT BLOCK THE LIVE PATH. The
+      user's demo holds the real HackRF on :8899; do not bind 8789/8899/8900 and never issue a
+      real retune against it.
+      PROVE FOUR THINGS END TO END:
+        1. DE-WELDED PER-AXIS TILE ADDRESSING served over a route - independent level_f and
+           level_t. §5.2's Correction 2 already measured the defect: the default ladder coarsens
+           frequency x16 and time x86400 across its levels, which is a ladder for one band over a
+           long time, not a map. This is the backend half of §7 step 4 (T-434), so that work is a
+           PREREQUISITE, not a parallel effort - do T-434's t_factor first or as part of this.
+        2. ONE WebGL2 CONTEXT, N SCISSORED PANES via gl.viewport + gl.scissor, a SHARED tile
+           texture LRU keyed by (level_f, level_t, f_block, t_block), grey-for-missing, and the
+           honesty tiers (live-iq / spectrum-history / survey-overview) VISIBLY DISTINCT. The
+           shared LRU is why it must be ONE context: a tile visible in two panes uploads once.
+        3. THE LIVE EDGE writing finest tiles for tuned ranges, PER-PANE FOLLOW-MODE, and
+           pan-to-untuned -> retune through T-343's gated typed DeviceAction with device_id
+           recorded (one capture at a time, settle gap honoured, no second path to the device).
+        4. SPLIT PANES + ZOOMABLE MINIMAP, with pane-viewport rectangles and per-SDR live
+           segments.
+      EXIT CRITERION, from the user: it convincingly replaces BOTH edge scrubbers AND the
+      separate history view. If it proves out, §8 becomes the UI direction and §7's remaining
+      steps are re-planned around it.
+      WHAT MUST NOT BE FAKED: grey means genuinely unobserved and is the main information this
+      surface carries - across 6 GHz and a retention window most of the canvas is honestly empty,
+      and the shape of what is NOT grey is the survey. Never invent resolution the hardware did
+      not capture; a wide or deep zoom shows survey-overview, not fabricated detail.
+      PAUSE FREEZES A PANE'S VIEW ONLY. Capture, ring and detection stay always-on. T-347 has just
+      made pause per-viewer rather than per-run, which is the same direction reached
+      independently - build on it, do not reintroduce a run-wide flag.
+    notes: |
+      This is a SPIKE: throwaway is acceptable and expected (spikes/ exists for it). The
+      deliverable is a YES/NO on the exit criterion with evidence, not production code. Say
+      plainly what did not work.
+      Read the recurring defect family it is meant to eliminate, because the spike should
+      demonstrate that each one cannot recur under one renderer: sliver-of-data (T-420),
+      box-jump (T-388), fill and resolution (T-397/T-411), axis and colormap divergence (T-397),
+      wheel-zoom mismatch (T-412). Every one was two implementations of the same idea drifting
+      apart.
+      The freeze is in force: no further polish on the separate navigator widgets. Genuine
+      backend bugs behind them stay (T-347, T-348).
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

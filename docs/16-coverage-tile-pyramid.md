@@ -475,6 +475,8 @@ the composition §2's correction 3 named:
 A buildable sequence. Each step says what it unblocks and which consumer it serves.
 
 > **Sequence state, 2026-09-17.** Steps **1, 2, 3 and 6 have landed** (T-421, T-423, T-419, T-406).
+> **§8 (the unified surface) changes what steps 4, 5 and 7 are for** — step 4's `t_factor` becomes the
+> de-welding the spike needs, and steps 5 and 7 are re-planned around T-437's outcome.
 > Step 6 ran early because it only ever depended on step 1. The next step is **4**, which is where the
 > storage cost lands and therefore the step to measure disk on; steps **5** (the tile route) and **7**
 > (the big view client) follow it and are not yet filed. Update this line when a step lands, so the
@@ -552,6 +554,106 @@ A buildable sequence. Each step says what it unblocks and which consumer it serv
 **And the standing instruction, unchanged: do not let T-405 and T-406 foreclose this.** T-405 takes its
 fold and shading from the pyramid rather than inventing one; T-406 accumulates into it rather than into
 a private accumulator.
+
+## 8. The unified surface — one canvas, one pyramid (user decision, 2026-09-17)
+
+**Status: decided by the user; the de-risking spike is T-437.** This section supersedes the separate
+live-waterfall / history-view / edge-navigator design. It is not a new idea bolted on — it is the
+completion of what §3 already implied when it said *the survey bar is a miniature of the big view*.
+
+### 8.1 The decision
+
+Collapse the **live waterfall, the history view and both edge navigators** into **one surface**: a
+single virtual canvas with **X = frequency across the full device range (1 MHz–6 GHz)** and **Y =
+time**, rendering only data we actually have, backed by the coverage tile pyramid this document
+already specifies (`hk-store`, `TileKey`, `Coverage`, the `Resolution` tiers).
+
+**Grey = genuinely unobserved, and that grey is the point.** It stops being an edge case in a
+renderer and becomes the main information the surface carries: across 6 GHz and a retention window,
+most of the canvas is honestly empty, and the shape of what is *not* grey is the survey.
+
+**The leap: the live view is also just a viewport into this surface** — "live" is the finest-level
+growing edge where hardware is currently tuned. There is no separate live-versus-history UI any more,
+and therefore no seam between them to keep consistent.
+
+### 8.2 The backend change: de-weld the axes
+
+Frequency (6 GHz) and time (the retention window) are different quantities with wildly different
+extents, so **no single pixels-per-unit can serve both**. Each axis zooms **independently** and snaps
+to **its own** pyramid level.
+
+**§5.2's Correction 2 already named this defect** — the default ladder coarsens frequency ×16 and time
+×86 400 across its levels, which is a ladder for *one band over a long time*, not a map. This section
+turns that observation into the requirement: **`level_f` and `level_t` are independent coordinates.**
+
+"Constant pixel density everywhere" means **uniform in-level density per pane** — the slippy-map
+invariant — **not** one global scale. This also replaces the earlier asks to make the two scrubbers'
+densities match and to let each scrubber's wheel scale its own density: same behaviour, obtained once
+from one renderer instead of twice from two widgets.
+
+**This is the backend half of §7 step 4** (`LevelConfig::t_factor` and the view scheme, filed as
+T-434), which is now a prerequisite of the spike rather than an independent step.
+
+### 8.3 The renderer: one canvas element, one WebGL2 context
+
+- **Split panes** via `gl.viewport` + `gl.scissor`. Each pane carries its own
+  `(center_f, span_f, center_t, span_t)`, resolves to its own per-axis pyramid level, and draws only
+  the tiles inside its box.
+- **A shared tile-texture LRU** keyed by `(level_f, level_t, f_block, t_block)`, uploaded on demand
+  under a budget. **A tile visible in two panes uploads once** — and that sharing is precisely why
+  this must be *one* context rather than one per pane.
+- **A zoomable minimap** is simply another viewport at a coarse level, overlaying rectangles for where
+  each pane is looking and lit segments for where each SDR is currently live.
+- **The honesty tiers stay visually distinct** — `live-iq`, `spectrum-history`, `survey-overview` —
+  so a wide or deep zoom never fakes resolution the hardware did not capture. §4's rule is unchanged
+  and now has one place to be enforced instead of three.
+
+### 8.4 Multiple SDRs, and what panes are actually for
+
+Several tuned ranges populate at once and **may be far apart** — 100 MHz and 2.4 GHz are not
+watchable in one viewport at any useful density. So panes exist to **split the canvas and
+independently pan, zoom and follow-live different sections of the same surface**.
+
+- **Per-pane follow-mode** pins that pane to the growing edge.
+- **Pause freezes a pane's view only.** Capture, the ring and detection remain always-on — the
+  invariant is unchanged, and T-347 has just made pause per-viewer rather than per-run, which is the
+  same direction arrived at independently.
+- **Panning a pane to an un-tuned frequency offers or triggers a retune**, reusing T-343's gated,
+  typed device action with `device_id` recorded. One capture at a time, settle gap honoured.
+
+**This subsumes T-380** ("one view window, even with multiple SDRs"). T-380's invariant was that extra
+front ends widen *coverage* and never split the *view*; under this design the surface is still one
+surface and the panes are viewports onto it, so the invariant survives in a stronger form: there is
+exactly one thing being looked at, and panes are where you look from.
+
+### 8.5 What this removes
+
+The two bespoke edge-scrubber widgets collapse into canvas pan/zoom plus the minimap. The
+live-versus-history split disappears. And the recurring scrubber defect family goes with them —
+sliver-of-data (T-420), box-jump (T-388), fill and resolution (T-397/T-411), axis and colormap
+divergence (T-397), wheel-zoom mismatch (T-412) — because **one renderer with one set of semantics
+cannot disagree with itself.** Every one of those was two implementations of the same idea drifting
+apart.
+
+**Freeze, per the user:** no further polish investment in the separate left-time and bottom-frequency
+navigator widgets. Genuine backend bugs behind them stay (T-347 pause-is-global, T-348 paused-view
+CPU) — those are not scrubber polish, they are correctness.
+
+### 8.6 The spike, and its exit criterion
+
+**T-437**, on replay/synthetic through the mock SDR, and it **must not block the live path**. Four
+things to prove end to end:
+
+1. **De-welded per-axis tile addressing** served over a route — independent `level_f` and `level_t`.
+2. **One WebGL2 context, N scissored panes**, a shared tile LRU, grey-for-missing, honesty tiers
+   visibly distinct.
+3. **The live edge** writing finest tiles for tuned ranges, **per-pane follow-mode**, and
+   pan-to-untuned → retune.
+4. **Split panes plus the zoomable minimap**, with pane-viewport rectangles and per-SDR live segments.
+
+**Exit criterion:** it convincingly replaces **both** edge scrubbers **and** the separate history view.
+If it proves out, this section becomes the UI direction and §7's remaining steps are re-planned around
+it.
 
 ## Sources
 
