@@ -47,6 +47,46 @@
 //! active", and since T-378 both record **which device** — the same `device_id` the baseline chain
 //! key and the history source key are hashed from — so the long-horizon spans are device-local too.
 //! The caller collects the spans from whichever of those it has and this module folds them.
+//!
+//! # The time axis (T-421, `docs/16` §6.3 / §7 step 1)
+//!
+//! T-368 folded those spans onto the **frequency** axis and collapsed time, so one grid answered
+//! *"was this band sampled anywhere in this window"* — a **column**, where a view drawing a
+//! waterfall needs a **cell**. The consequence was not cosmetic: a cell in a band the radio
+//! demonstrably watched, at an instant it was tuned somewhere else, came back `Observed` and read as
+//! *"sampled, level not retained"* rather than grey.
+//!
+//! This is not new data and not a new type. A [`CoverageSpan`] is already
+//! `(t_start, t_end, f_lo, f_hi, device)`; **per-(t, f) coverage is the same rasterisation with the
+//! time axis kept.** [`grid_over`] lays `nt × nf` cells on the window instead of `1 × nf`, and each
+//! cell goes through the same [`Coverage::of`] with its **own** extent as the window — so the
+//! refusal that makes state 3 unrepresentable as state 2 applies per cell, unchanged, and the
+//! one-row case *is* [`grid`], bit for bit.
+//!
+//! # Coarsening is a SUM over the children, never a best-of (T-419)
+//!
+//! [`CoverageGrid::coarsen`] is the fold, and it exists because the obvious alternative is wrong:
+//! rasterising **directly** onto a coarse grid answers *"did anything look anywhere in this cell"*
+//! and therefore reports a cell **fully covered** on the evidence of one sixteenth of its frequency
+//! extent — the exact shape T-419 removed from `Tile::fold_child`, which had been taking the max
+//! across child frequency cells. `observed_ns` is foldable; `duty` is not. So a parent's
+//! `observed_ns` is the **sum** over its children divided by the number of frequency children (the
+//! parent's own extent), and its `duty` is recomputed from that against the parent's own duration —
+//! never averaged from the children's duties. This module's tests prove every level against
+//! **level 0**, independently, because a parent-vs-child assertion is satisfied by the rounded-up
+//! answer at every level and so can only ever prove that the fold is *a* fold.
+//!
+//! # The fourth state: `Unobserved` here is *"no record"*, which past the horizon is not *"never"*
+//!
+//! `docs/16` §5.4. The spectrum-history pyramid has **no age limit** (a rolling byte budget) while
+//! the observation log expires at **30 days**, so the two cross: a cell older than the record
+//! horizon can hold a measurement whose coverage record has been discarded. A cell this module
+//! calls [`Coverage::Unobserved`] means *no surviving record covers it* — inside the horizon that is
+//! "nothing looked", and **beyond it that is "we no longer know whether we looked"**, which must not
+//! be painted grey. This module cannot decide which, because it is handed spans and not the horizon
+//! that produced them; [`CoverageGrid::unknown_rows_before`] is how a caller names the boundary, and
+//! it is deliberately a *question about rows* rather than a third [`Coverage`] variant — adding one
+//! is a `core_interface` change `docs/16` §5.4 says to make deliberately, if at all.
 
 use std::collections::BTreeMap;
 
@@ -55,6 +95,15 @@ use hk_model::{FreqRange, TimeRange, Timestamp};
 /// Most frequency cells one [`CoverageGrid`] may hold. Each cell is a measurement, and the fold is
 /// linear in `spans × cells_touched`, so the grid is bounded like every other served picture.
 pub const MAX_COVERAGE_CELLS: usize = 4096;
+
+/// Most time rows one [`CoverageGrid`] may hold — the same bound on the axis T-421 added.
+pub const MAX_COVERAGE_ROWS: usize = 4096;
+
+/// Most cells in total, `nt × nf`. Each axis is bounded on its own, but the fold's cost is the
+/// **product**, so the product is bounded too: 256 × 256, one tile of `docs/16` §6.2's view scheme.
+/// A request past it keeps every frequency cell asked for and reduces the time rows, and the grid
+/// reports the [`CoverageGrid::nt`] it actually built — the realised resolution is never implied.
+pub const MAX_COVERAGE_GRID_CELLS: usize = 65_536;
 
 /// Which front end a coverage claim belongs to.
 ///
@@ -129,10 +178,21 @@ impl CoverageSpan {
 pub struct Sampled {
     /// Distinct sampling intervals that covered the cell (after merging overlaps).
     pub spans: u32,
-    /// Nanoseconds of the window actually sampled. Always `> 0`.
+    /// Nanoseconds of the cell's own time extent actually sampled. Always `> 0`.
+    ///
+    /// On a one-row grid ([`grid`]) the cell's extent is the whole window; on an `nt`-row grid
+    /// ([`grid_over`]) it is that row's slice of it. After [`CoverageGrid::coarsen`] it is the
+    /// children's summed seconds over the parent's **frequency** extent, so a parent pooling one
+    /// observed child with `f_factor − 1` never-observed ones holds `1/f_factor` of a child's
+    /// seconds rather than a child's seconds (T-419).
     pub observed_ns: i64,
-    /// `observed_ns` as a fraction of the window, `0 < duty ≤ 1`. A cell sampled for part of the
-    /// window is observed for that part and unobserved for the rest — reported, not rounded away.
+    /// `observed_ns` as a fraction of the cell's own time extent, `0 < duty ≤ 1`. A cell sampled for
+    /// part of its extent is observed for that part and unobserved for the rest — reported, not
+    /// rounded away.
+    ///
+    /// **Derived against `observed_ns`, so it is re-derived whenever `observed_ns` changes.** It is
+    /// never averaged from children's duties in a fold; T-419's near-miss was the same shape one
+    /// field over (`occ_s` against `obs_s`), and a fold that carried a stale ratio would double it.
     pub duty: f64,
     /// End of the newest sampling interval: "when this cell was last looked at".
     pub last: Timestamp,
@@ -213,18 +273,30 @@ impl Coverage {
     }
 }
 
-/// One device's coverage of a band over a window, in `cells` frequency cells.
+/// One device's coverage of a band over a window, on an `nt × nf` time–frequency grid.
+///
+/// `nt == 1` is T-368's answer unchanged — one row over the whole window, which is what [`grid`],
+/// [`union_grid`] and [`by_device`] build. `nt > 1` is T-421's: the same rasterisation with the time
+/// axis kept, so a cell can say *"this front end was not tuned here, **then**"*.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoverageGrid {
     /// Whose coverage this is. Never a merge of two named devices (see [`union_grid`]).
     pub device: Device,
-    /// The window the duties are fractions of.
+    /// The window the rows partition.
     pub window: TimeRange,
-    /// Low edge of cell 0, Hz.
+    /// Time rows, earliest first. Always `>= 1`.
+    pub nt: usize,
+    /// Frequency cells per row, low frequency first. Always `>= 1`.
+    pub nf: usize,
+    /// Nominal row duration, ns. Rows partition `window` exactly, so a row may differ from this by
+    /// the division's remainder; [`CoverageGrid::row_time`] is the row's true extent.
+    pub t_cell_ns: i64,
+    /// Low edge of frequency cell 0, Hz.
     pub f_lo_hz: f64,
     /// Cell width, Hz.
     pub f_cell_hz: f64,
-    /// The cells, low frequency first.
+    /// The cells, **row-major**: row `t`, cell `f` is `cells[t * nf + f]`. Earliest row first, low
+    /// frequency first — so a one-row grid is exactly T-368's `Vec<Coverage>`.
     pub cells: Vec<Coverage>,
 }
 
@@ -239,7 +311,7 @@ impl CoverageGrid {
         self.cells.len() - self.observed_cells()
     }
 
-    /// The fraction of the band this device observed; `0.0` for an empty grid.
+    /// The fraction of the grid this device observed; `0.0` for an empty grid.
     pub fn observed_fraction(&self) -> f64 {
         if self.cells.is_empty() {
             return 0.0;
@@ -247,16 +319,172 @@ impl CoverageGrid {
         self.observed_cells() as f64 / self.cells.len() as f64
     }
 
-    /// The cell containing `f_hz`, or `None` outside the grid.
+    /// Cell `(t, f)`, or `None` outside the grid.
+    pub fn cell(&self, t: usize, f: usize) -> Option<&Coverage> {
+        if t >= self.nt || f >= self.nf {
+            return None;
+        }
+        self.cells.get(t * self.nf + f)
+    }
+
+    /// Row `t`'s true extent. Rows partition [`Self::window`] exactly and none is dropped to
+    /// rounding, so the last row absorbs the division's remainder rather than the window losing it.
+    pub fn row_time(&self, t: usize) -> Option<TimeRange> {
+        if t >= self.nt {
+            return None;
+        }
+        let w0 = self.window.start.as_unix_nanos();
+        let span = i128::from(self.window.duration_ns());
+        let edge = |i: usize| -> i64 {
+            (i128::from(w0) + span * i as i128 / self.nt as i128)
+                .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+        };
+        Some(TimeRange::new(
+            Timestamp::from_unix_nanos(edge(t)),
+            Timestamp::from_unix_nanos(edge(t + 1)),
+        ))
+    }
+
+    /// Frequency cell `f`'s extent.
+    pub fn freq_of(&self, f: usize) -> Option<FreqRange> {
+        if f >= self.nf {
+            return None;
+        }
+        let lo = self.f_lo_hz + self.f_cell_hz * f as f64;
+        Some(FreqRange::new(lo, lo + self.f_cell_hz))
+    }
+
+    /// The cell containing `f_hz` in **row 0**, or `None` outside the grid.
+    ///
+    /// On a one-row grid — every caller T-368 shipped — row 0 is the whole window and this is the
+    /// original meaning unchanged. On a multi-row grid say which row you mean: [`Self::at_tf`].
     pub fn at(&self, f_hz: f64) -> Option<&Coverage> {
+        self.f_index(f_hz).and_then(|f| self.cell(0, f))
+    }
+
+    /// The cell containing `(t, f_hz)`, or `None` outside the grid.
+    pub fn at_tf(&self, t: Timestamp, f_hz: f64) -> Option<&Coverage> {
+        let f = self.f_index(f_hz)?;
+        let span = self.window.duration_ns();
+        if span <= 0 {
+            return None;
+        }
+        let d = i128::from(t.as_unix_nanos() - self.window.start.as_unix_nanos());
+        if d < 0 {
+            return None;
+        }
+        let row = (d * self.nt as i128 / i128::from(span)) as usize;
+        self.cell(row.min(self.nt.saturating_sub(1)), f)
+    }
+
+    fn f_index(&self, f_hz: f64) -> Option<usize> {
         if !(f_hz.is_finite() && self.f_cell_hz > 0.0) {
             return None;
         }
         let i = ((f_hz - self.f_lo_hz) / self.f_cell_hz).floor();
-        if i < 0.0 {
+        if i < 0.0 || i >= self.nf as f64 {
             return None;
         }
-        self.cells.get(i as usize)
+        Some(i as usize)
+    }
+
+    /// Rows lying **wholly before** `oldest_record` — the boundary past which this grid's
+    /// [`Coverage::Unobserved`] stops meaning "nothing looked".
+    ///
+    /// `docs/16` §5.4's fourth state, made askable without a third [`Coverage`] variant. This module
+    /// is handed spans, not the horizon that produced them, so it cannot tell *no record* from *no
+    /// surviving record*; the caller that read the observation log knows when its oldest record
+    /// starts and passes it here. Rows `0..n` are **"we no longer know whether we looked"** and must
+    /// be drawn as a fourth thing, not as grey — greying them spells "never looked" for spectrum
+    /// whose records were merely discarded, which is [`Coverage::of`]'s sin one horizon out.
+    ///
+    /// Only rows are returned because the horizon is a time, not a band: a discarded record takes
+    /// every frequency with it.
+    pub fn unknown_rows_before(&self, oldest_record: Timestamp) -> usize {
+        (0..self.nt)
+            .take_while(|&t| {
+                self.row_time(t)
+                    .is_some_and(|r| r.end <= oldest_record && r.duration_ns() > 0)
+            })
+            .count()
+    }
+
+    /// Coarsens the grid by `t_factor × f_factor`, **summing** observed seconds over the children
+    /// and re-deriving `duty` against the parent's own extent.
+    ///
+    /// This is `docs/16` §6.3's rule and T-419's finding: `observed_ns` is foldable, `duty` is not.
+    /// A parent's `observed_ns` is `Σ children / f_factor` — the summed seconds spread over the
+    /// parent's own **frequency** extent — so one observed child among `f_factor` siblings gives the
+    /// parent `1/f_factor`, not the child's own value. Taking the best child instead is what let a
+    /// level-4 cell claim full coverage on one sixteenth of its band.
+    ///
+    /// Returns `None` unless both factors are `>= 1` and divide [`Self::nt`] and [`Self::nf`]
+    /// exactly: **a fold whose children do not partition its parent is not a fold**, and the sum
+    /// would then be over a different extent than the divisor claims. `docs/16` §6.2's ladder is ×2
+    /// on both axes from uniform tiles, so it always divides exactly.
+    ///
+    /// Nothing observed becomes unobserved: a parent with any observed child keeps at least one
+    /// nanosecond, so integer division can never manufacture grey out of arithmetic.
+    pub fn coarsen(&self, t_factor: usize, f_factor: usize) -> Option<CoverageGrid> {
+        if t_factor == 0 || f_factor == 0 || self.nt % t_factor != 0 || self.nf % f_factor != 0 {
+            return None;
+        }
+        if t_factor == 1 && f_factor == 1 {
+            return Some(self.clone());
+        }
+        let (nt, nf) = (self.nt / t_factor, self.nf / f_factor);
+        let out = CoverageGrid {
+            device: self.device.clone(),
+            window: self.window,
+            nt,
+            nf,
+            t_cell_ns: self.window.duration_ns() / nt.max(1) as i64,
+            f_lo_hz: self.f_lo_hz,
+            f_cell_hz: self.f_cell_hz * f_factor as f64,
+            cells: Vec::new(),
+        };
+        let mut cells = Vec::with_capacity(nt * nf);
+        for tp in 0..nt {
+            let parent_ns = out.row_time(tp).map_or(0, |r| r.duration_ns());
+            for fp in 0..nf {
+                let mut sum_ns = 0i128;
+                // `spans` is a merged-run count, and a run crossing two children is one run in each.
+                // Summing would double it and the fold no longer holds the intervals to re-merge, so
+                // take the **most any child saw**: a lower bound, which is the safe direction — it is
+                // `> 0` exactly when some child observed, which is all `Coverage::of` reads it for.
+                let mut spans = 0u32;
+                let (mut last_ns, mut center_hz, mut rate_hz) = (i64::MIN, 0.0f64, 0.0f64);
+                let mut any = false;
+                for t in tp * t_factor..(tp + 1) * t_factor {
+                    for f in fp * f_factor..(fp + 1) * f_factor {
+                        let Some(s) = self.cell(t, f).and_then(Coverage::sampled) else {
+                            continue;
+                        };
+                        any = true;
+                        sum_ns += i128::from(s.observed_ns);
+                        spans = spans.max(s.spans);
+                        let t_last = s.last.as_unix_nanos();
+                        if t_last >= last_ns {
+                            last_ns = t_last;
+                            center_hz = s.center_hz;
+                        }
+                        rate_hz = rate_hz.max(s.sample_rate_hz);
+                    }
+                }
+                // Over the parent's own frequency extent — the sum, not the best.
+                let observed_ns = (sum_ns / f_factor as i128).min(i128::from(i64::MAX)) as i64;
+                let observed_ns = if any { observed_ns.max(1) } else { 0 };
+                cells.push(Coverage::of(
+                    spans,
+                    observed_ns,
+                    parent_ns,
+                    Timestamp::from_unix_nanos(if any { last_ns } else { 0 }),
+                    center_hz,
+                    rate_hz,
+                ));
+            }
+        }
+        Some(CoverageGrid { cells, ..out })
     }
 }
 
@@ -306,10 +534,13 @@ impl Acc {
     }
 }
 
-/// Folds `spans` into one device's coverage grid over `freq` × `window`.
+/// Folds `spans` into one device's coverage grid over `freq` × `window`, collapsed on time.
 ///
 /// Only spans whose [`CoverageSpan::device`] equals `device` contribute — including
 /// [`Device::Unknown`], which matches only itself. `cells` is clamped to `1..=`[`MAX_COVERAGE_CELLS`].
+///
+/// This is [`grid_over`] with one time row, and it answers a **column**: *was this band sampled
+/// anywhere in this window*. For a cell — *was it sampled **then*** — ask [`grid_over`].
 pub fn grid(
     spans: &[CoverageSpan],
     device: &Device,
@@ -317,7 +548,35 @@ pub fn grid(
     window: TimeRange,
     cells: usize,
 ) -> CoverageGrid {
-    fold(spans, device.clone(), freq, window, cells, |s| {
+    grid_over(spans, device, freq, window, 1, cells)
+}
+
+/// Folds `spans` into one device's coverage on an `nt × nf` time–frequency grid (T-421).
+///
+/// The same rasterisation as [`grid`] with the time axis kept: each row is its own slice of
+/// `window`, a span contributes to a row only where it actually overlaps that row, and every cell
+/// goes through [`Coverage::of`] with the **row's own** duration as the window. So a band the front
+/// end watched for one second of a minute is observed in the row holding that second and
+/// [`Coverage::Unobserved`] — genuinely grey — in the other rows, where the column answer said
+/// "sampled" for all of them.
+///
+/// `nf` is clamped to `1..=`[`MAX_COVERAGE_CELLS`] and `nt` to `1..=`[`MAX_COVERAGE_ROWS`]; if the
+/// product still exceeds [`MAX_COVERAGE_GRID_CELLS`] the **time** rows are reduced to fit, and the
+/// grid says which [`CoverageGrid::nt`] it built.
+///
+/// **Coarsening a grid is [`CoverageGrid::coarsen`], not a coarser call to this function.** Asking
+/// here for a wide cell answers *"did anything look anywhere inside it"*, which reports a cell fully
+/// covered on a sliver of its frequency extent — the rounded-up shape T-419 removed from the tile
+/// fold. Rasterise at the finest resolution you mean and fold down.
+pub fn grid_over(
+    spans: &[CoverageSpan],
+    device: &Device,
+    freq: FreqRange,
+    window: TimeRange,
+    nt: usize,
+    nf: usize,
+) -> CoverageGrid {
+    fold(spans, device.clone(), freq, window, nt, nf, |s| {
         s.device == *device
     })
 }
@@ -334,33 +593,53 @@ pub fn union_grid(
     window: TimeRange,
     cells: usize,
 ) -> CoverageGrid {
-    fold(spans, Device::Any, freq, window, cells, |_| true)
+    union_grid_over(spans, freq, window, 1, cells)
 }
 
+/// [`union_grid`] with the time axis kept — every span, whatever device produced it, on an
+/// `nt × nf` grid labelled [`Device::Any`].
+pub fn union_grid_over(
+    spans: &[CoverageSpan],
+    freq: FreqRange,
+    window: TimeRange,
+    nt: usize,
+    nf: usize,
+) -> CoverageGrid {
+    fold(spans, Device::Any, freq, window, nt, nf, |_| true)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn fold(
     spans: &[CoverageSpan],
     label: Device,
     freq: FreqRange,
     window: TimeRange,
-    cells: usize,
+    nt: usize,
+    nf: usize,
     keep: impl Fn(&CoverageSpan) -> bool,
 ) -> CoverageGrid {
-    let n = cells.clamp(1, MAX_COVERAGE_CELLS);
+    let nf = nf.clamp(1, MAX_COVERAGE_CELLS);
+    let nt = nt
+        .clamp(1, MAX_COVERAGE_ROWS)
+        .min((MAX_COVERAGE_GRID_CELLS / nf).max(1));
     let width = freq.hi_hz - freq.lo_hz;
     let f_cell_hz = if width.is_finite() && width > 0.0 {
-        width / n as f64
+        width / nf as f64
     } else {
         0.0
     };
     let window_ns = window.duration_ns();
-    let mut acc: Vec<Acc> = (0..n).map(|_| Acc::default()).collect();
+    let w0 = window.start.as_unix_nanos();
+    // Row edges, computed from the window so the rows partition it exactly rather than drifting by
+    // the remainder of a division — and so a coarser grid's edges are always a subset of a finer
+    // one's, which is what makes `coarsen` an exact partition.
+    let edge = |i: usize| -> i64 {
+        (i128::from(w0) + i128::from(window_ns) * i as i128 / nt as i128) as i64
+    };
+    let mut acc: Vec<Acc> = (0..nt * nf).map(|_| Acc::default()).collect();
     if f_cell_hz > 0.0 && window_ns > 0 {
         for s in spans.iter().filter(|s| s.is_valid() && keep(s)) {
-            let t0 = s
-                .time
-                .start
-                .as_unix_nanos()
-                .max(window.start.as_unix_nanos());
+            let t0 = s.time.start.as_unix_nanos().max(w0);
             let t1 = s.time.end.as_unix_nanos().min(window.end.as_unix_nanos());
             if t1 <= t0 {
                 continue;
@@ -371,20 +650,40 @@ fn fold(
             let lo = ((s.freq.lo_hz - freq.lo_hz) / f_cell_hz).floor();
             let hi = ((s.freq.hi_hz - freq.lo_hz) / f_cell_hz).ceil();
             let lo = lo.max(0.0) as usize;
-            let hi = (hi.max(0.0) as usize).min(n);
-            for a in acc.iter_mut().take(hi).skip(lo) {
-                a.push(t0, t1, s);
+            let hi = (hi.max(0.0) as usize).min(nf);
+            if lo >= hi {
+                continue;
+            }
+            // Rows the span's interval touches, and within each row only the part that falls in it:
+            // coverage of another instant is no more coverage of this one than coverage of another
+            // band is coverage of this band.
+            let wn = i128::from(window_ns);
+            let row_lo = ((i128::from(t0 - w0) * nt as i128).div_euclid(wn) as usize).min(nt - 1);
+            let row_hi = (((i128::from(t1 - w0) * nt as i128 + wn - 1).div_euclid(wn)) as usize)
+                .clamp(row_lo + 1, nt);
+            for r in row_lo..row_hi {
+                let (r0, r1) = (edge(r).max(t0), edge(r + 1).min(t1));
+                if r1 <= r0 {
+                    continue;
+                }
+                for a in acc[r * nf..(r + 1) * nf].iter_mut().take(hi).skip(lo) {
+                    a.push(r0, r1, s);
+                }
             }
         }
     }
     let cells = acc
         .iter_mut()
-        .map(|a| {
+        .enumerate()
+        .map(|(i, a)| {
             let (n_merged, observed_ns) = a.merged();
+            // The window each cell's duty is a fraction of is the **row's own** extent, so
+            // `Coverage::of`'s refusal — and its `0 < duty <= 1` — apply per cell unchanged.
+            let row_ns = edge(i / nf + 1) - edge(i / nf);
             Coverage::of(
                 n_merged,
                 observed_ns,
-                window_ns,
+                row_ns,
                 Timestamp::from_unix_nanos(a.last_ns),
                 a.center_hz,
                 a.sample_rate_hz,
@@ -394,6 +693,9 @@ fn fold(
     CoverageGrid {
         device: label,
         window,
+        nt,
+        nf,
+        t_cell_ns: if nt > 0 { window_ns / nt as i64 } else { 0 },
         f_lo_hz: freq.lo_hz,
         f_cell_hz,
         cells,
@@ -410,13 +712,28 @@ pub fn by_device(
     window: TimeRange,
     cells: usize,
 ) -> Vec<CoverageGrid> {
+    by_device_over(spans, freq, window, 1, cells)
+}
+
+/// [`by_device`] with the time axis kept: one `nt × nf` grid per distinct device, never merged.
+///
+/// This is where *"fills in as more SDRs are added"* needs no new concepts — another front end is
+/// another grid under the same key, and [`union_grid_over`] is still the only way to get one answer
+/// out of several radios.
+pub fn by_device_over(
+    spans: &[CoverageSpan],
+    freq: FreqRange,
+    window: TimeRange,
+    nt: usize,
+    nf: usize,
+) -> Vec<CoverageGrid> {
     let mut devices: BTreeMap<Device, ()> = BTreeMap::new();
     for s in spans.iter().filter(|s| s.is_valid()) {
         devices.insert(s.device.clone(), ());
     }
     devices
         .keys()
-        .map(|d| grid(spans, d, freq, window, cells))
+        .map(|d| grid_over(spans, d, freq, window, nt, nf))
         .collect()
 }
 
@@ -628,6 +945,516 @@ mod tests {
         assert_eq!(s.observed_ns, 40_000_000_000, "30 s + 10 s, not 50 s");
         assert!((s.duty - 40.0 / 60.0).abs() < 1e-12);
         assert_eq!(s.last, t(1060));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // T-421: the record answer gains a time axis, and the fold that coarsens it is a SUM.
+    // ---------------------------------------------------------------------------------------
+
+    /// The ladder these use: 16 MHz of band in 1 MHz cells, 64 s of window in 4 s rows, so four ×2
+    /// frequency folds (1 → 2 → 4 → 8 → 16 MHz) and four ×2 time folds run over the same grid.
+    const NF0: usize = 16;
+    const NT0: usize = 16;
+
+    fn ladder_band() -> FreqRange {
+        FreqRange::new(0.0, 16e6)
+    }
+
+    fn ladder_window() -> TimeRange {
+        TimeRange::new(t(1000), t(1064))
+    }
+
+    fn dev_a() -> Device {
+        Device::Id("dev-a".into())
+    }
+
+    fn level0(spans: &[CoverageSpan]) -> CoverageGrid {
+        grid_over(spans, &dev_a(), ladder_band(), ladder_window(), NT0, NF0)
+    }
+
+    /// **The control, copied from T-419's `truth_from_level_0`.** The observed seconds of coarse
+    /// cell `(tp, fp)`, computed from the **level-0** grid alone: every level-0 cell inside the box
+    /// contributes its own observed seconds, the divisor is the number of level-0 frequency cells
+    /// the box spans, and the result is a fraction of the coarse cell's own duration. Nothing here
+    /// reads the cell it is checking, and nothing reads an intermediate level — which is the whole
+    /// point: a parent-vs-child assertion is satisfied by an answer `f_factor` times too large at
+    /// every level, so only a value pinned against the finest cells can catch a fold that rounds up.
+    fn truth_from_level_0(h0: &CoverageGrid, coarse: &CoverageGrid, tp: usize, fp: usize) -> f64 {
+        let box_t = coarse.row_time(tp).expect("row");
+        let box_f = coarse.freq_of(fp).expect("cell");
+        let f_children = (coarse.f_cell_hz / h0.f_cell_hz).round();
+        let mut observed_ns = 0f64;
+        for t in 0..h0.nt {
+            let r = h0.row_time(t).expect("row");
+            if r.start < box_t.start || r.end > box_t.end {
+                continue;
+            }
+            for f in 0..h0.nf {
+                let c = h0.freq_of(f).expect("cell");
+                if c.lo_hz < box_f.lo_hz || c.hi_hz > box_f.hi_hz {
+                    continue;
+                }
+                if let Some(s) = h0.cell(t, f).and_then(Coverage::sampled) {
+                    observed_ns += s.observed_ns as f64;
+                }
+            }
+        }
+        observed_ns / (f_children * box_t.duration_ns() as f64)
+    }
+
+    /// **The case that motivated T-421.** The radio watched 100–110 MHz for the first 10 s of a 60 s
+    /// window and was tuned elsewhere for the other 50. The column answer — one row over the whole
+    /// window, which is all T-368 could say — calls the band `Observed`, so a view drawing a cell at
+    /// t = 40 s reads "sampled, level not retained" and paints it as data it merely failed to keep.
+    /// With the time axis kept, the row holding the dwell is observed and **every other row is
+    /// genuinely grey.**
+    #[test]
+    fn a_band_the_radio_was_tuned_away_from_at_that_instant_is_grey_in_those_rows() {
+        let spans = vec![span("dev-a", 100e6, 110e6, 1000, 1010)];
+
+        // What the column answer says, and it is the whole column: observed, for all 60 s of it.
+        let column = grid(&spans, &dev_a(), band(), window(), 10);
+        assert!(column.at(105e6).unwrap().is_observed());
+        assert_eq!(column.nt, 1, "T-368's grid is the one-row case");
+
+        // With six 10 s rows, only the row the radio was actually here in.
+        let g = grid_over(&spans, &dev_a(), band(), window(), 6, 10);
+        assert_eq!((g.nt, g.nf), (6, 10));
+        let first = g.cell(0, 0).expect("row 0");
+        let s = first.sampled().expect("the dwell");
+        assert_eq!(s.observed_ns, 10_000_000_000, "the whole row");
+        assert_eq!(s.duty, 1.0, "duty is against the ROW, not the window");
+
+        for row in 1..6 {
+            assert_eq!(
+                *g.cell(row, 0).expect("row"),
+                Coverage::Unobserved,
+                "row {row}: the radio was tuned away, so the cell is grey — not 'sampled, level \
+                 not retained'"
+            );
+            assert!(
+                g.cell(row, 0).unwrap().sampled().is_none(),
+                "row {row}: and it carries no measurement to read as a zero"
+            );
+        }
+        // The band it never visited at all stays grey in every row, as before.
+        assert!((0..6).all(|r| !g.cell(r, 5).unwrap().is_observed()));
+        // And `at_tf` places an instant on the same rows.
+        assert!(g.at_tf(t(1005), 105e6).unwrap().is_observed());
+        assert_eq!(*g.at_tf(t(1045), 105e6).unwrap(), Coverage::Unobserved);
+    }
+
+    /// The one-row grid is T-368's answer bit for bit — same cells, same duties, same device
+    /// labelling — so the time axis is an addition and not a change of meaning.
+    #[test]
+    fn one_row_is_the_column_answer_unchanged() {
+        let spans = vec![
+            span("dev-a", 100e6, 110e6, 1000, 1030),
+            span("dev-b", 190e6, 200e6, 1010, 1060),
+        ];
+        for d in [dev_a(), Device::Id("dev-b".into())] {
+            let old = grid(&spans, &d, band(), window(), 10);
+            let new = grid_over(&spans, &d, band(), window(), 1, 10);
+            assert_eq!(old, new);
+            assert_eq!(old.nt, 1);
+            assert_eq!(old.cells.len(), 10);
+        }
+        assert_eq!(
+            union_grid(&spans, band(), window(), 10),
+            union_grid_over(&spans, band(), window(), 1, 10)
+        );
+        assert_eq!(
+            by_device(&spans, band(), window(), 10),
+            by_device_over(&spans, band(), window(), 1, 10)
+        );
+    }
+
+    /// **The defect T-419 found, measured on the new axis before it could be written.** One megahertz
+    /// of a sixteen-megahertz band is watched, continuously, for the whole window. Level 0 sees one
+    /// covered frequency cell beside fifteen unobserved ones; every ×2 frequency fold pools that cell
+    /// with a never-observed sibling, so coverage must **halve at every fold**: 1 → ½ → ¼ → ⅛ → 1/16.
+    ///
+    /// Every assertion is against level 0, computed independently.
+    #[test]
+    fn coarsening_in_frequency_halves_coverage_and_never_rounds_it_up() {
+        let spans = vec![span("dev-a", 0.0, 1e6, 1000, 1064)];
+        let h0 = level0(&spans);
+        assert_eq!(h0.cell(0, 0).unwrap().sampled().unwrap().duty, 1.0);
+        assert_eq!(*h0.cell(0, 1).unwrap(), Coverage::Unobserved);
+
+        let mut g = h0.clone();
+        for (fold_n, want) in [(1usize, 0.5f64), (2, 0.25), (3, 0.125), (4, 0.0625)] {
+            g = g.coarsen(1, 2).expect("×2 divides exactly");
+            assert_eq!(g.nf, NF0 >> fold_n);
+            let c = g.cell(0, 0).expect("the covered cell");
+            let s = c
+                .sampled()
+                .expect("still observed — the fold never greys what was seen");
+            let truth = truth_from_level_0(&h0, &g, 0, 0);
+            assert!(
+                (truth - want).abs() < 1e-9,
+                "fold {fold_n}: level-0 truth {truth} should be {want}"
+            );
+            assert!(
+                (s.duty - want).abs() < 1e-9,
+                "fold {fold_n}: duty {} should be {want} — the max-of-children rule said 1.0",
+                s.duty
+            );
+            // And the far end of the band, which nothing ever tuned, stays grey at every fold that
+            // still has one: a coverage fold that rounds up is one step from a fold that invents
+            // observation.
+            if g.nf > 1 {
+                assert_eq!(*g.cell(0, g.nf - 1).unwrap(), Coverage::Unobserved);
+            }
+        }
+    }
+
+    /// **The guard, as a test rather than a comment** — T-419's blind-spot control, on the record
+    /// answer. Ask the question a parent-vs-child assertion asks (*is the parent no more than its
+    /// best child?*) and it is satisfied at every level **by the answer twice too large**, because
+    /// the correct parent and the rounded-up parent differ by exactly `f_factor` and both are
+    /// consistent with some child. So that form can only ever prove the fold is *a* fold. Only
+    /// `truth_from_level_0` pins the value.
+    #[test]
+    fn a_parent_vs_child_assertion_would_not_have_caught_this() {
+        let spans = vec![span("dev-a", 0.0, 1e6, 1000, 1064)];
+        let h0 = level0(&spans);
+        let mut child = h0.clone();
+        for level in 1..=4 {
+            let parent = child.coarsen(1, 2).expect("×2");
+            let p = f64::from(parent.cell(0, 0).unwrap().sampled().unwrap().duty as f32);
+
+            // The OLD rule recomputed: the best-observed child frequency cell in the parent's box,
+            // as a fraction of the parent's own duration.
+            let box_f = parent.freq_of(0).unwrap();
+            let best = (0..child.nf)
+                .filter(|&f| {
+                    let c = child.freq_of(f).unwrap();
+                    c.lo_hz >= box_f.lo_hz && c.hi_hz <= box_f.hi_hz
+                })
+                .map(|f| {
+                    child
+                        .cell(0, f)
+                        .and_then(Coverage::sampled)
+                        .map_or(0.0, |s| s.duty)
+                })
+                .fold(0.0f64, f64::max);
+
+            // The blind assertion: true of the fixed value AND of the value twice as large.
+            assert!(
+                best >= p - 1e-9,
+                "level {level}: parent {p} > best child {best}"
+            );
+            assert!(
+                (best - 2.0 * p).abs() < 1e-9,
+                "level {level}: the max-of-children answer {best} is exactly f_factor × the truth \
+                 {p} — which is why that assertion proves nothing"
+            );
+            // The only assertion that would have failed under the old rule.
+            let truth = truth_from_level_0(&h0, &parent, 0, 0);
+            assert!(
+                (p - truth).abs() < 1e-9,
+                "level {level}: {p} vs level-0 truth {truth}"
+            );
+            child = parent;
+        }
+    }
+
+    /// The other axis, so the sum rule is not accidentally a frequency-only fix: the whole band is
+    /// watched, but only on every other row. Every time fold must read 0.5, not the best row's 1.0.
+    #[test]
+    fn coarsening_in_time_reports_the_summed_seconds_not_the_best_row() {
+        let spans: Vec<CoverageSpan> = (0..NT0 as i64)
+            .filter(|r| r % 2 == 0)
+            .map(|r| span("dev-a", 0.0, 16e6, 1000 + r * 4, 1000 + r * 4 + 4))
+            .collect();
+        let h0 = level0(&spans);
+        assert!(h0.cell(0, 0).unwrap().is_observed());
+        assert_eq!(*h0.cell(1, 0).unwrap(), Coverage::Unobserved);
+
+        let mut g = h0.clone();
+        for fold_n in 1..=4 {
+            g = g.coarsen(2, 1).expect("×2");
+            assert_eq!(g.nt, NT0 >> fold_n);
+            for f in 0..g.nf {
+                let s = g.cell(0, f).unwrap().sampled().expect("observed");
+                let truth = truth_from_level_0(&h0, &g, 0, f);
+                assert!(
+                    (truth - 0.5).abs() < 1e-9,
+                    "fold {fold_n} cell {f}: truth {truth}"
+                );
+                assert!(
+                    (s.duty - 0.5).abs() < 1e-9,
+                    "fold {fold_n} cell {f}: duty {} should be 0.5",
+                    s.duty
+                );
+            }
+        }
+    }
+
+    /// The fix must not cost the honest case anything: watched everywhere, always, reads 1.0 at
+    /// every fold on both axes. A coverage fold that under-reports is a different lie, same shape.
+    #[test]
+    fn a_fully_watched_band_still_reads_fully_covered_at_every_fold() {
+        let spans = vec![span("dev-a", 0.0, 16e6, 1000, 1064)];
+        let h0 = level0(&spans);
+        let mut g = h0.clone();
+        for fold_n in 1..=4 {
+            g = g.coarsen(2, 2).expect("×2 on both axes");
+            for t in 0..g.nt {
+                for f in 0..g.nf {
+                    let s = g.cell(t, f).unwrap().sampled().expect("observed");
+                    assert!(
+                        (s.duty - 1.0).abs() < 1e-9,
+                        "fold {fold_n} cell ({t}, {f}): duty {}",
+                        s.duty
+                    );
+                    assert!((truth_from_level_0(&h0, &g, t, f) - 1.0).abs() < 1e-9);
+                }
+            }
+        }
+    }
+
+    /// **Rasterising onto a coarse grid is not the fold, and the difference is the whole bug.**
+    /// Asked directly for one wide cell, the rasteriser answers *"did anything look anywhere in
+    /// here"* and says fully covered on one sixteenth of the band — the shape T-419 removed. The
+    /// fold answers *"how much of this cell's extent was looked at"* and says 1/16. Measured here so
+    /// the distinction is pinned rather than assumed, and so `coarsen` can never be quietly replaced
+    /// by a coarser call to `grid_over`.
+    #[test]
+    fn rasterising_directly_onto_a_coarse_grid_is_not_the_fold() {
+        let spans = vec![span("dev-a", 0.0, 1e6, 1000, 1064)];
+        let direct = grid_over(&spans, &dev_a(), ladder_band(), ladder_window(), NT0, 1);
+        assert_eq!(
+            direct.cell(0, 0).unwrap().sampled().unwrap().duty,
+            1.0,
+            "the direct answer rounds the sliver up to the whole cell"
+        );
+        let folded = level0(&spans).coarsen(1, NF0).expect("16 divides 16");
+        assert_eq!(folded.nf, 1);
+        assert!(
+            (folded.cell(0, 0).unwrap().sampled().unwrap().duty - 1.0 / NF0 as f64).abs() < 1e-9,
+            "the fold reports the sixteenth that was actually watched"
+        );
+    }
+
+    /// `duty` is derived against `observed_ns`, so the fold re-derives it against the **parent's**
+    /// own numbers and never averages the children's. T-419's near-miss was this shape one field
+    /// over: `occ_s` against `obs_s`, where carrying the stale ratio would have doubled occupancy.
+    /// Here, averaging the children's duties would report ⅝ where the truth is 5/16.
+    #[test]
+    fn a_folds_duty_is_re_derived_and_never_averaged_from_the_children() {
+        // Five of sixteen 1 MHz cells watched, each for the whole window.
+        let spans = vec![span("dev-a", 0.0, 5e6, 1000, 1064)];
+        let h0 = level0(&spans);
+        let g = h0.coarsen(1, NF0).expect("one cell");
+        let s = g.cell(0, 0).unwrap().sampled().unwrap();
+
+        let mean_of_child_duties = (0..h0.nf)
+            .filter_map(|f| h0.cell(0, f).and_then(Coverage::sampled))
+            .map(|c| c.duty)
+            .sum::<f64>()
+            / 5.0;
+        assert_eq!(
+            mean_of_child_duties, 1.0,
+            "the observed children all read 1.0"
+        );
+        assert!(
+            (s.duty - 5.0 / 16.0).abs() < 1e-9,
+            "duty {} should be 5/16 — the observed seconds over the PARENT's extent",
+            s.duty
+        );
+        assert!((truth_from_level_0(&h0, &g, 0, 0) - 5.0 / 16.0).abs() < 1e-9);
+        // And the same statement in the field it is derived from: the row is still a level-0 row
+        // (only the frequency axis was folded), so it is five sixteenths of a 4 s row.
+        let row_ns = ladder_window().duration_ns() / NT0 as i64;
+        assert_eq!(s.observed_ns, 5 * row_ns / 16);
+    }
+
+    /// The fold moves in one direction only: it never greys a cell some child observed (integer
+    /// division cannot manufacture "nothing looked"), and it never observes a cell no child did.
+    #[test]
+    fn coarsening_neither_invents_observation_nor_manufactures_grey() {
+        // A single nanosecond of a single cell, folded sixteen ways: 1/16 ns rounds to zero, and a
+        // zero would read as `Unobserved` — grey produced by arithmetic, not by the radio.
+        let one_ns = vec![CoverageSpan {
+            device: dev_a(),
+            time: TimeRange::new(
+                t(1000),
+                Timestamp::from_unix_nanos(t(1000).as_unix_nanos() + 1),
+            ),
+            freq: FreqRange::new(0.0, 1e6),
+            center_hz: 0.5e6,
+            sample_rate_hz: 1e6,
+        }];
+        let g = level0(&one_ns).coarsen(1, NF0).expect("fold");
+        let s = g
+            .cell(0, 0)
+            .unwrap()
+            .sampled()
+            .expect("a nanosecond is still a look");
+        assert_eq!(
+            s.observed_ns, 1,
+            "floored to the smallest claim that is still a claim"
+        );
+        assert!(s.duty > 0.0);
+
+        // Nothing anywhere stays nothing everywhere, at every fold.
+        let empty = level0(&[]);
+        let folded = empty.coarsen(2, 2).expect("fold");
+        assert_eq!(folded.observed_cells(), 0);
+        assert!(folded.cells.iter().all(|c| *c == Coverage::Unobserved));
+    }
+
+    /// A fold whose children do not partition its parent is not a fold, and is refused rather than
+    /// answered over a different extent than its divisor claims.
+    #[test]
+    fn a_fold_that_does_not_partition_its_parent_is_refused() {
+        let g = level0(&[span("dev-a", 0.0, 16e6, 1000, 1064)]);
+        assert!(g.coarsen(1, 3).is_none(), "3 does not divide 16");
+        assert!(g.coarsen(5, 1).is_none(), "5 does not divide 16");
+        assert!(g.coarsen(0, 2).is_none(), "a zero factor is not a fold");
+        assert_eq!(
+            g.coarsen(1, 1).as_ref(),
+            Some(&g),
+            "the identity fold is the grid"
+        );
+        assert!(g.coarsen(NT0, NF0).is_some(), "the whole grid in one cell");
+    }
+
+    /// **`docs/16` §5.4's fourth state, named rather than painted grey.** The pyramid has no age
+    /// limit and the observation log expires at 30 days, so a cell older than the oldest surviving
+    /// record is not "nothing looked" — it is *we no longer know whether we looked*. This module is
+    /// handed spans, not the horizon that produced them, so it cannot decide; the caller that read
+    /// the log passes the horizon and gets the rows back, and must draw them as a fourth thing.
+    #[test]
+    fn rows_before_the_record_horizon_are_not_the_same_grey_as_rows_inside_it() {
+        // The radio watched the band throughout, but the records covering the first half have been
+        // discarded — so those rows hold no span and read `Unobserved` exactly like a never-visited
+        // band, which is the confusion this method exists to prevent.
+        let spans = vec![span("dev-a", 0.0, 16e6, 1032, 1064)];
+        let g = level0(&spans);
+        let horizon = t(1032);
+
+        assert_eq!(g.unknown_rows_before(horizon), NT0 / 2);
+        for r in 0..NT0 / 2 {
+            assert_eq!(
+                *g.cell(r, 0).unwrap(),
+                Coverage::Unobserved,
+                "row {r} looks identical to never-observed…"
+            );
+        }
+        assert!(
+            (0..NT0 / 2).all(|r| r < g.unknown_rows_before(horizon)),
+            "…and only the horizon tells the caller it is 'we no longer know', not 'never'"
+        );
+        for r in NT0 / 2..NT0 {
+            assert!(
+                g.cell(r, 0).unwrap().is_observed(),
+                "row {r} is inside the record"
+            );
+        }
+        // A horizon at or before the window's start leaves every row knowable; one past its end
+        // leaves none of them.
+        assert_eq!(g.unknown_rows_before(t(1000)), 0);
+        assert_eq!(g.unknown_rows_before(t(900)), 0);
+        assert_eq!(g.unknown_rows_before(t(2000)), NT0);
+    }
+
+    /// The grid is bounded on both axes and on their product, and it reports the resolution it
+    /// actually built — a caller never has to assume it got what it asked for.
+    #[test]
+    fn the_grid_is_bounded_on_both_axes_and_says_what_it_built() {
+        let spans = vec![span("dev-a", 0.0, 16e6, 1000, 1064)];
+        let g = grid_over(&spans, &dev_a(), ladder_band(), ladder_window(), 0, 0);
+        assert_eq!((g.nt, g.nf), (1, 1), "zero is not a grid");
+
+        let g = grid_over(
+            &spans,
+            &dev_a(),
+            ladder_band(),
+            ladder_window(),
+            MAX_COVERAGE_ROWS * 4,
+            MAX_COVERAGE_CELLS * 4,
+        );
+        assert_eq!(
+            g.nf, MAX_COVERAGE_CELLS,
+            "frequency cells keep their own bound"
+        );
+        assert_eq!(
+            g.nt,
+            MAX_COVERAGE_GRID_CELLS / MAX_COVERAGE_CELLS,
+            "and the time rows give way so the product stays bounded"
+        );
+        assert_eq!(g.cells.len(), g.nt * g.nf);
+        assert!(g.cells.len() <= MAX_COVERAGE_GRID_CELLS);
+    }
+
+    /// The rows partition the window exactly — no instant belongs to two rows and none to none —
+    /// which is what makes a coarser grid's edges a subset of a finer one's, and therefore what
+    /// makes `coarsen` an exact partition rather than an approximation.
+    #[test]
+    fn rows_partition_the_window_exactly_and_nest_under_coarsening() {
+        // 7 rows over 64 s: the division has a remainder, which is where drift would show.
+        let g = grid_over(&[], &dev_a(), ladder_band(), ladder_window(), 7, 4);
+        assert_eq!(g.row_time(0).unwrap().start, g.window.start);
+        assert_eq!(g.row_time(6).unwrap().end, g.window.end);
+        for r in 1..7 {
+            assert_eq!(
+                g.row_time(r - 1).unwrap().end,
+                g.row_time(r).unwrap().start,
+                "row {r} starts where row {} ended",
+                r - 1
+            );
+        }
+        assert!(g.row_time(7).is_none());
+
+        // And the 16-row ladder's ×2 folds land on edges the finer grid already had.
+        let fine = grid_over(&[], &dev_a(), ladder_band(), ladder_window(), NT0, NF0);
+        let coarse = fine.coarsen(2, 2).expect("×2");
+        for r in 0..coarse.nt {
+            assert_eq!(
+                coarse.row_time(r).unwrap().start,
+                fine.row_time(r * 2).unwrap().start
+            );
+            assert_eq!(
+                coarse.row_time(r).unwrap().end,
+                fine.row_time(r * 2 + 1).unwrap().end
+            );
+        }
+    }
+
+    /// Two front ends, kept apart on the time axis too: each is grey exactly where — and **when** —
+    /// the other was looking. This is what makes *"fills in as more SDRs are added"* need no new
+    /// concepts: another radio is another grid under the same key.
+    #[test]
+    fn the_time_axis_stays_device_local() {
+        let spans = vec![
+            span("hackrf:aaa", 100e6, 110e6, 1000, 1030),
+            span("hackrf:bbb", 100e6, 110e6, 1030, 1060),
+        ];
+        let per = by_device_over(&spans, band(), window(), 6, 10);
+        assert_eq!(per.len(), 2);
+        let (a, b) = (&per[0], &per[1]);
+        assert_eq!(a.device, Device::Id("hackrf:aaa".into()));
+        assert!(a.cell(0, 0).unwrap().is_observed());
+        assert_eq!(
+            *a.cell(5, 0).unwrap(),
+            Coverage::Unobserved,
+            "a had stopped by then"
+        );
+        assert_eq!(
+            *b.cell(0, 0).unwrap(),
+            Coverage::Unobserved,
+            "b had not started"
+        );
+        assert!(b.cell(5, 0).unwrap().is_observed());
+
+        // The union is the only thing that sees both, and it wears neither radio's name.
+        let u = union_grid_over(&spans, band(), window(), 6, 10);
+        assert_eq!(u.device, Device::Any);
+        assert!(!u.device.is_named());
+        assert!((0..6).all(|r| u.cell(r, 0).unwrap().is_observed()));
     }
 
     /// A span is clipped to the window: coverage outside the window is not coverage inside it.
