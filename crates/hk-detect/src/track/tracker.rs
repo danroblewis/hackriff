@@ -1233,14 +1233,35 @@ impl Tracker {
         }
     }
 
-    /// T-101: closing track `i` is an in-band fragment — its centre lies inside a continuous
+    /// T-101: closing track `i` is an in-band fragment — its **band** overlaps a continuous
     /// track's (duty ≥ [`HOST_DUTY`]) detected extent (T-102: the wider of its OBW and its
-    /// detections' threshold-crossing boxes, plus the frequency tolerance; skirt flicker is
-    /// centred where the host itself crosses threshold and may straddle that edge by half its own
-    /// width, while a weak emitter one channel off is centred beyond it),
+    /// detections' threshold-crossing boxes, plus the frequency tolerance),
     /// that extent is at least [`TrackerConfig::inband_fragment_bw_ratio`] times wider and
     /// [`FRAGMENT_SNR_MARGIN_DB`] stronger (mean detection SNR), and `i`'s whole observed life lies
     /// inside the track's. The host is live or among the recently closed continuous tracks.
+    ///
+    /// **T-390: band overlap, not centre containment.** The host span is built from the host's
+    /// *mean* threshold-crossing offsets (`px_lo_off` / `px_hi_off` are EWMA'd, see
+    /// [`Self::host_span`]), and skirt flicker is precisely the frames in which the emission
+    /// crossed threshold **further out than that mean** — so a flicker box lands astride the edge
+    /// and its centre falls outside it about as often as inside. Measured on the user's 45 s FM
+    /// capture of 2026-09-15: against the 99.6994 MHz station (89 kHz box, SNR 13–17 dB, −29 dBFS,
+    /// continuous for all 45 s) the detector emitted 6–8 ms, 1–4 bin boxes at SNR 5.2–6.9 dB and
+    /// −40 to −46 dBFS whose bands straddle the station's mean lower crossing at ≈99.6486 MHz —
+    /// 99.63677–99.65552, 99.63111–99.65454, 99.63466–99.65810 — every one of them centred just
+    /// *outside* it. They are that station's own skirt, 12–17 dB down, one to two frames long,
+    /// reported in the same frames as the station's own full-width component.
+    ///
+    /// Requiring the fragment's band to *touch* the host's occupied band is the rule this doc
+    /// already stated ("may straddle that edge by half its own width"), and it introduces no new
+    /// number: the reach is the fragment's own measured width. It is also the signal model's own
+    /// line — two real emissions do not share a time–frequency cell (CLAUDE.md, "Overlap is an
+    /// error signal") — so energy touching a far stronger, far wider, concurrent emission's band
+    /// is that emission's spectrum, not a second emitter. A weak emitter one channel off is
+    /// *banded* beyond the host, not merely centred beyond it, and still keeps its own entry; so
+    /// do the [`TrackerConfig::inband_fragment_bw_ratio`] width gate (which is what holds two
+    /// adjacent broadcast stations apart), the [`FRAGMENT_SNR_MARGIN_DB`] level gate, and the
+    /// requirement that the host bracket the fragment's whole life.
     ///
     /// `live` (T-109, evaluating an open track for a live offer): a live host's duty is measured
     /// over its recorded life (`t_first..t_last_end`), since its current record is only reported
@@ -1254,10 +1275,13 @@ impl Tracker {
         let Some(s_snr) = slot_snr_peak(s) else {
             return false;
         };
+        // The fragment's own measured band. Half-open on neither side: a box that merely abuts the
+        // host's crossing is still a piece of that crossing.
+        let (s_lo, s_hi) = (s.fc - 0.5 * s.bw, s.fc + 0.5 * s.bw);
         let fits = |h: &HostSpan| {
             h.bw >= ratio * s.bw
-                && h.lo <= s.fc
-                && s.fc <= h.hi
+                && h.lo <= s_hi
+                && s_lo <= h.hi
                 && h.snr_peak_db >= s_snr + FRAGMENT_SNR_MARGIN_DB
                 && h.t_first <= s.t_first
                 && h.t_last_end >= s.t_last_end
