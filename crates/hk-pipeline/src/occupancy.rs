@@ -2004,6 +2004,16 @@ mod tests {
     /// sealed and reopened (so the state round-trips the tile format), then read back through the
     /// production occupancy path: `evaluate_band` → `VisitSample`s → `rows_for` → `OccupancyStat`.
     fn t359_rows(tag: &str, bias: impl Fn(i64) -> hk_model::BiasTee) -> Vec<OccupancyStat> {
+        t359_eval(tag, bias).0
+    }
+
+    /// As [`t359_rows`], and also the per-visit samples the rows were folded from — what T-372
+    /// refines.
+    #[allow(clippy::type_complexity)]
+    fn t359_eval(
+        tag: &str,
+        bias: impl Fn(i64) -> hk_model::BiasTee,
+    ) -> (Vec<OccupancyStat>, BTreeMap<SubjectId, Vec<VisitSample>>) {
         let dir =
             std::env::temp_dir().join(format!("hk-t359-{tag}-{}", hk_model::ids::SiteId::new()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2074,9 +2084,12 @@ mod tests {
         let rows = rows_for(&cfg, &channels, &series, span, span, unit, F_CELL);
         drop(p);
         let _ = std::fs::remove_dir_all(&dir);
-        rows.into_iter()
-            .filter(|r| matches!(r.subject, OccupancySubject::Channel { .. }))
-            .collect()
+        (
+            rows.into_iter()
+                .filter(|r| matches!(r.subject, OccupancySubject::Channel { .. }))
+                .collect(),
+            series,
+        )
     }
 
     /// The bias-tee states of `rows`, deduplicated.
@@ -2184,6 +2197,84 @@ mod tests {
         );
         for state in ["on", "off", "unknown"] {
             assert!(cohorts.iter().any(|c| c == state), "{cohorts:?}");
+        }
+    }
+
+    /// T-372, **end to end and measured**: a visit is attributed by comparing its extent against
+    /// the provenance **switch times**, so a mid-span switch costs only the time cell it landed in
+    /// instead of the whole read.
+    ///
+    /// This runs the production path — real frames into a real pyramid, sealed, reopened, read
+    /// back through `evaluate_band` — so the switch timestamps, the front-end steps and the origin
+    /// that keys them all survive the tile format rather than being hand-built. Under T-359 every
+    /// one of these 240 visits was `Unknown`, because the read was mixed *somewhere*.
+    ///
+    /// **Control**, and the point of the ticket: the fold to the occupancy row is unchanged. It
+    /// still needs **every** visit of the window to agree, so the switched run's rows stay
+    /// `Unknown` (asserted in `occupancy_rows_carry_the_bias_tee_and_key_their_own_baseline`) —
+    /// what is recovered is the per-visit evidence underneath, never a majority verdict on top.
+    #[test]
+    fn occupancy_visit_samples_are_attributed_either_side_of_a_bias_tee_switch() {
+        use hk_model::BiasTee;
+
+        let count = |series: &BTreeMap<SubjectId, Vec<VisitSample>>| {
+            let s: Vec<VisitSample> = series.values().flatten().copied().collect();
+            let n = |b: BiasTee| s.iter().filter(|v| v.bias_tee == b).count();
+            (
+                s.len(),
+                n(BiasTee::Off),
+                n(BiasTee::On),
+                n(BiasTee::Unknown),
+            )
+        };
+
+        // Control: a run that never switches is attributed throughout, as it was before T-372.
+        let (_, steady) = t359_eval("t372-steady", |_| BiasTee::Off);
+        let (n, off, on, unknown) = count(&steady);
+        assert!(n > 0);
+        assert_eq!(
+            (off, on, unknown),
+            (n, 0, 0),
+            "one state, every visit named"
+        );
+
+        // One switch, on a 1 s cell boundary (the frames are 1 s, so the switch is between cells
+        // and contaminates none of them).
+        let (rows, series) = t359_eval("t372-switch", |k| {
+            if k < T359_SECS / 2 {
+                BiasTee::Off
+            } else {
+                BiasTee::On
+            }
+        });
+        let (n, off, on, unknown) = count(&series);
+        println!(
+            "T-372: {n} visits over a {T359_SECS} s read with one bias-tee switch \
+             -> {off} off, {on} on, {unknown} unknown (T-359 gave {n} unknown)"
+        );
+        assert!(
+            n >= T359_SECS as usize,
+            "a visit per second per subject: {n}"
+        );
+        assert_eq!(unknown, 0, "the switch fell between time cells");
+        assert!(
+            off > 0 && on > 0,
+            "both sides recovered: {off} off, {on} on"
+        );
+        assert_eq!(off + on, n);
+        // And the halves are the halves: the switch is at the midpoint.
+        assert_eq!(off, on, "{off} off vs {on} on");
+
+        // The control, restated where it bites: the ROW is still `Unknown`, because a row needs
+        // every one of its visits to agree and this window holds both states. The refinement gives
+        // the analysis better evidence; it does not give the row a majority verdict.
+        assert!(!rows.is_empty());
+        for r in &rows {
+            assert_eq!(
+                r.bias_tee,
+                BiasTee::Unknown,
+                "a row spanning the switch claims neither state"
+            );
         }
     }
 
