@@ -8172,7 +8172,7 @@ tasks:
   - id: T-399
     title: The receiver-line survey has no production caller - classify_box is handed one burst, not a capture window
     milestone: M3
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -8228,7 +8228,7 @@ tasks:
   - id: T-401
     title: No acceptance test asserts latency, so the suite is blind to a whole class of defect
     milestone: M3
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -8276,6 +8276,39 @@ tasks:
       constant.
       Fix the generator so synthetic WFM is program-modulated to a realistic deviation,
       and check what else silently depended on the narrow scene.
+  - id: T-403
+    title: A station with no pilot and no identity still confirms at the end of the recording
+    milestone: M3
+    status: todo
+    priority: high
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    deps: [T-398, T-401]
+    acceptance: |
+      T-401's harness made this visible the moment it existed, which is the harness
+      earning its keep. A station with NEITHER a pilot to lock NOR an identity to
+      decode confirms at 14.00 s in a 14 s scene - THE END OF THE RECORDING, whatever
+      its length - via "continuous and trusted: 14.0 s on air".
+      T-398 found that route B is weighed only on track close, and short-circuited the
+      PILOT-LOCKED case (route C). The continuous-and-trusted route itself is still
+      close-only, so a signal with no fast evidence available still waits for the idle
+      timeout. T-398 fixed the case it could prove; this is the rest.
+      T-401 deliberately REPORTS this rather than asserting it: bounding it would make
+      the suite red for a defect that ticket does not fix, and loosening the bound to
+      fit would enshrine it. So it prints under "REPORTED, NOT ASSERTED" with the
+      reason. WHEN THIS LANDS, TURN THAT INTO A BOUND - the reported line is the
+      pending assertion, not a permanent exemption.
+      THE DANGER IS THE SAME AS T-398's, and sharper here. Route C could demand a lock
+      because a lock is positive evidence. A station with no pilot and no identity
+      offers only continuity and duty cycle, which are exactly the things a strong
+      artefact also has - our own reference harmonic is continuous with duty cycle
+      1.00. So evaluating route B live must not become "confirm anything that stays
+      on": the receiver-wide survey (T-394/T-399) now runs per capture state and can
+      say whether a continuous line is the receiver's, and that is the discriminator
+      to reach for before loosening a threshold.
+      Report the false-confirm rate against ADR-0016 section 7 and run
+      just acceptance-milestones. No floor moves.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
