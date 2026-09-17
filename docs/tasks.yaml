@@ -9105,7 +9105,7 @@ tasks:
   - id: T-420
     title: The waterfall truncates to a sliver instead of scaling to the selected span
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     core_interface: true
