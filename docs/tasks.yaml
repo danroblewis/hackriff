@@ -8819,7 +8819,7 @@ tasks:
   - id: T-414
     title: hk-gnss's own default acquisition threshold still finds 32 satellites in noise
     milestone: M5
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M5A
     core_interface: true
@@ -9018,30 +9018,49 @@ tasks:
       drops a slow consumer deliberately (T-388), which is NOT this - that is a policy
       about a consumer that cannot keep up, not about the producer retuning.
   - id: T-418
-    title: Something the user calls bad practice until T-417 is fixed
+    title: A narrower selection gives no more detail, because detail must come from resolution not from an impossible capture
     milestone: M2-hardening
     status: blocked
-    priority: normal
+    priority: high
     parallel_group: PIPE
     deps: [T-417]
     blocked_on: >-
-      the user resending the first half of their message. It reached this session truncated and only
-      this arrived, verbatim: "...practice until the retune-keeps-the-stream-alive bug (my previous
-      message) is fixed. File it; verify both messages became tickets." The SUBJECT - what is bad
-      practice, or what should be avoided - did not arrive, so there is nothing here to build. The
-      dependency is clear (it is unblocked or unnecessary once T-417 lands) but the content is not.
-      Do not guess it: an earlier reconstruction from a fragment put a framing on a suite that the
-      user then had to retract.
+      T-417 alone, by the user's instruction - the truncated-message blocker is CLEARED, the
+      full requirement arrived 2026-09-17 and is recorded below. A retune must keep the stream
+      alive before this is worth exercising, because every narrowing here IS a retune.
     notes: |
-      Filed because the user explicitly asked me to confirm BOTH messages became
-      tickets. This is the second. It is a placeholder with an honest reason rather
-      than an invented requirement.
-      WHAT IS RECOVERABLE: it concerns a practice or habit that the user considers
-      unwise WHILE retunes tear down the stream (T-417), which implies it becomes fine
-      once T-417 lands. A plausible reading is that it is about the retune-heavy
-      features shipped this session - region-select-on-release, the nudge buttons -
-      being unpleasant to exercise until the stream survives a retune. That is a GUESS
-      AND IS NOT FILED AS THE REQUIREMENT.
+      USER 2026-09-17, in two parts, both received in full.
+      THE BUG: when the user selects a SMALLER frequency range, THE SDR DOES NOT
+      INCREASE PRECISION/DEPTH. It stays at the coarse ~500 kHz / 4096-bin view around
+      101.3 instead of zooming in for detail.
+      THE DEVICE LIMIT THAT SHAPES THE FIX: the HackRF's minimum sample rate is
+      2 Msps, so A SUB-2-MHz WINDOW CANNOT BE CAPTURED. There is no narrow capture to
+      ask for.
+      THE FIX, both halves:
+      (1) A narrow selection SNAPS TO THE NARROWEST ACHIEVABLE instantaneous window -
+          drop the sample rate toward 2 Msps, CENTRED OFF-DC ON THE TARGET.
+      (2) AND INCREASE SPECTRAL RESOLUTION for that slice - a larger FFT and/or a DDC
+          channel zoom - so a tight selection shows finer Hz/bin detail.
+      The principle, in the user's words: DETAIL ON A NARROW VIEW COMES FROM
+      RESOLUTION/DECIMATION, NEVER FROM AN IMPOSSIBLE NARROW CAPTURE.
+      COORDINATOR NOTES, to save rediscovery:
+      - HALF OF (1) MAY ALREADY EXIST. T-392 built retunePlan with smallestCoveringSpan
+        - the least achievable span that covers a region, proven against an unsorted
+        ladder where the NEAREST entry covers nothing - and it snaps the centre through
+        T-341's grid. Check what it does for a sub-2-MHz region before rebuilding: the
+        gap may be only that nothing then raises resolution.
+      - "CENTRED OFF-DC ON THE TARGET" IS T-409's POINT, arriving from the other
+        direction. A signal at the exact centre lands on the DC/LO-leakage spike and
+        cannot be cleanly demodulated; T-317 and T-382 both measured that spike. So the
+        off-DC offset is not a nicety - a narrowing that centres the target perfectly
+        would put it on the worst part of the band.
+      - The honesty rule applies to the resolution half: T-334's resolution.source
+        already distinguishes live-IQ-backed detail from survey/history overview, and
+        the UI must never imply detail the front end did not capture. A DDC zoom gives
+        REAL finer Hz/bin from the same samples; interpolating a coarse FFT would not,
+        and must not be what happens.
+      Ties to T-341 (achievable-config snapping).
+
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
