@@ -307,6 +307,58 @@ pub struct Prediction {
 | ML | shadow changes no Classification row; each `active` family has enable evidence; zero ring sample drops with ML on |
 | Regression | M0/M1/M2 acceptance unchanged |
 
+### 7.1 Canonical baseline, and how a brief cites it (T-415)
+
+The floors above are fixed a priori. The **numbers a brief quotes as a do-not-regress
+baseline are not** — they are the latest measurement, and measurements move as real
+capability work lands (T-311 below is a legitimate example, not a bug). Two coordinator
+briefing errors (T-415) came from treating a measurement as if it were pinned like a floor:
+a stale figure got repeated across briefs after the true number had already moved, twice.
+The fix is not to freeze a number here forever; it is to give every brief exactly **one**
+re-derivable source to quote instead of a remembered digit.
+
+**Command:** `just acceptance-m3` (`HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test
+acceptance_m3 -- --nocapture`), reading the `[T-206]` lines it prints. Deterministic on
+fixed seeds — rerunning identical code and data reproduces a figure to 4 decimal places
+(verified for this entry: two independent runs of `m3_known_family_top_k_meets_the_floors`
+against the same commit gave 0.9345 both times).
+
+**Each figure names one population** (`hk_classify::harness::Summary`, `crates/hk-classify/src/harness.rs`);
+quoting one without its population is the failure mode this section exists to close:
+
+| Figure | Population | Measured (commit `d7ccd59`, 2026-09-17) |
+|---|---|---|
+| Known top-1 / top-2 | `synthetic-acceptance` source, all 8 taxonomy families, SNR bins ≥ gate+5 dB (the two highest of five bins) | 0.9345 / 0.9861 |
+| Wrong-label, overall | `synthetic-acceptance`, every bin including below-gate | 0.0040 |
+| Wrong-label, worst bin | `synthetic-acceptance`, bins ≥ gate, n ≥ 10 | 0.0333 |
+| Unknown recall / false-known | **the full held-out grid, all 11 generators, 396 snippets** — the gate's ruling (`m3_grid.rs`, `m3_unknown_recall_and_false_known_rate`). The 216-snippet reading over only the six generators §7's prose enumerates is printed alongside it (0.9954 / 0.0046 as of this measurement) but is **recorded, not used** — quoting it as the M3 number is the population-ambiguity failure mode, distinct from a stale-number failure mode | 0.9520 / 0.0480 |
+
+**T-404's 0.9480 top-1 was neither of those failure modes — a third one, now closed by
+this record.** It is the same metric over the same population as the row above (no
+population split exists for top-1, unlike unknown-recall/false-known), so it was not two
+numbers sharing a name. It also was not a transcription slip: T-404's commit message
+accurately reported what it had locally measured. What broke is narrower: checking out the
+exact commit that merged (`3d37ccf`) and running the named command today reproduces
+**0.9345**, not 0.9480, on code that is byte-identical to T-404's own branch tip
+(`b3fac0e`) for every file in `hk-classify`/`hk-estimate` (`git diff b3fac0e 3d37ccf --
+crates/hk-classify crates/hk-estimate` is empty) — so the merged code never scored 0.9480;
+T-404's own pre-commit measurement predated the last edit folded into that same squashed
+commit and was never re-run after it. **The number was real, but it described a commit
+that was never on `main`.** A brief that had re-derived via the command above at merge
+time, rather than trusting the commit message's figure, would have read 0.9345 from the
+start.
+
+**The method (T-419's, generalised): stash-and-measure, not assume.** An agent that meets
+a mismatch between a briefed baseline and what it measures does not guess which side is
+wrong. It stashes its entire diff, checks out the merge base with current `main` (or `main`
+itself if there is no in-flight diff), runs the named command, and compares. That
+determines — rather than assumes — whether a discrepancy predates the agent's own work.
+Only then does it report which of the three failure modes above applies: a stale number
+that has since legitimately moved (re-cite the fresh figure), a population mismatch
+(re-cite the correct row), or a genuine regression introduced by work in flight (fix or
+flag it, per the task's own scope — this ADR section is not where thresholds get relaxed
+to match a bad run).
+
 ## 8. MAUTO interface (M3 side; ADR-0015 owns the search)
 
 `hk_model::classify::SearchSeed`, assembled by `hk-pipeline/src/seed.rs` (T-215) and served at `GET /api/inventory/{id}/seed`:
