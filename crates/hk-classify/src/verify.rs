@@ -53,14 +53,37 @@
 //!   ALRT, and it is self-normalising: a larger constellation buys its extra flexibility with the
 //!   `1/M` prior, so no complexity penalty is needed or applied.
 //! - **fsk — GLRT over the frequency-pulse shape.** The instantaneous-frequency trajectory is fitted
-//!   as `A·Σ_k a_k·g(t − τ − kT)`, with `g` rectangular (CPFSK: `2fsk`, `msk`, `4fsk`) or Gaussian
+//!   as `A·Σ_k a_k·g(t − τ − kT)`, with `g` rectangular (CPFSK: `2fsk`, `4fsk`) or Gaussian
 //!   (`gfsk`), symbols hard-decided and `A` by least squares. This is the one thing that actually
 //!   separates 2-FSK from GFSK at the same modulation index: the *shape of the transition*, which
-//!   the tree can only see indirectly through the smearing of an IF histogram. `msk` is the same
-//!   rectangular model with `A` **fixed** by `h = 0.5` rather than free, which is what the class
-//!   means. A GLRT maximises over its free parameters, so hypotheses are compared by description
-//!   length ([`mdl_penalty`]) rather than by raw fit — otherwise `4fsk`, whose alphabet contains
-//!   the binary one, could never lose to `2fsk`.
+//!   the tree can only see indirectly through the smearing of an IF histogram. A GLRT maximises over
+//!   its free parameters, so hypotheses are compared by description length ([`mdl_penalty`]) rather
+//!   than by raw fit — otherwise `4fsk`, whose alphabet contains the binary one, could never lose
+//!   to `2fsk`.
+//!
+//! # Three classes this stage does not rank, and why (T-422)
+//!
+//! Both tests above are correct **given what they are told**, and for three labels what they are
+//! told is wrong at this geometry. Each declines by returning `None` from its model lookup, which
+//! leaves the label out of the hypothesis set entirely; [`bounded_update`] then carries its tree
+//! prior through untouched, so declining costs nothing and claims nothing.
+//!
+//! - **`qam16` and `qam64`** ([`constellation`]) — the ALRT's `N₀` comes from the SNR meter, but the
+//!   residual of an interpolated symbol sample here is dominated by filter and timing error, which
+//!   does not shrink with SNR. Sweeping *only* the assumed SNR flips both truths together, at the
+//!   same value, from "always `qam64`" to "always `qam16`": the ratio is a function of the
+//!   assumption, not of the data. It cost `qam16` class top-1 0.833 → 0.083 and bought nothing on
+//!   the PSK orders.
+//! - **`msk`** ([`fsk_model`]) — its peak deviation was fixed at `π/(2·sps)`, the *transmitter's*
+//!   `h = 0.5`. Its own free-deviation twin `2fsk` beat it on genuine MSK 22 times in 22, after the
+//!   MDL charge for that freedom, so the constraint is on the wrong quantity; the GLRT's arg-max
+//!   was `gfsk` 19 times in 22 and class top-1 fell 0.917 → 0.375.
+//!
+//! In each case the evidence that *does* name the class is elsewhere and already measured — the
+//! fitted densities for the QAM orders, C14's modulation index for MSK — which is the same shape of
+//! conclusion T-249 reached about `cw` and `ssb`. Note what let all three hide: `verifier_gain`
+//! measures the two pairs ADR-0016 §4.5 names, `2fsk`/`gfsk` and `bpsk`/`qpsk`, and none of the
+//! three is in either pair.
 //!
 //! # Bounded evidence, on purpose
 //!
@@ -82,6 +105,24 @@ pub const VERIFIER_VERSION: &str = "hk-classify/verify@1";
 
 /// Smallest prior probability a class needs to be a candidate (ADR-0016 §4.5). A label the tree
 /// gave less than this is not in the hypothesis set at all.
+///
+/// **It excludes every candidate the densities floored, and lowering it does not help** (measured,
+/// T-422). [`crate::tree::density_classes`] clamps its spread to [`MAX_LOG_LR`], so in a `k`-class
+/// family a floored rival normalises to exactly `1/(19 + k − 1)` — 0.0455 for the four `fsk`
+/// classes, 0.0435 for the five `analog` ones. Both are below 0.05, so whenever a density is
+/// decisive this stage sees a single candidate and skips, and it runs only where the density was
+/// already undecided.
+///
+/// That reads like the bug that costs `gfsk` its remaining errors, and it is not, for a reason
+/// worth writing down: **the density floor and this stage's cap are the same 19:1 number**. A
+/// candidate sitting at the floor is 19:1 behind, [`bounded_update`] may move it by at most 19:1,
+/// so the very best outcome is a dead heat — which `normalise_classes` then breaks alphabetically,
+/// against `gfsk` and in favour of `2fsk`, exactly as it broke `ssb` against `am` in T-249. Setting
+/// this to `1/23` and re-running the blind grid confirms it: `gfsk` does not move (0.750 at both
+/// bins), while `bpsk` falls 1.000 → 0.333 and `qpsk` 0.917 → 0.667, because the psk-qam ALRT then
+/// starts arbitrating PSK orders it had been skipping. The floor is protecting those calls, not
+/// obstructing `gfsk`. Making a floored candidate recoverable needs the two 19:1 bounds to stop
+/// being equal, which is an ADR-0016 §4.3/§4.5 question and not a constant to nudge here.
 pub const CANDIDATE_MIN_P: f64 = 0.05;
 
 /// Fewest symbols the verifier will test on. Below this the residual variance of a pulse fit, and
@@ -399,21 +440,49 @@ fn constellation(label: &str) -> Option<Vec<Complex64>> {
             })
             .collect::<Vec<_>>()
     };
-    let qam = |side: i32| {
-        let levels: Vec<f64> = (0..side).map(|i| f64::from(2 * i + 1 - side)).collect();
-        let raw: Vec<Complex64> = levels
-            .iter()
-            .flat_map(|i| levels.iter().map(move |q| Complex64::new(*i, *q)))
-            .collect();
-        let e = raw.iter().map(Complex64::norm_sqr).sum::<f64>() / raw.len() as f64;
-        raw.into_iter().map(|s| s / e.sqrt()).collect::<Vec<_>>()
-    };
     Some(match label {
         "bpsk" => psk(2),
         "qpsk" => psk(4),
         "8psk" => psk(8),
-        "qam16" => qam(4),
-        "qam64" => qam(8),
+        // **The QAM orders are not scored by this stage** (T-422). The ALRT below is a known-SNR
+        // test: it takes `N₀` from C13's in-band SNR and uses it as the symbol-decision noise
+        // variance. At this analysis geometry that is not what the residual is — a smoothed,
+        // interpolated symbol sample carries filter and timing error that does not shrink when the
+        // SNR rises — and the `qam16` / `qam64` ratio is decided by the assumption rather than by
+        // the data.
+        //
+        // Measured directly, by sweeping only the assumed SNR over the same 35 blind snippets and
+        // changing nothing else:
+        //
+        // ```text
+        // assumed SNR   genuine qam16 -> qam64   genuine qam64 -> qam64
+        //     30 dB            21 / 21                  14 / 14
+        //     20 dB            21 / 21                  14 / 14
+        //     15 dB            21 / 21                  14 / 14
+        //     12 dB            10 / 21                  14 / 14
+        //     10 dB             0 / 21                  10 / 14
+        //      6 dB             0 / 21                   0 / 14
+        // ```
+        //
+        // Both truths flip **together**, at the same assumed SNR, from "always the denser
+        // constellation" to "always the sparser one", and no value is right on both. That is the
+        // signature of a test with no discriminating power for alphabet order here: above the
+        // crossover the tiny `N₀` turns the mixture into a nearest-point distance and the denser
+        // lattice wins by construction; below it the `−ln M` alphabet term dominates and the
+        // sparser one wins by construction. Neither regime reads the data.
+        //
+        // What it cost: `qam16` class top-1 **0.833 from the tree's densities down to 0.083** after
+        // this stage, wrong-label 0.917, every one of them named `qam64`. What it bought: nothing —
+        // `bpsk`, `qpsk` and `8psk` are called identically with and without it (1.000, 0.875,
+        // 1.000). The pair ADR-0016 §4.5 names and `verifier_gain` measures is `bpsk`/`qpsk`, which
+        // is why this was never seen.
+        //
+        // Returning `None` leaves both labels out of the hypothesis set, and [`bounded_update`]
+        // carries their tree priors through untouched. Restoring the stage for them needs a
+        // residual estimated from the symbols rather than assumed from the SNR meter (and then the
+        // `1/(π N₀)` normaliser this function's caller may currently omit, because with a common
+        // `N₀` it cancels and with a fitted one it does not).
+        "qam16" | "qam64" => return None,
         _ => return None,
     })
 }
@@ -596,7 +665,7 @@ struct FskModel {
     fixed_peak: Option<f64>,
 }
 
-fn fsk_model(label: &str, sps: f64) -> Option<FskModel> {
+fn fsk_model(label: &str) -> Option<FskModel> {
     Some(match label {
         "2fsk" => FskModel {
             levels: 2,
@@ -604,15 +673,35 @@ fn fsk_model(label: &str, sps: f64) -> Option<FskModel> {
             free_bt: false,
             fixed_peak: None,
         },
-        // MSK *is* h = 0.5 (ADR-0016 §1): peak deviation Rs/4, i.e. π/(2·sps) rad/sample. Fixing it
-        // is the whole content of the hypothesis, and it is why `msk` can lose to `2fsk` on a
-        // waveform whose index is something else.
-        "msk" => FskModel {
-            levels: 2,
-            bt: Some(CHANNEL_BT),
-            free_bt: false,
-            fixed_peak: Some(std::f64::consts::PI / (2.0 * sps)),
-        },
+        // **`msk` is not testable here, so this stage does not test it** (T-422).
+        //
+        // MSK *is* h = 0.5 (ADR-0016 §1), so the hypothesis was `fixed_peak = π/(2·sps)` rad/sample
+        // — peak deviation Rs/4 — and fixing it was the whole content of the hypothesis. That value
+        // is the **transmitter's** deviation. The GLRT sees the deviation this receiver measures,
+        // after C13's ±0.75 × OBW99 channel filter and with `sps` coming from C14's rate estimate,
+        // and those are not the same number.
+        //
+        // The proof does not need the true value, only its own twin: `2fsk` is the identical
+        // hypothesis — two levels, rectangular pulse at [`CHANNEL_BT`] — differing *only* in fitting
+        // the deviation instead of fixing it. On the blind acceptance grid at gate+5/+10, `2fsk`
+        // beat `msk` on genuine MSK on 22 of 22 snippets, by 0.13–0.92 nats/symbol, **after** the
+        // [`mdl_penalty`] that charges it half a `ln n` for that extra freedom. A constraint that
+        // costs more residual than its own description length is buying is a constraint on the
+        // wrong quantity.
+        //
+        // The consequence, measured: the GLRT's arg-max on genuine MSK was `gfsk` 19 times in 22
+        // (`gfsk` fits the filtered trajectory better still), and the verifier re-ranked `msk` away
+        // on most of them — class top-1 0.917 from the tree down to 0.375 after this stage. The
+        // GLRT remains right on the pair ADR-0016 §4.5 names and `verifier_gain` measures: genuine
+        // `2fsk` → `2fsk` 21/23, genuine `gfsk` → `gfsk` 20/21. It is only `msk` it cannot rank.
+        //
+        // There is no fix inside this stage. Freeing the deviation makes `msk` *identical* to
+        // `2fsk`, so the hypothesis would stop existing; the index can only be tested against a
+        // known received scale, which this GLRT does not have. Returning `None` leaves `msk` out of
+        // the hypothesis set, and [`bounded_update`] then carries its prior through untouched — so
+        // the call falls to the one measurement that does resolve h at this geometry, C14's index
+        // ([`crate::tree::apply_msk_index`], dev-measured `h ∈ [0.500, 0.533]` on a genuine MSK).
+        "msk" => return None,
         "gfsk" => FskModel {
             levels: 2,
             bt: Some(BT_GRID[0]),
@@ -694,7 +783,7 @@ fn fsk_loglikelihoods(
 
     let mut out = Vec::new();
     for lp in candidates {
-        let Some(model) = fsk_model(&lp.label, sps) else {
+        let Some(model) = fsk_model(&lp.label) else {
             continue;
         };
         let bts: Vec<Option<f64>> = if model.free_bt {
