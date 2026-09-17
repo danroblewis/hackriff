@@ -5626,12 +5626,61 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
     // T-342: and so is the SHADE's rule. A 0–1 number normalised against a range the response never
     // named is a measurement the consumer cannot check or match: the strip must be able to share
     // the waterfall's scaling, which needs the range and the scale on the wire, not just the ratio.
+    //
+    // The rule text is unconditional: it describes the fold, so it is served whether or not the
+    // pyramid held a level to fold. Asserted here on the default-window answer, which is the one a
+    // client gets before any history exists.
+    assert_eq!(tuned["shade"]["fold"], json!("max-hold"), "{tuned}");
+    assert!(
+        tuned["shade"]["rule"]
+            .as_str()
+            .is_some_and(|s| s.contains("max-hold")),
+        "the fold must name itself: {tuned}"
+    );
+    assert!(
+        tuned["shade"]["unobserved"]
+            .as_str()
+            .is_some_and(|s| s.contains("the max of nothing is")),
+        "{tuned}"
+    );
+
+    // The VALUES are asked over an explicit window, and that is not a convenience: T-383 measured
+    // why. `shades()` folds with `nt = 1`, so `overview_level` sizes the tier by the WHOLE window.
+    // Over the default capture window (`retention_s` = 120 s here) the coarsest adequate tier is
+    // level 1, whose cells are 60 s wide — and a level-1 cell exists only once a level-0 block
+    // (60 s, aligned to the Unix epoch) has sealed, `seal_lag` = 2 s later. So the time for this
+    // route's `range_db` to appear on the DEFAULT window is
+    //
+    //     (time to the next epoch-aligned 60 s boundary) + 2 s   ∈ (2 s, 62 s]
+    //
+    // — measured six times running, each within 0.1 s of that formula (2026-09-17): to_next 26.86 s
+    // → 29.07 s, 55.67 → 57.82, 56.03 → 58.20, 55.78 → 57.90, 56.02 → 58.11, 55.45 → 57.65. The old
+    // 60 s budget therefore expired whenever the run began in the first ~2.2 s of a wall-clock
+    // minute, on an idle machine, for a reason that has nothing to do with the code under test; it
+    // was recorded twice as a "load flake" (T-320, T-383) and the isolated times people quoted
+    // (53.2 s, 21.1 s, 5.3 s, 58.2 s) are just that phase. A 20 s window resolves at level 0, whose
+    // 1 s cells the run has actually written, so the wait becomes a real bound on real work
+    // (measured 0.00–0.11 s over nine runs) instead of a race with the clock. The budget is 30 s
+    // rather than 60 s because it now bounds a quantity whose range we have measured: it is two
+    // orders of magnitude above it, and the point of the number is to be nowhere near the edge.
+    //
+    // WHAT THIS DOES NOT ASSERT, and it is a real defect rather than a test artefact: on the
+    // default window the strip carries no shade for the first minute of a server's life EVEN
+    // THOUGH the levels below hold the data — `overview_level` takes the coarsest adequate tier
+    // and does not fall back to a finer one that is populated. That is the user's "we have it but
+    // didn't render it" failure, and it needs its own ticket (it changes `level`/`src_t_cell_s`,
+    // which `/api/timeline` documents).
+    let t1_s = tuned["window"]["t1_s"].as_f64().expect("a live edge");
+    let (wt0, wt1) = (t1_s - 20.0, t1_s);
     let mut shaded = Value::Null;
     wait_for(
         "the spectrum history to give the strip a shade to explain",
-        Duration::from_secs(60),
+        Duration::from_secs(30),
         || {
-            let (st, got) = get(addr, &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=8"));
+            let (st, got) = get(
+                addr,
+                &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=8&t0={wt0}&t1={wt1}"),
+            );
             shaded = got;
             st == 200 && shaded["shade"]["range_db"].is_object()
         },

@@ -21,6 +21,46 @@
 # "Build/test/run" and docs/planning-log.md T-072/T-074/T-076 history) so a genuine
 # regression in any other test still fails on the first try. nextest reports retried
 # tests as "try N/M" in its human and JUnit output.
+#
+# ---------------------------------------------------------------------------------------
+# WHAT THIS GROUP DOES NOT DO (T-383). Read this before adding a name to it.
+#
+# `max-threads = 1` serialises the group's tests **against each other, inside one nextest
+# invocation**. It does nothing about the two things that actually make this machine slow:
+#
+#   1. the other ~27 tests nextest runs concurrently OUTSIDE the group (test-threads
+#      defaults to the core count, so a heavy-serial test still shares 28 cores);
+#   2. the other cargo builds on the box — up to four parallel agents plus the
+#      coordinator's gate (CLAUDE.md "Worktree launch step"), which no test-runner
+#      setting can see, let alone serialise.
+#
+# Five "load flakes" were filed against this file (T-344, T-383 and its four recorded
+# instances). THREE OF THE FOUR TESTS WERE ALREADY IN THE GROUP when they failed:
+# data_path since fc250ff (2026-09-14), decoded_capture since 8866566 (2026-09-15), and
+# every hk-cli test since T-077 itself. Membership had not lapsed and would not have
+# helped. T-383 measured each of the four and found:
+#
+#   - hk-cli::api_contract coverage_greys_only…: NOT a load flake at all. It waited 60 s
+#     for a quantity whose range is (2 s, 62 s] — the distance to the next epoch-aligned
+#     60 s spectrum-history rollup boundary plus `seal_lag` — so it failed on an IDLE
+#     machine whenever it started in the first ~2.2 s of a wall-clock minute. Fixed by
+#     asking over a window the pyramid can answer (58 s → 0.7 s), not by serialising.
+#   - hk-pipeline::data_path never_reports_ready…: a 2 s wall-clock no-progress window on
+#     a SUBPROCESS, 15× tighter than the chain's own PLUGIN_WAIT_STALL. Reproduced
+#     exactly by starving the plugin; fixed by using the same 30 s the chain uses.
+#   - hk-pipeline::presence_push: the failing test was contract A's per-poll extension
+#     record, which ADR-0019/T-410 deleted. The file's current test has no wall-clock
+#     quantity and published byte-identical output 6/6 at load average 57.
+#   - hk-pipeline::decoded_capture: not reproduced in 10 runs at load 46–69; its waits
+#     are 90 s against a measured 0.6 s.
+#
+# So the rule this file can enforce is narrow, and the one that matters is not:
+# **a test may not bound a quantity whose natural range it has not measured.** Nothing in
+# a nextest filterset can check that — filtersets see only package, binary and test name,
+# never what a test waits for — so it cannot be derived, and a longer list here would not
+# have caught any of the five. Measure the wait before you bound it; if a bound must grow,
+# say which number it is and why.
+# ---------------------------------------------------------------------------------------
 
 [test-groups.heavy-serial]
 max-threads = 1
