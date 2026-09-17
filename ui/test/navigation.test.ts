@@ -6,8 +6,8 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import {
-  detailLabel, detailOf, snapCenter, snapSpan, snapState, snapTimeCell,
-  type FrequencyGrid, type NavigationGrid, type TimeGrid,
+  containsCenter, detailLabel, detailOf, retunePlan, smallestCoveringSpan, snapCenter, snapSpan,
+  snapState, snapTimeCell, type FrequencyGrid, type NavigationGrid, type TimeGrid,
 } from "../src/navigation";
 
 /** HackRF One's synthesiser grid: 30 MHz / 2^20. */
@@ -125,4 +125,96 @@ test("detailLabel is presentation only", () => {
   assert.equal(detailLabel("live-iq"), "live IQ");
   assert.equal(detailLabel("spectrum-history"), "history");
   assert.equal(detailLabel("survey-overview"), "survey overview");
+});
+
+// ---------------------------------------------------------------------------
+// T-392: the capture configuration a region-select commands
+// ---------------------------------------------------------------------------
+
+test("T-392: containsCenter asks whether the grid COVERS a centre — snapCenter answers a different question", () => {
+  // snapCenter walks an out-of-band request inward to the nearest reachable point, so "did it
+  // snap?" calls every out-of-range centre achievable at the band edge. That is exactly the
+  // over-permissive reading a refusal must not be built on.
+  assert.equal(snapCenter(HACKRF, 7e9), 6e9 - (6e9 % STEP) + 0); // pulled inside the band
+  assert.ok(snapCenter(HACKRF, 7e9)! <= 6e9);
+  assert.equal(containsCenter(HACKRF, 7e9), false, "…but 7 GHz is not covered");
+  assert.equal(containsCenter(HACKRF, 6e9), true, "the boundary is covered");
+  assert.equal(containsCenter(HACKRF, 1e6), true);
+  assert.equal(containsCenter(HACKRF, 0.9e6), false);
+  assert.equal(containsCenter(null, 100e6), false);
+  // Disjoint bands: the gap between them is not covered, however near either edge it is.
+  const split = { ranges_hz: [[24e6, 1.766e9], [3e9, 6e9]] as [number, number][], center_step_hz: 1 };
+  assert.equal(containsCenter(split, 2e9), false);
+  assert.equal(containsCenter(split, 1.766e9), true);
+});
+
+test("T-392: smallestCoveringSpan takes the least entry that COVERS — never the nearest", () => {
+  const ladder: FrequencyGrid = { ...HACKRF, spans_hz: { values: [20e6, 2e6, 10e6, 8e6] }, max_live_span_hz: 20e6 };
+  // 3 MHz: 8, 10 and 20 all cover. The *nearest* entry is 2 MHz, which does not — picking it would
+  // open a window that cuts the selection in half.
+  assert.equal(smallestCoveringSpan(ladder, 3e6), 8e6);
+  assert.equal(snapSpan(ladder, 3e6), 2e6, "the nearest entry is the wrong answer here, by construction");
+  // The boundary covers: a window exactly as wide as the region contains it.
+  assert.equal(smallestCoveringSpan(ladder, 8e6), 8e6);
+  assert.equal(smallestCoveringSpan(ladder, 8e6 + 1), 10e6);
+  // Narrower than every entry: the ladder's floor. Wider than every entry: nothing covers it.
+  assert.equal(smallestCoveringSpan(ladder, 1), 2e6);
+  assert.equal(smallestCoveringSpan(ladder, 20e6 + 1), null);
+  // A continuous rate range takes the need itself, lifted to the floor.
+  assert.equal(smallestCoveringSpan(HACKRF, 400e3), 2e6);
+  assert.equal(smallestCoveringSpan(HACKRF, 5e6), 5e6);
+  assert.equal(smallestCoveringSpan(HACKRF, 20e6), 20e6);
+  assert.equal(smallestCoveringSpan(HACKRF, 20e6 + 1), null);
+  assert.equal(smallestCoveringSpan(null, 1e6), null);
+  assert.equal(smallestCoveringSpan(HACKRF, 0), null);
+});
+
+test("T-392: retunePlan computes the covering config, and refuses only when nothing can capture", () => {
+  // The ordinary case: centre on the synthesiser grid, smallest covering span, live-IQ detail.
+  const p = retunePlan(HACKRF, 432.0e6, 432.4e6);
+  assert.equal(p.ok, true);
+  if (!p.ok) return;
+  assert.equal(p.spanHz, 2e6);
+  assert.equal(p.source, "live-iq");
+  assert.equal(p.snappedCenter, true);
+  assert.ok(Math.abs(p.centerHz / STEP - Math.round(p.centerHz / STEP)) < 1e-6);
+  assert.ok(Math.abs(p.centerHz - 432.2e6) <= STEP);
+  // The window it opens contains the whole selection — the point of "covering".
+  assert.ok(p.centerHz - p.spanHz / 2 <= 432.0e6 && p.centerHz + p.spanHz / 2 >= 432.4e6);
+
+  // Refusal 1: the centre is outside every band. Not "snap it to the edge and go".
+  assert.deepEqual(retunePlan(HACKRF, 6.1e9, 6.2e9), { ok: false, reason: "center_out_of_range" });
+  // Adjacent: a centre inside the range retunes, even when the window it opens runs past the edge.
+  assert.equal(retunePlan(HACKRF, 6e9 - 0.2e6, 6e9).ok, true);
+
+  // Refusal 2: wider than one live window.
+  assert.deepEqual(retunePlan(HACKRF, 422e6, 462e6), { ok: false, reason: "span_too_wide" });
+  // Adjacent: exactly one window wide is capturable, and the snap's fraction of a step does not
+  // turn that into a refusal.
+  const edge = retunePlan(HACKRF, 432e6 - 10e6, 432e6 + 10e6);
+  assert.equal(edge.ok, true);
+  assert.equal(edge.ok && edge.spanHz, 20e6);
+
+  // Refusal 3 is the same check on a replay, whose band IS the recording's extent.
+  const rec: FrequencyGrid = { ...REPLAY, ranges_hz: [[99e6, 101e6]] };
+  assert.deepEqual(retunePlan(rec, 432e6, 432.4e6), { ok: false, reason: "center_out_of_range" });
+  const inRec = retunePlan(rec, 99.5e6, 99.9e6);
+  assert.equal(inRec.ok, true);
+  // An unknown step snaps nothing, and the plan says so rather than claiming a grid point.
+  assert.equal(inRec.ok && inRec.snappedCenter, false);
+  assert.equal(inRec.ok && inRec.centerHz, 99.7e6);
+
+  // No grid at all: nothing may be claimed achievable.
+  assert.deepEqual(retunePlan(null, 100e6, 101e6), { ok: false, reason: "no_grid" });
+  assert.deepEqual(retunePlan(HACKRF, 100e6, 100e6), { ok: false, reason: "no_grid" });
+
+  // A coarse tuning grid moves the centre enough to matter, and the span is computed from where
+  // the radio will actually sit — not from the centre that was asked for.
+  const coarse: FrequencyGrid = { ...HACKRF, center_step_hz: 1e6, spans_hz: { min: 1, max: 20e6 } };
+  const c = retunePlan(coarse, 432.4e6, 432.8e6);
+  assert.equal(c.ok, true);
+  if (!c.ok) return;
+  assert.equal(c.centerHz, 433e6);
+  assert.equal(c.spanHz, 1.2e6, "0.4 MHz would not reach the selection from 433 MHz");
+  assert.ok(c.centerHz - c.spanHz / 2 <= 432.4e6 && c.centerHz + c.spanHz / 2 >= 432.8e6);
 });
