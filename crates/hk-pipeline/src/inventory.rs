@@ -150,10 +150,15 @@ pub trait Inventory: Send {
     /// with no [`Self::emitter_of_track`] binding is skipped. That is T-388's gate, for the same
     /// reason: the strict offer predicate excludes exactly the continuous carriers a broadcast band
     /// is full of, and reusing it here would leave the signals this exists for undecided.
+    ///
+    /// `measuring` is whether a chain currently holds this emission
+    /// (`chains::EmissionClaims::measuring`). The live continuous route yields to it: see
+    /// [`ConfirmPolicy::decide`].
     fn live_trust(
         &mut self,
         _repo: &mut Repository,
         _summary: &TrackSummary,
+        _measuring: bool,
     ) -> Result<(), RepoError> {
         Ok(())
     }
@@ -327,6 +332,13 @@ pub struct TrackTrust {
     /// T-403: the analysis resolution its members were measured at, Hz
     /// ([`TrackSummary::bin_hz`]): the scale [`Self::bandwidth_hz`] has to be read against.
     pub bin_hz: f64,
+    /// T-403: a chain is **measuring this emission right now**
+    /// (`chains::EmissionClaims::measuring`), so a stronger, more specific answer about it is on
+    /// its way. Only a live review sets it; a closed track is past the question.
+    pub measuring: bool,
+    /// T-403: this is the **first** review at which the continuous evidence is complete, so the
+    /// specific routes have not yet had an interval in which to answer. Only a live review sets it.
+    pub settling: bool,
 }
 
 impl TrackTrust {
@@ -341,6 +353,18 @@ impl TrackTrust {
             closed: summary.closed.is_some(),
             bandwidth_hz: summary.track.bandwidth_hz,
             bin_hz: summary.bin_hz,
+            measuring: false,
+            settling: false,
+        }
+    }
+
+    /// With the two live-review facts set: whether a chain holds this emission as the review runs,
+    /// and whether this is the first review at which the continuous evidence was complete.
+    pub fn in_a_live_review(self, measuring: bool, settling: bool) -> Self {
+        Self {
+            measuring,
+            settling,
+            ..self
         }
     }
 
@@ -427,17 +451,24 @@ impl ConfirmPolicy {
                 "decoded identity ({scheme}) carried by {n} CRC-valid decode(s)"
             ));
         }
-        if let Some(reason) = self.continuous_reason(ev.track) {
+        // T-403: route C before route B. When both are in hand the *specific* measurement is what
+        // gets recorded — a pilot lock says "this is an FM broadcast station", where continuity
+        // and width say only "something modulated has been on air steadily".
+        if let Some(reason) = self.verified_reason(ev.verified.as_ref()) {
             return Some(reason);
         }
-        self.verified_reason(ev.verified.as_ref())
+        self.continuous_reason(ev.track, ev.verified.as_ref())
     }
 
     /// Routes B and B-live: the reason a continuous, trusted track confirms, or `None`.
     ///
     /// The four accumulation clauses are common to both and are the ones this rule has always
     /// had. What the track's state changes is what else must hold, not how much of them is enough.
-    fn continuous_reason(&self, track: Option<TrackTrust>) -> Option<String> {
+    fn continuous_reason(
+        &self,
+        track: Option<TrackTrust>,
+        v: Option<&VerifiedEmission>,
+    ) -> Option<String> {
         if !self.continuous {
             return None;
         }
@@ -459,6 +490,23 @@ impl ConfirmPolicy {
             // T-403: the extra clauses an unfinished life must also satisfy. Each is a positive
             // measurement that must be present; a missing or NaN one refuses.
             if !self.live_continuous {
+                return None;
+            }
+            // T-403: **the fallback yields.** Route B is the route of last resort; route C is the
+            // specific one. Where both can eventually fire, route C's evidence arrives later by
+            // construction — a demodulator needs a window of signal before it can report a lock,
+            // measured here at one review interval behind the point where continuity and width are
+            // already complete. So route B does not decide the first time its evidence is ready:
+            // `settling` is false only once the emitter has been carried through a review with the
+            // same continuous evidence, which gives any chain measuring it a full interval to
+            // record what it found.
+            //
+            // `measuring` is the sharper half of the same rule and needs no wait at all: while a
+            // chain actually holds this emission the answer is in flight, so route B stays out of
+            // the way until the demodulation exists however long that takes — bounded by the
+            // chain's own life, because a chain that rejects the mode releases the emission and
+            // route B decides on the next review.
+            if v.is_none() && (tr.measuring || tr.settling) {
                 return None;
             }
             if tr.suspect_fraction.is_nan() || tr.suspect_fraction > self.max_live_suspect_fraction
@@ -533,6 +581,9 @@ pub struct TrackInventory {
     /// at, so a re-offer that measured nothing new costs one comparison instead of a match and a
     /// clustering pass. Bounded with [`Self::run`].
     characterised: HashMap<EmitterId, (u64, u64)>,
+    /// T-403: tracks a live review has already weighed, so route B's first look only arms it
+    /// ([`ConfirmPolicy::decide`]). Bounded like [`Self::run`].
+    settling: HashSet<TrackId>,
     /// T-109: open tracks whose live offer created their entry; removed when the track closes,
     /// merges or joins a hop set (every open track ends in one of those).
     provisional: HashMap<TrackId, EmitterId>,
@@ -585,6 +636,7 @@ impl TrackInventory {
             run: VecDeque::new(),
             run_set: HashSet::new(),
             characterised: HashMap::new(),
+            settling: HashSet::new(),
             provisional: HashMap::new(),
             bound: HashMap::new(),
             retracted: 0,
@@ -856,6 +908,7 @@ impl Inventory for TrackInventory {
         &mut self,
         repo: &mut Repository,
         summary: &TrackSummary,
+        measuring: bool,
     ) -> Result<(), RepoError> {
         if summary.closed.is_some() || summary.inband_fragment {
             return Ok(());
@@ -867,10 +920,18 @@ impl Inventory for TrackInventory {
         };
         // The evidence reaches the end of the last burst the tracker measured, which is later than
         // the last sighting recorded against the entry; the change is stamped there, not earlier.
+        // T-403: the first review at which this emitter's continuous evidence is complete only
+        // *arms* route B; the next one may fire it. Remembering the track rather than the emitter
+        // keeps this bounded with the rest of the run memory, and a track is the thing whose
+        // evidence is being weighed.
+        let settling = self.settling.insert(summary.track.id);
+        if self.settling.len() > RUN_MEMORY {
+            self.settling.clear();
+        }
         self.review(
             repo,
             emitter,
-            Some(TrackTrust::of(summary)),
+            Some(TrackTrust::of(summary).in_a_live_review(measuring, settling)),
             Some(summary.track.time.end),
         )
     }
@@ -1251,15 +1312,100 @@ mod tests {
             closed: true,
             bandwidth_hz: 150e3,
             bin_hz: 4687.5,
+            measuring: false,
+            settling: false,
         }
     }
 
-    /// The same evidence on a track that is **still open** (T-403).
+    /// The same evidence on a track that is **still open**, at a review where route B is allowed
+    /// to decide: nothing is measuring it and it has already settled (T-403).
     fn steady_live() -> TrackTrust {
         TrackTrust {
             closed: false,
             ..steady()
         }
+    }
+
+    /// A locked 19 kHz pilot inside a WFM-width emission: route C's evidence.
+    fn locked() -> VerifiedEmission {
+        VerifiedEmission {
+            mode: "wfm".into(),
+            lock_quality: Some(0.98),
+            pilot_hz: Some(19_000.0),
+            bandwidth_hz: Some(180e3),
+        }
+    }
+
+    /// T-403: **the specific route wins, and the fallback waits for it.**
+    ///
+    /// Route B's evidence — continuity, duty cycle, width — is complete about two seconds into a
+    /// broadcast station. Route C's needs a demodulator to report a lock, which is one review
+    /// interval later by construction. At the moment route B is first ready the two cases are
+    /// *identical* to the rule: same width class, duty 1.00, no demodulation, no chain holding the
+    /// emission. Nothing evaluated then can tell the station that will produce a pilot from the one
+    /// that never will, so route B must not decide on that first look.
+    #[test]
+    fn t403_the_fallback_route_yields_to_the_specific_one() {
+        let p = ConfirmPolicy::default();
+        let ev = |track, verified| ConfirmEvidence {
+            identity: None,
+            track: Some(track),
+            verified,
+        };
+        // Both routes in hand: the specific measurement is what gets recorded.
+        let both = p
+            .decide(&ev(steady_live(), Some(locked())))
+            .expect("a locked pilot confirms");
+        assert!(
+            both.starts_with("verified"),
+            "a pilot lock says 'this is an FM broadcast station'; continuity says only 'something              modulated has been on air'. The specific one is the reason: {both}"
+        );
+        // The same, on a closed track: ordering is not a live-only rule.
+        let closed = p
+            .decide(&ev(steady(), Some(locked())))
+            .expect("still confirms");
+        assert!(closed.starts_with("verified"), "{closed}");
+
+        // The first live look at complete continuous evidence only arms route B.
+        let settling = TrackTrust {
+            settling: true,
+            ..steady_live()
+        };
+        assert_eq!(
+            p.decide(&ev(settling, None)),
+            None,
+            "route B does not decide the first time its evidence is ready — that is the interval              the demodulator needs to report"
+        );
+        // …but a lock already in hand is not made to wait for it.
+        assert!(
+            p.decide(&ev(settling, Some(locked())))
+                .is_some_and(|r| r.starts_with("verified")),
+            "the specific route never waits on the fallback's settling"
+        );
+        // While a chain holds the emission the answer is in flight, however long it takes.
+        let measuring = TrackTrust {
+            measuring: true,
+            ..steady_live()
+        };
+        assert_eq!(p.decide(&ev(measuring, None)), None, "an answer is coming");
+        // Once the chain has answered, route B decides on what it found: no lock, no route C, so
+        // the continuous route fires rather than the emitter waiting for its track to close.
+        let no_lock = VerifiedEmission {
+            lock_quality: None,
+            pilot_hz: None,
+            ..locked()
+        };
+        let fell_back = p
+            .decide(&ev(measuring, Some(no_lock)))
+            .expect("a chain that found no lock does not block the fallback for ever");
+        assert!(fell_back.starts_with("continuous"), "{fell_back}");
+        // And a chain that never claims the emission at all does not block it either: the station
+        // this ticket exists for is never demodulated in some scenes.
+        assert!(
+            p.decide(&ev(steady_live(), None))
+                .is_some_and(|r| r.starts_with("continuous")),
+            "nothing is measuring it and it has settled, so the fallback decides"
+        );
     }
 
     #[test]
@@ -1387,6 +1533,8 @@ mod tests {
             closed: false,
             bandwidth_hz: 4687.5,
             bin_hz: 4687.5,
+            measuring: false,
+            settling: false,
         };
         assert_eq!(
             p.decide(&ev(line)),

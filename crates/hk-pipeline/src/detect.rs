@@ -1062,7 +1062,12 @@ impl Writer {
                 // offers do — a close must be able to supersede a live decision, never the
                 // reverse.
                 for s in self.live_reviews.drain(..) {
-                    if inv.live_trust(&mut repo, &s).is_err() {
+                    // T-403: whether a chain holds this emission as the review runs. The live
+                    // continuous route yields to one — see `ConfirmPolicy::decide`.
+                    let measuring = shared
+                        .claims
+                        .measuring(s.track.f_center_hz, s.track.bandwidth_hz.max(0.0) / 2.0);
+                    if inv.live_trust(&mut repo, &s, measuring).is_err() {
                         inc(&dc.db_errors);
                     }
                 }

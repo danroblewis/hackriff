@@ -341,6 +341,25 @@ impl EmissionClaims {
     }
 
     /// `owner` finished at `now`: a committed claim is kept for `hold` samples, others dropped.
+    /// T-403: whether a chain is **measuring** the emission at `center_hz` (± `half_hz`) right
+    /// now — it claimed it and has not released it.
+    ///
+    /// This is the fact the live continuous confirmation route yields to. Route B's evidence
+    /// (continuity, duty cycle, width) is real but weaker *in kind* than a demodulator's: it says
+    /// "something modulated has been on air steadily", not "this is an FM broadcast station, and
+    /// here is its pilot". While a chain holds the emission the stronger answer is being measured,
+    /// and a fast route that confirmed anyway would record the weaker reason for a station the
+    /// system was about to identify positively — and *which* reason got recorded would depend on
+    /// how loaded the host was, because a chain under load writes its session later in the capture.
+    ///
+    /// A released claim (`until` set) does not count: the chain is finished with it, whatever it
+    /// concluded.
+    pub fn measuring(&self, center_hz: f64, half_hz: f64) -> bool {
+        self.lock()
+            .iter()
+            .any(|c| c.until.is_none() && (c.center_hz - center_hz).abs() < c.half_hz.max(half_hz))
+    }
+
     pub fn release(&self, owner: u64, now: u64, hold: u64) {
         let mut claims = self.lock();
         claims.retain(|c| c.owner != owner || c.committed);

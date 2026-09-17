@@ -2461,6 +2461,20 @@ impl Tracker {
         let horizon = match (period, closed) {
             (Some(p), _) => s.t_last_start + (p.period_s * NS) as i64,
             (None, Some(CloseCause::Idle | CloseCause::Capacity)) => s.t_last_end,
+            // T-403: an **open** track with a burst still in flight is not silent between the last
+            // reported end and the clock — it is mid-burst, and the detector simply has not cut the
+            // record yet (`flush_one` holds a group for `hold_frames`). `on_ns` can only count
+            // bursts that have been reported, so charging the unreported tail to the denominator
+            // makes a continuously-transmitting emitter's duty cycle read 0.80, 0.86, 0.89, 0.91 …
+            // — climbing to 1 as a fixed lag is divided by a growing window. A signal that never
+            // stops would then become "continuous" only once you had watched it long enough, which
+            // is an outcome tracking elapsed recording time rather than the evidence.
+            //
+            // `cur.is_some()` is exactly "a burst is open" — the same fact the idle rule reads to
+            // decide a track has gone quiet. When no burst is open the silence since `t_last_end`
+            // is real evidence and the clock is the right horizon, so a bursty emitter that has
+            // stopped is unaffected.
+            (None, None) if s.cur.is_some() => s.t_last_end,
             (None, _) => self.now.max(s.t_last_end),
         }
         .max(s.t_last_end);

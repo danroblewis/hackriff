@@ -526,6 +526,16 @@ fn t403_a_station_with_neither_pilot_nor_identity_still_resolves_within_budget()
         "[{T403}] with no pilot and no identity the only route left is the continuous one, weighed \
          live; got: {reason}"
     );
+    // A station that never stops transmitting has a duty cycle of 1, and it has it from the first
+    // moment it is measured. Reading anything less means the denominator is being charged for
+    // capture the detector has not reported on yet — a fixed lag divided by a growing window, so
+    // the number climbs towards 1 as a function of how long you watched rather than of what the
+    // signal did. That is what put family assignment at 5.00 s on a realistic scene.
+    assert!(
+        reason.contains("duty cycle 1.00"),
+        "[{T403}] a continuously-transmitting station is continuous the first time it is weighed, \
+         not after the observation window has amortised the detector's reporting lag; got: {reason}"
+    );
     assert_eq!(
         l.decodes, 0,
         "[{T403}] this scene carries no RDS. Measured: {l}"

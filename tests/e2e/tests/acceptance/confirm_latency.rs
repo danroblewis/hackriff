@@ -125,6 +125,12 @@ fn t398_wfm_without_pilot_does_not_take_the_fast_route() {
         "[{T403}] and it was decided on a life still being lived, not on a track that closed at the \
          end of the scene; got: {reason}"
     );
+    assert!(
+        reason.contains("duty cycle 1.00"),
+        "[{T403}] a station that never stops is continuous the first time it is weighed; a duty \
+         cycle below 1 here means the denominator is charged for capture the detector has not \
+         reported yet; got: {reason}"
+    );
 
     // Refusing to confirm is not the same as discarding the evidence. What the demodulator
     // measured is recorded either way — mode, bandwidth, and the absent lock, with the window it
