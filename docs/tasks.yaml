@@ -7134,7 +7134,17 @@ tasks:
     milestone: M3
     title: The classifier rejects 39% of genuine short bursts from their own class, and the fix costs open-set
       recall at the floor
-    status: todo
+    status: blocked
+    blocked_on: |
+      T-428. This ticket's ENTIRE deliverable is a trade curve the USER must choose from, and
+      both axes are quoted in held-out unknown recall against ADR-0016 §7's 0.90 floor
+      (0.9606 -> 0.9000 single-dimension, 0.9697 -> 0.9242 four-dimension). T-428 is live on
+      whether that very figure is reproducible: four agents re-derived it on main the same day
+      and split two-two, 0.9444/0.0556 against 0.9520/0.0480.
+      Asking the user to trade open-set honesty against burst recall, against a floor, using a
+      number currently known to disagree with itself, would be asking them to decide on a
+      figure I cannot stand behind. Unblock the moment T-428 says what the number is - the
+      measurement work here is otherwise fully specified and ready.
     priority: high
     deps:
     - T-328
@@ -8628,7 +8638,7 @@ tasks:
   - id: T-406
     title: Iterative scan mode - step the tune and retain the full-spectrum survey
     milestone: M4
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -9854,7 +9864,7 @@ tasks:
   - id: T-427
     milestone: M3
     title: pulsed/pulse is the fourth broken hand-written class table - top-1 0.000, wrong-label 1.000 at gate+5
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: M3A
     deps: [T-422]
