@@ -4,6 +4,15 @@
 .capture .section-h { margin-bottom: 0; }
 .capture .cap-note { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .capture .cap-note b { color: var(--muted); font-weight: 500; }
+/* T-391: the header is itself the disclosure control — reset to look like the plain label it
+   replaces (the section-h's own uppercase/letter-spacing/colour are inherited properties, so a
+   bare reset here is enough), plus a pointer cursor and a hover tint for the affordance. */
+.capture .cap-toggle { background: none; border: 0; padding: 0; margin: 0; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+.capture .cap-toggle:hover { color: var(--text); }
+/* Collapsed: the overview band (below) is hidden by `index.ts` (`band.hidden`), so the panel is
+   just its header row — this stops the grid still reserving the `1fr` row for it, which would
+   otherwise show as dead space under the label inside the shrunk `.cap-collapsed` row height. */
+.capture.collapsed { grid-template-rows: auto; }
 .cap-band { position: relative; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); overflow: hidden; cursor: text; min-height: 0; touch-action: none; }
 /* T-338: the compressed sideways overview waterfall of the retained capture window. One canvas
    pixel per served cell, stretched to the band — upscaling only, and `pixelated` so the browser

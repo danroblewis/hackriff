@@ -13,7 +13,7 @@ import { h } from "../dom";
 import { startPoll } from "../net";
 import { selectionStoreFor } from "../explore/selections";
 import { focusSelection } from "../explore/slice";
-import { goLive, reviewAt, setCaptureWindow, toast, type AppState } from "../state";
+import { goLive, reviewAt, setCaptureCollapsed, setCaptureWindow, toast, type AppState } from "../state";
 import {
   DRAG_PX, agoText, bufferedSpan, captureWindow, coverageText, currentSpan, durationText, eventMarkTitle,
   eventMarks, observedFraction, overviewShade, pctForAgo, scrubDataNote, scrubToTime, selectionSpans, timeRegionName,
@@ -40,8 +40,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const noteB = h("b", {}, "viewing live");
   const noteRest = document.createTextNode(" · coverage unknown");
   const recordBtn = h("button", { class: "mini", type: "button" }, "Record IQ");
+  // T-391: a header disclosure toggle. The user is unsure the panel is needed but likes it, so it
+  // stays — this only lets it fold out of the way, remembered like `mode`/`theme` (shell-slice.ts).
+  const chev = h("span", { "aria-hidden": "true" }, "▾");
+  const collapseBtn = h("button", { class: "cap-toggle", type: "button", "aria-expanded": "true" }, chev, " Capture · always recording");
   const head = h("div", { class: "section-h" },
-    h("span", {}, "Capture · always recording"),
+    collapseBtn,
     h("em", { class: "cap-note" }, noteB, noteRest, " ", recordBtn));
 
   // The band is itself a data display (the user's invariant): a compressed sideways overview
@@ -60,6 +64,21 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const band = h("div", { class: "cap-band" }, canvas, marksLayer, ringTrack, selLayer, playhead, livePill);
 
   el.replaceChildren(head, band);
+
+  // ---- collapse (T-391) ----
+  // Collapsing hides the overview band and shrinks this panel's own row to a header-height strip
+  // (`.cap-collapsed` on `.centre`, base.css). It never touches the two edge navigators: their
+  // thickness is fixed to match this panel's *expanded* size, on a separate grid row/column that
+  // `.cap-collapsed` does not mention — folding this panel away must not shrink an unrelated control.
+  collapseBtn.addEventListener("click", () => store.set(setCaptureCollapsed(!store.get().captureCollapsed)));
+  store.select((s) => s.captureCollapsed, (collapsed) => {
+    el.classList.toggle("collapsed", collapsed);
+    el.parentElement?.classList.toggle("cap-collapsed", collapsed);
+    band.hidden = collapsed;
+    chev.textContent = collapsed ? "▸" : "▾";
+    collapseBtn.setAttribute("aria-expanded", String(!collapsed));
+    collapseBtn.title = collapsed ? "Show the capture overview" : "Hide the capture overview";
+  }, { immediate: true });
 
   // The capture window the whole band is laid out on, from the backend. `null` = not answered, or
   // this server has no capture window: the band then scrubs nothing rather than inventing a span.

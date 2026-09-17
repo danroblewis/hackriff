@@ -36,19 +36,24 @@ export interface ShellState {
   toast: { text: string; seq: number };
   /** Open anomaly count for the Review button's badge (`GET /api/anomalies?status=open`, §4.1). */
   openAlarms: number;
+  /** T-391: whether the Capture panel's header disclosure is collapsed. A per-viewer display
+   * preference like `mode`/`theme` — persisted the same way, never something the backend needs — so
+   * folding the panel away survives a reload instead of resetting every time. */
+  captureCollapsed: boolean;
 }
 
 /** Per-viewer preferences kept in localStorage (never state that must persist). */
-export interface Prefs { mode: Mode; theme: Theme }
+export interface Prefs { mode: Mode; theme: Theme; captureCollapsed: boolean }
 
 export function parsePrefs(raw: string | null): Prefs {
-  const d: Prefs = { mode: "explore", theme: "system" };
+  const d: Prefs = { mode: "explore", theme: "system", captureCollapsed: false };
   if (!raw) return d;
   try {
     const p = JSON.parse(raw) as Partial<Prefs>;
     return {
       mode: p.mode === "decode" || p.mode === "history" ? p.mode : "explore",
       theme: p.theme === "dark" || p.theme === "light" ? p.theme : "system",
+      captureCollapsed: p.captureCollapsed === true,
     };
   } catch {
     return d;
@@ -62,6 +67,7 @@ export const shellInitial = (prefs: Prefs): ShellState => ({
   nav: { gotoHz: null, seq: 0 },
   toast: { text: "", seq: 0 },
   openAlarms: 0,
+  captureCollapsed: prefs.captureCollapsed,
 });
 
 export const setMode = (mode: Mode) => (): Partial<AppState> => ({ mode });
@@ -72,3 +78,7 @@ export const cycleTheme = (s: AppState): Partial<AppState> => ({ theme: THEMES[(
 export const requestGoto = (hz: number) => (s: AppState): Partial<AppState> => ({ nav: { gotoHz: hz, seq: s.nav.seq + 1 } });
 
 export const toast = (text: string) => (s: AppState): Partial<AppState> => ({ toast: { text, seq: s.toast.seq + 1 } });
+
+/** T-391: fold or unfold the Capture panel's overview band. Pure state only — capture/index.ts
+ * reads it back to hide the band and to toggle the layout class the panel's row size depends on. */
+export const setCaptureCollapsed = (collapsed: boolean) => (): Partial<AppState> => ({ captureCollapsed: collapsed });
