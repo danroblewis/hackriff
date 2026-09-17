@@ -3635,3 +3635,58 @@ from that route in exactly the way `bias_tee` was, filed as **T-381**.
 are APFS clones sharing most blocks — `du` reports 42 GB each and the true unique cost is far smaller.
 Holding launches at exactly the floor rather than seeding a third worktree; the cap is a maximum, not
 a target, and every time I have treated it as a target today the disk has gone to single digits.
+
+### B0.659 — T-379: the sidebars were never broken; the clock was (2026-09-16)
+
+Merged at `7ea090c`. The user said the black waterfall, the fixed-size grey block and the empty
+sidebars were **one failure**. They were right, and the shared cause is better than any of the three
+symptoms suggested.
+
+**The Candidate list re-derived perfectly — for a window the capture never covered.** Measured against
+a running server on the 915 MHz fixture:
+
+    capture window 1789297678..1789297798   wall now 1789604113   offset 306,315 s
+    candidates, no window          : 5
+    candidates, CAPTURE-clock 21 s : 4      <- what the waterfall shows
+    candidates, WALL-clock 21 s    : 0      <- what the UI actually sent
+
+The **4** is what makes this a diagnosis rather than a guess: the predicate works, so the mechanism was
+never the problem. The window came from `Date.now()`, three and a half days out. And the corroboration
+settles it beyond argument — **the capture band beside it queries the same route on the capture clock
+and its marks rendered.** Same data, two clocks, one surface drawing and one not.
+
+The other two symptoms had their own small causes and the same shape: `wf.reset()` writes `-1e30`,
+which misses the shader's `UNOBSERVED_DB` grey band and falls through to `cmap(0)` — so going Live
+painted black rather than grey, with no backfill; and the frequency navigator never subscribed to the
+time cursor, so scrubbed back it reported coverage for the **live edge** and greyed bands that had been
+observed at the time being viewed.
+
+`REVIEW_WINDOW_S` is deleted. `viewWindow()` is the waterfall's own `historyWindow` for every surface,
+which is what "one window" has to mean in code rather than in prose. The live edge is **`null`** when
+neither the spectrum rows nor `/api/timeline` answered — no query is sent rather than a plausible one,
+which is the same instinct as `BiasTee::Unknown` and `Coverage::Unobserved`, now in the client.
+
+Four emptinesses, four sentences, asked from `/api/coverage` for **exactly** the surface's window and
+only when it came back empty — and a coverage answer that never arrived **stays unknown rather than
+hardening into a measurement claim**. The three are asserted **pairwise distinct**, and restoring the
+wall-clock fallback fails three tests. The agent named its own control in the source:
+`THE CONTROL THAT MATTERS: a window that DOES hold data renders its rows`. Without it, every other
+assertion here is satisfiable by an always-empty sidebar that explains itself beautifully.
+
+Three follow-ups, and one of them is not a missing render. **T-385**: the focus panel caches by emitter
+id only, so a row merely **outside the window** renders as *"no longer in the inventory"*. That is a
+**false claim about the user's data** — the system asserting something it did not measure, which is
+the failure exploration-first exists to prevent. Filed at `high` with the requirement that a genuinely
+deleted emitter must still say so.
+
+**T-384 launched** as the open half: the output panel, decode inspector, status feed, pipelines and
+dock are live-edge-only, *"the feed opener exposes no history form, so no caller can ask"*, and the
+root is that `GET /api/inventory/{id}/decode` **has no time parameter at all** while
+`/api/captures/{id}/frames?from_t=&to_t=` already exists and the UI is unaware of it. Its brief makes
+the route choice an explicit deliverable, and carries the one invariant T-379 did not have to respect:
+re-deriving a decode view must **not re-decode** what is already done.
+
+**T-386** groups the rest of the census, with one judgement left open rather than assumed: the History
+catalogue renders its own wall-clock window, and by the user's own invariant the durable all-time
+catalogue is a **separate surface** — so whether it should follow the cursor at all must be settled
+before it is "fixed" into the view window.
