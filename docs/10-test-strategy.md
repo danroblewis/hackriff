@@ -255,6 +255,12 @@ base worth trusting and runs the full gate, so `main` - the branch everything el
 - is always verified whole. Renames and deletions count as touching the path (both sides of a rename).
 An empty diff is a printed no-op, not an accidental full run.
 
+In practice, **run it in the task worktree before merging**, where the default source is exactly the
+branch's own diff. Untracked files count as changes on purpose - a new `newdir/thing.rs` nobody has
+`git add`ed is still a change, and leaving it out is the one way this could fail open - so a stray
+scratch file (or the untracked `tools/` in the main checkout) forces the full gate. That is visible
+rather than mysterious: it is printed as a deciding file, and `--base REF` or `--files …` overrides it.
+
 **It always prints its decision before running anything**, including the deciding files: a silent
 classifier is a worse version of the judgement it replaces, because nobody can see or challenge the
 choice. For a full gate it prints the files that *forced* it, which is the answerable question.
