@@ -77,6 +77,16 @@ export function gotoDecision(g: ax.Geometry | null, v: ax.View | null, hz: numbe
 export type DeviceAction = {
   kind: "retune";
   centerHz: number;
+  /**
+   * The span the window must open to (T-392), or null to keep the rate it is on.
+   *
+   * A frequency-navigator region-select names a whole capture configuration, not just a centre: the
+   * smallest achievable sample rate that covers the selection (`retunePlan`). A centre alone would
+   * put the selection inside a window of whatever width the radio happened to be at, which for a
+   * selection wider than the current rate does not cover it at all. Non-null and different from the
+   * rate in force means one extra device call, `POST /api/control/rate`, before the centre.
+   */
+  spanHz?: number | null;
   /** The view to restore once the new header arrives, when the request implies one. */
   want: ax.View | null;
   source: "goto" | "bookmark" | "edge-offer" | "navigator";
@@ -87,7 +97,8 @@ export const retuneAction = (
   centerHz: number,
   source: DeviceAction["source"],
   want: ax.View | null = null,
-): DeviceAction => ({ kind: "retune", centerHz, want, source });
+  spanHz: number | null = null,
+): DeviceAction => ({ kind: "retune", centerHz, spanHz, want, source });
 
 /** A retune may be tried when the device is live or its state hasn't loaded yet (the server then
  * answers `409 not_live` on a replay). */
@@ -137,6 +148,13 @@ export async function applyDeviceAction(ctx: AppContext, action: DeviceAction): 
   const centerHz = snapCenter(dev.centerGrid, action.centerHz) ?? Math.round(action.centerHz);
   store.set((s) => ({ live: { ...s.live, pendingView: action.want, retuneOffer: null } }));
   try {
+    // T-392: a configuration, not just a centre. The rate goes first so the last header the retune
+    // produces is the one carrying the requested centre, and it is skipped entirely when the window
+    // is already the right width — a rate change re-plumbs the capture, so it is not made idly.
+    const spanHz = action.spanHz ?? null;
+    if (spanHz !== null && Number.isFinite(spanHz) && spanHz > 0 && Math.round(spanHz) !== dev.sampleRateHz) {
+      await ctx.client.post("/api/control/rate", { sample_rate_hz: Math.round(spanHz) });
+    }
     await ctx.client.post("/api/control/center", { center_hz: centerHz });
     const on = store.get().device.deviceId;
     store.set(toast(`Retuning ${on ? `${on} ` : ""}to ${(centerHz / 1e6).toFixed(4)} MHz`));

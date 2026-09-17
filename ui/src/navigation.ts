@@ -144,6 +144,98 @@ export function detailOf(g: FrequencyGrid | null, spanHz: number): DetailSource 
   return "live-iq";
 }
 
+/**
+ * Whether `hz` is inside one of the grid's own bands — **not** "nearest band", which is what
+ * [`snapCenter`] answers.
+ *
+ * The two are different questions and only this one may refuse a gesture. `snapCenter` deliberately
+ * walks an out-of-band request *inward* to the nearest reachable point, so asking it "did this
+ * snap?" would call every out-of-range centre achievable at the band edge. A region-select that is
+ * genuinely off the end of what the front end (or, on a replay, the recording) covers has to be
+ * told apart from one that is merely off the synthesiser's grid.
+ */
+export function containsCenter(g: CenterGrid | null, hz: number): boolean {
+  if (!g || !Number.isFinite(hz)) return false;
+  return g.ranges_hz.some((r) => Array.isArray(r) && hz >= r[0] && hz <= r[1]);
+}
+
+/**
+ * The **smallest** achievable span that still covers `needHz`, or null when none does.
+ *
+ * "Smallest that covers" and "nearest" are different answers, and only the first is right for a
+ * region-select: a discrete ladder whose nearest entry is *narrower* than the region would open a
+ * window that cuts the selection in half, and a wider-than-necessary one would throw away
+ * resolution the front end could have given. So a discrete list takes the least entry `>= needHz`
+ * (the boundary counts as covering — a window exactly as wide as the region contains it), and a
+ * continuous rate range takes `needHz` itself lifted to the range's floor.
+ *
+ * Null is "no configuration covers this", which is one of the three refusals the user allows.
+ */
+export function smallestCoveringSpan(g: FrequencyGrid | null, needHz: number): number | null {
+  if (!g || !Number.isFinite(needHz) || !(needHz > 0)) return null;
+  const s = g.spans_hz;
+  if ("values" in s) {
+    let best: number | null = null;
+    for (const v of s.values) if (Number.isFinite(v) && v >= needHz && (best === null || v < best)) best = v;
+    return best;
+  }
+  if (!(s.max >= s.min)) return null;
+  return needHz <= s.max ? Math.max(s.min, needHz) : null;
+}
+
+/** Why no achievable configuration can capture a requested region. The whole list — anything not
+ * here **retunes** rather than refusing, which is the half of the invariant that is easy to lose. */
+export type RetuneRefusal =
+  /** No grid was reported, so nothing can be claimed achievable. */
+  | "no_grid"
+  /** The region's centre is outside every band the front end (or the recording) covers. */
+  | "center_out_of_range"
+  /** Wider than one live window: no single capture can hold it. */
+  | "span_too_wide";
+
+/** The capture configuration that would cover a region, or the reason none can. */
+export type RetunePlan =
+  | { ok: true; centerHz: number; spanHz: number; snappedCenter: boolean; source: DetailSource }
+  | { ok: false; reason: RetuneRefusal };
+
+/**
+ * The `(centre, span)` a front end would have to take to capture `[lo, hi]` — **the one navigator
+ * decision that commands the radio** (CLAUDE.md, the frequency navigator).
+ *
+ * Unlike time, which is always a view over IQ already captured, a frequency outside the current
+ * window can only be reached by tuning there. So this computes the config rather than offering one:
+ * centre at the region's centre snapped to the achievable grid, and the **smallest** sample
+ * rate/span that still covers the region *after* that snap (snapping moves the centre, and a span
+ * chosen before it could leave an edge of the selection outside the window).
+ *
+ * It refuses only when nothing can capture the region — the three [`RetuneRefusal`]s. Everything
+ * else is a retune.
+ */
+export function retunePlan(g: FrequencyGrid | null, lo: number, hi: number): RetunePlan {
+  if (!g) return { ok: false, reason: "no_grid" };
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || !(hi > lo)) return { ok: false, reason: "no_grid" };
+  const want = (lo + hi) / 2;
+  if (!containsCenter(g, want)) return { ok: false, reason: "center_out_of_range" };
+  // Refuse a span wider than one live window before snapping anything: the front end's
+  // instantaneous bandwidth is the hard bound, and `max_live_span_hz` is the backend's statement of
+  // it. An unreported bound is not evidence of a wide window, but it is not grounds to refuse
+  // either — the span ladder below then decides.
+  const max = g.max_live_span_hz;
+  if (max !== null && hi - lo > max) return { ok: false, reason: "span_too_wide" };
+  const snapped = snapCenter(g, want);
+  const centerHz = snapped ?? want;
+  // Cover the region *from the centre the radio will actually sit on*, not from the one asked for:
+  // a span picked before the snap can leave an edge of the selection outside the window, and on a
+  // coarse tuning grid that is not a rounding detail but a miss.
+  const needHz = 2 * Math.max(centerHz - lo, hi - centerHz);
+  // The fallback is for the one case where only the snap pushed it over the top rung: the region
+  // itself fits a live window, so the widest covering span is right and refusing would be a refusal
+  // about a fraction of a tuning step.
+  const spanHz = smallestCoveringSpan(g, needHz) ?? smallestCoveringSpan(g, hi - lo);
+  if (spanHz === null) return { ok: false, reason: "span_too_wide" };
+  return { ok: true, centerHz, spanHz, snappedCenter: snapped !== null, source: detailOf(g, spanHz) };
+}
+
 /** A state resolved against the grid, and which axes had to move to reach it. */
 export interface SnappedState {
   centerHz: number | null;
