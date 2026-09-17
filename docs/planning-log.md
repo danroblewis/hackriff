@@ -4466,3 +4466,52 @@ as scanned.*
 
 **The shape of the day**: the suites were green throughout all of it. Every one of these was found by a
 measurement someone was told to take.
+
+### B0.675 — five merges, and three assertions that could not have failed (2026-09-17)
+
+**T-417** (`d8eec14`) — the user reported that a retune tore down the spectrum stream, and **the re-plumb
+was not the culprit**. The bridge watched *one publisher*; a retune replaces it, so the bridge was
+watching a corpse while a live publisher sat beside it under the same stream id. The registry now stamps
+a generation and the bridge watches the **stream id**. The second half was not in the report and would
+have outlived the fix: a reconnecting client took the header only on the first message, so a client that
+survived the re-plumb **would have drawn the new window's data on the old window's geometry** — right
+pixels, wrong frequencies, and nothing to make it look wrong.
+
+**T-420** (`33aa2b7`) — the user's "tiny sliver". `historyRows()` emitted **one texture row per served
+time cell** into a 512-row ring that the shader maps over the whole pane, so the visible fraction was
+`nt/512`: **21/512 ≈ 4%** by default, **2%** on a ten-minute drag. The data was all there and correctly
+timestamped. A row now takes the cell **its own midpoint** falls in, so the span fills the pane and
+replication is explicit rather than incidental.
+
+**T-419** (`eaef9e6`) — `Tile::fold_child` took the **max** of `obs_s` across children. Measured: 1 kHz
+observed out of 16 kHz reported **1.0 coverage at every fold depth**. The part worth keeping is the test
+it wrote to *not* catch it: `a_parent_vs_child_assertion_would_not_have_caught_this`. A parent-vs-child
+check can only prove the fold is *a* fold — the buggy max satisfies it at every level. Truth has to come
+from **level 0**, and the control now does.
+
+**T-249** (`ca40832`) — `analog_classes` was the last hand-written within-family table, and both failures
+were conjunctions that **could not fire**. `cw` required `sigma_af < 0.02`, written from noiseless
+physics; the IF estimator is noise-limited and follows a clean 1/√ρ law that does not reach that bound
+until **~28 dB, 18 dB above the gate**. `ssb` lost an **exact tie**: `am`'s "there is a carrier" term
+read `carrier_line_db > 14`, but that is a CFAR *strongest-line* statistic, not a carrier detector, and a
+suppressed-carrier SSB emission's loudest audio tone reads 28–40 dB on it. Both scored 0.7 and the tie
+broke **alphabetically** — which is exactly why `ssb` held top-2 0.75 while its top-1 was 0.000: the
+right answer was present, ranked second by nothing but its name. Class wrong-label 0.3500 → 0.0056,
+family floors bit-identical. ADR-0016 §2's guess (`ssb/cw +5`) named the wrong fragile class: **`am`** is
+the one needing the margin.
+
+**T-418** (`af20ad3`) — `freqZoomTarget` asked whether a selection lay **inside** the tuned window and
+returned a pure display zoom when it did. Inside-versus-outside is a **proxy** for the real question and
+gets narrowing backwards: the 200 kHz drag at 101.3 in a 2.4 MHz window is precisely the case that should
+buy detail, and was the one case guaranteed to buy none. Resolution now comes from a **longer transform**
+(488 → 30.5 Hz/bin), never an impossible narrow capture, and the off-DC offset is derived rather than
+picked — `span/4`, the point maximally far from the LO spike at one end of the half-band and the
+anti-alias roll-off at the other.
+
+**The shape of this batch**: three of the five were **assertions structurally incapable of catching their
+own subject** — a parent-vs-child fold check satisfied by the bug at every level, a conjunct whose
+threshold sits 18 dB beyond the measurement's noise floor, and a geometry proxy standing in for the
+question actually being asked. A fourth arrived the same day from the other direction: the load-flake
+test that timed **53.2 s alone yesterday and 21.1 s alone today** against a fixed 60 s budget. A bound
+over a quantity that swings 2.5× is not measuring the code either. **T-383** now carries all five
+instances with **T-344** folded in, because they are one problem.
