@@ -97,7 +97,21 @@ a pyramid is where they are easiest to lose.
 - **Never imply resolution the front end did not capture.** A wide zoom is **survey-history overview**,
   not live IQ, and the view must distinguish them (T-334's `resolution.source`).
 
-## 5. Open design questions — to settle before building
+## 5. Design questions — §5.1 and §5.2 decided by the user, 2026-09-17
+
+**The two gating questions are settled, Google-Maps-style.** The remaining three are settled *within*
+that framework as part of the design work; they do not gate and do not need the user.
+
+**§5.1 Tile addressing — DECIDED: fixed `(zoom, t_index, f_index)` map tiles.** Not the per-axis budget
+idiom for this view. (The budget idiom stays correct where it already lives — `/api/timeline`'s
+`columns`, `/api/floor`'s `max_steps` — and T-397 showed the *fold* composes on both axes already. This
+decision is about how the big view's **tiles are addressed**, not how a fold is computed.)
+
+**§5.2 Downsample timing — DECIDED: precomputed at seal time for the coarse zoom levels, on demand at
+the live/finest edge**, with **client-side tile eviction** and a **tiles-in-flight cap** for bounded
+browser memory. Storage cost accepted (140 GB free at the time of the decision). This matches how the
+history pyramid already tiers, so the coarse levels are a seal-time product like every other tier, and
+only the edge — where data is still arriving and cannot be precomputed — is computed on request.
 
 1. **Tile addressing.** Fixed `(zoom, t_index, f_index)` like a map, or per-axis budgets like
    `/api/timeline`'s `columns` and `/api/floor`'s `max_steps`? The budget idiom is already established
