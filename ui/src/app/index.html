@@ -28,6 +28,11 @@
     <span class="conn" id="conn" role="status" hidden></span>
     <div class="bar-spacer"></div>
     <form class="goto" id="goto-form" autocomplete="off"><label for="goto">Go to</label><input id="goto" class="mono" placeholder="101.3 MHz" inputmode="decimal"></form>
+    <!-- T-409: tuning nudges. A signal on the centre frequency sits on the tuner's own DC/LO
+         leakage spike and cannot be cleanly demodulated there; these shift the tuned centre by
+         1/8, 1/4 or 1/2 of the span to move it off DC while keeping it in the window. A press is
+         an explicit device action (T-343), never a gesture. -->
+    <div class="nudge" data-slot="nudge" role="group" aria-label="Tuning nudges"></div>
     <button class="mini" type="button" id="review-btn" aria-pressed="false">Review</button>
     <button class="mini" type="button" id="theme-btn">Theme</button>
   </header>

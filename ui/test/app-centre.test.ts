@@ -645,8 +645,10 @@ test("waterfall row preparation: max-pool decimation is exact and cheap at 16k t
 });
 
 test("centre mounts every centre slot; CSS is scoped to them with no wide min-width", () => {
-  // T-340 adds the two edge navigators, one parallel to each waterfall axis.
-  assert.deepEqual(Object.keys(mounts).sort(), ["axis", "freqnav", "live", "timenav"]);
+  // T-340 adds the two edge navigators, one parallel to each waterfall axis; T-409 adds the tuning
+  // nudges, which live in the top bar (hence no `.centre`-scoped CSS for them) but move the tuned
+  // centre, so they are a centre-area mount and reach the radio through view.ts's one gate.
+  assert.deepEqual(Object.keys(mounts).sort(), ["axis", "freqnav", "live", "nudge", "timenav"]);
   const css = readFileSync("src/app/centre/centre.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   const selectors = [...css.matchAll(/([^{}@]+)\{[^{}]*\}/g)].map((m) => m[1].trim()).filter((s) => s && !s.startsWith("@"));
   assert.ok(selectors.length > 10);

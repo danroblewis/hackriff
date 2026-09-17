@@ -114,7 +114,8 @@ export function gotoDecision(g: ax.Geometry | null, v: ax.View | null, hz: numbe
  *
  * `source` names the explicit user request it came from, so the toast (and any future log) can say
  * what moved the radio. There is deliberately no variant for a gesture: a pan produces a
- * `RetuneOffer` for the user to accept, never a `DeviceAction`.
+ * `RetuneOffer` for the user to accept, never a `DeviceAction`. (`"nudge"` is T-409's button press —
+ * a discrete, explicit action like the offer button, not the continuation of anything.)
  */
 export type DeviceAction = {
   kind: "retune";
@@ -131,7 +132,7 @@ export type DeviceAction = {
   spanHz?: number | null;
   /** The view to restore once the new header arrives, when the request implies one. */
   want: ax.View | null;
-  source: "goto" | "bookmark" | "edge-offer" | "navigator";
+  source: "goto" | "bookmark" | "edge-offer" | "navigator" | "nudge";
 };
 
 /** A retune of the live device to `centerHz`, from the explicit user request `source`. */

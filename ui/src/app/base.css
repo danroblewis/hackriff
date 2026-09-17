@@ -86,6 +86,22 @@ button, input, select { font: inherit; color: inherit; }
 .goto input { background: transparent; border: 0; width: 100px; font-family: var(--mono); outline: none; }
 .goto label { color: var(--dim); font-size: 11px; }
 
+/* T-409: tuning nudges. Six buttons, left-moving first, reading along the frequency axis they
+   move. Two states carry meaning and neither is decided for the user:
+     [data-ideal]  — the quarter-span nudge, which lands a centred signal midway between the LO
+                     spike at DC and the anti-alias roll-off at the edge (the derived ideal);
+     [data-hazard="edge"] — the half-span nudge, which lands it AT the edge, in the skirt. Amber,
+                     the same colour this UI already uses for "this moves the radio" (.fn-offer).
+   A nudge that cannot be taken in full is `disabled`, never clamped (see nudge.ts). */
+.nudge { display: flex; align-items: center; gap: 3px; }
+.nudge-label { color: var(--dim); font-size: 11px; margin-right: 3px; white-space: nowrap; }
+.nudge-btn { border: 1px solid var(--line); background: var(--ground); color: var(--muted); border-radius: 5px; padding: 2px 6px; font: 12px var(--ui); line-height: 1.2; cursor: pointer; }
+.nudge-btn:hover:not(:disabled) { color: var(--text); border-color: var(--dim); }
+.nudge-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.nudge-btn[data-ideal] { color: var(--text); border-color: var(--dim); font-weight: 600; }
+.nudge-btn[data-hazard="edge"]:not(:disabled) { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
+@media (pointer: coarse) { .nudge-btn { padding: 6px 9px; } }
+
 /* ---- Explore grid ---- */
 .main { display: grid; grid-template-columns: 290px minmax(0,1fr) 330px; min-height: 0; }
 .side { border-right: 1px solid var(--line); background: var(--panel); display: grid; grid-template-rows: minmax(0,1fr) minmax(0,150px); min-height: 0; }

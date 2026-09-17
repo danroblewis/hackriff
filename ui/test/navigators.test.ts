@@ -674,7 +674,9 @@ test("T-340: placement clips to the extent, clamps pans, and keeps zooms inside 
 // ---------------------------------------------------------------------------
 
 test("T-340: the centre area mounts both navigators, and their CSS stays scoped to their slots", () => {
-  assert.deepEqual(Object.keys(mounts).sort(), ["axis", "freqnav", "live", "timenav"]);
+  // T-409 added `nudge`: the tuning-nudge buttons, which move the tuned centre and so belong to
+  // the centre area (they reach the radio through view.ts's gate, never a gesture).
+  assert.deepEqual(Object.keys(mounts).sort(), ["axis", "freqnav", "live", "nudge", "timenav"]);
   assert.deepEqual(Object.keys(centreInitial()).sort(), ["live", "navGrid"]);
   const html = readFileSync("src/app/index.html", "utf8");
   // Parallel to their axes: the time bar beside the waterfall, the frequency bar below the axis.
