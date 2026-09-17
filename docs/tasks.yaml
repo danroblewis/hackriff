@@ -8546,6 +8546,57 @@ tasks:
       Control worth having: a nudge and its opposite return the tune to where it
       started (modulo one snap step), so the buttons are navigable rather than a
       one-way drift.
+  - id: T-410
+    title: Presence is an interval with endpoints, not an accumulation of observations - box runs to the live edge until an END is detected
+    milestone: M2-hardening
+    status: in-progress
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: [T-388, T-362]
+    acceptance: |
+      USER 2026-09-16 (message reached this session truncated at the front; the
+      substance below is what arrived and is unambiguous - CONFIRM THE FRAMING).
+      THE MODEL: a signal presence box extends FROM START STRAIGHT TO THE LIVE EDGE /
+      TOP OF THE WATERFALL BY ASSUMPTION, capping only on a REAL DETECTED END. The
+      stream needs only START / END / REOPEN events - NEVER a per-poll presence bump to
+      advance the box top.
+      EXPLICITLY REJECTED BY THE USER, record as rejected rather than re-proposing:
+        - rapidly re-testing presence;
+        - gating the next waterfall row on an end-decision.
+      SCOPE: presence.rs / the emitter model (docs/07), the detection END-DETECTOR, the
+      stream contract for start/end/reopen events (ADR-0004), and the UI box rendering.
+      ADR IF IT TOUCHES THE PRESENCE CONTRACT - and it does, see below.
+      THIS INVERTS A CONSTRAINT THE COORDINATOR IMPOSED ON T-388, DELIBERATELY. I told
+      that agent "a box drawn to the live edge on the ASSUMPTION the signal is still
+      there is a claim about air nobody measured", and it built three client-side
+      refusals, the third of which is exactly what must now change:
+      ui/src/presence.ts:65 - "Not contiguous. An extension whose span starts AFTER the
+      end on screen describes a different stretch of air, with silence in between."
+      The user's model is coherent and different, not looser: presence is an INTERVAL
+      WITH ENDPOINTS, so the measurement is the START event plus the ABSENCE OF AN END.
+      That is how tracking works - a track is open until it closes. The old model treated
+      presence as accumulated observations, where anything not yet observed is not yet
+      claimed. BOTH ARE DEFENSIBLE; THEY ARE DIFFERENT CONTRACTS, which is why this needs
+      an ADR rather than an edit.
+      THE LOAD-BEARING PIECE IS THE END DETECTOR, and the honesty burden moves onto it.
+      Under the old model a late end-decision cost nothing - the box simply stopped
+      growing. Under this one, a late or missed end means THE BOX OVER-CLAIMS AIR THAT
+      WAS SILENT, and it over-claims all the way to the live edge. So: what is the end
+      detector's latency, what is its false-negative rate, and what does the box do while
+      an end is suspected but not decided? State these, because they are now the
+      accuracy of the display.
+      REOPEN NEEDS A DEFINITION: what distinguishes a reopen from a new start? There is a
+      gap threshold in there somewhere and it should be derived, not picked. Note T-390
+      already relies on track close for its fragment rule, and T-398/T-403 found that a
+      permanently-on emitter HAS NO CLOSE until the 60 s idle timeout - so "end" is
+      currently a slow and partly arbitrary notion, and this ticket depends on it being
+      better than that.
+      KEEP: T-388's other two refusals (no interval on the row conjures no box; a
+      reordered record can never SHORTEN a box) and its rate bound. Keep the paused-view
+      behaviour - no socket while paused - and T-362's rule that a box carries times, not
+      screen positions.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
