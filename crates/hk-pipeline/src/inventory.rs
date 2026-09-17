@@ -31,6 +31,20 @@
 //! - **Continuous and trusted:** a closed track with at least `min_on_air_s` on air, duty cycle at
 //!   least `min_duty_cycle`, at most `max_suspect_fraction` suspect members (spur, image, IMD,
 //!   clipping) and at least `min_confirmed_detections` trust-confirmed detections.
+//! - **Verified emission (T-398):** a demodulation in `verified_modes` whose subcarrier loop
+//!   *locked* — for WFM, the 19 kHz stereo pilot tracked by the PLL to within
+//!   `pilot_tolerance_hz`, at `min_lock_quality` or better, inside `verified_bandwidth_hz` of
+//!   occupied bandwidth.
+//!
+//! The third route exists because the first two left a permanently-on emitter with **no live route
+//! at all**: its "continuous and trusted" evidence is only weighed when its track *closes*, so a
+//! station that never stops transmitting and carries no decodable identity stayed a candidate
+//! until the track idled out (`idle_timeout_s`, 60 s) — tens of seconds after a human, or the
+//! demodulator itself, could see what it was. It is a short-circuit on *positive* evidence rather
+//! than a relaxation of the other two: a locked pilot is a coherent subcarrier at a standardised
+//! offset, which a noise shelf, an intermodulation product or a skirt fragment does not have
+//! however long it is watched. Absent the lock the route does not fire and the other two decide
+//! exactly as before.
 //!
 //! Intermittent, weak or suspect emitters stay candidates until a user promotes them. User deletion
 //! and the re-detection rule are the repository's (`hk_model` lifecycle).
@@ -168,6 +182,28 @@ pub struct ConfirmPolicy {
     pub max_suspect_fraction: f64,
     /// Trust-confirmed member detections needed. Default 1.
     pub min_confirmed_detections: u64,
+    /// T-398: confirm on a **verified emission** — a demodulated mode whose subcarrier loop
+    /// actually locked. See [`ConfirmPolicy::decide`] for why this is positive evidence and not a
+    /// lowered threshold.
+    pub verified: bool,
+    /// Demodulator modes a lock may confirm. Default `wfm`.
+    pub verified_modes: Vec<String>,
+    /// Mean `cos e` of the locked loop needed, 0–1. Default 0.6.
+    pub min_lock_quality: f64,
+    /// Occupied bandwidth the verified mode implies, Hz. Default 50–400 kHz: an outer sanity bound
+    /// on the demodulator's own call, whose lower edge is `hk_demod`'s `wfm_pilot_min_obw_hz` —
+    /// the width at which that crate already accepts "pilot present, therefore WFM".
+    ///
+    /// Deliberately *not* `family::WIDEBAND_FM_OBW_HZ` (106–400 kHz). That window describes real
+    /// program-modulated broadcast FM, and occupancy alone has to carry the whole decision there.
+    /// Here the pilot lock carries it, and the width only has to rule out something narrowband
+    /// that happens to contain a 19 kHz component.
+    pub verified_bandwidth_hz: [f64; 2],
+    /// Nominal subcarrier the loop locks to, Hz. Default 19 000 (the FM stereo pilot).
+    pub pilot_nominal_hz: f64,
+    /// Largest offset of the measured subcarrier from [`Self::pilot_nominal_hz`], Hz. Default 100
+    /// — the pilot PLL's own pull-in range, so anything outside it never locked here at all.
+    pub pilot_tolerance_hz: f64,
 }
 
 impl Default for ConfirmPolicy {
@@ -182,6 +218,37 @@ impl Default for ConfirmPolicy {
             min_duty_cycle: 0.8,
             max_suspect_fraction: hk_detect::track::inventory::SUSPECT_FRACTION,
             min_confirmed_detections: 1,
+            verified: true,
+            verified_modes: vec!["wfm".into()],
+            min_lock_quality: 0.6,
+            verified_bandwidth_hz: [50e3, 400e3],
+            pilot_nominal_hz: 19_000.0,
+            pilot_tolerance_hz: 100.0,
+        }
+    }
+}
+
+/// T-398: a demodulation whose subcarrier loop locked, as the confirmation rule reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifiedEmission {
+    /// Demodulator mode, e.g. `wfm`.
+    pub mode: String,
+    /// Mean `cos e` while the loop was locked, 0–1. `None` when it never locked.
+    pub lock_quality: Option<f64>,
+    /// Measured subcarrier frequency, Hz. `None` when the loop never locked (T-037b).
+    pub pilot_hz: Option<f64>,
+    /// Occupied bandwidth the session measured, Hz.
+    pub bandwidth_hz: Option<f64>,
+}
+
+impl VerifiedEmission {
+    /// From a stored demodulation session.
+    pub fn of(d: &hk_model::decode::Demodulation) -> Self {
+        Self {
+            mode: d.mode.clone(),
+            lock_quality: d.lock_quality,
+            pilot_hz: d.params.pilot_hz,
+            bandwidth_hz: d.params.bandwidth_hz,
         }
     }
 }
@@ -219,10 +286,38 @@ pub struct ConfirmEvidence {
     pub identity: Option<(IdentityScheme, u64)>,
     /// The track just closed for this emitter, if the review follows a track close.
     pub track: Option<TrackTrust>,
+    /// T-398: the emitter's latest demodulation session, if a chain has run one
+    /// ([`Repository::latest_linked_demodulation_for_emitter`]).
+    pub verified: Option<VerifiedEmission>,
 }
 
 impl ConfirmPolicy {
     /// The confirmation reason, or `None` (stay a candidate).
+    ///
+    /// Three disjunctive routes, strongest first.
+    ///
+    /// **A — decoded identity.** A CRC-valid decode carrying a transmitter identity.
+    ///
+    /// **B — continuous and trusted.** A *closed* track that was on air long enough, at a high
+    /// enough duty cycle, with few enough suspect members. It needs the close because a duty cycle
+    /// is only meaningful over a finished life; an open track re-offers with `track: None`.
+    ///
+    /// **C — verified emission (T-398).** A demodulation whose subcarrier loop *locked*. This is
+    /// the fast route, and it is deliberately **not** route B with lower numbers: it confirms on
+    /// positive physical evidence rather than on less of the same evidence. A 19 kHz pilot that a
+    /// PLL tracked to within its pull-in range, with a mean `cos e` above
+    /// [`Self::min_lock_quality`], inside an emission of WFM occupied bandwidth, is a coherent
+    /// subcarrier at a standardised offset — something a noise shelf, an intermodulation product
+    /// or a skirt fragment cannot produce however long you watch it. (The stationary 75 kHz,
+    /// 4.6 dB noise shelf of T-316 has duty cycle 1.0 and would satisfy route B's occupancy for
+    /// ever; it has no pilot, so route C never sees it.) Absent the lock the route simply does not
+    /// fire and A and B decide as before — nothing is confirmed on a family the measurement did
+    /// not support.
+    ///
+    /// Why it matters beyond latency: routes A and B are the *only* routes a permanently-on
+    /// emitter had, and B cannot fire until the track closes — so a continuous station with no
+    /// decodable identity (no RDS, weak RDS, or a chain that lost the admission race) stayed a
+    /// candidate until its track idled out, tens of seconds later. That is the ~40 s the user saw.
     pub fn decide(&self, ev: &ConfirmEvidence) -> Option<String> {
         if !self.enabled {
             return None;
@@ -252,7 +347,43 @@ impl ConfirmPolicy {
                 tr.confirmed_detections
             ));
         }
-        None
+        self.verified_reason(ev.verified.as_ref())
+    }
+
+    /// Route C: the reason a locked demodulation confirms, or `None`. Every clause is a positive
+    /// measurement that must be present — a missing one is a refusal, never a pass.
+    fn verified_reason(&self, v: Option<&VerifiedEmission>) -> Option<String> {
+        if !self.verified {
+            return None;
+        }
+        let v = v?;
+        if !self.verified_modes.contains(&v.mode) {
+            return None;
+        }
+        // `lock_quality` and `pilot_hz` are both `Some` only once the loop actually locked
+        // (`PilotReport`, T-037b): a pilot-shaped bump that never held phase leaves them `None`.
+        // Every comparison is written so a NaN measurement refuses rather than passes.
+        let q = v.lock_quality?;
+        if q.is_nan() || q < self.min_lock_quality {
+            return None;
+        }
+        let pilot = v.pilot_hz?;
+        let offset = (pilot - self.pilot_nominal_hz).abs();
+        if offset.is_nan() || offset > self.pilot_tolerance_hz {
+            return None;
+        }
+        let bw = v.bandwidth_hz?;
+        let [lo, hi] = self.verified_bandwidth_hz;
+        if bw.is_nan() || bw < lo || bw > hi {
+            return None;
+        }
+        Some(format!(
+            "verified {} emission: {:.0} Hz subcarrier locked (quality {q:.2}) in {:.0} kHz \
+             occupied bandwidth",
+            v.mode,
+            pilot,
+            bw / 1e3,
+        ))
     }
 }
 
@@ -453,6 +584,15 @@ impl TrackInventory {
         let evidence = ConfirmEvidence {
             identity: repo.identity_decode_evidence(id)?,
             track,
+            // T-398: only read when a route C confirmation is actually possible, so the common
+            // review (a live offer for an emitter no chain has demodulated) costs no extra query.
+            verified: if self.policy.verified {
+                repo.latest_linked_demodulation_for_emitter(id)?
+                    .as_ref()
+                    .map(VerifiedEmission::of)
+            } else {
+                None
+            },
         };
         let Some(reason) = self.policy.decide(&evidence) else {
             return Ok(());
@@ -944,28 +1084,33 @@ mod tests {
         let none = ConfirmEvidence {
             identity: None,
             track: None,
+            verified: None,
         };
         assert_eq!(p.decide(&none), None);
         // A transmitter identity with a valid decode confirms; the framer's signature does not.
         let rds = ConfirmEvidence {
             identity: Some((IdentityScheme::RdsPi, 3)),
             track: None,
+            verified: None,
         };
         assert!(p.decide(&rds).unwrap().contains("rds-pi"));
         let framing = ConfirmEvidence {
             identity: Some((IdentityScheme::Other("hk-framing".into()), 20)),
             track: None,
+            verified: None,
         };
         assert_eq!(p.decide(&framing), None);
         let no_valid = ConfirmEvidence {
             identity: Some((IdentityScheme::RdsPi, 0)),
             track: None,
+            verified: None,
         };
         assert_eq!(p.decide(&no_valid), None);
         // Continuous and trusted confirms; intermittent, short, suspect or unverified do not.
         let ev = |track| ConfirmEvidence {
             identity: None,
             track: Some(track),
+            verified: None,
         };
         assert!(p.decide(&ev(steady())).unwrap().starts_with("continuous"));
         for (what, t) in [
@@ -1016,5 +1161,108 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "min_duty_cycle": 0.5 })).unwrap();
         assert_eq!(parsed.min_duty_cycle, 0.5);
         assert_eq!(parsed.min_on_air_s, 2.0);
+    }
+
+    /// T-398 route C. Each case removes exactly one piece of positive evidence from a signal that
+    /// otherwise confirms, so the test says what the rule *requires*, not merely that it fires.
+    #[test]
+    fn verified_emission_confirms_only_on_a_real_lock() {
+        let p = ConfirmPolicy::default();
+        let locked = VerifiedEmission {
+            mode: "wfm".into(),
+            lock_quality: Some(0.95),
+            pilot_hz: Some(18_999.9),
+            bandwidth_hz: Some(221e3),
+        };
+        let ev = |v: VerifiedEmission| ConfirmEvidence {
+            identity: None,
+            track: None,
+            verified: Some(v),
+        };
+
+        let reason = p.decide(&ev(locked.clone())).unwrap();
+        assert!(reason.contains("verified wfm"), "{reason}");
+        assert!(reason.contains("19000 Hz"), "{reason}");
+
+        for (what, v) in [
+            // A pilot-shaped bump the loop never held: `PilotReport` leaves both of these `None`
+            // unless it locked, so this is the difference between a lock and a peak.
+            (
+                "never locked",
+                VerifiedEmission {
+                    lock_quality: None,
+                    ..locked.clone()
+                },
+            ),
+            (
+                "no pilot frequency",
+                VerifiedEmission {
+                    pilot_hz: None,
+                    ..locked.clone()
+                },
+            ),
+            (
+                "poor lock",
+                VerifiedEmission {
+                    lock_quality: Some(0.2),
+                    ..locked.clone()
+                },
+            ),
+            // 19.5 kHz is not the stereo pilot, whatever locked to it.
+            (
+                "wrong subcarrier",
+                VerifiedEmission {
+                    pilot_hz: Some(19_500.0),
+                    ..locked.clone()
+                },
+            ),
+            (
+                "too narrow",
+                VerifiedEmission {
+                    bandwidth_hz: Some(12e3),
+                    ..locked.clone()
+                },
+            ),
+            (
+                "no bandwidth measured",
+                VerifiedEmission {
+                    bandwidth_hz: None,
+                    ..locked.clone()
+                },
+            ),
+            // The demodulator did not call it WFM, so its pilot machinery did not decide this.
+            (
+                "another mode",
+                VerifiedEmission {
+                    mode: "2fsk".into(),
+                    ..locked.clone()
+                },
+            ),
+            (
+                "unmeasurable",
+                VerifiedEmission {
+                    lock_quality: Some(f64::NAN),
+                    ..locked.clone()
+                },
+            ),
+        ] {
+            assert_eq!(p.decide(&ev(v)), None, "{what}");
+        }
+
+        // The route can be switched off without disturbing the other two.
+        let off = ConfirmPolicy {
+            verified: false,
+            ..ConfirmPolicy::default()
+        };
+        assert_eq!(off.decide(&ev(locked.clone())), None);
+        assert!(
+            off.decide(&ConfirmEvidence {
+                identity: Some((IdentityScheme::RdsPi, 3)),
+                track: None,
+                verified: Some(locked),
+            })
+            .unwrap()
+            .contains("rds-pi")
+        );
     }
 }

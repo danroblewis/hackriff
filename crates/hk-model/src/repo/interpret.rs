@@ -195,6 +195,40 @@ impl Repository {
         .next())
     }
 
+    /// The emitter's latest demodulation session **however it was attached** (T-398): by the
+    /// session's own `emitter_id`, or by an `emitter_link` naming it.
+    ///
+    /// [`Self::latest_demodulation_for_emitter`] finds only the first, which is what `GET
+    /// /api/inventory/{id}` wants. A chain that places its emitter from *mode evidence* writes the
+    /// Demodulation **before** the emitter exists, so that row's `emitter_id` stays null and only
+    /// the link records the attachment — exactly the case the T-398 confirmation rule runs on, a
+    /// pilot-locked WFM window identified a second into the emission and seconds before any RDS.
+    /// Follows merges the same way.
+    pub fn latest_linked_demodulation_for_emitter(
+        &self,
+        emitter: EmitterId,
+    ) -> Result<Option<Demodulation>, RepoError> {
+        let id = self.live_emitter_id(emitter)?;
+        Ok(bodies::<Demodulation, _>(
+            &self.conn,
+            "WITH RECURSIVE absorbed(id) AS ( \
+                 SELECT ?1 \
+                 UNION SELECT e.emitter_id FROM emitter e JOIN absorbed a ON e.merged_into = a.id \
+             ) \
+             SELECT body FROM demodulation \
+             WHERE emitter_id IN (SELECT id FROM absorbed) \
+                OR demod_id IN ( \
+                     SELECT target_id FROM emitter_link \
+                     WHERE target_kind = 'demodulation' \
+                       AND emitter_id IN (SELECT id FROM absorbed) \
+                   ) \
+             ORDER BY t_end DESC, demod_id DESC LIMIT 1",
+            params![blob(id)],
+        )?
+        .into_iter()
+        .next())
+    }
+
     /// Appends a decode. Refuses `content: Some` under a class that does not permit content
     /// ([`RepoError::GatedContent`]); the metadata-only decode is accepted.
     pub fn insert_decode(&mut self, d: &Decode) -> Result<(), RepoError> {
