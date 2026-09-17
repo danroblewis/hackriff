@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>T-437 — the unified surface</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0f1013; color: #cfd4dd;
+               font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #wrap { position: relative; height: 100%; display: grid; grid-template-rows: 1fr auto; }
+  #surface { width: 100%; height: 100%; display: block; }
+  #hud { white-space: pre; padding: 6px 10px; background: #15171c; border-top: 1px solid #262a33;
+         font-size: 11px; color: #9fb0c8; max-height: 30vh; overflow: auto; }
+  #offer { position: absolute; top: 10px; right: 12px; background: #7a3a12; color: #ffe6cf;
+           border: 1px solid #d2762b; padding: 6px 10px; cursor: pointer; border-radius: 3px; }
+  #legend { position: absolute; bottom: 20vh; right: 12px; background: #15171cdd; border: 1px solid #262a33;
+            padding: 6px 9px; border-radius: 3px; }
+  .sw { display: inline-block; width: 11px; height: 11px; vertical-align: -1px; margin-right: 5px; border: 1px solid #0006; }
+</style>
+<div id="wrap">
+  <canvas id="surface"></canvas>
+  <div id="hud">booting…</div>
+  <div id="offer" hidden></div>
+  <div id="legend">
+    <div><span class="sw" style="background:#282933"></span>unobserved (grey — the point)</div>
+    <div><span class="sw" style="background:#5b4a63"></span>survey-overview (hatched, desaturated)</div>
+    <div><span class="sw" style="background:#7c2b7a"></span>spectrum-history</div>
+    <div><span class="sw" style="background:#ffb24a"></span>live-iq (the growing edge)</div>
+  </div>
+</div>
+<script type="module" src="./main.js"></script>
