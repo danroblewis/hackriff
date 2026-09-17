@@ -5851,7 +5851,7 @@ tasks:
     milestone: M3
     title: 'blind_* family scores jump 0.10 to 1.00 between window sizes: a lock/no-lock transition fed
       to a Gaussian as a continuous value'
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-281
@@ -8095,7 +8095,7 @@ tasks:
   - id: T-397
     title: The frequency navigator survey strip must fold with max-hold and share the waterfall's intensity scaling
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     core_interface: true
@@ -8464,7 +8464,7 @@ tasks:
   - id: T-405
     title: The frequency navigator's view box goes; coverage shading makes the tuned window self-evident
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     core_interface: true
@@ -8701,7 +8701,7 @@ tasks:
   - id: T-411
     title: The left time-overview renders at the old 12px buffer size, so a few cells stretch into blocks
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     core_interface: true
@@ -8903,6 +8903,34 @@ tasks:
       With contiguous coverage the idle gap is 1 s, so a 30 s cadence is far outside
       2 x idle-gap and unaffected - confirm that test still passes rather than assuming.
 
+  - id: T-415
+    title: The M3 baseline quoted in briefs was wrong for several hours - known top-1 is 0.935, not 0.948
+    milestone: M3
+    status: todo
+    priority: normal
+    parallel_group: DOCS
+    deps: [T-404, T-311]
+    notes: |
+      COORDINATOR ERROR, caught by T-311 and confirmed by measurement on main.
+      T-404 reported "top-1 0.9187 -> 0.9480" and I carried 0.9480 into every
+      subsequent brief as the do-not-regress baseline. Main measures known top-1
+      0.935 (acceptance_m3 prints "known top-1 at gate+5dB | 0.935"), with unknown
+      recall 0.9596 and false-known 0.0404. T-311 ran main under stash and got the
+      same 0.9345 / 0.9861 / 0.0333, then flagged the mismatch in its report.
+      WHY IT MATTERS: briefs say "no floor moves" against a stated baseline. A wrong
+      baseline means an agent can read a real regression as an improvement, or spend
+      effort chasing a gap that was never there. Two agents received 0.9480.
+      WHAT TO ESTABLISH: which population and which SNR band each printed number
+      covers. The m3 output already distinguishes at least two readings - the FULL
+      held-out grid (396 snippets, all 11 generators) versus the 216 snippets of the
+      six generators ADR-0016 section 7 enumerates, which read 0.9907 / 0.0093 and are
+      recorded but NOT used. If top-1 has the same ambiguity, T-404's 0.9480 may be a
+      different true number rather than a wrong one - determine which, and say so.
+      THEN: state ONE canonical set in ADR-0016 section 7 with its population named,
+      so a brief can quote it without re-deriving. Every task that says "no floor
+      moves" is quoting something; that something should exist in one place.
+      Low effort, high leverage: this is bookkeeping that prevents a class of silent
+      misreading, not a code change.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
