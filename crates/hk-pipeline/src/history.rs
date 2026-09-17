@@ -225,15 +225,30 @@ pub(crate) fn run(
     let mut p = product.lock().unwrap_or_else(PoisonError::into_inner);
     tally(h, &queue.drain(&mut p));
     // A re-plumbed run (T-050) continues in a new segment: sealing now would make its frames late.
+    //
+    // **T-446 — the parentheses are the whole fix, and their absence was a permanent data loss.**
+    // This guard went in as `!continues && A || B` over the pre-existing `A || B`. Rust reads that
+    // as `(!continues && A) || B`, so `!continues` guarded only the first disjunct — and `B` is
+    // `frames_ingested`, a RUN-WIDE counter shared by every segment (see the module docs on
+    // `Shared`). After any segment has folded one frame, `B` is true forever, so **every** re-plumb
+    // sealed anyway. Sealing advances the pyramid's monotonic `watermark_ns` to the last frame
+    // **plus an hour**, and `Pyramid::ingest` answers `IngestOutcome::Late` for any frame whose
+    // level-0 block ends at or before the watermark. So the first retune stopped spectrum history
+    // for an hour of capture time — measured on the mock at 100.8 -> 433.92 MHz: `frames_ingested`
+    // froze at 453 while `frames_late` climbed to 547, `/api/timeline` served
+    // `grid.observed_cells = 0` for the new centre, and a retune *back* recovered nothing because
+    // the watermark never retreats. The IQ ring and the record-derived coverage plane stayed
+    // healthy throughout, which is what made it look like a read-side bug: the system knew it was
+    // looking, stored the samples, and wrote no measurements.
     let continues = shared.continues.load(Ordering::SeqCst);
-    if !continues && last_end.as_unix_nanos() > 0
+    let folded_anything = last_end.as_unix_nanos() > 0
         || shared
             .counters
             .history
             .frames_ingested
             .load(Ordering::Relaxed)
-            > 0
-    {
+            > 0;
+    if !continues && folded_anything {
         p.seal_through(last_end.saturating_add_nanos(3_600_000_000_000))
             .map_err(|e| anyhow::anyhow!("sealing history: {e}"))?;
     }
