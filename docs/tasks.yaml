@@ -6069,7 +6069,7 @@ tasks:
     milestone: M5
     title: 'hk-gnss is reachable only from its own tests: nothing schedules an L1 dwell, so the acquisition
       path has no caller'
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-274
@@ -8803,6 +8803,40 @@ tasks:
       T-340's control stays green: changing what the wheel MEANS must not change what it
       can REACH - no wheel on either bar reaches a device route.
 
+  - id: T-414
+    title: hk-gnss's own default acquisition threshold still finds 32 satellites in noise
+    milestone: M5
+    status: todo
+    priority: high
+    parallel_group: M5A
+    core_interface: true
+    model: opus
+    deps: [T-322]
+    acceptance: |
+      T-322 found this while wiring the caller and fixed it AT THE CALLER, deliberately
+      leaving hk-gnss's own default alone ("this is the caller sizing its own search").
+      That was the right call for that ticket and it leaves a loaded gun in the crate.
+      THE DEFECT: AcquisitionConfig's default peak-to-mean bar of 2.5 is sized for a
+      short profile, but the number of code-phase cells is the rate's samples per 1 ms
+      period - 2046 at minimum rate, 4000 at 4 Msps, 20000 at 20 Msps. At the higher
+      rates the bar is far below the noise-only maximum, so ACQUISITION RETURNS ALL 32
+      SATELLITES OUT OF PURE NOISE. T-322 measured exactly that before fixing its own
+      call site.
+      WHY IT MATTERS EVEN THOUGH THE ONE CALLER IS NOW CORRECT: a default that is wrong
+      at most sample rates is a trap for the second caller, and the failure is SILENT
+      and INVERTED - it reports an intact constellation, so a jamming assessment built
+      on it never fires. A capability that always says "fine" is worse than one that is
+      absent, because absence is visible.
+      THE FIX SHAPE, per T-322's own: compute the bar from profile length and
+      non-coherent block count for a STATED false-alarm rate, and check it against a
+      Monte Carlo of noise-only Gamma profiles rather than a chosen constant. That work
+      exists in hk_pipeline::gnss::acquisition_threshold - the question is whether it
+      belongs in hk-gnss as the default (so no caller can get it wrong) or whether the
+      crate should REFUSE a config whose bar is unsound for its rate.
+      Prefer refusing over defaulting if the two conflict: a wrong number that runs is
+      what this ticket is about.
+      Control: noise-only IQ at 2, 4 and 20 Msps yields ZERO acquisitions at the default;
+      planted PRNs at 20 dB under the floor are still recovered by number.
   - id: T-413
     title: Is a detected end provisional and revocable, and if so over what silence?
     milestone: M2-hardening
