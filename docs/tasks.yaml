@@ -6233,7 +6233,7 @@ tasks:
     milestone: M4
     title: 'ALGID is parsed and unit-tested but unreachable from IQ: it lives in voice frames and nothing
       demodulates those'
-    status: todo
+    status: blocked
     priority: normal
     deps:
     - T-270
@@ -7667,7 +7667,7 @@ tasks:
   - id: T-385
     title: The focus panel tells the user a row was deleted when it is merely outside the window
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     deps: [T-379]
