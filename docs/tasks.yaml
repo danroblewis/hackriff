@@ -8062,6 +8062,42 @@ tasks:
       Note docs-only "link/lint": check whether a link checker actually exists before
       wiring one in. If it does not, say so and wire lint only rather than inventing a
       dependency.
+  - id: T-397
+    title: The frequency navigator survey strip must fold with max-hold and share the waterfall's intensity scaling
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-368, T-391]
+    acceptance: |
+      USER 2026-09-16, items (B) and (C) of a four-part message that REACHED THIS
+      SESSION TRUNCATED. What arrived, verbatim and partial:
+        "(C) ...tensity - match its intensity scaling/colormap to the main waterfall
+         (with the max-hold from B) so signal prominence reads truthfully."
+      ITEM (A) AND THE FIRST HALF OF (B)/(C) WERE LOST. What is recoverable is that
+      (B) introduces a MAX-HOLD fold for the survey strip, and (C) requires the strip's
+      intensity scaling and colormap to MATCH THE MAIN WATERFALL so that prominence
+      reads truthfully. CONFIRM WITH THE USER BEFORE BUILDING - the missing half may
+      change the fold.
+      Why it matters, and why it is core_interface despite looking cosmetic: T-368
+      built the strip over the coverage map, where grey means GENUINELY UNOBSERVED and
+      Coverage::of refuses to let "never looked" be spelled as "looked and it was
+      quiet". A strip with a different intensity scale from the waterfall above it
+      makes the same energy read as two different strengths on one screen - which is
+      the honesty problem one layer up from the one T-368 solved. Max-hold is the fold
+      that stops a brief emission vanishing when many time cells collapse into one
+      survey column.
+      THE FOLD IS BACKEND (it decides what a column MEANS and must not fabricate
+      coverage); the colormap/scaling is thin-client presentation. Split accordingly:
+      the fold part takes the FULL gate, the UI part the ui-only gate - the user said
+      exactly this.
+      Constraint: max-hold must not turn an UNOBSERVED cell into an observed one. A
+      column holding some observed and some never-observed cells is partially covered,
+      and the strip must still say so - the max of nothing is not zero, it is unknown.
+      Keep T-340's guard green: no RF constant or signal logic in ui/src; a colormap
+      shared with the waterfall means sharing the CODE, not copying a scale.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
