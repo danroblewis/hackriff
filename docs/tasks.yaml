@@ -9779,7 +9779,7 @@ tasks:
   - id: T-425
     milestone: M2-hardening
     title: The retune seam gap is BIMODAL - 40% of runs land at 1.32 row periods against a 1.5 threshold, with a bit-identical value
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     deps: [T-417, T-383]
@@ -9885,7 +9885,7 @@ tasks:
   - id: T-428
     milestone: DOCS
     title: Four agents measured the same held-out unknown recall on main and got two different answers
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: DOCS
     deps: [T-415]
