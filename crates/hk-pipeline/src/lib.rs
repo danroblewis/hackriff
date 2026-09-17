@@ -8,7 +8,10 @@
 //!                  │                              │                  inventory (T-018), Anomalies (+ correlator)
 //!                  │                              ├─► 2 history:  STFT → NoiseFloorTracker → FloorProduct
 //!                  │                              │                (C26 pyramid tiles + C33 floor vs time)
-//!                  │                              └─► 3 spectrum: STFT → gated spectrum Publisher (C24)
+//!                  │                              ├─► 3 spectrum: STFT → gated spectrum Publisher (C24)
+//!                  │                              └─► 4 survey:   one window per capture state →
+//!                  │                                               receiver-line survey (T-399),
+//!                  │                                               reused by classification
 //!                  │
 //!   SourceControl ◄┴── control thread ◄── events (confirmed tracks, members, closes, captures)
 //!   (StepApplier;          │  scheduler on stream time (hackriffd), POIs, verification → trust
@@ -23,8 +26,9 @@
 //!   live in hk-core without cycles; hk-cli stays a thin binary crate over this one. hk-api is not
 //!   a dependency: streams are offered through [`StreamSink`] and status through
 //!   [`PipelineHandle::counters`].
-//! - **Threads.** Capture (raised priority, `hk_core::rt::spawn_capture_thread`), three always-on
-//!   readers, one control thread, one thread per runtime chain or recording. Readers never block
+//! - **Threads.** Capture (raised priority, `hk_core::rt::spawn_capture_thread`), four always-on
+//!   readers (detect, history, spectrum and the T-399 receiver-line [`survey`]), one control
+//!   thread, one thread per runtime chain or recording. Readers never block
 //!   the capture thread; slow consumers are lapped and their loss counted, except in lossless
 //!   replay where [`gate::FlowGate`] holds the capture thread back instead.
 //! - **Choices** (resolution, overlap and n_eff, batching): [`config`].
@@ -47,6 +51,7 @@ pub mod inventory;
 pub mod recipes;
 pub mod refine;
 pub mod stats;
+pub mod survey; // T-399
 
 // ADR-0012 §11 attention + memory wiring (pre-added by T-113; the owners fill them in).
 pub mod alarms; // T-122
@@ -103,6 +108,7 @@ pub use run::{
     replay_once,
 };
 pub use stats::Counters;
+pub use survey::{ReceiverSurvey, SurveyCadence, SurveyCounts};
 
 /// `HK_PIPELINE_DEBUG` is set: chain attach/detach and chain results are logged to stderr.
 pub(crate) fn debug_enabled() -> bool {
