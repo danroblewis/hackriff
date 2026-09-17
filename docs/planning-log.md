@@ -8,7 +8,11 @@ Convention: dates are absolute. "Reversible" = how hard it is to change later.
 
 **Building M0 (started 2026-09-13).** Autonomous coordinator session authorised by the user: provisional defaults adopted, trunking use cases SIGNAL-080..086 accepted, parallel worktree agents, commit per task (no push). See "Build log" at the bottom.
 
-**Planning complete (Phases 0–7).** All phases committed. test_tier filled for all 398 use cases (field 143, offline-recorded 92, offline-synth 80, data-only 53, hil 30). Heartbeat deleted. Awaiting user review of docs/planning-log.md open questions; next real work is spikes S4/S5/S1/S3 on the Mac + HackRF and task T-001.
+**Planning complete (Phases 0–7).** All phases committed. test_tier filled for all 398 use cases (field 143, offline-recorded 92, offline-synth 80, data-only 53, hil 30).
+
+> **Stale as written, kept for the record.** The line above ended "next real work is spikes S4/S5/S1/S3 on the Mac + HackRF and task T-001" — true on 2026-09-13, long overtaken. M0 landed, M0b/M1/M2 followed, and as of **2026-09-17** the board stands at **373 of 429 tasks done**, working M2-hardening, M3 classification and the coverage tile pyramid (`docs/16`). Live state is always `docs/tasks.yaml`; this section is a historical marker, not a status.
+
+**The ranked list below is also from the planning phase.** Several of its questions were answered by what got built — Q5's UI direction is settled and shipped as a web thin client, Q6's runtime substrate was decided by the spikes. It is kept unedited as the record of what was open *then*. **The current list is [Open for the user](#open-for-the-user-current) at the bottom of this file**, which is where this document's own header has always said it would be.
 
 ## Decisions from the user (not provisional)
 
@@ -4628,3 +4632,49 @@ Filed as **T-425**, with lowering the threshold explicitly forbidden: T-383's ru
 split **two-two** — 0.9444/0.0556 against 0.9520/0.0480 — the same day T-415's §7.1 landed to end exactly
 that. **T-428** is on it, and **T-364 is blocked behind it**: T-364's whole deliverable is a trade curve
 *the user* chooses from, with both axes quoted in that figure against the 0.90 floor.
+
+## Open for the user (current)
+
+Kept current by the coordinator; the planning-phase list near the top of this file is the 2026-09-13
+record and is not this. Everything here is **blocking something real** — nothing is parked here for
+tidiness. Last swept **2026-09-17**.
+
+**Needs you at the bench (physical, cannot be delegated):**
+
+- **T-375 — one 50 Ω terminator capture.** A single capture with the antenna replaced by a terminator
+  separates **conducted** coupling from **radiated**: conducted survives the terminator, radiated does
+  not. It is now the open question on **two** artefacts — T-382's 8 kHz host comb (measured at
+  −678.048 Hz relative to tuner DC) and T-317's 2.336 MHz oscillator family (harmonic 43 landing at
+  100.4653 MHz). Both are ours, both are characterised, and neither can be *attributed* without this.
+- **T-216 — the Jetson purchase** (S2/S6, and T-026's CUDA PFB). Not urgent: `docs/11` now orders the
+  hardware milestones last and MJETSON holds the tickets, so nothing on the critical path waits on it.
+  GPU work stays Mac-first behind the compute-provider conformance suite.
+
+**Needs a decision only you can make:**
+
+- **T-364 — burst recall against the open-set floor.** The shipped classifier rejects **39.4% of genuine
+  short bursts from their own class** (against 11.9% of the same classes' full windows), and CLAUDE.md
+  makes ephemeral emissions first-class — 902–928 MHz ISM bursts are the canonical playground. The fix is
+  identified and priced: pooled-window fitting takes N/8 unknown from 39.4% to 12.1%, but costs held-out
+  unknown recall **at or through ADR-0016 §7's 0.90 floor**. Your standing rule is that floors do not
+  move to accommodate a capability, so this is a product call, not a tuning one, and it will be put to
+  you as two curves rather than a recommendation.
+  **Currently blocked on T-428**, deliberately: four agents re-derived that same unknown-recall figure on
+  main on 2026-09-17 and split two-two (0.9444/0.0556 against 0.9520/0.0480). Asking you to trade against
+  a floor using a number that disagrees with itself would be asking you to decide on something the
+  coordinator cannot stand behind.
+
+**Sign-off, not blocking (work proceeds on the provisional text):**
+
+- **ADRs 0016–0019 are all still PROVISIONAL.** Two of the four carry models you have already settled in
+  conversation — 0017's time-extent signal model and 0019's presence-as-an-interval, including §6.2's
+  revocable end — so for those the text is downstream of a decision you made, and marking them ACCEPTED
+  is bookkeeping. 0016 (classification contracts) and 0018 (the GNSS known-code exception) are the two
+  where the substance is still the coordinator's reading rather than yours.
+- **T-282** — four use cases the T-258 capability audit flagged uncertain (for example, whether a
+  ham-microwave case is in scope). Low priority; they sit unmapped until someone rules.
+
+**Recently cleared, so you are not asked twice:** the WFM-without-pilot latency question closed itself
+(T-403 found the duty-cycle lag); the retune-keeps-the-stream-alive bug is fixed (T-417); the timeline
+sliver, the pixelated navigator and the narrow-selection resolution are all landed (T-420, T-397/T-411,
+T-418).
