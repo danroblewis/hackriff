@@ -9827,6 +9827,23 @@ tasks:
       the front end moves is TRUE and must stay visible, so the fix must not be to let the seam
       be papered over.
     notes: |
+      RATE RE-MEASURED 2026-09-17 by the coordinator, on main at 0f5399c, nothing staged:
+      7 OF 10 FAIL, up from the 4 of 10 recorded above. The failing value is STILL bit-identical
+      (gap 0.052906667 s against a 0.040106667 s row period), so the bimodality is unchanged -
+      what moved is how often it lands on the failing branch.
+      Five merges landed in between: T-416 (5017fe1), T-402 (0c8fad1), T-383+T-344 (9e6a6ae),
+      T-422 (5a717f1), T-423 (ed5521b). Two are worth knowing about:
+        T-416 TOUCHED THIS EXACT QUANTITY AND BELIEVED IT WAS FIXING IT. Its declining chain held a
+          ChainReader across a write, back-pressuring the capture thread in lossless replay and
+          "shrinking the retune seam gap by two row periods"; it measured 2/6 failing on its branch
+          against 0/6 on main at the time, fixed it with drop(cr), and got 4/4 clean. So a change
+          that PROVABLY IMPROVED the seam on its own branch now sits on a main where the rate has
+          GONE UP. Either there is more than one contributor, or that fix moved the distribution
+          rather than removing the cause.
+        T-383 edited crates/hk-cli/tests/api_contract.rs - the same file, a different test (the
+          coverage/shade wait). Probably unrelated; rule it in or out rather than assuming.
+      The agent was told directly, and told to report the before-rate IT measures rather than mine.
+      At 70% this is worse than filed: fail-fast now cancels most of the suite most of the time.
       Read T-383's result first - it is the worked example for how to take this kind of
       measurement, and its conclusion (an epoch-aligned quantity ranging over (2, 62] under a
       60 s bound) is exactly the shape of answer to look for here.
