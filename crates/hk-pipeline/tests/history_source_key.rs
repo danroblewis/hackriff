@@ -50,6 +50,7 @@ fn provenance_for(device_id: &str, center_hz: f64) -> Provenance {
         spur_mask_ref: None,
         timestamp_method: TimestampMethod::Synthetic,
         timestamp_error_budget_ns: None,
+        capture_artefacts: Vec::new(),
     }
 }
 

@@ -502,6 +502,7 @@ mod tests {
             spur_mask_ref: None,
             timestamp_method: TimestampMethod::Synthetic,
             timestamp_error_budget_ns: Some(0),
+            capture_artefacts: Vec::new(),
         })
     }
 

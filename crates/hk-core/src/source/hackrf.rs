@@ -822,6 +822,7 @@ fn provenance_record(
         spur_mask_ref: None,
         timestamp_method: TimestampMethod::HostArrival,
         timestamp_error_budget_ns: None,
+        capture_artefacts: Vec::new(),
     }
 }
 

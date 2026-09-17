@@ -76,7 +76,70 @@ pub(crate) struct RawLine {
     /// `block_hz`, so the block was widened to the statistical minimum: this significance was
     /// **not** measured at the pinned geometry.
     pub whiten_clamped: bool,
+    /// A bin excluded as a capture artefact ([`Excluded`]) outscored every bin that was kept, so
+    /// this line is the runner-up: without the exclusion the artefact would have been reported.
+    pub artefact_suppressed: bool,
 }
+
+/// Cyclic frequencies the **capture chain** contributes, excluded from the line search (T-373).
+///
+/// A periodic artefact of the capture path — the 8192-sample gain step T-317 found — puts a comb
+/// of lines into every channel of a stream, including channels holding nothing at all, and reads
+/// as frame structure. The combs here are derived from the capture's own provenance and its own
+/// sample rate ([`hk_model::Provenance::cyclic_artefacts`]); nothing in this module knows a
+/// frequency.
+///
+/// This excludes bins from the **argmax only**. The whitening floor still sees them, which is
+/// right: they are real power in the series, just not the emission's.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Excluded<'a> {
+    /// Comb fundamentals, Hz. Every harmonic `n·f₀` (n ≥ 1) inside the search band is excluded.
+    pub combs: &'a [f64],
+    /// Half-width excluded either side of each member, Hz.
+    pub guard_hz: f64,
+}
+
+impl Excluded<'_> {
+    /// Whether `f` Hz falls within [`Excluded::guard_hz`] of a harmonic of any comb.
+    fn hits(&self, f: f64) -> bool {
+        self.guard_hz > 0.0
+            && self.combs.iter().any(|&f0| {
+                let n = (f / f0).round();
+                n >= 1.0 && (f - n * f0).abs() <= self.guard_hz
+            })
+    }
+}
+
+/// Native bins excluded either side of each comb member.
+///
+/// **A narrow notch does not work, and the failure is measured.** A line is not one bin: the
+/// Blackman mainlobe is ±3 native bins (the reasoning under [`DC_GUARD_NATIVE_BINS`]), so removing
+/// only its peak leaves the argmax to walk the skirt and report the same artefact one bin over. On
+/// the 100.4653 MHz box of `capture-2026-09-15-fm-band`, over three 2 s windows, the shipped
+/// search reports harmonic 3 of the capture's comb at:
+///
+/// | guard | what the argmax reports |
+/// |---|---|
+/// | 0 bins | 878.90 Hz, **+0.04 to −0.02 bins** off the exact harmonic, 20.7–25.2 dB |
+/// | 0.5 bins | 878.67–879.14 Hz, **±0.47 bins** — the same line, still the argmax |
+/// | 1 bin | 878.40–879.41 Hz, **±1.01 bins** — still the same line |
+/// | **2 bins** | gone from all four methods in all three windows |
+/// | 3, 4, 6 bins | identical to 2 |
+///
+/// 2 is where it breaks at 20–25 dB; 4 is the transform's own mainlobe clearance, the same number
+/// [`DC_GUARD_NATIVE_BINS`] uses for the same reason, and does not depend on how strong the
+/// artefact happens to be in one fixture. The margin is free here: the only thing this notch can
+/// cost is a genuine emission whose symbol rate sits on a comb member, and that emission is not
+/// lost — it keeps its rate through the transition fit and the run-length seed, which the notch
+/// does not touch (measured: a 150 kBd emitter riding the recorded gain step, whose rate is
+/// *exactly* comb harmonic 512, is still the best candidate at 0 Hz offset and is trusted again
+/// at 1 native bin off; see `tests/capture_artefact.rs`).
+pub(crate) const ARTEFACT_GUARD_NATIVE_BINS: f64 = 4.0;
+
+// A comb is excluded only when its members are at least `4 × guard` apart, so no more than 1/4 of
+// the search band can ever be notched out. Below that the record is too short to resolve the comb
+// from the continuum, and notching it would delete a large share of the band on evidence the
+// transform cannot see. Enforced in `blind::estimate_inner`, which knows the record's native bin.
 
 /// Blackman equivalent noise bandwidth, bins.
 const BLACKMAN_ENBW: f64 = 1.73;
@@ -117,6 +180,7 @@ pub(crate) fn spectral_line(
     f_min: f64,
     f_max: f64,
     block_hz: f64,
+    excluded: Excluded<'_>,
 ) -> Option<RawLine> {
     let n = y.len();
     if n < 32 || f_max.partial_cmp(&f_min) != Some(std::cmp::Ordering::Greater) {
@@ -188,13 +252,24 @@ pub(crate) fn spectral_line(
         return None;
     }
     let mut best = (i_lo, f64::MIN);
+    // T-373: the strongest bin the capture's own chain contributed, tracked so a suppressed
+    // artefact is *reported* rather than silently dropped.
+    let mut best_excluded = f64::MIN;
     for (i, &p) in pw.iter().enumerate().take(i_hi + 1).skip(i_lo) {
         let r = p / (local(i) + 1e-30);
+        if excluded.hits((i as f64 - half as f64) * df) {
+            best_excluded = best_excluded.max(r);
+            continue;
+        }
         if r > best.1 {
             best = (i, r);
         }
     }
     let (k, r) = best;
+    if r == f64::MIN {
+        // Every usable bin was a capture artefact: there is no line to report here.
+        return None;
+    }
     let dk = if k > 0 && k + 1 < big_n {
         let (a, b, c) = (
             (pw[k - 1] + 1e-30).ln(),
@@ -218,6 +293,7 @@ pub(crate) fn spectral_line(
         significance_db: 10.0 * r.max(1e-30).log10(),
         sigma_hz,
         whiten_clamped,
+        artefact_suppressed: best_excluded > r,
     })
 }
 
@@ -229,11 +305,12 @@ pub(crate) fn complex_line(
     f_min: f64,
     f_max: f64,
     block_hz: f64,
+    excluded: Excluded<'_>,
 ) -> Option<RawLine> {
     let re: Vec<f64> = y.iter().map(|c| c.re).collect();
     let im: Vec<f64> = y.iter().map(|c| c.im).collect();
-    let a = spectral_line(plans, &re, fs, f_min, f_max, block_hz);
-    let b = spectral_line(plans, &im, fs, f_min, f_max, block_hz);
+    let a = spectral_line(plans, &re, fs, f_min, f_max, block_hz, excluded);
+    let b = spectral_line(plans, &im, fs, f_min, f_max, block_hz, excluded);
     match (a, b) {
         (Some(a), Some(b)) => Some(if a.significance_db >= b.significance_db {
             a
@@ -321,7 +398,7 @@ mod tests {
         let mut plans = Plans::default();
         // Block width pinned in Hz: 40 Hz is well inside the red-noise slope and comfortably above
         // the 24-native-bin minimum (n = 8192 gives a native cell of 0.12 Hz).
-        let l = spectral_line(&mut plans, &y, fs, 5.0, 400.0, 40.0).unwrap();
+        let l = spectral_line(&mut plans, &y, fs, 5.0, 400.0, 40.0, Excluded::default()).unwrap();
         assert!((l.freq_hz - 123.4).abs() < 0.1, "{l:?}");
         assert!(l.significance_db > 14.0, "{l:?}");
         assert!(!l.whiten_clamped, "{l:?}");
@@ -347,8 +424,18 @@ mod tests {
             })
             .collect();
         let mut plans = Plans::default();
-        let long = spectral_line(&mut plans, &y, fs, 5.0, 400.0, 40.0).unwrap();
-        let short = spectral_line(&mut plans, &y[..n / 8], fs, 5.0, 400.0, 40.0).unwrap();
+        let long =
+            spectral_line(&mut plans, &y, fs, 5.0, 400.0, 40.0, Excluded::default()).unwrap();
+        let short = spectral_line(
+            &mut plans,
+            &y[..n / 8],
+            fs,
+            5.0,
+            400.0,
+            40.0,
+            Excluded::default(),
+        )
+        .unwrap();
         // 40 Hz over a native cell of fs/n: 328 cells at n, 41 at n/8 — both above the minimum.
         assert!(
             !long.whiten_clamped && !short.whiten_clamped,
@@ -379,7 +466,7 @@ mod tests {
             })
             .collect();
         let mut plans = Plans::default();
-        let l = spectral_line(&mut plans, &y, fs, 5.0, 400.0, 40.0).unwrap();
+        let l = spectral_line(&mut plans, &y, fs, 5.0, 400.0, 40.0, Excluded::default()).unwrap();
         assert!(l.whiten_clamped, "{l:?}");
     }
 }

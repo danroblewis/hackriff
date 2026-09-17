@@ -169,6 +169,11 @@ impl SymbolEstimator {
             channel_bandwidth_hz: (CHANNEL_BANDWIDTH_OBW * obw_hz).min(sample_rate_hz),
             // The caller's symbol view is recentred on the emission, as C13 recentres a snippet.
             center_offset_hz: 0.0,
+            // No capture behind these samples — they are a caller's own view, the synthetic grid
+            // included — so nothing is excluded as a capture artefact (T-373). An unrecorded
+            // artefact is never an excluded one. The snippet path above carries provenance
+            // through `prepare`.
+            capture: None,
         }))
     }
 }

@@ -831,6 +831,7 @@ fn synthesised_provenance(
         spur_mask_ref: None,
         timestamp_method: TimestampMethod::Unknown,
         timestamp_error_budget_ns: None,
+        capture_artefacts: Vec::new(),
     }
 }
 
