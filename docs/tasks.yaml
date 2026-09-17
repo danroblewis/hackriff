@@ -9064,7 +9064,7 @@ tasks:
   - id: T-419
     title: Two coverage folds round partial coverage UP, so half-scanned spectrum reads as fully covered
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: STORE
     core_interface: true
