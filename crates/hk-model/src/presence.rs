@@ -102,6 +102,17 @@
 //! absence that cannot be shown. (Measured check: the user's own stopped-and-returned FM station
 //! has a 72 s silence, so it reads as two intervals even at the most conservative setting.)
 //!
+//! **"Unknown" has to mean unknown** (T-410, ADR-0019 §3). The gap *closes the interval*, so it is
+//! also the **end detector's latency** — and once a box runs to the live edge until an END is
+//! detected (ADR-0019 §1), a 60 s gap is a box over-claiming 60 s of silent air. Every reader in
+//! the served path took `conservative()` because no caller declared a revisit period, yet a
+//! receiver dwelling on one centre revisits that band every STFT frame and is not remotely
+//! unknown. [`IdleGap::from_coverage`] measures the period off the spans the receiver was actually
+//! observing in — the IQ ring's tune journal, which is the only thing that knows — and
+//! [`IdleGap::continuous`] names the contiguous case that `from_revisit_s(0.0)` could not express.
+//! `conservative()` is then reserved for its real meaning: **nobody recorded whether the receiver
+//! looked.**
+//!
 //! **What this does to a burst source, stated plainly.** In the 902–928 MHz ISM playground
 //! (T-254/T-255) a chatty sensor firing a 20 ms burst every 30 s is **fifty intervals, not one** —
 //! 30 s of silence is far longer than any revisit-derived gap. That is the intended reading:
@@ -188,6 +199,66 @@ impl IdleGap {
     /// absence is claimed that cannot be shown.
     pub fn conservative() -> Self {
         Self((MAX_IDLE_GAP_S * NS_PER_S) as i64)
+    }
+
+    /// The gap for a band the receiver **never looked away from**: the [`MIN_IDLE_GAP_S`] floor.
+    ///
+    /// Not a fourth option and not a new number — it is [`Self::from_revisit_s`] of a revisit
+    /// period shorter than half the floor, which clamps there. It exists as a *name* because
+    /// `from_revisit_s(0.0)` cannot express it: a zero period reads as "unknown" and takes the
+    /// conservative 60 s, so continuous dwell and no-information-at-all were indistinguishable
+    /// (ADR-0019 §3). A receiver dwelling on one centre revisits that band **every STFT frame**;
+    /// calling that unknown discards a measurement the run has in hand.
+    ///
+    /// The floor itself is the tracker's `max_transition_gap_s`: below it we would split what the
+    /// detector joined, so no evidence of continuous listening can push the gap any lower.
+    pub fn continuous() -> Self {
+        Self((MIN_IDLE_GAP_S * NS_PER_S) as i64)
+    }
+
+    /// The gap implied by the **coverage** of a band: how often this receiver actually looked at
+    /// it, read off the spans it was observed in (ADR-0019 §3).
+    ///
+    /// This is the same rule as [`Self::from_revisit_s`] with the revisit period **measured**
+    /// rather than declared. The revisit period of a band is the largest silence between
+    /// consecutive observations of it inside `window`, so:
+    ///
+    /// - **contiguous coverage** (one span, or spans that touch) ⇒ [`Self::continuous`];
+    /// - **combed coverage**, largest silence `P` ⇒ `from_revisit_s(P)`;
+    /// - **no spans at all** ⇒ [`Self::conservative`] — nobody recorded whether the receiver
+    ///   looked, which is the one case that genuinely is unknown.
+    ///
+    /// Only the part of each span inside `window` counts, and the silences before the first span
+    /// and after the last are **not** revisit gaps: they are the window reaching past the coverage
+    /// the caller asked about, not the receiver looking away mid-watch. Spans may arrive in any
+    /// order and may overlap (several front ends on one band, or a retune inside a dwell).
+    pub fn from_coverage(spans: &[TimeRange], window: TimeRange) -> Self {
+        let (w0, w1) = (window.start.as_unix_nanos(), window.end.as_unix_nanos());
+        let mut clipped: Vec<(i64, i64)> = spans
+            .iter()
+            .map(|s| {
+                (
+                    s.start.as_unix_nanos().max(w0),
+                    s.end.as_unix_nanos().min(w1),
+                )
+            })
+            .filter(|(a, b)| b > a)
+            .collect();
+        if clipped.is_empty() {
+            return Self::conservative();
+        }
+        clipped.sort_unstable();
+        // The largest silence *between* observations. Coalescing as we go means overlapping spans
+        // contribute no gap at all, which is what "two devices watched the same band" means.
+        let (mut worst_ns, mut reach) = (0i64, clipped[0].1);
+        for &(a, b) in &clipped[1..] {
+            worst_ns = worst_ns.max(a.saturating_sub(reach).max(0));
+            reach = reach.max(b);
+        }
+        if worst_ns <= 0 {
+            return Self::continuous();
+        }
+        Self::from_revisit_s(worst_ns as f64 / NS_PER_S)
     }
 
     /// The gap in nanoseconds.
@@ -475,6 +546,54 @@ mod tests {
         }
         assert_eq!(IdleGap::conservative().as_secs_f64(), MAX_IDLE_GAP_S);
         assert_eq!(IdleGap::default(), IdleGap::conservative());
+    }
+
+    /// The gap can be **measured** off coverage instead of declared, and the three readings are
+    /// distinguishable: continuously watched, combed, and not recorded at all (ADR-0019 §3).
+    #[test]
+    fn the_idle_gap_is_measured_from_the_coverage_of_the_band() {
+        let w = TimeRange::new(t(0.0), t(100.0));
+        let span = |a: f64, b: f64| TimeRange::new(t(a), t(b));
+
+        // Nobody recorded whether the receiver looked: the one genuinely unknown case.
+        assert_eq!(IdleGap::from_coverage(&[], w), IdleGap::conservative());
+
+        // A single dwell covering the window, and two that touch: the receiver never looked away.
+        assert_eq!(
+            IdleGap::from_coverage(&[span(0.0, 100.0)], w),
+            IdleGap::continuous()
+        );
+        assert_eq!(
+            IdleGap::from_coverage(&[span(0.0, 50.0), span(50.0, 100.0)], w),
+            IdleGap::continuous()
+        );
+        assert_eq!(IdleGap::continuous().as_secs_f64(), MIN_IDLE_GAP_S);
+        // Which is exactly `from_revisit_s` of a frame-rate revisit — not a fourth rule.
+        assert_eq!(IdleGap::from_revisit_s(0.02), IdleGap::continuous());
+
+        // Combed coverage: a sweep back every 10 s reads as a 20 s gap — two missed revisits.
+        let comb: Vec<TimeRange> = (0..9)
+            .map(|i| span(f64::from(i) * 10.0, f64::from(i) * 10.0 + 1.0))
+            .collect();
+        assert_eq!(IdleGap::from_coverage(&comb, w).as_secs_f64(), 18.0);
+
+        // Order-independent, and overlapping spans (two front ends on one band) close no gap.
+        assert_eq!(
+            IdleGap::from_coverage(&[span(40.0, 100.0), span(0.0, 60.0)], w),
+            IdleGap::continuous()
+        );
+
+        // The window reaching past the coverage is not the receiver looking away mid-watch: only
+        // silences *between* observations are revisit gaps.
+        assert_eq!(
+            IdleGap::from_coverage(&[span(40.0, 60.0)], w),
+            IdleGap::continuous()
+        );
+        // A span wholly outside the window contributes nothing at all.
+        assert_eq!(
+            IdleGap::from_coverage(&[span(-500.0, -400.0)], w),
+            IdleGap::conservative()
+        );
     }
 
     /// Overlapping source rows are one span of air time, not two (docs/07 §2.11).

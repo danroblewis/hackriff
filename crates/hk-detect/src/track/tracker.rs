@@ -828,6 +828,13 @@ impl Tracker {
     /// track that stopped keeps the end it stopped at, so an extent published from it can only ever
     /// say how far presence was seen — the reason this exists as a separate accessor rather than a
     /// clock read at the point of publication.
+    /// **The silence is reported, not judged** (T-410, ADR-0019 §3). Each extent carries the
+    /// silence since its measured end in two clocks — observed (through `Coverage`) and wall — so
+    /// the consumer can tell "this emission stopped while we were watching" from "we looked away".
+    /// The tracker does not decide the interval has closed: its own `idle_timeout_s` is 60 observed
+    /// seconds and deliberately long, so that a bursty emitter stays one track, and a *box* must
+    /// cap long before a *track* does. The two closes are separate decisions over the same
+    /// measurement (ADR-0019 §Relationship).
     pub fn live_extents_into(&self, out: &mut Vec<LiveExtent>) {
         out.clear();
         for s in &self.slots {
@@ -836,6 +843,8 @@ impl Tracker {
                     track: s.id,
                     t_start_ns: s.t_first,
                     t_end_ns: s.t_last_end,
+                    observed_silence_ns: self.coverage.observed(s.t_last_end, self.now),
+                    wall_silence_ns: self.now.saturating_sub(s.t_last_end).max(0),
                 });
             }
         }
