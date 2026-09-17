@@ -8527,7 +8527,7 @@ tasks:
   - id: T-407
     title: The two navigator bars are hard to use on touch
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: UI
     deps: [T-391, T-393]
@@ -8757,7 +8757,7 @@ tasks:
   - id: T-412
     title: The time wheel zooms when it should probably scroll; frequency wheel stays zoom
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: UI
     deps: [T-376, T-393]
@@ -8806,7 +8806,7 @@ tasks:
   - id: T-414
     title: hk-gnss's own default acquisition threshold still finds 32 satellites in noise
     milestone: M5
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: M5A
     core_interface: true
