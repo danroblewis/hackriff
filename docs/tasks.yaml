@@ -8161,7 +8161,7 @@ tasks:
   - id: T-399
     title: The receiver-line survey has no production caller - classify_box is handed one burst, not a capture window
     milestone: M3
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -8217,7 +8217,7 @@ tasks:
   - id: T-401
     title: No acceptance test asserts latency, so the suite is blind to a whole class of defect
     milestone: M3
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: M3A
     core_interface: true
