@@ -6691,7 +6691,7 @@ tasks:
     milestone: M2-hardening
     title: 'A load-sensitive test is not in the heavy-serial group: decoded_capture failed once under a
       three-crate parallel run'
-    status: in-progress
+    status: done
     priority: low
     deps: []
     parallel_group: PIPE
@@ -6704,6 +6704,14 @@ tasks:
       T-283 is separately investigating for hk-ml. DO NOT add a nextest retry: this project has been removing
       those, and a retry would hide exactly the kind of bug T-293 spent a session diagnosing. An honest
       ''reproduced N times in M runs under deliberate load'' is the deliverable'
+    commit: 9e6a6ae
+    result: |
+      CLOSED WITH NO CHANGE, in T-383's diff. The premise was stale when written: decoded_capture
+      has been in the heavy-serial group since 8866566 (T-092, 2026-09-15), the commit that added
+      the file. And it is not a budget problem - 0 failures in 10 runs at load 46-69 plus two
+      whole-crate runs, with waits of LIMIT = 90 s against a measured 0.57-0.82 s, a 150x margin.
+      See T-383's result for the family-wide finding.
+
   - id: T-345
     milestone: M4
     title: 'NXDN Type-C is identified but not decoded: the FSW is verified, the CAC layout is not, and a
@@ -7674,7 +7682,7 @@ tasks:
   - id: T-383
     title: A bounded-wait plugin test fails under parallel load and is not in the heavy-serial group
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     deps: []
@@ -7720,6 +7728,43 @@ tasks:
       (classifier score tables) that cannot reach the spectrum-history strip at all.
       That is the concrete cost of leaving this: every load flake makes the coordinator
       re-run the whole gate to find out it was nothing.
+    commit: 9e6a6ae
+    result: |
+      FIXED, and the measurement dissolved most of the premise. T-344 closed in the same diff.
+      THE COVERAGE TEST WAS NEVER A LOAD FLAKE. The wait that expires is the SECOND one
+      (spectrum-history shade), not the coverage wait, which takes 0.11 s. `shades()` folds with
+      nt = 1, so overview_level sizes the tier by the whole 120 s window and reads LEVEL 1 (60 s
+      cells). A level-1 cell exists only once a level-0 block seals, and LEVEL-0 BLOCKS ARE
+      ALIGNED TO THE UNIX EPOCH. So the wait is (time to the next epoch-aligned 60 s boundary) +
+      seal_lag(2 s), a quantity ranging over (2 s, 62 s]. Six consecutive runs matched that
+      formula to within 0.1 s (26.86->29.07, 55.67->57.82, 56.03->58.20, 55.78->57.90,
+      56.02->58.11, 55.45->57.65).
+      A 60 s BUDGET OVER IT FAILS ON A COMPLETELY IDLE MACHINE whenever the run starts in the
+      first ~2.2 s of a wall-clock minute - about 3.6% of runs. Every "isolated" figure anyone
+      quoted was that phase and nothing else: 53.2 s (T-320), 21.1 s (coordinator), 5.3 s and
+      58.2 s (T-383). Load only pushed it over the edge more often.
+      Fix: ask the shade values over an explicit 20 s window, resolving at level 0 whose 1 s cells
+      the run has actually written. 58 s -> 0.63 s, deterministic. NOTHING WEAKENED - the rule-text
+      assertions now also run against the default-window answer, so the test asserts strictly more.
+      BOUNDED-WAIT TEST: a budget problem, reproduced BY MUTATION rather than by waiting for luck.
+      --start-delay-ms 20000 against settle_s = 2.0 fails on exactly the reported message and
+      passes at 30.0. The 2.0 was this test file's own invention; 30 s is PLUGIN_WAIT_STALL, the
+      number the chain already uses for the same question on its lossless branch.
+      TWO OF THE FIVE INSTANCES WERE STALE. presence_push's named test was contract A's per-poll
+      extension record, DELETED by ADR-0019/T-410; the current test has no wall-clock quantity and
+      published byte-identical output 6/6 at load 57, so it was deliberately NOT added to
+      heavy-serial. T-344's decoded_capture has been in heavy-serial since the commit that created
+      the file (T-092, 8866566) - that ticket's title was wrong when written.
+      THE STRUCTURAL ANSWER: membership was never the problem. THREE OF THE FOUR TESTS WERE
+      ALREADY MEMBERS. `max-threads = 1` serialises the group against ITSELF inside one nextest
+      invocation; it does nothing about the ~27 tests running concurrently outside it and nothing
+      about four agents building on the same box. Derivation would not have helped either -
+      nextest filtersets see only package, binary and test name, so the only derivable marker is a
+      naming convention, which is "remembered" relocated rather than removed.
+      The rule that DOES generalise is now in .config/nextest.toml where the next person reaches
+      for the list: A TEST MAY NOT BOUND A QUANTITY WHOSE NATURAL RANGE IT HAS NOT MEASURED.
+      No retry added, no assertion weakened, no scanner built, no name added to heavy-serial.
+      Reported not fixed -> filed as T-426.
 
   - id: T-384
     title: The output and decode surfaces cannot re-derive for a scrubbed window, and the decode route has no time parameter to ask with
@@ -8386,16 +8431,7 @@ tasks:
   - id: T-402
     title: Our own synthetic WFM is too narrow to trigger our own WFM occupancy rule
     milestone: M3
-    status: blocked
-    blocked_on: >-
-      T-416, a third defect - and the LATENCY blockers are gone. With T-403 merged (aa5dab9)
-      this scene now reads family 2.00 s and confirm 2.00 s, both inside budget; the 5.00 s
-      family gap the user called a defect is fixed. What remains red is one assertion:
-      confirm_latency.rs:143 "the measurement that declined to confirm is still recorded". A
-      real 150 kHz MONO broadcast FM station is not recognised as WFM by mode selection, and a
-      REJECTED MODE WRITES NOTHING - so T-398's own standard, that short evidence leaves a log
-      rather than a promotion, fails for want of the log. Mode rules and chain records are
-      hk-demod's, which T-403 was fenced out of. Merges when T-416 lands.
+    status: done
     priority: normal
     parallel_group: M3A
     deps: [T-398]
@@ -8446,6 +8482,25 @@ tasks:
       refit ON TOP of that, not race it. T-404 also added SynthConfig::packet_preamble
       (default true) to hk-classify synth - nowhere near the WFM bandwidth, but it is
       the same file family.
+    commit: 0c8fad1
+    result: |
+      MERGED AT LAST - the longest-held branch of the session, complete and green in isolation
+      since the morning, held across THREE successive real defects, each now fixed on main rather
+      than worked around:
+        1st T-403: family latency 5.00 s against a 4 s budget. The cause was in the DUTY CYCLE -
+          `observed` was always on_air + 0.51 s, a fixed lag in the denominator divided by a
+          growing window, so a signal that never stops became "continuous" only once you had
+          watched it long enough.
+        2nd: with that fixed the latency read 2.00 s and a third defect surfaced - A REJECTED MODE
+          WROTE NOTHING AT ALL, so confirm_latency.rs:143 found no demodulation for a station that
+          declined to confirm.
+        3rd T-416: fixed that (a refusal now leaves a record) and the reason it was a mono station
+          in the first place (the pilot was evidence in name, a requirement in effect).
+      NO REBASE WAS NEEDED. 96 commits landed on main while it waited and NONE touched any of its
+      six files; merge-tree reported no conflict. The hold was only ever semantic - and note that
+      the red assertion was never in T-402's own diff: T-402 regulates the synthetic fixture's
+      peak deviation, which changes what the pipeline sees, which made a different test fail.
+      Both t398 assertions pass directly; full gate passed.
 
   - id: T-403
     title: A station with no pilot and no identity still confirms at the end of the recording
@@ -9102,7 +9157,7 @@ tasks:
   - id: T-416
     title: A real mono FM station is not recognised as WFM, and the rejection leaves no trace
     milestone: M3
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -9135,6 +9190,42 @@ tasks:
       Control: a genuinely unrecognisable emission still declines, and still logs.
       Do not make (1) pass by lowering a confidence threshold - if 0.75 is the right
       confidence for "unknown", the question is why a 150 kHz FM carrier produces it.
+    commit: 5017fe1
+    result: |
+      FIXED, and the cause was a 110 Hz miss. The WFM candidate is raised on width alone so the
+      pilot never gated CANDIDACY - the confidence ladder did. A 150 kHz mono station measured
+      149890 Hz OBW, missed wfm_mono_min_obw_hz by 110 Hz, fell to the 0.25 arm, landed under
+      min_decide_confidence 0.35, and reported unknown at 1.00 - 0.25 = 0.75. Envelope was
+      perfectly constant (-3.6e-7); nothing else was wrong. For ANY pilotless station between the
+      120 kHz candidate edge and 150 kHz the pilot was the only route to a decision.
+      NOT retuned - it cannot be derived (T-316's 106 kHz comes from the L-R subcarrier; mono has
+      no equivalent, a quiet mono station is just narrower). Replaced by the other structural fact
+      about the service: 47 CFR 73.310(a) / ITU-R BS.450 put the main channel at 50 Hz-15 kHz and
+      L-R at 23-53 kHz, so `baseband_fraction` asks what fraction of multiplex power is in the
+      programme channel. Mono ~1 by definition, stereo ~1/2 (recognised by its pilot instead).
+      Measured off the discriminator the pilot check already runs, both bands fixed BY THE SERVICE
+      - which matters because FM output noise rises as f^2 and a Nyquist-wide denominator reports
+      the sample rate (0.88 over +/-500 kHz vs 0.999 over the emission's own +/-90 kHz).
+      Threshold 0.95 from 47 CFR 73.319(d)'s 20% injection cap. min_decide_confidence untouched.
+      THE CONTROL: a measured baseband that is NOT a programme channel now LOWERS confidence to
+      0.2 instead of letting width carry it. Width alone used to be enough, which called a 180 kHz
+      4-CPFSK data link broadcast FM - being wide and constant-envelope is what every
+      constant-modulus digital emission is. Sweep carries both halves blind: wfm75k-mono
+      0.996-1.000 must be WFM from 20 dB; 4fsk-wide 0.29-0.42 must NEVER be WFM at any SNR.
+      Documented cost: a stereo station whose pilot is not found at all now abstains.
+      THE SILENCE: `write_declined` writes the Demodulation and nothing else - mode, parameters,
+      the absent lock, the window measured over. Route C refuses such a row on its own terms.
+      Filing it needed a seam: a chain attaches on the TRACKER's confirmation and probes ~1 s in,
+      routinely before the inventory has offered that track a row (verified - emitter_of_track and
+      a fingerprint match both returned None), so Inventory::chain_measurement holds it until bind
+      or until the track closes. It creates nothing. Run summary now reads "8 mode rejected
+      (8 recorded)" on a real FM capture.
+      TWO REAL BUGS FOUND ON THE WAY, both outside the ticket: `stored_detection` re-entered
+      Shared::repo's plain Mutex and SELF-DEADLOCKED the whole pipeline; and the declining chain
+      held its ChainReader across the write, back-pressuring the capture thread in lossless replay
+      (which shrank T-417's retune seam gap by two row periods).
+      Coordinator verification: full suite 2274/2274 on the merge, lint + acceptance-ci green.
+
   - id: T-417
     title: A retune tears the stream down; consumers should keep receiving across it
     milestone: M2-hardening
@@ -9445,7 +9536,7 @@ tasks:
   - id: T-422
     title: fsk and qam16 have the same class-level defect cw and ssb had - a hand-written table and a misordered density
     milestone: M3
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: M3A
     deps: [T-249]
@@ -9481,11 +9572,67 @@ tasks:
     notes: |
       Read T-249's result field first - it is the worked example for this ticket, and
       the two causes it found are the two hypotheses to test.
+    commit: 5a717f1
+    result: |
+      FIXED - and TWO OF THE THREE WERE NOT WHERE MY BRIEF SAID. All three showed T-249's tell
+      (healthy top-2 0.917-1.000 against a dead top-1) but lost the ranking in three DIFFERENT
+      places.
+      fsk/gfsk WAS the hand table, as predicted. `smeared = if_bimodality < 0.66` had to fire to
+      score gfsk 0.5 instead of 0.12. Measured at gate+5/+10: gfsk 0.695-0.833, 2fsk 0.785-0.906 -
+      OVERLAPPING, and both ENTIRELY ABOVE 0.66. Never fired; no snippet was ever called gfsk by
+      the tree. THE DIMENSION: if_bimodality does not distinguish Gaussian shaping from
+      rectangular keying, because C13's +/-0.75xOBW99 channel filter has already smoothed both -
+      the constant was written at the TRANSMITTER, the feature is measured AFTER THE RECEIVE
+      FILTER.
+      fsk/msk was NOT THE TREE, which named it correctly at 0.917. The POST-SYNC VERIFIER
+      re-ranked it away. Its hypothesis fixed peak deviation at pi/(2*sps), the transmitter's
+      h = 0.5. Proof needing no true value: `2fsk` is the IDENTICAL model with the deviation FREE
+      and it beat msk on genuine MSK 22 OF 22 after the MDL charge for that freedom; the GLRT's
+      arg-max was then gfsk 19/22 and top-1 fell 0.917 -> 0.375. THE DIMENSION: sps and the
+      transmitter's h do not determine the deviation this receiver measures - a constraint costing
+      more residual than its own description length is a constraint on the wrong quantity.
+      psk-qam/qam16 was NOT THE DENSITIES - this contradicts my brief. They had it right 21/24 and
+      the tree called it at 0.833; the verifier's ALRT dropped it to 0.083. The ALRT takes N0 from
+      the SNR meter. Sweeping ONLY that assumption over the same 35 blind snippets: 30/20/15 dB ->
+      qam16 21/21, qam64 14/14; 12 dB -> 10/21, 14/14; 10 dB -> 0/21, 10/14; 6 dB -> 0/21, 0/14.
+      BOTH TRUTHS FLIP TOGETHER and NO VALUE IS RIGHT ON BOTH. THE DIMENSION: snr_db does not
+      measure the symbol-decision residual - above the crossover the tiny N0 makes the mixture a
+      nearest-point test and the denser lattice wins BY CONSTRUCTION; below it the -ln M term
+      dominates and the sparser one wins. Neither regime reads the data; not a threshold to tune.
+      FIXES: fsk routes through the densities like analog/psk-qam; the one conjunct that worked
+      (h ~ 0.5) is kept as `apply_msk_index` because mod_index_h is not a features@1 dimension so
+      no density can score it (genuine MSK reads h in [0.500, 0.533] at every SNR on dev). The
+      verifier declines msk, qam16 and qam64, stays right on the pair ADR-0016 §4.5 names
+      (2fsk 21/23, gfsk 20/21), and gives up nothing on bpsk/qpsk/8psk.
+      MOVED: gfsk 0.333/0.417 -> 0.750/0.750 (wrong 0.667/0.583 -> 0.250); msk 0.333/0.417 ->
+      1.000/0.833 (wrong 0.667/0.500 -> 0.000/0.083); qam16 0.083/0.083 -> 0.833/0.833 (wrong
+      0.917/0.833 -> 0.167/0.083). fsk class top-1 0.667 -> 0.896, wrong 0.3125 -> 0.0833;
+      psk-qam 0.758 -> 0.900, 0.1833 -> 0.0417; analog unchanged. No abstention traded.
+      THE ONE LOSS, STATED: qam64 at gate+10 drops 0.833 -> 0.750 (wrong 0.083 -> 0.167) - the
+      verifier's bias toward the denser constellation had been covering it.
+      Every family-level figure BIT-IDENTICAL, verified T-419-style (stashed the whole diff,
+      re-ran on main, reproduces exactly).
+      CAUGHT ON THE WAY: the index factor initially stretched the candidate spread to 361:1 and
+      lifted a WRONG gfsk call to p = 0.903, through the 19:1 bound that is the only reason a
+      class call cannot be confidently wrong. Re-clamped; confidently-wrong is now 0 in both
+      families, pinned by the new test.
+      NO GATE DERIVED, and the dev sweep says why: fsk wrong calls are FLAT 23->33 dB, so it is a
+      geometry limit, not a noise limit. qam16 alone would give class_gate_db 7.0 but qam64 is
+      wrong at every step to 30 dB, so the family is never exact and chasing it would withhold the
+      whole 20 dB bin for two wrong calls. Both threshold rows carry the measurement.
+      LEFT ALONE DELIBERATELY: `pulsed`/`pulse` is a FOURTH broken hand table (top-1 0.000, wrong
+      1.000 at gate+5) -> filed as T-427. CANDIDATE_MIN_P vs the density floor are the same 19:1
+      number, so a density-floored candidate can at best be brought LEVEL with the leader and the
+      tie breaks alphabetically - exactly how ssb lost to am; tested, lowering it costs bpsk
+      1.000 -> 0.333, so the floor is protecting the PSK calls, not obstructing gfsk.
+      `verifier_gain` measures only the two pairs the ADR names and none of these three classes is
+      in either - which is why all three hid behind a green suite.
+      ALSO REPORTED A BASELINE DISAGREEMENT -> filed as T-428.
 
   - id: T-423
     milestone: M2-hardening
     title: docs/16 step 2 - coverage reaches the wire with a time axis, and the invariant gets a test home before any tile exists
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -9540,6 +9687,50 @@ tasks:
       message. T-415 found that T-404's 0.9480 was real, accurately transcribed, and described
       a commit that never reached main.
       Gate: crates/ + docs/api.md, so FULL. Run the affected suite twice (T-403).
+    commit: ed5521b
+    result: |
+      DONE - docs/16 §7 step 2, with ZERO new arithmetic. T-421's step 1 was complete enough that
+      grid_over, by_device_over, union_grid_over and unknown_rows_before were used exactly as they
+      landed.
+      THE §5.4 DECISION (which T-421 left to the caller that knows where the horizon is):
+      "state": "unknown" is a FOURTH VALUE of the cell's existing state field, carrying NO
+      measurement keys by the same structural rule as "unobserved", beside a `horizon` block
+      (oldest_record_s, unknown_rows, rows) that makes the claim CHECKABLE rather than something
+      the client must take on trust.
+      NOT a third Coverage variant, for three reasons now in the module header and docs/api.md:
+        (1) THE FOLD HAS NO INPUT FOR IT. Coverage is computed from spans and no span carries the
+            horizon that produced it. Coverage::of - the one construction site, whose whole job is
+            refusing to mint an observation out of nothing - would have to be handed a horizon it
+            cannot check to decide a question it was never asked.
+        (2) IT IS A PROPERTY OF A ROW, NOT A CELL. A discarded record takes every frequency with
+            it. A per-cell variant would permit "unknown at 100 MHz, unobserved at 101 MHz" in the
+            SAME ROW, which is unrepresentable in reality.
+        (3) A variant breaks every consumer to say something none of them could compute, and
+            disturbs the two-variant design that makes state 3 unrepresentable as state 2.
+      The horizon is a MIN over consulted sources: a row is knowable if AT LEAST ONE record reaches
+      it. With no record at all every row is "unknown" - a server that has forgotten its tune
+      history cannot claim the radio was not there. An OBSERVED cell is never relabelled: a
+      surviving measurement is itself proof we looked. resolution.grey_rule now says in the
+      response that "unknown" is not grey and not a level, naming hatching (T-413) as the drawing.
+      THE TRAP WORTH RECORDING: /api/timeline ALREADY HAD a grid.coverage array and IT IS NOT THIS.
+      That one is FRAME coverage - it reads 0 both where nothing looked AND where the pyramid's
+      byte budget evicted what it saw. Treating it as the coverage plane would have shipped step 2
+      as already-done while still being wrong. docs/api.md now carries a table separating the two.
+      CONTRACT ASSERTIONS ON VALUES, each with a control the other half cannot satisfy (T-315's
+      standard): row 0 observed at duty ~1 AGAINST ITS OWN ROW while rows 2.. are exactly
+      {"state":"unobserved"} - one key, so no measurement key at all - with the control that the
+      identical window at rows=1 still answers `observed`, i.e. the wrong answer T-405/T-411 were
+      reading, asserted as still-wrong-without-the-axis. The column's observed_s is the SUM of the
+      rows' and its duty is re-derived against the column's own extent (< 0.25, ~1/6 not 1),
+      grounded against the rows themselves and never against a coarser answer per T-419/T-421. A
+      window before the oldest record: every cell exactly {"state":"unknown"}, unknown_rows ==
+      rows, unobserved_cells == 0, oldest_record_s > t1, asserted != the unobserved cell from
+      property 1 AND unknown_rows == 0 inside the live window, so neither state is a constant.
+      BEYOND SCOPE AND CORRECTLY SO: three client sites would have collapsed the new value into
+      grey - a regression this change itself introduced. CoverageCell.state admits "unknown",
+      unobservedCount counts only "unobserved", windowCoverage maps it to its existing null (NOT
+      KNOWN), and the survey strip draws it as nothing rather than borrowing grey. ~15 lines. The
+      distinct hatched fill belongs to T-405's follow-up once the strip reads the per-(t,f) plane.
 
   - id: T-424
     milestone: CI
@@ -9585,6 +9776,150 @@ tasks:
       Do NOT "fix" this by adding tools/ or fixtures/ to a gate ignore list. fixtures/ is full
       for a real reason - the suites read it - and the classifier having a silent ignore list is
       precisely the shape of self-weakening T-396 wrote the fail-closed rule to prevent.
+  - id: T-425
+    milestone: M2-hardening
+    title: The retune seam gap is BIMODAL - 40% of runs land at 1.32 row periods against a 1.5 threshold, with a bit-identical value
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    deps: [T-417, T-383]
+    found_by: 'coordinator (2026-09-17), measured on clean main while gating T-416'
+    acceptance: |
+      MEASURED, NOT INFERRED. hk-cli::api_contract::a_retune_keeps_connected_stream_consumers_
+      connected fails on CLEAN MAIN, with no merge staged, 4 of 10 runs - and the failure value
+      is BIT-IDENTICAL every single time:
+        "at least one row's worth of time must be MISSING at the seam, not filled:
+         gap 0.052906667 s against a 0.040106667 s row period"
+      The assertion is `gap_s > period_s * 1.5`, i.e. 0.0529 against a required 0.0602. So the
+      seam lands at 1.32 row periods, NOT below one - the panic message undersells its own
+      threshold and should be fixed to state 1.5 while you are here.
+      THIS IS NOT JITTER AND NOT THE T-383 FAMILY. Jitter would spread the value; this is two
+      discrete outcomes, and the failing one repeats to the nanosecond. Something about the
+      retune either does or does not cost one extra row - a retune landing mid-row versus on a
+      row boundary is the obvious hypothesis, and the fixture's row period (0.0401 s) against
+      the observed gap (0.0529 s) says the difference is about 0.0128 s, roughly a third of a
+      row. MEASURE IT before assuming.
+      CONFIRMED NOT A REGRESSION FROM T-416: the same 10-run measurement was taken on main
+      before merging it, and 8 runs on the merge gave 3 failures - 40% vs 37.5%, indistinguishable.
+      WHY IT MATTERS MORE THAN ITS SIZE SUGGESTS: at 40% it fails roughly every other full gate,
+      and nextest's fail-fast then cancels ~384 remaining tests, so ONE bimodal seam hides the
+      state of a fifth of the suite. It already cost one full gate re-run today. It has also
+      been misfiled twice as a load flake (T-249's agent saw it under load; T-416 believed it
+      had caused it and "fixed" it with an unrelated drop(cr) that was a real improvement for a
+      different reason).
+      DoD: explain the bimodality with a measurement - which code path produces the two
+      outcomes and why. Then either make the seam deterministic, or make the assertion measure
+      the quantity that is actually invariant. DO NOT simply lower 1.5 to 1.2: T-383 just
+      established the standing rule for this repo - A TEST MAY NOT BOUND A QUANTITY WHOSE
+      NATURAL RANGE IT HAS NOT MEASURED - and loosening a bound to fit an unexplained bimodal
+      distribution is the same error in the other direction. The honesty constraint the test
+      defends is real (T-410's open cap, T-413's hatched revoked gap): a break in the data while
+      the front end moves is TRUE and must stay visible, so the fix must not be to let the seam
+      be papered over.
+    notes: |
+      Read T-383's result first - it is the worked example for how to take this kind of
+      measurement, and its conclusion (an epoch-aligned quantity ranging over (2, 62] under a
+      60 s bound) is exactly the shape of answer to look for here.
+
+  - id: T-426
+    milestone: M2-hardening
+    title: /api/coverage serves no shade for the first minute of a server's life though the finer levels hold the data
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    deps: [T-383]
+    found_by: 'T-383 (2026-09-17), while root-causing the coverage test - reported deliberately unfixed'
+    acceptance: |
+      T-383 found this while establishing that the "load flake" was an epoch-alignment problem,
+      and deliberately did not fix it because it changes documented fields.
+      On the DEFAULT capture window, /api/coverage serves no shade for the first minute of a
+      server's life EVEN THOUGH THE FINER LEVELS HOLD THE DATA, because `overview_level` takes
+      the COARSEST ADEQUATE TIER and never falls back to a populated finer one. Level-0 blocks
+      are aligned to the Unix epoch, so a level-1 cell does not exist until the first aligned
+      60 s boundary has sealed - while level 0 has had 1 s cells all along.
+      THIS IS THE USER'S OWN RULE VIOLATED (CLAUDE.md, 2026-09-16): "Whenever data exists for
+      that window it must be shown; a surface may render grey/empty ONLY where data genuinely
+      does not exist. 'We have it but didn't render it' is a bug." It is the same failure as the
+      black Live waterfall and the fixed-size grey block, one layer down.
+      It is core_interface because it changes `level` and `src_t_cell_s`, which /api/timeline
+      documents - so docs/api.md and api_contract.rs move together (T-079).
+      DoD: a populated finer tier is used when the coarsest adequate one is empty, with the
+      served `level` telling the truth about which tier answered. Assert the VALUE for a window
+      in the first minute of a server's life (T-315's standard).
+    notes: |
+      T-383 named this in the coverage test's own comment so it could not be lost. The fix
+      interacts with T-423's new coverage plane - read that first.
+
+  - id: T-427
+    milestone: M3
+    title: pulsed/pulse is the fourth broken hand-written class table - top-1 0.000, wrong-label 1.000 at gate+5
+    status: todo
+    priority: normal
+    parallel_group: M3A
+    deps: [T-422]
+    use_cases:
+    - SIGNAL-062
+    found_by: 'T-422 (2026-09-17), measured while fixing fsk and psk-qam; recorded in code'
+    acceptance: |
+      The fourth instance of the same family. T-249 fixed analog (the last hand table, as it was
+      then believed); T-422 fixed fsk (the actual last one) and found psk-qam's failure was in
+      the verifier instead. `pulsed`/`pulse` measures top-1 0.000 with wrong-label 1.000 at
+      gate+5 - a class that is never named correctly and always named confidently wrong.
+      DoD follows T-249's and T-422's form, which is now well established: state the MEASURED
+      cause before proposing a fix, and name WHICH DIMENSION fails to separate the classes. The
+      four causes found so far, as hypotheses to test in order:
+        - a conjunction written from noiseless physics whose feature is noise-limited at this
+          geometry (T-249's cw: sigma_af < 0.02, unreachable until ~28 dB, 18 dB above gate);
+        - a tie broken by a feature that does not measure what its name says, resolved
+          ALPHABETICALLY (T-249's ssb vs am on carrier_line_db);
+        - a constant written at the transmitter against a feature measured after the receive
+          filter (T-422's gfsk: if_bimodality < 0.66 against a channel filter that already
+          smoothed both classes);
+        - a post-sync verifier re-ranking a correct tree call away (T-422's msk and qam16).
+      Then fix the call or withhold it below a DERIVED gate with a recorded reason
+      (T-297/T-311/T-312), never a confidently wrong name. Pin properties, not numbers.
+      Family floors: quote ADR-0016 §7.1 and RE-DERIVE with `just acceptance-m3` - see T-428,
+      which is live on exactly this point.
+
+  - id: T-428
+    milestone: DOCS
+    title: Four agents measured the same held-out unknown recall on main and got two different answers
+    status: todo
+    priority: high
+    parallel_group: DOCS
+    deps: [T-415]
+    found_by: 'coordinator (2026-09-17), reconciling four agent reports after T-415 landed §7.1'
+    acceptance: |
+      T-415 established ADR-0016 §7.1 as the ONE canonical set, with a population named per
+      figure and `just acceptance-m3` as the re-derivation command. Within the same day, four
+      agents re-derived the held-out unknown recall ON MAIN and split two-two:
+        T-249  -> unknown recall 0.9444 / false-known 0.0556
+        T-421  -> 0.9520 / 0.0480   ("matched your stated values exactly")
+        T-416  -> 0.9520 / 0.0480   ("I ran the same command on main: identical")
+        T-422  -> 0.9444 / 0.0556   ("predates my diff. Worth feeding to T-415")
+      Each measured what it believed was merged main; T-422 additionally re-ran under stash to
+      confirm the figure predated its own diff. §7.1 records 0.9520 / 0.0480.
+      THE 216-SNIPPET READING IS NOT THE EXPLANATION - T-415 measured that at 0.9954 / 0.0046,
+      which matches neither. So this is a THIRD population, a non-determinism, or main genuinely
+      moving between measurements. All three are worth knowing, and they need different fixes.
+      WHY HIGH: this is the exact failure §7.1 was written to end, appearing the same day §7.1
+      landed. If the canonical number itself is not reproducible then every "no floor moves"
+      claim in every brief is unfalsifiable, and the stash-and-measure protocol - which is the
+      one defence we have - returns a different answer depending on who runs it.
+      DoD: determine WHICH of the three it is, with the commits each agent actually measured
+      (their worktrees are gone, but their merge bases are in the git history and each reported
+      its own branch point). If it is non-determinism, find the source and either remove it or
+      state the figure with its spread instead of four decimal places - a number quoted to 4 dp
+      that varies in the 3rd is worse than a number quoted with its range. Update §7.1 with what
+      is actually true, including how many runs back the claim.
+    notes: |
+      Related: T-415's own finding, that T-404's 0.9480 was real and accurately transcribed but
+      described a pre-commit tree that never reached main. That was a third failure mode nobody
+      had enumerated. This may be a fourth.
+      Note that the two family figures everyone agrees on (top-1 0.9345, top-2 0.9861) are
+      computed by a different path from unknown recall / false-known. Whatever this is, it is
+      specific to the open-set numbers - which is a clue, not a coincidence.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
