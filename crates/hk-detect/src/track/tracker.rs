@@ -13,7 +13,7 @@ use crate::record::{CloseReason, Confirmation, DetectionRecord, DetectorEvent};
 
 use super::config::{HopConfig, TrackerConfig};
 use super::events::{
-    BoundaryKind, CloseCause, Distribution, HopSetSummary, SegmentBoundary, TrackEvent,
+    BoundaryKind, CloseCause, Distribution, HopSetSummary, LiveExtent, SegmentBoundary, TrackEvent,
     TrackSummary,
 };
 use super::persist::TrackBatch;
@@ -789,17 +789,55 @@ impl Tracker {
     /// continuous host (the T-101 rule, evaluated now against the live host set).
     pub fn live_offers_into(&self, min_bursts: u64, out: &mut Vec<TrackSummary>) {
         out.clear();
-        for (i, s) in self.slots.iter().enumerate() {
-            if !s.live
-                || s.tentative
-                || s.bursts < min_bursts
-                || s.hop_links > 0
-                || s.hop_set.is_some()
-                || self.inband_fragment(i, true)
-            {
-                continue;
+        for i in 0..self.slots.len() {
+            if self.offerable_live(i, min_bursts) {
+                out.push(self.summary(i, None));
             }
-            out.push(self.summary(i, None));
+        }
+    }
+
+    /// The predicate [`Tracker::live_offers_into`] and [`Tracker::live_extents_into`] share, so the
+    /// fast extent of a track can never describe one the slow offer would not have made an entry
+    /// for.
+    fn offerable_live(&self, i: usize, min_bursts: u64) -> bool {
+        let s = &self.slots[i];
+        s.live
+            && !s.tentative
+            && s.bursts >= min_bursts
+            && s.hop_links == 0
+            && s.hop_set.is_none()
+            && !self.inband_fragment(i, true)
+    }
+
+    /// T-388: the **observed** time extent of every open, non-tentative track, into `out` (cleared
+    /// first).
+    ///
+    /// It builds no [`TrackSummary`]: no period fold, no distribution, no coverage query — just the
+    /// two timestamps and the id already in the slot. That is what makes it affordable every flush
+    /// (0.5 s) where the full offer, which writes to the database, runs every 5 s.
+    ///
+    /// **Wider than [`Tracker::live_offers_into`], deliberately.** That predicate decides whether to
+    /// *create* an inventory row, so it is strict (several bursts, a settled fate) — and it excludes
+    /// exactly the continuous carriers a broadcast band is full of, which are one long burst and
+    /// enter the inventory through a chain instead. An extent creates nothing: it is published only
+    /// for a track the inventory has already given a row (`Inventory::emitter_of_track`), and that
+    /// lookup is the gate. Reusing the strict predicate here would have left the signals this exists
+    /// for unextended.
+    ///
+    /// **`t_end_ns` is `t_last_end`: the end of the last burst actually measured, never `now`.** A
+    /// track that stopped keeps the end it stopped at, so an extent published from it can only ever
+    /// say how far presence was seen — the reason this exists as a separate accessor rather than a
+    /// clock read at the point of publication.
+    pub fn live_extents_into(&self, out: &mut Vec<LiveExtent>) {
+        out.clear();
+        for s in &self.slots {
+            if s.live && !s.tentative {
+                out.push(LiveExtent {
+                    track: s.id,
+                    t_start_ns: s.t_first,
+                    t_end_ns: s.t_last_end,
+                });
+            }
         }
     }
 

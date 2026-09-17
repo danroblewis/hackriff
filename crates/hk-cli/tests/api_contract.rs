@@ -648,6 +648,38 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         },
     );
 
+    // T-388: the `presence` stream is offered beside the spectrum stream — the push that lets a live
+    // signal's box top track the live edge instead of waiting for the 5 s `/api/inventory` poll
+    // (docs/stream-contract.md §15, ADR-0004). Timing metadata, so `messages` and unrestricted, and
+    // remote-permitted or the browser could not subscribe at all.
+    wait_for(
+        "the presence stream to be offered",
+        Duration::from_secs(30),
+        || {
+            get(addr, "/api/streams").1["streams"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|s| s["stream_id"] == "presence"))
+        },
+    );
+    let (_, v) = get(addr, "/api/streams");
+    let presence = v["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["stream_id"] == "presence")
+        .unwrap();
+    assert_eq!(presence["kind"], "messages", "{presence}");
+    assert_eq!(presence["content_class"], "unrestricted", "{presence}");
+    assert_eq!(presence["remote_permitted"], true, "{presence}");
+    assert_eq!(presence["ws_path"], "/ws/presence", "{presence}");
+    // A timing stream has no geometry: an extension is new time, not new frequency (T-362).
+    for absent in ["center_hz", "bandwidth_hz", "fft_size", "datatype"] {
+        assert!(
+            presence[absent].is_null(),
+            "presence.{absent} should be null: {presence}"
+        );
+    }
+
     // dc_excluded_hz (T-167, ADR-0013 gap 10): the spectrum stream's DC-notch half-width, taken
     // from the detector's own DC rule, not hardcoded on the wire.
     let (_, v) = get(addr, "/api/streams");

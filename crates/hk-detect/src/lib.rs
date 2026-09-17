@@ -105,7 +105,8 @@ pub use record::{
 pub use rules::Geometry;
 pub use step::{GuardFrame, ShapeView, StepGuard, StepGuardConfig, WideView};
 pub use track::{
-    BoundaryKind, CloseCause, TrackBatch, TrackEvent, TrackSummary, Tracker, TrackerConfig,
+    BoundaryKind, CloseCause, LiveExtent, TrackBatch, TrackEvent, TrackSummary, Tracker,
+    TrackerConfig,
 };
 pub use trust::{
     CaptureEmitter, CaptureResult, CaptureSide, GainState, GainStepConfig, GainStepResult,

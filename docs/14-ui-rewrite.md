@@ -282,6 +282,52 @@ Two things that had to be settled rather than assumed:
 
 And the same bug T-379 killed was still alive here: `ui/src/app/decode/plots.ts` windowed its frame buffer on `Date.now() * 1e6` at three sites, comparing a browser instant against capture-clock `t_ns`. On the replay behind T-379 that is a 3.5-day gap, so the "last 60 s" CRC tally was permanently empty — and with the offset the other way it would have silently become an all-time tally labelled 60 s. Those sites now take the view window; the live buffer is bounded by *count* rather than by a clock (a time-trimmed buffer discards live frames while the view is scrubbed back, so returning to Live would find the plot missing frames it had already received); and a window the socket never carried is backfilled from the pipeline's own capture, because those frames exist and the rule is that data which exists must be shown.
 
+### A live box grows at the speed it was measured, not at the speed it was polled (T-388)
+
+**The user, live testing 2026-09-16:** *"the scrolling presence boxes now follow the waterfall
+(T-362 confirmed), but a live signal box extends UP slowly."*
+
+T-362 had made a box sit on the right rows; it still reached the right *height* far too late. The
+diagnosis held, link by link, and one number in it was worse than reported:
+
+| link | cadence | the bottleneck? |
+|---|---|---|
+| tracker advances an open track's end | **per STFT frame** | no — as reported |
+| detect reader flushes to the writer | 0.5 s | no |
+| **open track offered to the inventory** (`LIVE_OFFER_NS`) | **5 s** | **yes** |
+| writer stores it | ≤ 200 ms | no |
+| **UI `/api/inventory` poll** | **5 s** (not the 2 s reported; that is the *device* poll) | **yes** |
+
+Two lazy links in series, so a box top sat 5–10 s behind the live edge. Shortening the poll alone
+would have halved it; shortening the offer alone would have halved the other half; and neither is
+free — the offer writes to the database and runs the merge, explain and confirm passes.
+
+**The fix is a push, and the reason is not speed.** `presence`, a new `messages` stream
+([stream contract §15](stream-contract.md), ADR-0004), carries how far each open emitter's presence
+**has been observed** — the end of the last burst the detector measured, never a clock read. A client
+must not interpolate towards the live edge between records: *a box drawn to the live edge on the
+assumption the signal is still there is a claim about air nobody measured.* Fast is the goal;
+inventing the most recent second is not. It is the coverage map's grey rule (T-368) and T-385's six
+sentences, applied to a rectangle's top edge.
+
+That single rule is what makes the control test the important one: **an emission that stops stops
+extending**, because the tracker stops advancing the end and the stream can only repeat what it was
+given. The end-to-end test keys a tone off with a third of the recording still to run and asserts
+that **no** record names a later time; the latency half asserts the steps and the final lag in
+seconds.
+
+**Scope: the following view only.** A paused or scrubbed view answers about a fixed past window —
+which the four obligations above wired it to — so it unsubscribes and stays exactly on the poll it
+had. Nothing about T-379/T-384's window plumbing changes.
+
+**What the push may and may not do.** It only ever *extends* a row already on screen: the poll still
+creates, arbitrates, merges, confirms and windows the rows, and a track with no row publishes
+nothing. A record carries **time only** — no frequency — because a presence extension is new time,
+not new geometry (T-362), so this path cannot move a box sideways. The client refuses a record that
+would shorten a box, or that would bridge a silence between two separate stretches of air. Producer
+side, the rate is capped at 32 records per 250 ms tick — 128/s — whatever the band is doing;
+what a tick leaves out simply grows on the poll as before.
+
 ### History surface (workflow #3)
 
 A **separate surface**, not a tab of Explore: the durable catalogue of every event, one-offs included, browsable by region and time (`GET /api/events`, and `GET /api/inventory/{id}/presence` for one emitter's track).

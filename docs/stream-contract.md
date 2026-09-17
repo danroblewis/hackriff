@@ -9,6 +9,7 @@ One contract serves two uses:
 ## 1. Versioning
 
 - Every stream opens with a header carrying `"schema": "hackriff.stream"` and `"version": "<major>.<minor>"`. This document is **1.2**: 1.1 (1.0 plus the optional header `audio` profile and the binary `status` record type, T-043, §12) plus the inspector streams of §14 (ADR-0011, T-089): the `frame`, `status` and `edit` message record types and the optional header `inspector` object. The optional header `stage` object (§14.4) is added with stage streams (T-088).
+- **1.2 also adds the `presence` stream (§15, T-388)**: a new `messages` stream, which is additive — a reader that does not know it simply does not subscribe to it.
 - **Minor versions** may only add:
   - optional header fields;
   - optional message-record fields;
@@ -839,6 +840,105 @@ Served over `/ws/open/<name>` (§12.1) and TCP `open/<name>` (§13.1), with the 
 - `inspector?pipeline=<id>[&output=<id>]`: a pipeline's inspector output from now. The same records are offered as the always-on stream `inspector/<pipeline_id>/<output_id>` while the pipeline runs.
 - `inspector?capture=<id>[&from_frame=<n>][&field_map=<recipe_id>@<version>:<map_id>]`: replay, optionally re-parsed, of a recorded decoded stream. **Served (T-092):** frame records from frame `n` by index seek, paced to the consumer, stream id `capture/<id>`; see docs/api.md "Decoded captures".
 - `stage?pipeline=<id>&node=<node>[&port=<port>][&view=raw|spectrum|sync_search|eye]`: a stage stream (§14.4).
+
+## 15. The presence stream: live box growth (1.2, T-388)
+
+**Stream id `presence`** (`/ws/presence`), `messages` kind, `message_schema` `hackriff.presence/1`,
+`content_class` `unrestricted`, listed by `GET /api/streams`. Published by `hk-pipeline`
+(`crates/hk-pipeline/src/presence.rs`) from the detection writer thread.
+
+### 15.1 Why there is a stream at all
+
+The user, live testing 2026-09-16: *"a live signal box extends UP slowly."* Detection was never the
+bottleneck — the tracker advances an open track's end (`t_last_end`) on **every STFT frame**. What
+was slow was everything between that and the screen, and it was two lazy links in series:
+
+| link | cadence |
+|---|---|
+| tracker advances `t_last_end` | per frame |
+| detect reader flushes a `WriteBatch` | 0.5 s (`flush_interval_s`) |
+| **open track offered to the inventory** (`LIVE_OFFER_NS`) | **5 s** |
+| writer thread stores it | ≤ 200 ms |
+| UI `GET /api/inventory` poll | **5 s** |
+
+So a box top sat between 5 s and 10 s behind the live edge. Shortening either link alone leaves the
+other; this stream removes both by carrying the extension on its own path. **The 5 s offer and the
+5 s poll are unchanged** and still do their jobs — creating the row, arbitrating, merging, confirming
+it, and serving a *window*. The stream only ever extends a row that is already on screen.
+
+### 15.2 What a record may say
+
+**A box may only extend as far as presence has actually been observed.** The time published is the
+end of the last burst the detector *measured* (`hk_detect::LiveExtent::t_end_ns`, the tracker's
+`t_last_end`), never a clock read and never an assumption that a signal heard a moment ago is still
+transmitting. The consequence is the property that matters: **an emission that stops stops
+extending**, within one tick, because the tracker stops advancing that field and this stream can only
+repeat the end it was given.
+
+Client-side extrapolation — drawing the box to the live edge because a signal *was* there a second
+ago — would be faster still and would be a claim about air nobody measured. That is why the fix is a
+push. It is the same rule as `Coverage::of` (T-368) refusing to spell "never looked" as "looked and
+it was quiet", and as an absent row meaning out-of-window rather than deleted (T-385).
+
+### 15.3 Record shape
+
+```json
+{"type":"message","seq":7,"t_ns":1757774400123456789,"emitter_id":"0199…",
+ "content_class":"unrestricted","gated":false,"frame_model":"presence-extension",
+ "metadata":{"kind":"presence-extension",
+             "last_interval":{"t_start_s":1757774390.1,"t_end_s":1757774400.12,"open":true}}}
+```
+
+- The envelope is §5.1's, unchanged. `t_ns` is the extension's own end instant — integer Unix
+  nanoseconds, never a bare `t` (§1, T-354) — and is the same instant as `metadata.last_interval.t_end_s`.
+- `metadata.last_interval` is deliberately the **same object** `GET /api/inventory` serves as
+  `presence.last_interval`: the same three field names in the same `_s` seconds unit
+  (`docs/api.md`), so a client assigns it rather than converting it and the fast surface cannot
+  invent a shape the slow one would disagree with.
+- `open` is always `true`: a record exists because the tracker still holds that track open. It is
+  stated on the wire, never inferred on the client.
+- **No frequency.** A presence extension is new *time*, not new geometry (T-362: a box is a band
+  fraction plus two absolute capture times). The box's edges came from the row and are not restated,
+  so this path can never move a box sideways.
+- `content` is never present: there is no content, only timing — of exactly the class
+  `/api/inventory`'s own `presence` object already carries unconditionally.
+
+### 15.4 Which tracks are published, and which are not
+
+One record per open track per tick, for tracks the inventory has already given a row
+(`Inventory::emitter_of_track`, written where a live offer or a chain write resolves one). **A track
+with no row publishes nothing**: an extension names an emitter, and a track with no row has no box to
+extend.
+
+The set of *extents* is wider than the set of live *offers*: an offer decides whether to create a
+row, so it is strict (several bursts, a settled fate) and excludes exactly the continuous carriers a
+broadcast band is full of, which are one long burst and enter the inventory through a chain instead.
+An extent creates nothing, so the row lookup is the only gate it needs.
+
+A track that closes, merges or joins a hop set is forgotten at once and publishes nothing further:
+its box stops at the last end measured, and the close's own sighting is what the next poll serves.
+
+### 15.5 Rate, and what bounds it
+
+Two gates, both producer-side:
+- at most one tick per **250 ms** of stream time (`PRESENCE_PUSH_NS`), and
+- at most **32** records in a tick (`MAX_EXTENSIONS_PER_TICK`).
+
+That is a hard ceiling of **128 records/s**, however busy the band is, because the cap is on records
+and not on tracks. Beyond it, the tracks left out of a tick are not extended in it (counted as
+`/detect/presence_extensions_truncated`); their boxes grow on the 5 s poll as before. The tick keeps
+the newest ends — the boxes closest to the live edge are the ones being watched grow. Beyond that,
+§7's backpressure is unchanged: a slow consumer is dropped, never the survey.
+
+### 15.6 Consumers
+
+Only a **following** view subscribes. A paused or scrubbed view is answering about a fixed past
+window; its rows are already complete for that window and a push has nothing to add, so the socket is
+closed and that path stays on the poll (`ui/src/app/explore/presence-stream.ts`). The client applies
+a record to a row it already holds, and refuses in three cases (`ui/src/presence.ts`): no interval on
+the row (nothing to extend, and none is conjured), an end at or behind the one held (a reordered
+record can never shorten a box), and a span starting *after* the end held (a different stretch of air
+with silence in between — bridging it would assert the emitter transmitted through the gap).
 
 ## Sources
 

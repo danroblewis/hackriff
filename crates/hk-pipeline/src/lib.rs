@@ -54,6 +54,7 @@ pub mod attention; // T-119
 pub mod candidates; // T-128
 pub mod observe; // T-115
 pub mod occupancy; // T-118
+pub mod presence; // T-388
 pub mod reports; // T-121
 
 mod capture;
@@ -87,6 +88,10 @@ pub use control::SwitchableControl;
 pub use events::Candidate;
 pub use family::{Explanation, FamilyPrior, explain_emitter, explanations};
 pub use inventory::{CONFIRM_RULE, ConfirmPolicy, Inventory, TrackInventory};
+pub use presence::{
+    MAX_EXTENSIONS_PER_TICK, PRESENCE_EXTENSION_KIND, PRESENCE_MESSAGE_SCHEMA, PRESENCE_PUSH_NS,
+    PRESENCE_STREAM_ID, PresenceExtension, PresenceStream,
+};
 pub use recorder::{
     RECORDING_DEFAULT_S, RECORDING_LABEL_MAX, RECORDING_MAX_BYTES, RECORDING_MAX_S, RecordingStatus,
 };

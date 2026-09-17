@@ -53,8 +53,8 @@ use hk_detect::clip::is_clipped_ci8;
 use hk_detect::track::TrackSummary;
 use hk_detect::{
     BandProfile, BurstConfig, BurstDetector, ClipCount, Confirmation, DetectionProfile,
-    DetectionRecord, DetectionWriter, Detector, DetectorConfig, DetectorEvent, TrackBatch,
-    TrackEvent, Tracker, TrackerConfig,
+    DetectionRecord, DetectionWriter, Detector, DetectorConfig, DetectorEvent, LiveExtent,
+    TrackBatch, TrackEvent, Tracker, TrackerConfig,
 };
 use hk_dsp::floor::{FloorConfig, FloorEvent, NoiseFloorTracker};
 use hk_dsp::window::WindowKind;
@@ -64,6 +64,7 @@ use num_complex::Complex;
 
 use crate::dc_twin::{LiveDcTwins, Observed};
 use crate::events::{Candidate, ControlEvent, MemberBox};
+use crate::presence::PresenceStream;
 use crate::run::Shared;
 use crate::stats::{add, inc, set};
 
@@ -77,6 +78,9 @@ const LIVE_OFFER_NS: i64 = 5_000_000_000;
 /// Bursts an open track needs before it is offered live (T-109): a repeating emitter, not a
 /// one-off or a continuous carrier (those enter at close, as before).
 const LIVE_MIN_BURSTS: u64 = 4;
+/// Open tracks whose observed extent one flush may carry to the writer (T-388). The presence
+/// stream caps what it publishes again; this only bounds the batch.
+const MAX_LIVE_EXTENTS: usize = 256;
 /// Batches the writer queue holds.
 pub(crate) const WRITER_QUEUE: usize = 8;
 /// Retry period for failed writes (and queued trust verdicts) while no batch arrives.
@@ -115,6 +119,11 @@ struct WriteBatch {
     closed: Vec<TrackEvent>,
     /// Open confirmed channel tracks offered to the inventory before they close (T-109).
     live: Vec<TrackSummary>,
+    /// The **observed** time extent of every track the same predicate would offer, collected on
+    /// every flush rather than every `LIVE_OFFER_NS` (T-388): what the presence stream publishes so
+    /// a live signal's box grows without waiting for the next database offer. Times come from the
+    /// tracker's `t_last_end`, so a track that stopped carries the end it stopped at.
+    live_extents: Vec<LiveExtent>,
     floor: Vec<FloorEvent>,
     now_ns: i64,
     capture_name: Option<String>,
@@ -134,6 +143,7 @@ impl WriteBatch {
             && self.tracks.is_empty()
             && self.closed.is_empty()
             && self.live.is_empty()
+            && self.live_extents.is_empty()
             && self.floor.is_empty()
             && self.capture_name.is_none()
     }
@@ -144,6 +154,7 @@ impl WriteBatch {
             tracks,
             mut closed,
             live,
+            live_extents,
             mut floor,
             now_ns,
             capture_name,
@@ -154,6 +165,11 @@ impl WriteBatch {
         if !live.is_empty() {
             // Only the newest offer matters: each summary supersedes the older one of its track.
             self.live = live;
+        }
+        if !live_extents.is_empty() {
+            // Same rule, and more so: an extent is a *latest observed end*, so a carried-over older
+            // one would publish a box top behind the one already measured. The newest wins.
+            self.live_extents = live_extents;
         }
         self.floor.append(&mut floor);
         self.now_ns = self.now_ns.max(now_ns);
@@ -264,6 +280,8 @@ struct DetectNode {
     live_offered_ns: Option<i64>,
     /// Reused for the tracker's live offers (T-109).
     live_buf: Vec<TrackSummary>,
+    /// Scratch for [`MAX_LIVE_EXTENTS`] open-track extents (T-388), reused every flush.
+    extent_buf: Vec<LiveExtent>,
     now_ns: i64,
     segments: u64,
     segment_start: Timestamp,
@@ -330,6 +348,7 @@ impl DetectNode {
             last_flush_ns: None,
             live_offered_ns: None,
             live_buf: Vec::new(),
+            extent_buf: Vec::new(),
             now_ns: 0,
             segments: 0,
             segment_start: Timestamp::UNIX_EPOCH,
@@ -672,11 +691,22 @@ impl DetectNode {
         } else {
             Vec::new()
         };
+        // T-388: every flush, not every `LIVE_OFFER_NS`. The extents are the same tracks under the
+        // same predicate, but reading two timestamps out of each slot instead of building a
+        // `TrackSummary`, so the fast path costs a fraction of the offer it rides beside.
+        let live_extents = if self.namer.named() && !self.finishing {
+            self.tracker.live_extents_into(&mut self.extent_buf);
+            self.extent_buf.truncate(MAX_LIVE_EXTENTS);
+            self.extent_buf.drain(..).collect()
+        } else {
+            Vec::new()
+        };
         let batch = WriteBatch {
             detections: std::mem::take(&mut self.pending),
             tracks: std::mem::take(&mut self.batch),
             closed,
             live,
+            live_extents,
             floor: std::mem::take(&mut self.pending_floor),
             now_ns: self.now_ns,
             capture_name: self.namer.take(),
@@ -766,6 +796,10 @@ struct Writer {
     tracks: TrackBatch,
     closed: Vec<TrackEvent>,
     live: Vec<TrackSummary>,
+    /// The latest observed extents (T-388), replaced by each batch and published by [`Writer::write`].
+    live_extents: Vec<LiveExtent>,
+    /// The `presence` stream: track→emitter bindings the offers teach it, and the tick gate.
+    presence: PresenceStream,
     floor: Vec<FloorEvent>,
     anomalies: Option<FloorAnomalies>,
     correlator: Option<(Correlator, FeedCache)>,
@@ -795,6 +829,7 @@ impl Writer {
             None => None,
         };
         let site = shared.cfg.settings.site.map(|s| Site::new(s[0], s[1]));
+        let presence = PresenceStream::new(shared.cfg.stream_sink.as_ref())?;
         Ok(Self {
             detections: DetectionWriter::new(shared.cfg.settings.detection_batch),
             shared,
@@ -802,6 +837,8 @@ impl Writer {
             tracks: TrackBatch::new(),
             closed: Vec::new(),
             live: Vec::new(),
+            live_extents: Vec::new(),
+            presence,
             floor: Vec::new(),
             anomalies,
             correlator,
@@ -816,6 +853,7 @@ impl Writer {
             tracks,
             closed,
             live,
+            live_extents,
             floor,
             now_ns,
             capture_name,
@@ -833,6 +871,9 @@ impl Writer {
         if !live.is_empty() {
             self.live = live;
         }
+        if !live_extents.is_empty() {
+            self.live_extents = live_extents;
+        }
         self.floor.extend(floor);
         self.now_ns = self.now_ns.max(now_ns);
     }
@@ -844,6 +885,33 @@ impl Writer {
             || !self.closed.is_empty()
             || !self.live.is_empty()
             || !self.floor.is_empty()
+    }
+
+    /// T-388: one presence tick — publish how far each open track's presence has been observed,
+    /// for the tracks the inventory has already given a row.
+    ///
+    /// Deliberately **not** part of [`Writer::write`] and **not** in [`Writer::has_work`]: this
+    /// writes nothing to the repository and must not make the writer take the lock (or count a
+    /// batch) on a run where the only thing happening is that a signal is still on the air. It runs
+    /// once per loop iteration and gates itself to `PRESENCE_PUSH_NS`.
+    fn publish_presence(&mut self) {
+        if self.live_extents.is_empty() || !self.presence.due(self.now_ns) {
+            return;
+        }
+        // The inventory is the one place that knows which emitter a track's row is, and the lock is
+        // taken only for that lookup: no repository work, no writes.
+        let (published, truncated) = {
+            let inv = self
+                .shared
+                .inventory
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.presence
+                .tick(self.now_ns, &self.live_extents, |t| inv.emitter_of_track(t))
+        };
+        let dc = &self.shared.counters.detect;
+        add(&dc.presence_extensions, published as u64);
+        add(&dc.presence_extensions_truncated, truncated as u64);
     }
 
     /// One write pass (see the module docs for the order and the retry rules).
@@ -984,11 +1052,15 @@ impl Writer {
                         self.take(msg, &mut acks);
                     }
                     self.write();
+                    self.publish_presence();
                     for ack in acks {
                         let _ = ack.send(());
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => self.write(),
+                Err(RecvTimeoutError::Timeout) => {
+                    self.write();
+                    self.publish_presence();
+                }
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
