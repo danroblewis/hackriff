@@ -190,6 +190,14 @@ acceptance-m4 *args:
 acceptance-chirp *args:
     HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_chirp {{args}}
 
+# T-364: re-derive both curves of the burst-recall vs open-set trade (docs/17), over N seed bases
+# so every figure carries its draw spread (ADR-0016 §7.2). Runs the shipped feature set and the
+# four-cyclic-dimension expansion, ~20 min each on the dev Mac. Measurement only: nothing it does
+# reaches a default build, and `cyclic-dims` is never on in CI. Extra args go to the binary.
+t364-curves *args:
+    cargo run --release -p hk-classify --bin t364-curves -- --out /tmp/t364-max.json {{args}}
+    cargo run --release -p hk-classify --features cyclic-dims --bin t364-curves -- --out /tmp/t364-four.json {{args}}
+
 test-py:
     cd py && uv run --locked pytest
 

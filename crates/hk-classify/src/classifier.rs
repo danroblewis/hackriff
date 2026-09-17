@@ -122,6 +122,16 @@ impl Classifier {
         }
     }
 
+    /// A classifier over **both** models the caller fitted (T-364).
+    ///
+    /// `bin/fit-densities` fits two models under one protocol, and an experiment that changes the
+    /// protocol has to change both or it measures a hybrid of the old and the new. Prefer
+    /// [`Classifier::with_model`] when only the claiming model is under test; the below-gate model
+    /// still cannot make the classifier more confident, only move mass to `unknown`.
+    pub fn with_models(model: DensityModel, below_gate: DensityModel) -> Self {
+        Self { model, below_gate }
+    }
+
     /// The densities it scores with.
     pub fn model(&self) -> &DensityModel {
         &self.model

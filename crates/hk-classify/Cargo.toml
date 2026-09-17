@@ -26,6 +26,12 @@ default = []
 # trained model. The shadow stage itself, and its "shadow changes nothing" proof, are in the
 # default build: they are written against the `LoadedModel` trait, not against any engine.
 dl-mlp = ["hk-ml/ml-mlp"]
+# T-364 MEASUREMENT ONLY, never shipped and never on in CI: carries the four cyclic line
+# significances as four `features@N` dimensions in place of their max (T-310's expansion, refused
+# by T-328). It exists so `bin/t364-curves` can re-derive the four-dimension half of the trade the
+# user is being asked to rule on. A default build is byte-for-byte unaffected. Tests that enumerate
+# `FEATURE_NAMES` (`tests/feature_length_invariance.rs`) do not hold under it, by construction.
+cyclic-dims = []
 
 # Loads a trained per-family model, so it needs an evaluator; the exporter does not.
 [[bin]]

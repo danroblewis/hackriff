@@ -392,7 +392,10 @@ pub const IF_LOCAL_WINDOW: usize = 512;
 
 /// Names of `features@N`, in vector order. The density files key on these names, so the order may
 /// grow but never change meaning within a version.
-pub const FEATURE_NAMES: &[&str] = &[
+///
+/// This is the shipped list and the whole of [`FEATURE_NAMES`] in a default build. The
+/// experiment-only `cyclic-dims` feature appends four names to it (T-364); nothing else may.
+const BASE_FEATURE_NAMES: [&str; 30] = [
     "gamma_max",
     "sigma_aa",
     "sigma_ap",
@@ -424,6 +427,48 @@ pub const FEATURE_NAMES: &[&str] = &[
     "if_local_bimodality",
     "if_local_modality",
 ];
+
+/// Names of `features@N`, in vector order.
+#[cfg(not(feature = "cyclic-dims"))]
+pub const FEATURE_NAMES: &[&str] = &BASE_FEATURE_NAMES;
+
+/// The four line significances carried as four dimensions in place of their max — T-310's
+/// expansion, refused by T-328, re-priced by T-364. Indexed by `LineMethod as usize`.
+#[cfg(feature = "cyclic-dims")]
+const CYCLIC_DIM_NAMES: [&str; 4] = [
+    "cyclic_db_m0",
+    "cyclic_db_m1",
+    "cyclic_db_m2",
+    "cyclic_db_m3",
+];
+
+/// [`BASE_FEATURE_NAMES`] with [`CYCLIC_DIM_NAMES`] appended (T-364's `cyclic-dims` experiment).
+#[cfg(feature = "cyclic-dims")]
+const fn feature_names_with_cyclic_dims() -> [&'static str; 34] {
+    let mut out = [""; 34];
+    let mut i = 0;
+    while i < BASE_FEATURE_NAMES.len() {
+        out[i] = BASE_FEATURE_NAMES[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < CYCLIC_DIM_NAMES.len() {
+        out[BASE_FEATURE_NAMES.len() + j] = CYCLIC_DIM_NAMES[j];
+        j += 1;
+    }
+    out
+}
+
+/// Names of `features@N`, in vector order.
+///
+/// **Experiment build only** (`--features cyclic-dims`, T-364). `cyclic_db` is still in the list —
+/// names never change meaning within a version — but [`symbol_features`] leaves it abstaining and
+/// sets the four `cyclic_db_m*` dimensions instead, so a model fitted in this build scores the
+/// expansion and a model fitted in a default build scores the max. Nothing ships from here: the
+/// shipped density files and every default build are untouched, because a name that always
+/// abstains is dropped by `density::fit`'s `MIN_PRESENCE`.
+#[cfg(feature = "cyclic-dims")]
+pub const FEATURE_NAMES: &[&str] = &feature_names_with_cyclic_dims();
 
 /// The inputs a feature vector is computed from.
 #[derive(Clone, Copy, Debug)]
@@ -1225,6 +1270,21 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
 /// **T-328 put a number on the cost: 39.4 % of genuine N/8 bursts of a taxonomy class come back
 /// `unknown`, against 11.9 % of that class's full windows** — and measured that pooling window
 /// lengths at fit time, not changing this statistic, is what addresses it.
+///
+/// **T-364 re-measured both over eight seed bases and found the number understates the gap, for a
+/// reason that matters here** (`docs/17-burst-recall-vs-open-set.md`, re-derive with
+/// `just t364-curves`). T-328 shortened **C14's window only** — the classifier still saw a
+/// full-length snippet — and that reading reproduces at 38.4 % ±2.1 %. A *genuinely* short emission
+/// is short in the classifier's snippet too, and measured that way the rejection is **70.3 %
+/// ±1.7 %** against 9.4 % ±1.4 % on full windows. Pooling C14's window at fit time removes almost
+/// all of the first (38.4 % → 11.1 %) and little of the second (70.3 % → 58.0 %), which locates most
+/// of the remaining harm **outside** this statistic, in the other ~20 features' own dependence on
+/// the snippet length. Pooling costs held-out unknown recall 0.9530 ±0.0084 → 0.8911 ±0.0112 with
+/// the max, and 0.9561 ±0.0057 → 0.9088 ±0.0053 with the four dimensions — so T-328's ordering
+/// reversal is real, and at a pooled fit the expansion is the only form measured that holds
+/// ADR-0016 §7's 0.90 floor. **Nothing was adopted**: the trade is a product decision open for the
+/// user, and the densities and this statistic are unchanged.
+///
 /// `cyclic_line_window.rs` pins the structural findings — that the band **does not** move, and that
 /// a short burst puts three of the four line significances off at once — so neither the wrong law,
 /// nor the fixed defect, nor the refused expansion can be re-derived from a single seed.
@@ -1232,13 +1292,24 @@ fn symbol_features(f: &mut Features, input: &FeatureInput<'_>) {
     let Some(s) = input.symbols else {
         return;
     };
-    let best = s
-        .lines
-        .iter()
-        .map(|l| l.significance_db)
-        .fold(f64::NEG_INFINITY, f64::max);
-    if best.is_finite() {
-        f.set("cyclic_db", best);
+    #[cfg(not(feature = "cyclic-dims"))]
+    {
+        let best = s
+            .lines
+            .iter()
+            .map(|l| l.significance_db)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if best.is_finite() {
+            f.set("cyclic_db", best);
+        }
+    }
+    // T-364's experiment build: the four significances as four dimensions instead of their max.
+    // Off by default; see `FEATURE_NAMES`.
+    #[cfg(feature = "cyclic-dims")]
+    for l in &s.lines {
+        if let Some(name) = CYCLIC_DIM_NAMES.get(l.method as usize) {
+            f.set(name, l.significance_db);
+        }
     }
     if let (Some(obw), Some(rate)) = (input.obw_hz, s.symbol_rate_bd.value()) {
         if rate > 0.0 {
