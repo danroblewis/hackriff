@@ -6,10 +6,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { OutputEntry } from "../src/app/state";
 import {
-  collectPanelSources, nextPanelTab, panelsEmptyText, rdsFieldText, rdsIdentity, rdsViewModel, scopePoints,
-  trimRds, ScopeBuffer,
+  collectPanelSources, decodeEmptyText, decodePath, loadDecodeView, nextPanelTab, panelsEmptyText,
+  rdsFieldText, rdsIdentity, rdsViewModel, scopePoints, trimRds, ScopeBuffer,
   type DecodeRow, type PanelSource, type PipelineLite,
 } from "../src/app/explore/output-panel";
+import { viewWindow, windowKey } from "../src/app/explore/inventory";
+import { WATERFALL_ROWS } from "../src/waterfall";
 
 function audioOutput(over: Partial<OutputEntry> = {}): OutputEntry {
   return {
@@ -202,4 +204,140 @@ test("scopePoints clamps out-of-range samples to +-1, and is empty with no sampl
   assert.equal(scopePoints([2, -2], 2, 10), "0,0.0 1,10.0");
   assert.equal(scopePoints([], 10, 10), "");
   assert.equal(scopePoints([1], 0, 10), "");
+});
+
+// ---- T-384: the panels are views over the one window, and say which emptiness they got ----
+
+/** The capture clock these fixtures run on, deliberately far from any wall clock. */
+const CAPTURE_EDGE_S = 1_789_297_847;
+
+/** A `WindowState` (the store shape `viewWindow` reads) with everything unset but what a test names. */
+function winState(over: {
+  view?: { loHz: number; hiHz: number } | null; rowRateHz?: number | null; edgeTS?: number | null;
+  time?: { live: boolean; tS?: number; spanS?: number | null };
+} = {}) {
+  return {
+    live: {
+      view: over.view === undefined ? { loHz: 99.6e6, hiHz: 102e6 } : over.view,
+      rowRateHz: over.rowRateHz ?? 25,
+      edgeTS: over.edgeTS === undefined ? CAPTURE_EDGE_S : over.edgeTS,
+    },
+    device: { rowsPerS: null },
+    time: over.time ?? { live: true },
+    captureWindow: null,
+  };
+}
+
+/** A row of the window under test, on the capture clock. */
+function windowRow(over: Partial<DecodeRow> = {}): DecodeRow {
+  return decodeRow({ frame_model: "rds-ps", at: CAPTURE_EDGE_S - 2, fields: { text: "KROQ FM" }, ...over });
+}
+
+/** A client that records every path, answers `/decode` with `rows` and `/api/coverage` with a cell. */
+function decodeClient(rows: readonly DecodeRow[], coverage: "observed" | "unobserved" | "none" | "fail" = "observed") {
+  const paths: string[] = [];
+  const client = {
+    get: async <T,>(path: string): Promise<T> => {
+      paths.push(path);
+      if (path.startsWith("/api/coverage")) {
+        if (coverage === "fail") throw new Error("coverage is not available here");
+        return (coverage === "none" ? { any: { cells: [] } } : { any: { cells: [{ state: coverage }] } }) as T;
+      }
+      return { decodes: rows } as T;
+    },
+  };
+  return { client, paths };
+}
+
+test("THE PROPERTY: the decode request carries the window the waterfall shows, on the capture clock", () => {
+  // The bug: this route had no time parameter at all, so a scrubbed panel kept rendering the live
+  // edge's PS/RadioText/PTY under a past window's heading. `decodePath` is the fix's whole surface.
+  const live = decodePath("em-fm", viewWindow(winState()))!;
+  const q = new URLSearchParams(live.slice(live.indexOf("?") + 1));
+  assert.ok(live.startsWith("/api/inventory/em-fm/decode?"));
+  assert.equal(Number(q.get("t1")), CAPTURE_EDGE_S, "the window ends at the live edge");
+  assert.equal(Number(q.get("t0")), CAPTURE_EDGE_S - WATERFALL_ROWS / 25, "one waterfall span back");
+
+  // Scrubbed back: the reviewed instant over the same span — the waterfall's own window, not a
+  // second one kept by this panel.
+  const back = decodePath("em-fm", viewWindow(winState({ time: { live: false, tS: CAPTURE_EDGE_S - 3600 } })))!;
+  const bq = new URLSearchParams(back.slice(back.indexOf("?") + 1));
+  assert.equal(Number(bq.get("t1")), CAPTURE_EDGE_S - 3600);
+  assert.equal(Number(bq.get("t0")), CAPTURE_EDGE_S - 3600 - WATERFALL_ROWS / 25);
+
+  // A span dragged on the time navigator is the window here too.
+  const dragged = decodePath("em-fm", viewWindow(winState({ time: { live: false, tS: 500, spanS: 600 } })))!;
+  assert.ok(dragged.endsWith("?t0=-100&t1=500"), dragged);
+});
+
+test("THE CONTROL: no live edge reported -> no query is sent at all, and nothing is invented", () => {
+  // Without this the property is satisfiable by always producing *some* window — which is exactly
+  // how the empty sidebar happened: a window was always produced, and it was on the wrong clock.
+  assert.equal(decodePath("em-fm", viewWindow(winState({ edgeTS: null }))), null);
+});
+
+test("THE CONTROL THAT MATTERS: a window that DOES hold decodes renders their values", async () => {
+  // Without this, every assertion below is satisfiable by a panel that is always empty and merely
+  // explains its emptiness well.
+  const { client, paths } = decodeClient([
+    windowRow({ frame_model: "rds-ps", fields: { text: "KROQ FM " } }),
+    windowRow({ frame_model: "rds-rt", fields: { text: "Now playing" } }),
+    windowRow({ frame_model: "rds-group", fields: { tp: true, pty: 10 } }),
+  ]);
+  const view = await loadDecodeView(client, winState(), "em-fm");
+  assert.equal(view.kind, "rows");
+  assert.equal(paths.length, 1, "one request, and no coverage question: the window was not empty");
+  assert.equal(new URLSearchParams(paths[0].slice(paths[0].indexOf("?") + 1)).get("t1"), String(CAPTURE_EDGE_S));
+
+  const rds = rdsViewModel((view as { kind: "rows"; decodes: readonly DecodeRow[] }).decodes)!;
+  assert.equal(trimRds(rds.ps), "KROQ FM", "the station name the window's own row carries");
+  assert.equal(rds.rt, "Now playing");
+  assert.equal(rds.pty, 10);
+  assert.equal(rds.tp, true);
+});
+
+test("THE GENUINELY-EMPTY CONTROL: an empty window asks about its coverage, for exactly that window", async () => {
+  const { client, paths } = decodeClient([], "unobserved");
+  const view = await loadDecodeView(client, winState(), "em-fm");
+  assert.deepEqual(view, { kind: "empty", coverage: "unobserved" });
+  assert.equal(paths.length, 2, "the coverage question is asked only when the window came back empty");
+  const cov = new URLSearchParams(paths[1].slice(paths[1].indexOf("?") + 1));
+  assert.equal(Number(cov.get("t1")), CAPTURE_EDGE_S, "about exactly this panel's window, not another");
+  assert.equal(Number(cov.get("t0")), CAPTURE_EDGE_S - WATERFALL_ROWS / 25);
+  assert.equal(cov.get("f_lo"), String(99.6e6));
+});
+
+test("a coverage answer that never came stays UNKNOWN rather than hardening into a measurement claim", async () => {
+  for (const c of ["none", "fail"] as const) {
+    const { client } = decodeClient([], c);
+    assert.deepEqual(await loadDecodeView(client, winState(), "em-fm"), { kind: "empty", coverage: null }, c);
+  }
+});
+
+test("THE DISTINGUISHING TEST: the four emptinesses produce four different sentences", () => {
+  const sentences = [
+    decodeEmptyText({ kind: "no-window" }),
+    decodeEmptyText({ kind: "empty", coverage: "unobserved" }),
+    decodeEmptyText({ kind: "empty", coverage: "observed" }),
+    decodeEmptyText({ kind: "empty", coverage: null }),
+  ];
+  assert.equal(new Set(sentences).size, 4, `pairwise distinct: ${JSON.stringify(sentences)}`);
+  // Only the third is a claim about the air and the decoder; the first two are about *this UI*, and
+  // rendering either of them as the third invents a result out of an absence of measurement.
+  assert.match(sentences[1], /no data, not a quiet band/);
+  assert.match(sentences[2], /Nothing decoded in this window/);
+  assert.equal(decodeEmptyText({ kind: "error", message: "503: unavailable" }), "503: unavailable");
+});
+
+test("windowKey changes exactly when the window does, so a mounted panel re-reads instead of trailing", () => {
+  const base = winState();
+  assert.equal(windowKey(base), windowKey(winState()), "identical state, identical key");
+  assert.notEqual(windowKey(base), windowKey(winState({ edgeTS: CAPTURE_EDGE_S + 1 })), "the live edge advanced");
+  assert.notEqual(windowKey(base), windowKey(winState({ time: { live: false, tS: CAPTURE_EDGE_S } })), "scrubbed back");
+  assert.notEqual(
+    windowKey(winState({ time: { live: false, tS: 500, spanS: 20 } })),
+    windowKey(winState({ time: { live: false, tS: 500, spanS: 600 } })),
+    "a dragged span is a different window at the same instant",
+  );
+  assert.notEqual(windowKey(base), windowKey(winState({ rowRateHz: 64 })), "the span is derived from the row rate");
 });

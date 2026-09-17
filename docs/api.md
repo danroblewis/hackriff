@@ -317,9 +317,9 @@ What the C15 classifier measured about one emitter, in full. The inventory row c
 - **Gating.** Like `/api/inventory/{id}/decode` and `/api/signatures/match`, an emitter whose decoded identity is withheld answers exactly as one nothing has classified — no flag, no count, no marker — so this route can never confirm a withheld identity indirectly. An emitter with no decoded identity is served normally.
 - **Errors** `{"error", "code"}`: `404 not_found` (unknown or unparsable id), `503 unavailable` (this server has no inventory), `405` other methods.
 
-### `GET /api/inventory/{id}/decode` — latest decode fields (T-159, ADR-0013 API GAP 3)
+### `GET /api/inventory/{id}/decode[?t0=&t1=]` — decode fields for a window (T-159; window T-384, ADR-0013 §3.3.1)
 
-The emitter's most recently decoded fields: the focus panel's "Decoded summary" and per-signal output panels (RDS PS/RT for FM, decoded records for digital recipes; docs/14 "Added scope from docs/15 §7"). `{id}` resolves like `/api/inventory/{id}` (a merged id resolves to its live survivor). No parsing happens in the UI — every field here is as the decoder or recipe committed it.
+The emitter's decoded fields: the focus panel's "Decoded summary" and per-signal output panels (RDS PS/RT for FM, decoded records for digital recipes; docs/14 "Added scope from docs/15 §7"). `{id}` resolves like `/api/inventory/{id}` (a merged id resolves to its live survivor). No parsing happens in the UI — every field here is as the decoder or recipe committed it.
 
 ```jsonc
 {
@@ -333,6 +333,15 @@ The emitter's most recently decoded fields: the focus panel's "Decoded summary" 
   ]
 }
 ```
+
+**The window (`t0`/`t1`, T-384).** Given together, Unix **seconds** on the capture clock, closed on both ends: the answer is *what was decoded in that window* — one row per `(decoder, frame_model)` that produced anything inside it, each row the latest **within the window**. Without them it is the latest of all time, exactly as before. A half-given pair (`t0` with no `t1`, or the reverse) and `t1 < t0` are `400 invalid`, as is a nanosecond value in the seconds parameter (both ends are bounded to |t| < 9×10⁹ s), so an invented or misread window can never succeed and return a plausible-looking zero rows.
+
+This exists because the output/decode panels are views over the UI's one (time × frequency) window like every other surface (ADR-0013 §3.3.1), and this route had **no time parameter at all** — a panel scrubbed back an hour could only keep rendering the live edge's fields and label them the window's. Two rules follow, and both are asserted by value:
+
+- **It filters; it never re-decodes.** A `Decode` row is what the decoder or recipe already committed, carrying its own capture-clock `at`. Serving a past window selects stored rows, so CLAUDE.md's incremental-decode invariant (*live decoding extends the region's time extent and decodes only the newly-arrived part, never re-decoding what is already done*) holds trivially: no decoder runs here, and re-running one to answer a scrub would break it.
+- **Latest-per-frame-model is computed after the filter, not before.** The other order answers "the all-time latest row, if it happens to fall in the window", which reports *nothing* for a window that plainly holds an older row — data that exists and would not be rendered.
+
+**Not `/api/captures/{id}/frames`.** That route is keyed by *capture* (one recording of one pipeline's decoded stream), already carries `from_t`/`to_t`, and serves raw stream records at frame granularity — the right route for the packet inspector's own scrubbing. It cannot answer *what has this emitter decoded*: there is no emitter→capture key to follow (the `decode` table has neither an emitter nor a capture column; it is keyed by decoded identity), and assembling an RDS station name out of raw group records in the client would be both a thin-client violation and the re-decoding the invariant above forbids. The two stay distinct: this route is emitter-keyed and serves committed fields; that one is capture-keyed and serves records.
 
 One row per `(decoder, frame_model)` pair the emitter's decoded identity has produced, newest first: a plugin decoder (`readsb`, or the built-in `hk-rds`) commits one frame model per row, while a recipe's several `messages` outputs share one `decoder` (`recipe:<id>`, e.g. `rds.recipe.json`'s `group-info`/`station`/`radiotext` outputs) but each names its own `frame_model`, so RDS's PI/group metadata, PS and RadioText each get their own row. `recipe_id` is the id after `recipe:` when `decoder` has that prefix, else `null`. `fields` merges the row's metadata (frame type, addresses, counts — always stored) and content (payload/text, only when the caller's identity access reveals it; content gating is off by default, T-143) into one object, exactly as the decoder/recipe committed them. `crc.valid` is whether the frame's check passed; `source_session` is the producing `Demodulation`'s id, else the replayed `Recording`'s id, else `null` for a live decode with neither. An emitter with no decoded identity, or one content gating withholds, answers `{"decodes": []}` — the same lookup never confirms a withheld identity by naming its decodes (T-036). `404 not_found` for an unknown id.
 

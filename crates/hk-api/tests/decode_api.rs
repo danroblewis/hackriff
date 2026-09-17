@@ -144,6 +144,195 @@ fn decode_route_is_empty_then_serves_the_latest_row_per_frame_model() {
     );
 }
 
+// ---- T-384: the window, so a scrubbed output panel can ask ----
+
+/// Seeds one emitter with a decode history spread over a minute, so a window can select a *part*
+/// of it. Three `rds-group` rows and two `rds-ps` rows, each at a distinct capture second.
+fn seed_decode_history(repo: &Arc<Mutex<Repository>>) {
+    let mut repo = repo.lock().unwrap();
+    for (t, pty) in [(10, 1), (30, 2), (50, 3)] {
+        repo.insert_decode(&rds_decode(
+            "rds-group",
+            T0 + t,
+            json!({"group_type": 0, "pty": pty}),
+            None,
+        ))
+        .unwrap();
+    }
+    for (t, text) in [(20, "EARLY"), (40, "LATE")] {
+        repo.insert_decode(&rds_decode(
+            "rds-ps",
+            T0 + t,
+            json!({}),
+            Some(json!({"text": text})),
+        ))
+        .unwrap();
+    }
+}
+
+/// Rows as `(frame_model, at−T0)` pairs, for terse assertions.
+fn rows_of(v: &Value) -> Vec<(String, i64)> {
+    v["decodes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{v}"))
+        .iter()
+        .map(|r| {
+            (
+                r["frame_model"].as_str().unwrap().to_owned(),
+                r["at"].as_f64().unwrap().round() as i64 - T0,
+            )
+        })
+        .collect()
+}
+
+/// **THE CONTROL THAT MATTERS.** A window that *does* hold decodes serves them, asserted on the
+/// values — not merely on the absence of an error, and not merely on emptiness.
+///
+/// Without this every other assertion in this section is satisfiable by a route that answers
+/// `{"decodes": []}` for every window it is given, which is precisely the
+/// *we-have-it-but-didn't-render-it* failure the whole-UI window rule is about. The panel above it
+/// would then explain its emptiness beautifully and be wrong every time.
+#[test]
+fn a_window_that_holds_decodes_serves_them_with_their_values() {
+    let (server, seeded, repo) = serve_seeded();
+    let addr = server.local_addr();
+    seed_decode_history(&repo);
+
+    // [T0+15, T0+45] holds rds-group at 30 and rds-ps at 20 and 40.
+    let (status, v) = authed(
+        addr,
+        &format!(
+            "/api/inventory/{}/decode?t0={}&t1={}",
+            seeded.rds,
+            T0 + 15,
+            T0 + 45
+        ),
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(
+        rows_of(&v),
+        vec![("rds-ps".to_owned(), 40), ("rds-group".to_owned(), 30)],
+        "the window's own latest row per frame model, newest first: {v}"
+    );
+    assert_eq!(
+        v["decodes"][0]["fields"]["text"],
+        json!("LATE"),
+        "the value the panel renders comes from the windowed row: {v}"
+    );
+    assert_eq!(v["decodes"][1]["fields"]["pty"], json!(2), "{v}");
+}
+
+/// **THE PROPERTY.** The window selects what was decoded *in it*, on the capture clock — nothing
+/// widened to look full, nothing narrowed to the live edge.
+#[test]
+fn the_window_selects_what_was_decoded_in_it_and_never_widens() {
+    let (server, seeded, repo) = serve_seeded();
+    let addr = server.local_addr();
+    seed_decode_history(&repo);
+    let ask = |t0: i64, t1: i64| {
+        authed(
+            addr,
+            &format!("/api/inventory/{}/decode?t0={t0}&t1={t1}", seeded.rds),
+        )
+        .1
+    };
+
+    // Unwindowed is unchanged: the latest of all time (T-159's behaviour, still the default).
+    let (status, all) = authed(addr, &format!("/api/inventory/{}/decode", seeded.rds));
+    assert_eq!(status, 200, "{all}");
+    assert_eq!(
+        rows_of(&all),
+        vec![("rds-group".to_owned(), 50), ("rds-ps".to_owned(), 40)]
+    );
+
+    // An early window answers about the early rows — NOT about the live edge's. This is the bug
+    // the route's missing parameter caused: a panel scrubbed back to T0+10 had no way to ask, so
+    // it went on showing pty 3 from T0+50 and called it the window's.
+    assert_eq!(
+        rows_of(&ask(T0 + 5, T0 + 25)),
+        vec![("rds-ps".to_owned(), 20), ("rds-group".to_owned(), 10)],
+        "the early window's own rows"
+    );
+    assert_eq!(
+        ask(T0 + 5, T0 + 25)["decodes"][1]["fields"]["pty"],
+        json!(1)
+    );
+
+    // A window that holds ONLY the older of two rows of a frame model must serve that older row —
+    // latest-per-frame-model is computed after the filter, not before. The other order answers
+    // "nothing decoded here" for a window that plainly holds a decode.
+    assert_eq!(
+        rows_of(&ask(T0 + 5, T0 + 15)),
+        vec![("rds-group".to_owned(), 10)],
+        "the older row is the window's latest"
+    );
+
+    // Closed on both ends, like every other window on this API.
+    assert_eq!(
+        rows_of(&ask(T0 + 10, T0 + 10)),
+        vec![("rds-group".to_owned(), 10)]
+    );
+}
+
+/// **THE GENUINELY-EMPTY CONTROL.** A window nothing was decoded in is empty, and that emptiness
+/// is a fact about the window rather than a failure to ask: the same emitter, the same route, a
+/// different window, and the rows are there.
+#[test]
+fn a_window_with_no_decodes_is_empty_while_the_neighbouring_one_is_not() {
+    let (server, seeded, repo) = serve_seeded();
+    let addr = server.local_addr();
+    seed_decode_history(&repo);
+
+    let (status, quiet) = authed(
+        addr,
+        &format!(
+            "/api/inventory/{}/decode?t0={}&t1={}",
+            seeded.rds,
+            T0 + 60,
+            T0 + 120
+        ),
+    );
+    assert_eq!(status, 200, "{quiet}");
+    assert_eq!(quiet["decodes"], json!([]), "nothing was decoded then");
+
+    let (_, busy) = authed(
+        addr,
+        &format!(
+            "/api/inventory/{}/decode?t0={}&t1={}",
+            seeded.rds,
+            T0,
+            T0 + 60
+        ),
+    );
+    assert_eq!(rows_of(&busy).len(), 2, "and the very next window is full");
+}
+
+/// A half-given window is refused rather than completed. An invented end is exactly the
+/// *plausible query* the whole-UI window rule forbids: it would succeed, return an honest zero
+/// rows, and read on screen as a finding.
+#[test]
+fn a_half_given_or_backwards_window_is_refused_and_nanoseconds_are_not_mistaken_for_seconds() {
+    let (server, seeded, _repo) = serve_seeded();
+    let addr = server.local_addr();
+    let path = |q: &str| format!("/api/inventory/{}/decode?{q}", seeded.rds);
+
+    for q in [
+        format!("t0={}", T0),
+        format!("t1={}", T0),
+        format!("t0={}&t1={}", T0 + 10, T0),
+        // A nanosecond value in a seconds parameter: refused, never silently misread as a
+        // year-56000 window that selects everything.
+        format!("t0=0&t1={}", T0 * 1_000_000_000),
+    ] {
+        let (status, v) = authed(addr, &path(&q));
+        assert_eq!(
+            (status, v["code"].as_str()),
+            (400, Some("invalid")),
+            "{q} must be refused: {v}"
+        );
+    }
+}
+
 #[test]
 fn decode_route_404s_for_an_unknown_id_and_is_empty_without_a_decoded_identity() {
     let (server, seeded, _repo) = serve_seeded();

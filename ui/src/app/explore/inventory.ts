@@ -156,6 +156,27 @@ export function viewWindow(state: WindowState): ViewWindow | null {
   return edge === null ? null : { t0: edge - span, t1: edge };
 }
 
+/**
+ * A string that changes exactly when [[viewWindow]] would (T-384): the time cursor, the stream's
+ * live edge, the capture window's end and the row rate the span is derived from.
+ *
+ * Surfaces subscribe to *this*, not to `s.time` alone. A panel watching only the cursor never
+ * re-reads when the live edge advances or a new capture window arrives, so it goes on answering
+ * about the window it was mounted in while the waterfall beside it shows another — which is the
+ * whole-UI window rule broken by omission rather than by a wrong query. One definition, so two
+ * surfaces cannot disagree about when the window moved.
+ */
+export function windowKey(state: WindowState): string {
+  const t = state.time;
+  return [
+    t.live ? "live" : `${t.tS}/${t.spanS ?? ""}`,
+    state.live.edgeTS ?? "",
+    state.captureWindow?.t1S ?? "",
+    state.live.rowRateHz ?? "",
+    state.device.rowsPerS ?? "",
+  ].join("|");
+}
+
 /** The frequency filters both lists share — the tuned/zoomed view span. Deliberately carries no
  * time: the window belongs to the Candidate query alone (see [[loadInventoryRows]]). */
 export function viewFilters(state: WindowState): Filters {
@@ -237,9 +258,13 @@ function windowBand(state: WindowState): { lo: number; hi: number } | null {
  * `Coverage::of` refuses to mint an observation out of a zero span — so there is no parallel notion
  * of emptiness invented here. One cell, because the question is about the window as a whole: it is
  * unobserved only when **no** part of the band was sampled in it.
+ *
+ * Shared with the output/decode panels (T-384) rather than re-asked there: two surfaces that
+ * decided "unobserved" by two routines would eventually disagree about one window, and the rule
+ * they are both held to is that emptiness names a single cause.
  */
-async function windowCoverage(
-  client: InventoryClient, state: WindowState, w: { t0: number; t1: number },
+export async function windowCoverage(
+  client: Pick<InventoryClient, "get">, state: WindowState, w: { t0: number; t1: number },
 ): Promise<WindowCoverage> {
   const band = windowBand(state);
   if (!band || !(w.t1 > w.t0)) return null;

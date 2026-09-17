@@ -4,6 +4,7 @@
 // sync-search plot (gap 6) aren't served yet, so those show an honest placeholder instead.
 import type { AppContext, MountFn } from "../context";
 import { h } from "../dom";
+import { viewWindow, windowKey, type ViewWindow } from "../explore/inventory";
 import { FLAG_GATED, openStream, type StreamSocket } from "../net";
 import { findBlock, subscribeDecodeFeed, type BlockDescriptor, type DecodeFeed, type PipelineNode, type PortType } from "./pipelines";
 import { bitStripPlot, linePlot, placeholderPlot, scatterPlot, tallyPlot } from "./svg";
@@ -35,9 +36,9 @@ export function pickPlots(node: PipelineNode | null, block: BlockDescriptor | nu
   const frames = outPort(block, "frames");
   if (frames) {
     return [
-      { kind: "frame-tally-crc", title: "Frames by CRC status", note: "last 60 s", caption: "tally of decoded frames, this stage's output" },
+      { kind: "frame-tally-crc", title: "Frames by CRC status", note: "this window", caption: "tally of decoded frames, this stage's output" },
       followHops
-        ? { kind: "channel-map", title: "Frames by channel", note: "last 60 s", caption: "which channel each frame arrived on" }
+        ? { kind: "channel-map", title: "Frames by channel", note: "this window", caption: "which channel each frame arrived on" }
         : { kind: "gap", gap: 6, title: "Sync search", note: "", caption: "match score per candidate position — not served yet (API gap 6)" },
     ];
   }
@@ -129,15 +130,65 @@ export function tallyChannels(frames: readonly FrameRecord[]): { label: string; 
   return [...counts.entries()].map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count);
 }
 
-/** Keeps only frames whose `t_ns` (stream-contract §5.1) falls in the last `windowS` seconds of `nowNs`. */
-export function withinWindow(frames: readonly FrameRecord[], nowNs: number, windowS: number): FrameRecord[] {
-  const cutoff = nowNs - windowS * 1e9;
-  return frames.filter((f) => typeof f.t_ns === "number" && f.t_ns >= cutoff);
+/**
+ * Keeps only the frames whose own `t_ns` (stream-contract §5.1) falls inside the view window,
+ * which is `[t0, t1]` in Unix **seconds on the capture clock** (T-384).
+ *
+ * This used to be `withinWindow(frames, Date.now() * 1e6, 60)` — a wall-clock instant compared
+ * against capture-clock stamps, the same bug T-379 removed from the inventory path and still live
+ * here at three call sites. It is not an off-by-a-bit: a replay's clock and the browser's are
+ * unrelated, and the fixture behind T-379 sat 3.5 days apart, so *every* frame fell outside the
+ * 60 s window and the tally rendered permanently empty — or, with the offset the other way, every
+ * frame fell inside it and the "last 60 s" tally silently became an all-time one.
+ *
+ * Both ends are closed, and both come from the window: a tally of only-since-then would show
+ * frames the waterfall above it no longer displays.
+ */
+export function withinWindow(frames: readonly FrameRecord[], w: ViewWindow): FrameRecord[] {
+  const t0 = w.t0 * 1e9, t1 = w.t1 * 1e9;
+  return frames.filter((f) => typeof f.t_ns === "number" && f.t_ns >= t0 && f.t_ns <= t1);
+}
+
+/** Newest `cap` frames, by arrival. The live buffer is bounded by *count*, never by a clock: a
+ * time-trimmed buffer would discard live frames while the view is scrubbed back, so going Live
+ * again would find the plot empty of data it had already received (T-384). */
+export function capFrames(frames: readonly FrameRecord[], cap: number): FrameRecord[] {
+  return frames.length <= cap ? [...frames] : frames.slice(frames.length - cap);
+}
+
+// ---- the window's frames, when the live tap doesn't hold them (T-384) ----
+
+/** A `GET /api/captures` row, narrowed to the fields this module reads. */
+export interface CaptureLite { id: string; pipeline_id: string; t_last: number }
+
+/**
+ * The most recently written capture of `pipelineId`, or `null`.
+ *
+ * A pipeline's decoded frames are recorded to a capture (`/api/captures`, stream contract §14.7),
+ * so the frames of a *past* window exist even though the live tap — a socket, with no history
+ * form — cannot replay them. The whole-UI window rule makes fetching them obligatory rather than
+ * optional: data exists for the window, so it must be shown.
+ */
+export function captureFor(captures: readonly CaptureLite[], pipelineId: string): CaptureLite | null {
+  return captures.filter((c) => c.pipeline_id === pipelineId).sort((a, b) => b.t_last - a.t_last)[0] ?? null;
+}
+
+/** Frames of one capture over exactly the view window. `from_t`/`to_t` are Unix **seconds**, the
+ * same clock as `w` (docs/api.md "Scrubbing"); `limit` is the route's documented maximum, so a
+ * dense window is truncated rather than widened. */
+export const CAPTURE_FRAME_LIMIT = 500;
+
+export function captureFramesPath(captureId: string, w: ViewWindow): string {
+  return `/api/captures/${encodeURIComponent(captureId)}/frames?from_t=${w.t0}&to_t=${w.t1}&limit=${CAPTURE_FRAME_LIMIT}`;
 }
 
 // ---- mount ----
 
-const PLOT_W = 520, PLOT_H = 190, MAX_POINTS = 800, FRAME_WINDOW_S = 60;
+const PLOT_W = 520, PLOT_H = 190, MAX_POINTS = 800;
+
+/** How many live frames the tap keeps. Bounded by count, not by a clock — see [[capFrames]]. Large
+ * enough to cover a long dragged span at a busy frame rate, small enough to re-tally per render. */
+const FRAME_BUF_CAP = 4000;
 
 function plotPanel(id: "a" | "b"): HTMLElement {
   return h("div", { class: "plot" },
@@ -164,7 +215,11 @@ export const mountPlots: MountFn = (el, ctx: AppContext) => {
   let tapBuf: number[] = [];
   let tapIq: { x: number; y: number }[] = [];
   let frameBuf: FrameRecord[] = [];
+  /** Frames fetched from the pipeline's capture for a window the live tap never carried (T-384),
+   * and the window they are of — so a stale set is never tallied under a new window. */
+  let backfill: { w: ViewWindow; frames: FrameRecord[] } | null = null;
   let unsubFrames: (() => void) | null = null;
+  let unsubWindow: (() => void) | null = null;
   let currentKey = "";
   let renderTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -183,19 +238,64 @@ export const mountPlots: MountFn = (el, ctx: AppContext) => {
     fill(panelB, b, plotSvg(b));
   }
 
+  /** The frames of the current view window: what the live tap received, plus whatever the
+   * pipeline's capture held for a window the tap never saw. `null` when no window can be named —
+   * the plot then says so instead of tallying an unbounded buffer as if it were a window. */
+  function windowFrames(): { w: ViewWindow; frames: FrameRecord[] } | null {
+    const w = viewWindow(ctx.store.get());
+    if (w === null) return null;
+    const live = withinWindow(frameBuf, w);
+    const stored = backfill && backfill.w.t0 === w.t0 && backfill.w.t1 === w.t1 ? backfill.frames : [];
+    // De-duplicated on the frame's own time+sequence: a window straddling the live edge is served
+    // by both sources, and a frame counted twice would overstate a tally.
+    const seen = new Set(live.map((f) => `${f.t_ns}/${f.seq}`));
+    return { w, frames: [...live, ...stored.filter((f) => !seen.has(`${f.t_ns}/${f.seq}`))] };
+  }
+
   function plotSvg(choice: PlotChoice): SVGElement {
     switch (choice.kind) {
       case "tap":
         if (choice.portType === "iq") return scatterPlot(PLOT_W, PLOT_H, tapIq);
         if (choice.portType === "bits") return bitStripPlot(PLOT_W, PLOT_H, tapBuf);
         return linePlot(PLOT_W, PLOT_H, tapBuf);
-      case "frame-tally-crc":
-        return tallyPlot(PLOT_W, PLOT_H, tallyCrcStatus(withinWindow(frameBuf, Date.now() * 1e6, FRAME_WINDOW_S)));
-      case "channel-map":
-        return tallyPlot(PLOT_W, PLOT_H, tallyChannels(withinWindow(frameBuf, Date.now() * 1e6, FRAME_WINDOW_S)));
+      case "frame-tally-crc": {
+        const wf = windowFrames();
+        return wf === null
+          ? placeholderPlot(PLOT_W, PLOT_H, ["waiting for the capture window…"])
+          : tallyPlot(PLOT_W, PLOT_H, tallyCrcStatus(wf.frames));
+      }
+      case "channel-map": {
+        const wf = windowFrames();
+        return wf === null
+          ? placeholderPlot(PLOT_W, PLOT_H, ["waiting for the capture window…"])
+          : tallyPlot(PLOT_W, PLOT_H, tallyChannels(wf.frames));
+      }
       case "gap":
         return placeholderPlot(PLOT_W, PLOT_H, [choice.caption]);
     }
+  }
+
+  /**
+   * Fetches the window's frames from the pipeline's capture, when the live tap cannot have them.
+   *
+   * Best-effort and additive: a failure or a pipeline with no capture leaves the live frames alone
+   * rather than emptying the plot. It never re-decodes — `/api/captures/{id}/frames` serves records
+   * the pipeline already wrote, which is what the incremental-decode invariant asks for.
+   */
+  async function loadBackfill(pipelineId: string) {
+    const w = viewWindow(ctx.store.get());
+    if (w === null) { backfill = null; return; }
+    if (backfill && backfill.w.t0 === w.t0 && backfill.w.t1 === w.t1) return;
+    try {
+      const list = await ctx.client.get<{ captures?: readonly CaptureLite[] }>("/api/captures");
+      const cap = captureFor(list.captures ?? [], pipelineId);
+      if (!cap) { backfill = { w, frames: [] }; return; }
+      const page = await ctx.client.get<{ frames?: readonly FrameRecord[] }>(captureFramesPath(cap.id, w));
+      backfill = { w, frames: [...(page.frames ?? [])] };
+    } catch {
+      backfill = { w, frames: [] };
+    }
+    scheduleRender();
   }
 
   function teardownTap() {
@@ -207,7 +307,10 @@ export const mountPlots: MountFn = (el, ctx: AppContext) => {
   function teardownFrames() {
     unsubFrames?.();
     unsubFrames = null;
+    unsubWindow?.();
+    unsubWindow = null;
     frameBuf = [];
+    backfill = null;
   }
 
   function ensureWiring() {
@@ -239,9 +342,14 @@ export const mountPlots: MountFn = (el, ctx: AppContext) => {
     }
     const needsFrames = [a, b].some((c) => c.kind === "frame-tally-crc" || c.kind === "channel-map");
     if (needsFrames && p) {
-      unsubFrames = subscribePipelineFeed(ctx, p.id, {
-        frame(f) { frameBuf = withinWindow([...frameBuf, f], Date.now() * 1e6, FRAME_WINDOW_S); scheduleRender(); },
+      const pipelineId = p.id;
+      unsubFrames = subscribePipelineFeed(ctx, pipelineId, {
+        frame(f) { frameBuf = capFrames([...frameBuf, f], FRAME_BUF_CAP); scheduleRender(); },
       });
+      // T-384: the tallies are a view over the same window as the waterfall, so they re-derive when
+      // it moves — and fetch the window's recorded frames when the live tap never carried them.
+      unsubWindow = ctx.store.select(windowKey, () => { void loadBackfill(pipelineId); });
+      void loadBackfill(pipelineId);
     }
     renderNow();
   }
