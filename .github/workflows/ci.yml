@@ -8,6 +8,17 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+  # T-436: run nextest under its `ci` profile, defined at the end of .config/nextest.toml.
+  # That file's DEFAULT profile now caps test-threads at 8, which is calibrated for the dev
+  # Mac — 28 logical CPUs of which up to 24 are committed to four concurrent building agents
+  # by CLAUDE.md policy. A GitHub-hosted runner is a dedicated 2–4 vCPU container with no
+  # co-tenants, so 8 would be 2–4× oversubscription there; the `ci` profile puts it back to
+  # nextest's stock one-test-per-CPU, which on that box is already the uncontended number.
+  # The profile inherits everything else from `default` (heavy-serial and its membership,
+  # the per-test retries), so this changes the thread count and nothing else. `just
+  # acceptance-ci` runs under plain `cargo test`, which ignores this.
+  NEXTEST_PROFILE: ci
+
 jobs:
   test:
     runs-on: ubuntu-latest

@@ -15,7 +15,8 @@
 #
 # Everything else (hk-model, hk-dsp, hk-detect, hk-estimate, hk-demod, hk-store,
 # hk-context, hk-stream, hk-plugins, and the rest of hk-core/hk-pipeline) runs fully
-# parallel at the default test-threads.
+# parallel, up to `test-threads` — see "HOW MANY TESTS RUN AT ONCE" below, which is no
+# longer nextest's default of one-per-logical-CPU.
 #
 # Retries are scoped to the specific tests known to be flaky under load (see CLAUDE.md
 # "Build/test/run" and docs/planning-log.md T-072/T-074/T-076 history) so a genuine
@@ -28,8 +29,10 @@
 # `max-threads = 1` serialises the group's tests **against each other, inside one nextest
 # invocation**. It does nothing about the two things that actually make this machine slow:
 #
-#   1. the other ~27 tests nextest runs concurrently OUTSIDE the group (test-threads
-#      defaults to the core count, so a heavy-serial test still shares 28 cores);
+#   1. the other tests nextest runs concurrently OUTSIDE the group — ~27 of them when
+#      T-383 measured this, because test-threads was still nextest's default of one per
+#      logical CPU; 7 of them now that T-436 has capped it (below). Fewer, not none: a
+#      heavy-serial test still shares the box with everything outside the group.
 #   2. the other cargo builds on the box — up to four parallel agents plus the
 #      coordinator's gate (CLAUDE.md "Worktree launch step"), which no test-runner
 #      setting can see, let alone serialise.
@@ -61,6 +64,91 @@
 # have caught any of the five. Measure the wait before you bound it; if a bound must grow,
 # say which number it is and why.
 # ---------------------------------------------------------------------------------------
+
+# =========================================================================================
+# HOW MANY TESTS RUN AT ONCE (T-436). Read this before changing the number.
+#
+# nextest's default is one test per logical CPU — 28 on the dev Mac. That is the right
+# number for a suite of CPU-bound unit tests on a box nextest has to itself. This suite is
+# neither. A large minority of it starts `hk serve`, spawns plugin subprocesses, drives
+# real-time-paced replays and then BOUNDS A WALL-CLOCK LATENCY; and CLAUDE.md's own
+# "Worktree launch step" commits up to four concurrent agents at CARGO_BUILD_JOBS=6 — 24 of
+# the 28 cores — by design. So nextest schedules 28 wall-clock-sensitive tests onto roughly
+# four cores' worth of real capacity. Oversubscription of exactly the resource they measure.
+#
+# WHAT THIS IS NOT. It is not a fix for a flaky test, and it must not be read as one.
+# T-430's conclusion stands: concurrency is not the defect, it is the SAMPLING RATE on
+# defects like these. Every failure T-430 and T-433 root-caused was reachable on an IDLE
+# machine (the coverage one at 10–20 % per run at zero load), so a lower thread count would
+# only have made them rarer and harder to diagnose — which is what happened for months. The
+# number below buys back the 7–12 minutes a false red costs per merge, and some wall clock
+# with it; it does not make one test correct. A test that only passes on an idle machine is
+# still wrong. Keep filing them — and expect them to surface more slowly now.
+#
+# MEASURED, on the dev Mac (28 logical CPUs), `--workspace --exclude hk-e2e`:
+#   - default (28) : three consecutive full runs on ONE clean diff, three DIFFERENT
+#                    timing-test failures, each green in isolation (T-436). T-426's agent
+#                    independently saw four more runs fail a rotating set. T-300's measured
+#                    the mechanism: hk-plugins' 43 tests take 8.9 s for all 43 in isolation
+#                    and 24–43 s PER TEST inside a concurrent run.
+#
+# THE COST IS NEGATIVE. This was expected to be a trade — "slower but correct" — and it is
+# not one. Back-to-back on one tree, warm, nothing else changed (T-436's own A/B; the
+# coordinator separately measured 1403 s at 8 against ~1450 s at the default over a wider
+# scope, same direction):
+#
+#                          8 threads        28 threads (nextest's default here)
+#     result               2205/2205 PASS   1 FAILED  (view_pause_keeps_capture)
+#     nextest run time         234.3 s          279.6 s      (+19 %)
+#     wall clock incl. list    279 s            449 s        (+61 %)
+#     CPU-seconds of test        1312 s           1909 s     (+45 % for the SAME tests)
+#
+# THE DEFAULT IS SLOWER *AND* FLAKIER, and the reason is structural rather than lucky:
+#
+#     heavy-serial group   224.1 s / 266 tests   279.4 s / 266 tests
+#     everything else     1088.2 s / 1939       1629.2 s / 1940
+#
+# The `heavy-serial` group is max-threads = 1 at ANY setting, so its 224 s IS the run's
+# critical path — 96 % of the 234 s run at 8 threads, and 100 % of the 279 s run at 28.
+# The other 1939 tests are not on the critical path at either setting (1088 s spread over
+# 7 free threads is 155 s; 1629 s over 27 is 60 s). So raising the parallelism outside the
+# group cannot shorten the run — there is nothing left to overlap with — and it does
+# lengthen it, by taking CPU away from the one-at-a-time tests that ARE the critical path:
+# the same 266 serial tests cost 224 s at 8 and 279 s at 28. That is also the whole flake
+# mechanism in one line, since those are the tests that bound wall-clock latencies.
+#   - corroborating, from an investigation that was not looking for a thread count at all
+#     (T-257, docs/10 §3.4): nextest `LEAK` lines here are a macOS pipe(2)/FD_CLOEXEC race
+#     between concurrently SPAWNING test processes, and they scale with spawn concurrency
+#     and nothing else. 6 of 10 runs leaked at the default 28; 6 of 12 at 16; ZERO in a
+#     full 1754-test workspace run at 8, and zero in 25 hk-plugins runs at 6. A second,
+#     independently measured discontinuity in the same place.
+#   - 8            : still not zero. One 8-thread run passed 2298/2298 with no exclusions;
+#                    a later one failed once (view_pause_keeps_capture, then 0/8 isolated)
+#                    and passed 2302/2302 on the immediate re-run at the same 8. With this
+#                    ticket's run the tally is 28 → 4 runs, 4 failures; 8 → 4 runs, 1
+#                    failure. BETTER, NOT SUFFICIENT — the point of "WHAT THIS IS NOT".
+#                    Note WHICH test failed at 28 above: view_pause_keeps_capture, the same
+#                    one that failed the one 8-thread run. It is a live defect and the cap
+#                    has just made it rarer. Somebody still has to go and measure what it
+#                    waits for.
+#
+# WHY 8 AND NOT num-cpus/4, OR 28. Nothing here scales with the core count; it scales with
+# how much of the box is someone else's. On this box that is fixed by policy, not by
+# hardware: four agents by design. 8 is the value with evidence behind it, and it sits in
+# the same arithmetic neighbourhood as the 6 that T-144 already chose for CARGO_BUILD_JOBS
+# and for the per-agent `--test-threads`. CLAUDE.md asked agents to pass `--test-threads 6`
+# by hand; nobody did, because `just test-crate` and `just test-one` do not. Putting the
+# number here is the one-definition move T-353 made for lint and T-396 for the gate: the
+# coordinator's gate, every agent's targeted run and CI now agree by construction.
+#
+# CI IS A DIFFERENT BOX AND GETS A DIFFERENT NUMBER — see [profile.ci] at the end of this
+# file. 8 is calibrated for a 28-core machine with co-tenants; the CI runner is a dedicated
+# 2–4 vCPU container with none, where 8 would be 2–4× oversubscription and the stock
+# one-per-CPU default is already correct.
+# =========================================================================================
+
+[profile.default]
+test-threads = 8
 
 [test-groups.heavy-serial]
 max-threads = 1
@@ -156,3 +244,28 @@ test-group = 'heavy-serial'
 [[profile.default.overrides]]
 filter = 'package(hk-pipeline) and binary(iterative_scan_device)'
 test-group = 'heavy-serial'
+
+# =========================================================================================
+# THE CI RUNNER IS NOT THIS BOX (T-436).
+#
+# `test-threads = 8` above is calibrated for the dev Mac: 28 logical CPUs of which up to 24
+# are committed to four concurrent building agents by CLAUDE.md policy. None of that is true
+# on CI. A GitHub-hosted `ubuntu-latest` runner is a dedicated 2–4 vCPU container with no
+# co-tenants, so nextest's stock one-test-per-CPU is already the correct, uncontended
+# number there — and 8 would be 2–4× oversubscription, i.e. this change would make CI worse
+# on the one machine nobody here can observe. (CI has never been exercised: nothing has been
+# pushed. That is a reason to leave its parallelism alone, not a reason to guess at it.)
+#
+# So CI opts back in to the default explicitly, and `.github/workflows/ci.yml` selects this
+# profile with NEXTEST_PROFILE. Custom profiles inherit from `default`, and override lookup
+# walks the inheritance chain, so everything above — the heavy-serial group, its membership,
+# the existing per-test retries — still applies here. The ONLY thing this profile changes is
+# the thread count.
+#
+# If CI ever shows the same rotating timing failures, the fix is NOT to copy 8 down here:
+# it is to find out what that runner's real capacity is and to keep fixing the tests that
+# bound unmeasured quantities (T-430, T-433, T-446).
+# =========================================================================================
+
+[profile.ci]
+test-threads = "num-cpus"
