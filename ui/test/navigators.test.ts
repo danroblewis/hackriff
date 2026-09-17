@@ -165,39 +165,255 @@ test("T-340: a region dragged on the frequency navigator zooms the main view to 
   assert.equal(regionFromDrag(ext, 0.5, 0.5), null);
   assert.equal(freqZoomTarget(GRID, G, null, true).kind, "none");
 
-  // A drag wider than one capture window is **survey overview**, and says so before it happens.
+  // A drag wider than one capture window cannot be captured at all (T-392): no achievable config
+  // covers 120 MHz on a 20 MHz front end, so it is one of the three refusals.
   const wide = regionFromDrag(ext, fracOf(80e6), fracOf(200e6))!;
   const w = freqZoomTarget(GRID, G, wide, true);
-  assert.equal(w.kind, "offer");
-  if (w.kind !== "offer") return;
-  assert.equal(w.source, "survey-overview");
+  assert.equal(w.kind, "error");
+  assert.equal(w.kind === "error" ? w.reason : null, "span_too_wide");
 });
 
-test("T-340 control: a region outside the tuned band OFFERS a retune on the achievable grid — it does not zoom", () => {
+// ---------------------------------------------------------------------------
+// T-392: region-select on the frequency navigator RETUNES — the one navigator action that
+// commands the radio.
+//
+// The user's invariant (CLAUDE.md, the frequency navigator): *"Selecting a region on it retunes the
+// front end to cover that region (snapped to an achievable config), not merely offering a retune —
+// this is the one navigator action that commands the radio, because unlike time (always a view over
+// already-captured data) a frequency outside the current window can only be reached by tuning
+// there. An error appears only when no achievable configuration can capture the region."*
+//
+// The whole design is one boundary, and both sides of it are asserted below:
+//
+//   inside the tuned window  → a pure view zoom, **zero** device calls;
+//   outside it               → **exactly one** retune, with the computed config asserted by value.
+//
+// The controls that stop a degenerate implementation passing: a span the ladder could cover with a
+// *wider* entry must still pick the smallest one, and each of the three refusals is paired with an
+// adjacent region that must retune rather than refuse — the error path is where over-refusal hides.
+// ---------------------------------------------------------------------------
+
+/** Region between two frequencies, as a drag on the bar produces it. */
+const regionOf = (lo: number, hi: number) => {
   const ext = spectrumExtent(GRID.frequency)!;
-  const fracOf = (hz: number) => (hz - ext.lo) / (ext.hi - ext.lo);
-  // A region a long way from the tuned 100 MHz: the waterfall does not hold this IQ.
-  const region = regionFromDrag(ext, fracOf(432.0e6), fracOf(432.4e6))!;
+  return regionFromDrag(ext, (lo - ext.lo) / (ext.hi - ext.lo), (hi - ext.lo) / (ext.hi - ext.lo))!;
+};
+
+test("T-392: a region OUTSIDE the tuned window retunes to the config that covers it — it does not offer", () => {
+  // A region a long way from the tuned 100 MHz: the waterfall does not hold this IQ, and no view
+  // state can make it. Before T-392 this left an offer and told the user to retune themselves.
+  const region = regionOf(432.0e6, 432.4e6);
   const z = freqZoomTarget(GRID, G, region, true);
-  assert.equal(z.kind, "offer", "showing a region outside the window needs the radio moved");
-  if (z.kind !== "offer") return;
-  // The offered centre is on the front end's own synthesiser grid (T-341), not a rounded hertz.
+  assert.equal(z.kind, "retune", "a region outside the window must command the radio, not propose it");
+  if (z.kind !== "retune") return;
+
+  // The centre is on the front end's own synthesiser grid (T-341), not a rounded hertz.
   const step = GRID.frequency!.center_step_hz!;
   near(z.centerHz / step - Math.round(z.centerHz / step), 0, 1e-6);
   near(z.centerHz, snapState(GRID, 432.2e6, 400e3).centerHz!, 1e-3);
+  // The span is the smallest achievable one covering the selection. This front end's rates are
+  // continuous from 2 MHz, so a 400 kHz selection opens the narrowest window that holds it.
+  assert.equal(z.spanHz, 2e6);
+  assert.equal(z.source, "live-iq");
   assert.deepEqual(z.view, { loHz: region.lo, hiHz: region.hi });
 
-  // With an unknown tuning step nothing snaps: the region's own centre is carried, and the offer
-  // makes no claim that the device can sit exactly there (`snapState` returns null).
+  // With an unknown tuning step nothing snaps: the region's own centre is carried, and nothing
+  // claims the device sits exactly there (`snapState` returns null).
   const unknown: NavigationGrid = {
     ...GRID, frequency: { ...GRID.frequency!, center_step: "unknown", center_step_hz: null },
   };
   const u = freqZoomTarget(unknown, G, region, true);
-  near(u.kind === "offer" ? u.centerHz : NaN, 432.2e6, 1);
+  near(u.kind === "retune" ? u.centerHz : NaN, 432.2e6, 1);
   assert.equal(snapState(unknown, 432.2e6, 400e3).centerHz, null);
+});
 
-  // A replay has no front end to offer: nothing happens rather than a dead button.
-  assert.equal(freqZoomTarget(GRID, null, region, false).kind, "none");
+test("T-392: the span chosen is the SMALLEST achievable one that covers the region, not merely one that does", () => {
+  // A discrete rate ladder with a wider entry that would also cover the selection: picking by
+  // "nearest" or by "the first that fits, scanning down" both give the wrong answer here.
+  const ladder: NavigationGrid = {
+    ...GRID,
+    frequency: {
+      ...GRID.frequency!,
+      spans_hz: { values: [20e6, 2e6, 10e6, 8e6] }, // deliberately unsorted: order must not decide
+      max_live_span_hz: 20e6,
+      // A round tuning step, so the centres below land exactly on it and the rung under test is the
+      // region's width rather than the width plus a fraction of a synthesiser step.
+      center_step: "uniform", center_step_hz: 1e3,
+    },
+  };
+  // 3 MHz wide at 432 MHz: 8, 10 and 20 MHz all cover it. Only 8 MHz is the smallest.
+  const three = freqZoomTarget(ladder, G, { lo: 430.5e6, hi: 433.5e6 }, true);
+  assert.equal(three.kind === "retune" ? three.spanHz : null, 8e6);
+  // Narrower than every entry: the ladder's own floor, not the region's width.
+  const tiny = freqZoomTarget(ladder, G, { lo: 432.0e6, hi: 432.1e6 }, true);
+  assert.equal(tiny.kind === "retune" ? tiny.spanHz : null, 2e6);
+  // Exactly one entry wide: the boundary covers, so it takes that entry rather than the next up.
+  const exact = freqZoomTarget(ladder, G, { lo: 428e6, hi: 436e6 }, true);
+  assert.equal(exact.kind === "retune" ? exact.spanHz : null, 8e6);
+  // A hair wider than it: the next rung, and only the next rung.
+  const over = freqZoomTarget(ladder, G, { lo: 428e6, hi: 436.001e6 }, true);
+  assert.equal(over.kind === "retune" ? over.spanHz : null, 10e6);
+  // Wider than every entry: no configuration covers it, which is refusal (2).
+  const past = freqZoomTarget(ladder, G, { lo: 422e6, hi: 443e6 }, true);
+  assert.equal(past.kind === "error" ? past.reason : null, "span_too_wide");
+
+  // The smallest covering span is measured from the centre the radio will SIT ON, not the one
+  // asked for. With a coarse synthesiser step the snap moves the centre, and a span chosen before
+  // it would leave an edge of the selection outside the window.
+  const coarse: NavigationGrid = {
+    ...GRID,
+    frequency: {
+      ...GRID.frequency!, center_step: "uniform", center_step_hz: 1e6,
+      spans_hz: { min: 1, max: 20e6 },
+    },
+  };
+  const r = regionOf(432.4e6, 432.8e6); // centre 432.6 MHz snaps down to 432 MHz: 0.6 MHz away
+  const c = freqZoomTarget(coarse, G, r, true);
+  assert.equal(c.kind, "retune");
+  if (c.kind !== "retune") return;
+  assert.equal(c.centerHz, 433e6);
+  // 433 ± span/2 must contain 432.4–432.8, so span ≥ 2 × (433 − 432.4) = 1.2 MHz — and exactly that.
+  assert.equal(c.spanHz, 1.2e6);
+  assert.ok(c.centerHz - c.spanHz / 2 <= r.lo + 1e-6 && c.centerHz + c.spanHz / 2 >= r.hi - 1e-6,
+    "the chosen window must contain the selection");
+});
+
+test("T-392: the three refusals — and next to each, a region that must RETUNE rather than refuse", () => {
+  const gf = GRID.frequency!;
+
+  // (1) A centre outside the device's tunable range. The bar's own extent is 1 MHz–6 GHz, so the
+  // out-of-range case is built from the grid rather than from the drag: a region above 6 GHz.
+  const above = { lo: 6.1e9, hi: 6.2e9 };
+  const e1 = freqZoomTarget(GRID, G, above, true);
+  assert.equal(e1.kind === "error" ? e1.reason : null, "center_out_of_range");
+  // ADJACENT: a centre just inside the top of the range retunes. The window it opens runs past
+  // 6 GHz, and that is fine — the invariant bounds the *centre*, not the window's edges.
+  const inside = { lo: gf.ranges_hz[0][1] - 0.2e6, hi: gf.ranges_hz[0][1] };
+  const a1 = freqZoomTarget(GRID, G, inside, true);
+  assert.equal(a1.kind, "retune", "a centre inside the range must retune, however close to the edge");
+  // …and the same at the bottom of the range.
+  const low = { lo: gf.ranges_hz[0][0], hi: gf.ranges_hz[0][0] + 0.2e6 };
+  assert.equal(freqZoomTarget(GRID, G, low, true).kind, "retune");
+
+  // (2) A span wider than one live window. 20 MHz is this front end's instantaneous bandwidth.
+  const max = gf.max_live_span_hz!;
+  const e2 = freqZoomTarget(GRID, G, { lo: 432e6 - max, hi: 432e6 + max }, true);
+  assert.equal(e2.kind === "error" ? e2.reason : null, "span_too_wide");
+  // ADJACENT: exactly `max_live_span_hz` wide is one window's worth and must retune — the boundary
+  // counts as inside, the same direction `detailOf` errs in.
+  const a2 = freqZoomTarget(GRID, G, { lo: 432e6 - max / 2, hi: 432e6 + max / 2 }, true);
+  assert.equal(a2.kind, "retune", "a selection exactly one window wide is capturable");
+  assert.equal(a2.kind === "retune" ? a2.spanHz : null, max);
+
+  // (3) On a replay, outside the recording's extent. A replay reports the recording as its band
+  // (`replay_capabilities`), so this is the same `ranges_hz` check against a much smaller range.
+  const recording: NavigationGrid = {
+    ...GRID,
+    frequency: {
+      ...gf, controllable: false, device_id: null, driver: "sigmf-replay",
+      ranges_hz: [[99e6, 101e6]], center_step: "unknown", center_step_hz: null,
+      spans_hz: { values: [2e6] }, max_live_span_hz: 2e6,
+      current: { center_hz: 100e6, span_hz: 2e6 },
+    },
+  };
+  // The replay's own window is narrower than the recording's extent, so "outside the played window"
+  // and "outside the recording" are different places and the two answers can be told apart.
+  const Gr: ax.Geometry = { centerHz: 100e6, bandwidthHz: 0.4e6, bins: 1024 };
+  const e3 = freqZoomTarget(recording, Gr, { lo: 432e6, hi: 432.4e6 }, false);
+  assert.equal(e3.kind === "error" ? e3.reason : null, "center_out_of_range");
+  assert.match(e3.kind === "error" ? e3.text : "", /this recording covers/);
+  // ADJACENT (inside the recording): behaves. A region inside the played window is a view zoom,
+  // with no device involved on either side of the boundary.
+  const a3 = freqZoomTarget(recording, Gr, { lo: 99.9e6, hi: 100.1e6 }, false);
+  assert.equal(a3.kind, "view");
+  // Inside the recording's extent but outside the played window: not a refusal about the region —
+  // there is simply no radio on a replay, and it says so rather than posting a doomed retune.
+  const a3b = freqZoomTarget(recording, Gr, { lo: 100.6e6, hi: 100.9e6 }, false);
+  assert.equal(a3b.kind === "error" ? a3b.reason : null, "not_live");
+
+  // A region with no width is still nothing at all, not an error.
+  assert.equal(freqZoomTarget(GRID, G, null, true).kind, "none");
+  // And the live-device error text names what the front end can tune, from the wire.
+  assert.match(e1.kind === "error" ? e1.text : "", /the front end can tune/);
+});
+
+test("T-392: THE BOUNDARY — inside the window is zero device calls, outside it is one retune with the computed config", async () => {
+  const { ctx, calls } = deviceSpyCtx();
+  const v0 = ctx.store.get().live.view!;
+
+  // INSIDE the tuned 98.8–101.2 MHz window: "look closer". A pure view zoom, and the radio is not
+  // touched on any path — this is the half of the gesture that must never become a device action.
+  const inside = regionOf(99.6e6, 100.4e6);
+  await applyFreqZoom(ctx, freqZoomTarget(GRID, G, inside, true));
+  assert.deepEqual(calls, [], "a region inside the tuned window must reach no device route");
+  assert.notDeepEqual(ctx.store.get().live.view, v0, "…and it is not that nothing happened: the view zoomed");
+  near(ctx.store.get().live.view!.loHz, 99.6e6, 1);
+  near(ctx.store.get().live.view!.hiHz, 100.4e6, 1);
+  assert.equal(ctx.store.get().live.retuneOffer, null, "no offer either — there is nothing to offer");
+
+  // OUTSIDE it: "go there". One device action, carrying the whole computed configuration — the
+  // smallest span that covers the selection, then the snapped centre.
+  const outside = regionOf(432.0e6, 432.4e6);
+  const plan = freqZoomTarget(GRID, G, outside, true);
+  assert.equal(plan.kind, "retune");
+  if (plan.kind !== "retune") return;
+  await applyFreqZoom(ctx, plan);
+  assert.equal(calls.length, 2, "one retune: the covering rate, then the centre");
+  assert.deepEqual(calls[0], { method: "POST", path: "/api/control/rate", body: { sample_rate_hz: 2_000_000 } });
+  // The centre goes out exactly as planned: re-snapping an already-snapped centre is a no-op.
+  assert.deepEqual(calls[1], { method: "POST", path: "/api/control/center", body: { center_hz: plan.centerHz } });
+  // By value, not "a call happened": the centre is on the synthesiser grid and within a step of the
+  // region's centre, and the window it opens contains the whole selection.
+  const step = GRID.frequency!.center_step_hz!;
+  const posted = (calls[1].body as { center_hz: number }).center_hz;
+  assert.ok(Math.abs(posted - 432.2e6) <= step, `${posted} is more than one step off the region centre`);
+  assert.ok(posted - 1e6 <= outside.lo && posted + 1e6 >= outside.hi, "the opened window must contain the selection");
+  // The view it asked for is pending until the new header arrives, and no stale offer is left.
+  assert.deepEqual(ctx.store.get().live.pendingView, { loHz: outside.lo, hiHz: outside.hi });
+  assert.equal(ctx.store.get().live.retuneOffer, null);
+  assert.match(ctx.store.get().toast.text, /Retuning hackrf:/);
+
+  // The rate call is skipped when the window is already the right width: a rate change re-plumbs
+  // the capture, so one is not made idly.
+  calls.length = 0;
+  ctx.store.set((s) => ({ device: { ...s.device, sampleRateHz: 2_000_000 } }));
+  await applyFreqZoom(ctx, freqZoomTarget(GRID, G, regionOf(433.0e6, 433.4e6), true));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/control/center");
+
+  // A refusal reaches nothing at all, and says why.
+  calls.length = 0;
+  await applyFreqZoom(ctx, freqZoomTarget(GRID, G, { lo: 6.1e9, hi: 6.2e9 }, true));
+  assert.deepEqual(calls, [], "a region nothing can capture must not be posted to the radio");
+  assert.match(ctx.store.get().toast.text, /Outside what the front end can tune/);
+});
+
+test("T-392: the retune fires on RELEASE and there is no confirmation in front of it — but a PAN still only offers", () => {
+  // The user's correction: *"REMOVE the 'Retune here' confirmation button — do not require
+  // confirmation; the retune fires when the user RELEASES the cursor on a frequency-navigator
+  // region select."* So `applyFreqZoom` — the one thing on this bar that can build a device action
+  // — sits **after** the mount's `if (!done) return;` guard: nothing an in-flight drag does can
+  // reach it, and nothing between the release and the request asks the user again.
+  const src = readFileSync("src/app/centre/navigators.ts", "utf8");
+  const freqMount = src.slice(src.indexOf("function mountFreqNav("), src.indexOf("function mountTimeNav("));
+  const region = freqMount.indexOf("onRegion:");
+  const guard = freqMount.indexOf("if (!done) return;", region);
+  const fire = freqMount.indexOf("applyFreqZoom(", region);
+  assert.ok(region > 0 && guard > region, "the region handler must return early while the drag is in flight");
+  assert.ok(fire > guard, "the retune must fire only after the release, never on pointermove");
+  // And the region path builds no offer: it clears one, it never creates one to be confirmed.
+  const after = freqMount.slice(guard);
+  assert.ok(!/setRetuneOffer\(\{/.test(after), "a region-select must not interpose a confirmation offer");
+
+  // A **pan** is the other half of the decision, and it keeps the offer. A pan has no target
+  // region to interpret — the user drags and stops — so firing a retune at the end of one would
+  // make the radio move as a side effect of scrolling, which is exactly T-340's control. The
+  // mechanism is not orphaned either: the waterfall's own edge pan (`viewHooks().edgeOffer`) and
+  // the axis strip's button are the same offer.
+  const panEnd = freqMount.slice(freqMount.indexOf("onPanEnd:"), region);
+  assert.ok(panEnd.includes("setRetuneOffer"), "a pan past the edge still offers rather than commands");
+  assert.ok(!panEnd.includes("applyDeviceAction") && !panEnd.includes("applyFreqZoom"),
+    "…and it must not reach the radio itself");
 });
 
 // ---------------------------------------------------------------------------
@@ -563,7 +779,7 @@ test("T-367 control: dragging the vertical bar changes only time — the frequen
   assert.deepEqual(calls, [], "no time gesture may reach the control API");
 });
 
-test("T-367 control: dragging the horizontal bar changes only frequency — the time cursor is bit-identical", () => {
+test("T-367 control: dragging the horizontal bar changes only frequency — the time cursor is bit-identical", async () => {
   const { ctx, calls } = deviceSpyCtx();
   const ext = spectrumExtent(GRID.frequency)!;
   const fracOf = (hz: number) => (hz - ext.lo) / (ext.hi - ext.lo);
@@ -581,17 +797,19 @@ test("T-367 control: dragging the horizontal bar changes only frequency — the 
 
   // A region dragged inside the tuned band: a view zoom.
   const inside = regionFromDrag(ext, fracOf(99.6e6), fracOf(100.4e6))!;
-  applyFreqZoom(ctx.store, freqZoomTarget(GRID, G, inside, true));
+  await applyFreqZoom(ctx, freqZoomTarget(GRID, G, inside, true));
   assert.deepEqual(ctx.store.get().live.view, { loHz: inside.lo, hiHz: inside.hi });
   assert.ok(Object.is(ctx.store.get().time, timeBefore), "a frequency zoom moved the time cursor");
+  assert.deepEqual(calls, [], "a pan, and a zoom inside the window, reach no control route");
 
-  // A region outside it: an offer. Still no time movement, and still no device reached.
+  // A region outside it: T-392's retune — the one navigator action that commands the radio. It
+  // still does not touch the time axis, which is the property under test here.
   const outside = regionFromDrag(ext, fracOf(432.0e6), fracOf(432.4e6))!;
-  applyFreqZoom(ctx.store, freqZoomTarget(GRID, G, outside, true));
-  assert.ok(ctx.store.get().live.retuneOffer, "the frequency gesture must still offer the retune");
-  assert.ok(Object.is(ctx.store.get().time, timeBefore), "offering a retune moved the time cursor");
+  await applyFreqZoom(ctx, freqZoomTarget(GRID, G, outside, true));
+  assert.ok(calls.some((c) => c.path === "/api/control/center"), "the frequency gesture must retune");
+  assert.ok(Object.is(ctx.store.get().time, timeBefore), "retuning moved the time cursor");
   assert.deepEqual(ctx.store.get().time, { live: false, tS: t1 - 42, spanS: 20 });
-  assert.deepEqual(calls, [], "no frequency gesture may reach the control API by itself");
+  assert.ok(calls.every((c) => c.path.startsWith("/api/control/")), "and it reaches only control routes");
 });
 
 test("T-367 control: the source wires each bar to one axis — no frequency writer in the time mount, no time writer in the frequency mount", () => {
@@ -988,22 +1206,57 @@ test("T-393: the frequency bar's drag readout describes what selecting ACTUALLY 
   assert.match(insideText, /zooms the view, the radio stays put/);
   assert.doesNotMatch(insideText, /Retune/);
 
-  // Outside it: this build leaves a retune OFFER the user then presses (T-343), so the readout says
-  // "offers", not "retunes".
+  // Outside it: T-392 made this gesture COMMAND the radio on release, so the readout says it
+  // retunes. (Before T-392 it left an offer to press, and this line said "offers" — the control
+  // below is what caught that, and it is kept here inverted rather than deleted.)
   const outside = regionFromDrag(ext, fracOf(432.0e6), fracOf(432.4e6))!;
   const outsideText = freqSelectText(GRID, G, outside, true);
-  assert.match(outsideText, /outside the tuned window — offers "Retune to 432\.\d+ MHz"/);
-  assert.match(outsideText, /centre 432\.\d+ MHz · span 2\.000 MHz/, "with the config that offer would set, snapped");
-
-  // THE CONTROL that keeps the sentence and the gesture from drifting apart: whichever branch
-  // `freqZoomTarget` takes is the branch the text describes, for every region either of them sees.
-  for (const r of [inside, outside, regionFromDrag(ext, fracOf(5.9e9), fracOf(5.95e9))!]) {
-    const kind = freqZoomTarget(GRID, G, r, true).kind;
-    assert.equal(freqSelectText(GRID, G, r, true).includes("offers"), kind === "offer", `${kind}: ${JSON.stringify(r)}`);
+  assert.match(outsideText, /retunes the radio on release: centre 432\.\d+ MHz · span 2\.000 MHz \(sample rate\) · live IQ/);
+  assert.doesNotMatch(outsideText, /offer/, "region-select no longer offers anything — it acts");
+  // The config in the line is `retunePlan`'s own, not a second opinion re-derived beside it.
+  const planned = freqZoomTarget(GRID, G, outside, true);
+  assert.equal(planned.kind, "retune");
+  if (planned.kind === "retune") {
+    assert.ok(outsideText.includes(ax.fmtMHz(planned.centerHz, Math.max(1, planned.spanHz / 100))), outsideText);
+    assert.ok(outsideText.includes(ax.fmtBandwidth(planned.spanHz)), outsideText);
   }
-  // A replay has no live front end, so a region outside the window resolves to nothing — and the
-  // readout offers nothing rather than an action that would be refused.
-  assert.equal(freqSelectText(GRID, G, outside, false), "");
+
+  // Nothing can capture it: the readout is the refusal's OWN words, so the line and the action
+  // cannot disagree about why. Three real refusals, all reached through the same branch.
+  const tooWide = regionFromDrag(ext, fracOf(1.0e9), fracOf(2.0e9))!;     // wider than one window
+  // A front end with a GAP in its coverage, so "centre outside every band" is a region a user can
+  // really drag on this bar rather than a value only a test could construct.
+  const SPLIT: NavigationGrid = { ...GRID, frequency: { ...GRID.frequency!, ranges_hz: [[1e6, 100e6], [400e6, 6e9]] } };
+  const inGap = regionFromDrag(ext, fracOf(200e6), fracOf(210e6))!;       // centre in the uncovered gap
+  for (const [why, grid, region, isLive] of [
+    ["span_too_wide", GRID, tooWide, true],
+    ["center_out_of_range", SPLIT, inGap, true],
+    ["not_live", GRID, outside, false],
+  ] as const) {
+    const t = freqZoomTarget(grid, G, region, isLive);
+    assert.equal(t.kind, "error", why);
+    if (t.kind !== "error") continue;
+    assert.equal(t.reason, why);
+    const text = freqSelectText(grid, G, region, isLive);
+    assert.match(text, /cannot capture this — /);
+    assert.ok(text.endsWith(t.text), `the readout must use the refusal's own words: ${text}`);
+  }
+
+  // THE CONTROL that keeps the sentence and the gesture from drifting apart, in T-392's shape:
+  // whichever branch `freqZoomTarget` takes is the branch the text describes, for every region,
+  // grid and liveness either of them sees. This is the assertion that failed loudly when T-392
+  // landed and turned the offer into a retune.
+  const cases = [GRID, SPLIT].flatMap((grid) =>
+    [inside, outside, tooWide, inGap, regionFromDrag(ext, fracOf(5.9e9), fracOf(5.95e9))!]
+      .map((r) => [grid, r] as const));
+  for (const [grid, r] of cases) for (const isLive of [true, false]) {
+    const kind = freqZoomTarget(grid, G, r, isLive).kind;
+    const text = freqSelectText(grid, G, r, isLive);
+    assert.equal(/zooms the view/.test(text), kind === "view", `view: ${kind} — ${text}`);
+    assert.equal(/retunes the radio on release/.test(text), kind === "retune", `retune: ${kind} — ${text}`);
+    assert.equal(/cannot capture this/.test(text), kind === "error", `error: ${kind} — ${text}`);
+    assert.equal(text === "", kind === "none", `none: ${kind} — ${text}`);
+  }
   assert.equal(freqSelectText(GRID, G, null, true), "");
 });
 

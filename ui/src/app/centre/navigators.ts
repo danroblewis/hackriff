@@ -25,13 +25,26 @@
 //
 // Four properties this file exists to hold, each with a test:
 //
-//  1. **A navigator never moves the radio.** Panning and zooming either bar changes what is drawn.
-//     Moving the front end is a device action (T-343): it can stop and re-plumb the running
-//     capture and it takes the one radio. A region dragged *outside* the tuned band therefore
-//     leaves a `RetuneOffer` in the store — the same offer a pan to the band edge leaves — and the
-//     device is reached only when the user presses it, through `view.ts`'s `applyDeviceAction`
-//     with `source: "navigator"`. Nothing here names a device route; `app-centre.test.ts` asserts
-//     that against the source of every file under `src/`.
+//  1. **No *continuous* gesture moves the radio; one discrete one does (T-392).** Panning and
+//     wheel-zooming either bar changes what is drawn and nothing else — a pan past the band edge
+//     leaves a `RetuneOffer` in the store for the user to press, which is T-340's control (a ±1.0
+//     drag of the whole 6 GHz bar reaching no route) and is unchanged. The single exception is
+//     **region-select on the frequency bar**, which the user made *"the one navigator action that
+//     commands the radio"*: unlike time, which is always a view over already-captured data, a
+//     frequency outside the current window can only be reached by tuning there, so the drag
+//     computes the covering capture config and applies it. It fires **on release**, with no
+//     confirmation step in front of it — the user asked for the button removed from this gesture —
+//     so the device action is built after the mount's `if (!done) return;` guard and nowhere else.
+//     It still goes through `view.ts`'s gated, typed `applyDeviceAction` with `source: "navigator"`
+//     and the device's `device_id` recorded; nothing here names a device route, which
+//     `app-centre.test.ts` asserts against the source of every file under `src/`.
+//
+//     **The pan keeps its offer**, deliberately. A pan has no target region to interpret — the user
+//     drags and stops — so there is nothing to fire on, and retuning at the end of a pan that ran
+//     past the band edge would make the radio move as a side effect of scrolling. The offer is not
+//     an orphan either: the waterfall's own edge pan (`viewHooks().edgeOffer`) and the axis strip's
+//     button are the same mechanism. So "no confirmation" applies to the gesture that names a
+//     destination, and the gesture that does not still asks.
 //  2. **The time bar spans the capture window, not the history horizon.** Its extent is
 //     `GET /api/timeline`'s window (the IQ ring's configured retention, T-338), so every position
 //     on it has capture behind it. `/api/navigation`'s `time` block is the *spectrum-history*
@@ -61,7 +74,8 @@
 import * as ax from "../../axis";
 import { EDGE_OFFER_FRAC } from "../../controls/gestures";
 import {
-  detailLabel, snapState, snapTimeCell, type DetailSource, type HistoryTier, type NavigationGrid,
+  detailLabel, retunePlan, snapState, snapTimeCell,
+  type DetailSource, type FrequencyGrid, type HistoryTier, type NavigationGrid, type RetuneRefusal,
 } from "../../navigation";
 import {
   activeWindows, bandKey, clockRangeText, clockText, coverageRequest, litSegments, placeOn,
@@ -81,7 +95,9 @@ import { viewWindow } from "../explore/inventory";
 import { startPoll } from "../net";
 import { sameCursor } from "./review-render";
 import { goLive, reviewAt, setNavigation, toast } from "../state";
-import { applyDeviceAction, mayRetune, retuneAction, retuneLabel, setLiveView, setRetuneOffer } from "./view";
+import {
+  applyDeviceAction, mayRetune, retuneAction, retuneLabel, setLiveView, setRetuneOffer, NOT_LIVE_TEXT,
+} from "./view";
 
 /** A range's edges in MHz, at a resolution taken from the range's own width — so the readout's
  * precision follows what is being shown and no frequency constant appears in this file. */
@@ -125,38 +141,75 @@ export function freqPan(g: ax.Geometry, v: ax.View, ext: Range, deltaFrac: numbe
 export type FreqZoom =
   /** Inside the tuned band: a display zoom over live IQ, and no device is involved. */
   | { kind: "view"; view: ax.View; source: DetailSource }
-  /** Outside it: showing this needs the radio moved, so it is **offered**, never performed. */
-  | { kind: "offer"; centerHz: number; view: ax.View; source: DetailSource }
-  /** Nothing to do: no geometry and no live device (a replay), or a region with no width. */
+  /** Outside it: the one navigator gesture that **commands the radio** (T-392). Carries the whole
+   * capture configuration — centre *and* the smallest span that covers the selection. */
+  | { kind: "retune"; centerHz: number; spanHz: number; view: ax.View; source: DetailSource }
+  /** No achievable configuration can capture it, or there is no front end to command. */
+  | { kind: "error"; reason: RetuneRefusal | "not_live"; text: string }
+  /** Nothing to do: a region with no width. */
   | { kind: "none" };
+
+/** Why a region cannot be captured, in words. The extents come from the grid on the wire — the
+ * device's own bands, never a constant in this file. */
+function refusalText(g: FrequencyGrid | null, reason: RetuneRefusal, live: boolean): string {
+  const where = live ? "the front end can tune" : "this recording covers";
+  if (reason === "center_out_of_range") {
+    const ext = spectrumExtent(g);
+    return ext
+      ? `Outside what ${where}: ${fmtEdges(ext.lo, ext.hi)} MHz.`
+      : `Outside what ${where}.`;
+  }
+  if (reason === "span_too_wide") {
+    const max = g?.max_live_span_hz ?? null;
+    return max === null
+      ? "Wider than one capture window can hold."
+      : `Wider than one capture window: at most ${ax.fmtMHz(max, Math.max(1, max / 100))} MHz at once.`;
+  }
+  return "No navigable spectrum reported — nothing to tune.";
+}
 
 /**
  * The region `[lo, hi]` a drag selected, resolved against the achievable grid (T-341).
  *
- * A region that fits inside the tuned band is a **view change** — the waterfall already holds that
- * IQ. A region outside it cannot be shown without retuning, so this returns an `offer` carrying
- * the **snapped** centre (`snapState`; `null` step → the region's own centre, and then nothing
- * claims the device sits exactly there). `source` is the detail claim the resulting view would
- * carry, so the bar can say "survey overview" before the zoom happens rather than after.
+ * **The boundary is the whole design.** The same gesture means two different things:
+ *
+ *  - a region **inside the tuned window** is "look closer" — the waterfall already holds that IQ,
+ *    so it is a pure view zoom and no device call happens on any path;
+ *  - a region **outside it** is "go there", and that is only reachable by tuning there. Unlike time
+ *    (always a view over already-captured data), no amount of view state can show a frequency the
+ *    front end is not on. So this resolves to a `retune` — the config, computed and applied, not
+ *    offered (CLAUDE.md: *"this is the one navigator action that commands the radio"*).
+ *
+ * It refuses **only** when nothing can capture the region: a centre outside the tunable range, a
+ * span wider than one live window, or — on a replay — outside the recording's extent, which is the
+ * same `ranges_hz` check because a replay reports the recording as its band. Anything else retunes;
+ * "outside the tuned window, retune yourself" is exactly the behaviour this replaced.
  */
 export function freqZoomTarget(
   grid: NavigationGrid, g: ax.Geometry | null, region: Range | null, live: boolean,
 ): FreqZoom {
   if (!region || !(region.hi > region.lo)) return { kind: "none" };
-  const centre = (region.lo + region.hi) / 2, span = region.hi - region.lo;
-  const snapped = snapState(grid, centre, span);
   if (g) {
     const full = ax.fullView(g);
+    // INSIDE: a display zoom. Nothing below this line can be reached for such a region.
     if (region.lo >= full.loHz && region.hi <= full.hiHz) {
-      return { kind: "view", view: ax.zoomTo(g, region.lo, region.hi), source: snapped.source };
+      const span = snapState(grid, (region.lo + region.hi) / 2, region.hi - region.lo);
+      return { kind: "view", view: ax.zoomTo(g, region.lo, region.hi), source: span.source };
     }
   }
-  if (!live) return { kind: "none" };
+  // OUTSIDE: the config that would cover it, or the one reason none can.
+  const fg = grid.frequency;
+  const plan = retunePlan(fg, region.lo, region.hi);
+  if (!plan.ok) return { kind: "error", reason: plan.reason, text: refusalText(fg, plan.reason, live) };
+  // A replay's band is the recording, so a region achievable against it is inside the recording —
+  // but there is still no radio to move, and saying so beats a retune the server answers 409 to.
+  if (!live) return { kind: "error", reason: "not_live", text: NOT_LIVE_TEXT };
   return {
-    kind: "offer",
-    centerHz: snapped.centerHz ?? centre,
+    kind: "retune",
+    centerHz: plan.centerHz,
+    spanHz: plan.spanHz,
     view: { loHz: region.lo, hiHz: region.hi },
-    source: snapped.source,
+    source: plan.source,
   };
 }
 
@@ -169,14 +222,24 @@ type AppStore = AppContext["store"];
  * Every write here lands in the `live` slice (plus the toast, which belongs to no axis). Nothing in
  * this function can reach the time cursor, which is why a horizontal drag leaves `state.time` the
  * same object it was — the "bit-identical other axis" control in `navigators.test.ts`.
+ *
+ * T-392: the `retune` branch is the **one** place a navigator gesture reaches the front end, and it
+ * does so through the same gated typed `DeviceAction` the offer button always used — the path is
+ * not new, the trigger is. Pan and wheel still resolve to `view` or to nothing, so T-340's control
+ * (a ±1.0 drag of the whole bar reaching no route) is untouched by it.
  */
-export function applyFreqZoom(store: AppStore, target: FreqZoom): void {
+export async function applyFreqZoom(ctx: AppContext, target: FreqZoom): Promise<void> {
+  const { store } = ctx;
   if (target.kind === "view") {
     store.set(setLiveView(target.view));
     store.set(toast(`Zoomed to ${fmtEdges(target.view.loHz, target.view.hiHz)} MHz · ${detailLabel(target.source)}`));
-  } else if (target.kind === "offer") {
-    store.set(setRetuneOffer({ centerHz: target.centerHz, view: target.view }));
-    store.set(toast(`Outside the tuned window — ${retuneLabel(target.centerHz)} to see it (${detailLabel(target.source)}).`));
+  } else if (target.kind === "error") {
+    store.set(toast(target.text));
+  } else if (target.kind === "retune") {
+    // A region-select supersedes any pending pan-to-the-edge offer: the user has just said where
+    // they want the radio, so a stale button proposing somewhere else is noise.
+    store.set(setRetuneOffer(null));
+    await applyDeviceAction(ctx, retuneAction(target.centerHz, "navigator", target.view, target.spanHz));
   }
 }
 
@@ -200,18 +263,24 @@ export function applyFreqZoom(store: AppStore, target: FreqZoom): void {
  * constant appears here (the same rule as `fmtEdges`). */
 const resOf = (span: number) => Math.max(1, span / 100);
 
-/** "centre C · span S (sample rate) · live IQ": the capture state a selection resolves to, snapped
- * to the achievable grid (T-341's `snapState`), and what each axis being unknown means. A live
- * window's span *is* its sample rate (`navigation.ts`), which is why the third field can name one. */
-function configText(grid: NavigationGrid, centreHz: number, spanHz: number): string {
-  const s = snapState(grid, centreHz, spanHz);
-  const res = resOf(spanHz);
+/** "centre C · span S (sample rate) · live IQ": one already-resolved capture state in words. A live
+ * window's span *is* its sample rate (`navigation.ts`), which is why the third field can name one.
+ * Nothing is decided here — the caller brings the config, from `snapState` or from `retunePlan`. */
+function stateText(centerHz: number | null, spanHz: number | null, source: DetailSource): string {
+  const res = resOf(spanHz ?? 1);
   // A null centre is "the source states no tuning step", never "anywhere is reachable" (rule 1 in
   // navigation.ts): nothing here may claim the device can sit exactly where the user pointed.
-  const centre = s.centerHz === null ? "centre not on any stated grid" : `centre ${ax.fmtMHz(s.centerHz, res)} MHz`;
-  const span = s.spanHz === null ? "span unknown" : `span ${ax.fmtBandwidth(s.spanHz)}`;
-  const rate = s.source === "live-iq" && s.spanHz !== null ? " (sample rate)" : "";
-  return `${centre} · ${span}${rate} · ${detailLabel(s.source)}`;
+  const centre = centerHz === null ? "centre not on any stated grid" : `centre ${ax.fmtMHz(centerHz, res)} MHz`;
+  const span = spanHz === null ? "span unknown" : `span ${ax.fmtBandwidth(spanHz)}`;
+  const rate = source === "live-iq" && spanHz !== null ? " (sample rate)" : "";
+  return `${centre} · ${span}${rate} · ${detailLabel(source)}`;
+}
+
+/** The state a *hover* would resolve to: a point has no width, so the current window's span is
+ * carried through T-341's `snapState` to the achievable grid. */
+function configText(grid: NavigationGrid, centreHz: number, spanHz: number): string {
+  const s = snapState(grid, centreHz, spanHz);
+  return stateText(s.centerHz, s.spanHz, s.source);
 }
 
 /**
@@ -232,6 +301,14 @@ export function freqHoverText(grid: NavigationGrid, ext: Range | null, frac: num
 /**
  * Drag on the **frequency** bar: the range selected, and what selecting it does — taken from
  * `freqZoomTarget`, so the sentence and the gesture are the same decision.
+ *
+ * **This readout was rewritten when T-392 landed, and that is the point of taking the branch from
+ * the gesture.** Before it, a region outside the tuned window left a *retune offer* the user then
+ * pressed, and the line said "offers". T-392 made the same gesture command the radio on release, so
+ * the line now says it retunes — and says a refusal in the refusal's **own** `text`, rather than a
+ * second wording of the same reason that could drift from it. (The frequency bar's *pan* still
+ * leaves an offer, deliberately: a pan names no destination to fire on. That wording lives in
+ * `onPanEnd`, not here.)
  */
 export function freqSelectText(
   grid: NavigationGrid, g: ax.Geometry | null, region: Range | null, live: boolean,
@@ -240,8 +317,12 @@ export function freqSelectText(
   if (!region || t.kind === "none") return "";
   const edges = `${fmtEdges(region.lo, region.hi)} MHz`;
   if (t.kind === "view") return `${edges} · zooms the view, the radio stays put · ${detailLabel(t.source)}`;
-  // The offer branch, said as an offer: pressing the button is what moves the front end (T-343).
-  return `${edges} · outside the tuned window — offers "${retuneLabel(t.centerHz)}" · ${configText(grid, t.centerHz, spanOf(region))}`;
+  // No achievable configuration covers it (or there is no radio to move): the honest line is the
+  // one `freqZoomTarget` already wrote, naming the device's own bounds from the served grid.
+  if (t.kind === "error") return `${edges} · cannot capture this — ${t.text}`;
+  // The config `retunePlan` computed, not a second opinion about it: the centre the radio will sit
+  // on after the snap, and the smallest span that still covers the selection from there.
+  return `${edges} · retunes the radio on release: ${stateText(t.centerHz, t.spanHz, t.source)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -590,7 +671,9 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
       dragText = done ? null : freqSelectText(s.navGrid.grid ?? { frequency: null, time: null }, g, region, mayRetune(s.device));
       showReadout(dragText ?? "", b);
       if (!done) return;
-      applyFreqZoom(store, freqZoomTarget(s.navGrid.grid ?? { frequency: null, time: null }, g, region, mayRetune(s.device)));
+      // T-392: the one gesture on either bar that may command the radio. Inside the tuned window it
+      // is a view zoom and reaches nothing; outside it, it retunes to cover the selection.
+      void applyFreqZoom(ctx, freqZoomTarget(s.navGrid.grid ?? { frequency: null, time: null }, g, region, mayRetune(s.device)));
     },
   });
   let panOverflow = 0;
