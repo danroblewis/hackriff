@@ -71,7 +71,9 @@
    Both are view controls — the one thing here that moves the radio is the retune offer button,
    styled as an action (amber) exactly like the axis strip's, never as a readout. */
 .freqnav { touch-action: none; user-select: none; -webkit-user-select: none; }
-.freqnav .fn-track { position: absolute; left: 10px; right: 10px; top: 5px; height: 12px; border: 1px solid var(--line); border-radius: 3px; background: color-mix(in srgb, var(--text) 5%, transparent); cursor: crosshair; }
+/* T-391: the track fills the bar's own (now 92px, base.css) height instead of a fixed 12px sliver
+   pinned near the top — the T-368 survey strip it draws was measured but had nowhere to be seen. */
+.freqnav .fn-track { position: absolute; left: 10px; right: 10px; top: 8px; bottom: 20px; border: 1px solid var(--line); border-radius: 3px; background: color-mix(in srgb, var(--text) 5%, transparent); cursor: crosshair; }
 .freqnav .fn-track.dragging { cursor: grabbing; }
 .freqnav .fn-lit-layer { position: absolute; inset: 0; pointer-events: none; }
 /* One lit segment per reported active capture window (docs/api.md `windows`). */

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createStore } from "../src/app/store";
 import {
-  cycleTheme, focusSignal, goLive, initialState, openReview, parsePrefs, toggleReview, removeOutput, requestGoto, reviewAt, setMode, upsertOutput,
+  cycleTheme, focusSignal, goLive, initialState, openReview, parsePrefs, setCaptureCollapsed, toggleReview, removeOutput, requestGoto, reviewAt, setMode, upsertOutput,
   type OutputEntry,
 } from "../src/app/state";
 import type { Row } from "../src/inventory";
@@ -93,7 +93,7 @@ test("a throwing patch function still lets queued patches flush, then reaches th
 
 test("initialState composes every area slice", () => {
   const st = initialState();
-  for (const k of ["mode", "theme", "conn", "device", "nav", "toast", "time", "outputs", "focus", "inventory", "selections", "live", "decode", "inspector", "review"]) {
+  for (const k of ["mode", "theme", "conn", "device", "nav", "toast", "captureCollapsed", "time", "outputs", "focus", "inventory", "selections", "live", "decode", "inspector", "review"]) {
     assert.ok(k in st, `missing ${k}`);
   }
   assert.deepEqual(st.decode, { pipelineId: null, nodeId: null });
@@ -101,10 +101,14 @@ test("initialState composes every area slice", () => {
 });
 
 test("prefs parse defensively", () => {
-  assert.deepEqual(parsePrefs(null), { mode: "explore", theme: "system" });
-  assert.deepEqual(parsePrefs("{bad"), { mode: "explore", theme: "system" });
-  assert.deepEqual(parsePrefs('{"mode":"decode","theme":"light"}'), { mode: "decode", theme: "light" });
-  assert.deepEqual(parsePrefs('{"mode":"x","theme":"neon"}'), { mode: "explore", theme: "system" });
+  assert.deepEqual(parsePrefs(null), { mode: "explore", theme: "system", captureCollapsed: false });
+  assert.deepEqual(parsePrefs("{bad"), { mode: "explore", theme: "system", captureCollapsed: false });
+  assert.deepEqual(parsePrefs('{"mode":"decode","theme":"light"}'), { mode: "decode", theme: "light", captureCollapsed: false });
+  assert.deepEqual(parsePrefs('{"mode":"x","theme":"neon"}'), { mode: "explore", theme: "system", captureCollapsed: false });
+  // T-391: the Capture panel's collapsed state persists exactly like mode/theme, through the same
+  // `hk-mui-prefs` localStorage blob — not a mechanism of its own.
+  assert.deepEqual(parsePrefs('{"captureCollapsed":true}'), { mode: "explore", theme: "system", captureCollapsed: true });
+  assert.equal(parsePrefs('{"captureCollapsed":"true"}').captureCollapsed, false, "only a literal boolean true collapses it");
 });
 
 test("mode, theme, time cursor and goto actions", () => {
@@ -126,6 +130,15 @@ test("mode, theme, time cursor and goto actions", () => {
   s.set(requestGoto(101.3e6));
   s.set(requestGoto(101.3e6));
   assert.deepEqual(s.get().nav, { gotoHz: 101.3e6, seq: 2 });
+});
+
+test("T-391: setCaptureCollapsed writes captureCollapsed and nothing else", () => {
+  const s = createStore(initialState());
+  assert.equal(s.get().captureCollapsed, false);
+  s.set(setCaptureCollapsed(true));
+  assert.equal(s.get().captureCollapsed, true);
+  s.set(setCaptureCollapsed(false));
+  assert.equal(s.get().captureCollapsed, false);
 });
 
 test("review drawer toggles and opens on a tab and region", () => {

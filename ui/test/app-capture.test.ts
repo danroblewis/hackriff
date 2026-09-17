@@ -271,3 +271,61 @@ test("capture.css: the timeline is fluid (no fixed wide pixel width) and scrubba
   // never collapses to nothing when the page goes to one column.
   assert.match(readFileSync("src/app/base.css", "utf8"), /\.centre\s*\{[^}]*grid-template-rows:[^}]*92px/);
 });
+
+// ---- T-391: the edge navigators are as thick as the Capture panel, and stay that way when it folds ----
+
+test("T-391 property: the freqnav row and the timenav column both equal the Capture panel's own row", () => {
+  const css = readFileSync("src/app/base.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rowsOf = (rule: string) => rule.match(/grid-template-rows:\s*([^;]+);/)![1].trim().split(/\s+/);
+  const colsOf = (rule: string) => rule.match(/grid-template-columns:\s*([^;]+);/)![1].trim().split(/\s+/);
+
+  // .centre's rows are [wfrow, axis, freqnav, capture] — asserted as the actual values, not merely
+  // "greater than 12px": the freqnav row and the Capture row are the same 92px.
+  const centreRows = rowsOf(css.match(/\.centre\s*\{[^}]*\}/)![0]);
+  assert.deepEqual(centreRows, ["minmax(0,1fr)", "26px", "92px", "92px"], "wfrow / axis / freqnav / capture");
+  assert.equal(centreRows[2], centreRows[3], "freqnav is exactly as thick as the Capture panel");
+
+  // .wfrow's columns are [timenav, specwf] — the timenav column is the same 92px too.
+  const wfrowCols = colsOf(css.match(/\.wfrow\s*\{[^}]*\}/)![0]);
+  assert.deepEqual(wfrowCols, ["92px", "minmax(0,1fr)"], "timenav / specwf");
+  assert.equal(wfrowCols[0], centreRows[3], "timenav is exactly as wide as the Capture panel is tall");
+});
+
+test("T-391 control: collapsing the Capture panel changes only Capture's own row, never freqnav's or timenav's", () => {
+  const css = readFileSync("src/app/base.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rowsOf = (rule: string) => rule.match(/grid-template-rows:\s*([^;]+);/)![1].trim().split(/\s+/);
+  const expandedRows = rowsOf(css.match(/\.centre\s*\{[^}]*\}/)![0]);
+  const collapsedRows = rowsOf(css.match(/\.centre\.cap-collapsed\s*\{[^}]*\}/)![0]);
+
+  // The decision: navigator thickness follows the Capture panel's *expanded* size and is fixed
+  // there — it does not track the panel's live collapsed state. So collapsing rewrites only the
+  // last (Capture) row; the third (freqnav) row is identical in both rules.
+  assert.deepEqual(collapsedRows, ["minmax(0,1fr)", "26px", "92px", "34px"]);
+  assert.equal(collapsedRows[2], expandedRows[2], "freqnav's row is untouched by Capture collapsing");
+  assert.notEqual(collapsedRows[3], expandedRows[3], "Capture's own row is what actually shrinks");
+
+  // No rule ever makes the collapse touch .wfrow (the timenav column) at all.
+  assert.doesNotMatch(css, /\.wfrow\.cap-collapsed|\.timenav\.cap-collapsed|\.freqnav\.cap-collapsed/);
+
+  // Holds at the one-screen breakpoint too, not only at the default width.
+  const narrow = css.slice(css.indexOf("@media (max-width: 900px)"), css.indexOf("@media (prefers-reduced-motion"));
+  const narrowExpanded = rowsOf(narrow.match(/\.centre\s*\{[^}]*\}/)![0]);
+  const narrowCollapsed = rowsOf(narrow.match(/\.centre\.cap-collapsed\s*\{[^}]*\}/)![0]);
+  assert.deepEqual(narrowExpanded.slice(2), ["92px", "92px"], "freqnav and Capture stay 92px at 900px too");
+  assert.deepEqual(narrowCollapsed.slice(2), ["92px", "34px"], "same decoupling holds at 900px");
+  // The rest of the one-screen layout (single column, no horizontal scroll) is unchanged by this
+  // task — still one column, and .centre's own overflow rules are untouched.
+  assert.match(narrow, /\.main,\s*\.wb\s*\{\s*grid-template-columns:\s*minmax\(0,1fr\);\s*\}/);
+});
+
+test("T-391: the Capture panel header is a disclosure toggle, wired through the persisted shell pref, and never resizes the navigators itself", () => {
+  const src = readFileSync("src/app/capture/index.ts", "utf8");
+  assert.match(src, /setCaptureCollapsed/, "the toggle reads/writes the persisted captureCollapsed pref");
+  assert.match(src, /band\.hidden\s*=\s*collapsed/, "collapsing hides the overview band");
+  assert.match(src, /el\.parentElement\?\.classList\.toggle\(\s*"cap-collapsed"/, "only the layout class is touched, not a literal size");
+  // The panel itself is never removed — the user was explicit it should stay.
+  assert.doesNotMatch(src, /el\.remove\(\)|band\.remove\(\)/);
+
+  const capCss = readFileSync("src/app/capture/capture.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(capCss, /\.capture\.collapsed\s*\{[^}]*grid-template-rows:\s*auto/, "the collapsed panel is header-only internally too");
+});

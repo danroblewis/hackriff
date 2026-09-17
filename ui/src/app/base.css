@@ -89,9 +89,15 @@ button, input, select { font: inherit; color: inherit; }
 .side-sel { border-top: 1px solid var(--line); }
 /* T-340: the centre column is waterfall row, frequency axis, frequency navigator, capture band.
    The waterfall row is itself two columns: the vertical time navigator and the spectrum/waterfall,
-   so each navigator runs parallel to the axis it controls. */
-.centre { display: grid; grid-template-rows: minmax(0,1fr) 26px 30px 92px; min-height: 0; min-width: 0; background: var(--ground); }
-.wfrow { display: grid; grid-template-columns: 30px minmax(0,1fr); min-height: 0; min-width: 0; }
+   so each navigator runs parallel to the axis it controls.
+   T-391: both edge navigators are as thick as the Capture panel is tall (92px) — the T-367 time
+   overview and the T-368 survey strip were being measured and served into what was really a 12px/
+   30px track, too thin to read. `.cap-collapsed` (toggled on this element by capture/index.ts) only
+   ever rewrites the LAST value below — the Capture panel's own row — never the THIRD (freqnav's),
+   so folding that one panel can never resize a navigator (decided and pinned by a test: T-391). */
+.centre { display: grid; grid-template-rows: minmax(0,1fr) 26px 92px 92px; min-height: 0; min-width: 0; background: var(--ground); }
+.centre.cap-collapsed { grid-template-rows: minmax(0,1fr) 26px 92px 34px; }
+.wfrow { display: grid; grid-template-columns: 92px minmax(0,1fr); min-height: 0; min-width: 0; }
 .timenav { position: relative; min-height: 0; border-right: 1px solid var(--line); background: var(--panel); overflow: hidden; }
 .freqnav { position: relative; border-top: 1px solid var(--line); background: var(--panel); font: 10px var(--mono); color: var(--muted); overflow: hidden; }
 .specwf { position: relative; min-height: 0; overflow: hidden; }
@@ -136,7 +142,8 @@ button, input, select { font: inherit; color: inherit; }
   .bar-spacer { display: none; }
   .main, .wb { grid-template-columns: minmax(0,1fr); }
   .side { grid-template-rows: minmax(0,240px) minmax(0,130px); border-right: 0; border-bottom: 1px solid var(--line); }
-  .centre { grid-template-rows: 370px 26px 30px 92px; }
+  .centre { grid-template-rows: 370px 26px 92px 92px; }
+  .centre.cap-collapsed { grid-template-rows: 370px 26px 92px 34px; }
   .focus, .wb-right { border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
   .wb-side { border-right: 0; border-bottom: 1px solid var(--line); overflow: visible; }
   .wb-centre { grid-template-rows: auto 440px 460px; }
