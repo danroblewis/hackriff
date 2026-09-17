@@ -312,7 +312,11 @@ pub fn class_guess(
                 vec![("ask4", 0.7), ("ook", 0.3)]
             }
         }
-        "fsk" => fsk_classes(features, mod_index_h),
+        "fsk" => {
+            let mut scores = density_classes("fsk", features, model)?;
+            apply_msk_index(&mut scores, mod_index_h);
+            scores
+        }
         "psk-qam" => density_classes("psk-qam", features, model)?,
         "ofdm" => vec![("ofdm", 0.95)],
         "css" => vec![("chirp", 0.95)],
@@ -370,41 +374,107 @@ pub fn class_guess(
 // `cw` 36/36 and `ssb` 36/36 correct and margins of 25–60 nats. The separating evidence was
 // already on disk; only the call site was not reading it.
 
-fn fsk_classes(features: &Features, mod_index_h: Option<f64>) -> Vec<(&'static str, f64)> {
-    let modality = features.get("if_modality").unwrap_or(2.0);
-    let bimodality = features.get("if_bimodality").unwrap_or(0.0);
-    let mut v = Vec::new();
-    let multilevel = modality >= 3.0;
-    v.push(("4fsk", if multilevel { 0.7 } else { 0.08 }));
-    // MSK is the h = 0.5 case; C14 measures h when it locks a rate.
-    let msk = mod_index_h.is_some_and(|h| (0.42..0.58).contains(&h));
-    v.push(("msk", if msk && !multilevel { 0.6 } else { 0.06 }));
-    // Gaussian shaping smears the two tones together, so the histogram is less cleanly bimodal.
-    let smeared = bimodality < 0.66;
-    v.push((
-        "gfsk",
-        if !multilevel && smeared && !msk {
-            0.5
-        } else {
-            0.12
-        },
-    ));
-    v.push((
-        "2fsk",
-        if !multilevel && !smeared && !msk {
-            0.7
-        } else {
-            0.15
-        },
-    ));
-    v
+// There was an `fsk_classes` hand-written score table here — the **last** of them, after T-249
+// removed `analog_classes` and T-200 removed `PSK_QAM_CUMULANTS`. It is gone for the same measured
+// reason (T-422): one of its conjunctions was **unreachable at this geometry**.
+//
+// Measured on the blind acceptance grid at and above the fsk class gate (23 dB): `gfsk` top-1
+// **0.000** with wrong-label 0.667/0.583, every snippet named `2fsk`.
+//
+// **`gfsk` could not be named at all.** Its conjunction required `smeared = if_bimodality < 0.66`,
+// written from the noiseless physics ("Gaussian shaping smears the two tones together, so the
+// histogram is less cleanly bimodal"). It does — *relative to* a rectangular keying measured at the
+// transmitter. But nothing downstream of the antenna sees a rectangle: C13 hands the classifier a
+// snippet filtered to ±0.75 × OBW99, and that filter smooths the instantaneous-frequency trajectory
+// of **every** FSK emission it passes ([`crate::verify::CHANNEL_BT`] exists for exactly this
+// reason). So the whole family sits in one band and the classes differ only by their position
+// inside it: measured `if_bimodality` at gate+5/+10 is **0.695–0.833 for `gfsk`** against
+// 0.785–0.906 for `2fsk` — overlapping ranges, and **both entirely above 0.66**. The conjunct
+// therefore never fired, `gfsk` scored the 0.12 floor against `2fsk`'s 0.7, and no snippet in the
+// grid was ever called `gfsk` by the tree.
+//
+// A threshold moved to 0.84 would separate *these* two on *this* grid, which is why it is not what
+// happened: the constant would then be fitted to the acceptance split, and the ranges overlap in
+// any case. What replaces it is [`density_classes`] over the same fitted densities `psk-qam` and
+// `analog` already use. Measured before any change, as their arg-max over the four `fsk` classes:
+// **dev** 2fsk 25–29/36, gfsk 33/36, msk 17–21/36, 4fsk 36/36; blind acceptance seeds at
+// gate+5/+10, 2fsk 0.917, gfsk 0.750, msk 0.542, 4fsk 1.000. The `gfsk` evidence was already on
+// disk; only the call site was not reading it.
+//
+// The one conjunct that **did** work is kept, as [`apply_msk_index`], because the thing it reads is
+// the one piece of evidence the densities cannot see.
+
+/// Half-width of the modulation-index window that names `msk`.
+///
+/// MSK **is** `h = 0.5` (ADR-0016 §1) — that is the definition of the class, not a tuned constant.
+/// What has to be measured is whether the estimator resolves it here, which is the test T-249's
+/// `cw` conjunct failed (`sigma_af < 0.02` against a σ_af that does not reach 0.02 until ~28 dB).
+/// C14's index passes it comfortably: on the **dev** split at and above the fsk class gate, a
+/// genuine MSK reads `h ∈ [0.500, 0.533]` at every SNR from gate+0 to gate+10 — a total spread of
+/// 0.033, present on 32–36 of 36 snippets. 0.05 covers that range with margin and is the
+/// measurement's resolution, not a separation fitted between classes.
+pub const MSK_INDEX_TOL: f64 = 0.05;
+
+/// Folds C14's modulation index into the `fsk` class scores as a bounded likelihood ratio.
+///
+/// **Why this is not the score table coming back.** `mod_index_h` is not a `features@1` dimension:
+/// it lives on [`crate::symbols::SymbolParameters`], so no class density is fitted on it and
+/// [`density_classes`] cannot score it. It is also the only dimension on which `msk` is *defined*
+/// rather than merely typical — and the densities are correspondingly weak there (dev arg-max
+/// 17–21/36, the worst of the four classes, with the residual going to `gfsk`, which is what a
+/// smooth-phase binary keying at some other index looks like).
+///
+/// So the index is carried explicitly, and the measurement says it separates: on the **dev** split,
+/// `msk` 0.500–0.533 against `2fsk` 0.413–1.617 (median 0.901), `gfsk` 0.311–0.910 (median 0.681)
+/// and `4fsk` 0.179–1.302. The `4fsk` range overlaps the window, which is why this only scales a
+/// hypothesis the densities have already ranked rather than deciding on its own: `4fsk` is
+/// separated by `if_modality` and scores 36/36 by density arg-max.
+///
+/// The factor is [`MAX_LOG_LR`] — the same 19:1 bound [`density_classes`] clamps its spread to and
+/// the post-sync verifier applies to its own likelihoods, and for the same reason: one measured
+/// quantity under a model with no channel in it may order the candidates, not settle them. An
+/// absent index changes nothing, so a snippet C14 could not lock on is not evidence against `msk`.
+///
+/// **The spread is re-clamped afterwards**, and that is not bookkeeping. [`density_classes`]
+/// guarantees that no class call can be *confidently* wrong by holding every candidate within 19:1
+/// of the best one, which caps the top class below 0.87. Multiplying one entry that is already at
+/// that floor by `1/19` would stretch the spread to 361:1 and lift the top class to 0.903 —
+/// measured, on the three `gfsk` snippets this call still gets wrong. A term that makes a wrong
+/// answer *more* confident is worse than no term, so the bound is restored rather than assumed.
+fn apply_msk_index(scores: &mut [(&'static str, f64)], mod_index_h: Option<f64>) {
+    let Some(h) = mod_index_h else { return };
+    let factor = if (h - 0.5).abs() <= MSK_INDEX_TOL {
+        MAX_LOG_LR.exp()
+    } else {
+        (-MAX_LOG_LR).exp()
+    };
+    for (class, score) in scores.iter_mut() {
+        if *class == "msk" {
+            *score *= factor;
+        }
+    }
+    let best = scores.iter().map(|(_, s)| *s).fold(0.0_f64, f64::max);
+    if !(best.is_finite() && best > 0.0) {
+        return;
+    }
+    let floor = best * (-MAX_LOG_LR).exp();
+    for (_, score) in scores.iter_mut() {
+        *score = score.max(floor);
+    }
 }
 
 /// The within-family order of `family`, from the class-conditional densities (ADR-0016 §4.3)
-/// rather than from a hand-written table of feature thresholds. `psk-qam` uses it because the
-/// textbook cumulant pairs that oversampling destroyed cannot rank constellations (see the note
-/// above); `analog` uses it because the conjunctions it replaced could not name `cw` or `ssb` at
-/// all (T-249, see the note above `fsk_classes`).
+/// rather than from a hand-written table of feature thresholds. **Every multi-class family whose
+/// table was measurably broken now routes through it.** `psk-qam` uses it because the textbook
+/// cumulant pairs that oversampling destroyed cannot rank constellations (see the note above);
+/// `analog` because the conjunctions it replaced could not name `cw` or `ssb` at all (T-249); `fsk`
+/// because the conjunction that was supposed to name `gfsk` sat below the whole family's measured
+/// range of the feature it tested (T-422, see the note above [`apply_msk_index`]).
+///
+/// Two two-way tables remain, in [`class_guess`]: `ook-ask` (`low_fraction`) and `pulsed` (`duty`).
+/// The first measures — `ook` and `ask4` are 0.833–0.917 top-1 with **zero** wrong labels on the
+/// blind grid. The second does not: `pulse` is 0.000 top-1 with wrong 1.000 at gate+5, and it is
+/// left alone here only because it is outside T-422's three classes and wants its own measurement.
 ///
 /// **Why this is the right evidence.** The densities are fitted on the dev grid at *this* analysis
 /// geometry, so each class's dimensions describe what the feature really measures on that
@@ -632,5 +702,60 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// The modulation-index factor may reorder the `fsk` candidates; it may not widen the spread
+    /// [`density_classes`] clamps to [`MAX_LOG_LR`] (T-422).
+    ///
+    /// That bound is the whole reason a class call cannot be *confidently* wrong: hold every rival
+    /// within 19:1 of the best and the top class stays under 0.87. Dividing an entry that is
+    /// already at the floor by 19 again stretches it to 361:1 and lifts the leader to 0.903 —
+    /// measured on the `gfsk` snippets this call still gets wrong, which is exactly where a
+    /// confident number does the most damage.
+    #[test]
+    fn the_msk_index_factor_reorders_the_fsk_call_without_widening_its_spread() {
+        let classes = ["2fsk", "gfsk", "msk", "4fsk"];
+        for h in [None, Some(0.5), Some(0.9), Some(0.46), Some(0.2)] {
+            for (class, snr, seed) in [
+                (Class::Fsk2, 25.0, 11),
+                (Class::Gfsk, 25.0, 12),
+                (Class::Msk, 25.0, 13),
+                (Class::Fsk4, 25.0, 14),
+            ] {
+                let f = feats(class, snr, seed);
+                let mut scores =
+                    density_classes("fsk", &f, DensityModel::builtin()).expect("fsk densities");
+                apply_msk_index(&mut scores, h);
+                let best = scores.iter().map(|(_, s)| *s).fold(0.0_f64, f64::max);
+                let worst = scores.iter().map(|(_, s)| *s).fold(f64::MAX, f64::min);
+                assert!(best > 0.0);
+                assert!(
+                    best / worst <= MAX_LOG_LR.exp() * (1.0 + 1e-9),
+                    "spread {:.3} exceeds the 19:1 bound for h {h:?}: {scores:?}",
+                    best / worst
+                );
+                // Every class stays a live hypothesis, whatever the index said.
+                for name in classes {
+                    assert!(
+                        scores.iter().any(|(c, s)| *c == name && *s > 0.0),
+                        "{name} was zeroed for h {h:?}: {scores:?}"
+                    );
+                }
+                let call = normalise_classes(scores).expect("a call");
+                assert!(
+                    call.p < 0.9,
+                    "fsk class call reported p {} for h {h:?}",
+                    call.p
+                );
+            }
+        }
+
+        // An absent index is not evidence against `msk`: a snippet C14 could not lock on must come
+        // out exactly as the densities left it.
+        let f = feats(Class::Msk, 25.0, 15);
+        let plain = density_classes("fsk", &f, DensityModel::builtin()).expect("fsk densities");
+        let mut untouched = plain.clone();
+        apply_msk_index(&mut untouched, None);
+        assert_eq!(plain, untouched);
     }
 }

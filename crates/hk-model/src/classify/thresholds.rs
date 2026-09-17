@@ -76,6 +76,13 @@ pub const THRESHOLDS: &[FamilyThresholds] = &[
     FamilyThresholds {
         family: "fsk",
         snr_gate_db: Some(20.0),
+        // **Re-derived and left where it is** (T-422), by T-249's method: sweep the class call on
+        // the **dev** split in 1 dB steps above the current class gate and take the lowest step
+        // that is exact and exact at every step above. There is none. Measured wrong calls per 36
+        // dev snippets over 23-33 dB: `2fsk` 7-9, `gfsk` 3-5, `msk` 0-2 — **flat**, with `gfsk`
+        // marginally *worse* at the top of the range than the bottom. A class gate withholds a name
+        // the measurement cannot yet resolve; these residuals are not SNR-limited, so raising it
+        // would suppress correct names without removing a single wrong one.
         class_gate_db: 3.0,
         min_confidence: 0.6,
         open_set_max: 0.5,
@@ -83,6 +90,14 @@ pub const THRESHOLDS: &[FamilyThresholds] = &[
     FamilyThresholds {
         family: "psk-qam",
         snr_gate_db: Some(15.0),
+        // Also re-derived and left (T-422). On dev, `qam16` alone *would* give a gate: 5 wrong of
+        // 36 at 20 dB (the current class gate), 3 at 21, then **0 from 22 dB upward and 0 at every
+        // step above** — `class_gate_db` 7.0. But the rule is applied to the family's within-family
+        // call, and `qam64` is wrong 1-3 of 36 at every step from 20 to 30 dB, so no step is exact
+        // for the family. Moving to 7.0 to chase `qam16` would withhold the whole 20 dB bin, where
+        // `bpsk` and `8psk` are 1.000 and `qam16` is now 0.833 — paying several correct names for
+        // two wrong ones, with the family still not exact. The trade T-249 accepted for `analog`
+        // was against a 0.350 class wrong-label rate; this one is 0.0417.
         class_gate_db: 5.0,
         min_confidence: 0.6,
         open_set_max: 0.5,

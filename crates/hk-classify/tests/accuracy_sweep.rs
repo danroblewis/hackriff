@@ -473,3 +473,158 @@ fn the_analog_class_call_is_right_or_absent_but_never_confidently_wrong() {
     }
     eprintln!("[T-249] below the class gate: {below} analog calls, all class-abstaining");
 }
+
+/// **The `fsk` and `psk-qam` families name the class they found, or name none — never the wrong
+/// one** (T-422), the sibling of the analog test above and for three more classes that were wrong
+/// far more often than they were right inside a correct family call.
+///
+/// Measured on this blind grid before the fix, at and above each family's class gate: `gfsk` top-1
+/// 0.333/0.417 with wrong 0.667/0.583, `msk` 0.333/0.417 with wrong 0.667/0.500, and `qam16` top-1
+/// **0.083** with wrong 0.917/0.833. Every one of them had a healthy top-2 (0.917–1.000), which is
+/// the tell T-249 named: a class losing a *ranking*, not one whose evidence is absent.
+///
+/// Three separate causes, in two different stages:
+/// - `gfsk` — the last hand-written score table, `fsk_classes`. Its conjunction needed
+///   `if_bimodality < 0.66`, but C13's channel filter smooths every FSK emission's IF trajectory,
+///   so the whole family measures 0.70–0.91 here and no `gfsk` snippet ever reached the bound.
+///   Gone; `fsk` routes through the class-conditional densities like every other family.
+/// - `msk` — the tree named it correctly (0.917) from C14's modulation index and the **verifier**
+///   re-ranked it away, because its `h = 0.5` hypothesis fixes the *transmitter's* peak deviation
+///   and the receiver does not measure that number. `msk` is out of the verifier's hypothesis set.
+/// - `qam16` — nothing to do with the densities, which had it right 21/24. The verifier's ALRT takes
+///   `N₀` from the SNR meter; sweeping only that assumption flips both QAM truths together, so the
+///   ratio was a function of the assumption. The QAM orders are out of its hypothesis set too.
+///
+/// The assertions are properties, not today's numbers: every class in both families is nameable,
+/// the class wrong-label rate stays bounded, no wrong name is reported confidently, and below the
+/// class gate the name is withheld **with a recorded reason**.
+#[test]
+fn the_fsk_and_psk_qam_class_calls_are_right_or_absent_but_never_confidently_wrong() {
+    let mut c14 = SymbolEstimator::new();
+    let mut seed = ACCEPTANCE_SEED_BASE + 700_000;
+
+    for (family, classes) in [
+        (
+            "fsk",
+            &[Class::Fsk2, Class::Gfsk, Class::Msk, Class::Fsk4][..],
+        ),
+        (
+            "psk-qam",
+            &[
+                Class::Bpsk,
+                Class::Qpsk,
+                Class::Psk8,
+                Class::Qam16,
+                Class::Qam64,
+            ][..],
+        ),
+    ] {
+        let t = thresholds_of(family).expect("family thresholds");
+        let gate = t.snr_gate_db.expect("family gate");
+        let class_gate = t.class_gate_db;
+
+        let mut named = 0usize;
+        let mut right = 0usize;
+        let mut wrong = 0usize;
+        let mut confident_wrong = 0usize;
+        let mut per_class: Vec<(&str, usize, usize, usize)> = Vec::new();
+        for class in classes {
+            let (mut n, mut ok, mut bad) = (0usize, 0usize, 0usize);
+            for offset in [class_gate, class_gate + 5.0] {
+                for _ in 0..TRIALS {
+                    seed += 1;
+                    let c = classify_one(&mut c14, *class, gate + offset, seed);
+                    c.validate().expect("contract");
+                    if c.family != family {
+                        continue; // a family-level abstention; the family floors above judge those
+                    }
+                    n += 1;
+                    match c.class.as_ref() {
+                        Some(call) if call.label == class.label() => ok += 1,
+                        Some(call) => {
+                            bad += 1;
+                            if call.p >= 0.9 {
+                                confident_wrong += 1;
+                                eprintln!(
+                                    "[T-422] {} called {} at p {:.3}",
+                                    class.label(),
+                                    call.label,
+                                    call.p
+                                );
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+            named += n;
+            right += ok;
+            wrong += bad;
+            per_class.push((class.label(), n, ok, bad));
+        }
+        for (label, n, ok, bad) in &per_class {
+            eprintln!(
+                "[T-422] {family} {label:<5} at/above class gate: n {n:>3}, correct {ok:>3}, wrong {bad:>3}"
+            );
+        }
+        assert!(named >= 40, "too few {family} calls to judge: {named}");
+
+        // **Every class is nameable.** `gfsk` was at exactly zero from the tree and `qam16` at
+        // 0.083 after the verifier — neither of which any family-level floor can see.
+        for (label, _, ok, _) in &per_class {
+            assert!(
+                *ok > 0,
+                "{label} was never named correctly at or above its class gate: {per_class:?}"
+            );
+        }
+
+        // **No confident wrong name**, the property that outranks accuracy: an abstention is free
+        // here, a confidently wrong name is what this project has reverted three times. Both
+        // families are at zero after T-422 — including the p = 0.903 the `msk` index factor briefly
+        // reached before its spread was re-clamped to the densities' own 19:1 bound.
+        assert_eq!(
+            confident_wrong, 0,
+            "{family} reported a wrong class at p >= 0.9: {per_class:?}"
+        );
+
+        // **The wrong-label rate stays bounded.** Measured after T-422 over the full T-213 grid at
+        // and above each class gate: `fsk` **0.3125 -> 0.0833** and `psk-qam` **0.1833 -> 0.0417**,
+        // with class top-1 0.667 -> 0.896 and 0.758 -> 0.900. The bound below is loose on purpose —
+        // it is a regression guard, not a target, and an honest improvement must never trip it.
+        let wrong_rate = wrong as f64 / named as f64;
+        assert!(
+            wrong_rate <= 0.20,
+            "{family} class wrong-label {wrong_rate:.3}: {per_class:?}"
+        );
+        assert!(
+            right as f64 / named as f64 >= 0.70,
+            "{family} class top-1 {:.3}: {per_class:?}",
+            right as f64 / named as f64
+        );
+
+        // **Below the class gate the name is withheld, not guessed**, and the reason is recorded.
+        let mut below = 0usize;
+        for class in classes {
+            for _ in 0..TRIALS {
+                seed += 1;
+                let c = classify_one(&mut c14, *class, gate + class_gate - 1.0, seed);
+                if c.family != family {
+                    continue;
+                }
+                below += 1;
+                assert!(
+                    c.class.is_none(),
+                    "{} named {:?} below the class gate",
+                    class.label(),
+                    c.class
+                );
+                assert!(
+                    c.reasons.iter().any(|r| r == "below_class_gate"),
+                    "no reason recorded for the withheld class: {:?}",
+                    c.reasons
+                );
+            }
+        }
+        eprintln!("[T-422] {family}: below the class gate, {below} calls, all class-abstaining");
+    }
+}
