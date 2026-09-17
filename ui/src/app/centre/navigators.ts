@@ -86,6 +86,35 @@
 //     down (`dimSegments`). It cannot disagree with the lit windows because it is computed from
 //     them, and with no window reported the whole bar dims rather than one being assumed.
 //     Drag-to-retune (property 1) is untouched; the transient `.fn-draft` still shows it in flight.
+//  9. **(T-412) On the time axis the wheel PANS; span-zoom is the secondary gesture. (T-407) Touch
+//     resolves to the same arithmetic as the mouse.** The user's correction: *"the TIME axis wheel
+//     should PAN / SCROLL THROUGH TIME — wheel up/down moves the viewed window earlier/later,
+//     keeping the duration/span FIXED — NOT zoom the time window … the user scrolls through time
+//     constantly and rarely resizes."* So the plain wheel on the vertical bar is `timeWheelPan`,
+//     which is `timePanTarget` — **the same pan a drag runs** — with a notch converted to a
+//     distance; zoom moved to ctrl/cmd + wheel, a pinch, and the region drag that always did it.
+//     The frequency bar's wheel is unchanged and still zooms.
+//
+//     **Panning at the ends keeps the span.** `timePanTarget` now clamps the whole reviewed
+//     *window* through `clampInto` (which shifts and never resizes) rather than clamping its end
+//     instant, so a pan into the oldest edge stops with the window inside the capture and the span
+//     comes out the number it went in as. A pan that silently resized was the bug in the other
+//     direction, and the mirror of it is the one this must not introduce.
+//
+//     **One gesture, several input devices.** A pinch is the touch spelling of the wheel and a
+//     touch drag is the existing pan, so neither forks: `pinchFactor` returns a factor in
+//     `ax.wheelFactor`'s own units, and both feed `zoomTimeBy` / `zoomFreqBy`, one per bar, which
+//     each bar's wheel handler also calls. Touch usability is the rest: hit targets grown for a
+//     finger (`grabTolerancePx` on the view marker, `@media (pointer: coarse)` on the controls),
+//     a drag threshold that is the *input device's* (`dragThresholdPx`) measured along the **bar's
+//     own axis**, and `touch-action: none` scoped to `.freqnav` / `.timenav` so a drag on a bar
+//     does not scroll the page while every other surface scrolls normally.
+//
+//     **And changing what a gesture means changed nothing about what it can reach.** Property 1
+//     holds unaltered on every new input: the committed region select on the frequency bar is
+//     still the only path to the radio, and a tap, a cross-axis stroke and a pinch all miss it by
+//     construction — a tap and a stroke never pass the threshold *along the bar*, and a pinch is
+//     cancelled rather than committed (`onCancel`).
 //
 // Everything below is placement, gesture and styling. Which states are achievable, which windows
 // are active and what the capture window spans are all backend answers (`ui/src/navigators.ts` is
@@ -98,9 +127,11 @@ import {
 } from "../../navigation";
 import { cmapBytes } from "../../cmap";
 import {
-  activeWindows, bandKey, clockRangeText, clockText, coverageRequest, dimSegments, litSegments,
-  placeOn, regionFromDrag, spanOf, spectrumExtent, stripCells, surveyCells, surveyViewport,
-  timeAtFraction, timeExtent, timelineRequest, unobservedCount, valueAt, zoomWithin, type Band,
+  DRAG_PX, TOUCH_DRAG_PX, activeWindows, bandKey, clampInto, clockRangeText, clockText,
+  coverageRequest, dimSegments,
+  dragThresholdPx, grabTolerancePx, grabsMarker, litSegments, pinchFactor, pinchSpread, placeOn,
+  regionFromDrag, spanOf, spectrumExtent, stripCells, surveyCells, surveyViewport, timeAtFraction,
+  timeExtent, timelineRequest, unobservedCount, valueAt, wheelPanFrac, zoomWithin, type Band,
   type CoverageCell, type CoverageResponse, type Range,
 } from "../../navigators";
 import {
@@ -126,8 +157,10 @@ const fmtEdges = (lo: number, hi: number) => {
   return `${ax.fmtMHz(lo, res)}–${ax.fmtMHz(hi, res)}`;
 };
 
-/** Pointer travel (px) that makes a press a deliberate drag rather than a click (overlays.ts). */
-export const DRAG_PX = 6;
+/** Pointer travel (px) that makes a press a deliberate drag rather than a click (overlays.ts), and
+ * the touch-sized threshold beside it. One definition, in `ui/src/navigators.ts` with the rest of
+ * the input arithmetic, re-exported here for the callers that had it from this module. */
+export { DRAG_PX, TOUCH_DRAG_PX, dragThresholdPx };
 
 /** The most cells either strip will ask for on either axis — the caps `GET /api/timeline` states
  * for `columns` (time) and `rows` (frequency). Both bars now size their request from their own
@@ -400,13 +433,49 @@ const cursorAt = (ext: Range, c: TimeCursorNow) => (c.live ? ext.hi : c.tS);
 export const MIN_ZOOM_S = 1e-3;
 
 /**
- * The cursor a **pan** of `deltaFrac` of the bar moves to: the reviewed instant slides along the
- * capture window, keeping whatever span is being reviewed, and reaching the newest edge is *live*.
+ * The cursor a **pan** of `deltaFrac` of the bar moves to: the reviewed **window** slides along the
+ * capture window, keeping the span it is reviewing, and reaching the newest edge is *live*.
+ *
+ * **The clamp is the whole reviewed window, not its end (T-412).** This is the one gesture every
+ * input device's pan resolves to — a drag on the bar, a finger, and now the wheel — so "panning at
+ * the ends must not resize" has to hold here or it holds nowhere. Clamping only the end instant
+ * would leave a 20 s window hanging half off the oldest edge of a capture that has nothing there:
+ * the stored `spanS` would still say 20 s while the view showed ten of data and ten of nothing,
+ * which is the same lie as a pan that silently resized. `clampInto` **shifts and never resizes**,
+ * so the window stops with all of itself inside the retained capture and the span comes out the
+ * number it went in as. A span wider than the whole capture window degenerates to the window, which
+ * is `live`.
  */
 export function timePanTarget(ext: Range, cur: TimeCursorNow, deltaFrac: number): TimeTarget {
   const d = Number.isFinite(deltaFrac) ? deltaFrac * spanOf(ext) : 0;
-  const next = Math.min(ext.hi, Math.max(ext.lo, cursorAt(ext, cur) + d));
+  const end = cursorAt(ext, cur) + d;
+  // A live cursor is reviewing no span yet, so there is no window to keep inside — only the instant.
+  const span = cur.live ? 0 : Math.max(0, cur.spanS ?? 0);
+  const next = clampInto(ext, { lo: end - span, hi: end }).hi;
   return next >= ext.hi ? { live: true } : { live: false, tS: next, spanS: cur.live ? null : cur.spanS };
+}
+
+/**
+ * The pan a **wheel notch** on the time bar asks for (T-412) — the primary time gesture.
+ *
+ * The user's correction: *"the TIME axis wheel should PAN / SCROLL THROUGH TIME — wheel up/down
+ * moves the viewed window earlier/later, keeping the duration/span FIXED — NOT zoom the time
+ * window. The user scrolls through time constantly and rarely resizes."* So the wheel resolves to
+ * the **existing pan**, not to a second one: this converts a notch to a distance and hands it to
+ * `timePanTarget`, which is where the fixed span and the edge clamp already live. A touch drag is
+ * that same pan, and span-zoom is the secondary gesture (ctrl/cmd + wheel, a pinch, or a dragged
+ * region) through `timeWheelTarget`.
+ *
+ * A notch moves a fraction of **what is on screen**, not of the whole retention: scrolling through
+ * a 20 s window inside a 10 minute capture must step in 20-second-sized amounts or every notch is a
+ * jump to somewhere unrelated. With no span being reviewed yet the fallback is `timeWheelTarget`'s,
+ * for the same reason — a duration constant here would be a step nobody asked for.
+ */
+export function timeWheelPan(ext: Range, cur: TimeCursorNow, deltaY: number, deltaMode = 0): TimeTarget {
+  const span = (cur.live ? 0 : (cur.spanS ?? 0)) || spanOf(ext) / 8;
+  const whole = spanOf(ext);
+  const frac = whole > 0 ? wheelPanFrac(deltaY, deltaMode) * (span / whole) : 0;
+  return timePanTarget(ext, cur, frac);
 }
 
 /**
@@ -495,42 +564,115 @@ export function timeDetailText(z: TimeZoom | null): string {
 interface BarDrag {
   /** Fraction along the bar, 0 at its `lo` end. */
   frac(e: PointerEvent): number;
+  /** The pointer's position along **this bar's own axis**, in client pixels. The frequency bar is
+   * horizontal and the time bar vertical, and only differences are used. */
+  axisPx(e: PointerEvent): number;
   onPan(deltaFrac: number): void;
   onPanEnd(): void;
   onRegion(a: number, b: number, done: boolean): void;
   /** Whether the press started on the marker showing the current view (pan) or the bar (region). */
   onMarker(e: PointerEvent): boolean;
+  /** Abandon whatever this press was becoming, committing nothing: a second finger arrived, so the
+   * gesture is a pinch and **a pinch never selects** (`live-spectrum.ts` settled the same rule for
+   * the waterfall). On the frequency bar this is load-bearing — a committed region select retunes
+   * the radio on release (T-392), so a pinch that fell through to `onRegion(…, done)` would tune
+   * wherever the fingers happened to be. */
+  onCancel(): void;
+  /** A two-finger zoom, as a factor in `axis.wheelFactor`'s units (> 1 zooms in) about fraction
+   * `at` of the bar. The same number a wheel produces, handed to the same zoom. */
+  onPinch(factor: number, at: number): void;
 }
 
-/** Drag-to-pan on the view marker, drag-a-region anywhere else. Both are view gestures; neither
- * has any path to the control API. */
+/**
+ * Drag-to-pan on the view marker, drag-a-region anywhere else, two fingers to zoom. Every one of
+ * them is a view gesture; none has any path to the control API (T-340), and the one gesture that
+ * *does* reach it — a committed region select on the frequency bar — is reached only from the
+ * `done` branch below, which a pinch and a tap both miss.
+ *
+ * **T-407, the touch half.** Three things separate a finger from a mouse here, and each is the
+ * difference between a usable bar and an accidental command:
+ *
+ *  - **Travel is measured along the bar's own axis.** It was `clientX + clientY`, which counts a
+ *    swipe *across* the bar as travel *along* it — so a finger stroked down the (horizontal)
+ *    frequency bar registered as a region select of nearly zero width, and a page-scroll reflex on
+ *    a bar became a gesture. Only the bar's own axis counts now, so a cross-axis stroke stays a tap.
+ *  - **The threshold is the input device's** (`dragThresholdPx`): a finger lands over several pixels
+ *    and wobbles as it lifts, and at the mouse's 6 px that wobble is a drag.
+ *  - **A second pointer ends the drag and starts a pinch**, committing nothing.
+ */
 function attachBar(el: HTMLElement, d: BarDrag) {
-  let mode: "pan" | "region" | null = null, startFrac = 0, lastFrac = 0, downPx = 0, moved = false;
-  const axisPx = (e: PointerEvent) => e.clientX + e.clientY; // only differences are used
+  let mode: "pan" | "region" | "pinch" | null = null, startFrac = 0, lastFrac = 0;
+  let downPx = 0, moved = false, threshold = DRAG_PX;
+  /** Live pointers, by id: position along the bar's axis, and the fraction there. */
+  const pts = new Map<number, number>();
+  /** The spread the pinch began at, and the factor already delivered from it. The **absolute**
+   * factor is always measured from `pinchFrom` — a ratio of successive frames would accumulate
+   * rounding — but what is handed on is the **increment** since the last frame, because the zoom it
+   * feeds reads the bar's current state, exactly as a wheel notch does. That is what makes the
+   * pinch and the wheel one call rather than two that agree. */
+  let pinchFrom = 0, pinchLast = 1, pinchAt = 0.5;
+
+  const beginPinch = () => {
+    const xs = [...pts.values()];
+    if (xs.length < 2) return;
+    if (mode && mode !== "pinch") d.onCancel(); // a pinch never selects, and never pans
+    pinchFrom = pinchSpread(xs[0], xs[1]);
+    pinchLast = 1;
+    pinchAt = (startFrac + lastFrac) / 2;
+    mode = "pinch";
+  };
+
   el.addEventListener("pointerdown", (e) => {
     if ((e.target as Element | null)?.closest?.("button, a, input, select")) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
-    mode = d.onMarker(e) ? "pan" : "region";
-    startFrac = lastFrac = d.frac(e);
-    downPx = axisPx(e);
-    moved = false;
+    pts.set(e.pointerId, d.axisPx(e));
     el.setPointerCapture(e.pointerId);
     el.classList.add("dragging");
     e.preventDefault();
+    if (pts.size > 1) { lastFrac = d.frac(e); beginPinch(); return; }
+    mode = d.onMarker(e) ? "pan" : "region";
+    startFrac = lastFrac = d.frac(e);
+    downPx = d.axisPx(e);
+    threshold = dragThresholdPx(e.pointerType);
+    moved = false;
   });
   el.addEventListener("pointermove", (e) => {
-    if (!mode) return;
+    if (!mode || !pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, d.axisPx(e));
+    if (mode === "pinch") {
+      const xs = [...pts.values()];
+      if (xs.length < 2 || !(pinchFrom > 0)) return;
+      const abs = pinchFactor(pinchFrom, pinchSpread(xs[0], xs[1]));
+      const step = abs / pinchLast;
+      pinchLast = abs;
+      if (step !== 1) d.onPinch(step, pinchAt);
+      return;
+    }
     const f = d.frac(e);
-    if (Math.abs(axisPx(e) - downPx) >= DRAG_PX) moved = true;
+    if (Math.abs(d.axisPx(e) - downPx) >= threshold) moved = true;
     if (mode === "pan") { d.onPan(f - lastFrac); lastFrac = f; }
     else if (moved) d.onRegion(startFrac, f, false);
   });
   const end = (e: PointerEvent) => {
-    if (!mode) return;
-    el.classList.remove("dragging");
-    if (mode === "pan") d.onPanEnd();
+    const had = pts.delete(e.pointerId);
+    if (pts.size === 0) el.classList.remove("dragging");
+    if (!had || !mode) return;
+    if (pts.size > 0) {
+      // A finger of a pinch lifted. With two or more left the pinch continues, re-anchored on the
+      // fingers that remain — measuring on from a spread one of them is no longer part of would
+      // jump the zoom. With one left the gesture is over as far as committing goes: the remaining
+      // finger must NOT become a region select that retunes where the pinch happened to finish.
+      if (mode === "pinch" && pts.size > 1) { beginPinch(); return; }
+      if (mode === "pinch") d.onCancel();
+      mode = null;
+      return;
+    }
+    if (mode === "pinch") d.onCancel();
+    else if (mode === "pan") d.onPanEnd();
+    // The only path to a committed selection, and on the frequency bar the only path to the radio:
+    // one pointer, travel past its device's threshold along the bar's own axis, released on the bar.
     else if (moved && e.type === "pointerup") d.onRegion(startFrac, d.frac(e), true);
-    else d.onRegion(startFrac, startFrac, true); // a click: clear any draft, select nothing
+    else d.onRegion(startFrac, startFrac, true); // a tap: clear any draft, select nothing
     mode = null;
   };
   el.addEventListener("pointerup", end);
@@ -719,13 +861,39 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
       : s.navGrid.loaded ? "no navigable spectrum reported (no live front end)" : "navigation grid not loaded";
   };
 
+  /**
+   * **The one frequency-bar zoom (T-407).** A wheel notch and a two-finger pinch are two ways of
+   * naming the same factor (`ax.wheelFactor` / `pinchFactor`, both > 1 to zoom in), so they meet
+   * here rather than each growing their own copy of the viewport arithmetic. It writes no store
+   * slice and reaches no device route — a survey frame is not a tune (T-343), and T-340's control
+   * still holds on both inputs: no zoom and no pan on either bar can move the radio.
+   */
+  const zoomFreqBy = (factor: number, at: number) => {
+    const b = bounds(), ext = extent();
+    if (!b || !ext) return;
+    // Never narrower than one capture window: a survey frame inside the live window would claim to
+    // resolve the spectrum more finely than the front end can open it (T-341's rule, on this axis).
+    const floor = tuned()?.span_hz ?? spanOf(b) / SURVEY_CELLS;
+    viewport = zoomWithin(b, ext, Math.min(1, Math.max(0, at)), factor, floor);
+    viewportTouched = true;
+    render();
+    void refreshSurvey();
+  };
+
   attachBar(track, {
     frac: (e) => ax.pointerFrac(e.clientX, track.getBoundingClientRect()),
+    // The frequency bar is horizontal, so travel along it is travel in x. A stroke *down* the bar
+    // (a page-scroll reflex) is therefore not a region select, which on this bar is the gesture
+    // that commands the radio.
+    axisPx: (e) => e.clientX,
+    onCancel: () => { draft.hidden = true; dragText = null; readout.hidden = true; },
+    onPinch: zoomFreqBy,
     // T-405: the view box that was the pan handle is gone, so there is nothing on this bar to grab
     // for a pan and every press is a region select — the gesture the user kept ("drag-to-retune,
-    // transient draft only"). The pan handlers below are untouched and still reachable through
-    // `attachBar`'s contract; which gesture should drive this bar's panning is T-412/T-407's
-    // question, not this ticket's, and inventing an invisible handle here would pre-empt it.
+    // transient draft only"). T-412 answered the question T-405 left open by moving this bar's
+    // travel onto the wheel and the pinch (`zoomFreqBy` pans as it scales about the pointer), so no
+    // invisible handle is needed; the pan handlers below stay reachable through `attachBar`'s
+    // contract and keep the edge offer they always had.
     onMarker: () => false,
     // Panning moves the view inside the tuned band and stops at its edges. No branch of this
     // reaches the control API, at any pan distance — that is the T-343 property, restated here.
@@ -794,22 +962,13 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
 
   // T-376: the wheel zooms **this bar's own viewport** about the pointer, with the same
   // `ax.wheelFactor` the waterfall uses, so the gesture matches. Zooming about the pointer pans as
-  // it scales, which is how the bar is moved along the spectrum. It writes no store slice and
-  // reaches no device route — a survey frame is not a tune (T-343), and T-340's control still
-  // holds: no pan and no wheel on either bar can move the radio.
+  // it scales, which is how the bar is moved along the spectrum. **T-412 leaves this bar's wheel a
+  // zoom** — only the *time* axis's primary wheel gesture changed — and T-407 gives the same zoom
+  // its touch spelling by routing a pinch into the identical `zoomFreqBy`.
   track.addEventListener("wheel", (e) => {
-    const b = bounds();
-    const ext = extent();
-    if (!b || !ext || e.deltaY === 0) return;
+    if (!bounds() || !extent() || e.deltaY === 0) return;
     e.preventDefault();
-    const at = ax.pointerFrac(e.clientX, track.getBoundingClientRect());
-    // Never narrower than one capture window: a survey frame inside the live window would claim to
-    // resolve the spectrum more finely than the front end can open it (T-341's rule, on this axis).
-    const floor = tuned()?.span_hz ?? spanOf(b) / SURVEY_CELLS;
-    viewport = zoomWithin(b, ext, Math.min(1, Math.max(0, at)), ax.wheelFactor(e.deltaY, e.deltaMode), floor);
-    viewportTouched = true;
-    render();
-    void refreshSurvey();
+    zoomFreqBy(ax.wheelFactor(e.deltaY, e.deltaMode), ax.pointerFrac(e.clientX, track.getBoundingClientRect()));
   }, { passive: false });
 
   /** Which (frequency viewport × time window) the drawn cells are of. Both halves, so neither can
@@ -990,12 +1149,38 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
     track.classList.toggle("reviewing", !t.live);
   };
 
+  /**
+   * **The one time-axis zoom (T-412 / T-407).** Span-zoom is now the *secondary* time gesture — the
+   * user scrolls through time constantly and rarely resizes — so it is reached deliberately:
+   * ctrl/cmd + wheel (which is also what a trackpad pinch sends), a two-finger pinch, or a dragged
+   * region. All of them are one factor into `timeWheelTarget`, the arithmetic the plain wheel used
+   * to run. The gesture's *meaning* moved; the arithmetic did not, and neither did what it can
+   * reach — a time gesture writes the time cursor and nothing else.
+   */
+  const zoomTimeBy = (factor: number) => {
+    const ext = extent();
+    if (ext) applyTimeTarget(store, timeWheelTarget(ext, cursorNow(), factor));
+  };
+
   attachBar(track, {
     frac: (e) => {
       const r = track.getBoundingClientRect();
       return r.height > 0 ? Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) : 1;
     },
-    onMarker: (e) => !marker.hidden && (e.target === marker || marker.contains(e.target as Node)),
+    // Time runs down this bar, so travel along it is travel in y — a stroke *across* the bar is not
+    // a time region select.
+    axisPx: (e) => e.clientY,
+    onCancel: () => { draft.hidden = true; dragText = null; readout.hidden = true; },
+    onPinch: (factor) => zoomTimeBy(factor),
+    // T-407, "larger hit targets": the view marker can be a few pixels of a long bar, which a mouse
+    // can hit and a finger cannot. The grab is decided from the marker's measured extent plus the
+    // tolerance the input device earns (`grabTolerancePx`: none for a mouse, a fingertip for touch),
+    // so the handle grows for touch without the drawn marker changing at all.
+    onMarker: (e) => {
+      if (marker.hidden) return false;
+      const r = marker.getBoundingClientRect();
+      return grabsMarker(r.top, r.bottom, e.clientY, grabTolerancePx(e.pointerType));
+    },
     // Panning the time bar moves the reviewed instant, and only that. It touches the store's time
     // cursor and nothing else: capture, the ring and detection are always-on (CLAUDE.md, "Pause
     // freezes the view, not the capture"), no time gesture has ever had a path to a device route,
@@ -1045,12 +1230,24 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
   });
   track.addEventListener("pointerleave", () => { dragText = null; readout.hidden = true; });
 
-  // Wheel zooms the reviewed span about the pointer, on the time axis only.
+  /**
+   * **T-412: the time wheel PANS.** *"Wheel up/down moves the viewed window earlier/later, keeping
+   * the duration/span FIXED — NOT zoom the time window. The user scrolls through time constantly
+   * and rarely resizes."* So the plain wheel is the pan — scroll up goes back toward older, which
+   * is the direction this bar's own axis runs (oldest at the top) and the direction the waterfall's
+   * time axis runs — and the span-zoom it replaced is now reached deliberately, with ctrl/cmd held.
+   *
+   * ctrl/cmd + wheel is not an extra gesture invented for this: it is what a **trackpad pinch**
+   * already sends, so the secondary zoom and the two-finger zoom are literally the same event on a
+   * laptop, and `zoomTimeBy` is the single place either lands. Both are still time-axis-only and
+   * still reach nothing but the time cursor.
+   */
   track.addEventListener("wheel", (e) => {
     const ext = extent();
     if (!ext || e.deltaY === 0) return;
     e.preventDefault();
-    applyTimeTarget(store, timeWheelTarget(ext, cursorNow(), ax.wheelFactor(e.deltaY, e.deltaMode)));
+    if (e.ctrlKey || e.metaKey) zoomTimeBy(ax.wheelFactor(e.deltaY, e.deltaMode));
+    else applyTimeTarget(store, timeWheelPan(ext, cursorNow(), e.deltaY, e.deltaMode));
   }, { passive: false });
 
   /** The time cursor as the gesture functions take it; `tS` is unused while live. */
