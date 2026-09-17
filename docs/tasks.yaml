@@ -10674,7 +10674,7 @@ tasks:
   - id: T-434
     milestone: MCANVAS
     title: docs/16 step 4 - LevelConfig::t_factor and the view scheme, and the step where the storage cost lands
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -10722,6 +10722,50 @@ tasks:
       the scheme, and both now accumulate into it rather than into private accumulators.
       Gate: crates/ so FULL. Run the affected suite twice (T-403). Floors: ADR-0016 §7.1, and read
       §7.2 first - the held-out figures have a draw sd of 0.008, so a +/-0.02 move is noise.
+    commit: 5684346
+    result: |
+      DONE - de-welded, and the disk measurement overturned two of §6's assumptions.
+      level_f and level_t become independent coordinates DERIVED FROM THE GEOMETRY rather than
+      carried beside it: Geometry::f_axis()/t_axis() give the distinct cell widths per axis,
+      axes_of(level) and level_at(level_f, level_t) translate. hk_model::TileKey is UNCHANGED, so
+      scheme 1 keeps its weld and is bit-identical.
+      TWO THINGS THE ROUTE MUST HONOUR, both forced by the implementation: level_at returns None
+      where a scheme has no such node - A WELDED LADDER IS THE DIAGONAL of the lattice - so the
+      route answers "no such node" rather than snapping to a level whose time cell is a day; and
+      Resolution::MaxCells/Cell still scan levels in INDEX order, which is a coarseness order only
+      for a ladder, so T-438 must address by explicit (level_f, level_t) and not rely on them.
+      MEASURED DISK COST, real encodes through the production codec (lattice_cost.rs, now docs/16
+      §6.4-§6.5):
+        a 256x256 level-0 tile costs 1548 + 1.24 x cells bytes - a full tile ~83 kB, not the
+          ~918 kB its 14 B/cell implies; 64x64 tiles cost 2.30 B/cell, so §6.2's 256x256 is the
+          cheaper tile as well as the uniform one;
+        THE LEVEL COUNT IS MULTIPLICATIVE, THE BYTES ARE NOT - a 4x4 lattice is 4.8x its finest
+          node and 3.2x the welded ladder embedded in it as the diagonal, same data and same run.
+          64 nodes cost a handful of finest levels, not 64;
+        THE SURPRISE: A COARSE CELL COSTS MORE THAN A FINE ONE - 3.4-3.6 B/cell against level 0's
+          2.30, a 1.5x penalty, because folding destroys the temporal correlation zstd was living
+          on. §6 assumed bytes proportional to cells and understates by half as much again;
+        WHICH BOUND BINDS MOVES: 20 MHz dwelled continuously, scheme 1 writes 771 MB/day and its
+          8 GiB budget binds at 11 days, while the §6.2 view lattice writes 1.26 MB/day and would
+          not bind for 6842 - so the observation log's 180-day AGE binds instead at every
+          (level_f, level_t), and T-423's fourth state, which §5.4 argued was unreachable in
+          practice, BECOMES REACHABLE after half a year.
+      DE-WELDING COSTS THE PERCENTILES: a tile keeps one histogram per frequency cell over the
+      whole tile, which is the parent cell's histogram ONLY when a child tile is one parent time
+      cell - the weld. So a de-welded fold writes no p_low/p_high; they stay unknown and reach the
+      wire as `unknown` rather than inventing a distribution. View tiles carry measurement,
+      occupancy and coverage; the noise floor stays a scheme-1 question.
+      LEFT FOR T-438/T-439, stated by the agent: no production view-scheme instance is opened
+      alongside scheme 1 (PyramidConfig::view_lattice exists and is tested, nothing in hk-pipeline
+      opens it); and the finest-node RAM/latency question - §6.2's V(0,0) keeps a level-0 tile open
+      for 9.1 h per 25.6 MHz block at ~3 MB of accumulator, fine for a survey and wrong for a live
+      edge, which is F1's problem from the other side.
+      COORDINATOR ERROR: this merge was completed accidentally by a `git commit` of board files
+      while it was staged - git commits everything staged during an active merge - so it landed
+      before its gate finished and under a tasks.yaml message. Message amended; main verified
+      separately at 445/445 (hk-store + hk-pipeline), 332/332 (hk-e2e + hk-api + hk-cli), and zero
+      FAIL lines across the 2230 tests of the interrupted full run.
+
   - id: T-435
     milestone: M3
     title: The class NAME changes with SNR in 3 of 252 sequences, and one of them is a confidently-wrong FAMILY at the gate
@@ -10926,7 +10970,7 @@ tasks:
   - id: T-438
     milestone: MCANVAS
     title: The tile route, addressed by independent (level_f, level_t) - docs/16 step 5 under de-welded axes
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CANVAS-BE
     core_interface: true
