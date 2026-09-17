@@ -800,8 +800,7 @@ impl Pyramid {
     ) -> Result<Option<Source<'_>>, StoreError> {
         if let Some(t) = self.open[level].get(&(fb, tb)) {
             let preview = if level == 0 {
-                let floor = self.floors.get(&fb).map(|f| &f.floor[..]);
-                t.column_preview(floor, margin, pct)
+                t.column_preview(margin, pct)
             } else {
                 None
             };

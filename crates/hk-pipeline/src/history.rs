@@ -12,6 +12,20 @@
 //! oldest are dropped and counted) and folded in order by the next frame that gets the lock
 //! (`frames_deferred`, `frames_dropped`).
 //!
+//! **One floor tracker, one front end (T-377).** This reader's `NoiseFloorTracker` is *not* keyed
+//! by origin, and does not need to be: it is fed only from `shared.ring`, and a ring carries the
+//! blocks of exactly one source. `Pipeline::start` takes one `Box<dyn Source>`; a re-plumb (T-050)
+//! hands that *same still-open device* back and starts the new segment with it, and each segment
+//! builds its own reader and its own tracker. `Provenance::device_id` is a per-source constant —
+//! `hackrf:<serial>`, `sigmf:<hw>` from the one recording's global metadata, `mock:<device>` — and
+//! the source conformance suite's `device-info` check pins it equal to `DeviceInfo::device_id` on
+//! every block, which is the value T-314 takes the run's `ChainKey` from. So `source_key(...)`
+//! below is constant for the life of a tracker, and no frame of one front end can move another's
+//! floor here. The tracker that *was* pooled is the pyramid's own (`Pyramid::floors`), whose
+//! ingest contract explicitly admits interleaved sources; T-377 keys that one by
+//! `FrameInput::source`. Should a ring ever carry two devices, this tracker must be split the same
+//! way.
+//!
 //! **Source and site (T-133).** Every frame is folded with its origin: the source key of the run's
 //! `device_id` and the site the attention service's site state machine gives at the frame's sample
 //! time ([`frame_site`]; `unassigned` when the run has no attention service), so history tiles

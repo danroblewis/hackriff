@@ -1,8 +1,17 @@
-//! The tile file format. Little-endian throughout. Version 5 (T-332) is written; versions 1
-//! (T-017), 2 (T-116), 3 (T-133) and 4 (T-141) are still read, so no migration is needed: older
-//! tiles stay valid until evicted, frames of v1/v2 tiles read as of unknown source and site, v1–v3
-//! tiles carry no per-shape value counts, and v1–v4 tiles read with every bias-tee state
-//! `unknown` — which is exactly what they are, since nothing recorded it.
+//! The tile file format. Little-endian throughout. Version 6 (T-377) is written; versions 1
+//! (T-017), 2 (T-116), 3 (T-133), 4 (T-141) and 5 (T-332) are still read, so no migration is
+//! needed: older tiles stay valid until evicted, frames of v1/v2 tiles read as of unknown source
+//! and site, v1–v3 tiles carry no per-shape value counts, and v1–v4 tiles read with every
+//! bias-tee state `unknown` — which is exactly what they are, since nothing recorded it.
+//!
+//! **Version 6 adds no bytes.** It is a *semantic* marker: a v6 level-0 tile's stored `occupancy`
+//! was decided against the floor of the frame's **own** front end ([`super::FrameInput::source`]),
+//! a v1–v5 one against a floor every front end that fed the pyramid contributed to. That decision
+//! is baked into the cell and cannot be recomputed from the tile — the levels survive, the floor
+//! they were compared with does not — so old tiles are left exactly as written and counted on
+//! open as [`super::PyramidStats::tiles_pre_origin_floor`] rather than quietly credited with a
+//! guarantee they do not carry. In a pyramid only one front end ever fed, the two rules give the
+//! same answer, which is every single-device store.
 //!
 //! ```text
 //! preamble (28 B)  magic "HKTILE\0\x01" [8] · format u16 · header_len u16 · payload_len u64 ·
@@ -65,8 +74,9 @@ use super::tile::{
 
 const MAGIC: [u8; 8] = *b"HKTILE\0\x01";
 /// Tile file format version written (T-116: 2; T-133: 3, per-tile origins; T-141: 4, per-shape
-/// value counts; T-332: 5, bias-tee state). Versions 1–4 are still read.
-pub const FORMAT_VERSION: u16 = 5;
+/// value counts; T-332: 5, bias-tee state; T-377: 6, occupancy decided against the frame's own
+/// origin's floor — no new bytes, see the [module docs](self)). Versions 1–5 are still read.
+pub const FORMAT_VERSION: u16 = 6;
 const PREAMBLE_LEN: usize = 28;
 const UNKNOWN_DB: i16 = i16::MIN;
 /// Largest raw payload a zstd tile may claim (bounds decompression memory).

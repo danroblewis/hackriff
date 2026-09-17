@@ -45,6 +45,16 @@ pub struct PyramidStats {
     pub bytes_evicted: u64,
     /// Temp, truncated or corrupt files ignored (and removed) on open or read.
     pub files_ignored: u64,
+    /// T-377: sealed level-0 tiles found on open that were written **before** per-origin floor
+    /// tracking (tile format < [`super::codec::FORMAT_VERSION`]). Their stored `occupancy` was
+    /// decided against a floor every front end fed, and it cannot be recomputed from the tile —
+    /// the level values are there, the floor they were compared with is not. Nonzero means part
+    /// of the history predates the guarantee; in a pyramid only one front end ever fed, the two
+    /// rules give the same answer, so this is a disclosure, not a defect count.
+    pub tiles_pre_origin_floor: u64,
+    /// T-377: sealed level-0 tiles that fed **no** front end's floor track because they could not
+    /// name one source (two front ends interleaved inside one tile, or unrecorded origins).
+    pub floor_tiles_unattributed: u64,
     /// After the last enforcement, the budget could not be met without evicting tiles that no
     /// coarser level covers yet.
     pub over_budget: bool,
@@ -62,7 +72,16 @@ pub enum IngestOutcome {
     Late,
 }
 
-/// Per-f-block default floor: min over the last `w` sealed tiles' per-cell low percentile.
+/// Per-(source, f-block) default floor: min over the last `w` sealed tiles' per-cell low
+/// percentile, over the tiles of **one** front end.
+///
+/// **T-377.** A noise floor is a property of one receive chain (T-303, ADR-0012 §3.1), and this
+/// tracker decides a level-0 cell's stored `occupancy` at *ingest*, where no read-side filter can
+/// reach it afterwards. Keyed only by frequency block it was fed by every front end that folded
+/// into the pyramid, so a tile pure in origin could still carry an occupancy decided against
+/// another chain's floor. The key is therefore `(FrameInput::source, f_block)` — the same
+/// `source_key(device_id)` the occupancy read and `BaselineKey`'s `ChainKey` use (T-314) — so the
+/// threshold, the measurement and the baseline key are one value by construction.
 #[derive(Clone, Debug)]
 pub(super) struct FloorTrack {
     w: usize,
@@ -115,7 +134,8 @@ pub struct Pyramid {
     #[allow(clippy::vec_box)]
     pool: Vec<Vec<Box<Tile>>>,
     plan: RegridPlan,
-    pub(super) floors: HashMap<i64, FloorTrack>,
+    /// Default level-0 floor per `(source, f_block)` (T-377): see [`FloorTrack`].
+    pub(super) floors: HashMap<(u64, i64), FloorTrack>,
     /// Every tile whose block ends at or before this has sealed.
     watermark_ns: i64,
     latest_ns: i64,
@@ -476,9 +496,10 @@ impl Pyramid {
                 tb,
                 next_seal_ns,
             );
-            let floor = floors.get(&fb).map(|f| &f.floor[..]);
+            // T-377: this frame's own chain's floor, never the pyramid's pooled one.
+            let floor = floors.get(&(frame.source, fb)).map(|f| &f.floor[..]);
             if tile.col_t.is_some_and(|c| t_in > c) {
-                tile.close_column(floor, margin, pct, scratch);
+                tile.close_column(margin, pct, scratch);
             }
             let late =
                 tile.col_done.is_some_and(|d| t_in <= d) || tile.col_t.is_some_and(|c| t_in < c);
@@ -495,16 +516,16 @@ impl Pyramid {
                 let v_db = db(v_lin);
                 let pk_db = db(f64::from(plan.max(s, peak)).max(v_lin));
                 let f = (s.cell - fb * nf) as usize;
-                let thr = frame
-                    .floor_db
-                    .map_or(f32::NAN, |fl| plan.mean(s, fl) as f32 + margin);
+                // T-377: the threshold is resolved here, against this frame's own origin's
+                // floor, so the stored occupancy decision can never carry another front end's
+                // floor. NaN only when neither the caller nor this chain knows a floor yet, and
+                // then `column_stats`' cold-start percentile of this column stands in.
+                let thr = frame.floor_db.map_or_else(
+                    || floor.map_or(f32::NAN, |fl| fl[f] + margin),
+                    |fl| plan.mean(s, fl) as f32 + margin,
+                );
                 tile.add_value(t_in, f, v_db, pk_db, v_lin, dur_s, &hist_cfg);
                 if late {
-                    let thr = if thr.is_nan() {
-                        floor.map_or(f32::NAN, |fl| fl[f] + margin)
-                    } else {
-                        thr
-                    };
                     tile.add_late_occupancy(t_in, f, v_db, thr, dur_s);
                 } else {
                     tile.col.push(ColEntry {
@@ -593,8 +614,7 @@ impl Pyramid {
                     continue;
                 };
                 if level == 0 {
-                    let floor = self.floors.get(&fb).map(|f| &f.floor[..]);
-                    tile.close_column(floor, margin, pct, &mut self.scratch);
+                    tile.close_column(margin, pct, &mut self.scratch);
                     self.update_floor(&tile);
                 }
                 let written = self.write_tile(level, &tile, true);
@@ -622,12 +642,24 @@ impl Pyramid {
         self.enforce_budget()
     }
 
+    /// Feeds a sealed level-0 tile's low percentile into **its own** front end's floor track
+    /// (T-377).
+    ///
+    /// A tile whose frames came from two front ends — or whose origins were not all recorded —
+    /// measures neither chain's floor, so it feeds none: the tile's histogram is the pooled
+    /// mixture, and pushing it under the majority contributor would be exactly the pooling this
+    /// key removes (T-359's rule). The cost is that such a tile leaves both chains a little
+    /// staler, which is the same trade T-314 made at the read.
     fn update_floor(&mut self, tile: &Tile) {
+        let Some(source) = tile.prov.sole_source() else {
+            self.stats.floor_tiles_unattributed += 1;
+            return;
+        };
         let (w, nf) = (self.cfg.floor_memory_tiles, self.geom.nf);
         let hist_cfg = self.cfg.histogram;
         let q = self.cfg.low_percentile;
         self.floors
-            .entry(tile.key.f_block)
+            .entry((source, tile.key.f_block))
             .or_insert_with(|| FloorTrack::new(w, nf))
             .push(|f| hist_percentile(tile.hist_row(f), &hist_cfg, q));
     }
@@ -1021,8 +1053,7 @@ impl Pyramid {
             let Some(mut tile) = self.open[0].remove(&k) else {
                 continue;
             };
-            let floor = self.floors.get(&k.0).map(|f| &f.floor[..]);
-            tile.close_column(floor, margin, pct, &mut self.scratch);
+            tile.close_column(margin, pct, &mut self.scratch);
             let written = self.write_tile(0, &tile, false);
             self.open[0].insert(k, tile);
             if let Err(e) = written {
@@ -1079,6 +1110,12 @@ impl Pyramid {
                     match codec::read_header(&path).map_err(io_err(&path))? {
                         Some((h, len)) => {
                             self.check_header(&h, level, fb, tb, &path)?;
+                            // T-377: a level-0 tile written before per-origin floor tracking
+                            // carries an occupancy decided against a pooled floor, and nothing in
+                            // the tile can recompute it. Counted, never silently adopted.
+                            if level == 0 && h.format < codec::FORMAT_VERSION {
+                                self.stats.tiles_pre_origin_floor += 1;
+                            }
                             if h.sealed {
                                 self.sealed[level].insert((tb, fb), len);
                                 self.level_bytes[level] += len;
