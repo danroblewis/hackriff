@@ -4849,6 +4849,70 @@ return, and partial findings beat a complete report.
 **Frozen, per the directive:** no new non-canvas work. T-431 (the `duty` estimator at both thresholds)
 finishes as a cheap in-flight ticket; T-430 + T-433 is gate-health, which unblocks everything.
 
+### B0.682 — the spike says YES to the renderer and NO to the system, and the renderer was never the risk (2026-09-17)
+
+**T-437** (`bc44ed1`, artifacts in `spikes/t437-unified-surface/`) answered the exit criterion with the
+most useful shape a spike can return: **YES for the renderer, NO for the system as it stands** — and
+two of the four blockers are outside the renderer entirely.
+
+**The renderer is the easy half by two orders of magnitude.** 48 panes at **p95 2.2 ms**, flat in pane
+count, because what scales is draw calls (~450) and 450 trivial quads is nothing. The shared LRU did
+exactly what §8.3 claimed: **95 distinct keys → 95 uploads**, 8 panes sharing one tile, **18.68 MB**
+resident against **149.44 MB** for one cache per pane, upload at 0.026 ms/tile. **Size the budget by
+memory, not upload time.**
+
+**The real cost is tile *production*, three orders larger** — ~500 ms per tile in the stub, 50–110 s to
+fill a screen; even at a hypothetical 10 ms server-side a 208-tile screen is 2 s. *That* is what
+T-438/T-440 design against.
+
+**F1 is the finding that would have wasted the milestone.** §6.2's V0 time cell is **128 s** and the IQ
+retention window is **120 s** — **the entire live view fits inside one time cell**, so "live is a
+viewport onto the finest growing edge" was not coarse but *unrepresentable*. And since every realistic
+pane is finer than 128 s, **`level_t` would have pinned at 0 and the de-welding would have bought
+nothing on the axis it exists for**: §8.2 de-welds the axes and §6.2 re-welds them by making one
+constant. **The floor is the decision, not the ratio.**
+
+**F2** — `/api/history` treats a per-axis budget as a **level selector**: tightening the *frequency*
+budget 1.5× cost **34× of time resolution and greyed a third of the window**. A grey-honesty violation
+caused by level choice, which **§4 does not name**, because §4 guards the fold and the fold is fine.
+
+**F3** — an undersized tile budget makes the surface **lie**: below `budget ≈ working set`, 101–198
+tiles per frame render grey, and grey is this surface's load-bearing claim.
+
+**F4** → **T-446**, high: after a retune the pyramid **stops recording permanently** while the ring
+stays healthy and coverage still reports `observed, duty 1.0`.
+
+**The spike caught itself, which is the detail worth keeping.** Its first minimap comparison failed
+because a translucent pane-viewport wash was drawn over the sample point — **an overlay tinting a
+measurement, the exact defect class this surface exists to prevent, reappearing inside the spike
+proving it.** It also corrected §8.5: the guarantee is *"same ramp, same scale, stated level"*, **not**
+"same picture", since two viewports at different levels legitimately differ and the minimap is nearly
+always at a different level. Overstating it invites a reopened bug.
+
+**T-434** (`5684346`) de-welded the axes and measured the disk, overturning two of §6's assumptions:
+**the level count is multiplicative but the bytes are not** (a 4×4 lattice is **4.8×** its finest node,
+not 16×), and **a coarse cell costs *more* per cell than a fine one** — 3.4–3.6 B/cell against level
+0's 2.30, because folding destroys the temporal correlation zstd was living on. It also found that
+**de-welding costs the percentiles**: a tile's per-frequency histogram is the parent's *only* when a
+child tile is one parent time cell — which is the weld itself — so a de-welded fold writes `unknown`
+rather than inventing a distribution.
+
+**T-430 + T-433** (`704cf22`) dissolved three "load flakes" at once: all bound a quantity that **moves
+in whole 16384-sample capture blocks**, so every "6.8 ms" and every "2490368" three agents reported
+independently was a **constant**. `2490368` is exactly `2506752 − 16384`. And `dropped == 0` moved to
+the bench tier because the CI test is **unpaced at ~4.5× real time** — the ticket's premise that the
+chain runs in real time was simply not true of the primary test.
+
+**T-431** (`06e4b7d`) fixed the estimator rather than the constant, rejecting four alternatives each on
+a measurement, and deleted **both** SNR-order guard exemptions — which the guard's exact-set assertion
+verified, since a stale entry would have failed naming itself.
+
+**A coordinator error worth not repeating.** I ran `git add docs/tasks.yaml && git commit` while the
+T-434 merge was staged. **During a merge there is no partial commit** — a pathspec-less `git commit`
+completes it — so T-434 landed before its gate finished, under a message about tasks.yaml. Message
+amended, main verified separately (445/445, 332/332, zero FAIL lines across 2230 more). Cost time, not
+correctness.
+
 ## Open for the user (current)
 
 Kept current by the coordinator; the planning-phase list near the top of this file is the 2026-09-13
