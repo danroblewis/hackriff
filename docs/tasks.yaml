@@ -6234,6 +6234,11 @@ tasks:
     title: 'ALGID is parsed and unit-tested but unreachable from IQ: it lives in voice frames and nothing
       demodulates those'
     status: blocked
+    blocked_on: >-
+      a capability that does not exist: ALGID lives in the voice frames on the granted channel
+      and nothing demodulates those yet (T-270 said so at the time). Unblocked by a voice-frame
+      decode existing - not by a slot, and not by anyone deciding anything. Was sitting as todo
+      and making the unblocked-work census lie until 2026-09-16.
     priority: normal
     deps:
     - T-270
@@ -7380,6 +7385,12 @@ tasks:
     title: 50 ohm terminator capture - is the oscillator family radiated or conducted?
     milestone: M2-hardening
     status: blocked
+    blocked_on: >-
+      the user, at the bench. A single 50 ohm terminator capture separates conducted from
+      radiated coupling: conducted survives the terminator, radiated does not. It is now the
+      open question on TWO artefacts, not one - T-317 could not decide it for the 2.336 MHz
+      oscillator family, and T-382 traced a second family to hackriff own ring-reader path. No
+      software work unblocks it.
     priority: normal
     parallel_group: HW
     needs: hardware
@@ -8270,6 +8281,14 @@ tasks:
     title: Our own synthetic WFM is too narrow to trigger our own WFM occupancy rule
     milestone: M3
     status: blocked
+    blocked_on: >-
+      T-403 answering one question. The work is COMPLETE and committed (branch task-t402,
+      eb29365), gate otherwise green, milestones green - but it leaves
+      confirm_latency::t398_wfm_without_pilot_does_not_take_the_fast_route red: family
+      assignment takes 14.00 s against T-401 4.0 s budget on the now-realistic mono scene.
+      14.00 s is exactly the scene length, the same end-of-recording signature T-398 found for
+      confirmation, so it is either the defect T-403 is already fixing or a second one on the
+      family path. Merge the moment T-403 says which.
     priority: normal
     parallel_group: M3A
     deps: [T-398]
@@ -8459,6 +8478,13 @@ tasks:
     title: The coverage tile pyramid and the full-spectrum-over-time view - design before building
     milestone: M5
     status: blocked
+    blocked_on: >-
+      the user, a design decision. docs/16 section 5 lists five open questions and two gate
+      everything downstream: TILE ADDRESSING (map-style fixed tiles vs the per-axis budget
+      idiom this repo already uses - they do not obviously compose) and WHEN DOWNSAMPLING
+      HAPPENS (precomputed at seal time, bounding read latency and costing storage in a system
+      that hit 9.5 GB free today, or on demand, the reverse trade). Not blocked on capacity:
+      nobody can start until these are settled.
     priority: normal
     parallel_group: DESIGN
     core_interface: true
