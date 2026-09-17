@@ -3087,6 +3087,231 @@ fn ws_stream_header_matches_the_stream_contract() {
     stop_server(serving);
 }
 
+/// One thing a stream consumer saw, in arrival order.
+#[derive(Debug)]
+enum Saw {
+    /// A data record and its capture time (ns).
+    Row(i64),
+    /// A text message that parsed as JSON — on a binary stream, a stream header.
+    Header(Value),
+}
+
+/// What a consumer saw on its socket over one window of time.
+#[derive(Debug, Default)]
+struct Seen {
+    saw: Vec<Saw>,
+    closed: Option<String>,
+}
+
+impl Seen {
+    fn rows(&self) -> usize {
+        self.saw.iter().filter(|s| matches!(s, Saw::Row(_))).count()
+    }
+
+    /// Everything seen after the first header satisfying `pick` (none if no such header arrived).
+    fn after_header(&self, pick: impl Fn(&Value) -> bool) -> Option<(&Value, &[Saw])> {
+        let i = self
+            .saw
+            .iter()
+            .position(|s| matches!(s, Saw::Header(h) if pick(h)))?;
+        let Saw::Header(h) = &self.saw[i] else {
+            unreachable!()
+        };
+        Some((h, &self.saw[i + 1..]))
+    }
+
+    /// The capture time of the last row seen.
+    fn last_row(&self) -> Option<i64> {
+        self.saw.iter().rev().find_map(|s| match s {
+            Saw::Row(t) => Some(*t),
+            _ => None,
+        })
+    }
+}
+
+/// Reads `ws` until `done` is satisfied, `deadline` passes, or it closes, recording data records
+/// (with their capture timestamps) and text messages in order. The socket's read timeout bounds
+/// each blocking read.
+fn drain_ws(ws: &mut Ws, deadline: Instant, done: impl Fn(&Seen) -> bool) -> Seen {
+    let mut seen = Seen::default();
+    if let MaybeTlsStream::Plain(s) = ws.get_mut() {
+        s.set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
+    }
+    while Instant::now() < deadline && !done(&seen) {
+        match ws.read() {
+            Ok(Message::Binary(b)) => {
+                if b.len() >= 32 && b[0] == 1 {
+                    seen.saw
+                        .push(Saw::Row(i64::from_le_bytes(b[16..24].try_into().unwrap())));
+                }
+            }
+            Ok(Message::Text(t)) => {
+                if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
+                    seen.saw.push(Saw::Header(v));
+                }
+            }
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(e) => {
+                seen.closed = Some(e.to_string());
+                break;
+            }
+        }
+    }
+    seen
+}
+
+/// T-417 (the user, 2026-09-17): *"a settle gap is fine … so connected consumers keep receiving
+/// after the retune"*. A retune moves the front end, so the rows after it describe a different
+/// window and the stream must re-offer its header — but the **connection** is not the thing that
+/// moved, and tearing it down is what made every retune gesture (T-343, T-392, T-409, the
+/// frequency navigator's offer) unpleasant: the picture died on every one.
+///
+/// Both retune shapes are asserted, because they are different code paths:
+/// - **tuned in place** (same class and rate): no re-plumb, but the spectrum reader still finishes
+///   its publisher and offers a new one under the same id, because a header must describe every
+///   row after it (T-057);
+/// - **a re-plumb** (another sample rate): the whole segment is rebuilt around the still-open
+///   device (T-399), so every reader and every publisher is new.
+///
+/// What the consumer sees in both: its rows stop, a **new header** arrives on the same socket, and
+/// rows of the new window follow. The gap is real and stays visible — nothing is held, repeated or
+/// interpolated across it; the header is the honest seam.
+#[test]
+fn a_retune_keeps_connected_stream_consumers_connected() {
+    let (_dir_guard, serving, addr) = start_server();
+    wait_for(
+        "the spectrum stream to be offered",
+        Duration::from_secs(30),
+        || {
+            get(addr, "/api/streams").1["streams"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|s| s["stream_id"] == "spectrum/live"))
+        },
+    );
+    let mut ws = connect_ws(addr, &format!("/ws/spectrum/live?token={TOKEN}")).unwrap();
+    let Message::Text(text) = ws.read().unwrap() else {
+        panic!("first message must be the header (text)")
+    };
+    let first: Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(first["center_hz"], json!(FIXTURE_CENTER_HZ), "{first}");
+
+    let before = drain_ws(&mut ws, Instant::now() + Duration::from_secs(10), |s| {
+        s.rows() >= 10
+    });
+    assert!(before.rows() > 0, "rows before the retune");
+    assert!(before.closed.is_none(), "{:?}", before.closed);
+
+    // ---- (1) tuned in place: same class, same rate, a different centre ----
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let moved = step * (((FIXTURE_CENTER_HZ + 1e6) / step).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{moved:?}}}"),
+    );
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(r["run"]["segment"], json!(0), "tuned in place: {r}");
+
+    let moved_to = r["tuning"]["center_hz"].as_f64().expect("center_hz");
+    let new_centre = |h: &Value| {
+        h["center_hz"]
+            .as_f64()
+            .is_some_and(|c| (c - moved_to).abs() < 1.0)
+    };
+    let after = drain_ws(&mut ws, Instant::now() + Duration::from_secs(30), |s| {
+        s.after_header(new_centre)
+            .is_some_and(|(_, rest)| rest.iter().filter(|x| matches!(x, Saw::Row(_))).count() >= 10)
+    });
+    assert!(
+        after.closed.is_none(),
+        "the retune closed the consumer's socket: {:?}",
+        after.closed
+    );
+    let (hd, rest) = after
+        .after_header(new_centre)
+        .unwrap_or_else(|| panic!("a header for the new centre {moved_to}: {after:?}"));
+    assert_eq!(hd["stream_id"], json!("spectrum/live"), "{hd}");
+    assert_eq!(hd["schema"], json!("hackriff.stream"), "{hd}");
+    assert!(
+        rest.iter().any(|s| matches!(s, Saw::Row(_))),
+        "rows of the new window after its header: {after:?}"
+    );
+
+    // ---- (2) a re-plumb: another sample rate rebuilds the whole segment ----
+    let (st, r) = post(addr, "/api/control/rate", r#"{"sample_rate_hz": 4.8e6}"#);
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(r["run"]["segment"], json!(1), "the run re-plumbed: {r}");
+
+    let new_rate = |h: &Value| h["bandwidth_hz"].as_f64() == Some(4.8e6);
+    let across = drain_ws(&mut ws, Instant::now() + Duration::from_secs(60), |s| {
+        s.after_header(new_rate)
+            .is_some_and(|(_, rest)| rest.iter().filter(|x| matches!(x, Saw::Row(_))).count() >= 10)
+    });
+    assert!(
+        across.closed.is_none(),
+        "the re-plumb closed the consumer's socket: {:?}",
+        across.closed
+    );
+    let (hd, rest) = across
+        .after_header(new_rate)
+        .unwrap_or_else(|| panic!("a header for the new rate: {across:?}"));
+    assert_eq!(hd["stream_id"], json!("spectrum/live"), "{hd}");
+    let rows_after: Vec<i64> = rest
+        .iter()
+        .filter_map(|s| match s {
+            Saw::Row(t) => Some(*t),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !rows_after.is_empty(),
+        "rows after the re-plumb: {across:?}"
+    );
+
+    // ---- the gap is real, and it is not papered over ----
+    // The honesty constraint (T-410's open cap, T-413's hatched revoked gap, the coverage rule
+    // applied to time): a break in the data while the front end moves is true and must stay
+    // visible. The connection persists; the data honestly gaps. So across the seam the capture
+    // clock **skips** — nothing is held, repeated or interpolated to cover it.
+    let last_before = after.last_row().expect("rows before the re-plumb");
+    let mut periods: Vec<i64> = after
+        .saw
+        .iter()
+        .filter_map(|s| match s {
+            Saw::Row(t) => Some(*t),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .collect();
+    periods.sort_unstable();
+    let period_s = periods[periods.len() / 2] as f64 / 1e9;
+    let gap_s = (rows_after[0] - last_before) as f64 / 1e9;
+    assert!(
+        gap_s > period_s * 1.5,
+        "at least one row's worth of time must be MISSING at the seam, not filled: \
+         gap {gap_s} s against a {period_s} s row period"
+    );
+    // And no row is a held or repeated one: capture time strictly advances everywhere, seam
+    // included. (A held last frame would show as a repeated or non-advancing timestamp.)
+    for (a, b) in std::iter::once(&last_before)
+        .chain(rows_after.iter())
+        .zip(rows_after.iter())
+    {
+        assert!(b > a, "row timestamps strictly advance: {a} then {b}");
+    }
+
+    let _ = ws.close(None);
+    stop_server(serving);
+}
+
 #[test]
 fn ws_open_listen_streams_pcm_data_records_of_the_station() {
     let (_dir_guard, serving, addr) = start_server();

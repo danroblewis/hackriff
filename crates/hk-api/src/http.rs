@@ -1181,7 +1181,7 @@ fn websocket(mut stream: TcpStream, shared: &Shared, req: &Request, stream_id: &
     let Some(key) = req.header("sec-websocket-key").map(str::trim) else {
         return respond_error(&mut stream, 400, "missing Sec-WebSocket-Key");
     };
-    let Some(handle) = shared.state.streams.handle(stream_id) else {
+    let Some(offer) = shared.state.streams.offer(stream_id) else {
         return respond_error(&mut stream, 404, "no such stream");
     };
     let response = format!(
@@ -1194,8 +1194,18 @@ fn websocket(mut stream: TcpStream, shared: &Shared, req: &Request, stream_id: &
         .peer_addr()
         .map_or_else(|_| "unknown".into(), |a| a.to_string());
     let _ = stream.set_write_timeout(None);
-    match bridge::attach(&handle, &stream, format!("ws:{peer}"), response) {
-        Ok(id) => bridge::watch_peer(&handle, stream, id),
+    let label = format!("ws:{peer}");
+    match bridge::attach(&offer.handle, &stream, label.clone(), response) {
+        // T-417: the connection is watched against the *stream id*, not one publisher of it, so a
+        // retune (which offers a new publisher under the same id) does not drop the browser.
+        Ok(attached) => bridge::watch_peer(
+            &shared.state.streams,
+            stream_id,
+            offer,
+            attached,
+            stream,
+            label,
+        ),
         Err(StreamError::LocalOnly { .. }) => respond_error(
             &mut stream,
             403,

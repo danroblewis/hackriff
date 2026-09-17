@@ -89,8 +89,16 @@ export function parseSpectrumRecord(buf: ArrayBuffer): SpectrumRecord | null {
 
 // ---- stream sockets ----
 
+/** `schema` of a stream header (docs/stream-contract.md §4), which no record carries. */
+export const STREAM_SCHEMA = "hackriff.stream";
+
 export interface StreamHandlers {
-  /** First text message: the stream header JSON (already parsed). */
+  /**
+   * The stream header JSON (already parsed). The first text message always; and again, on the
+   * same socket, whenever the producer re-offers the stream — a retune or a re-plumb finishes one
+   * publisher and offers the next under the same id, and the bridge carries the connection across
+   * (T-417, docs/stream-contract.md §10). Every record after it belongs to the new header.
+   */
   onHeader(h: Record<string, unknown>): void;
   /** `/ws/open/*` refusal instead of a header (`{type: "refused", status, code, reason}`). */
   onRefused?(r: { status: number; code: string; reason: string }): void;
@@ -110,7 +118,21 @@ export function openStream(path: string, token: string, handlers: StreamHandlers
   let first = true, live = false, closed = false;
   ws.onmessage = (ev) => {
     if (typeof ev.data !== "string") { if (live) handlers.onBinary?.(ev.data as ArrayBuffer); return; }
-    if (!first) { handlers.onText?.(ev.data); return; }
+    if (!first) {
+      // T-417: a stream id outlives its publishers. A retune or a re-plumb offers a new publisher
+      // under the same id and the bridge carries this connection across to it, so a later text
+      // message carrying the stream schema is the NEW header, not a record — the honest seam that
+      // says the window moved. (The substring test keeps message streams, whose records are all
+      // text, from being parsed twice; no record carries `schema`.)
+      if (ev.data.includes(`"${STREAM_SCHEMA}"`)) {
+        try {
+          const h = JSON.parse(ev.data) as Record<string, unknown>;
+          if (h.schema === STREAM_SCHEMA) { handlers.onHeader(h); return; }
+        } catch { /* not a header after all: it is a record */ }
+      }
+      handlers.onText?.(ev.data);
+      return;
+    }
     first = false;
     let j: Record<string, unknown>;
     try { j = JSON.parse(ev.data) as Record<string, unknown>; } catch { ws.close(); return; }
