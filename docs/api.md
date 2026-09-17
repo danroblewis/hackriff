@@ -37,8 +37,8 @@
 | GET | `/api/inventory/{id}/presence` | token | `t0`, `t1`? (Unix s, together) | T-264 one emitter's presence track: every interval with its own timespan (below) | 400 invalid window, 404 not_found, 503 unavailable |
 | GET | `/api/analysis/strongest` | token | `f_lo`, `f_hi` (Hz), `window_s`? (default 5, max 300) | T-079 strongest observed signal in the band over the recent window (below) | 400 invalid region/window, 404 no history store |
 | GET | `/api/navigation` | token | `center_hz`+`span_hz`? (together; `span_hz` > 0), `t_cell_s`? | T-341 the achievable `(centre, span)` grid and the history tiers; with a requested state, the nearest realizable one and its live-IQ/overview claim (below) | 400 a non-finite number, or `center_hz`/`span_hz` given apart |
-| GET | `/api/timeline` | token | `f_lo`+`f_hi`? (Hz, together), `columns`? (1…4096, default 96), `rows`? (1…512, default 1). **No `t0`/`t1`** — the time extent is the ring's, not the caller's | T-338 the capture window (the IQ ring's configured retention) and the compressed overview waterfall drawn on it (below) | 400 unknown parameter, a half-given band, or a column/row budget out of range; 404 no spectrum history on this server |
-| GET | `/api/coverage` | token | `f_lo`+`f_hi` (Hz, **required**), `cells`? (1…4096, default 256), `t0`+`t1`? (Unix s, together; default the capture window) | T-368 the coverage map: which front end actually sampled which frequency, so a view greys only what was **never observed** (below) | 400 unknown parameter, a missing or half-given band, a half-given window, or a cell budget out of range; 404 no capture window and no `t0`/`t1` given |
+| GET | `/api/timeline` | token | `f_lo`+`f_hi`? (Hz, together), `columns`? (1…4096, default 96), `rows`? (1…512, default 1). **No `t0`/`t1`** — the time extent is the ring's, not the caller's | T-338 the capture window (the IQ ring's configured retention), the compressed overview waterfall drawn on it, and T-423 the record-derived per-cell coverage plane beside it (below) | 400 unknown parameter, a half-given band, or a column/row budget out of range; 404 no spectrum history on this server |
+| GET | `/api/coverage` | token | `f_lo`+`f_hi` (Hz, **required**), `cells`? (1…4096, default 256), `rows`? (1…4096, default 1), `t0`+`t1`? (Unix s, together; default the capture window) | T-368 the coverage map: which front end actually sampled which frequency **and when** (T-423's time axis), so a view greys only what was **never observed** (below) | 400 unknown parameter, a missing or half-given band, a half-given window, or a cell/row budget out of range; 404 no capture window and no `t0`/`t1` given |
 | GET | `/api/status` | token | – | Pipeline counters (opaque, per-build; never content) | 401, 404 no status on this server |
 
 None of these are audited (`GET` requests never are). All are capped in result size as noted per route.
@@ -546,6 +546,25 @@ The asymmetry is deliberate and it is the route's shape: **the window is the ser
                                        "coverage": { "statistic": "extent-weighted-mean", "scale": "fraction", "unobserved": "0" },
                                        "frames": { "statistic": "sum", "scale": "count", "unobserved": "0" } },
                            "range_db": "the observed minimum and maximum of `max_db` over this grid, …" } },
+  "coverage": {                                   // T-423: record-derived, per drawn cell
+    "grid": { "nt": 96, "nf": 4, "t0_s": 1789300800.0, "t_cell_s": 1.25,
+              "f_lo_hz": 99600000.0, "f_cell_hz": 600000.0,
+              "aligned": true, "order": "row-major: cells[t * nf + f], … the same layout as `grid`" },
+    "devices": [ { "device": "hackrf:0000…925f", "named": true,
+                   "observed_cells": 30, "unobserved_cells": 66, "unknown_cells": 0,
+                   "observed_fraction": 0.31,
+                   "cells": [ { "state": "unobserved" },
+                              { "state": "observed", "spans": 1, "observed_s": 1.25, "duty": 1.0,
+                                "last_s": 1789300920.0, "center_hz": 100800000.0,
+                                "sample_rate_hz": 2400000.0 }, "…" ] } ],
+    "any": { "device": "any", "named": false, "…": "…" },
+    "horizon": { "oldest_record_s": 1789300890.0, "unknown_rows": 72, "rows": 96,
+                 "rule": "a row wholly before `oldest_record_s` … is \"unknown\" …",
+                 "state_rule": "\"unknown\" carries no measurement keys, exactly like \"unobserved\" …" },
+    "sources": [ { "kind": "iq-ring", "spans": 37, "named_spans": 37, "device_known": true, "available": true },
+                 { "kind": "observation-log", "spans": 12, "named_spans": 12, "device_known": true, "available": true } ],
+    "rule": "record-derived: whether the front end was TUNED to this cell … `grid.coverage` is a different measurement …"
+  },
   "resolution": { "source": "spectrum-history", "live": false, "statement": "…",
                   "horizon": "iq-ring",
                   "served_span_hz": 2400000.0, "max_live_span_hz": 20000000.0,
@@ -587,6 +606,22 @@ So the tier is chosen from the **time** axis — the coarsest tier whose cells a
 
 `null` in `max_db`/`occupancy_max` is **not observed**, never quiet (C26). `observed_cells` counts the cells something was folded into.
 
+#### `coverage` — the record-derived plane, and why `grid.coverage` is not it (T-423)
+
+`grid.coverage` and the top-level `coverage` block answer **different questions**, and only the second one decides grey.
+
+| | `grid.coverage[i]` | `coverage.any.cells[i].state` |
+|---|---|---|
+| Derived from | **frames** the spectrum-history pyramid still holds | **records**: the IQ ring journal's segments and the observation log's dwell/sweep windows |
+| `0` / `"unobserved"` means | no frames here — *either* nothing looked *or* the byte budget evicted what it saw | no surviving record covers this cell: nothing looked |
+| Answers | how much of this cell the pyramid can still draw | whether the front end was **tuned** to this cell, then |
+
+A cell with no frames but a covering tune record is *sampled, level not retained* — which a client must draw differently from grey, and could not tell apart from `grid.coverage` alone. That confusion is the bug T-405's survey bar and T-411's time navigator both had, one axis each.
+
+The plane is laid on **exactly the same axes as `grid`** — `nt = columns` time rows × `nf = rows` frequency cells, row-major, earliest row and lowest frequency first — so a client indexes one array with the other's index. `coverage.grid` restates those axes and `aligned` says whether they still match; the per-(t, f) cap in the rasteriser can reduce the time axis, and a realised grid is never implied. Cells carry no `shade` key: this route serves its own levels in `grid.max_db`, and a `shade: null` would read as the *sampled, level not retained* claim above.
+
+Everything else — the cell states, `devices[]`, `any`, `horizon`, `sources` — is exactly [`/api/coverage`](#get-apicoverage--the-coverage-map-grey-means-genuinely-unobserved-t-368)'s, from the same computation, so the two routes cannot disagree about what was sampled.
+
 #### The band-collapsed series, and why the response states its own semantics (T-342)
 
 `rows=1` (the default) is the **band-collapsed activity-vs-time series**: one value per time step over a whole region. It is the sibling of [`/api/analysis/strongest`](#get-apianalysisstrongest--strongest-signal-in-a-band-t-079) — "strongest in a band", kept server-side — laid out along a time axis the way [`/api/floor`](#get-apifloor--calibrated-floor-vs-time-t-021-space-050)'s `max_steps` lays out a floor track. The pyramid cannot serve it directly at any level: its coarsest **frequency** cell is 100 kHz, so no `max_f` collapses a MHz-wide band into one column. The fold does, and it is the same fold transposed that gives `/api/coverage` its survey-strip shade (`nt = 1`: one max-hold per frequency cell over the whole window).
@@ -608,7 +643,7 @@ It is served with its semantics **on the wire**, in `grid.semantics`, because a 
 
 ### `GET /api/coverage` — the coverage map: grey means genuinely unobserved (T-368)
 
-Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `cells` (1…4096, default 256), `t0`&`t1` (Unix s, given together; default the capture window this server holds).
+Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `cells` (1…4096, default 256), `rows` (1…4096, default 1 — the **time** axis, T-423), `t0`&`t1` (Unix s, given together; default the capture window this server holds).
 
 **The rule, from the user** (CLAUDE.md, "Time, the waterfall, and the live view"):
 
@@ -621,11 +656,14 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
   "region": { "lo_hz": 88000000.0, "hi_hz": 108000000.0 },
   "window": { "t0_s": 1789300320.0, "t1_s": 1789300920.0, "span_s": 600.0,
               "source": "capture-window" },   // or "requested" when t0/t1 were given
-  "grid":   { "cells": 4, "f_lo_hz": 88000000.0, "f_cell_hz": 5000000.0 },
+  "grid":   { "cells": 4, "rows": 1, "requested_rows": 1,     // `rows` is the REALISED time axis
+              "f_lo_hz": 88000000.0, "f_cell_hz": 5000000.0,
+              "t0_s": 1789300320.0, "t_cell_s": 600.0,
+              "order": "row-major: cells[t * cells + f], earliest row first, low frequency first" },
   "devices": [{                                // one entry per front end that actually sampled here
     "device": "hackrf:0000000000000000a06063c8234e925f",
     "named": true,                             // false for the "unknown" and "any" labels
-    "observed_cells": 2, "unobserved_cells": 2, "observed_fraction": 0.5,
+    "observed_cells": 2, "unobserved_cells": 2, "unknown_cells": 0, "observed_fraction": 0.5,
     "cells": [
       // 1. observed, and there was energy
       { "state": "observed", "spans": 1, "observed_s": 600.0, "duty": 1.0,
@@ -643,7 +681,12 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
         "shade": null }
     ]
   }],
-  "any": { "device": "any", "named": false, "observed_cells": 3, "unobserved_cells": 1, "cells": [ … ] },
+  "any": { "device": "any", "named": false, "observed_cells": 3, "unobserved_cells": 1,
+           "unknown_cells": 0, "cells": [ … ] },
+  "horizon": { "oldest_record_s": 1789214520.0,  // null when nothing here holds a tune record
+               "unknown_rows": 0, "rows": 1,
+               "rule": "a row wholly before `oldest_record_s` has no surviving record either way, so its unsampled cells are \"unknown\" (we no longer know whether we looked), never \"unobserved\" (nothing looked). …",
+               "state_rule": "\"unknown\" carries no measurement keys, exactly like \"unobserved\", and must be drawn as neither grey nor a level …" },
   "sources": [
     { "kind": "iq-ring",         "spans": 37, "named_spans": 37, "device_known": true, "available": true },
     { "kind": "observation-log", "spans": 12, "named_spans": 12, "device_known": true, "available": true }
@@ -655,22 +698,53 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
              "unobserved": "an unobserved cell carries no `shade` key: the max of nothing is unknown, not zero, …" },
   "resolution": { "source": "survey-overview", "live": false, "statement": "…",
                   "served_span_hz": 20000000.0, "max_live_span_hz": 20000000.0,
-                  "grey_rule": "grey a cell if and only if its state is \"unobserved\"",
+                  "grey_rule": "grey a cell if and only if its state is \"unobserved\"; \"unknown\" is not grey and not a level — draw it as a fourth thing (hatching, per T-413)",
                   "shade_rule": "shade is the max-hold over the window, normalised over `shade.range_db`; it never decides observed-versus-unobserved" }
 }
 ```
 
-#### Three states, and the third cannot be spelled as the second
+#### Four states, and none of them can be spelled as another
 
 | State | Meaning | On the wire |
 |---|---|---|
 | 1 | observed, and there was energy | `"state": "observed"` with a high `shade` |
 | 2 | observed, and it was **quiet** — a finding | `"state": "observed"` with a low `shade` |
 | 3 | **never observed** — no claim either way | `"state": "unobserved"`, **and no measurement keys at all** |
+| 4 | **we no longer know whether we looked** (T-423) | `"state": "unknown"`, and no measurement keys either |
 
-The pair that gets collapsed is 2 and 3, and collapsing them is how a view comes to report "nothing here" about spectrum nothing ever looked at. So an unobserved cell carries **no `shade`, no `duty`, no `observed_s`** — not `null` ones. That is stronger than a nullable number, because there is no field a client can read as zero: the absence is structural. It is the same rule as `bias_tee: "unknown"` ≠ `"off"` — **nothing said is never permissive** — and it holds in the type as well as the JSON: `hk_store::coverage::Sampled::new` refuses to mint an observation out of a zero span count or a zero sampled duration, and hands back `Coverage::Unobserved` instead.
+The pair that gets collapsed is 2 and 3, and collapsing them is how a view comes to report "nothing here" about spectrum nothing ever looked at. So an unobserved cell carries **no `shade`, no `duty`, no `observed_s`** — not `null` ones. That is stronger than a nullable number, because there is no field a client can read as zero: the absence is structural. It is the same rule as `bias_tee: "unknown"` ≠ `"off"` — **nothing said is never permissive** — and it holds in the type as well as the JSON: `hk_store::coverage::Coverage::of` refuses to mint an observation out of a zero span count or a zero sampled duration, and hands back `Coverage::Unobserved` instead.
 
 `shade: null` on an **observed** cell is a different thing again: sampled, but the spectrum history keeps no level for it. A client draws that differently from grey and differently from the bottom of the ramp. **Grey is `state == "unobserved"` and nothing else**, which is what `resolution.grey_rule` says in the response.
+
+#### The time axis: `rows` (T-423)
+
+`rows` is the **time** budget, the twin of `cells`. It defaults to `1`, which is one row over the whole window and is T-368's original answer unchanged: *was this band sampled anywhere in this window*. That is a **column**, and a view drawing a waterfall needs a **cell** — *was it sampled __then__*. Without the axis, a band the radio watched for ten seconds of a minute came back `observed` for the whole minute, and both the survey bar (T-405) and the time navigator (T-411) drew a cell the radio was demonstrably tuned away from as *sampled, level not retained* rather than grey.
+
+- `cells` arrays are **row-major**: `cells[t * grid.cells + f]`, earliest row first, low frequency first. `grid.order` says so in the response.
+- `grid.rows` is the **realised** row count and `grid.requested_rows` what was asked for. The rasteriser bounds the product `rows × cells`, and reduces the **time** axis when it must — so a realised resolution is never implied. `grid.t0_s` and `grid.t_cell_s` are the axis itself.
+- Each cell's `duty` and `observed_s` are against **its own row's** extent, not the window's. So a column at `duty` ≈ 1/6 and its one covered row at `duty` ≈ 1 describe the same seconds: `observed_s` sums across rows, `duty` is re-derived, never averaged (T-419: `observed_s` is foldable, `duty` is not).
+- The same rasterisation serves `devices[]` and `any`, so **the time axis is per device** and is never flattened into a merged claim (T-259/T-305).
+
+#### The fourth state: `"unknown"` means *we no longer know whether we looked*
+
+The horizons on this server are **deliberately different lengths and they cross**: the spectrum-history pyramid has no age limit at all (a rolling byte budget), the IQ ring holds minutes, and the observation log expires at 30 days. So spectrum exists that no surviving coverage record covers — and, far more commonly, a requested window simply reaches back past every record this server still holds.
+
+`"unobserved"` is the claim *nothing looked*. Past the record horizon nothing supports that claim, and painting it grey spells "never looked" for spectrum whose records were merely discarded. That is the same error as reporting a never-observed cell as quiet, one horizon out — so it gets its own state, and `resolution.grey_rule` says in the response that it is **not grey**. Draw it as a fourth thing; hatching is the house precedent (T-413).
+
+`horizon` makes the claim checkable rather than asking the client to take it:
+
+| Field | Says |
+|---|---|
+| `oldest_record_s` | The earliest instant **any** consulted source still holds a record for — `min` over the IQ ring's buffered start and the observation log's oldest surviving hour. `min`, not `max`: a row is knowable if *at least one* record reaches it. `null` when nothing here holds a record, in which case **every** row is `"unknown"` — a server that has forgotten its tune history cannot say the radio was not there. |
+| `unknown_rows` | How many leading rows lie wholly before it — the rows whose unsampled cells are served as `"unknown"`. |
+| `rows` | The grid's realised row count, so `unknown_rows` can be read against it. |
+
+Two rules hold and are stated in the response:
+
+- **An observed cell is never relabelled.** A surviving measurement is itself proof we looked, so it stays `"observed"` past the horizon. Only `"unobserved"` can become `"unknown"`.
+- **The horizon is a time, not a band.** A discarded record takes every frequency with it, so the state applies to whole *rows*. `unobserved_cells` and `unknown_cells` are reported separately and never summed for you.
+
+This is a **wire** state and deliberately not a third `hk_store::coverage::Coverage` variant (`docs/16` §5.4 asks for the reasoning to be stated): the fold is handed spans, which do not carry the horizon that produced them, so only the caller that *read* the records can decide it; the state is a property of a row rather than of a cell, and `CoverageGrid::unknown_rows_before` already has that shape; and `Coverage`'s two-variant design is what makes state 3 unrepresentable as state 2, which a third variant would disturb for every consumer to say something none of them could compute.
 
 #### What a `shade` is, and against what (T-342)
 

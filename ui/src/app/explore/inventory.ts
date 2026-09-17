@@ -348,8 +348,12 @@ export async function windowCoverage(
     );
     const cells = surveyCells(body);
     // Not asked about, or served nothing: unknown. Never "unobserved" by default — that would be a
-    // measurement claim made out of a missing answer.
-    return cells.length === 0 ? null : cells.some((c) => c.state === "observed") ? "observed" : "unobserved";
+    // measurement claim made out of a missing answer. The route's own `"unknown"` state (T-423 —
+    // the window lies before its oldest surviving tune record) maps here too, for the same reason:
+    // it is the server declining to make the claim, not making the negative one.
+    if (cells.length === 0) return null;
+    if (cells.some((c) => c.state === "observed")) return "observed";
+    return cells.every((c) => c.state === "unknown") ? null : "unobserved";
   } catch {
     return null;
   }
