@@ -245,14 +245,20 @@ fn t082_two_nearby_fm_stations_stay_two_entries() {
     let Some((real, _)) = private_truth(crate::signal_062::FM_FIXTURE) else {
         return;
     };
-    // A second RDS station 300 kHz above the recording's 101.3 MHz station, on air with it.
+    // A second RDS station 500 kHz above the recording's 101.3 MHz station, on air with it. T-402:
+    // was 300 kHz (800 kHz offset); `fm_broadcast_rds` used to measure ~100 kHz OBW99 (unregulated
+    // peak deviation), so 300 kHz was a real guard band. Regulating the composite to a realistic
+    // ~75 kHz peak deviation (see the generator) widens it to ~190-220 kHz, close to what the
+    // recording's own real station measures, and the guard band collapsed enough that the two
+    // stations merged into one detection instead of staying two (`[T-082] each station appears
+    // once` failed with zero matches). 500 kHz (1000 kHz offset) restores real separation.
     let near = synth_or_skip!(
         SynthRequest::new("fm_broadcast_rds")
             .seed(8201)
             .datatype(Datatype::Cf32Le)
             .param("sample_rate", 2.4e6)
             .param("center_hz", 100.8e6)
-            .param("offset_hz", 800e3)
+            .param("offset_hz", 1_000e3)
             .param("duration_s", 5.0)
             .param("power_dbfs", -16.0)
             .param("noise_dbfs", -120.0)

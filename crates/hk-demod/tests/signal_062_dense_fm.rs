@@ -1,6 +1,17 @@
 //! T-099 (SIGNAL-062): mode selection with strong adjacent channels. A dense FM scene: the target
-//! station (stereo WFM, RDS PI C0DE) with equal-power neighbours 200 kHz either side (their own
+//! station (stereo WFM, RDS PI C0DE) with equal-power neighbours 260 kHz either side (their own
 //! PIs), each from the `fm_broadcast_rds` synthesiser, summed and quantised as a HackRF would.
+//!
+//! T-402: `fm_broadcast_rds` used to measure ~100 kHz OBW99 (an unregulated composite peaks far
+//! under its nominal deviation, unlike a real station's limiter), so 200 kHz spacing put a
+//! comfortable guard band between neighbours almost by accident. Regulating the composite to a
+//! realistic ~75 kHz peak deviation widens each station to ~190-220 kHz OBW99 -- close to what it
+//! actually is on air -- which left under 10 kHz of clearance at 200 kHz and started corrupting
+//! the target's own RDS with neighbour energy (`box -12000/240000: Wfm, PI None`). Spacing wide
+//! enough to clear that (400 kHz+) instead left the neighbours outside every tested box, so C13
+//! never abstained and the adjacent-channel fallback this test exists to exercise never ran. 260
+//! kHz is the narrowest spacing where both hold: the widest boxes still reach into a neighbour
+//! (triggering the fallback), and the target's own RDS still decodes clean.
 //!
 //! The receiver sees only IQ, provenance and a detection-like box around the target; the PIs are
 //! the scene's private truth, compared after the run.
@@ -15,7 +26,7 @@ use num_complex::Complex;
 
 const FS: f64 = 1.2e6;
 const TARGET_HZ: f64 = 100e3;
-const SPACING_HZ: f64 = 200e3;
+const SPACING_HZ: f64 = 260e3;
 
 struct Station {
     offset_hz: f64,

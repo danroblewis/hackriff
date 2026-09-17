@@ -1,8 +1,19 @@
 //! T-099 (SIGNAL-062) through the composed pipeline and a scripted radio: a dense FM scene, the
-//! target station with equal-power neighbours 200 kHz either side (each the `fm_broadcast_rds`
+//! target station with equal-power neighbours 400 kHz either side (each the `fm_broadcast_rds`
 //! synthesiser with its own PI), summed and quantised as the capture thread does. Before T-099
 //! the neighbours made mode selection abstain on bandwidth and the `wfm-rds` chain stopped at the
 //! probe (`mode_rejected`); now the chain attaches, selects WFM and decodes the target's PI.
+//!
+//! T-402 widened `fm_broadcast_rds` from an unregulated ~100 kHz OBW99 to a realistic ~190-220 kHz
+//! (a regulated ~75 kHz peak deviation, matching what a station's limiter actually holds), which
+//! made the original 200 kHz spacing narrower than the stations themselves: `t129` measured one
+//! merged occupancy channel across all three instead of three, and the target's own PI stopped
+//! decoding cleanly between its now-much-closer neighbours (`crates/hk-demod/tests/
+//! signal_062_dense_fm.rs` hit the same overlap and needed the same kind of widening). Unlike that
+//! test, this one runs blind detection/tracking/confirmation over time rather than a hand-specified
+//! box, and needed more margin before decoding cleanly again; 400 kHz spacing plus `FS` doubled to
+//! 2.4 Msps (so `t129`'s `0.8 * FS` observed band still covers all three stations, including the
+//! upper neighbour at +500 kHz) is the smallest combination found that passes both tests.
 //!
 //! Blind: the pipeline sees only the radio's IQ; the PIs are the scene's private truth, compared
 //! against the stored decodes after the run.
@@ -26,10 +37,10 @@ use hk_pipeline::{
 use num_complex::Complex;
 
 const SIGNAL_062: &str = "SIGNAL-062";
-const FS: f64 = 1.2e6;
-/// Capture centre; the stations sit at −100, +100 and +300 kHz from it.
+const FS: f64 = 2.4e6;
+/// Capture centre; the stations sit at −300, +100 and +500 kHz from it.
 const CENTER_HZ: f64 = 99.4e6;
-const SPACING_HZ: f64 = 200e3;
+const SPACING_HZ: f64 = 400e3;
 
 /// Station truth `(center_hz, bandwidth_hz)`.
 type Truth = Vec<(f64, f64)>;
