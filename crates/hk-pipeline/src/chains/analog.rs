@@ -5,8 +5,17 @@
 //!
 //! **Probe.** Mode selection first runs on the leading `probe_s` of the window. The chain
 //! continues to the full window only when the selected mode is in `accept_modes` (and a pilot
-//! was found when `require_pilot`); otherwise it stops without writing anything
-//! (`mode_rejected`). Mode selection, not the spec, decides what is demodulated.
+//! was found when `require_pilot`); otherwise it stops (`mode_rejected`). Mode selection, not the
+//! spec, decides what is demodulated.
+//!
+//! **A declined probe still records what it measured (T-416).** It used to stop having written
+//! nothing at all, which made "we looked at this window and it is not ours" indistinguishable from
+//! "nothing ever looked here" — the distinction `Coverage::Unobserved` draws against
+//! observed-and-quiet, and `BiasTee::Unknown` against off. [`log_declined`] writes the
+//! Demodulation (`hk_demod::write_declined`) against the emission's inventory entry and nothing
+//! else: no sighting, no classification, no identity, no decode, no label. A refusal is evidence,
+//! not a claim, and route C of the confirmation rule refuses such a row on its own terms because
+//! it carries neither a lock quality nor a pilot.
 //!
 //! **Refinement (T-070).** When the probe accepted a mode with an objective
 //! ([`crate::refine`]), the collected window refines the channel from the demodulated output,
@@ -48,7 +57,8 @@ use std::thread;
 use hk_core::{Discontinuity, ProvenanceHandle};
 use hk_demod::refine::{IqWindow, RefineStart, RefinementOutcome, Tuning};
 use hk_demod::{
-    AnalogMode, AnalogReceiver, AnalogSession, ReceiverConfig, RecordContext, write_session,
+    AnalogMode, AnalogReceiver, AnalogSession, ReceiverConfig, RecordContext, write_declined,
+    write_session,
 };
 use hk_dsp::InputInfo;
 use hk_estimate::SnippetRequest;
@@ -274,10 +284,11 @@ pub(crate) fn run(
         if w.iq.len() < probe {
             return;
         }
-        let accepted = match demodulate(&w, probe, &cand, node.bandwidth_hz, None, false) {
+        let probed = demodulate(&w, probe, &cand, node.bandwidth_hz, None, false);
+        let accepted = match &probed {
             Some(Ok(s)) => {
                 let mode_ok =
-                    node.accept_modes.is_empty() || node.accept_modes.contains(&mode_name(&s));
+                    node.accept_modes.is_empty() || node.accept_modes.contains(&mode_name(s));
                 let pilot_ok =
                     !node.require_pilot || s.mode.features.pilot.as_ref().is_some_and(|p| p.found);
                 // The receiver's CFO estimate can slide onto a strong neighbour: the emission
@@ -314,7 +325,7 @@ pub(crate) fn run(
                         "hk-pipeline: analog probe {:.4} MHz (channel {:.4}): mode {} ({:.2}), pilot {:?} → {} (OBW99 {:?} Hz, {:?})",
                         s.rf_center_hz / 1e6,
                         channel_center / 1e6,
-                        mode_name(&s),
+                        mode_name(s),
                         s.mode.confidence,
                         s.mode.features.pilot.as_ref().map(|p| p.found),
                         if accepted { "continue" } else { "stop" },
@@ -331,6 +342,22 @@ pub(crate) fn run(
         };
         if !accepted {
             inc(&c.mode_rejected);
+            // T-416: **the refusal is recorded.** A probe that declines used to leave nothing at
+            // all, so "we measured this window and it is not what this chain demodulates" was
+            // indistinguishable from "nothing ever looked here" — the same confusion
+            // `Coverage::Unobserved` and `BiasTee::Unknown` exist to prevent. What it measured is
+            // written as a Demodulation against the emission's inventory entry: mode, estimated
+            // parameters, the absent lock, and the window they came from. No promotion follows
+            // from it (see `hk_demod::write_declined`).
+            if let Some(Ok(s)) = &probed {
+                // Release the ring reader **before** writing. The chain is leaving either way and
+                // needs no more samples, and its gate cursor back-pressures the capture thread in
+                // a lossless replay: holding it across two database transactions parks the whole
+                // capture on this refusal's bookkeeping. (The same reason the record node runs on
+                // its own thread rather than inline.)
+                drop(cr);
+                log_declined(&shared, s, &cand);
+            }
             return;
         }
     }
@@ -377,6 +404,56 @@ pub(crate) fn run(
     );
     if let Some(join) = recorder {
         let _ = join.join();
+    }
+}
+
+/// Records a probe that declined the window it measured (T-416).
+///
+/// The row goes in first and is *then* filed against the emission's inventory entry
+/// (`Inventory::chain_measurement`), which is what makes the refusal findable — a Demodulation
+/// nothing links to is a row in a table nobody reads. The two steps are separate because a chain
+/// attaches on the **tracker's** confirmation and probes about a second into an emission, which is
+/// routinely before the inventory has offered that track a row at all; the inventory holds the
+/// measurement until the track is bound rather than the chain guessing at an entry or dropping it.
+fn log_declined(shared: &Arc<Shared>, session: &AnalogSession, cand: &Candidate) {
+    let c = &shared.counters.chains;
+    // Takes the repository lock itself, so it runs before the guard below: `Shared::repo` is a
+    // plain `Mutex` and re-entering it deadlocks the chain.
+    let detection_ref = super::stored_detection(shared, cand.detection);
+    let ctx = RecordContext {
+        recording_ref: None,
+        detection_ref,
+        emitter_hint: None,
+        counted_as: None,
+    };
+    let mut repo = shared.repo();
+    let demod = match write_declined(&mut repo, session, &ctx) {
+        Ok(id) => id,
+        Err(err) => {
+            inc(&c.errors);
+            eprintln!("hk-pipeline: analog chain declined-measurement write: {err}");
+            return;
+        }
+    };
+    inc(&c.declined_measurements);
+    let at = session.time_range().end;
+    let mut inv = shared
+        .inventory
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Named, not just counted (T-293/T-319): losing this silently is losing the record the whole
+    // path exists to leave.
+    if let Err(err) = inv.chain_measurement(&mut repo, cand.track, demod, at) {
+        inc(&c.errors);
+        eprintln!("hk-pipeline: analog chain declined-measurement link: {err}");
+    }
+    if crate::debug_enabled() {
+        eprintln!(
+            "hk-pipeline: analog probe {:.4} MHz declined; measurement recorded as {demod:?} \
+             (mode {})",
+            session.rf_center_hz / 1e6,
+            mode_name(session),
+        );
     }
 }
 

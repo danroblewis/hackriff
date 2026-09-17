@@ -18,6 +18,19 @@
 //!   are recorded. **On/off keying** of the carrier reference separates keyed CW.
 //! - **19 kHz pilot** from a trial quadrature discriminator on wide channels ([`tone_frequency`]
 //!   in 18.9–19.1 kHz with a significance test).
+//! - **Baseband fit (T-416).** The same trial discriminator's output is the *modulating signal*,
+//!   and broadcast FM's is defined by the service, not by the programme: 47 CFR 73.310(a) /
+//!   ITU-R BS.450 put the main channel at 50 Hz–15 kHz, the pilot at 19 kHz and the L−R
+//!   subcarrier at 23–53 kHz. [`ModeFeatures::baseband_fraction`] asks the question that
+//!   identifies a **mono** station: of the power in the multiplex (50 Hz–53 kHz), how much is in
+//!   the programme channel (50 Hz–15 kHz)? For a mono broadcaster the answer is ≈ 1 by definition
+//!   — there is nothing else in its baseband but injection-limited subcarriers — while a stereo
+//!   station answers ≈ ½ (its L−R lives exactly in the rest) and is recognised by its pilot
+//!   instead. DC is excluded from both: a residual carrier offset is a constant in a
+//!   discriminator's output and describes the tuning, not the modulation. Both bands come from the
+//!   service, so the measurement does not depend on the sample rate the snippet was taken at —
+//!   which matters, because FM output noise rises as f² and a denominator set by the snippet's
+//!   Nyquist would report the sample rate rather than the signal.
 //! - **Adjacent channels (T-099).** When C13's OBW99 abstains because strong neighbours fill the
 //!   snippet (dense FM: equal-power stations 200 kHz away inflate its noise reference or reach
 //!   the snippet edge), OBW99 is measured between the spectral valleys that separate the emission
@@ -26,11 +39,30 @@
 //!   neighbours. An isolated emission, or one reaching the snippet edge, keeps C13's abstention.
 //!
 //! Rules (thresholds tuned on the T-065 synthetic sweep, still to be trained on captures):
-//! - **WFM:** OBW ≥ 120 kHz; a pilot confirms it (stereo). Without a pilot, mono WFM needs
-//!   OBW ≥ 150 kHz and a constant envelope, at lower confidence. A lightly modulated station
-//!   (quiet programme, test tones: the T-023 synthetic reads OBW99 ≈ 97 kHz) is still WFM when
-//!   OBW ≥ 50 kHz, the envelope is constant and the trial discriminator finds the pilot; nothing
-//!   else puts a significant 19 kHz line in an FM discriminator's output.
+//! - **WFM:** OBW ≥ 120 kHz; a pilot confirms it (stereo). **The pilot is evidence, never a
+//!   requirement** — a mono station has none, and a rule that needs one cannot recognise any mono
+//!   broadcaster (T-416). Without a pilot, mono WFM is recognised on the **baseband fit** above
+//!   plus a constant envelope, at lower confidence: the emission's whole multiplex *is* its
+//!   programme channel, which is what being mono means.
+//!
+//!   The other half, and the one that keeps this from being a relaxation: a measured baseband that
+//!   is **not** a programme channel now *lowers* the confidence instead of leaving width to carry
+//!   it. Width used to be enough on its own — OBW ≥ 150 kHz and a constant envelope read as WFM —
+//!   which called a 180 kHz 4-CPFSK data link broadcast FM, since being wide and constant-envelope
+//!   is what every constant-modulus digital emission is. It no longer does
+//!   (`tests/signal_062_mode_sweep.rs` holds both halves blind). What this gives up is a **stereo**
+//!   station whose pilot was not found at all, which used to reach WFM on width: it now abstains.
+//!   The pilot is the narrowest, easiest feature in the multiplex to find, so a station that
+//!   loses it is at an SNR where the rest of the baseband is unmeasurable too — in the sweep both
+//!   fail together at 3 dB and both succeed from 10 dB.
+//!
+//!   A slow wide FSK whose symbol rate fits inside the programme channel stays indistinguishable
+//!   here, and correctly so: it *is* frequency modulation, and C20's IF histogram is what separates
+//!   keying from audio. Where the baseband cannot be measured the older width ladder still applies
+//!   (OBW ≥ 150 kHz and a constant envelope). A lightly modulated station (quiet programme, test
+//!   tones: the T-023 synthetic reads OBW99 ≈ 97 kHz) is still WFM when OBW ≥ 50 kHz, the envelope
+//!   is constant and the trial discriminator finds the pilot; nothing else puts a significant
+//!   19 kHz line in an FM discriminator's output.
 //! - **CW:** carrier-dominant, OBW ≤ 500 Hz (or unmeasurable) and either keyed on/off (with
 //!   in-phase sidebands), or an unmodulated carrier (no significant in-phase sidebands, or an
 //!   in-phase residue under 1 % depth, which at high SNR is quantisation rather than AM (T-073);
@@ -107,8 +139,24 @@ impl AnalogMode {
 pub struct ModeConfig {
     /// Smallest WFM OBW99, Hz.
     pub wfm_min_obw_hz: f64,
-    /// Smallest OBW99 for mono WFM without a pilot, Hz.
+    /// Smallest OBW99 for mono WFM without a pilot, Hz. Only the fallback since T-416: it applies
+    /// when the discriminated baseband could not be measured at all.
     pub wfm_mono_min_obw_hz: f64,
+    /// Top of the broadcast FM **programme channel**, Hz: the main (mono) audio channel's upper
+    /// edge, 47 CFR 73.310(a) / ITU-R BS.450. A mono station has nothing above it but
+    /// injection-limited subcarriers.
+    pub wfm_programme_max_hz: f64,
+    /// Top of the broadcast FM **multiplex**, Hz: the L−R subcarrier's upper edge (ITU-R BS.450,
+    /// 47 CFR 73.322), and so the widest baseband any broadcast station modulates with.
+    pub wfm_multiplex_max_hz: f64,
+    /// Bottom of the broadcast FM baseband, Hz (47 CFR 73.310(a)): below it there is no programme
+    /// to measure, only the tuning offset the discriminator renders as DC.
+    pub wfm_baseband_min_hz: f64,
+    /// Smallest share of the multiplex's power that must lie in the programme channel for the
+    /// emission to read as a **mono** broadcast. 47 CFR 73.319(d) caps total subcarrier injection
+    /// at 20 % of modulation, so at most 4 % of a mono station's baseband power can sit between
+    /// 15 and 53 kHz even when it runs every subcarrier it is allowed; 0.95 is that bound.
+    pub wfm_min_baseband_fraction: f64,
     /// Smallest OBW99 for WFM when a pilot is found and the envelope is constant, Hz.
     pub wfm_pilot_min_obw_hz: f64,
     /// Largest NBFM OBW99, Hz.
@@ -170,6 +218,10 @@ impl Default for ModeConfig {
         Self {
             wfm_min_obw_hz: 120e3,
             wfm_mono_min_obw_hz: 150e3,
+            wfm_programme_max_hz: 15e3,
+            wfm_multiplex_max_hz: 53e3,
+            wfm_baseband_min_hz: 50.0,
+            wfm_min_baseband_fraction: 0.95,
             wfm_pilot_min_obw_hz: 50e3,
             nbfm_max_obw_hz: 25e3,
             cw_max_obw_hz: 500.0,
@@ -282,6 +334,13 @@ pub struct ModeFeatures {
     pub keyed_on_snr_db: Option<f64>,
     /// Trial-discriminator pilot check, when run.
     pub pilot: Option<PilotCheck>,
+    /// T-416: share of the discriminated multiplex's power that lies in the mono programme
+    /// channel — `P(50 Hz..15 kHz) / P(50 Hz..53 kHz)` of the trial discriminator's output,
+    /// measured whenever the pilot check runs. ≈ 1 for a mono broadcast station, ≈ ½ for a stereo
+    /// one (its L−R fills the rest), and small for an emission whose modulating signal is a symbol
+    /// stream rather than a programme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseband_fraction: Option<f64>,
 }
 
 /// One mode considered.
@@ -414,10 +473,12 @@ impl ModeSelector {
             let channel = channel_half.and_then(|half| {
                 measure::channel32(x, snip.sample_rate_hz, cfo.unwrap_or(0.0), half)
             });
-            f.pilot = Some(match &channel {
-                Some((w, rate)) => self.pilot_check(w, *rate),
-                None => self.pilot_check(x, snip.sample_rate_hz),
-            });
+            let (pilot, baseband) = match &channel {
+                Some((w, rate)) => self.discriminate(w, *rate),
+                None => self.discriminate(x, snip.sample_rate_hz),
+            };
+            f.pilot = Some(pilot);
+            f.baseband_fraction = baseband;
         }
         let env = f.envelope_variation;
         let constant = env.is_some_and(|v| v <= c.constant_envelope_max);
@@ -473,10 +534,54 @@ impl ModeSelector {
                     if varying { 0.8 } else { 0.95 }
                 } else {
                     ev.push("no 19 kHz pilot (mono or not broadcast FM)".into());
-                    match (obw >= c.wfm_mono_min_obw_hz, constant) {
-                        (true, true) => 0.65,
-                        (true, false) if !varying => 0.45,
-                        _ => 0.25,
+                    // T-416: the pilot is evidence, not a requirement. A mono station has none, so
+                    // what stands in for it is the *other* structural fact about the service — its
+                    // baseband. This replaces a width bar that could not be derived (the stereo
+                    // 106 kHz floor comes from the subcarrier; mono has no equivalent, so a quiet
+                    // mono station is simply narrower) and that made every mono broadcaster between
+                    // the 120 kHz candidate edge and 150 kHz undecidable whatever else it showed.
+                    match f
+                        .baseband_fraction
+                        .map(|v| v >= c.wfm_min_baseband_fraction)
+                    {
+                        Some(true) if constant => {
+                            ev.push(format!(
+                                "{:.1} % of the multiplex is in the {:.0} kHz programme channel, \
+                                 on a constant-envelope carrier: a mono broadcast baseband, which \
+                                 has no pilot to find",
+                                100.0 * f.baseband_fraction.unwrap_or(f64::NAN),
+                                c.wfm_programme_max_hz / 1e3
+                            ));
+                            0.65
+                        }
+                        Some(true) => {
+                            ev.push(format!(
+                                "{:.1} % of the multiplex is in the {:.0} kHz programme channel, \
+                                 but the envelope is not constant",
+                                100.0 * f.baseband_fraction.unwrap_or(f64::NAN),
+                                c.wfm_programme_max_hz / 1e3
+                            ));
+                            0.45
+                        }
+                        // Measured, and it is not a programme baseband: a wide constant-envelope
+                        // emission modulated by something the broadcast multiplex has no room for.
+                        // Width alone will not promote it.
+                        Some(false) => {
+                            ev.push(format!(
+                                "only {:.1} % of the multiplex is in the {:.0} kHz programme \
+                                 channel, so the modulating signal is not a mono broadcast \
+                                 baseband",
+                                100.0 * f.baseband_fraction.unwrap_or(f64::NAN),
+                                c.wfm_programme_max_hz / 1e3
+                            ));
+                            0.2
+                        }
+                        // Not measurable (no trial discriminator): the pre-T-416 width ladder.
+                        None => match (obw >= c.wfm_mono_min_obw_hz, constant) {
+                            (true, true) => 0.65,
+                            (true, false) if !varying => 0.45,
+                            _ => 0.25,
+                        },
                     }
                 };
                 cands.push(ModeCandidate {
@@ -700,18 +805,28 @@ impl ModeSelector {
         }
     }
 
-    fn pilot_check(&self, x: &[Complex32], fs: f64) -> PilotCheck {
+    /// One trial discriminator, two readings of its output: the 19 kHz pilot line, and — T-416 —
+    /// how much of the multiplex's power lies inside the mono programme channel.
+    fn discriminate(&self, x: &[Complex32], fs: f64) -> (PilotCheck, Option<f64>) {
+        let c = &self.config;
         let mut disc = Discriminator::new(fs);
         let mpx: Vec<f32> = x.iter().map(|&s| disc.push(s)).skip(1).collect();
         let est = tone_frequency(&mpx, fs, 18_900.0, 19_100.0);
         let sig = est.evidence().significance_db;
         let freq = est.value();
-        PilotCheck {
+        let pilot = PilotCheck {
             frequency_hz: freq,
             significance_db: sig,
-            found: freq.is_some()
-                && sig.is_some_and(|s| s >= self.config.pilot_min_significance_db),
-        }
+            found: freq.is_some() && sig.is_some_and(|s| s >= c.pilot_min_significance_db),
+        };
+        let baseband = measure::band_fraction(
+            &mpx,
+            fs,
+            c.wfm_baseband_min_hz,
+            c.wfm_programme_max_hz,
+            c.wfm_multiplex_max_hz,
+        );
+        (pilot, baseband)
     }
 }
 

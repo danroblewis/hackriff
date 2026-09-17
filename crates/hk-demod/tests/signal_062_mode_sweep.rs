@@ -13,8 +13,16 @@
 //!
 //! Signals: unmodulated carrier; AM at 10/30/60/100 % depth with a 1 kHz tone and with
 //! voice-like audio; NBFM at 2.5 and 5 kHz deviation (tone, voice-like); WFM at 75 kHz with a
-//! 19 kHz pilot; USB and LSB voice-like; keyed CW; noise only (both scenes). SNR 3/10/20/30 dB.
-//! Every case carries a frequency offset from the box centre; half also drift linearly.
+//! 19 kHz pilot; **WFM at 75 kHz mono, with no pilot at all** (T-416); a **wide constant-envelope
+//! 4-CPFSK data link** (T-416); USB and LSB voice-like; keyed CW; noise only (both scenes).
+//! SNR 3/10/20/30 dB. Every case carries a frequency offset from the box centre; half also drift
+//! linearly.
+//!
+//! **The last two are a pair, and they are the T-416 control.** Every mono broadcaster in the
+//! world lacks the 19 kHz pilot, so a selector that needs one cannot recognise any of them; and a
+//! selector that recognises them by relaxing until anything wide and constant-envelope is WFM has
+//! replaced one defect with a worse one. `wfm75k-mono` must read as WFM, and `4fsk-wide` — equally
+//! wide, equally constant-envelope, and genuinely not broadcast FM — must not.
 
 mod common;
 
@@ -29,6 +37,13 @@ use num_complex::Complex32;
 const SECS: f64 = 0.5;
 const SNRS: [f64; 4] = [3.0, 10.0, 20.0, 30.0];
 
+/// T-416 control: symbol rate of the wide data link, Bd. Comparable to its own occupied
+/// bandwidth, as a digital emission's is — which is exactly why its instantaneous frequency
+/// cannot fit inside a broadcast multiplex.
+const FSK_BAUD: f64 = 80e3;
+/// Its four frequency levels, Hz.
+const FSK_LEVELS_HZ: [f64; 4] = [-54e3, -18e3, 18e3, 54e3];
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Signal {
     Carrier,
@@ -38,6 +53,11 @@ enum Signal {
     NbfmTone(f64),
     NbfmVoice(f64),
     Wfm,
+    /// T-416: the same 75 kHz-deviation broadcast station, **mono** — no 19 kHz pilot.
+    WfmMono,
+    /// T-416: a wide constant-envelope 4-level CPFSK data link. Not broadcast FM, and the control
+    /// that recognising mono FM did not turn into "anything wide and constant-envelope is FM".
+    FskWide,
     Usb,
     Lsb,
     NoiseNarrow,
@@ -45,7 +65,7 @@ enum Signal {
 }
 
 impl Signal {
-    const ALL: [Signal; 19] = [
+    const ALL: [Signal; 21] = [
         Signal::Carrier,
         Signal::CwKeyed,
         Signal::AmTone(10),
@@ -61,6 +81,8 @@ impl Signal {
         Signal::NbfmVoice(2.5e3),
         Signal::NbfmVoice(5e3),
         Signal::Wfm,
+        Signal::WfmMono,
+        Signal::FskWide,
         Signal::Usb,
         Signal::Lsb,
         Signal::NoiseNarrow,
@@ -76,6 +98,8 @@ impl Signal {
             Signal::NbfmTone(d) => format!("nbfm{:.1}k-tone", d / 1e3),
             Signal::NbfmVoice(d) => format!("nbfm{:.1}k-voice", d / 1e3),
             Signal::Wfm => "wfm75k-pilot".into(),
+            Signal::WfmMono => "wfm75k-mono".into(),
+            Signal::FskWide => "4fsk-wide".into(),
             Signal::Usb => "usb-voice".into(),
             Signal::Lsb => "lsb-voice".into(),
             Signal::NoiseNarrow => "noise-25k".into(),
@@ -94,6 +118,8 @@ impl Signal {
             Signal::AmTone(_) | Signal::AmVoice(_) => "am-100%",
             Signal::NbfmTone(_) | Signal::NbfmVoice(_) => "nbfm",
             Signal::Wfm => "wfm",
+            Signal::WfmMono => "wfm-mono",
+            Signal::FskWide => "fsk-wide",
             Signal::Usb | Signal::Lsb => "ssb",
             Signal::NoiseNarrow | Signal::NoiseWide => "noise",
         }
@@ -105,19 +131,24 @@ impl Signal {
             Signal::Carrier | Signal::CwKeyed => AnalogMode::Cw,
             Signal::AmTone(_) | Signal::AmVoice(_) => AnalogMode::Am,
             Signal::NbfmTone(_) | Signal::NbfmVoice(_) => AnalogMode::Nbfm,
-            Signal::Wfm => AnalogMode::Wfm,
+            Signal::Wfm | Signal::WfmMono => AnalogMode::Wfm,
             Signal::Usb | Signal::Lsb => AnalogMode::Ssb,
-            Signal::NoiseNarrow | Signal::NoiseWide => AnalogMode::Unknown,
+            // No analog mode describes a data link; the selector must abstain, not guess.
+            Signal::FskWide | Signal::NoiseNarrow | Signal::NoiseWide => AnalogMode::Unknown,
         }
     }
 
     fn wide(self) -> bool {
-        matches!(self, Signal::Wfm | Signal::NoiseWide)
+        matches!(
+            self,
+            Signal::Wfm | Signal::WfmMono | Signal::FskWide | Signal::NoiseWide
+        )
     }
 }
 
-const ROWS: [&str; 10] = [
-    "carrier", "cw-keyed", "am-10%", "am-30%", "am-60%", "am-100%", "nbfm", "wfm", "ssb", "noise",
+const ROWS: [&str; 12] = [
+    "carrier", "cw-keyed", "am-10%", "am-30%", "am-60%", "am-100%", "nbfm", "wfm", "wfm-mono",
+    "fsk-wide", "ssb", "noise",
 ];
 
 #[derive(Clone, Debug)]
@@ -217,11 +248,24 @@ fn scene(case: &Case) -> Scene {
     };
     let carrier0 = box_centre + offset - energy_centre;
     let (vre, van) = match sig {
-        Signal::AmVoice(_) | Signal::NbfmVoice(_) | Signal::Wfm | Signal::Usb | Signal::Lsb => {
-            voice(fs, n, &mut rng)
-        }
+        Signal::AmVoice(_)
+        | Signal::NbfmVoice(_)
+        | Signal::Wfm
+        | Signal::WfmMono
+        | Signal::Usb
+        | Signal::Lsb => voice(fs, n, &mut rng),
         _ => (Vec::new(), Vec::new()),
     };
+    // T-416: the data link's 4-level symbol stream, drawn once so drift and SNR variants of the
+    // same seed carry the same bits.
+    let fsk = matches!(sig, Signal::FskWide)
+        .then(|| {
+            let symbols = (n as f64 / (fs / FSK_BAUD)).ceil() as usize + 2;
+            (0..symbols)
+                .map(|_| FSK_LEVELS_HZ[(rng.unit() * 4.0) as usize % 4])
+                .collect::<Vec<f64>>()
+        })
+        .unwrap_or_default();
     let a = 0.1;
     let mut theta = TAU * rng.unit();
     let mut fm_phase = 0.0;
@@ -247,6 +291,20 @@ fn scene(case: &Case) -> Scene {
             Signal::Wfm => {
                 let mpx = 0.9 * vre[k] + 0.1 * (TAU * 19_000.0 * t).cos();
                 fm_phase += TAU * 75e3 * mpx / fs;
+                (a, fm_phase, None)
+            }
+            Signal::WfmMono => {
+                // A mono station: the same programme, the same peak deviation, no pilot and no
+                // subcarrier of any kind. There is nothing here but audio.
+                fm_phase += TAU * 75e3 * vre[k] / fs;
+                (a, fm_phase, None)
+            }
+            Signal::FskWide => {
+                // Phase-continuous 4-CPFSK: constant envelope and about as wide as the broadcast
+                // station, but its modulating signal is a symbol stream at FSK_BAUD, which no
+                // broadcast baseband has room for.
+                let sym = fsk[((t * FSK_BAUD) as usize).min(fsk.len() - 1)];
+                fm_phase += TAU * sym / fs;
                 (a, fm_phase, None)
             }
             Signal::Usb => (a, 0.0, Some(van[k])),
@@ -382,7 +440,8 @@ fn report(outcomes: &[Outcome]) {
             let r = |v: Option<f64>, k: f64| v.map(|x| (x * k).round() / k);
             eprintln!(
                 "  {:<16} {:>4.0} dB {:<6} -> {:<7} {:.2} | obw {:?} env {:?} sym {:?} sq {:?} | \
-                 line {:?} Hz {:?} dB frac {:?} | t {:?} bal {:?} depth {:?}/{:?} sb/c {:?} off {:?} | {:?}",
+                 line {:?} Hz {:?} dB frac {:?} | t {:?} bal {:?} depth {:?}/{:?} sb/c {:?} off {:?} \
+                 | pilot {:?} baseband {:?} | {:?}",
                 o.case.signal.name(),
                 o.case.snr_db,
                 if o.case.drift { "drift" } else { "offset" },
@@ -401,6 +460,8 @@ fn report(outcomes: &[Outcome]) {
                 r(f.am_depth_floor, 1e3),
                 r(f.sideband_to_carrier_db, 1e1),
                 r(f.keyed_off_fraction, 1e2),
+                f.pilot.map(|p| p.found),
+                r(f.baseband_fraction, 1e3),
                 o.decision.reason,
             );
         }
@@ -435,6 +496,17 @@ fn signal_062_mode_sweep_blind_confusion() {
             Signal::CwKeyed | Signal::NbfmTone(_) | Signal::NbfmVoice(_) | Signal::Wfm => {
                 snr >= 10.0
             }
+            // T-416. The mono station must be recognised without a pilot — but only once its
+            // whole 53 kHz baseband is above the noise. The pilot is a narrowband feature and can
+            // be found at 10 dB; a mono station has no such feature, so what identifies it is the
+            // *shape* of its whole multiplex, and at 10 dB over 200 kHz the discriminator's own
+            // f²-rising noise fills the part above the programme channel. Below that it abstains,
+            // which is the honest answer and not a guess. (10 dB CNR is also about where a
+            // wideband FM receiver reaches threshold and starts clicking.)
+            Signal::WfmMono => snr >= 20.0,
+            // The data link must never be called WFM, at any SNR: being wide and
+            // constant-envelope is not evidence of broadcast FM.
+            Signal::FskWide => true,
             Signal::Usb | Signal::Lsb => false,
         };
         // AM shallower than the depth the sideband test reports it could detect is, to the

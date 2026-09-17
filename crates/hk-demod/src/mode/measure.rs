@@ -202,6 +202,56 @@ fn line(x: &[Complex32], fs: f64, box_bw_hz: f64, n0: f64) -> Option<Line> {
     })
 }
 
+/// Power of the real signal `x` in `lo_hz..hi_hz` over its power in `lo_hz..band_hz` (T-416).
+///
+/// `lo_hz` excludes DC and the bins the window smears it over: a residual carrier offset is a
+/// **constant** in a discriminator's output, so it is the one component that says nothing at all
+/// about the modulating signal.
+///
+/// `band_hz` bounds the denominator, and it is a **fixed property of the service**, not the
+/// snippet's Nyquist. It has to be: a discriminator's output noise density rises as f², so
+/// integrated across a snippet several times wider than the emission the denominator is almost
+/// entirely noise from outside the signal, and the ratio then reports the sample rate the snippet
+/// happened to be taken at rather than anything about the modulation (a clean 30 dB station read
+/// 0.88 over ±500 kHz and 0.999 over its own ±90 kHz). `None` when the PSD cannot be formed, or
+/// when the denominator band is no wider than the numerator's — which would compare a quantity
+/// with itself.
+pub(super) fn band_fraction(
+    x: &[f32],
+    fs: f64,
+    lo_hz: f64,
+    hi_hz: f64,
+    band_hz: f64,
+) -> Option<f64> {
+    if !(fs.is_finite() && lo_hz.is_finite() && hi_hz.is_finite()) {
+        return None;
+    }
+    if fs <= 0.0 || lo_hz < 0.0 || hi_hz <= lo_hz {
+        return None;
+    }
+    // NaN refuses, as every measurement here does.
+    let band = band_hz.min(0.5 * fs);
+    if band.is_nan() || band <= hi_hz {
+        return None;
+    }
+    let c: Vec<Complex32> = x.iter().map(|&v| Complex32::new(v, 0.0)).collect();
+    let psd = welch(&c, fs, TARGET_BIN_HZ)?;
+    let nfft = psd.len();
+    let df = fs / nfft as f64;
+    // A real signal's spectrum is symmetric, so one side answers the ratio.
+    let klo = ((lo_hz / df).ceil() as usize).max(2);
+    let khi = ((hi_hz / df).floor() as usize).min(nfft / 2);
+    let ktop = ((band / df).floor() as usize).min(nfft / 2);
+    if klo > khi || khi >= ktop {
+        return None;
+    }
+    let total: f64 = psd[klo..=ktop].iter().sum();
+    if total.is_nan() || total <= 0.0 {
+        return None;
+    }
+    Some(psd[klo..=khi].iter().sum::<f64>() / total)
+}
+
 /// The emission at the box centre measured between adjacent emissions (T-099).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Adjacent {

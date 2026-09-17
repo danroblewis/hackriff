@@ -1787,10 +1787,11 @@ impl RunSummary {
             c("/chains/plugin_restarts")
         ));
         line(format!(
-            "rejected:    {} outside window, {} duplicate channel, {} mode rejected, {} FSK boxes missed",
+            "rejected:    {} outside window, {} duplicate channel, {} mode rejected ({} recorded), {} FSK boxes missed",
             c("/chains/outside_window"),
             c("/chains/duplicate_channel"),
             c("/chains/mode_rejected"),
+            c("/chains/declined_measurements"),
             c("/chains/fsk_boxes_missed")
         ));
         line(format!(

@@ -202,6 +202,9 @@ counter_group!(
         duplicate_channel,
         /// Analog chains whose probe mode selection was not accepted.
         mode_rejected,
+        /// T-416: declined probes whose measurement was written anyway, so the refusal leaves a
+        /// record rather than silence. Below `mode_rejected` means a refusal went unrecorded.
+        declined_measurements,
         /// Chain attach failures (plugin spawn, DDC plan).
         attach_errors,
         /// Samples chains read.
