@@ -10829,6 +10829,12 @@ tasks:
       levels actually answered (T-426's rule: the tier that ANSWERED, not the one implied);
       coverage and honesty tier ride along; in-flight cap enforced and asserted.
     notes: |
+      TESTING PROTOCOL (CLAUDE.md, after T-416/T-426/T-430 each stalled on it): the agent runs
+      TARGETED tests only - `just test-crate <crate>` or `just test-one <name>` for what its diff
+      touches - and HANDS BACK when they pass. NEVER `just gate`, never the full suite. The
+      COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
+      harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
+      with uncommitted work.
       SCHEDULING, verified from the dependency graph 2026-09-17: THIS TICKET IS THE FAN-OUT POINT
       of the whole milestone. The chain is T-434 -> T-438 -> {T-439, T-440} -> {T-441, T-442} ->
       {T-443, T-444} -> T-445, so nothing else in MCANVAS can start until T-438 lands, and the
@@ -10871,6 +10877,13 @@ tasks:
       pane can read with no live-specific code path, and the always-on invariant is asserted (ring
       and detections keep advancing while tiles are written).
 
+    notes: |
+      TESTING PROTOCOL (CLAUDE.md, after T-416/T-426/T-430 each stalled on it): the agent runs
+      TARGETED tests only - `just test-crate <crate>` or `just test-one <name>` for what its diff
+      touches - and HANDS BACK when they pass. NEVER `just gate`, never the full suite. The
+      COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
+      harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
+      with uncommitted work.
   - id: T-440
     milestone: MCANVAS
     title: The renderer core - one canvas, one WebGL2 context, N scissored panes, shared tile-texture LRU
@@ -10902,6 +10915,12 @@ tasks:
       (asserted, not assumed); per-axis levels are independent; the eviction budget is measured
       and stated.
     notes: |
+      TESTING PROTOCOL (CLAUDE.md, after T-416/T-426/T-430 each stalled on it): the agent runs
+      TARGETED tests only - `just test-crate <crate>` or `just test-one <name>` for what its diff
+      touches - and HANDS BACK when they pass. NEVER `just gate`, never the full suite. The
+      COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
+      harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
+      with uncommitted work.
       T-437's spike is exploring exactly this. Read its findings before starting - the spike's job
       is to tell you what does NOT work, and a spike that reports only success has de-risked
       nothing.
@@ -10936,6 +10955,13 @@ tasks:
       thing; and a zoom beyond live-IQ resolution shows survey-overview rather than upscaled
       detail presented as measurement.
 
+    notes: |
+      TESTING PROTOCOL (CLAUDE.md, after T-416/T-426/T-430 each stalled on it): the agent runs
+      TARGETED tests only - `just test-crate <crate>` or `just test-one <name>` for what its diff
+      touches - and HANDS BACK when they pass. NEVER `just gate`, never the full suite. The
+      COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
+      harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
+      with uncommitted work.
   - id: T-442
     milestone: MCANVAS
     title: The pane model - split, independent pan/zoom, per-pane follow-mode and per-pane pause
@@ -10965,6 +10991,13 @@ tasks:
       pausing one pane provably does not affect another pane or any other viewer (assert it the way
       T-347 did - two consumers, values not status codes); capture keeps advancing throughout.
 
+    notes: |
+      TESTING PROTOCOL (CLAUDE.md, after T-416/T-426/T-430 each stalled on it): the agent runs
+      TARGETED tests only - `just test-crate <crate>` or `just test-one <name>` for what its diff
+      touches - and HANDS BACK when they pass. NEVER `just gate`, never the full suite. The
+      COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
+      harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
+      with uncommitted work.
   - id: T-443
     milestone: MCANVAS
     title: The zoomable minimap - another viewport, with pane rectangles and per-SDR live segments
@@ -10986,6 +11019,13 @@ tasks:
       track pane state every frame (not on a poll - T-388's box-jump was a per-poll layout against
       a per-frame scroll); per-SDR live segments come from the same coverage the panes read.
 
+    notes: |
+      TESTING PROTOCOL (CLAUDE.md, after T-416/T-426/T-430 each stalled on it): the agent runs
+      TARGETED tests only - `just test-crate <crate>` or `just test-one <name>` for what its diff
+      touches - and HANDS BACK when they pass. NEVER `just gate`, never the full suite. The
+      COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
+      harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
+      with uncommitted work.
   - id: T-444
     milestone: MCANVAS
     title: Retune-on-pan - panning a pane to un-tuned spectrum offers or triggers a retune
@@ -11016,6 +11056,13 @@ tasks:
       DoD: a pan alone never commands the radio (T-340's control passes verbatim); the explicit act
       does, through the one gated path; the achievable-config snapping is reused, not reinvented.
 
+    notes: |
+      TESTING PROTOCOL (CLAUDE.md, after T-416/T-426/T-430 each stalled on it): the agent runs
+      TARGETED tests only - `just test-crate <crate>` or `just test-one <name>` for what its diff
+      touches - and HANDS BACK when they pass. NEVER `just gate`, never the full suite. The
+      COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
+      harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
+      with uncommitted work.
   - id: T-445
     milestone: MCANVAS
     title: The cutover - retire both edge scrubbers and the separate history view
@@ -11049,6 +11096,12 @@ tasks:
       a home on the canvas or is explicitly reported as dropped with the user's sign-off needed;
       docs/api.md, docs/14 and ui/CONTROLS.md updated; the UI suite green.
     notes: |
+      TESTING PROTOCOL (CLAUDE.md, after T-416/T-426/T-430 each stalled on it): the agent runs
+      TARGETED tests only - `just test-crate <crate>` or `just test-one <name>` for what its diff
+      touches - and HANDS BACK when they pass. NEVER `just gate`, never the full suite. The
+      COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
+      harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
+      with uncommitted work.
       T-348 (a paused view costs full CPU) and any other genuine backend bug behind the old widgets
       stay open on their own merits - they are correctness, not scrubber polish.
 notes:
