@@ -9158,6 +9158,48 @@ tasks:
       Control: a span with genuinely less data behind it than the display has rows
       still fills honestly - replicated and labelled - rather than either stretching or
       leaving the rest empty.
+  - id: T-421
+    title: Per-(time, frequency) coverage rasterisation - the record answer gains a time axis
+    milestone: M2-hardening
+    status: in-progress
+    priority: high
+    parallel_group: STORE
+    core_interface: true
+    model: opus
+    deps: [T-408, T-419]
+    acceptance: |
+      T-408's section 7 STEP 1, and the only step that closes the gap its section 2
+      names. It had no ticket; filed 2026-09-17.
+      THE GAP, in T-408's own table: there are TWO coverage answers, from different
+      evidence, and neither alone suffices.
+        CellStats::coverage (Tile::obs_s) - evidence is MEASUREMENT, frames landed.
+          Per (t cell, f cell). No device. Horizon: the pyramid's byte budget.
+        hk_store::Coverage (T-368)      - evidence is RECORD, the radio was tuned here.
+          Per f cell OVER ONE WINDOW. Device-named. Horizon: ring 120 s / log 30 days.
+      The record-derived answer HAS NO TIME AXIS, so it decides a COLUMN where the view
+      needs a CELL. That is why the survey bar falls back to a column's state and a cell
+      in an observed band the radio was tuned away from at that instant reads as
+      "sampled, level not retained" rather than grey.
+      THE FIX IS NOT NEW DATA. The ring journal's segments and the observation log's
+      ObservedWindow/HopVisit are ALREADY (t_start, t_end, f_lo, f_hi, device) tuples -
+      today rasterised onto the frequency axis and collapsed on time. Per-(t,f) coverage
+      is THAT SAME RASTERISATION WITH THE TIME AXIS KEPT.
+      NO NEW TYPE. Coverage::of's refusal applies per cell unchanged, and Sampled's six
+      fields are all per-cell computable. Device stays in the key (any default, named
+      false), which maps onto the existing OriginFilter/source filter - which is why
+      "fills in as more SDRs are added" needs no new concepts.
+      THE FOLD RULE IS A SUM, NOT A MAX, and T-419 has just established why that matters:
+      Tile::fold_child reported FULL COVERAGE on one sixteenth of a band because it took
+      the max across children. Do not reintroduce that shape on the new axis. T-419's
+      truth_from_level_0 control is the pattern - prove against the finest cells, never
+      against a parent, because a parent-vs-child assertion satisfies the buggy answer at
+      every level.
+      HONESTY, unchanged from T-368: Coverage::of refuses a zero span count, a
+      non-positive sampled duration or a non-positive window and returns Unobserved
+      rather than a zeroed Sampled; Sampled is non_exhaustive so there is no second door;
+      an unobserved cell carries NO MEASUREMENT KEYS AT ALL.
+      Pure backend. No wire change (that is step 2). Serves nothing visibly yet and
+      unblocks everything below it.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
