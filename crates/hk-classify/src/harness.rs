@@ -615,12 +615,19 @@ impl Report {
              | wrong-label rate at gate | {:.3} |\n\
              | wrong-label rate overall | {:.3} |\n\
              | worst per-bin wrong-label rate | {:.3} |\n\
-             | held-out unknown recall | {:.3} |\n\
-             | held-out false-known rate | {:.3} |\n\
+             | held-out unknown recall (harness draw, abstention-only — NOT the ADR-0016 §7.1 gate \
+             figure) | {:.3} |\n\
+             | held-out false-known rate (harness draw) | {:.3} |\n\
              | families with an UNMEASURED open set | {} |\n\n\
              ## Open-set coverage, per family\n\n\
              The two held-out figures above are averages over whatever negatives existed. A family \
              with no negative contributes nothing to them and is **unmeasured**, never good.\n\n\
+             They are also **not the M3 gate's figure**: this draw uses held-out seeds continuing \
+             the `synthetic-acceptance` sequence and scores `family == \"unknown\"` alone, while \
+             the gate (`m3_grid.rs::m3_unknown_recall_and_false_known_rate`) uses its own seed \
+             range and also counts `open_set_score >= 0.5`. Draw-to-draw spread of this quantity \
+             is sd ~0.008 over 396 snippets, so the two readings differ by less than noise and \
+             neither substitutes for the other — quote the gate's line, per ADR-0016 §7.2.\n\n\
              | family | OOD n | unknown recall | false-known | generators |\n\
              |---|---:|---:|---:|---|\n",
             self.run.grid,

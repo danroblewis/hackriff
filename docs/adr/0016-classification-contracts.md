@@ -318,20 +318,29 @@ The fix is not to freeze a number here forever; it is to give every brief exactl
 re-derivable source to quote instead of a remembered digit.
 
 **Command:** `just acceptance-m3` (`HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test
-acceptance_m3 -- --nocapture`), reading the `[T-206]` lines it prints. Deterministic on
-fixed seeds — rerunning identical code and data reproduces a figure to 4 decimal places
-(verified for this entry: two independent runs of `m3_known_family_top_k_meets_the_floors`
-against the same commit gave 0.9345 both times).
+acceptance_m3 -- --nocapture`), reading the `[T-206]` lines it prints.
+
+**Determinism, with the run count that backs it (T-428).** Every figure below is a pure
+function of the code and the fixed seeds: no RNG is drawn without a seed, and the
+classification path takes no `hk-dsp` compute provider, so no thread count or machine load
+reaches it. **Measured, not assumed:** 9 runs of `m3_unknown_recall_and_false_known_rate`
+on commit `651335f` (5 filtered, 4 through the whole binary) returned the identical
+per-generator breakdown and the identical aggregate, and the T-213 report's own figures were
+byte-identical across the 4 full runs. Separately, the command was run once on each of 7
+commits spanning 2026-09-17 (`41f6aa1`, `ca40832`, `d7ccd59`, `522f94c`, `9e6a6ae`,
+`5a717f1`, `651335f`) and returned 0.9520 / 0.0480 at every one — **`main` did not move**.
+A figure in the table below that does not reproduce is therefore evidence of a code change
+or of a *different figure being read*, never of run-to-run noise.
 
 **Each figure names one population** (`hk_classify::harness::Summary`, `crates/hk-classify/src/harness.rs`);
 quoting one without its population is the failure mode this section exists to close:
 
-| Figure | Population | Measured (commit `d7ccd59`, 2026-09-17) |
+| Figure | Population | Measured (commit `651335f`, 2026-09-17, n runs) |
 |---|---|---|
-| Known top-1 / top-2 | `synthetic-acceptance` source, all 8 taxonomy families, SNR bins ≥ gate+5 dB (the two highest of five bins) | 0.9345 / 0.9861 |
-| Wrong-label, overall | `synthetic-acceptance`, every bin including below-gate | 0.0040 |
-| Wrong-label, worst bin | `synthetic-acceptance`, bins ≥ gate, n ≥ 10 | 0.0333 |
-| Unknown recall / false-known | **the full held-out grid, all 11 generators, 396 snippets** — the gate's ruling (`m3_grid.rs`, `m3_unknown_recall_and_false_known_rate`). The 216-snippet reading over only the six generators §7's prose enumerates is printed alongside it (0.9954 / 0.0046 as of this measurement) but is **recorded, not used** — quoting it as the M3 number is the population-ambiguity failure mode, distinct from a stale-number failure mode | 0.9520 / 0.0480 |
+| Known top-1 / top-2 | `synthetic-acceptance` source, all 8 taxonomy families, SNR bins ≥ gate+5 dB (the two highest of five bins) | 0.9345 / 0.9861 (4 runs, identical) |
+| Wrong-label, overall | `synthetic-acceptance`, every bin including below-gate | 0.0040 (4 runs, identical) |
+| Wrong-label, worst bin | `synthetic-acceptance`, bins ≥ gate, n ≥ 10 | 0.0333 (4 runs, identical) |
+| Unknown recall / false-known | **the gate's draw: 396 held-out snippets, all 11 generators, seeds `ACCEPTANCE_SEED_BASE + 700_001…`** — `m3_grid.rs::held_out`, asserted by `m3_unknown_recall_and_false_known_rate`. Read **this** row; two other held-out readings are printed by the same command and neither is the gate (see §7.2) | 0.9520 / 0.0480 = 377/396 (9 runs, identical) — but see the sampling spread in §7.2 before quoting 4 dp |
 
 **T-404's 0.9480 top-1 was neither of those failure modes — a third one, now closed by
 this record.** It is the same metric over the same population as the row above (no
@@ -353,11 +362,59 @@ a mismatch between a briefed baseline and what it measures does not guess which 
 wrong. It stashes its entire diff, checks out the merge base with current `main` (or `main`
 itself if there is no in-flight diff), runs the named command, and compares. That
 determines — rather than assumes — whether a discrepancy predates the agent's own work.
-Only then does it report which of the three failure modes above applies: a stale number
+Only then does it report which failure mode applies: a stale number
 that has since legitimately moved (re-cite the fresh figure), a population mismatch
 (re-cite the correct row), or a genuine regression introduced by work in flight (fix or
 flag it, per the task's own scope — this ADR section is not where thresholds get relaxed
-to match a bad run).
+to match a bad run). **It has one blind spot, added by T-428 (§7.2): the protocol
+establishes which *tree* was measured, and cannot catch reading the wrong *line* of the
+same output. Before concluding anything from a mismatch, check §7.2's table that the two
+figures came from the same printed reading — and if the gap is under ±0.02 on the
+open-set figures, it is inside the draw's own sampling spread and is not a finding at
+all.**
+
+### 7.2 `just acceptance-m3` prints three held-out readings, and only one is the gate (T-428)
+
+Within a day of §7.1 landing, four agents re-derived "held-out unknown recall" on `main`
+and split two-two: 0.9520 / 0.0480 (T-421, T-416) against 0.9444 / 0.0556 (T-249, T-422),
+with T-422 reaching its figure through the stash-and-measure protocol. **Neither side
+misread and neither side was stale.** Both numbers are printed by one run of the one
+canonical command, over *different draws of the same quantity*:
+
+| Printed as | Where | Population | Value on `651335f` |
+|---|---|---|---|
+| `[T-206] RULING — … FULL held-out grid (396 snippets, all 11 generators)` | `m3_grid.rs::held_out`, seeds `+700_001…` | **the gate** | 0.9520 / 0.0480 = 377/396 |
+| `\| held-out unknown recall \| 0.944 \|` in the T-213 markdown report, and the `[T-206] open set <family> …` per-family lines that decompose it | `hk_classify::harness`, held-out seeds that **continue the `synthetic-acceptance` sequence** — a different 396 snippets from the same 11 generators | not the gate | 0.9444 / 0.0556 = 374/396 |
+| `[T-206] the other reading, over the 216 snippets of the six generators §7 enumerates` | `m3_grid.rs`, subset of the gate's draw | not the gate (§7.1 already) | 0.9954 / 0.0046 |
+
+**The gap is sampling, not scoring.** The two readings also use different predicates — the
+gate counts `family == "unknown" || open_set_score ≥ 0.5` (both outcomes, per §7 row 4),
+the harness counts `family == "unknown"` alone — so the predicate was the obvious suspect.
+It is not the cause: instrumenting `held_out()` to count both predicates over the gate's
+draw gives **377 either way**, so the `open_set_score` clause contributes zero and the
+entire 3-snippet gap is the different seed range.
+
+**So 4 decimal places were never defensible.** Re-running the gate's own draw at eight seed
+bases (`+100_000 … +800_000`) on `651335f` gives 370, 377, 377, 377, 378, 379, 380,
+381 of 396 — **0.9343 to 0.9621, mean 0.9530, sd 0.0084**. The "disagreement" that produced
+this ticket is 0.0076, *under one standard deviation of the draw-to-draw spread of the same
+quantity on identical code*. A 4-dp quote invites exactly the false-precision comparison
+that cost four agents a day.
+
+**How to quote it.** The gate's assertion stays exact and reproducible (377/396 on the
+pinned seeds, 9/9 runs) — that is what CI checks. But a **brief citing this as a
+do-not-regress baseline quotes it as `≈0.95 (draw sd 0.008; a ±0.02 move is noise)`**, and
+treats only a move outside that as a signal worth investigating. Comparing two figures to
+4 dp is meaningful only when both came from the same seed range, which the printed output
+does not make obvious — hence the table above.
+
+**This was a fourth failure mode**, distinct from the three above: not a stale number, not
+the §7-vs-full population split §7.1 already names, and not T-404's never-merged commit. It
+is **one metric name over two different draws, emitted by the same command in the same
+run**, where the quantity's own sampling spread exceeds the gap. The stash-and-measure
+protocol cannot catch it — T-422 followed the protocol correctly and still got 0.9444,
+because the protocol checks *which tree* was measured and this failure is about *which
+line was read*.
 
 ## 8. MAUTO interface (M3 side; ADR-0015 owns the search)
 
