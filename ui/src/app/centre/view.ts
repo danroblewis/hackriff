@@ -25,6 +25,7 @@ import * as ax from "../../axis";
 import { ControlError } from "../../controls/client";
 import type { ViewHooks } from "../../controls/gestures";
 import { snapCenter } from "../../navigation";
+import { currentSpan } from "../capture/timeline";
 import type { AppContext } from "../context";
 import { toast } from "../shell-slice";
 import type { AppState } from "../state";
@@ -34,6 +35,47 @@ import type { LiveSlice, RetuneOffer } from "./slice";
 export function geometryOfLive(l: Pick<LiveSlice, "centerHz" | "bandwidthHz" | "bins">): ax.Geometry | null {
   if (l.centerHz === null || l.bandwidthHz === null || l.bins === null) return null;
   return { centerHz: l.centerHz, bandwidthHz: l.bandwidthHz, bins: l.bins };
+}
+
+/**
+ * The frequency window the centre pane's **overlays and axis** are placed in (T-386).
+ *
+ * Not `live.view` alone, and that is the fix. `live.view` exists only once a spectrum stream
+ * header has arrived, so the whole overlay layer — every bracket, every Confirmed band, every
+ * selection box, the frequency ticks — was gated on a live socket: a replay whose stream had not
+ * connected, a paused session, or a run whose stream ended drew **no boxes at all** while
+ * `/api/inventory` was answering with rows for exactly the band the device reports. That is "we
+ * have it but didn't render it" with a single point of failure in front of it.
+ *
+ * The tuned band is the same fallback the capture band and the History surface already take
+ * ([[currentSpan]]), so this adds no new source of truth: it reads `/api/control/state`'s own
+ * centre and sample rate. `null` stays *unknown* — nothing is invented when neither has answered.
+ *
+ * What it deliberately does **not** cover: the waterfall's rows and the time-extent boxes drawn in
+ * its render pass need the stream's bin geometry and the waterfall's own clock, and gestures need
+ * both. A view is enough to *place* a frequency; it is not enough to draw or to hit-test time.
+ */
+export function centreView(s: CentreViewState): ax.View | null {
+  return currentSpan({ live: s.live.view, device: s.device });
+}
+
+/** What [[centreView]] reads. `AppState` satisfies it structurally. */
+export interface CentreViewState {
+  live: Pick<LiveSlice, "view">;
+  device: { centerHz: number | null; sampleRateHz: number | null };
+}
+
+/**
+ * A key that changes exactly when [[centreView]] would — the subscription every surface placing
+ * something in that view takes, so none of them re-derives which inputs matter.
+ *
+ * It is not `live.view` alone for the same reason [[centreView]] is not: a device answer moves the
+ * window without touching the stream slice, and a surface watching only the stream then goes on
+ * drawing in the window it was mounted in.
+ */
+export function centreViewKey(s: CentreViewState): string {
+  const v = centreView(s);
+  return v ? `${v.loHz}/${v.hiHz}` : "";
 }
 
 /**

@@ -140,6 +140,24 @@ export function currentSpan(input: {
   return { loHz: centerHz - sampleRateHz / 2, hiHz: centerHz + sampleRateHz / 2 };
 }
 
+/**
+ * A key that changes exactly when [[currentSpan]] does (T-386): the band the capture panel's
+ * **content** — its overview grid, its coverage fraction and gaps, its event marks — is an answer
+ * about.
+ *
+ * The panel polls once a minute. Before T-386 it read the span *inside* that poll, so a retune or a
+ * zoom left up to 60 s of the **previous band's** overview, coverage and marks on screen, labelled
+ * as this window's. That is worse than an empty surface: it is the window rule broken by rendering
+ * data that exists for some *other* window as if it were this one. Tagging every answer with the
+ * band it came from lets the panel discard it the instant the view leaves that band, rather than
+ * drawing it until the next tick.
+ *
+ * Rounded to whole hertz so a float that re-derives to the same tuning does not look like a move.
+ */
+export function bandKey(span: { loHz: number; hiHz: number } | null): string {
+  return span ? `${Math.round(span.loHz)}/${Math.round(span.hiHz)}` : "";
+}
+
 // ---- time-window select (T-194) ----
 
 /** Pointer travel (px) that turns a scrub into a deliberate time-window drag (mirrors the live

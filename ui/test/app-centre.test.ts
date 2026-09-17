@@ -22,7 +22,7 @@ import { centreInitial } from "../src/app/centre/slice";
 import type { AppContext } from "../src/app/context";
 import { createStore } from "../src/app/store";
 import { initialState } from "../src/app/state";
-import { applyDeviceAction, geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retuneAction, retuneErrorText, viewHooks } from "../src/app/centre/view";
+import { applyDeviceAction, centreView, centreViewKey, geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retuneAction, retuneErrorText, viewHooks } from "../src/app/centre/view";
 import { UNOBSERVED_DB, decimateRow } from "../src/waterfall";
 
 const G: ax.Geometry = { centerHz: 100_000_000, bandwidthHz: 2_400_000, bins: 1024 };
@@ -646,6 +646,80 @@ test("T-343: gestures.ts names no device route, and the device routes have exact
   assert.deepEqual(callers, ["app/centre/view.ts", "app/review/device.ts"],
     "a new file reaches the front end: make it an explicit device action or route it through view.ts");
 });
+
+// ---- T-386: the overlay layer is not gated on a live stream socket -------------------------
+//
+// Every bracket, Confirmed band, selection box and frequency tick was placed in `live.view`, which
+// exists only once a spectrum stream header has arrived. So a replay whose stream had not
+// connected, a paused session, or a run whose stream ended rendered **no boxes at all**, silently,
+// while `/api/inventory` was answering with rows for exactly the band the device reports — "we
+// have it but didn't render it", with a single point of failure in front of it.
+
+test("T-386 THE PROPERTY: with no stream header the overlays are still placed, in the tuned band the device reports", () => {
+  const noHeader = { live: { view: null }, device: { centerHz: 101.3e6, sampleRateHz: 2e6 } };
+  assert.deepEqual(centreView(noHeader), { loHz: 100.3e6, hiHz: 102.3e6 });
+  // And a row of that band lands where the axis puts it, rather than nowhere.
+  const v = centreView(noHeader)!;
+  const bk = bracketLayout([makeCentreRow({ id: "e1", f_lo_hz: 101.2e6, f_hi_hz: 101.4e6, f_center_hz: 101.3e6 })], v, 1200, null);
+  assert.deepEqual(bk.map((b) => b.id), ["e1"]);
+  assert.ok(bk[0].leftPct > 44 && bk[0].leftPct < 46, `placed at ${bk[0].leftPct}%`);
+  // The axis strip takes the same view, so brackets never draw over unlabelled ticks.
+  assert.ok(tickModel(centreView(noHeader), 1200).length > 0, "the frequency axis is labelled too");
+});
+
+test("T-386 THE CONTROL: with neither a header nor a device the view stays UNKNOWN, never invented", () => {
+  assert.equal(centreView({ live: { view: null }, device: { centerHz: null, sampleRateHz: null } }), null);
+  assert.equal(centreView({ live: { view: null }, device: { centerHz: 101.3e6, sampleRateHz: null } }), null);
+  // The header still wins when there is one: a zoom is the view, not the whole tuned band.
+  assert.deepEqual(
+    centreView({ live: { view: { loHz: 101e6, hiHz: 101.5e6 } }, device: { centerHz: 101.3e6, sampleRateHz: 2e6 } }),
+    { loHz: 101e6, hiHz: 101.5e6 },
+  );
+});
+
+test("T-386: the render path places overlays in centreView, and only the waterfall's own pass stays stream-gated", () => {
+  const src = readFileSync("src/app/centre/live-spectrum.ts", "utf8");
+  assert.match(src, /const s = store\.get\(\), v = centreView\(s\), g = geometryOfLive\(s\.live\)/);
+  // The bail-out is now the view alone. Gating it on `g` as well is the bug: geometry needs a
+  // header, and placement does not.
+  assert.match(src, /\n\s*if \(!v\) \{/);
+  assert.ok(!/if \(!v \|\| !g\) \{/.test(src), "the DOM overlays must not require the stream's bin geometry");
+  // setBoxes is the exception, and says so: the render pass places boxes in texture units.
+  assert.match(src, /if \(g\) \{\s*\n\s*wf\?\.setBoxes\(/);
+  // And a device answer re-renders: it is a new view, and it does not arrive through `live.view`.
+  // One key for both surfaces, so neither re-derives which inputs move the view.
+  assert.match(src, /store\.select\(centreViewKey, schedule\)/);
+  const axis = readFileSync("src/app/centre/axis-view.ts", "utf8");
+  assert.match(axis, /tickModel\(centreView\(s\), el\.clientWidth\)/);
+  assert.match(axis, /store\.select\(centreViewKey, schedule\)/);
+  // The key must move when either input does, or a surface subscribing to it is subscribing to
+  // nothing: a device-only change is exactly the case `live.view` alone misses.
+  const noHeader = (centerHz: number) => centreViewKey({ live: { view: null }, device: { centerHz, sampleRateHz: 2e6 } });
+  assert.notEqual(noHeader(101.3e6), noHeader(915e6));
+  assert.equal(centreViewKey({ live: { view: null }, device: { centerHz: null, sampleRateHz: null } }), "");
+});
+
+test("T-386 CLOCK GUARD: no clock of the browser's own reaches the centre view modules", () => {
+  // T-393's guard, extended to the modules T-386 touched. `live-spectrum.ts` formats *served*
+  // capture times (`hms`) and must go on doing only that: the live edge, the review cursor and the
+  // history window are all the capture clock's, and none of them may fall back to wall time.
+  for (const f of ["src/app/centre/view.ts", "src/app/centre/axis-view.ts", "src/app/centre/live-spectrum.ts"]) {
+    const src = readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    for (const word of ["Date.now", "performance.now", "toLocaleTimeString", "getTimezoneOffset"]) {
+      assert.ok(!src.includes(word), `${f} must not contain "${word}"`);
+    }
+  }
+});
+
+/** A `Row` for the centre-view placement tests; only the fields placement reads are meaningful. */
+function makeCentreRow(over: Partial<Row> & { id: string }): Row {
+  return {
+    state: "candidate", f_center_hz: 100e6, bandwidth_hz: 200e3, f_lo_hz: 99.9e6, f_hi_hz: 100.1e6,
+    first_seen_s: 0, last_seen_s: 0, count: 1, known_status: "unknown", status: null, tags: [],
+    family: null, identity_scheme: null, identity_class: null, withheld: false, explanations: [],
+    ...over,
+  } as Row;
+}
 
 /** Every `.ts` file under `dir`, as paths relative to ui/ (tests run from there). */
 function walk(dir: string): string[] {

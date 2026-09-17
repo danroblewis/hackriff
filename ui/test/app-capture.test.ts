@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  DRAG_PX, MAX_MARKS, MIN_MARK_PCT, agoText, bufferedSpan, captureWindow, coverageText, currentSpan, durationText,
+  DRAG_PX, MAX_MARKS, MIN_MARK_PCT, agoText, bandKey, bufferedSpan, captureWindow, coverageText, currentSpan, durationText,
   eventMarkTitle, eventMarks, inCoverageGap, iqBackingAt, observedFraction, overviewShade, pctForAgo,
   scrubDataNote, scrubToTime, selectionSpans, timeRegionName, timeWindowFromScrub,
   type CaptureWindow, type EventRow,
@@ -249,6 +249,54 @@ test("the band's span has no default: nothing can fall back to a constant window
   assert.doesNotMatch(src, /windowS\s*:\s*number\s*=/, "a defaulted windowS is a constant in disguise");
   assert.doesNotMatch(src, /(export )?const WINDOW_S/, "the constant itself is gone, not merely unused");
   assert.doesNotMatch(src.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, ""), /48\s*\*\s*3600/);
+});
+
+// ---- T-386: the band's CONTENT is tagged with the band it answers about --------------------
+//
+// The panel polls once a minute and used to read the frequency span *inside* that poll, so a
+// retune or a zoom left up to 60 s of the **previous band's** overview grid, coverage fraction,
+// gaps and event marks on screen, labelled as this window's. That is the window rule broken in the
+// direction that is worse than an empty surface: data that exists for some *other* window, drawn
+// as if it were this one.
+
+test("T-386 THE PROPERTY: an answer is keyed to the band it is about, so another band's answer is not this band's", () => {
+  const a = bandKey({ loHz: 100e6, hiHz: 102e6 });
+  assert.equal(a, bandKey({ loHz: 100e6, hiHz: 102e6 }), "the same tuning is the same key");
+  assert.notEqual(a, bandKey({ loHz: 915e6, hiHz: 916e6 }), "a retune is a different key");
+  assert.notEqual(a, bandKey({ loHz: 100.5e6, hiHz: 101.5e6 }), "and so is a zoom");
+  // A float that re-derives to the same tuning is not a move (the span is arithmetic over
+  // centre/rate, and re-deriving it must not look like a retune every poll).
+  assert.equal(a, bandKey({ loHz: 100e6 + 1e-7, hiHz: 102e6 - 1e-7 }));
+  assert.equal(bandKey(null), "", "nothing tuned is its own key, and never collides with a band");
+});
+
+test("T-386 THE CONTROL: the band re-asks on a frequency change and never renders the band it has left", () => {
+  const src = readFileSync("src/app/capture/index.ts", "utf8");
+  // Every frequency-scoped thing the panel draws goes through `shown()`, which is the key check.
+  assert.match(src, /const shown = \(\): BandContent \| null =>[\s\S]*?content\.key === currentKey\(\)/);
+  for (const use of [/renderBand\(shown\(\)\?\.grid/, /shown\(\)\?\.events/, /coverageText\(c\?\.fraction/, /scrubDataNote\(t\.tS, false, win, c\?\.gaps/]) {
+    assert.match(src, use, `a frequency-scoped render must read through shown(): ${use}`);
+  }
+  // None of them may keep its own long-lived copy any more: those were the stale ones.
+  assert.ok(!/let coverageFraction|let coverageGaps|let eventRows/.test(src), "no untagged frequency-scoped state survives");
+  // And the poll is restarted on a band change rather than waiting out its minute.
+  assert.match(src, /store\.select\(\(s\) => bandKey\(spanOf\(s\)\)/);
+  assert.match(src, /stopBand\(\);\s*stopBand = startPoll\(loadBand, 60_000\)/);
+  // The capture *window* is deliberately not keyed: the ring's retention is the same whatever the
+  // radio is tuned to, so `win` must stay shared rather than being thrown away on a retune.
+  assert.ok(!/win = null/.test(src), "a retune must not blank the time axis, only the band's content");
+});
+
+test("T-386 CLOCK GUARD: no clock of the browser's own reaches the capture-band modules", () => {
+  // T-393's guard, extended to the modules T-386 touched. The band already scrubs on the capture
+  // clock (`scrubToTime` takes the window's own `t1S`); this is the structural half, so a later
+  // edit cannot quietly anchor the band, its marks or its re-poll to wall time.
+  for (const f of ["src/app/capture/index.ts", "src/app/capture/timeline.ts"]) {
+    const src = readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    for (const word of ["Date.now", "performance.now", "toLocaleTimeString", "getTimezoneOffset"]) {
+      assert.ok(!src.includes(word), `${f} must not contain "${word}"`);
+    }
+  }
 });
 
 test("capture.css: the marks layer, ring track and overview canvas are drawn, and none is fixed-width", () => {

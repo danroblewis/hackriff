@@ -19,8 +19,8 @@ import type { NewSelection } from "../../selections";
 import { MARK_DROP, MARK_GATED, Waterfall } from "../../waterfall";
 import type { AppContext } from "../context";
 import { h } from "../dom";
-import { liveEdgeS, renderedInventory, setUserBand } from "../explore/inventory";
-import { selectionStoreFor } from "../explore/selections";
+import { liveEdgeS, renderedInventory, setUserBand, viewWindow, windowKey } from "../explore/inventory";
+import { selectionStoreFor, selectionsInWindow } from "../explore/selections";
 import { focusSelection, focusSignal, patchInventoryRow } from "../explore/slice";
 import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
 import { apiConnFor, backoffMs, openStream, parseSpectrumRecord, type StreamSocket } from "../net";
@@ -33,7 +33,7 @@ import {
 } from "./overlays";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor } from "./review-render";
 import { setLiveEdge } from "./slice";
-import { applyDeviceAction, geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retuneAction, setLiveView, viewHooks } from "./view";
+import { applyDeviceAction, centreView, centreViewKey, geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retuneAction, setLiveView, viewHooks } from "./view";
 
 interface StreamInfo { stream_id: string; kind: string; remote_permitted: boolean }
 
@@ -133,13 +133,18 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   const schedule = () => { if (!queued) queued = requestAnimationFrame(() => { queued = 0; render(); }); };
 
   function render() {
-    const s = store.get(), v = s.live.view, g = geometryOfLive(s.live);
+    // T-386: the overlays are placed in `centreView`, not `live.view`. Before a stream header —
+    // a replay that has not connected, a paused session, a stream that ended — `live.view` is null
+    // and this returned here having cleared every bracket, band and selection box, while the
+    // inventory beside it held rows for the very band the device reports. Placement needs a
+    // frequency window and nothing more; the tuned band is one.
+    const s = store.get(), v = centreView(s), g = geometryOfLive(s.live);
     const specPct = (wf?.specFrac ?? 0.35) * 100;
     specLayer.style.height = `${specPct}%`;
     wfLayer.style.top = `${specPct}%`;
     badge.style.top = `calc(${specPct}% + 8px)`;
     scale.textContent = wf ? timeScaleText(wf.rows, rowPeriodS(), wf) : "";
-    if (!v || !g) {
+    if (!v) {
       for (const e of bracketEls.values()) e.remove();
       bracketEls.clear();
       wfLayer.replaceChildren();
@@ -149,6 +154,10 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     }
     const focusSig = s.focus.kind === "signal" ? s.focus.id : null;
     const focusSel = s.focus.kind === "selection" ? s.focus.id : null;
+    // T-386/T-389: ONE filtered collection of selections for the sidebar list, the full-height
+    // boxes here and the timed boxes in the waterfall's render pass. `explore/index.ts` renders
+    // `listed` too, so the three cannot drift into separate predicates.
+    const sels = selectionsInWindow(s.selections.list, v, viewWindow(s));
     const seen = new Set<string>();
     // T-389: one filtered collection for the list, the brackets and the boxes. `listed` is what
     // Explore counts, so a bracket exists for exactly the rows the list shows; `boxed` is the
@@ -191,10 +200,15 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     // as a capture-time region and drawn in its render pass, beside the very rows it describes.
     // This is a data update, not a placement: the boxes carry no screen position, so this call
     // happening on the ~1 s poll (or not happening at all for a while) cannot move anything.
-    wf?.setBoxes([
-      ...presenceBoxes(rendered.boxed, g, focusSig),
-      ...selectionTimeBoxes(s.selections.list, g, focusSel),
-    ]);
+    // `g` is the stream's bin geometry: the render pass places a box across the band in texture
+    // units, which the tuned-band fallback cannot supply. With no header there is no waterfall to
+    // draw into either, so this is the one part of the layer that stays stream-gated (T-386).
+    if (g) {
+      wf?.setBoxes([
+        ...presenceBoxes(rendered.boxed, g, focusSig),
+        ...selectionTimeBoxes(sels.listed, g, focusSel),
+      ]);
+    }
 
     const layer: HTMLElement[] = [];
     const m = dc ? placeExtent(v, dc.loHz, dc.hiHz, 0.002) : null;
@@ -211,7 +225,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     // **untimed** ones are here: a frequency-only selection has no time axis to sit on, so it is
     // full height and cannot drift. A timed one went into the render pass above (T-362), and a
     // right-click over it resolves the same way one over a Confirmed band box does — by frequency.
-    for (const b of selectionBoxes(s.selections.list, v, focusSel)) {
+    for (const b of selectionBoxes(sels.listed, v, focusSel)) {
       const e = h("div", { class: `c-sel${b.active ? " active" : ""}${b.pending ? " pending" : ""}`, "data-id": b.id });
       place(e, b);
       layer.push(e);
@@ -624,6 +638,11 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
   store.select((s) => s.inventory.rows, schedule);
   store.select((s) => s.focus, schedule);
   store.select((s) => s.selections.list, schedule);
+  // T-386: the overlay layer now falls back to the tuned band when no header has arrived, and the
+  // selections it draws are window-scoped — so a device answer and a moving time window both change
+  // what this renders, and neither reaches it through `live.view`.
+  store.select(centreViewKey, schedule);
+  store.select(windowKey, schedule);
   store.select((s) => s.nav.seq, () => {
     const s = store.get();
     if (s.nav.gotoHz === null) return;

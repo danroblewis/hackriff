@@ -5,13 +5,20 @@
 // one-off burst is a row with its own timespan rather than something that had to be a live
 // candidate to be recorded. Nothing here filters by what a signal "is": the backend's `/api/events`
 // answer is the catalogue, and this file chooses the box and draws the answer.
+//
+// T-386 — **this surface does not follow the view window, on purpose**, and the reasoning is in
+// `catalogue.ts` beside `INDEPENDENT_PERIOD_NOTE`. Two things follow from that decision and are
+// implemented here: the surface *states* which window it answers about, standingly; and the period
+// it opens on ends at the **capture clock's** live edge rather than `Date.now()`.
 import { fmtT, fromUtcInput, utcInput } from "../../history";
 import type { AppContext, AreaMounts, MountFn } from "../context";
 import { h } from "../dom";
 import { apiErrorText } from "../explore/format";
+import { liveEdgeS } from "../explore/inventory";
 import { focusSignal, setMode } from "../state";
 import {
-  defaultRegion, emptyText, eventRowView, eventsQuery, lastedText, summaryText, trackQuery,
+  INDEPENDENT_PERIOD_NOTE, defaultRegion, defaultRegionNote, emptyText, eventRowView, eventsQuery,
+  lastedText, summaryText, trackQuery,
   type CataloguePage, type CatalogueEmitter, type PresenceTrack, type Region,
 } from "./catalogue";
 
@@ -34,6 +41,9 @@ class CatalogueSurface {
   private readonly state = h("select", { "aria-label": "Rows" }, ...STATES.map((s) => h("option", { value: s.value }, s.label)));
   private readonly note = h("div", { class: "hist-note hint" });
   private readonly coverage = h("div", { class: "hist-note hint" });
+  /** T-386: the standing statement of which window this surface answers about. Always shown —
+   * never only when the list is empty — because the claim is about the surface, not the answer. */
+  private readonly scope = h("div", { class: "hist-note hint" }, INDEPENDENT_PERIOD_NOTE);
   private readonly list = h("div", { class: "hist-list" });
   private readonly more = h("button", { class: "mini", type: "button", hidden: true, onclick: () => void this.load(true) }, "Load more");
   private readonly root: HTMLElement;
@@ -51,20 +61,31 @@ class CatalogueSurface {
         h("label", {}, "To (UTC)", this.t1),
         h("label", {}, "Rows", this.state),
         h("button", { class: "mini", type: "submit" }, "Show")),
-      this.note, this.coverage, this.list, this.more);
+      this.scope, this.note, this.coverage, this.list, this.more);
   }
 
   el(): HTMLElement { return this.root; }
 
-  /** First switch to the surface fills the form from what is already on screen and loads. */
+  /**
+   * First switch to the surface fills the form from what is already on screen and loads.
+   *
+   * The period ends at the **capture clock's** live edge, not the browser's (T-386): this surface
+   * used to open on `Date.now()`, so on a capture running away from wall time it opened on a day
+   * the receiver was never switched on for. With no capture clock reported it opens on no period at
+   * all and says so — an unfilled form is honest, an invented day is not.
+   *
+   * `loaded` latches only on success, so waiting for the clock is not a one-shot: the caller calls
+   * this again when a band or a live edge is first reported, and a surface the user opened early
+   * fills itself in rather than sitting on its own excuse until the page is reloaded.
+   */
   activate() {
     if (this.loaded) return;
-    this.loaded = true;
     const s = this.ctx.store.get();
-    const r = defaultRegion({ live: s.live.view, device: s.device }, Date.now() / 1000);
-    if (r) this.fill(r);
-    if (r) void this.load();
-    else this.note.textContent = "Tune the receiver, or type a region and period.";
+    const d = defaultRegion({ live: s.live.view, device: s.device }, liveEdgeS(s));
+    if (d.kind !== "region") { this.note.textContent = defaultRegionNote(d); return; }
+    this.loaded = true;
+    this.fill(d.region);
+    void this.load();
   }
 
   private fill(r: Region) {
@@ -156,7 +177,12 @@ class CatalogueSurface {
 const mountCatalogue: MountFn = (el, ctx) => {
   const surface = new CatalogueSurface(ctx);
   el.replaceChildren(surface.el());
-  ctx.store.select((s) => s.mode, (mode) => { if (mode === "history") surface.activate(); }, { immediate: true });
+  const activateHere = () => { if (ctx.store.get().mode === "history") surface.activate(); };
+  ctx.store.select((s) => s.mode, activateHere, { immediate: true });
+  // T-386: and again when a capture clock or a band is first reported. Opening this surface before
+  // the first `/api/timeline` answer used to leave it permanently on "no period"; it now fills in
+  // the moment there is an honest period to fill it with.
+  ctx.store.select((s) => `${liveEdgeS(s)}|${s.live.view?.loHz}|${s.device.centerHz}`, activateHere);
 };
 
 export const mounts: AreaMounts = { catalogue: mountCatalogue };
