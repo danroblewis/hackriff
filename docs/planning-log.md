@@ -4037,3 +4037,111 @@ direction from a fragment: once successfully from a `CLAUDE.md` diff, once — h
 frame that was not theirs. The docs now carry a "superseded framing" line so the wrong version cannot
 be mistaken for a decision, and I should say plainly which part of a truncated message I actually
 received rather than writing around the gap.
+
+### B0.667 — the UI-only merge gate, and three surfaces that were right to be live-only (2026-09-16)
+
+**Process change, user-approved and now in `CLAUDE.md` + docs/10.** A merge touching **only** `ui/` and
+**neither `crates/` nor `docs/api.md`** is gated on `just lint` + `just test-ui` alone. The reasoning
+is architectural rather than expedient: all signal logic lives in the backend, the backend is
+contract-tested (T-079), and **no acceptance test drives the browser** — the e2e suites run through the
+device interface. A ui-only change therefore cannot move the Rust signal path, and running those
+suites against one proves nothing while costing minutes per iteration.
+
+I added one line the user did not ask for, and it is the honest half: **this gate does not cover a
+client asking the backend for the wrong thing — and neither did the full one.** Contract tests assert
+the *server* serves a route correctly, not that the client calls it correctly. T-367's time navigator
+requested `/api/timeline` with no band at all and drew an empty canvas **with every suite green**. So
+the old gate was already giving false comfort here, and the guard belongs in `ui/test`: assert the
+**request** the client builds, not only the response it renders. T-367 added exactly that, T-389
+generalised it.
+
+**T-387 merged under the full gate** (it touched `crates/hk-cli`), and the prior question was most of
+the answer: **three of the four surfaces are legitimately live-only.** A pipelines list answers *which
+decoder processes exist in this run* — a process is running or it is not, and there is no past-window
+form to invent. The status feed is decoder telemetry, stored verbatim but **indexed by nothing**, and
+a lock from an hour ago is not that stage's state. The outputs dock is session state: a socket this
+tab holds cannot exist in a window an hour ago, and there would be nothing there to stop.
+
+**Being live-only is not the bug; looking windowed while being live-only is** — the same class as
+T-385's false deletion and T-389's wall-clock query. Each surface now declares itself through one
+shared note whose only inputs are the subject and Play/Pause, with a test pinning that it never
+depends on whether the panel is empty, so an emptiness can never read as the window's answer.
+
+Only the packet inspector re-derives, and it needed **no contract change**:
+`/api/captures/{id}/frames?from_t&to_t` already carried the window, and `docs/api.md` had **already**
+named it the right route for the inspector's own scrubbing — a line T-384 wrote while deciding
+something else. What changed is that the boundary is now written down rather than rediscovered: *a
+stream carries the live edge; a window is a query and belongs to the API that owns the index; a
+surface that cannot be windowed must declare itself live-only.*
+
+**T-391 merged** (`691d330`) and the inner track mattered more than the outer bar: `.fn-track` was a
+hard-coded `top:5px; height:12px` sliver, so T-367's frequency-scoped overview and T-368's
+coverage-backed survey strip were drawing real data into a 12 px strip near the top of an already-thin
+30 px bar. Two tasks' work, present and invisible. Both bars are now 92 px and the track fills them.
+The collapse interaction was **decided rather than incidental** — thickness follows the Capture
+panel's expanded size and stays there, pinned by a control asserting the two CSS rules differ in
+exactly one position at both breakpoints.
+
+**The capture-clock bug has now been found four times in one day** — T-379 (a window 306,315 s out),
+T-384 (three sites in `plots.ts`), T-389 (the live Confirmed query naming no live edge), and T-387 had
+to prove it was avoiding it. The T-393/T-395 brief forbids a fifth in the navigator readouts, where it
+would be worst: the user would *read* a wall-clock time and believe it. **If it appears again I should
+stop fixing instances and make it unrepresentable** — a capture-clock type the formatters demand,
+rather than a number anything can supply.
+
+**T-393 + T-395 launched as one worktree and one merge**, at the user's request, under the new gate.
+The brief's sharp edge is T-393 part (3): it describes what a frequency region-select *would do*, and
+**T-392 is in flight changing exactly that**. The agent is told to check which behaviour the build has
+when it writes the readout rather than assume, and never to promise behaviour the build lacks.
+
+### B0.668 — T-390: a centre tested against a mean, and the symptom that was not the bug (2026-09-16)
+
+Merged at `4521287`. The brief asked which layer owned the over-split — detection or dedup — and
+demanded evidence. The answer came from the **detection** table rather than the emitter table, which is
+the part I would not have thought to specify.
+
+Around the confirmed 101.2988 MHz station (continuous 1000 ms components, 140 kHz, SNR 22–26 dB) the
+detector also emits **6 ms, 1–3 bin components at SNR 3.7–7.6 dB**, *in the very frames the parent's
+full-width component is reported*. Twelve to twenty-nine dB below their parent, one to two frames
+against its 45 s. One emission's spectrum cut up — not emitters.
+
+**Dedup could not be the layer, and its refusal is a feature.** Its guard rejects this geometry
+deliberately: narrow-inside-wide gives *"bandwidth ratio beyond tolerance"*, an offset staircase gives
+*"separated −3 dB extents"* — and that refusal is exactly what protects a real subcarrier and what
+T-233 forbids loosening. Asking dedup to clean up a segmentation error would have meant weakening the
+thing standing between us and merging two genuine emitters.
+
+**The hole:** `inband_fragment` tested the fragment's **centre** for containment in the host span, but
+that span is built from the host's **mean** threshold-crossing offsets (EWMA'd). **Skirt flicker *is*
+the frames where the emission crossed threshold further out than that mean** — so the box lands astride
+the edge and its centre falls outside about as often as inside. Three measured boxes against the
+99.6994 station's mean lower crossing all reach back into the emission and all are centred outside it.
+The fix requires the fragment's **band** to overlap, with **no new constant** — the reach is the
+fragment's own measured width, which is what the doc already claimed the rule did. And the new test was
+verified to **fail** on the old rule.
+
+**The honest half is better than the fix.** The 99.86/99.87/99.91 trio the user actually reported is
+**not this bug**: that band sits 0.3 dB over its own running-median baseline, the 2026-09-13 20 Msps
+capture of the same site shows no emission at 99.9 MHz, and 99.86 is 161 kHz above the 99.69 station —
+outside any plausible WFM skirt (Carson ±128 kHz). Either a weak emission neither capture can see, or
+false alarms in the baseband-filter transition. **Settling it needs the device.** An agent that fixed
+a real defect and then said plainly that it was not the user's reported symptom is doing the job right.
+
+Two findings filed rather than folded in, and the first is the dangerous one: `relate.rs` calls
+`xdb_bandwidth_hz` the **−3 dB extent** in its module doc, in `RowEvidence::xdb_freq` and in the
+literal verdict string — but `DetectorConfig::xdb_level_db = 10.0`, so it is the **−10 dB** extent.
+Wider extents make `distinguishing_evidence` **less** likely to declare two rows separated, i.e. the
+guard is **more merge-happy than documented**, which is the T-233-dangerous direction.
+
+**T-396 launched** for the user's diff-aware `just gate`, superseding the prose rule from B0.667. Its
+governing principle is the repo's own: **classification fails closed** — anything unrecognised runs
+the full gate, never the cheapest. Three cases a naive implementation gets wrong are named: `fixtures/`
+(acceptance reads them), and the `justfile` and `.github/`, because **they are the gate** and a change
+to them must be verified by the expensive path or the gate can weaken itself.
+
+**A fourth truncated message.** Item (A) and half of (B)/(C) never arrived. (D) — no confirmation
+button, retune on release — went straight to T-392 mid-build, with the note that removing a
+confirmation makes T-340's no-retune-on-pan control *more* load-bearing, not less. (B)/(C) are filed as
+**T-397**, explicitly marked as needing confirmation before anyone builds from a fragment. I have now
+reconstructed user direction from partial messages four times today; once I inferred a frame that was
+not theirs (B0.666), and the correction cost a doc rewrite.
