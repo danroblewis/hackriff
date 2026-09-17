@@ -4811,6 +4811,44 @@ emptied, so it costs nothing and prevents the next round.
 live path. Its exit criterion is the user's: *it convincingly replaces both edge scrubbers and the
 separate history view.*
 
+### B0.681 — MCANVAS: the canvas becomes a milestone, and the decomposition is a serial chain (2026-09-17)
+
+The user went **all-in** on docs/16 §8: make it a milestone, decompose the full ticket set now, point
+all builder capacity at it, and start no new non-canvas work. `docs/11` gains the **MCANVAS** row;
+`docs/tasks.yaml` gains **T-438…T-445**, joining **T-434** (de-welded levels) and **T-437** (the spike),
+both retagged into it.
+
+**The decomposition, and the reason each ticket carries a specific old scar.** These are not generic
+briefs — every one names the lesson it is most likely to violate, because this milestone rebuilds
+surfaces whose defects are already catalogued:
+
+- **T-440** (the renderer core) is told to reuse `cmap.ts`'s single `CMAP_STOPS` array — which T-397
+  created *precisely so the shader and the strips could not diverge*. One renderer must not
+  reintroduce two colormaps, which is the exact failure it exists to end.
+- **T-442** (the pane model) must not reintroduce a run-wide pause flag: T-347 retired one **today**
+  on the grounds that a run-wide boolean cannot represent N viewers, and made the client's `time.live`
+  the single mechanism.
+- **T-444** (retune-on-pan) inherits T-407's two ways a finger could retune the radio — a 6 px mouse
+  threshold making a fat-fingered tap a drag, and travel measured as `clientX + clientY` so a stroke
+  *across* a bar counted as travel *along* it — both latent until a confirmation step was removed.
+- **T-445** (the cutover) must show each retired defect is **unreachable**, not merely absent.
+
+**The finding worth recording: the set is a serial chain.** T-434 → T-438 → T-440 → everything else.
+All eight new tickets are gated, directly or transitively, on the de-welding landing. So "point all
+capacity here" is **capacity-limited by a dependency, not by agents** — adding builders would only
+duplicate T-437, which is already exploring the client half against a stubbed tile source.
+
+The response was coordination rather than fake parallelism: **T-434 was asked to land the minimum that
+unblocks T-438** and split the remainder out (a smaller diff that unblocks nine tickets beats a
+complete one tomorrow), while keeping the disk measurement, which is its own deliverable and which
+T-438 needs *before* it hardens an addressing scheme. And **T-437 was told its negative results now
+feed eight filed tickets** — if the shared-LRU key is wrong, if the sustainable pane count is lower
+than §8 assumes, or if the minimap's cost is not negligible, those are the most valuable things it can
+return, and partial findings beat a complete report.
+
+**Frozen, per the directive:** no new non-canvas work. T-431 (the `duty` estimator at both thresholds)
+finishes as a cheap in-flight ticket; T-430 + T-433 is gate-health, which unblocks everything.
+
 ## Open for the user (current)
 
 Kept current by the coordinator; the planning-phase list near the top of this file is the 2026-09-13
