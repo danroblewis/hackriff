@@ -1771,6 +1771,18 @@ impl AttentionService {
                     "f_lo": lo,
                     "f_hi": hi,
                     "cal": e.state.key.cal,
+                    // T-371: the row names the bias-tee cohort its numbers belong to. T-359 split
+                    // the cohorts, so one subject at one slot can hold two pools with different
+                    // numbers, both correct; without this field the two rows are identical on the
+                    // wire and the disagreement reads as the system being inconsistent.
+                    //
+                    // Always present, as one of the three states, exactly as `/api/baselines`
+                    // renders the same key: `"unknown"` is a **cohort**, not a gap. It is what
+                    // every pre-T-359 baseline and every source that cannot report the state
+                    // carries, so omitting it or writing a null would invite the reader to coerce
+                    // the commonest value to `"off"` — the claim `BiasTee::powered` exists to
+                    // refuse. The string, never `powered()`, for exactly that reason.
+                    "bias_tee": e.state.key.bias_tee.as_str(),
                     "maturity": m,
                     "mixed": sub.mixed,
                     "gain_states": sub.gains.len(),

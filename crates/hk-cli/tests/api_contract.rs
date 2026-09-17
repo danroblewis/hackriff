@@ -5548,6 +5548,19 @@ fn attention_sites_baselines_candidates_and_weights_answer_as_documented() {
         is_array(&v["subjects"]) && v["truncated"] == json!(false),
         "{v}"
     );
+    // T-371: a slots row names the bias-tee cohort its numbers belong to, so two rows for one
+    // subject and slot that differ only in the tee state are told apart on the wire. The served
+    // value is always one of the three states: never omitted, never a null and never a bool, so
+    // nothing on this route lets a reader coerce `unknown` — the commonest cohort, and the one
+    // every pre-T-359 baseline carries — into `off`. (A fresh site has no baselines, so this
+    // server serves no rows; the values are asserted against real folds in
+    // `hk_pipeline::occupancy::tests::slots_rows_name_their_bias_tee_cohort_and_legacy_reads_unknown`.)
+    for r in v["subjects"].as_array().into_iter().flatten() {
+        assert!(
+            matches!(r["bias_tee"].as_str(), Some("unknown" | "off" | "on")),
+            "{r}"
+        );
+    }
     let (st, _) = get(addr, "/api/baselines/slots?f_lo=100000000");
     assert_eq!(st, 400);
     let (st, v) = post(addr, "/api/baselines/refreeze", "{}");

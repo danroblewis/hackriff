@@ -2185,6 +2185,110 @@ mod tests {
         }
     }
 
+    /// T-371: a `/api/baselines/slots` row **names the cohort its numbers belong to**.
+    ///
+    /// T-359 split occupancy cohorts by bias-tee state, so one site × subject × slot can now
+    /// legitimately hold two pools with different numbers, both correct. The slots row carried
+    /// only `cal`, so those pools served two rows **identical on the wire**: a reader saw two
+    /// indistinguishable rows disagreeing and had nothing to resolve it with — which reads as the
+    /// system being inconsistent, not as two cohorts. The row now carries `bias_tee`.
+    ///
+    /// The three runs differ in **nothing but the tee**: same site, same channel, same floor, same
+    /// gain state, same calibration, same slot (the folds all land at [`T359_T0`]).
+    ///
+    /// - **Property:** rows folded under `On` and under `Off` are distinguishable on the wire, by
+    ///   value — same `subject`, same `f_lo`/`f_hi`, different `bias_tee`.
+    /// - **Control (literal legacy bytes):** a row stored before T-359 — its JSON with the
+    ///   `bias_tee` field *removed*, not nulled, exactly as T-359 built its migration control —
+    ///   still renders, in the `unknown` cohort. `unknown` is a value the route always states, not
+    ///   an omission and not a null: nothing on this path lets a reader coerce it.
+    /// - **The negative that matters:** the legacy rows are derived from the **`On`** run, so a
+    ///   `powered().unwrap_or(false)` anywhere between the key and the wire would show up here
+    ///   twice over — as a third `off` row, and as the disappearance of the `unknown` cohort.
+    ///   Exactly one row reads `off`, and it is the one measured with the tee off.
+    #[test]
+    fn slots_rows_name_their_bias_tee_cohort_and_legacy_reads_unknown() {
+        use hk_model::BiasTee;
+
+        let on = t371_rows(BiasTee::On);
+        let off = t371_rows(BiasTee::Off);
+        // The pre-T-359 wire form of an `on` row: the field absent, never a null.
+        let legacy: Vec<OccupancyStat> = on
+            .iter()
+            .map(|r| {
+                let mut v = serde_json::to_value(r).unwrap();
+                assert_eq!(v["bias_tee"], serde_json::json!("on"), "{v}");
+                v.as_object_mut().unwrap().remove("bias_tee");
+                assert!(v.get("bias_tee").is_none(), "removed, not nulled: {v}");
+                serde_json::from_value::<OccupancyStat>(v).unwrap()
+            })
+            .collect();
+        assert!(!on.is_empty() && !off.is_empty() && !legacy.is_empty());
+
+        let a = crate::attention::AttentionService::in_memory().unwrap();
+        a.set_current_site(crate::attention::SiteSelect {
+            name: Some("bench".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let span_end = ts(T359_T0 + T359_SECS * T_CELL);
+        for rows in [&on, &off, &legacy] {
+            let mut rows = rows.clone();
+            stamp_site(&a, &mut rows, span_end);
+            a.ingest_interval(&rows, 0, span_end, BTreeMap::new());
+        }
+
+        let slots = a.slots_json(None, 0.0, 1e9, None, None).unwrap();
+        let rows = slots["subjects"].as_array().unwrap();
+        // One subject, one site: every row here is the same measurement under a different tee
+        // state, which is the whole point — the cohort is the only thing that separates them.
+        let subject = &rows[0]["subject"];
+        for r in rows {
+            assert_eq!(&r["subject"], subject, "one subject: {slots}");
+            assert_eq!(r["f_lo"], rows[0]["f_lo"], "one extent: {slots}");
+            assert_eq!(r["f_hi"], rows[0]["f_hi"], "one extent: {slots}");
+            assert_eq!(r["cal"], rows[0]["cal"], "one calibration: {slots}");
+        }
+        let cohorts: Vec<&str> = rows
+            .iter()
+            .map(|r| {
+                r["bias_tee"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("every row states its cohort: {r}"))
+            })
+            .collect();
+        println!("T-371 slots cohorts for one subject: {cohorts:?}");
+        assert_eq!(
+            cohorts.iter().filter(|c| **c == "on").count(),
+            1,
+            "the tee-on run: {slots}"
+        );
+        assert_eq!(
+            cohorts.iter().filter(|c| **c == "off").count(),
+            1,
+            "only the run measured with the tee off reads off: {slots}"
+        );
+        assert_eq!(
+            cohorts.iter().filter(|c| **c == "unknown").count(),
+            1,
+            "the pre-T-359 row renders, as unknown — not blank, not off: {slots}"
+        );
+        assert_eq!(cohorts.len(), 3, "three cohorts, three rows: {slots}");
+        // On the wire the cohort is a state, never a bool and never a null a reader could read as
+        // off, and never absent (`BiasTee::powered()` is `None` for unknown, not `Some(false)`).
+        for r in rows {
+            assert!(
+                !r["bias_tee"].is_null() && !r["bias_tee"].is_boolean(),
+                "{r}"
+            );
+        }
+    }
+
+    /// Channel rows from one [`t359_rows`] run held at `bias` throughout.
+    fn t371_rows(bias: hk_model::BiasTee) -> Vec<OccupancyStat> {
+        t359_rows(&format!("t371-{}", bias.as_str()), |_| bias)
+    }
+
     // T-314: the per-front-end guarantee reaches the measurement, not just the key.
 
     const T314_SECS: i64 = 256;
