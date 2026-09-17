@@ -784,13 +784,19 @@ impl Tracker {
 
     /// T-109: summaries of the open, confirmed tracks whose inventory fate is settled enough to
     /// offer before they close, into `out` (cleared first; summaries are built only for these):
-    /// at least `min_bursts` bursts, no hop link and no hop set, formed or pending (a member's
+    /// at least `min_bursts` bursts **or** at least `min_on_air_s` of air (T-403 — see
+    /// [`Tracker::offerable_live`]), no hop link and no hop set, formed or pending (a member's
     /// inventory row is its hop set's), and not an in-band fragment of a live or recently closed
     /// continuous host (the T-101 rule, evaluated now against the live host set).
-    pub fn live_offers_into(&self, min_bursts: u64, out: &mut Vec<TrackSummary>) {
+    pub fn live_offers_into(
+        &self,
+        min_bursts: u64,
+        min_on_air_s: f64,
+        out: &mut Vec<TrackSummary>,
+    ) {
         out.clear();
         for i in 0..self.slots.len() {
-            if self.offerable_live(i, min_bursts) {
+            if self.offerable_live(i, min_bursts, min_on_air_s) {
                 out.push(self.summary(i, None));
             }
         }
@@ -799,11 +805,20 @@ impl Tracker {
     /// The predicate [`Tracker::live_offers_into`] and [`Tracker::live_extents_into`] share, so the
     /// fast extent of a track can never describe one the slow offer would not have made an entry
     /// for.
-    fn offerable_live(&self, i: usize, min_bursts: u64) -> bool {
+    ///
+    /// **T-403 added the `min_on_air_s` alternative to the burst count**, and it is the clause a
+    /// continuous carrier passes. A broadcast station is *one long burst*, so it never reaches
+    /// `min_bursts` however long it transmits: before T-403 it was never offered, its inventory row
+    /// came from a chain if one claimed it, and if none did — a mode the chain rejected, an
+    /// admission race lost — it had no row at all until its track idled out. The two clauses ask
+    /// the same question of different emitters: several bursts is evidence for a repeating one,
+    /// seconds of unbroken air is evidence for a continuous one. Every other clause (live, not
+    /// tentative, no hop link or set, not an in-band fragment) is unchanged and applies to both.
+    fn offerable_live(&self, i: usize, min_bursts: u64, min_on_air_s: f64) -> bool {
         let s = &self.slots[i];
         s.live
             && !s.tentative
-            && s.bursts >= min_bursts
+            && (s.bursts >= min_bursts || s.on_ns as f64 / NS >= min_on_air_s)
             && s.hop_links == 0
             && s.hop_set.is_none()
             && !self.inband_fragment(i, true)
@@ -2455,6 +2470,20 @@ impl Tracker {
         let horizon = match (period, closed) {
             (Some(p), _) => s.t_last_start + (p.period_s * NS) as i64,
             (None, Some(CloseCause::Idle | CloseCause::Capacity)) => s.t_last_end,
+            // T-403: an **open** track with a burst still in flight is not silent between the last
+            // reported end and the clock — it is mid-burst, and the detector simply has not cut the
+            // record yet (`flush_one` holds a group for `hold_frames`). `on_ns` can only count
+            // bursts that have been reported, so charging the unreported tail to the denominator
+            // makes a continuously-transmitting emitter's duty cycle read 0.80, 0.86, 0.89, 0.91 …
+            // — climbing to 1 as a fixed lag is divided by a growing window. A signal that never
+            // stops would then become "continuous" only once you had watched it long enough, which
+            // is an outcome tracking elapsed recording time rather than the evidence.
+            //
+            // `cur.is_some()` is exactly "a burst is open" — the same fact the idle rule reads to
+            // decide a track has gone quiet. When no burst is open the silence since `t_last_end`
+            // is real evidence and the clock is the right horizon, so a bursty emitter that has
+            // stopped is unaffected.
+            (None, None) if s.cur.is_some() => s.t_last_end,
             (None, _) => self.now.max(s.t_last_end),
         }
         .max(s.t_last_end);
@@ -2525,6 +2554,7 @@ impl Tracker {
                 0.0
             },
             confirmed_detections: s.confirmed,
+            bin_hz: s.bin_hz,
             next_burst_eta: period
                 .map(|p| Timestamp::from_unix_nanos(s.t_last_start + (p.period_s * NS) as i64)),
             closed,

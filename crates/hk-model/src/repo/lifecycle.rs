@@ -233,6 +233,79 @@ impl Repository {
         }))
     }
 
+    /// T-403: records that an **already-Confirmed** entry's evidence has strengthened — the same
+    /// state, a better reason — as a new append-only row.
+    ///
+    /// Why the reason has to be able to strengthen: an entry is confirmed by whichever rule is
+    /// satisfied first, and the rules are not satisfied at the same time. A continuous emission's
+    /// occupancy evidence is complete about two seconds in; a demodulator's pilot lock needs a
+    /// window of signal and lands later, and *how much* later depends on how loaded the host is.
+    /// Without this the recorded reason is whichever route happened to arrive first, so the same
+    /// capture explains itself as "continuous and trusted" on a busy machine and "verified wfm
+    /// emission: 19000 Hz subcarrier locked" on an idle one. Nothing about the signal differs.
+    ///
+    /// **It is not a state change and it never invents one.** The row carries `state == previous`,
+    /// so a reader counting transitions filters it out and a reader asking "why is this confirmed"
+    /// takes the latest row and gets the best answer the run ever had. The *time* an entry was
+    /// confirmed stays the first transition into [`LifecycleState::Confirmed`]; only the
+    /// explanation moves. `Ok(None)` when the entry is not in `state`, when the reason is
+    /// unchanged, or when the state is not one whose evidence accrues (only `Confirmed` is).
+    ///
+    /// Ranking the reasons is the caller's: this records what it is told, like every other
+    /// lifecycle write.
+    pub fn restate_emitter_lifecycle(
+        &mut self,
+        id: EmitterId,
+        author: LifecycleAuthor,
+        actor: &str,
+        reason: &str,
+        t: Timestamp,
+    ) -> Result<Option<LifecycleChange>, RepoError> {
+        check_text("actor", actor)?;
+        check_text("reason", reason)?;
+        let tx = self.write_tx()?;
+        let not_found = || RepoError::NotFound {
+            kind: "emitter",
+            id: id.to_string(),
+        };
+        let live = super::cluster::live_id(&tx, id)?.ok_or_else(not_found)?;
+        let state = state_of(&tx, live)?;
+        if state != LifecycleState::Confirmed {
+            return Ok(None);
+        }
+        let current: Option<String> = tx
+            .prepare_cached(
+                "SELECT reason FROM emitter_lifecycle WHERE emitter_id = ?1                  ORDER BY t DESC, rowid DESC LIMIT 1",
+            )?
+            .query_row(params![blob(live)], |r| r.get(0))
+            .optional()?;
+        if current.as_deref() == Some(reason) {
+            return Ok(None);
+        }
+        tx.prepare_cached(
+            "INSERT INTO emitter_lifecycle (emitter_id, state, previous, author, actor, reason, t)              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?
+        .execute(params![
+            blob(live),
+            enum_text(&state)?,
+            enum_text(&state)?,
+            enum_text(&author)?,
+            actor,
+            reason,
+            t.as_unix_nanos()
+        ])?;
+        tx.commit()?;
+        Ok(Some(LifecycleChange {
+            emitter_id: live,
+            state,
+            previous: state,
+            author,
+            actor: actor.to_owned(),
+            reason: reason.to_owned(),
+            t,
+        }))
+    }
+
     /// Current lifecycle state of an emitter (a merged id reads its survivor's).
     pub fn emitter_lifecycle_state(&self, id: EmitterId) -> Result<LifecycleState, RepoError> {
         let live = super::cluster::live_id(&self.conn, id)?.ok_or_else(|| RepoError::NotFound {

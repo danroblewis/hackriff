@@ -153,6 +153,17 @@ pub struct TrackSummary {
     pub suspect_fraction: f64,
     /// Member detections confirmed as emitter candidates (at emission or later).
     pub confirmed_detections: u64,
+    /// T-403: the analysis resolution the track's members were measured at, Hz — the detector's own
+    /// frequency bin, taken as the narrowest any member was measured at.
+    ///
+    /// It is the scale [`Track::bandwidth_hz`] has to be read against, because the tracker floors a
+    /// member's width at one bin (`width = obw.max(bin_hz)`). **A receiver-generated line is CW**: a
+    /// reference harmonic, an LO relative, a clock harmonic or a comb tooth carries no modulation,
+    /// so the only width it can show is the analysis window's own. A bandwidth expressed in bins is
+    /// therefore what separates a modulated emission from the receiver's own line without a list of
+    /// frequencies to maintain — which is the same reason T-394 measured the receiver's cyclic lines
+    /// instead of listing them.
+    pub bin_hz: f64,
     /// `last start + period`, when periodic.
     pub next_burst_eta: Option<Timestamp>,
     /// Why it closed, if it has.

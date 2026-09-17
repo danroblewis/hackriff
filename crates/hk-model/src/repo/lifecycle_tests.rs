@@ -284,3 +284,95 @@ fn t078_recurrence_from_the_observation_ledger() {
     assert_eq!(rec.recent[0].time.start, t(8.0));
     assert_eq!(rec.recent[0].count, 30);
 }
+
+/// T-403: a confirmation's **reason** may strengthen; its **state** and its **time** may not.
+///
+/// An entry is confirmed by whichever rule is satisfied first, and the rules are not satisfied at
+/// the same moment — occupancy evidence is complete seconds before a demodulator can report a
+/// lock, and how much before depends on how loaded the host is. Without this the recorded
+/// explanation is whichever route won a race, so the same capture explains itself differently on a
+/// busy machine than on an idle one.
+#[test]
+fn t403_a_confirmations_reason_strengthens_without_inventing_a_state_change() {
+    let mut r = repo();
+    let s = stored_track(&mut r, 101.3e6, tr(0.0, 14.0), 1.0, 14);
+    let id = r.record_sighting(&s, None).unwrap().emitter_id;
+    r.change_emitter_lifecycle(
+        id,
+        LifecycleState::Confirmed,
+        LifecycleAuthor::Auto,
+        "hk-pipeline/confirm@1",
+        "continuous and trusted",
+        t(2.0),
+    )
+    .unwrap()
+    .expect("the first sufficient evidence confirms it");
+
+    // The stronger reason is recorded as a new row, and it is the one a reader of "why" sees.
+    let up = r
+        .restate_emitter_lifecycle(
+            id,
+            LifecycleAuthor::Auto,
+            "hk-pipeline/confirm@1",
+            "verified wfm emission",
+            t(3.0),
+        )
+        .unwrap()
+        .expect("a stronger reason is recorded");
+    assert_eq!(up.state, LifecycleState::Confirmed);
+    assert_eq!(
+        up.previous,
+        LifecycleState::Confirmed,
+        "state == previous, so a reader counting transitions filters it out"
+    );
+    let h = r.emitter_lifecycle_history(id).unwrap();
+    assert_eq!(h.len(), 2, "append-only: the first reason is still there");
+    assert_eq!(h[0].reason, "continuous and trusted");
+    assert_eq!(h[1].reason, "verified wfm emission");
+    assert_eq!(
+        h.iter()
+            .find(|c| c.state == LifecycleState::Confirmed)
+            .unwrap()
+            .t,
+        t(2.0),
+        "time-to-Confirmed is the first transition and does not move"
+    );
+    assert_eq!(
+        r.emitter_lifecycle_state(id).unwrap(),
+        LifecycleState::Confirmed
+    );
+
+    // The same reason again is not a change, so nothing accumulates on a repeating review.
+    assert!(
+        r.restate_emitter_lifecycle(
+            id,
+            LifecycleAuthor::Auto,
+            "hk-pipeline/confirm@1",
+            "verified wfm emission",
+            t(4.0),
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(r.emitter_lifecycle_history(id).unwrap().len(), 2);
+
+    // A candidate has no confirmation to restate: this never confirms anything by itself.
+    let s2 = stored_track(&mut r, 99.5e6, tr(0.0, 14.0), 1.0, 14);
+    let other = r.record_sighting(&s2, None).unwrap().emitter_id;
+    assert!(
+        r.restate_emitter_lifecycle(
+            other,
+            LifecycleAuthor::Auto,
+            "hk-pipeline/confirm@1",
+            "verified wfm emission",
+            t(4.0),
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        r.emitter_lifecycle_state(other).unwrap(),
+        LifecycleState::Candidate
+    );
+    assert!(r.emitter_lifecycle_history(other).unwrap().is_empty());
+}
