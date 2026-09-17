@@ -8372,6 +8372,29 @@ tasks:
       to reach for before loosening a threshold.
       Report the false-confirm rate against ADR-0016 section 7 and run
       just acceptance-milestones. No floor moves.
+      MERGED AND REVERTED (coordinator, 2026-09-16, main green at 0465926). The work
+      is good and the latency result stands - 14.00 s to 3.00 s on all five seeds - but
+      ROUTE B RACES T-398's ROUTE C. I gated the branch (acceptance 48 passed), committed,
+      and the same 48 tests then gave 47 passed / 1 failed on main:
+      confirm_latency::t398_pilot_locked_wfm_confirms_within_seconds - "with no RDS on air
+      the only available route is the verified emission", got "continuous and trusted".
+      Same code, different outcome across two runs: the routes race and route B sometimes
+      reaches Confirmed first on a PILOT-LOCKED station.
+      WHY THIS IS DESIGN, NOT A TEST TO UPDATE: T-398's assertion encodes an intent - a
+      pilot-locked WFM station should be confirmed BY ITS PILOT LOCK, which is positive
+      evidence that it IS WFM. Route B confirms on continuity + width + zero-suspect,
+      which is real but WEAKER IN KIND: "something modulated has been on air steadily",
+      not "this is an FM broadcast station". If B wins the race, the reason recorded on
+      the emitter is the weaker one even when the stronger was available.
+      AND THE "NO SECOND TICKET" CONCLUSION IS CONTRADICTED BY MEASUREMENT: with T-402's
+      realistic 75 kHz-deviation scene on top of this branch, confirm is 3.00 s (the fix
+      works) but FAMILY ASSIGNMENT IS 5.00 s against T-401's 4.0 s budget - detect 0.00s,
+      family 5.00s (fm-broadcast), 159 kHz wide (34 analysis bins). T-403 predicted family
+      1.00 s from its own 155 kHz composite; the real scene disagrees by four seconds.
+      Agent resumed with both. The second must NOT be resolved by widening the 4 s bound:
+      if the bound was calibrated on an unrealistically narrow scene, that is the user's
+      call to re-derive, not ours.
+
   - id: T-404
     title: Six more features measure the observation, and three of them are one defect
     milestone: M3
