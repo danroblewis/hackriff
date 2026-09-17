@@ -2224,10 +2224,10 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
     stop_server(serving);
 }
 
-// --- Control API: display/pause (device-independent), bookmarks, selections, outputs ------------
+// --- Control API: display (device-independent), bookmarks, selections, outputs ------------------
 
 #[test]
-fn control_display_pause_and_bookmarks_answer_as_documented() {
+fn control_display_and_bookmarks_answer_as_documented() {
     let (_dir_guard, serving, addr) = start_server();
 
     let (st, v) = post(
@@ -2238,14 +2238,21 @@ fn control_display_pause_and_bookmarks_answer_as_documented() {
     assert_eq!(st, 200, "{v}");
     assert_eq!(
         v["display"],
-        json!({"fft_size": 512, "averaging": 2, "rows_per_s": 10.0, "paused": false, "window": "hann"})
+        json!({"fft_size": 512, "averaging": 2, "rows_per_s": 10.0, "window": "hann"})
     );
     let (st, v) = post(addr, "/api/control/display", "{}");
     assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
-    let (st, v) = post(addr, "/api/control/pause", "{}");
-    assert_eq!((st, &v["display"]["paused"]), (200, &json!(true)));
-    let (st, v) = post(addr, "/api/control/resume", "{}");
-    assert_eq!((st, &v["display"]["paused"]), (200, &json!(false)));
+    // T-347: `display` no longer carries `paused`, and pause/resume are not routes. The view's
+    // Pause is the client's own time cursor (docs/api.md, "Pause is client view state"); a
+    // run-wide flag meant one browser froze every other browser's waterfall.
+    for path in ["/api/control/pause", "/api/control/resume"] {
+        let (st, v) = post(addr, path, "{}");
+        assert_eq!(
+            (st, v["code"].as_str()),
+            (404, Some("not_found")),
+            "{path} must not exist: {v}"
+        );
+    }
 
     // Display window (T-067).
     let (st, v) = post(
@@ -2272,9 +2279,9 @@ fn control_display_pause_and_bookmarks_answer_as_documented() {
         (200, Some(7e6)),
         "{v}"
     );
-    // T-343: a device action's answer says so, and against which front end. A display or pause
-    // answer carries no `device` key at all — that difference is the contract a client reads to
-    // tell "this changed the world" from "this changed the view".
+    // T-343: a device action's answer says so, and against which front end. A display answer
+    // carries no `device` key at all — that difference is the contract a client reads to tell
+    // "this changed the world" from "this changed the view".
     assert_eq!(v["device"]["action"], json!("baseband_filter"), "{v}");
     assert!(
         v["device"]["id"]
@@ -2282,13 +2289,11 @@ fn control_display_pause_and_bookmarks_answer_as_documented() {
             .is_some_and(|d| d.starts_with("mock:")),
         "{v}"
     );
-    let (_, paused) = post(addr, "/api/control/pause", "{}");
+    let (_, shown) = post(addr, "/api/control/display", r#"{"averaging": 4}"#);
     assert!(
-        paused.get("device").is_none(),
-        "a pause is not a device action: {paused}"
+        shown.get("device").is_none(),
+        "a display change is not a device action: {shown}"
     );
-    let (_, resumed) = post(addr, "/api/control/resume", "{}");
-    assert!(resumed.get("device").is_none(), "{resumed}");
     let (st, v) = post(
         addr,
         "/api/control/baseband_filter",
@@ -3364,6 +3369,166 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
     }
 
     let _ = ws.close(None);
+    stop_server(serving);
+}
+
+/// T-347 — **one client's Pause never freezes another client's stream.**
+///
+/// The defect: `POST /api/control/pause` set `DisplaySettings.paused` on the **run**, and every
+/// connected client shares the run. One browser pressing Pause stopped the spectrum publisher for
+/// all of them. T-339 had already shown the flag never reached the device, so the invariant it
+/// guarded held — but the user's other half did not: *"the UI's time window is **independent view
+/// state**"* (CLAUDE.md), and a run-wide boolean cannot be per-viewer state.
+///
+/// The design (docs/api.md, "Pause is client view state"): Pause is the client's own time cursor,
+/// the same mechanism as scrubbing — one mechanism for what the user calls one thing — and the
+/// two routes are gone. This test asserts that where the bug lived: **two real connections**, not
+/// one. A single-client test cannot see a cross-client defect, which is presumably why it shipped.
+///
+/// Three legs, each asserting a value rather than a status code (T-315):
+///
+/// 1. **The lever is gone.** `POST /api/control/pause` and `/resume` answer `404 not_found`, and
+///    `display` carries no `paused`. Without this the rest would pass on a server that still has a
+///    run-wide pause nobody happened to press.
+/// 2. **A held view is invisible to the other viewer.** Client A does exactly what the UI now does
+///    to pause — a store write, i.e. *nothing on the wire* — and B's rows keep arriving with
+///    **strictly advancing capture timestamps**, past the newest row B had seen when A paused.
+///    A's own rows keep arriving too: holding a view does not stop the client's own stream either,
+///    it stops the client *advancing over* it.
+/// 3. **And a client that really stops consuming still cannot stall the other one.** A stops
+///    draining its socket altogether — the strongest thing a paused viewer can do to the server
+///    short of hanging up, and the shape T-348's per-connection saving would take — and B's rows
+///    still advance. This is the drop-not-block policy (docs/stream-contract.md §7) holding across
+///    clients: the producer never waits on a consumer, so one frozen browser cannot freeze another.
+#[test]
+fn one_clients_pause_never_freezes_another_clients_stream() {
+    let (_dir_guard, serving, addr) = start_server();
+    wait_for(
+        "the spectrum stream to be offered",
+        Duration::from_secs(30),
+        || {
+            get(addr, "/api/streams").1["streams"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|s| s["stream_id"] == "spectrum/live"))
+        },
+    );
+
+    /// Rows, newest last, from what a consumer saw.
+    fn row_times(seen: &Seen) -> Vec<i64> {
+        seen.saw
+            .iter()
+            .filter_map(|s| match s {
+                Saw::Row(t) => Some(*t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Reads `ws` until it has `n` rows or `limit` passes, and returns their capture times.
+    fn rows_within(ws: &mut Ws, n: usize, limit: Duration) -> (Vec<i64>, Option<String>) {
+        let seen = drain_ws(ws, Instant::now() + limit, |s| s.rows() >= n);
+        (row_times(&seen), seen.closed)
+    }
+
+    let open = |who: &str| {
+        let mut ws = connect_ws(addr, &format!("/ws/spectrum/live?token={TOKEN}")).unwrap();
+        let Message::Text(text) = ws.read().unwrap() else {
+            panic!("{who}: the first message must be the header (text)")
+        };
+        let header: Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(
+            header["stream_id"],
+            json!("spectrum/live"),
+            "{who}: {header}"
+        );
+        ws
+    };
+    // Two browsers on one server, which is the whole point: the bug is invisible with one.
+    let mut a = open("A");
+    let mut b = open("B");
+
+    let (a0, a_closed) = rows_within(&mut a, 5, Duration::from_secs(30));
+    let (b0, b_closed) = rows_within(&mut b, 5, Duration::from_secs(30));
+    assert!(
+        a_closed.is_none() && b_closed.is_none(),
+        "{a_closed:?} {b_closed:?}"
+    );
+    assert!(
+        a0.len() >= 5 && b0.len() >= 5,
+        "both clients must be receiving before either pauses: A {} rows, B {} rows",
+        a0.len(),
+        b0.len()
+    );
+    let b_before = *b0.last().expect("B saw a row");
+
+    // ---- (1) the lever is gone ----
+    for path in ["/api/control/pause", "/api/control/resume"] {
+        let (st, v) = post(addr, path, "{}");
+        assert_eq!(
+            (st, v["code"].as_str()),
+            (404, Some("not_found")),
+            "{path} still exists: a run-wide pause is one viewer freezing every other viewer"
+        );
+    }
+    let (st, state) = get(addr, "/api/control/state");
+    assert_eq!(st, 200, "{state}");
+    assert!(
+        state["run"]["display"].get("paused").is_none(),
+        "the run's display still carries a shared `paused`: {}",
+        state["run"]["display"]
+    );
+
+    // ---- (2) A pauses, which is a store write and nothing else; B is untouched ----
+    //
+    // There is deliberately no request here. That *is* the design: the UI's Pause writes its own
+    // time cursor (ui/src/app/centre/navigators.ts), and `ui/test/navigators.test.ts` asserts it
+    // issues no request — the "assert the request the client builds" guard. What this test can see
+    // from the server's side is the consequence, and it is the one the user reported.
+    let (b1, b_closed) = rows_within(&mut b, 10, Duration::from_secs(30));
+    assert!(b_closed.is_none(), "B's socket closed: {b_closed:?}");
+    assert!(
+        b1.len() >= 10,
+        "B's waterfall stopped while A was paused: {} rows in 30 s",
+        b1.len()
+    );
+    for w in b1.windows(2) {
+        assert!(
+            w[1] > w[0],
+            "B's rows must advance in capture time, not repeat: {b1:?}"
+        );
+    }
+    assert!(
+        *b1.last().unwrap() > b_before,
+        "B's newest row is no newer than before A paused: {} vs {b_before}",
+        b1.last().unwrap()
+    );
+    // A's own stream did not stop either: pausing holds the *view* over the rows, not the rows.
+    let (a1, a_closed) = rows_within(&mut a, 5, Duration::from_secs(30));
+    assert!(a_closed.is_none(), "A's socket closed: {a_closed:?}");
+    assert!(a1.len() >= 5, "A's own stream stopped: {} rows", a1.len());
+
+    // ---- (3) A stops consuming entirely; B still advances ----
+    //
+    // A is not read again from here. 50 rows is about 2 s of B's stream at the run's 25 rows/s, so
+    // A sits unread long enough for its own queue to back up while B is measured (the deadline is
+    // 30x the measured time, per the rule about bounding a quantity you have measured). Whether A
+    // is then dropped as a slow consumer is the documented §7 policy and not this test's subject;
+    // what matters is that nothing about A reaches B.
+    let b_mark = *b1.last().unwrap();
+    let (b2, b_closed) = rows_within(&mut b, 50, Duration::from_secs(60));
+    assert!(
+        b_closed.is_none(),
+        "B was disconnected because A stopped reading: {b_closed:?}"
+    );
+    assert!(
+        b2.len() >= 50 && *b2.last().unwrap() > b_mark,
+        "B stalled behind a client that stopped consuming: {} rows, newest {:?} vs {b_mark}",
+        b2.len(),
+        b2.last()
+    );
+
+    let _ = a.close(None);
+    let _ = b.close(None);
     stop_server(serving);
 }
 

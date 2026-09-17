@@ -110,7 +110,7 @@ test("requests: bearer header on every call, JSON bodies on mutations, token nev
   assert.equal(post.init.headers["Content-Type"], "application/json");
   assert.equal(post.init.body, JSON.stringify({ center_hz: 101.3e6 }));
   assert.ok(!post.url.includes(tok));
-  assert.throws(() => buildRequest("POST", `/api/control/pause?token=${tok}`, tok), /never goes in a fetch URL/);
+  assert.throws(() => buildRequest("POST", `/api/control/record/stop?token=${tok}`, tok), /never goes in a fetch URL/);
   assert.throws(() => buildRequest("DELETE", "/api/bookmarks/x?a=1&token=t", tok), /never goes in a fetch URL/);
   assert.throws(() => buildRequest("POST", "https://evil.example/api/control/center", tok, {}), /origin-relative/);
   assert.throws(() => buildRequest("POST", "//evil.example/api", tok, {}), /origin-relative/);
@@ -123,7 +123,7 @@ test("requests: bearer header on every call, JSON bodies on mutations, token nev
     return url.includes("rate") ? reply(409, { error: "device settings apply to a live source", code: "not_live" }) : reply(200, { ok: true });
   });
   await client.get("/api/control/state");
-  await client.post("/api/control/pause");
+  await client.post("/api/control/record/stop");
   await client.post("/api/control/gains", { gains: { lna: 24 } });
   await client.put("/api/bookmarks/abc", { name: "x" });
   await client.del("/api/bookmarks/abc");
@@ -136,7 +136,7 @@ test("requests: bearer header on every call, JSON bodies on mutations, token nev
   }
   const byUrl = (m: string, u: string) => seen.find((s) => s.init.method === m && s.url === u)!.init;
   assert.equal(byUrl("GET", "/api/control/state").body, undefined);
-  assert.equal(byUrl("POST", "/api/control/pause").body, "{}", "empty mutations send {}");
+  assert.equal(byUrl("POST", "/api/control/record/stop").body, "{}", "empty mutations send {}");
   assert.equal(byUrl("POST", "/api/control/gains").body, '{"gains":{"lna":24}}');
   assert.equal(byUrl("DELETE", "/api/bookmarks/abc").body, undefined);
 });

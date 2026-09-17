@@ -148,7 +148,6 @@ impl FakeRun {
                 fft_size: 1024,
                 averaging: 1,
                 rows_per_s: 25.0,
-                paused: false,
                 window: "hann".to_owned(),
             },
             recording: RecordingState::default(),
@@ -194,11 +193,6 @@ impl RunControl for FakeRun {
             }
             s.display.window = w.clone();
         }
-        Ok(s.display.clone())
-    }
-    fn set_paused(&self, paused: bool) -> Result<DisplayState, LiveControlError> {
-        let mut s = self.0.lock().unwrap();
-        s.display.paused = paused;
         Ok(s.display.clone())
     }
     fn start_recording(
@@ -633,7 +627,7 @@ fn control_values_are_validated_with_clear_errors() {
             400,
             "not null",
         ),
-        ("/api/control/pause", r#"{"now": true}"#, 400, "now"),
+        ("/api/control/record/stop", r#"{"now": true}"#, 400, "now"),
         (
             "/api/control/baseband_filter",
             r#"{}"#,
@@ -755,7 +749,16 @@ fn every_control_action_is_audited_with_old_and_new_values() {
         .status,
         200
     );
-    assert_eq!(authed(addr, "POST", "/api/control/pause", None).status, 200);
+    assert_eq!(
+        authed(
+            addr,
+            "POST",
+            "/api/control/display",
+            Some(r#"{"rows_per_s": 10.0}"#)
+        )
+        .status,
+        200
+    );
     assert_eq!(
         authed(
             addr,
@@ -806,7 +809,7 @@ fn every_control_action_is_audited_with_old_and_new_values() {
     assert!(failed["error"].as_str().unwrap().contains("out of range"));
     assert_eq!(entries[2]["old"]["averaging"], json!(1));
     assert_eq!(entries[2]["new"]["averaging"], json!(8));
-    assert_eq!(entries[3]["new"]["paused"], json!(true));
+    assert_eq!(entries[3]["new"]["rows_per_s"], json!(10.0));
     assert_eq!(entries[5]["new"]["stored"], json!(true));
     assert_eq!(entries[6]["old"]["bias_tee"], json!("off"));
     assert_eq!(entries[6]["new"]["bias_tee"], json!("on"));
@@ -1219,10 +1222,6 @@ fn replayed_recordings_refuse_device_settings_and_accept_display_settings() {
     assert_eq!(rep.status, 200, "{}", rep.body);
     assert_eq!(rep.body["display"]["fft_size"], json!(2048));
     assert_eq!(rep.body["display"]["window"], json!("blackman-harris"));
-    assert_eq!(
-        authed(addr, "POST", "/api/control/resume", None).status,
-        200
-    );
     let state = authed(addr, "GET", "/api/control/state", None);
     assert_eq!(state.body["live"], json!(false));
     assert!(state.body["device"].is_null());
@@ -1370,9 +1369,11 @@ fn bookmarks_are_validated_and_persist_across_servers() {
 
 /// T-343 — **a retune is a device action, not a view change.**
 ///
-/// T-339 proved that pause, scrub and zoom never reach the device. Its sibling property is the
-/// other half: exactly one family of requests *does*, and it is labelled as such everywhere it
-/// can be seen — in the answer, in the audit log, and against a named front end.
+/// T-339 proved that pause, scrub and zoom never reach the device, and T-347 went further: they
+/// reach no route at all, because holding the view is the client's own time cursor. Its sibling
+/// property is the other half: exactly one family of requests *does* reach the front end, and it
+/// is labelled as such everywhere it can be seen — in the answer, in the audit log, and against a
+/// named front end.
 ///
 /// The failure this guards is the one the T-339 audit found: `POST /api/control/center` was
 /// indistinguishable from a view change, so a pan let go slightly too far reached
@@ -1424,13 +1425,14 @@ fn t343_device_actions_are_labelled_and_attributed_and_view_changes_reach_nothin
         );
     }
 
-    // The view side: display, pause, resume and recording. None may reach the device, and none may
-    // be labelled a device action — this is the pan-does-not-retune control at the API seam.
+    // The view side: display and recording. None may reach the device, and none may be labelled a
+    // device action — this is the pan-does-not-retune control at the API seam. T-347 removed pause
+    // and resume from this list by removing the routes: the view's own Pause is client state and
+    // makes no request, which `one_clients_pause_never_freezes_another_clients_stream`
+    // (crates/hk-cli/tests/api_contract.rs) asserts across two connected clients.
     let reached_before = r.device.calls().len();
-    let view_calls: [(&str, &str); 5] = [
+    let view_calls: [(&str, &str); 3] = [
         ("/api/control/display", r#"{"fft_size": 2048}"#),
-        ("/api/control/pause", "{}"),
-        ("/api/control/resume", "{}"),
         ("/api/control/record/start", r#"{"label": "view"}"#),
         ("/api/control/record/stop", "{}"),
     ];

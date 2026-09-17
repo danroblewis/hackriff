@@ -14,7 +14,7 @@ Standard control sets of [SDR++](https://github.com/AlexandreRouma/SDRPlusPlus),
 | Waterfall min/max, auto-level (SDR++, SigDigger) | client (`waterfall.ts`) | Auto (floor/peak tracking) or manual dB |
 | Peak / max hold (SDRangel, SigDigger) | client | Max-hold trace over the spectrum; resets on retune |
 | Bookmarks / frequency manager, markers (SDR++, SDRangel, SigDigger) | `/api/bookmarks` | Add from a click or a selection; jump zooms, or retunes on request |
-| Freeze / pause (SDRangel spectrum, SigDigger) | `POST /api/control/pause`, `resume` | Pauses only the spectrum stream; capture, detection and history continue |
+| Freeze / pause (SDRangel spectrum, SigDigger) | client (the time navigator's LIVE/PAUSED control) | T-347: holding the view is the client's own time cursor — the same state a scrub leaves — so it is per-viewer and reaches no route. The run-wide `/api/control/pause` is gone: it froze every connected browser's waterfall at once |
 | Record baseband (SDR++ recorder, SDRangel file sink) | `POST /api/control/record/start`, `stop` | Refused under content-forbidding classes (409 `refused`) |
 
 **Skipped, and why:**

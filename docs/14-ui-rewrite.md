@@ -154,7 +154,7 @@ Why that cannot desync: there is no stored pixel position to go stale. The box's
 
 - **The property — between polls.** Advance the waterfall by *N* rows with **no** `setBoxes` at all; the box must have moved by exactly *N* rows of the rows' own mapping. A test that only checked placement at poll boundaries passes on the broken code.
 - **The control — no jump.** A poll delivering an identical interval must produce a byte-identical rectangle. That is the "jump" half of the bug, and it is what proves a poll is no longer a placement event.
-- **Paused** (T-339: pause freezes the view, never the capture): rows stop being pushed while the ring keeps filling, so the head holds — and the box holds with it, on the rows **displayed**, across 30 frames and several polls.
+- **Paused** (T-339: pause freezes the view, never the capture; T-347: and freezes only *this* viewer's, because pause is the client's own time cursor and reaches no route): rows stop being pushed while the ring keeps filling, so the head holds — and the box holds with it, on the rows **displayed**, across 30 frames and several polls.
 - **Zoomed:** the box goes through the zoom window the row pass was handed in that same frame, and a zoom with no poll in between rescales it exactly as it rescales the rows.
 - **Uneven rows:** a 1.2 s gated gap puts a nominal 25 rows/s 29 rows adrift on a 512-row pane; the box follows the ring.
 - **Mutation-checked.** Reverting to poll-rate evaluation fails the between-polls property and the zoom case, while the no-jump and paused controls keep passing — which is exactly the discrimination those controls are for.

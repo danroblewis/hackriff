@@ -16,7 +16,6 @@
 //! | POST | `/api/control/bias_tee` | `{"enabled"}` | `tuning` (501 without a bias tee) |
 //! | POST | `/api/control/baseband_filter` (T-067) | `{"bandwidth_hz"}` | `tuning` (validated against `device.baseband_filter`; 501 without one) |
 //! | POST | `/api/control/display` | any of `{"fft_size", "averaging", "rows_per_s", "window"}` (T-067) | `display` |
-//! | POST | `/api/control/pause`, `/api/control/resume` | `{}` or empty | `display` |
 //! | POST | `/api/control/record/start` | `{"label"?, "max_s"?}` | `recording` (409 `refused` under a class that forbids content) |
 //! | POST | `/api/control/record/stop` | `{}` or empty | `recording` (the stored Recording) |
 //! | GET, POST | `/api/bookmarks` | create: `{"name", "f_center_hz", "kind"?, "bandwidth_hz"?, "note"?}` | list / the created bookmark (201) |
@@ -24,7 +23,24 @@
 //!
 //! Device endpoints (centre, rate, gains, bias tee, baseband filter) need a live source
 //! ([`crate::ApiState::live_control`]); on a replayed recording they answer 409 `not_live`, while
-//! display, pause, recording and bookmarks keep working.
+//! display, recording and bookmarks keep working.
+//!
+//! # There is no pause here (T-347)
+//!
+//! `POST /api/control/pause` and `/api/control/resume` are **gone**. They set a run-wide `paused`
+//! flag that stopped the spectrum publisher for *everyone*, so one browser pressing Pause froze
+//! every other browser's waterfall. The user's invariant is that the UI's time window is
+//! **independent view state** (CLAUDE.md, "Pause freezes the view, not the capture"), and a
+//! run-wide boolean cannot be per-viewer state. Pause is therefore the client's own time cursor —
+//! the same mechanism as scrubbing, which is what "one mechanism for what the user calls one
+//! thing" means — and it reaches no route at all.
+//!
+//! What a client may still legitimately want to tell the server is that it has **stopped
+//! consuming**, to save bandwidth and CPU on a handheld (T-348). That is a property of a
+//! *connection*, not of the run: the connection-scoped form already exists (a consumer that has
+//! stopped looking closes its subscription, and the publisher stops encoding for it), and any
+//! future explicit control must be scoped the same way. A run-wide flag is the one shape it must
+//! never take again.
 //!
 //! # Device actions vs view changes (T-343)
 //!
@@ -41,9 +57,10 @@
 //!   409 `device_busy` naming the holder rather than racing it to the driver.
 //!
 //! `POST /api/control/center` is not a view control. It re-derives the window's content class and,
-//! when the class or rate changes, stops and re-plumbs the running segment. Pause, scrub and zoom
-//! never reach the device (T-339); a retune does, and that asymmetry is the point. A client must
-//! therefore only call it for an **explicit** user action — never as the continuation of a pan.
+//! when the class or rate changes, stops and re-plumbs the running segment. Holding the view,
+//! scrubbing and zooming never reach the device (T-339) — they reach no route at all (T-347); a
+//! retune does, and that asymmetry is the point. A client must therefore only call it for an
+//! **explicit** user action — never as the continuation of a pan.
 //!
 //! # Security properties
 //! - **Token in the header only.** Mutating requests (`POST`, `PUT`, `DELETE`) must carry
@@ -101,8 +118,6 @@ pub struct DisplayState {
     pub averaging: u32,
     /// Requested rows per second (waterfall speed).
     pub rows_per_s: f64,
-    /// Publishing paused.
-    pub paused: bool,
     /// Analysis window for the published PSD (T-067), e.g. `"hann"`.
     pub window: String,
 }
@@ -187,7 +202,7 @@ pub struct RunState {
     pub recording: RecordingState,
 }
 
-/// Display, pause and recording control of the running pipeline (implemented by the composition
+/// Display and recording control of the running pipeline (implemented by the composition
 /// over `hk_pipeline::PipelineController`). Available for recordings and live runs alike.
 pub trait RunControl: Send + Sync {
     /// The run's state.
@@ -196,8 +211,6 @@ pub trait RunControl: Send + Sync {
     fn display_limits(&self) -> DisplayLimits;
     /// Applies a display update (all or nothing).
     fn set_display(&self, update: &DisplayUpdate) -> Result<DisplayState, LiveControlError>;
-    /// Pauses or resumes spectrum publishing.
-    fn set_paused(&self, paused: bool) -> Result<DisplayState, LiveControlError>;
     /// Starts a manual IQ recording of the tuned window.
     fn start_recording(
         &self,
@@ -692,8 +705,6 @@ enum Action {
     BiasTee,
     BasebandFilter,
     Display,
-    Pause,
-    Resume,
     RecordStart,
     RecordStop,
     ListBookmarks,
@@ -713,8 +724,6 @@ impl Action {
             Self::BiasTee => "bias_tee",
             Self::BasebandFilter => "baseband_filter",
             Self::Display => "display",
-            Self::Pause => "pause",
-            Self::Resume => "resume",
             Self::RecordStart => "record_start",
             Self::RecordStop => "record_stop",
             Self::ListBookmarks => "bookmarks_list",
@@ -735,8 +744,9 @@ impl Action {
     /// **Which routes reach the front end** (T-343). This match is the classification: a route is
     /// a device action if and only if it names a [`DeviceAction`] here, and the arms are
     /// exhaustive, so a new route cannot be added without deciding which side of the line it is
-    /// on. Everything on the `None` side only changes what is shown — pause, scrub and zoom never
-    /// touch the device (T-339), and a retune does, which is the whole asymmetry.
+    /// on. Everything on the `None` side only changes what is shown — holding the view, scrubbing
+    /// and zooming never touch the device (T-339) and reach no route at all (T-347), and a retune
+    /// does, which is the whole asymmetry.
     fn device_action(self) -> Option<DeviceAction> {
         match self {
             Self::Center => Some(DeviceAction::Retune),
@@ -746,8 +756,6 @@ impl Action {
             Self::BasebandFilter => Some(DeviceAction::BasebandFilter),
             Self::State
             | Self::Display
-            | Self::Pause
-            | Self::Resume
             | Self::RecordStart
             | Self::RecordStop
             | Self::ListBookmarks
@@ -791,8 +799,6 @@ fn resolve(method: &str, path: &str) -> Option<Result<Action, Option<&'static st
             "bias_tee" => pick("POST", Action::BiasTee),
             "baseband_filter" => pick("POST", Action::BasebandFilter),
             "display" => pick("POST", Action::Display),
-            "pause" => pick("POST", Action::Pause),
-            "resume" => pick("POST", Action::Resume),
             "record/start" => pick("POST", Action::RecordStart),
             "record/stop" => pick("POST", Action::RecordStop),
             _ => Err(None),
@@ -1114,7 +1120,7 @@ fn live(state: &ApiState) -> Result<&dyn crate::LiveControl, Fail> {
             409,
             "not_live",
             "device settings apply to a live source; this server is not running one (a replayed \
-             recording accepts display, pause, recording and bookmark requests only)",
+             recording accepts display, recording and bookmark requests only)",
         )
     })
 }
@@ -1143,7 +1149,6 @@ fn display_json(d: &DisplayState) -> Value {
         "fft_size": d.fft_size,
         "averaging": d.averaging,
         "rows_per_s": d.rows_per_s,
-        "paused": d.paused,
         "window": d.window,
     })
 }
@@ -1449,13 +1454,6 @@ fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<
             let new = display_json(&rc.set_display(&update)?);
             Ok(ok(json!({ "display": new }), old, new))
         }
-        Action::Pause | Action::Resume => {
-            no_fields(body)?;
-            let rc = run(state)?;
-            let old = display_json(&rc.state().display);
-            let new = display_json(&rc.set_paused(action == Action::Pause)?);
-            Ok(ok(json!({ "display": new }), old, new))
-        }
         Action::RecordStart => {
             only(body, &["label", "max_s"])?;
             let label = text(body, "label")?.flatten();
@@ -1553,13 +1551,11 @@ mod tests {
                 "{path} must be a device action"
             );
         }
-        // The view side: pause, scrub and zoom never touch the device (T-339), and neither do
-        // display, recording or bookmarks.
+        // The view side: holding the view, scrubbing and zooming never touch the device (T-339),
+        // and neither do display, recording or bookmarks.
         for (method, path) in [
             ("GET", "/api/control/state"),
             ("POST", "/api/control/display"),
-            ("POST", "/api/control/pause"),
-            ("POST", "/api/control/resume"),
             ("POST", "/api/control/record/start"),
             ("POST", "/api/control/record/stop"),
             ("GET", "/api/bookmarks"),
@@ -1601,6 +1597,11 @@ mod tests {
             Some(Err(Some("POST")))
         );
         assert_eq!(resolve("POST", "/api/control/tx"), Some(Err(None)));
+        // T-347: pause and resume are not routes. A run-wide pause is one viewer freezing every
+        // other viewer's waterfall, so the fix was to delete the lever, not to re-scope it — and
+        // an unknown control path is a 404, exactly like `tx`.
+        assert_eq!(resolve("POST", "/api/control/pause"), Some(Err(None)));
+        assert_eq!(resolve("POST", "/api/control/resume"), Some(Err(None)));
         assert_eq!(resolve("GET", "/api/streams"), None);
         let id = BookmarkId::new();
         assert_eq!(

@@ -1369,10 +1369,13 @@ impl Stopper {
 /// (`shared.stop.store(true)`) and re-plumbs the run, tearing down and restarting the always-on
 /// readers. It is the only method here that can do that.
 ///
-/// [`PipelineController::set_display`], [`PipelineController::set_paused`],
-/// [`PipelineController::start_recording`] and [`PipelineController::stop_recording`] are **view
-/// and output controls**: capture, the ring and detection are always-on and none of them stops or
-/// slows the source (T-339, pinned by `tests/view_pause_keeps_capture.rs`).
+/// [`PipelineController::set_display`], [`PipelineController::start_recording`] and
+/// [`PipelineController::stop_recording`] are **view and output controls**: capture, the ring and
+/// detection are always-on and none of them stops or slows the source (T-339, pinned by
+/// `tests/view_pause_keeps_capture.rs`).
+///
+/// There is **no pause here at all** (T-347): holding the view is the client's own time window, so
+/// no control on this type — and no route in front of it — can stop the run's rows for everyone.
 ///
 /// So a caller must reach `retune` only for an explicit user request to move the front end —
 /// never as the continuation of a pan, a zoom or a scrub, which change what is shown and nothing
@@ -1508,11 +1511,6 @@ impl PipelineController {
             .display
             .patch(patch)
             .map_err(ControlFailure::Invalid)
-    }
-
-    /// Pauses or resumes spectrum publishing (capture, detection and history continue).
-    pub fn set_paused(&self, paused: bool) -> DisplaySettings {
-        self.sup.common.display.set_paused(paused)
     }
 
     /// Starts recording the tuned window's IQ (see [`crate::recorder`]): refused under a class

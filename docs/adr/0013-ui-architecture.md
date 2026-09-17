@@ -132,7 +132,7 @@ A slice that changes must be a new object or array.
 | `inventory` | `{tab, sort, rows by id, loadedAtS, error}` | T-151 poll | T-151, T-152 (brackets), T-150 (dock labels) | `GET /api/inventory`, 5 s, for the view span; Candidates also scoped to the waterfall's time window, Confirmed never (§3.3) |
 | `selections` | `{list, sync}` | T-151 (mirrors `SelectionStore`) | T-152 (boxes), T-151 | `/api/selections` via `SelectionStore` |
 | `outputs` | `OutputEntry[]` | T-150 (`upsertOutput` / `removeOutput`); T-151 and T-153 through T-150's `outputs` actions | T-150 dock, T-151 (on-air dots, Listen pressed) | streams this page opened plus `GET /api/pipelines` |
-| `time` | `{live: true}` \| `{live: false, tS}` | T-150 (capture scrub, LIVE) | T-152 (history render), T-151 (inventory `t0`/`t1`), shell | UI cursor over the retained range |
+| `time` | `{live: true}` \| `{live: false, tS, spanS?}` | T-395 (the time navigator's LIVE/PAUSED control), T-340 (scrub, time zoom) | T-152 (history render), T-151 (inventory `t0`/`t1`), shell | UI cursor over the retained range. **This is Pause** (T-347): following the live edge or holding a fixed range are the two states, and pausing is entering the second without dragging — one mechanism for what the user calls one thing, and no server state |
 | `decode` | `{pipelineId, nodeId}` | T-153 (pipeline and stage) | T-153, T-154 | UI |
 | `inspector` | `{frameSeq, fieldNodeId}` | T-154 (frame and field) | T-154 | UI |
 | `nav` | `{gotoHz, seq}` | shell (Go to) | T-152 (pan or retune), T-151 (focus nearest known row) | UI one-shot request |
@@ -338,7 +338,7 @@ Update modes: **poll** (interval in §3.2), **stream**, **action** (on user acti
 | Report tab | `GET /api/report?f_lo&f_hi&t0&t1[&format]` | as `report.ts` | action | default region = `live.view`, span = the capture timeline range |
 | History tab | `GET /api/history`, `GET /api/floor` | as `history.ts` | action | opened from a selection on its region |
 | Scheduler tab | `GET /api/scheduler`, `/arms`, `/leases`; `POST/DELETE /api/scheduler/leases` | as `scheduler.ts` | poll / action | |
-| Device tab | `/api/control/*` | `controls/model.ts` `panelModel` | poll / action | gains, span, bias tee, baseband filter, display, pause |
+| Device tab | `/api/control/*` | `controls/model.ts` `panelModel` | poll / action | gains, span, bias tee, baseband filter, display. **No pause** (T-347): holding the view is the `time` cursor, per viewer, and reaches no route — a run-wide pause froze every connected browser at once |
 | Bookmarks tab | `/api/bookmarks*` | `controls/bookmarks.ts` | poll / action | |
 
 ### 4.9 API gaps and proposed backend tasks

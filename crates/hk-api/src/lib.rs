@@ -9,7 +9,7 @@
 //! - [`http`]: the HTTP server (T-022a): JSON endpoints, static UI, and the WebSocket route, all
 //!   behind one bearer token ([`auth`]).
 //! - [`control`]: the authenticated, audited, receive-only control API (T-050): centre, rate,
-//!   named gains, bias tee, display (FFT size, averaging, row rate), pause/resume, manual
+//!   named gains, bias tee, display (FFT size, averaging, row rate), manual
 //!   recording, bookmarks.
 //! - [`live_control`]: the device-generic live control handle behind the device endpoints.
 //! - [`bridge`]: the WebSocket bridge, mapping one stream 1:1 to one browser WebSocket as a

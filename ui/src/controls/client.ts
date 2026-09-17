@@ -90,7 +90,7 @@ export function reactionTo(e: unknown): { reaction: Reaction; message: string } 
   const m = e.message;
   switch (e.code) {
     case "unauthorized": return { reaction: "reauth", message: "token rejected: paste the token again" };
-    case "not_live": return { reaction: "not-live", message: "replay: device settings need a live source (display, pause, record and bookmarks still work)" };
+    case "not_live": return { reaction: "not-live", message: "replay: device settings need a live source (display, record and bookmarks still work)" };
     case "conflict": return { reaction: "busy", message: `busy: ${m}` };
     // T-343: only one process can hold the radio, so a device action can lose it. Say who has it
     // and stop; never retry a device command into a race.

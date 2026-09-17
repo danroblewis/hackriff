@@ -278,6 +278,14 @@ pub const DISPLAY_ROWS_MIN: f64 = 0.5;
 
 /// Live display settings of the spectrum stream (T-050): applied by the spectrum reader at its
 /// next row without a restart; they never touch detection, history or the device.
+///
+/// **There is no `paused` here, and there must not be one (T-347).** These settings belong to the
+/// *run*, and every connected client shares them — which is exactly right for the geometry of the
+/// published rows (one STFT, one FFT size, one row rate) and exactly wrong for whether a viewer is
+/// looking. "Pause holds a fixed time range for inspection" (CLAUDE.md) is *per viewer*: a
+/// run-wide boolean cannot represent N viewers, so the one that used to live here froze every
+/// browser's waterfall when any one of them pressed Pause. The view's time window is client state
+/// and is held there; nothing about it reaches this struct, the reader, or the device.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct DisplaySettings {
     /// Bins per spectrum row (a power of two, [`DISPLAY_FFT_MIN`]..=[`DISPLAY_FFT_MAX`]).
@@ -287,8 +295,6 @@ pub struct DisplaySettings {
     /// Requested rows per second (the waterfall speed); a class that forbids content caps the
     /// published rate at 50 rows/s.
     pub rows_per_s: f64,
-    /// Publishing is paused (the waterfall freezes). Capture, detection and history continue.
-    pub paused: bool,
     /// Analysis window for the published PSD (T-067; default Hann).
     pub window: WindowKind,
 }
@@ -307,13 +313,12 @@ pub struct DisplayPatch {
 }
 
 impl DisplaySettings {
-    /// The settings from a run's [`PipelineSettings`] (unpaused, no averaging, Hann window).
+    /// The settings from a run's [`PipelineSettings`] (no averaging, Hann window).
     pub fn from_settings(s: &PipelineSettings) -> Self {
         Self {
             fft_size: s.spectrum_fft_len,
             averaging: 1,
             rows_per_s: s.spectrum_rows_per_s,
-            paused: false,
             window: WindowKind::default(),
         }
     }
@@ -477,7 +482,7 @@ mod tests {
     #[test]
     fn display_patches_are_validated_all_or_nothing() {
         let d = DisplaySettings::from_settings(&PipelineSettings::default());
-        assert_eq!((d.fft_size, d.averaging, d.paused), (1024, 1, false));
+        assert_eq!((d.fft_size, d.averaging), (1024, 1));
         assert_eq!(d.window, WindowKind::Hann, "default window");
         let ok = d
             .patched(&DisplayPatch {

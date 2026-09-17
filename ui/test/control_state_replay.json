@@ -17,7 +17,6 @@
     "display": {
       "averaging": 1,
       "fft_size": 4096,
-      "paused": false,
       "rows_per_s": 25.0,
       "window": "hann"
     },

@@ -1,8 +1,8 @@
 //! T-050 end to end over HTTP: the composition `hk serve` uses (`serve_api` + the pipeline
 //! controller adapters) over a scripted retunable radio behind the device contract. Display,
-//! pause, manual recording, in-place retune, a retune into another content class (re-plumb),
-//! a rate change (re-plumb),
-//! named gains, bias tee, audit and bookmarks; and a replayed recording refusing device settings.
+//! manual recording, in-place retune, a retune into another content class (re-plumb), a rate
+//! change (re-plumb), named gains, bias tee, audit and bookmarks; a replayed recording refusing
+//! device settings; and (T-347) the retired pause/resume routes answering 404.
 
 #[path = "../../hk-pipeline/tests/support/radio.rs"]
 mod radio;
@@ -148,18 +148,22 @@ fn the_control_api_drives_a_live_run_through_class_changes_and_rate_changes() {
     assert_eq!(st, 200, "{v}");
     assert_eq!(
         v["display"],
-        json!({"fft_size": 512, "averaging": 4, "rows_per_s": 10.0, "paused": false, "window": "hann"})
+        json!({"fft_size": 512, "averaging": 4, "rows_per_s": 10.0, "window": "hann"})
     );
     let (st, v) = post(addr, "/api/control/display", r#"{"fft_size": 1000}"#);
     assert_eq!((st, v["code"].as_str()), (400, Some("invalid")));
-    assert_eq!(
-        post(addr, "/api/control/pause", "{}").1["display"]["paused"],
-        json!(true)
-    );
-    assert_eq!(
-        post(addr, "/api/control/resume", "{}").1["display"]["paused"],
-        json!(false)
-    );
+    // T-347: there is no run-wide pause any more. Holding the view is the client's own time
+    // cursor, so the routes that used to freeze every connected browser's waterfall are gone —
+    // asserted here as well as in the contract suite, because a route nobody calls is easy to
+    // re-add by accident.
+    for path in ["/api/control/pause", "/api/control/resume"] {
+        let (st, v) = post(addr, path, "{}");
+        assert_eq!(
+            (st, v["code"].as_str()),
+            (404, Some("not_found")),
+            "{path} must not exist: a run-wide pause is one viewer freezing all the others"
+        );
+    }
 
     // A manual recording under broadcast FM (content permitted) is stored.
     let (st, v) = post(

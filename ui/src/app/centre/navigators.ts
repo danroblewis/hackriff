@@ -143,7 +143,7 @@ import type { AppContext } from "../context";
 import { h } from "../dom";
 // T-379: the survey strip is a view over the one (time × frequency) window, so it reads the same
 // window the inventory lists do rather than defaulting to the server's live edge.
-import { viewWindow } from "../explore/inventory";
+import { liveEdgeS, viewWindow } from "../explore/inventory";
 import { startPoll } from "../net";
 import { sameCursor } from "./review-render";
 import { goLive, reviewAt, setNavigation, toast } from "../state";
@@ -720,6 +720,43 @@ export function goLiveFromNav(store: AppStore): void {
   store.set(toast("Back to live."));
 }
 
+/**
+ * **Pause (T-347).** Stop following the live edge and hold the window the waterfall is showing.
+ *
+ * This is the whole of Pause, and it deliberately reaches nothing. It used to be
+ * `POST /api/control/pause`, which set `paused` on the **run** — so one browser pressing Pause
+ * froze every other browser's waterfall. The user's invariant is that *"the UI's time window is
+ * **independent view state**"* (CLAUDE.md), and a view state shared between browsers is not view
+ * state; the route is gone (docs/api.md, "Pause is client view state").
+ *
+ * So Pause is not a second mechanism beside scrubbing — it **is** the scrub mechanism, entered
+ * without dragging: the cursor stops following and holds `[edge − span, edge]`, exactly the state a
+ * drag or a time zoom leaves behind. One mechanism for what the user calls one thing. Everything
+ * downstream (`viewWindow`, the presence push, the live-only notes, the box layout) already reads
+ * that cursor, so nothing else has to know Pause happened.
+ *
+ * `spanS: null` means *the span already on screen* — [[viewWindow]] falls back to the waterfall's
+ * own rows-over-row-rate — so pausing changes the cursor's `live` flag and nothing about the
+ * geometry. With no live edge reported yet there is no instant to hold, and the view says so
+ * rather than inventing one (the [[liveEdgeS]] rule).
+ */
+export function holdViewFromNav(store: AppStore): void {
+  const s = store.get();
+  const edge = liveEdgeS(s);
+  if (edge === null) {
+    store.set(toast("No capture time reported yet — nothing to hold."));
+    return;
+  }
+  applyTimeTarget(store, { live: false, tS: edge, spanS: s.time.live ? null : s.time.spanS ?? null });
+  store.set(toast(`Paused at ${clockText(edge)}. Capture, the ring and detection are still running.`));
+}
+
+/** The time bar's one play/pause control: follow the live edge, or hold the view where it is. */
+export function toggleLiveFromNav(store: AppStore): void {
+  if (store.get().time.live) holdViewFromNav(store);
+  else goLiveFromNav(store);
+}
+
 /** The tier line beside a time zoom: which cells answer it, never a claim of live-IQ detail. */
 export function timeDetailText(z: TimeZoom | null): string {
   if (!z) return "";
@@ -1247,13 +1284,18 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
   // T-395: **Live** lives here, at the foot of the time navigator, because following the live edge
   // is a time-axis choice — the same one a pan to the newest end of this bar makes. It moved off
   // the Capture panel, whose subject is the recording, not the view's time window.
+  //
+  // T-347 made it the **one play/pause control**, because that is what the user calls one thing.
+  // Pressing it while following holds the view here; pressing it while held follows again. A
+  // scrubbed view reads as PAUSED for the same reason: holding a past window and pausing at the
+  // live edge are the same state, reached by two gestures. Neither reaches a route — the run-wide
+  // `/api/control/pause` that froze every other browser's waterfall is gone.
   const liveBtn = h("button", {
     class: "tn-live", type: "button",
-    title: "Follow the live edge. Capture, the ring and detection are always on — this moves the view, not the radio.",
   }, "● LIVE");
   const track = h("div", { class: "tn-track" }, canvas, marker, draft, readout);
   el.replaceChildren(axisLabel, track, liveBtn);
-  liveBtn.addEventListener("click", () => goLiveFromNav(store));
+  liveBtn.addEventListener("click", () => toggleLiveFromNav(store));
 
   // The capture window this bar is laid out on (T-338): `GET /api/timeline`'s window, which is the
   // IQ ring's configured retention. `null` = not answered, or this server has no capture window;
@@ -1323,6 +1365,10 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
     // cannot follow the live edge".
     liveBtn.classList.toggle("following", t.live);
     liveBtn.setAttribute("aria-pressed", String(t.live));
+    liveBtn.textContent = t.live ? "● LIVE" : "❚❚ PAUSED";
+    liveBtn.title = t.live
+      ? "Following the live edge — press to pause the view here. Capture, the ring and detection stay on, and no other viewer is affected."
+      : "The view is held at a fixed time range — press to follow the live edge again.";
     if (!ext) { marker.hidden = true; track.title = "No capture window on this server"; return; }
     // Both halves of what this bar is, said together: how long it spans, and which frequencies the
     // picture on it is of. The second half is the T-367 correction made visible.

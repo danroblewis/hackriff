@@ -40,7 +40,10 @@ export interface Tuning {
   center_hz: number; sample_rate_hz: number; gains: Record<string, number>; bias_tee: BiasTeeState;
   baseband_filter_hz: number | null;
 }
-export interface Display { fft_size: number; averaging: number; rows_per_s: number; paused: boolean; window: string }
+/** `/api/control/state`'s `display`. No `paused` (T-347): that was run-wide state every client
+ * shared, so one browser's Pause froze all of them. Holding the view is the client's own time
+ * cursor (`state.time`), never a server setting. */
+export interface Display { fft_size: number; averaging: number; rows_per_s: number; window: string }
 /** `/api/control/state`'s `display_limits` (T-067): the UI stops hard-coding hk-pipeline's `DISPLAY_*` bounds. */
 export interface DisplayLimits {
   fft_size_min: number; fft_size_max: number; averaging_max: number;
@@ -152,7 +155,7 @@ export interface Gate { enabled: boolean; reason: string }
 export interface PanelModel {
   /** Centre, rate, gains, bias tee, baseband filter. */
   device: Gate;
-  /** FFT size, averaging, speed, window, pause (server-side display). */
+  /** FFT size, averaging, speed, window (the run's shared display settings). */
   display: Gate;
   /** Record start (stop stays possible while one is active). */
   record: Gate & { active: boolean };
@@ -193,8 +196,8 @@ const off = (reason: string): Gate => ({ enabled: false, reason });
 
 /**
  * The panel's state. `pending`: this page has a device request in flight (no double submit).
- * Replay (no live source): device controls off with the `not_live` reason; display, pause,
- * recording and bookmarks stay on.
+ * Replay (no live source): device controls off with the `not_live` reason; display, recording and
+ * bookmarks stay on.
  */
 export function panelModel(s: ControlState, pending = false): PanelModel {
   const run = s.run;
