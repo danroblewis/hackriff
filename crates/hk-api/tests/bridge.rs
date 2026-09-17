@@ -393,6 +393,81 @@ fn a_new_publisher_under_the_same_id_keeps_the_browser_connected() {
     );
 }
 
+/// T-425: the carry-over must be **driven by the offer**, not by `bridge::WATCH_TICK`.
+///
+/// The test above waits for the carried-over consumer before it publishes, so it never noticed
+/// that the re-attach used to be quantised to the 50 ms tick. The pipeline does not wait: the
+/// spectrum reader offers the new publisher when the new segment's first samples arrive and
+/// publishes that window's first row one row period later (~40 ms at the live rate). A
+/// tick-quantised re-attach therefore swallowed the first one or two rows of every new window,
+/// silently — the consumer was not subscribed, so there is no drop marker to say so — and made
+/// each retune look like a longer break in the air than it was. That is the coverage lie told in
+/// the other direction, and it also made `hk-cli::api_contract`'s seam assertion meaningless: a
+/// mutation that papered the seam over completely still passed, because the swallowed rows forged
+/// a gap that was not there.
+///
+/// Measured: with `StreamRegistry::wait_for_offer_after` the consumer is re-subscribed in tens of
+/// microseconds. The bound below is half of `WATCH_TICK`, which is three orders of magnitude above
+/// that and still fails outright if the wait goes back to polling on the tick.
+#[test]
+fn the_carry_over_re_subscribes_on_the_offer_not_on_the_watch_tick() {
+    let registry = StreamRegistry::new();
+    let bins = 16usize;
+    let mut first = Publisher::new(
+        spectrum_header(
+            "spectrum/live",
+            ContentClass::Unrestricted,
+            30.0,
+            bins as u32,
+        ),
+        PublisherConfig::default(),
+    )
+    .unwrap();
+    registry.register(first.header(), first.handle());
+    let server = serve(&registry);
+    let mut ws = authed(server.local_addr(), "spectrum/live").unwrap();
+    assert_eq!(header_of(&ws.read().unwrap()).center_hz, Some(100e6));
+    first
+        .publish_binary(BinaryRecord {
+            t: Timestamp::from_unix_nanos(1_789_300_800_000_000_000),
+            sample_index: 0,
+            flags: RecordFlags::empty(),
+            payload: &row(0, bins),
+        })
+        .unwrap();
+    assert!(matches!(ws.read().unwrap(), Message::Binary(_)));
+
+    // The seam, in the shape a re-plumb has it: the old publisher finishes when the old segment
+    // tears down, and the new one is offered only after the whole re-plumb, so the watcher is
+    // already parked in the settle gap when the offer lands. Noticing the finish is still
+    // tick-paced and is not what this measures; the sleep puts the watcher past that point, so the
+    // clock below times the offer → re-subscribe step alone.
+    let handle1 = first.handle();
+    first.finish();
+    wait_for("the publisher to finish", || handle1.open_consumers() == 0);
+    thread::sleep(Duration::from_millis(150)); // > 2 × bridge::WATCH_TICK
+    let mut header = spectrum_header(
+        "spectrum/live",
+        ContentClass::Unrestricted,
+        30.0,
+        bins as u32,
+    );
+    header.center_hz = Some(101.8e6);
+    let second = Publisher::new(header, PublisherConfig::default()).unwrap();
+    let handle2 = second.handle();
+    let offered = Instant::now();
+    registry.register(second.header(), handle2.clone());
+    while handle2.open_consumers() == 0 {
+        assert!(
+            offered.elapsed() < Duration::from_millis(25),
+            "the carried-over consumer took {:?} to re-subscribe: the bridge is waiting on a \
+             timer again, and the producer's first rows of the new window are being lost",
+            offered.elapsed()
+        );
+        std::hint::spin_loop();
+    }
+}
+
 #[test]
 fn slow_browser_is_dropped_while_the_producer_keeps_rate() {
     const PAYLOAD: usize = 64 * 1024;

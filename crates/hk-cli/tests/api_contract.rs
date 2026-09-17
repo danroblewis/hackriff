@@ -3279,6 +3279,40 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
     // applied to time): a break in the data while the front end moves is true and must stay
     // visible. The connection persists; the data honestly gaps. So across the seam the capture
     // clock **skips** — nothing is held, repeated or interpolated to cover it.
+    //
+    // T-425 measured what that skip actually is, because the bound here used to be `> 1.5 ×
+    // period` and failed on a bit-identical value — 14% of runs on an idle machine, 40% under a
+    // 12-way CPU load, and 70% on the coordinator's box, all at the same commit. That spread is
+    // the finding, not noise: the rate is a property of the machine, never of the tree, so no
+    // merge ever moved it (T-416 believed it had; T-383 edited this file but 5600 lines away).
+    // The seam decomposes exactly:
+    //
+    //     gap = hole + period_old + n × period_new
+    //
+    // - `hole` is the capture time genuinely missing while the front end moves (the settle
+    //   discard plus the samples the re-plumb consumed): **12.8 ms**, about **a third of a row**,
+    //   never a whole one. So "at least one row's worth of time must be MISSING" was a claim about
+    //   this system that was never true, and 1.5 × period (60.2 ms) sat *above* the real seam of
+    //   52.9 ms.
+    // - `period_old` = 40.107 ms (96 256 samples at 2.4 MHz), `period_new` = 40.0 ms (192 000 at
+    //   4.8 MHz).
+    // - `n` was the number of new-window rows this consumer **never received**, because the bridge
+    //   looked for the replacement publisher once per `WATCH_TICK` (50 ms) while the new segment
+    //   filled its first row in ~40 ms: a phase race with n ∈ {0, 1, 2}. Mutating WATCH_TICK to
+    //   1 ms made the old assertion fail 6/6 at exactly 52.906667 ms; 200 ms made it pass 4/4. The
+    //   old bound only ever passed *because* rows were dropped in delivery — and a mutation that
+    //   papered the seam over completely still passed, because the dropped rows forged a gap that
+    //   was not there. T-425 fixed that in `bridge::watch_peer` (it now waits on the registry, not
+    //   on a tick), which is what makes the assertion below mean anything: with the fix the same
+    //   mutation fails 4/4.
+    //
+    // So bound the quantity that is invariant. A seam that was held, repeated, interpolated or
+    // back-filled puts the next row exactly `period_old` after the last one; an honest one puts it
+    // strictly later. `period_old` is therefore not a fitted threshold but the exact boundary
+    // between the two, and it stays a *lower* bound because a stalled consumer can still lose rows
+    // (n > 0), which only pushes the measurement further above it, never below — so nothing here
+    // is load-sensitive. Measured: 52.906667 ms in 7 of 8 runs after the bridge fix (ratio 1.32),
+    // one run at 616 ms (n = 14, a stall). No upper bound: `n` has no measured ceiling.
     let last_before = after.last_row().expect("rows before the re-plumb");
     let mut periods: Vec<i64> = after
         .saw
@@ -3292,20 +3326,41 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
         .map(|w| w[1] - w[0])
         .collect();
     periods.sort_unstable();
-    let period_s = periods[periods.len() / 2] as f64 / 1e9;
+    let period_ns = periods[periods.len() / 2];
+    let period_s = period_ns as f64 / 1e9;
     let gap_s = (rows_after[0] - last_before) as f64 / 1e9;
     assert!(
-        gap_s > period_s * 1.5,
-        "at least one row's worth of time must be MISSING at the seam, not filled: \
-         gap {gap_s} s against a {period_s} s row period"
+        gap_s > period_s,
+        "capture time must be MISSING at the seam, not filled: the first row of the new window \
+         starts {gap_s} s after the last row of the old one, which is no later than the \
+         {period_s} s row period a held, repeated or interpolated seam would produce"
     );
-    // And no row is a held or repeated one: capture time strictly advances everywhere, seam
-    // included. (A held last frame would show as a repeated or non-advancing timestamp.)
+    // And the hole is at the seam and nowhere else: no row is a held or repeated one (capture time
+    // strictly advances everywhere, seam included — a held last frame would show as a repeated or
+    // non-advancing timestamp), and no row after the seam lands *earlier* than one row period
+    // after its predecessor, which is what back-filling the hole with squeezed rows would look
+    // like. Only the "never shorter" half is asserted: rows lost in delivery lengthen a step and
+    // never shorten one, so this stays true under any load.
     for (a, b) in std::iter::once(&last_before)
         .chain(rows_after.iter())
         .zip(rows_after.iter())
     {
         assert!(b > a, "row timestamps strictly advance: {a} then {b}");
+    }
+    let mut steps: Vec<i64> = rows_after.windows(2).map(|w| w[1] - w[0]).collect();
+    steps.sort_unstable();
+    // The new window has its own row period (192 000 samples at 4.8 MHz = 40.0 ms, against the old
+    // window's 40.107 ms), so it is measured here rather than carried over from `period_ns`.
+    let new_period_ns = steps[steps.len() / 2];
+    for w in rows_after.windows(2) {
+        // ±2 ns: row times are sample_index / rate rounded to whole nanoseconds.
+        assert!(
+            w[1] - w[0] >= new_period_ns - 2,
+            "a row after the seam is {} ns after the one before it, shorter than the new window's \
+             {new_period_ns} ns row period — the hole belongs at the seam, not squeezed back into \
+             the window: {rows_after:?}",
+            w[1] - w[0]
+        );
     }
 
     let _ = ws.close(None);
