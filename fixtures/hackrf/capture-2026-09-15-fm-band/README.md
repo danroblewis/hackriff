@@ -245,7 +245,57 @@ harmonic number rather than a line — a flat notch lets h2 straight back out, w
 | 100.4653 MHz box | 22.48 dB at 1313.95 Hz (h2) | **13.13 dB**, no two methods agreeing |
 
 A **fourth** receiver-wide family is visible underneath, spaced ~119.95 Hz (1439, 1559,
-1679, 2159 Hz…) at 13–17 dB — plausibly mains-related, not measured, and not excluded.
+1679, 2159 Hz…) at 13–17 dB — plausibly mains-related. It was never recorded here, and
+**T‑394 measured it blind** (below).
+
+## The receiver-wide test itself (T‑394)
+
+Each of the three exclusions above is a named frequency taken from this capture's
+provenance, and each one revealed the next. T‑394 replaced the *strategy*, not the
+records: `hk-estimate/src/blind/receiver.rs` measures the general property T‑382 stated —
+**a line at one frequency in channels holding nothing is the receiver's, written down or
+not**.
+
+It channelises the capture with the shipped polyphase bank (32 channels of 75 kHz),
+keeps the channels whose power sits at a running-median baseline *and* whose neighbours'
+does too, whitens each through C14's own transform, and takes the **median across them**.
+A line more than half the empty channels carry is device-local; an emission's structure,
+confined to its own band and skirt, is not.
+
+Run over 2 s of this capture with `capture_artefacts` **stripped**, so nothing it reports
+can have come from a record (`hk-estimate/tests/receiver_lines.rs`), 16 reference channels
+of 32:
+
+| line | median over the reference channels |
+|---|---|
+| 8 kHz host comb, h1–h7 | 19.5 – 30.8 dB |
+| ~655.75 Hz family, h1–h4 (655.78, 1311.31, 1966.84, 2622.38 Hz) | 15.3 – 33.5 dB |
+| `fs/8192` comb, h1–h6 (292.77 … 1757.83 Hz) | 14.8 – 21.0 dB |
+| **~119.95 Hz family** — 1439.32 / 1559.33 / 1679.33 and 2039.35 / 2159.35 / 2278.86 Hz | **12.4 – 17.9 dB** |
+| **19 kHz stereo pilot** | **3.2 dB — below threshold, not a line** |
+| **38 kHz stereo subcarrier** | **0.6 dB — below threshold, not a line** |
+
+So the measurement recovers all three recorded families *and* the fourth, and it leaves
+the two stations' real subcarriers alone — which is the control the whole thing turns on,
+because the pilot reads 35.3 dB in the station's own channel and ≥ 18 dB in six others.
+The median is what separates them: 7 channels of 32 is not a majority.
+
+On a 22-box grid across the passband (every other box of the 44 above, same geometry),
+with only the measurement acting:
+
+| | discriminator off | on |
+|---|---|---|
+| boxes whose argmax is a receiver line | 18 of 22 | **0 of 22** |
+| per-box median `cyclic_db` | 27.83 dB | **13.80 dB** |
+| boxes above 20 dB | 22 of 22 | **4 of 22** |
+| the three strongest | receiver artefacts | **19 kHz pilot 31.94 / 30.11 dB, 38 kHz subcarrier 29.08 dB**, 6.5 dB clear of anything else |
+
+**Still leaves something**, and it is recorded rather than tuned away: a coherent bump at
+**1316.9 Hz** reads 9.4 dB in the receiver-line spectrum, below the 12 dB threshold, and
+shows through as one box's 15 dB argmax. The null of this statistic, measured on a clean
+synthetic capture over 59 990 cells, is max 7.52 dB / p99.99 6.37 / median 1.58 dB, so
+12 dB has 4.5 dB of margin and chasing a 9.4 dB bump would be tuning the threshold to this
+fixture.
 
 ## What the acceptance test asserts
 
@@ -282,7 +332,11 @@ with the truth stripped before the device sees the recording:
   "arrives through the antenna" from "generated in the box"), and a **back-to-back pair on
   one host in one session** — one recorded with `hackrf_transfer`, one through the ring
   reader — which separates the session from our output path.
-- The ~119.95 Hz family under everything else is unmeasured.
+- The ~119.95 Hz family under everything else is now **measured** (T‑394, above) but still
+  unidentified: nothing says what runs at ~119.95 Hz, and mains at 120 Hz (full-wave
+  rectified 60 Hz) is a guess this capture cannot confirm. A 50 Ω terminator capture and a
+  mains-frequency reference would settle it.
+- The 1316.9 Hz bump T‑394 leaves behind is unidentified and below the survey threshold.
 - Nothing in the system spots a harmonic family. Image and reference-harmonic
   attribution exist (T-302); "these three emitters are harmonics of one fundamental
   nobody can see" is a capability that does not.

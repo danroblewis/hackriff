@@ -703,6 +703,29 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
 /// a line at one frequency in channels holding nothing is the receiver's, whether or not anyone
 /// has written it down — not a longer list.
 ///
+/// **T-394 built that test** ([`hk_estimate::blind::receiver`]). It channelises the capture, finds
+/// the channels whose power is at the local noise floor and whose neighbours' is too, whitens each
+/// through C14's own transform and takes the **median across them**: a line more than half of
+/// those channels carry is device-local by construction, and an emission's structure — confined to
+/// its own band and skirt — is not. Nothing about it is a frequency, a drift or a fixture.
+///
+/// Measured on `capture-2026-09-15-fm-band` with the provenance records **stripped**, so only the
+/// measurement can act: over 16 reference channels the three families that each needed a record
+/// come back (the `fs/8192` comb's h1–h6, the 8 kHz comb's h1–h7, the ~655.75 Hz family's h1–h4),
+/// **and so does the fourth, unrecorded, ~119.95 Hz family** (1439/1559/1679 and 2039/2159/2279
+/// Hz, 12.4–16.1 dB) — caught with nothing naming it. Over a 22-box grid across the passband the
+/// argmax is a receiver line in **18 of 22** boxes without it and **0 of 22** with it, the per-box
+/// median `cyclic_db` falls **27.8 → 13.8 dB**, boxes above 20 dB go 22 → 4, and the three
+/// strongest are the stations' genuine 19 kHz pilot (31.9, 30.1 dB) and 38 kHz subcarrier
+/// (29.1 dB), 6.5 dB clear of anything else. The control the whole thing turns on holds: the
+/// pilot reads **3.2 dB** in this statistic against 20–31 dB for every receiver family, because it
+/// is in a handful of channels and they are in all of them.
+///
+/// It is **not yet wired into the pipeline's own call site**: the survey wants a second or more of
+/// the raw tuned span, and `hk_pipeline::classify::classify_box` is handed one burst. Until a
+/// caller with a capture window calls [`crate::SymbolEstimator::survey_receiver_lines`], this
+/// dimension still leans on the recorded exclusions on a real capture.
+///
 /// T-281 reasoned that a coherent line's peak grows with the record
 /// while the whitened noise median does not, so the ratio should grow about `10·log10(N)`, and
 /// measured `ook` 20.17 → 31.44 dB and `bpsk` 15.32 → 25.08 dB over 8× of window on one seed at

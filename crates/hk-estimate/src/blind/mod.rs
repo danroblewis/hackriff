@@ -55,6 +55,7 @@
 pub mod consensus;
 pub mod family;
 pub(crate) mod lines;
+pub mod receiver;
 pub mod transitions;
 pub(crate) mod util;
 
@@ -67,6 +68,7 @@ use serde::{Deserialize, Serialize};
 
 pub use consensus::{LineSupport, RateCandidate};
 pub use family::FskCentreStats;
+pub use receiver::{ReceiverLine, ReceiverLines, SurveyConfig};
 pub use transitions::{FitFailure, LsGuards, TransitionFit};
 
 use crate::dsp::{ChannelFilter, mix_into};
@@ -538,6 +540,17 @@ pub struct SymbolParameters {
     /// records no artefact, or when the record was too short to resolve the comb.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_cyclic_hz: Vec<f64>,
+    /// Cyclic lines excluded from the search because this receiver was **measured** to contribute
+    /// them, Hz, ascending (T-394).
+    ///
+    /// The frequencies of [`ReceiverLines`] that fall inside [`SymbolParameters::rate_range_hz`].
+    /// Unlike [`SymbolParameters::excluded_cyclic_hz`] these are not derived from a record naming
+    /// an artefact: each was seen at one frequency in channels of this same capture that hold no
+    /// emission, which is what makes it the receiver's (see [`receiver`]). Empty when no survey
+    /// was in force for this window, when the survey belongs to another device/tune/gain state, or
+    /// when it would have notched more than a quarter of the search band.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_receiver_hz: Vec<f64>,
     /// Family label (`Unknown` unless SNR_ext ≥ floor and confidence ≥ floor).
     pub family: Family,
     /// Family confidence `best · (1 − 0.7·second)`.
@@ -579,6 +592,7 @@ impl SymbolParameters {
             transition_fit: None,
             rate_range_hz: (f64::NAN, f64::NAN),
             excluded_cyclic_hz: Vec::new(),
+            excluded_receiver_hz: Vec::new(),
             family: Family::Unknown,
             family_confidence: 0.0,
             family_scores: FamilyScores::default(),
@@ -625,6 +639,14 @@ impl SymbolParameters {
 pub struct BlindEstimator {
     config: BlindConfig,
     plans: Plans,
+    /// Cyclic lines **measured** to be this receiver's (T-394), applied to every window captured
+    /// through the same device, tune and gain state.
+    ///
+    /// It lives on the estimator rather than on [`BlindInput`] because it describes the receiver
+    /// being looked through, not the window being looked at: one survey serves every box of a
+    /// capture, and it is checked against each window's own provenance before it is used
+    /// ([`ReceiverLines::applies_to`]) so a survey never crosses a device, a retune or a gain step.
+    receiver: Option<ReceiverLines>,
 }
 
 enum LsMode<'a> {
@@ -671,12 +693,40 @@ impl BlindEstimator {
         Self {
             config,
             plans: Plans::default(),
+            receiver: None,
         }
     }
 
     /// Settings.
     pub fn config(&self) -> &BlindConfig {
         &self.config
+    }
+
+    /// Measures this receiver's own cyclic lines over a capture window and keeps them
+    /// ([`receiver::survey`], T-394). Returns whether the survey produced a set.
+    ///
+    /// A survey that abstains — too short a window, too few channels holding nothing — **clears**
+    /// what was held rather than leaving a stale one in place: an exclusion that no longer
+    /// describes the receiver is worse than none, because it is invisible.
+    pub fn survey_receiver_lines<T: hk_dsp::IqSample>(
+        &mut self,
+        info: hk_dsp::InputInfo<'_>,
+        samples: &[T],
+        cfg: &SurveyConfig,
+    ) -> bool {
+        self.receiver = receiver::survey(&mut self.plans, info, samples, cfg);
+        self.receiver.is_some()
+    }
+
+    /// The measured receiver lines in force, if any.
+    pub fn receiver_lines(&self) -> Option<&ReceiverLines> {
+        self.receiver.as_ref()
+    }
+
+    /// Sets (or clears) the measured receiver lines directly — for a caller that surveyed
+    /// elsewhere, and for the controls that prove this exclusion has teeth.
+    pub fn set_receiver_lines(&mut self, lines: Option<ReceiverLines>) {
+        self.receiver = lines;
     }
 
     /// Prepares a snippet for C14. With a measured OBW99 and CFO: [`normalise`] with
@@ -957,9 +1007,46 @@ impl BlindEstimator {
             })
             .collect();
         let excluded_cyclic_hz: Vec<f64> = combs.iter().map(|c| c.fundamental_hz).collect();
+        // T-394: cyclic lines this receiver was **measured** to contribute — seen at one frequency
+        // in channels of this same capture that hold no emission. Every entry of `combs` above is
+        // a frequency someone wrote down; every entry here is one the capture was measured to
+        // carry, which is the only form of this that generalises past one fixture.
+        //
+        // A survey is device-local physics, so it is applied only to a window captured through the
+        // same device, tune and gain state (T-259/T-305), and only when the window carries the
+        // provenance to check that against.
+        let receiver_guard_hz = self
+            .receiver
+            .as_ref()
+            .map_or(0.0, |r| r.guard_hz(native_hz));
+        let receiver_lines: &[receiver::ReceiverLine] = self
+            .receiver
+            .as_ref()
+            .filter(|r| input.capture.is_some_and(|p| r.applies_to(p)))
+            .map(|r| r.in_band(f_min, f_max))
+            .unwrap_or_default();
+        // The same quarter-band rule the combs obey: a notch removing more than a quarter of the
+        // search band is deleting the band rather than an artefact, and a survey that produced one
+        // is measuring something other than lines.
+        let notched: f64 = receiver_lines
+            .iter()
+            .map(|l| 2.0 * (l.half_width_hz + receiver_guard_hz))
+            .sum();
+        let receiver_lines = if notched > 0.25 * (f_max - f_min) {
+            &[][..]
+        } else {
+            receiver_lines
+        };
+        let excluded_receiver_hz: Vec<f64> = receiver_lines.iter().map(|l| l.freq_hz).collect();
         let excluded = lines::Excluded {
             combs: &combs,
             guard_hz,
+            receiver: receiver_lines,
+            receiver_guard_hz,
+            receiver_max_half_hz: receiver_lines
+                .iter()
+                .map(|l| l.half_width_hz)
+                .fold(0.0, f64::max),
         };
         let d = ((fs / obw / 2.0).round() as usize).max(1);
         let env_sq: Vec<f64> = xe.iter().map(|s| f64::from(s.norm_sqr())).collect();
@@ -1159,6 +1246,7 @@ impl BlindEstimator {
             reasons.push(BlindReason::CaptureArtefact);
         }
         out.excluded_cyclic_hz = excluded_cyclic_hz;
+        out.excluded_receiver_hz = excluded_receiver_hz;
         out.lines = raw_lines;
         out.family = family;
         out.family_confidence = conf;
