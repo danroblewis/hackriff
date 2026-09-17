@@ -28,5 +28,6 @@
 .cap-band .cap-mark.confirmed { background: var(--teal); }
 .cap-band .cap-ring { position: absolute; bottom: 0; height: 3px; background: var(--teal-soft); border-top: 1px solid color-mix(in srgb, var(--teal) 45%, transparent); pointer-events: none; }
 .cap-band .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--amber); box-shadow: 0 0 0 1px color-mix(in srgb, var(--ground) 60%, transparent); pointer-events: none; }
-.cap-band .live-pill { position: absolute; top: 4px; right: 6px; font: 600 9.5px var(--ui); letter-spacing: 0.08em; color: var(--coral); border: 1px solid color-mix(in srgb, var(--coral) 50%, transparent); background: color-mix(in srgb, var(--coral) 12%, transparent); padding: 1px 6px; border-radius: 4px; cursor: pointer; }
-.cap-band.reviewing .live-pill { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 50%, transparent); background: color-mix(in srgb, var(--amber) 12%, transparent); }
+/* T-395: `.live-pill` used to be here. The control moved to the time navigator (centre.css's
+   `.timenav .tn-live`) — following the live edge is a time-axis choice, and the left bar is the
+   time axis. Nothing else about the band changed. */

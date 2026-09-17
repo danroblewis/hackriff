@@ -28,23 +28,25 @@ import { readFileSync } from "node:fs";
 import * as ax from "../src/axis";
 import { snapState, type NavigationGrid } from "../src/navigation";
 import {
-  activeWindows, bandKey, clampInto, coverageRequest, defaultViewport, litSegments, panWithin,
-  placeOn, regionFromDrag, sameBand, spanOf, spectrumExtent, surveyCells, surveyViewport,
-  timeExtent, timelineRequest, unobservedCount, valueAt, zoomWithin,
+  activeWindows, bandKey, clampInto, clockRangeText, clockText, coverageRequest, defaultViewport,
+  litSegments, panWithin, placeOn, regionFromDrag, sameBand, spanOf, spectrumExtent, surveyCells,
+  surveyViewport, timeExtent, timelineRequest, unobservedCount, valueAt, zoomWithin,
   type CoverageCell, type CoverageResponse, type Range,
 } from "../src/navigators";
 import { captureWindow, currentSpan } from "../src/app/capture/timeline";
 import {
-  applyFreqZoom, applyTimeTarget, freqPan, freqZoomTarget, timeDetailText, timePanTarget,
-  timeWheelTarget, timeZoomTarget,
+  applyFreqZoom, applyTimeTarget, freqHoverText, freqPan, freqSelectText, freqZoomTarget,
+  goLiveFromNav, timeDetailText, timeDragText, timeHoverText, timePanTarget, timeWheelTarget,
+  timeZoomTarget,
 } from "../src/app/centre/navigators";
+import { mountPresenceStream } from "../src/app/explore/presence-stream";
 import { mounts } from "../src/app/centre";
 import { historyWindow, sameCursor } from "../src/app/centre/review-render";
 import { centreInitial, setNavigation } from "../src/app/centre/slice";
 import { applyDeviceAction, retuneAction, setLiveView, setRetuneOffer } from "../src/app/centre/view";
 import type { AppContext } from "../src/app/context";
 import { createStore } from "../src/app/store";
-import { initialState, reviewAt } from "../src/app/state";
+import { goLive, initialState, reviewAt } from "../src/app/state";
 
 const near = (a: number, b: number, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `${a} ≉ ${b}`);
 
@@ -1019,4 +1021,285 @@ test("T-376: wheel-zooming the frequency bar changes only the bar's frame, and r
   assert.deepEqual(calls, [], "a bar zoom must never reach the control API");
   assert.ok(Object.is(ctx.store.get().live, before.live), "a bar zoom must not move the main view");
   assert.ok(Object.is(ctx.store.get().time, before.time), "a bar zoom must not scrub time");
+});
+
+// ---------------------------------------------------------------------------
+// T-395: Live moved onto the time navigator — the control, not the state
+// ---------------------------------------------------------------------------
+//
+// The user's placement argument: *following the live edge vs holding a past window is a TIME-axis
+// choice, so it belongs with the time navigator, consistent with "left bar = time".*
+//
+// The risk this suite exists for is the opposite of a layout bug. `time.live` is load-bearing:
+// T-388's presence push subscribes **only** while it is true (a paused view opens no socket at
+// all), T-379's view window is derived from the same cursor, and T-387's live-only notes change
+// their text on it. So the assertions below are not that a button exists somewhere new — they are
+// that **the relocation moved no state**: the same patch is dispatched, the frequency axis does not
+// move with it, no device route is reached, and the presence stream's paused/live behaviour is
+// bit-for-bit what T-388 landed.
+
+test("T-395: the Live control dispatches the SAME action from the time bar, and moves nothing else", () => {
+  const { ctx, calls } = deviceSpyCtx();
+  ctx.store.set(reviewAt(1_600_000_300, 20));
+  const liveBefore = ctx.store.get().live;
+
+  goLiveFromNav(ctx.store);
+
+  // The identical patch the Capture panel's pill produced, compared against a store driven by
+  // `goLive` itself rather than against a hand-written literal.
+  const ref = createStore(initialState());
+  ref.set(reviewAt(1_600_000_300, 20));
+  ref.set(goLive);
+  assert.deepEqual(ctx.store.get().time, ref.get().time);
+  assert.deepEqual(ctx.store.get().time, { live: true });
+
+  // T-367's rule, restated for the new control: a time control writes the time cursor and nothing
+  // else, so the frequency slice comes out the same object.
+  assert.ok(Object.is(ctx.store.get().live, liveBefore), "the Live control must not move the frequency axis");
+  assert.deepEqual(calls, [], "following the live edge is a view change, never a device action");
+});
+
+/** The presence socket stub, as T-388's own suite uses one: the point is what does and does not get
+ * constructed, so the class only has to record that. */
+class LiveSocket {
+  static open: LiveSocket[] = [];
+  binaryType = "";
+  onmessage: ((ev: { data: string | ArrayBuffer }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  closed = false;
+  constructor(readonly url: string) { LiveSocket.open.push(this); }
+  close() { this.closed = true; this.onclose?.(); }
+}
+
+test("T-395: the presence push sees paused and live exactly as T-388 left it, through the relocated control", async () => {
+  LiveSocket.open = [];
+  (globalThis as Record<string, unknown>).WebSocket = LiveSocket;
+  (globalThis as Record<string, unknown>).location = { protocol: "http:", host: "h" };
+  (globalThis as Record<string, unknown>).window = globalThis;
+
+  const store = createStore(initialState());
+  store.set(reviewAt(900)); // held in the past, before anything mounts
+  let gets = 0;
+  const client = {
+    get: async () => { gets++; return { streams: [{ stream_id: "presence", kind: "messages", remote_permitted: true }] }; },
+  } as unknown as AppContext["client"];
+  const stop = mountPresenceStream({ store, client, token: "t" } as AppContext);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(gets, 0, "paused: no stream is even discovered — T-388's rule, unchanged by the move");
+  assert.equal(LiveSocket.open.length, 0, "and no socket is opened");
+
+  // The relocated control, and nothing else, drives the transition.
+  goLiveFromNav(store);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(LiveSocket.open.length, 1, "pressing LIVE on the time bar subscribes, exactly as the Capture pill did");
+  assert.ok(LiveSocket.open[0].url.includes("/ws/presence"));
+
+  // …and pausing again still closes it: the pair is intact, not just the live half.
+  store.set(reviewAt(900));
+  assert.ok(LiveSocket.open[0].closed, "pausing still closes the socket");
+  stop();
+});
+
+test("T-395: the control lives on the time navigator and no longer on the Capture panel", () => {
+  const nav = readFileSync("src/app/centre/navigators.ts", "utf8");
+  const timeMount = nav.slice(nav.indexOf("function mountTimeNav("), nav.indexOf("export const navigatorMounts"));
+  assert.match(timeMount, /class: "tn-live"/, "the LIVE control is built by the TIME navigator");
+  assert.match(timeMount, /goLiveFromNav\(store\)/, "and wired to the same time-axis action");
+
+  // Gone from the Capture panel — the element, its handler and its style, not merely hidden.
+  const cap = readFileSync("src/app/capture/index.ts", "utf8");
+  assert.doesNotMatch(cap, /live-pill|livePill/, "the Capture panel no longer builds a LIVE control");
+  const capCss = readFileSync("src/app/capture/capture.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.doesNotMatch(capCss, /live-pill/, "and its style went with it");
+
+  // The move is a move, not a deletion: the style is on the time bar now, scoped to that slot.
+  const css = readFileSync("src/app/centre/centre.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(css, /\.timenav \.tn-live\s*\{/);
+  assert.match(css, /\.timenav \.tn-live\.following\s*\{/, "it still shows which of the two states the view is in");
+});
+
+// ---------------------------------------------------------------------------
+// T-393: what each bar is, and what it says under the cursor
+// ---------------------------------------------------------------------------
+//
+// The user asked for three things: a static label naming each bar's axis; on the TIME bar the clock
+// time at the cursor and the selected range during a drag; on the FREQUENCY bar the frequency at
+// the cursor **and the SDR configuration selecting there would set**, snapped to the achievable
+// grid. Minimal, hover/drag only.
+//
+// The one that has to be right is the clock. Four separate times in this UI a surface has rendered
+// the browser's wall clock over capture data (T-379's 306,315 s-out window, T-384's three sites in
+// `plots.ts`, T-389's live Confirmed query, and the trap T-387 had to prove it avoided). A time
+// navigator that did it would be the worst of them, because a user reads a clock and believes it.
+
+test("T-393: the time bar's readout is on the CAPTURE clock, and provably not the browser's", () => {
+  // A capture window years away from wall-clock now — a replay, or the mock SDR: exactly the case
+  // the previous four bugs were found in.
+  const ext = timeExtent({ t0S: 1_600_000_000, t1S: 1_600_000_600, spanS: 600 })!;
+
+  // 1600000000 is 2020-09-13T12:26:40Z; half way along a 600 s window is 300 s later.
+  assert.equal(timeHoverText(ext, 0), "12:26:40Z");
+  assert.equal(timeHoverText(ext, 0.5), "12:31:40Z");
+  assert.equal(timeHoverText(ext, 1), "12:36:40Z");
+
+  // THE CONTROL: the same cursor position, formatted from the browser's clock instead. The readout
+  // is not that — and cannot become it, because `Date.now()` is not an input to the function.
+  const browser = clockText(Date.now() / 1000);
+  assert.notEqual(timeHoverText(ext, 0.5), browser, "the readout is the browser's wall clock");
+  assert.notEqual(timeHoverText(ext, 1), browser, "even the live edge is the CAPTURE clock's edge");
+
+  // …and the same position on a *different* capture window gives a different answer, so the mapping
+  // is genuinely the window's and not a constant that happened to match.
+  const other = timeExtent({ t0S: 1_600_003_600, t1S: 1_600_004_200, spanS: 600 })!;
+  assert.notEqual(timeHoverText(other, 0.5), timeHoverText(ext, 0.5));
+
+  // No window answered yet: nothing is claimed, rather than a wall-clock time standing in.
+  assert.equal(timeHoverText(null, 0.5), "");
+});
+
+test("T-393: dragging the time bar reads out the selected RANGE and how long it is", () => {
+  const ext = timeExtent({ t0S: 1_600_000_000, t1S: 1_600_000_600, spanS: 600 })!;
+  // A drag from a third of the way down to two thirds: 200 s in, 400 s in.
+  // `durationText` is the band's own wording, reused rather than re-spelled here (200 s → "3 min").
+  assert.equal(timeDragText(ext, 1 / 3, 2 / 3), "12:30:00Z–12:33:20Z · 3 min");
+  assert.equal(timeDragText(ext, 0.5, 0.6), "12:31:40Z–12:32:40Z · 60 s");
+  // Dragged upward (newest to oldest) it names the same range: a range has no direction.
+  assert.equal(timeDragText(ext, 2 / 3, 1 / 3), timeDragText(ext, 1 / 3, 2 / 3));
+  // A press with no width is not a range — it falls back to the instant under the cursor.
+  assert.equal(timeDragText(ext, 0.5, 0.5), timeHoverText(ext, 0.5));
+  // The range text, too, is on the capture clock.
+  assert.equal(clockRangeText(1_600_000_600, 1_600_000_000), "12:26:40Z–12:36:40Z");
+});
+
+test("T-393: the frequency bar says where the cursor is AND the config selecting there would set — snapped", () => {
+  const ext = spectrumExtent(GRID.frequency)!;
+  const at = (hz: number) => (hz - ext.lo) / spanOf(ext);
+  // The view is 1 MHz wide (99.5–100.5), which is NARROWER than any span this front end can open:
+  // `spans_hz.min` is 2 MHz. The readout must therefore say 2.000 MHz, not the 1 MHz asked for —
+  // that is the T-341 snap, reused rather than re-derived here.
+  const text = freqHoverText(GRID, ext, at(100e6), 1e6);
+  assert.match(text, /^100\.\d+ MHz · centre /, "where the cursor is comes first");
+  assert.match(text, /span 2\.000 MHz \(sample rate\)/, "the achievable span, and what it is");
+  assert.match(text, /· live IQ$/, "and the detail claim that comes with it");
+  // The snapped centre is `snapState`'s, not the raw pointer frequency.
+  const snapped = snapState(GRID, valueAt(ext, at(100e6)), 1e6);
+  assert.ok(snapped.centerHz !== null && text.includes(ax.fmtMHz(snapped.centerHz, 1e6 / 100)), text);
+
+  // A front end that cannot state its tuning step snaps no centre — and the readout says so rather
+  // than implying the radio can sit exactly where the user pointed (navigation.ts, rule 1).
+  const vague: NavigationGrid = { ...GRID, frequency: { ...GRID.frequency!, center_step: "unknown", center_step_hz: null } };
+  assert.match(freqHoverText(vague, ext, at(100e6), 1e6), /centre not on any stated grid/);
+
+  // Nothing tuned: where the cursor is, and no invented window around it.
+  assert.equal(freqHoverText(GRID, ext, at(100e6), null).includes("centre"), false);
+  assert.equal(freqHoverText(GRID, null, 0.5, 1e6), "");
+});
+
+test("T-393: the frequency bar's drag readout describes what selecting ACTUALLY does in this build", () => {
+  const ext = spectrumExtent(GRID.frequency)!;
+  const fracOf = (hz: number) => (hz - ext.lo) / spanOf(ext);
+
+  // Inside the tuned window: a view zoom. The radio does not move, and the readout does not say it
+  // would — the failure mode being a line that promises behaviour the code has not got.
+  const inside = regionFromDrag(ext, fracOf(99.6e6), fracOf(100.4e6))!;
+  const insideText = freqSelectText(GRID, G, inside, true);
+  assert.match(insideText, /zooms the view, the radio stays put/);
+  assert.doesNotMatch(insideText, /Retune/);
+
+  // Outside it: T-392 made this gesture COMMAND the radio on release, so the readout says it
+  // retunes. (Before T-392 it left an offer to press, and this line said "offers" — the control
+  // below is what caught that, and it is kept here inverted rather than deleted.)
+  const outside = regionFromDrag(ext, fracOf(432.0e6), fracOf(432.4e6))!;
+  const outsideText = freqSelectText(GRID, G, outside, true);
+  assert.match(outsideText, /retunes the radio on release: centre 432\.\d+ MHz · span 2\.000 MHz \(sample rate\) · live IQ/);
+  assert.doesNotMatch(outsideText, /offer/, "region-select no longer offers anything — it acts");
+  // The config in the line is `retunePlan`'s own, not a second opinion re-derived beside it.
+  const planned = freqZoomTarget(GRID, G, outside, true);
+  assert.equal(planned.kind, "retune");
+  if (planned.kind === "retune") {
+    assert.ok(outsideText.includes(ax.fmtMHz(planned.centerHz, Math.max(1, planned.spanHz / 100))), outsideText);
+    assert.ok(outsideText.includes(ax.fmtBandwidth(planned.spanHz)), outsideText);
+  }
+
+  // Nothing can capture it: the readout is the refusal's OWN words, so the line and the action
+  // cannot disagree about why. Three real refusals, all reached through the same branch.
+  const tooWide = regionFromDrag(ext, fracOf(1.0e9), fracOf(2.0e9))!;     // wider than one window
+  // A front end with a GAP in its coverage, so "centre outside every band" is a region a user can
+  // really drag on this bar rather than a value only a test could construct.
+  const SPLIT: NavigationGrid = { ...GRID, frequency: { ...GRID.frequency!, ranges_hz: [[1e6, 100e6], [400e6, 6e9]] } };
+  const inGap = regionFromDrag(ext, fracOf(200e6), fracOf(210e6))!;       // centre in the uncovered gap
+  for (const [why, grid, region, isLive] of [
+    ["span_too_wide", GRID, tooWide, true],
+    ["center_out_of_range", SPLIT, inGap, true],
+    ["not_live", GRID, outside, false],
+  ] as const) {
+    const t = freqZoomTarget(grid, G, region, isLive);
+    assert.equal(t.kind, "error", why);
+    if (t.kind !== "error") continue;
+    assert.equal(t.reason, why);
+    const text = freqSelectText(grid, G, region, isLive);
+    assert.match(text, /cannot capture this — /);
+    assert.ok(text.endsWith(t.text), `the readout must use the refusal's own words: ${text}`);
+  }
+
+  // THE CONTROL that keeps the sentence and the gesture from drifting apart, in T-392's shape:
+  // whichever branch `freqZoomTarget` takes is the branch the text describes, for every region,
+  // grid and liveness either of them sees. This is the assertion that failed loudly when T-392
+  // landed and turned the offer into a retune.
+  const cases = [GRID, SPLIT].flatMap((grid) =>
+    [inside, outside, tooWide, inGap, regionFromDrag(ext, fracOf(5.9e9), fracOf(5.95e9))!]
+      .map((r) => [grid, r] as const));
+  for (const [grid, r] of cases) for (const isLive of [true, false]) {
+    const kind = freqZoomTarget(grid, G, r, isLive).kind;
+    const text = freqSelectText(grid, G, r, isLive);
+    assert.equal(/zooms the view/.test(text), kind === "view", `view: ${kind} — ${text}`);
+    assert.equal(/retunes the radio on release/.test(text), kind === "retune", `retune: ${kind} — ${text}`);
+    assert.equal(/cannot capture this/.test(text), kind === "error", `error: ${kind} — ${text}`);
+    assert.equal(text === "", kind === "none", `none: ${kind} — ${text}`);
+  }
+  assert.equal(freqSelectText(GRID, G, null, true), "");
+});
+
+test("T-393: each bar carries a static label for its own axis, and a readout shown only on hover or drag", () => {
+  const nav = readFileSync("src/app/centre/navigators.ts", "utf8");
+  const freqMount = nav.slice(nav.indexOf("function mountFreqNav("), nav.indexOf("function mountTimeNav("));
+  const timeMount = nav.slice(nav.indexOf("function mountTimeNav("), nav.indexOf("export const navigatorMounts"));
+
+  // (1) the static labels, each naming the axis its own bar controls.
+  assert.match(timeMount, /class: "tn-axis-label" \}, "TIME"/);
+  assert.match(freqMount, /class: "fn-axis-label" \}, "FREQ"/);
+
+  // (2)/(3) a readout per bar, hidden at rest and revealed by the pointer — not a permanent tick row.
+  for (const [name, mount] of [["time", timeMount], ["frequency", freqMount]] as const) {
+    assert.match(mount, /readout\.hidden = true/, `${name}: the readout rests hidden`);
+    assert.match(mount, /addEventListener\("pointermove"/, `${name}: it follows the cursor`);
+    assert.match(mount, /addEventListener\("pointerleave", \(\) => \{ dragText = null; readout\.hidden = true; \}\)/,
+      `${name}: and goes away when the pointer does`);
+  }
+  // Each bar's readout moves along its OWN axis: the time line travels vertically, the frequency
+  // line horizontally. Wiring either to the other's axis is the T-367 class of bug, in miniature.
+  assert.match(timeMount, /readout\.style\.top =/);
+  assert.ok(!/readout\.style\.left =/.test(timeMount), "the time readout must not travel horizontally");
+  assert.match(freqMount, /readout\.style\.left =/);
+  assert.ok(!/readout\.style\.top =/.test(freqMount), "the frequency readout must not travel vertically");
+
+  const css = readFileSync("src/app/centre/centre.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const sel of [".timenav .tn-axis-label", ".timenav .tn-readout", ".freqnav .fn-axis-label", ".freqnav .fn-readout"]) {
+    assert.ok(css.includes(`${sel} {`), `missing ${sel}`);
+  }
+  // Readouts are labels, never pointer targets: one over the track must not eat the drag under it.
+  assert.match(css, /\.timenav \.tn-readout \{[^}]*pointer-events: none/);
+  assert.match(css, /\.freqnav \.fn-readout \{[^}]*pointer-events: none/);
+});
+
+test("T-393: no clock of the browser's own reaches either navigator module", () => {
+  // The structural half of the capture-clock property: the functions above cannot start reading
+  // wall-clock time in a later edit without this failing. (T-388 pins the same thing on the
+  // presence modules, for the same reason.)
+  for (const f of ["src/navigators.ts", "src/app/centre/navigators.ts"]) {
+    const src = readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    for (const word of ["Date.now", "performance.now", "toLocaleTimeString", "getTimezoneOffset"]) {
+      assert.ok(!src.includes(word), `${f} must not contain "${word}"`);
+    }
+  }
 });
