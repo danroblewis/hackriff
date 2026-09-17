@@ -5851,7 +5851,7 @@ tasks:
     milestone: M3
     title: 'blind_* family scores jump 0.10 to 1.00 between window sizes: a lock/no-lock transition fed
       to a Gaussian as a continuous value'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-281
@@ -6069,7 +6069,7 @@ tasks:
     milestone: M5
     title: 'hk-gnss is reachable only from its own tests: nothing schedules an L1 dwell, so the acquisition
       path has no caller'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-274
@@ -6234,6 +6234,11 @@ tasks:
     title: 'ALGID is parsed and unit-tested but unreachable from IQ: it lives in voice frames and nothing
       demodulates those'
     status: blocked
+    blocked_on: >-
+      a capability that does not exist: ALGID lives in the voice frames on the granted channel
+      and nothing demodulates those yet (T-270 said so at the time). Unblocked by a voice-frame
+      decode existing - not by a slot, and not by anyone deciding anything. Was sitting as todo
+      and making the unblocked-work census lie until 2026-09-16.
     priority: normal
     deps:
     - T-270
@@ -7380,6 +7385,12 @@ tasks:
     title: 50 ohm terminator capture - is the oscillator family radiated or conducted?
     milestone: M2-hardening
     status: blocked
+    blocked_on: >-
+      the user, at the bench. A single 50 ohm terminator capture separates conducted from
+      radiated coupling: conducted survives the terminator, radiated does not. It is now the
+      open question on TWO artefacts, not one - T-317 could not decide it for the 2.336 MHz
+      oscillator family, and T-382 traced a second family to hackriff own ring-reader path. No
+      software work unblocks it.
     priority: normal
     parallel_group: HW
     needs: hardware
@@ -8126,6 +8137,52 @@ tasks:
       WHAT REMAINS: the client sharing the waterfall's colormap CODE (not copying a
       scale), and THE USER'S CONFIRMATION of the truncated half of their message.
       That makes the remainder a ui-only change.
+      USER REFINEMENT 2026-09-16, and it changes the shape of this ticket: the strip
+      currently looks like it renders a SINGLE ROW (one spectrum across the frequency
+      range) STRETCHED VERTICALLY to fill the bar height. That is wrong.
+      IT SHOULD BE A PROPER MINI-WATERFALL: several TIME ROWS stacked (time down,
+      frequency across the survey range), as many rows as fit the bar's height AT THE
+      MAIN WATERFALL'S NATIVE ROW RESOLUTION - the same vertical resolution as the big
+      waterfall, just a short window of recent history. Each row is a max-hold-folded
+      spectrum of the whole survey range.
+      NET: the bottom bar is a SMALL RECENT-HISTORY SPECTROGRAM OF THE WHOLE SPECTRUM,
+      not one row scaled up. Same principle as T-411's left overview: REAL ROWS AT
+      WATERFALL RESOLUTION, NEVER ONE CELL STRETCHED.
+      THE ARCHITECTURAL CONSEQUENCE, which the coordinator is flagging rather than the
+      user: this is no longer a ui-only change. T-342 delivered the backend half as a
+      fold PER FREQUENCY CELL OVER A WINDOW - one row. A mini-waterfall needs
+      ROWS x CELLS, which is the SECOND AXIS docs/16 section 2 names as the one real gap
+      between what exists and the tile pyramid: "the pyramid is tiered in TIME and
+      coverage answers per FREQUENCY CELL over a window; the big view needs both at
+      several zoom levels".
+      So the bottom bar being a mini-waterfall makes it literally a miniature of T-408's
+      big view - which is exactly what the user said it was when they described the
+      shared pyramid. DO NOT build a private two-axis query for this bar. Read docs/16
+      first; if the answer is that this waits on the pyramid's second axis, say so.
+      USER 2026-09-16, COLOURING - fold alongside the resolution / max-hold / multi-row
+      work already here. The mini-waterfall strips render in shades of CYAN/TEAL ONLY,
+      which does not match the main waterfall. They must use THE SAME COLORMAP AND THE
+      SAME SCALING as the main WebGL waterfall, so they read as small versions of the
+      real display rather than a monochrome ramp.
+      COORDINATOR FINDING - the two halves are in very different places:
+      SCALING IS ALREADY SERVED. T-342 made /api/coverage state its range_db and
+      normalisation ("0 at range_db.lo, 1 at range_db.hi, linear in dB and clamped"),
+      precisely so a strip could not be normalised against a range the response never
+      named. Use it; do not re-derive a range in the client.
+      THE PALETTE IS IN A SHADER. ui/src/waterfall.ts:73 `vec3 cmap(float x)` is GLSL -
+      six stops (near-black, deep blue, cyan, yellow, red, white) with piecewise mixes at
+      0.2 / 0.45 / 0.7 / 0.9. The navigator strips are 2D canvas. So "share the colormap"
+      means one of two real choices, and they should be weighed rather than defaulted:
+        (a) EXTRACT the stops and the mix to shared TS, have the shader and the strips
+            both consume one definition - the strips then get the palette without WebGL,
+            and a future change to the ramp moves both; or
+        (b) RENDER THE STRIPS IN WEBGL too, which shares the code by construction and
+            costs a second context per bar.
+      COPYING THE SIX STOPS INTO THE CANVAS PATH IS THE WRONG ANSWER even though it is
+      the quickest: it is the third place the same ramp would live, and the user is here
+      because two renderings already disagree.
+      A colormap is presentation, so T-340's ui/src guard does not forbid it - but the
+      SCALE must still come from the wire, which is what that guard is protecting.
 
   - id: T-398
     title: A strong WFM+RDS station takes ~40 s to reach Confirmed when a human sees it in under five
@@ -8270,6 +8327,15 @@ tasks:
     title: Our own synthetic WFM is too narrow to trigger our own WFM occupancy rule
     milestone: M3
     status: blocked
+    blocked_on: >-
+      T-403's SECOND attempt. T-403 was merged (1aeefee) and REVERTED (0465926) the same hour:
+      its new live confirm route races T-398's pilot-lock route nondeterministically - the same
+      48 acceptance tests gave 48 passed then 47 passed / 1 failed on identical code. So T-403
+      is NOT in main. Separately, and measured on T-402's own realistic scene with T-403
+      applied: confirm is fixed (3.00 s) but FAMILY ASSIGNMENT IS 5.00 s against T-401's 4.0 s
+      budget. Per the user 2026-09-17 that residual is A REAL DEFECT TO FIX, NOT A BLOCK - it
+      is assigned to T-403, which owns both the race and the family path. T-402's own work is
+      complete and green in isolation; it lands when T-403 lands.
     priority: normal
     parallel_group: M3A
     deps: [T-398]
@@ -8297,6 +8363,11 @@ tasks:
       DO NOT resolve this by relaxing T-401's 4 s bound: it is a difference of two
       capture timestamps chosen against a measured 1.00 s, and loosening it to fit a
       regression would enshrine exactly what the harness exists to catch.
+      SEQUENCING (T-404, merged 3d37ccf): it refit BOTH density files and bumped
+      features@5 -> features@6. If this ticket refits after its scene change it must
+      refit ON TOP of that, not race it. T-404 also added SynthConfig::packet_preamble
+      (default true) to hk-classify synth - nowhere near the WFM bandwidth, but it is
+      the same file family.
 
   - id: T-403
     title: A station with no pilot and no identity still confirms at the end of the recording
@@ -8331,10 +8402,33 @@ tasks:
       to reach for before loosening a threshold.
       Report the false-confirm rate against ADR-0016 section 7 and run
       just acceptance-milestones. No floor moves.
+      MERGED AND REVERTED (coordinator, 2026-09-16, main green at 0465926). The work
+      is good and the latency result stands - 14.00 s to 3.00 s on all five seeds - but
+      ROUTE B RACES T-398's ROUTE C. I gated the branch (acceptance 48 passed), committed,
+      and the same 48 tests then gave 47 passed / 1 failed on main:
+      confirm_latency::t398_pilot_locked_wfm_confirms_within_seconds - "with no RDS on air
+      the only available route is the verified emission", got "continuous and trusted".
+      Same code, different outcome across two runs: the routes race and route B sometimes
+      reaches Confirmed first on a PILOT-LOCKED station.
+      WHY THIS IS DESIGN, NOT A TEST TO UPDATE: T-398's assertion encodes an intent - a
+      pilot-locked WFM station should be confirmed BY ITS PILOT LOCK, which is positive
+      evidence that it IS WFM. Route B confirms on continuity + width + zero-suspect,
+      which is real but WEAKER IN KIND: "something modulated has been on air steadily",
+      not "this is an FM broadcast station". If B wins the race, the reason recorded on
+      the emitter is the weaker one even when the stronger was available.
+      AND THE "NO SECOND TICKET" CONCLUSION IS CONTRADICTED BY MEASUREMENT: with T-402's
+      realistic 75 kHz-deviation scene on top of this branch, confirm is 3.00 s (the fix
+      works) but FAMILY ASSIGNMENT IS 5.00 s against T-401's 4.0 s budget - detect 0.00s,
+      family 5.00s (fm-broadcast), 159 kHz wide (34 analysis bins). T-403 predicted family
+      1.00 s from its own 155 kHz composite; the real scene disagrees by four seconds.
+      Agent resumed with both. The second must NOT be resolved by widening the 4 s bound:
+      if the bound was calibrated on an unrealistically narrow scene, that is the user's
+      call to re-derive, not ours.
+
   - id: T-404
     title: Six more features measure the observation, and three of them are one defect
     milestone: M3
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -8459,6 +8553,13 @@ tasks:
     title: The coverage tile pyramid and the full-spectrum-over-time view - design before building
     milestone: M5
     status: blocked
+    blocked_on: >-
+      the user, a design decision. docs/16 section 5 lists five open questions and two gate
+      everything downstream: TILE ADDRESSING (map-style fixed tiles vs the per-axis budget
+      idiom this repo already uses - they do not obviously compose) and WHEN DOWNSAMPLING
+      HAPPENS (precomputed at seal time, bounding read latency and costing storage in a system
+      that hit 9.5 GB free today, or on demand, the reverse trade). Not blocked on capacity:
+      nobody can start until these are settled.
     priority: normal
     parallel_group: DESIGN
     core_interface: true
@@ -8597,6 +8698,111 @@ tasks:
       reordered record can never SHORTEN a box) and its rate bound. Keep the paused-view
       behaviour - no socket while paused - and T-362's rule that a box carries times, not
       screen positions.
+  - id: T-411
+    title: The left time-overview renders at the old 12px buffer size, so a few cells stretch into blocks
+    milestone: M2-hardening
+    status: todo
+    priority: high
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-391, T-338, T-334]
+    acceptance: |
+      USER 2026-09-16, ITEM (A) OF THE FOUR-PART NAVIGATOR MESSAGE - LOST TO TRUNCATION
+      AND RE-FILED AT THE USER'S REQUEST. Items (B) and (C) became T-397; (A) was
+      dropped and never became a ticket. The user asked about it "a while ago". Filed.
+      THE DEFECT: the LEFT TIME NAVIGATOR overview is badly PIXELATED because its render
+      buffer is still as thin as the old ~12 px track, so a few cells stretch across the
+      now-wider bar into meaningless blocks. T-391 widened the bar to 92 px; the buffer
+      did not follow.
+      REQUIRED: render the left time-overview at a RESOLUTION MATCHING THE WIDENED BAR -
+      enough frequency bins across its width and enough time rows - so it looks like a
+      normal waterfall over a very long time range. Lower-res than the main view is
+      fine; BLOCKY GARBAGE IS NOT.
+      Use MAX-HOLD when downsampling (same as T-397 for the bottom bar) so narrow and
+      bursty signals are not averaged away, and SHARE THE WATERFALL INTENSITY SCALING.
+      THE REFINEMENT THE USER ADDED FOR BOTH BARS: real rows at waterfall resolution,
+      NEVER ONE CELL STRETCHED. This bar shows a long time range, so its rows are folded
+      hard - but they must be ROWS, each a real fold of a real interval, not one row
+      scaled up.
+      ui-only gate WHERE POSSIBLE - but see the note in T-397: asking for R rows instead
+      of 1 may not be a client-side change, and if /api/timeline cannot serve the row
+      count this bar needs at the resolution it needs, say so rather than upsampling in
+      the client. Upsampling is how the current blockiness happened.
+      USER 2026-09-16, COLOURING - fold alongside the resolution / max-hold / multi-row
+      work already here. The mini-waterfall strips render in shades of CYAN/TEAL ONLY,
+      which does not match the main waterfall. They must use THE SAME COLORMAP AND THE
+      SAME SCALING as the main WebGL waterfall, so they read as small versions of the
+      real display rather than a monochrome ramp.
+      COORDINATOR FINDING - the two halves are in very different places:
+      SCALING IS ALREADY SERVED. T-342 made /api/coverage state its range_db and
+      normalisation ("0 at range_db.lo, 1 at range_db.hi, linear in dB and clamped"),
+      precisely so a strip could not be normalised against a range the response never
+      named. Use it; do not re-derive a range in the client.
+      THE PALETTE IS IN A SHADER. ui/src/waterfall.ts:73 `vec3 cmap(float x)` is GLSL -
+      six stops (near-black, deep blue, cyan, yellow, red, white) with piecewise mixes at
+      0.2 / 0.45 / 0.7 / 0.9. The navigator strips are 2D canvas. So "share the colormap"
+      means one of two real choices, and they should be weighed rather than defaulted:
+        (a) EXTRACT the stops and the mix to shared TS, have the shader and the strips
+            both consume one definition - the strips then get the palette without WebGL,
+            and a future change to the ramp moves both; or
+        (b) RENDER THE STRIPS IN WEBGL too, which shares the code by construction and
+            costs a second context per bar.
+      COPYING THE SIX STOPS INTO THE CANVAS PATH IS THE WRONG ANSWER even though it is
+      the quickest: it is the third place the same ramp would live, and the user is here
+      because two renderings already disagree.
+      A colormap is presentation, so T-340's ui/src guard does not forbid it - but the
+      SCALE must still come from the wire, which is what that guard is protecting.
+
+  - id: T-412
+    title: The time wheel zooms when it should probably scroll; frequency wheel stays zoom
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: UI
+    deps: [T-376, T-393]
+    notes: |
+      WHAT ARRIVED, and it is actionable on its own terms once the missing half lands:
+        - FREQUENCY axis wheel = ZOOM. Already true: T-376 made the frequency bar's wheel zoom its own
+          viewport about the pointer with the waterfall's own wheelFactor
+          (ui/src/app/centre/navigators.ts:705). No change needed, but it is now pinned as intended
+          rather than incidental.
+        - TIME-SPAN ZOOM IS A DELIBERATE SECONDARY GESTURE. This is the change. Today the time bar's
+          wheel ZOOMS the reviewed span about the pointer (navigators.ts:933, "Wheel zooms the
+          reviewed span about the pointer, on the time axis only") - i.e. time-span zoom is currently
+          the PRIMARY wheel gesture, which is what the user is correcting.
+      THE INFERENCE I AM NOT MAKING: the natural reading is that the time wheel should SCROLL/PAN
+      through time - wheel-as-scroll is what a vertical axis usually means - with zoom moved behind a
+      modifier or a control. That is a guess and it is not filed as the requirement. Confirm first.
+      WHEN IT LANDS, two things carry over from the navigator work already done:
+        - one zoom, several input devices: T-407 will add pinch, and pinch is the touch equivalent of
+          the wheel. Whatever the time wheel does, pinch and wheel must resolve to the SAME arithmetic
+          rather than forking the gesture logic.
+        - T-340's control must stay green: no pan and no wheel on either bar may reach a device route
+          (a +/-1.0 drag of the whole 6 GHz bar through a spy client, calls empty). Changing what the
+          wheel MEANS must not change what it can REACH.
+      UI-only gate where possible.
+      THE MISSING HALF ARRIVED (user, 2026-09-17), and it is the whole change:
+      THE TIME AXIS WHEEL SHOULD PAN / SCROLL THROUGH TIME - wheel up/down moves the
+      viewed window EARLIER/LATER, keeping the DURATION/SPAN FIXED. NOT zoom.
+      Rationale, the user's: "the user scrolls through time constantly and rarely
+      resizes", so time-span zoom moves to a DELIBERATE SECONDARY GESTURE - Ctrl/Cmd +
+      wheel, or drag-select-to-zoom on the time navigator.
+      DIRECTION MATCHES THE WATERFALL TIME AXIS: scroll up = back toward OLDER.
+      FREQUENCY-AXIS WHEEL STAYS ZOOM (already true, T-376).
+      So navigators.ts:933 ("Wheel zooms the reviewed span about the pointer") becomes a
+      pan at fixed span, and timeWheelTarget's zoom moves behind the modifier. Note
+      timeWheelTarget already computes a zoom about the pointer - the secondary gesture
+      can keep that arithmetic rather than growing a second one.
+      WATCH THE EDGES: panning at fixed span into the ends of the capture window must
+      clamp without shrinking the span (a pan that silently resizes is the bug this
+      replaces, mirrored). And T-379/T-386 established the window is the capture clock's,
+      so a pan moves a capture-time window, never a wall-clock one.
+      Pinch (T-407) is the touch wheel: whatever pan/zoom split lands here, pinch and
+      wheel must resolve to the SAME arithmetic rather than forking.
+      T-340's control stays green: changing what the wheel MEANS must not change what it
+      can REACH - no wheel on either bar reaches a device route.
+
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
