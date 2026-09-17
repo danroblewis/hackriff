@@ -239,7 +239,7 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
 **`presence` (T-284, ADR-0017 TM-2/§2.3).** **When** this emitter was on the air, seen through the request's window — the object a caller reads instead of `first_seen_s`/`last_seen_s`, which are the *hull* of the presence track and never its extent (a signal seen once at 09:00 and once at 17:00 has an eight-hour hull that is 99.99 % silence; never render it as a duration). `{"intervals", "on_air_s", "last_interval": {"t_start_s", "t_end_s", "open"} | null, "liveness", "ended_t_s", "silence_s", "confidence"}`:
 
 - **`intervals`** — how many presence intervals intersect the window; **`on_air_s`** — time on air *inside* it, Σ of each interval's intersection with the window. Together they are the honest rendering: *"17 events, 4.2 s on air"*. `on_air_s` is what a live list **ranks by**, in place of the lifetime `count`.
-- **`last_interval`** — the latest interval intersecting the window, or `null` when none does. It is the box drawn across trace and waterfall.
+- **`last_interval`** — the latest interval intersecting the window, or `null` when none does. It is the box drawn across trace and waterfall. **Its `t_end_s` also advances over the `presence` stream between polls (T-388, below):** the box grows at the speed the presence was measured, not the speed this route is polled.
 - **`liveness`** — `live` (an interval intersecting the window is open at the live edge), `ended` (its latest in-window interval is closed) or `absent` (no interval intersects; a Candidate in that state is simply not listed, a Confirmed catalogue entry is). **`ended_t_s`** is when it stopped, set exactly when `liveness` is `ended` and `null` otherwise — *"ended 4 minutes ago"*.
 - **`silence_s` / `confidence` — the decayed rank (T-251, ADR-0017 TM-6).** `silence_s` is the time from the latest in-window interval's end to this window's live edge (`0` while on air, `null` when `absent`). `confidence` is the row's confidence in its own hypothesis, `0`–`1`:
 
@@ -1262,6 +1262,26 @@ Where and when the radio actually observed, and why: one `DwellRecord` per non-s
 - `gaps`: unobserved intervals of at least `min_gap_s` (default: any), at most 1000 (`gaps_truncated`).
 - `tau_s`: up to 16 comma-separated burst durations; each `poi` row is the fraction of burst start times in the span whose burst overlaps an observation (`hk_model::attention::schedule::poi_fraction`).
 - `400 invalid` for a missing or bad `f_lo`/`f_hi`/`t0`/`t1` (`f_hi > f_lo ≥ 0`, `t1 > t0`), `tier`, `cursor`, `limit`, `channel_hz` or `tau_s`; `503 unavailable` when the server has no observation log; `405` for other methods.
+
+### Stream `presence` — live box growth (T-388)
+
+Stream id `presence` (`/ws/presence`, ADR-0004 `messages` kind, `message_schema` `hackriff.presence/1`, `content_class` `unrestricted`, listed by `GET /api/streams`; full spec: [stream contract §15](stream-contract.md)). One record per open emitter per tick, saying **how far that emitter's presence has now been observed**:
+
+```json
+{"type":"message","seq":7,"t_ns":1757774400123456789,"emitter_id":"0199…",
+ "content_class":"unrestricted","gated":false,"frame_model":"presence-extension",
+ "metadata":{"kind":"presence-extension",
+             "last_interval":{"t_start_s":1757774390.1,"t_end_s":1757774400.12,"open":true}}}
+```
+
+**Why it exists.** `GET /api/inventory` is polled, and an open track reaches the inventory every 5 s (`LIVE_OFFER_NS`), so a live signal's box on the waterfall used to grow in steps of 5–10 s even though detection runs on every STFT frame. This stream removes both delays without changing either: the poll still creates, arbitrates, merges, confirms and **windows** the rows, and the stream only extends one already on screen.
+
+- `metadata.last_interval` is the **same object** the row's `presence.last_interval` is, above — assign it, do not rebuild it. The envelope's `t_ns` is the same instant as `t_end_s`, in integer Unix nanoseconds (the units convention: `_s` seconds, `_ns` nanoseconds).
+- **The end published is the end of the last burst actually measured, never a clock read.** A consumer must **not** extrapolate towards the live edge between records: a box drawn to now on the assumption the signal is still there is a claim about air nobody measured. The consequence is the property worth testing — an emission that stops stops extending.
+- **Time only, no frequency.** An extension is new time, not new geometry; the box's frequency edges come from the row.
+- A track with no inventory row publishes nothing, and a closed or merged track publishes nothing further.
+- **Rate:** at most one tick per 250 ms and at most 32 records per tick — 128 records/s, whatever the band is doing. What a tick leaves out grows on the poll as before. A slow consumer is dropped, never the survey.
+- Only a **following** view should subscribe; a paused or scrubbed view is answering about a fixed past window and stays on the poll.
 
 Stream `observations` (ADR-0004 `messages` kind, `message_schema` `hackriff.observation/1`, metadata only, listed by `GET /api/streams`): one message per record the log writes, published from the writer thread (a slow subscriber drops messages, never log records). `metadata.kind` is `dwell` (`reason_text`, `record`: the `DwellRecord`) or `sweep-summary` (`plan_version`, `geometry`, `t0_s`, `t1_s`, `visits`, `observed_s`, `f_lo_hz`/`f_hi_hz` of the visited hops, `preempted_hops`, `dropped_samples`, `overload_hops`). Geometry records are not streamed; read them from `GET /api/observations`.
 

@@ -116,8 +116,8 @@ mod tracker;
 
 pub use config::{HopConfig, PeriodConfig, SplitConfig, TrackerConfig};
 pub use events::{
-    BoundaryKind, CloseCause, Distribution, HopSetSummary, Periodicity, SegmentBoundary,
-    TrackEvent, TrackSummary,
+    BoundaryKind, CloseCause, Distribution, HopSetSummary, LiveExtent, Periodicity,
+    SegmentBoundary, TrackEvent, TrackSummary,
 };
 pub use persist::TrackBatch;
 pub use tracker::{Tracker, TrackerStats};

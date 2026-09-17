@@ -88,6 +88,25 @@ impl From<Distribution> for BurstLengths {
     }
 }
 
+/// The observed time extent of one open track (T-388): what
+/// [`Tracker::live_extents_into`](crate::Tracker::live_extents_into) publishes every flush so a
+/// live signal's box can grow without waiting for the 5 s inventory offer.
+///
+/// It is deliberately two timestamps and an id and **nothing else**. A presence extension is new
+/// *time*, not new geometry: the frequency edges of the box on screen came from the inventory row
+/// and are not restated here, so a fast path can never disagree with the slow one about where a
+/// signal is — only about how far it has been heard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiveExtent {
+    /// The open track.
+    pub track: TrackId,
+    /// First member's start, stream ns.
+    pub t_start_ns: i64,
+    /// **End of the last burst actually measured**, stream ns — never a clock read. A track that
+    /// has gone quiet keeps the end it went quiet at.
+    pub t_end_ns: i64,
+}
+
 /// A track with every C10 feature, including those docs/07's `Track` does not store yet.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrackSummary {

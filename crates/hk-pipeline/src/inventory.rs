@@ -124,6 +124,19 @@ pub trait Inventory: Send {
     ) -> Result<(), RepoError> {
         Ok(())
     }
+
+    /// The emitter whose inventory row `track`'s observations are recorded against, when this
+    /// inventory has given it one (T-388).
+    ///
+    /// The live presence push ([`crate::presence`]) addresses an emitter — that is what the client
+    /// holds a row and a box for — while the tracker knows only tracks, so something has to join
+    /// the two, and this is the only seam that sees both. **A track with no answer here is not
+    /// published**, which is what keeps the push from naming a box that does not exist.
+    ///
+    /// Read-only and cheap: an answer already worked out when the row was written, never a query.
+    fn emitter_of_track(&self, _track: TrackId) -> Option<EmitterId> {
+        None
+    }
 }
 
 /// Leaves the inventory to the chains' record writers (no track clustering).
@@ -259,6 +272,11 @@ pub struct TrackInventory {
     /// T-109: open tracks whose live offer created their entry; removed when the track closes,
     /// merges or joins a hop set (every open track ends in one of those).
     provisional: HashMap<TrackId, EmitterId>,
+    /// T-388: which emitter each open track's row is, for [`Inventory::emitter_of_track`]. Written
+    /// wherever a track's row is resolved — a live offer and a chain write, the two seams that
+    /// reach an entry — and removed when the track ends, so a closed track publishes nothing
+    /// further. Bounded like [`Self::run`].
+    bound: HashMap<TrackId, EmitterId>,
     /// Provisional entries retracted because their track's end yielded no sighting (T-109).
     pub retracted: u64,
     /// Sightings recorded.
@@ -304,6 +322,7 @@ impl TrackInventory {
             run_set: HashSet::new(),
             characterised: HashMap::new(),
             provisional: HashMap::new(),
+            bound: HashMap::new(),
             retracted: 0,
             sightings: 0,
             created: 0,
@@ -317,6 +336,17 @@ impl TrackInventory {
             matches: 0,
             clustered: 0,
         }
+    }
+
+    /// T-388: records which emitter `track`'s row is, for [`Inventory::emitter_of_track`]. Bounded
+    /// the way [`Self::run`] is: past the cap the map is cleared rather than grown, and the
+    /// bindings are re-learnt by the next offer or chain write. A forgotten binding costs a box a
+    /// few hundred milliseconds of extension, never a wrong one.
+    fn bind(&mut self, track: TrackId, emitter: EmitterId) {
+        if self.bound.len() >= RUN_MEMORY && !self.bound.contains_key(&track) {
+            self.bound.clear();
+        }
+        self.bound.insert(track, emitter);
     }
 
     /// Whether `id` may be linked to another entry of its emission: not when it carries a
@@ -454,6 +484,10 @@ impl Inventory for TrackInventory {
         match event {
             TrackEvent::Closed(summary) => {
                 let track = summary.track.id;
+                // T-388: a closed track publishes no further extension. Its box stops at the last
+                // end the tracker measured, and the close's own sighting is what the next poll
+                // serves.
+                self.bound.remove(&track);
                 let provisional = self.provisional.remove(&track);
                 match track_sighting(summary) {
                     Some(mut s) => {
@@ -471,6 +505,7 @@ impl Inventory for TrackInventory {
             TrackEvent::HopSetFormed(h) => {
                 // Channels offered before the set formed now belong to the set's entry.
                 for &m in &h.members {
+                    self.bound.remove(&m);
                     if let Some(emitter) = self.provisional.remove(&m) {
                         self.retract(repo, m, emitter, h.time.end)?;
                     }
@@ -481,6 +516,7 @@ impl Inventory for TrackInventory {
                 self.offer(repo, &hop_set_sighting(h), None)?;
             }
             TrackEvent::Merged { from, at, .. } => {
+                self.bound.remove(from);
                 if let Some(emitter) = self.provisional.remove(from) {
                     self.retract(repo, *from, emitter, *at)?;
                 }
@@ -507,17 +543,29 @@ impl Inventory for TrackInventory {
         if created {
             self.provisional.insert(summary.track.id, emitter);
         }
+        self.bind(summary.track.id, emitter);
         Ok(())
     }
 
     fn chain_emitter(
         &mut self,
         repo: &mut Repository,
-        _track: Option<TrackId>,
+        track: Option<TrackId>,
         emitter: EmitterId,
     ) -> Result<(), RepoError> {
         let id = self.link(repo, emitter)?;
+        // T-388: the other seam that resolves a track's row, and the one a continuous carrier
+        // arrives by — a WFM station is one long burst, so the live offer above (which wants
+        // several) never fires for it and its entry comes from the chain instead. Binding only the
+        // offer would have left exactly the signals the bug was reported against unextended.
+        if let Some(track) = track {
+            self.bind(track, id);
+        }
         self.touch(repo, id, None)
+    }
+
+    fn emitter_of_track(&self, track: TrackId) -> Option<EmitterId> {
+        self.bound.get(&track).copied()
     }
 }
 

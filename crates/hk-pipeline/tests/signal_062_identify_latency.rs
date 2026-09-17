@@ -108,6 +108,10 @@ impl Inventory for Recording {
     ) -> Result<(), RepoError> {
         self.inner.live_track(repo, summary)
     }
+
+    fn emitter_of_track(&self, track: hk_model::TrackId) -> Option<EmitterId> {
+        self.inner.emitter_of_track(track)
+    }
 }
 
 /// Replays `meta` blind through the mock SDR (unpaced, lossless) with the recording inventory.

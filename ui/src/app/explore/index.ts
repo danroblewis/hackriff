@@ -19,6 +19,7 @@ import {
   clusterChip, deleteEntry, emptyListText, loadInventoryRows, nextInventorySort, promoteEntry,
   recurrenceDots, rowChips, rowSeenText, sortInventoryRows, type Row,
 } from "./inventory";
+import { mountPresenceStream } from "./presence-stream";
 import { foundInside, selectionStoreFor, sortSelections, type Selection } from "./selections";
 import {
   clusterLoadErrorText, clusterSummary, fetchCluster, fetchSignatureMatch, signatureMatchSummary,
@@ -145,6 +146,11 @@ const mountInventory: MountFn = (el, ctx) => {
   ctx.store.select((s) => s.time, () => void reload(), { eq: sameCursor });
   void reload();
   startPoll(reload, 5000, (e) => ctx.store.set(toast(`inventory: ${apiErrorText(e)}`)));
+  // T-388: while the view follows the live edge, a continuing signal's box top tracks it over the
+  // `presence` stream instead of waiting up to 5 s for the poll above (which still owns creating,
+  // arbitrating and windowing the rows — the push only ever extends one that is already here). A
+  // paused or scrubbed view unsubscribes and is left on exactly this poll.
+  mountPresenceStream(ctx);
 };
 
 // ---- selections (sidebar) ----

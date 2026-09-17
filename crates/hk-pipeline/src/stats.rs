@@ -146,6 +146,10 @@ counter_group!(
         dense_flagged,
         /// Trust verdict rows written.
         verdicts_written,
+        /// Presence extensions published on the `presence` stream (T-388).
+        presence_extensions,
+        /// Presence extensions a tick left out at its cap; those boxes grow on the poll instead.
+        presence_extensions_truncated,
     }
 );
 
