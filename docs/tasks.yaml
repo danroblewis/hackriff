@@ -8111,7 +8111,7 @@ tasks:
   - id: T-398
     title: A strong WFM+RDS station takes ~40 s to reach Confirmed when a human sees it in under five
     milestone: M3
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -8214,6 +8214,57 @@ tasks:
       which-suites rule there. Do not set it globally in the justfile without checking
       whether any recipe WANTS incremental - a developer building locally may.
       Control: a gate run leaves target/debug/incremental no larger than it found it.
+  - id: T-401
+    title: No acceptance test asserts latency, so the suite is blind to a whole class of defect
+    milestone: M3
+    status: todo
+    priority: high
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    deps: [T-398]
+    acceptance: |
+      T-398's most valuable finding, and it is about the SUITE rather than the code.
+      "No test in the suite asserts latency at all. Every acceptance test inspects
+      TERMINAL state, so 40 s and 1 s leave an identical inventory at the end of a
+      fixture. The suite was blind to this class by construction."
+      A confirm that took 60 s - the whole recording - passed every test we have,
+      because the row was there when the music stopped. The user found it by looking
+      at the screen.
+      THE WORK: make time-to-outcome assertable, then assert it where it matters.
+      T-398 built the first two (tests/e2e/tests/acceptance/confirm_latency.rs, matched
+      to hidden truth after the run by measured centre and bandwidth - BLIND, per the
+      standing rule). Generalise that shape rather than copying it: detection,
+      family assignment, confirmation, and first decode are all latencies a user feels
+      and none are currently bounded.
+      THE TRAP: a latency assertion is a timing test, and this repo already has two
+      that fail under parallel load (T-344, T-383). Assert on CAPTURE-CLOCK time, not
+      wall time, so a loaded machine cannot fail it - T-398's own numbers separate the
+      two (1.0 s capture vs 3.22 s wall) and that separation is the design, not an
+      accident.
+      Related, and also T-398's: the M3 suite passed on synthetic while this failed
+      live, because every synthetic WFM scene ships clean RDS with a perfect PI, so the
+      fast route always fired and the slow route's defect was never exercised.
+      Suppressing RDS in a synthetic scene REPRODUCED the bug. A suite whose fixtures
+      are all best-case cannot find a fallback path's bug.
+  - id: T-402
+    title: Our own synthetic WFM is too narrow to trigger our own WFM occupancy rule
+    milestone: M3
+    status: todo
+    priority: normal
+    parallel_group: M3A
+    deps: [T-398]
+    notes: |
+      T-398, third synthetic gap. The synthetic WFM scene is TONE-MODULATED, so its
+      occupied bandwidth is ~103 kHz where real program-modulated FM measures ~221 kHz.
+      That puts it BELOW the project's own WIDEBAND_FM_OBW_HZ lower edge of 106 kHz -
+      so the occupancy family rule does not fire on our own WFM fixture.
+      Note 106 kHz is not arbitrary and must not be moved to make this pass: T-316
+      derived it as 2 x 53 kHz from the stereo subcarrier top, after DECLINING a
+      100e3 value that turned the suite green. The fixture is what is wrong, not the
+      constant.
+      Fix the generator so synthetic WFM is program-modulated to a realistic deviation,
+      and check what else silently depended on the narrow scene.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
