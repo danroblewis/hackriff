@@ -9930,6 +9930,71 @@ tasks:
       Note that the two family figures everyone agrees on (top-1 0.9345, top-2 0.9861) are
       computed by a different path from unknown recall / false-known. Whatever this is, it is
       specific to the open-set numbers - which is a clue, not a coincidence.
+  - id: T-429
+    milestone: M3
+    title: The observation guard varies ONE axis - record length - and holds SNR fixed at 25 dB, so every SNR-dependent feature is invisible to it
+    status: todo
+    priority: high
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    deps: [T-404, T-427]
+    use_cases:
+    - SIGNAL-062
+    found_by: 'coordinator (2026-09-17), reading feature_length_invariance.rs after T-427 reported `duty` measures the SNR'
+    acceptance: |
+      THE GUARD IS GOOD AND IT WORKS. crates/hk-classify/tests/feature_length_invariance.rs is 932
+      lines covering 30 features, it found SEVEN defects on its first run (all fixed by T-404), and
+      its exemption discipline is the right one - exempt BY NAME, each exemption carrying the
+      mechanism and a measurement, so fixing one makes the exemption disappear from a diff.
+      IT VARIES EXACTLY ONE AXIS. Line 110-112:
+        /// SNR the invariance is measured at: well above every family gate, so what moves is the
+        /// record.
+        const SNR_DB: f64 = 25.0;
+      That is the CORRECT choice for testing length invariance - holding SNR fixed is what isolates
+      the record as the variable. But "the observation" has more than one axis, and the guard is
+      structurally blind to the others BY CONSTRUCTION. A feature that measures the SNR instead of
+      the signal passes it every time.
+      TWO DEFECTS THIS WOULD HAVE CAUGHT, both found the hard way TODAY:
+        T-427 (2026-09-17): `duty` measures the SNR, not the transmitter's on-fraction. `duty` IS in
+          the guard's 30 features and passed, because at a fixed 25 dB there is nothing for it to
+          track.
+        T-249 (2026-09-17): `cw` required sigma_af < 0.02, and measured sigma_af on the SAME keyed
+          carrier is 0.170-0.207 at 10 dB, 0.068-0.092 at 15 and 0.038-0.050 at 20 - a clean
+          1/sqrt(rho) law, a FOUR-FOLD move across the operating range, on a feature named as a
+          property of the signal (frequency excursion). The conjunct could never fire below ~28 dB.
+          That is the same defect as `duty`, and it cost a whole class its top-1.
+      So this family has now been swept THREE times (T-281's audit, T-404's six, T-427's fourth
+      table) and the fourth instance arrived on an axis nobody was testing.
+      WHAT TO BUILD: a second axis on the SAME test, extending it in place - do NOT build a parallel
+      suite, and do not build a scanner or a watchdog. Vary SNR with the signal and the record
+      length fixed, and assert per-feature as the length axis already does.
+      THE HARD DESIGN QUESTION, and it is the whole ticket: "does not move with SNR" is the WRONG
+      assertion for most features, because every estimator's VARIANCE grows as SNR falls - that is
+      physics, not a defect. What must not move is the feature's EXPECTATION. Distinguish:
+        - a feature whose expectation is stable and whose spread widens as SNR falls -> healthy;
+        - a feature whose expectation SLIDES with SNR -> it is reading the noise, and a threshold
+          written against it is a threshold on the receiver (T-249's sigma_af, T-427's duty).
+      Deciding how to measure that - and with how many seeds per SNR step to make it credible - is
+      the core_interface judgement here. State the method before the results.
+      An SNR axis needs its OWN exemption list: snr_db and any deliberate SNR statistic are exempt
+      BY NAME, with the mechanism recorded, exactly as OBSERVATION_STATISTICS does for length. An
+      exemption without a measurement is not an exemption (the existing file's own rule).
+      DoD: the second axis exists in the same test, its exemption list is audited and each entry
+      carries its mechanism, and it REPRODUCES both known defects when they are reintroduced - a
+      guard that cannot catch the two bugs that motivated it is not a guard. Then report what else
+      it found, which on the length axis's precedent will not be nothing.
+      Family floors must not move; quote ADR-0016 §7.1 and RE-DERIVE (see T-428, live on whether the
+      open-set figures there are reproducible).
+    notes: |
+      A THIRD AXIS probably exists and is worth naming even if not built here: receiver gain state /
+      segment count. T-404's `carrier_line_db` fix already had to reckon with segment count ("biased
+      in the segment count T-312 left moving"), and T-259/T-305 established that images, harmonics,
+      IMD and noise floor are DEVICE-LOCAL. Say whether the axis is real and what it would cost.
+      Read feature_length_invariance.rs's header comment first - it is the best short account in the
+      repo of this defect family, and the method it settled on (per-feature tolerances derived from
+      what the estimator can do, exemption by name with a measurement) is the method to reuse rather
+      than reinvent.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
