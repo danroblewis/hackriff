@@ -4827,6 +4827,202 @@ fn the_timeline_spans_the_capture_window_and_draws_it() {
     stop_server(serving);
 }
 
+/// T-368: **grey means genuinely unobserved.**
+///
+/// The user's invariant: *"the view renders whatever samples are actually available for the current
+/// time-and-frequency selection, and greys only cells that were truly never observed"*, from *"a
+/// coverage map derived from the SDR configuration/tune history — for each interval, which
+/// centre/span/rate (and which device) was active"*.
+///
+/// The property is that **three states stay three**: observed-with-energy, observed-and-quiet, and
+/// never-observed are not two states with a null in the middle. The one that must not be servable
+/// as the others is the third, so the assertions below are a matched pair on one running server:
+///
+///  - the band the mock front end is actually tuned to reads **observed**, with the sampling that
+///    proves it (a real `duty` over a real interval, and a `device` naming the radio);
+///  - a band 2.4 GHz away, which this run demonstrably never tuned, reads **unobserved** — and
+///    carries **no measurement key at all**, so there is nothing a client could read as a zero
+///    level and draw as a quiet band.
+///
+/// The second half is the control for the first: without it a route that answered "unobserved"
+/// everywhere would pass, and without the first a route that answered "observed" everywhere would.
+/// Neither can pass both. (The mutation control — assume coverage everywhere and watch the property
+/// break — is the unit test `hk_store::coverage::assuming_coverage_everywhere_breaks_the_property`,
+/// where the map can actually be mutated.)
+///
+/// Values, not shape (T-315).
+#[test]
+fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked() {
+    let (_dir_guard, serving, addr) = start_server_retaining(Some(120.0));
+    let (lo, hi) = (
+        FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
+        FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0,
+    );
+    // Somewhere this run has never been and cannot have been: 2.4 GHz, a thousand capture windows
+    // away from the fixture's 100.8 MHz.
+    let (flo, fhi) = (2.400e9, 2.410e9);
+
+    let mut tuned = Value::Null;
+    wait_for(
+        "the coverage map to report the tuned band as sampled",
+        Duration::from_secs(60),
+        || {
+            // 404 until the ring has a live edge to hang a capture window on: a server with no
+            // capture window says so rather than inventing a span.
+            let (st, got) = get(addr, &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=8"));
+            if st != 200 {
+                return false;
+            }
+            tuned = got;
+            tuned["any"]["observed_cells"].as_u64().unwrap_or(0) > 0
+        },
+    );
+
+    // ---- state 1/2: the tuned band was sampled, and the answer says how ----
+    let cells = tuned["any"]["cells"].as_array().expect("cells").clone();
+    assert_eq!(cells.len(), 8, "{tuned}");
+    let observed: Vec<&Value> = cells
+        .iter()
+        .filter(|c| c["state"] == json!("observed"))
+        .collect();
+    assert!(!observed.is_empty(), "{tuned}");
+    for c in &observed {
+        // A real sampling, not a placeholder: a positive duty over a positive interval, at the
+        // rate the front end was actually running.
+        assert!(c["duty"].as_f64().unwrap_or(0.0) > 0.0, "{c}");
+        assert!(c["observed_s"].as_f64().unwrap_or(0.0) > 0.0, "{c}");
+        assert!(c["spans"].as_u64().unwrap_or(0) >= 1, "{c}");
+        assert_eq!(c["sample_rate_hz"].as_f64(), Some(FIXTURE_RATE_HZ), "{c}");
+        assert_eq!(c["center_hz"].as_f64(), Some(FIXTURE_CENTER_HZ), "{c}");
+    }
+    // The window is the capture window, and the map was built from a tune history that names the
+    // radio: the IQ ring journal contributed, and its spans are device-known.
+    assert_eq!(
+        tuned["window"]["source"],
+        json!("capture-window"),
+        "{tuned}"
+    );
+    let ring = tuned["sources"]
+        .as_array()
+        .expect("sources")
+        .iter()
+        .find(|s| s["kind"] == json!("iq-ring"))
+        .expect("the iq-ring source row")
+        .clone();
+    assert_eq!(ring["available"], json!(true), "{tuned}");
+    assert_eq!(ring["device_known"], json!(true), "{tuned}");
+    assert!(ring["spans"].as_u64().unwrap_or(0) > 0, "{tuned}");
+
+    // ---- device-local: the grid is one radio's, and it is named ----
+    let devices = tuned["devices"].as_array().expect("devices").clone();
+    let named: Vec<&Value> = devices
+        .iter()
+        .filter(|d| d["named"] == json!(true))
+        .collect();
+    assert!(
+        !named.is_empty(),
+        "the tuned band must name the radio: {tuned}"
+    );
+    for d in &named {
+        let id = d["device"].as_str().unwrap_or_default();
+        assert!(!id.is_empty() && id != "unknown" && id != "any", "{d}");
+        assert!(d["observed_cells"].as_u64().unwrap_or(0) > 0, "{d}");
+    }
+    // The union is labelled as a union and is never mistaken for a radio.
+    assert_eq!(tuned["any"]["device"], json!("any"), "{tuned}");
+    assert_eq!(tuned["any"]["named"], json!(false), "{tuned}");
+
+    // ---- state 3: a band never tuned, and it is a DIFFERENT value, not a null measurement ----
+    let (st, fresh) = get(
+        addr,
+        &format!("/api/coverage?f_lo={flo}&f_hi={fhi}&cells=8"),
+    );
+    assert_eq!(st, 200, "{fresh}");
+    assert_eq!(fresh["any"]["observed_cells"], json!(0), "{fresh}");
+    assert_eq!(fresh["any"]["unobserved_cells"], json!(8), "{fresh}");
+    assert_eq!(fresh["any"]["observed_fraction"], json!(0.0), "{fresh}");
+    for c in fresh["any"]["cells"].as_array().expect("cells") {
+        assert_eq!(*c, json!({ "state": "unobserved" }), "{fresh}");
+        // The whole point: no field here can be read as a measured zero.
+        assert!(c.get("shade").is_none(), "{c}");
+        assert!(c.get("duty").is_none(), "{c}");
+        assert!(c.get("observed_s").is_none(), "{c}");
+    }
+    // Two devices' coverage is never unioned into one device's claim: no named front end asserts
+    // it sampled a band it never went to.
+    for d in fresh["devices"].as_array().expect("devices") {
+        assert_eq!(d["observed_cells"], json!(0), "{d}");
+    }
+    // And the two answers are genuinely different values on the wire, not the same null.
+    assert_ne!(tuned["any"]["cells"], fresh["any"]["cells"]);
+    assert_ne!(observed[0]["state"], json!("unobserved"));
+    // The rule is stated in the response rather than left to the client to invent.
+    assert_eq!(
+        tuned["resolution"]["grey_rule"],
+        json!("grey a cell if and only if its state is \"unobserved\""),
+        "{tuned}"
+    );
+
+    // ---- the backfill: going Live for a range that has history starts POPULATED, not black ----
+    // The same band the coverage map says was sampled has spectrum history behind it, so the first
+    // picture drawn for it carries content rather than an empty box.
+    let (st, drawn) = get(
+        addr,
+        &format!("/api/timeline?f_lo={lo}&f_hi={hi}&columns=32&rows=4"),
+    );
+    assert_eq!(st, 200, "{drawn}");
+    assert!(
+        drawn["grid"]["observed_cells"].as_u64().unwrap_or(0) > 0,
+        "a range with history must backfill, not start black: {drawn}"
+    );
+    assert!(drawn["grid"]["range_db"].is_object(), "{drawn}");
+    // The control: a genuinely fresh range has nothing to backfill, and says so with unobserved
+    // cells rather than a drawn-but-quiet band. Backfill is not a constant.
+    let (st, blank) = get(
+        addr,
+        &format!("/api/timeline?f_lo={flo}&f_hi={fhi}&columns=32&rows=4"),
+    );
+    assert_eq!(st, 200, "{blank}");
+    assert_eq!(blank["grid"]["observed_cells"], json!(0), "{blank}");
+    assert!(blank["grid"]["range_db"].is_null(), "{blank}");
+    for v in blank["grid"]["max_db"].as_array().expect("max_db") {
+        assert!(v.is_null(), "not observed is not quiet: {blank}");
+    }
+
+    // ---- refusals ----
+    for bad in [
+        "cells=8",                     // no band: the region is required here
+        "f_lo=1000&cells=8",           // half a band
+        "f_lo=1000&f_hi=2000&cells=0", // cell budget out of range
+        "f_lo=1000&f_hi=2000&cells=99999",
+        "f_lo=1000&f_hi=2000&t0=1",   // half a window
+        "f_lo=1000&f_hi=2000&nope=1", // unknown parameter
+    ] {
+        let (st, v) = get(addr, &format!("/api/coverage?{bad}"));
+        assert_eq!(st, 400, "expected 400 for {bad}: {v}");
+    }
+    // An explicit window is honoured and says so.
+    let (st, v) = get(
+        addr,
+        &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=4&t0=1&t1=2"),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["window"]["source"], json!("requested"), "{v}");
+    assert_eq!(v["window"]["span_s"], json!(1.0), "{v}");
+    // A window in 1970 saw nothing, whatever the band: the map is time-scoped, not a band property.
+    assert_eq!(v["any"]["observed_cells"], json!(0), "{v}");
+
+    let (st, _) = call(
+        addr,
+        "POST",
+        "/api/coverage",
+        Some(&format!("Bearer {TOKEN}")),
+        Some("{}"),
+    );
+    assert_eq!(st, 405);
+    stop_server(serving);
+}
+
 #[test]
 fn every_route_in_the_route_table_is_documented() {
     let doc_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md");

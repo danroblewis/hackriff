@@ -34,6 +34,7 @@ pub mod captures;
 pub mod classification; // T-247
 pub mod clusters; // T-202
 pub mod control;
+pub mod coverage; // T-368: the coverage map - grey means genuinely unobserved
 pub mod datasets; // T-205
 pub mod decode; // T-159
 pub mod events; // T-264 (ADR-0017 TM-8): the durable catalogue behind the History surface
