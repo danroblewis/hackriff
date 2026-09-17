@@ -7634,7 +7634,7 @@ tasks:
   - id: T-384
     title: The output and decode surfaces cannot re-derive for a scrubbed window, and the decode route has no time parameter to ask with
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     core_interface: true
@@ -7667,7 +7667,7 @@ tasks:
   - id: T-385
     title: The focus panel tells the user a row was deleted when it is merely outside the window
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     deps: [T-379]
@@ -7703,6 +7703,38 @@ tasks:
       Separately, and not a cursor issue: the centre view's overlays are dead without a
       live stream header, so a replay or a paused session with no header renders no
       boxes at all. That is a fragility worth its own control.
+  - id: T-387
+    title: Four live surfaces cannot re-derive because the websocket transports have no history form
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: [T-384]
+    acceptance: |
+      T-384 wired the output panels and decode plots to the view window and left four
+      surfaces on the live edge FOR A STATED REASON, which is this ticket.
+      The packet inspector, status feed, pipelines list and outputs dock are live
+      WEBSOCKET transports: /ws/open/inspector and /ws/open/stage have NO HISTORY
+      FORM, so no caller can ask them for a past window. Adding one is a STREAM
+      CONTRACT change (ADR-0004), not a UI fix, which is why T-384 correctly stopped.
+      The user's rule (CLAUDE.md 2026-09-16) covers these surfaces too: every surface
+      is a view over one (time range x frequency range) window and must show all the
+      data it has for it.
+      Settle FIRST whether these surfaces should re-derive at all. A status feed and a
+      pipelines list may be legitimately live-only - they describe the RUN, not the
+      air - in which case the honest fix is for them to SAY they are live-only rather
+      than silently appear scrubbed. The packet inspector is different: packets are
+      data about the air and have capture-clock timestamps.
+      T-384 found the honest substitute already works for the plots - they reach the
+      same frames through /api/captures/{id}/frames?from_t=&to_t=, which already has
+      the window. Ask whether the inspector can do the same before extending the
+      stream contract.
+      Hold T-384's standards: ask on the capture clock; never widen the window to look
+      full; distinguish empty-because-unobserved from empty-because-not-fetched via
+      hk_store::Coverage; and include the control that a window which DOES hold data
+      renders its rows.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
