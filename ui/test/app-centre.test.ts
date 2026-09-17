@@ -17,13 +17,13 @@ import {
   placeExtent, presenceBoxes, regionName, selectionBoxes, selectionTimeBoxes, selectionLabel, snapFracToPixel, timeScaleText, tipOnLeft, type RowClock,
 } from "../src/app/centre/overlays";
 import { placeTimeBoxes, type TimeBox } from "../src/timebox";
-import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor, type HistoryGrid } from "../src/app/centre/review-render";
+import { historyDetailText, historyFill, historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor, type HistoryGrid } from "../src/app/centre/review-render";
 import { centreInitial } from "../src/app/centre/slice";
 import type { AppContext } from "../src/app/context";
 import { createStore } from "../src/app/store";
 import { initialState } from "../src/app/state";
 import { applyDeviceAction, centreView, centreViewKey, geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retuneAction, retuneErrorText, viewHooks } from "../src/app/centre/view";
-import { UNOBSERVED_DB, decimateRow } from "../src/waterfall";
+import { UNOBSERVED_DB, WATERFALL_ROWS, decimateRow } from "../src/waterfall";
 
 const G: ax.Geometry = { centerHz: 100_000_000, bandwidthHz: 2_400_000, bins: 1024 };
 const V: ax.View = { loHz: 99_000_000, hiHz: 101_000_000 }; // 2 MHz view
@@ -495,17 +495,43 @@ test("history grid → waterfall rows: max over cells, null and outside grey, ne
   assert.equal(parseHistory(grid), grid);
   assert.equal(parseHistory({ ...grid, max_db: [1, 2] }), null);
   assert.equal(parseHistory({ ...grid, f_cell_hz: 0 }), null);
+  // T-420: 3 measured cells drawn into 10 rows — the served span fills every row, and each cell's
+  // one measured value repeats across the rows it covers. It used to return 3 rows, which
+  // `Waterfall.setRows` painted into a ring of 512 whose whole height is drawn.
   const two = historyRows(grid, { loHz: 0, hiHz: 4000 }, 2, 10);
-  assert.deepEqual(two.times, [100, 100.5, 101]);
-  assert.deepEqual([...two.rows[0]], [-10, -40]);
-  assert.deepEqual([...two.rows[1]], [-11, -31]);
-  assert.deepEqual([...two.rows[2]], [U, U]);
+  assert.equal(two.rows.length, 10, "every drawn row is filled: the span is not a sliver");
+  assert.equal(two.times.length, 10);
+  two.times.forEach((t, k) => near(t, 100 + k * 0.15, 1e-9)); // 1.5 s served extent over 10 rows
+  for (const k of [0, 1, 2]) assert.deepEqual([...two.rows[k]], [-10, -40], `row ${k} is cell 0`);
+  for (const k of [3, 4, 5, 6]) assert.deepEqual([...two.rows[k]], [-11, -31], `row ${k} is cell 1`);
+  for (const k of [7, 8, 9]) assert.deepEqual([...two.rows[k]], [U, U], `row ${k} is cell 2`);
+  // Replication, not interpolation: a repeated row is the very same measured values, never a blend
+  // of the two cells either side of it.
+  assert.ok(two.rows.every((r) => [...r].every((v) => v === -10 || v === -40 || v === -11 || v === -31 || v === U)),
+    "no value on screen is one the grid did not contain");
+  const f = historyFill(grid, 10)!;
+  assert.deepEqual({ ...f }, { rows: 10, t0S: 100, spanS: 1.5, rowDurS: 0.15, cells: 3, rowsPerCell: 10 / 3, replicated: true });
+  assert.equal(historyFill(grid, 0), null);
+  assert.equal(historyFill({ ...grid, nt: 0, max_db: [] }, 512), null);
+  // The honest-fill label: the span, the tier that answered, and that one cell was repeated.
+  assert.equal(historyDetailText(grid, 10), "2 s · spectrum-history overview · 500 ms cells repeated across 3.3 rows");
+  assert.equal(
+    historyDetailText({ ...grid, resolution: { source: "survey-overview" } }, 10),
+    "2 s · survey overview · 500 ms cells repeated across 3.3 rows",
+  );
+  assert.equal(historyDetailText(grid, 3), "2 s · spectrum-history overview · 500 ms cells, one per row");
+  assert.equal(historyDetailText(grid, 2), "2 s · spectrum-history overview · 500 ms cells, 1.5 folded per row (max-hold)");
+  assert.equal(historyDetailText({ ...grid, nt: 0, max_db: [] }, 512), "");
+  // The view coarser than the grid (`resolution.over_resolved` names max_t): cells fold by the
+  // backend's own max-hold — and the WINDOW is still whole, never the newest rows only.
   const fine = historyRows(grid, { loHz: -1000, hiHz: 5000 }, 12, 2); // half-cell texels, band wider than the grid
-  assert.deepEqual(fine.times, [100.5, 101]);
+  assert.equal(fine.rows.length, 2);
+  fine.times.forEach((t, k) => near(t, 100 + k * 0.75, 1e-9));
   const r = [...fine.rows[0]];
   assert.deepEqual(r.slice(0, 2), [U, U]);
-  assert.deepEqual(r.slice(2, 10), [-11, -11, -21, -21, -31, -31, -41, -41]);
+  assert.deepEqual(r.slice(2, 10), [-10, -10, -20, -20, -31, -31, -40, -40], "max of cells 0 and 1");
   assert.deepEqual(r.slice(10), [U, U]);
+  assert.deepEqual([...fine.rows[1]].slice(2, 10), [-11, -11, -21, -21, -31, -31, -41, -41], "max of cells 1 and 2");
   const w = historyWindow(1000, 512, 0.04);
   near(w.t0, 1000 - 20.48, 1e-9); assert.equal(w.t1, 1000);
   assert.equal(historyMaxCells(16384, 512), 500_000);
@@ -521,6 +547,55 @@ test("history grid → waterfall rows: max over cells, null and outside grey, ne
   assert.equal(sameCursor({ live: true }, { live: true }), true);
   assert.equal(sameCursor({ live: false, tS: 5 }, { live: false, tS: 5 }), true);
   assert.equal(sameCursor({ live: false, tS: 5 }, { live: true }), false);
+});
+
+// T-420 — the reported bug at its real scale, and the relationship that fixes it.
+// CLAUDE.md, "Time is zoomable": *"the waterfall's time resolution (pixels / rows per second) is a
+// function of the chosen span … so zooming in time re-scales rather than truncates."*
+test("T-420 selected span fills the waterfall height: every drawn row, honestly replicated", () => {
+  const U = Math.fround(UNOBSERVED_DB);
+  // One texel wide keeps the case about the TIME axis. The pyramid's finest tier is a 1 s cell
+  // (hk-store default ladder), so these are the grids the two reported gestures actually get back.
+  const band = { loHz: 0, hiHz: 1000 };
+  const cells = (nt: number) => Array.from({ length: nt }, (_, i) => -100 + i);
+  const at = (nt: number, tCell: number, t0 = 1_700_000_000): HistoryGrid =>
+    ({ f_lo_hz: 0, f_cell_hz: 1000, nf: 1, t0_s: t0, t_cell_s: tCell, nt, max_db: cells(nt) });
+
+  // The DEFAULT window: 512 rows at 25 rows/s ≈ 20.5 s, served as 21 one-second cells.
+  const def = historyWindow(1_700_000_020, WATERFALL_ROWS, 1 / 25);
+  near(def.t1 - def.t0, WATERFALL_ROWS / 25, 1e-6);
+  const d = historyRows(at(21, 1), band, 1, WATERFALL_ROWS);
+  assert.equal(d.rows.length, WATERFALL_ROWS, "21 measured cells fill all 512 rows, not 4 % of them");
+  assert.ok(d.rows.every((r) => r[0] !== U && Number.isFinite(r[0])), "no row is left unpainted");
+  // A DRAGGED 10 min range: too long for the 1 s tier's 512-row budget, so the 60 s tier answers
+  // with 10 cells. That is the case the old code drew at 10/512 — 2 % — and the wider the drag the
+  // thinner the sliver got.
+  const wide = historyRows(at(10, 60), band, 1, WATERFALL_ROWS);
+  assert.equal(wide.rows.length, WATERFALL_ROWS);
+  const wf = historyFill(at(10, 60), WATERFALL_ROWS)!;
+  assert.equal(wf.spanS, 600);
+  assert.equal(wf.replicated, true);
+  near(wf.rowDurS, 600 / WATERFALL_ROWS, 1e-12);
+  // Honest fill: every value on screen is one of the ten the backend measured (no interpolation,
+  // no stretch), each appears on a contiguous run of rows, and the run lengths match the cells.
+  const drawn = wide.rows.map((r) => r[0]);
+  assert.ok(drawn.every((v) => cells(10).includes(v)), "only measured values are drawn");
+  assert.deepEqual([...new Set(drawn)], cells(10), "in order, all ten, none invented");
+  for (const v of cells(10)) {
+    const idx = drawn.flatMap((x, i) => (x === v ? [i] : []));
+    assert.equal(idx[idx.length - 1] - idx[0] + 1, idx.length, `cell ${v} is one contiguous run`);
+    assert.ok(Math.abs(idx.length - WATERFALL_ROWS / 10) <= 1, `cell ${v} spans ~51 rows`);
+  }
+  // Row times span the served window, so the one shared time axis (T-337) covers the whole pane and
+  // the boxes drawn through `rowsBackAt` land on the rows they describe.
+  near(wide.times[0], 1_700_000_000, 1e-6);
+  near(wide.times[WATERFALL_ROWS - 1], 1_700_000_000 + 600 - wf.rowDurS, 1e-6);
+  // …and it SAYS it is overview, and says the repeat, rather than passing a coarse tier off as detail.
+  assert.equal(historyDetailText(at(10, 60), WATERFALL_ROWS), "10 min · spectrum-history overview · 60 s cells repeated across 51.2 rows");
+  // The request the client builds (the ui/test guard CLAUDE.md names): max_t is the rows the
+  // waterfall will draw — one served cell per drawn row at most, T-397's rule on the time axis.
+  assert.ok(historyQuery(band, def.t0, def.t1, historyMaxCells(2048, WATERFALL_ROWS), WATERFALL_ROWS, 2048)
+    .includes(`&max_t=${WATERFALL_ROWS}&max_f=2048`));
 });
 
 test("Go to: pan inside the band keeping width, retune outside when live, else not_live", () => {

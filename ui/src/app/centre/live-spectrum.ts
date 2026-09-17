@@ -31,7 +31,7 @@ import {
   hoverText, isDrag, levelU, placeExtent, presenceBoxes, selectionBoxes, selectionTimeBoxes, selectionLabel, timeScaleText, tipOnLeft,
   type BandEdge, type DcMask, type DragPoint, type RowClock, type Span,
 } from "./overlays";
-import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor } from "./review-render";
+import { historyDetailText, historyFill, historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor } from "./review-render";
 import { setLiveEdge } from "./slice";
 import { applyDeviceAction, centreView, centreViewKey, geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retuneAction, setLiveView, viewHooks } from "./view";
 
@@ -573,10 +573,19 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       ));
       if (seq !== reviewSeq || store.get().time.live || wf !== w) return;
       if (!grid) { review(`reviewing ${hms(tS)} · unexpected history response`); return; }
-      const out = historyRows(grid, full, w.texWidth, w.rows);
+      // T-420: the served span is laid across every row of the ring, so the dragged window fills
+      // the waterfall's height instead of painting `nt` rows into 512 and leaving black under them.
+      // `reviewPeriodS` is therefore the duration of a **drawn row**, not of a measured cell — it
+      // is what the time-scale label and the newest row's half-open end cap are measured in, and a
+      // cell's duration would now overstate the window by `rows / nt`.
+      const out = historyRows(grid, full, w.texWidth, w.rows), fill = historyFill(grid, w.rows);
       w.setRows(out.rows, out.times);
-      reviewPeriodS = grid.t_cell_s;
-      review(out.rows.length ? `reviewing ${hms(tS)} · history (grey = not observed)` : `reviewing ${hms(tS)} · no history here`);
+      reviewPeriodS = fill ? fill.rowDurS : null;
+      // Filling honestly means saying how it was filled (T-334/T-342): the span, which tier
+      // answered, and whether one measured value was repeated across rows.
+      review(out.rows.length
+        ? `reviewing ${hms(tS)} · ${historyDetailText(grid, w.rows)} · grey = not observed`
+        : `reviewing ${hms(tS)} · no history here`);
       schedule();
     } catch (e) {
       if (seq === reviewSeq) review(`reviewing ${hms(tS)} · history unavailable: ${apiConnFor(e).message}`);
