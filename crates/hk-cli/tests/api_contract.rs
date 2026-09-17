@@ -1910,6 +1910,49 @@ fn inventory_entry_promote_and_delete_answer_as_documented() {
     let (st, v) = get(addr, &format!("/api/inventory/{}/decode", EmitterId::new()));
     assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
 
+    // T-384: the window. Values, not shape — a window that covers every row's `at` must serve the
+    // same rows the unwindowed call did, and one that covers none of them must serve none. RDS lock
+    // timing on a fixture is not deterministic, so this asserts the *relationship* between the two
+    // answers rather than a row count; the seeded-repository suite
+    // (`crates/hk-api/tests/decode_api.rs`) pins partial windows, the after-the-filter collapse and
+    // the refusals by value.
+    let all: Vec<f64> = decodes.iter().filter_map(|r| r["at"].as_f64()).collect();
+    let (lo, hi) = (
+        all.iter().cloned().fold(f64::INFINITY, f64::min),
+        all.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+    );
+    let windowed = |t0: f64, t1: f64| {
+        let (st, v) = get(addr, &format!("/api/inventory/{id}/decode?t0={t0}&t1={t1}"));
+        assert_eq!(st, 200, "{v}");
+        v["decodes"].as_array().cloned().unwrap_or_default()
+    };
+    if !all.is_empty() {
+        assert_eq!(
+            windowed(lo - 1.0, hi + 1.0),
+            *decodes,
+            "a window covering every row's `at` serves exactly the unwindowed rows"
+        );
+        assert!(
+            windowed(hi + 60.0, hi + 120.0).is_empty(),
+            "a window after the last decode holds none of them"
+        );
+    }
+    // A half-given, backwards, or nanosecond-valued window is refused rather than completed: an
+    // invented window would succeed and return a plausible-looking zero rows (ADR-0013 §3.3.1).
+    for q in [
+        "t0=1789300820",
+        "t1=1789300820",
+        "t0=2&t1=1",
+        "t0=0&t1=1789300820000000000",
+    ] {
+        let (st, v) = get(addr, &format!("/api/inventory/{id}/decode?{q}"));
+        assert_eq!(
+            (st, v["code"].as_str()),
+            (400, Some("invalid")),
+            "{q} must be refused: {v}"
+        );
+    }
+
     // Promote: candidate -> confirmed (idempotent: a second promote reports changed: false).
     let (st, v) = post(addr, &format!("/api/inventory/{id}/promote"), "{}");
     assert_eq!(st, 200, "{v}");

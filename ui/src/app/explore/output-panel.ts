@@ -20,7 +20,8 @@ import { mountInspectorPanel } from "../decode/inspector";
 import { startPoll } from "../net";
 import type { OutputEntry } from "../state";
 import { apiErrorText, fmtMHz } from "./format";
-import type { Row } from "./inventory";
+import { viewWindow, windowCoverage, windowKey, type Row, type ViewWindow, type WindowState } from "./inventory";
+import type { WindowCoverage } from "./slice";
 
 // ---- pipelines (a minimal local shape: T-195 only needs emitter_id/state/outputs, so this module
 // doesn't statically import decode/pipelines.ts and pull its (much larger) recipe/palette UI into
@@ -99,6 +100,98 @@ export interface DecodeRow {
   fields: Readonly<Record<string, unknown>>; crc: { valid: boolean }; source_session: string | null;
 }
 export interface DecodeResponse { decodes: readonly DecodeRow[] }
+
+// ---- the window these panels are a view over (T-384) ----
+
+/**
+ * The `/decode` request for one emitter over the **view window**, or `null` when the window is
+ * unknown and nothing may be asked.
+ *
+ * The output/decode panels are views over the UI's one (time × frequency) window like every other
+ * surface (CLAUDE.md 2026-09-16; ADR-0013 §3.3.1). They were live-edge-only: the route carried no
+ * time parameter at all, so a panel scrubbed back an hour went on rendering the live edge's PS,
+ * RadioText and PTY and labelled them the window's. That is the *we-have-it-but-didn't-render-it*
+ * bug inverted — not an empty surface, a surface showing the **wrong window's** data, which is
+ * worse because it looks right.
+ *
+ * `t0`/`t1` are the same [[viewWindow]] the waterfall, the Candidate list and the frequency
+ * navigator name — one window, not one per surface — and they are on the **capture clock**.
+ * `Date.now()` is not a fallback here any more than it is there: a replay's stamps and the
+ * browser's are unrelated, and a window built from the wrong clock returns an honest zero rows
+ * that reads on screen as "nothing was decoded".
+ */
+export function decodePath(emitterId: string, w: ViewWindow | null): string | null {
+  return w === null ? null : `/api/inventory/${encodeURIComponent(emitterId)}/decode?t0=${w.t0}&t1=${w.t1}`;
+}
+
+/** What a panel's `/decode` read produced for the window it asked about. */
+export type DecodeView =
+  | { kind: "rows"; decodes: readonly DecodeRow[] }
+  /** No window could be named, so nothing was asked. */
+  | { kind: "no-window" }
+  /** The window was asked about and held no decode; `coverage` says whether anything ever looked. */
+  | { kind: "empty"; coverage: WindowCoverage }
+  | { kind: "error"; message: string };
+
+/**
+ * What an empty decode panel says, and — as on the sidebar (T-379's `emptyListText`) — it must
+ * never be one sentence. The same four-state vocabulary, read off the same `GET /api/coverage`
+ * answer through the same [[windowCoverage]] helper, so the two surfaces cannot come to different
+ * conclusions about one window:
+ *
+ * | state | what it means | sentence |
+ * |---|---|---|
+ * | no window known | the UI does not know which window to ask about | "Waiting for the capture window…" |
+ * | window unobserved | nothing ever looked here | "Nothing was observed in this window — no data, not a quiet band." |
+ * | window observed | the receiver was sampling and no decode was committed | "Nothing decoded in this window." |
+ * | coverage unknown | the window was asked about; whether it was sampled is not known | "No decode listed for this window." |
+ *
+ * Only the third is a finding. Rendering the first or second as the third turns an absence of
+ * measurement into a result — the error the waterfall's grey rule exists to stop, on this surface.
+ */
+export function decodeEmptyText(v: Exclude<DecodeView, { kind: "rows" }>): string {
+  if (v.kind === "error") return v.message;
+  if (v.kind === "no-window") return "Waiting for the capture window…";
+  if (v.coverage === "unobserved") return "Nothing was observed in this window — no data, not a quiet band.";
+  if (v.coverage === "observed") return "Nothing decoded in this window.";
+  return "No decode listed for this window.";
+}
+
+/** The `/decode` client both panels share: `AppContext["client"]` satisfies it structurally. */
+export interface DecodeClient { get<T>(path: string): Promise<T> }
+
+/**
+ * Reads one emitter's decodes **for the view window**, and says which emptiness it got.
+ *
+ * Coverage is asked for only when the window came back with no decodes — the one case where the
+ * difference between "nothing was decoded" and "nothing ever looked here" is the whole message.
+ * A coverage answer that never came stays *unknown* rather than hardening into "unobserved"
+ * ([[windowCoverage]] returns `null` for that), so a missing answer never becomes a measurement
+ * claim.
+ *
+ * **This never re-decodes.** `/api/inventory/{id}/decode` serves rows the decoder already
+ * committed, selected by their own capture-clock `at`; asking about a past window is a read, not a
+ * re-run. Re-deriving a view by replaying the decoder over already-decoded frames would break the
+ * incremental-decode invariant (CLAUDE.md: *live decoding extends the region's time extent and
+ * decodes only the newly-arrived part*).
+ */
+export async function loadDecodeView(
+  client: DecodeClient, state: WindowState, emitterId: string,
+): Promise<DecodeView> {
+  const w = viewWindow(state);
+  const path = decodePath(emitterId, w);
+  // No window: send nothing. An invented window succeeds and returns zero rows, and zero rows
+  // renders exactly like a signal that decoded nothing.
+  if (path === null || w === null) return { kind: "no-window" };
+  let decodes: readonly DecodeRow[];
+  try {
+    decodes = (await client.get<DecodeResponse>(path)).decodes;
+  } catch (e) {
+    return { kind: "error", message: apiErrorText(e) };
+  }
+  if (decodes.length > 0) return { kind: "rows", decodes };
+  return { kind: "empty", coverage: await windowCoverage(client, state, w) };
+}
 
 /** The three `rds.recipe.json` `messages` outputs' `frame_model`s (recipe file, `outputs[].decode.
  * frame_model`): `group-info` → `rds-group` (PI/TP/PTY, the identity sighting), `station` →
@@ -259,11 +352,21 @@ export function rdsFieldText(raw: string | null): string {
  * json` has no group-4A node, so CT is a recipe/API gap (reported, not derived; see the task's
  * final report) rather than a field this code could ever fill in. Shared by the dedicated RDS
  * panel and the compact box under a Listen scope, so the two never disagree. */
-function renderRdsBox(el: HTMLElement, rds: RdsViewModel | null, pi: RdsIdentity): void {
+function renderRdsBox(el: HTMLElement, view: DecodeView, pi: RdsIdentity): void {
+  // T-384: an empty panel names *which* emptiness it is, exactly as the sidebar does. "No RDS
+  // decode yet" read the same whether the station had decoded nothing in the viewed window, the
+  // receiver had never looked there, or — the bug — no window had been asked about at all.
+  if (view.kind !== "rows") {
+    el.replaceChildren(h("p", { class: "hint" }, decodeEmptyText(view)));
+    return;
+  }
+  const rds = rdsViewModel(view.decodes);
   const v = rds ?? { ps: null, rt: null, tp: null, pty: null, updatedAtS: 0 };
   const hasAnything = v.ps !== null || v.rt !== null || v.tp !== null || v.pty !== null || pi.value !== null || pi.withheld;
   if (!hasAnything) {
-    el.replaceChildren(h("p", { class: "hint" }, "No RDS decode yet."));
+    // Rows came back for the window, but none of them is RDS: a statement about this decode, not
+    // about the window, so it keeps its own sentence.
+    el.replaceChildren(h("p", { class: "hint" }, "No RDS decode in this window."));
     return;
   }
   const piText = pi.withheld ? "withheld" : (pi.value ?? "not yet received");
@@ -293,24 +396,25 @@ class DigitalPanel {
 class RdsPanel {
   private bodyEl: HTMLElement;
   private stopPoll: () => void;
+  private unsubWindow: () => void;
 
   constructor(el: HTMLElement, private ctx: AppContext, private emitterId: string) {
-    this.bodyEl = h("div", { class: "rds-box" }, h("p", { class: "hint" }, "No RDS decode yet."));
+    this.bodyEl = h("div", { class: "rds-box" }, h("p", { class: "hint" }, "Loading…"));
     el.replaceChildren(h("div", { class: "section-h" }, "RDS"), this.bodyEl);
     this.stopPoll = startPoll(() => this.load(), 3000);
+    // Scrubbing must re-derive the panel, not leave the live edge's fields on screen under a past
+    // window's heading (T-384). The 3 s poll would eventually catch up; a subscription makes the
+    // panel move *with* the cursor instead of trailing it.
+    this.unsubWindow = ctx.store.select(windowKey, () => { void this.load(); });
   }
 
   private async load() {
-    try {
-      const r = await this.ctx.client.get<DecodeResponse>(`/api/inventory/${encodeURIComponent(this.emitterId)}/decode`);
-      const row = this.ctx.store.get().inventory.rows[this.emitterId];
-      renderRdsBox(this.bodyEl, rdsViewModel(r.decodes), rdsIdentity(row));
-    } catch (e) {
-      this.bodyEl.replaceChildren(h("p", { class: "hint" }, apiErrorText(e)));
-    }
+    const view = await loadDecodeView(this.ctx.client, this.ctx.store.get(), this.emitterId);
+    const row = this.ctx.store.get().inventory.rows[this.emitterId];
+    renderRdsBox(this.bodyEl, view, rdsIdentity(row));
   }
 
-  destroy() { this.stopPoll(); }
+  destroy() { this.stopPoll(); this.unsubWindow(); }
 }
 
 class AudioPanel {
@@ -320,6 +424,7 @@ class AudioPanel {
   private rdsEl: HTMLElement;
   private unsubSamples: () => void;
   private stopPoll: () => void;
+  private unsubWindow: () => void = () => {};
   private raf = 0;
   private dirty = false;
 
@@ -331,13 +436,14 @@ class AudioPanel {
     this.poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline") as SVGPolylineElement;
     this.poly.setAttribute("class", "scope-line");
     this.svg.append(this.poly);
-    this.rdsEl = h("div", { class: "rds-box" }, h("p", { class: "hint" }, "No RDS decode yet."));
+    this.rdsEl = h("div", { class: "rds-box" }, h("p", { class: "hint" }, "Loading…"));
     el.replaceChildren(
       h("div", { class: "out-scope" }, this.svg),
       this.rdsEl,
     );
     this.unsubSamples = getAudioSession(ctx).onSamples(outputId, (pcm) => { this.scope.push(pcm); this.scheduleDraw(); });
     this.stopPoll = startPoll(() => this.loadDecode(), 3000);
+    this.unsubWindow = ctx.store.select(windowKey, () => { void this.loadDecode(); });
   }
 
   private scheduleDraw() {
@@ -350,19 +456,16 @@ class AudioPanel {
   }
 
   private async loadDecode() {
-    try {
-      const r = await this.ctx.client.get<DecodeResponse>(`/api/inventory/${encodeURIComponent(this.emitterId)}/decode`);
-      const row = this.ctx.store.get().inventory.rows[this.emitterId];
-      renderRdsBox(this.rdsEl, rdsViewModel(r.decodes), rdsIdentity(row));
-    } catch (e) {
-      this.rdsEl.replaceChildren(h("p", { class: "hint" }, apiErrorText(e)));
-    }
+    const view = await loadDecodeView(this.ctx.client, this.ctx.store.get(), this.emitterId);
+    const row = this.ctx.store.get().inventory.rows[this.emitterId];
+    renderRdsBox(this.rdsEl, view, rdsIdentity(row));
   }
 
   destroy() {
     cancelAnimationFrame(this.raf);
     this.unsubSamples();
     this.stopPoll();
+    this.unsubWindow();
   }
 }
 

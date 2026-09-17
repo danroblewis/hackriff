@@ -15,8 +15,8 @@ import {
 } from "../src/app/decode/pipelines";
 import { nodeChip } from "../src/app/decode/stages";
 import {
-  decimate, decodeBits, decodeIq, decodeReal, parseBinaryRecord, pickPlots, tallyChannels,
-  tallyCrcStatus, withinWindow,
+  CAPTURE_FRAME_LIMIT, capFrames, captureFor, captureFramesPath, decimate, decodeBits, decodeIq,
+  decodeReal, parseBinaryRecord, pickPlots, tallyChannels, tallyCrcStatus, withinWindow,
 } from "../src/app/decode/plots";
 import {
   applyFragment, applyParam, assistRouteFor, coerceParamValue, nextNodeId, qualityTiles, recordsPerSecond,
@@ -164,10 +164,74 @@ test("tallyCrcStatus and tallyChannels: sorted descending, honest 'unknown' buck
   assert.deepEqual(tallyChannels(frames), [{ label: "101.300 MHz", count: 2 }, { label: "102.100 MHz", count: 1 }, { label: "unknown", count: 1 }]);
 });
 
-test("withinWindow keeps only frames within the trailing window", () => {
-  const now = 100 * 1e9;
-  const frames = [{ t_ns: now - 70 * 1e9 }, { t_ns: now - 30 * 1e9 }, { t_ns: now }];
-  assert.equal(withinWindow(frames, now, 60).length, 2);
+// ---- T-384: the plots are a view over the same window as the waterfall ----
+
+/** The capture clock these fixtures run on, deliberately far from any wall clock — the fixture
+ * that exposed T-379 sat 3.5 days from `Date.now()`, and these tests must fail if a browser clock
+ * creeps back into the plots. */
+const CAPTURE_EDGE_S = 1_789_297_847;
+
+test("withinWindow keeps the frames inside the view window, on the capture clock", () => {
+  const at = (s: number) => ({ t_ns: (CAPTURE_EDGE_S + s) * 1e9, crc_status: "valid" });
+  const frames = [at(-70), at(-30), at(0)];
+  assert.equal(withinWindow(frames, { t0: CAPTURE_EDGE_S - 60, t1: CAPTURE_EDGE_S }).length, 2);
+  // Closed on both ends, and the window's *start* excludes as much as its end does — the old
+  // signature had only a trailing edge, so a scrubbed-back window could not exclude newer frames.
+  assert.equal(withinWindow(frames, { t0: CAPTURE_EDGE_S - 70, t1: CAPTURE_EDGE_S - 30 }).length, 2);
+  assert.equal(withinWindow(frames, { t0: CAPTURE_EDGE_S - 50, t1: CAPTURE_EDGE_S - 40 }).length, 0);
+});
+
+test("THE DISTINGUISHING TEST: the same frames tally on the capture clock and vanish on the browser's", () => {
+  // This is the bug, reproduced: `withinWindow(frames, Date.now() * 1e6, 60)` compared a wall-clock
+  // instant against capture-clock `t_ns`. On the replay behind T-379 the two sat 306,315 s apart,
+  // so a "last 60 s" tally of frames that had certainly arrived rendered permanently empty — and on
+  // a source whose clock runs ahead instead, every frame passes and the 60 s tally silently becomes
+  // an all-time one. Either way the plot is not a view of the window it claims.
+  const frames = [
+    { t_ns: (CAPTURE_EDGE_S - 5) * 1e9, crc_status: "valid" },
+    { t_ns: (CAPTURE_EDGE_S - 3) * 1e9, crc_status: "valid" },
+    { t_ns: (CAPTURE_EDGE_S - 1) * 1e9, crc_status: "invalid" },
+  ];
+  const capture = withinWindow(frames, { t0: CAPTURE_EDGE_S - 20, t1: CAPTURE_EDGE_S });
+  assert.deepEqual(
+    tallyCrcStatus(capture),
+    [{ label: "valid", count: 2 }, { label: "invalid", count: 1 }],
+    "THE CONTROL: a window that DOES hold frames tallies them, by label and count",
+  );
+
+  const wallNowS = CAPTURE_EDGE_S + 306_315; // the measured offset from T-379's fixture
+  const wall = withinWindow(frames, { t0: wallNowS - 20, t1: wallNowS });
+  assert.deepEqual(tallyCrcStatus(wall), [], "the browser's clock selects none of them");
+  assert.notDeepEqual(tallyCrcStatus(capture), tallyCrcStatus(wall), "the two clocks are not interchangeable");
+});
+
+test("capFrames bounds the live buffer by count, never by a clock", () => {
+  // A time-trimmed buffer drops live frames while the view is scrubbed back, so returning to Live
+  // would find the plot empty of frames it had already received.
+  const frames = Array.from({ length: 10 }, (_, i) => ({ t_ns: (CAPTURE_EDGE_S + i) * 1e9 }));
+  assert.deepEqual(capFrames(frames, 20), frames, "under the cap, unchanged");
+  const kept = capFrames(frames, 3);
+  assert.equal(kept.length, 3);
+  assert.deepEqual(kept.map((f) => f.t_ns), frames.slice(7).map((f) => f.t_ns), "the newest are kept");
+});
+
+test("a window the live tap never carried is fetched from the pipeline's capture, over exactly that window", () => {
+  // The rule's positive half: frames for a scrubbed window exist (the pipeline records them), so
+  // they must be shown. The socket has no history form, so the capture is where they come from.
+  const captures = [
+    { id: "cap-old", pipeline_id: "p1", t_last: CAPTURE_EDGE_S - 600 },
+    { id: "cap-new", pipeline_id: "p1", t_last: CAPTURE_EDGE_S },
+    { id: "cap-other", pipeline_id: "p2", t_last: CAPTURE_EDGE_S },
+  ];
+  assert.equal(captureFor(captures, "p1")?.id, "cap-new", "the most recently written capture of that pipeline");
+  assert.equal(captureFor(captures, "p3"), null, "and null rather than another pipeline's");
+
+  const w = { t0: CAPTURE_EDGE_S - 20, t1: CAPTURE_EDGE_S };
+  const q = new URLSearchParams(captureFramesPath("cap/new", w).split("?")[1]);
+  assert.ok(captureFramesPath("cap/new", w).startsWith("/api/captures/cap%2Fnew/frames?"), "the id is escaped");
+  assert.equal(Number(q.get("from_t")), w.t0, "from_t/to_t are Unix seconds on the capture clock");
+  assert.equal(Number(q.get("to_t")), w.t1);
+  assert.equal(Number(q.get("limit")), CAPTURE_FRAME_LIMIT, "the route's documented maximum, so a dense window truncates rather than widens");
 });
 
 // ---- params.ts ----

@@ -857,6 +857,28 @@ fn short_text(q: &Params, key: &'static str) -> Result<Option<String>, ApiError>
     }
 }
 
+/// The `t0`/`t1` view window, in Unix seconds on the **capture clock**, or `None` when the caller
+/// named none (T-384).
+///
+/// One parser for every windowed route, so `/api/inventory`, `/api/inventory/{id}/decode` and
+/// anything added later cannot disagree about what a window is, what its bounds mean, or which
+/// half of a half-given pair is an error. The UI sends one window to every surface
+/// (`ui/src/app/explore/inventory.ts`'s `viewWindow`), and a route that parsed it differently
+/// would silently answer about a different range than the waterfall beside it is showing.
+///
+/// Both ends are required together — a lone `t0` is a caller bug, not "from then on", because a
+/// window with an invented end is exactly the *plausible query* the whole-UI window rule forbids.
+pub fn parse_time_window(q: &Params) -> Result<Option<TimeRange>, ApiError> {
+    match optional_pair(q, "t0", "t1")? {
+        None => Ok(None),
+        Some((t0, t1)) if t1 >= t0 && t0 > -4e9 && t1 < 9e9 => Ok(Some(TimeRange::new(
+            Timestamp::from_unix_nanos((t0 * 1e9).round() as i64),
+            Timestamp::from_unix_nanos((t1 * 1e9).round() as i64),
+        ))),
+        Some(_) => Err(bad("need t0 <= t1 (Unix seconds)")),
+    }
+}
+
 /// Parses the `/api/inventory` filters into an [`InventoryQuery`]. Identity access is always
 /// [`IdentityAccess::Standard`]: no request parameter can grant the own-traffic authorisation.
 pub fn parse_inventory_query(q: &Params) -> Result<InventoryQuery, ApiError> {
@@ -865,14 +887,7 @@ pub fn parse_inventory_query(q: &Params) -> Result<InventoryQuery, ApiError> {
         Some((lo, hi)) if lo >= 0.0 && hi > lo && hi <= 1e12 => Some(FreqRange::new(lo, hi)),
         Some(_) => return Err(bad("need 0 <= f_lo < f_hi")),
     };
-    let time = match optional_pair(q, "t0", "t1")? {
-        None => None,
-        Some((t0, t1)) if t1 >= t0 && t0 > -4e9 && t1 < 9e9 => Some(TimeRange::new(
-            Timestamp::from_unix_nanos((t0 * 1e9).round() as i64),
-            Timestamp::from_unix_nanos((t1 * 1e9).round() as i64),
-        )),
-        Some(_) => return Err(bad("need t0 <= t1 (Unix seconds)")),
-    };
+    let time = parse_time_window(q)?;
     let mut status = Vec::new();
     for s in nonempty(q, "status").into_iter().flat_map(|v| v.split(',')) {
         let parsed: KnownStatus = serde_json::from_value(Value::String(s.trim().to_owned()))
