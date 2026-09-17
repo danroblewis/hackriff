@@ -152,8 +152,11 @@ has to exist and be trusted first.
 
 A large **Y = time, X = whole spectrum** view with Google-Maps-style zoom levels, mostly **grey =
 unobserved** (that grey is the point — you see where you scanned), confirmed signals highlighted, and
-filling in as more SDRs are added. Design doc: **`docs/16-coverage-tile-pyramid.md`**; task **T-408**,
-held on design sign-off rather than on capacity.
+filling in as more SDRs are added. Design doc: **`docs/16-coverage-tile-pyramid.md`**; task **T-408**.
+**The design is settled (2026-09-17):** the user decided tile addressing (fixed `(zoom, t_index,
+f_index)` map tiles) and downsample timing (precomputed at seal, on demand at the live edge, with
+client-side eviction); T-408 settled emitter highlighting, per-zoom retention horizons and the
+eviction policy inside that framework. `docs/16 §7` is the buildable sequence.
 
 It is filed **before** its consumers because the user's architectural instruction is that **one tile
 pyramid serves all three** of the big view, the bottom frequency-survey bar (T-405) and the
@@ -161,8 +164,13 @@ iterative-scan accumulation (T-406) — *the survey bar is a miniature of the bi
 separately they would disagree visibly, on one screen, about the same spectrum.
 
 Most of the machinery exists (tiered history, `hk_store::Coverage`, the max-hold fold with stated
-semantics, the device chain of custody). **The gap is the second axis**: the pyramid is tiered in time,
-coverage answers per frequency cell over a window, and the view needs both at several zoom levels.
+semantics, the device chain of custody) — including **fixed tile addressing**, which is already the
+store's own idiom (`hk_model::TileKey`, one file per tile). **The gap is the second axis**, and T-408
+made it specific: the existing ladder welds the axes at the wrong ratio (frequency coarsens ×16 across
+it while time coarsens ×86 400, and `t_cell` of a level is forced to equal one whole tile of the level
+below), and the record-derived coverage map has no time axis at all, so it decides a *column* where the
+view needs a *cell*. Two coverage folds also round partial coverage **up**, which a view whose point is
+"where have I scanned" cannot inherit. See `docs/16 §2`, `§4` and `§6`.
 
 Placement: **M5-ish**, after the current M2-hardening/M3 work, and after or alongside the
 software-acceptance field check above — but T-405 and T-406 must be built against it now rather than
