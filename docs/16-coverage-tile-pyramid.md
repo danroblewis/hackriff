@@ -639,6 +639,65 @@ apart.
 navigator widgets. Genuine backend bugs behind them stay (T-347 pause-is-global, T-348 paused-view
 CPU) — those are not scrubber polish, they are correctness.
 
+### 8.5a What the spike proved, and the three places §8 and §6 were wrong (T-437, 2026-09-17)
+
+**Verdict: YES for the renderer, NO for the system as it stands** — and two of the blockers are
+outside the renderer entirely. None of the findings is a reason to abandon the design; all four are
+cheaper to fix than the scrubbers were to keep. Evidence: `spikes/t437-unified-surface/`, 31
+automated checks on real WebGL2, with a re-run recipe.
+
+**The renderer is the easy half, by two orders of magnitude.** 48 panes at **p95 2.2 ms**, flat in
+pane count — what scales is draw calls (~450 at 48 panes) and 450 trivial quads is nothing. The
+shared LRU works exactly as §8.3 claims: **95 distinct keys, 95 uploads, 8 panes sharing one tile,
+18.68 MB resident against 149.44 MB for one cache per pane.** Upload is 0.026 ms/tile, so **size the
+budget by memory, not upload time.**
+
+**The real cost is tile PRODUCTION, three orders of magnitude larger** — the stub built a tile in
+~500 ms mean over 313 tiles, 50–110 s to fill a screen; even at a hypothetical 10 ms server-side,
+208 tiles is 2 s. **That is the number T-438/T-440 design against, not the 2 ms of rendering.**
+
+**F1 — §6.2's V0 floor is wrong, and it re-welds the axes §8.2 de-welds.** §6.2's V0 time cell is
+**128 s** and the IQ retention window is **120 s**, so **the entire live view fits inside one time
+cell**. "Live is a viewport onto the finest growing edge" is not coarse there, it is
+*unrepresentable*. Worse, every realistic pane — seconds to tens of minutes across ~840 px — is finer
+than 128 s, so **`level_t` pins at 0 and the de-welding buys nothing on the axis it was introduced
+for**. §6.2 must extend the ladder **downward in time to the store's own level-0 floor**
+(6.25 kHz × 1 s), which is what the spike ran on and where everything works. **The floor is the
+decision, not the ratio.**
+
+**F2 — `/api/history` treats a per-axis budget as a LEVEL SELECTOR, not a fold target.** Same window,
+same band, only `max_f` changed: `max_f=384` served 38 784/38 784 cells observed (100 %);
+`max_f=256` served 384/576 (**67 %**). Tightening the *frequency* budget 1.5× cost **34× of time
+resolution and turned a third of the window grey**. That is a **grey-honesty violation caused by
+level choice, which §4 does not name** — §4 guards the fold, and the fold is fine; here a cell reads
+*unobserved* while level 0 holds the measurement. `/api/timeline` does not have this defect (it folds
+onto exactly `nt × nf` and walks finest-ward when a tier is empty, per T-426). **So T-438's route is
+`/api/timeline`'s engine plus `/api/history`'s `t0`/`t1`.**
+
+**F3 — an undersized client tile budget makes the surface LIE.** Below `budget ≈ working set` the
+cliff is sharp and predictable, but the consequence is not performance: **101–198 tiles per frame
+render grey**, and grey is this surface's load-bearing claim that the radio never looked there. **A
+memory budget must never be able to manufacture that claim** — T-440/T-441 must distinguish
+*not-resident* from *unobserved*.
+
+**F4 — after a retune the pyramid stops recording, permanently.** Filed as **T-446**. The ring stays
+healthy and the record-derived coverage plane says `observed, duty 1.0`, while the measurement plane
+writes nothing and never recovers. It falsifies §8's central claim the moment you use §8.4's primary
+gesture.
+
+**The key needs `device` and `scheme`.** §6.3 already says coverage is device-local; §8.3's four-part
+key omits it, and retrofitting a key is the expensive kind of change. T-434 confirms the per-axis
+coordinates are *derived from the geometry* (`axes_of`, `level_at`) with `TileKey` unchanged, and that
+`level_at` returns `None` where a scheme has no such node — **a welded ladder is the diagonal**, so
+the route must answer "no such node" rather than snap to a level whose time cell is a day.
+
+**§8.5 overstates the anti-divergence claim, and the overstatement invites a reopened bug.** Measured,
+pane A, pane B and the minimap at the *same* level sample bit-identical pixels. But the guarantee is
+**"same ramp, same scale, stated level"**, not "same picture": two viewports at different
+`(level_f, level_t)` legitimately differ, because a coarser cell is a max over more cells. Since the
+minimap is 6 GHz wide it is nearly always at a different level. **The fix is to state the level per
+pane, not to hide the difference.**
+
 ### 8.6 The spike, and its exit criterion
 
 **T-437**, on replay/synthetic through the mock SDR, and it **must not block the live path**. Four

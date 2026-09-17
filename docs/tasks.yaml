@@ -11104,6 +11104,57 @@ tasks:
       with uncommitted work.
       T-348 (a paused view costs full CPU) and any other genuine backend bug behind the old widgets
       stay open on their own merits - they are correctness, not scrubber polish.
+  - id: T-446
+    milestone: MCANVAS
+    title: After a retune the spectrum-history pyramid stops recording, permanently - the ring advances and coverage says observed, but nothing is written
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: []
+    use_cases: [AWARE-011, AWARE-042]
+    found_by: 'T-437 (2026-09-17), the unified-surface spike - finding F4, reproducible in ~3 minutes'
+    acceptance: |
+      A LIVE BACKEND DEFECT, found by the spike and not diagnosed there (it was a UI spike).
+      CONTROLLED EXPERIMENT, dedicated backend on :18788, fresh data dir, one retune:
+        BEFORE retune   centre 100 800 000   grid observed = 88 / 128   level 0
+        retune -> {action: retune, id: mock:hackrf:...d2b861dc263bc293}, segment 1
+        T+20s  after    centre 433 920 000   grid observed =  0 / 128
+        T+80s                                grid observed =  0 / 128
+        T+140s                               grid observed =  0 / 128
+        retune BACK to 100 800 000 (segment 2), +45 s -> grid observed = 0 / 32  NEVER RECOVERS
+      AT THE SAME MOMENT, ON THE SAME SERVER:
+        the IQ RING IS HEALTHY - t1_s tracks wall clock to 0.1 s, 576 MB buffered, dropped 0;
+        the RECORD-DERIVED COVERAGE PLANE IS ALIVE - /api/coverage at 433.92 MHz reports 8/8 cells
+          "observed", duty 1.0, observed_s 60, last_s moving forward between polls;
+        the MEASUREMENT PLANE IS EMPTY - /api/timeline grid.observed_cells = 0, with
+          resolution.budget.frequency.source_cells: 385 available.
+      SO THE SYSTEM KNOWS IT IS LOOKING, STORES THE SAMPLES, AND WRITES NO SPECTRUM HISTORY.
+      WHY IT IS HIGH AND WHY IT IS IN MCANVAS: it falsifies docs/16 §8's central claim the moment
+      you use the surface's one device gesture. §8.4 makes pan-to-untuned -> retune the primary way
+      to move around the canvas, and after that retune "live is the finest growing edge" is false.
+      On a never-retuned backend the edge grows correctly - the spike measured the same tile going
+      11712 -> 17280 observed cells in 28 s - so the defect is specifically in what a retune does to
+      the history writer or the segment plumbing.
+      DoD: root-cause it (hk-pipeline's history writer or the segment plumbing is where T-437
+      pointed, but do not inherit that guess - measure), fix it, and assert the property: after a
+      retune, spectrum history for the NEW centre begins accumulating, and a retune BACK resumes the
+      original band. Reproduce the failure first so the test is known non-vacuous.
+      UNVERIFIED ON REAL HARDWARE - the spike correctly did not touch the user's demo. Do not
+      assume the mock and the live device fail the same way; say which you tested.
+    notes: |
+      Reproducible in ~3 minutes - the recipe is in spikes/t437-unified-surface/results/ and the
+      spike's README.
+      RELATED FOURTH STATE, and T-437 argues it is a normal state rather than an error: this
+      exposes "OBSERVED-BUT-NOT-YET-MEASURED" - the radio was demonstrably tuned there and sampling
+      (duty 1.0) and the pyramid holds nothing. Grey would be a lie in exactly the way §4 forbids;
+      drawing data would be a bigger one. It is NOT T-423's "unknown" (the record aged out, we no
+      longer know whether we looked) - this is "we certainly looked and have not written it down",
+      which ON A LIVE EDGE IS THE NORMAL STATE OF THE NEWEST CELLS. T-441 owns the colour; this
+      ticket owns the defect. Fixing the defect does not remove the state.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-pipeline` and
+      `just test-one <name>` - then HAND BACK. Never `just gate`; the coordinator gates at merge.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
