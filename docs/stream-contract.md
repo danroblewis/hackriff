@@ -412,6 +412,14 @@ gracefully across a re-plumb rather than erroring."* So on the bridge:
   nothing is sent: no held frame, no repeated row, no interpolation. The capture clock skips,
   because the front end really was moving, and the header is the honest seam. (The coverage rule —
   grey means genuinely unobserved — applies to time as much as frequency.)
+- **and the gap is only the gap (T-425).** The re-subscribe waits on the registry
+  (`StreamRegistry::wait_for_offer_after`), not on `bridge::WATCH_TICK`, so it happens within
+  microseconds of the offer. The producer offers the next publisher when the new segment's first
+  samples arrive and publishes that window's first record a row period later (~40 ms), so a
+  tick-quantised re-attach silently swallowed the first one or two rows of every new window — with
+  no drop marker, because the consumer was not subscribed to be told. That made each retune look
+  like a longer break in the air than it was: the same lie as papering the seam over, told in the
+  other direction. A stalled consumer can still lose rows; what is fixed is losing them by design.
 - **this is not §7's drop policy.** `SlowConsumer`, `PeerGone`, `DrainTimeout` and `Detached` all
   shut the socket down exactly as before: a consumer that cannot keep up is still dropped
   deliberately, never the survey. Only `PublisherFinished` is carried.

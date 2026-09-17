@@ -46,6 +46,15 @@
 //! **The gap stays visible.** Nothing is held, repeated or interpolated across it: the rows simply
 //! stop and start again, and the header is the honest seam that says the window moved.
 //!
+//! **And the gap is only the gap (T-425).** While it waits, [`watch_peer`] blocks on the registry
+//! ([`StreamRegistry::wait_for_offer_after`]) rather than re-checking it once per [`WATCH_TICK`],
+//! so the socket is re-subscribed within microseconds of the offer instead of up to 50 ms later.
+//! The producer offers its new publisher when the new segment's first samples arrive and publishes
+//! that window's first row a row period later (~40 ms), so a tick-quantised re-attach lost the
+//! first one or two rows of every new window — silently, with no drop marker, since the consumer
+//! was not subscribed to be told. It made every retune look like a longer break in the air than it
+//! was, which is the same lie as papering the seam over, told in the other direction.
+//!
 //! **This is not the slow-consumer policy.** A consumer that cannot keep up is still dropped
 //! deliberately (§7, T-388) — [`CloseReason::SlowConsumer`], [`CloseReason::DrainTimeout`],
 //! [`CloseReason::PeerGone`] and [`CloseReason::Detached`] all shut the socket down exactly as
@@ -54,8 +63,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use hk_model::ContentClass;
@@ -133,7 +141,9 @@ pub struct Offer {
 #[derive(Clone, Default)]
 pub struct StreamRegistry {
     inner: Arc<RwLock<BTreeMap<String, Entry>>>,
-    generation: Arc<AtomicU64>,
+    /// Generation counter and the signal that it moved (T-425): a consumer in a settle gap waits
+    /// on this instead of polling, so it is re-subscribed before the next window's first record.
+    offers: Arc<(Mutex<u64>, Condvar)>,
 }
 
 impl StreamRegistry {
@@ -145,7 +155,9 @@ impl StreamRegistry {
     /// Offers `handle` under `header.stream_id`.
     pub fn register(&self, header: &StreamHeader, handle: PublisherHandle) {
         let info = StreamInfo::from_header(header);
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let (lock, cv) = &*self.offers;
+        let mut generation = lock.lock().unwrap_or_else(|p| p.into_inner());
+        *generation += 1;
         let mut map = self.inner.write().unwrap_or_else(|p| p.into_inner());
         map.insert(
             info.stream_id.clone(),
@@ -153,9 +165,12 @@ impl StreamRegistry {
                 info,
                 header: header.clone(),
                 handle,
-                generation,
+                generation: *generation,
             },
         );
+        drop(map);
+        drop(generation);
+        cv.notify_all();
     }
 
     /// Stops offering `stream_id`.
@@ -183,6 +198,39 @@ impl StreamRegistry {
     /// publisher of a stream whose previous one has finished, never the finished one again).
     pub fn offer_after(&self, stream_id: &str, generation: u64) -> Option<Offer> {
         self.offer(stream_id).filter(|o| o.generation > generation)
+    }
+
+    /// [`StreamRegistry::offer_after`], waiting up to `timeout` for one to appear (T-425).
+    ///
+    /// A consumer whose publisher has finished is in the settle gap and has nothing else to do, so
+    /// it blocks here rather than re-checking on a timer: the producer offers the next publisher
+    /// one row period *before* it publishes that window's first record, and a polled re-attach
+    /// spends that margin and loses records the consumer is never told about. Returns `None` on
+    /// timeout (the caller re-checks the socket and its grace, then waits again).
+    pub fn wait_for_offer_after(
+        &self,
+        stream_id: &str,
+        generation: u64,
+        timeout: Duration,
+    ) -> Option<Offer> {
+        let deadline = Instant::now() + timeout;
+        let (lock, cv) = &*self.offers;
+        // Held across the check so an offer registered between the check and the wait still wakes
+        // us: `register` takes this lock before it inserts, and notifies after releasing it.
+        let mut seen = lock.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            if let Some(offer) = self.offer_after(stream_id, generation) {
+                return Some(offer);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            seen = cv
+                .wait_timeout(seen, left)
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
     }
 
     /// The `/api/streams` JSON: metadata only.
@@ -364,6 +412,11 @@ pub const CARRY_OVER_GRACE: Duration = Duration::from_secs(60);
 /// tick — nothing at the single-digit consumer counts a handheld has (§2).
 const WATCH_TICK: Duration = Duration::from_millis(50);
 
+/// How long the peer check may block during a carry-over wait (T-425). The wait itself is spent in
+/// the registry, so this read is only the peer/drain check and must not add to the re-attach
+/// latency; it runs at most once per [`WATCH_TICK`] that passes without an offer.
+const GAP_PEER_POLL: Duration = Duration::from_millis(1);
+
 /// The consumer of one bridged connection, and how it ended.
 ///
 /// Held by [`watch_peer`], which needs the close **reason** to tell "the producer replaced this
@@ -426,7 +479,11 @@ pub fn attach(
 /// The loop reads the socket on a short timeout rather than blocking on it forever. That one read
 /// does three jobs: it notices the peer (consumers never write, so anything readable means gone),
 /// it notices the server's shutdown drain, which closes every connection's socket — including
-/// during a carry-over wait, which must not outlive the server — and it paces the wait.
+/// during a carry-over wait, which must not outlive the server — and it paces the wait. During a
+/// carry-over wait the pacing job moves to the registry ([`StreamRegistry::wait_for_offer_after`],
+/// T-425) so the re-attach is not quantised to [`WATCH_TICK`]; the read still runs once per tick
+/// that passes without an offer, on a [`GAP_PEER_POLL`] timeout, so the other two jobs are
+/// unchanged.
 pub fn watch_peer(
     streams: &StreamRegistry,
     stream_id: &str,
@@ -442,19 +499,41 @@ pub fn watch_peer(
     // gap is the truth about the front end moving.
     let mut waiting: Option<Instant> = None;
     loop {
-        match stream.read(&mut byte) {
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) => {}
-            _ => break, // peer data, EOF, the closer's shutdown, or the server draining
-        }
-        if waiting.is_none() {
+        if waiting.is_some() {
+            // In the settle gap: nothing arrives on the socket, so wait on the *registry* for the
+            // producer's next offer (T-425). Waking on the offer rather than on the next tick is
+            // what keeps the new window's first rows — the producer publishes them a row period
+            // after it offers, and a consumer that is not subscribed yet is not even told it
+            // missed them. Only when that times out is the peer polled (briefly: the socket's read
+            // timeout is dropped to `GAP_PEER_POLL` for the gap), so a hang-up mid-gap still ends
+            // the connection as it did before.
+            if streams
+                .wait_for_offer_after(stream_id, offer.generation, WATCH_TICK)
+                .is_none()
+            {
+                match stream.read(&mut byte) {
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) => {}
+                    _ => break,
+                }
+            }
+        } else {
+            match stream.read(&mut byte) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                _ => break, // peer data, EOF, the closer's shutdown, or the server draining
+            }
             match attached.reason() {
                 None => continue,
                 Some(CloseReason::PublisherFinished) => {
                     waiting = Some(Instant::now() + CARRY_OVER_GRACE);
+                    let _ = stream.set_read_timeout(Some(GAP_PEER_POLL));
                 }
                 Some(_) => break, // SlowConsumer, PeerGone, DrainTimeout, Detached: it ends here
             }
@@ -468,6 +547,7 @@ pub fn watch_peer(
                         offer = next;
                         attached = a;
                         waiting = None;
+                        let _ = stream.set_read_timeout(Some(WATCH_TICK));
                     }
                     // Local-only, the consumer cap, or already finished: end it honestly.
                     Err(_) => break,
