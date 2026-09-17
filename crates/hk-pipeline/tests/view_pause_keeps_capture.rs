@@ -93,6 +93,44 @@ fn marks(handle: &PipelineHandle, c: &Counters) -> Marks {
     }
 }
 
+/// Waits until **both** the capture counter and the ring head have advanced `n` past `from`.
+///
+/// T-433. A phase must close on the counters it is asserted on. These two used to be asserted
+/// against a phase the SOURCE's `emitted` counter closed, and the three move in lockstep only up
+/// to the block in flight between them: `writer.push` advances the ring, then `add(&c.samples, n)`
+/// advances capture, and `emitted` ran ahead of both. `wait_emitted` also overshoots its target to
+/// the next whole block, so the phase really spans 153 x 16 384 = 2 506 752 emitted samples against
+/// a 2 500 000 bound — **6 752 samples of headroom, less than half a block**. One block in flight
+/// at the closing mark and the answer is 2 506 752 - 16 384 = 2 490 368: the figure T-406 and
+/// T-436 reported independently, to the sample, which is why it was bit-identical on two trees and
+/// not the "load flake" it was filed as. Load makes the in-flight block likelier; it does not make
+/// the bound sound.
+///
+/// Closing the phase on these counters removes the mismatch instead of widening the bound: the
+/// claim — capture and the ring kept advancing while the view was held — is now carried by this
+/// wait's deadline, which a view control that reached the device would blow.
+fn wait_advanced(
+    handle: &PipelineHandle,
+    c: &Counters,
+    from: Marks,
+    n: u64,
+    limit: Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        let now = marks(handle, c);
+        if now.captured.saturating_sub(from.captured) >= n
+            && now.ring.saturating_sub(from.ring) >= n
+        {
+            return true;
+        }
+        if std::time::Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// `after - before`, per field.
 fn delta(before: Marks, after: Marks) -> Marks {
     Marks {
@@ -149,9 +187,8 @@ fn holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection() {
 
     // ---- phase A: playing (the live control) ----
     let a0 = marks(&handle, &counters);
-    let target = ctl.emitted() + PHASE_SAMPLES;
     assert!(
-        ctl.wait_emitted(target, LIMIT),
+        wait_advanced(&handle, &counters, a0, PHASE_SAMPLES, LIMIT),
         "the source stalled while playing"
     );
     let a = delta(a0, marks(&handle, &counters));
@@ -179,10 +216,10 @@ fn holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection() {
 
     // ---- phase B: the view held, the display moved ----
     let b0 = marks(&handle, &counters);
-    let target = ctl.emitted() + PHASE_SAMPLES;
     assert!(
-        ctl.wait_emitted(target, LIMIT),
-        "the source stopped being read while the view was held: a view control reached the device"
+        wait_advanced(&handle, &counters, b0, PHASE_SAMPLES, LIMIT),
+        "capture or the ring stopped advancing while the view was held: a view control reached \
+         the device"
     );
     let b = delta(b0, marks(&handle, &counters));
     eprintln!("held:    {b:?}");
@@ -199,7 +236,16 @@ fn holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection() {
     );
 
     // The property: the ring, the capture thread and detection all carried on while the view was
-    // held, by margins comparable to the phase-A control.
+    // held, by margins comparable to the phase-A control. Both counters are now the phase's own
+    // closing condition (`wait_advanced`), so these restate what the wait established rather than
+    // racing it: a view control that reached the device stops capture, and the wait's deadline —
+    // 120 s against 5 s of samples — is what fails, not a comparison one in-flight block decides
+    // (T-433). The same two lines are asserted for the playing control, so neither phase can pass
+    // on a run where nothing was happening.
+    assert!(
+        a.captured >= PHASE_SAMPLES && a.ring >= PHASE_SAMPLES,
+        "{a:?}"
+    );
     assert!(
         b.captured >= PHASE_SAMPLES,
         "capture slowed while the view was held: {} samples over a phase of {PHASE_SAMPLES} (playing: {})",
