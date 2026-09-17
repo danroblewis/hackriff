@@ -3775,3 +3775,54 @@ fixing one of four buys no compliance and makes the gap harder to see; *fix all 
 none*. Its dangerous property is recorded and worth repeating: with the wrong CRC essentially every
 real TSBK fails **while the trellis reports a clean metric**, so it presents as a demodulator or
 front-end fault and will burn a debugging session on the wrong layer.
+
+### B0.662 — T-384 and T-385: the decode window, and a sentence that was usually false (2026-09-16)
+
+Merged at `700613c` and `dc409a1`. Together they close the user's cross-cutting UI rule for every
+surface that can honestly answer for a window.
+
+**T-384 made the route choice a deliverable rather than a coin-flip, and the store settled it.**
+`/api/inventory/{id}/decode` is emitter-keyed and serves stored rows the decoder already committed,
+each carrying its own capture-clock `at` — and it had no time parameter at all. `/api/captures/{id}/frames`
+is capture-keyed and already had one. The decisive fact is that the `decode` table has **neither an
+emitter nor a capture column**, so there is no emitter→capture key to follow: reaching an RDS station
+name through the captures route would mean re-assembling it from raw group records in the client, which
+is a thin-client violation *and* a re-decode. So the window went on `/decode` and the captures route was
+left alone — no half-route.
+
+**The ordering is the part I would have got wrong.** A window filters committed rows by their own `at`,
+and the filter runs **before** the latest-per-`(decoder, frame_model)` collapse. The other order answers
+*"nothing decoded here"* for a window that plainly holds an older row — the whole rule lost to an
+ordering. Both orders are pinned by test.
+
+The three `Date.now()` sites were the same wall-clock-against-capture-data bug T-379 removed from the
+inventory path, and the diagnosis of what they did is worth keeping: on T-379's replay the *"last 60 s"*
+tally was **permanently empty**; with the offset the other way it would have become an **all-time tally
+under a 60 s label** — the same rule broken in the direction that *looks healthy*. The third site was the
+buffer trim, now bounded by **count** rather than a clock, because a time-trimmed buffer discards live
+frames while the view is scrubbed back, so going Live would find the plot missing frames it had already
+received.
+
+**T-385 replaced one sentence that was usually false with six that are each true.** Every focused row
+missing from `inventory.rows` said *"That signal is no longer in the inventory."* The Candidate list is
+window-scoped **by design**, so the ordinary way a row leaves that map is the user scrubbing or retuning
+away — which made the common case a deletion claim the UI had never measured. A deletion is now read
+from the **entry's own lifecycle state**, which `/api/inventory/{id}` already serves; nothing is inferred
+from absence from the list, because absence from the list only tells you about a window. No backend
+change was needed: **the route existed, the question was missing.**
+
+Its best finding is a race I would not have predicted. The cache key carries the **row-set identity** as
+well as the window, because against T-187's optimistic delete a lookup made in the instant between the
+local removal and the server's `DELETE` can still see a live entry — so without it **a real deletion
+could hide behind "outside the window"**, which is this fix's own mirror image. Six sentences asserted
+pairwise distinct, mirroring T-379's three, and a lookup that never answered resolves to `unchecked`,
+never `deleted`.
+
+**T-387 files what T-384 correctly refused.** Four surfaces stay on the live edge because
+`/ws/open/inspector` and `/ws/open/stage` have **no history form**, and adding one is a stream-contract
+change (ADR-0004), not a UI fix. Its brief asks the prior question first: a status feed and a pipelines
+list may be legitimately live-only — they describe the **run**, not the air — in which case the honest
+fix is for them to *say* they are live-only rather than silently appear scrubbed. The packet inspector is
+different, because packets are data about the air and carry capture-clock timestamps. And T-384 already
+found the honest substitute for the plots: they reach the same frames through the captures route, which
+already has the window. Ask that before extending the stream contract.
