@@ -6027,7 +6027,7 @@ tasks:
     milestone: M2-hardening
     title: Cluster id is not surfaced in Explore, so the one signal that makes near-duplicates visible reaches
       nobody
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-309
@@ -7631,6 +7631,17 @@ tasks:
       machine's idleness.
       It WILL bite the coordinator's full check on a loaded machine, which is how both
       agents met it.
+      THIRD INSTANCE (T-320, 2026-09-16): hk-cli::api_contract
+      coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked
+      timed out at 60 s waiting for spectrum history under parallel agent load, and
+      passes alone in 53.2 s. It is sitting 6.8 s inside its own timeout, so it is
+      not a race - it is a budget that was set on an idle machine.
+      That makes three (T-344, this ticket's original, and now this one) and they
+      are one problem: A TIMEOUT IS A STATEMENT ABOUT THE MACHINE, not the code.
+      Fix them together, and prefer removing the wall-clock dependency to raising
+      the number - T-401 is establishing the capture-clock pattern for exactly this
+      reason and its shape should be reused here.
+
   - id: T-384
     title: The output and decode surfaces cannot re-derive for a scrubbed window, and the decode route has no time parameter to ask with
     milestone: M2-hardening
