@@ -77,7 +77,7 @@ use crate::normalise::{NormaliseConfig, NormalisedSnippet, normalise};
 use crate::params::ParameterSet;
 use crate::snippet::{ChannelSnippet, EstimateError};
 use consensus::{Consensus, Fitter, Thresholds};
-use family::{longest_run, median5, symbol_centre_stats};
+use family::{K_ORDER2, longest_run, median5, soft_veto, symbol_centre_stats};
 use lines::{Plans, carrier_line, complex_line, spectral_line};
 use transitions::{rate_transitions_ls, runlength_unit};
 use util::{inst_freq, kmeans2, mean, median, moving_avg, quantile, std};
@@ -216,12 +216,59 @@ pub enum ObwSource {
     DetectionBox,
 }
 
+/// Envelope level changes the OOK evidence needs before contrast means anything (T-311).
+///
+/// [`FamilyScores::ook`] is a contrast between two envelope levels, and a contrast needs keying
+/// events to be a contrast. With fewer than this many transitions the two "levels" are one level
+/// and whatever the record's slow amplitude wander did, so the score is **not measured** rather
+/// than zero: [`FamilyFeatures::envelope_changes`] is what a caller tests to tell the two apart,
+/// and `hk_classify::features` abstains on `blind_ook` below it.
+///
+/// Twelve is six keyings — the fewest that give the on-level and the off-level six draws each,
+/// which is what a *difference of two means* needs before its own standard error, `sqrt(2/6)` of
+/// the level spread, is smaller than the difference the contrast exists to resolve.
+pub const MIN_ENVELOPE_TRANSITIONS: usize = 12;
+
+/// Largest envelope coefficient of variation that still reads as a keyed FREQUENCY rather than a
+/// keyed amplitude. Unchanged from the shipped test; see [`family::soft_veto`] for the ramp.
+const ENV_CV_MAX: f64 = 0.35;
+/// Penalty applied when it does not.
+const ENV_CV_PENALTY: f64 = 0.4;
+/// Highest the OOK off-level may sit above the noise RMS and still be an off-level.
+const OFF_LEVEL_MAX_SIGMAS: f64 = 2.5;
+/// Penalty applied when it does not.
+const OFF_LEVEL_PENALTY: f64 = 0.4;
+/// 3σ relative standard error of a fourth-order sample statistic over `n` draws,
+/// `3·sqrt(10.667/n)`. The same constant `feature_length_invariance::K_ORDER4` derives.
+const K_ORDER4: f64 = 9.80;
+
 /// Family scores in [0, 1].
+///
+/// # These are DECISIONS, and a decision is not a density dimension (T-311)
+///
+/// Each is a saturating ramp on a continuous statistic multiplied by veto constants, and its
+/// numeric value below saturation is a *product of those constants* — 0.10, 0.20, 0.30, 0.40 —
+/// which says **which** measurement ruled the family out, not how much of the family was present.
+/// That is fine for what C14 uses them for ([`SymbolParameters::family`], the rate-consensus seed,
+/// the digital-structure test) and it is what `hk_classify` must not read as a continuous
+/// measurement.
+///
+/// Three of the four quantities underneath are **maxima** — the carrier-line coherence over `n`
+/// bins, [`FskCentreStats::periodicity`] over 8 lags, and [`FskCentreStats::fisher_j`] over 8
+/// sampling phases and up to 4 candidate rates — so each has a null level that **rises as the
+/// record shrinks**, and each was compared against a fixed threshold. That, not the estimator's
+/// lock, is what made a burst read 0.10 at one window length and 1.00 at another. The coherence is
+/// now bias-corrected so its null is 0 at every length ([`crate::blind::lines::carrier_line`]) and
+/// the periodicity veto ramps over its own standard error rather than snapping
+/// ([`family::periodicity_penalty`]). The one place a lock genuinely is binary — too few members in the
+/// smaller IF cluster for the Fisher ratio's denominator to exist — refuses the candidate
+/// ([`family::MIN_CLUSTER_MEMBERS`]) so the score is **absent** rather than low.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FamilyScores {
-    /// OOK.
+    /// OOK. Not measured when [`FamilyFeatures::envelope_changes`] is below
+    /// [`MIN_ENVELOPE_TRANSITIONS`]; 0 there means "could not look", not "looked and saw nothing".
     pub ook: f64,
-    /// FSK.
+    /// FSK. Not measured when [`FamilyFeatures::fsk`] is `None`.
     pub fsk: f64,
     /// BPSK.
     pub bpsk: f64,
@@ -1125,34 +1172,70 @@ impl BlindEstimator {
             });
         let mut fsk_score = fsk_best.map_or(0.0, |s| {
             ((s.fisher_j - 2.5) / 2.0).clamp(0.0, 1.0)
-                * if s.occupancy > 0.1 { 1.0 } else { 0.3 }
-                * if s.separation_hz > 0.1 * obw {
-                    1.0
-                } else {
-                    0.2
-                }
-                * if env_cv < 0.35 { 1.0 } else { 0.4 }
-                * if s.valley < 0.6 { 1.0 } else { 0.15 }
-                * if s.periodicity > 0.95 { 0.1 } else { 1.0 }
+                * s.veto_product(obw)
+                // env_cv is a coefficient of variation over the on-samples; its 3σ relative error
+                // is fourth-order (the sampling error of a spread is set by the fourth moment of
+                // what is being spread), over n_on independent envelope samples.
+                * soft_veto(
+                    env_cv,
+                    ENV_CV_MAX,
+                    env_cv * K_ORDER4 / (xon.len().max(1) as f64).sqrt(),
+                    ENV_CV_PENALTY,
+                    true,
+                )
         });
         let noise_rms = nz.sqrt();
         let mut ook_score = 0.0;
-        if p_lo > 0.08 && p_lo < 0.92 && n_env_tr >= 12 {
+        if p_lo > 0.08 && p_lo < 0.92 && n_env_tr >= MIN_ENVELOPE_TRANSITIONS {
+            // The off-level over the noise RMS: a ratio of two amplitude estimates, the tighter of
+            // which is formed over the p_lo·n samples the low level is estimated from, so its 3σ
+            // relative error is second-order over that count.
+            let sigmas = lo / noise_rms.max(f64::MIN_POSITIVE);
+            let low_n = (p_lo * xon.len() as f64).max(1.0);
             ook_score = ((contrast_db - 8.0) / 6.0).clamp(0.0, 1.0)
-                * if lo < 2.5 * noise_rms { 1.0 } else { 0.4 };
+                * soft_veto(
+                    sigmas,
+                    OFF_LEVEL_MAX_SIGMAS,
+                    sigmas * K_ORDER2 / low_n.sqrt(),
+                    OFF_LEVEL_PENALTY,
+                    true,
+                );
         }
-        if ook_score >= 0.8 {
-            fsk_score *= 0.3;
-        } else if fsk_score >= 0.5 {
-            ook_score *= 0.3;
+        // OOK and FSK compete: a keyed envelope and a keyed frequency look alike to each other's
+        // evidence, so each discounts the other. The shipped form was a pair of hard thresholds —
+        // `ook >= 0.8` cut FSK by ×0.3, otherwise `fsk >= 0.5` cut OOK by ×0.3 — which made each
+        // score a DISCONTINUOUS function of the other, so any gate flipping anywhere in either
+        // family moved the other by a factor of 3.3. Measured on the dev grid: one `ppm` waveform
+        // read `blind_ook` 1.00 over its full record and 0.12 over its last quarter, entirely
+        // because the FSK side crossed 0.5 (T-311).
+        //
+        // The form below keeps the shipped rule's two properties — only the LOSER is discounted,
+        // and by ×0.3 when the winner saturates — and drops the absolute thresholds that decided
+        // who the loser was. Which family leads is now a comparison between the two, so the only
+        // discontinuity left is at an exact tie, where the two families' evidence is genuinely
+        // equal and either answer is as good. It is the form C14 already uses for `conf` on the
+        // next page: `ranked[0] · (1 − 0.7·ranked[1])`.
+        let (ook_raw, fsk_raw) = (ook_score, fsk_score);
+        if ook_raw >= fsk_raw {
+            fsk_score = fsk_raw * (1.0 - 0.7 * ook_raw);
+        } else {
+            ook_score = ook_raw * (1.0 - 0.7 * fsk_raw);
         }
-        let (c1, _, _) = carrier_line(plans, &xon, fs, 1);
-        let (c2, _, u2) = carrier_line(plans, &xon, fs, 2);
-        let (c4, _, _) = carrier_line(plans, &xon, fs, 4);
+        let (c1, _, _, n1) = carrier_line(plans, &xon, fs, 1);
+        let (c2, _, u2, n2) = carrier_line(plans, &xon, fs, 2);
+        let (c4, _, _, n4) = carrier_line(plans, &xon, fs, 4);
+        // The two ratio tests compare two bias-corrected coherences, each of which is a maximum
+        // whose residual spread is of order its own null. So `c1 − 0.5·c2` is tested against zero
+        // over a width of `hypot(n1, 0.5·n2)` — the same soft-veto rule, with the width the
+        // estimator itself reports rather than a constant. `u2` is the runner-up over the peak of
+        // the SAME Rayleigh field, where the two order statistics differ by about `1/(2·ln M)`.
+        let ratio_w = |a: f64, b: f64| (a * a + 0.25 * b * b).sqrt();
+        let u2_w = 1.0 / (2.0 * (xon.len().max(2) as f64).ln());
         let bpsk_score = ((c2 - 0.25) / 0.25).clamp(0.0, 1.0)
-            * if c1 < 0.5 * c2 { 1.0 } else { 0.3 }
-            * if u2 < 0.6 { 1.0 } else { 0.2 };
-        let qpsk_score = ((c4 - 0.2) / 0.2).clamp(0.0, 1.0) * if c2 < 0.5 * c4 { 1.0 } else { 0.2 };
+            * soft_veto(c1 - 0.5 * c2, 0.0, ratio_w(n1, n2), 0.3, true)
+            * soft_veto(u2, 0.6, u2_w, 0.2, true);
+        let qpsk_score = ((c4 - 0.2) / 0.2).clamp(0.0, 1.0)
+            * soft_veto(c2 - 0.5 * c4, 0.0, ratio_w(n2, n4), 0.2, true);
         let scores = FamilyScores {
             ook: ook_score,
             fsk: fsk_score,
