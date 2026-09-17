@@ -6,8 +6,9 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import {
-  containsCenter, dcOffsetHz, detailLabel, detailOf, detailPlan, retunePlan, smallestCoveringSpan,
-  snapCenter, snapSpan, snapState, snapTimeCell,
+  NUDGE_FRACTIONS, NUDGE_IDEAL_FRACTION, NUDGE_SKIRT_LANDING,
+  containsCenter, dcOffsetHz, detailLabel, detailOf, detailPlan, nudgeGeometry, nudgePlan,
+  retunePlan, smallestCoveringSpan, snapCenter, snapSpan, snapState, snapTimeCell,
   type FrequencyGrid, type NavigationGrid, type TimeGrid,
 } from "../src/navigation";
 
@@ -374,4 +375,174 @@ test("T-418: BOTH halves together beat either alone, and the gain is real at eve
   assert.ok(before / (p.spanHz / 4096) < 1.25);
   // Half two is where the detail comes from, and together they are the answer the user asked for.
   assert.ok(d.binHz < before / 4, `${d.binHz} Hz/bin is not meaningfully finer than ${before}`);
+});
+
+// ---------------------------------------------------------------------------
+// T-409: tuning nudges — move a signal off the DC spike without losing it from the band
+// ---------------------------------------------------------------------------
+//
+// The three things the ticket says are not obvious from the ask, each with the control that stops a
+// degenerate implementation passing:
+//
+//  1. it SNAPS, and says by how much the actual shift differs from the advertised fraction;
+//  2. it never CLAMPS — a nudge that cannot be taken in full refuses, because a clamped nudge moves
+//     less than the button says (control: `snapCenter` would have "succeeded" at the band edge);
+//  3. the largest offered fraction lands a centred signal at the BAND EDGE, in the anti-alias
+//     skirt — one hazard swapped for the other — which the geometry states rather than hides.
+//
+// Plus the property that makes the buttons navigable rather than a one-way drift: a nudge and its
+// opposite return the tune to where it started.
+
+test("T-409: a nudge is derived, snapped, and says what it actually moved", () => {
+  const span = 2.4e6;
+  const from = snapCenter(HACKRF, 100.8e6)!;
+  const p = nudgePlan(HACKRF, from, span, 1 / 4);
+  assert.equal(p.ok, true);
+  if (!p.ok) return;
+
+  // The advertised distance is exactly a quarter of the tuned span…
+  assert.equal(p.advertisedHz, span / 4);
+  // …and the centre asked for is ON the grid, which is why the actual shift is not exactly that.
+  assert.equal(p.centerHz, Math.round(p.centerHz / STEP) * STEP);
+  assert.equal(p.onGrid, true);
+  assert.notEqual(p.shiftHz, p.advertisedHz, "the grid moved it: an exact fraction would be a lie");
+  assert.ok(Math.abs(p.snapErrorHz) <= STEP / 2, `${p.snapErrorHz} is more than half a tuning step`);
+  assert.equal(p.snapErrorHz, p.centerHz - p.requestedHz);
+  assert.equal(p.shiftHz, p.centerHz - from);
+
+  // Re-snapping the planned centre downstream (`applyDeviceAction` does) is a no-op, so the number
+  // the tooltip prints is the number that goes to the radio.
+  assert.equal(snapCenter(HACKRF, p.centerHz), p.centerHz);
+});
+
+test("T-409 THE HAZARD: 1/4 span is the derived ideal and 1/2 span is the trap, stated not hidden", () => {
+  const span = 2.4e6;
+  const from = snapCenter(HACKRF, 100.8e6)!;
+  const landing = (f: number) => {
+    const p = nudgePlan(HACKRF, from, span, f);
+    assert.equal(p.ok, true);
+    return p.ok ? p.geometry : null!;
+  };
+
+  // A signal sitting on DC ends up this far from DC, as a fraction of the way to the window edge.
+  // The hazards are at 0 (the LO spike) and 1 (the anti-alias roll-off), so 0.5 is maximally far
+  // from both — the same derivation `dcOffsetHz` makes for T-418, reached from the other side.
+  //
+  // The tolerance is the snap's own: `landing` is derived from the shift actually taken, so it sits
+  // within half a tuning step of the fraction's ideal — `(STEP/2) / (span/2)` = `STEP/span`. That is
+  // not slop in the test, it is the quantity the readout exists to report.
+  const tol = STEP / span;
+  assert.ok(Math.abs(landing(1 / 8).landing - 0.25) <= tol);
+  assert.ok(Math.abs(landing(1 / 4).landing - 0.5) <= tol, "a quarter span is the midpoint");
+  assert.ok(Math.abs(landing(1 / 2).landing - 1) <= tol, "a half span is the EDGE, not a bigger dodge");
+
+  // Which is what `intoSkirt` says, and only of the largest one.
+  assert.equal(landing(1 / 8).intoSkirt, false);
+  assert.equal(landing(1 / 4).intoSkirt, false);
+  assert.equal(landing(1 / 2).intoSkirt, true);
+  assert.equal(landing(-1 / 2).intoSkirt, true, "direction does not change which hazard is met");
+  // THE CONTROL on that flag: it must not be decided by an exact `landing >= 1`, because the snap
+  // moves the landing point by ±step/span and a half-span nudge therefore lands a hair either side
+  // of the edge depending only on which way `snapCenter` rounded. A flag that flipped on 14 Hz in
+  // 1.2 MHz would be noise; the threshold is a stated edge REGION (`NUDGE_SKIRT_LANDING`), wide
+  // enough that both roundings agree.
+  assert.notEqual(landing(1 / 2).landing, 1, "the snap moved it off the exact edge, either way");
+  assert.ok(NUDGE_SKIRT_LANDING < 1 && NUDGE_SKIRT_LANDING > 2 * NUDGE_IDEAL_FRACTION);
+  assert.ok(1 - NUDGE_SKIRT_LANDING > tol, "the edge region must be far wider than any snap");
+
+  // The ideal constant names the fraction whose landing is the midpoint — not a preference.
+  assert.ok(Math.abs(landing(NUDGE_IDEAL_FRACTION).landing - 0.5) <= tol);
+  assert.deepEqual([...NUDGE_FRACTIONS], [1 / 8, 1 / 4, 1 / 2]);
+
+  // And the other cost the largest fraction carries: half the window in force is left behind, and
+  // a formerly-centred signal is exactly on the boundary of what was kept.
+  assert.ok(Math.abs(landing(1 / 8).overlap - 0.875) <= tol);
+  assert.ok(Math.abs(landing(1 / 2).overlap - 0.5) <= tol);
+
+  // The geometry is derived from the SHIFT ACTUALLY TAKEN, never from the fraction on the button —
+  // so a snap that moved the centre moves the landing point with it.
+  const p = nudgePlan(HACKRF, from, span, 1 / 4);
+  assert.equal(p.ok && p.geometry.shiftHz, p.ok ? p.shiftHz : null);
+});
+
+test("T-409 THE CONTROL: a nudge that cannot be taken IN FULL refuses — it is never clamped", () => {
+  const span = 2.4e6;
+  // 4 MHz below the top of the band, asking to move 1.2 MHz up: fine.
+  const near = snapCenter(HACKRF, 6e9 - 4e6)!;
+  assert.equal(nudgePlan(HACKRF, near, span, 1 / 2).ok, true);
+
+  // Now from a centre where +1/2 span lands past the end of every tunable band.
+  const edge = snapCenter(HACKRF, 6e9 - 0.5e6)!;
+  const over = nudgePlan(HACKRF, edge, span, 1 / 2);
+  assert.equal(over.ok, false);
+  assert.equal(over.ok === false && over.reason, "out_of_range");
+  // The refusal names where it would have had to go, so the UI can say it.
+  assert.ok(over.ok === false && over.requestedHz !== null && over.requestedHz > 6e9);
+
+  // THE CONTROL that makes that assertion mean something: `snapCenter` would happily have returned
+  // a centre here — it walks an out-of-band request INWARD — so a plan built on it would have
+  // reported success while moving less than the button said. That is exactly the distinction T-392
+  // drew, and this is the test that stops it being undrawn.
+  const walked = snapCenter(HACKRF, edge + span / 2);
+  assert.ok(walked !== null && walked <= 6e9, "snapCenter clamps inward, which is why it is not the test");
+  assert.ok(walked! - edge < span / 2, "…and the clamped move is SHORTER than the nudge advertised");
+
+  // The opposite direction is unaffected: refusing is per-button, not a dead row.
+  assert.equal(nudgePlan(HACKRF, edge, span, -1 / 2).ok, true);
+  // And the same at the bottom of the band.
+  const low = snapCenter(HACKRF, 1.2e6)!;
+  assert.equal(nudgePlan(HACKRF, low, span, -1 / 2).ok === false && nudgePlan(HACKRF, low, span, -1 / 2).reason, "out_of_range");
+});
+
+test("T-409 THE PROPERTY: a nudge and its opposite return the tune to where it started", () => {
+  const span = 2.4e6;
+  for (const f of NUDGE_FRACTIONS) {
+    for (const dir of [1, -1]) {
+      const from = snapCenter(HACKRF, 100.8e6)!;
+      const out = nudgePlan(HACKRF, from, span, dir * f);
+      assert.equal(out.ok, true);
+      if (!out.ok) continue;
+      const back = nudgePlan(HACKRF, out.centerHz, span, -dir * f);
+      assert.equal(back.ok, true);
+      if (!back.ok) continue;
+      // Exactly, from an on-grid start: `snapCenter` rounds to the nearest multiple, so the step
+      // count added by one nudge is the step count the opposite one subtracts.
+      assert.equal(back.centerHz, from, `${dir * f} then back landed on ${back.centerHz}, not ${from}`);
+    }
+  }
+
+  // From a centre that is NOT on the grid the round trip lands on the nearest grid point instead —
+  // within one snap step, which is the most any grid can promise ("modulo one snap step").
+  const off = 100.8e6 + STEP / 3;
+  const there = nudgePlan(HACKRF, off, span, 1 / 8);
+  assert.equal(there.ok, true);
+  if (!there.ok) return;
+  const backAgain = nudgePlan(HACKRF, there.centerHz, span, -1 / 8);
+  assert.equal(backAgain.ok, true);
+  assert.ok(backAgain.ok && Math.abs(backAgain.centerHz - off) <= STEP, "drifted by more than one step");
+});
+
+test("T-409: the refusals that are not about the band, and the unknown-step case that still tunes", () => {
+  const span = 2.4e6;
+  assert.equal(nudgePlan(null, 100.8e6, span, 1 / 4).ok === false && nudgePlan(null, 100.8e6, span, 1 / 4).reason, "no_grid");
+  assert.equal(nudgePlan(HACKRF, null, span, 1 / 4).ok === false && nudgePlan(HACKRF, null, span, 1 / 4).reason, "no_center");
+  assert.equal(nudgePlan(HACKRF, 100.8e6, null, 1 / 4).ok === false && nudgePlan(HACKRF, 100.8e6, null, 1 / 4).reason, "no_span");
+  assert.equal(nudgePlan(HACKRF, 100.8e6, 0, 1 / 4).ok === false && nudgePlan(HACKRF, 100.8e6, 0, 1 / 4).reason, "no_span");
+  assert.equal(nudgePlan(HACKRF, 100.8e6, span, 0).ok === false && nudgePlan(HACKRF, 100.8e6, span, 0).reason, "no_span");
+
+  // A source that states no tuning step still has a radio and can still be tuned — so the nudge is
+  // taken, at exactly what was asked for, and `onGrid` is false: rule 1 in navigation.ts, nothing
+  // may claim the front end will sit exactly there.
+  const u: FrequencyGrid = { ...HACKRF, center_step: "unknown", center_step_hz: null };
+  const p = nudgePlan(u, 100.8e6, span, 1 / 4);
+  assert.equal(p.ok, true);
+  if (!p.ok) return;
+  assert.equal(p.onGrid, false);
+  assert.equal(p.centerHz, p.requestedHz);
+  assert.equal(p.snapErrorHz, 0);
+  assert.equal(p.shiftHz, span / 4);
+
+  // nudgeGeometry refuses the same non-answers rather than producing a landing point from nothing.
+  assert.equal(nudgeGeometry(0, 1e5), null);
+  assert.equal(nudgeGeometry(2.4e6, NaN), null);
 });

@@ -221,6 +221,185 @@ export function dcOffsetHz(spanHz: number, needHz: number, stepHz: number | null
   return room > 0 ? Math.min(spanHz / 4, room) : 0;
 }
 
+// ---------------------------------------------------------------------------
+// Nudging the tune off DC (T-409)
+// ---------------------------------------------------------------------------
+//
+// **The user's ask:** buttons that shift the tuned centre left/right by 1/8, 1/4 or 1/2 of the
+// current tuned span. **The reason it exists** is the same one [`dcOffsetHz`] exists for, arrived at
+// from the other side: a signal sitting on the centre frequency sits on the tuner's own DC/LO
+// leakage spike, and cannot be cleanly demodulated or decoded there. T-317 ruled that spike out as
+// an external cause and flags `spur_reason` on it, T-382 measured the host comb at −678.048 Hz
+// relative to tuner DC, and the 2026-09-15 fixture's tuner-DC box is one of the few T-394 still
+// leaves above 20 dB. It is real, it is ours, and it sits exactly where a user naturally tunes.
+// A nudge moves the radio out from under it while keeping the signal in the window.
+//
+// Where T-418 *places* a window it is already opening, this *moves* one the user is already in. The
+// arithmetic is deliberately the same arithmetic, so the two cannot disagree about where DC is safe.
+
+/** The fractions of the tuned span the nudge control offers, narrowest first (the user's ask). */
+export const NUDGE_FRACTIONS = [1 / 8, 1 / 4, 1 / 2] as const;
+
+/**
+ * The offered fraction that lands a previously-centred signal on [`dcOffsetHz`]'s derived ideal —
+ * the midpoint of the usable half-band, `span/4` off DC.
+ *
+ * Not a preference among the three: it is the *only* one of them with a derivation behind it, and
+ * it is the same derivation the region-select already uses. The other two are offered because the
+ * user asked for them and because a nudge is also how you step along a band, not because they are
+ * equally good at the job this control exists to do.
+ */
+export const NUDGE_IDEAL_FRACTION = 1 / 4;
+
+/**
+ * Where the window's edge region begins, as a fraction of the way from DC to the band edge — the
+ * threshold [`NudgeGeometry.intoSkirt`] is decided by.
+ *
+ * It is **not** `1`. An anti-alias filter does not start at Nyquist and stop being a problem a hertz
+ * inside it; it rolls off *before* the edge, and the front end's baseband filter is at most as wide
+ * as the sample rate, so the outermost part of every window is skirt however the numbers round. The
+ * value also has to be far larger than any snap: a half-span nudge lands at `1 − (step/span)` or
+ * `1 + (step/span)` depending on which way `snapCenter` rounded — about one part in 10^5 on a
+ * HackRF — and a hazard flag that flipped on that would be noise, not a warning. A tenth of the
+ * half-band is conservative in the right direction and stable against both.
+ */
+export const NUDGE_SKIRT_LANDING = 0.9;
+
+/**
+ * What a nudge does to the picture, in the terms the two hazards are stated in — **derived from the
+ * shift actually taken**, never from the fraction on the button (they differ by up to half a
+ * tuning step once the centre is snapped).
+ */
+export interface NudgeGeometry {
+  /** The signed shift of the tuned centre, Hz. */
+  shiftHz: number;
+  /**
+   * Where a signal that is **on DC now** ends up, as a fraction of the distance from DC (0) to the
+   * window edge (1).
+   *
+   * This is the number the whole control is about, and it is why the largest offered fraction is
+   * not the best one. The usable half-band has a hazard at each end — the LO spike at 0, the
+   * anti-alias filter's roll-off at Nyquist — so `0.5`, the midpoint, is maximally far from both
+   * (`NUDGE_IDEAL_FRACTION`, and `dcOffsetHz`'s `span/4` said the other way round). `landing` is
+   * `2 × |shift| / span`, so 1/8 span lands at 0.25, 1/4 span at 0.5, and **1/2 span at 1.0 — at
+   * the band edge, in the skirt**: out of one hazard and straight into the other.
+   */
+  landing: number;
+  /** Fraction of the window in force that is still inside the window after the nudge: `1 − |shift|
+   * / span`. At 1/2 span exactly half the window is left behind — and a formerly-centred signal is
+   * exactly on the boundary of what was kept. */
+  overlap: number;
+  /** `landing >= NUDGE_SKIRT_LANDING`: a centred signal lands in the window's edge region, where
+   * the anti-alias filter rolls off. The trap the largest offered fraction sets for the very case
+   * this control exists to fix — stated, not silently offered, and not withheld either. */
+  intoSkirt: boolean;
+}
+
+/** [`NudgeGeometry`] for a shift of `shiftHz` inside a window of `spanHz`; null when either is not
+ * a number this can be derived from. */
+export function nudgeGeometry(spanHz: number, shiftHz: number): NudgeGeometry | null {
+  if (!Number.isFinite(spanHz) || !(spanHz > 0) || !Number.isFinite(shiftHz)) return null;
+  const d = Math.abs(shiftHz);
+  const landing = d / (spanHz / 2);
+  return { shiftHz, landing, overlap: Math.max(0, 1 - d / spanHz), intoSkirt: landing >= NUDGE_SKIRT_LANDING };
+}
+
+/** Why a nudge cannot be taken. Each one **disables** the button rather than shrinking the move —
+ * see [`nudgePlan`] on why a clamp would be the worse answer. */
+export type NudgeRefusal =
+  /** No tunable range reported, so nothing may be claimed achievable (the same refusal
+   * `retunePlan` makes, for the same reason). */
+  | "no_grid"
+  /** The tuned centre is not known yet, so there is nothing to nudge *from*. */
+  | "no_center"
+  /** The tuned span is not known yet, so the fraction names no distance. */
+  | "no_span"
+  /** The nudge would land the centre outside every band the front end can tune. */
+  | "out_of_range";
+
+/** A nudge that can be taken, or the reason it cannot. */
+export type NudgePlan =
+  | {
+    ok: true;
+    /** The centre to ask the radio for — already on the grid, so re-snapping it downstream is a
+     * no-op and the number in the tooltip is the number that goes out. */
+    centerHz: number;
+    /** `fromHz + fraction × span`, before the snap. */
+    requestedHz: number;
+    /** The centre the nudge starts from. */
+    fromHz: number;
+    /** `centerHz − fromHz`: what the radio will **actually** move, which is the fraction's distance
+     * plus the snap's own displacement. */
+    shiftHz: number;
+    /** `fraction × span`: what the button's label claims. Differs from `shiftHz` by `snapErrorHz`. */
+    advertisedHz: number;
+    /** `centerHz − requestedHz`, at most half a tuning step. Non-zero is the honest reason the
+     * actual shift is not exactly the advertised one, and the readout says so. */
+    snapErrorHz: number;
+    /** Whether `centerHz` is a point the source *stated* is achievable. False when the grid reports
+     * no step: the nudge is still taken (there is a radio and it can be tuned), but nothing may
+     * claim the front end will sit exactly here — rule 1 at the top of this file. */
+    onGrid: boolean;
+    geometry: NudgeGeometry;
+  }
+  | { ok: false; reason: NudgeRefusal; requestedHz: number | null };
+
+/**
+ * The nudge of `fraction` of `spanHz` from `fromHz`, resolved against the achievable centre grid.
+ *
+ * **Two things this must not do, and they pull in opposite directions.**
+ *
+ * *It must snap.* Achievable centres are a grid (`center_step_hz`; a HackRF's is 30 MHz / 2^20 =
+ * 28.6102294921875 Hz), and `centre + fraction × span` is not generally on it. So the centre asked
+ * for is `snapCenter`'s, and the shift the radio actually takes then differs from the advertised
+ * fraction by up to half a step — which `snapErrorHz` carries out to the readout rather than
+ * quietly absorbing.
+ *
+ * *It must not clamp.* At the edge of the device's range a clamped nudge would move **less than the
+ * button says**, and a control that quietly does less than it claims is the failure mode T-392
+ * already met and chose against: `containsCenter` is not `snapCenter` **precisely because** snapping
+ * walks an out-of-band request inward, which would call every out-of-range centre achievable at the
+ * band edge. So the test here is `containsCenter` on the *requested* centre, and a nudge that cannot
+ * be taken in full is refused — the caller disables the button and says why. (Snapping afterwards
+ * can still move the centre by half a step; that is the grid, not a clamp, and it is reported.)
+ *
+ * **Reversibility.** `snapCenter` rounds to the nearest multiple of the step, so from a centre that
+ * is on the grid, a nudge and its opposite return to exactly where they started: `round((k·s + d)/s)
+ * = k + round(d/s)`, and subtracting the same `d` subtracts the same `round(d/s)`. From a centre
+ * that is *off* the grid the round trip lands on the nearest grid point instead — within one snap
+ * step, which is the most any grid can promise. That makes the buttons navigable rather than a
+ * one-way drift, and it is asserted in `ui/test/navigation.test.ts`.
+ */
+export function nudgePlan(
+  g: CenterGrid | null, fromHz: number | null, spanHz: number | null, fraction: number,
+): NudgePlan {
+  // A null grid refuses, exactly as `retunePlan` does: not knowing the tunable range is not evidence
+  // that a centre is reachable, and this control commands the radio.
+  if (!g) return { ok: false, reason: "no_grid", requestedHz: null };
+  if (fromHz === null || !Number.isFinite(fromHz)) return { ok: false, reason: "no_center", requestedHz: null };
+  if (spanHz === null || !Number.isFinite(spanHz) || !(spanHz > 0)) {
+    return { ok: false, reason: "no_span", requestedHz: null };
+  }
+  if (!Number.isFinite(fraction) || fraction === 0) return { ok: false, reason: "no_span", requestedHz: null };
+  const advertisedHz = fraction * spanHz;
+  const requestedHz = fromHz + advertisedHz;
+  if (!containsCenter(g, requestedHz)) return { ok: false, reason: "out_of_range", requestedHz };
+  const snapped = snapCenter(g, requestedHz);
+  const centerHz = snapped ?? requestedHz;
+  const shiftHz = centerHz - fromHz;
+  return {
+    ok: true,
+    centerHz,
+    requestedHz,
+    fromHz,
+    shiftHz,
+    advertisedHz,
+    snapErrorHz: centerHz - requestedHz,
+    onGrid: snapped !== null,
+    geometry: nudgeGeometry(spanHz, shiftHz)!,
+  };
+}
+
 /** Why no achievable configuration can capture a requested region. The whole list — anything not
  * here **retunes** rather than refusing, which is the half of the invariant that is easy to lose. */
 export type RetuneRefusal =
