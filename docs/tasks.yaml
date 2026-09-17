@@ -7134,7 +7134,7 @@ tasks:
     milestone: M3
     title: The classifier rejects 39% of genuine short bursts from their own class, and the fix costs open-set
       recall at the floor
-    status: todo
+    status: in-progress
     priority: high
     deps:
     - T-328
@@ -10152,7 +10152,7 @@ tasks:
   - id: T-429
     milestone: M3
     title: The observation guard varies ONE axis - record length - and holds SNR fixed at 25 dB, so every SNR-dependent feature is invisible to it
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: M3A
     core_interface: true
