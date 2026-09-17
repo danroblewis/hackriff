@@ -82,8 +82,8 @@ pub mod observable;
 pub mod prn;
 
 pub use acquire::{
-    AcquireError, AcquisitionConfig, AcquisitionEvidence, AcquisitionResult, KnownCodeLed,
-    SvAcquisition, acquire,
+    AcquireError, AcquisitionConfig, AcquisitionEvidence, AcquisitionResult, AcquisitionThreshold,
+    DEFAULT_FALSE_ALARM, KnownCodeLed, SvAcquisition, acquire, acquisition_threshold,
 };
 pub use integrity::{
     IntegrityConfig, JammingAssessment, JammingVerdict, LockEvidence, PowerEvidence, SpoofTell,

@@ -61,8 +61,8 @@ use hk_context::gnss_service::{GnssServiceEvidence, GnssServiceVerdict, L1_BAND_
 use hk_core::ReadOutcome;
 use hk_dsp::ddc::{DdcKernel, DdcSpec};
 use hk_gnss::{
-    AcquisitionConfig, IntegrityConfig, JammingVerdict, KnownCodeLed, LockEvidence, PowerEvidence,
-    PrnCodebook, acquire,
+    AcquisitionConfig, AcquisitionThreshold, IntegrityConfig, JammingVerdict, KnownCodeLed,
+    LockEvidence, PowerEvidence, PrnCodebook, acquire,
 };
 use hk_model::{FreqRange, Provenance, TimeRange, Timestamp};
 use num_complex::{Complex, Complex32};
@@ -94,13 +94,6 @@ pub struct GnssDwellConfig {
     pub acq: AcquisitionConfig,
     /// Jamming/spoofing thresholds.
     pub integrity: IntegrityConfig,
-    /// Target per-satellite false-alarm probability for the acquisition threshold. The threshold
-    /// itself is computed per dwell from this and the profile length; see
-    /// [`acquisition_threshold`].
-    pub false_alarm: f64,
-    /// Fixes the peak-to-mean threshold instead of computing it. For experiments only — a fixed
-    /// bar does not survive a change of sample rate.
-    pub threshold_override: Option<f32>,
 }
 
 impl Default for GnssDwellConfig {
@@ -118,53 +111,20 @@ impl Default for GnssDwellConfig {
                 noncoherent_blocks: 4,
                 doppler_max_hz: 5_000.0,
                 doppler_step_hz: 500.0,
-                // Overwritten per dwell by `acquisition_threshold`.
-                threshold_ratio: 2.5,
+                // Not a number this file gets to choose. The bar is derived inside hk-gnss from
+                // the search's own geometry — see `AcquisitionThreshold` (T-414).
+                threshold: AcquisitionThreshold::default(),
                 // Overwritten per dwell with the DDC's actual output rate.
                 sample_rate_hz: 2_046_000.0,
             },
             integrity: IntegrityConfig::default(),
-            false_alarm: 1.0e-4,
-            threshold_override: None,
         }
     }
-}
-
-/// The peak-to-mean bar for a code-phase profile of `cells` cells accumulated over `blocks`
-/// non-coherent blocks, at a target per-satellite false-alarm probability `p_fa`.
-///
-/// **This has to be computed, not fixed, and getting it wrong is not subtle.**
-/// `AcquisitionConfig`'s default of 2.5 is a floor sized for a short profile. The number of
-/// code-phase cells searched is the *samples per 1 ms code period*, so it rises with the rate —
-/// 2046 cells at the minimum rate, 4000 at 4 Msps, 20 000 at 20 Msps — and each cell is another
-/// chance for noise to clear a fixed bar. Left at 2.5 over a 4000-cell profile, acquisition
-/// returns **all 32 satellites out of pure noise**, which would make every dwell report an intact
-/// constellation and quietly disable the whole jamming assessment.
-///
-/// The normalised profile is Gamma(`blocks`)/`blocks`, so the per-cell upper tail is
-/// `P(X > x) ≈ e^{-k x} (k x)^{k-1} / (k-1)!` with `k = blocks`, and the bar is the `x` where
-/// `cells · P(X > x) = p_fa`. Solved by bisection — the tail is monotone.
-pub fn acquisition_threshold(cells: usize, blocks: usize, p_fa: f64) -> f32 {
-    let k = blocks.max(1) as f64;
-    let n = cells.max(1) as f64;
-    let target = (p_fa.clamp(1e-12, 0.5) / n).ln();
-    // ln P(X > x) = -k·x + (k−1)·ln(k·x) − ln((k−1)!)
-    let ln_fact: f64 = (1..blocks.max(1)).map(|i| (i as f64).ln()).sum();
-    let ln_tail = |x: f64| -k * x + (k - 1.0) * (k * x).ln() - ln_fact;
-    let (mut lo, mut hi) = (1.0f64, 200.0f64);
-    for _ in 0..80 {
-        let mid = 0.5 * (lo + hi);
-        if ln_tail(mid) > target {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    (0.5 * (lo + hi)) as f32
 }
 
 /// Reads `extra.gnss` from the scan plan: `{"dwell_s", "every_s", "window_s", "bandwidth_hz",
-/// "coherent_ms", "noncoherent_blocks", "doppler_max_hz", "doppler_step_hz", "threshold_ratio"}`.
+/// "coherent_ms", "noncoherent_blocks", "doppler_max_hz", "doppler_step_hz", "false_alarm",
+/// "threshold_ratio"}`.
 ///
 /// Absent or `null` leaves [`GnssDwellConfig::default`]. The **centre is not settable**: L1 is
 /// where L1 is, and a knob for it would be a frequency list arriving through config.
@@ -199,8 +159,12 @@ pub fn gnss_config(plan: &hk_model::ScanPlan) -> anyhow::Result<GnssDwellConfig>
             "noncoherent_blocks" => cfg.acq.noncoherent_blocks = count(v)?,
             "doppler_max_hz" => cfg.acq.doppler_max_hz = num(v)?,
             "doppler_step_hz" => cfg.acq.doppler_step_hz = num(v)?,
-            "threshold_ratio" => cfg.threshold_override = Some(num(v)? as f32),
-            "false_alarm" => cfg.false_alarm = num(v)?,
+            // Both spellings of the same knob, and the crate refuses a ratio it cannot stand
+            // behind at the rate the dwell actually runs at.
+            "threshold_ratio" => {
+                cfg.acq.threshold = AcquisitionThreshold::PeakToMean(num(v)? as f32);
+            }
+            "false_alarm" => cfg.acq.threshold = AcquisitionThreshold::FalseAlarm(num(v)?),
             other => anyhow::bail!("extra.gnss: unknown key {other}"),
         }
     }
@@ -513,14 +477,22 @@ fn measure(
     let power_dbfs = 10.0 * mean_power.max(1e-20).log10();
 
     let mut cfg = gnss.cfg.acq;
+    // The one thing the caller owns is the rate it actually decimated to. The bar that goes with
+    // that rate is hk-gnss's to derive, because the bar is a function of the rate (T-414).
     cfg.sample_rate_hz = out_rate;
-    cfg.threshold_ratio = gnss.cfg.threshold_override.unwrap_or_else(|| {
-        acquisition_threshold(per_ms, cfg.noncoherent_blocks, gnss.cfg.false_alarm)
-    });
     // The witness: this call is known-signal-**led**, and says so in its own signature
     // (ADR-0018 §3). Its only constructor takes the published code set.
     let led = KnownCodeLed::with_codebook(&gnss.codebook);
-    let result = acquire(&led, &gnss.codebook, iq, &cfg).ok()?;
+    let result = match acquire(&led, &gnss.codebook, iq, &cfg) {
+        Ok(r) => r,
+        // A refused threshold is a misconfiguration, and staying quiet about it would reproduce
+        // the very failure mode this guards: a dwell that reports nothing wrong.
+        Err(e @ hk_gnss::AcquireError::ThresholdUnsound { .. }) => {
+            eprintln!("hk-gnss: refusing to acquire this dwell: {e}");
+            return None;
+        }
+        Err(_) => return None,
+    };
 
     let acquired_prns: Vec<u8> = result.acquired.iter().map(|a| a.prn).collect();
     let mean_cn0_dbhz = (!result.acquired.is_empty()).then(|| {
@@ -678,54 +650,40 @@ mod tests {
         }
     }
 
-    /// The bar must rise with the number of cells searched. A fixed 2.5 over a 4000-cell profile
-    /// acquires the whole constellation out of noise, which is the failure this replaces.
+    /// The scan plan may name either spelling of the bar, and both become the crate's one knob —
+    /// so a `threshold_ratio` in a plan is checked against the rate the dwell runs at rather than
+    /// silently applied to a search it does not fit (T-414).
     #[test]
-    fn the_acquisition_bar_rises_with_the_profile_it_searches() {
-        let short = acquisition_threshold(2046, 4, 1e-3);
-        let long = acquisition_threshold(20_000, 4, 1e-3);
-        assert!(long > short, "{short} -> {long}");
-        assert!(
-            short > 2.5,
-            "a 2046-cell profile already needs more than 2.5: {short}"
-        );
-        // Stricter false alarm, higher bar; more non-coherent averaging, lower bar.
-        assert!(acquisition_threshold(4000, 4, 1e-6) > acquisition_threshold(4000, 4, 1e-3));
-        assert!(acquisition_threshold(4000, 16, 1e-3) < acquisition_threshold(4000, 4, 1e-3));
-    }
-
-    /// The tail approximation must actually hit the false-alarm rate it claims. Draws Gamma(k)/k
-    /// profiles from a deterministic generator and counts how often the maximum clears the bar.
-    #[test]
-    fn the_bar_delivers_about_the_false_alarm_rate_it_promises() {
-        const CELLS: usize = 4000;
-        const BLOCKS: usize = 4;
-        let bar = f64::from(acquisition_threshold(CELLS, BLOCKS, 1e-3));
-        let mut state = 0x243f_6a88_85a3_08d3u64;
-        let mut unit = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            ((state >> 11) as f64 / (1u64 << 53) as f64).max(1e-15)
+    fn a_plan_may_state_an_error_rate_or_a_ratio_and_the_crate_judges_the_ratio() {
+        let plan_with = |gnss: serde_json::Value| {
+            let mut plan =
+                crate::replay_plan(L1_CENTER_HZ, 4.0e6, hk_model::Timestamp::from_unix_nanos(0));
+            plan.extra = serde_json::json!({ "gnss": gnss });
+            gnss_config(&plan).expect("plan parses")
         };
-        let mut fired = 0;
-        const TRIALS: usize = 2000;
-        for _ in 0..TRIALS {
-            let mut peak = 0.0f64;
-            for _ in 0..CELLS {
-                // Gamma(k,1) as a sum of k exponentials, normalised to mean 1.
-                let g: f64 = (0..BLOCKS).map(|_| -unit().ln()).sum();
-                peak = peak.max(g / BLOCKS as f64);
-            }
-            if peak > bar {
-                fired += 1;
-            }
-        }
-        let rate = fired as f64 / TRIALS as f64;
-        assert!(
-            rate < 1e-2,
-            "{fired}/{TRIALS} noise-only profiles cleared {bar}: {rate}"
+
+        // Nothing stated: the derived default, which is sound at every rate.
+        assert_eq!(
+            GnssDwellConfig::default().acq.threshold,
+            AcquisitionThreshold::FalseAlarm(hk_gnss::DEFAULT_FALSE_ALARM)
         );
+
+        let strict = plan_with(serde_json::json!({"false_alarm": 1e-7}));
+        assert_eq!(strict.acq.threshold, AcquisitionThreshold::FalseAlarm(1e-7));
+
+        // The old trap, now a refusal: 2.5 is under the coin-flip line at any acquirable rate.
+        let mut fixed = plan_with(serde_json::json!({"threshold_ratio": 2.5})).acq;
+        assert_eq!(fixed.threshold, AcquisitionThreshold::PeakToMean(2.5));
+        for rate in [2_046_000.0, 4.0e6, 20.0e6] {
+            fixed.sample_rate_hz = rate;
+            assert!(
+                matches!(
+                    fixed.peak_to_mean_bar(),
+                    Err(hk_gnss::AcquireError::ThresholdUnsound { .. })
+                ),
+                "a plan fixing 2.5 must be refused at {rate} Hz, not run"
+            );
+        }
     }
 
     #[test]

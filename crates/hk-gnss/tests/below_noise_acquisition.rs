@@ -173,7 +173,10 @@ fn known_code_correlation_recovers_the_satellite() {
         doppler_step_hz: 250.0,
         coherent_ms: 1,
         noncoherent_blocks: BLOCKS,
-        threshold_ratio: 8.0,
+        // **The crate's own default**, not a number this test picked. T-414: a bar that is only
+        // right at one sample rate is a trap, so the default is derived from the search geometry
+        // and this test is one of the two controls on it — a real satellite must still be found.
+        threshold: AcquisitionConfig::default().threshold,
     };
 
     let result = acquire(&led, &book, &with_sv, &cfg).expect("acquisition runs");
@@ -248,7 +251,6 @@ fn nothing_is_acquired_from_noise_alone() {
     let cfg = AcquisitionConfig {
         sample_rate_hz: SAMPLE_RATE_HZ,
         noncoherent_blocks: BLOCKS,
-        threshold_ratio: 8.0,
         ..Default::default()
     };
 
@@ -273,7 +275,6 @@ fn a_satellite_that_is_not_there_is_not_found() {
     let cfg = AcquisitionConfig {
         sample_rate_hz: SAMPLE_RATE_HZ,
         noncoherent_blocks: BLOCKS,
-        threshold_ratio: 8.0,
         ..Default::default()
     };
 
