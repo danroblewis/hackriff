@@ -607,8 +607,8 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
   }],
   "any": { "device": "any", "named": false, "observed_cells": 3, "unobserved_cells": 1, "cells": [ … ] },
   "sources": [
-    { "kind": "iq-ring",         "spans": 37, "device_known": true,  "available": true },
-    { "kind": "observation-log", "spans": 12, "device_known": false, "available": true }
+    { "kind": "iq-ring",         "spans": 37, "named_spans": 37, "device_known": true, "available": true },
+    { "kind": "observation-log", "spans": 12, "named_spans": 12, "device_known": true, "available": true }
   ],
   "resolution": { "source": "survey-overview", "live": false, "statement": "…",
                   "served_span_hz": 20000000.0, "max_live_span_hz": 20000000.0,
@@ -639,9 +639,11 @@ Nothing new is journalled for this. Two records already say "for each interval, 
 | Source | Interval | Centre/span/rate | Device | Horizon |
 |---|---|---|---|---|
 | IQ ring journal ([`/api/iqbuffer`](#rolling-iq-capture-buffer-t-157) segments, ADR-0014) | yes | yes | **yes** (`device_id`) | the ring's retention |
-| observation log (`DwellRecord`/`SweepRecord`, ADR-0012 §1) | yes | yes (`ObservedWindow`) | no | 30 days |
+| observation log (`DwellRecord`/`SweepRecord`, ADR-0012 §1) | yes | yes (`ObservedWindow`) | **yes** (`device_id`, T-378) | 30 days |
 
-The ring journal opens a new segment on **every** provenance change, so retunes are segment boundaries by construction — it is already a tune history, and it is the only one that names the radio. The observation log reaches far beyond the ring but records no `device_id` today, so its spans are `"unknown"`. `sources[]` reports both, including when one contributed nothing, so a client can tell *this record had nothing here* from *this record was not consulted*.
+The ring journal opens a new segment on **every** provenance change, so retunes are segment boundaries by construction — it is already a tune history. **T-378** put the same `device_id` on the observation log's records — the source's own `DeviceInfo::device_id`, the one value the baseline chain key and the history source key are also hashed from — so the long horizon is device-local too, and coverage over the whole retention answers *"did **this** front end look here"* rather than only *"did anything"*.
+
+A record that names no device — every record written before T-378, and any source that states no identity — stays `"unknown"`, and is **never** read as the radio that happens to be running now. `sources[]` therefore reports two numbers per record kind: `spans`, how many it contributed, and `named_spans`, how many of those actually named a front end. `device_known` is the measured `named_spans == spans`, not a declaration about the record kind, so a log still holding pre-T-378 lines says so. A source with no spans still appears, so a client can tell *this record had nothing here* from *this record was not consulted*.
 
 ### `GET /api/status` — pipeline counters (T-027)
 

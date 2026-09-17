@@ -473,9 +473,13 @@ No new record is journalled. Two existing ones already say "for each interval, w
 | Source | Interval | Centre/span/rate | Device | Horizon |
 |---|---|---|---|---|
 | **IQ ring journal** (§2's `Recording`/ADR-0014 ring segments) — a new segment on **every** provenance change, so retunes are segment boundaries by construction | yes | yes | **yes** (`Provenance::device_id`) | the ring's configured retention |
-| **Observation log** (`DwellRecord`/`SweepRecord`, ADR-0012 §1; `ObservedWindow::covered()` already removes the DC notch) | yes | yes | **no** (`device_id` is not on these records today) | 30 days |
+| **Observation log** (`DwellRecord`/`SweepRecord`, ADR-0012 §1; `ObservedWindow::covered()` already removes the DC notch) | yes | yes | **yes** — `device_id`, T-378 | 30 days |
 
-This is the gap the model still carries, and it is worth stating plainly: the long-horizon tune history does not record which radio made it. Until `DwellRecord`/`SweepRecord` carry a device, coverage older than the IQ ring is attributed to `Device::Unknown` — honest, and weaker than it needs to be. Adding `device_id` to those two records (with `serde(default)`, so existing logs read back as unknown rather than as a device) is the change that closes it.
+**One spelling of "which device" (T-378).** `DwellRecord::device_id` and `SweepRecord::device_id` carry the source's own `DeviceInfo::device_id` — the same string `ChainKey::of_device` (T-303/T-314) and `hk_store::history::source_key` (T-304/T-377) are hashed from. Four links of one chain of custody, one value: the baseline key, the history origin, the ingest floor key and the observation record all name the front end with the same string, so there is no second way to say it and nothing to drift. Both writers take it from the source's identity, never from `PipelineConfig::device_id`, which is a config default that names no device that produced anything.
+
+The field is `#[serde(default, skip_serializing_if = "Option::is_none")]`: a record written before T-378 reads back with **no** device, and coverage reads that as `Device::Unknown` — its own device, which never answers for a named front end and is never defaulted to whichever radio is running now. Reading it as the running device would invent provenance for data that has none, the same class of error as `BiasTee::Unknown` reading as `off`. Because the field is skipped when absent, a record with no device serialises to exactly the bytes it did before, so the CRC-checked line log's existing content is untouched.
+
+With both histories device-local, coverage over the **whole** retention answers "did *this* front end look here", not merely "did anything" — which, with two SDRs, is the question. `GET /api/coverage`'s `sources[]` reports `named_spans` beside `spans` per record kind, so a log still holding pre-T-378 lines discloses them rather than claiming a device-local horizon it has not got.
 
 The wire form is `GET /api/coverage` (`docs/api.md`); the surface it fills is docs/14's frequency navigator; the rule it serves is ADR-0017 §2.4.5.
 

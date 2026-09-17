@@ -1678,6 +1678,7 @@ mod tests {
                 seq: i as u64,
                 plan_version: 1,
                 site: SiteKey::Unassigned,
+                device_id: None,
                 reason: Reason::PoiDwell { poi: 1 },
                 tier: Tier::ScheduledPlan,
                 window: ObservedWindow {

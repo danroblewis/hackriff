@@ -6,6 +6,26 @@
 //! (after retune settle, cut short by preemption), and [`ObservedWindow::usable`] is the analysed
 //! frequency extent under the same usable-span rule the history ingest applies, so the log and
 //! history tile coverage agree ("not observed" ≠ "quiet").
+//!
+//! # The device of a record
+//!
+//! [`DwellRecord::device_id`] and [`SweepRecord::device_id`] name **which front end looked**
+//! (T-378). Without them the observation log answers only "did *anything* look here", and the
+//! coverage map built from it (`hk_store::coverage`) attributes every span beyond the IQ ring's
+//! retention to an unknown radio — which, with two SDRs, is the whole question (docs/07 §4.4,
+//! ADR-0017 §2.4.5).
+//!
+//! **One spelling of "which device".** The value is the source's own `DeviceInfo::device_id` — the
+//! same string `hk_model::attention::baseline::ChainKey::of_device` and `hk_store::history::source_key`
+//! hash. T-303 keyed baselines by it, T-314 took the run's chain from it, T-377 keyed the ingest
+//! floor by it, and this record carries it: one value, four links, no second way to say it.
+//! A test in `hk-pipeline` (`tests/history_source_key.rs`) pins the hashes together.
+//!
+//! **`None` is unknown, never the device that happens to be running.** The field is
+//! `#[serde(default)]`, so every record written before T-378 reads back with no device — and
+//! coverage reads that as `Device::Unknown`, which is its own device and never answers for a named
+//! front end. Defaulting it to the running radio would invent provenance for data that has none:
+//! the same error as reading `BiasTee::Unknown` as `off`.
 
 use serde::{Deserialize, Serialize};
 
@@ -270,6 +290,9 @@ pub struct DwellRecord {
     pub plan_version: u32,
     /// Site key at the time.
     pub site: SiteKey,
+    /// Which front end observed (T-378). See [`the device rule`](self#the-device-of-a-record).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
     /// Why.
     pub reason: Reason,
     /// Tier it ran at; equals `reason.tier()`.
@@ -377,6 +400,9 @@ pub struct SweepRecord {
     pub plan_version: u32,
     /// Site key.
     pub site: SiteKey,
+    /// Which front end observed (T-378). See [`the device rule`](self#the-device-of-a-record).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
     /// [`SweepGeometry::id`] of the hops.
     pub geometry: u64,
     /// First hop start to last hop end.
@@ -526,6 +552,9 @@ mod tests {
     use crate::ids::SiteId;
     use crate::time::Timestamp;
 
+    /// The front end the fixtures say looked: a real `DeviceInfo::device_id` spelling.
+    const DEVICE: &str = "hackrf:0000000000000000a06063c8234e925f";
+
     fn t(s: f64) -> Timestamp {
         Timestamp::from_unix_nanos((s * 1e9) as i64)
     }
@@ -547,6 +576,7 @@ mod tests {
             seq: 7,
             plan_version: 1,
             site: SiteKey::Site(SiteId::new()),
+            device_id: Some(DEVICE.into()),
             reason: Reason::Novelty { arm: 3, score: 0.8 },
             tier: Tier::Bandit,
             window: window(),
@@ -629,6 +659,67 @@ mod tests {
         assert!(dc.validate().is_err());
     }
 
+    /// T-378. **Property:** a record written by a named device reads back as that device, in the
+    /// exact `device_id` spelling `ChainKey::of_device` hashes.
+    ///
+    /// **Migration control:** the literal bytes of a pre-T-378 record — no `device_id` key at all —
+    /// still read, and read back with **no** device. Never the device that happens to be running,
+    /// which the second half asserts by decoding the old bytes while a named record exists beside
+    /// them and checking the old one did not acquire its identity.
+    #[test]
+    fn a_records_device_survives_a_round_trip_and_an_old_record_reads_back_unknown() {
+        // Property: written by a device, read back as that device.
+        let d = dwell();
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains(DEVICE), "the device is on the wire: {json}");
+        let back: DwellRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.device_id.as_deref(), Some(DEVICE));
+        // The value is the one the rest of the chain hashes: `ChainKey::of_device` of this string
+        // is the run's chain key, and `hk_store::history::source_key` of it is the history origin.
+        // (hk-model cannot see hk-store; `hk-pipeline/tests/history_source_key.rs` pins the pair.)
+        assert_eq!(
+            super::super::baseline::ChainKey::of_device(back.device_id.as_deref().unwrap()),
+            super::super::baseline::ChainKey::of_device(DEVICE),
+        );
+        let s: SweepRecord =
+            serde_json::from_str(&serde_json::to_string(&sweep()).unwrap()).unwrap();
+        assert_eq!(s.device_id.as_deref(), Some(DEVICE));
+
+        // Migration control: the literal old bytes. This is a pre-T-378 line as it was written —
+        // the `device_id` key does not appear anywhere in it — not a new record with the field
+        // unset.
+        let old = r#"{"schema":1,"seq":7,"plan_version":1,"site":{"kind":"unassigned"},
+            "reason":{"code":"novelty","arm":3,"score":0.8},"tier":"bandit",
+            "window":{"center_hz":433920000.0,"sample_rate_hz":2000000.0,
+              "usable":{"lo_hz":433120000.0,"hi_hz":434720000.0},"rbw_hz":1000.0},
+            "rf_path":0,
+            "planned":{"start_ns":100000000000,"end_ns":110000000000},
+            "observed":{"start_ns":100050000000,"end_ns":110000000000},
+            "preempted":false,"dropped_samples":0,"overload":false}"#;
+        assert!(!old.contains("device_id"), "the old bytes name no device");
+        let read: DwellRecord = serde_json::from_str(old).expect("a pre-T-378 record still reads");
+        read.validate().unwrap();
+        assert_eq!(
+            read.device_id, None,
+            "a record written before devices were logged says nothing about which radio looked"
+        );
+        assert_ne!(
+            read.device_id.as_deref(),
+            Some(DEVICE),
+            "and it must never acquire the device that happens to be running"
+        );
+        // Old bytes back out are old bytes: nothing invented an identity on the way through.
+        assert!(!serde_json::to_string(&read).unwrap().contains("device_id"));
+
+        let old_sweep = r#"{"schema":1,"plan_version":1,"site":{"kind":"unassigned"},
+            "geometry":42,"span":{"start_ns":0,"end_ns":1000000000},
+            "visits":[{"hop":0,"start_ms":0,"observed_ms":45}],
+            "preempted_hops":0,"dropped_samples":0,"overload_hops":0}"#;
+        let read: SweepRecord = serde_json::from_str(old_sweep).expect("a pre-T-378 sweep reads");
+        read.validate().unwrap();
+        assert_eq!(read.device_id, None);
+    }
+
     #[test]
     fn covered_extent_removes_the_dc_notch() {
         let c = window().covered();
@@ -637,13 +728,13 @@ mod tests {
         assert_eq!(c[1], FreqRange::new(433.93e6, 434.72e6));
     }
 
-    #[test]
-    fn sweep_record_bounds_and_order() {
-        let mut s = SweepRecord {
+    fn sweep() -> SweepRecord {
+        SweepRecord {
             schema: 1,
             survey_id: None,
             plan_version: 1,
             site: SiteKey::Unassigned,
+            device_id: Some(DEVICE.into()),
             geometry: 42,
             span: TimeRange::new(t(0.0), t(1.0)),
             visits: vec![
@@ -661,7 +752,12 @@ mod tests {
             preempted_hops: 0,
             dropped_samples: 0,
             overload_hops: 0,
-        };
+        }
+    }
+
+    #[test]
+    fn sweep_record_bounds_and_order() {
+        let mut s = sweep();
         s.validate().unwrap();
         s.visits.swap(0, 1);
         assert_eq!(s.validate().unwrap_err().field, "visits");

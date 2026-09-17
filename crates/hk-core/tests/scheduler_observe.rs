@@ -15,6 +15,9 @@ use hk_model::{ScanPolicy, Timestamp};
 use sched_common::*;
 use serde_json::json;
 
+/// The front end the recorder names (T-378): a `DeviceInfo::device_id` spelling.
+const DEVICE: &str = "hackrf:0000000000000000a06063c8234e925f";
+
 struct Counting;
 
 thread_local! {
@@ -92,7 +95,7 @@ fn scheduler_observe_records_one_sweep_record_per_pass_in_schedule_order() {
     let n = s.plan().hops.len();
     assert!(n >= 3, "plan has {n} hops");
     let steps = run(&mut s, 3 * n);
-    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None);
+    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None, Some(DEVICE.into()));
     let mut out = Vec::new();
     for st in &steps {
         rec.observe(&applied(st), &mut |r| out.push(r));
@@ -207,7 +210,7 @@ fn scheduler_observe_an_undithered_hop_0_does_not_split_the_pass_record() {
         assert!(matches!(st.purpose, Purpose::Sweep { .. }));
         assert_eq!(st.dither_pass, (i / n) % 2 == 1, "step {i}");
     }
-    let mut rec = ObservationRecorder::new(&compiled, RULE, None, None);
+    let mut rec = ObservationRecorder::new(&compiled, RULE, None, None, Some(DEVICE.into()));
     let mut out = Vec::new();
     for st in &steps {
         rec.observe(&applied(st), &mut |r| out.push(r));
@@ -254,7 +257,7 @@ fn scheduler_observe_dwells_are_one_record_each_with_reason_tier_and_preemption(
     let mut o = applied(&step);
     o.settled = Some(step.t_start.saturating_add_nanos(5_000_000));
     o.end = step.t_start.saturating_add_nanos(step.duration_ns / 2);
-    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None);
+    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None, Some(DEVICE.into()));
     let mut out = Vec::new();
     rec.observe(&o, &mut |r| out.push(r));
     let [ObservationRecord::Dwell(d)] = out.as_slice() else {
@@ -286,7 +289,7 @@ fn scheduler_observe_sweep_records_never_span_more_than_60_s() {
     let mut s = hackrf(&p);
     let n = s.plan().hops.len();
     let steps = run(&mut s, n);
-    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None);
+    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None, Some(DEVICE.into()));
     let mut out = Vec::new();
     // Stretch every hop to 25 s: a record closes before a visit would pass 60 s.
     for (k, st) in steps.iter().enumerate() {
@@ -329,7 +332,7 @@ fn scheduler_observe_a_long_intent_closes_the_open_sweep_record_when_it_begins()
 
     // The pipeline calls `begin` as the intent starts: the half pass is emitted then, not 2 h
     // later with the next hop.
-    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None);
+    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None, Some(DEVICE.into()));
     let mut out = Vec::new();
     for st in &steps[..half] {
         rec.observe(&applied(st), &mut |r| out.push(r));
@@ -348,7 +351,7 @@ fn scheduler_observe_a_long_intent_closes_the_open_sweep_record_when_it_begins()
 
     // A short dwell leaves the pass open; a caller that never calls `begin` still gets the sweep
     // before the long step's record.
-    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None);
+    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None, Some(DEVICE.into()));
     let mut out = Vec::new();
     for st in &steps[..half] {
         rec.observe(&applied(st), &mut |r| out.push(r));
@@ -367,27 +370,62 @@ fn scheduler_observe_a_long_intent_closes_the_open_sweep_record_when_it_begins()
     assert!(matches!(out[k - 1], ObservationRecord::Dwell(_)));
 }
 
+/// Hops are the 20-per-second case and must stay allocation-free. A dwell allocates exactly one
+/// thing since T-378 — the record's `device_id` — and the third block proves that is what it is:
+/// the same steps through a recorder whose source named no device allocate nothing at all.
 #[test]
-fn scheduler_observe_steady_state_hops_and_dwells_do_not_allocate() {
+fn scheduler_observe_steady_state_hops_do_not_allocate_and_a_dwell_allocates_only_its_device() {
     let p = sweep_plan();
     let mut s = hackrf(&p);
     let n = s.plan().hops.len();
     let steps = run(&mut s, 2 * n + 1);
-    let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None);
-    let mut emitted = 0usize;
-    // Warm up: the geometry and the first pass; hop 0 of pass 2 closes pass 1.
-    for st in &steps[..=n] {
-        rec.observe(&applied(st), &mut |_| emitted += 1);
-    }
+    // Warm up a recorder: the geometry and the first pass; hop 0 of pass 2 closes pass 1.
+    let warm = |device: Option<String>| {
+        let mut rec = ObservationRecorder::new(s.plan(), RULE, None, None, device);
+        let mut emitted = 0usize;
+        for st in &steps[..=n] {
+            rec.observe(&applied(st), &mut |_| emitted += 1);
+        }
+        (rec, emitted)
+    };
     let obs: Vec<StepObservation> = steps[n + 1..2 * n].iter().map(applied).collect();
     let mut dwell = obs[0];
     dwell.step.purpose = Purpose::UserIntent { intent: 1 };
+
+    // Each block gets its own warmed recorder: re-observing a pass's hops on a used one closes its
+    // open sweep record, which allocates for a reason that has nothing to do with this test.
+    // Hops alone, with a device named: nothing allocates.
+    let (mut hops_only, emitted) = warm(Some(DEVICE.into()));
+    assert!(emitted >= 2);
+    let (_, allocs) = counted(|| {
+        for o in &obs {
+            hops_only.observe(o, &mut |_| {});
+        }
+    });
+    assert_eq!(allocs, 0, "a hop allocated in the steady state");
+
+    // Dwells interleaved with them: exactly one allocation each, the device id the record carries.
+    let (mut rec, _) = warm(Some(DEVICE.into()));
     let (_, allocs) = counted(|| {
         for o in &obs {
             rec.observe(o, &mut |_| {});
             rec.observe(&dwell, &mut |_| {});
         }
     });
-    assert!(emitted >= 2);
+    assert_eq!(
+        allocs,
+        obs.len(),
+        "a dwell must allocate its device id and nothing else"
+    );
+
+    // The control: the identical steps through a recorder whose source named no device allocate
+    // nothing at all — which is what makes the count above attributable to the device id.
+    let (mut bare, _) = warm(None);
+    let (_, allocs) = counted(|| {
+        for o in &obs {
+            bare.observe(o, &mut |_| {});
+            bare.observe(&dwell, &mut |_| {});
+        }
+    });
     assert_eq!(allocs, 0, "observe allocated in the steady state");
 }

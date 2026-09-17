@@ -21,6 +21,9 @@ use hk_pipeline::{
 };
 use hk_store::observation::RecordQuery;
 
+/// A `PipelineConfig::device_id` that names no device that produced anything (T-314's point).
+const CONFIG_NAMES_NO_DEVICE: &str = "config-default:names-no-device";
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -62,7 +65,13 @@ fn observation_log_through_the_mock_sdr_matches_the_tuned_windows_and_the_schedu
     cfg.source_class = replay.class;
     cfg.lossless = true;
     cfg.drive_scheduler = true;
-    cfg.device_id = replay.device.device_id.clone();
+    // T-378: the records must name the **source's own** identity, so the config is deliberately
+    // given a name no device has — exactly the `PipelineConfig::device_id` default T-314 refused
+    // to key the receive chain from. If the log ever reports this string, it is naming a radio
+    // that produced nothing.
+    let device = replay.device.device_id.clone();
+    assert_ne!(device, CONFIG_NAMES_NO_DEVICE);
+    cfg.device_id = CONFIG_NAMES_NO_DEVICE.into();
     let (fft_len, _) = detection_resolution(FS, &cfg.settings);
 
     // The schedule, compiled independently exactly as the pipeline's scheduler compiles it.
@@ -190,7 +199,42 @@ fn observation_log_through_the_mock_sdr_matches_the_tuned_windows_and_the_schedu
             }
             ObservationRecord::Geometry(_) => unreachable!("geometries are returned apart"),
         }
+        // T-378: every record names the front end that observed, and it is the **source's own**
+        // `DeviceInfo::device_id` — never `PipelineConfig::device_id`, which here names nothing.
+        let named = match r {
+            ObservationRecord::Dwell(d) => d.device_id.as_deref(),
+            ObservationRecord::Sweep(s) => s.device_id.as_deref(),
+            ObservationRecord::Geometry(_) => None,
+        };
+        assert_eq!(named, Some(device.as_str()), "{r:?}");
+        assert_ne!(named, Some(CONFIG_NAMES_NO_DEVICE), "{r:?}");
     }
+    // The fourth link of the chain of custody, pinned: the value the log carries is the value the
+    // baseline chain key (T-303/T-314) and the history origin (T-304/T-377) are both hashed from.
+    // A third spelling of "which device" would be a new drift surface; this asserts there is none.
+    assert_eq!(
+        hk_model::attention::baseline::ChainKey::of_device(&device),
+        hk_model::attention::baseline::ChainKey::Device(hk_store::history::source_key(&device)),
+    );
+    // And the long horizon can now answer "did THIS front end look here": the log's records fold
+    // into device-local coverage spans naming the radio, where before T-378 they were all unknown.
+    let spans: Vec<(hk_store::coverage::Device, hk_model::FreqRange)> = page
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            ObservationRecord::Dwell(d) => Some((
+                hk_store::coverage::Device::Id(d.device_id.clone()?),
+                d.window.usable,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        spans
+            .iter()
+            .all(|(d, _)| *d == hk_store::coverage::Device::Id(device.clone())),
+        "{spans:?}"
+    );
     // Every emitted step is one record: sweep hops as visits, the rest as dwells.
     let steps = |p: &str| summary.counter(&format!("/scheduler/{p}"));
     assert_eq!(steps("apply_errors"), 0);
@@ -328,7 +372,10 @@ fn observation_log_records_interactive_tuning_without_a_scheduler() {
     let mut cfg = PipelineConfig::new(dir.0.join("data"), plan).unwrap();
     cfg.source_class = replay.class;
     cfg.live_window_class = true;
-    cfg.device_id = replay.device.device_id.clone();
+    // T-378, again on the interactive path: the config names no device, so a record that named
+    // one could only have got it from the source itself.
+    let device = replay.device.device_id.clone();
+    cfg.device_id = CONFIG_NAMES_NO_DEVICE.into();
     let (fft_len, _) = detection_resolution(FS, &cfg.settings);
     let t0 = replay.info.start_time;
     let handle = Pipeline::start(
@@ -372,6 +419,13 @@ fn observation_log_records_interactive_tuning_without_a_scheduler() {
         limit: 10_000,
     });
     assert!(page.geometries.is_empty(), "no sweeps without a scheduler");
+    // T-378: every interactive record names the front end that observed, the source's own id.
+    for r in &page.records {
+        let ObservationRecord::Dwell(d) = r else {
+            continue;
+        };
+        assert_eq!(d.device_id.as_deref(), Some(device.as_str()), "{d:?}");
+    }
     let rule = WindowRule {
         fft_bins: fft_len,
         dc_half_hz: DC_NOTCH_HALF_HZ,

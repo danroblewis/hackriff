@@ -49,13 +49,15 @@ All contract time comes from the **device/sample clock** (the `Timestamp` carrie
 
 `attention::observation::DwellRecord`, one per non-sweep step (POI/bandit dwells, verification steps, region dwells, leases, interactive intent):
 
-- **Identity:** `survey_id`, `seq` (scheduler step `seq`), `plan_version`, `site`.
+- **Identity:** `survey_id`, `seq` (scheduler step `seq`), `plan_version`, `site`, `device_id` (T-378).
 - **Why:** `reason: Reason` and `tier: Tier`; `tier` must equal `reason.tier()`.
 - **Where:** `window: ObservedWindow` (`center_hz`, `sample_rate_hz`, `usable` analysed extent, optional `dc_excluded` notch, `rbw_hz`) and `rf_path`.
 - **When:** `planned` and `observed` intervals. `observed` starts after retune settle and is cut when a higher tier preempts (`preempted`).
 - **Trust:** `dropped_samples`, `overload`, `provenance_ref`.
 
 `observed`, not `planned`, feeds every statistic: a step cut by the user, or one whose samples were dropped, did not observe its planned time.
+
+**Which front end observed (T-378).** `device_id` is on both record kinds (`SweepRecord` too) and is the source's own `DeviceInfo::device_id` — the same value `ChainKey::of_device` and `hk_store::history::source_key` are hashed from (§6.1), so the baseline key, the history origin, the ingest floor key and the observation record all name the front end with one string. Without it the coverage map built from this log (ADR-0017 §2.4.5, docs/07 §4.4) could only say "something looked here" over the log's 30-day horizon, which with two front ends is not an answer. The field is `serde(default)`: records written before T-378 read back with **no** device and fold as `Device::Unknown`, never as whichever radio is running — the `BiasTee::Unknown` ≠ `off` rule, applied to identity. `provenance_ref` is a separate thing and does not replace it: it is a `ProvenanceId` reference into the run's SQLite repository, resolvable only by joining a database that may have rotated long before the 30-day log has, and it is `None` at every writer today.
 
 ### 1.2 Reason codes
 
@@ -65,7 +67,7 @@ All contract time comes from the **device/sample clock** (the `Timestamp` carrie
 
 Discovery hops run at ~20 steps/s (`sweep_step_ns` 50 ms), so per-hop rows would be ~1.7 M/day. Instead:
 - **`SweepGeometry`** (id = hash of the canonical hop windows, `plan_version`, `hops: Vec<ObservedWindow>`) is written once per geometry change. A DC-dithered plan (T-173, ADR-0005) has two, one per pass parity. Each is written once, before the first record that uses it, and each pass's record references its parity's geometry. `HopVisit::hop` stays the plan's hop index.
-- **`SweepRecord`** covers at most one pass or 60 s, whichever ends first. It holds `geometry`, `span`, and `visits: Vec<HopVisit { hop, start_ms, observed_ms }>` in time order, plus `preempted_hops`, `dropped_samples` and `overload_hops`.
+- **`SweepRecord`** covers at most one pass or 60 s, whichever ends first. It holds `geometry`, `span`, `device_id` (§1.1), and `visits: Vec<HopVisit { hop, start_ms, observed_ms }>` in time order, plus `preempted_hops`, `dropped_samples` and `overload_hops`.
 
 At 400 hops per pass that is ~12 B per visit before compression, about 7 MB/day worst case.
 
