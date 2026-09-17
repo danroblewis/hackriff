@@ -7817,7 +7817,7 @@ tasks:
   - id: T-390
     title: Candidate boxes over-split into the FM station skirts and still overlap in the SERVED path after T-369
     milestone: M3
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M3B
     core_interface: true
@@ -8019,6 +8019,49 @@ tasks:
       hover/drag readouts) - launch them as a single agent in one worktree once T-392
       lands, since T-393 part (3) describes what a region-select would do and T-392 is
       what makes that true.
+  - id: T-396
+    title: One diff-aware gate command, so which-tests-to-run lives in the runner and not in agent judgement
+    milestone: M2-hardening
+    status: in-progress
+    priority: high
+    parallel_group: CI
+    core_interface: true
+    model: opus
+    deps: [T-358]
+    acceptance: |
+      USER 2026-09-16, and it SUPERSEDES the prose UI-only-gate rule recorded in
+      CLAUDE.md + docs/10 hours earlier. Build `just gate` (or `just check`): it
+      inspects the git diff - changed files vs the MERGE BASE for a branch, or the
+      staged set - CLASSIFIES them, and runs exactly the needed suites.
+      CLASSIFICATION -> SUITES:
+        - only under ui/ (and NOT crates/, NOT docs/api.md) -> just test-ui + lint
+        - anything touching crates/ or docs/api.md         -> full just test + just acceptance
+        - docs-only                                        -> link/lint
+        - python-only                                      -> test-py + lint-py
+      Wire BOTH CI and the coordinator's per-merge check to call this ONE command,
+      extending T-358's "the CI test job is one recipe call", so passing tests is
+      enforced deterministically at the gate regardless of which agent ran it.
+      Optional backstop: a git pre-push hook or a Claude Code Stop hook that runs
+      `just gate` - but CI plus the merge gate is the real guarantee, not the hook.
+      Keep full test + acceptance as the periodic/milestone check.
+      Record in CLAUDE.md (Engineering) and docs/10, REPLACING the prose UI-only-gate
+      rule with "run just gate".
+      THE RULE THAT MAKES IT SAFE: classification MUST FAIL CLOSED. Any path that does
+      not match a known class runs the FULL gate - never the cheapest. This is the
+      repo's own "nothing said is never permissive" applied to the runner
+      (BiasTee::Unknown is not Off; Coverage::Unobserved is not quiet). A new
+      top-level directory must not silently inherit the ui-only treatment.
+      Specifically NOT ui-only, and each for a reason: fixtures/ (acceptance inputs -
+      T-317/T-373/T-382 all changed fixture metadata and the suites read it), the
+      justfile and .github/ (they ARE the gate - a change to them must be verified by
+      the expensive path), plugins/, py/ beyond the python-only class, and anything at
+      the repo root.
+      It must PRINT its decision - the class it chose and the suites it will run -
+      before running them, so a human or an agent can see and challenge the choice.
+      A silent classifier is a worse version of the judgement it replaces.
+      Note docs-only "link/lint": check whether a link checker actually exists before
+      wiring one in. If it does not, say so and wire lint only rather than inventing a
+      dependency.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
