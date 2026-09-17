@@ -102,6 +102,11 @@ See `docs/stream-contract.md` §10.
 - **First message:** text, the stream header JSON.
 - **Each later message:** one record, binary for spectrum. It starts with the 32-byte
   little-endian record header: type, flags, length, seq, `t` in ns, and sample index.
+- **A later *text* message whose `schema` is `hackriff.stream` is a new header** (T-417): a retune
+  or a re-plumb offers a new publisher under the same `stream_id` and the bridge keeps this
+  connection on it, so the socket does not die when the radio moves. Everything after that header
+  describes the new window; the data genuinely gaps across the seam and nothing is drawn over it.
+  `net.openStream` does this dispatch, so a panel only ever sees `onHeader` again.
 - **Spectrum rows** from `hk serve` are `rf32_le`: `fft_size` values of PSD in dBFS/Hz, in
   ascending frequency over `center_hz ± bandwidth_hz/2`.
 - **Record type 2** is a drop marker. With the `GATED` flag, the rows were withheld by the egress

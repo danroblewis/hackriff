@@ -250,8 +250,13 @@ fn bridge_maps_frames_one_to_one() {
             .unwrap();
     }
     let (spec_header, msg_header) = (spectrum.header().clone(), messages.header().clone());
+    // T-417: finishing a publisher no longer ends the connection by itself — a retune finishes one
+    // and offers the next under the same id. A stream that is really over withdraws its id, which
+    // is what the pipeline's `stream_unsink` does, and that is what closes these sockets.
     spectrum.finish();
     messages.finish();
+    registry.unregister("spectrum/f");
+    registry.unregister("decodes/f");
 
     let msgs = drain(&mut ws_spec);
     assert_eq!(msgs.len(), 41, "header + one message per record");
@@ -290,6 +295,102 @@ fn bridge_maps_frames_one_to_one() {
         assert_eq!(env.seq, i as u64);
         assert_eq!(env.value["content"]["text"], json!(format!("hello {i}")));
     }
+}
+
+/// T-417 (the user, 2026-09-17): *"a settle gap is fine … so connected consumers keep receiving
+/// after the retune"*. A retune finishes the spectrum publisher and offers a new one under the same
+/// id (a header must describe every row after it, T-057); a re-plumb rebuilds every reader and does
+/// the same. The **connection** is not what moved, so the bridge carries it across: the socket
+/// stays open and the next publisher's header arrives on it as another text message.
+///
+/// The counterpart — a consumer that cannot keep up is still dropped deliberately (§7, T-388) — is
+/// `slow_browser_is_dropped_while_the_producer_keeps_rate` below, unchanged by this.
+#[test]
+fn a_new_publisher_under_the_same_id_keeps_the_browser_connected() {
+    let registry = StreamRegistry::new();
+    let bins = 16usize;
+    let mut first = Publisher::new(
+        spectrum_header(
+            "spectrum/live",
+            ContentClass::Unrestricted,
+            30.0,
+            bins as u32,
+        ),
+        PublisherConfig::default(),
+    )
+    .unwrap();
+    registry.register(first.header(), first.handle());
+    let server = serve(&registry);
+    let mut ws = authed(server.local_addr(), "spectrum/live").unwrap();
+    assert_eq!(header_of(&ws.read().unwrap()).center_hz, Some(100e6));
+    for i in 0..3u64 {
+        first
+            .publish_binary(BinaryRecord {
+                t: Timestamp::from_unix_nanos(1_789_300_800_000_000_000 + i as i64 * 40_000_000),
+                sample_index: i * 4096,
+                flags: RecordFlags::empty(),
+                payload: &row(i, bins),
+            })
+            .unwrap();
+    }
+    for _ in 0..3 {
+        assert!(matches!(ws.read().unwrap(), Message::Binary(_)));
+    }
+
+    // The retune: this publisher is finished and the next window is offered under the same id.
+    // Nothing is published in between — the settle gap is real and is not covered over.
+    first.finish();
+    let mut header = spectrum_header(
+        "spectrum/live",
+        ContentClass::Unrestricted,
+        30.0,
+        bins as u32,
+    );
+    header.center_hz = Some(101.8e6);
+    let mut second = Publisher::new(header, PublisherConfig::default()).unwrap();
+    let handle2 = second.handle();
+    registry.register(second.header(), handle2.clone());
+
+    // The same socket, never reconnected, receives the new header and then the new window's rows.
+    let hd = loop {
+        match ws.read().unwrap() {
+            Message::Text(t) => {
+                break StreamHeader::from_json_bytes(t.as_str().as_bytes()).unwrap();
+            }
+            Message::Binary(_) => panic!("a row of the old window after it finished"),
+            _ => {}
+        }
+    };
+    assert_eq!(hd.center_hz, Some(101.8e6), "the new window's header");
+    assert_eq!(hd.stream_id, "spectrum/live", "the same stream id");
+    wait_for("the carried-over consumer", || {
+        handle2.open_consumers() == 1
+    });
+    second
+        .publish_binary(BinaryRecord {
+            t: Timestamp::from_unix_nanos(1_789_300_801_000_000_000),
+            sample_index: 0,
+            flags: RecordFlags::empty(),
+            payload: &row(9, bins),
+        })
+        .unwrap();
+    let Message::Binary(b) = ws.read().unwrap() else {
+        panic!("a row of the new window")
+    };
+    let Record::Binary(d) = parse_record(StreamKind::Spectrum, &b).unwrap() else {
+        panic!("data record expected")
+    };
+    assert_eq!(d.payload, row(9, bins));
+
+    // And a stream that is really over — the id withdrawn — still ends the connection.
+    second.finish();
+    registry.unregister("spectrum/live");
+    assert!(
+        drain(&mut ws)
+            .iter()
+            .all(|m| !matches!(m, Message::Text(_))),
+        "no third header: there is no third window"
+    );
 }
 
 #[test]
@@ -367,6 +468,7 @@ fn slow_browser_is_dropped_while_the_producer_keeps_rate() {
         .find(|s| s.label == slow_label)
         .expect("slow consumer stats");
     publisher.finish();
+    registry.unregister("iq/fast"); // T-417: what ends a connection is the id going away
     let (records, dropped) = reader.join().unwrap();
 
     eprintln!(

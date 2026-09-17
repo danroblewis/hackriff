@@ -539,7 +539,10 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     if (!s) { store.set((st) => ({ conn: { ...st.conn, spectrum: "unavailable" } })); retry("no spectrum stream"); return; }
     sock = openStream(`/ws/${s.stream_id}`, ctx.token, {
       onHeader, onBinary,
-      // A stream that was live and ended (a new replay pass, a re-plumb) reconnects at once.
+      // T-417: a retune or a re-plumb no longer reaches here at all — the bridge keeps this socket
+      // and delivers the new window's header on it, so `onHeader` runs again and the view follows
+      // without a flash of "reconnecting". What is left is a stream that really ended (a new replay
+      // pass, the run stopping, the server going away), which reconnects at once.
       onClose: (wasLive) => { if (wasLive) attempt = 0; retry(wasLive ? "stream ended; reconnecting" : "disconnected; retrying"); },
     });
   }

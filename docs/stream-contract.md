@@ -395,6 +395,33 @@ as every other consumer (§2), so it sees only records the gate has already pass
   only on that browser's TCP socket, its bounded ring fills, records are dropped with markers, and
   it is disconnected after `disconnect_after`. There is no second queue in the bridge.
 
+**A `stream_id` outlives its publishers (T-417).** A retune finishes the spectrum publisher and
+offers a new one under the **same id**, because a header must describe every row after it (T-057);
+a re-plumb rebuilds every reader around the still-open device (T-399) and does the same. Neither is
+a reason to drop the browser — the user, 2026-09-17: *"a settle gap is fine … so connected
+consumers keep receiving after the retune; and the UI spectrum websocket client should reconnect
+gracefully across a re-plumb rather than erroring."* So on the bridge:
+
+- the socket **stays open** when a publisher finishes, and the connection is re-subscribed to the
+  next offer under that id (`bridge::watch_peer`, up to `bridge::CARRY_OVER_GRACE` = 60 s, after
+  which the connection ends as it always did);
+- that publisher's header goes out as **another text message** on the live connection, and the
+  records after it belong to it. A client reads any later text message whose `schema` is
+  `hackriff.stream` as a new header — no record carries `schema`, so the two never collide;
+- **the gap stays visible.** Between the last row of the old window and the first of the new,
+  nothing is sent: no held frame, no repeated row, no interpolation. The capture clock skips,
+  because the front end really was moving, and the header is the honest seam. (The coverage rule —
+  grey means genuinely unobserved — applies to time as much as frequency.)
+- **this is not §7's drop policy.** `SlowConsumer`, `PeerGone`, `DrainTimeout` and `Detached` all
+  shut the socket down exactly as before: a consumer that cannot keep up is still dropped
+  deliberately, never the survey. Only `PublisherFinished` is carried.
+
+**The framed transports are unchanged.** Over TCP/UDS (§§2–7) a header is still sent once per
+connection and a consumer of an always-on stream ends when its publisher finishes; the carry-over
+is a property of the §10 bridge mapping, where each record is already a self-delimiting message.
+Extending it to the framed transports would change what `StreamReader` and the plugin host must
+parse, and is a contract change, not a bridge one.
+
 **Locality: always remote.** Every browser connection subscribes wrapped in `Declared::remote`,
 **even from `127.0.0.1`** — a page can forward what it receives, so it is treated as remote-capable
 regardless of where the socket originates. Consequently an `own-key-decrypted` stream is refused
@@ -432,7 +459,9 @@ not accepted until one frees up. `/api/history` and `/api/floor` (below) additio
 result size.
 
 **Consumers never write.** As in §2: any byte a browser sends (a close frame included) or a hang-up
-is read by `watch_peer` as the signal to close that consumer and shut its socket down.
+is read by `watch_peer` as the signal to close that consumer and shut its socket down. `watch_peer`
+polls the socket on a short read timeout rather than blocking forever, so it can also notice that
+its publisher finished and carry the connection over (above).
 
 **Read-only control/query endpoints.** The bridge shares its `hk-api` HTTP server with four
 `GET`, token-authenticated JSON endpoints that are **not part of the framed stream contract** above
