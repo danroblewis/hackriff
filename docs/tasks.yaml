@@ -7493,7 +7493,7 @@ tasks:
   - id: T-379
     title: Every UI surface must show all the data it has for the window; empty sidebars are the same bug as the black waterfall
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     core_interface: true
@@ -7631,6 +7631,78 @@ tasks:
       machine's idleness.
       It WILL bite the coordinator's full check on a loaded machine, which is how both
       agents met it.
+  - id: T-384
+    title: The output and decode surfaces cannot re-derive for a scrubbed window, and the decode route has no time parameter to ask with
+    milestone: M2-hardening
+    status: in-progress
+    priority: high
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-379]
+    acceptance: |
+      The remaining half of the user's cross-cutting rule (CLAUDE.md 2026-09-16):
+      every surface is a view over one (time range x frequency range) window and must
+      show all the data it has for it. T-379 fixed the waterfall, both navigators and
+      the Candidate list. THE OUTPUT/DECODE SURFACES ARE THE OPEN HALF.
+      T-379's census: the output panel, decode inspector, status feed, pipelines and
+      dock are LIVE-EDGE-ONLY and never subscribe to the cursor. Worse, the feed
+      opener exposes no history form, so NO CALLER CAN ASK.
+      The backend gap is the root: GET /api/inventory/{id}/decode has NO TIME
+      PARAMETER AT ALL, so even a correctly-wired panel could not re-derive for a
+      scrubbed window. Meanwhile /api/captures/{id}/frames?from_t=&to_t= EXISTS and
+      the whole UI is unaware of it. Establish which of those is the right route for
+      this before adding a parameter to either.
+      ALSO IN SCOPE, same root cause: ui/src/app/decode/plots.ts still windows frame
+      buffers on Date.now()*1e6 (three sites) - the exact wall-clock-against-capture-
+      data bug T-379 removed from the inventory path, still live here.
+      Hold T-379's standard: ask on the CAPTURE clock; never widen the window to look
+      full; distinguish empty-because-unobserved from empty-because-not-fetched using
+      hk_store::Coverage rather than a second notion of emptiness; and include the
+      control that a window which DOES hold data renders its rows, or every other
+      assertion is satisfiable by an always-empty panel that explains itself well.
+      Respects the incremental-decode invariant: live decoding EXTENDS a region and
+      decodes only the newly-arrived part. Re-deriving a view over past frames must
+      not re-decode what is already done.
+  - id: T-385
+    title: The focus panel tells the user a row was deleted when it is merely outside the window
+    milestone: M2-hardening
+    status: todo
+    priority: high
+    parallel_group: UI
+    deps: [T-379]
+    notes: |
+      Found by T-379's census. The focus panel caches by emitter id only, so a row that
+      is simply outside the current (time, frequency) window renders as "no longer in
+      the inventory".
+      That is not a missing render - it is a FALSE CLAIM to the user about their data,
+      and it is the exact failure mode the exploration-first principle exists to
+      prevent: the system asserting something it did not measure. An emitter outside
+      the window is unobserved-here, not deleted.
+      The fix is to key the cache on the window as well as the id, and to say which of
+      the two is true. T-379 built the four-way emptiness vocabulary for exactly this
+      (no window / unobserved / observed-and-quiet / coverage unknown) - reuse it.
+      Control: an emitter that genuinely WAS deleted must still say so.
+  - id: T-386
+    title: Three more surfaces ignore the time cursor, and the centre view dies without a stream header
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: UI
+    deps: [T-379]
+    notes: |
+      The rest of T-379's census, grouped because they share one cause - a surface that
+      loads once and never asks again:
+      - SELECTIONS SIDEBAR: loads once, ever; ignores t_lo/t_hi entirely.
+      - HISTORY CATALOGUE: renders its OWN wall-clock window and ignores the cursor.
+        Note this one is legitimately different - the durable all-time catalogue is a
+        separate surface by the user's own invariant - so decide whether it should
+        follow the cursor at all, or whether its window is deliberately independent.
+        Do not "fix" it into the view window without settling that.
+      - CAPTURE BAND: correct on time, but up to 60 s stale on a FREQUENCY change.
+      Separately, and not a cursor issue: the centre view's overlays are dead without a
+      live stream header, so a replay or a paused session with no header renders no
+      boxes at all. That is a fragility worth its own control.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
