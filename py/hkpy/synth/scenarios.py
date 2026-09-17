@@ -381,6 +381,16 @@ FM_DEFAULTS: dict[str, Any] = {
     "right_tone_hz": 400.0,
     "mono_deviation_hz": 30000.0,
     "stereo_deviation_hz": 30000.0,
+    # T-402: the regulatory ceiling on the mono+stereo composite (ITU-R BS.450 / FCC 73.322 cap
+    # 100% modulation at 75 kHz peak). `mono_deviation_hz`/`stereo_deviation_hz` above are pre-cap
+    # component weights; the composite they build is rescaled so its peak lands exactly here before
+    # pilot/RDS are added (see `fm_broadcast_rds`). Without this step the two-tone composite's peak
+    # sits far under 75 kHz most of the time (unlike a real station, which a broadcast limiter keeps
+    # near peak almost continuously — see hk-classify's `wfm_multiplex`, which hit the same problem
+    # for its own synthetic corpus and fixed it the same way), so the emission ends up too narrow to
+    # read as wideband FM (T-398: our own WFM fixture measured ~103 kHz OBW99, under
+    # `family::WIDEBAND_FM_OBW_HZ`'s 106 kHz floor, where a real station measures ~127-221 kHz).
+    "peak_deviation_hz": 75000.0,
     "pilot_deviation_hz": 6750.0,
     "rds_deviation_hz": 2000.0,
     # RadioText (group 2A, up to 64 characters; T-094). Empty: PS groups only.
@@ -402,10 +412,23 @@ def fm_broadcast_rds(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     left = np.sin(2 * math.pi * float(p["left_tone_hz"]) * t)
     right = np.sin(2 * math.pi * float(p["right_tone_hz"]) * t)
     w_pilot = 2 * math.pi * rds.PILOT_HZ * t
-    mpx = float(p["mono_deviation_hz"]) * (left + right) / 2
+    composite = float(p["mono_deviation_hz"]) * (left + right) / 2
     if p["stereo"]:
-        mpx += float(p["pilot_deviation_hz"]) * np.sin(w_pilot)
-        mpx += float(p["stereo_deviation_hz"]) * (left - right) / 2 * np.sin(2 * w_pilot)
+        composite = composite + float(p["stereo_deviation_hz"]) * (left - right) / 2 * np.sin(2 * w_pilot)
+    # Peak-deviation regulation (T-402): a real broadcast limiter holds the composite at the
+    # station's licensed peak almost continuously, which is what actually sets the occupied
+    # bandwidth (see `peak_deviation_hz` above) -- not the nominal per-component deviations, which
+    # rarely reach their arithmetic sum at any one instant. `composite_peak` is this scene's own
+    # peak (found, not assumed), so the scale is derived from what was actually generated.
+    peak_cap_hz = float(p["peak_deviation_hz"])
+    composite_peak = float(np.max(np.abs(composite))) if n else 0.0
+    scale = peak_cap_hz / composite_peak if composite_peak > 0 else 1.0
+    composite = composite * scale
+    eff_mono_dev = float(p["mono_deviation_hz"]) * scale
+    eff_stereo_dev = float(p["stereo_deviation_hz"]) * scale if p["stereo"] else 0.0
+    mpx = composite
+    if p["stereo"]:
+        mpx = mpx + float(p["pilot_deviation_hz"]) * np.sin(w_pilot)
     pi = int(p["pi_hex"], 16)
     n_groups = int(math.ceil(n / fs * rds.BITRATE_BD / 104)) + 1
     # One cycle: PS segments 0-3 (0A), then every RadioText segment (2A) when there is text.
@@ -447,8 +470,7 @@ def fm_broadcast_rds(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         pilot={"present": bool(p["stereo"]), "frequency_hz": rds.PILOT_HZ,
                "deviation_hz": float(p["pilot_deviation_hz"]) if p["stereo"] else 0.0},
         audio={"left_tone_hz": float(p["left_tone_hz"]), "right_tone_hz": float(p["right_tone_hz"]),
-               "mono_deviation_hz": float(p["mono_deviation_hz"]),
-               "stereo_deviation_hz": float(p["stereo_deviation_hz"]) if p["stereo"] else 0.0},
+               "mono_deviation_hz": eff_mono_dev, "stereo_deviation_hz": eff_stereo_dev},
         rds=rds_truth, identity={"type": "rds_pi", "value": f"{pi:04X}"}, label_expected=ps.strip(),
     )
     f = cap.center_hz + off

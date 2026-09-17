@@ -112,8 +112,17 @@ fn t219_one_physical_station_yields_one_shown_row() {
 }
 
 /// The guard: two genuinely distinct adjacent stations are not merged, suppressed or superseded.
-/// The scene is the real FM recording with a second synthetic RDS station 300 kHz above its own,
+/// The scene is the real FM recording with a second synthetic RDS station 500 kHz above its own,
 /// on air with it — two emissions whose −3 dB extents are separated.
+///
+/// T-402: was 300 kHz (800 kHz offset). `fm_broadcast_rds` used to measure ~100 kHz OBW99
+/// (unregulated peak deviation); regulating it to a realistic ~75 kHz peak deviation widens it to
+/// ~190-220 kHz, close to what the recording's own real station measures, which collapsed 300 kHz
+/// of separation into an overlap (this guard's own `assert_eq!(matched.len(), 1, ...)` started
+/// failing with zero matches — the two stations were no longer "whose −3 dB extents are
+/// separated" at all). 500 kHz (1000 kHz offset) restores that separation; see
+/// `inventory_lifecycle::t082_two_nearby_fm_stations_stay_two_entries`, which is the same scene
+/// shape and got the same fix.
 #[test]
 fn t219_two_distinct_adjacent_stations_are_never_collapsed() {
     let Some((real, _)) = private_truth(crate::signal_062::FM_FIXTURE) else {
@@ -125,7 +134,7 @@ fn t219_two_distinct_adjacent_stations_are_never_collapsed() {
             .datatype(Datatype::Cf32Le)
             .param("sample_rate", 2.4e6)
             .param("center_hz", 100.8e6)
-            .param("offset_hz", 800e3)
+            .param("offset_hz", 1_000e3)
             .param("duration_s", 5.0)
             .param("power_dbfs", -16.0)
             .param("noise_dbfs", -120.0)

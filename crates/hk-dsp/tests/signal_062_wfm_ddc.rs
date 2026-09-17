@@ -53,7 +53,7 @@ fn signal_062_wfm_ddc_to_250k_fills_channel_and_shows_pilot() {
     let prov = provenance(fx.center_hz_at(0).unwrap(), fs);
 
     let spec: DdcSpec = serde_json::from_value(serde_json::json!({
-        "center_offset_hz": offset, "bandwidth_hz": 220e3, "output_rate_hz": 250e3
+        "center_offset_hz": offset, "bandwidth_hz": 240e3, "output_rate_hz": 250e3
     }))
     .unwrap();
     let mut ddc = Ddc::new(spec, fs).unwrap();
