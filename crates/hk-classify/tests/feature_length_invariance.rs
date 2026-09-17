@@ -1136,11 +1136,12 @@ struct OrderException {
 /// axis does better than the length axis's method rather than differently: "fixing one makes the
 /// exemption disappear from a diff" stops being a discipline and becomes a failing test.
 ///
-/// Read the grouping before the entries. Five of the seven are the **same three mechanisms**:
+/// Read the grouping before the entries. Six of the seven fall into **three mechanisms**:
 /// an envelope threshold set by the record's own mean (`duty`, `low_fraction`), a statistic
 /// measured against the noise floor (`carrier_line_db`, `gamma_max`), and a cumulant normalised by
-/// the total power (`c42_norm`, twice). Two of those five are the defects that motivated the
-/// ticket; the other three had not been reported.
+/// the total power (`c42_norm`, twice); `sigma_af` is the seventh, an IF estimator that is
+/// noise-limited on a feature named as a frequency excursion. Two of the seven are the defects
+/// that motivated the ticket; three of the rest had not been reported at all.
 const SNR_ORDER_EXCEPTIONS: &[OrderException] = &[
     OrderException {
         feature: "duty",
@@ -1241,6 +1242,11 @@ const SNR_ORDER_EXCEPTIONS: &[OrderException] = &[
     },
 ];
 
+/// One class's reading of one feature at one rung: mean and sample standard deviation over
+/// [`SNR_SEEDS`] waveforms, or `None` where fewer than [`SNR_MIN_PRESENT`] of them reported a
+/// value (an abstention is the honest answer and is never compared).
+type MeanSd = Option<(f64, f64)>;
+
 /// Mean and sample (n-1) standard deviation.
 fn mean_sd(v: &[f64]) -> (f64, f64) {
     let n = v.len() as f64;
@@ -1254,20 +1260,16 @@ fn mean_sd(v: &[f64]) -> (f64, f64) {
 #[test]
 fn every_feature_is_either_snr_order_preserving_or_a_named_noise_statistic() {
     // The asserted set is "every feature not exempt by name", so on this axis a new dimension is
-    // asserted by default rather than unclassified — the opposite default from the length axis,
-    // and the safe one: a feature added without a thought about the receiver gets guarded, not
-    // skipped. What must stay visible in a diff is the exemption.
-    let asserted = FEATURE_NAMES
-        .iter()
-        .filter(|name| !NOISE_STATISTICS.iter().any(|(n, _)| n == *name))
-        .count();
-    assert_eq!(
-        asserted + NOISE_STATISTICS.len(),
-        FEATURE_NAMES.len(),
-        "features@{} changed size without this axis noticing",
-        hk_classify::features::FEATURES_VERSION,
-    );
-    for (name, why) in NOISE_STATISTICS {
+    // guarded BY DEFAULT rather than landing unclassified — the opposite default from the length
+    // axis, and the safe one here: a feature added without a thought about the receiver gets
+    // asserted, and the thing that has to appear in a diff is the *exemption*. There is therefore
+    // no completeness hole to check, and the checks below are on the exemption lists themselves.
+    for (i, (name, why)) in NOISE_STATISTICS.iter().enumerate() {
+        assert!(
+            !NOISE_STATISTICS[..i].iter().any(|(n, _)| n == name),
+            "{name} is exempt from the SNR axis twice: two mechanisms for one name means one of \
+             them was never checked"
+        );
         assert!(
             FEATURE_NAMES.contains(name),
             "{name} is exempt from the SNR axis but is not a feature: delete the exemption"
@@ -1318,7 +1320,7 @@ fn a_feature_ranks_two_emissions_the_same_way_however_loudly_they_were_heard() {
 
     // [class][rung][feature] -> (mean, sd) over SNR_SEEDS waveforms, or None where fewer than
     // SNR_MIN_PRESENT of them reported a value.
-    let mut stats: Vec<Vec<Vec<Option<(f64, f64)>>>> = Vec::new();
+    let mut stats: Vec<Vec<Vec<MeanSd>>> = Vec::new();
     for class in Class::TAXONOMY {
         let mut per_rung = Vec::new();
         for snr in SNR_LADDER {
@@ -1365,7 +1367,7 @@ fn a_feature_ranks_two_emissions_the_same_way_however_loudly_they_were_heard() {
 
     let mut compared = 0usize;
     let mut resolved = 0usize;
-    let mut found: Vec<(usize, usize, usize, String)> = Vec::new();
+    let mut found: Vec<(&str, usize, usize, String)> = Vec::new();
     for (fi, name) in asserted.iter().enumerate() {
         for &(i, j) in &pairs {
             let mut signs: Vec<(f64, i8)> = Vec::new();
@@ -1392,7 +1394,7 @@ fn a_feature_ranks_two_emissions_the_same_way_however_loudly_they_were_heard() {
                 }
             }
             if signs.iter().any(|(_, s)| *s > 0) && signs.iter().any(|(_, s)| *s < 0) {
-                found.push((fi, i, j, table));
+                found.push((*name, i, j, table));
             }
         }
     }
@@ -1416,11 +1418,12 @@ fn a_feature_ranks_two_emissions_the_same_way_however_loudly_they_were_heard() {
     // Exact-set comparison, both ways.
     let mut undeclared = Vec::new();
     let mut matched = vec![false; SNR_ORDER_EXCEPTIONS.len()];
-    for (fi, i, j, table) in &found {
-        let (name, a, b) = (asserted[*fi], Class::TAXONOMY[*i], Class::TAXONOMY[*j]);
-        match SNR_ORDER_EXCEPTIONS.iter().position(|e| {
-            e.feature == name && ((e.a == a && e.b == b) || (e.a == b && e.b == a))
-        }) {
+    for (name, i, j, table) in &found {
+        let (a, b) = (Class::TAXONOMY[*i], Class::TAXONOMY[*j]);
+        match SNR_ORDER_EXCEPTIONS
+            .iter()
+            .position(|e| e.feature == *name && ((e.a == a && e.b == b) || (e.a == b && e.b == a)))
+        {
             Some(k) => matched[k] = true,
             None => undeclared.push(format!(
                 "{name:<20} {} {a:?} vs {b:?}: ranks them one way at one SNR and the other way at \
