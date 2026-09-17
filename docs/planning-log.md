@@ -4145,3 +4145,55 @@ confirmation makes T-340's no-retune-on-pan control *more* load-bearing, not les
 **T-397**, explicitly marked as needing confirmation before anyone builds from a fragment. I have now
 reconstructed user direction from partial messages four times today; once I inferred a frame that was
 not theirs (B0.666), and the correction cost a doc rewrite.
+
+### B0.669 — the wall-clock bug's sixth site, and the guard that now forbids it (2026-09-16)
+
+**T-386** (`10a9614`) closed T-379's census, and the finding is the one I predicted two heartbeats ago
+without expecting to be right so soon: `History.activate()` called
+`defaultRegion(..., Date.now() / 1000)` — **the sixth site**. On a capture 3.5 days from wall time it
+opened on a 24 h period the receiver was never on for, so the durable catalogue's **first impression**
+was an empty answer about a window that never existed.
+
+The count for one day: T-379 (the Candidate list, a window 306,315 s out), T-384 (three sites in
+`plots.ts`), T-389 (the live Confirmed query naming no live edge), T-387 (had to prove it was avoiding
+it), T-393 (designed it out with a source guard), T-386 (found it again, elsewhere). **Six surfaces,
+one mistake, each caught only because someone went looking.**
+
+**T-393's guard is now extended to every module T-386 touched** — capture, centre, explore, history —
+banning `Date.now`, `performance.now`, `toLocaleTimeString` and `getTimezoneOffset`. That is the
+"stop fixing instances, make it unrepresentable" move I said I would bring to the user if it recurred;
+the agent arrived at it independently. One exemption is **named rather than granted wholesale**:
+`inventory.ts` keeps exactly one `Date.now`, the page-lifecycle stamp that distinguishes "Loading…"
+from an empty answer, pinned to that single expression with the other three clocks banned outright.
+That is the right shape — an exemption you can see is not a hole.
+
+**The judgement was the point of the ticket, and it went the way I hoped.** The History catalogue
+**stays independent** of the view window, with four reasons rather than inertia: CLAUDE.md puts the
+durable record in a *separate* surface; workflow #3 is *"choose a region and see what activity was seen
+there over time"*, so choosing the period **is** the function and slaving it to the cursor would delete
+the feature; the view window is bounded by the IQ ring's retention while the catalogue exists for the
+periods beyond it, so following the cursor would make most of the durable record unreachable from the
+surface built to reach it; and it is a separate **mode**, so the adjacency that made T-387's panels
+misleading does not apply.
+
+Two smaller calls worth keeping. **Untimed selections are frequency-only marks** — "this band,
+whenever" — so they belong in every window their frequency overlaps; dropping them on a time window
+they never claimed would be the same bug pointing the other way. And **coverage is deliberately not an
+empty state for selections**: a selection is not a measurement, the user drew it, so *"nothing was
+observed in this window"* would be a coverage claim invented to fill a sentence. Declining to reuse a
+shared vocabulary where it does not apply is harder than reusing it.
+
+**The brief's premise was wrong and the agent said so**: `GET /api/selections` has no query parameters
+at all — `t_lo`/`t_hi` are fields of the `Selection` object, not list filters. The page holds the whole
+set, so the fix was client-side and the gate stayed UI-only.
+
+**The UI-only gate has now run three times** (T-393+T-395, T-386, and the classification check on
+T-392 which correctly demanded the full gate). It is doing what the user intended: roughly four
+minutes saved per UI merge, on changes that could not have moved the Rust path.
+
+**Disk discipline, corrected.** My scratchpad went 613 MB → 9.0 GB in an hour, almost all of it two
+4 GB replay data directories from T-398's cold-start measurements. I left them alone — they were
+minutes old and that agent is mid-measurement — and messaged it to drop each store once it has read
+its numbers out. I also did **not** clear sccache this time, which is a deliberate change: clearing it
+at 6.9 GB was right, but cold rebuilds convert APFS-shared blocks into private ones, so part of the
+8 GB it frees is spent buying divergence across every live worktree.
