@@ -1166,9 +1166,54 @@ fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
 /// hold the open set better than the max (0.9242 against 0.9000) at the same burst recall — so the
 /// expansion is refused **at this fitting protocol**, not on principle.
 ///
-/// The `blind_*` family scores move with the window too, and discontinuously — reproduced across
-/// seeds at 25 dB, a 2-FSK burst scores `blind_fsk` 0.10 at N/8, 0.44 at N/4 and 1.00 at N/2 and
-/// N — because the line C14 locks on changes once the record is long enough. That is T-311.
+/// # The four `blind_*` scores: T-311's answer, and it was not a lock
+///
+/// T-281 reported the same window dependence in them, discontinuously — a 2-FSK burst scoring
+/// `blind_fsk` 0.10 at N/8, 0.44 at N/4 and 1.00 at N/2 and N — and read it as the line C14 locks
+/// on changing once the record is long enough. **That ladder does not reproduce** once T-404's
+/// packet-preamble confound is off: `fsk2`, `gfsk` and `msk` read exactly 1.00 at all four rungs on
+/// every dev seed. The mechanism was somewhere else, and it was not binary.
+///
+/// **Three of the four quantities the scores are built from are MAXIMA, and a maximum's null level
+/// rises as the record shrinks.** The carrier-line coherence is a maximum over `n` bins, whose null
+/// is `sqrt(Σ|z|²·ln n)/Σ|z|`; `FskCentreStats::periodicity` is a maximum over 8 lags about a
+/// proportion's `0.5 ± K/sqrt(m)`; `fisher_j` is a maximum over 8 sampling phases and up to 4
+/// candidate rates. Every one was compared against a **fixed** threshold, so a threshold sharper
+/// than the statistic feeding it turned that statistic's own sampling noise into a ×3 to ×10 jump
+/// in a number handed to a fitted Gaussian. Three fixes, all in `hk_estimate::blind`:
+///
+/// 1. The coherence is **bias-corrected in power**, so its null is 0 at every record length — the
+///    move T-404 made for `cp_corr`, whose maximum-over-lags had the same defect.
+/// 2. Every veto **ramps across its own statistic's 3σ** about the unchanged threshold
+///    (`blind::family::soft_veto`), and so does the OOK/FSK competition, which had been a pair of
+///    hard thresholds making each score a discontinuous function of the other.
+/// 3. Where a lock genuinely **is** binary — too few members in the smaller IF cluster for the
+///    Fisher ratio's denominator to exist, or too few keyings for an envelope contrast — the score
+///    is **ABSENT**, not low (`blind::family::MIN_CLUSTER_MEMBERS`,
+///    `blind::MIN_ENVELOPE_TRANSITIONS`). Absent means *not measured*, T-297's rule for
+///    `sweep_rate_hz_per_s`, so a not-yet-locked reading can no longer be scored as evidence for a
+///    different family.
+///
+/// What that bought, measured on the dev ladder: **a class's own family score is now flat** —
+/// `ook`, `cw`, `fsk2`, `gfsk`, `msk`, `bpsk` and `qpsk` read 1.00 at N, N/2, N/4 and N/8 on every
+/// seed, and `fsk4` 0.82–0.93, where `cw` used to collapse to a fabricated 0.00 at N/8 off nine
+/// keyings. `feature_length_invariance::a_classs_own_family_score_survives_truncation` asserts it.
+///
+/// **They stay exempt anyway, for the other half.** A class's score for a family it is *not* is a
+/// detector's response to a signal it was not built for, and nothing entitles that to be stable;
+/// `qam16`'s `blind_qpsk` moves 0.9 → 0.18 because a QAM's x⁴ line is a property of the symbol
+/// sequence, and `ppm`'s `blind_ook` moves 1.00 → 0.20 because PPM is framed with inter-frame gaps,
+/// so a prefix is a different on/off mixture. Both are the emission, not the estimator.
+///
+/// **Cost, against main on the identical grid:** known top-1 0.9345, top-2 0.9861, wrong-label
+/// 0.0040 overall and 0.0333 worst-bin — **every one unchanged**. Only the open set moved: M3
+/// unknown recall 0.9596 → 0.9520 and false-known 0.0404 → 0.0480, three snippets in 396, both far
+/// inside ADR-0016 §7's floors. That direction is the one to expect and it is T-312's, not T-404's:
+/// the veto constants were a **categorical fingerprint** — every `am` snippet read `blind_bpsk`
+/// exactly 0.30 because 0.30 meant "the c1 gate fired" — so the fitted sigma was near zero and the
+/// χ² open set was leaning on a spike that measured which branch was taken rather than the signal.
+/// Withdrawing it costs open-set recall and buys nothing back in known accuracy, because a spike
+/// every class shares does not separate knowns.
 ///
 /// **What this costs today:** [`crate::symbols::MAX_WINDOW_SAMPLES`] caps the window at 65 536
 /// samples, so a *continuous* emission is always measured at the cap and is self-consistent. The
@@ -1200,8 +1245,18 @@ fn symbol_features(f: &mut Features, input: &FeatureInput<'_>) {
             f.set("obw_over_rs", obw / rate);
         }
     }
-    f.set("blind_ook", s.family_scores.ook);
-    f.set("blind_fsk", s.family_scores.fsk);
+    // ABSENT means NOT MEASURED (T-311, T-297's rule for `sweep_rate_hz_per_s`). C14 returns 0.0
+    // for a family whose evidence it could not look at as well as for one it looked at and ruled
+    // out, and a density fitted over both reads the first as evidence for whatever class sits near
+    // zero — evidence manufactured from a failure to measure. The two conditions below are exactly
+    // C14's own admission rules, so what stays is "measured, no evidence" and what goes is "could
+    // not look".
+    if s.family_features.envelope_changes >= hk_estimate::blind::MIN_ENVELOPE_TRANSITIONS {
+        f.set("blind_ook", s.family_scores.ook);
+    }
+    if s.family_features.fsk.is_some() {
+        f.set("blind_fsk", s.family_scores.fsk);
+    }
     f.set("blind_bpsk", s.family_scores.bpsk);
     f.set("blind_qpsk", s.family_scores.qpsk);
 }

@@ -485,16 +485,45 @@ pub(crate) fn complex_line(
 /// Power-of-p carrier line of `x^p` (S5 `carrier_lines`): coherence `max|FFT| / Σ|x|^p`
 /// (≈ 1 for a pure carrier of `x^p`), the carrier frequency / p, and the amplitude ratio of the
 /// second-largest line (outside ±3 native bins, circular) to the largest. Unwindowed, 2× pad.
-pub(crate) fn carrier_line(plans: &mut Plans, x: &[Complex32], fs: f64, p: u32) -> (f64, f64, f64) {
+///
+/// # The coherence is bias-corrected, because its null falls as `1/sqrt(n)` (T-311)
+///
+/// The raw ratio is a **maximum over bins**, and a maximum's null level is not zero. At any
+/// frequency no line sits on, the bin is a sum of `n` independent terms, so it is complex Gaussian
+/// with variance `n·E|z|²` and Rayleigh magnitude; the largest of the `n` resolvable bins has
+/// expectation `≈ sqrt(n·E|z|²·ln n)`. Divided by the denominator `n·E|z|`, a record with **no
+/// line at all** still reads
+///
+/// ```text
+/// c_null = sqrt(E|z|² · ln n / n) / E|z| = sqrt(Σ|z|² · ln n) / Σ|z|
+/// ```
+///
+/// which **grows as the record shrinks**. Every caller compares this coherence against a fixed
+/// threshold (`bpsk_score`'s 0.25, `qpsk_score`'s 0.2, `carrier_only`'s 0.7), so a fixed threshold
+/// on a moving null is a lock/no-lock transition that fires on *record length* rather than on the
+/// signal — the defect T-404 found in `cp_corr`, whose maximum-over-lags had a null falling the
+/// same way, and fixed the same way. Reporting `sqrt(max(0, c² − c_null²))` puts the null at **0**
+/// at every record length, so what is returned is the line's own coherence and nothing else.
+///
+/// Returns `(coherence, frequency/p, second/peak, null)` — the fourth being that null level, which
+/// is the scale of what is left in the coherence after the correction and therefore the width any
+/// comparison against it must be no sharper than.
+pub(crate) fn carrier_line(
+    plans: &mut Plans,
+    x: &[Complex32],
+    fs: f64,
+    p: u32,
+) -> (f64, f64, f64, f64) {
     let n = x.len();
     if n < 8 {
-        return (0.0, 0.0, 1.0);
+        return (0.0, 0.0, 1.0, 1.0);
     }
     let big_n = (n * 2).next_power_of_two();
     let (fft, buf) = plans.fft(big_n);
     buf.clear();
     buf.resize(big_n, Complex32::default());
     let mut abs_sum = 0.0f64;
+    let mut sq_sum = 0.0f64;
     for (&v, b) in x.iter().zip(buf.iter_mut()) {
         let z = match p {
             1 => v,
@@ -505,7 +534,9 @@ pub(crate) fn carrier_line(plans: &mut Plans, x: &[Complex32], fs: f64, p: u32) 
             }
             _ => v.powu(p),
         };
-        abs_sum += f64::from(z.norm());
+        let a = f64::from(z.norm());
+        abs_sum += a;
+        sq_sum += a * a;
         *b = z;
     }
     fft.forward(buf);
@@ -531,10 +562,16 @@ pub(crate) fn carrier_line(plans: &mut Plans, x: &[Complex32], fs: f64, p: u32) 
         k as f64 - big_n as f64
     } * fs
         / big_n as f64;
+    // The null of a maximum over `n` resolvable bins, in the same units as the coherence: what a
+    // record carrying no line at all would read at this length. Subtracted in POWER, so the null
+    // of what is returned is 0 rather than a number that grows as the record shrinks.
+    let c = peak / (abs_sum + 1e-12);
+    let c_null_sq = sq_sum * (n as f64).ln() / (abs_sum * abs_sum + 1e-24);
     (
-        peak / (abs_sum + 1e-12),
+        (c * c - c_null_sq).max(0.0).sqrt(),
         f / f64::from(p),
         second / (peak + 1e-12),
+        c_null_sq.sqrt(),
     )
 }
 
