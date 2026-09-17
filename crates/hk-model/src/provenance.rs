@@ -154,6 +154,39 @@ pub struct CaptureArtefact {
     /// Depth of the modulation, dB, when it is an amplitude artefact. Informational.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_db: Option<f64>,
+    /// Measured fractional wander of the fundamental over the record, ppm (T-382).
+    ///
+    /// **A free-running artefact is a band, not a line, and the band widens with harmonic
+    /// number.** A source locked to the samples or to a crystal does not move: the 8192-sample
+    /// gain step holds `fs/8192` to 175 ppm and the host 8 kHz comb holds 8000 Hz to 1.1 ppm,
+    /// both at the measurement floor. The ~655 Hz modulation in
+    /// `fixtures/hackrf/capture-2026-09-15-fm-band` wanders **2300 ppm** over 45 s, which is why
+    /// a fixed notch cannot cover it: harmonic *n* of a fundamental with frequency noise carries
+    /// *n* times that noise (the physics T-317 used to pin an oscillator family by
+    /// `width / n = const`), so a guard that does not scale with *n* misses the second harmonic
+    /// and beyond — which is exactly the member that dominates here.
+    ///
+    /// Recorded in ppm rather than Hz for the same reason `period_samples` is in samples: it is
+    /// the property of the source, and it stays true when the fundamental is re-derived for a
+    /// different sample rate. Absent means "does not measurably move", which is the default and
+    /// leaves the consumer's own guard the only width.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift_ppm: Option<f64>,
+    /// Highest comb member measured above the floor, when the comb **ends**.
+    ///
+    /// Usually absent, and absent is the honest default: a periodic artefact of period `T` puts
+    /// energy at every multiple of `1/T`, falling as `1/n` but never stopping, so a count is a
+    /// detection floor rather than a physical limit (the gain step's ≥ 27 harmonics, the host
+    /// comb's members right across the span).
+    ///
+    /// It is recorded only when the *shape* says the comb is short: the ~655 Hz modulation is a
+    /// near-sinusoid with one dominant harmonic (16.4 dB at h1, 23.5 dB at h2, 10.0 dB at h3 and
+    /// nothing above the floor after that), not a pulse train. Excluding every multiple of it
+    /// would be excluding members that were measured absent — and with [`Self::drift_ppm`]
+    /// widening each guard by `n`, an unbounded comb would notch a quarter of the search band by
+    /// harmonic 50.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harmonics: Option<u32>,
     /// How it was measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_by: Option<String>,
@@ -182,6 +215,22 @@ impl CaptureArtefact {
             .filter(|p| p.is_finite() && *p > 0.0)
             .map(|p| 1.0 / p)
     }
+}
+
+/// One capture-chain comb, as the line search needs it: where it starts, how far it wanders, and
+/// where it stops (T-382).
+///
+/// Every field is *derived* — the fundamental from the recorded period against the stream's own
+/// sample rate, the tolerance from the recorded drift — so nothing downstream carries a frequency.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CyclicComb {
+    /// Fundamental in this stream, Hz.
+    pub fundamental_hz: f64,
+    /// Measured fractional wander, as a fraction (not ppm). `0.0` when the artefact does not move.
+    /// Harmonic `n` wanders by `n · fundamental_hz · drift`.
+    pub drift: f64,
+    /// Highest member measured present, or `None` for a comb with no measured end.
+    pub harmonics: Option<u32>,
 }
 
 /// The trust record for a measurement (docs/07 §2.6). Immutable once written; deduplicated by
@@ -246,14 +295,32 @@ impl Provenance {
     /// the same artefact excludes 292.969 Hz in a 2.4 Msps capture and 1220.703 Hz in a 10 Msps
     /// one. Nothing downstream may hardcode either number.
     ///
-    /// Only the fundamental is reported, never a harmonic count: a periodic artefact of period T
-    /// puts energy at *every* multiple of 1/T, falling as 1/n but never stopping, so a measured
-    /// count is a detection floor and not a physical limit. A consumer excludes every multiple
-    /// its own analysis band holds.
-    pub fn cyclic_artefacts(&self) -> Vec<f64> {
+    /// A harmonic count is reported only where one was *measured* (see
+    /// [`CaptureArtefact::harmonics`]); the usual answer is `None`, because a periodic artefact of
+    /// period T puts energy at *every* multiple of 1/T, falling as 1/n but never stopping, so a
+    /// count is normally a detection floor and not a physical limit. A consumer then excludes
+    /// every multiple its own analysis band holds.
+    pub fn cyclic_combs(&self) -> Vec<CyclicComb> {
         self.capture_artefacts
             .iter()
-            .filter_map(|a| a.fundamental_hz(self.tune.sample_rate_hz))
+            .filter_map(|a| {
+                Some(CyclicComb {
+                    fundamental_hz: a.fundamental_hz(self.tune.sample_rate_hz)?,
+                    drift: a
+                        .drift_ppm
+                        .filter(|d| d.is_finite() && *d > 0.0)
+                        .map_or(0.0, |d| d * 1e-6),
+                    harmonics: a.harmonics.filter(|h| *h > 0),
+                })
+            })
+            .collect()
+    }
+
+    /// The fundamentals of [`Provenance::cyclic_combs`], Hz — the reportable form.
+    pub fn cyclic_artefacts(&self) -> Vec<f64> {
+        self.cyclic_combs()
+            .into_iter()
+            .map(|c| c.fundamental_hz)
             .collect()
     }
 }
@@ -347,7 +414,23 @@ mod tests {
             period_samples: Some(8192.0),
             period_s: Some(8192.0 / 2.4e6),
             step_db: Some(-0.431),
+            drift_ppm: None,
+            harmonics: None,
             measured_by: Some("T-317".into()),
+            note: None,
+        }
+    }
+
+    /// T-382: the ~655 Hz modulation of the same fixture — wall-time, free-running, and short.
+    fn drifting_modulation() -> CaptureArtefact {
+        CaptureArtefact {
+            kind: "drifting-noise-floor-modulation".into(),
+            period_samples: None,
+            period_s: Some(1.0 / 655.198),
+            step_db: None,
+            drift_ppm: Some(2300.0),
+            harmonics: Some(3),
+            measured_by: Some("T-382".into()),
             note: None,
         }
     }
@@ -389,6 +472,61 @@ mod tests {
         assert_eq!(p.cyclic_artefacts(), vec![292.968_75]);
         p.tune.sample_rate_hz = 10e6;
         assert_eq!(p.cyclic_artefacts(), vec![1_220.703_125_f64]);
+    }
+
+    /// T-382: a sample-locked artefact and a free-running one are different objects, and the
+    /// difference has to survive to the consumer — the first is a line at one frequency, the
+    /// second a band that widens with harmonic number and then stops.
+    #[test]
+    fn cyclic_combs_carry_the_measured_drift_and_the_measured_end() {
+        let mut p = sample();
+        p.tune.sample_rate_hz = 2.4e6;
+        p.capture_artefacts = vec![gain_step(), drifting_modulation()];
+        let combs = p.cyclic_combs();
+        assert_eq!(combs.len(), 2);
+
+        // Sample-locked: no drift recorded means no extra width, and no measured end.
+        assert!((combs[0].fundamental_hz - 292.968_75).abs() < 1e-9);
+        assert_eq!(combs[0].drift, 0.0);
+        assert_eq!(combs[0].harmonics, None);
+
+        // Free-running and wall-timed: the fundamental does *not* move with the sample rate, and
+        // the drift arrives as a fraction so harmonic n is `n · f₀ · drift` wide.
+        assert!((combs[1].fundamental_hz - 655.198).abs() < 1e-6);
+        assert!((combs[1].drift - 2.3e-3).abs() < 1e-12);
+        assert_eq!(combs[1].harmonics, Some(3));
+        p.tune.sample_rate_hz = 10e6;
+        let at_10 = p.cyclic_combs();
+        assert!(
+            (at_10[0].fundamental_hz - 1_220.703_125).abs() < 1e-9,
+            "sample-locked moves"
+        );
+        assert!(
+            (at_10[1].fundamental_hz - 655.198).abs() < 1e-6,
+            "wall-timed does not"
+        );
+
+        // Nonsense never becomes a width or an end.
+        p.capture_artefacts = vec![CaptureArtefact {
+            drift_ppm: Some(f64::NAN),
+            harmonics: Some(0),
+            ..drifting_modulation()
+        }];
+        assert_eq!(p.cyclic_combs()[0].drift, 0.0);
+        assert_eq!(p.cyclic_combs()[0].harmonics, None);
+    }
+
+    /// T-382 migration: the two fields are absent from every row written before they existed, and
+    /// adding them must not move a stored row's canonical JSON or its SHA-256 dedup key.
+    #[test]
+    fn drift_and_harmonics_are_omitted_when_absent() {
+        let mut p = sample();
+        p.capture_artefacts = vec![gain_step()];
+        let json = serde_json::to_value(&p).unwrap();
+        let a = &json["capture_artefacts"][0];
+        assert!(a.get("drift_ppm").is_none(), "{a}");
+        assert!(a.get("harmonics").is_none(), "{a}");
+        assert_eq!(serde_json::from_value::<Provenance>(json).unwrap(), p);
     }
 
     /// T-373 migration: every provenance row written before capture artefacts existed has no

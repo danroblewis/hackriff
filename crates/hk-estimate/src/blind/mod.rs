@@ -940,16 +940,25 @@ impl BlindEstimator {
         // record's native bin. Nothing here knows a frequency.
         let native_hz = fs / n as f64;
         let guard_hz = cfg.artefact_guard_bins.max(0.0) * native_hz;
-        let excluded_cyclic_hz: Vec<f64> = input
+        // The spacing test is against the *widest* guard the comb will apply inside this band, not
+        // the transform's floor: a comb that drifts is notched more generously at its top harmonic
+        // than at its fundamental (T-382), and it is that width the quarter-band rule must judge.
+        let combs: Vec<hk_model::CyclicComb> = input
             .capture
-            .map(Provenance::cyclic_artefacts)
+            .map(Provenance::cyclic_combs)
             .unwrap_or_default()
             .into_iter()
             .filter(|_| guard_hz > 0.0)
-            .filter(|f0| f0.is_finite() && *f0 >= 4.0 * guard_hz)
+            .filter(|c| c.fundamental_hz.is_finite() && c.fundamental_hz > 0.0)
+            .filter(|c| {
+                let in_band = (f_max / c.fundamental_hz).floor().max(1.0);
+                let top = c.harmonics.map_or(in_band, |m| in_band.min(f64::from(m)));
+                c.fundamental_hz >= 4.0 * (guard_hz + top * c.fundamental_hz * c.drift.max(0.0))
+            })
             .collect();
+        let excluded_cyclic_hz: Vec<f64> = combs.iter().map(|c| c.fundamental_hz).collect();
         let excluded = lines::Excluded {
-            combs: &excluded_cyclic_hz,
+            combs: &combs,
             guard_hz,
         };
         let d = ((fs / obw / 2.0).round() as usize).max(1);

@@ -184,19 +184,68 @@ the fourth root of E x⁴ scale by 0.958, 0.949 and 0.929, and the low window's 
 2.69 against 2.93, so the low window is not the high window times a constant. The
 mechanism inside that path is not identified.
 
-**Two other receiver-wide cyclic lines are in this capture and are *not* excluded**, both
-measured by T‑373 and neither belonging to the fs/8192 comb:
+**Two other receiver-wide cyclic lines are in this capture, and T‑382 identified both.**
+T‑373 found them by measuring what C14 read once the `fs/8192` comb was gone, and the
+answer was that in 28 of 44 narrowband boxes the argmax had never been that comb at all.
 
-- an **8 kHz comb** (7999.55, 16000.19, 23999.74 Hz; 23 dB in an empty box), present in
-  the 2026-09-13 `hackrf_transfer` captures at the same frequencies, so it is the device
-  or the host and not our recorder;
-- a **drifting ~0.66 kHz family** — 657.03 Hz and its second harmonic 1313 Hz here,
-  moving 1314.0 → 1310.2 → 1309.2 Hz over 16 s, and 822.90/1645.80 Hz in the 2026-09-13
-  session.
+**The 8 kHz comb is the host's clock, and it is the same artefact T‑317 found in the RF
+spectrum.** T‑317 recorded "a wideband line comb spaced 7999.9 Hz at tuner DC − 674 Hz +
+n·8 kHz" and T‑373 recorded "an exact 8 kHz comb at 7999.55 / 16000.19 / 23999.74 Hz, up
+to 38 dB" in the envelope. These are the two halves of one thing: RF spur lines sitting on
+an 8 kHz grid, whose pairwise beats inside any channel put an 8 kHz comb into that
+channel's envelope. The proof is two observables 12 600× apart in frequency agreeing on
+one number — the envelope comb measures **7999.9434 Hz** (sd 0.0087 Hz), i.e. **+7.078
+ppm** below an exact 8 kHz, while the RF comb member nearest tuner DC sits at **−678.048
+Hz**, which against N = 100.8 MHz / 8 kHz = 12 600 exactly implies **+6.727 ppm**. They
+agree to **0.35 ppm**, which can only happen if both come from one 8 kHz host-referenced
+grid sampled by a receiver clock running ~6.9 ppm fast. The 2026-09-13 capture of the same
+band repeats it at a different temperature: spacing +3.765 ppm, offset +4.005 ppm, agreeing
+to 0.24 ppm. 8 kHz is the USB 2.0 microframe rate. It is present in **all six** captures,
+including all five taken with `hackrf_transfer`, so it is the device or the host and not
+hackriff. It is now recorded as a wall-time artefact and excluded.
 
-The second is the **strongest** cyclic line in most narrowband boxes of this capture (up
-to 32 dB) and is the argmax C14 reports once the fs/8192 comb is excluded. Neither is
-identified, and neither is safe to notch without that identification (one drifts).
+**The drifting family is a free-running ~655.75 Hz modulation of the receiver's own noise,
+and it is not the 674 Hz above.** Its **second harmonic dominates**: 16.4 dB at h1,
+**23.5 dB at h2**, 10.0 dB at h3, h4 at the floor in the whole stream but 14.8–16.7 dB in
+narrowband boxes, and h5 upward never lock in frequency — a near-sinusoid, not a pulse
+train, which is why it has nothing like the gain step's ≥ 27 harmonics. It sits at one
+frequency (spread 0.06 Hz) in **all 22 noise-only channels** of the span *and* inside both
+WFM stations, which no emission can do, and it **rides on the receiver's noise rather than
+on the antenna signal**: depth 22.0 % of channel power at 101.000 MHz and 21.1 % at
+100.650 MHz against 6.9 % in the 99.6999 MHz station and 1.9 % in the 101.2987 MHz one.
+It is **free-running**: h2 wanders 1308.1–1314.9 Hz over the 45 s (**2600 ppm** half-range)
+while in the same blocks `fs/8192` holds to 175 ppm and the 8 kHz comb to 1.1 ppm, both at
+the measurement floor — so it is locked to neither the sample clock nor the host's 8 kHz
+reference, and 2600 ppm of thermal wander rules out any crystal-derived source. Like the
+gain step it is **absent from the matched control**: the 2026-09-13 100.8 MHz / 2.4 Msps /
+same-gains `hackrf_transfer` capture reads 6.6 dB where this one reads 23.1 dB at identical
+RBW and record length.
+
+It is **not** T‑317's 674 Hz. That number is this capture's 8 kHz comb offset, which
+measures −678.048 Hz here — 22.3 Hz (18 sd) away, drifting the *other* way, and moving to
+−403.70 Hz on the 2026-09-13 capture where this modulation is absent altogether. The two do
+covary (r = +0.92, both tracking device temperature, which makes f/2 + |δ| look constant at
+1333.24 Hz — close to 8000/6), but that is co-variation and not an identity: the sum's sd is
+0.85× the sd of f/2 alone, and a 655 Hz wall-time artefact measured against a clock 6.7 ppm
+off would move by 0.00002 Hz for the observed excursion, not 3 Hz.
+
+**Its cause is not identified**, only its character. It is recorded with its measured drift
+and its measured end (`drift_ppm`, `harmonics`) so the exclusion is a *band* that widens with
+harmonic number rather than a line — a flat notch lets h2 straight back out, which
+`hk-estimate/tests/capture_artefact.rs` asserts by zeroing the recorded drift.
+
+**What all three exclusions are worth, measured on the shipped C13→C14 chain** over a
+44-box grid across the passband at three 2 s windows:
+
+| | before T‑382 | after |
+|---|---|---|
+| boxes whose `cyclic_db` is a receiver artefact | 38 of 44 | **0 of 44** (all three windows) |
+| per-box median `cyclic_db` | 27.4 dB | **14.0 dB** |
+| boxes above 20 dB | 43 of 44 | **6 of 44** — the two stations' real 19 kHz pilot and 38 kHz subcarrier |
+| 100.4653 MHz box | 22.48 dB at 1313.95 Hz (h2) | **13.13 dB**, no two methods agreeing |
+
+A **fourth** receiver-wide family is visible underneath, spaced ~119.95 Hz (1439, 1559,
+1679, 2159 Hz…) at 13–17 dB — plausibly mains-related, not measured, and not excluded.
 
 ## What the acceptance test asserts
 
@@ -227,7 +276,13 @@ with the truth stripped before the device sees the recording:
   antenna and host, and the 20 Msps pair is quantisation-limited, so turning the amp off
   moved the family's excess over the floor no more than it moved the real stations'. A
   capture with a **50 Ω terminator** in place of the antenna would settle it.
-- The 8192-sample gain step above has no identified source.
+- The 8192-sample gain step has no identified source, and neither has the ~655.75 Hz
+  modulation. Both appear only in the one capture taken through hackriff's own ring-reader
+  output path. Two experiments would decide it: a **50 Ω terminator** capture (separating
+  "arrives through the antenna" from "generated in the box"), and a **back-to-back pair on
+  one host in one session** — one recorded with `hackrf_transfer`, one through the ring
+  reader — which separates the session from our output path.
+- The ~119.95 Hz family under everything else is unmeasured.
 - Nothing in the system spots a harmonic family. Image and reference-harmonic
   attribution exist (T-302); "these three emitters are harmonics of one fundamental
   nobody can see" is a capability that does not.
