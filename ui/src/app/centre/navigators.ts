@@ -74,7 +74,11 @@ import {
 } from "../capture/timeline";
 import type { AppContext } from "../context";
 import { h } from "../dom";
+// T-379: the survey strip is a view over the one (time × frequency) window, so it reads the same
+// window the inventory lists do rather than defaulting to the server's live edge.
+import { viewWindow } from "../explore/inventory";
 import { startPoll } from "../net";
+import { sameCursor } from "./review-render";
 import { goLive, reviewAt, setNavigation, toast } from "../state";
 import { applyDeviceAction, mayRetune, retuneAction, retuneLabel, setLiveView, setRetuneOffer } from "./view";
 
@@ -425,7 +429,11 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
     // T-368: how much of the spectrum was never looked at, from the served coverage. `null` (not
     // asked yet) says so rather than reporting nothing observed.
     const grey = unobservedCount(survey);
-    const coverage = grey === null || surveyFor !== (ext ? `${ext.lo}:${ext.hi}` : "")
+    // T-379: the strip is stale if either half of the window moved — the frequency viewport under
+    // it, or the time range it is of. Both are in the key, so a scrub says "coverage unknown" until
+    // the answer for the scrubbed window is in, rather than showing the live edge's cells as if
+    // they were of the window on screen.
+    const coverage = grey === null || surveyFor !== surveyKey(ext)
       ? "coverage unknown"
       : `${grey} of ${survey.length} never observed`;
     label.textContent = ext
@@ -494,12 +502,20 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
     void refreshSurvey();
   }, { passive: false });
 
-  /** Re-asks for the strip when the viewport it is drawn on has moved (or nothing is drawn yet). */
+  /** Which (frequency viewport × time window) the drawn cells are of. Both halves, so neither can
+   * move without the readout noticing (T-368 viewport, T-379 window). */
+  const surveyKey = (ext: Range | null) => {
+    const w = viewWindow(store.get());
+    return `${ext ? `${ext.lo}:${ext.hi}` : ""}@${w ? `${w.t0}:${w.t1}` : ""}`;
+  };
+
+  /** Re-asks for the strip when the viewport it is drawn on, **or the window it is of**, has moved
+   * (T-379: the survey is a view over the one (time × frequency) window, not over the live edge). */
   async function refreshSurvey() {
     const ext = extent();
-    const path = coverageRequest(ext, SURVEY_CELLS);
+    const key = surveyKey(ext);
+    const path = coverageRequest(ext, SURVEY_CELLS, viewWindow(store.get()));
     if (!path) return;
-    const key = ext ? `${ext.lo}:${ext.hi}` : "";
     const body = await client.get<CoverageResponse>(path).catch(() => null);
     if (!body) return;
     survey = surveyCells(body);
@@ -516,6 +532,10 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
   store.select((s) => s.navGrid.grid?.frequency?.current?.center_hz ?? null, () => {
     if (!viewportTouched) void refreshSurvey();
   });
+  // T-379: scrubbing moves the time half of the window, so the strip is re-asked for that window —
+  // the bug this closes is a bottom bar that kept answering about the live edge while the waterfall
+  // above it showed an hour ago, greying bands that had in fact been observed then.
+  store.select((s) => s.time, () => { render(); void refreshSurvey(); }, { eq: sameCursor });
 
   // The one poll that fills the navigation slice, read by both navigators.
   startPoll(async () => {

@@ -13,8 +13,8 @@ import {
 } from "./format";
 import { selectionSummary } from "./focus";
 import {
-  clusterChip, deleteEntry, loadInventoryRows, nextInventorySort, promoteEntry, recurrenceDots,
-  rowChips, rowSeenText, sortInventoryRows, type Row,
+  clusterChip, deleteEntry, emptyListText, loadInventoryRows, nextInventorySort, promoteEntry,
+  recurrenceDots, rowChips, rowSeenText, sortInventoryRows, type Row,
 } from "./inventory";
 import { foundInside, selectionStoreFor, sortSelections, type Selection } from "./selections";
 import {
@@ -124,7 +124,10 @@ const mountInventory: MountFn = (el, ctx) => {
     }
     const tabRows = s.inventory.tab === "confirmed" ? confirmed : candidate;
     const shown = sortInventoryRows(tabRows, s.inventory.sort.key, s.inventory.sort.dir);
-    list.replaceChildren(...(shown.length ? shown.map(renderRow) : [h("div", { class: "empty" }, s.inventory.error ?? "Nothing here yet.")]));
+    // T-379: an empty list says *which* emptiness it is. "Nothing here yet" read the same whether
+    // the receiver had listened and heard nothing, had never looked, or had simply not been asked —
+    // and the last of those was the bug the whole-UI window rule names.
+    list.replaceChildren(...(shown.length ? shown.map(renderRow) : [h("div", { class: "empty" }, emptyListText(s.inventory))]));
   }
 
   ctx.store.select(

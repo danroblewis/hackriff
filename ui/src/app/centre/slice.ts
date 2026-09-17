@@ -15,6 +15,16 @@ export interface RetuneOffer { centerHz: number; view: { loHz: number; hiHz: num
 export interface LiveSlice {
   streamId: string | null; centerHz: number | null; bandwidthHz: number | null; bins: number | null;
   rowRateHz: number | null; view: { loHz: number; hiHz: number } | null;
+  /**
+   * The capture time of the newest spectrum row the stream has delivered (T-379) — the live edge,
+   * on the **capture clock**, arriving with every row rather than on a poll.
+   *
+   * The spectrum record carries its own absolute time (docs/api.md), so this is served, never
+   * measured here. `null` means no timed row has arrived yet, and a surface then falls back to the
+   * capture window's `t1S` — and to *unknown* when there is no window either. Nothing substitutes
+   * `Date.now()`: a replay's clock and the browser's are unrelated.
+   */
+  edgeTS: number | null;
   /** The view a retune asked for (a pan past the band edge), applied by the next header whose
    * geometry differs; null otherwise. */
   pendingView: { loHz: number; hiHz: number } | null;
@@ -41,7 +51,7 @@ export interface CentreState { live: LiveSlice; navGrid: NavGridSlice }
 export const centreInitial = (): CentreState => ({
   live: {
     streamId: null, centerHz: null, bandwidthHz: null, bins: null, rowRateHz: null, view: null,
-    pendingView: null, retuneOffer: null,
+    edgeTS: null, pendingView: null, retuneOffer: null,
   },
   navGrid: { grid: null, windows: [], loaded: false },
 });
@@ -49,3 +59,18 @@ export const centreInitial = (): CentreState => ({
 /** Records a `GET /api/navigation` answer (T-340). A store write only: nothing here moves a device. */
 export const setNavigation = (grid: NavigationGrid | null, windows: ActiveWindow[]) => (): { navGrid: NavGridSlice } =>
   ({ navGrid: { grid, windows, loaded: true } });
+
+/** Seconds the stream's live edge must advance before it is written back (T-379). Rows arrive at
+ * about 25/s and nothing re-renders on the edge alone, so this only keeps the store from churning;
+ * the inventory's window is read at call time, and a quarter-second is far inside its 5 s poll. */
+export const EDGE_WRITE_S = 0.25;
+
+/** Records the newest spectrum row's capture time, if it advanced enough to be worth a write
+ * ([[EDGE_WRITE_S]]). A non-finite or going-backwards time is ignored — a re-plumbed stream's first
+ * rows can repeat, and a live edge must never move backwards under the lists that read it. */
+export const setLiveEdge = (tS: number) => (s: { live: LiveSlice }): { live?: LiveSlice } => {
+  if (!Number.isFinite(tS)) return {};
+  const cur = s.live.edgeTS;
+  if (cur !== null && tS - cur < EDGE_WRITE_S) return {};
+  return { live: { ...s.live, edgeTS: tS } };
+};

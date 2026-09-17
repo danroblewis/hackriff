@@ -190,9 +190,21 @@ A task adds new top-level keys in its own slice file (e.g. T-155 adds `bookmarks
 - **Candidates are window-scoped; Confirmed are always listed.** A deliberate asymmetry, straight from invariant 3 (ADR-0017 §2.2). A **Candidate** is a hypothesis about energy in the current window, so outside that window there is nothing to hypothesise about and the row is simply not listed — nothing expires and no decay logic is involved. A **Confirmed** row is a catalogue entry carrying its own time-presence track, so it stays listed whether or not it is transmitting. Without the asymmetry, a user watching a quiet band would see their confirmed stations vanish the moment those stations stopped transmitting — a live-visible regression dressed as a fix. The window is a *caller* choice: `GET /api/inventory` with no `t0`/`t1` is not time-filtered at all, so the Confirmed query simply omits them.
 - **Reviewing (`{live: false, tS}`):** the stream stays connected, but rows aren't pushed.
   - T-152 renders `GET /api/history?f_lo&f_hi&t0=tS−window&t1=tS&format=json` (`max_db`, unobserved cells drawn grey), into the same `Waterfall` via `push` after a reset.
-  - T-151 adds `t0`/`t1` to the **Candidate** query (`tS − REVIEW_WINDOW_S` … `tS`); the Confirmed query stays unwindowed, for the same reason as while live.
+  - T-151 adds `t0`/`t1` to the **Candidate** query; the Confirmed query stays unwindowed, for the same reason as while live.
   - Outputs keep playing live.
   - The Go to action and device controls still act on the live device.
+
+#### 3.3.1 Every surface is a view over one window (T-379, cross-cutting)
+
+The user's whole-UI rule (CLAUDE.md, 2026-09-16) makes the bullets above a *general* obligation rather than the time cursor's private arrangement: **every surface — the waterfall, both edge navigators, the inventory Candidate/Confirmed lists, the focus panel, the output/decode panels — is a view over the one (time range × frequency range) window, and must display all the data it has for it.** Grey or empty is permitted only where data genuinely does not exist; *"we have it but didn't render it" is a bug.*
+
+Concretely, and enforced by tests rather than by convention:
+
+- **`time` is not the only input; `captureWindow` and `live.edgeTS` are the clock.** The live edge is the newest spectrum row's own capture timestamp, falling back to `GET /api/timeline`'s capture window, and is **`null` when neither has answered**. `Date.now()` is not a fallback anywhere in `ui/src` for windowing a query. The failure it caused: `loadInventoryRows` windowed on the browser clock, which on a replay sat 3.5 days from capture time, so the Candidate query asked about a range the capture never covered and returned zero while five candidates sat in the store — four of them inside the very span on screen.
+- **One window, shared.** `viewWindow(state)` is the single definition, and it is the waterfall's own `historyWindow` arithmetic — a dragged span when the time navigator asked for one, else the rows-on-screen span. The Candidate query and the frequency navigator's `GET /api/coverage` both name it. `REVIEW_WINDOW_S = 3600` is gone: a review-only constant was a second window living beside the first.
+- **A surface that cannot name its window sends no query.** Not a plausible one. An invented window returns an honest zero rows, and zero rows renders exactly like a quiet band.
+- **Empty states name their cause.** `emptyListText` maps *no window* / *unobserved* / *observed* / *coverage unknown* onto four different sentences. The unobserved claim is `GET /api/coverage` for exactly the window in question — the backend's `Coverage`, never a client-side guess, and an answer that never came stays *unknown*.
+- **Going Live backfills.** §4.3's waterfall re-asks `/api/history` over the last span on entering LIVE and after a retune, instead of showing an empty ring; the ring's per-row absolute times keep history and live rows on one axis.
 
 ## 4. Frontend↔API map
 
