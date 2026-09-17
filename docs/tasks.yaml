@@ -5690,7 +5690,7 @@ tasks:
     title: 'T-267 confirmer uses CRC-16/CCITT-FALSE, but real P25 TSBKs use the AUGMENTED CRC-CCITT - on the first real capture this will look like a demodulator fault'
     milestone: M4
     priority: medium
-    status: todo
+    status: in-progress
     deps: [T-268]
     parallel_group: M4A
     core_interface: true
@@ -6757,7 +6757,7 @@ tasks:
   - id: T-347
     milestone: M2-hardening
     title: Pause is global run state, so one browser pausing freezes every other browsers waterfall
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-339
