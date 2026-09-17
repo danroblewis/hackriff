@@ -1,6 +1,6 @@
 # ADR-0019 — Presence is an interval with endpoints: the box runs to the live edge until an END is detected
 
-**Status:** PROVISIONAL. The *model* is **settled by the user** (2026-09-16, T-410) and is recorded, not proposed. What is proposed here is where the honesty burden lands, the end detector that has to carry it, and the START/END/REOPEN stream shape.
+**Status:** PROVISIONAL. The *model* is **settled by the user** (2026-09-16, T-410; §6.2 by the user 2026-09-17, T-413) and is recorded, not proposed. What is proposed here is where the honesty burden lands, the end detector that has to carry it, and the START/END/REOPEN stream shape.
 
 **Source:** the user, 2026-09-16, T-410. It **inverts a constraint the coordinator imposed on T-388** eleven hours earlier, deliberately and with reasons.
 
@@ -152,7 +152,35 @@ CLAUDE.md's statement of the model says an end is revocable: *"if later samples 
 
 **The remaining case — a return *after* an END — is deliberately left to the poll, because the stream has no honest start to publish for it.** The tracker joins bursts across its own `idle_timeout_s` (60 observed s), far past the gap a *box* caps at, so the same track reappears after its END. But `LiveExtent::t_start_ns` is `t_first`, **the track's first burst**, not the resumption; publishing it as the new interval's start would claim the exact silence the END was drawn for. The resumption's own start is not in the extent. So an END is recorded per *track*, that track publishes nothing further, and the next inventory poll serves the new interval with the start it actually has (≤ 5 s). A **new track** bound to the same emitter is different and does publish: its `t_first` is its own first burst, which is a correct interval start. **That is the derivation of REOPEN's identity half — it is the tracker's own continuity judgement, not a threshold chosen here.**
 
-**What is NOT done, and why it is the user's call.** Making the end revocable *after* it fires would mean `intervals_from_spans` joining source rows across a longer silence than the idle gap — and that collides head-on with a settled, reasoned decision in this codebase: ADR-0017 and docs/07 §2.27 hold that a chatty 915 MHz ISM sensor firing every 30 s is **fifty intervals, not one** ("50 events, 1.0 s on air" is honest; smearing fifty transmissions into one span of mostly silence is the hull pathology ADR-0017 exists to remove), asserted by `hk_model::presence::tests::a_chatty_burst_source_reads_as_one_interval_per_burst`. Any revocation window wide enough to rejoin a real dropout is also wide enough to swallow a burst cadence, and the two readings cannot both be right. **Flagged for the user rather than decided here.**
+### 6.2 The end *is* revocable, and the window is one further idle gap (T-413, the user 2026-09-17)
+
+**Decided by the user**, answering §6.1's flag: *"YES, a detected end is revocable. Reuse the existing idle-gap constant as the silence tolerance — `clamp(2 × revisit_period, 1 s, 60 s)`, the same one presence/confidence already uses. **No new parameter.** If the signal resumes within idle-gap of the detected end, null the end and keep the ONE interval open (same row, per T-262 revival). If the silence exceeds idle-gap before it resumes, the end stands and a resumption is a genuinely new interval/event."* Recorded, not proposed. The user may override the tolerance later.
+
+**The window is anchored on the END *event*, and it has to be.** §3's detector emits an END only after a *full* idle gap of observed silence, so at the instant an END exists the silence since the **measured** end is already exactly one gap. A window measured from the measured end is therefore unreachable by construction — every resumption after an END is more than one gap past it, and the rule could never fire. The reading adopted is the only one under which it has effect:
+
+```text
+silence ≤ gap              → no END at all               (§3, unchanged)
+gap < silence ≤ 2 × gap    → an END fired, and a resumption REVOKES it: ONE interval
+silence > 2 × gap          → the END stands; a resumption is a genuinely new interval (§6)
+silence > MAX_IDLE_GAP_S   → never revocable, whatever the gap (below)
+```
+
+**So the effective join tolerance is `2 × idle gap` although only one constant exists** — and that is not the constant doubled as a dial. The two gaps are two different statements about the same unit of *observed absence*: the first is the absence that **justifies** the end, the second the absence that **confirms** it. Equivalently, with no arithmetic at all: **the end stands revocable for exactly as long as `confidence_after_silence` is still above `1/e`**, its first e-fold, which is by definition one independent absence observation after the one that closed the interval (§5 / ADR-0017 TM-6, already in the codebase). Nothing new is tuned.
+
+**Written off the measured end, not off the decision.** `measured end + 2 × gap` and `END event + 1 × gap` are the same instant when the END is timely, and the first is the form both surfaces are implemented in (`IdleGap::revocable_nanos`, `Announced::revocable_until_ns`). That keeps the stream and the 5 s poll the **same predicate on the same timestamps**, which §4 requires of them, and stops the window silently widening when an END was published late.
+
+**One ceiling revocation may not lift: `MAX_IDLE_GAP_S` (60 s).** `revocable_nanos` is clamped there for the reason the gap itself is clamped there — past the tracker's own `idle_timeout_s` two source rows were judged discontinuous by a **measurement** upstream, and §6's table already says such intervals "can never be rejoined". Revoking there would overrule a measurement with a parameter. It binds only on the unknown-revisit path; under a live dwell the gap is 1 s and the window 2 s, nowhere near it. (Measured check: the user's stopped-and-returned FM station, a 72 s silence, stays two intervals — asserted.)
+
+**§6.1's collision with the ISM reading, resolved numerically rather than by judgement.** ADR-0017 holds that a chatty 915 MHz sensor firing every 30 s is **fifty intervals, not one**, asserted by `a_chatty_burst_source_reads_as_one_interval_per_burst`. Under contiguous coverage the gap is 1 s, so the revocation window closes **2 s** after the measured end — a 30 s cadence sits fifteen times outside it. The two readings do not in fact conflict at this tolerance, and the ISM test now asserts the margin rather than being left to coincidence.
+
+**What stops the join asserting presence through measured silence.** The rejoined interval spans air the receiver *was listening through and measured empty*, which is the one thing §2's open-cap rendering exists to avoid asserting. Two things carry it, and the first is the load-bearing one:
+
+1. **The numbers never claim it.** The interval records the silence it was rejoined across (`PresenceInterval::revoked`, served as `revoked_s`), and **`duration_s` and `on_air_s` both subtract it**. Revoking an end therefore changes how many *events* were seen and never how much air was claimed. Without this the rejoin would be the ADR-0017 hull pathology one level down — a sensor at a 1.5 s cadence under a 1 s gap would read as one interval of 75 s "on air" holding 1 s of emission. Asserted by test, on both the interval and the window projection, clipped.
+2. **The box says it approximates.** The rejoined interval is **one box** — the user's ruling, and a broken border would read as two — drawn with the existing `hatch` treatment, whose documented meaning is already exactly this: *a rectangle known to approximate the thing it covers* (its other user is a chirp drawn as its bounding box, ADR-0017 §1.3). The hover states the revoked silence.
+
+**Deliberately *not* the open cap's treatment**, though it is the obvious thing to reach for: the open cap means **not yet measured**, and a revoked gap is measured, and measured **empty**. Spelling "looked and it was quiet" as "never looked" is the coverage map's grey rule (T-368) inverted — the one substitution this product refuses — so reusing the cap's idiom here would trade one dishonesty for its mirror image. The honest reading of a revoked gap is *interior* to the box, and a per-span interior treatment needs the box shader (`waterfall.ts`, one `uAssumedFrom` scalar today); that is a follow-up, not a reason to leave the join looking solid in the meantime.
+
+**On the wire: a new record kind, not an END with a null.** `presence-revoke` carries the interval's **original** `t_start_s`, `open: true`, and the measured end the resumption has reached — one box grows, where a `presence-reopen` would draw a second. An END with a null `t_end_s` was rejected: it contradicts itself (the kind says closed, the content says open), and it breaks the parser's `open == (kind != end)` invariant, which is the check that catches a malformed record today. `message_schema` goes to `/3`, and the reason is **not** the added kind, which is additive: it is that **`presence-end` changed meaning**, becoming provisional for one idle gap, so a consumer that files an END as final is now wrong about a record it already understands and must see a schema it does not know.
 
 ### 7. The three client-side refusals
 
@@ -164,13 +192,14 @@ CLAUDE.md's statement of the model says an end is revocable: *"if later samples 
 
 ### 8. The stream: START / END / REOPEN (`hackriff.presence/2`)
 
-ADR-0004 §15 is amended. The `presence` stream carries three record kinds in place of `presence-extension`, which is retired:
+ADR-0004 §15 is amended. The `presence` stream carries these record kinds in place of `presence-extension`, which is retired (`presence-revoke` and `revoked_s` added by T-413, §6.2, with the schema at `/3`):
 
 | kind | when | says |
 |---|---|---|
 | `presence-start` | a new interval opens on an emitter with no prior interval | `{t_start_s, open: true}` |
 | `presence-reopen` | a new interval opens on an emitter that has prior intervals | `{t_start_s, open: true}` |
 | `presence-end` | an interval closes (observed silence > idle gap, or the track closes) | `{t_start_s, t_end_s, open: false}` |
+| `presence-revoke` | the signal resumed within one further idle gap: the END is withdrawn and the **same** interval is open again (§6.2, T-413) | `{t_start_s (the original), t_end_s, open: true, revoked_s}` |
 
 `metadata.last_interval` stays the **same three-field object** `/api/inventory` serves, so a client assigns it rather than rebuilding it, and the fast surface still cannot invent a shape the slow one would disagree with. Envelope `t_ns` stays integer Unix nanoseconds (T-354). No frequency on any of them: an endpoint is time, not geometry (T-362).
 

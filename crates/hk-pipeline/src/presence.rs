@@ -58,6 +58,41 @@
 //! the backstop, so **≤ 5 s** — and under contract B the poll is permitted to *cap* a box, where
 //! under contract A both surfaces could only ever extend.
 //!
+//! # The END is provisional: [`REVOKE`](PresenceEventKind::Revoke) (T-413)
+//!
+//! *(The user, 2026-09-17, answering the question ADR-0019 §6.1 flagged.)* A detected end is
+//! **revocable**: a signal that resumes within tolerance nulls the end and **keeps the one interval
+//! open** on the **same row**, rather than splitting it or spawning an emitter. The tolerance is the
+//! **existing idle gap** — no new parameter.
+//!
+//! **The window is anchored on the END event, not on the measured end.** An interval closes only
+//! after a full gap of observed silence, so at the instant an END exists the silence since the
+//! *measured* end is already exactly one gap: a window measured from there could never be reached.
+//! It therefore runs from the **decision** and lasts one gap — which places its far edge at
+//! `measured end + 2 × gap`, and that is the form it is written in
+//! ([`Announced::revocable_until_ns`], [`hk_model::IdleGap::revocable_nanos`]). Writing it off the
+//! measurement rather than off the decision is what keeps this stream and the 5 s poll the **same
+//! predicate on the same timestamps** (ADR-0019 §4), and stops the window silently widening when an
+//! END was published late.
+//!
+//! **So the effective join tolerance is `2 × gap` although only one constant exists**, and it is not
+//! that constant doubled: the first gap is the observed absence that *justifies* the end, the second
+//! the observed absence that *confirms* it. Equivalently, the end stands revocable for exactly as
+//! long as `hk_model::confidence_after_silence` is still above `1/e`.
+//!
+//! **What makes a resumption visible here.** A capped interval is kept, not forgotten: on a later
+//! tick its extent's measured end has moved past the end this stream published, which is the whole
+//! signal — the resumption's own *start* is never in the extent (it carries `t_first`), and nothing
+//! here needs it, because the REVOKE re-opens the interval the END capped rather than opening a new
+//! one. One gap later with no resumption, the END becomes final and the entry is forgotten, after
+//! which the same track returning publishes nothing and the poll serves it (ADR-0019 §6.1,
+//! unchanged).
+//!
+//! **What the END now means to a consumer.** It is a cap that may be withdrawn for one idle gap, so
+//! a consumer must not treat it as final before then. That is a change to an existing record's
+//! meaning and not only an added kind, which is why the schema goes to `/3` rather than pretending
+//! the addition is transparent.
+//!
 //! # Shape
 //!
 //! `messages` kind, schema [`PRESENCE_MESSAGE_SCHEMA`], `content_class` unrestricted:
@@ -102,8 +137,10 @@ use crate::config::StreamSink;
 pub const PRESENCE_STREAM_ID: &str = "presence";
 /// Message schema. **Bumped to `/2` by T-410**: the record kinds changed, and a consumer that only
 /// understands `presence-extension` must see a schema it does not know rather than silently ignore
-/// every endpoint on the stream.
-pub const PRESENCE_MESSAGE_SCHEMA: &str = "hackriff.presence/2";
+/// every endpoint on the stream. **Bumped to `/3` by T-413**: `presence-revoke` is added, and — the
+/// part that is not additive — `presence-end` becomes *provisional* for one idle gap, so a consumer
+/// that files an END as final is now wrong about a record it already understands.
+pub const PRESENCE_MESSAGE_SCHEMA: &str = "hackriff.presence/3";
 
 /// `metadata.kind` (and `frame_model`) of a record opening an emitter's **first** interval.
 pub const PRESENCE_START_KIND: &str = "presence-start";
@@ -111,6 +148,9 @@ pub const PRESENCE_START_KIND: &str = "presence-start";
 pub const PRESENCE_REOPEN_KIND: &str = "presence-reopen";
 /// …closing an interval, at its **measured** end.
 pub const PRESENCE_END_KIND: &str = "presence-end";
+/// …**withdrawing** an END published within the last idle gap: the same interval, still open
+/// (T-413). Never a new interval — that is [`PRESENCE_REOPEN_KIND`], and it draws a second box.
+pub const PRESENCE_REVOKE_KIND: &str = "presence-revoke";
 
 /// Shortest gap between ticks, stream ns. 250 ms: well inside the ~1 s the box must cap within, and
 /// four times the 0.5 s detect flush that feeds it, so the flush — not this — paces the stream.
@@ -148,13 +188,20 @@ const NS_PER_S: f64 = 1e9;
 /// the conservative gap applies — this stream defers, and the inventory poll (which measures the
 /// gap off the run's tune history, `hk_api::coverage::ObservedCoverage`) closes the box.
 pub fn interval_closed(e: &LiveExtent) -> bool {
+    e.observed_silence_ns > idle_gap_ns(e)
+}
+
+/// The idle gap this extent's endpoints are judged under, ns — the gap that closes its interval and,
+/// once closed, the gap for which the END stands **revocable** (T-413). One derivation, so the two
+/// decisions can never be taken under different numbers.
+pub fn idle_gap_ns(e: &LiveExtent) -> i64 {
     let watched = e.observed_silence_ns >= e.wall_silence_ns.saturating_sub(COVERAGE_SLACK_NS);
     let gap_s = if watched {
         MIN_IDLE_GAP_S
     } else {
         MAX_IDLE_GAP_S
     };
-    e.observed_silence_ns > (gap_s * NS_PER_S) as i64
+    (gap_s * NS_PER_S) as i64
 }
 
 /// Which endpoint a record announces.
@@ -166,8 +213,14 @@ pub enum PresenceEventKind {
     /// longer than the idle gap, which is what makes it a *new* interval rather than a
     /// continuation (ADR-0019 §6).
     Reopen,
-    /// An interval closed, at its measured end.
+    /// An interval closed, at its measured end. **Provisional**: revocable for one idle gap
+    /// (T-413).
     End,
+    /// An END published within the last idle gap is **withdrawn**: the signal came back inside the
+    /// revocation window, so the interval it capped is the *same* interval and is open again
+    /// (T-413). It carries that interval's original `t_start_s`, which is what distinguishes it
+    /// from a [`Reopen`](Self::Reopen): one box grows, rather than a second appearing.
+    Revoke,
 }
 
 impl PresenceEventKind {
@@ -177,6 +230,7 @@ impl PresenceEventKind {
             Self::Start => PRESENCE_START_KIND,
             Self::Reopen => PRESENCE_REOPEN_KIND,
             Self::End => PRESENCE_END_KIND,
+            Self::Revoke => PRESENCE_REVOKE_KIND,
         }
     }
 
@@ -199,6 +253,16 @@ pub struct PresenceEvent {
     /// instant the end was decided and never `now`. On an opening record it is the interval's start
     /// so far; on a closing one it is where the box retracts to.
     pub t_end_ns: i64,
+    /// Measured silence inside this interval whose end was revoked, ns (T-413). 0 on every kind but
+    /// [`Revoke`](PresenceEventKind::Revoke).
+    ///
+    /// A **lower bound**, and a measured one: it is the silence the receiver actually watched and
+    /// acted on — from the capped measured end to the tick that published the END, one full idle
+    /// gap. The true gap runs on to the resumption's first sample, which is not in a
+    /// [`LiveExtent`] (it carries `t_first`), so the stream states what it can show and the
+    /// inventory poll replaces it with the exact figure within 5 s. Nothing computes air time from
+    /// this; it is what tells a viewer the box covers silence at all.
+    pub revoked_ns: i64,
 }
 
 /// Unix seconds of a nanosecond instant, the `_s` unit `docs/api.md` and the inventory row use.
@@ -210,11 +274,12 @@ impl PresenceEvent {
     /// The record this event publishes as. Pure, so the wire shape is unit-tested without a
     /// publisher (see the tests at the foot of this module).
     pub fn record(&self) -> MessageRecord {
-        // The instant the record is *about*: where a box's newest edge lands because of it.
-        let t = if self.kind.open() {
-            self.t_start_ns
-        } else {
-            self.t_end_ns
+        // The instant the record is *about*: where a box's newest edge lands because of it. An
+        // opening record places a box's oldest edge; an END caps one at its measured end, and a
+        // REVOKE re-opens that same box with its measured edge where the resumption has reached.
+        let t = match self.kind {
+            PresenceEventKind::Start | PresenceEventKind::Reopen => self.t_start_ns,
+            PresenceEventKind::End | PresenceEventKind::Revoke => self.t_end_ns,
         };
         MessageRecord {
             t: Timestamp::from_unix_nanos(t),
@@ -238,6 +303,7 @@ impl PresenceEvent {
                     "t_start_s": secs(self.t_start_ns),
                     "t_end_s": secs(self.t_end_ns),
                     "open": self.kind.open(),
+                    "revoked_s": secs(self.revoked_ns),
                 },
             }),
             content: None,
@@ -245,12 +311,54 @@ impl PresenceEvent {
     }
 }
 
-/// An interval this stream has announced as open, and has not yet announced the end of.
+/// An interval this stream has announced, and has not yet finished with: either still open, or
+/// capped by an END that is **still revocable** (T-413).
 #[derive(Clone, Copy, Debug)]
 struct Announced {
     track: TrackId,
     t_start_ns: i64,
     t_end_ns: i64,
+    /// The tick at which this stream published the END capping this interval, capture ns. `None`
+    /// while the interval is open. Its only use is the **lower bound** a REVOKE reports as the
+    /// silence measured ([`PresenceEvent::revoked_ns`]); the window itself is measured off
+    /// [`Self::t_end_ns`], for the reason on [`Self::revocable_until_ns`].
+    capped_at_ns: Option<i64>,
+    /// The idle gap the END was decided under ([`idle_gap_ns`]) — and therefore the length of the
+    /// revocation window, so the detection and its confirmation are one number, measured once.
+    gap_ns: i64,
+}
+
+impl Announced {
+    /// The last instant a resumption may begin and still revoke this interval's END, capture ns.
+    ///
+    /// The user's rule is "within one idle gap **of the detected end**", and the detected end is
+    /// the END *event* — a window measured from the *measured* end could never be reached, because
+    /// an END only fires once a full gap of silence has already been observed past it. That makes
+    /// the window `[measured end + gap, measured end + 2 × gap]`, and it is implemented in that
+    /// second form — off the measurement rather than off the decision — for two reasons: it is
+    /// literally the predicate [`hk_model::IdleGap::revocable_nanos`] states, so the stream and the
+    /// 5 s poll cannot disagree about which resumptions are one interval; and it does not drift if
+    /// the END itself was published late, where anchoring on the decision would silently widen.
+    fn revocable_until_ns(&self) -> i64 {
+        // Clamped by `MAX_IDLE_GAP_S` for the reason `IdleGap::revocable_nanos` is: past the
+        // tracker's own idle timeout the discontinuity was judged by a measurement upstream, and
+        // revocation may not overrule it (ADR-0019 §6). It binds only on the unknown-revisit path.
+        let window = self
+            .gap_ns
+            .saturating_mul(2)
+            .min((MAX_IDLE_GAP_S * NS_PER_S) as i64);
+        self.t_end_ns.saturating_add(window)
+    }
+
+    /// Whether this entry's END has been published and is no longer revocable at `now_ns`.
+    ///
+    /// One [`PRESENCE_PUSH_NS`] of slack, because a resumption is only ever *noticed* at a tick:
+    /// without it, a signal that came back inside the window would have its revocation refused for
+    /// having been reported on time.
+    fn end_is_final(&self, now_ns: i64) -> bool {
+        self.capped_at_ns.is_some()
+            && now_ns > self.revocable_until_ns().saturating_add(PRESENCE_PUSH_NS)
+    }
 }
 
 /// The run's presence-endpoint publisher: the tick gate, the open set, and the stream itself.
@@ -263,7 +371,8 @@ pub struct PresenceStream {
     publisher: Option<Publisher>,
     /// Stream time of the last tick.
     last_ns: Option<i64>,
-    /// Emitters whose interval this stream has opened and not yet closed.
+    /// Emitters whose interval this stream has opened and not yet *finished with* — open, or capped
+    /// by an END that is still revocable (T-413).
     open: HashMap<EmitterId, Announced>,
     /// Emitters this stream has closed an interval for, newest last — the REOPEN/START test.
     remembered: VecDeque<EmitterId>,
@@ -355,6 +464,7 @@ impl PresenceStream {
     /// a fabricated END would cap a box on air.
     pub fn plan(
         &mut self,
+        now_ns: i64,
         extents: &[LiveExtent],
         extents_complete: bool,
         emitter_of: impl Fn(TrackId) -> Option<EmitterId>,
@@ -362,6 +472,21 @@ impl PresenceStream {
         let mut ends: Vec<PresenceEvent> = Vec::new();
         let mut opens: Vec<PresenceEvent> = Vec::new();
         let mut seen: Vec<EmitterId> = Vec::with_capacity(extents.len());
+
+        // An END whose revocation window has run out is final. Retiring these first — on the tick
+        // clock, so it happens whether or not an extent is still being offered for the track — is
+        // what stops a capped entry lingering and stops the vanished-track sweep below ending an
+        // interval it already ended (T-413).
+        let expired: Vec<(EmitterId, TrackId)> = self
+            .open
+            .iter()
+            .filter(|(_, a)| a.end_is_final(now_ns))
+            .map(|(e, a)| (*e, a.track))
+            .collect();
+        for (emitter, track) in expired {
+            self.open.remove(&emitter);
+            self.remember(emitter, track);
+        }
 
         for e in extents {
             // An extent for a track the inventory has given no row is not addressed to anything:
@@ -372,15 +497,96 @@ impl PresenceStream {
             seen.push(emitter);
             let closed = interval_closed(e);
             match self.open.get(&emitter).copied() {
-                // A different, later interval on the same emitter: the announced one ended where it
-                // was last measured, and this one opens. Emitting both keeps the silence between
-                // them drawn as silence — a REOPEN never stretches a box across it (ADR-0019 §6).
-                Some(a) if e.t_start_ns > a.t_start_ns => {
+                // **The END was provisional, and this is the resumption that revokes it** (T-413).
+                // The interval the END capped re-opens — same emitter, same row, same `t_start_ns`,
+                // ONE interval — rather than a REOPEN's second box. A capped entry that is still
+                // silent says nothing; one whose window has run out was already retired above.
+                Some(a) if a.capped_at_ns.is_some() => {
+                    // The resumption's own start when the extent has one past the cap (a new track
+                    // bound to this emitter): then the gap is *known*, and is checked against the
+                    // same `2 × gap` the batch derivation uses. Otherwise the same track came back
+                    // and its `t_start_ns` is `t_first`, so the tick that noticed it is the best
+                    // clock there is, with one tick of slack for the noticing.
+                    let resumed_at = (e.t_start_ns > a.t_end_ns).then_some(e.t_start_ns);
+                    let inside = match resumed_at {
+                        Some(t) => t <= a.revocable_until_ns(),
+                        None => {
+                            e.t_end_ns > a.t_end_ns
+                                && now_ns <= a.revocable_until_ns() + PRESENCE_PUSH_NS
+                        }
+                    };
+                    if inside {
+                        let capped_at = a.capped_at_ns.expect("guarded by the arm");
+                        opens.push(PresenceEvent {
+                            kind: PresenceEventKind::Revoke,
+                            emitter,
+                            t_start_ns: a.t_start_ns,
+                            t_end_ns: e.t_end_ns.max(a.t_end_ns),
+                            // What the receiver watched and acted on, exactly when the gap is
+                            // known; otherwise the silence up to the END it is withdrawing, which
+                            // is the part it can show. The poll states the full figure.
+                            revoked_ns: resumed_at
+                                .unwrap_or(capped_at)
+                                .saturating_sub(a.t_end_ns)
+                                .max(0),
+                        });
+                        self.open.insert(
+                            emitter,
+                            Announced {
+                                track: e.track,
+                                t_start_ns: a.t_start_ns,
+                                t_end_ns: e.t_end_ns.max(a.t_end_ns),
+                                capped_at_ns: None,
+                                gap_ns: a.gap_ns,
+                            },
+                        );
+                    } else if let Some(t) = resumed_at {
+                        // Past the window, and this extent's start is the resumption's *own*: the
+                        // END stands and this is a genuinely new interval. ADR-0019 §6.1 leaves the
+                        // same *track*'s return to the poll because its only available start is
+                        // `t_first`; a start on the near side of the capped silence is honest, and
+                        // publishing it here is what stops a refused revocation stalling the box
+                        // until the poll catches up.
+                        self.open.remove(&emitter);
+                        self.remember(emitter, a.track);
+                        if !closed {
+                            opens.push(PresenceEvent {
+                                kind: self.opening_kind(emitter),
+                                emitter,
+                                t_start_ns: t,
+                                t_end_ns: e.t_end_ns,
+                                revoked_ns: 0,
+                            });
+                            self.open.insert(
+                                emitter,
+                                Announced {
+                                    track: e.track,
+                                    t_start_ns: t,
+                                    t_end_ns: e.t_end_ns,
+                                    capped_at_ns: None,
+                                    gap_ns: idle_gap_ns(e),
+                                },
+                            );
+                        }
+                    }
+                }
+                // A different, later interval on the same emitter, across a silence too long to be
+                // one interval: the announced one ended where it was last measured, and this one
+                // opens. Emitting both keeps the silence between them drawn as silence — a REOPEN
+                // never stretches a box across it (ADR-0019 §6).
+                //
+                // The guard is T-413's: inside `2 × gap` there is no second interval at all. No END
+                // was ever published for this entry (it is still open — the resumption beat the tick
+                // that would have capped it), so there is nothing to revoke and nothing to say: the
+                // interval simply continues, and the poll records the silence it crossed as a
+                // revoked gap. Falling through to the arm below is exactly that.
+                Some(a) if e.t_start_ns > a.t_start_ns && e.t_start_ns > a.revocable_until_ns() => {
                     ends.push(PresenceEvent {
                         kind: PresenceEventKind::End,
                         emitter,
                         t_start_ns: a.t_start_ns,
                         t_end_ns: a.t_end_ns,
+                        revoked_ns: 0,
                     });
                     self.open.remove(&emitter);
                     self.remember(emitter, e.track);
@@ -390,6 +596,7 @@ impl PresenceStream {
                             emitter,
                             t_start_ns: e.t_start_ns,
                             t_end_ns: e.t_end_ns,
+                            revoked_ns: 0,
                         });
                         self.open.insert(
                             emitter,
@@ -397,6 +604,8 @@ impl PresenceStream {
                                 track: e.track,
                                 t_start_ns: e.t_start_ns,
                                 t_end_ns: e.t_end_ns,
+                                capped_at_ns: None,
+                                gap_ns: idle_gap_ns(e),
                             },
                         );
                     }
@@ -412,9 +621,23 @@ impl PresenceStream {
                             // The *measured* end, taken from the extent rather than from what was
                             // announced, so the box retracts to where the detector last heard it.
                             t_end_ns: e.t_end_ns.max(a.t_start_ns),
+                            revoked_ns: 0,
                         });
-                        self.open.remove(&emitter);
-                        self.remember(emitter, e.track);
+                        // **Kept, not forgotten** (T-413): the END is provisional for one further
+                        // gap, and only an entry that is still here can be revoked. `end_is_final`
+                        // retires it when the window runs out, and until then the emitter is not
+                        // `remember`ed — so a resumption inside the window revokes, and one outside
+                        // it takes the unchanged ADR-0019 §6.1 route through the poll.
+                        self.open.insert(
+                            emitter,
+                            Announced {
+                                track: e.track,
+                                t_start_ns: a.t_start_ns,
+                                t_end_ns: e.t_end_ns.max(a.t_start_ns),
+                                capped_at_ns: Some(now_ns),
+                                gap_ns: idle_gap_ns(e),
+                            },
+                        );
                     } else if e.t_end_ns > a.t_end_ns {
                         self.open.insert(
                             emitter,
@@ -422,6 +645,8 @@ impl PresenceStream {
                                 track: e.track,
                                 t_start_ns: a.t_start_ns,
                                 t_end_ns: e.t_end_ns,
+                                capped_at_ns: None,
+                                gap_ns: idle_gap_ns(e),
                             },
                         );
                     }
@@ -439,6 +664,7 @@ impl PresenceStream {
                         emitter,
                         t_start_ns: e.t_start_ns,
                         t_end_ns: e.t_end_ns,
+                        revoked_ns: 0,
                     });
                     self.open.insert(
                         emitter,
@@ -446,6 +672,8 @@ impl PresenceStream {
                             track: e.track,
                             t_start_ns: e.t_start_ns,
                             t_end_ns: e.t_end_ns,
+                            capped_at_ns: None,
+                            gap_ns: idle_gap_ns(e),
                         },
                     );
                 }
@@ -456,22 +684,29 @@ impl PresenceStream {
         // The belt-and-braces END: an announced emitter with no extent at all. Its track closed
         // (idle, capacity, end of stream), or its row was unbound. Either way the box must cap, and
         // this is what makes "there is no path that produces no END" true.
+        // An entry already capped is skipped: its END has been published, it is waiting out its
+        // revocation window, and ending it again would publish a duplicate (T-413).
         if extents_complete {
-            let gone: Vec<(EmitterId, TrackId)> = self
+            let gone: Vec<EmitterId> = self
                 .open
                 .iter()
-                .filter(|(e, _)| !seen.contains(e))
-                .map(|(e, a)| (*e, a.track))
+                .filter(|(e, a)| !seen.contains(e) && a.capped_at_ns.is_none())
+                .map(|(e, _)| *e)
                 .collect();
-            for (emitter, track) in gone {
-                let a = self.open.remove(&emitter).expect("key came from the map");
-                self.remember(emitter, track);
-                ends.push(PresenceEvent {
+            for emitter in gone {
+                let a = self.open.get_mut(&emitter).expect("key came from the map");
+                let ev = PresenceEvent {
                     kind: PresenceEventKind::End,
                     emitter,
                     t_start_ns: a.t_start_ns,
                     t_end_ns: a.t_end_ns,
-                });
+                    revoked_ns: 0,
+                };
+                // Capped, not dropped: a track that vanished for a moment — a truncated batch it
+                // was cut from, a momentary unbinding — and comes back inside the window revokes
+                // this END like any other. `end_is_final` retires it otherwise.
+                a.capped_at_ns = Some(now_ns);
+                ends.push(ev);
             }
         }
 
@@ -496,7 +731,7 @@ impl PresenceStream {
             return (0, 0);
         }
         self.last_ns = Some(now_ns);
-        for ev in self.plan(extents, extents_complete, emitter_of) {
+        for ev in self.plan(now_ns, extents, extents_complete, emitter_of) {
             self.deferred.push_back(ev);
         }
         // Oldest first past the ceiling. Reached only above 128 endpoints a second, where the poll
@@ -551,7 +786,27 @@ mod tests {
         PresenceStream::new(None).unwrap()
     }
 
-    /// The wire shape of both endpoint kinds: `t_ns` is the instant the record is *about*, the
+    /// The capture instant a tick carrying these extents runs at: the newest measured end plus the
+    /// silence observed since it, which is what the frame clock reads when the batch is flushed.
+    fn now_of(extents: &[LiveExtent]) -> i64 {
+        extents
+            .iter()
+            .map(|e| e.t_end_ns.saturating_add(e.wall_silence_ns))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// `plan` at the instant its extents describe.
+    fn plan(
+        s: &mut PresenceStream,
+        extents: &[LiveExtent],
+        complete: bool,
+        who: impl Fn(TrackId) -> Option<EmitterId>,
+    ) -> Vec<PresenceEvent> {
+        s.plan(now_of(extents), extents, complete, who)
+    }
+
+    /// The wire shape of the endpoint kinds: `t_ns` is the instant the record is *about*, the
     /// metadata is the inventory row's own `last_interval` in seconds (T-354), and neither carries
     /// geometry (T-362).
     #[test]
@@ -563,6 +818,7 @@ mod tests {
             emitter,
             t_start_ns: t0,
             t_end_ns: t1,
+            revoked_ns: 0,
         };
         let rec = start.record();
         assert_eq!(
@@ -591,6 +847,7 @@ mod tests {
         assert_eq!(iv["t_start_s"].as_f64().unwrap(), 1_500_000_000.0);
         assert_eq!(iv["t_end_s"].as_f64().unwrap(), 1_500_000_012.5);
         assert_eq!(iv["open"], json!(false));
+        assert_eq!(iv["revoked_s"].as_f64().unwrap(), 0.0);
         let text = rec.metadata.to_string();
         for banned in ["f_lo", "f_hi", "f_center", "bandwidth"] {
             assert!(
@@ -598,6 +855,26 @@ mod tests {
                 "an endpoint is time, not geometry: {banned}"
             );
         }
+
+        // T-413: a REVOKE withdraws that END. It is about the measured edge the interval has
+        // reached, states the same `t_start_s` (one interval, not a second box), and carries the
+        // silence the receiver measured inside it.
+        let revoke = PresenceEvent {
+            kind: PresenceEventKind::Revoke,
+            revoked_ns: 3 * S / 2,
+            ..start
+        };
+        let rec = revoke.record();
+        assert_eq!(
+            rec.t.as_unix_nanos(),
+            t1,
+            "about the re-opened measured edge"
+        );
+        assert_eq!(rec.frame_model.as_deref(), Some(PRESENCE_REVOKE_KIND));
+        let iv = &rec.metadata["last_interval"];
+        assert_eq!(iv["open"], json!(true), "the interval is open again");
+        assert_eq!(iv["t_start_s"].as_f64().unwrap(), 1_500_000_000.0);
+        assert_eq!(iv["revoked_s"].as_f64().unwrap(), 1.5);
     }
 
     /// **The property contract B is for.** A signal that keeps transmitting produces exactly one
@@ -608,11 +885,11 @@ mod tests {
         let (track, emitter) = (TrackId::new(), EmitterId::new());
         let mut s = stream();
         let who = rows(&[(track, emitter)]);
-        let first = s.plan(&[watched(track, 0, S, 0)], true, &who);
+        let first = plan(&mut s, &[watched(track, 0, S, 0)], true, &who);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].kind, PresenceEventKind::Start);
         for k in 2..40 {
-            let later = s.plan(&[watched(track, 0, k * S, 0)], true, &who);
+            let later = plan(&mut s, &[watched(track, 0, k * S, 0)], true, &who);
             assert!(later.is_empty(), "tick {k} said something: {later:?}");
         }
     }
@@ -626,12 +903,9 @@ mod tests {
 
         // Watched: nothing at the gap, closed just past it.
         let mut s = stream();
-        s.plan(&[watched(track, 0, 10 * S, 0)], true, &who);
-        assert!(
-            s.plan(&[watched(track, 0, 10 * S, S)], true, &who)
-                .is_empty()
-        );
-        let end = s.plan(&[watched(track, 0, 10 * S, S + S / 4)], true, &who);
+        plan(&mut s, &[watched(track, 0, 10 * S, 0)], true, &who);
+        assert!(plan(&mut s, &[watched(track, 0, 10 * S, S)], true, &who).is_empty());
+        let end = plan(&mut s, &[watched(track, 0, 10 * S, S + S / 4)], true, &who);
         assert_eq!(end.len(), 1);
         assert_eq!(end[0].kind, PresenceEventKind::End);
         assert_eq!(
@@ -642,14 +916,14 @@ mod tests {
 
         // Looked away: five seconds of wall silence, only 50 ms of it observed. Not evidence.
         let mut s = stream();
-        s.plan(&[watched(track, 0, 10 * S, 0)], true, &who);
+        plan(&mut s, &[watched(track, 0, 10 * S, 0)], true, &who);
         let swept = LiveExtent {
             observed_silence_ns: S / 20,
             wall_silence_ns: 5 * S,
             ..watched(track, 0, 10 * S, 0)
         };
         assert!(
-            s.plan(&[swept], true, &who).is_empty(),
+            plan(&mut s, &[swept], true, &who).is_empty(),
             "no absence was observed"
         );
         assert!(
@@ -662,52 +936,130 @@ mod tests {
         );
     }
 
-    /// **The end is provisional, and what may revoke it.** A silence shorter than the idle gap
-    /// never produces an END at all, so a signal that blips off and returns inside it keeps one
-    /// unbroken box and one interval — the user's "null the end and keep the single interval open",
-    /// satisfied before an end exists to null (CLAUDE.md, ADR-0019 §6).
-    ///
-    /// Once an END *has* been published, the same track returning publishes nothing: its extent
-    /// carries `t_first`, the track's first burst, and announcing that as a new interval's start
-    /// would claim the silence the END was just drawn for. The poll serves the resumption with the
-    /// start it actually has.
+    /// **A silence inside the gap never ends the interval at all** — the user's "null the end and
+    /// keep the single interval open", satisfied before an end exists to null.
     #[test]
-    fn a_silence_inside_the_gap_never_ends_the_interval_and_a_resumption_after_one_does_not_reclaim_it()
-     {
+    fn a_silence_inside_the_gap_never_ends_the_interval() {
         let (track, emitter) = (TrackId::new(), EmitterId::new());
         let mut s = stream();
         let who = rows(&[(track, emitter)]);
 
-        // Open, then blip off for half the gap and come back: nothing at all is published, so the
-        // box was never capped and the interval was never split.
-        let opened = s.plan(&[watched(track, 0, 5 * S, 0)], true, &who);
+        let opened = plan(&mut s, &[watched(track, 0, 5 * S, 0)], true, &who);
         assert_eq!(opened.len(), 1);
-        assert!(
-            s.plan(&[watched(track, 0, 5 * S, S / 2)], true, &who)
-                .is_empty()
-        );
-        assert!(
-            s.plan(&[watched(track, 0, 6 * S, 0)], true, &who)
-                .is_empty()
-        );
-
-        // Now a silence past the gap caps it…
-        let end = s.plan(&[watched(track, 0, 6 * S, 2 * S)], true, &who);
-        assert_eq!(end.len(), 1);
-        assert_eq!(end[0].kind, PresenceEventKind::End);
-
-        // …and the SAME track coming back says nothing, because the only start it could offer is
-        // the track's first burst at 0 — which is on the far side of the silence just capped.
-        let back = s.plan(&[watched(track, 0, 20 * S, 0)], true, &who);
-        assert!(
-            back.is_empty(),
-            "a resumption whose only available start predates the capped silence must not be \
-             published: {back:?}"
-        );
+        assert!(plan(&mut s, &[watched(track, 0, 5 * S, S / 2)], true, &who).is_empty());
+        assert!(plan(&mut s, &[watched(track, 0, 6 * S, 0)], true, &who).is_empty());
     }
 
-    /// A returning signal on the same emitter reopens it — and the two intervals are two records
-    /// and two boxes, never one box stretched across the silence between them.
+    /// **T-413: the END is provisional, and a resumption inside the window revokes it.** One
+    /// interval, one row, the same `t_start_ns` — never a second box.
+    #[test]
+    fn a_resumption_inside_the_revocation_window_revokes_the_end() {
+        let (track, emitter) = (TrackId::new(), EmitterId::new());
+        let mut s = stream();
+        let who = rows(&[(track, emitter)]);
+
+        plan(&mut s, &[watched(track, 0, 5 * S, 0)], true, &who);
+        // A watched silence past the 1 s gap caps it at the measured end.
+        let end = plan(&mut s, &[watched(track, 0, 5 * S, S + S / 4)], true, &who);
+        assert_eq!(end.len(), 1);
+        assert_eq!(end[0].kind, PresenceEventKind::End);
+        assert_eq!(end[0].t_end_ns, 5 * S);
+
+        // The same track comes back 1.6 s past the measured end — inside `2 × gap`. The END is
+        // withdrawn and the interval is the SAME interval, still starting at 0.
+        let back = plan(
+            &mut s,
+            &[watched(track, 0, 5 * S + 8 * S / 5, 0)],
+            true,
+            &who,
+        );
+        assert_eq!(back.len(), 1, "expected a revocation: {back:?}");
+        assert_eq!(back[0].kind, PresenceEventKind::Revoke);
+        assert_eq!(back[0].t_start_ns, 0, "one interval, not a new one");
+        assert_eq!(back[0].t_end_ns, 5 * S + 8 * S / 5);
+        assert!(
+            back[0].revoked_ns > 0,
+            "it states the measured silence it rejoined: {back:?}"
+        );
+        assert!(
+            back[0].revoked_ns <= 8 * S / 5,
+            "and never more than the gap really was"
+        );
+
+        // And it is open again: continuing after a revocation is news to nobody.
+        assert!(plan(&mut s, &[watched(track, 0, 10 * S, 0)], true, &who).is_empty());
+    }
+
+    /// **The far side of the boundary, asserted rather than assumed.** A resumption past
+    /// `2 × gap` leaves the END standing; the interval is not rejoined, and this stream says
+    /// nothing further about the track (the poll serves the new interval — ADR-0019 §6.1).
+    #[test]
+    fn a_resumption_outside_the_revocation_window_leaves_the_end_standing() {
+        let (track, emitter) = (TrackId::new(), EmitterId::new());
+        let mut s = stream();
+        let who = rows(&[(track, emitter)]);
+
+        plan(&mut s, &[watched(track, 0, 5 * S, 0)], true, &who);
+        let end = plan(&mut s, &[watched(track, 0, 5 * S, S + S / 4)], true, &who);
+        assert_eq!(end[0].kind, PresenceEventKind::End);
+
+        // Still silent at 2.5 s: past the window, so the end becomes final. (Silence alone
+        // publishes nothing — the END has already been sent.)
+        assert!(plan(&mut s, &[watched(track, 0, 5 * S, 5 * S / 2)], true, &who).is_empty());
+        // The track returns. Its only available start is `t_first` at 0, on the far side of the
+        // capped silence, so there is no honest opening record and none is published.
+        let back = plan(&mut s, &[watched(track, 0, 20 * S, 0)], true, &who);
+        assert!(back.is_empty(), "the end stands: {back:?}");
+    }
+
+    /// **The boundary itself**, on both sides of one nanosecond, using a resumption whose own start
+    /// is known (a new track on the same emitter) so the gap is exact rather than tick-quantised.
+    #[test]
+    fn the_revocation_window_is_two_idle_gaps_from_the_measured_end() {
+        let gap = (MIN_IDLE_GAP_S * NS_PER_S) as i64;
+        let run = |resume_at: i64| {
+            let emitter = EmitterId::new();
+            let (first, second) = (TrackId::new(), TrackId::new());
+            let mut s = stream();
+            let who = rows(&[(first, emitter), (second, emitter)]);
+            plan(&mut s, &[watched(first, 0, 5 * S, 0)], true, &who);
+            let end = plan(
+                &mut s,
+                &[watched(first, 0, 5 * S, gap + gap / 4)],
+                true,
+                &who,
+            );
+            assert_eq!(end[0].kind, PresenceEventKind::End);
+            plan(
+                &mut s,
+                &[watched(second, resume_at, resume_at + S / 10, 0)],
+                true,
+                &who,
+            )
+        };
+
+        let inside = run(5 * S + 2 * gap);
+        assert_eq!(inside.len(), 1);
+        assert_eq!(inside[0].kind, PresenceEventKind::Revoke, "at the edge");
+        assert_eq!(inside[0].t_start_ns, 0, "the interval the END capped");
+        assert_eq!(
+            inside[0].revoked_ns,
+            2 * gap,
+            "the gap is known exactly here, so it is stated exactly"
+        );
+
+        let outside = run(5 * S + 2 * gap + 1);
+        assert_eq!(outside.len(), 1, "{outside:?}");
+        assert_eq!(
+            outside[0].kind,
+            PresenceEventKind::Reopen,
+            "one nanosecond past the window is a genuinely new interval"
+        );
+        assert_eq!(outside[0].t_start_ns, 5 * S + 2 * gap + 1);
+    }
+
+    /// A returning signal on the same emitter, far past the window, reopens it — and the two
+    /// intervals are two records and two boxes, never one box stretched across the silence.
     #[test]
     fn a_returning_signal_reopens_the_same_emitter_and_never_spans_the_silence() {
         let emitter = EmitterId::new();
@@ -715,12 +1067,12 @@ mod tests {
         let mut s = stream();
         let who = rows(&[(first, emitter), (second, emitter)]);
 
-        s.plan(&[watched(first, 0, 5 * S, 0)], true, &who);
-        let end = s.plan(&[watched(first, 0, 5 * S, 2 * S)], true, &who);
+        plan(&mut s, &[watched(first, 0, 5 * S, 0)], true, &who);
+        let end = plan(&mut s, &[watched(first, 0, 5 * S, 2 * S)], true, &who);
         assert_eq!(end[0].kind, PresenceEventKind::End);
 
-        // A new track on the same emitter, starting after the silence.
-        let out = s.plan(&[watched(second, 30 * S, 31 * S, 0)], true, &who);
+        // A new track on the same emitter, starting 25 s after the silence.
+        let out = plan(&mut s, &[watched(second, 30 * S, 31 * S, 0)], true, &who);
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].kind,
@@ -737,7 +1089,8 @@ mod tests {
         // A fresh emitter with no history starts rather than reopens. (Its own stream, so the
         // emitter above staying open is not read as vanished and closed in the same breath.)
         let (t3, other) = (TrackId::new(), EmitterId::new());
-        let out = stream().plan(
+        let out = plan(
+            &mut stream(),
             &[watched(t3, 40 * S, 41 * S, 0)],
             true,
             rows(&[(t3, other)]),
@@ -747,22 +1100,28 @@ mod tests {
 
     /// The belt-and-braces END: a track that vanishes (closed, or its row unbound) still caps its
     /// box — but only when the extent list is known complete, so a truncated batch can never
-    /// fabricate an end for a signal still on the air.
+    /// fabricate an end for a signal still on the air. T-413: that END is provisional like any
+    /// other, so the entry is held for one revocation window and only then forgotten.
     #[test]
     fn a_vanished_track_is_ended_but_only_from_a_complete_list() {
         let (track, emitter) = (TrackId::new(), EmitterId::new());
         let who = rows(&[(track, emitter)]);
 
         let mut s = stream();
-        s.plan(&[watched(track, 0, 5 * S, 0)], true, &who);
+        s.plan(5 * S, &[watched(track, 0, 5 * S, 0)], true, &who);
         assert!(
-            s.plan(&[], false, &who).is_empty(),
+            s.plan(5 * S, &[], false, &who).is_empty(),
             "a truncated list ends nothing"
         );
-        let end = s.plan(&[], true, &who);
+        let end = s.plan(5 * S, &[], true, &who);
         assert_eq!(end.len(), 1);
         assert_eq!(end[0].kind, PresenceEventKind::End);
         assert_eq!(end[0].t_end_ns, 5 * S, "the last end it was announced with");
+        // Ending it twice would be a duplicate cap; the entry is waiting out its window.
+        assert!(s.plan(5 * S + S / 2, &[], true, &who).is_empty());
+        assert!(s.has_state(), "still revocable");
+        // Past `2 × gap` (plus the tick slack) it is final and nothing is left.
+        assert!(s.plan(5 * S + 4 * S, &[], true, &who).is_empty());
         assert!(!s.has_state(), "and nothing is left open");
     }
 
@@ -771,7 +1130,8 @@ mod tests {
     fn a_track_with_no_inventory_row_yields_no_event() {
         let (with_row, without) = (TrackId::new(), TrackId::new());
         let mut s = stream();
-        let out = s.plan(
+        let out = plan(
+            &mut s,
             &[watched(with_row, 0, S, 0), watched(without, 0, S, 0)],
             true,
             rows(&[(with_row, EmitterId::new())]),
@@ -793,21 +1153,21 @@ mod tests {
         }
         let who = rows(&pairs);
         // Everything opens…
-        let opens = s.plan(&extents, true, &who);
+        let opens = plan(&mut s, &extents, true, &who);
         assert_eq!(opens.len(), n);
         // …then one of them stops while the rest keep going. Its END leads the next plan.
         let mut next = extents.clone();
         next[n - 1].observed_silence_ns = 2 * S;
         next[n - 1].wall_silence_ns = 2 * S;
         let mut s2 = stream();
-        s2.plan(&extents, true, &who);
-        let out = s2.plan(&next, true, &who);
+        plan(&mut s2, &extents, true, &who);
+        let out = plan(&mut s2, &next, true, &who);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, PresenceEventKind::End);
 
         // The cap is on records per tick; the remainder is deferred, and counted.
         let mut s3 = PresenceStream::new(None).unwrap();
-        s3.plan(&extents, true, &who)
+        plan(&mut s3, &extents, true, &who)
             .into_iter()
             .for_each(|e| s3.deferred.push_back(e));
         assert_eq!(s3.deferred.len(), n);

@@ -32,8 +32,8 @@ use std::sync::{Arc, Mutex};
 use common::*;
 use hk_model::sigmf::{Capture, Datatype, SigmfMeta};
 use hk_pipeline::{
-    PRESENCE_END_KIND, PRESENCE_MESSAGE_SCHEMA, PRESENCE_REOPEN_KIND, PRESENCE_START_KIND,
-    PRESENCE_STREAM_ID,
+    PRESENCE_END_KIND, PRESENCE_MESSAGE_SCHEMA, PRESENCE_REOPEN_KIND, PRESENCE_REVOKE_KIND,
+    PRESENCE_START_KIND, PRESENCE_STREAM_ID,
 };
 use hk_stream::{Declared, Record, StreamKind, StreamReader};
 use serde_json::json;
@@ -170,7 +170,13 @@ fn a_live_signals_box_opens_once_and_caps_at_the_measured_end() {
         }
         let kind = v["metadata"]["kind"].as_str().unwrap().to_owned();
         assert!(
-            [PRESENCE_START_KIND, PRESENCE_REOPEN_KIND, PRESENCE_END_KIND].contains(&kind.as_str()),
+            [
+                PRESENCE_START_KIND,
+                PRESENCE_REOPEN_KIND,
+                PRESENCE_END_KIND,
+                PRESENCE_REVOKE_KIND,
+            ]
+            .contains(&kind.as_str()),
             "unknown record kind on the presence stream: {kind}"
         );
         assert_eq!(v["frame_model"], json!(kind));
@@ -194,7 +200,10 @@ fn a_live_signals_box_opens_once_and_caps_at_the_measured_end() {
     // T-354: the envelope's `t_ns` is the instant the record is about, in integer Unix nanoseconds
     // — the interval's start for an opening record, its measured end for a closing one.
     for e in &seen {
-        let about = if e.open { e.t_start_s } else { e.t_end_s };
+        // An opening record is about its start; an END and a REVOKE are both about the measured
+        // edge the box lands on (T-413).
+        let opening = e.kind == PRESENCE_START_KIND || e.kind == PRESENCE_REOPEN_KIND;
+        let about = if opening { e.t_start_s } else { e.t_end_s };
         assert!(
             (e.t_ns as f64 * 1e-9 - about).abs() < 1e-6,
             "t_ns disagrees with the endpoint it names: {} vs {about}",

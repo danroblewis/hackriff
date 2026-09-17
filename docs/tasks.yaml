@@ -8552,19 +8552,11 @@ tasks:
   - id: T-408
     title: The coverage tile pyramid and the full-spectrum-over-time view - design before building
     milestone: M5
-    status: blocked
-    blocked_on: >-
-      the user, a design decision. docs/16 section 5 lists five open questions and two gate
-      everything downstream: TILE ADDRESSING (map-style fixed tiles vs the per-axis budget
-      idiom this repo already uses - they do not obviously compose) and WHEN DOWNSAMPLING
-      HAPPENS (precomputed at seal time, bounding read latency and costing storage in a system
-      that hit 9.5 GB free today, or on demand, the reverse trade). Not blocked on capacity:
-      nobody can start until these are settled.
+    status: in-progress
     priority: normal
     parallel_group: DESIGN
     core_interface: true
     model: fable-or-opus-with-user
-    needs: user-design-signoff
     deps: [T-368, T-342]
     acceptance: |
       USER 2026-09-16, item (3) - "the user promises it is very cool". Design doc
@@ -8594,6 +8586,27 @@ tasks:
       The invariants it must not lose are in section 4, and the one the user is already
       feeling is that FOLDING NEVER LOWERS A VALUE - that is what makes a peak survive
       downsampling, and its absence is T-405's washed-out yellow and red peaks.
+      USER DECISION 2026-09-17 - UNBLOCKED. The two gating questions are settled
+      GOOGLE-MAPS-STYLE:
+      section 5.1 TILE ADDRESSING = FIXED (zoom, t_index, f_index) map tiles. NOT the
+      per-axis budget idiom for this view. (The budget idiom stays correct for
+      /api/timeline and /api/floor - this decision is about the big view's tiles.)
+      section 5.2 DOWNSAMPLE TIMING = PRECOMPUTED at seal time for the coarse zoom
+      levels, ON-DEMAND at the live/finest edge, with CLIENT-SIDE TILE EVICTION and a
+      TILES-IN-FLIGHT CAP for bounded browser memory. Storage cost accepted (140 GB
+      free at the time of the decision).
+      THE REMAINING THREE (5.3 confirmed-signal highlighting, 5.4 retention horizon per
+      zoom level, 5.5 eviction policy) ARE SETTLED WITHIN THAT FRAMEWORK AS PART OF THE
+      DESIGN WORK. They do not gate and do not need the user.
+      Note for 5.4 in particular: the horizons are already three different things - the
+      IQ ring (seconds to minutes), spectrum history (longer, lossy) and the
+      observation log (30 days) - so "which horizon does this zoom level answer for"
+      has a real answer per level rather than one global choice, and the grey must mean
+      unobserved AT THAT LEVEL'S HORIZON.
+      Note for 5.3: T-386 settled that the durable catalogue is an INDEPENDENT surface
+      from the view cursor, and this view is a history surface - so whose time frame
+      the highlighted emitters belong to is a live question, not a styling one.
+
   - id: T-409
     title: Tuning nudge buttons - move a signal off the DC spike without losing it from the band
     milestone: M2-hardening
@@ -8840,7 +8853,7 @@ tasks:
   - id: T-413
     title: Is a detected end provisional and revocable, and if so over what silence?
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -8934,7 +8947,7 @@ tasks:
   - id: T-416
     title: A real mono FM station is not recognised as WFM, and the rejection leaves no trace
     milestone: M3
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -8967,6 +8980,68 @@ tasks:
       Control: a genuinely unrecognisable emission still declines, and still logs.
       Do not make (1) pass by lowering a confidence threshold - if 0.75 is the right
       confidence for "unknown", the question is why a 150 kHz FM carrier produces it.
+  - id: T-417
+    title: A retune tears the stream down; consumers should keep receiving across it
+    milestone: M2-hardening
+    status: in-progress
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: []
+    acceptance: |
+      USER 2026-09-17 (message reached this session TRUNCATED at the front; what
+      arrived is below, verbatim, and is unambiguous about the requirement):
+        "...gap is fine), so connected consumers keep receiving after the retune; and
+         the UI spectrum websocket client should reconnect gracefully across a
+         re-plumb rather than erroring."
+      So: A RETUNE MUST NOT DISCONNECT STREAM CONSUMERS. A settle gap is fine - a
+      break in the data is expected and honest while the front end moves - but the
+      CONNECTION should survive, and the UI's spectrum websocket should reconnect
+      gracefully across a re-plumb rather than erroring.
+      WHY THIS IS HIGH AND WHY IT IS URGENT NOW: this session has just shipped four
+      ways to retune - T-343's gated device action, T-392's region-select-on-release,
+      T-409's nudge buttons (filed), and the frequency navigator's offer. Every one of
+      them is unpleasant to use if the stream dies each time. The retune features and
+      this defect are the same user-facing experience.
+      WHAT TO ESTABLISH FIRST: whether the teardown is the re-plumb itself
+      (Pipeline::replumb takes the still-open device out of the slot and calls
+      start_segment, which builds new readers) or the client erroring on a gap it
+      should tolerate. T-399 documents that replumb reuses the SAME still-open device,
+      so the device is not closing - which points at the readers and their publishers.
+      HONESTY CONSTRAINT: a gap in the data is real and must stay visible. Do not paper
+      over the settle gap by holding the last frame or interpolating - the coverage
+      rule (grey means genuinely unobserved) applies to time as much as frequency, and
+      T-410's open cap is the precedent for drawing an absence rather than hiding it.
+      The connection persists; the data honestly gaps.
+      Note the stream contract already distinguishes these: publisher backpressure
+      drops a slow consumer deliberately (T-388), which is NOT this - that is a policy
+      about a consumer that cannot keep up, not about the producer retuning.
+  - id: T-418
+    title: Something the user calls bad practice until T-417 is fixed
+    milestone: M2-hardening
+    status: blocked
+    priority: normal
+    parallel_group: PIPE
+    deps: [T-417]
+    blocked_on: >-
+      the user resending the first half of their message. It reached this session truncated and only
+      this arrived, verbatim: "...practice until the retune-keeps-the-stream-alive bug (my previous
+      message) is fixed. File it; verify both messages became tickets." The SUBJECT - what is bad
+      practice, or what should be avoided - did not arrive, so there is nothing here to build. The
+      dependency is clear (it is unblocked or unnecessary once T-417 lands) but the content is not.
+      Do not guess it: an earlier reconstruction from a fragment put a framing on a suite that the
+      user then had to retract.
+    notes: |
+      Filed because the user explicitly asked me to confirm BOTH messages became
+      tickets. This is the second. It is a placeholder with an honest reason rather
+      than an invented requirement.
+      WHAT IS RECOVERABLE: it concerns a practice or habit that the user considers
+      unwise WHILE retunes tear down the stream (T-417), which implies it becomes fine
+      once T-417 lands. A plausible reading is that it is about the retune-heavy
+      features shipped this session - region-select-on-release, the nudge buttons -
+      being unpleasant to exercise until the stream survives a retune. That is a GUESS
+      AND IS NOT FILED AS THE REQUIREMENT.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
