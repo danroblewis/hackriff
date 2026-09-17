@@ -3996,3 +3996,44 @@ scheduled: it may tune directly to known references because it tests the equipme
 analysis, so the no-lookup-and-tune rule does not apply — that rule protects the *analysis* from being
 handed its answer. Their message arrived truncated and the note says so, so the front half can be
 confirmed before anyone builds from it.
+
+### B0.666 — the self-test note was mis-framed; it is a software acceptance suite (2026-09-16)
+
+The user corrected the note I recorded in B0.665. I had written it from a **truncated message** whose
+surviving fragment said *"...MAY tune directly to known references because it tests the EQUIPMENT not
+blind detection"*, and I framed the whole thing around equipment verification. **That framing is
+wrong, and the user has withdrawn the frequency-calibration/WWV-ppm angle entirely** as their own
+over-addition.
+
+**What it actually is: a software acceptance / user-simulation suite.** It drives the **live app
+through browser instrumentation** (Playwright) against real hardware and ambient AM/FM, to prove **the
+software** works end to end. The radio is the fixture, not the subject. The simulated session is
+concrete: open the app; tune to *or search for* a promising region; sit a while and confirm **candidate
+and confirmed** signals appear; confirm they can be tuned to; confirm **decoding works**, with **RDS on
+FM as the headline**; and confirm **no duplicate bands appear**.
+
+It is a **curated subset of the existing e2e and unit assertions**, reused where they map, run against
+the live app rather than the mock device. Still T5/T6, still never gates CI, placement after or
+alongside M7, not scheduled.
+
+Two things worth noting beyond the correction.
+
+**The no-lookup-and-tune rule genuinely does not apply here, but for a sharper reason than I wrote.**
+That rule protects *blind detection* from being handed its answer. This suite is not testing
+detection's blindness — it is testing that the product works. Tuning to a known FM station to check
+RDS decodes is not a shortcut past an analysis; there is no analysis being shortcut.
+
+**Step 6 is the property the user is watching fail right now.** "Confirm no duplicate bands appear" is
+exactly T-369/T-390 — the candidates over-split into the FM station skirts. A field check that
+asserted it would have caught this before the user did, from the surface the user actually uses. That
+is an argument for the suite that the original framing obscured entirely.
+
+A **deferred variant** is recorded in docs/11 only: a lighter version running **on boot-up as a
+power-on self-test**. The user judges it harder, ruled it out for now, and asked only that it be noted
+— it sits downstream of the manual browser-driven check, which has to exist and be trusted first.
+
+The correction is also a lesson about truncated messages. I have now twice reconstructed user
+direction from a fragment: once successfully from a `CLAUDE.md` diff, once — here — by inferring a
+frame that was not theirs. The docs now carry a "superseded framing" line so the wrong version cannot
+be mistaken for a decision, and I should say plainly which part of a truncated message I actually
+received rather than writing around the gap.

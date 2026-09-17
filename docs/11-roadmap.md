@@ -108,21 +108,44 @@ Ordered by shared-core coverage ([docs/06 §4.2](06-capability-map.md)): widen t
 - [SoapySDR](https://github.com/pothosware/SoapySDR): target for later non-HackRF devices behind the generic interface (T-048).
 - Internal: [docs/06 §4.2](06-capability-map.md), [docs/10](10-test-strategy.md), [ADR-0005](adr/0005-survey-dwell-scheduler.md), [tasks.yaml](tasks.yaml) T-039, T-042..T-045, T-047..T-053.
 
-### Equipment self-test suite (user, 2026-09-16) — recorded, not scheduled
+### Software acceptance / user-simulation field check (user, 2026-09-16)
 
-A second, clearly separate acceptance suite that **verifies the equipment rather than the analysis**.
+**This is not a radio test and not calibration.** It is a **software acceptance suite**: it drives the
+**live app through browser instrumentation** against real hardware and ambient AM/FM, to prove the
+software works end to end as a user experiences it. The radio is the *fixture*, not the subject.
 
-- It **MAY tune directly to known references** (broadcast stations, beacons, GNSS) because it tests
-  the **equipment**, not blind detection — so it does **not** violate the no-lookup-and-tune rule that
-  governs the blind suites. That rule exists to stop the *analysis* being handed its answer; a
-  receiver check has no analysis to protect.
-- **Keep the two suites separate and labeled.** The value of the blind suite comes entirely from its
-  discipline, and a single mixed runner would erode it by making "we tuned there" unremarkable.
-- **Productized T5/T6 tier (HIL / field). It never gates CI**, like the other hardware tiers.
-- **New dependency: a browser-automation harness**, since it drives the product as a user sees it.
+**The simulated user session:**
 
-*Status: recorded only. The user was explicit — do not add tasks and do not build it yet.*
+1. Open the app.
+2. Tune to — or **search for** — a region likely to hold good signals.
+3. Sit a while, and confirm **candidate *and* confirmed** signals appear.
+4. Confirm they can be **tuned to**.
+5. Confirm **decoding works**. **RDS on FM is the headline** — prove we decode the RDS sideband. Where
+   automated decoding exists, capture and verify its output.
+6. Confirm **no duplicate bands appear** — live dedup correctness.
 
-*Coordinator note: the user's message reached this session truncated; the front half is not recorded
-here. What is written above is the portion that arrived, and it should be confirmed before anyone
-builds from it.*
+**It is a curated subset of the existing e2e and unit assertions**, reused where they map, run against
+the **live app via the browser** rather than against the mock device. Assume AM/FM present as the
+signal source.
+
+Because it drives the real product rather than the analysis, it may tune directly to a known region
+without violating the no-lookup-and-tune rule: that rule protects *blind detection* from being handed
+its answer, and this suite is not testing detection's blindness — it is testing that the software
+works. **Keep it separate from, and labeled apart from, the blind suites**, whose value comes entirely
+from that discipline.
+
+- **Tier: productized T5/T6 (HIL / field). It never gates CI.**
+- **New dependency: a browser-automation harness (Playwright).**
+- **Placement: after or alongside M7.** Not scheduled now.
+
+*Note: step 6 is the same property the user is currently seeing fail live (see T-369, T-390) — a field
+check that asserts it would have caught it.*
+
+*Superseded framing: an earlier version of this note, written from a truncated message, described this
+as an "equipment self-test" and implied frequency calibration. That framing is withdrawn by the user:
+a frequency-reference check is a minor optional extra at most, and is not the point.*
+
+**Deferred variant — power-on self-test (recorded, explicitly not now).** A lighter version of the
+above that runs **automatically on boot-up**. The user judges it harder and has ruled it out for now:
+**do not design or build it.** It sits downstream of the manual, browser-driven field check — that one
+has to exist and be trusted first.
