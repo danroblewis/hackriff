@@ -132,9 +132,9 @@ pub use repo::{
     USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand,
 };
 pub use signature::cluster::{
-    CLUSTER_FIELDS, CLUSTER_MIN_APPEARANCES, CLUSTER_MIN_MEMBERS, ClusterCentroid, ClusterEvent,
-    ClusterEventKind, ClusterState, EmitterClusterLink, SignatureCluster, is_cluster_field,
-    is_cluster_id, new_cluster_id,
+    CLUSTER_FIELDS, CLUSTER_LABEL_LEN, CLUSTER_MIN_APPEARANCES, CLUSTER_MIN_MEMBERS,
+    ClusterCentroid, ClusterEvent, ClusterEventKind, ClusterState, EmitterClusterLink,
+    SignatureCluster, cluster_label, is_cluster_field, is_cluster_id, new_cluster_id,
 };
 pub use signature::{
     EMISSION_FEATURES_VERSION, EmissionFeatures, Feat, FeatValue, FieldAgreement, FieldExpect,

@@ -22,5 +22,9 @@ tungstenite.workspace = true
 
 [dev-dependencies]
 hk-core.workspace = true
+# T-320: the `cluster_group` test drives the *real* C18 clusterer rather than writing cluster rows
+# by hand, so "these rows measure alike" is decided by the measurements. hk-context does not
+# depend on hk-api, so this edge is acyclic and test-only.
+hk-context.workspace = true
 hk-dsp.workspace = true
 num-complex.workspace = true

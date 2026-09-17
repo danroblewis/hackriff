@@ -24,7 +24,7 @@ use hk_model::{
     AnnotationAuthor, AnnotationTarget, ArtifactKind, Demodulation, FreqRange, IdentityAccess,
     IdentityScheme, IdleGap, InventoryEntry, InventoryIdentity, InventoryQuery, KnownStatus,
     LifecycleAuthor, LifecycleState, Presence, RelationVisibility, RepoError, Repository,
-    StatusAuthor, TimeRange, Timestamp,
+    StatusAuthor, TimeRange, Timestamp, cluster_label,
 };
 use hk_store::history::{
     CoverageSummary, FORMAT_VERSION, FilterSummary, FrontEndState, Geometry, HistoryStat,
@@ -1065,6 +1065,10 @@ fn reason_is_identity_free(author: StatusAuthor) -> bool {
 /// `recurrence` (occurrences, appearances, span, on-air time, duty cycle and the
 /// [`RECENT_APPEARANCES`] latest appearances).
 ///
+/// T-320: `cluster_group` is the row's `cluster_id` served as grouping data — the id, a short
+/// stable `label`, and `rows_in_view`, the number of rows **on this page** sharing it. See
+/// [`cluster_group_json`]: it makes duplication visible and de-duplicates nothing.
+///
 /// T-171: `total` is [`Repository::count_inventory`] — the number of rows the same filters match,
 /// ignoring `cursor`/`limit`, so a caller can show a count past one page. It is an efficient
 /// indexed `COUNT(*)` for every filter but a `tag` outside `hk_model::TAG_VOCABULARY`, which is
@@ -1084,6 +1088,21 @@ pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> 
         // it renders can never disagree.
         entries.push(inventory_entry_json_at(repo, entry, query.time, at).map_err(failed)?);
     }
+    // T-320: the grouping, computed here because only the list knows what is in view. A client
+    // must not derive it — the UI is a thin client over this contract (CLAUDE.md) — and only the
+    // server can scope the count honestly to the page it actually served.
+    let mut per_cluster: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for e in &entries {
+        if let Some(id) = e["cluster_id"].as_str() {
+            *per_cluster.entry(id.to_owned()).or_default() += 1;
+        }
+    }
+    for e in &mut entries {
+        let id = e["cluster_id"].as_str().map(ToOwned::to_owned);
+        let n = id.as_deref().and_then(|i| per_cluster.get(i)).copied();
+        e["cluster_group"] = cluster_group_json(id.as_deref(), n.unwrap_or(1));
+    }
     Ok(json!({
         "entries": entries,
         "next_cursor": page
@@ -1098,6 +1117,36 @@ pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> 
 
 /// Latest appearances listed per `/api/inventory` row.
 pub const RECENT_APPEARANCES: usize = 8;
+
+/// T-320 `cluster_group`: the row's C18 cluster membership served as **grouping data**, so a list
+/// can show *which* rows measure alike rather than only that each has been seen before.
+///
+/// `null` exactly when `cluster_id` is — no cluster, one that is not yet visible, or a
+/// withheld-identity row — so it can never reveal a membership `cluster_id` withholds.
+///
+/// - `cluster_id`: the same id as the row's own field, repeated so the object stands alone.
+/// - `label`: [`hk_model::cluster_label`], a short stable form of that id. Backend-owned because
+///   the grouping is the backend's claim, not a client's arithmetic over a page it happens to hold.
+/// - `rows_in_view`: how many rows **in this response** carry the same id. It is scoped to what
+///   was served — never a cluster's total membership, which `/api/clusters/{id}` answers — so a
+///   client can say "11 of the rows you are looking at measure alike" and nothing stronger.
+///
+/// **It groups; it does not merge.** Rows sharing a label stay separate inventory rows with their
+/// own ids, counts, detections and history: a cluster is a *type* and an emitter an *instance*
+/// (ADR-0016 §5), and clustering writes nothing on an emitter — pinned by
+/// `a_cluster_never_changes_anything_about_the_emitter`. Duplicate rows are minted upstream by
+/// entity resolution; this field makes such duplication **visible**, and de-duplicates nothing.
+/// The grouping is derived from the cluster id alone, so it cannot vary with which front end
+/// reported a row (T-259/T-305: identity and clustering never read the device).
+fn cluster_group_json(cluster_id: Option<&str>, rows_in_view: usize) -> Value {
+    cluster_id.map_or(Value::Null, |id| {
+        json!({
+            "cluster_id": id,
+            "label": cluster_label(id),
+            "rows_in_view": rows_in_view,
+        })
+    })
+}
 
 /// One `/api/inventory` row (see [`inventory_json`]).
 /// T-191 `user_band` object: edges (Hz), `set_at` (Unix s), actor (token fingerprint) and the
@@ -1429,6 +1478,7 @@ pub fn inventory_entry_json_at(
                 None => None,
             }
         };
+        let cluster_group = cluster_group_json(cluster_id.as_deref(), 1);
         // ADR-0017 TM-2: when this emitter was on the air, through the request's window. The
         // emitter's own `first_seen`/`last_seen` are a *hull* and never an extent, so this — not
         // they — is what a caller reads for "is it on air, and for how long".
@@ -1476,6 +1526,11 @@ pub fn inventory_entry_json_at(
             // T-202 (ADR-0016 §5): C18 cluster membership — evidence that this emission measures
             // like others, never an identity, a family or a status.
             "cluster_id": cluster_id,
+            // T-320: the same membership as *grouping data*, so a list can show which rows measure
+            // alike instead of only that each one has been seen before. `rows_in_view` is 1 here —
+            // a single row is the whole view — and [`inventory_json`] raises it to the number of
+            // rows on the page that share the id. It groups; it never merges.
+            "cluster_group": cluster_group,
             "identity_scheme": scheme,
             "identity_class": class,
             "withheld": withheld,

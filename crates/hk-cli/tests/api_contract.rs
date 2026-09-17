@@ -1159,6 +1159,8 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         "latest_classification",
         // T-202: the C18 cluster of unknowns this row belongs to (present, possibly null).
         "cluster_id",
+        // T-320: that membership as grouping data (present, possibly null).
+        "cluster_group",
         // T-284 (ADR-0017 TM-2): when this row was on the air, through the request's window.
         "presence",
     ] {
@@ -1224,6 +1226,58 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         matches!(row["state"].as_str(), Some("candidate" | "confirmed")),
         "default listing excludes deleted entries: {row}"
     );
+    // T-320: `cluster_group` is grouping *data*, so the contract is about its values, not its
+    // keys (T-315: a shape-only assertion satisfies the letter of T-079 and not its point). Every
+    // claim below is re-derived from the served page here, independently of the server:
+    //   - it is null exactly when `cluster_id` is, so it can never reveal a withheld membership;
+    //   - rows in the same cluster carry the *same* id and the *same* label on the wire;
+    //   - rows in different clusters carry *different* labels — without which the property is
+    //     satisfiable by emitting one constant;
+    //   - `rows_in_view` is the count of same-cluster rows on this page, not a cluster's total.
+    {
+        use std::collections::HashMap;
+        let rows = v["entries"].as_array().unwrap();
+        let mut counted: HashMap<&str, usize> = HashMap::new();
+        for r in rows {
+            if let Some(id) = r["cluster_id"].as_str() {
+                *counted.entry(id).or_default() += 1;
+            }
+        }
+        let mut label_of: HashMap<&str, &str> = HashMap::new();
+        for r in rows {
+            let g = &r["cluster_group"];
+            assert_eq!(
+                g.is_null(),
+                r["cluster_id"].is_null(),
+                "cluster_group is null exactly when cluster_id is: {r}"
+            );
+            let Some(id) = r["cluster_id"].as_str() else {
+                continue;
+            };
+            assert_eq!(g["cluster_id"].as_str(), Some(id), "{r}");
+            let label = g["label"].as_str().expect("label is a string");
+            assert!(!label.is_empty() && label.len() <= 6, "label {label}: {r}");
+            assert_eq!(
+                g["rows_in_view"].as_u64(),
+                Some(counted[id] as u64),
+                "rows_in_view counts same-cluster rows on this page: {r}"
+            );
+            // The property: one cluster reads one label, on every row that shares it.
+            let seen = label_of.entry(id).or_insert(label);
+            assert_eq!(*seen, label, "one cluster, two labels: {r}");
+        }
+        // The control: two rows that are not in the same cluster do not read as one group.
+        // Without it the property above is satisfiable by emitting a single constant.
+        let mut labels: Vec<&str> = label_of.values().copied().collect();
+        labels.sort_unstable();
+        let distinct = labels.len();
+        labels.dedup();
+        assert_eq!(
+            labels.len(),
+            distinct,
+            "distinct clusters must read distinct labels: {label_of:?}"
+        );
+    }
     for field in [
         "occurrences",
         "appearances",
