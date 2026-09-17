@@ -865,7 +865,11 @@ mod tests {
             ..start
         };
         let rec = revoke.record();
-        assert_eq!(rec.t.as_unix_nanos(), t1, "about the re-opened measured edge");
+        assert_eq!(
+            rec.t.as_unix_nanos(),
+            t1,
+            "about the re-opened measured edge"
+        );
         assert_eq!(rec.frame_model.as_deref(), Some(PRESENCE_REVOKE_KIND));
         let iv = &rec.metadata["last_interval"];
         assert_eq!(iv["open"], json!(true), "the interval is open again");
@@ -963,7 +967,12 @@ mod tests {
 
         // The same track comes back 1.6 s past the measured end — inside `2 × gap`. The END is
         // withdrawn and the interval is the SAME interval, still starting at 0.
-        let back = plan(&mut s, &[watched(track, 0, 5 * S + 8 * S / 5, 0)], true, &who);
+        let back = plan(
+            &mut s,
+            &[watched(track, 0, 5 * S + 8 * S / 5, 0)],
+            true,
+            &who,
+        );
         assert_eq!(back.len(), 1, "expected a revocation: {back:?}");
         assert_eq!(back[0].kind, PresenceEventKind::Revoke);
         assert_eq!(back[0].t_start_ns, 0, "one interval, not a new one");
@@ -1014,7 +1023,12 @@ mod tests {
             let mut s = stream();
             let who = rows(&[(first, emitter), (second, emitter)]);
             plan(&mut s, &[watched(first, 0, 5 * S, 0)], true, &who);
-            let end = plan(&mut s, &[watched(first, 0, 5 * S, gap + gap / 4)], true, &who);
+            let end = plan(
+                &mut s,
+                &[watched(first, 0, 5 * S, gap + gap / 4)],
+                true,
+                &who,
+            );
             assert_eq!(end[0].kind, PresenceEventKind::End);
             plan(
                 &mut s,

@@ -60,9 +60,7 @@ fn event_json(entry: &InventoryEntry, i: &PresenceInterval, window: TimeRange) -
     let revoked_in_window: i64 = i
         .revoked
         .iter()
-        .map(|g| {
-            (g.end.as_unix_nanos().min(hi) - g.start.as_unix_nanos().max(lo)).max(0)
-        })
+        .map(|g| (g.end.as_unix_nanos().min(hi) - g.start.as_unix_nanos().max(lo)).max(0))
         .sum();
     json!({
         "emitter_id": entry.emitter.id.to_string(),

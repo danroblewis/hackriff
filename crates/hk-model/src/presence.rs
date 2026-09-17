@@ -762,7 +762,11 @@ mod tests {
     fn a_resumption_within_one_further_gap_revokes_the_detected_end() {
         let gap = IdleGap::from_revisit_s(1.0); // 2 s
         let (g, g2) = (gap.as_secs_f64(), gap.revocable_nanos() as f64 / NS_PER_S);
-        assert_eq!(g2, 2.0 * g, "one gap to the end event, one more to confirm it");
+        assert_eq!(
+            g2,
+            2.0 * g,
+            "one gap to the end event, one more to confirm it"
+        );
         // Never past the tracker's own idle timeout: there the discontinuity was measured upstream
         // and no revocation may rejoin it. The user's 72 s FM dropout stays two intervals.
         assert_eq!(
@@ -778,7 +782,11 @@ mod tests {
         assert_eq!(fm.len(), 2, "a 72 s silence is two intervals: {fm:?}");
 
         // Inside the window: ONE interval, the end nulled, and the silence recorded on it.
-        let joined = intervals_from_spans(&[span(0.0, 10.0, 1), span(10.0 + g2, 12.0, 1)], gap, t(12.0));
+        let joined = intervals_from_spans(
+            &[span(0.0, 10.0, 1), span(10.0 + g2, 12.0, 1)],
+            gap,
+            t(12.0),
+        );
         assert_eq!(joined.len(), 1, "the end was revoked: {joined:?}");
         assert_eq!(joined[0].revoked.len(), 1);
         assert_eq!(joined[0].revoked[0], TimeRange::new(t(10.0), t(10.0 + g2)));
@@ -790,11 +798,16 @@ mod tests {
             gap,
             t(12.0),
         );
-        assert_eq!(split.len(), 2, "past the window the end is final: {split:?}");
+        assert_eq!(
+            split.len(),
+            2,
+            "past the window the end is final: {split:?}"
+        );
         assert!(split.iter().all(|i| i.revoked.is_empty()));
 
         // And a silence inside ONE gap never detected an end at all, so nothing is revoked.
-        let never = intervals_from_spans(&[span(0.0, 10.0, 1), span(10.0 + g, 12.0, 1)], gap, t(12.0));
+        let never =
+            intervals_from_spans(&[span(0.0, 10.0, 1), span(10.0 + g, 12.0, 1)], gap, t(12.0));
         assert_eq!(never.len(), 1);
         assert!(
             never[0].revoked.is_empty(),
@@ -820,7 +833,10 @@ mod tests {
 
         // Clipped, not all-or-nothing: a window covering half the revoked gap subtracts half.
         let half = presence_in_window(&got, TimeRange::new(t(11.5), t(20.0)), gap);
-        assert_eq!(half.on_air_s, 7.0, "8.5 s of extent less 1.5 s of revoked silence");
+        assert_eq!(
+            half.on_air_s, 7.0,
+            "8.5 s of extent less 1.5 s of revoked silence"
+        );
         // A window ending before the gap subtracts nothing.
         let before = presence_in_window(&got, TimeRange::new(t(0.0), t(10.0)), gap);
         assert_eq!(before.on_air_s, 10.0);

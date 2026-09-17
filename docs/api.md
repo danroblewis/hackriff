@@ -206,7 +206,7 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
       "f_center_hz": 101300000.0, "bandwidth_hz": 150000.0, "f_lo_hz": 101225000.0, "f_hi_hz": 101375000.0,
       "first_seen_s": 1789300800.0, "last_seen_s": 1789300920.0, "count": 42,
       "presence": { "intervals": 2, "on_air_s": 364.0,
-                    "last_interval": { "t_start_s": 1789300871.0, "t_end_s": 1789300920.0, "open": true },
+                    "last_interval": { "t_start_s": 1789300871.0, "t_end_s": 1789300920.0, "open": true, "revoked_s": 0.0 },
                     "liveness": "live", "ended_t_s": null },
       "known_status": "known",
       "status": { "status": "known", "author": "prior", "t_s": 1789300810.0,
@@ -408,7 +408,7 @@ The row's `presence` object is a *projection through a window* (how many interva
                    "open": true, "count": 12, "sources": 2, "f_center_hz": 101300000.0 } ],
   "total": 1, "truncated": false,
   "presence": { "intervals": 1, "on_air_s": 49.0,
-                "last_interval": { "t_start_s": 1789300871.0, "t_end_s": 1789300920.0, "open": true },
+                "last_interval": { "t_start_s": 1789300871.0, "t_end_s": 1789300920.0, "open": true, "revoked_s": 0.0 },
                 "liveness": "live", "ended_t_s": null, "silence_s": 0.0, "confidence": 1.0 }
 }
 ```
@@ -1330,7 +1330,7 @@ Stream id `presence` (`/ws/presence`, ADR-0004 `messages` kind, `message_schema`
 {"type":"message","seq":7,"t_ns":1757774400123456789,"emitter_id":"0199…",
  "content_class":"unrestricted","gated":false,"frame_model":"presence-end",
  "metadata":{"kind":"presence-end",
-             "last_interval":{"t_start_s":1757774390.1,"t_end_s":1757774400.12,"open":false}}}
+             "last_interval":{"t_start_s":1757774390.1,"t_end_s":1757774400.12,"open":false,"revoked_s":0.0}}}
 ```
 
 **Why it exists, and what changed.** `GET /api/inventory` is polled, and an open track reaches the inventory every 5 s (`LIVE_OFFER_NS`), so a live signal's box used to grow in steps of 5–10 s even though detection runs on every STFT frame. T-388 fixed that by pushing the measured top forward once per tick. T-410 replaced the model: **presence is an interval with endpoints**, so an open interval's box runs from its start **to the live edge** and caps only on a detected end — the measurement is the opening record plus the *absence* of a closing one. The poll still creates, arbitrates, merges, confirms and **windows** the rows; it may now also **cap** a box, and is the backstop for a lost close.

@@ -907,7 +907,7 @@ can be late; it can never be the reason a box stays open.**
 {"type":"message","seq":7,"t_ns":1757774400123456789,"emitter_id":"0199…",
  "content_class":"unrestricted","gated":false,"frame_model":"presence-end",
  "metadata":{"kind":"presence-end",
-             "last_interval":{"t_start_s":1757774390.1,"t_end_s":1757774400.12,"open":false}}}
+             "last_interval":{"t_start_s":1757774390.1,"t_end_s":1757774400.12,"open":false,"revoked_s":0.0}}}
 ```
 
 - `metadata.kind` and `frame_model` are one of **`presence-start`**, **`presence-reopen`**,

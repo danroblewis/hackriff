@@ -1370,7 +1370,10 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
             );
         }
         assert!(
-            row["presence"]["last_interval"]["revoked_s"].as_f64().unwrap() >= 0.0,
+            row["presence"]["last_interval"]["revoked_s"]
+                .as_f64()
+                .unwrap()
+                >= 0.0,
             "revoked silence is a duration: {row}"
         );
         assert_eq!(
