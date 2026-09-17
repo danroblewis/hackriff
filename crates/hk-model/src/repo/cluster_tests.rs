@@ -849,6 +849,7 @@ fn emitter_latest_measurement_reads_the_newest_linked_detection() {
             spur_mask_ref: None,
             timestamp_method: TimestampMethod::Synthetic,
             timestamp_error_budget_ns: None,
+            capture_artefacts: Vec::new(),
         })
         .unwrap();
     let det = |snr: f64, peak: f32, seen: TimeRange| Detection {

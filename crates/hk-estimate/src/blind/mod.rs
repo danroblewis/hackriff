@@ -60,7 +60,8 @@ pub(crate) mod util;
 
 use std::time::Instant;
 
-use hk_model::EstimatedParams;
+use hk_core::ProvenanceHandle;
+use hk_model::{EstimatedParams, Provenance};
 use num_complex::{Complex, Complex32};
 use serde::{Deserialize, Serialize};
 
@@ -143,6 +144,13 @@ pub struct CyclicLine {
     /// [`CyclicLine::significance_db`] was **not** measured at C14's pinned geometry (T-327).
     #[serde(default)]
     pub whiten_clamped: bool,
+    /// A capture artefact outscored this line and was excluded (T-373): without the exclusion
+    /// [`SymbolParameters::excluded_cyclic_hz`] would have been reported here instead. The
+    /// artefact belongs to the receiver, not the emission, so this line is the honest answer —
+    /// but a genuine emission whose rate sits on a comb member is suppressed the same way, and
+    /// this flag is how that case is visible rather than silent.
+    #[serde(default)]
+    pub artefact_suppressed: bool,
 }
 
 /// Coarse modulation family (C15 family scores).
@@ -189,6 +197,10 @@ pub enum BlindReason {
     /// C13 gave no OBW99 (below its bandwidth floor): the detection-box bandwidth bounds the
     /// search and scales the filters instead. The trust rules are unchanged.
     BandwidthFromBox,
+    /// A cyclic line contributed by the **capture chain** outscored every line kept, and was
+    /// excluded (T-373). What is reported is the runner-up. See
+    /// [`SymbolParameters::excluded_cyclic_hz`].
+    CaptureArtefact,
 }
 
 /// Where the bandwidth scaling C14's constants came from.
@@ -312,6 +324,15 @@ pub struct BlindConfig {
     pub samples_per_obw: f64,
     /// Minimum input samples.
     pub min_samples: usize,
+    /// Native periodogram bins excluded either side of each capture-artefact comb member (T-373),
+    /// or **0 to exclude nothing**.
+    ///
+    /// Default [`lines::ARTEFACT_GUARD_NATIVE_BINS`]. It is a width in *bins*, not in Hz, because
+    /// the thing being removed is one line of this transform: see the constant for why 4 is the
+    /// narrowest width that actually removes it. Zero is the control setting — it makes C14 read
+    /// the capture's own comb as the emission's structure again, which is what the T-373
+    /// regression test uses to prove it has teeth.
+    pub artefact_guard_bins: f64,
 }
 
 impl Default for BlindConfig {
@@ -334,6 +355,7 @@ impl Default for BlindConfig {
             top_k: 3,
             samples_per_obw: 6.0,
             min_samples: 64,
+            artefact_guard_bins: lines::ARTEFACT_GUARD_NATIVE_BINS,
         }
     }
 }
@@ -373,6 +395,13 @@ pub struct BlindInput<'a> {
     pub channel_bandwidth_hz: f64,
     /// Offset of the sample centre from the snippet centre, Hz (added to FSK levels).
     pub center_offset_hz: f64,
+    /// Provenance of the capture these samples came from, when known (T-373).
+    ///
+    /// C14 reads exactly one thing from it: the periodic artefacts the capture chain stamps into
+    /// the stream ([`hk_model::Provenance::cyclic_artefacts`]), whose comb it must not report as
+    /// the emission's own structure. `None` (a hand-built window, a synthetic series) excludes
+    /// nothing, which is the honest default — an unrecorded artefact is not an excluded one.
+    pub capture: Option<&'a Provenance>,
 }
 
 impl<'a> BlindInput<'a> {
@@ -399,6 +428,7 @@ impl<'a> BlindInput<'a> {
             noise_power: noise,
             channel_bandwidth_hz: n.channel_bandwidth_hz,
             center_offset_hz: n.cfo_applied_hz,
+            capture: Some(n.provenance.get()),
         })
     }
 
@@ -434,6 +464,8 @@ pub struct BlindWindow {
     pub source_index: f64,
     /// Source samples per window sample.
     pub source_per_sample: f64,
+    /// Provenance of the capture the snippet came from (T-373): see [`BlindInput::capture`].
+    pub capture: Option<ProvenanceHandle>,
 }
 
 impl BlindWindow {
@@ -448,6 +480,7 @@ impl BlindWindow {
             noise_power: self.noise_power,
             channel_bandwidth_hz: self.channel_bandwidth_hz,
             center_offset_hz: self.center_offset_hz,
+            capture: self.capture.as_ref().map(ProvenanceHandle::get),
         }
     }
 }
@@ -497,6 +530,14 @@ pub struct SymbolParameters {
     /// Search range, Hz. A function of OBW99 and the sample rate only: two readings of one emitter
     /// searched the same band however long each was watched for (T-327).
     pub rate_range_hz: (f64, f64),
+    /// Cyclic comb fundamentals excluded from the search as capture artefacts, Hz (T-373).
+    ///
+    /// Derived from the capture's own provenance and sample rate — never a constant — and listed
+    /// here so a reader can see what this measurement refused to look at. Every harmonic of each
+    /// entry inside [`SymbolParameters::rate_range_hz`] was excluded. Empty when the capture
+    /// records no artefact, or when the record was too short to resolve the comb.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_cyclic_hz: Vec<f64>,
     /// Family label (`Unknown` unless SNR_ext ≥ floor and confidence ≥ floor).
     pub family: Family,
     /// Family confidence `best · (1 − 0.7·second)`.
@@ -537,6 +578,7 @@ impl SymbolParameters {
             lines: Vec::new(),
             transition_fit: None,
             rate_range_hz: (f64::NAN, f64::NAN),
+            excluded_cyclic_hz: Vec::new(),
             family: Family::Unknown,
             family_confidence: 0.0,
             family_scores: FamilyScores::default(),
@@ -662,6 +704,7 @@ impl BlindEstimator {
                 center_offset_hz: i.center_offset_hz,
                 source_index: n.time.source_index,
                 source_per_sample: n.time.source_per_output,
+                capture: Some(n.provenance.clone()),
             });
         }
         let fs = snip.sample_rate_hz;
@@ -706,6 +749,7 @@ impl BlindEstimator {
             center_offset_hz: cfo,
             source_index: snip.source_index_of(s0),
             source_per_sample: snip.time.source_per_output,
+            capture: Some(snip.provenance.clone()),
         })
     }
 
@@ -890,6 +934,24 @@ impl BlindEstimator {
             .rate_max_hz
             .unwrap_or(cfg.rate_max_obw * obw)
             .min(cfg.rate_max_fs * fs);
+        // T-373: cyclic combs this capture's own chain contributes. Both the fundamentals and the
+        // notch width come from the capture and the transform — the fundamentals from the
+        // recorded artefact period against the capture's sample rate, the width from this
+        // record's native bin. Nothing here knows a frequency.
+        let native_hz = fs / n as f64;
+        let guard_hz = cfg.artefact_guard_bins.max(0.0) * native_hz;
+        let excluded_cyclic_hz: Vec<f64> = input
+            .capture
+            .map(Provenance::cyclic_artefacts)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|_| guard_hz > 0.0)
+            .filter(|f0| f0.is_finite() && *f0 >= 4.0 * guard_hz)
+            .collect();
+        let excluded = lines::Excluded {
+            combs: &excluded_cyclic_hz,
+            guard_hz,
+        };
         let d = ((fs / obw / 2.0).round() as usize).max(1);
         let env_sq: Vec<f64> = xe.iter().map(|s| f64::from(s.norm_sqr())).collect();
         let env_diff: Vec<f64> = a.windows(2).map(|w| (w[1] - w[0]).powi(2)).collect();
@@ -912,23 +974,24 @@ impl BlindEstimator {
             significance_db: l.map_or(0.0, |l| l.significance_db),
             sigma_hz: l.map(|l| l.sigma_hz),
             whiten_clamped: l.is_some_and(|l| l.whiten_clamped),
+            artefact_suppressed: l.is_some_and(|l| l.artefact_suppressed),
         };
         let raw_lines = vec![
             mk(
                 LineMethod::EnvelopeSquare,
-                spectral_line(plans, &env_sq, fs, f_min, f_max, whiten_hz),
+                spectral_line(plans, &env_sq, fs, f_min, f_max, whiten_hz, excluded),
             ),
             mk(
                 LineMethod::EnvelopeDiff,
-                spectral_line(plans, &env_diff, fs, f_min, f_max, whiten_hz),
+                spectral_line(plans, &env_diff, fs, f_min, f_max, whiten_hz, excluded),
             ),
             mk(
                 LineMethod::DelayMultiply,
-                complex_line(plans, &dm, fs, f_min, f_max, whiten_hz),
+                complex_line(plans, &dm, fs, f_min, f_max, whiten_hz, excluded),
             ),
             mk(
                 LineMethod::IfDiff,
-                spectral_line(plans, &if_diff, fs, f_min, f_max, whiten_hz),
+                spectral_line(plans, &if_diff, fs, f_min, f_max, whiten_hz, excluded),
             ),
         ];
 
@@ -1082,6 +1145,11 @@ impl BlindEstimator {
 
         let mut out = SymbolParameters::empty(fs, n, snr, Reason::Upstream);
         out.rate_range_hz = (f_min, f_max);
+        // T-373: what the search refused to look at, and whether refusing changed the answer.
+        if raw_lines.iter().any(|l| l.artefact_suppressed) {
+            reasons.push(BlindReason::CaptureArtefact);
+        }
+        out.excluded_cyclic_hz = excluded_cyclic_hz;
         out.lines = raw_lines;
         out.family = family;
         out.family_confidence = conf;

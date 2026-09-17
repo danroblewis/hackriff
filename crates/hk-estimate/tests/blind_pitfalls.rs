@@ -143,6 +143,7 @@ fn pitfall3_mean_not_median_noise_floor_gates_trust() {
             noise_power: None,
             channel_bandwidth_hz: 2.0 * snip.passband_hz,
             center_offset_hz: 0.0,
+            capture: Some(snip.provenance.get()),
         };
         let s = chain.blind.estimate(&input);
         assert!(

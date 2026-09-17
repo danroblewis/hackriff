@@ -939,6 +939,7 @@ mod watch_tests {
             spur_mask_ref: None,
             timestamp_method: TimestampMethod::Synthetic,
             timestamp_error_budget_ns: None,
+            capture_artefacts: Vec::new(),
         })
         .unwrap()
     }

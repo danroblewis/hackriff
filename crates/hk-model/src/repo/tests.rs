@@ -149,6 +149,7 @@ fn sample_provenance(cal: CalibrationStateId, spur: SpurMaskId) -> Provenance {
         spur_mask_ref: Some(spur),
         timestamp_method: TimestampMethod::Synthetic,
         timestamp_error_budget_ns: Some(1_000),
+        capture_artefacts: Vec::new(),
     }
 }
 

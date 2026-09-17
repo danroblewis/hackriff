@@ -83,6 +83,7 @@ fn prov_on(r: &mut Repository, device: &str, port: Option<&str>, lo: f64) -> Pro
         spur_mask_ref: None,
         timestamp_method: TimestampMethod::Synthetic,
         timestamp_error_budget_ns: None,
+        capture_artefacts: Vec::new(),
     })
     .unwrap()
 }
