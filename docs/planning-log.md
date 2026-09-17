@@ -4197,3 +4197,60 @@ minutes old and that agent is mid-measurement — and messaged it to drop each s
 its numbers out. I also did **not** clear sccache this time, which is a deliberate change: clearing it
 at 6.9 GB was right, but cold rebuilds convert APFS-shared blocks into private ones, so part of the
 8 GB it frees is spent buying divergence across every live worktree.
+
+### B0.670 — T-394 and T-396: the notch list stops growing, and the gate stops depending on judgement (2026-09-16)
+
+**T-394** (`38d237f`) replaced a strategy rather than a record. Three receiver artefacts had been found
+one at a time, each exclusion revealing the next; the survey now measures them. Channelise with the
+shipped polyphase bank, find the channels holding nothing, whiten each through **C14's own transform**
+(`lines::whiten` was extracted precisely so the survey and the search cannot end up at different
+geometries), and take the **median** across those channels.
+
+**The median is the control, and the reasoning is the good part.** An emission's cyclic structure is
+confined to its own band and skirt; the receiver's is not. *"Seen in more than one channel"* would have
+eaten the pilot — **every** FM station carries one at 19 kHz. *"Carried by more than half the channels
+that hold nothing"* does not. Run with the fixture's records **stripped**, it recovers all three known
+families and catches the unrecorded fourth at 12.4–17.9 dB, while the pilot reads **3.2 dB** and the
+subcarrier **0.6 dB** — correctly not lines.
+
+On the shipped chain: argmax is an artefact **18/22 → 0/22**, median `cyclic_db` **27.83 → 13.80 dB**.
+The three strongest survivors are the real pilot and subcarrier, 6.5 dB clear — including **the pilot
+leaking into a box that is at the noise floor by power** and still keeping it, which is exactly the
+case the ticket demanded and the one an over-eager test would have destroyed.
+
+Two refusals worth as much as the fix. A coherent **9.4 dB bump at 1316.9 Hz** sits below threshold and
+shows through as one box's argmax; lowering the threshold to catch it would leave 1.9 dB over the
+measured null — **tuning to one fixture, which is the strategy this replaces**. And the survey is
+**not wired into the pipeline**, declared at birth with the reason: it needs a second of raw span and
+`classify_box` is handed a 27 ms burst. Filed as **T-399** — the eighth no-caller instance, and the
+first *declared* rather than discovered by audit.
+
+It also found a real bug on the way: `spectral_line` tested the exclusion on the periodogram **bin**
+but reported the bin **plus parabolic interpolation**, so C14 could report a frequency it had refused
+to look at.
+
+**T-396** (`23ea27c`) put the which-suites rule in the runner. `just gate` classifies the diff, prints
+its decision, then runs exactly the needed suites — and **falls off the end to FULL**, the same
+"nothing said is never permissive" that governs `BiasTee::Unknown` and `Coverage::Unobserved`.
+
+The call beyond the ticket is the one I would have missed: **`py/hkpy/gate.py` and its tests classify
+as `full`, not `py`** — a naive prefix rule would let the classifier edit itself under `test-py`. *The
+gate must not be able to certify its own weakening.* The same reasoning already covered the justfile
+and `.github/`; extending it to the classifier's own source closes the loop.
+
+Two more good judgements: **a CI push has no base worth trusting and runs the full gate**, so main is
+always verified whole; and **untracked files count**, because otherwise a never-`git add`ed
+`newdir/x.rs` fails open. There is no link checker in this repo and none was added — docs-only runs
+nothing and **says why**.
+
+**One deviation from the user's wording, surfaced rather than buried:** the `ui` class runs `test-ui`
+alone, not `test-ui` + `lint`, because `just lint` is `lint-rust` + `lint-py`, there is no JS/TS
+linter, and `tsc --noEmit` already runs inside `test-ui`. Running clippy over the workspace for a `.ts`
+edit proves nothing. It is flagged to the user and reversible in a word.
+
+**Disk, and a correction to my own model.** At 13 GB I cleared main's `target/debug/incremental`,
+3.6 GB by `du`, and **df did not move** — the blocks were clone-shared with three live worktree
+targets. `du` on this repo is close to meaningless; the only reclaim that works is removing a worktree
+after a merge. Filed **T-400**: `just gate` shells out without `CARGO_INCREMENTAL=0`, so the
+coordinator's own check regenerates state every agent brief is configured to avoid — the rule belongs
+in the runner, exactly as T-396 moved the which-suites rule there.

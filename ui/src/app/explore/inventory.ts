@@ -537,7 +537,17 @@ export function rowSeenText(r: Row): string {
 }
 
 /** A sparkline of `recurrence.recent[]` counts, normalised 0–1, most recent last; empty without
- * recent history yet. Candidate rows show this as the mockup's activity dots. */
+ * recent history yet. Candidate rows show this as the mockup's activity dots.
+ *
+ * T-342 judged this one and left it here: it is **presentation, not a measurement**. The distinction
+ * that ticket draws is *deciding which value represents an interval* — the backend's — versus
+ * arithmetic over values it already decided. Nothing is folded here: the server serves one `count`
+ * per appearance, and each dot draws exactly one of them. The division is bar-chart scaling of a
+ * dimensionless count with no RF quantity in it, and the claim a sparkline makes is relative shape
+ * over time, not a level. (`reduceActivity`, the reduction this ticket was filed over, was neither:
+ * it chose a max over frequency cells — a value the server never served — and read it against a
+ * dB range it decided itself.) Nor can it turn absence into quiet: an appearance that did not
+ * happen has no entry, so it draws no dot rather than a zero-height one. */
 export function recurrenceDots(r: Row, n = 8): number[] {
   const recent = r.recurrence?.recent ?? [];
   if (recent.length === 0) return [];

@@ -569,6 +569,59 @@ pub(crate) struct OverviewRead {
     pub src_f_cell_hz: f64,
 }
 
+/// The fold every band-collapsed series on this API is made with, stated once and served verbatim
+/// (T-342).
+///
+/// The rule is not "a max happens to be taken". It is the pair of claims a consumer would otherwise
+/// have to guess at: **which statistic** a drawn cell is, and **what happens to a cell nothing was
+/// folded into**. The second half is the one that makes a display lie quietly — a fold that emitted
+/// its floor for an empty cell would render *never looked* as *looked and it was quiet*, which is
+/// the distinction [`hk_store::Coverage::of`] exists to make unspellable.
+pub(crate) const MAX_HOLD_RULE: &str = "max-hold: a cell is the maximum of the source cells folded \
+     into it, so folding further never lowers a value and a brief emission survives the collapse; \
+     the max of nothing is unobserved, not zero";
+
+/// What a cell nothing was folded into looks like on the wire, said in the response rather than
+/// left to a reader of this source (T-342, the `grey_rule` precedent from T-368).
+pub(crate) const UNOBSERVED_RULE: &str = "a cell nothing was folded into is null in `max_db` and \
+     `occupancy_max`, and 0 in `coverage` and `frames`: null is never observed, never quiet, and is \
+     not the bottom of the scale";
+
+/// The unit of a folded dB series, in the vocabulary [`/api/floor`](floor_vs_time_json) already
+/// uses: densities per Hz, calibrated to the antenna port or relative to ADC full scale.
+pub(crate) fn scale_str(unit: hk_model::PowerUnit) -> &'static str {
+    match unit {
+        hk_model::PowerUnit::Dbm => "dbm-per-hz",
+        hk_model::PowerUnit::Dbfs => "dbfs-per-hz",
+    }
+}
+
+/// What one served overview grid **means**: the fold, the scale, and the unobserved rule (T-342).
+///
+/// Served beside the numbers so that nothing downstream has to infer whether a value is a max or a
+/// mean, or what it is relative to. A series whose statistic is unstated is one a client will
+/// eventually re-reduce for itself, which is how the measurement walked into `ui/src` the first
+/// time.
+pub(crate) fn overview_semantics_json(o: &hk_store::Overview) -> Value {
+    let scale = scale_str(o.unit);
+    json!({
+        "fold": "max-hold",
+        "rule": MAX_HOLD_RULE,
+        "unobserved_rule": UNOBSERVED_RULE,
+        // Per series, because they are not all max-holds: three of the four fold by a different
+        // exact rule, and a single "max-hold" label over the grid would misstate them.
+        "series": {
+            "max_db":        { "statistic": "max-hold", "scale": scale,      "unobserved": "null" },
+            "occupancy_max": { "statistic": "max",      "scale": "fraction", "unobserved": "null" },
+            "coverage":      { "statistic": "mean",     "scale": "fraction", "unobserved": "0" },
+            "frames":        { "statistic": "sum",      "scale": "count",    "unobserved": "0" },
+        },
+        "range_db": "the observed minimum and maximum of `max_db` over this grid, in the same \
+            scale, measured here so a client shades against a scale it was given rather than one \
+            it decided from the values it happened to receive",
+    })
+}
+
 /// The pyramid tier that answers a timeline overview (T-338).
 ///
 /// The rule is the **coarsest tier whose time cells are no larger than one drawn column**: reading
@@ -819,6 +872,15 @@ pub fn strongest_json(p: &Pyramid, q: &Params, now: Timestamp) -> Result<Value, 
                 "duration_s": t_cell_s,
                 "t_cell_s": t_cell_s,
                 "window": window,
+                // The same statement the band-collapsed series carries (T-342): this route is
+                // "strongest in a band", which is a max-hold over a window, and a consumer must
+                // not have to read the docs to learn that or to learn what `max_db` is relative
+                // to. `unit` is the source grid's, densities per Hz.
+                "semantics": {
+                    "statistic": "max-hold",
+                    "rule": MAX_HOLD_RULE,
+                    "scale": scale_str(h.unit),
+                },
             })
         }
     })

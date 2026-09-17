@@ -175,6 +175,38 @@ fn grid_json(o: &hk_store::Overview) -> Value {
         // The grid's own observed range of `max_db`, so the client draws a scale it was given
         // rather than deciding one from the values it happens to hold. `null` = nothing observed.
         "range_db": o.range_db.map(|(lo, hi)| json!({"lo": lo, "hi": hi})),
+        // The scale of `max_db`/`range_db`, carried from the source grid rather than assumed
+        // (T-342). `"dbfs"` is uncalibrated, relative to ADC full scale; `"dbm"` is at the
+        // antenna port. Densities per Hz either way — see `semantics.series.max_db.scale`.
+        "unit": o.unit,
+        // What the numbers above mean: the fold, the scale, and what an empty cell is (T-342).
+        "semantics": crate::query::overview_semantics_json(o),
+    })
+}
+
+/// What each axis budget asked for and what it got (T-342).
+///
+/// A budget that can be silently missed is a budget a client cannot reason about. Here neither axis
+/// can be: the fold lays the grid on the window itself, so `served` is always `requested`, and the
+/// only thing that varies is whether there were enough **source** cells to fill it. When there were
+/// not, one measured value repeats — T-334's safe direction — and `replicated` is the flag that
+/// says a neighbouring pair of equal values is a repeat rather than two measurements that agreed.
+fn budget_json(r: &crate::query::OverviewRead, columns: usize, rows: usize) -> Value {
+    let axis = |requested: usize, served: usize, source: usize| {
+        json!({
+            "requested": requested,
+            "served": served,
+            "source_cells": source,
+            "replicated": source < served,
+        })
+    };
+    json!({
+        "time": axis(columns, r.grid.nt, r.grid.src_nt),
+        "frequency": axis(rows, r.grid.nf, r.grid.src_nf),
+        "statement": "the served grid is exactly the budget asked for: a budget is a drawing \
+            budget, and the window is never truncated to fit it. Where an axis had fewer source \
+            cells than cells asked for, `replicated` is true and one measured value repeats across \
+            the extra cells — never interpolated, never invented.",
     })
 }
 
@@ -212,6 +244,12 @@ fn resolution_json(
         "src_f_cell_hz": r.src_f_cell_hz,
         "requested": { "columns": columns, "rows": rows },
         "served": { "nt": r.grid.nt, "nf": r.grid.nf, "cells": r.grid.nt * r.grid.nf },
+        // The axis budgets, and what became of them (T-342). `columns` is a **time-axis budget**,
+        // the same idea as `/api/floor`'s `max_steps` — and, unlike a page size, it is always met
+        // exactly: asking for more columns than the window has source cells never truncates the
+        // window, it replicates a measured value across the extra columns, and `replicated` says
+        // so. Silent truncation is the failure this block exists to make impossible to hide.
+        "budget": budget_json(r, columns, rows),
         // The fold happens here, so the grid is always exactly the shape asked for: unlike
         // `/api/history`, this route never hands back more cells than the view can draw.
         "reduced_from": { "nt": r.grid.src_nt, "nf": r.grid.src_nf },
