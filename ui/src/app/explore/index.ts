@@ -17,7 +17,7 @@ import {
 } from "./focus";
 import {
   clusterChip, deleteEntry, emptyListText, loadInventoryRows, nextInventorySort, promoteEntry,
-  recurrenceDots, rowChips, rowSeenText, sortInventoryRows, type Row,
+  recurrenceDots, renderedInventory, rowChips, rowSeenText, sortInventoryRows, type Row,
 } from "./inventory";
 import { foundInside, selectionStoreFor, sortSelections, type Selection } from "./selections";
 import {
@@ -112,9 +112,11 @@ const mountInventory: MountFn = (el, ctx) => {
 
   function render() {
     const s = ctx.store.get();
-    const rows = Object.values(s.inventory.rows);
-    const confirmed = rows.filter((r) => r.state === "confirmed");
-    const candidate = rows.filter((r) => r.state === "candidate");
+    // T-389: one filtered collection, shared with the waterfall's boxes (`renderedInventory`).
+    // The list used to apply its own `filter(r => r.state === …)` while the boxes applied a
+    // second, stricter one; two predicates over one store is how a "1 candidate" heading came to
+    // stand beside several drawn candidate boxes.
+    const { listed: { confirmed, candidate } } = renderedInventory(s.inventory.rows, s.focus.kind === "signal" ? s.focus.id : null);
     tabConfirmed.setAttribute("aria-selected", String(s.inventory.tab === "confirmed"));
     tabCandidate.setAttribute("aria-selected", String(s.inventory.tab === "candidate"));
     tabConfirmed.replaceChildren("Confirmed ", h("span", { class: "count" }, more.confirmed ? "500+" : String(confirmed.length)));

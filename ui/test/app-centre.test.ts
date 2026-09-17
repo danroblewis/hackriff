@@ -92,16 +92,20 @@ test("placeExtent maps Hz to percent of the view, clamps to it, and widens to th
   near(m.widthPct, 1); near(m.leftPct, 99);
 });
 
-test("brackets: candidate rows only (Confirmed rows get the T-193 band box instead), labels hidden when narrow", () => {
+test("brackets: Candidate AND Confirmed rows (T-389), never deleted ones; the focused one last; labels hidden when narrow", () => {
   const rows = [
-    row("a", 99_900_000, 100_100_000), // confirmed: 200 kHz = 10 % of the view — no bracket now
+    row("a", 99_900_000, 100_100_000), // confirmed: 200 kHz = 10 % of the view
     row("b", 100_500_000, 100_510_000, "candidate"), // 10 kHz = 0.5 %
     row("d", 99_200_000, 99_300_000, "deleted"),
     row("x", 105_000_000, 105_200_000, "candidate"), // out of view
   ];
   const wide = bracketLayout(rows, V, 1440, "b");
-  assert.deepEqual(wide.map((b) => b.id), ["b"]);
-  const [b] = wide;
+  // T-389: confirmed is here again. T-193 moved it to the full-height band box and T-261 then
+  // narrowed that box to the focused row, which left an UNSELECTED confirmed row with no marker in
+  // the spectrum pane at all — the user's "the confirmed box appears only after I click it".
+  assert.deepEqual(wide.map((b) => b.id), ["a", "b"], "the focused row sorts last so it draws on top");
+  assert.equal(wide.find((x) => x.id === "a")!.state, "confirmed");
+  const b = wide.find((x) => x.id === "b")!;
   assert.equal(b.active, true); assert.equal(b.state, "candidate"); assert.equal(b.narrow, true); // 0.5 % of 1440 px = 7 px
   const phone = bracketLayout(rows, V, 400, null);
   assert.equal(phone.find((x) => x.id === "b")!.narrow, true);

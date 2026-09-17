@@ -19,7 +19,7 @@ import type { NewSelection } from "../../selections";
 import { MARK_DROP, MARK_GATED, Waterfall } from "../../waterfall";
 import type { AppContext } from "../context";
 import { h } from "../dom";
-import { liveEdgeS, setUserBand } from "../explore/inventory";
+import { liveEdgeS, renderedInventory, setUserBand } from "../explore/inventory";
 import { selectionStoreFor } from "../explore/selections";
 import { focusSelection, focusSignal, patchInventoryRow } from "../explore/slice";
 import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
@@ -150,7 +150,11 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     const focusSig = s.focus.kind === "signal" ? s.focus.id : null;
     const focusSel = s.focus.kind === "selection" ? s.focus.id : null;
     const seen = new Set<string>();
-    for (const b of bracketLayout(Object.values(s.inventory.rows), v, el.clientWidth, focusSig)) {
+    // T-389: one filtered collection for the list, the brackets and the boxes. `listed` is what
+    // Explore counts, so a bracket exists for exactly the rows the list shows; `boxed` is the
+    // subset that carries a measured time extent, and `noExtent` is the disclosed difference.
+    const rendered = renderedInventory(s.inventory.rows, focusSig);
+    for (const b of bracketLayout([...rendered.listed.candidate, ...rendered.listed.confirmed], v, el.clientWidth, focusSig)) {
       let e = bracketEls.get(b.id);
       if (!e) {
         e = h("div", { "data-id": b.id }, h("span"));
@@ -188,7 +192,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     // This is a data update, not a placement: the boxes carry no screen position, so this call
     // happening on the ~1 s poll (or not happening at all for a while) cannot move anything.
     wf?.setBoxes([
-      ...presenceBoxes(Object.values(s.inventory.rows), g, focusSig),
+      ...presenceBoxes(rendered.boxed, g, focusSig),
       ...selectionTimeBoxes(s.selections.list, g, focusSel),
     ]);
 
