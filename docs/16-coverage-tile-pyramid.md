@@ -80,7 +80,7 @@ the big view needs.**
 | Answer | Evidence | Granularity | Device | Horizon |
 |---|---|---|---|---|
 | `CellStats::coverage` (the tile's `obs_s`) | **measurement** — frames actually landed here | per (time cell, frequency cell) | no (only per-tile, via `Origin`/`ProvenanceSummary`) | the pyramid's byte budget |
-| `hk_store::Coverage` (T-368) | **record** — the ring journal and the observation log say the radio was tuned here | per frequency cell **over one window** | **yes** (`by_device`, T-378) | ring retention (120 s) and observation log (30 days) |
+| `hk_store::Coverage` (T-368) | **record** — the ring journal and the observation log say the radio was tuned here | per frequency cell **over one window** | **yes** (`by_device`, T-378) | ring retention (120 s) and observation log (180 days since T-406; was 30) |
 
 A measurement is proof we looked. A record is proof we looked. They are not redundant: the tile knows
 nothing about a dwell whose frames never reached the history, and the record has no time axis, so it
@@ -266,7 +266,7 @@ and — importantly — **they are not ordered the way the ladder is**:
 |---|---|---|
 | IQ ring | **120 s** default (`DEFAULT_RETENTION_S`), `hk serve --iq-retention` | a byte quota derived from retention × rate |
 | Spectrum history | **not an age at all** — every level's `max_age` is `None` in the default scheme | a rolling **8 GiB byte budget**, so the realised horizon depends on how busy the spectrum was |
-| Observation log | **30 days** (`30 * 24 * HOUR_NS`) and 512 MiB, device-named since T-378 | age first, bytes second |
+| Observation log | **180 days** and **2 GiB**, device-named since T-378 (**T-406 raised both** from 30 days / 512 MiB; see the note under the recommendation below) | depends on the policy — see T-406's measurement |
 
 **The rule: each zoom level names exactly one coverage source, and that source's horizon must be at
 least as long as the level's own time extent.** The reason is the consequence the brief puts first —
@@ -307,6 +307,26 @@ the case where it is not. **This is the cheapest correctness purchase in the who
 also what T-406 needs most (§7 step 6). The arithmetic is order-of-magnitude and **unverified**: at one
 dwell record per 10 s and a few hundred bytes per JSONL line, a month is ~100 MB, so the 512 MiB cap
 binds at roughly five months and the 30-day age binds long before it.
+
+**LANDED (T-406), and the arithmetic above is now measured.** The defaults are **180 days** and
+**2 GiB** (`hk_store::observation::{DEFAULT_MAX_AGE_NS, DEFAULT_MAX_BYTES}`), both overridable per
+run (`ObservationLogConfig::with_retention`,
+`ScanPlan.extra.pipeline.observation_retention_days` / `observation_max_mb`).
+`hk-pipeline/tests/iterative_scan.rs::a_dwell_records_line_cost_decides_which_retention_bound_binds`
+encodes a real scan record through the production codec and measures **618 bytes** per line — inside
+"a few hundred" — and derives both bounds from it. It also states the thing this section did not:
+**which bound binds depends on the policy.**
+
+- **Dwelling** (T-406's iterative scan) writes one line per step: at the 10 s floor of the user's
+  range, ~5.3 MB/day, so 2 GiB holds ~400 days and the **age** binds first. That is the intended
+  order, and it is what makes the fourth state unreachable in practice.
+- **Sweeping** at 50 ms hops writes one aggregated record per pass or 60 s, but each carries up to
+  ~1500 hop visits — two orders of magnitude denser per day — so there the **byte quota** binds
+  long before 180 days. Raising the age alone would not have moved that horizon at all, which is
+  why both had to move.
+
+Still open for the user (ADR-0012 §12 Q3): whether 2 GiB is acceptable on the device's disk. It is a
+ceiling reached after months rather than an allocation, and both bounds are settings.
 
 ### 5.5 Eviction — SETTLED: LRU over a byte budget, two pins, and two separate caps
 
@@ -481,13 +501,42 @@ A buildable sequence. Each step says what it unblocks and which consumer it serv
    §5.5's cap (3) as ingest backpressure. Plus the events **aggregate** form from §5.3 for the coarse
    zooms. **Serves:** the big view's backend, and — because the bars are projections of the same
    pyramid — it is what stops T-405/T-411 and the big view ever disagreeing on one screen.
-6. **T-406's accumulation.** The sweep already writes observation-log records and history frames; the
-   new work is that a dwell step must write **one record per step with its true band and interval**,
-   not one coarse record spanning the sweep, or step 1's rasteriser cannot see the shape of what was
-   scanned. This is the **second consumer of §5.4**, and the one that feels the horizon decision most:
-   a 30-day coverage record is what makes *"a region the sweep cleared last week"* distinguishable from
-   *"a region the sweep has not reached"*. §5.4's recommendation to lengthen the observation log is
-   T-406's dwell retention. **Serves:** T-406. Can start any time after step 1; its honesty depends on it.
+6. **T-406's accumulation. LANDED.** The sweep already writes observation-log records and history
+   frames; the new work is that a dwell step must write **one record per step with its true band and
+   interval**, not one coarse record spanning the sweep, or step 1's rasteriser cannot see the shape
+   of what was scanned. This is the **second consumer of §5.4**, and the one that feels the horizon
+   decision most: a coverage record is what makes *"a region the sweep cleared last week"*
+   distinguishable from *"a region the sweep has not reached"*. §5.4's recommendation to lengthen the
+   observation log is T-406's dwell retention. **Serves:** T-406.
+
+   **What landed, and the one decision that carries it.** `hk_core::scheduler::IterativeScan` is a
+   **dwell policy over the scheduler that already exists** — a `ScanPolicy::DwellOnly` plan over the
+   device's tunable ranges with a configurable `region_dwell_ns` (default 15 s; 10–30 s is the range
+   the user named and `IterativeScan::recommended` reports it). No new scheduler, no new
+   accumulator. Reachable as `--survey-dwell SECONDS` on `hk run`, `hk replay` and `hackriffd`, and
+   carried inside the plan itself (`extra.scheduler.region_dwell_s`) so a `--plan` file round-trips
+   the policy.
+
+   The load-bearing decision is the step **purpose**. A `DwellOnly` hop emits
+   `Purpose::RegionDwell`, and `ObservationRecorder` writes one `DwellRecord` per step with that
+   step's own `window` and `observed`; only `Purpose::Sweep` aggregates, into a record that spans a
+   pass. Implementing the scan as long sweep hops would have produced exactly the coarse record this
+   step warns about. The record → `CoverageSpan` mapping moved into `hk-store`
+   (`hk_store::spans_from_records`) beside the rasteriser that consumes it, so there is one place
+   that decides what shape a record takes on the grid, and `/api/coverage` calls it rather than
+   keeping a copy.
+
+   **Proved end to end, not per layer.** `hk-pipeline/tests/iterative_scan.rs` runs the chain
+   scheduler → recorder → observation log → coverage spans → `grid_over` and asserts the pass
+   rasterises as a **diagonal**: at the instant the tune was on hop *k*, hop *k* is `Observed` and
+   every other hop is `Unobserved` — observed-and-quiet kept apart from not-yet-reached, per cell —
+   while the same spans collapsed to one row say the whole band *was* cleared over the pass. It also
+   asserts the fourth state (rows before the record horizon), and that a notched dwell reaches the
+   rasteriser as two bands. `hk-pipeline/tests/iterative_scan_device.rs` runs it **through the mock
+   SDR device**: the scan retunes the radio, every record names the `device_id`, coverage spreads
+   across the walked range and stops there, and the spectrum-history **pyramid** — the same one this
+   document's big view and survey bar read — holds frames across it (140/140 frequency cells
+   measured).
 7. **The big view client.** Tiles, the `/api/events` overlay, LRU eviction with the two pins, the LIFO
    cancellable queue, and the parent-upscaled-and-labelled fallback that keeps grey meaning unobserved.
    **Serves:** the user's ask.

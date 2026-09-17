@@ -136,6 +136,9 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
                     live: live.clone(),
                     data_dir: data_dir.clone(),
                     plan: None,
+                    // `hk serve` is interactive tuning: it never drives the scheduler, so an
+                    // iterative scan would have nothing to step it (T-406).
+                    survey_dwell_s: None,
                     schedule: false,
                     feeds: None,
                     calibration: opts.calibration.clone(),

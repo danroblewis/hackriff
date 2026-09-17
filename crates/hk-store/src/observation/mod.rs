@@ -15,9 +15,13 @@
 //! - **Crash recovery:** a torn tail line fails its CRC and is skipped on read; on open the newest
 //!   segment's torn tail is truncated, so appends start on a line boundary. At most one flush
 //!   interval is lost.
-//! - **Retention:** whole hours older than [`ObservationLogConfig::max_age_ns`] (30 days) before
-//!   the newest record's **sample time** are deleted, then oldest hours until the log fits
-//!   [`ObservationLogConfig::max_bytes`] (512 MiB). Replay time never keys retention on wall time.
+//! - **Retention:** whole hours older than [`ObservationLogConfig::max_age_ns`]
+//!   ([`DEFAULT_MAX_AGE_NS`], 180 days) before the newest record's **sample time** are deleted,
+//!   then oldest hours until the log fits [`ObservationLogConfig::max_bytes`]
+//!   ([`DEFAULT_MAX_BYTES`], 2 GiB). Replay time never keys retention on wall time.
+//!   T-406 raised both from 30 days / 512 MiB — `docs/16` §5.4, and the reasons and the measured
+//!   arithmetic are on [`DEFAULT_MAX_AGE_NS`]. [`ObservationLogConfig::with_retention`] and
+//!   `ScanPlan.extra.pipeline.observation_retention_days` lower them on a device with less disk.
 //! - **Never blocks the pipeline** ([`ObservationWriter`]): producers hand records to an
 //!   [`ObservationQueue`] (bounded; `offer` never waits: a full queue drops and counts) drained by
 //!   one writer thread.
@@ -35,7 +39,10 @@ mod writer;
 #[cfg(test)]
 mod tests;
 
-pub use log::{ObservationLogConfig, ObservationLogStats, ObservationStore, StallGuard};
+pub use log::{
+    DEFAULT_MAX_AGE_NS, DEFAULT_MAX_BYTES, ObservationLogConfig, ObservationLogStats,
+    ObservationStore, StallGuard,
+};
 pub use query::{
     DEFAULT_RECORD_LIMIT, MAX_RECORD_LIMIT, RecordPage, RecordQuery, Visit, coverage_gaps,
     totals_from_visits,

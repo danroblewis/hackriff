@@ -727,7 +727,7 @@ The pair that gets collapsed is 2 and 3, and collapsing them is how a view comes
 
 #### The fourth state: `"unknown"` means *we no longer know whether we looked*
 
-The horizons on this server are **deliberately different lengths and they cross**: the spectrum-history pyramid has no age limit at all (a rolling byte budget), the IQ ring holds minutes, and the observation log expires at 30 days. So spectrum exists that no surviving coverage record covers — and, far more commonly, a requested window simply reaches back past every record this server still holds.
+The horizons on this server are **deliberately different lengths and they cross**: the spectrum-history pyramid has no age limit at all (a rolling byte budget), the IQ ring holds minutes, and the observation log expires at 180 days (T-406 raised it from 30 so the coverage record outlives the pyramid it explains; the byte quota can still bind first — see below). So spectrum exists that no surviving coverage record covers — and, far more commonly, a requested window simply reaches back past every record this server still holds.
 
 `"unobserved"` is the claim *nothing looked*. Past the record horizon nothing supports that claim, and painting it grey spells "never looked" for spectrum whose records were merely discarded. That is the same error as reporting a never-observed cell as quiet, one horizon out — so it gets its own state, and `resolution.grey_rule` says in the response that it is **not grey**. Draw it as a fourth thing; hatching is the house precedent (T-413).
 
@@ -761,7 +761,7 @@ Nothing new is journalled for this. Two records already say "for each interval, 
 | Source | Interval | Centre/span/rate | Device | Horizon |
 |---|---|---|---|---|
 | IQ ring journal ([`/api/iqbuffer`](#rolling-iq-capture-buffer-t-157) segments, ADR-0014) | yes | yes | **yes** (`device_id`) | the ring's retention |
-| observation log (`DwellRecord`/`SweepRecord`, ADR-0012 §1) | yes | yes (`ObservedWindow`) | **yes** (`device_id`, T-378) | 30 days |
+| observation log (`DwellRecord`/`SweepRecord`, ADR-0012 §1) | yes | yes (`ObservedWindow`) | **yes** (`device_id`, T-378) | 180 days / 2 GiB, whichever binds (T-406) |
 
 The ring journal opens a new segment on **every** provenance change, so retunes are segment boundaries by construction — it is already a tune history. **T-378** put the same `device_id` on the observation log's records — the source's own `DeviceInfo::device_id`, the one value the baseline chain key and the history source key are also hashed from — so the long horizon is device-local too, and coverage over the whole retention answers *"did **this** front end look here"* rather than only *"did anything"*.
 
@@ -1348,7 +1348,7 @@ Where and when the radio actually observed, and why: one `DwellRecord` per non-s
 - **Observed extent.** `window.usable` is the analysed spectrum frame's extent (the span history tiles fold, so log and tile coverage describe the same cells), clipped to the sampled band; `window.dc_excluded` is the ±15 kHz DC notch. A frequency range counts as observed only while it lies **entirely** inside `usable` minus the notch.
 - **Observed interval.** `observed` starts when the analysed data carries the step's tuning (retune settle) and ends when the next step starts, clipped to `planned`; `preempted` marks a step cut before its planned end. Sweep `visits[]` give `start_ms`/`observed_ms` after the record's `span.t0`.
 - **Freshness.** Queries read the segment files plus the writer's unflushed buffer. Records are dropped (and counted in `log.dropped`) only when the writer queue is full; the pipeline never waits for the log.
-- **Storage.** Hourly CRC-line segments `<data>/observations/YYYY/MM/DD/HH.log`, flushed at most once a minute (or at 256 KiB), fsynced at hour seal, kept 30 days / 512 MiB by sample time.
+- **Storage.** Hourly CRC-line segments `<data>/observations/YYYY/MM/DD/HH.log`, flushed at most once a minute (or at 256 KiB), fsynced at hour seal, kept **180 days / 2 GiB** by sample time (T-406, `docs/16` §5.4 — raised from 30 days / 512 MiB so the coverage record outlives the spectrum-history pyramid it explains; lower them with `ScanPlan.extra.pipeline.observation_retention_days` / `observation_max_mb`). **Which bound binds depends on the policy, and it is measured, not assumed:** an iterative scan (T-406) writes one 618-byte line per step, so at a 10 s dwell that is ~5.3 MB/day and the quota holds ~400 days — the age binds first. A continuous 50 ms-hop sweep aggregates up to ~1500 hop visits into one record and is ~2 orders of magnitude denser per day, so there the **quota** binds and raising the age alone would not have moved that horizon.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|

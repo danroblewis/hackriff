@@ -28,6 +28,11 @@ struct Args {
     /// ScanPlan JSON (default: one region over the source window).
     #[arg(long)]
     plan: Option<PathBuf>,
+    /// Iterative scan (T-406): step the tune across everything the source can tune, dwelling this
+    /// many seconds per step (10-30 s is what the survey is sized for). The daemon always drives
+    /// the scheduler, so this steps immediately. Conflicts with --plan.
+    #[arg(long, value_name = "SECONDS", conflicts_with = "plan")]
+    survey_dwell: Option<f64>,
     /// API listen address. 0.0.0.0 exposes the API to the whole network (token only, no TLS).
     #[arg(long, default_value = "127.0.0.1:8787")]
     bind: SocketAddr,
@@ -68,6 +73,7 @@ fn main() -> anyhow::Result<()> {
         loop_replay: a.loop_replay,
         data_dir: a.data_dir,
         plan: a.plan,
+        survey_dwell_s: a.survey_dwell,
         bind: a.bind,
         ui_dist,
         unpaced: a.unpaced,

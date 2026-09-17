@@ -894,6 +894,10 @@ impl Pipeline {
                 &cfg.data_dir,
                 device_id,
                 cfg.stream_sink.as_ref(),
+                (
+                    cfg.settings.observation_retention_days,
+                    cfg.settings.observation_max_mb,
+                ),
             )
             .map_err(|e| eprintln!("observation log disabled: {e:#}"))
             .ok(),

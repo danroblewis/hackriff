@@ -91,7 +91,7 @@ The log lives in hk-store `observation/` (T-115):
 - **Layout:** hourly segments `<data>/observations/YYYY/MM/DD/HH.log`. Each line is `<crc32-hex8> <json ObservationRecord>`.
 - **Writes:** a writer thread buffers and flushes at most once a minute or at 256 KiB, and fsyncs when the hour seals.
 - **Crash recovery:** a torn tail line fails its CRC and is dropped on open. At most one flush interval is lost.
-- **Retention:** defaults 30 days and 512 MiB, whole hours deleted oldest first.
+- **Retention:** defaults **180 days and 2 GiB**, whole hours deleted oldest first (T-406 raised them from 30 days / 512 MiB; `docs/16` §5.4 and `hk_store::observation::DEFAULT_MAX_AGE_NS` carry the reasons and the measured arithmetic). Overridable per run via `ScanPlan.extra.pipeline.observation_retention_days` / `observation_max_mb`.
 - **Never blocks the pipeline:** records reach the writer on a bounded queue, and when it is full they are dropped and counted.
 
 ## 2. OccupancyStat (C12)
@@ -690,7 +690,7 @@ Streams (ADR-0004 `messages` kind, metadata only, never content):
 
 | Data | Home | Format | Write pattern | Retention default |
 |---|---|---|---|---|
-| Observation log | hk-store `observation/` | hourly CRC-line NDJSON segments | writer thread; flush ≤ 1/min or 256 KiB; fsync at hour seal; drop-and-count when the queue is full | 30 days, 512 MiB |
+| Observation log | hk-store `observation/` | hourly CRC-line NDJSON segments | writer thread; flush ≤ 1/min or 256 KiB; fsync at hour seal; drop-and-count when the queue is full | 180 days, 2 GiB (T-406) |
 | Occupancy series | hk-store `occupancy/` | daily CRC-line segments of `OccupancyStat` | one append batch per interval close (15 min); hourly rollup | 15-min 90 days; 1-h 2 years; 256 MiB |
 | Learned channel plan | hk-store `occupancy/channels.json` | versioned JSON | atomic rewrite on version change | kept |
 | Baselines | hk-store `baseline/` | one binary file per `BaselineKey` (reference + adaptive) | temp → fsync → rename at hour-slot close | 1 GiB, least-recently-visited site first |
@@ -783,7 +783,7 @@ T-113 **pre-added** the shared declarations: `pub mod` lines, empty stub modules
 
 1. **Maturity pooling.** OK to fall back from hour-of-week (needs 24 h *in that slot*, ~24 weeks) to hour-of-day, day part, then all hours (mature after one parked day), with the resolution shown? Or insist on literal hour-of-week maturity?
 2. **Local time for slots.** A fixed UTC offset per site (no DST) is simple, but shifts human patterns by an hour for half the year. Accept for M2, or bring in a time-zone database?
-3. **Retention defaults.** Observation log 30 d / 512 MiB; occupancy 90 d at 15 min, 2 y hourly; baselines 1 GiB. Right for the device's disk?
+3. **Retention defaults.** Observation log **180 d / 2 GiB** (T-406 raised it from 30 d / 512 MiB on `docs/16` §5.4's reasoning: the coverage record is orders of magnitude cheaper per unit of time covered than a spectrum cell, so it is backwards for it to expire before the pyramid it explains — and a 30-day record was making *"a region the sweep cleared last week"* indistinguishable from *"a region the sweep has not reached"*); occupancy 90 d at 15 min, 2 y hourly; baselines 1 GiB. **Still open for the user:** is 2 GiB acceptable on the device's disk? It is a ceiling reached after months, not an allocation, and both bounds are now per-run settings.
 4. **Walk surveys.** While moving, occupancy and inventory continue but novelty alarms are off. Is that the behaviour you want, and is 250 m the right default site radius?
 5. **Scheduler floors and weights.** 25 % sweep floor, 15 % exploration floor, and novelty-led score weights (1, 2, 1, 0.5, 0.5, 1) as defaults, to be revisited with T-114 simulator numbers?
 

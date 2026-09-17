@@ -147,3 +147,12 @@ retries = 1
 [[profile.default.overrides]]
 filter = 'test(dc_twin_lookup_scales_n_log_n_over_days)'
 test-group = 'heavy-serial'
+
+# T-406: the iterative-scan device test drives a whole mock-device pipeline and waits on
+# stream-time progress, so it sits with the other pipeline-driving tests rather than racing them.
+# Its replay is unpaced (it asserts what the scan did, not wall-clock pacing) and its waits are
+# measured, per the rule above: runs took 2.2 s wall against a 120 s deadline, and wrote 12 scan
+# records against a floor of 5.
+[[profile.default.overrides]]
+filter = 'package(hk-pipeline) and binary(iterative_scan_device)'
+test-group = 'heavy-serial'

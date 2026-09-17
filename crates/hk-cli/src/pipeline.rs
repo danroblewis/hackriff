@@ -138,6 +138,9 @@ pub struct ReplayArgs {
     pub data_dir: Option<PathBuf>,
     /// ScanPlan JSON.
     pub plan: Option<PathBuf>,
+    /// Iterative scan (T-406): step the tune across everything the source can tune, dwelling this
+    /// many seconds per step. `None` keeps the single-region default plan.
+    pub survey_dwell_s: Option<f64>,
     /// Serve the API while (and after) running.
     pub serve: Option<SocketAddr>,
     /// Real-time pacing (lossy) instead of unpaced lossless replay.
@@ -167,6 +170,9 @@ pub struct RunArgs {
     pub data_dir: Option<PathBuf>,
     /// ScanPlan JSON.
     pub plan: Option<PathBuf>,
+    /// Iterative scan (T-406): step the tune across the device's tunable range, dwelling this
+    /// many seconds per step. `None` keeps the single-region default plan.
+    pub survey_dwell_s: Option<f64>,
     /// Serve the API while (and after) running.
     pub serve: Option<SocketAddr>,
     /// Drive the attention scheduler (it retunes the radio).
@@ -194,6 +200,9 @@ pub struct DaemonArgs {
     pub data_dir: PathBuf,
     /// ScanPlan JSON.
     pub plan: Option<PathBuf>,
+    /// Iterative scan (T-406): step the tune across the device's tunable range, dwelling this
+    /// many seconds per step. `None` keeps the single-region default plan.
+    pub survey_dwell_s: Option<f64>,
     /// API listen address.
     pub bind: SocketAddr,
     /// Built UI directory.
@@ -340,6 +349,60 @@ pub fn max_rate_hz(caps: &SourceCapabilities) -> Option<f64> {
     match &caps.sample_rates {
         SampleRates::Continuous { max_hz, .. } => Some(*max_hz),
         SampleRates::Discrete(rates) => rates.iter().copied().reduce(f64::max),
+    }
+}
+
+/// The plan one run scans under: a `--plan` file, an **iterative scan** over everything the front
+/// end can tune (`--survey-dwell`, T-406), or the single-region default around the source window.
+///
+/// `--survey-dwell` is the user's "step the tune to the next region after sampling enough per step".
+/// It is a dwell policy over the scheduler that already exists — a `DwellOnly` plan over
+/// [`SourceCapabilities::frequency_ranges`] with the given dwell — so every step writes its own
+/// observation record and the coverage map keeps the shape of what was scanned
+/// (`hk_core::scheduler::IterativeScan`, `docs/16` §7 step 6). It only takes effect with the
+/// scheduler driving; a run that does not drive it never steps.
+///
+/// A `--plan` file wins if both are given, and says so rather than silently ignoring one.
+pub fn plan_for_run(
+    path: Option<&Path>,
+    survey_dwell_s: Option<f64>,
+    info: &SourceInfo,
+    caps: &SourceCapabilities,
+) -> anyhow::Result<ScanPlan> {
+    match (path, survey_dwell_s) {
+        (Some(p), Some(_)) => {
+            anyhow::bail!(
+                "--plan {} and --survey-dwell both given: pass one. A plan file can carry the \
+                 iterative scan itself (policy \"dwell-only\", extra.scheduler.region_dwell_s).",
+                p.display()
+            )
+        }
+        (None, Some(dwell_s)) => {
+            let scan = hk_core::scheduler::IterativeScan::from_seconds(dwell_s)?;
+            let t = if info.start_time.as_unix_nanos() > 0 {
+                info.start_time
+            } else {
+                Timestamp::now()
+            };
+            let plan = scan.plan_over_capabilities(caps, t);
+            if !scan.recommended() {
+                eprintln!(
+                    "iterative scan: a {:.3} s dwell is outside the 10-30 s the survey is sized \
+                     for; the pass is linear in it",
+                    scan.dwell_s()
+                );
+            }
+            // Say what a step of this length can and cannot catch, here — where the user turns the
+            // policy on and the pass length is a surprise worth having before the run, not after.
+            // A plan this source cannot compile is left to fail where plans normally fail.
+            if let Ok(cfg) = hk_core::scheduler::SchedulerConfig::from_plan(&plan)
+                && let Ok(compiled) = hk_core::scheduler::CompiledPlan::compile(&plan, &cfg, caps)
+            {
+                eprintln!("{}", scan.budget(&compiled).statement());
+            }
+            Ok(plan)
+        }
+        (path, None) => load_plan(path, info),
     }
 }
 
@@ -1431,6 +1494,9 @@ pub struct LiveOptions {
     pub data_dir: PathBuf,
     /// ScanPlan JSON.
     pub plan: Option<PathBuf>,
+    /// Iterative scan (T-406): step the tune across the device's tunable range, dwelling this
+    /// many seconds per step. `None` keeps the single-region default plan.
+    pub survey_dwell_s: Option<f64>,
     /// Drive the attention scheduler (then no live control handle is offered).
     pub schedule: bool,
     /// Offline feed cache for the correlator.
@@ -1464,7 +1530,8 @@ pub struct LivePipeline {
 /// Starts the whole pipeline over the live HackRF One (see the module docs).
 pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Result<LivePipeline> {
     let live = open_live(&opts.source, &opts.live)?;
-    let plan = load_plan(opts.plan.as_deref(), &live.info)?;
+    let caps = live.source.capabilities();
+    let plan = plan_for_run(opts.plan.as_deref(), opts.survey_dwell_s, &live.info, caps)?;
     let fs = live.info.sample_rate_hz;
     let class = if opts.schedule {
         plan_class(&plan, fs)
@@ -1543,7 +1610,8 @@ pub fn run_replay(args: &ReplayArgs) -> anyhow::Result<RunSummary> {
     };
     // A scheduled replay is retuned: the mock device serves it (T-057).
     let rec = open_recording(&args.fixture, pacing, args.schedule)?;
-    let plan = load_plan(args.plan.as_deref(), &rec.info)?;
+    let caps = rec.source.capabilities();
+    let plan = plan_for_run(args.plan.as_deref(), args.survey_dwell_s, &rec.info, caps)?;
     let class = if args.schedule {
         most_restrictive(rec.class, plan_class(&plan, rec.info.sample_rate_hz))
     } else {
@@ -1608,6 +1676,7 @@ pub fn run_live(args: &RunArgs) -> anyhow::Result<RunSummary> {
             live: args.live.clone(),
             data_dir: args.data_dir.clone().unwrap_or_else(temp_data_dir),
             plan: args.plan.clone(),
+            survey_dwell_s: args.survey_dwell_s,
             schedule: args.schedule,
             feeds: args.feeds.clone(),
             calibration: args.calibration.clone(),
@@ -1680,6 +1749,7 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
                 live: args.live.clone(),
                 data_dir: args.data_dir.clone(),
                 plan: args.plan.clone(),
+                survey_dwell_s: args.survey_dwell_s,
                 schedule: true,
                 feeds: args.feeds.clone(),
                 calibration: args.calibration.clone(),
@@ -1730,7 +1800,8 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
     };
     // The scheduler retunes the recording: the mock device serves it truthfully (T-057).
     let rec = open_recording(&path, pacing, true)?;
-    let plan = load_plan(args.plan.as_deref(), &rec.info)?;
+    let caps = rec.source.capabilities();
+    let plan = plan_for_run(args.plan.as_deref(), args.survey_dwell_s, &rec.info, caps)?;
     let class = most_restrictive(rec.class, plan_class(&plan, rec.info.sample_rate_hz));
     let mut cfg = config_for(
         args.data_dir.clone(),
@@ -1877,6 +1948,7 @@ mod tests {
             loop_replay: false,
             data_dir,
             plan: None,
+            survey_dwell_s: None,
             bind: "127.0.0.1:0".parse().unwrap(),
             ui_dist: None,
             unpaced: true,
@@ -2256,6 +2328,7 @@ mod tests {
                 live: LiveArgs::default(),
                 data_dir: dir.join("live"),
                 plan: None,
+                survey_dwell_s: None,
                 schedule: false,
                 feeds: None,
                 calibration: None,

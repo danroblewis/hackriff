@@ -28,7 +28,9 @@ pub mod baseline; // T-119
 pub mod observation; // T-115
 pub mod occupancy; // T-118
 
-pub use coverage::{Coverage, CoverageGrid, CoverageSpan, Device, Sampled};
+pub use coverage::{
+    Coverage, CoverageGrid, CoverageSpan, Device, RecordSpans, Sampled, spans_from_records,
+};
 pub use history::{
     CellStats, ChannelSummary, FilterSummary, FrameInput, FrameOrigin, GainState, HistogramConfig,
     IngestOutcome, LevelConfig, OriginField, OriginFilter, Overview, OverviewCell,
