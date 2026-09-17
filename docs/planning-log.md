@@ -4652,17 +4652,25 @@ tidiness. Last swept **2026-09-17**.
 
 **Needs a decision only you can make:**
 
-- **T-364 — burst recall against the open-set floor.** The shipped classifier rejects **39.4% of genuine
-  short bursts from their own class** (against 11.9% of the same classes' full windows), and CLAUDE.md
-  makes ephemeral emissions first-class — 902–928 MHz ISM bursts are the canonical playground. The fix is
-  identified and priced: pooled-window fitting takes N/8 unknown from 39.4% to 12.1%, but costs held-out
-  unknown recall **at or through ADR-0016 §7's 0.90 floor**. Your standing rule is that floors do not
-  move to accommodate a capability, so this is a product call, not a tuning one, and it will be put to
-  you as two curves rather than a recommendation.
-  **Currently blocked on T-428**, deliberately: four agents re-derived that same unknown-recall figure on
-  main on 2026-09-17 and split two-two (0.9444/0.0556 against 0.9520/0.0480). Asking you to trade against
-  a floor using a number that disagrees with itself would be asking you to decide on something the
-  coordinator cannot stand behind.
+- **T-364 — burst recall against the open-set floor. Measured and written up: [docs/17](17-burst-recall-vs-open-set.md).**
+  Both curves are now priced over **eight seed bases** with a spread at every point, so the trade can be
+  read without the false precision that T-428 exposed. Four things changed the question the ticket was
+  filed with:
+  1. **The gap is about twice the headline.** T-328's 39.4 % shortened only C14's window; a *genuinely*
+     short emission is short in the classifier's snippet too, and there the shipped classifier rejects
+     **70.3 % ±1.7 %** of a class's own N/8 bursts.
+  2. **The fix as priced is below the floor, not at it.** Pooled fitting with the shipped single
+     `cyclic_db` gives held-out unknown recall **0.8911 ±0.0112**, 2.3 standard errors *under* 0.90, with
+     7 of 8 individual draws failing. The extra sample resolved the ambiguity against the option.
+  3. **T-328's ordering reversal is real and decisive.** With the four cyclic dimensions the same pooled
+     fit gives **0.9088 ±0.0053** — above the floor and distinguishably so (0 of 8 draws below, ~5 % of
+     single gate runs would read under). It is the only configuration measured that buys a real piece of
+     the burst gap and holds the floor, and it buys only the C14-window half of it.
+  4. **The shipped open set is already at the floor on genuine short bursts** — 0.8949 ±0.0159, 5 of 8
+     draws below 0.90 — before anything is changed. The gate's 0.95 is a full-window number.
+  Four options are laid out in docs/17 §6 with what each buys and costs; **no recommendation is made and
+  no floor was moved**. Your standing rule (floors do not move to accommodate a capability) rules out the
+  one option that actually fixes genuine short bursts, which is the heart of the call.
 
 **Sign-off, not blocking (work proceeds on the provisional text):**
 
