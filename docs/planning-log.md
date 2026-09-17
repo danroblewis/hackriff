@@ -3874,3 +3874,56 @@ precisely the fabrication the constraint forbids, and a latency test alone would
 row still does not name its receive chain, exactly as it did not name the bias tee before T-371, and
 after T-314 the chain comes from the source's own `DeviceInfo`, so a two-front-end site produces two
 pools per subject that remain indistinguishable on that route.
+
+### B0.664 — T-382: 38 of 44 boxes were reading the receiver, and a disk reclaim at 6.9 GB (2026-09-16)
+
+Merged at `156bb99`. The drifting family is a **free-running ~655.75 Hz amplitude modulation of the
+receiver's own noise contribution**, and the measurement that settles it is the channel census: **one
+frequency, spread 0.06 Hz, in all 22 noise-only channels across the span and inside both WFM
+stations.** No emission does that. It rides on the noise rather than the antenna signal — depth 22.0 %
+and 21.1 % in empty channels against 6.9 % and 1.9 % inside the stations — and h2 wanders **2600 ppm**
+in 45 s while `fs/8192` holds to 175 ppm and the 8 kHz comb to 1.1 ppm in the same blocks, which rules
+out any crystal-derived source. Absent from the matched 2026-09-13 control at the same rate and gains.
+Like the gain step, it is in the one capture taken through **hackriff's own ring-reader path**.
+
+**What it was costing, on the shipped chain over 44 boxes:** boxes whose cyclic argmax is an artefact
+**38/44 → 0/44**; median `cyclic_db` **27.4 → 14.0 dB**; boxes over 20 dB **43/44 → 6/44**, and those
+six are the stations' real 19 kHz pilot and 38 kHz subcarrier. So the dimension was very nearly a
+measurement of the receiver. T-373's residual 22.5 dB was this family, confirmed on the same
+instrument.
+
+Two side results worth keeping. **657 and T-317's 674 Hz are not the same thing** — 674 is the 8 kHz
+comb offset at −678.048 Hz, 18 sd away and drifting the other way; they covary (r = +0.92, both
+tracking temperature), which makes a tempting constant, and the control that breaks it is the
+2026-09-13 capture where the offset is −403.70 Hz and the envelope carries nothing there. And **the
+two 8 kHz combs are one comb**: T-317's RF spur lines on a host-clocked grid, whose pairwise beats
+inside a channel make T-373's envelope comb — proved from two observables **12,600× apart in
+frequency** agreeing to **0.35 ppm**, repeated at another temperature to 0.24 ppm. 8 kHz is the USB
+microframe rate.
+
+**The caveat is the real finding.** A fourth receiver-wide family at ~119.95 Hz spacing is now visible
+underneath at 13–17 dB, plausibly mains-related, unmeasured, unexcluded. Each exclusion so far has been
+a named frequency from one fixture's provenance, and **each has revealed the next artefact**. The
+agent named the general fix rather than attempting it: *a line at one frequency in channels holding
+nothing is the receiver's, written down or not* — a receiver-wide test, not a growing list of notches.
+That belongs in a ticket and it is the right shape for the recurring defect family.
+
+**Disk hit 6.9 GB — worse than the user's 9.1 GB reading by the time I acted.** Merging T-382 and
+removing its worktree took it to 17 GB; clearing sccache (a real 8 GB, unshared) and stale scratchpad
+data took it to **25 GB**. I had been holding sccache back at a 15 GB threshold on the grounds that
+stopping the server mid-build risks the in-flight compiles; the user's instruction overrode that, and
+in hindsight my threshold was set too low given how fast four builders drain the disk. The lesson to
+carry: worktree removal is the big lever, sccache is the reliable 8 GB, and `du` on the targets is
+worthless because of the APFS clone sharing.
+
+**T-381's agent stalled** by ending its turn waiting on a backgrounded `just acceptance` — the one
+process rule every brief states. Its worktree still holds all four modified files, nothing lost, and
+it has been told to re-run the gate in the foreground, to expect a cold first build because sccache is
+gone, and that main has moved under it (T-378 touched `hk-pipeline/src/run.rs`).
+
+Two new tickets from live testing. **T-391**: the navigators sit in ~12 px tracks, so T-367's
+frequency-scoped time overview and T-368's coverage-backed survey strip both render real data nobody
+can see — not cosmetic. **T-392**: a region selected on the frequency navigator should **retune** to
+cover it rather than report that it is outside the window, with the distinction that makes it a
+design rather than a convenience — the same gesture means *look closer* inside the window and *go
+there* outside it — and with T-340's no-retune control on pan and wheel explicitly required to survive.
