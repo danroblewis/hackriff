@@ -55,14 +55,24 @@ fn event_json(entry: &InventoryEntry, i: &PresenceInterval, window: TimeRange) -
             .max(window.start.as_unix_nanos()),
         i.time.end.as_unix_nanos().min(window.end.as_unix_nanos()),
     );
+    // Silence a revoked end rejoined is inside the extent and is not air (T-413), so it comes off
+    // the in-window figure exactly as it comes off `duration_s`.
+    let revoked_in_window: i64 = i
+        .revoked
+        .iter()
+        .map(|g| {
+            (g.end.as_unix_nanos().min(hi) - g.start.as_unix_nanos().max(lo)).max(0)
+        })
+        .sum();
     json!({
         "emitter_id": entry.emitter.id.to_string(),
         "t_start_s": ts_s(i.time.start),
         "t_end_s": ts_s(i.time.end),
         // Backend-computed: a client never derives a timespan from two fields it was handed.
         "duration_s": i.duration_s(),
-        "in_window_s": (hi - lo).max(0) as f64 / 1e9,
+        "in_window_s": ((hi - lo).max(0) - revoked_in_window).max(0) as f64 / 1e9,
         "open": i.open,
+        "revoked_s": i.revoked_s(),
         "count": i.count,
         "sources": i.sources,
         "f_center_hz": i.f_center_hz,

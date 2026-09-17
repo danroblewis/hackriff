@@ -15,7 +15,12 @@ export interface UserBand { f_lo: number; f_hi: number; set_at: number; actor: s
  * T-284, ADR-0017 TM-2/§2.3): "the box the waterfall draws" (TM-4). `open`: still on the air at the
  * window's own live edge — an advancing `t_end_s` on the next poll is what makes a box grow; nothing
  * here is extrapolated client-side between polls. */
-export interface PresenceInterval { t_start_s: number; t_end_s: number; open: boolean }
+/** `revoked_s` (T-413, ADR-0019 §6.1) is measured silence *inside* this interval whose detected end
+ * a resumption revoked — the interval is one interval on one emitter, and this says how much of the
+ * span it covers the receiver measured empty. Absent on a pre-T-413 backend; `0` for the
+ * overwhelming majority of intervals. Nothing in the client computes air time from it: it is why a
+ * rejoined box is marked rather than drawn as if it were on air throughout. */
+export interface PresenceInterval { t_start_s: number; t_end_s: number; open: boolean; revoked_s?: number }
 
 /** When this emitter was on the air, seen through the request's window (docs/api.md `presence`,
  * T-284, ADR-0017 TM-2/§2.3) — read this instead of `first_seen_s`/`last_seen_s`, which are the

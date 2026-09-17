@@ -1307,10 +1307,14 @@ pub fn parse_presence_at(
 /// excluded from every liveness decision and from live-list ranking (ADR-0017 §5).
 ///
 /// - `intervals` — how many presence intervals intersect the window ("17 events").
-/// - `on_air_s` — time on air *inside* the window: Σ of each interval's intersection with it.
-///   This is what a live list ranks by, in place of the lifetime `count`.
+/// - `on_air_s` — time on air *inside* the window: Σ of each interval's intersection with it,
+///   **less** any silence a revoked end rejoined (T-413). This is what a live list ranks by, in
+///   place of the lifetime `count`.
 /// - `last_interval` — the latest interval intersecting the window (`t_start_s`, `t_end_s`,
-///   `open`), or `null` when none does. It is the box the waterfall draws (TM-4).
+///   `open`, `revoked_s`), or `null` when none does. It is the box the waterfall draws (TM-4).
+///   `revoked_s` is measured silence *inside* the interval whose detected end a resumption revoked
+///   (T-413, ADR-0019 §6.1): the interval is one interval, and this says how much of the span it
+///   covers was measured empty, so the box is never drawn as if it were on air throughout.
 /// - `liveness` — `live` / `ended` / `absent` (§2.3).
 /// - `ended_t_s` — when it stopped, for `ended` only; `null` while live or absent. This is the
 ///   "ended 4 minutes ago" the product previously could not say.
@@ -1331,10 +1335,14 @@ pub(crate) fn presence_json(p: &Presence) -> Value {
     json!({
         "intervals": p.intervals,
         "on_air_s": p.on_air_s,
-        "last_interval": p.last_interval.map(|i| json!({
+        "last_interval": p.last_interval.as_ref().map(|i| json!({
             "t_start_s": ts_s(i.time.start),
             "t_end_s": ts_s(i.time.end),
             "open": i.open,
+            // T-413: measured silence inside this interval whose detected end a resumption revoked.
+            // 0 for almost every interval; when it is not, the box covers air that was measured
+            // *empty*, and the renderer marks it rather than drawing the join solid.
+            "revoked_s": i.revoked_s(),
         })),
         "liveness": p.liveness.as_str(),
         "ended_t_s": p.ended_t.map(ts_s),

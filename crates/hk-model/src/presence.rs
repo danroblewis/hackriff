@@ -21,6 +21,10 @@
 //! - **A silence longer than the idle gap closes the interval.** The next row starts a **new**
 //!   interval on the **same emitter**. Nothing is deleted and nothing is rewritten; closure is a
 //!   measurement fact (evidence stopped arriving), and it is permanent History.
+//! - **…unless the signal comes back inside one further idle gap, which *revokes* the end**
+//!   ([`IdleGap::revocable_nanos`], T-413). The two rows are then one interval again, the silence
+//!   between them is recorded on it as a [revoked gap](PresenceInterval::revoked), and **no part of
+//!   that silence is ever counted as time on air**. See "The end is revocable" below.
 //! - **`open` is derived, never stored** ([`PresenceInterval::open`]): an interval is open while
 //!   `now − t_end ≤ idle_gap`. Only the latest interval can be open, by construction. Storing a
 //!   decision made under one parameter value is the measurement-versus-interpretation mistake
@@ -121,6 +125,49 @@
 //! not fifty rows. The fact that the sensor is *periodic* is said by `EmissionFeatures`
 //! (period, duty cycle, burst length — ADR-0016 §5), which is where that belongs; it is not said by
 //! smearing fifty transmissions into one span of mostly silence.
+//!
+//! # The end is revocable, and the window is one further idle gap (T-413, ADR-0019 §6.1)
+//!
+//! *(The user, 2026-09-17, answering the question ADR-0019 §6.1 flagged rather than decided.)* A
+//! detected end is **provisional**: if the signal resumes within tolerance, **null the end and keep
+//! the one interval open** rather than splitting it or spawning a new emitter. The tolerance is the
+//! **existing** [`IdleGap`] — no new parameter.
+//!
+//! **Where the window is anchored, and why it cannot be the measured end.** An interval closes only
+//! after a *full* idle gap of observed silence, so by the time an end exists to revoke, the silence
+//! since the **measured** end is already exactly one gap. Measuring the revocation window from the
+//! measured end would make it unreachable by construction: every resumption after an end is more
+//! than one gap past it. So the window runs from **the end *event*** — the instant the decision was
+//! taken, which is one gap past the measurement that provoked it:
+//!
+//! ```text
+//! silence ≤ gap          → no end is detected at all      (the interval simply continues)
+//! gap < silence ≤ 2×gap  → an end fired, and a resumption REVOKES it: ONE interval
+//! silence > 2×gap        → the end stands; a resumption is a genuinely new interval
+//! silence > 60 s         → never revocable, whatever the gap: the tracker already closed the
+//!                          track, so the discontinuity is a measurement, not a parameter
+//! ```
+//!
+//! **So the effective join tolerance is `2 × gap` although only one constant exists**, and the two
+//! gaps are not the same measurement twice: the first is the observed absence that *justifies* the
+//! end, the second is the observed absence that *confirms* it. One is the detection, the other is
+//! its confirmation, and both are one unit of observed absence — the only unit this module has.
+//! Equivalently, and with no arithmetic at all: **the end stands revocable for exactly as long as
+//! [`confidence_after_silence`] is still above `1/e`**, its first e-fold, which is by definition one
+//! independent absence observation after the one that closed the interval.
+//!
+//! **Time on air is never claimed across a revoked gap.** The rejoined interval keeps the silence on
+//! itself ([`PresenceInterval::revoked`]) and [`PresenceInterval::duration_s`] and
+//! [`Presence::on_air_s`] both subtract it. Without that, a sensor chattering at a 1.5 s cadence
+//! under a 1 s gap would read as one interval of 75 s "on air" holding 1 s of emission — the
+//! ADR-0017 hull pathology, reintroduced one level down. With it, the count of events changes and
+//! the air time does not, which is the only honest way for a join to be free.
+//!
+//! **The ISM reading is untouched**, and that is a numeric fact rather than a hope: under contiguous
+//! coverage the gap is 1 s, so the window closes 2 s after the measured end, and a sensor firing
+//! every 30 s is fifty intervals exactly as before
+//! ([`tests::a_chatty_burst_source_reads_as_one_interval_per_burst`]). Any revocation window wide
+//! enough to swallow that cadence would have to be more than fifteen times the one derived here.
 //!
 //! **Why per-band is worse.** A per-band idle gap has no measurement behind it: it is a number
 //! chosen until one screen looks right. It would make the same sensor read as one interval or
@@ -266,6 +313,31 @@ impl IdleGap {
         self.0
     }
 
+    /// The silence a resumption may cross and still **revoke** the end that fired inside it:
+    /// `2 × gap` (T-413, ADR-0019 §6.1; see the module docs for the derivation).
+    ///
+    /// Not a second parameter, and not a wider gap. It is this gap twice, for two different
+    /// statements: the first is the observed absence that closes the interval, the second the
+    /// observed absence that confirms the closure. A signal returning before the second has
+    /// accumulated nulls the end and the interval stays **one** interval; one returning after it
+    /// starts a new one. Anchored on the end *event* rather than on the measured end, because the
+    /// end event is already one gap past the measurement and a window measured from the measurement
+    /// could never be reached.
+    ///
+    /// **Clamped by [`MAX_IDLE_GAP_S`], which is the one ceiling revocation may not lift.** Past it
+    /// the tracker has already closed the track, so two source rows further apart than 60 s were
+    /// judged discontinuous by a **measurement** upstream, and ADR-0019 §6 is explicit that they
+    /// "can never be rejoined" — revoking there would overrule a measurement with a parameter,
+    /// which is exactly what the clamp on the gap itself exists to prevent. It binds only when the
+    /// revisit period is unknown or very long: under a live dwell the gap is 1 s and the window is
+    /// 2 s, nowhere near it. (Measured check: the user's stopped-and-returned FM station has a 72 s
+    /// silence, and stays two intervals.)
+    pub const fn revocable_nanos(self) -> i64 {
+        let max = (MAX_IDLE_GAP_S * NS_PER_S) as i64;
+        let doubled = self.0.saturating_mul(2);
+        if doubled > max { max } else { doubled }
+    }
+
     /// The gap in seconds.
     pub fn as_secs_f64(self) -> f64 {
         self.0 as f64 / NS_PER_S
@@ -324,9 +396,10 @@ pub struct ObservationSpan {
 
 /// A maximal span during which one emitter was continuously on the air, within the detector's
 /// ability to tell continuity from gaps (docs/07 §2.27).
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PresenceInterval {
-    /// The time extent. **This**, not the emitter's hull, is how long the signal was on air.
+    /// The time extent. **This**, not the emitter's hull, is how long the signal was on air —
+    /// less [`Self::revoked`], which is measured silence and is never on-air time.
     pub time: TimeRange,
     /// Source rows normalised into this interval (≥ 1).
     pub sources: u32,
@@ -338,12 +411,39 @@ pub struct PresenceInterval {
     pub f_center_hz: Option<f64>,
     /// Derived, never stored: `now − t_end ≤ idle_gap`. Only the latest interval can be open.
     pub open: bool,
+    /// Silences inside this interval that a resumption **revoked the end of** (T-413): each is
+    /// longer than one [`IdleGap`] — long enough that an end was detected in it — and no longer
+    /// than [`IdleGap::revocable_nanos`], so the signal came back inside the revocation window and
+    /// the interval stayed one interval on one emitter.
+    ///
+    /// **Measured silence, never time on air.** [`Self::duration_s`] and [`Presence::on_air_s`]
+    /// both subtract it, so revoking an end changes how many *events* were seen and never how much
+    /// air was claimed. Empty for the overwhelming majority of intervals; it exists so that "one
+    /// interval" can never quietly become "on air throughout".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<TimeRange>,
 }
 
 impl PresenceInterval {
-    /// Time on air in this interval, s.
+    /// Time on air in this interval, s: its extent **less** every [revoked gap](Self::revoked),
+    /// which is silence the receiver measured and this interval must not claim.
     pub fn duration_s(&self) -> f64 {
-        self.time.duration_ns().max(0) as f64 / NS_PER_S
+        let ns = self.time.duration_ns().max(0) - self.revoked_ns();
+        ns.max(0) as f64 / NS_PER_S
+    }
+
+    /// Total measured silence inside this interval whose end was revoked, ns.
+    pub fn revoked_ns(&self) -> i64 {
+        self.revoked
+            .iter()
+            .map(|g| g.duration_ns().max(0))
+            .fold(0i64, i64::saturating_add)
+    }
+
+    /// Total measured silence inside this interval whose end was revoked, s. The number the row and
+    /// the box state, so "one interval" is never read as "on air throughout".
+    pub fn revoked_s(&self) -> f64 {
+        self.revoked_ns() as f64 / NS_PER_S
     }
 }
 
@@ -374,12 +474,14 @@ impl Liveness {
 
 /// An emitter's presence as seen through one view window `[t0, t1]`. Every field is derived from
 /// interval boundaries; none is derived from `count`.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Presence {
     /// Intervals intersecting the window.
     pub intervals: u64,
-    /// Time on air **inside** the window, s: Σ of each interval's intersection with it. This is
-    /// the honest replacement for ranking by lifetime `count`.
+    /// Time on air **inside** the window, s: Σ of each interval's intersection with it, **less**
+    /// every [revoked gap](PresenceInterval::revoked) inside it (T-413). This is the honest
+    /// replacement for ranking by lifetime `count`, and subtracting the revoked silence is what
+    /// stops a revoked end buying air time it was never measured to have.
     pub on_air_s: f64,
     /// The latest interval intersecting the window, if any.
     pub last_interval: Option<PresenceInterval>,
@@ -408,9 +510,13 @@ pub struct Presence {
 // ---------------------------------------------------------------------------------------------
 
 /// Normalises raw source rows into the emitter's ordered set of **disjoint** presence intervals
-/// (module docs): overlapping rows and rows separated by at most `gap` fold together; a longer
-/// silence closes the interval and the next row opens a new one. `now` is the live edge, and
-/// decides only which interval reads as open.
+/// (module docs): overlapping rows and rows separated by at most `gap` fold together; a silence
+/// past `gap` detects an end, which a row arriving within one *further* gap **revokes**
+/// ([`IdleGap::revocable_nanos`], T-413) — the rows fold together and the silence is recorded as a
+/// [revoked gap](PresenceInterval::revoked) rather than claimed as air; a longer silence closes the
+/// interval for good and the next row opens a new one. `now` is the live edge, and decides only
+/// which interval reads as open — a revoked end never delays closure, so the end detector's latency
+/// is exactly what it was.
 ///
 /// Reads `time` only. `count` is carried through untouched.
 pub fn intervals_from_spans(
@@ -422,12 +528,27 @@ pub fn intervals_from_spans(
     spans.sort_by_key(|s| (s.time.start, s.time.end));
     let mut out: Vec<PresenceInterval> = Vec::with_capacity(spans.len());
     for s in spans {
-        let joins = out.last().is_some_and(|cur| {
-            s.time.start.as_unix_nanos()
-                <= cur.time.end.as_unix_nanos().saturating_add(gap.as_nanos())
+        // The silence this row would have to cross to join the interval in hand. Negative when the
+        // rows overlap, which is the "two sources describing the same minutes" case.
+        let silence = out.last().map(|cur| {
+            s.time
+                .start
+                .as_unix_nanos()
+                .saturating_sub(cur.time.end.as_unix_nanos())
         });
+        // Past one gap an end was detected; inside two, this row is the resumption that revokes it,
+        // and the silence it crossed is carried on the interval so nothing counts it as air.
+        let revoked = match silence {
+            Some(s_ns) if s_ns > gap.as_nanos() && s_ns <= gap.revocable_nanos() => Some(s_ns),
+            _ => None,
+        };
+        let joins = silence.is_some_and(|s_ns| s_ns <= gap.revocable_nanos());
         match out.last_mut() {
             Some(cur) if joins => {
+                if let Some(ns) = revoked {
+                    debug_assert!(ns > 0, "a revoked gap is a real silence");
+                    cur.revoked.push(TimeRange::new(cur.time.end, s.time.start));
+                }
                 if s.time.end > cur.time.end {
                     cur.time.end = s.time.end;
                 }
@@ -445,6 +566,7 @@ pub fn intervals_from_spans(
                 count: s.count,
                 f_center_hz: s.f_center_hz,
                 open: false,
+                revoked: Vec::new(),
             }),
         }
     }
@@ -483,9 +605,19 @@ pub fn presence_in_window(
         let lo = i.time.start.as_unix_nanos().max(t0);
         let hi = i.time.end.as_unix_nanos().min(t1);
         on_air_ns += i128::from(hi - lo).max(0);
+        // A revoked end joined two spans across silence the receiver measured. The join is what the
+        // user asked for; claiming that silence as air is not, so the in-window part of it comes
+        // straight back off (T-413).
+        for g in &i.revoked {
+            let (glo, ghi) = (
+                g.start.as_unix_nanos().max(lo),
+                g.end.as_unix_nanos().min(hi),
+            );
+            on_air_ns -= i128::from(ghi - glo).max(0);
+        }
         live |= i.open;
-        if last.is_none_or(|l| i.time.end >= l.time.end) {
-            last = Some(*i);
+        if last.as_ref().is_none_or(|l| i.time.end >= l.time.end) {
+            last = Some(i.clone());
         }
     }
     let liveness = match (n, live) {
@@ -493,8 +625,9 @@ pub fn presence_in_window(
         (_, true) => Liveness::Live,
         (_, false) => Liveness::Ended,
     };
-    let silence_s =
-        last.map(|l| (t1.saturating_sub(l.time.end.as_unix_nanos())).max(0) as f64 / NS_PER_S);
+    let silence_s = last
+        .as_ref()
+        .map(|l| (t1.saturating_sub(l.time.end.as_unix_nanos())).max(0) as f64 / NS_PER_S);
     // Gated on `liveness`, not on a recomputed silence, so "confident" and "live" are the same
     // statement: an open interval is one the receiver has observed no absence for at all.
     let confidence = match liveness {
@@ -504,11 +637,11 @@ pub fn presence_in_window(
     };
     Presence {
         intervals: n,
-        on_air_s: on_air_ns as f64 / NS_PER_S,
+        on_air_s: on_air_ns.max(0) as f64 / NS_PER_S,
+        ended_t: (liveness == Liveness::Ended)
+            .then(|| last.as_ref().expect("ended has an interval").time.end),
         last_interval: last,
         liveness,
-        ended_t: (liveness == Liveness::Ended)
-            .then(|| last.expect("ended has an interval").time.end),
         silence_s,
         confidence,
     }
@@ -622,6 +755,102 @@ mod tests {
         assert!(got[1].open);
     }
 
+    /// **The revocation rule and its boundary** (T-413, ADR-0019 §6.1). The window is anchored on
+    /// the end *event*, one gap past the measured end, so the join tolerance is `2 × gap` — and the
+    /// boundary is asserted on both sides rather than assumed.
+    #[test]
+    fn a_resumption_within_one_further_gap_revokes_the_detected_end() {
+        let gap = IdleGap::from_revisit_s(1.0); // 2 s
+        let (g, g2) = (gap.as_secs_f64(), gap.revocable_nanos() as f64 / NS_PER_S);
+        assert_eq!(g2, 2.0 * g, "one gap to the end event, one more to confirm it");
+        // Never past the tracker's own idle timeout: there the discontinuity was measured upstream
+        // and no revocation may rejoin it. The user's 72 s FM dropout stays two intervals.
+        assert_eq!(
+            IdleGap::conservative().revocable_nanos() as f64 / NS_PER_S,
+            MAX_IDLE_GAP_S,
+            "revocation may not lift the ceiling the gap is clamped to"
+        );
+        let fm = intervals_from_spans(
+            &[span(0.0, 300.0, 1), span(372.0, 400.0, 1)],
+            IdleGap::conservative(),
+            t(400.0),
+        );
+        assert_eq!(fm.len(), 2, "a 72 s silence is two intervals: {fm:?}");
+
+        // Inside the window: ONE interval, the end nulled, and the silence recorded on it.
+        let joined = intervals_from_spans(&[span(0.0, 10.0, 1), span(10.0 + g2, 12.0, 1)], gap, t(12.0));
+        assert_eq!(joined.len(), 1, "the end was revoked: {joined:?}");
+        assert_eq!(joined[0].revoked.len(), 1);
+        assert_eq!(joined[0].revoked[0], TimeRange::new(t(10.0), t(10.0 + g2)));
+        assert!(joined[0].open, "one interval, open at the live edge");
+
+        // One nanosecond past it: the end stands, and the resumption is a new interval.
+        let split = intervals_from_spans(
+            &[span(0.0, 10.0, 1), span(10.0 + g2 + 1e-9, 12.0, 1)],
+            gap,
+            t(12.0),
+        );
+        assert_eq!(split.len(), 2, "past the window the end is final: {split:?}");
+        assert!(split.iter().all(|i| i.revoked.is_empty()));
+
+        // And a silence inside ONE gap never detected an end at all, so nothing is revoked.
+        let never = intervals_from_spans(&[span(0.0, 10.0, 1), span(10.0 + g, 12.0, 1)], gap, t(12.0));
+        assert_eq!(never.len(), 1);
+        assert!(
+            never[0].revoked.is_empty(),
+            "no end fired here, so there is none to revoke"
+        );
+    }
+
+    /// **The join is free, and time on air pays nothing for it.** Rejoining across measured silence
+    /// is exactly the ADR-0017 hull pathology unless the silence comes back off the air time, so it
+    /// does — on the interval, and on the window projection, clipped like everything else.
+    #[test]
+    fn a_revoked_gap_is_never_counted_as_time_on_air() {
+        let gap = IdleGap::from_revisit_s(1.0); // 2 s, revocable to 4 s
+        let got = intervals_from_spans(&[span(0.0, 10.0, 1), span(13.0, 20.0, 1)], gap, t(20.0));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].time, TimeRange::new(t(0.0), t(20.0)));
+        assert_eq!(got[0].revoked_s(), 3.0);
+        assert_eq!(got[0].duration_s(), 17.0, "20 s of extent, 17 s of air");
+
+        let p = presence_in_window(&got, TimeRange::new(t(0.0), t(20.0)), gap);
+        assert_eq!(p.on_air_s, 17.0, "the window projection subtracts it too");
+        assert_eq!(p.intervals, 1);
+
+        // Clipped, not all-or-nothing: a window covering half the revoked gap subtracts half.
+        let half = presence_in_window(&got, TimeRange::new(t(11.5), t(20.0)), gap);
+        assert_eq!(half.on_air_s, 7.0, "8.5 s of extent less 1.5 s of revoked silence");
+        // A window ending before the gap subtracts nothing.
+        let before = presence_in_window(&got, TimeRange::new(t(0.0), t(10.0)), gap);
+        assert_eq!(before.on_air_s, 10.0);
+
+        // The pathology this closes, at the new tolerance: a 1.5 s cadence under a 1 s gap folds
+        // into one interval, and still reads its true air time rather than the span it covers.
+        let fast = IdleGap::continuous();
+        let bursts: Vec<ObservationSpan> = (0..50)
+            .map(|i| span(f64::from(i) * 1.5, f64::from(i) * 1.5 + 0.02, 1))
+            .collect();
+        let got = intervals_from_spans(&bursts, fast, t(73.52));
+        assert_eq!(got.len(), 1, "1.5 s is inside the 2 s revocation window");
+        let air: f64 = got.iter().map(PresenceInterval::duration_s).sum();
+        assert!((air - 1.0).abs() < 1e-6, "1.0 s on air over 73.5 s: {air}");
+    }
+
+    /// A revoked end never delays closure: the interval still reads open for exactly one gap past
+    /// its measured end, so the end detector's latency is what T-410 made it.
+    #[test]
+    fn revocation_does_not_widen_the_window_an_interval_reads_open_over() {
+        let gap = IdleGap::from_revisit_s(1.0); // 2 s
+        let one = intervals_from_spans(&[span(0.0, 10.0, 1)], gap, t(12.0));
+        assert!(one[0].open, "still inside one gap of the measured end");
+        let past = intervals_from_spans(&[span(0.0, 10.0, 1)], gap, t(12.5));
+        assert!(
+            !past[0].open,
+            "closed at one gap, not two - the end fires, and only then is it revocable"
+        );
+    }
+
     /// The ISM consequence, stated as a test: a chatty burst source is one interval per burst.
     #[test]
     fn a_chatty_burst_source_reads_as_one_interval_per_burst() {
@@ -631,6 +860,13 @@ mod tests {
             .collect();
         let got = intervals_from_spans(&bursts, gap, t(1470.02));
         assert_eq!(got.len(), 50, "fifty events, deliberately - not one span");
+        // T-413: the revocation window has to be checked against this, not assumed clear of it. A
+        // 30 s cadence sits ten times outside a 3 s window, so no end here is ever revoked.
+        assert!(
+            (gap.revocable_nanos() as f64 / NS_PER_S) < 30.0,
+            "a revocation window this wide would swallow the ISM cadence"
+        );
+        assert!(got.iter().all(|i| i.revoked.is_empty()));
         let on_air: f64 = got.iter().map(PresenceInterval::duration_s).sum();
         assert!(
             (on_air - 1.0).abs() < 1e-6,

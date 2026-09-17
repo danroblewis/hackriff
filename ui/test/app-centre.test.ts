@@ -42,8 +42,8 @@ function row(id: string, lo: number, hi: number, state: Row["state"] = "confirme
 
 /** A `presence.last_interval` (docs/api.md `presence`, T-284): `open` defaults to the interval
  * still being live at the request window's own edge. */
-function iv(t0: number, t1: number, open = true): Presence {
-  return { intervals: 1, on_air_s: t1 - t0, last_interval: { t_start_s: t0, t_end_s: t1, open }, liveness: open ? "live" : "ended", ended_t_s: open ? null : t1 };
+function iv(t0: number, t1: number, open = true, revoked_s = 0): Presence {
+  return { intervals: 1, on_air_s: t1 - t0 - revoked_s, last_interval: { t_start_s: t0, t_end_s: t1, open, revoked_s }, liveness: open ? "live" : "ended", ended_t_s: open ? null : t1 };
 }
 const near = (a: number, b: number, eps = 1e-9) => assert.ok(Math.abs(a - b) <= eps, `${a} ≉ ${b}`);
 
@@ -214,6 +214,24 @@ test("presenceBoxes: a row classified as css/chirp is flagged so the box is labe
   assert.equal(boxes.find((x) => x.id === "a")!.style.hatch, true, "and the hatch says so on screen");
   assert.ok(boxes.find((x) => x.id === "a")!.title!.includes("bounding box"), "and the hover readout says why");
   assert.ok(drawn(boxes[0], clock), "still placed like any other box");
+});
+
+test("T-413: an interval rejoined across a revoked end is ONE box, hatched — never solid over air measured empty, and never the open cap's idiom", () => {
+  // The user's ruling is one interval on one row, so the box must not break in two. But the span it
+  // covers holds silence the receiver *measured*, so it must not go solid either. `hatch` already
+  // means "a rectangle known to approximate the thing it covers" (its other user is a chirp), which
+  // is exactly the statement, and the border stays continuous because this is one interval.
+  const rejoined = row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1005, true, 1.4));
+  const plain = row("b", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1005, true));
+  const [a, b] = presenceBoxes([rejoined, plain], G, null);
+  assert.equal(a.revokedS, 1.4, "read off the API, never derived from the two endpoints");
+  assert.equal(a.style.hatch, true, "the fill says it approximates");
+  assert.equal(b.style.hatch, false, "and an ordinary interval is untouched");
+  assert.equal(a.style.dashPx, b.style.dashPx, "one interval: the border is not broken into two boxes");
+  assert.equal(a.style.fill[3], b.style.fill[3], "and not lightened into the open cap's idiom, which means NOT MEASURED");
+  assert.ok(a.title.includes("revoked end"), `the hover states it: ${a.title}`);
+  assert.ok(a.title.includes("not counted as air"), a.title);
+  assert.equal(b.revokedS, 0);
 });
 
 // ---- T-337: one shared time axis ----------------------------------------------------------

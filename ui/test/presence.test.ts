@@ -22,22 +22,25 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   applyPresenceEvent, parsePresenceEvent,
-  PRESENCE_END_KIND, PRESENCE_REOPEN_KIND, PRESENCE_START_KIND,
+  PRESENCE_END_KIND, PRESENCE_REOPEN_KIND, PRESENCE_REVOKE_KIND, PRESENCE_START_KIND,
 } from "../src/presence";
 import type { Presence, Row } from "../src/inventory";
 
 /** One `presence` record as `hk-pipeline::presence` publishes it (docs/stream-contract.md §15). */
-const record = (emitter: string, kind: string, t0: number, t1: number) => {
+const record = (emitter: string, kind: string, t0: number, t1: number, revoked_s = 0) => {
   const open = kind !== PRESENCE_END_KIND;
+  const opening = kind === PRESENCE_START_KIND || kind === PRESENCE_REOPEN_KIND;
   return JSON.stringify({
-    type: "message", seq: 3, t_ns: Math.round((open ? t0 : t1) * 1e9), emitter_id: emitter,
+    type: "message", seq: 3, t_ns: Math.round((opening ? t0 : t1) * 1e9), emitter_id: emitter,
     content_class: "unrestricted", gated: false, frame_model: kind,
-    metadata: { kind, last_interval: { t_start_s: t0, t_end_s: t1, open } },
+    metadata: { kind, last_interval: { t_start_s: t0, t_end_s: t1, open, revoked_s } },
   });
 };
 const start = (e: string, t0: number, t1: number) => record(e, PRESENCE_START_KIND, t0, t1);
 const reopen = (e: string, t0: number, t1: number) => record(e, PRESENCE_REOPEN_KIND, t0, t1);
 const end = (e: string, t0: number, t1: number) => record(e, PRESENCE_END_KIND, t0, t1);
+const revoke = (e: string, t0: number, t1: number, revoked_s = 1.4) =>
+  record(e, PRESENCE_REVOKE_KIND, t0, t1, revoked_s);
 
 const presence = (t0: number, t1: number, open = true): Presence => ({
   intervals: 1, on_air_s: t1 - t0, last_interval: { t_start_s: t0, t_end_s: t1, open },
@@ -125,7 +128,7 @@ test("T-410: a row with no interval in the window gets no box conjured for it �
 // ---------------------------------------------------------------------------
 
 test("T-410: only a well-formed endpoint record parses; everything else is nothing to apply", () => {
-  for (const good of [start("e1", 1, 2), reopen("e1", 1, 2), end("e1", 1, 2)]) {
+  for (const good of [start("e1", 1, 2), reopen("e1", 1, 2), end("e1", 1, 2), revoke("e1", 1, 2)]) {
     assert.ok(parsePresenceEvent(good), good);
   }
   const meta = (m: unknown) => JSON.stringify({ type: "message", emitter_id: "e1", metadata: m });
@@ -139,6 +142,8 @@ test("T-410: only a well-formed endpoint record parses; everything else is nothi
     // A record that disagrees with itself: the kind says closed, the interval says open.
     meta({ kind: PRESENCE_END_KIND, last_interval: { t_start_s: 1, t_end_s: 2, open: true } }),
     meta({ kind: PRESENCE_START_KIND, last_interval: { t_start_s: 1, t_end_s: 2, open: false } }),
+    // A revocation re-opens the interval it capped, so it can never state `open: false`.
+    meta({ kind: PRESENCE_REVOKE_KIND, last_interval: { t_start_s: 1, t_end_s: 2, open: false } }),
     "not json at all",
   ];
   for (const b of bad) assert.equal(parsePresenceEvent(b), null, b);
@@ -248,4 +253,41 @@ test("T-410: pausing a following view closes the socket; going live re-subscribe
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(FakeSocket.open.length, 2, "following again: subscribed again");
   h.stop();
+});
+
+// ---------------------------------------------------------------------------
+// (T-413) the END is provisional: a resumption inside the window revokes it
+// ---------------------------------------------------------------------------
+
+test("T-413: a REVOKE re-opens the SAME interval — one box grows, a second never appears", () => {
+  // The poll served the row capped at its measured end. The signal came back inside the revocation
+  // window, so the end is nulled and the interval is the one it capped: same start, open again.
+  const p = presence(990.0, 995.0, false);
+  const after = applyPresenceEvent(row(p), parsePresenceEvent(revoke("e1", 990.0, 996.6, 1.4))!)!;
+  const iv = after.last_interval!;
+  assert.equal(iv.t_start_s, 990.0, "the interval the END capped, not a new one");
+  assert.equal(iv.t_end_s, 996.6, "the measured edge the resumption has reached");
+  assert.equal(iv.open, true, "open again: the box runs to the live edge");
+  assert.equal(iv.revoked_s, 1.4, "and it carries the measured silence it was rejoined across");
+});
+
+test("T-413: the revoked silence only ever grows — the stream states a bound, the poll the whole gap", () => {
+  // The stream can only show the silence it watched before deciding; the poll knows the rest. A
+  // later record must never talk the figure back down and make the box look more continuous.
+  const p = presence(990.0, 995.0, false);
+  const streamed = applyPresenceEvent(row(p), parsePresenceEvent(revoke("e1", 990.0, 996.6, 2.0))!)!;
+  const again = applyPresenceEvent(row(streamed), parsePresenceEvent(revoke("e1", 990.0, 997.0, 1.0))!)!;
+  assert.equal(again.last_interval!.revoked_s, 2.0, "never revised downwards");
+});
+
+test("T-413: a REVOKE addressed to a later interval, or one that would shorten the measured end, is refused", () => {
+  const p = presence(990.0, 995.0, false);
+  // A later start is a different interval — this row is not holding it, so there is nothing here
+  // to revoke and nothing is invented (refusal 1's reasoning).
+  assert.equal(applyPresenceEvent(row(p), parsePresenceEvent(revoke("e1", 1010.0, 1012.0))!), null);
+  // And nothing may pull the measured extent backwards (refusal 2).
+  assert.equal(applyPresenceEvent(row(p), parsePresenceEvent(revoke("e1", 990.0, 994.0))!), null);
+  // A row with no interval at all still gets no box conjured for it.
+  const none: Presence = { intervals: 0, on_air_s: 0, last_interval: null, liveness: "absent", ended_t_s: null };
+  assert.equal(applyPresenceEvent(row(none), parsePresenceEvent(revoke("e1", 990.0, 996.0))!), null);
 });

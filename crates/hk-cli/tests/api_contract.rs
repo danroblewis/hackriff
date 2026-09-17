@@ -1360,12 +1360,19 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         assert_eq!(row["presence"]["intervals"], json!(0), "{row}");
         assert!(row["presence"]["last_interval"].is_null(), "{row}");
     } else {
-        for field in ["t_start_s", "t_end_s"] {
+        // `revoked_s` (T-413, ADR-0019 §6.2): measured silence inside the interval whose detected
+        // end a resumption revoked. Always served, so a client can never confuse "no revoked gap"
+        // with "this backend does not say".
+        for field in ["t_start_s", "t_end_s", "revoked_s"] {
             assert!(
                 row["presence"]["last_interval"][field].is_number(),
                 "last_interval missing {field}: {row}"
             );
         }
+        assert!(
+            row["presence"]["last_interval"]["revoked_s"].as_f64().unwrap() >= 0.0,
+            "revoked silence is a duration: {row}"
+        );
         assert_eq!(
             row["presence"]["last_interval"]["open"].as_bool(),
             Some(liveness == Some("live")),

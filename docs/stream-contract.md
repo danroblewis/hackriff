@@ -8,9 +8,10 @@ One contract serves two uses:
 
 ## 1. Versioning
 
-- Every stream opens with a header carrying `"schema": "hackriff.stream"` and `"version": "<major>.<minor>"`. This document is **1.3**: 1.1 (1.0 plus the optional header `audio` profile and the binary `status` record type, T-043, §12) plus the inspector streams of §14 (ADR-0011, T-089): the `frame`, `status` and `edit` message record types and the optional header `inspector` object. The optional header `stage` object (§14.4) is added with stage streams (T-088).
+- Every stream opens with a header carrying `"schema": "hackriff.stream"` and `"version": "<major>.<minor>"`. This document is **1.4**: 1.1 (1.0 plus the optional header `audio` profile and the binary `status` record type, T-043, §12) plus the inspector streams of §14 (ADR-0011, T-089): the `frame`, `status` and `edit` message record types and the optional header `inspector` object. The optional header `stage` object (§14.4) is added with stage streams (T-088).
 - **1.2 added the `presence` stream (§15, T-388)**: a new `messages` stream, additive — a reader that does not know it simply does not subscribe to it.
 - **1.3 changes what that stream carries (§15, T-410, [ADR-0019](adr/0019-presence-as-an-interval-with-endpoints.md))**: presence becomes an **interval with endpoints**, so the records are `presence-start` / `presence-reopen` / `presence-end` and `presence-extension` is retired. This is **not** additive — it replaces record kinds on an existing stream — so the stream's own `message_schema` is bumped from `hackriff.presence/1` to `hackriff.presence/2` rather than the document's minor version pretending nothing moved. A contract-A consumer then sees a schema it does not know, instead of silently ignoring every endpoint. The stream's *framing* is untouched, which is why this is a minor document version and a per-stream schema major.
+- **1.4 makes the detected end revocable (§15, T-413, [ADR-0019](adr/0019-presence-as-an-interval-with-endpoints.md) §6.1)**: `presence-revoke` is added, `presence.last_interval` gains `revoked_s`, and `message_schema` goes to `hackriff.presence/3`. The added kind and field are additive; the schema major is for what is not — **`presence-end` becomes provisional** for one idle gap, so a consumer that files an END as final is now wrong about a record it already understands, and must see a schema it does not know rather than be quietly mistaken.
 - **Minor versions** may only add:
   - optional header fields;
   - optional message-record fields;
@@ -851,7 +852,7 @@ Served over `/ws/open/<name>` (§12.1) and TCP `open/<name>` (§13.1), with the 
 
 ## 15. The presence stream: interval endpoints (1.3, T-388 → T-410)
 
-**Stream id `presence`** (`/ws/presence`), `messages` kind, `message_schema` **`hackriff.presence/2`**,
+**Stream id `presence`** (`/ws/presence`), `messages` kind, `message_schema` **`hackriff.presence/3`**,
 `content_class` `unrestricted`, listed by `GET /api/streams`. Published by `hk-pipeline`
 (`crates/hk-pipeline/src/presence.rs`) from the detection writer thread.
 
@@ -909,35 +910,61 @@ can be late; it can never be the reason a box stays open.**
              "last_interval":{"t_start_s":1757774390.1,"t_end_s":1757774400.12,"open":false}}}
 ```
 
-- `metadata.kind` and `frame_model` are one of **`presence-start`**, **`presence-reopen`** or
-  **`presence-end`**. `presence-extension` is retired, and the schema bump to `/2` is what stops a
-  contract-A consumer silently ignoring every endpoint on the stream.
+- `metadata.kind` and `frame_model` are one of **`presence-start`**, **`presence-reopen`**,
+  **`presence-end`** or **`presence-revoke`**. `presence-extension` is retired, and the schema bump
+  to `/2` is what stopped a contract-A consumer silently ignoring every endpoint on the stream; the
+  bump to `/3` (T-413) is because **`presence-end` changed meaning** — it is now provisional for one
+  idle gap, so a consumer that files an END as final is wrong about a record it already understands,
+  which is not something an added kind alone would have told it.
 - The envelope is §5.1's, unchanged. `t_ns` is the instant the record is *about* — the interval's
   start for an opening record, its measured end for a closing one — integer Unix nanoseconds, never
   a bare `t` (§1, T-354).
 - `metadata.last_interval` is deliberately the **same object** `GET /api/inventory` serves as
-  `presence.last_interval`: the same three field names in the same `_s` seconds unit
-  (`docs/api.md`), so a client assigns it rather than converting it and the fast surface cannot
-  invent a shape the slow one would disagree with.
-- `open` is `true` on `presence-start`/`presence-reopen` and `false` on `presence-end`. It is stated
-  on the wire, never inferred on the client, and a record whose `open` disagrees with its `kind` is
-  malformed.
+  `presence.last_interval`: the same field names in the same `_s` seconds unit (`docs/api.md`), so a
+  client assigns it rather than converting it and the fast surface cannot invent a shape the slow
+  one would disagree with. That includes `revoked_s` (T-413) — measured silence inside the interval
+  whose end was revoked.
+- `open` is `false` only on `presence-end`. It is stated on the wire, never inferred on the client,
+  and a record whose `open` disagrees with its `kind` is malformed.
 - **No frequency.** An endpoint is new *time*, not new geometry (T-362: a box is a band fraction
   plus two absolute capture times). The box's edges came from the row and are not restated, so this
   path can never move a box sideways.
 - `content` is never present: there is no content, only timing — of exactly the class
   `/api/inventory`'s own `presence` object already carries unconditionally.
 
-### 15.4 START, REOPEN, and which tracks are published
+### 15.4 START, REOPEN, REVOKE, and which tracks are published
 
 **START versus REOPEN is an identity question; whether there is a new interval at all is an absence
 question.** Neither threshold is picked:
 
 ```
 silence ≤ idle gap                          → the same interval continues; NO RECORD
-silence > idle gap, same emitter            → presence-reopen: a new interval, a SECOND box
-silence > idle gap, no existing emitter     → presence-start
+idle gap < silence ≤ 2 × idle gap           → presence-revoke: the END is withdrawn, ONE interval
+silence > 2 × idle gap, same emitter        → presence-reopen: a new interval, a SECOND box
+silence > 2 × idle gap, no existing emitter → presence-start
+silence > 60 s                              → never revocable: the tracker already closed the track,
+                                              so the discontinuity is a measurement (§15.2)
 ```
+
+**`presence-revoke` (T-413): a detected end is provisional.** The user's ruling is that a signal
+resuming within tolerance **nulls the end and keeps the one interval open**, on the same row, rather
+than splitting it or spawning an emitter — and the tolerance is the **existing idle gap**, with no
+new parameter. The window is anchored on the END *event*, not on the measured end: an END only fires
+once a full gap of silence has been observed past the measurement, so a window measured from the
+measurement could never be reached. One gap from the decision puts its far edge at
+`measured end + 2 × gap`, which is the form both this stream and `hk_model::presence` are written in
+(`IdleGap::revocable_nanos`) — the same predicate on the same timestamps, so the fast and slow
+surfaces cannot disagree about which resumptions are one interval. **So the effective join tolerance
+is two gaps although only one constant exists**: the first is the observed absence that justifies the
+end, the second the observed absence that confirms it.
+
+A REVOKE carries the interval's **original** `t_start_s` — that is what distinguishes it from a
+REOPEN: one box grows, rather than a second appearing — and a `revoked_s` that is a measured **lower
+bound**, the silence the receiver watched before deciding. The resumption's own start is not in a
+`LiveExtent` (it carries `t_first`), so the stream states what it can show and the 5 s poll states
+the whole gap. **`revoked_s` is never air**: `on_air_s` and `duration_s` both subtract it, so a join
+across measured silence changes how many *events* were seen and never how much air was claimed —
+without which the rejoin would be the ADR-0017 hull pathology one level down.
 
 The gap is the same constant, derived the same way, as the one that closes an interval (§15.2). A
 REOPEN never stretches a box across the silence — it replaces `last_interval`, so the returning
@@ -956,13 +983,15 @@ announced open and then sees no extent for is ended at the last measured end it 
 That is what makes "there is no path that produces no END" true — and it is suppressed when the
 extent batch was at its cap, since absence from a truncated list is not evidence a track closed.
 
-**A track that returns after its own END publishes nothing more.** The tracker joins bursts across
+**A track that returns after its own END, and outside the revocation window, publishes nothing
+more.** The tracker joins bursts across
 its `idle_timeout_s` (60 observed s), far past the gap a box caps at, so the same track reappears
 after the END; but its extent carries `t_first`, the track's *first* burst, not the resumption.
 Publishing that as a new interval's start would claim the silence the END was just drawn for, so the
 stream stays quiet and the 5 s poll serves the new interval with the start it actually has. A **new
-track** bound to the same emitter is different, and does publish a `presence-reopen`: its `t_first`
-is its own first burst, which is a correct interval start. That is what makes the reopen/new-start
+track** bound to the same emitter is different, and does publish — a `presence-revoke` inside the
+revocation window, a `presence-reopen` outside it — because its `t_first` is its own first burst,
+which is a correct interval start and an exactly-known gap. That is what makes the reopen/new-start
 distinction the **tracker's** continuity judgement rather than a threshold chosen on this stream.
 
 ### 15.5 Rate, truncation, and the backstop
@@ -996,8 +1025,11 @@ a record to a row it already holds, and refuses (`ui/src/presence.ts`, ADR-0019 
 
 - **no interval on the row** — nothing to cap or open, and none is conjured; rows are created by the
   poll, never by the stream;
-- **anything that would shorten the measured extent** — an END at or before the end already held, or
-  an opening record that would move a live interval's start later. Capping the open cap is not
+- **a REVOKE addressed to a later interval than the one held** — a revocation re-opens the interval
+  it capped, so one claiming a later `t_start_s` is not about this row's interval;
+- **anything that would shorten the measured extent** — an END at or before the end already held, an
+  opening record that would move a live interval's start later, or a REVOKE that would pull the
+  measured end backwards. Capping the open cap is not
   shortening: that span was assumption standing in for a measurement.
 
 T-388's third refusal — *a span starting after the end held is refused, and the box waits for the
