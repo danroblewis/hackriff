@@ -60,6 +60,12 @@
 //! standards compliance. **Anyone feeding this a real off-air capture must fix all four**, and the
 //! CRC variant is the one that will silently look like a demodulator fault instead of a codec bug.
 //!
+//! T-300 turned that paragraph into assertions rather than acting on it: the tests at the end of
+//! [`super::confirm`] pin all four simplifications — the CRC variant, the missing trellis code, the
+//! missing deinterleaver and the unstripped status symbols — so none of them can be inherited
+//! silently. They also pin the part that misleads: a correctly-formed real TSBK fails this build's
+//! check with *certainty*, at the fixed residue `0x99F6`, while the trellis reports a clean metric.
+//!
 //! # Metadata only
 //!
 //! Nothing here touches audio, voice frames or message payloads, and **nothing here decrypts

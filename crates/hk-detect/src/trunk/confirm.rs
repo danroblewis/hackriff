@@ -406,6 +406,11 @@ impl CcConfirmer {
     pub fn new(cfg: CcConfirmConfig) -> Self {
         // CRC-16/CCITT-FALSE: poly 0x1021, init 0xFFFF, no reflection, xorout 0. Computing it
         // across data *and* the appended CRC leaves 0, which is the check used below.
+        //
+        // This is NOT the CRC a real P25 TSBK carries — that is the augmented CRC-CCITT (init 0,
+        // final XOR 0xFFFF) — and it is one of four deliberate simplifications that must be fixed
+        // together or not at all. The tests at the end of this file state all four and the
+        // failure mode the wrong CRC produces on a real capture (T-268, T-300).
         let crc = BitCrc::new(16, 0x1021, 0xFFFF, false, false, 0)
             .expect("CRC-16/CCITT-FALSE is a valid BitCrc");
         Self {
@@ -970,5 +975,219 @@ mod tests {
         assert_eq!(c.scan(&[1, 1, 1]).trials, 0);
         assert_eq!(c.scan(&[1u8; FRAME_DIBITS - 1]).trials, 0);
         assert_eq!(c.scan(&[1u8; FRAME_DIBITS]).trials, 1);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // T-300: the four simplifications, said out loud by the suite.
+    //
+    // This build's P25 framing is NOT standards-compliant, in exactly four ways. T-268 found the
+    // CRC one and deliberately left it alone, which was right: fixing one of four buys no
+    // compliance and only makes the other three harder to see. Fix all four together, or none.
+    //
+    // The tests below exist because prose in a module header is inherited silently and a failing
+    // assertion is not. What each one pins:
+    //
+    //  1. CRC VARIANT. This build checks CRC-16/CCITT-FALSE — poly 0x1021, init 0xFFFF, no final
+    //     XOR, residue 0 over data-plus-trailer. A real TSBK carries the **augmented** CRC-CCITT:
+    //     same polynomial, init 0x0000, final XOR 0xFFFF (the catalogued CRC-16/GSM, published
+    //     check value 0xCE3C over "123456789"). Pinned by
+    //     `a_real_tsbks_augmented_crc_is_rejected_by_this_builds_ccitt_false_check`.
+    //  2. NO TRELLIS CODE. This build reads the 12-byte TSBK straight off the air as 48 dibits.
+    //     Real P25 protects it with the rate-1/2 trellis code of TIA-102.BAAA-A Annex A, which
+    //     expands those 48 information dibits to 98 channel dibits. Pinned by
+    //     `the_p25_frame_geometry_is_the_simplified_one`.
+    //  3. NO DEINTERLEAVER. This build packs the dibits in the order they arrived. Real P25 sends
+    //     the 98 channel dibits through a block interleaver first, so a compliant decoder's bytes
+    //     are a permutation of what came off the air. Pinned by
+    //     `the_block_handed_to_the_tsbk_decoder_is_in_transmission_order`.
+    //  4. NO STATUS SYMBOLS. This build reads `BLOCK_DIBITS` contiguously from the end of the
+    //     sync. Real P25 rides a 2-bit status symbol after every 35 data dibits (stride 36,
+    //     counted from the frame sync's first dibit), so nothing that indexes "N dibits past the
+    //     sync" is right until they are stripped. Pinned by
+    //     `the_status_symbols_a_real_frame_carries_break_this_build`.
+    //
+    // A fifth difference is recorded but not asserted, because it is not on T-300's list: a real
+    // frame carries a 64-bit NID — NAC plus DUID under BCH(63,16,11) — between the frame sync and
+    // the payload, and this build reads neither it nor past it.
+    //
+    // THE FAILURE MODE IS THE DANGEROUS PART, and it is why the CRC is the one that will mislead
+    // you. It is not a degradation: a correctly-formed real TSBK fails this confirmer's check
+    // with **certainty**, at the fixed residue 0x99F6 — the two trailers differ by a constant
+    // 0xFFFF and a CRC is linear in that difference, so the data bytes do not enter into it. The
+    // trellis, which is the layer anyone looks at first, meanwhile reports a clean metric. So on
+    // the first real off-air capture this presents as a demodulator or front-end fault and sends
+    // the debugging to the wrong layer.
+    //
+    // If you are here reading a wall of failing TSBKs with a clean symbol stream: the codec is
+    // the suspect, not the radio, and the four tests below are the list of what to fix.
+    // -----------------------------------------------------------------------------------------
+
+    /// Dibits a compliant TSBK occupies on air after the rate-1/2 trellis code: 48 information
+    /// dibits in, 98 channel dibits out (TIA-102.BAAA-A Annex A).
+    const P25_TRELLIS_CODED_TSBK_DIBITS: usize = 98;
+
+    /// Dibits of NID — 64 bits, NAC plus DUID under BCH(63,16,11) — between the frame sync and the
+    /// payload of a compliant frame.
+    const P25_NID_DIBITS: usize = 32;
+
+    /// On-air dibits per status symbol: one rides after every 35 data dibits, counting from the
+    /// frame sync's first dibit.
+    const P25_STATUS_SYMBOL_STRIDE: usize = 36;
+
+    /// What this build's CRC-16/CCITT-FALSE check leaves on a correctly-formed real TSBK. Zero is
+    /// "valid", so this is "invalid" — and it is a **constant**, independent of the ten data
+    /// bytes, which is why the failure is total rather than occasional.
+    const REAL_TSBK_RESIDUE_UNDER_THIS_BUILD: u16 = 0x99F6;
+
+    /// The augmented CRC-CCITT a real TSBK carries: poly 0x1021, init 0x0000, MSB-first, final
+    /// XOR 0xFFFF. Catalogued as CRC-16/GSM; its published check value is asserted below so this
+    /// reference cannot quietly drift into agreeing with the build it is meant to contradict.
+    fn crc16_augmented(data: &[u8]) -> u16 {
+        let mut crc = 0u16;
+        for &b in data {
+            crc ^= u16::from(b) << 8;
+            for _ in 0..8 {
+                crc = if crc & 0x8000 != 0 {
+                    (crc << 1) ^ 0x1021
+                } else {
+                    crc << 1
+                };
+            }
+        }
+        crc ^ 0xFFFF
+    }
+
+    /// Simplification 1. The CRC this build checks is not the CRC the air carries, and the
+    /// consequence is certain rather than statistical.
+    #[test]
+    fn a_real_tsbks_augmented_crc_is_rejected_by_this_builds_ccitt_false_check() {
+        // Both oracles guarded by their published check values before either is used: 0x29B1 is
+        // CRC-16/CCITT-FALSE over "123456789", 0xCE3C is the augmented variant over the same.
+        assert_eq!(crc16(b"123456789"), 0x29B1);
+        assert_eq!(crc16_augmented(b"123456789"), 0xCE3C);
+
+        let c = CcConfirmer::default();
+        let mut rng = SplitMix(0x2C1);
+        for _ in 0..1000 {
+            let data: Vec<u8> = (0..10).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
+
+            // The block a real P25 control channel would put on the air.
+            let mut real = data.clone();
+            real.extend_from_slice(&crc16_augmented(&data).to_be_bytes());
+            // The block this build's generator and confirmer agree on.
+            let mut simplified = data.clone();
+            simplified.extend_from_slice(&crc16(&data).to_be_bytes());
+            assert_ne!(
+                real, simplified,
+                "the two variants must disagree, or this test proves nothing"
+            );
+
+            // The simplified block passes, the real one does not — and the real one fails at the
+            // same residue every time, for every payload.
+            assert_eq!(c.crc.compute(&simplified, 0, BLOCK_BYTES * 8), 0);
+            assert_eq!(
+                c.crc.compute(&real, 0, BLOCK_BYTES * 8) as u16,
+                REAL_TSBK_RESIDUE_UNDER_THIS_BUILD,
+                "a real TSBK fails this check at a fixed residue, not a random one"
+            );
+            assert!(
+                c.decode_block(CcFraming::P25Phase1, &unpack_dibits(&real))
+                    .is_none(),
+                "a standards-compliant TSBK is rejected by this build"
+            );
+            assert!(
+                c.decode_block(CcFraming::P25Phase1, &unpack_dibits(&simplified))
+                    .is_some(),
+            );
+        }
+    }
+
+    /// Simplification 2, and the shape of 4: the frame this build reads is the uncoded one.
+    #[test]
+    fn the_p25_frame_geometry_is_the_simplified_one() {
+        // A 12-byte TSBK read straight off the air, four dibits to the byte.
+        assert_eq!(BLOCK_DIBITS, BLOCK_BYTES * 4);
+        assert_eq!(BLOCK_DIBITS, 48);
+        assert_ne!(
+            BLOCK_DIBITS, P25_TRELLIS_CODED_TSBK_DIBITS,
+            "no rate-1/2 trellis code: the 48 information dibits are never expanded to 98"
+        );
+
+        // Sync then block, with nothing between them and nothing inserted into them.
+        assert_eq!(FRAME_DIBITS, P25_FRAME_SYNC_DIBITS.len() + BLOCK_DIBITS);
+        assert_eq!(FRAME_DIBITS, 72);
+
+        // A compliant single-block TSDU, in data dibits: sync, NID, trellis-coded TSBK.
+        let compliant =
+            P25_FRAME_SYNC_DIBITS.len() + P25_NID_DIBITS + P25_TRELLIS_CODED_TSBK_DIBITS;
+        assert_eq!(compliant, 154);
+        assert!(
+            FRAME_DIBITS < compliant,
+            "this build's frame is shorter than a compliant one because three layers are missing"
+        );
+        assert!(
+            compliant / P25_STATUS_SYMBOL_STRIDE >= 4,
+            "a compliant frame of this length carries status symbols this build never strips"
+        );
+    }
+
+    /// Simplification 3. Real P25 interleaves; this build does not, so the bytes handed to the
+    /// TSBK decoder are exactly the bytes that arrived, in the order they arrived.
+    #[test]
+    fn the_block_handed_to_the_tsbk_decoder_is_in_transmission_order() {
+        let mut rng = SplitMix(31);
+        let data: Vec<u8> = (0..10).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
+        let mut block = data.clone();
+        block.extend_from_slice(&crc16(&data).to_be_bytes());
+
+        let mut stream = Vec::new();
+        for _ in 0..4 {
+            stream.extend_from_slice(&P25_FRAME_SYNC_DIBITS);
+            stream.extend_from_slice(&unpack_dibits(&block));
+        }
+
+        let got = CcConfirmer::default().crc_valid_blocks(&stream);
+        assert!(got.len() >= MIN_CRC_VALID as usize);
+        for b in got {
+            assert_eq!(
+                b.as_slice(),
+                block.as_slice(),
+                "no deinterleaver runs here: adding one is part of the same four-way fix"
+            );
+        }
+    }
+
+    /// Simplification 4. Put the status symbols a real frame carries into a stream this build
+    /// otherwise confirms, and it stops confirming — because nothing removes them.
+    #[test]
+    fn the_status_symbols_a_real_frame_carries_break_this_build() {
+        let c = CcConfirmer::default();
+        let stream = cc_stream(21, 8);
+        assert!(
+            c.confirm(&candidate(), &stream).is_some(),
+            "the simplified stream confirms, so the next assertion is about the status symbols"
+        );
+
+        // One status symbol after every 35 data dibits, counting from the sync's first dibit. Its
+        // value carries channel status on the air and is irrelevant here: what breaks the decode
+        // is that a dibit is *there at all* and this build reads straight past it.
+        let mut on_air = Vec::with_capacity(stream.len() + stream.len() / 35 + 1);
+        for (i, &d) in stream.iter().enumerate() {
+            if i > 0 && i % (P25_STATUS_SYMBOL_STRIDE - 1) == 0 {
+                on_air.push(0b01);
+            }
+            on_air.push(d);
+        }
+        assert!(on_air.len() > stream.len());
+
+        let s = c.scan(&on_air);
+        assert_eq!(
+            s.crc_valid, 0,
+            "a compliantly-framed stream yields no valid block here: {s:?}"
+        );
+        assert!(
+            c.confirm(&candidate(), &on_air).is_none(),
+            "this build cannot confirm a stream carrying real status symbols"
+        );
     }
 }
