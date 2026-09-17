@@ -8095,7 +8095,7 @@ tasks:
   - id: T-397
     title: The frequency navigator survey strip must fold with max-hold and share the waterfall's intensity scaling
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: UI
     core_interface: true
@@ -8464,7 +8464,7 @@ tasks:
   - id: T-405
     title: The frequency navigator's view box goes; coverage shading makes the tuned window self-evident
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     core_interface: true
@@ -8701,7 +8701,7 @@ tasks:
   - id: T-411
     title: The left time-overview renders at the old 12px buffer size, so a few cells stretch into blocks
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     core_interface: true
