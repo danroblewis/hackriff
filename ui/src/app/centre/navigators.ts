@@ -122,8 +122,9 @@
 import * as ax from "../../axis";
 import { EDGE_OFFER_FRAC } from "../../controls/gestures";
 import {
-  detailLabel, retunePlan, snapState, snapTimeCell,
-  type DetailSource, type FrequencyGrid, type HistoryTier, type NavigationGrid, type RetuneRefusal,
+  detailLabel, detailPlan, retunePlan, snapState, snapTimeCell,
+  type DetailPlan, type DetailSource, type FftBounds, type FrequencyGrid, type HistoryTier,
+  type NavigationGrid, type RetuneRefusal,
 } from "../../navigation";
 import { cmapBytes } from "../../cmap";
 import {
@@ -147,7 +148,7 @@ import { startPoll } from "../net";
 import { sameCursor } from "./review-render";
 import { goLive, reviewAt, setNavigation, toast } from "../state";
 import {
-  applyDeviceAction, mayRetune, retuneAction, retuneLabel, setLiveView, setRetuneOffer, NOT_LIVE_TEXT,
+  applyDeviceAction, applyDisplayDetail, mayRetune, retuneAction, retuneLabel, setLiveView, setRetuneOffer, NOT_LIVE_TEXT,
 } from "./view";
 
 /** A range's edges in MHz, at a resolution taken from the range's own width — so the readout's
@@ -224,17 +225,62 @@ export function freqPan(g: ax.Geometry, v: ax.View, ext: Range, deltaFrac: numbe
   return ax.panView(g, v, d);
 }
 
+/**
+ * What the front end and the display are on **now**, as a narrowing has to be judged against
+ * (T-418). All four come from state already in hand — the live stream's header and
+ * `/api/control/state`'s `display_limits` — so nothing here fetches to decide.
+ */
+export interface DetailRequest {
+  /** The FFT bounds the server accepts, or null before `/api/control/state` has answered. Null
+   * leaves the transform where it is: nothing may claim a size the server would take. */
+  bounds: FftBounds | null;
+  /** Bins per row in force (the live header's `fft_size`), or null with no stream yet. */
+  currentBins: number | null;
+  /** Pixels the selection will be drawn across — the budget for "one measured bin per pixel". */
+  wantBins: number;
+}
+
 /** What a region dragged on the frequency navigator resolves to. */
 export type FreqZoom =
-  /** Inside the tuned band: a display zoom over live IQ, and no device is involved. */
-  | { kind: "view"; view: ax.View; source: DetailSource }
-  /** Outside it: the one navigator gesture that **commands the radio** (T-392). Carries the whole
-   * capture configuration — centre *and* the smallest span that covers the selection. */
-  | { kind: "retune"; centerHz: number; spanHz: number; view: ax.View; source: DetailSource }
+  /** Inside the tuned band, and the window in force is already the best one for it: a display zoom
+   * over live IQ. No device is involved — but `detail` may still raise the **transform**, which
+   * re-plumbs nothing and is where a narrow view's Hz/bin actually comes from (T-418). */
+  | { kind: "view"; view: ax.View; source: DetailSource; detail: DetailPlan | null }
+  /** The one navigator gesture that **commands the radio** (T-392). Carries the whole capture
+   * configuration — centre *and* the narrowest span that covers the selection — plus the transform
+   * that turns that window into detail (T-418). */
+  | {
+    kind: "retune"; centerHz: number; spanHz: number; view: ax.View; source: DetailSource;
+    detail: DetailPlan | null; dcOffsetHz: number; clearsDc: boolean;
+    /** Why the radio is being moved, for the readout. Derived, never a message passed in. */
+    why: RetuneReason;
+  }
   /** No achievable configuration can capture it, or there is no front end to command. */
   | { kind: "error"; reason: RetuneRefusal | "not_live"; text: string }
   /** Nothing to do: a region with no width. */
   | { kind: "none" };
+
+/**
+ * Why a selection moves the radio rather than only the view — the three cases, and nothing else
+ * reaches the device (T-418).
+ *
+ * The old test was "is the region outside the tuned window", which is a *proxy* for the real
+ * question and got the narrowing case wrong: a 200 kHz selection inside a 2.4 MHz window is inside,
+ * so it resolved to a pure view zoom and the capture never narrowed at all — the bug this task
+ * fixes. These three are the honest question, each self-limiting so a repeat of the same selection
+ * settles rather than moving the radio again.
+ */
+export type RetuneReason =
+  /** The selection is not (wholly) inside the window in force: no view state can show it. */
+  | "reach"
+  /** A narrower achievable window exists, so narrowing buys Hz/bin the transform would otherwise
+   * have to find. Self-limiting: once the window is the narrowest that covers, it is not narrower
+   * next time. */
+  | "narrow"
+  /** DC — the tuner's own leakage spike — falls inside the selection, and a placement exists that
+   * clears it (T-409, arriving from the other direction). Self-limiting: after the move DC is
+   * outside the selection, so re-selecting the same region asks for nothing. */
+  | "dc";
 
 /** Why a region cannot be captured, in words. The extents come from the grid on the wire — the
  * device's own bands, never a constant in this file. */
@@ -256,48 +302,99 @@ function refusalText(g: FrequencyGrid | null, reason: RetuneRefusal, live: boole
 }
 
 /**
- * The region `[lo, hi]` a drag selected, resolved against the achievable grid (T-341).
+ * The region `[lo, hi]` a drag selected, resolved against the achievable grid (T-341) — **both**
+ * halves of it: the window the front end opens, and the transform that gives that window detail.
  *
- * **The boundary is the whole design.** The same gesture means two different things:
+ * **T-418, the bug this shape exists to fix.** The old rule was "inside the tuned window → a pure
+ * view zoom, and no device call happens on any path". Inside/outside is a proxy for the real
+ * question and it gets narrowing exactly backwards: selecting 200 kHz inside a 2.4 MHz window is
+ * *inside*, so nothing changed — not the sample rate, not the FFT — and the user got the same
+ * coarse 488 Hz/bin picture drawn wider. Zooming in has to buy detail, and it was buying none.
  *
- *  - a region **inside the tuned window** is "look closer" — the waterfall already holds that IQ,
- *    so it is a pure view zoom and no device call happens on any path;
- *  - a region **outside it** is "go there", and that is only reachable by tuning there. Unlike time
- *    (always a view over already-captured data), no amount of view state can show a frequency the
- *    front end is not on. So this resolves to a `retune` — the config, computed and applied, not
- *    offered (CLAUDE.md: *"this is the one navigator action that commands the radio"*).
+ * **The two halves, and why the second one is not optional.** The user's principle: *"Detail on a
+ * narrow view comes from resolution/decimation, never from an impossible narrow capture."* A
+ * HackRF's minimum sample rate is 2 Msps, so **a sub-2-MHz window cannot be captured at all**;
+ * there is no narrow capture to ask for, and no amount of retuning will produce one. So:
  *
- * It refuses **only** when nothing can capture the region: a centre outside the tunable range, a
- * span wider than one live window, or — on a replay — outside the recording's extent, which is the
- * same `ranges_hz` check because a replay reports the recording as its band. Anything else retunes;
- * "outside the tuned window, retune yourself" is exactly the behaviour this replaced.
+ *  1. **The window snaps to the narrowest achievable one** (`retunePlan`, which bottoms out at the
+ *     device's rate floor and places the target **off DC** — see `dcOffsetHz`, because a perfectly
+ *     centred target lands on the tuner's own leakage spike).
+ *  2. **And the transform lengthens** (`detailPlan`), which is where every hertz of resolution
+ *     below that floor comes from. A longer FFT is a genuine measurement over more samples, not a
+ *     coarse one stretched; it is not a device action and costs no settle gap, which is why it is
+ *     the first lever and not the last.
+ *
+ * Whether the radio moves is [`RetuneReason`]'s three cases, not a geometry test. It refuses **only**
+ * when nothing can capture the region: a centre outside the tunable range, a span wider than one
+ * live window, or — on a replay — outside the recording's extent, which is the same `ranges_hz`
+ * check because a replay reports the recording as its band.
  */
 export function freqZoomTarget(
   grid: NavigationGrid, g: ax.Geometry | null, region: Range | null, live: boolean,
+  detail?: DetailRequest,
 ): FreqZoom {
   if (!region || !(region.hi > region.lo)) return { kind: "none" };
-  if (g) {
-    const full = ax.fullView(g);
-    // INSIDE: a display zoom. Nothing below this line can be reached for such a region.
-    if (region.lo >= full.loHz && region.hi <= full.hiHz) {
-      const span = snapState(grid, (region.lo + region.hi) / 2, region.hi - region.lo);
-      return { kind: "view", view: ax.zoomTo(g, region.lo, region.hi), source: span.source };
+  const fg = grid.frequency;
+  const width = region.hi - region.lo;
+  const bounds = detail?.bounds ?? null;
+  const wantBins = detail?.wantBins ?? 0;
+  /** The transform for this selection inside a window of `spanHz`, or null when nothing may be
+   * claimed about the bounds. Never raised past what the selection can use. */
+  const planDetail = (spanHz: number): DetailPlan | null => {
+    const p = detailPlan(bounds, spanHz, width, wantBins);
+    // Already there: asking for the size in force would be a no-op call on the wire.
+    return p && p.fftSize === detail?.currentBins ? null : p;
+  };
+
+  const inWindow = g ? region.lo >= ax.fullView(g).loHz && region.hi <= ax.fullView(g).hiHz : false;
+  const plan = retunePlan(fg, region.lo, region.hi);
+
+  if (plan.ok && live) {
+    // The span in force. The header's bandwidth is what the radio is actually producing, which is
+    // the number a narrowing must beat; with no header there is nothing to compare and `reach`
+    // below decides on its own.
+    const cur = g?.bandwidthHz ?? null;
+    const narrower = cur !== null && Number.isFinite(cur) && plan.spanHz < cur;
+    // DC is the window's centre. "Sitting on the spike" is DC inside the selection *now*, and the
+    // move is worth making only if the plan actually clears it — otherwise the selection is simply
+    // too wide a fraction of the narrowest window for any placement to help, and moving the radio
+    // would buy nothing.
+    const onDc = g !== null && g.centerHz >= region.lo && g.centerHz <= region.hi && plan.clearsDc;
+    const why: RetuneReason | null = !inWindow ? "reach" : narrower ? "narrow" : onDc ? "dc" : null;
+    if (why !== null) {
+      return {
+        kind: "retune",
+        centerHz: plan.centerHz,
+        spanHz: plan.spanHz,
+        view: { loHz: region.lo, hiHz: region.hi },
+        source: plan.source,
+        // The transform is planned against the window that will be in force after the retune, not
+        // the one being left behind — they are different denominators for the same Hz/bin.
+        detail: planDetail(plan.spanHz),
+        dcOffsetHz: plan.dcOffsetHz,
+        clearsDc: plan.clearsDc,
+        why,
+      };
     }
   }
-  // OUTSIDE: the config that would cover it, or the one reason none can.
-  const fg = grid.frequency;
-  const plan = retunePlan(fg, region.lo, region.hi);
+
+  if (g && inWindow) {
+    // The window in force is already the best achievable one for this selection, so the radio stays
+    // put — but the *transform* still moves, which is the half that was missing. This is the branch
+    // a second, narrower drag inside an already-narrowed window takes, and it must still get finer.
+    const span = snapState(grid, (region.lo + region.hi) / 2, width);
+    return {
+      kind: "view",
+      view: ax.zoomTo(g, region.lo, region.hi),
+      source: span.source,
+      detail: planDetail(g.bandwidthHz),
+    };
+  }
+  // Not reachable as a view, and no config covers it (or there is no radio to move).
   if (!plan.ok) return { kind: "error", reason: plan.reason, text: refusalText(fg, plan.reason, live) };
   // A replay's band is the recording, so a region achievable against it is inside the recording —
   // but there is still no radio to move, and saying so beats a retune the server answers 409 to.
-  if (!live) return { kind: "error", reason: "not_live", text: NOT_LIVE_TEXT };
-  return {
-    kind: "retune",
-    centerHz: plan.centerHz,
-    spanHz: plan.spanHz,
-    view: { loHz: region.lo, hiHz: region.hi },
-    source: plan.source,
-  };
+  return { kind: "error", reason: "not_live", text: NOT_LIVE_TEXT };
 }
 
 /** The store, as both navigators take it. */
@@ -319,7 +416,13 @@ export async function applyFreqZoom(ctx: AppContext, target: FreqZoom): Promise<
   const { store } = ctx;
   if (target.kind === "view") {
     store.set(setLiveView(target.view));
-    store.set(toast(`Zoomed to ${fmtEdges(target.view.loHz, target.view.hiHz)} MHz · ${detailLabel(target.source)}`));
+    // T-418: the transform moves even when the radio does not. `applyDisplayDetail` is a *view*
+    // control — no device route, no re-plumb, no settle gap — so this branch still reaches nothing
+    // the T-343 property protects, while a narrow zoom finally gets finer bins.
+    await applyDisplayDetail(ctx, target.detail);
+    store.set(toast(
+      `Zoomed to ${fmtEdges(target.view.loHz, target.view.hiHz)} MHz · ${detailLabel(target.source)}${detailText(target.detail)}`,
+    ));
   } else if (target.kind === "error") {
     store.set(toast(target.text));
   } else if (target.kind === "retune") {
@@ -327,6 +430,10 @@ export async function applyFreqZoom(ctx: AppContext, target: FreqZoom): Promise<
     // they want the radio, so a stale button proposing somewhere else is noise.
     store.set(setRetuneOffer(null));
     await applyDeviceAction(ctx, retuneAction(target.centerHz, "navigator", target.view, target.spanHz));
+    // After the retune, not before: the transform is sized for the window that is now in force, and
+    // a rate change re-plumbs the stream — asking for the FFT first would have it rebuilt under a
+    // sample rate that is about to change.
+    await applyDisplayDetail(ctx, target.detail);
   }
 }
 
@@ -349,6 +456,36 @@ export async function applyFreqZoom(ctx: AppContext, target: FreqZoom): Promise<
 /** The resolution to print a frequency at, taken from the width being described — so no frequency
  * constant appears here (the same rule as `fmtEdges`). */
 const resOf = (span: number) => Math.max(1, span / 100);
+
+/** A bin width in words, at whatever unit keeps it readable. Presentation only. */
+const fmtBinHz = (hz: number) =>
+  hz >= 1e3 ? `${(hz / 1e3).toFixed(hz >= 1e4 ? 1 : 2)} kHz` : hz >= 1 ? `${hz.toFixed(1)} Hz` : `${hz.toFixed(3)} Hz`;
+
+/**
+ * What the transform buys, said out loud (T-418) — the honesty half of the fix.
+ *
+ * It prints the Hz/bin the user is **actually getting**, because that is the number the whole
+ * gesture is about and it was previously never shown at all. Two things it must never do: imply
+ * detail that was not measured, and go quiet at the point where zooming stops helping. So when
+ * `fft_size_max` bound the answer it says the bins are **repeated to fill the pixels**, in those
+ * words — a repeated measurement is honest, an interpolated one would not be, and the user is owed
+ * the difference (the same distinction T-420 drew on the time axis, and `ui/src/waterfall.ts`'s
+ * nearest-repeat is what actually happens to those rows).
+ */
+function detailText(p: DetailPlan | null): string {
+  if (!p) return "";
+  const at = ` · ${fmtBinHz(p.binHz)}/bin at ${p.fftSize} bins`;
+  return p.capped
+    ? `${at} — the longest transform this front end offers; bins are repeated to fill the pixels beyond it`
+    : at;
+}
+
+/** Why the radio is moving, in the user's terms. Each is the reason the gesture resolved the way it
+ * did, taken from the same [`RetuneReason`] the release acts on — never a second wording. */
+const whyText = (w: RetuneReason): string =>
+  w === "reach" ? "outside the tuned window"
+    : w === "narrow" ? "narrowing the capture to the least window that covers it"
+      : "moving the selection off the tuner's DC spike";
 
 /** "centre C · span S (sample rate) · live IQ": one already-resolved capture state in words. A live
  * window's span *is* its sample rate (`navigation.ts`), which is why the third field can name one.
@@ -399,17 +536,44 @@ export function freqHoverText(grid: NavigationGrid, ext: Range | null, frac: num
  */
 export function freqSelectText(
   grid: NavigationGrid, g: ax.Geometry | null, region: Range | null, live: boolean,
+  detail?: DetailRequest,
 ): string {
-  const t = freqZoomTarget(grid, g, region, live);
+  const t = freqZoomTarget(grid, g, region, live, detail);
   if (!region || t.kind === "none") return "";
   const edges = `${fmtEdges(region.lo, region.hi)} MHz`;
-  if (t.kind === "view") return `${edges} · zooms the view, the radio stays put · ${detailLabel(t.source)}`;
+  // T-418: even the "radio stays put" line now ends in a Hz/bin, because a zoom that buys no detail
+  // was the bug — and a line that did not name the resolution could not have shown it.
+  if (t.kind === "view") {
+    return `${edges} · zooms the view, the radio stays put · ${detailLabel(t.source)}${detailText(t.detail)}`;
+  }
   // No achievable configuration covers it (or there is no radio to move): the honest line is the
   // one `freqZoomTarget` already wrote, naming the device's own bounds from the served grid.
   if (t.kind === "error") return `${edges} · cannot capture this — ${t.text}`;
   // The config `retunePlan` computed, not a second opinion about it: the centre the radio will sit
-  // on after the snap, and the smallest span that still covers the selection from there.
-  return `${edges} · retunes the radio on release: ${stateText(t.centerHz, t.spanHz, t.source)}`;
+  // on after the snap, the narrowest span that still covers the selection from there, why it is
+  // moving, and the Hz/bin that comes out. When the selection is narrower than any window the front
+  // end can open, `dcNote` is where the user is told that — with the reason, not as a failure.
+  return `${edges} · retunes the radio on release (${whyText(t.why)}): ${stateText(t.centerHz, t.spanHz, t.source)}${dcNote(t)}${detailText(t.detail)}`;
+}
+
+/**
+ * Where the selection sits relative to DC, and — when the window could not be narrowed to the
+ * selection — **why it was not**.
+ *
+ * This is the sentence the user gets when they select a range narrower than any achievable window.
+ * The honest answer is not silence and not an error: the window *is* the narrowest the front end
+ * has, the selection is a slice of it, and the detail comes from the transform. Saying so is the
+ * difference between "this tool ignored me" and "this is the hardware's floor, and here is what was
+ * done about it".
+ */
+function dcNote(t: Extract<FreqZoom, { kind: "retune" }>): string {
+  const off = Math.abs(t.dcOffsetHz);
+  if (!t.clearsDc) {
+    // DC lands inside the selection whatever the placement — the selection is too wide a fraction
+    // of the narrowest covering window. Never dressed up as a clean window.
+    return " · the tuner's DC spike falls inside this selection (no placement of this window clears it)";
+  }
+  return off > 0 ? ` · placed ${ax.fmtBandwidth(off)} off DC to keep it clear of the tuner's spike` : "";
 }
 
 // ---------------------------------------------------------------------------
@@ -733,6 +897,20 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
   };
   /** T-393: the text a drag in flight is showing, and `null` when no drag owns the readout. */
   let dragText: string | null = null;
+  /**
+   * T-418: what the transform is on now, and how many bins a selection can usefully be given.
+   *
+   * `wantBins` is the bar's own pixel width, which is the waterfall's too — the frequency navigator
+   * runs parallel to the waterfall's frequency axis by construction (CLAUDE.md, the edge
+   * navigators), so a bin per pixel here is a bin per pixel there. Same rule as T-397's
+   * `stripCells`: the render width is the only non-arbitrary statement of how much detail a view
+   * can actually show, and asking for more would be work nothing draws.
+   */
+  const detailRequest = (): DetailRequest => ({
+    bounds: store.get().device.fftBounds,
+    currentBins: store.get().live.bins,
+    wantBins: Math.max(1, track.clientWidth),
+  });
   const extent = (): Range | null => {
     const t = tuned();
     viewport = surveyViewport(bounds(), viewport, viewportTouched, t?.center_hz, t?.span_hz);
@@ -925,13 +1103,17 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
       if (p && !done) pctStyle(draft, p, false);
       const g = geom();
       // T-393: while the drag is in flight the readout says what selecting *this* region does,
-      // taken from the same `freqZoomTarget` the release will apply.
-      dragText = done ? null : freqSelectText(s.navGrid.grid ?? { frequency: null, time: null }, g, region, mayRetune(s.device));
+      // taken from the same `freqZoomTarget` the release will apply — and from the same
+      // `DetailRequest`, so the Hz/bin the line promises is the one the release asks for.
+      const det = detailRequest();
+      dragText = done ? null : freqSelectText(s.navGrid.grid ?? { frequency: null, time: null }, g, region, mayRetune(s.device), det);
       showReadout(dragText ?? "", b);
       if (!done) return;
-      // T-392: the one gesture on either bar that may command the radio. Inside the tuned window it
-      // is a view zoom and reaches nothing; outside it, it retunes to cover the selection.
-      void applyFreqZoom(ctx, freqZoomTarget(s.navGrid.grid ?? { frequency: null, time: null }, g, region, mayRetune(s.device)));
+      // T-392/T-418: the one gesture on either bar that may command the radio. It narrows the
+      // capture to the least window that covers the selection (placed off DC), and raises the
+      // transform so the narrowed view actually resolves finer — the second half being where every
+      // hertz below the device's 2 Msps floor comes from.
+      void applyFreqZoom(ctx, freqZoomTarget(s.navGrid.grid ?? { frequency: null, time: null }, g, region, mayRetune(s.device), det));
     },
   });
   let panOverflow = 0;

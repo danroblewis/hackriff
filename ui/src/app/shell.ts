@@ -33,6 +33,12 @@ export function deviceFrom(cs: ControlState): AppState["device"] {
     centerGrid: cs.device
       ? { ranges_hz: cs.device.frequency_ranges_hz, center_step_hz: cs.device.tuning_step_hz ?? null }
       : null,
+    // T-418: the transform's own ladder, straight from `display_limits`. Null when this server has
+    // no running pipeline to report one — and then nothing raises the resolution, rather than a
+    // guess at a bound the server never stated.
+    fftBounds: cs.display_limits
+      ? { fft_size_min: cs.display_limits.fft_size_min, fft_size_max: cs.display_limits.fft_size_max }
+      : null,
   };
 }
 

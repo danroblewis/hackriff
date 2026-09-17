@@ -1,7 +1,7 @@
 // Shell state (ADR-0013 §3.1). Owner: T-150 (shell). Top-level keys: mode, theme, conn, device,
 // nav, toast. `device` is T-150's alone (the top bar's reduction of `/api/control/state`); T-155's
 // Device tab keeps the full control state it needs in its own review slice, never here.
-import type { CenterGrid } from "../navigation";
+import type { CenterGrid, FftBounds } from "../navigation";
 import type { AppState } from "./state";
 
 /** T-264 (ADR-0017 TM-8): `history` is the durable all-time catalogue (workflow #3), a surface of
@@ -26,6 +26,17 @@ export interface DeviceSlice {
    * `/api/control/state`'s `device`. Null before the state loads or on a run with no device; a
    * `center_step_hz` of null means the source cannot state a step, and then **nothing snaps**. */
   centerGrid: CenterGrid | null;
+  /**
+   * The FFT axis of `/api/control/state`'s `display_limits` (T-418): the bounds a longer transform
+   * may be asked for within, and the other half of "navigation is discretized to achievable states"
+   * — a narrow selection's detail comes from the transform, so the transform has its own ladder.
+   *
+   * Null before the state loads or on a server with no running pipeline, and then **nothing raises
+   * the resolution**: the same discipline as a null `center_step_hz`. Not knowing the bound is not
+   * permission to invent one, and a client that guessed would be asking for a size the server may
+   * reject on a device it has not been told about.
+   */
+  fftBounds: FftBounds | null;
 }
 
 /** One-shot navigation requests from the top bar (Go to), consumed by T-151/T-152. */
@@ -63,7 +74,7 @@ export function parsePrefs(raw: string | null): Prefs {
 export const shellInitial = (prefs: Prefs): ShellState => ({
   mode: prefs.mode, theme: prefs.theme,
   conn: { api: "connecting", spectrum: "idle", message: "" },
-  device: { loaded: false, live: false, finished: false, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, centerGrid: null },
+  device: { loaded: false, live: false, finished: false, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, centerGrid: null, fftBounds: null },
   nav: { gotoHz: null, seq: 0 },
   toast: { text: "", seq: 0 },
   openAlarms: 0,
