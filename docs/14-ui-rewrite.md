@@ -83,6 +83,7 @@ Each in-window row draws a **box** spanning the spectrum trace and the waterfall
 - A one-off burst's box is a few milliseconds tall and stays that way. Bursts finally look like bursts.
 - A chirp gets the **bounding box** of its sweep (ADR-0017 §1.3 — a swept polyline is a later refinement, deliberately not in the plan).
 - The **focused** row keeps the existing draggable-edge yellow box from the docs/15 §7 scope above, so the user-band drag (T-191) is unaffected.
+- **Two boxes are never drawn stacked, and the client does nothing to arrange that** (T-369). Overlap in time *and* frequency is an error signal in the backend — real emissions do not share a region, and two that did would not demodulate — so `/api/inventory` re-analyses the overlapping region against the detections behind it and either collapses the boxes into the emission they measure as, or records why it could not and leaves both. Either way the list the client draws from does not carry the pair. **The UI must not hide, offset, stack, or z-order overlapping boxes to compensate:** an overlap that reaches the screen is a backend bug to report, not a layout problem to solve, and papering over it would hide the very evidence the re-analysis runs on. `crates/hk-cli/tests/api_contract.rs` asserts the served list has no stacked pair, and the acceptance suite asserts it on the real 45 s off-air capture.
 
 ### Timeline scrubber and scrub-back
 
@@ -239,6 +240,17 @@ This is the exploration-first honesty principle applied to navigation — the sa
 **Where the client uses it today.** `applyDeviceAction` (`ui/src/app/centre/view.ts`) snaps a retune's centre to the grid before it posts. It used to `Math.round` to a whole hertz — a number the front end does not have. Everything else the module offers is for T-340's navigators and T-338's timeline, which are the surfaces where a gesture becomes a capture state; a zoom *inside* the tuned band is a display zoom over live IQ and correctly snaps to nothing.
 
 **The live-vs-overview claim is on the wire, not inferred.** T-334 shipped `resolution.source` as the constant `"spectrum-history"`, documented as the home for "which tier answered"; T-341 gave it its other two values, `"live-iq"` and `"survey-overview"`, plus a `live` boolean and a backend-rendered `statement`. `/api/history` never claims `live-iq` — it reads the pyramid and only the pyramid — but it does say `"survey-overview"` when the span it served could not have fitted one capture window. A client styles the difference; it never decides it.
+
+### Grey means genuinely unobserved, and the frequency bar has a viewport (T-368, T-376)
+
+The honest half of the rule above. T-341 stopped the view claiming detail the front end never captured; this lets it *show* what the front end did capture, and grey only what it did not.
+
+- **Three states, three treatments.** Observed-with-energy is the colour ramp; observed-and-quiet is the ramp's low end — a real finding; **never observed is grey**. A fourth, *observed but no level retained*, is a flat tint: neither grey nor the ramp's bottom. The client decides none of this: `GET /api/coverage` serves `state` per cell and `resolution.grey_rule` states the rule, and an unobserved cell carries no measurement key the client could read as a zero.
+- **The frequency navigator's survey strip is that coverage.** The bar spans the device-available spectrum, most of which the radio has never been tuned to; filling it from energy alone would paint never-observed spectrum as quiet, which is exactly the failure the invariant forbids. So the strip's cells come from the coverage map, and the bar re-asks over whatever range it is currently showing.
+- **The bar has a viewport of its own (T-376).** Its extent used to be the whole reported spectrum, fixed — on a 1 MHz–6 GHz front end a 2.4 MHz capture window is four ten-thousandths of the bar, invisible rather than off-centre. It now opens **centred on the current tune centre**, a few tens of capture windows wide, and the **wheel zooms that viewport** about the pointer with the same `wheelFactor` the waterfall uses. Zooming out toward the whole range is exactly when the coverage map has to be right.
+- **An untouched viewport follows the tune; a framed one does not.** The default frame answers *where am I*, so it moves when the radio does. Once the user has deliberately zoomed, re-centring under them would undo the gesture they just made, so a touched viewport is only clamped back into the device's reported bounds.
+- **No gesture on either bar moves the radio.** The wheel writes the bar's own frame and no store slice; panning the view marker moves the main view; only the region drag leaves a **retune offer**, and only pressing it reaches the device (T-343). T-340's control — drag ±1.0 of the full bar through a spy client and assert nothing was called — still holds unchanged.
+- **Backfill.** Switching to Live for a range that has history starts populated from the pyramid rather than black, because the coverage map says the range was observed and the history has the cells to draw.
 
 ### History surface (workflow #3)
 

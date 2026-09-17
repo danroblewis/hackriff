@@ -3389,3 +3389,198 @@ devices covering disjoint ranges must not union into a claim that one saw both.
 Fences are tight with four agents live: T-368 is explicitly barred from `hk-store/src/history/query.rs`
 and the occupancy modules, because T-314 is inside exactly that question right now, and told to stop
 short and report rather than edit if it needs something there.
+
+### B0.654 — T-317 identifies the unknown emission, and finds something worse on the way (2026-09-16)
+
+Merged at `7c3f4fb`. The repo's only genuinely blind identification exercise is closed:
+**the 100.465 MHz emission is harmonic 43 of a free-running ~2.336 MHz oscillator** — a local
+unintentional emitter, carrying no modulation at all.
+
+It could not be solved inside its own capture, and that is the interesting part. The 2026-09-13
+captures at 98 MHz / 20 Msps span 90.6–105.4 MHz, and there the emission has **siblings**: n = 43,
+44, 45 give three independent estimates of f₀ agreeing to **9 Hz (3.7 ppm)**, and the fit
+`f = n·f₀ + b` returns **b = +67 Hz**, which pins the indices — off by one would move the intercept
+by a whole 2.34 MHz. Two facts turn that from coincidence into identification: **rms width ÷ n is
+138/120/137 Hz**, so the 28 kHz *is* the fundamental's ~134 Hz of frequency noise multiplied by 43;
+and it **moves**, 41.9 kHz across four captures at 417 ppm over two days, while the real stations sit
+1.34 kHz and 56 Hz off channel.
+
+Ten hypotheses are recorded ruled out **with their measurements**, including the two that would have
+been easiest to assert instead of test: IMD between the two WFM stations (an IM3 of two 128 kHz
+carriers cannot be 28 kHz wide) and the receiver's own 8 kHz spur comb (which is real, and would need
+n = 41.75). The band plan offers exactly one row, `fm-broadcast`, and the measurement contradicts it
+on every count; the e2e comment now says plainly that letting that row name this emission would be
+DB-as-truth. **The assertion did not change** — only detection is asserted, never a service the
+measurement did not support.
+
+**The side finding is the more consequential half, and it is now T-373 at `high`.** The raw stream
+carries a periodic gain step: samples 0–895 of every 8192-sample period run 0.431 dB low, across all
+13,184 periods. It is stream-wide — on the receiver's DC line (27 dB), its reference harmonic (16 dB),
+and **in bands containing no emission at all** (23 dB). It puts a **292.969 Hz comb with ≥27
+harmonics** into amplitude, and through a channel filter into the discriminator of anything narrowband
+and weak.
+
+**Read naively it looks like a 3.41 ms TDMA frame.** An expert analyst with the whole capture in front
+of them followed it for a while and was pulled out only by a control on the receiver's own CW lines.
+That is this repo's recurring defect — a feature measuring the *observation* rather than the *signal* —
+in its most seductive form, and the acceptance suite runs on exactly these fixtures.
+
+T-373's brief therefore puts **blast radius before fix**, and demands numbers: inspection cannot find
+this, only measurement can, and "nothing shipped reads it" is a perfectly good answer if it is
+evidenced. The exclusion must be **derived from the capture**, never a hardcoded 293 Hz — a different
+sample rate moves the comb, and a magic constant would be the same mistake in a new coat. The control
+that matters is a genuine emission whose symbol rate lands near a comb harmonic and must still be
+found: an exclusion that silently eats real structure converts a visible false positive into an
+invisible false negative.
+
+Two more filed. **T-374** is a real capability gap T-317 proved by doing the work by hand: T-302
+reasons about one emitter against the device, and nothing reasons about a *family* of emitters against
+an unseen common cause. T-317's method is the specification, and per T-233 it must be able to say no —
+a fit over enough emitters will always find some f₀, so the control is unrelated emitters that must not
+be declared a family. **T-375** is the user's terminator capture, which now has a sharp question:
+conducted coupling survives a 50 Ω load and radiated does not, so it decides whether this oscillator is
+the user's own equipment or something in the room.
+
+### B0.655 — the user's two navigator additions, and why they went to T-368 (2026-09-16)
+
+The user gave these as additions to T-367 "while it is in flight". **T-367 had already merged**
+(`9a46489`, ~40 minutes earlier), so there was nothing to fold into — but T-368 is live in the same
+file, and on inspection the second addition turns out to be the coverage map seen from the other
+side. Both went to T-368 as T-376; the board records it as folded rather than queued.
+
+**Addition (1) was largely already satisfied**, and checking was worth more than building. Both bars
+already wheel-zoom their own axis about the pointer, both through the shared `ax.wheelFactor`, so the
+gesture already matches the waterfall — `mountFreqNav`'s handler at `navigators.ts:398`,
+`mountTimeNav`'s at `:538`.
+
+**Addition (2) is absent, and the real symptom is worse than the user's description.** They asked for
+the bottom bar to be *centred* on the tune centre rather than the 1–6 GHz midpoint. In fact
+`extent()` is `spectrumExtent(...)` — the union of `ranges_hz`, the **whole 1 MHz–6 GHz, fixed**, with
+no viewport at all. A 2.4 MHz tuned window is then **0.04% of the bar**: not off-centre, invisible.
+Worth saying back to them plainly, because "centre it" and "it has no viewport" call for different
+work.
+
+The consequence is a redefinition, not a tweak: the frequency bar's wheel currently zooms the **main
+waterfall view** (`setLiveView`), so giving the bar its own span changes what an existing gesture
+means. The message to T-368 therefore pins the invariants around it rather than the implementation —
+region-drag keeps setting centre through T-343's gated `DeviceAction`, and **T-340's no-retune control
+must survive unchanged** (±1.0 of a 6 GHz bar through a spy client, `calls` empty). No pan, no wheel,
+ever reaches the radio.
+
+One question is left to the agent with my inclination stated but not imposed: what the viewport does
+when the device retunes while the user has panned away. An untouched viewport following the tune
+centre and a user-panned one staying put is my guess at the right answer, but it is a judgement about
+feel, and the agent is closer to it.
+
+The reason this is T-368's work and not a separate ticket: **what fills that bar when you wheel-zoom
+out toward 1–6 GHz is the coverage map**. Without it the zoomed-out bar paints never-observed spectrum
+as quiet — the exact failure T-368 exists to prevent, and why T-367 declined to fill the bar and said
+to sequence T-368 first. The viewport makes the coverage map visible; the coverage map makes the
+viewport honest. The agent is told to report rather than silently drop it if this blows its scope.
+
+### B0.656 — T-369 and T-314 merged: two gaps that both stopped one layer short (2026-09-16)
+
+Merged at `7abf95d` and `3054742`. They arrived an hour apart and turn out to be the same shape of
+bug: a guarantee that was real, and stopped before it reached the thing it was supposed to protect.
+
+**T-369 — the diagnosis was (a), and I had guessed (b).** The user's symptom (*"the user still sees
+overlapping boxes live"*) pointed at the served path re-expanding a merge, and the brief said so while
+demanding the agent establish which. It established the opposite: every overlapping row came back
+`relation: null` with **no `emitter_relation` row at all** — not a standing claim, not a revoked one,
+empty history. The served path was innocent; there was nothing to serve.
+
+The cause is `bands_compete`, gating every T-219 stage at 60 % of **both** bands. The middle box of
+the observed staircase overlaps its neighbours by 49.7 % and 6 % of the narrower band, so suppression
+and competition are unreachable **for exactly the two geometries that stack boxes**: a narrow box
+inside a wide one, and a staircase of offsets. And that same gate is what stops a real subcarrier
+vanishing into its host, so loosening it was never available. A threshold that is correct in the
+common case and unreachable in the failing one is a good disguise.
+
+No new merge key — the evidence is the measured `f_lo`/`f_hi` behind each member, merged into
+contiguous modes, which reads the air and never the device, so T-259/T-305 holds by construction.
+Re-analysis can conclude **contested** as well as merge: nothing merged, nothing hidden, both rows
+listed, the finding recorded append-only. The containment pair gets exactly that, blocked by bandwidth
+ratio — the geometry of a subcarrier as much as of a fragment.
+
+The control is the part I would keep: two 220 kHz stations 200 kHz apart, asserting **both** that
+their bands really overlap **and** that the measurements alone merge into one mode, so only the −3 dB
+extents separate them. That is a control that could actually fail. Two real bugs fell out on the way —
+stage 3 revoking stage 4's claims every touch, and a region that depended on which row a sighting
+touched, so the same three boxes elected a different survivor per entry point. Churn, not resolution.
+**On screen: 12 rows → 11, two overlapping pairs → none.**
+
+**T-314 — answer (i), and the ticket's premise was half wrong.** The origin *does* survive to level 0,
+but per **tile**, not per cell: `ProvenanceSummary::origins` counts frames per origin, and
+`query_filtered` returns `OriginMatch::Mixed` at level 0 as **unobserved**, counted in
+`cells_excluded`. A pure tile answers its own chain; a pooled tile answers nothing. So the read-side
+filter was not the false green I feared — the cost is coverage, not accuracy.
+
+**The (ii)-shaped problem was somewhere else, and worse.** T-303's chain came from
+`PipelineConfig::device_id` — the `"sigmf-replay"` default everywhere except `hk replay` — while
+history origins come from each frame's own provenance. **The key already claimed one front end while
+measuring another**, and under a per-source read it measured nothing at all; a fixture test went to
+zero channels. The chain now comes from the source's own `DeviceInfo`, and `ChainKey::of_device` and
+`source_key` are deliberately the same function, pinned by a test, so the key and the measurement
+cannot drift apart again.
+
+The control is asserted **first**, as the precondition, and it is worth the space: pooled, two chains
+30 dB apart compound — chain A's floor under chain B's level — so **128 visits read occupied with
+nothing on the air**, and the baseline folds a 30 dB excess no emission produced.
+
+Both agents declined to over-reach, which is the habit worth naming. T-369 left the contested verdict
+unsurfaced rather than add a `RelationKind` that would break an exhaustive match it did not own.
+T-314 measured its residual, pinned it with a test that asserts the **broken** behaviour, and filed
+**T-377** rather than widening. Both are now launched: T-377 (per-origin floor tracking at ingest —
+the decision is baked into the stored cell, so no read-side filter can undo it) and **T-371**, which
+T-359 made urgent: cohorts now split, so one subject shows two indistinguishable slots rows with
+different numbers and no field saying why.
+
+### B0.657 — T-368 merged, and the user generalises its rule to the whole UI (2026-09-16)
+
+Merged at `0b93e5f`, with T-376 folded in.
+
+**Two tune histories already existed and neither had ever been read as coverage.** The IQ ring
+journal opens a segment on every provenance change, so retunes are segment boundaries by
+construction — it is literally *"for each interval, which centre/span/rate and which device"*. The
+observation log is the long-horizon half. No new ledger, no schema change. Four other candidates were
+inspected and rejected for stated reasons: `provenance` is content-hash-deduped and **timeless**,
+`survey` is run-coarse, `track_segment` has boundaries but no config values, and `TunedLo` is never
+persisted.
+
+**One correction made at merge.** `Coverage::of` refuses zero spans, a non-positive sampled duration
+or a non-positive window, and the doc claimed `Sampled` "has no public constructor of its own, so
+there is no second door". Its fields are all `pub`, so `Coverage::Observed(Sampled { spans: 0, … })`
+was exactly that second door — the ticket's whole thesis, spellable in one struct literal. `Sampled`
+is now `#[non_exhaustive]`: fields stay readable, which is the point, but `Coverage::of` is the only
+way in from outside the crate. Behaviour never depended on it (the sole construction site is
+`Coverage::of` itself), so this is a claim made true rather than a bug fixed — but a false claim
+guarding a core invariant is worth ten lines.
+
+T-376's ruling on retune is the agent's and I would not have improved it: **an untouched viewport
+follows the tune centre; a user-framed one stays put and is only re-clamped**, because re-centring
+under a deliberate gesture would undo it. The viewport floors at one capture window, since a survey
+frame narrower than the live window would claim resolution the front end cannot open. It also
+declined to add a background-drag pan on the frequency bar, because that gesture is already
+region-zoom there, and said so rather than quietly picking one.
+
+**Then the user generalised the rule.** New `CLAUDE.md` invariant: every surface — waterfall, both
+navigators, the Candidate/Confirmed lists, the output/decode panels — is a view over one
+(time × frequency) window and **must display all the data it has for it**; empty only where data
+genuinely does not exist. They name three symptoms and say they are **one failure**: *"the black Live
+waterfall, the fixed-size grey block, and the empty sidebars"*. T-368 closed the first two. **The
+sidebars are still open and are the one on screen**, so T-379 went out at `high`.
+
+Its brief is an **audit before a fix**: census every surface, then answer the question that actually
+matters — when the window is scrubbed into history, do the lists **re-derive** from the ring/pyramid
+or merely **empty**? Those look identical on screen and are opposite bugs. And it names the temptation
+to refuse: making a sidebar non-empty by showing stale or all-time rows would satisfy the letter and
+break the time-scoping invariant. The fix is to fetch what exists for the window, not to widen the
+window. T-368's `Coverage` type is the honest machinery for "genuinely does not exist", and the brief
+points at it rather than letting a second notion of emptiness grow.
+
+**T-380** files the companion invariant: one view window even with multiple SDRs — extra front ends
+widen coverage, never split the view. It carries a tension I made explicit rather than leaving for
+someone to trip over: drawing a cell captured by device B into a view centred on device A's tune is a
+**display** union and is legitimate; asserting the two devices saw the same emitter is an **identity**
+claim and is not. It depends on T-378, since coverage cannot say which device looked where over the
+long horizon until observation-log spans carry a device.

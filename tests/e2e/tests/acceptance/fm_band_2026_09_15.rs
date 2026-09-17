@@ -49,7 +49,7 @@ pub struct FmBandRun {
 }
 
 /// The shared run; `None` when the LFS data is not fetched (skip).
-fn run() -> Option<&'static FmBandRun> {
+pub fn run() -> Option<&'static FmBandRun> {
     static RUN: OnceLock<Option<FmBandRun>> = OnceLock::new();
     RUN.get_or_init(|| {
         let meta = real_fixture_in(FIXTURE_DIR, "iq")?;

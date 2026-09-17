@@ -11,7 +11,11 @@
 //!   folded into tiles and a floor-vs-time query with uncertainty and flags.
 //! - [`outputs`]: output files (T-061): WAV writer, SigMF-style JSON sidecars, output disk usage.
 //! - [`iqbuffer`]: the rolling raw-IQ capture buffer behind the Capture timeline (T-157).
+//! - [`coverage`]: the coverage map (T-368): which front end actually sampled which
+//!   time–frequency cell, so a view greys only what was **never observed** — three states, with
+//!   "never looked" unrepresentable as "looked and it was quiet".
 
+pub mod coverage; // T-368
 pub mod dataset; // T-205
 pub mod decoded;
 pub mod history;
@@ -24,6 +28,7 @@ pub mod baseline; // T-119
 pub mod observation; // T-115
 pub mod occupancy; // T-118
 
+pub use coverage::{Coverage, CoverageGrid, CoverageSpan, Device, Sampled};
 pub use history::{
     CellStats, ChannelSummary, FilterSummary, FrameInput, FrameOrigin, GainState, HistogramConfig,
     IngestOutcome, LevelConfig, OriginField, OriginFilter, Overview, OverviewCell,

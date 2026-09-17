@@ -5902,7 +5902,7 @@ tasks:
     milestone: M2-hardening
     title: 'Keying baselines is not end-to-end: occupancy reads history unfiltered, so front ends are already
       averaged in the level-0 cells before a baseline sees them'
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-303
@@ -7165,7 +7165,7 @@ tasks:
     milestone: M2-hardening
     title: 'Grey must mean genuinely unobserved: the waterfall needs a backend coverage map derived from
       the tune history'
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-341
@@ -7192,7 +7192,7 @@ tasks:
     milestone: M2-hardening
     title: 'Overlapping boxes are an error signal: re-analyse the region rather than ranking competitors,
       and make dedup collapse in the SERVED path'
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: M3B
@@ -7214,6 +7214,45 @@ tasks:
       T-309 found clustering refused joins on observation statistics; T-336 fixed cross-producer double
       counting. Re-measure against the current tree rather than inheriting any of those numbers. Fold into
       docs/07, docs/14 and ADR-0017'
+    result: 'DIAGNOSIS FIRST, and it is (a) - the collapse never happened, not a clean inventory the
+      served path re-expanded. Two blind runs through the mock SDR read back from a live /api/inventory:
+      the 5 s FM capture served a 9.4 kHz box wholly inside a 22.1 kHz box, and the 45 s real capture
+      served THREE boxes at 101.6654-101.6836, 101.6751-101.6922 and 101.6913-101.7054 MHz over the
+      same 40 s - two overlapping pairs. Every one came back with relation: null AND no emitter_relation
+      row at all, standing or revoked. So relations=shown (repo/cluster.rs inventory_where, NOT DEFERS_SQL)
+      was hiding correctly and there was nothing to hide. Cause: bands_compete gates every T-219 stage
+      at OVERLAP_MIN_FRACTION = 60 % of BOTH bands, and the middle box overlaps its neighbours by 49.7 %
+      and 6 % of the narrower - so suppression and competition are unreachable for exactly the geometries
+      that stack boxes. That gate is also what stops a narrow emission vanishing into a wide host, so
+      loosening it was not the fix. FIX: resolve_overlaps gains stage 4, the region re-analysis. Rows
+      still overlapping in time AND frequency (relate::boxes_overlap) form a region - the connected
+      component, closed transitively by querying each member own overlaps so the survivor does not depend
+      on which row a sighting touched (this was a real bug found in test: b elected itself top from its
+      own neighbourhood). The region is re-analysed against the air not the rows: every detection band
+      behind every member (f_lo/f_hi) merged into contiguous modes (relate::modes, gap tolerance = the
+      same centre uncertainty distinguishing_evidence uses). One mode => the boxes are cuts of one emission,
+      best-supported box kept, others duplicate-of it with detail.verdict one-emission and the measured
+      mode disclosed - the one place a claim is made without the pairwise 60 % test, and never without
+      distinguishing_evidence, so T-233 holds. More than one mode, or the guard blocks => CONTESTED:
+      nothing merged, nothing hidden, both rows listed, finding appended as an active = 0 row with detail.verdict
+      contested + blocked_by + modes. Stage 3 revoke_kind now skips region claims (the two stages were
+      revoking each other every touch). TERMINATION: no recursion, region bounded to MAX_NEIGHBOURS = 32,
+      claims idempotent, and REGION_MAX_ROUNDS = 3 contested verdicts per row then it stops writing entirely.
+      MEASURED AFTER: the 45 s capture serves 0 stacked pairs (12 rows -> 11 shown, the middle box collapsed);
+      the 5 s containment pair is left alone and contested, blocked by bandwidth ratio beyond tolerance
+      - the geometry of a subcarrier as much as of a fragment, which is the case that must not be guessed.
+      Tests: t369_no_two_boxes_are_served_stacked_on_the_real_fm_capture and t369_every_stacked_pair_still_served_carries_a_recorded_verdict
+      (tests/e2e, asserted on the served wire), t369_a_staircase_of_offset_boxes_over_one_emission_stops_overlapping,
+      t369_two_stations_on_the_200_khz_raster_are_never_merged_by_re_analysis (the control: two 220 kHz-wide
+      stations 200 kHz apart whose occupied bands really do overlap and whose detections really do form
+      one mode - only the separated -3 dB extents keep them apart), t369_region_re_analysis_terminates_at_its_bound
+      (20 rounds, asserts the write count is exactly REGION_MAX_ROUNDS and every later round writes zero).
+      api_contract.rs asserts the served list has no stacked pair. No schema change, no new RelationKind,
+      no wire shape change. Folded into docs/07 2.27, docs/14, ADR-0017 4.1, docs/api.md. KNOWN GAP: a
+      contested verdict is history, not a standing claim, so the UI cannot yet show "this region is contested"
+      - it would need a new served field or relation kind (the latter breaks hk-context exhaustive match,
+      owned by T-359). Filed as follow-up.'
+
   - id: T-370
     milestone: M2-hardening
     title: /api/selections/{id}/watch serves nanoseconds under a bare t, and the unit sweep cannot reach
@@ -7239,7 +7278,7 @@ tasks:
   - id: T-371
     title: A baselines/slots row does not name its bias-tee cohort
     milestone: M4
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CTX
     deps: [T-359]
@@ -7358,6 +7397,169 @@ tasks:
       This decides whether the emitter is the user's own equipment (fix it) or
       something in the room (catalogue it), and it is the honest close of T-317's
       one open question.
+  - id: T-376
+    title: The frequency navigator has no viewport of its own, so the tuned window is 0.04% of the bar
+    milestone: M2-hardening
+    status: done
+    priority: high
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-367]
+    acceptance: |
+      USER, 2026-09-16, two additions given for T-367 (already merged at 9a46489),
+      so they are FOLDED INTO T-368 which is live in the same file. Verbatim:
+      (1) BOTH the left (time) and bottom (frequency) bars need SCROLL/WHEEL-TO-ZOOM
+      on their own axis, matching the waterfall display gesture - wheel zooms, drag
+      pans, drag-a-region zooms-to-region.
+      (2) The bottom FREQUENCY bar surveys the whole device-available HackRF range
+      (1 MHz-6 GHz) but its VIEW is CENTRED ON THE CURRENT TUNE CENTRE by default -
+      so starting at centre 100.8 MHz means the bottom bar is centred around
+      100.8 MHz (not the 1-6 GHz midpoint), and you wheel-zoom out to see more of
+      the range or in to narrow it.
+      VERIFIED AGAINST THE MERGED CODE. Item 1 is largely present: both bars already
+      wheel-zoom their own axis about the pointer through the shared ax.wheelFactor,
+      so the gesture already matches the waterfall.
+      Item 2 is absent and the symptom is worse than described. The bottom bar's
+      extent is spectrumExtent() = the union of ranges_hz, i.e. the WHOLE 1 MHz-6 GHz,
+      FIXED, with no viewport of its own. A 2.4 MHz tuned window is then 0.04% of the
+      bar - not merely off-centre but invisible.
+      CONSEQUENCE FOR ITEM 1: wheel over the frequency bar currently zooms the MAIN
+      waterfall view (setLiveView), not the bar. Giving the bar its own viewport
+      redefines that gesture. Region-drag must KEEP setting centre (the device action,
+      gated, device_id recorded) and T-340's no-retune property must survive: no pan
+      or wheel may ever retune.
+      This is the same feature as T-368's coverage map seen from the other side - what
+      FILLS the bar when you wheel-zoom out toward 1-6 GHz is coverage, and without it
+      the zoomed-out bar would paint never-observed spectrum as quiet.
+  - id: T-377
+    title: A level-0 cell's occupancy was decided at ingest against a floor every front end feeds,
+      so a per-chain read can still inherit another chain's threshold
+    milestone: M4
+    status: in-progress
+    priority: medium
+    parallel_group: PIPE
+    deps: [T-314]
+    notes: |
+      T-314 made every occupancy read per-chain, and the level statistics (max/mean/p_low/floor)
+      are now that chain's alone. `CellStats::occupancy` is not: it was decided when the frame was
+      FOLDED, against `Pyramid`'s own tracked per-frequency-block floor (`column_stats`: thr =
+      floor[f] + margin), and that tracker is fed by every front end - as is the pipeline's
+      `NoiseFloorTracker`, one per run, not one per device. So a tile that is PURE in origin can
+      carry an occupancy decided against another chain's floor. No read-side filter can undo it:
+      the decision is baked into the stored cell.
+      MEASURED CONSEQUENCE (T-314, `occupancy_ingest_time_floor_is_still_pooled_across_front_ends`):
+      chain B at -70 dBFS/Hz beside chain A at -100 reads its own level and its own floor
+      correctly, and yet `local_floors` sees a dense neighbourhood (occupancy 1.0 from A's floor),
+      flags the floor SUSPECT, and `channel_level_excess` declines - so the baseline folds NOTHING
+      for chain B. Ingested alone, the identical frames fold an excess of 0.00 dB.
+      The direction is safe (withholding, never mis-stating, never the other chain's value), which
+      is why T-314 landed without it. The fix is per-origin floor tracking at ingest: `FrameInput`
+      already carries `source`, so the tracker and `Pyramid::floors` can key on it the way T-331
+      keyed the floor tracker on the bias tee.
+      DO NOT fix it by reading the suspect flag differently: the flag is correct about the cell it
+      describes. The cell is what is wrong.
+      Test: the existing pin inverts - chain B beside chain A folds the SAME excess it folds alone -
+      with the pooled control still showing the cross-chain occupancy, so the fix cannot pass by
+      disabling the density rule.
+
+  - id: T-378
+    title: Observation-log coverage has no device, so long-horizon spans are Unknown while ring spans are named
+    milestone: M2-hardening
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: [T-368]
+    acceptance: |
+      T-368 built the coverage map from two histories that already existed. The IQ
+      ring journal names its device; the observation log (DwellRecord/SweepRecord)
+      does NOT, so every long-horizon coverage span reads Device::Unknown.
+      The consequence is precisely the failure T-305 exists to prevent, one step
+      removed: coverage over the retention horizon cannot answer "did THIS front
+      end look here", only "did anything". With two SDRs that is the whole question,
+      and the frequency navigator's survey strip is built from this same coverage.
+      T-368 stopped short for a good reason - two construction sites sat inside
+      T-314's fenced files (hk-pipeline/src/occupancy.rs, hk-context occupancy
+      engine, both in mod tests). Those fences are gone; T-314 merged at 3054742.
+      The fix is named in docs/07 4.4 and ADR-0017 2.4.5: add device_id with
+      serde(default) so existing logs read back Unknown, never as a device.
+      Use the SAME value the rest of the chain uses - T-314 pinned ChainKey::of_device
+      and hk_store::history::source_key as deliberately the same function. A third
+      spelling of "which device" would be a new drift surface.
+      Control: an existing observation log written before this change still reads
+      back, and reads Unknown - never the device that happens to be running now.
+  - id: T-379
+    title: Every UI surface must show all the data it has for the window; empty sidebars are the same bug as the black waterfall
+    milestone: M2-hardening
+    status: in-progress
+    priority: high
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-368]
+    acceptance: |
+      USER INVARIANT 2026-09-16, added to CLAUDE.md as a CROSS-CUTTING UI RULE and
+      to be folded into docs/14 + ADR-0013/ADR-0017. Verbatim:
+      "The whole UI is scoped to one (time range x frequency range) window, and must
+      display all the data it has for that window. Every surface - the waterfall,
+      both edge navigators, the inventory Candidate/Confirmed lists, the
+      output/decode panels - is a view over the current (time range, frequency
+      range) selection. WHENEVER DATA EXISTS FOR THAT WINDOW (live, the IQ ring, the
+      spectrum-history pyramid, prior surveys) IT MUST BE SHOWN; a surface may render
+      grey/empty ONLY where data genuinely does not exist. 'We have it but didn't
+      render it' is a bug - the black Live waterfall, the fixed-size grey block, and
+      the empty sidebars were all the same failure. This generalises the coverage
+      rule below to the entire UI."
+      The user names three symptoms and says they are ONE failure. T-368 closed two
+      of them (the grey block and the Live backfill, via the coverage map). THE EMPTY
+      SIDEBARS ARE STILL OPEN and are the live-visible one.
+      This is an AUDIT task before it is a fix task: enumerate every surface, and for
+      each one determine whether it can render data that exists for the current
+      window, and what it does when the window is scrubbed into history. Report the
+      census before fixing. The inventory lists are already time-scoped to the view
+      by an existing invariant, so the question is whether scrubbing RE-DERIVES them
+      from history (ring / pyramid / surveys) or merely empties them.
+      The rule has a sharp edge that must not be blunted: a surface may render empty
+      ONLY where data genuinely does not exist. T-368 built exactly the machinery for
+      answering that question honestly (hk-store coverage: Unobserved vs
+      Observed(Sampled), with state 3 unrepresentable as state 2). Empty-because-
+      unobserved and empty-because-not-fetched must be distinguishable, and the
+      second is a bug.
+      Do NOT redesign the UI - the rewrite is deferred. This is about rendering data
+      that already exists, not restyling.
+  - id: T-380
+    title: One view window, even with multiple SDRs - extra front ends widen coverage, they never split the view
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-379, T-378]
+    acceptance: |
+      USER INVARIANT 2026-09-16, CLAUDE.md, same message as T-379. Verbatim:
+      "One view window, even with multiple SDRs. The UI always presents a single
+      (time range x frequency range) window. Additional SDRs (when supported)
+      COLLECT DATA PASSIVELY IN THE BACKGROUND, widening the coverage available to
+      display; they do not add view windows or split the view. The frequency
+      navigator may show where background collection is happening (lit coverage
+      segments), but the main view stays one window over whatever data exists there,
+      FROM WHICHEVER SOURCE CAPTURED IT."
+      This settles a question the architecture had left open. The multi-SDR rule was
+      "do not bake a single-device assumption into the source layer, scheduler or
+      inventory" - which is about CAPTURE. This says the VIEW is single by design:
+      N front ends are a coverage-widening mechanism, not N panes.
+      Tension to resolve explicitly, not silently: the main view must draw from
+      whichever source captured the data, while T-259/T-305 says dedup, clustering
+      and identity must NOT read the device, and images/harmonics/IMD/noise floor
+      MUST. Drawing a cell captured by device B into a view centred on device A's
+      tune is a DISPLAY union, and it is legitimate; asserting the two devices saw
+      the same emitter is an IDENTITY claim, and it is not. Write down where that
+      line falls in ADR-0017 and hold it in the code.
+      Depends on T-378: coverage cannot say which device looked where over the long
+      horizon until observation-log spans carry a device.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

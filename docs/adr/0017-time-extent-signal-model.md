@@ -210,6 +210,26 @@ Wire form: `docs/api.md` "The capture window, and the overview drawn on it"; dat
 
 ---
 
+#### 2.4.5 Grey means genuinely unobserved: the coverage map (T-368; the user's time/waterfall invariant)
+
+> **The waterfall shows the data that exists for the selected (time, frequency); grey means genuinely unobserved.** The view renders whatever samples are actually available for the current time-and-frequency selection, and greys only cells that were **truly never observed** — never a fixed-size grey placeholder. Switching to **Live** for a frequency range **backfills from history** (ring / spectrum-history pyramid) instead of starting black as if the device just powered on. This requires the backend to keep a **coverage map derived from the SDR configuration/tune history** — for each interval, which centre/span/rate (and which device) was active — so observed-vs-unobserved is computed from what was actually sampled, and the frequency navigator's survey view is built from that same coverage.
+
+§2.4.3 stops a window **claiming** detail it never captured. This is its other half: the window may **show** what it did capture, and must grey only what it did not.
+
+**Decision.** Three states, and the third is a distinct value at every layer:
+
+1. observed, and there was energy;
+2. observed, and it was **quiet** — a real, reportable finding;
+3. **never observed** — no claim either way, and the only thing that is grey.
+
+States 2 and 3 are the pair that collapses, and collapsing them invents an absence-of-signal finding out of an absence of measurement. So state 3 is made **unrepresentable as state 2**: `hk_store::coverage::Sampled` has no value meaning "nothing was sampled" — its only constructor refuses a zero span count or a zero sampled duration and yields `Coverage::Unobserved` — and on the wire (`GET /api/coverage`) an unobserved cell carries **no measurement keys at all**, not null ones. This is the `BiasTee::Unknown` ≠ `Off` rule (§ADR-0013, T-325) applied to observation itself: *nothing said is never permissive.* A fourth case is kept distinct rather than folded in: **observed, level not retained** (`shade: null` on an observed cell).
+
+**Device-local.** Coverage is a fact about one front end. Two radios covering disjoint ranges are two grids, each unobserved where the other looked; `Device::Unknown` is its own device and never answers for a named one; a union exists only as an explicitly-requested, explicitly-labelled `Device::Any`. Merging them would be the claim T-259/T-305 exist to forbid.
+
+**Derived, not journalled.** The map is read out of provenance that is already written: the **IQ ring journal** (a segment per provenance change, so a segment per retune, each naming the device) over the ring's retention, and the **observation log**'s `DwellRecord`/`SweepRecord` windows (ADR-0012 §1) over 30 days. The second records no `device_id` today, so its spans are `unknown` — honest, and the one gap this decision leaves open (§11).
+
+**Consequence for the frequency navigator.** Its survey strip is built from this map and from nothing else, and the bar gained a viewport centred on the current tune (T-376) precisely so a user can zoom out toward the whole device range — which is the moment a coverage-blind strip would paint never-observed spectrum as quiet.
+
 ## 3. Invariant 3 — Candidate / Confirmed / History
 
 | Surface | Object | Scope | Question it answers |
@@ -229,11 +249,32 @@ Four distinct mechanisms, often conflated:
 | Mechanism | What it does | Where it lives |
 |---|---|---|
 | **Merge** | collapses near-duplicate rows describing one emission | `resolve_overlaps` / `emitter_relation` (T-219, T-250) |
+| **Region re-analysis** | treats a surviving overlap as proof the analysis is wrong, and resolves the region against the measurements | `resolve_overlaps` stage 4 (T-369, §4.1) |
 | **Interval close** | records that evidence stopped | derived from `t_end` + `idle_gap` (this ADR, TM-5) |
 | **Window scoping** | removes a stopped signal from the live list | the query predicate (this ADR, TM-2/TM-3) |
 | **Decay** | lowers a *hypothesis's* confidence as its evidence ages | candidate confidence (T-251, TM-6) |
 
 Only the last is decay, and it is the smallest of the four.
+
+### 4.1 Overlap is an error signal, not a ranking problem (T-369)
+
+**The user's invariant (CLAUDE.md, 2026-09-16):** Confirmed and Candidate regions should not overlap in time–frequency — real emissions essentially never do, and two truly overlapping signals would not demodulate. So **overlapping boxes are proof the analysis is wrong**, with at least one true signal somewhere inside the union, and the resolution is **active re-analysis of the region**, not ranking one box above another.
+
+**What was measured first (2026-09-16, T-369).** Two blind runs through the mock SDR, read back from a live `/api/inventory`:
+
+- The 5 s FM capture served a 9.4 kHz box wholly inside a 22.1 kHz box, both on the air together.
+- The 45 s FM capture served **three** boxes at 101.6654–101.6836, 101.6751–101.6922 and 101.6913–101.7054 MHz over the same 40 s — two overlapping pairs.
+
+Every one of those rows came back with `"relation": null` and **no `emitter_relation` row at all**, standing or revoked. So the failure was **(a) the collapse never happened**, not (b) a clean inventory that the served path re-expanded: `relations=shown` correctly hides deferring rows and there was simply nothing to hide. The cause is `bands_compete`'s 60 %-of-**both**-bands gate (`OVERLAP_MIN_FRACTION`), which the middle box misses at 49.7 % and 6 % of the narrower band — and every T-219 stage is behind that gate. The same gate is what T-219 deliberately uses to keep a narrow emission from disappearing into a wide host, so loosening it is not the fix.
+
+**Stage 4.** After the ranking stages, rows still overlapping in **time and frequency** (`boxes_overlap`) form a **region**: the connected component, closed transitively by querying each member's own overlaps, so the region — and therefore its survivor — does not depend on which row a sighting happened to touch. The region is then re-analysed **against the air rather than against the rows**: the measured `f_lo`/`f_hi` of every detection behind every member are merged into contiguous **modes** (`hk_model::relate::modes`, gap tolerance = the same centre uncertainty `distinguishing_evidence` uses).
+
+- **One mode** → the measurements never separated: the boxes are cuts of one emission. The best-supported box is kept, the others become `duplicate-of` it with `detail.verdict = "one-emission"` and the measured mode disclosed. This is the only place a claim is made without the pairwise 60 % test — and it is still made *through* `distinguishing_evidence`, so the T-233 guard is never bypassed.
+- **More than one mode, or the guard blocks** → **contested**: nothing merged, nothing hidden, both rows still listed, and the finding appended as a revoked (`active = 0`) row carrying `detail.verdict = "contested"`, `detail.blocked_by` and `detail.modes`. Merging is the dangerous direction; an overlap that cannot be resolved confidently is explained rather than guessed at.
+
+**Termination is part of the contract**, because this runs on a live serving path. The stage does not recurse, the region is bounded to 32 rows, claims are idempotent, and an unresolved region appends at most `REGION_MAX_ROUNDS` (3) contested verdicts per row before it stops writing.
+
+**Measured after:** the 45 s capture serves 0 stacked pairs (11 rows, the middle box collapsed into the region's best-supported one); the 5 s capture's containment pair is left alone and contested, blocked by `bandwidth ratio beyond tolerance` — the geometry of a subcarrier as much as of a fragment, which is exactly the case that must not be guessed.
 
 **New merge evidence the time model hands T-250 for free:** skirt fragments of one FM station have intervals that **start and stop together**; two genuinely distinct adjacent stations do not. **Co-onset/co-offset of presence intervals** is therefore a distinguishing signal that needs no bandwidth estimate — which matters, because T-250's live hypothesis is that under-estimated bandwidths stop the band-overlap rules firing at all. It fits in `emitter_relation.detail` as JSON with no schema change (migration 0008 is append-only and already carries `t`). Offered as a strengthening, not a requirement.
 
@@ -355,6 +396,7 @@ No conflict. `CandidatePipeline` rows hang off the emitter and are interpretatio
 | §2.20 Selection | Note that `t_lo`/`t_hi` already make a selection a time–frequency region; a timeline drag is the existing object. |
 | §2.21 Classification | One sentence: `family_in_window` is an additive projection of the same rank; the ladder is unchanged. |
 | §4 | The central region-over-time query gains presence intervals as its event source, beside Detection and Track. |
+| **New §4.4 Coverage map** (T-368) | Observed-versus-unobserved is computed from the tune history (IQ ring journal + observation log), per device, with `Coverage::Unobserved` a distinct value from an observed-and-quiet cell. Records the open gap: `DwellRecord`/`SweepRecord` carry no `device_id`, so coverage beyond the ring is `Device::Unknown`. |
 
 ### 8.2 An emitter that is a set of disjoint events
 

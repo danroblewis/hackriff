@@ -267,6 +267,7 @@ Provenance for the ML runtime (`hk_ml`, a contract stub until T-203): a `ModelMa
 - **Revival appends, never duplicates.** A returning signal that entity resolution places on the same emitter gets a **new interval on the same `emitter_id`**: `emitter_observation` is keyed by `(source_kind, source_id)`, so a new track is a new row on the existing emitter.
   - **The storage half is free; the *resolution* half was not** (*T-262, measured*). Getting a second interval costs nothing — but only once entity resolution puts the returning track on the same emitter, and it did not: the user's 99.8148/99.8151 pair failed the fingerprint match on **burst length** alone (0.68 s vs 0.37 s, normalised error 1.86), because that is a statistic of the 305 s and 59 s windows each row was watched over, not of the emission. Two observations whose presence intervals are **disjoint** were watched over different windows, so `period`, `duty cycle` and `burst length` carry no information about identity and are excluded (`Fingerprint::compare_across_silence`); centre, bandwidth, family, symbol rate, deviation and hop behaviour still apply, so distinct emissions stay distinct. This is the same narrow exclusion T-250 made in `relate::distinguishing_evidence`, applied one layer earlier. **Cost:** two emissions sharing a channel, a bandwidth and a family that never transmit at the same time can no longer be separated by duty cycle alone (the ISM case, measured at TM-9).
 - **Bursts and chirps are first-class.** A one-off burst is one interval a few milliseconds long; a 10-second chirp is one interval with a 10-second extent. **Limitation:** one `(f_lo, f_hi)` per interval means a chirp's box is the **bounding box** of its sweep, with the per-detection ladder underneath. A swept polyline `f(t)` is a later refinement and is deliberately not in ADR-0017's plan.
+- **Overlapping intervals across *rows* are an error signal** (*T-369, [ADR-0017](adr/0017-time-extent-signal-model.md) §4.1*). Within one emitter, overlapping source rows normalise into one interval (above). **Between** two emitters, a shared region in time *and* frequency is not something to normalise — it is proof the analysis is wrong, because two real emissions do not occupy one region and two that did would not demodulate. It triggers **re-analysis of the region** (`resolve_overlaps` stage 4), which merges the measured `f_lo`/`f_hi` of every detection behind every overlapping row into contiguous modes and either collapses the rows into the one emission those modes show (`emitter_relation`, `detail.verdict = "one-emission"`) or records the region **contested** (an `active = 0` row carrying `detail.blocked_by`) and leaves both rows listed. It never merges past `relate::distinguishing_evidence`, and it is bounded by `relate::REGION_MAX_ROUNDS` because it runs on a live serving path.
 - **An appearance is exactly one presence interval.** This gives ADR-0016 §5's cluster-visibility gate ("≥ 3 appearances of one emitter across ≥ 2 sessions") a precise meaning, and fixes the rule that **cluster membership counts emitters, never intervals** — otherwise one intermittent sensor would trip a cluster's ≥ 3-member gate on its own.
 - **Retention & size:** rows are small and kept with their Emitter; they outlive the raw detections they summarise, which is what lets History answer for one-offs after detection rows have aged out.
 - **Storage:** `emitter_observation`; ADR-0017's migration 0012 adds `idx_emitter_observation_time (emitter_id, t_start, t_end)` and nothing else — **no `closed_at` column, no persisted decay score** (a mutable score on `emitter` would be a second `count` waiting to happen; if one must persist, it goes in an append-only table like `emitter_lifecycle`).
@@ -442,6 +443,41 @@ Each axis errs in the direction where the user loses *choice* rather than *truth
 | the claim | to the **weaker** one | over-claims detail nobody captured |
 
 The wire form is `GET /api/navigation` and `resolution.source` on `GET /api/history` (`docs/api.md`); the UI consequences are docs/14; the navigation surfaces that consume the grid are ADR-0017's Explore/History split and the edge navigators (T-340), the capture timeline (T-338).
+
+### 4.4 The coverage map: grey means genuinely unobserved (T-368)
+
+§4.3 stops a view **claiming** detail the front end never captured. This is the other half of the same honesty: a view may **show** what the front end did capture, and must grey only what it did not.
+
+> **The waterfall shows the data that exists for the selected (time, frequency); grey means genuinely unobserved.** … This requires the backend to keep a **coverage map derived from the SDR configuration/tune history** — for each interval, which centre/span/rate (and which device) was active — so observed-vs-unobserved is computed from what was actually sampled, and the frequency navigator's survey view is built from that same coverage. (User invariant, 2026-09-16.)
+
+#### The three states, and why the third is a type and not a null
+
+| State | Meaning | Model |
+|---|---|---|
+| 1 | observed, and there was energy | `Coverage::Observed(Sampled)`, level high |
+| 2 | observed, and it was **quiet** — a finding | `Coverage::Observed(Sampled)`, level low |
+| 3 | **never observed** — no claim either way | `Coverage::Unobserved` |
+
+States 2 and 3 are the pair that gets collapsed, and collapsing them is how a view comes to report "nothing here" about spectrum nothing ever looked at — an absence-of-signal finding invented out of an absence of measurement. So the model makes state 3 **unrepresentable as state 2**: `Sampled` has no value meaning "nothing was sampled" (`hk_store::coverage::Sampled::new` refuses a zero span count or a zero sampled duration and yields `Unobserved`), and on the wire an unobserved cell carries **no measurement keys at all** rather than null ones. Same rule as `BiasTee::Unknown` ≠ `Off` and `Encryption::Unknown` ≠ clear: *nothing said is never permissive.*
+
+A fourth thing exists and is deliberately distinct: **observed, level not retained** (`shade: null` on an observed cell) — the radio sampled here but the spectrum-history pyramid keeps no value for it. Drawn as neither grey nor the bottom of the ramp.
+
+#### Coverage is device-local
+
+Coverage is a fact about **one front end** (§2's provenance rule; T-259/T-305). Two radios covering disjoint ranges are two coverage grids, each unobserved exactly where the other looked — never merged into a claim that either saw both. `Device::Unknown` is its own device, not a wildcard: a span whose record did not name the radio is evidence that *something* looked, never that a *particular* front end did. A union across devices exists only as an explicitly-requested, explicitly-labelled `Device::Any`.
+
+#### Derived from provenance already written, not a new ledger
+
+No new record is journalled. Two existing ones already say "for each interval, which centre/span/rate was active"; one of them also says which device.
+
+| Source | Interval | Centre/span/rate | Device | Horizon |
+|---|---|---|---|---|
+| **IQ ring journal** (§2's `Recording`/ADR-0014 ring segments) — a new segment on **every** provenance change, so retunes are segment boundaries by construction | yes | yes | **yes** (`Provenance::device_id`) | the ring's configured retention |
+| **Observation log** (`DwellRecord`/`SweepRecord`, ADR-0012 §1; `ObservedWindow::covered()` already removes the DC notch) | yes | yes | **no** (`device_id` is not on these records today) | 30 days |
+
+This is the gap the model still carries, and it is worth stating plainly: the long-horizon tune history does not record which radio made it. Until `DwellRecord`/`SweepRecord` carry a device, coverage older than the IQ ring is attributed to `Device::Unknown` — honest, and weaker than it needs to be. Adding `device_id` to those two records (with `serde(default)`, so existing logs read back as unknown rather than as a device) is the change that closes it.
+
+The wire form is `GET /api/coverage` (`docs/api.md`); the surface it fills is docs/14's frequency navigator; the rule it serves is ADR-0017 §2.4.5.
 
 ## 5. Worked examples
 

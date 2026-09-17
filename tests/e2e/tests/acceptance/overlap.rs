@@ -178,3 +178,175 @@ fn t219_two_distinct_adjacent_stations_are_never_collapsed() {
         "[{T219}] two adjacent stations stay two entries"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// T-369: overlap is an error signal, checked on the wire the UI actually receives.
+// ---------------------------------------------------------------------------------------------
+
+const T369: &str = "T-369";
+
+/// The presence extent of a served row: its last interval, or the hull when a row carries none.
+/// Exactly what the waterfall draws a box between (docs/api.md `presence.last_interval`).
+fn row_time(r: &Value) -> (f64, f64) {
+    let p = &r["presence"]["last_interval"];
+    match (p["t_start_s"].as_f64(), p["t_end_s"].as_f64()) {
+        (Some(a), Some(b)) => (a, b),
+        _ => (
+            r["first_seen_s"].as_f64().unwrap_or(f64::NAN),
+            r["last_seen_s"].as_f64().unwrap_or(f64::NAN),
+        ),
+    }
+}
+
+/// The band of a served row, as the overlay draws it (`f_lo_hz`, `f_hi_hz`).
+fn row_band(r: &Value) -> (f64, f64) {
+    (
+        r["f_lo_hz"].as_f64().unwrap_or(f64::NAN),
+        r["f_hi_hz"].as_f64().unwrap_or(f64::NAN),
+    )
+}
+
+/// Every pair of served rows whose boxes overlap in **time and frequency** — two boxes drawn on
+/// top of each other, which is the error signal itself.
+fn stacked(rows: &[Value]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for i in 0..rows.len() {
+        for j in (i + 1)..rows.len() {
+            let ((alo, ahi), (blo, bhi)) = (row_band(&rows[i]), row_band(&rows[j]));
+            let ((at0, at1), (bt0, bt1)) = (row_time(&rows[i]), row_time(&rows[j]));
+            if alo.max(blo) < ahi.min(bhi) && at0.max(bt0) <= at1.min(bt1) {
+                out.push((i, j));
+            }
+        }
+    }
+    out
+}
+
+/// Whether the repository holds a re-analysis verdict for this row (a contested finding, or a
+/// claim it made) — i.e. the overlap was seen and reasoned about rather than left in silence.
+fn has_verdict(r: &hk_model::Repository, id: EmitterId) -> bool {
+    r.emitter_relation_history(id).unwrap().iter().any(|x| {
+        x.detail
+            .as_ref()
+            .is_some_and(|d| d.get("verdict").is_some())
+    })
+}
+
+/// **The property, on the wire.** Drive the real 45 s off-air FM capture through the mock SDR
+/// device and read `/api/inventory` from a running server — the same bytes the waterfall lays its
+/// boxes out from. No two boxes are drawn stacked, because the region re-analysis collapsed the
+/// ones that measured as one emission.
+///
+/// What this replaces, measured on this very fixture before the change: three candidate boxes at
+/// 101.6654-101.6836, 101.6751-101.6922 and 101.6913-101.7054 MHz, all on the air over the same
+/// 40 s, overlapping in **two** pairs — and `/api/inventory` served all three with
+/// `"relation": null` and **no relation row of any kind in the repository**, standing or revoked.
+/// The collapse was not failing to reach the wire; it was never running, because the middle box
+/// overlaps its neighbours by 49.7 % and 6 % of the narrower band and `bands_compete` gates every
+/// T-219 stage at 60 % of **both**.
+#[test]
+fn t369_no_two_boxes_are_served_stacked_on_the_real_fm_capture() {
+    let Some(run) = crate::fm_band_2026_09_15::run() else {
+        return;
+    };
+    let rows = inventory_rows(&run.dir.0);
+    assert!(
+        rows.len() >= 8,
+        "[{T369}] the scene is not empty: {}",
+        rows.len()
+    );
+    let pairs = stacked(&rows);
+    assert!(
+        pairs.is_empty(),
+        "[{T369}] boxes served stacked in time and frequency: {:?}",
+        pairs
+            .iter()
+            .map(|&(i, j)| (row_band(&rows[i]), row_band(&rows[j])))
+            .collect::<Vec<_>>()
+    );
+
+    // And the collapse really happened here rather than the scene having nothing to collapse:
+    // a row is kept in full, hidden from the default list, deferring for a reason that names the
+    // re-analysis and the measured mode behind it.
+    let r = repo(&run.dir.0);
+    let all = inventory(
+        &r,
+        InventoryQuery {
+            relations: RelationVisibility::All,
+            ..InventoryQuery::default()
+        },
+    );
+    let shown: BTreeSet<EmitterId> = rows.iter().map(row_id).collect();
+    let deferring: Vec<&InventoryEntry> = all
+        .iter()
+        .filter(|e| !shown.contains(&e.emitter.id))
+        .collect();
+    assert_eq!(
+        deferring.len(),
+        1,
+        "[{T369}] one of the stacked boxes collapsed: {:?}",
+        deferring
+            .iter()
+            .map(|e| entry_extent(e))
+            .collect::<Vec<_>>()
+    );
+    let rel = r.emitter_relations(deferring[0].emitter.id).unwrap();
+    assert_eq!(rel.len(), 1);
+    assert!(
+        rel[0].reason.contains("region re-analysis"),
+        "[{T369}] the served reason is the re-analysis, not a ranking: {}",
+        rel[0].reason
+    );
+    let detail = rel[0].detail.as_ref().unwrap();
+    assert_eq!(detail["verdict"], "one-emission");
+    assert_eq!(
+        detail["members"], 3,
+        "[{T369}] three boxes were in the region"
+    );
+    assert!(
+        r.emitter(deferring[0].emitter.id).unwrap().count > 0,
+        "[{T369}] the collapsed row keeps its observations"
+    );
+    eprintln!(
+        "[{T369}] 45 s real capture: {} shown, 0 stacked; {:?} collapsed into the region's \
+         best-supported box",
+        rows.len(),
+        entry_extent(deferring[0])
+    );
+}
+
+/// **The honest half.** On the 5 s capture one pair genuinely cannot be resolved — a 9.4 kHz box
+/// measured in a single frame wholly inside a 22.1 kHz box, 2.35x apart in bandwidth, which is the
+/// geometry of a subcarrier as much as of a fragment. Merging is the dangerous direction, so it is
+/// **not** merged. What must never happen is the old behaviour: two boxes stacked with nothing
+/// anywhere saying the system noticed. Every stacked pair the wire still serves carries a recorded
+/// verdict naming the region and what blocked the merge.
+#[test]
+fn t369_every_stacked_pair_still_served_carries_a_recorded_verdict() {
+    let Some(run) = crate::signal_062::fm_run() else {
+        return;
+    };
+    let rows = inventory_rows(&run.dir.0);
+    let r = repo(&run.dir.0);
+    for (i, j) in stacked(&rows) {
+        let (a, b) = (row_id(&rows[i]), row_id(&rows[j]));
+        assert!(
+            has_verdict(&r, a) || has_verdict(&r, b),
+            "[{T369}] {:?} and {:?} are served stacked with no re-analysis verdict at all",
+            row_band(&rows[i]),
+            row_band(&rows[j])
+        );
+        let v: Vec<String> = r
+            .emitter_relation_history(b)
+            .unwrap()
+            .into_iter()
+            .filter(|x| {
+                x.detail
+                    .as_ref()
+                    .is_some_and(|d| d.get("verdict").is_some())
+            })
+            .map(|x| x.reason)
+            .collect();
+        eprintln!("[{T369}] contested and left alone, with reasons: {v:?}");
+    }
+}

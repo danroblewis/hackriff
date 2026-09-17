@@ -28,8 +28,10 @@ import { readFileSync } from "node:fs";
 import * as ax from "../src/axis";
 import { snapState, type NavigationGrid } from "../src/navigation";
 import {
-  activeWindows, bandKey, clampInto, litSegments, panWithin, placeOn, regionFromDrag, sameBand,
-  spectrumExtent, timeExtent, timelineRequest, valueAt, zoomWithin, type Range,
+  activeWindows, bandKey, clampInto, coverageRequest, defaultViewport, litSegments, panWithin,
+  placeOn, regionFromDrag, sameBand, spanOf, spectrumExtent, surveyCells, surveyViewport,
+  timeExtent, timelineRequest, unobservedCount, valueAt, zoomWithin,
+  type CoverageCell, type CoverageResponse, type Range,
 } from "../src/navigators";
 import { captureWindow, currentSpan } from "../src/app/capture/timeline";
 import {
@@ -618,4 +620,161 @@ test("T-367 control: the source wires each bar to one axis — no frequency writ
   }
   // The regression itself: an unscoped `/api/timeline` request, which returns no grid at all.
   assert.ok(!/\/api\/timeline\?columns/.test(src), "the time navigator must not ask for an unscoped overview");
+});
+
+// ---------------------------------------------------------------------------
+// T-368: the frequency navigator's survey strip, and grey meaning genuinely unobserved
+// ---------------------------------------------------------------------------
+//
+// The user's invariant: *"the waterfall shows the data that exists for the selected (time,
+// frequency); grey means genuinely unobserved … the frequency navigator's survey view is built from
+// that same coverage."*
+//
+// The property here is the client half: **the three states stay three on the way to the pixel.**
+// Observed-and-quiet and never-observed must not arrive as the same value, and "not asked yet" must
+// not arrive as "nothing observed". Each has the control that fails if the distinction collapses.
+
+test("T-368: an unobserved cell and an observed-quiet cell are different values, not the same null", () => {
+  // Exactly what `GET /api/coverage` serves (docs/api.md): the unobserved cell carries NO
+  // measurement keys, and the quiet cell carries a real one at the bottom of the scale.
+  const body = {
+    grid: { cells: 4, f_lo_hz: 1e6, f_cell_hz: 1e6 },
+    any: { cells: [
+      { state: "observed", shade: 0 },        // 2: looked, and it was quiet — a finding
+      { state: "observed", shade: 0.93 },     // 1: looked, and there was energy
+      { state: "unobserved" },                // 3: nothing ever looked — grey
+      { state: "observed", shade: null },     // sampled, level not retained — neither of the above
+    ] },
+  } as const;
+  const cells = surveyCells(body as unknown as CoverageResponse);
+  assert.equal(cells.length, 4);
+
+  // The pair that gets collapsed, kept apart: a measured nothing is not an absence of measurement.
+  assert.notDeepEqual(cells[0], cells[2]);
+  assert.equal(cells[0].state, "observed");
+  assert.equal(cells[0].shade, 0);
+  assert.equal(cells[2].state, "unobserved");
+  assert.equal("shade" in cells[2], false, "an unobserved cell carries no measurement key to misread");
+
+  // Only the never-observed cell is grey. The quiet one is not, and neither is the one whose level
+  // was not retained — three cells, three treatments.
+  assert.equal(cells.filter((c) => c.state !== "observed").length, 1);
+  assert.equal(unobservedCount(cells), 1);
+
+  // The control: collapse the states the way a naive client would — read `shade ?? 0` and call the
+  // low ones quiet — and the never-observed cell becomes indistinguishable from the quiet one.
+  const collapsed = cells.map((c) => c.shade ?? 0);
+  assert.equal(collapsed[0], collapsed[2], "the collapse the assertions above forbid");
+});
+
+test("T-368: an unasked strip reads as unknown, never as nothing observed", () => {
+  // "Not asked yet" is not a finding. `null`, not 0 — the same rule as `coverageText`'s.
+  assert.equal(unobservedCount([]), null);
+  assert.deepEqual(surveyCells(null), []);
+  assert.deepEqual(surveyCells(undefined), []);
+  assert.deepEqual(surveyCells({ grid: null, any: null } as CoverageResponse), []);
+  assert.deepEqual(surveyCells({ any: { cells: null } } as unknown as CoverageResponse), []);
+  // The control: a strip that WAS served, and every cell of which was never observed, reports its
+  // count — so the `null` above is genuinely "unknown" and not "none".
+  const all = [{ state: "unobserved" }, { state: "unobserved" }] as CoverageCell[];
+  assert.equal(unobservedCount(all), 2);
+});
+
+test("T-368: the survey strip asks about the spectrum extent the bar spans, and nothing else", () => {
+  const ext = spectrumExtent(GRID.frequency)!;
+  const path = coverageRequest(ext, 512)!;
+  // The range asked for is the bar's own extent — the device-available spectrum from the grid —
+  // so every drawn cell is of a frequency the bar actually covers.
+  assert.match(path, /^\/api\/coverage\?/);
+  assert.equal(new URLSearchParams(path.split("?")[1]).get("f_lo"), String(ext.lo));
+  assert.equal(new URLSearchParams(path.split("?")[1]).get("f_hi"), String(ext.hi));
+  assert.equal(new URLSearchParams(path.split("?")[1]).get("cells"), "512");
+  // No extent, no request: the bar draws no strip rather than one over an assumed range.
+  assert.equal(coverageRequest(null, 512), null);
+  assert.equal(coverageRequest({ lo: 10, hi: 10 }, 512), null);
+  assert.equal(coverageRequest(ext, 0), null);
+  // It never asks for a time range: this bar is the frequency axis (T-367).
+  assert.ok(!path.includes("t0="), "the frequency navigator never scrubs time");
+});
+
+// ---------------------------------------------------------------------------
+// T-376: the frequency bar has a viewport of its own, centred on the tune
+// ---------------------------------------------------------------------------
+//
+// The user: *"the bottom FREQUENCY bar surveys the whole device-available range but its VIEW is
+// CENTRED ON THE CURRENT TUNE CENTRE by default … and you wheel-zoom out to see more of the range
+// or in to narrow it."*
+//
+// Before this the bar's extent was the whole reported spectrum, fixed — so on a 1 MHz–6 GHz front
+// end the 2.4 MHz capture window was four ten-thousandths of the bar: invisible, not off-centre.
+
+test("T-376: the frequency bar opens centred on the tune, not on the middle of the spectrum", () => {
+  const b = spectrumExtent(GRID.frequency)!;
+  const cur = GRID.frequency!.current!;
+  const v = defaultViewport(b, cur.center_hz, cur.span_hz)!;
+
+  // Centred on the tune, to within the clamp.
+  near((v.lo + v.hi) / 2, cur.center_hz, 1);
+  // …which is emphatically NOT the middle of the reported range, and that is the whole point.
+  assert.ok(Math.abs((v.lo + v.hi) / 2 - (b.lo + b.hi) / 2) > spanOf(b) / 4);
+  // The capture window is now a readable fraction of the bar rather than a vanishing one.
+  const before = cur.span_hz / spanOf(b);         // the whole-spectrum bar: invisible
+  const after = cur.span_hz / spanOf(v);          // the viewport: visible
+  assert.ok(before < 1e-3, `${before} — the pre-T-376 bar`);
+  assert.ok(after > 0.01, `${after} — the window must be visible on the bar`);
+  // It stays inside the device's own reported bounds; nothing here invents a range.
+  assert.ok(v.lo >= b.lo && v.hi <= b.hi);
+
+  // No tune reported: the honest frame is the whole reported range, never a guessed middle.
+  assert.deepEqual(defaultViewport(b, null, null), { ...b });
+  assert.deepEqual(defaultViewport(b, cur.center_hz, 0), { ...b });
+  assert.equal(defaultViewport(null, cur.center_hz, cur.span_hz), null);
+});
+
+test("T-376: an untouched viewport follows a retune; a viewport the user framed does not", () => {
+  const b = spectrumExtent(GRID.frequency)!;
+  const cur = GRID.frequency!.current!;
+  const first = surveyViewport(b, null, false, cur.center_hz, cur.span_hz)!;
+  near((first.lo + first.hi) / 2, cur.center_hz, 1);
+
+  // The radio moves. An untouched frame answers "where am I", so it moves with it.
+  const moved = cur.center_hz * 4;
+  const followed = surveyViewport(b, first, false, moved, cur.span_hz)!;
+  near((followed.lo + followed.hi) / 2, moved, 1);
+  assert.notDeepEqual(followed, first);
+
+  // The user frames a region by wheel-zooming. Now the radio moves again — and the frame they made
+  // stays where they put it, because re-centring under them would undo the gesture.
+  const framed = zoomWithin(b, first, 0.5, 8, cur.span_hz);
+  const held = surveyViewport(b, framed, true, moved * 2, cur.span_hz)!;
+  assert.deepEqual(held, framed);
+  // Still clamped into the device's bounds, whatever the user did.
+  const wild = surveyViewport(b, { lo: b.lo - spanOf(b), hi: b.lo - 1 }, true, moved, cur.span_hz)!;
+  assert.ok(wild.lo >= b.lo && wild.hi <= b.hi);
+});
+
+test("T-376: wheel-zooming the frequency bar changes only the bar's frame, and reaches no device", async () => {
+  const { ctx, calls } = deviceSpyCtx();
+  const b = spectrumExtent(GRID.frequency)!;
+  const cur = GRID.frequency!.current!;
+  const before = ctx.store.get();
+  let v = surveyViewport(b, null, false, cur.center_hz, cur.span_hz)!;
+
+  // What the mount's wheel handler does, at every zoom the user can reach: out to the whole range
+  // and back in to one capture window.
+  for (const factor of [0.01, 0.5, 2, 100, 1e6]) {
+    v = zoomWithin(b, v, 0.5, factor, cur.span_hz);
+    assert.ok(v.lo >= b.lo && v.hi <= b.hi, "never outside the reported bounds");
+    assert.ok(spanOf(v) >= cur.span_hz - 1e-6, "never narrower than one capture window");
+  }
+  // Zoomed all the way out (a factor below 1 widens), the bar shows the whole reported range —
+  // which is what has to be filled honestly, and why the coverage map is the other half of this.
+  assert.ok(spanOf(zoomWithin(b, v, 0.5, 1e-9, cur.span_hz)) >= spanOf(b) - 1e-6);
+  // …and all the way in, it stops at one capture window rather than claiming finer survey detail.
+  assert.ok(Math.abs(spanOf(zoomWithin(b, v, 0.5, 1e9, cur.span_hz)) - cur.span_hz) < 1e-6);
+
+  // The two properties T-340 and T-343 put on this bar, restated for the new gesture.
+  assert.deepEqual(calls, [], "a bar zoom must never reach the control API");
+  assert.ok(Object.is(ctx.store.get().live, before.live), "a bar zoom must not move the main view");
+  assert.ok(Object.is(ctx.store.get().time, before.time), "a bar zoom must not scrub time");
 });

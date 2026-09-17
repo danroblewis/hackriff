@@ -94,7 +94,7 @@ fn f64_of(v: &Value, key: &str) -> Option<f64> {
 
 /// Reads the ring's status (`limit=1`: the window is wanted, not the segment list) and the history's
 /// live edge, which stands in for `t1` only while the ring holds nothing yet.
-fn capture_window(state: &ApiState) -> (CaptureWindow, Value) {
+pub(crate) fn capture_window(state: &ApiState) -> (CaptureWindow, Value) {
     let status = state.iq_buffer.as_deref().map(|c| {
         c.status(&crate::iqbuffer::IqBufferQuery {
             t0: None,

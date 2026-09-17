@@ -775,6 +775,21 @@ impl Pipeline {
             crate::compute::for_run(&cfg.settings.compute, &counters.compute)?;
         cfg.settings.compute = compute_options;
         let product = Arc::new(Mutex::new(product));
+        // The run's receive chain, named once: T-303 keys the baselines by it, and T-314 reads
+        // the history through it, so the key and the measurement under it must be the same front
+        // end. It therefore comes from the **source's own identity**, which is what stamps the
+        // provenance `device_id` of every block and so the history origin of every frame
+        // (T-304) — not from `PipelineConfig::device_id`, which is a default (`"sigmf-replay"`)
+        // in every path that does not set it and names no device that produced anything. A
+        // source that states no identity gives `ChainKey::Unknown`: the baselines pool and the
+        // history read is unrestricted, which is honest about what is known, where a key built
+        // from the config default would claim a front end and measure another.
+        let chain = source
+            .control()
+            .device_info()
+            .map_or(hk_model::attention::baseline::ChainKey::Unknown, |d| {
+                hk_model::attention::baseline::ChainKey::of_device(&d.device_id)
+            });
         // T-118: the occupancy engine reads history and detections off the real-time path.
         let occupancy = crate::occupancy::OccupancyService::open(
             cfg.data_dir.join("occupancy"),
@@ -782,6 +797,7 @@ impl Pipeline {
             db_path.clone(),
             Arc::clone(&counters),
             crate::occupancy::OccupancyConfig::default(),
+            chain,
         );
         // T-128: one attention service for the run; never fails the run.
         // T-303: baselines are keyed by the front end the run measures with, so a second device at
@@ -789,7 +805,7 @@ impl Pipeline {
         let attention = crate::attention::AttentionService::open_for_run(
             &cfg.data_dir,
             &db_path,
-            hk_model::attention::baseline::ChainKey::of_device(&cfg.device_id),
+            chain,
             Arc::clone(&counters),
         )
         .map_err(|e| eprintln!("attention service disabled: {e:#}"))
