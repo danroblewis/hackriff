@@ -47,6 +47,7 @@
 //! cost **4.9 seconds** of C14 time, which is not a per-event cost any real-time system can carry.
 //! Truncating costs nothing a symbol-rate estimate needs (see [`MAX_WINDOW_SAMPLES`]).
 
+use hk_estimate::blind::receiver::{ReceiverLines, SurveyConfig};
 use hk_estimate::blind::{BlindEstimator, BlindInput, BlindReason, ObwSource, SymbolParameters};
 use hk_estimate::{ChannelSnippet, ParameterSet};
 use num_complex::Complex32;
@@ -101,6 +102,39 @@ impl SymbolEstimator {
     /// The underlying C14 estimator (for a caller that needs its configuration).
     pub fn inner(&mut self) -> &mut BlindEstimator {
         &mut self.inner
+    }
+
+    /// Measures this receiver's own cyclic lines over a **capture window** and keeps them, so the
+    /// cyclic dimensions of every box classified through this estimator stop reading the receiver
+    /// (T-394; [`hk_estimate::blind::receiver`]). Returns whether a survey was produced.
+    ///
+    /// **This wants a long wideband window, not a burst.** The survey channelises the tuned span
+    /// and needs enough of it to resolve a line — the shipped geometry reads a native cell of
+    /// `channels / (2 × seconds)` Hz, so a 27 ms burst would pin a line only to ±600 Hz and the
+    /// exclusion would be a notch across the band. Call it from wherever the pipeline holds a
+    /// second or more of the raw stream, once per capture state, not once per classification:
+    /// [`crate::symbols`]' cost bound is per event and this is not.
+    ///
+    /// The result is checked against each analysed window's own provenance before it is used, so a
+    /// survey never crosses a device, a retune or a gain step (T-259/T-305).
+    pub fn survey_receiver_lines<T: hk_dsp::IqSample>(
+        &mut self,
+        info: hk_dsp::InputInfo<'_>,
+        samples: &[T],
+        cfg: &SurveyConfig,
+    ) -> bool {
+        self.inner.survey_receiver_lines(info, samples, cfg)
+    }
+
+    /// The measured receiver lines in force, if any.
+    pub fn receiver_lines(&self) -> Option<&ReceiverLines> {
+        self.inner.receiver_lines()
+    }
+
+    /// Sets (or clears) the measured receiver lines directly — for a caller that surveyed
+    /// elsewhere, and for the controls that prove the exclusion has teeth.
+    pub fn set_receiver_lines(&mut self, lines: Option<ReceiverLines>) {
+        self.inner.set_receiver_lines(lines);
     }
 
     /// Runs C14 over a detection box the way the pipeline does: C14 prepares the snippet at its own
@@ -170,9 +204,11 @@ impl SymbolEstimator {
             // The caller's symbol view is recentred on the emission, as C13 recentres a snippet.
             center_offset_hz: 0.0,
             // No capture behind these samples — they are a caller's own view, the synthetic grid
-            // included — so nothing is excluded as a capture artefact (T-373). An unrecorded
-            // artefact is never an excluded one. The snippet path above carries provenance
-            // through `prepare`.
+            // included — so nothing is excluded as a capture artefact (T-373), and a measured
+            // receiver survey does not apply either: it is checked against a window's provenance
+            // and there is none (T-394). An unrecorded artefact is never an excluded one, and an
+            // unattributable window is never a surveyed receiver's. The snippet path above
+            // carries provenance through `prepare`.
             capture: None,
         }))
     }

@@ -101,6 +101,22 @@ pub(crate) struct Excluded<'a> {
     /// Half-width excluded either side of each member, Hz — the transform's own floor. A comb that
     /// records drift widens beyond it with harmonic number; see [`Excluded::guard_for`].
     pub guard_hz: f64,
+    /// Lines **measured** to be the receiver's, at their measured frequencies, ascending
+    /// ([`super::receiver::ReceiverLines`], T-394).
+    ///
+    /// These need no provenance record: each one was seen at one frequency in channels of this
+    /// same capture that hold no emission, which is what makes it device-local. Every entry of
+    /// [`Excluded::combs`] above is a frequency someone wrote down; every entry here is a
+    /// frequency this capture was measured to carry.
+    pub receiver: &'a [super::receiver::ReceiverLine],
+    /// Clearance added either side of each measured line's **own measured band**, Hz. Wider than
+    /// [`Excluded::guard_hz`] because it carries the survey transform's own resolution as well as
+    /// this record's: see [`super::receiver::ReceiverLines::guard_hz`].
+    pub receiver_guard_hz: f64,
+    /// Widest [`super::receiver::ReceiverLine::half_width_hz`] in [`Excluded::receiver`]: how far
+    /// back the ascending list must be scanned from a frequency before no earlier line can reach
+    /// it.
+    pub receiver_max_half_hz: f64,
 }
 
 impl Excluded<'_> {
@@ -126,15 +142,36 @@ impl Excluded<'_> {
         self.guard_hz + n * c.fundamental_hz * c.drift.max(0.0)
     }
 
-    /// Whether `f` Hz falls within the guard of a harmonic of any comb.
+    /// Whether `f` Hz falls within the guard of a harmonic of any comb, or of a measured
+    /// receiver line.
     fn hits(&self, f: f64) -> bool {
-        self.guard_hz > 0.0
+        (self.guard_hz > 0.0
             && self.combs.iter().any(|c| {
                 let n = (f / c.fundamental_hz).round();
                 n >= 1.0
                     && c.harmonics.is_none_or(|m| n <= f64::from(m))
                     && (f - n * c.fundamental_hz).abs() <= self.guard_for(c, n)
-            })
+            }))
+            || self.hits_receiver(f)
+    }
+
+    /// Whether `f` Hz falls inside a measured receiver line's own band plus
+    /// [`Excluded::receiver_guard_hz`].
+    ///
+    /// The list is ascending by frequency and the bands are narrow, so this scans from the first
+    /// line that could possibly reach `f` rather than over all of them: a survey of a real capture
+    /// reports tens of lines and this runs once per periodogram bin of four searches.
+    fn hits_receiver(&self, f: f64) -> bool {
+        let g = self.receiver_guard_hz;
+        if !g.is_finite() || g <= 0.0 || self.receiver.is_empty() {
+            return false;
+        }
+        let reach = g + self.receiver_max_half_hz;
+        let i = self.receiver.partition_point(|l| l.freq_hz < f - reach);
+        self.receiver[i..]
+            .iter()
+            .take_while(|l| l.freq_hz <= f + reach)
+            .any(|l| (f - l.freq_hz).abs() <= l.half_width_hz + g)
     }
 }
 
@@ -197,21 +234,83 @@ const MIN_WHITEN_NATIVE_BINS: f64 = 24.0;
 /// C14 reports no line instead of the rate it could have measured.
 const DC_GUARD_NATIVE_BINS: f64 = 4.0;
 
-/// Strongest locally whitened line of the real series `y` in `[f_min, f_max]`, judged against a
-/// floor estimated over blocks `block_hz` wide (see the [module docs](self)).
+/// The locally whitened periodogram of one real feature series: everything
+/// [`spectral_line`] needs before it picks an argmax, and the same transform the receiver-line
+/// survey reads ([`super::receiver`]).
 ///
-/// `None` when the series is shorter than 32 samples or the range holds fewer than 5 bins.
-pub(crate) fn spectral_line(
-    plans: &mut Plans,
-    y: &[f64],
-    fs: f64,
-    f_min: f64,
-    f_max: f64,
-    block_hz: f64,
-    excluded: Excluded<'_>,
-) -> Option<RawLine> {
+/// It is one object rather than two code paths on purpose: a survey that measured its lines
+/// through a *different* transform would report frequencies this search cannot match, and the
+/// guard would be papering over a geometry difference instead of a measurement uncertainty.
+pub(crate) struct Whitened {
+    /// Zero-padded periodogram, fftshifted: index `i` ↔ frequency `(i − N/2)·df`.
+    pw: Vec<f64>,
+    /// Block medians of [`Whitened::pw`], `blk` padded bins apart.
+    medians: Vec<f64>,
+    /// Padded bins per whitening block.
+    blk: usize,
+    /// Padded bin width, Hz.
+    pub df: f64,
+    /// Index of zero frequency, `N/2`.
+    pub half: usize,
+    /// Independent (native) cell width `fs/n`, Hz.
+    pub native_hz: f64,
+    /// The pinned block held fewer than [`MIN_WHITEN_NATIVE_BINS`] native cells and was widened.
+    pub clamped: bool,
+}
+
+impl Whitened {
+    /// Interpolated local floor at padded bin `i`:
+    /// `np.interp(arange(N), (arange(nb) + 0.5)·blk, medians)`, clamped at the ends.
+    fn local(&self, i: usize) -> f64 {
+        let nb = self.medians.len();
+        let pos = (i as f64 - 0.5 * self.blk as f64) / self.blk as f64;
+        if pos <= 0.0 {
+            self.medians[0]
+        } else if pos >= (nb - 1) as f64 {
+            self.medians[nb - 1]
+        } else {
+            let j = pos.floor() as usize;
+            let t = pos - j as f64;
+            self.medians[j] * (1.0 - t) + self.medians[j + 1] * t
+        }
+    }
+
+    /// Whitened ratio at padded bin `i` (power over the local floor).
+    pub fn ratio(&self, i: usize) -> f64 {
+        self.pw[i] / (self.local(i) + 1e-30)
+    }
+
+    /// Padded bins.
+    pub fn len(&self) -> usize {
+        self.pw.len()
+    }
+
+    /// Frequency of padded bin `i`, Hz.
+    pub fn freq_hz(&self, i: usize) -> f64 {
+        (i as f64 - self.half as f64) * self.df
+    }
+
+    /// First padded bin at or above `f_min` that the transform can report a line in: the
+    /// [`DC_GUARD_NATIVE_BINS`] floor is a property of the transform over this record, not of the
+    /// caller's band.
+    pub fn first_usable(&self, f_min: f64) -> usize {
+        let f_lo = f_min.max(DC_GUARD_NATIVE_BINS * self.native_hz);
+        ((f_lo / self.df) + self.half as f64).ceil().max(0.0) as usize
+    }
+
+    /// Last padded bin at or below `f_max`.
+    pub fn last_usable(&self, f_max: f64) -> usize {
+        (((f_max / self.df) + self.half as f64).floor().max(0.0) as usize).min(self.len() - 1)
+    }
+}
+
+/// The locally whitened periodogram of the real series `y`, against a floor estimated over blocks
+/// `block_hz` wide (see the [module docs](self)).
+///
+/// `None` when the series is shorter than 32 samples or holds fewer than 3 whitening blocks.
+pub(crate) fn whiten(plans: &mut Plans, y: &[f64], fs: f64, block_hz: f64) -> Option<Whitened> {
     let n = y.len();
-    if n < 32 || f_max.partial_cmp(&f_min) != Some(std::cmp::Ordering::Greater) {
+    if n < 32 {
         return None;
     }
     let big_n = (n * 4).next_power_of_two();
@@ -257,48 +356,55 @@ pub(crate) fn spectral_line(
             super::util::median(&scratch)
         })
         .collect();
-    // np.interp(arange(N), (arange(nb) + 0.5)·blk, medians): clamped at the ends.
-    let local = |i: usize| -> f64 {
-        let pos = (i as f64 - 0.5 * blk as f64) / blk as f64;
-        if pos <= 0.0 {
-            medians[0]
-        } else if pos >= (nb - 1) as f64 {
-            medians[nb - 1]
-        } else {
-            let j = pos.floor() as usize;
-            let t = pos - j as f64;
-            medians[j] * (1.0 - t) + medians[j + 1] * t
-        }
-    };
-    let df = fs / big_n as f64;
-    // The search band is pinned by the caller; this raises only the first *usable* bin, which is a
-    // limit of the transform over this record rather than a change of geometry.
-    let f_lo = f_min.max(DC_GUARD_NATIVE_BINS * native_hz);
-    let i_lo = ((f_lo / df) + half as f64).ceil().max(0.0) as usize;
-    let i_hi = (((f_max / df) + half as f64).floor().max(0.0) as usize).min(big_n - 1);
+    Some(Whitened {
+        pw,
+        medians,
+        blk,
+        df: fs / big_n as f64,
+        half,
+        native_hz,
+        clamped: whiten_clamped,
+    })
+}
+
+/// Strongest locally whitened line of the real series `y` in `[f_min, f_max]`, judged against a
+/// floor estimated over blocks `block_hz` wide (see the [module docs](self)).
+///
+/// `None` when the series is shorter than 32 samples or the range holds fewer than 5 bins.
+pub(crate) fn spectral_line(
+    plans: &mut Plans,
+    y: &[f64],
+    fs: f64,
+    f_min: f64,
+    f_max: f64,
+    block_hz: f64,
+    excluded: Excluded<'_>,
+) -> Option<RawLine> {
+    if f_max.partial_cmp(&f_min) != Some(std::cmp::Ordering::Greater) {
+        return None;
+    }
+    let w = whiten(plans, y, fs, block_hz)?;
+    let (pw, df, half, big_n) = (&w.pw, w.df, w.half, w.len());
+    let whiten_clamped = w.clamped;
+    // The search band is pinned by the caller; `first_usable` raises only the first *usable* bin,
+    // which is a limit of the transform over this record rather than a change of geometry.
+    let i_lo = w.first_usable(f_min);
+    let i_hi = w.last_usable(f_max);
     if i_hi < i_lo + 4 {
         return None;
     }
-    let mut best = (i_lo, f64::MIN);
     // T-373: the strongest bin the capture's own chain contributed, tracked so a suppressed
     // artefact is *reported* rather than silently dropped.
     let mut best_excluded = f64::MIN;
-    for (i, &p) in pw.iter().enumerate().take(i_hi + 1).skip(i_lo) {
-        let r = p / (local(i) + 1e-30);
-        if excluded.hits((i as f64 - half as f64) * df) {
-            best_excluded = best_excluded.max(r);
-            continue;
+    // Parabolic interpolation moves the reported peak off its bin, and it can move it *into* an
+    // exclusion the bin itself sat outside — a line on the very edge of a notch. Reporting a
+    // frequency this search refused to look at is not an answer, so the bin is banned and the
+    // scan repeated (T-394). A handful of edge bins is all a real notch has.
+    let mut banned: Vec<usize> = Vec::new();
+    let interp = |k: usize| -> f64 {
+        if k == 0 || k + 1 >= big_n {
+            return 0.0;
         }
-        if r > best.1 {
-            best = (i, r);
-        }
-    }
-    let (k, r) = best;
-    if r == f64::MIN {
-        // Every usable bin was a capture artefact: there is no line to report here.
-        return None;
-    }
-    let dk = if k > 0 && k + 1 < big_n {
         let (a, b, c) = (
             (pw[k - 1] + 1e-30).ln(),
             (pw[k] + 1e-30).ln(),
@@ -310,12 +416,39 @@ pub(crate) fn spectral_line(
         } else {
             0.0
         }
-    } else {
-        0.0
+    };
+    let (k, r, dk) = loop {
+        let mut best = (i_lo, f64::MIN);
+        for i in i_lo..=i_hi {
+            let r = w.ratio(i);
+            if excluded.hits((i as f64 - half as f64) * df) {
+                best_excluded = best_excluded.max(r);
+                continue;
+            }
+            if banned.contains(&i) {
+                continue;
+            }
+            if r > best.1 {
+                best = (i, r);
+            }
+        }
+        let (k, r) = best;
+        if r == f64::MIN {
+            // Every usable bin was a capture artefact: there is no line to report here.
+            return None;
+        }
+        let dk = interp(k);
+        if banned.len() < 8 && excluded.hits((k as f64 - half as f64 + dk) * df) {
+            best_excluded = best_excluded.max(r);
+            banned.push(k);
+            continue;
+        }
+        break (k, r, dk);
     };
     // Whitened bins are exponential with median ln 2: line-to-noise ≈ r·ln 2 − 1.
     let lnr = (r * std::f64::consts::LN_2 - 1.0).max(1e-6);
-    let sigma_hz = (fs * (12.0 * BLACKMAN_ENBW / lnr).sqrt() / (TAU * n as f64)).max(0.05 * df);
+    let sigma_hz =
+        (fs * (12.0 * BLACKMAN_ENBW / lnr).sqrt() / (TAU * y.len() as f64)).max(0.05 * df);
     Some(RawLine {
         freq_hz: (k as f64 - half as f64 + dk) * df,
         significance_db: 10.0 * r.max(1e-30).log10(),
