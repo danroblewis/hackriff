@@ -11,7 +11,10 @@ import {
   apiErrorText, classificationDistribution, explanationWhy, fmtBandwidth, fmtMHz, rasterText,
   refinedNote, unknownScorePct, unknownScoreText,
 } from "./format";
-import { selectionSummary } from "./focus";
+import {
+  fetchEmitterLookup, selectionSummary, signalFocus, signalFocusText, type EmitterLookup,
+  type Loaded,
+} from "./focus";
 import {
   clusterChip, deleteEntry, emptyListText, loadInventoryRows, nextInventorySort, promoteEntry,
   recurrenceDots, rowChips, rowSeenText, sortInventoryRows, type Row,
@@ -23,7 +26,7 @@ import {
 } from "./signature";
 import {
   focusSelection, focusSignal, removeInventoryRowLocal, restoreInventoryRowLocal, setInventorySort,
-  setInventoryTab, type InventorySortKey, type InventoryTab,
+  setInventoryTab, type InventorySortKey, type InventoryTab, type InventoryWindow,
 } from "./slice";
 
 const SORT_LABEL: Record<InventorySortKey, string> = { freq: "Freq", last_seen: "Last seen", count: "Count", bandwidth: "Bandwidth" };
@@ -179,9 +182,6 @@ const mountSelections: MountFn = (el, ctx) => {
 
 function stateBadge(state: string): HTMLElement { return h("span", { class: `state ${state}` }, state); }
 
-/** A loaded value, `"loading"` while its fetch is in flight, or `undefined` before it starts. */
-type Loaded<T> = T | "loading" | undefined;
-
 function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<SignatureMatch | null>, cluster: Loaded<Cluster | null>): HTMLElement {
   const chips = [stateBadge(r.state), ...rowChips(r).map((c) => h("span", { class: `chip ${c.cls}` }, c.text))];
   const flags = r.explanations[0]?.flags ?? [];
@@ -300,6 +300,37 @@ const mountFocus: MountFn = (el, ctx) => {
   const matchCache = new Map<string, Loaded<SignatureMatch | null>>();
   const clusterCache = new Map<string, Loaded<Cluster | null>>();
 
+  // T-385: whether a focused emitter that is NOT among the window's rows was deleted or is merely
+  // outside the window on screen. **Keyed by the window as well as the id**: "not here" is a fact
+  // about one window, so an answer is only current for the window it was asked about and every new
+  // window re-asks. One slot, because only one signal is focused at a time. While a re-ask is in
+  // flight the previous answer still renders — existence is window-independent even though the
+  // conclusion drawn from it is not — so the sentence never flashes back to "Checking…" each poll.
+  let lookup: { id: string; at: string; v: Loaded<EmitterLookup> } | null = null;
+
+  // The key an answer is current for: the window it is about, plus the identity of the row set it
+  // was asked alongside. The second half closes the delete race — `deleteEntry` drops the row
+  // locally before the server has answered (T-187's optimistic delete), so a lookup made in that
+  // instant can still see a live entry; its `reload` then publishes a fresh row set, which re-asks
+  // and settles on "deleted". Without it a real deletion could hide behind "outside the window",
+  // which is this fix's own mirror image.
+  let rowsGen = 0, rowsSeen: unknown = null;
+  function lookupKey(rows: unknown, w: InventoryWindow | null): string {
+    if (rows !== rowsSeen) { rowsSeen = rows; rowsGen++; }
+    return `${w === null ? "" : `${w.t0}:${w.t1}`}#${rowsGen}`;
+  }
+
+  function lookupFor(id: string, at: string): Loaded<EmitterLookup> {
+    const held = lookup && lookup.id === id ? lookup : null;
+    if (held && (held.at === at || held.v === "loading")) return held.v;
+    lookup = { id, at, v: "loading" };
+    fetchEmitterLookup(ctx.client, id).then((v) => {
+      if (lookup?.id === id && lookup.at === at) lookup = { id, at, v };
+      render();
+    });
+    return held?.v;
+  }
+
   function loadMatch(emitterId: string) {
     if (matchCache.has(emitterId)) return;
     matchCache.set(emitterId, "loading");
@@ -321,11 +352,20 @@ const mountFocus: MountFn = (el, ctx) => {
     if (focus.kind === "signal") {
       const row = s.inventory.rows[focus.id];
       if (row) {
+        if (lookup?.id === row.id) lookup = null; // the row is here: nothing to ask, nothing to keep
         loadMatch(row.id);
         if (row.cluster_id) loadCluster(row.cluster_id);
       }
+      // T-385: the panel says *which* absence it is. It used to say "no longer in the inventory"
+      // for every row not in `inventory.rows`, which for a window-scoped list is mostly the ordinary
+      // case of having scrubbed or retuned away — a claim about the user's data the UI never made a
+      // measurement for.
+      const at = lookupKey(s.inventory.rows, s.inventory.window);
+      const view = signalFocus(row, s.inventory.window, row ? undefined : lookupFor(focus.id, at));
       el.replaceChildren(
-        row ? renderSignalFocus(ctx, row, matchCache.get(row.id), row.cluster_id ? clusterCache.get(row.cluster_id) : null) : h("div", { class: "empty" }, "That signal is no longer in the inventory."),
+        view.kind === "row"
+          ? renderSignalFocus(ctx, view.row, matchCache.get(view.row.id), view.row.cluster_id ? clusterCache.get(view.row.cluster_id) : null)
+          : h("div", { class: "empty" }, signalFocusText(view)),
         outputPanelsEl,
       );
       ensureOutputPanels(outputPanelsEl, ctx);
@@ -338,10 +378,12 @@ const mountFocus: MountFn = (el, ctx) => {
     }
     el.replaceChildren(h("div", { class: "empty" }, "Select a signal or drag a region to focus it."), outputPanelsEl);
   }
+  // `inventory.window` is selected too (T-385): the window is what turns "not among the rows" into
+  // a sentence, and it changes without the rows changing (a re-ask that returned the same set).
   ctx.store.select(
-    (s) => [s.focus, s.inventory.rows, s.selections.list, s.outputs] as const,
+    (s) => [s.focus, s.inventory.rows, s.inventory.window, s.selections.list, s.outputs] as const,
     render,
-    { immediate: true, eq: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3] },
+    { immediate: true, eq: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3] && a[4] === b[4] },
   );
 };
 
