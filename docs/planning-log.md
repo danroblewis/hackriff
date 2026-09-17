@@ -4254,3 +4254,62 @@ targets. `du` on this repo is close to meaningless; the only reclaim that works 
 after a merge. Filed **T-400**: `just gate` shells out without `CARGO_INCREMENTAL=0`, so the
 coordinator's own check regenerates state every agent brief is configured to avoid — the rule belongs
 in the runner, exactly as T-396 moved the which-suites rule there.
+
+### B0.671 — three merges: a stale ticket, a rule evaluated too late, and a cluster made visible (2026-09-16)
+
+**T-342** (`58cc961`) — **the ticket was stale and the agent read the board rather than the brief.**
+`reduceActivity` does not exist; T-338 deleted it and moved the fold into
+`hk_store::RegionHistory::overview`, and `tasks.yaml`'s own later note on T-342 said so ("T-342 is its
+`rows = 1` case … should be closed or retargeted") while the brief I wrote quoted the original
+acceptance text. Adding a band-collapsed route would have duplicated `/api/timeline` — exactly the
+"new machinery" the ticket forbids. **My brief was the stale artefact; the agent caught it.** Worth
+remembering when I write the next one from a ticket's original text.
+
+So it closed the gap the ticket actually names: **the fold never stated its semantics or its scale on
+the wire.** `grid.semantics` now carries the fold, a rule string (*"the max of nothing is unobserved,
+not zero"*), and **per-series** `statistic`/`scale`/`unobserved` — because they are not all max-holds
+(`max_db` max-hold, `occupancy_max` max, `coverage` mean, `frames` sum). `columns` is now explicitly a
+time-axis budget, the sibling of `/api/floor`'s `max_steps`, stating that **a budget never truncates
+the window**.
+
+Its control is a value assertion on a live server: `max_db[i].is_null() == (frames[i] == 0)` for every
+step. Fill an empty step with the range floor — the plausible bug — and it breaks, because the step
+still has zero frames. It also **half-wired T-397**: `/api/coverage` now serves a `shade` block with
+its denominator named, which is precisely item (C), leaving a ui-only remainder.
+
+**T-398** (`b582a80`) — **the ~40 s was not in the capture, and the agent said so** rather than
+fitting the story to the ticket. 101.3 confirmed in 4.65 s because its RDS decoded early. The defect
+was in the same run's neighbours: continuous emitters at 99.6925 and 100.4653 MHz confirmed at
+**60.02 s, the end of the recording**, having met the rule's thresholds at about 2.5 s.
+
+The cause is **when** the rule is evaluated, not what it requires: route B is weighed only on track
+close, and a station that never stops transmitting has no close until the 60 s idle timeout. So a
+permanently-on emitter's only live route to Confirmed was a decoded identity. **101.3 escaped through
+RDS.** Backend decision 4.65 s against ≤5 s of display latency, measured separately as demanded — a
+decision problem, not a display one.
+
+The short-circuit requires a **lock, not a bump** (`lock_quality` and `pilot_hz` are `Some` only once
+the PLL held phase; every comparison refuses on NaN), and when it does not fire the measurement is
+still written — **short evidence leaves a log, not a promotion**, which is exactly the user's
+fragment. M3 floors unchanged to four decimals, exit gate green.
+
+**Its most valuable finding is about the suite: no acceptance test asserts latency at all.** Every one
+inspects terminal state, so 60 s and 1 s leave an identical inventory. A confirm consuming the whole
+recording passed everything we have. Filed as **T-401** (running). Two more synthetic gaps: every
+synthetic WFM scene ships clean RDS with a perfect PI so the broken fallback was never exercised —
+**suppressing RDS reproduced the bug** — and our synthetic WFM is tone-modulated at ~103 kHz, below our
+own 106 kHz threshold (**T-402**, with a note that 106 kHz came from the stereo subcarrier and must not
+be moved to make it pass).
+
+**T-320** (`363a26b`) — the cluster is visible and says plainly that it merges nothing:
+*"signature cluster 199ABC · 11 rows measure alike"*, with a hover stating the rows stay separate. I
+required that wording because **I told the user twice that clustering would fix their 82 duplicates
+and it does not.** A test asserts the chip contains none of *duplicate / merged / removed / collapsed*,
+and the honesty test asserts the served row is **byte-identical before and after clustering** apart
+from the two cluster fields. The agent also gave the honest scale: T-369's collapse removed **one row
+of twelve**, not 82.
+
+**A third flaky timeout** was folded into T-383 rather than filed separately: a contract test passes
+alone in 53.2 s against a **60 s** timeout. Three instances now, and they are one problem — **a timeout
+is a statement about the machine, not the code.** T-401 is establishing the capture-clock pattern for
+exactly this reason and its shape should be reused rather than the numbers raised.
