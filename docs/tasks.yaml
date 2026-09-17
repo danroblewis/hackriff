@@ -9020,14 +9020,10 @@ tasks:
   - id: T-418
     title: A narrower selection gives no more detail, because detail must come from resolution not from an impossible capture
     milestone: M2-hardening
-    status: blocked
+    status: todo
     priority: high
     parallel_group: PIPE
     deps: [T-417]
-    blocked_on: >-
-      T-417 alone, by the user's instruction - the truncated-message blocker is CLEARED, the
-      full requirement arrived 2026-09-17 and is recorded below. A retune must keep the stream
-      alive before this is worth exercising, because every narrowing here IS a retune.
     notes: |
       USER 2026-09-17, in two parts, both received in full.
       THE BUG: when the user selects a SMALLER frequency range, THE SDR DOES NOT
@@ -9060,6 +9056,11 @@ tasks:
         REAL finer Hz/bin from the same samples; interpolating a coarse FFT would not,
         and must not be what happens.
       Ties to T-341 (achievable-config snapping).
+      UNBLOCKED 2026-09-17: T-417 merged (d8eec14). A retune now keeps connected
+      consumers connected - the fault was not the re-plumb but spectrum::reoffer
+      finishing the publisher on a header-key change, plus a client that treated only
+      the FIRST text message as a header. Both fixed, so every narrowing this ticket
+      performs is now exercisable.
 
   - id: T-419
     title: Two coverage folds round partial coverage UP, so half-scanned spectrum reads as fully covered
