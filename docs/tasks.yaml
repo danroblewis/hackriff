@@ -8840,7 +8840,7 @@ tasks:
   - id: T-413
     title: Is a detected end provisional and revocable, and if so over what silence?
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
