@@ -10808,7 +10808,7 @@ tasks:
   - id: T-436
     milestone: CI
     title: The suite is green at --test-threads 8 and flaky at nextest's default 28 - the coordinator's gate runs at the flaky one
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CI
     deps: [T-383]
@@ -10869,6 +10869,39 @@ tasks:
       The T-430 coverage test's failure here reproduced its known signature exactly: row 1 picking up
       6.8 ms of capture from the live edge read by a previous HTTP round-trip, the same figure T-425
       measured.
+    commit: dfe9284
+    result: |
+      DONE, and THE COST IS NEGATIVE - there was no trade-off to discuss.
+      .config/nextest.toml gets [profile.default] test-threads = 8, with [profile.ci] at "num-cpus"
+      selected by NEXTEST_PROFILE in the workflow. No retry, no name added to heavy-serial.
+      MEASURED A/B, back to back on one tree, warm, only the thread count changed: 8 threads gave
+      2205/2205 in 234.3 s of nextest time; 28 gave ONE FAILURE in 279.6 s (+19%), 449 s wall (+61%),
+      1909 CPU-seconds against 1312 for the same tests. FASTER AND CORRECT.
+      AND IT IS STRUCTURAL, not luck. By group: heavy-serial 224.1 s at 8 vs 279.4 s at 28; everything
+      else 1088.2 s vs 1629.2 s. THE SERIAL GROUP IS ONE-AT-A-TIME AT ANY SETTING, SO ITS DURATION IS
+      THE CRITICAL PATH - 96% of the 8-thread run, 100% of the 28-thread one. The other 1939 tests are
+      off the critical path either way (1088 s over 7 free threads = 155 s; 1629 s over 27 = 60 s), so
+      parallelism outside the group has nothing left to overlap with and can only steal CPU from the
+      tests that ARE the critical path. Same mechanism as the flakes - those are the tests bounding
+      wall-clock latencies.
+      CORROBORATION FOUND RATHER THAN PRODUCED: docs/10 §3.4 (T-257) measured LEAK lines - a macOS
+      pipe(2)/FD_CLOEXEC race between concurrently SPAWNING test processes - at 6/10 runs at 28, 6/12
+      at 16, and ZERO at 8 and 6. A separate investigation months ago found the same discontinuity in
+      the same place.
+      CI AND DEV DIFFER, leaving CI alone: 8 is calibrated for a box where 24 of 28 logical CPUs are
+      committed to four building agents BY POLICY. A hosted runner is a dedicated 2-4 vCPU container
+      with no co-tenants, where one-per-CPU is the uncontended number. That also rules out "a fraction
+      of the core count" - the constraint scales with how much of the box is someone else's, not with
+      cores.
+      Encoding verified rather than trusted: an invalid value is rejected by name, so nextest does read
+      the file; NEXTEST_PROFILE=ci still reports heavy-serial as an override for the default profile.
+      WHAT IT MAKES HARDER TO DETECT, written into the file above the number: it lowers the sampling
+      rate on exactly the defects T-430 said to keep hunting. The test that failed at 28 in its A/B was
+      hk-pipeline::view_pause_keeps_capture, a live undiagnosed defect now firing less often. Tally:
+      28 -> 4 runs, 4 failures; 8 -> 4 runs, 1 failure. Filed as T-448.
+      Side effect: just test-crate / test-one are now capped too. CLAUDE.md asked agents for
+      --test-threads 6 by hand, which neither recipe ever passed, so that rule had no effect.
+
   - id: T-437
     milestone: MCANVAS
     title: SPIKE - the unified full-spectrum surface - one WebGL2 canvas, de-welded axes, split panes, zoomable minimap
@@ -10970,7 +11003,7 @@ tasks:
   - id: T-438
     milestone: MCANVAS
     title: The tile route, addressed by independent (level_f, level_t) - docs/16 step 5 under de-welded axes
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CANVAS-BE
     core_interface: true
@@ -11017,11 +11050,44 @@ tasks:
       T-437's spike is proving the client half against a stub. Coordinate through the coordinator
       rather than guessing at its shape - if the spike wants a different addressing, that is a
       finding worth having before this hardens.
+    commit: f1981be
+    result: |
+      DONE - the MCANVAS fan-out. GET /api/tiles?level_f&level_t&f_index&t_index[&scheme][&device][&cells],
+      keyed (device, scheme, level_f, level_t, f_index, t_index).
+      `scheme` IS THE LATTICE THE ADDRESS IS EXPRESSED IN, and it is what makes "no such node"
+      answerable rather than theoretical: scheme=view is the de-welded lattice; scheme=<n> reads a
+      store scheme's own levels off T-434's f_axis()/t_axis(), so A WELDED LADDER IS THE DIAGONAL OF
+      ITS OWN LATTICE and scheme=1&level_f=0&level_t=3 is a 404 whose message says why. Never a snap.
+      `device` is whose coverage decides this tile's grey (§6.3, device-local).
+      IT ALSO FIXED F1, because the floor is an addressing decision: the view lattice's node (0,0) is
+      THE OPEN PYRAMID'S OWN LEVEL-0 CELL, not §6.2's 100 kHz x 128 s. Asserted - t_cells_ns[0] == 1 s.
+      F2 AVOIDED BY REMOVING THE SURFACE: there is NO caller-supplied per-axis cell budget on this
+      route. The grid is always exactly cells x cells on the tile's own extent - THE ADDRESS IS THE
+      BUDGET - so coarsening level_f leaves the time cell bit-identical (asserted twice). Level chosen
+      FINEST-AFFORDABLE-FIRST, never coarsest-adequate, so folding cannot grey a cell the finer level
+      holds; only replication is a claim, stated per axis and downgrading the tier.
+      T-426'S WALK DIRECTION INVERTS FOR THIS ROUTE and §7 step 5 does not say so: /api/timeline prefers
+      coarsest adequate and walks finer, a tile must prefer finest affordable and walk coarser because
+      eviction hits the finest first. Getting it backwards would have reimported F2.
+      Candidates ordered by CELL AREA explicitly - T-434's index-order warning became a test on a real
+      4x4 lattice where index order puts a time-coarser node first.
+      MEASURED TILE PRODUCTION through the real store and fold: 11.4 ms per 256x256 tile, 1.1 ms at
+      64x64, 851968 source cells in 10 lock holds at 149 ms chunked. A 208-tile screen is ~2.4 s, so
+      the spike's "hypothetical 10 ms server-side" was nearly exact.
+      Both caps real: chunked by whole output rows with the history lock RE-ACQUIRED PER CHUNK so a
+      live-edge fan-out cannot lock ingest out for a whole tile; TILE_MAX_IN_FLIGHT = 4 refused as a
+      503 NAMING THE CAP.
+      FOUND: §6.2's V0 is unbackable at the COARSE end too (a 3.28 GHz x 48-day tile needs 32768
+      frequency cells at scheme 1's coarsest and no finer level is affordable) - servable only because
+      of chunking, and the real gap is that NOTHING OPENS A VIEW-SCHEME INSTANCE YET, which is T-439's.
+      §5.3's aggregate cannot live on the tile response even as a field (a tile's value is
+      immutability, counts change on every append) - it is on /api/tiles/events. And de-welding costs
+      the percentiles at the API boundary too: grid.percentiles reaches the wire as `unknown`.
 
   - id: T-439
     milestone: MCANVAS
     title: Live-edge tiles - "live" is the finest level growing where hardware is tuned, not a separate mode
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CANVAS-BE
     core_interface: true
@@ -11056,7 +11122,7 @@ tasks:
   - id: T-440
     milestone: MCANVAS
     title: The renderer core - one canvas, one WebGL2 context, N scissored panes, shared tile-texture LRU
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CANVAS-FE
     core_interface: true
@@ -11276,7 +11342,7 @@ tasks:
   - id: T-446
     milestone: MCANVAS
     title: After a retune the spectrum-history pyramid stops recording, permanently - the ring advances and coverage says observed, but nothing is written
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -11324,6 +11390,39 @@ tasks:
       ticket owns the defect. Fixing the defect does not remove the state.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-pipeline` and
       `just test-one <name>` - then HAND BACK. Never `just gate`; the coordinator gates at merge.
+    commit: ecffd6a
+    result: |
+      FIXED - ONE MISSING PAIR OF PARENTHESES in crates/hk-pipeline/src/history.rs:
+          if !continues && last_end.as_unix_nanos() > 0
+              || shared.counters.history.frames_ingested.load(...) > 0
+      Rust groups that as (!continues && A) || B, so `!continues` guarded ONLY THE FIRST DISJUNCT. B is
+      frames_ingested - a RUN-WIDE counter shared by every segment - so once any segment had folded one
+      frame it was true for ever and EVERY re-plumb sealed anyway. seal_through advances a MONOTONIC
+      watermark, here to last_end + 1 hour, and any frame whose level-0 block ends at or before it
+      returns Late. So the first retune stopped spectrum history for AN HOUR OF CAPTURE TIME, and the
+      watermark never retreats - which is why retuning back recovered nothing.
+      Introduced with this shape in 6c4612a (T-050), which added `!continues &&` in front of a
+      pre-existing `A || B`. ITS OWN COMMENT STATES THE INTENT CORRECTLY; the precedence defeated it.
+      REPRODUCED FIRST on the live mock: frames_ingested froze at 453 while frames_late climbed to 547,
+      and /api/timeline reported 0/512 observed cells for the new centre while /api/coverage in THE SAME
+      RESPONSE reported 296 observed. After the fix: new centre 216/512, original band 208 -> 312 after
+      retuning back, frames_late 0 across both.
+      THE TRAP IT RECORDED IS WORTH MORE THAN THE FIX. Its first test draft asked "has anything landed
+      YET" - patient in WALL clock, unbounded in CAPTURE time. The defect is bounded in capture time
+      (one hour) and a scripted radio outruns an hour of stream time in ~88 s of wall clock, SO THE
+      BROKEN BUILD PASSED TWO OF THOSE ASSERTIONS. Only frames_late caught it. Each band assertion is
+      now scoped to the capture-time window of the phase that must have recorded it; tightened, the
+      broken build fails on assertion 2 and the fixed build passes in 1.6 s. Red-then-green both ways.
+      That is the capture-clock-versus-wall-clock family in a NEW place: not a feature measuring the
+      observation, but A TEST WHOSE PATIENCE WAS MEASURED IN THE WRONG CLOCK.
+      Blast radius: Shared::continues is set in exactly one place (the control-API re-plumb).
+      Mock only, and it says so; no front-end code is involved, so the live device should behave the
+      same, but a real HackRF's settle gaps change WHEN frames arrive, not whether they land behind a
+      watermark.
+      NOTE FOR T-441: the fix does NOT remove observed-but-not-yet-measured. Post-fix, 433.92 MHz shows
+      216 measurement cells against 224 coverage cells - the newest cells are legitimately
+      looked-at-but-not-yet-written, the normal state of a live edge, distinct from T-423's "unknown".
+
   - id: T-447
     milestone: M3
     title: phase_features and derotate take their strong-envelope subset over the same broken mean rule T-431 just fixed
@@ -11361,6 +11460,37 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-classify`,
       `just test-crate hk-estimate`, `just test-one <name>` - then HAND BACK. Never `just gate`; the
       coordinator gates once at merge.
+  - id: T-448
+    milestone: M2-hardening
+    title: view_pause_keeps_capture fails at 28 threads and once at 8 - a live undiagnosed defect the thread cap now hides
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    deps: [T-436, T-430]
+    found_by: 'T-436 (2026-09-17), in its own A/B - it flagged the defect its change makes rarer'
+    acceptance: |
+      T-436 capped the suite at 8 test threads and SAID PLAINLY what that hides. In its A/B the
+      test that failed at 28 threads was
+      hk-pipeline::view_pause_keeps_capture::holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection
+      - and the same test failed the one 8-thread run recorded on this ticket's predecessor.
+      RUNNING TALLY: 28 threads -> 4 runs, 4 failures; 8 threads -> 4 runs, 1 failure. Better, not
+      sufficient. The cap lowered the sampling rate on a defect nobody has diagnosed.
+      NOTE THAT T-430 ALREADY FIXED A DIFFERENT DEFECT IN THIS SAME FILE: the phase closed when the
+      SOURCE's emitted counter passed 2500000 while the assertion read the CAPTURE and RING
+      counters, which trail by the block in flight - 6752 samples of headroom, less than half a
+      16384-sample block. That one is fixed and its rate went 3/48 -> 0/48. THIS IS A DIFFERENT
+      FAILURE in the same file, so do not assume T-430's mechanism; measure which assertion fires
+      and what quantity it bounds.
+      T-430's rule applies: A TEST MAY NOT BOUND A QUANTITY WHOSE NATURAL RANGE IT HAS NOT
+      MEASURED. And T-446 added a second clock to watch for - its first test draft was patient in
+      WALL clock but unbounded in CAPTURE time, so the broken build passed. Check which clock this
+      test's patience is measured in.
+      DoD: measure the range, root-cause, fix, and report before/after rates over at least 10 runs
+      at BOTH 8 and 28 threads - 28 specifically, because that is where the sampling rate is high
+      enough to see it and the cap is what made it rare.
+    notes: |
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-pipeline`,
+      `just test-one <name>` - then HAND BACK. Never `just gate`; the coordinator gates at merge.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
