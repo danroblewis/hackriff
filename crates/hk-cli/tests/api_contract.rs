@@ -4955,6 +4955,18 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
     assert_eq!(ring["available"], json!(true), "{tuned}");
     assert_eq!(ring["device_known"], json!(true), "{tuned}");
     assert!(ring["spans"].as_u64().unwrap_or(0) > 0, "{tuned}");
+    // T-378: `device_known` is measured, not declared — every span this record contributed named
+    // a front end. Both tune histories report the count, so a log still holding records written
+    // before devices were logged discloses them instead of claiming a device-local horizon.
+    assert_eq!(ring["named_spans"], ring["spans"], "{tuned}");
+    for src in tuned["sources"].as_array().expect("sources") {
+        let (spans, named) = (
+            src["spans"].as_u64().expect("spans"),
+            src["named_spans"].as_u64().expect("named_spans"),
+        );
+        assert!(named <= spans, "{src}");
+        assert_eq!(src["device_known"], json!(named == spans), "{src}");
+    }
 
     // ---- device-local: the grid is one radio's, and it is named ----
     let devices = tuned["devices"].as_array().expect("devices").clone();

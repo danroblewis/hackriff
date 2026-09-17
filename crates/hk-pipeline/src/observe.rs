@@ -51,14 +51,25 @@ pub const DC_NOTCH_HALF_HZ: f64 = 15e3;
 /// The run's observation log (see the module docs).
 pub struct ObservationLog {
     writer: ObservationWriter,
+    /// The front end every record of this log names (T-378): the source's own
+    /// `DeviceInfo::device_id`, which is also what `ChainKey::of_device` hashes into the run's
+    /// receive chain and `hk_store::history::source_key` hashes into each frame's history origin.
+    /// `None` for a source that states no identity, and then the records say nothing about which
+    /// radio looked rather than borrowing the one that happens to be running.
+    device_id: Option<String>,
 }
 
 impl ObservationLog {
     /// Opens the log under `<data_dir>/observations` and starts its writer; offers the
-    /// `observations` stream through `sink`.
-    pub(crate) fn open(data_dir: &Path, sink: Option<&StreamSink>) -> anyhow::Result<Self> {
+    /// `observations` stream through `sink`. `device_id` is the front end the records name.
+    pub(crate) fn open(
+        data_dir: &Path,
+        device_id: Option<String>,
+        sink: Option<&StreamSink>,
+    ) -> anyhow::Result<Self> {
         Self::open_with(
             ObservationLogConfig::new(data_dir.join("observations")),
+            device_id,
             sink,
         )
     }
@@ -66,6 +77,7 @@ impl ObservationLog {
     /// [`ObservationLog::open`] with explicit log settings.
     pub(crate) fn open_with(
         config: ObservationLogConfig,
+        device_id: Option<String>,
         sink: Option<&StreamSink>,
     ) -> anyhow::Result<Self> {
         let store = ObservationStore::open(config)?;
@@ -88,6 +100,7 @@ impl ObservationLog {
         };
         Ok(Self {
             writer: ObservationWriter::spawn(store, tap)?,
+            device_id,
         })
     }
 
@@ -106,7 +119,13 @@ impl ObservationLog {
         counters: Arc<Counters>,
     ) -> Observer {
         Observer {
-            recorder: ObservationRecorder::new(plan, rule(fft_bins), fixed_tuning, survey_id),
+            recorder: ObservationRecorder::new(
+                plan,
+                rule(fft_bins),
+                fixed_tuning,
+                survey_id,
+                self.device_id.clone(),
+            ),
             queue: self.writer.queue(),
             fixed: fixed_tuning.is_some(),
             counters,
@@ -126,6 +145,7 @@ impl ObservationLog {
         InteractiveObserver {
             rule: rule(fft_bins),
             survey_id,
+            device_id: self.device_id.clone(),
             queue: self.writer.queue(),
             seq0: counters.tune_seq.load(Ordering::SeqCst),
             counters,
@@ -347,6 +367,8 @@ struct OpenTune {
 pub(crate) struct InteractiveObserver {
     rule: WindowRule,
     survey_id: Option<SurveyId>,
+    /// The front end this observer's records name (T-378); see `ObservationLog::device_id`.
+    device_id: Option<String>,
     queue: ObservationQueue,
     counters: Arc<Counters>,
     /// `tune_seq` before this segment's capture started: nothing is recorded until it moves.
@@ -418,6 +440,7 @@ impl InteractiveObserver {
             seq: self.records,
             plan_version: 0,
             site: SiteKey::Unassigned,
+            device_id: self.device_id.clone(),
             reason,
             tier: reason.tier(),
             window: self
@@ -454,12 +477,18 @@ mod tests {
 
     use super::*;
 
+    /// A `DeviceInfo::device_id` spelling, as a real source states it.
+    const TEST_DEVICE: &str = "mock:hackrf-one";
+
     #[test]
     fn observe_a_long_intent_between_sweeps_leaves_the_sweep_queryable_in_its_own_hour() {
         let dir = std::env::temp_dir().join(format!("hk-t115-intent-{}", std::process::id()));
-        let log =
-            ObservationLog::open_with(ObservationLogConfig::new(dir.join("observations")), None)
-                .unwrap();
+        let log = ObservationLog::open_with(
+            ObservationLogConfig::new(dir.join("observations")),
+            Some(TEST_DEVICE.into()),
+            None,
+        )
+        .unwrap();
         let store = log.store();
         // 10 min into an hour: a 2 h intent ends two hours later.
         let t0 = Timestamp::from_unix_nanos(1_789_297_800_000_000_000);
@@ -528,7 +557,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hk-t115-stall-{}", std::process::id()));
         let mut cfg = ObservationLogConfig::new(dir.join("observations"));
         cfg.queue_len = 4;
-        let log = ObservationLog::open_with(cfg, None).unwrap();
+        let log = ObservationLog::open_with(cfg, Some(TEST_DEVICE.into()), None).unwrap();
         let t0 = Timestamp::from_unix_nanos(1_789_297_800_000_000_000);
         let plan = crate::config::replay_plan(100e6, 2e6, t0);
         let mut sc = SchedulerConfig::from_plan(&plan).unwrap();

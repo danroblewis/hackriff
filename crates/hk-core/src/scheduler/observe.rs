@@ -15,10 +15,11 @@
 //!   referencing a [`SweepGeometry`] emitted once per geometry change. Every other purpose is one
 //!   [`DwellRecord`].
 //!
-//! **Allocation:** [`ObservationRecorder::observe`] does not allocate for a dwell step or for a
-//! hop that does not close a sweep record (visits go into a preallocated buffer); closing a
-//! record allocates its replacement buffer once. All times are the device/sample clock the steps
-//! carry (ADR-0012 §0).
+//! **Allocation:** [`ObservationRecorder::observe`] allocates only the record's `device_id` for a
+//! dwell step (T-378: one short `String` clone, so the record names the front end without a second
+//! lookup), and nothing at all for a hop that does not close a sweep record (visits go into a
+//! preallocated buffer); closing a record allocates its replacement buffer and one `device_id`.
+//! All times are the device/sample clock the steps carry (ADR-0012 §0).
 
 use hk_model::attention::ATTENTION_SCHEMA_VERSION;
 use hk_model::attention::baseline::SiteKey;
@@ -122,6 +123,10 @@ pub struct ObservationRecorder {
     rule: WindowRule,
     site: SiteKey,
     survey_id: Option<SurveyId>,
+    /// The front end these records describe (T-378): the source's own `DeviceInfo::device_id`,
+    /// the same value `ChainKey::of_device` and `hk_store::history::source_key` hash. `None` when
+    /// the source states no identity — recorded as unknown, never as whichever radio is running.
+    device_id: Option<String>,
     /// The geometry hops are recorded against now.
     geometry: SweepGeometry,
     geometry_pending: bool,
@@ -137,16 +142,19 @@ pub struct ObservationRecorder {
 impl ObservationRecorder {
     /// A recorder for `plan`'s hops. `fixed_tuning` is the `(centre, rate)` of a source that
     /// cannot retune (every hop then observes that window); `None` for a controllable source.
+    /// `device_id` is the front end the records name (T-378), `None` when the source states none.
     pub fn new(
         plan: &CompiledPlan,
         rule: WindowRule,
         fixed_tuning: Option<(f64, f64)>,
         survey_id: Option<SurveyId>,
+        device_id: Option<String>,
     ) -> Self {
         let mut r = Self {
             rule,
             site: SiteKey::Unassigned,
             survey_id,
+            device_id,
             geometry: SweepGeometry {
                 schema: ATTENTION_SCHEMA_VERSION,
                 id: 0,
@@ -261,6 +269,7 @@ impl ObservationRecorder {
                     seq: o.step.seq,
                     plan_version: o.step.plan_version,
                     site: self.site,
+                    device_id: self.device_id.clone(),
                     reason,
                     tier: reason.tier(),
                     window: self.rule.window(o.center_hz, o.rate_hz),
@@ -285,6 +294,7 @@ impl ObservationRecorder {
             survey_id: self.survey_id,
             plan_version: s.plan_version,
             site: self.site,
+            device_id: self.device_id.clone(),
             geometry: s.geometry,
             span: TimeRange::new(s.start, s.end),
             visits,

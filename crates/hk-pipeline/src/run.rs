@@ -784,12 +784,15 @@ impl Pipeline {
         // source that states no identity gives `ChainKey::Unknown`: the baselines pool and the
         // history read is unrestricted, which is honest about what is known, where a key built
         // from the config default would claim a front end and measure another.
-        let chain = source
-            .control()
-            .device_info()
-            .map_or(hk_model::attention::baseline::ChainKey::Unknown, |d| {
-                hk_model::attention::baseline::ChainKey::of_device(&d.device_id)
-            });
+        // T-378: the observation log's records name the same front end, so the long-horizon
+        // coverage map can answer "did THIS radio look here" and not merely "did anything". One
+        // string, read once, hashed into the chain below — a second spelling of "which device"
+        // would be a new drift surface.
+        let device_id = source.control().device_info().map(|d| d.device_id);
+        let chain = device_id.as_deref().map_or(
+            hk_model::attention::baseline::ChainKey::Unknown,
+            hk_model::attention::baseline::ChainKey::of_device,
+        );
         // T-118: the occupancy engine reads history and detections off the real-time path.
         let occupancy = crate::occupancy::OccupancyService::open(
             cfg.data_dir.join("occupancy"),
@@ -871,6 +874,7 @@ impl Pipeline {
             scheduler: Arc::new(crate::control::SchedulerHub::default()),
             observations: crate::observe::ObservationLog::open(
                 &cfg.data_dir,
+                device_id,
                 cfg.stream_sink.as_ref(),
             )
             .map_err(|e| eprintln!("observation log disabled: {e:#}"))

@@ -14,6 +14,11 @@ use super::log::{ObservationLogStats, ObservationStore};
 /// Called on the writer thread for every record it appends (e.g. the `observations` stream).
 pub type RecordTap = Box<dyn FnMut(&ObservationRecord) + Send>;
 
+/// The big variant is the *only* one that is ever sent in volume — `Stop` goes once, when the run
+/// ends — so boxing the record to even the variants up would add an allocation to every offer on
+/// the producer's (control-thread) path to save nothing. The queue is bounded, so the cost of the
+/// size is bounded with it.
+#[allow(clippy::large_enum_variant)]
 enum Msg {
     Record(ObservationRecord),
     Stop,

@@ -1532,6 +1532,7 @@ mod tests {
             survey_id: None,
             plan_version: 1,
             site: SiteKey::Unassigned,
+            device_id: None,
             geometry: 7,
             span: TimeRange::new(t0, t0.saturating_add_nanos(1_000_000_000)),
             visits: vec![
@@ -1556,6 +1557,7 @@ mod tests {
             seq: 1,
             plan_version: 1,
             site: SiteKey::Unassigned,
+            device_id: None,
             reason: Reason::PoiDwell { poi: 1 },
             tier: Tier::Bandit,
             window: win(100e6),

@@ -44,14 +44,17 @@
 //! | Source | Interval | Centre/span/rate | Device | Horizon |
 //! |---|---|---|---|---|
 //! | IQ ring journal (`/api/iqbuffer` segments, ADR-0014) | yes | yes | **yes** (`device_id`) | the ring's retention |
-//! | observation log (`DwellRecord`/`SweepRecord`, ADR-0012 §1) | yes | yes (`ObservedWindow`) | no | 30 days |
+//! | observation log (`DwellRecord`/`SweepRecord`, ADR-0012 §1) | yes | yes (`ObservedWindow`) | **yes** (`device_id`, T-378) | 30 days |
 //!
 //! The ring journal opens a new segment on **every** provenance change, so retunes are segment
-//! boundaries by construction — it is already a tune history, and it is the only one that names the
-//! radio. The observation log extends the horizon far beyond the ring but records no `device_id`
-//! today, so its spans are [`Device::Unknown`]: evidence that *something* looked, never evidence
-//! that a *particular* front end did. The two are kept apart for exactly that reason, and `sources`
-//! in the response says which contributed.
+//! boundaries by construction — it is already a tune history. **T-378** put the same `device_id` on
+//! the observation log's records, so the long horizon is device-local too and coverage over the
+//! retention window answers "did *this* front end look here", not merely "did anything" — which,
+//! with two SDRs, is the whole question. A record that names no device (every record written before
+//! T-378, or a source that states no identity) stays [`Device::Unknown`]: evidence that *something*
+//! looked, never evidence that a *particular* front end did, and never read as whichever radio is
+//! running now. `sources` in the response reports, per record kind, how many spans actually named
+//! one.
 //!
 //! | Method | Path | Query | Answers |
 //! |---|---|---|---|
@@ -127,18 +130,36 @@ fn ring_spans(state: &ApiState, freq: FreqRange, window: TimeRange) -> Vec<Cover
         .collect()
 }
 
+/// Which front end an observation record says looked (T-378).
+///
+/// A record that names one is device-local evidence, exactly like an IQ-ring segment. A record
+/// that names none — every record written before T-378, and every record of a source that states
+/// no identity — is [`Device::Unknown`]: evidence that *something* looked, and nothing more. It is
+/// never read as the device that happens to be running now, which would invent provenance for data
+/// that has none (`BiasTee::Unknown` ≠ `off`).
+fn record_device(device_id: Option<&String>) -> Device {
+    device_id
+        .filter(|d| !d.is_empty())
+        .map_or(Device::Unknown, |d| Device::Id(d.clone()))
+}
+
 /// The tune history the observation log holds: every dwell's and every sweep hop's analysed extent
 /// over the interval it was analysed in (ADR-0012 §1).
 ///
-/// These records carry no `device_id` today, so every span is [`Device::Unknown`] — which is a
-/// device of its own and never answers for a named front end. `ObservedWindow::covered()` already
+/// Since T-378 these records name the front end that observed, so a span from the log is
+/// device-local over the log's 30-day horizon — far beyond the IQ ring's retention — and the
+/// coverage map can answer "did *this* radio look here" over the whole of it. A record without a
+/// device stays [`Device::Unknown`] (see [`record_device`]). `ObservedWindow::covered()` already
 /// removes the DC notch, so a notched window contributes two spans and the notch stays honestly
 /// unobserved.
+///
+/// Returns the spans and how many of them named a device, so the answer's `sources` row can say
+/// whether this record actually knew.
 fn observation_spans(
     store: &ObservationStore,
     freq: FreqRange,
     window: TimeRange,
-) -> Vec<CoverageSpan> {
+) -> (Vec<CoverageSpan>, usize) {
     let page = store.query(&RecordQuery {
         freq,
         span: window,
@@ -147,11 +168,13 @@ fn observation_spans(
         limit: MAX_RECORD_LIMIT,
     });
     let mut out = Vec::new();
-    let mut push = |w: &ObservedWindow, t: TimeRange| {
+    let mut named = 0usize;
+    let mut push = |device: &Device, w: &ObservedWindow, t: TimeRange| {
         for c in w.covered() {
             if c.overlaps(&freq) {
+                named += usize::from(device.is_named());
                 out.push(CoverageSpan {
-                    device: Device::Unknown,
+                    device: device.clone(),
                     time: t,
                     freq: c,
                     center_hz: w.center_hz,
@@ -162,8 +185,11 @@ fn observation_spans(
     };
     for r in &page.records {
         match r {
-            ObservationRecord::Dwell(d) => push(&d.window, d.observed),
+            ObservationRecord::Dwell(d) => {
+                push(&record_device(d.device_id.as_ref()), &d.window, d.observed)
+            }
             ObservationRecord::Sweep(s) => {
+                let device = record_device(s.device_id.as_ref());
                 let Some(g) = page.geometries.iter().find(|g| g.id == s.geometry) else {
                     continue;
                 };
@@ -177,14 +203,14 @@ fn observation_spans(
                         .saturating_add_nanos(i64::from(v.start_ms) * 1_000_000);
                     let end = start.saturating_add_nanos(i64::from(v.observed_ms) * 1_000_000);
                     if end > start {
-                        push(w, TimeRange::new(start, end));
+                        push(&device, w, TimeRange::new(start, end));
                     }
                 }
             }
             ObservationRecord::Geometry(_) => {}
         }
     }
-    out
+    (out, named)
 }
 
 /// One cell's JSON. An unobserved cell carries **no measurement keys**, so there is nothing a
@@ -275,8 +301,12 @@ pub fn coverage_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
 
     let mut spans = ring_spans(state, freq, window);
     let ring = spans.len();
+    let ring_named = spans.iter().filter(|s| s.device.is_named()).count();
+    let mut log_named = 0;
     if let Some(store) = state.observations.as_ref() {
-        spans.extend(observation_spans(store, freq, window));
+        let (log_spans, named) = observation_spans(store, freq, window);
+        log_named = named;
+        spans.extend(log_spans);
     }
     let log = spans.len() - ring;
 
@@ -307,12 +337,18 @@ pub fn coverage_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         // The deliberate union, labelled `"any"` so it can never be mistaken for one radio's
         // coverage (T-259/T-305: device-local physics reads the device).
         "any": grid_json(&any, Some(&shades)),
-        // Which tune histories answered. A source with no spans still appears, so a client can tell
-        // "this record had nothing here" from "this record was not consulted".
+        // Which tune histories answered, how many of each one's spans actually named the radio,
+        // and whether every span it contributed did. `device_known` is **measured, not declared**
+        // (T-378): a log still holding records written before devices were logged reports them as
+        // the unattributed spans they are instead of claiming a device-local horizon it has not
+        // got. A source with no spans still appears, so a client can tell "this record had nothing
+        // here" from "this record was not consulted".
         "sources": [
-            { "kind": "iq-ring", "spans": ring, "device_known": true,
+            { "kind": "iq-ring", "spans": ring, "named_spans": ring_named,
+              "device_known": ring_named == ring,
               "available": state.iq_buffer.is_some() },
-            { "kind": "observation-log", "spans": log, "device_known": false,
+            { "kind": "observation-log", "spans": log, "named_spans": log_named,
+              "device_known": log_named == log,
               "available": state.observations.is_some() },
         ],
         "resolution": {
@@ -378,6 +414,238 @@ mod tests {
 
     fn t(s: i64) -> Timestamp {
         Timestamp::from_unix_nanos(s * 1_000_000_000)
+    }
+
+    /// The front end this run is using, so the migration control has a device available to
+    /// wrongly acquire.
+    const RUNNING: &str = "hackrf:0000000000000000a06063c8234e925f";
+    /// A second front end, covering somewhere else entirely.
+    const OTHER: &str = "rtl-sdr:00000001";
+
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "hk-coverage-{tag}-{}-{:?}",
+                std::process::id(),
+                std::time::Instant::now()
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn band() -> FreqRange {
+        // 100 MHz wide, so a 10-cell grid has 10 MHz cells.
+        FreqRange::new(100e6, 200e6)
+    }
+
+    fn observation_window() -> TimeRange {
+        TimeRange::new(t(1000), t(1060))
+    }
+
+    /// One dwell over `lo..hi` for the whole window, observed by `device` (or by nobody).
+    fn dwell_over(device: Option<&str>, lo: f64, hi: f64) -> ObservationRecord {
+        use hk_model::attention::baseline::SiteKey;
+        use hk_model::attention::observation::{DwellRecord, Reason, Tier};
+        let reason = Reason::RegionDwell { hop: 0 };
+        ObservationRecord::Dwell(DwellRecord {
+            schema: hk_model::attention::ATTENTION_SCHEMA_VERSION,
+            survey_id: None,
+            seq: 1,
+            plan_version: 1,
+            site: SiteKey::Unassigned,
+            device_id: device.map(str::to_string),
+            reason,
+            tier: Tier::ScheduledPlan,
+            window: ObservedWindow {
+                center_hz: (lo + hi) / 2.0,
+                sample_rate_hz: hi - lo,
+                usable: FreqRange::new(lo, hi),
+                dc_excluded: None,
+                rbw_hz: 1e3,
+            },
+            rf_path: 0,
+            planned: observation_window(),
+            observed: observation_window(),
+            preempted: false,
+            dropped_samples: 0,
+            overload: false,
+            provenance_ref: None,
+        })
+    }
+
+    fn store_of(dir: &TempDir, records: &[ObservationRecord]) -> ObservationStore {
+        let s = ObservationStore::open(hk_store::observation::ObservationLogConfig::new(
+            dir.0.join("observations"),
+        ))
+        .unwrap();
+        for r in records {
+            s.append(r);
+        }
+        s.flush();
+        s
+    }
+
+    /// **The property.** Coverage over the observation log's horizon — the long one, far beyond the
+    /// IQ ring's retention — answers *"did **this** front end look here"*, not merely "did
+    /// anything". Two radios on disjoint ranges are two grids, each unobserved exactly where the
+    /// other looked, and neither one's coverage is ever the union.
+    ///
+    /// (T-368's `two_devices_on_disjoint_ranges_do_not_union` shape, now driven through real
+    /// observation-log records rather than hand-built spans — which is the whole of T-378: before
+    /// it, both of these records produced `Device::Unknown` and this test could not be written.)
+    #[test]
+    fn long_horizon_coverage_names_the_front_end_that_looked_and_two_devices_do_not_union() {
+        let dir = TempDir::new("two-devices");
+        let store = store_of(
+            &dir,
+            &[
+                dwell_over(Some(RUNNING), 100e6, 110e6),
+                dwell_over(Some(OTHER), 190e6, 200e6),
+            ],
+        );
+        let (spans, named) = observation_spans(&store, band(), observation_window());
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert_eq!(named, 2, "both records named their radio");
+
+        let a = hk_store::coverage::grid(
+            &spans,
+            &Device::Id(RUNNING.into()),
+            band(),
+            observation_window(),
+            10,
+        );
+        let b = hk_store::coverage::grid(
+            &spans,
+            &Device::Id(OTHER.into()),
+            band(),
+            observation_window(),
+            10,
+        );
+        assert!(a.at(105e6).unwrap().is_observed(), "{a:?}");
+        assert_eq!(*a.at(195e6).unwrap(), Coverage::Unobserved, "{a:?}");
+        assert!(b.at(195e6).unwrap().is_observed(), "{b:?}");
+        assert_eq!(*b.at(105e6).unwrap(), Coverage::Unobserved, "{b:?}");
+        assert_eq!((a.observed_cells(), b.observed_cells()), (1, 1));
+
+        // `by_device` keeps them apart and names both; the union is only what someone asked for.
+        let per = hk_store::coverage::by_device(&spans, band(), observation_window(), 10);
+        assert_eq!(per.len(), 2);
+        assert!(per.iter().all(|g| g.device.is_named()));
+        let u = hk_store::coverage::union_grid(&spans, band(), observation_window(), 10);
+        assert_eq!(u.device, Device::Any);
+        assert!(!u.device.is_named());
+        assert_eq!(u.observed_cells(), 2);
+    }
+
+    /// **The migration control.** An observation log written *before* T-378 — the literal old
+    /// bytes, hand-written below with no `device_id` key anywhere in them — still reads, and its
+    /// coverage is `Device::Unknown`: evidence that *something* looked, never evidence that the
+    /// radio running now did.
+    ///
+    /// **The mutation.** Default the missing field to the running device (`mutant` below) and the
+    /// control breaks: the named grid then claims a band that front end demonstrably never tuned.
+    /// That is what makes the honest assertion load-bearing rather than vacuous.
+    #[test]
+    fn a_pre_t378_log_reads_back_unknown_and_never_the_device_that_happens_to_be_running() {
+        let dir = TempDir::new("pre-t378");
+        let root = dir.0.join("observations");
+        // The literal bytes of a pre-T-378 dwell over 140–160 MHz, CRC and all, written into the
+        // log before this run opens it.
+        let json = concat!(
+            r#"{"record":"dwell","schema":1,"seq":11,"plan_version":1,"#,
+            r#""site":{"kind":"unassigned"},"reason":{"code":"region-dwell","hop":0},"#,
+            r#""tier":"scheduled-plan","window":{"center_hz":150000000.0,"#,
+            r#""sample_rate_hz":20000000.0,"usable":{"lo_hz":140000000.0,"hi_hz":160000000.0},"#,
+            r#""rbw_hz":1000.0},"rf_path":0,"#,
+            r#""planned":{"start_ns":1000000000000,"end_ns":1060000000000},"#,
+            r#""observed":{"start_ns":1000000000000,"end_ns":1060000000000},"#,
+            r#""preempted":false,"dropped_samples":0,"overload":false}"#,
+        );
+        assert!(!json.contains("device_id"), "the old bytes name no device");
+        let path = hk_store::observation::segment::segment_path(
+            &root,
+            hk_store::observation::segment::hour_of(t(1030)),
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{:08x} {json}
+",
+                hk_store::observation::segment::crc32(json.as_bytes())
+            ),
+        )
+        .unwrap();
+
+        // The running device is in the same log, looking somewhere else — so there is a device
+        // available for the old record to wrongly acquire.
+        let store = store_of(&dir, &[dwell_over(Some(RUNNING), 100e6, 110e6)]);
+        let (spans, named) = observation_spans(&store, band(), observation_window());
+        assert_eq!(spans.len(), 2, "both records read: {spans:?}");
+        assert_eq!(named, 1, "only one of them named a radio: {spans:?}");
+        assert!(
+            spans.iter().any(|s| s.device == Device::Unknown),
+            "the pre-T-378 record must read back unknown: {spans:?}"
+        );
+        assert!(
+            !spans
+                .iter()
+                .any(|s| s.device == Device::Id(RUNNING.into()) && s.freq.lo_hz == 140e6),
+            "the old record must never acquire the running device: {spans:?}"
+        );
+
+        // The consequence: the running front end's own coverage says it never looked at 150 MHz.
+        let honest = hk_store::coverage::grid(
+            &spans,
+            &Device::Id(RUNNING.into()),
+            band(),
+            observation_window(),
+            10,
+        );
+        assert!(honest.at(105e6).unwrap().is_observed(), "{honest:?}");
+        assert_eq!(
+            *honest.at(150e6).unwrap(),
+            Coverage::Unobserved,
+            "an unattributed span is not this radio's coverage: {honest:?}"
+        );
+        // Unknown is its own device, and it did look there.
+        let unknown =
+            hk_store::coverage::grid(&spans, &Device::Unknown, band(), observation_window(), 10);
+        assert!(unknown.at(150e6).unwrap().is_observed(), "{unknown:?}");
+        assert!(!unknown.device.is_named());
+
+        // The mutation: read a missing device as the one that happens to be running.
+        let mutant: Vec<CoverageSpan> = spans
+            .iter()
+            .map(|s| CoverageSpan {
+                device: Device::Id(RUNNING.into()),
+                ..s.clone()
+            })
+            .collect();
+        let m = hk_store::coverage::grid(
+            &mutant,
+            &Device::Id(RUNNING.into()),
+            band(),
+            observation_window(),
+            10,
+        );
+        assert!(
+            m.at(150e6).unwrap().is_observed(),
+            "the mutant must claim the band this radio never tuned: {m:?}"
+        );
+        assert_ne!(
+            honest.cells, m.cells,
+            "so the honest assertion is doing work"
+        );
     }
 
     #[test]

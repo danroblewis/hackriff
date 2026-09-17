@@ -44,8 +44,9 @@
 //! `sample_rate_hz`/`device_id`, one per provenance change — so one per retune, by construction)
 //! and the observation log's dwell and sweep windows (`ObservedWindow::covered()` over
 //! `DwellRecord::observed`). Both already record "for each interval, which centre/span/rate was
-//! active"; the first also records which device. The caller collects the spans from whichever of
-//! those it has and this module folds them.
+//! active", and since T-378 both record **which device** — the same `device_id` the baseline chain
+//! key and the history source key are hashed from — so the long-horizon spans are device-local too.
+//! The caller collects the spans from whichever of those it has and this module folds them.
 
 use std::collections::BTreeMap;
 
@@ -59,7 +60,8 @@ pub const MAX_COVERAGE_CELLS: usize = 4096;
 ///
 /// [`Device::Unknown`] is **not** a wildcard and **not** a device: a span whose record did not name
 /// the radio is evidence that *something* sampled there, and nothing more. It never satisfies a
-/// query for a named front end, and it never merges into one.
+/// query for a named front end, and it never merges into one. A record written before its producer
+/// logged a device reads back here, never as the front end that happens to be running now.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Device {
     /// A named front end (the `device_id` of the provenance that produced the samples).

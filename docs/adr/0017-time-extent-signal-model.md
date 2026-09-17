@@ -242,7 +242,9 @@ States 2 and 3 are the pair that collapses, and collapsing them invents an absen
 
 **Device-local.** Coverage is a fact about one front end. Two radios covering disjoint ranges are two grids, each unobserved where the other looked; `Device::Unknown` is its own device and never answers for a named one; a union exists only as an explicitly-requested, explicitly-labelled `Device::Any`. Merging them would be the claim T-259/T-305 exist to forbid.
 
-**Derived, not journalled.** The map is read out of provenance that is already written: the **IQ ring journal** (a segment per provenance change, so a segment per retune, each naming the device) over the ring's retention, and the **observation log**'s `DwellRecord`/`SweepRecord` windows (ADR-0012 §1) over 30 days. The second records no `device_id` today, so its spans are `unknown` — honest, and the one gap this decision leaves open (§11).
+**Derived, not journalled.** The map is read out of provenance that is already written: the **IQ ring journal** (a segment per provenance change, so a segment per retune, each naming the device) over the ring's retention, and the **observation log**'s `DwellRecord`/`SweepRecord` windows (ADR-0012 §1) over 30 days.
+
+**Both name the device (T-378).** The observation log's records carry `device_id` — the source's own `DeviceInfo::device_id`, the same value `ChainKey::of_device` (T-303/T-314) and `hk_store::history::source_key` (T-304/T-377) are hashed from, so the baseline key, the history origin, the ingest floor key and the coverage span are one string and not four spellings of one idea. The long horizon is therefore device-local too, and coverage over the whole retention answers "did **this** front end look here" rather than only "did anything" — which, with two SDRs, is the question. The field is `serde(default)`: a record written before T-378 reads back with no device and folds as `Device::Unknown`, never as the radio that happens to be running, which would invent provenance for data that has none (the `BiasTee::Unknown` ≠ `off` rule again). `GET /api/coverage`'s `sources[]` discloses, per record kind, how many spans actually named one.
 
 **Consequence for the frequency navigator.** Its survey strip is built from this map and from nothing else, and the bar gained a viewport centred on the current tune (T-376) precisely so a user can zoom out toward the whole device range — which is the moment a coverage-blind strip would paint never-observed spectrum as quiet.
 
@@ -412,7 +414,7 @@ No conflict. `CandidatePipeline` rows hang off the emitter and are interpretatio
 | §2.20 Selection | Note that `t_lo`/`t_hi` already make a selection a time–frequency region; a timeline drag is the existing object. |
 | §2.21 Classification | One sentence: `family_in_window` is an additive projection of the same rank; the ladder is unchanged. |
 | §4 | The central region-over-time query gains presence intervals as its event source, beside Detection and Track. |
-| **New §4.4 Coverage map** (T-368) | Observed-versus-unobserved is computed from the tune history (IQ ring journal + observation log), per device, with `Coverage::Unobserved` a distinct value from an observed-and-quiet cell. Records the open gap: `DwellRecord`/`SweepRecord` carry no `device_id`, so coverage beyond the ring is `Device::Unknown`. |
+| **New §4.4 Coverage map** (T-368, T-378) | Observed-versus-unobserved is computed from the tune history (IQ ring journal + observation log), per device, with `Coverage::Unobserved` a distinct value from an observed-and-quiet cell. T-378 closed the gap T-368 recorded: `DwellRecord`/`SweepRecord` now carry `device_id` — the same value as the baseline chain key and the history source key — so coverage beyond the ring is device-local, while pre-T-378 records still read back `Device::Unknown`. |
 
 ### 8.2 An emitter that is a set of disjoint events
 

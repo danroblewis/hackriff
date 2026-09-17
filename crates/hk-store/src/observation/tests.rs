@@ -17,6 +17,8 @@ use super::*;
 
 /// 2026-09-13T00:00:00Z.
 const T0: i64 = 1_789_257_600_000_000_000;
+/// The front end these fixtures say looked (T-378): a `DeviceInfo::device_id` spelling.
+const DEVICE: &str = "hackrf:0000000000000000a06063c8234e925f";
 const S: i64 = 1_000_000_000;
 
 struct TempDir(std::path::PathBuf);
@@ -69,6 +71,7 @@ fn sweep(start: i64) -> ObservationRecord {
         survey_id: None,
         plan_version: 1,
         site: SiteKey::Unassigned,
+        device_id: Some(DEVICE.into()),
         geometry: 42,
         span: TimeRange::new(t(start), t(start + 100_000_000)),
         visits: vec![
@@ -96,6 +99,7 @@ fn dwell(start: i64, len: i64, center: f64, reason: Reason) -> ObservationRecord
         seq: 1,
         plan_version: 1,
         site: SiteKey::Unassigned,
+        device_id: Some(DEVICE.into()),
         reason,
         tier: reason.tier(),
         window: window(center),
@@ -363,4 +367,102 @@ fn observation_stalled_writer_drops_and_counts_without_blocking_producers() {
     drop(guard);
     writer.finish();
     assert_eq!(s.stats().written.load(Ordering::Relaxed), accepted);
+}
+
+/// One pre-T-378 log line, written by hand into the segment its end time belongs to: the literal
+/// bytes as the log wrote them before observation records named a device, CRC and all. The
+/// `device_id` key does not appear in it.
+fn write_pre_t378_dwell(root: &std::path::Path, end_ns: i64, center: f64) -> String {
+    let json = format!(
+        r#"{{"record":"dwell","schema":1,"seq":11,"plan_version":1,"site":{{"kind":"unassigned"}},"reason":{{"code":"poi-dwell","poi":5}},"tier":"bandit","window":{{"center_hz":{center:?},"sample_rate_hz":2000000.0,"usable":{{"lo_hz":{lo:?},"hi_hz":{hi:?}}},"rbw_hz":1000.0}},"rf_path":0,"planned":{{"start_ns":{start},"end_ns":{end_ns}}},"observed":{{"start_ns":{start},"end_ns":{end_ns}}},"preempted":false,"dropped_samples":0,"overload":false}}"#,
+        lo = center - 1e6,
+        hi = center + 1e6,
+        start = end_ns - S,
+    );
+    assert!(!json.contains("device_id"), "the old bytes name no device");
+    let path = super::segment::segment_path(root, super::segment::hour_of(t(end_ns)));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let line = format!("{:08x} {json}\n", super::segment::crc32(json.as_bytes()));
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(line.as_bytes())
+        .unwrap();
+    json
+}
+
+/// T-378. **Property:** a record written by a named front end comes back out of the log naming
+/// that front end — through the CRC line codec, the hour segments and the region query, which is
+/// the whole path the long-horizon coverage map reads.
+///
+/// **Migration control:** a log written *before* this change — the literal old bytes, hand-written
+/// above, not a record that merely happens to be unset — still reads, and reads back with **no**
+/// device. The named record sits in the same log at the same time, so "the device that happens to
+/// be running" is available for the old record to acquire, and it must not acquire it.
+#[test]
+fn observation_records_carry_their_device_and_a_pre_t378_line_reads_back_unknown() {
+    let dir = TempDir::new("device");
+    // The old line is written into the log *before* this run opens it: the log this run inherits
+    // already holds records nothing said the device of.
+    write_pre_t378_dwell(&dir.0.join("observations"), T0 + 2 * S, 100e6);
+    let s = store(&dir);
+    s.append(&dwell(T0 + 3 * S, S, 100e6, Reason::PoiDwell { poi: 3 }));
+    s.flush();
+
+    let page = s.query(&RecordQuery {
+        freq: FreqRange::new(99e6, 101e6),
+        span: TimeRange::new(t(T0), t(T0 + 10 * S)),
+        tier: None,
+        cursor: 0,
+        limit: 100,
+    });
+    let devices: Vec<Option<&str>> = page
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            ObservationRecord::Dwell(d) => Some(d.device_id.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        devices.len(),
+        2,
+        "both the old line and the new record read: {page:?}"
+    );
+    // The property: the record this run wrote names the front end that wrote it.
+    assert!(
+        devices.contains(&Some(DEVICE)),
+        "a named device must survive the log: {devices:?}"
+    );
+    // The migration control: the old line stays unattributed, never borrowing the device beside it.
+    assert!(
+        devices.contains(&None),
+        "a pre-T-378 line must read back with no device: {devices:?}"
+    );
+    assert_eq!(
+        devices.iter().filter(|d| **d == Some(DEVICE)).count(),
+        1,
+        "exactly one record names the running device: {devices:?}"
+    );
+
+    // A sweep record carries it too, over the same path.
+    s.append(&ObservationRecord::Geometry(geometry()));
+    s.append(&sweep(T0 + 4 * S));
+    s.flush();
+    let page = s.query(&RecordQuery {
+        freq: FreqRange::new(99e6, 102e6),
+        span: TimeRange::new(t(T0 + 4 * S), t(T0 + 5 * S)),
+        tier: None,
+        cursor: 0,
+        limit: 100,
+    });
+    assert!(
+        page.records.iter().any(
+            |r| matches!(r, ObservationRecord::Sweep(sw) if sw.device_id.as_deref() == Some(DEVICE))
+        ),
+        "{page:?}"
+    );
 }
