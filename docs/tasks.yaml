@@ -9020,7 +9020,7 @@ tasks:
   - id: T-418
     title: A narrower selection gives no more detail, because detail must come from resolution not from an impossible capture
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     deps: [T-417]
