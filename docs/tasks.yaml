@@ -7915,7 +7915,7 @@ tasks:
   - id: T-393
     title: The navigators say nothing about what they select; add labels and hover/drag readouts
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: UI
     core_interface: true
@@ -7995,7 +7995,7 @@ tasks:
   - id: T-395
     title: The Live button is a time-axis control sitting in the Capture panel; move it onto the time navigator
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: UI
     deps: [T-391]
@@ -8101,7 +8101,7 @@ tasks:
   - id: T-398
     title: A strong WFM+RDS station takes ~40 s to reach Confirmed when a human sees it in under five
     milestone: M3
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: M3A
     core_interface: true
