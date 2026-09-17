@@ -485,6 +485,17 @@ struct StripShades {
     /// Scale of `range_db` (`"dbfs-per-hz"` / `"dbm-per-hz"`); `None` when no history answered at
     /// all — an unnamed scale beats a guessed one.
     scale: Option<&'static str>,
+    /// The pyramid tier these shades were actually read from, and its own cells (T-426).
+    ///
+    /// Served because the tier is no longer a function of the window alone: when the preferred
+    /// (coarsest adequate) tier holds nothing and a finer one does, the finer one answers, and a
+    /// fallback nobody can see is as dishonest as the empty strip it replaces. `None` only when
+    /// this server has no spectrum history to read at all.
+    level: Option<u8>,
+    /// That tier's time cell, s; `None` with `level`.
+    src_t_cell_s: Option<f64>,
+    /// That tier's frequency cell, Hz; `None` with `level`.
+    src_f_cell_hz: Option<f64>,
 }
 
 /// The level the spectrum history holds for each cell of the strip, normalised to the strip's own
@@ -512,27 +523,36 @@ fn shades(
         t1_ns: window.end.as_unix_nanos(),
     };
     crate::http::with_history(state, |p| {
-        Ok(crate::query::overview_read(p, &region, rows, cells)?.grid)
+        crate::query::overview_read(p, &region, rows, cells)
     })
-    .map(|o| StripShades {
-        values: o
-            .cells
-            .iter()
-            .map(|c| match (o.range_db, c.observed()) {
-                (Some((lo, hi)), true) if c.max_db.is_finite() => {
-                    let span = if hi > lo { hi - lo } else { 1.0 };
-                    Some(((c.max_db - lo) / span).clamp(0.0, 1.0))
-                }
-                _ => None,
-            })
-            .collect(),
-        range_db: o.range_db,
-        scale: Some(crate::query::scale_str(o.unit)),
+    .map(|r| {
+        let o = r.grid;
+        StripShades {
+            values: o
+                .cells
+                .iter()
+                .map(|c| match (o.range_db, c.observed()) {
+                    (Some((lo, hi)), true) if c.max_db.is_finite() => {
+                        let span = if hi > lo { hi - lo } else { 1.0 };
+                        Some(((c.max_db - lo) / span).clamp(0.0, 1.0))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            range_db: o.range_db,
+            scale: Some(crate::query::scale_str(o.unit)),
+            level: Some(r.level),
+            src_t_cell_s: Some(r.src_t_cell_s),
+            src_f_cell_hz: Some(r.src_f_cell_hz),
+        }
     })
     .unwrap_or_else(|_| StripShades {
         values: vec![None; rows * cells],
         range_db: None,
         scale: None,
+        level: None,
+        src_t_cell_s: None,
+        src_f_cell_hz: None,
     })
 }
 
@@ -616,6 +636,19 @@ pub fn coverage_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
             "scale": shades.scale,
             "range_db": shades.range_db.map(|(lo, hi)| json!({"lo": lo, "hi": hi})),
             "normalisation": "0 at `range_db.lo`, 1 at `range_db.hi`, linear in dB and clamped",
+            // Which pyramid tier drew the shading, and that tier's own cells (T-426). The tier is
+            // not a function of the window alone: the coarsest tier whose cells fit one drawn
+            // column is *preferred*, but when it holds nothing a populated finer tier answers
+            // instead — more resolution than was asked for, never less. Serving the level is what
+            // keeps that fallback honest; the same three fields appear in `/api/timeline`'s
+            // `resolution`, from the same read.
+            "level": shades.level,
+            "src_t_cell_s": shades.src_t_cell_s,
+            "src_f_cell_hz": shades.src_f_cell_hz,
+            "level_rule": "the tier that ACTUALLY answered: the coarsest tier whose time cells are \
+                no larger than one drawn cell is preferred, and a populated finer tier answers \
+                when it is empty — so `src_t_cell_s` smaller than the drawn cell is more \
+                resolution than asked for, folded down, and never invented detail",
             // The constraint the survey strip shares with the timeline's series: folding many
             // time cells into one column must never turn a never-observed cell into an observed
             // one. An unobserved cell carries no `shade` key at all, which is stronger than a

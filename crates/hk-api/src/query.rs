@@ -628,30 +628,55 @@ pub(crate) fn overview_semantics_json(o: &hk_store::Overview) -> Value {
     })
 }
 
-/// The pyramid tier that answers a timeline overview (T-338).
+/// The pyramid tiers that may answer a timeline overview, **preferred first** (T-338, T-426).
 ///
-/// The rule is the **coarsest tier whose time cells are no larger than one drawn column**: reading
-/// finer than the picture buys nothing and costs cells, and reading coarser while a finer tier
-/// would fit throws away detail the timeline is there to show. When no tier is fine enough (a
-/// window of seconds asked for in ~100 columns is finer than the 1 s floor of the ladder), the
-/// finest tier that fits the budget answers and its cells **replicate** across columns — T-334's
-/// safe direction, and `resolution.t_cell_s` says so rather than hiding it.
-fn overview_level(geom: &Geometry, r: &Region, columns: usize) -> Result<u8, ApiError> {
+/// A tier is **adequate** when two conditions hold: its time cells are no larger than one drawn
+/// column, and its grid over the region fits the cell budget. *Adequate is a ceiling, not a
+/// target* — every tier finer than the coarsest adequate one satisfies both conditions too, so the
+/// adequate tiers form a suffix of the ladder from the coarsest adequate one down to level 0. The
+/// coarsest is merely **preferred**, because reading finer than the picture costs cells for detail
+/// the fold immediately collapses; it is not the only honest answer.
+///
+/// That distinction is the T-426 fix. Before it the coarsest adequate tier was the *only* tier
+/// consulted, so a window whose coarse tier held nothing served an empty picture while the finer
+/// tiers held the data — the user's "we have it but didn't render it" bug (CLAUDE.md, 2026-09-16),
+/// and on the default capture window it lasted the **first minute of a server's life**: `shades()`
+/// folds with `nt = 1`, sizing the tier by the whole 120 s window, so level 1 (60 s cells) was
+/// preferred — and a level-1 cell exists only once an epoch-aligned level-0 block has sealed, while
+/// level 0 has had 1 s cells all along (T-383 measured the wait at (2 s, 62 s]).
+///
+/// Falling back **down** the ladder never fakes resolution. The one direction that has to be
+/// declared is `src_t_cell_s` *larger* than the drawn cell, where a measured value repeats across
+/// columns (T-334); a finer source is the opposite, and the fold reduces it onto the same drawn
+/// grid either way. And the walk is only ever downward: coarse tiles are rolled up from fine ones,
+/// so a coarser tier cannot hold what a finer one lacks. (The converse *can* happen — the byte
+/// budget evicts the finest tiles first — which the preferred-first order already handles.)
+///
+/// When no tier is fine enough (a window of seconds asked for in ~100 columns is finer than the 1 s
+/// floor of the ladder), the finest tier that fits the budget answers alone and its cells
+/// **replicate** across columns — T-334's safe direction, and `resolution.t_cell_s` says so rather
+/// than hiding it.
+fn overview_levels(geom: &Geometry, r: &Region, columns: usize) -> Result<Vec<u8>, ApiError> {
     let out_t_ns = ((r.t1_ns - r.t0_ns) as f64 / columns.max(1) as f64).max(1.0);
     let fits = |l: usize| {
         let (nt, nf) = dims(geom, l, r);
         nt * nf <= MAX_API_CELLS as f64
     };
-    // Levels run finest first, so iterate in reverse to take the coarsest adequate tier.
-    if let Some(l) = (0..geom.n_levels())
+    // Levels run finest first, so iterate in reverse to take the coarsest adequate tier; every
+    // adequate tier below it follows, coarse to fine.
+    if let Some(top) = (0..geom.n_levels())
         .rev()
         .find(|&l| (geom.levels[l].t_cell_ns as f64) <= out_t_ns && fits(l))
     {
-        return Ok(l as u8);
+        return Ok((0..=top)
+            .rev()
+            .filter(|&l| fits(l))
+            .map(|l| l as u8)
+            .collect());
     }
     (0..geom.n_levels())
         .find(|&l| fits(l))
-        .map(|l| l as u8)
+        .map(|l| vec![l as u8])
         .ok_or_else(|| {
             ApiError::new(
                 400,
@@ -660,37 +685,55 @@ fn overview_level(geom: &Geometry, r: &Region, columns: usize) -> Result<u8, Api
         })
 }
 
-/// Reads the compressed overview of one window (T-338): the pyramid at [`overview_level`], folded
-/// by [`hk_store::RegionHistory::overview`] onto exactly `columns × rows` cells over the window.
+/// Reads the compressed overview of one window (T-338): the pyramid at one of
+/// [`overview_levels`], folded by [`hk_store::RegionHistory::overview`] onto exactly
+/// `columns × rows` cells over the window.
 ///
 /// The fold is here rather than in the client because choosing which measured value stands for a
 /// drawn cell is a measurement (T-334), and because no single pyramid tier can be fine in time and
 /// coarse in frequency at once — the ladder couples its axes, and a thin sideways strip needs
 /// exactly that combination.
+///
+/// **A populated finer tier answers when the preferred one is empty (T-426)**, and `level` /
+/// `src_t_cell_s` report the tier that *actually* answered — falling back silently would trade one
+/// lie for another. The preference is kept whenever it holds anything at all, so this changes
+/// nothing about an ordinary read: the walk costs one extra query per empty tier, and an empty tier
+/// is one with no tiles to read. When no tier holds anything the preferred tier's (empty) answer
+/// stands, so an honestly empty window still reports the tier that would have drawn it.
 pub(crate) fn overview_read(
     p: &Pyramid,
     r: &Region,
     columns: usize,
     rows: usize,
 ) -> Result<OverviewRead, ApiError> {
-    let level = overview_level(p.geometry(), r, columns)?;
     let time = TimeRange::new(
         Timestamp::from_unix_nanos(r.t0_ns),
         Timestamp::from_unix_nanos(r.t1_ns),
     );
-    let h = p
-        .query(&RegionQuery {
-            freq: r.freq,
-            time,
-            resolution: Resolution::Level(level),
+    let read = |level: u8| -> Result<OverviewRead, ApiError> {
+        let h = p
+            .query(&RegionQuery {
+                freq: r.freq,
+                time,
+                resolution: Resolution::Level(level),
+            })
+            .map_err(|_| ApiError::new(400, "history query refused"))?;
+        Ok(OverviewRead {
+            grid: h.overview(time, r.freq, columns, rows),
+            level: h.level,
+            src_t_cell_s: h.t_cell_ns as f64 / 1e9,
+            src_f_cell_hz: h.f_cell_hz,
         })
-        .map_err(|_| ApiError::new(400, "history query refused"))?;
-    Ok(OverviewRead {
-        grid: h.overview(time, r.freq, columns, rows),
-        level: h.level,
-        src_t_cell_s: h.t_cell_ns as f64 / 1e9,
-        src_f_cell_hz: h.f_cell_hz,
-    })
+    };
+    let mut preferred: Option<OverviewRead> = None;
+    for level in overview_levels(p.geometry(), r, columns)? {
+        let got = read(level)?;
+        if got.grid.observed_cells > 0 {
+            return Ok(got);
+        }
+        preferred.get_or_insert(got);
+    }
+    preferred.ok_or_else(|| ApiError::new(400, "history query refused"))
 }
 
 /// What the spectrum history observed over one region (T-264, ADR-0017 TM-8): the coverage mask
@@ -1684,5 +1727,163 @@ mod tests {
         }
         assert!(count(&getter(&[("max_cells", "0")]), "max_cells", 1, 10).is_err());
         assert_eq!(count(&getter(&[]), "max_cells", 7, 10).unwrap(), 7);
+    }
+
+    // ---- T-426: a populated finer tier answers when the preferred one is empty ------------------
+
+    /// 2026-09-13T12:00:00Z — **exactly on an epoch-aligned minute**, so the level-0 block boundary
+    /// that causes the defect in production falls at a known place here rather than wherever the
+    /// wall clock happens to be. Nothing in this module's tests reads the wall clock.
+    const TT0_S: i64 = 1_789_300_800;
+    const TT0: i64 = TT0_S * 1_000_000_000;
+
+    fn test_region(t0_ns: i64, t1_ns: i64) -> Region {
+        Region {
+            freq: FreqRange::new(446e6 - 100e3, 446e6 + 100e3),
+            t0_ns,
+            t1_ns,
+        }
+    }
+
+    /// One second-by-second minute of frames from `TT0`, **unsealed**: level 0 holds every second
+    /// and no level-0 block has closed, so no level-1 cell exists — the state a server is in for
+    /// its first minute of life.
+    ///
+    /// Sixty frames, not more, and that is the whole construction: a level-0 block is 60 cells and
+    /// [`Pyramid::ingest`] seals a block once the newest frame's end passes the block's end by
+    /// `seal_lag` (2 s). The last frame here ends exactly on the boundary, 2 s short of the seal,
+    /// so the fixture sits in the defect's regime by arithmetic rather than by timing.
+    fn unsealed_first_minute(dir: &std::path::Path) -> hk_store::Pyramid {
+        const NB: usize = 64;
+        let mut p =
+            hk_store::Pyramid::open(dir, hk_store::history::PyramidConfig::default()).unwrap();
+        let psd = [1e-9f32; NB];
+        for k in 0..60i64 {
+            p.ingest(&hk_store::history::FrameInput::new(
+                Timestamp::from_unix_nanos(TT0 + k * 1_000_000_000),
+                1_000_000_000,
+                446e6 - 100e3,
+                3125.0,
+                hk_model::PowerUnit::Dbfs,
+                &psd,
+            ))
+            .unwrap();
+        }
+        p
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("hk-api-q-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// Adequate is a **ceiling, not a target**: every tier finer than the coarsest adequate one
+    /// satisfies the same two conditions (cells no larger than one drawn column, grid within the
+    /// budget), so the candidates are a suffix of the ladder, preferred first. Pinned as a property
+    /// of the ladder rather than as a list of numbers.
+    #[test]
+    fn the_adequate_tiers_are_every_tier_at_or_below_the_coarsest_that_fits_one_drawn_cell() {
+        let geom = hk_store::history::PyramidConfig::default()
+            .geometry()
+            .unwrap();
+        // A 120 s window drawn in one row: the drawn cell is 120 s, so level 1 (60 s) is the
+        // coarsest adequate tier and level 0 (1 s) is the one below it.
+        let ls = overview_levels(&geom, &test_region(TT0, TT0 + 120_000_000_000), 1).unwrap();
+        assert_eq!(ls, vec![1, 0]);
+        for (i, &l) in ls.iter().enumerate() {
+            assert!(
+                (geom.levels[l as usize].t_cell_ns as f64) <= 120e9,
+                "every candidate is adequate, not just the first"
+            );
+            assert!(
+                i == 0 || l < ls[i - 1],
+                "coarsest first, then finer: {ls:?}"
+            );
+        }
+        // The same window drawn in 120 columns asks for 1 s cells: only level 0 is adequate, and
+        // there is nothing finer to fall back to.
+        assert_eq!(
+            overview_levels(&geom, &test_region(TT0, TT0 + 120_000_000_000), 120).unwrap(),
+            vec![0]
+        );
+        // Finer than the ladder's 1 s floor: the finest tier answers alone and replicates.
+        assert_eq!(
+            overview_levels(&geom, &test_region(TT0, TT0 + 2_000_000_000), 100).unwrap(),
+            vec![0]
+        );
+    }
+
+    /// The fix, and its control, with the seal made **explicit** so neither depends on the clock.
+    ///
+    /// Before: the coarsest adequate tier was the only one consulted, so a 120 s window drawn in
+    /// one row read level 1 and served an empty picture for as long as no epoch-aligned minute had
+    /// sealed — while level 0 held every second of it (the user's "we have it but didn't render
+    /// it" bug, CLAUDE.md 2026-09-16).
+    ///
+    /// After: the populated finer tier answers, and `level`/`src_t_cell_s` say which tier did.
+    /// The control is the same window, same request, once a level-1 cell exists: the preference is
+    /// still a preference, so the coarse tier takes the read back. Without it a fix that simply
+    /// hard-wired level 0 would pass.
+    #[test]
+    fn a_populated_finer_tier_answers_when_the_preferred_one_is_empty_and_says_so() {
+        let dir = temp_dir("fallback");
+        let mut p = unsealed_first_minute(&dir);
+        let r = test_region(TT0, TT0 + 120_000_000_000);
+
+        // The preferred tier over this window is level 1, and it is genuinely empty: asking for it
+        // directly is the before-state, in the test, so the fallback is not proving itself.
+        let empty = p
+            .query(&RegionQuery {
+                freq: r.freq,
+                time: TimeRange::new(
+                    Timestamp::from_unix_nanos(r.t0_ns),
+                    Timestamp::from_unix_nanos(r.t1_ns),
+                ),
+                resolution: Resolution::Level(1),
+            })
+            .unwrap()
+            .overview(
+                TimeRange::new(
+                    Timestamp::from_unix_nanos(r.t0_ns),
+                    Timestamp::from_unix_nanos(r.t1_ns),
+                ),
+                r.freq,
+                1,
+                8,
+            );
+        assert_eq!(empty.observed_cells, 0, "the preferred tier holds nothing");
+        assert_eq!(empty.range_db, None);
+
+        // The fix: the read falls to level 0, which has had 1 s cells all along.
+        let got = overview_read(&p, &r, 1, 8).unwrap();
+        assert_eq!(got.level, 0, "the populated finer tier must answer");
+        assert_eq!(got.src_t_cell_s, 1.0, "and say which tier it was");
+        assert!(got.grid.observed_cells > 0, "with the data actually shown");
+        assert!(got.grid.range_db.is_some(), "with a scale to shade against");
+
+        // THE CONTROL: seal, so a level-1 cell exists, and the same call takes the preferred tier
+        // back. Sealing is explicit here — no wall-clock boundary, no waiting.
+        p.seal_through(Timestamp::from_unix_nanos(TT0 + 180_000_000_000))
+            .unwrap();
+        let after = overview_read(&p, &r, 1, 8).unwrap();
+        assert_eq!(
+            after.level, 1,
+            "the fallback is a fallback, not the default"
+        );
+        assert_eq!(after.src_t_cell_s, 60.0);
+        assert!(after.grid.observed_cells > 0);
+
+        // And a window nothing was ever written for still names the tier that would have drawn it,
+        // rather than walking the whole ladder and reporting the finest: an empty answer is honest
+        // about its resolution too.
+        let far = test_region(TT0 + 86_400_000_000_000, TT0 + 86_520_000_000_000);
+        let none = overview_read(&p, &far, 1, 8).unwrap();
+        assert_eq!(none.grid.observed_cells, 0);
+        assert_eq!(none.level, 1);
+        assert_eq!(none.src_t_cell_s, 60.0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

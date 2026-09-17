@@ -606,6 +606,18 @@ So the tier is chosen from the **time** axis — the coarsest tier whose cells a
 
 `null` in `max_db`/`occupancy_max` is **not observed**, never quiet (C26). `observed_cells` counts the cells something was folded into.
 
+#### A populated finer tier answers when the coarsest one is empty (T-426)
+
+That coarsest tier is **preferred, not required**. *Adequate is a ceiling, not a target*: a tier is adequate when its cells are no larger than one drawn column **and** its grid fits the cell budget, and every tier finer than the coarsest adequate one meets both conditions too. So the adequate tiers are a run of the ladder, and the read takes the coarsest **that holds anything** — reading finer costs cells, but serving an empty picture over data the next tier down is holding costs the user the picture.
+
+That is not hypothetical. Over the default capture window with `rows = 1` (the survey strip's fold, and `/api/coverage`'s) the preferred tier is level 1, whose cells are 60 s — and a level-1 cell exists only once a level-0 block has **sealed**, 2 s after an epoch-aligned minute boundary. A server therefore served **no shade at all for its first minute of life** while level 0 had held 1 s cells the whole time: the user's *"we have it but didn't render it"* bug (CLAUDE.md, 2026-09-16), one layer under the black Live waterfall.
+
+**`level` and `src_t_cell_s` report the tier that actually answered**, on both routes — a silent fallback would trade one lie for another. Reading the pair:
+
+- `src_t_cell_s` **smaller** than the drawn cell is *more* resolution than the picture asked for, folded down onto the grid you requested. Nothing is invented and no warning is needed; only the opposite direction (`src_t_cell_s` > `t_cell_s`, a measured value repeating across columns) is a claim about the picture, and it keeps its statement above.
+- The walk is only ever **downward**. Coarse tiles are rolled up from fine ones, so a coarser tier can never hold what a finer one lacks; the converse *can* happen — the byte budget evicts the finest tiles first — and the preferred-first order already covers it.
+- When **no** tier holds anything, the preferred tier's empty answer stands and `level` names it, so an honestly empty window is still honest about its resolution.
+
 #### `coverage` — the record-derived plane, and why `grid.coverage` is not it (T-423)
 
 `grid.coverage` and the top-level `coverage` block answer **different questions**, and only the second one decides grey.
@@ -695,6 +707,8 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
              "statistic": "max-hold over the whole window, per frequency cell",
              "scale": "dbfs-per-hz", "range_db": { "lo": -138.2, "hi": -91.0 },
              "normalisation": "0 at `range_db.lo`, 1 at `range_db.hi`, linear in dB and clamped",
+             "level": 0, "src_t_cell_s": 1.0, "src_f_cell_hz": 6250.0,   // T-426: the tier that ACTUALLY answered
+             "level_rule": "the tier that ACTUALLY answered: the coarsest tier whose time cells are no larger than one drawn cell is preferred, and a populated finer tier answers when it is empty …",
              "unobserved": "an unobserved cell carries no `shade` key: the max of nothing is unknown, not zero, …" },
   "resolution": { "source": "survey-overview", "live": false, "statement": "…",
                   "served_span_hz": 20000000.0, "max_live_span_hz": 20000000.0,
@@ -749,6 +763,8 @@ This is a **wire** state and deliberately not a third `hk_store::coverage::Cover
 #### What a `shade` is, and against what (T-342)
 
 A 0–1 number normalised against a range the response never named is a measurement a consumer cannot check, match or reproduce — and a strip drawn on one scale beside a waterfall drawn on another makes the same energy read as two different strengths on one screen. So the `shade` block states the whole of it: the fold (**max-hold over the window**, one value per frequency cell — the same fold [`/api/timeline`](#the-band-collapsed-series-and-why-the-response-states-its-own-semantics-t-342) applies along the other axis, via the same `hk_store::RegionHistory::overview`), the `scale` and `range_db` the ratio is relative to, the `normalisation` itself, and the constraint that matters most here: **max-hold must not turn an unobserved cell into an observed one.** An unobserved cell carries no `shade` key at all — the max of nothing is unknown, not zero, and not the bottom of the ramp.
+
+`level`, `src_t_cell_s` and `src_f_cell_hz` name **which pyramid tier drew the shading** (T-426), the same three fields `/api/timeline`'s `resolution` carries and from the same read. They are on the wire because the tier is not a function of the window alone: the coarsest tier whose cells fit one drawn cell is *preferred*, and when it holds nothing a populated finer tier answers instead — see [A populated finer tier answers when the coarsest one is empty](#a-populated-finer-tier-answers-when-the-coarsest-one-is-empty-t-426), which is also the bug this route showed most plainly (no shade for the first minute of a server's life, over data level 0 was holding all along). `src_t_cell_s` smaller than `grid.t_cell_s` is more resolution than was asked for, folded down; `level_rule` says so in the response. All three are `null` only when this server has no spectrum history at all.
 
 #### Device-local, never unioned
 
