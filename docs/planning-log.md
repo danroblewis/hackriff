@@ -4037,3 +4037,59 @@ direction from a fragment: once successfully from a `CLAUDE.md` diff, once — h
 frame that was not theirs. The docs now carry a "superseded framing" line so the wrong version cannot
 be mistaken for a decision, and I should say plainly which part of a truncated message I actually
 received rather than writing around the gap.
+
+### B0.667 — the UI-only merge gate, and three surfaces that were right to be live-only (2026-09-16)
+
+**Process change, user-approved and now in `CLAUDE.md` + docs/10.** A merge touching **only** `ui/` and
+**neither `crates/` nor `docs/api.md`** is gated on `just lint` + `just test-ui` alone. The reasoning
+is architectural rather than expedient: all signal logic lives in the backend, the backend is
+contract-tested (T-079), and **no acceptance test drives the browser** — the e2e suites run through the
+device interface. A ui-only change therefore cannot move the Rust signal path, and running those
+suites against one proves nothing while costing minutes per iteration.
+
+I added one line the user did not ask for, and it is the honest half: **this gate does not cover a
+client asking the backend for the wrong thing — and neither did the full one.** Contract tests assert
+the *server* serves a route correctly, not that the client calls it correctly. T-367's time navigator
+requested `/api/timeline` with no band at all and drew an empty canvas **with every suite green**. So
+the old gate was already giving false comfort here, and the guard belongs in `ui/test`: assert the
+**request** the client builds, not only the response it renders. T-367 added exactly that, T-389
+generalised it.
+
+**T-387 merged under the full gate** (it touched `crates/hk-cli`), and the prior question was most of
+the answer: **three of the four surfaces are legitimately live-only.** A pipelines list answers *which
+decoder processes exist in this run* — a process is running or it is not, and there is no past-window
+form to invent. The status feed is decoder telemetry, stored verbatim but **indexed by nothing**, and
+a lock from an hour ago is not that stage's state. The outputs dock is session state: a socket this
+tab holds cannot exist in a window an hour ago, and there would be nothing there to stop.
+
+**Being live-only is not the bug; looking windowed while being live-only is** — the same class as
+T-385's false deletion and T-389's wall-clock query. Each surface now declares itself through one
+shared note whose only inputs are the subject and Play/Pause, with a test pinning that it never
+depends on whether the panel is empty, so an emptiness can never read as the window's answer.
+
+Only the packet inspector re-derives, and it needed **no contract change**:
+`/api/captures/{id}/frames?from_t&to_t` already carried the window, and `docs/api.md` had **already**
+named it the right route for the inspector's own scrubbing — a line T-384 wrote while deciding
+something else. What changed is that the boundary is now written down rather than rediscovered: *a
+stream carries the live edge; a window is a query and belongs to the API that owns the index; a
+surface that cannot be windowed must declare itself live-only.*
+
+**T-391 merged** (`691d330`) and the inner track mattered more than the outer bar: `.fn-track` was a
+hard-coded `top:5px; height:12px` sliver, so T-367's frequency-scoped overview and T-368's
+coverage-backed survey strip were drawing real data into a 12 px strip near the top of an already-thin
+30 px bar. Two tasks' work, present and invisible. Both bars are now 92 px and the track fills them.
+The collapse interaction was **decided rather than incidental** — thickness follows the Capture
+panel's expanded size and stays there, pinned by a control asserting the two CSS rules differ in
+exactly one position at both breakpoints.
+
+**The capture-clock bug has now been found four times in one day** — T-379 (a window 306,315 s out),
+T-384 (three sites in `plots.ts`), T-389 (the live Confirmed query naming no live edge), and T-387 had
+to prove it was avoiding it. The T-393/T-395 brief forbids a fifth in the navigator readouts, where it
+would be worst: the user would *read* a wall-clock time and believe it. **If it appears again I should
+stop fixing instances and make it unrepresentable** — a capture-clock type the formatters demand,
+rather than a number anything can supply.
+
+**T-393 + T-395 launched as one worktree and one merge**, at the user's request, under the new gate.
+The brief's sharp edge is T-393 part (3): it describes what a frequency region-select *would do*, and
+**T-392 is in flight changing exactly that**. The agent is told to check which behaviour the build has
+when it writes the readout rather than assume, and never to promise behaviour the build lacks.
