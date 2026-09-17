@@ -206,6 +206,12 @@ const rgba = (c: readonly [number, number, number], a: number) => [c[0], c[1], c
  * newest edge amber and thickens it; `chirp` hatches the fill, since ADR-0017 §1.3 names a swept
  * carrier drawn as its bounding box as an approximation, not the truth. Presentation only.
  *
+ * T-410 (ADR-0019 §1) makes `open` load-bearing rather than decorative: an open interval's box runs
+ * to the **live edge**, so the amber edge it marks is now the live edge itself, and the span
+ * between the last measured end and it is the open cap (`ui/src/timebox.ts`, drawn lighter with a
+ * rule where measurement stops). The colours here are unchanged; what changed is what the top edge
+ * of an open box *is*.
+ *
  * Confirmed is drawn **heavier** than Candidate (T-389). It used to be the lighter of the two: a
  * 1 px solid border at 10 % fill against a candidate's 1 px *dashed* border, and dashes read as a
  * box where two thin lines read as nothing — which is the wrong way round, since a confirmed
@@ -241,7 +247,13 @@ export interface PresenceBox extends TimeBox {
  * with no interval (`last_interval: null`, or no `presence` at all on a pre-T-284 fixture) yields
  * nothing: no zero-width or zero-duration box is ever fabricated. Whether a box is *on screen* is
  * decided where it is drawn, against the rows actually held — one whose span has scrolled off draws
- * nothing rather than a rectangle clamped to a duration it never had. */
+ * nothing rather than a rectangle clamped to a duration it never had.
+ *
+ * T-410 (ADR-0019): an **open** interval's box is `openEnded`, so it runs to the live edge rather
+ * than stopping at `t_end_s`. Nothing here computes that edge — the render pass places it at the
+ * newest row it is drawing, which is the only place that knows it per frame (T-362) — and
+ * `t_end_s` stays exactly as served, now as the boundary between what was measured and the open
+ * cap above it. The one claim this file makes about unmeasured air is drawn as a claim. */
 export function presenceBoxes(rows: readonly Row[], g: ax.Geometry, focusedId: string | null): PresenceBox[] {
   const out: PresenceBox[] = [];
   for (const r of rows) {
@@ -252,9 +264,9 @@ export function presenceBoxes(rows: readonly Row[], g: ax.Geometry, focusedId: s
     const label = ax.fmtMHz(r.f_center_hz, 1e3), chirp = r.family === "css";
     out.push({
       id: r.id, state: r.state, u0: bandFrac(g, r.f_lo_hz), u1: bandFrac(g, r.f_hi_hz),
-      tLo: iv.t_start_s, tHi: iv.t_end_s, open: iv.open, chirp, label,
+      tLo: iv.t_start_s, tHi: iv.t_end_s, openEnded: iv.open, open: iv.open, chirp, label,
       style: presenceStyle(r.state, iv.open, chirp),
-      title: `${label} MHz · ${r.state}${iv.open ? " · on air" : ""}${chirp ? " · bounding box (chirp: a swept carrier drawn as its extent, not its sweep)" : ""}`,
+      title: `${label} MHz · ${r.state}${iv.open ? " · on air (open to the live edge; measured to the rule)" : ""}${chirp ? " · bounding box (chirp: a swept carrier drawn as its extent, not its sweep)" : ""}`,
     });
   }
   return out;

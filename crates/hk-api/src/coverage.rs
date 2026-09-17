@@ -75,6 +75,60 @@ pub const DEFAULT_CELLS: usize = 256;
 /// Segments read from the IQ ring journal for one answer.
 const RING_SEGMENTS: usize = 10_000;
 
+/// The whole tunable spectrum, for a caller asking "which bands did the receiver watch at all"
+/// rather than about one band. Wider than any front end, so it filters nothing out.
+const ALL_FREQ: FreqRange = FreqRange::new(f64::NEG_INFINITY, f64::INFINITY);
+
+/// What the receiver actually watched over one request's window: the IQ ring's tune history,
+/// read **once per request** and then asked per band (T-410, ADR-0019 §3).
+///
+/// # Why presence needs this
+///
+/// An interval closes after [`hk_model::IdleGap`] of **observed** silence, and that gap is also the
+/// end detector's latency — the time a box runs to the live edge before capping. hk-api used to
+/// pass `IdleGap::conservative()` (60 s) everywhere, on the grounds that it "does not know the
+/// scheduler's revisit period". But the receiver's revisit period is not a scheduler declaration;
+/// it is a **measurement**, and the ring journal is where it is recorded: one segment per retune,
+/// each naming its window, centre and rate. A dwell on one centre is one long segment over the
+/// band — a revisit period of one STFT frame, not "unknown".
+///
+/// # Why it is asked per band and not per request
+///
+/// A sweep's segments are contiguous in *time* and disjoint in *frequency*. Folding them without
+/// regard to frequency would read as "the receiver never looked away", which is true of the
+/// receiver and false of every individual band. So the spans are kept whole and
+/// [`Self::idle_gap`] selects the ones that overlap the band being asked about, exactly as
+/// [`ring_spans`] does for the coverage grid: coverage of somewhere else is not coverage of here.
+#[derive(Clone, Debug, Default)]
+pub struct ObservedCoverage {
+    spans: Vec<CoverageSpan>,
+}
+
+impl ObservedCoverage {
+    /// Reads the ring's tune history over `window`. Empty when the server has no ring — which
+    /// yields [`hk_model::IdleGap::conservative`] for every band, the unchanged behaviour for a
+    /// replay store or a history-only server.
+    pub fn of(state: &ApiState, window: TimeRange) -> Self {
+        Self {
+            spans: ring_spans(state, ALL_FREQ, window),
+        }
+    }
+
+    /// The idle gap for `freq` over `window`: how often this receiver looked at **that band**.
+    ///
+    /// See [`hk_model::IdleGap::from_coverage`] for the rule and the three readings it
+    /// distinguishes (continuously watched, combed, never recorded).
+    pub fn idle_gap(&self, freq: FreqRange, window: TimeRange) -> hk_model::IdleGap {
+        let spans: Vec<TimeRange> = self
+            .spans
+            .iter()
+            .filter(|s| s.freq.overlaps(&freq))
+            .map(|s| s.time)
+            .collect();
+        hk_model::IdleGap::from_coverage(&spans, window)
+    }
+}
+
 fn f64_of(v: &Value, key: &str) -> Option<f64> {
     v.get(key).and_then(Value::as_f64).filter(|x| x.is_finite())
 }

@@ -1,21 +1,27 @@
-//! T-388, end to end through the real pipeline: a live signal's box top tracks the live edge, and
-//! **stops when the emission stops**.
+//! T-410 (was T-388), end to end through the real pipeline: the `presence` stream publishes an
+//! interval's **endpoints**, nothing while it continues, and it **caps at the measured end** when
+//! the emission stops.
 //!
-//! The user's report, from live testing on 2026-09-16: *"a live signal box extends UP slowly."* The
-//! chain that made it slow was two lazy links in series — an open track reached the inventory every
-//! `LIVE_OFFER_NS` (5 s) and the UI polled `/api/inventory` every 5 s — so a box top sat 5–10 s
-//! behind. This test drives the whole thing over a keyed tone and asserts on the records the
-//! `presence` stream actually published, not on a helper.
+//! T-388 built this stream under contract A — a record per open emitter per tick pushing the box's
+//! measured top forward. ADR-0019 replaced it with contract B: the box runs to the live edge and
+//! caps only on a detected END, so the stream carries START / END / REOPEN and **never a per-poll
+//! presence bump**. This test drives the whole thing over a keyed tone and asserts on the records
+//! actually published, not on a helper.
 //!
-//! Two properties, and the second is the one that a latency test alone would miss:
+//! Three properties, over one 12 s recording whose tone keys off for good at 8 s:
 //!
-//! 1. **Latency, with numbers.** Successive extensions of the same emitter are no more than
-//!    `MAX_STEP_S` apart in observed time, and the last one reaches within `MAX_LAG_S` of the last
-//!    instant the tone was actually on the air. Both are ~1 s, against the 5–10 s before.
-//! 2. **A stopped emission stops extending.** The tone is keyed off with a third of the recording
-//!    still to run. **No record may name a time after it stopped** — not one, however many ticks the
-//!    stream keeps taking. A push that kept the box growing to the live edge would be a claim about
-//!    air nobody measured, and that is the failure this asserts against.
+//! 1. **Endpoints only.** A continuing interval says nothing. The keyed emitter produces **one**
+//!    opening record and **one** closing record, not one per tick — which is what makes the stream
+//!    silent over a band of steady carriers.
+//! 2. **A silence shorter than the idle gap is not an end.** The tone is off for 0.5 s between
+//!    bursts, inside the 1 s floor, so those gaps close nothing: the receiver was watching, but it
+//!    has not watched long enough to call an absence. Eight key-offs must not become eight
+//!    intervals.
+//! 3. **The END caps at the MEASURED end.** The closing record names the last instant the tone was
+//!    actually on the air — not the instant the end was decided, and not `now`. This is what makes
+//!    the box *retract* to the truth rather than stop wherever the assumption had reached, and it
+//!    is the assertion that keeps contract B honest: with a third of the recording still to run,
+//!    **no record may name a time after the emission stopped**.
 
 mod common;
 
@@ -25,7 +31,10 @@ use std::sync::{Arc, Mutex};
 
 use common::*;
 use hk_model::sigmf::{Capture, Datatype, SigmfMeta};
-use hk_pipeline::{PRESENCE_EXTENSION_KIND, PRESENCE_MESSAGE_SCHEMA, PRESENCE_STREAM_ID};
+use hk_pipeline::{
+    PRESENCE_END_KIND, PRESENCE_MESSAGE_SCHEMA, PRESENCE_REOPEN_KIND, PRESENCE_START_KIND,
+    PRESENCE_STREAM_ID,
+};
 use hk_stream::{Declared, Record, StreamKind, StreamReader};
 use serde_json::json;
 
@@ -39,11 +48,9 @@ const STOPS_AT_S: f64 = 8.0;
 /// `LIVE_MIN_BURSTS`, and slow enough that each is many STFT frames long.
 const KEY_PERIOD_S: f64 = 1.0;
 
-/// Longest step between successive observed ends of one emitter, s. The push period is 250 ms of
-/// stream time and the detect flush that feeds it is 500 ms, so a step is a flush; the keying's own
-/// off-half is what makes this a second rather than a flush.
-const MAX_STEP_S: f64 = 1.5;
-/// Longest lag of the final extension behind the last instant the tone was on the air, s.
+/// Longest lag of the closing record's measured end behind the last instant the tone was on the
+/// air, s. The END names the measured end, so this bounds how much of a real emission a capped box
+/// can lose — and, equally, that the 0.5 s key-offs did not close the interval early.
 const MAX_LAG_S: f64 = 1.0;
 /// Slack past `STOPS_AT_S` a detection may legitimately claim: one detector frame's worth of
 /// trailing energy. Anything beyond this is the box drawing ahead of the evidence.
@@ -102,18 +109,20 @@ fn keyed_tone(dir: &Path) -> PathBuf {
     path
 }
 
-/// One published extension, as a reader sees it.
+/// One published endpoint, as a reader sees it.
 #[derive(Debug)]
 struct Seen {
+    kind: String,
     emitter: String,
     t_start_s: f64,
     t_end_s: f64,
     t_ns: i64,
+    open: bool,
 }
 
 #[test]
-fn a_live_signals_box_tracks_the_live_edge_and_stops_when_the_emission_does() {
-    let dir = TempDir::new("t388");
+fn a_live_signals_box_opens_once_and_caps_at_the_measured_end() {
+    let dir = TempDir::new("t410");
     let meta = keyed_tone(&dir.0.join("src"));
     let (mut cfg, replay) = replay_config(&dir.0, &meta, json!({}), hk_core::Pacing::Unpaced);
     let t0_ns = replay.info.start_time.as_unix_nanos();
@@ -127,7 +136,7 @@ fn a_live_signals_box_tracks_the_live_edge_and_stops_when_the_emission_does() {
             *hdr.lock().unwrap() = Some((h.kind, h.message_schema.clone()));
             handle
                 .subscribe(
-                    "t388-consumer",
+                    "t410-consumer",
                     Declared::local(sink_buf.clone()),
                     Box::new(|_| {}),
                 )
@@ -153,61 +162,66 @@ fn a_live_signals_box_tracks_the_live_edge_and_stops_when_the_emission_does() {
     let mut seen: Vec<Seen> = Vec::new();
     while let Some(r) = reader.next_record().unwrap() {
         let Record::Message(m) = r else {
-            continue; // a drop marker is not an extension
+            continue; // a drop marker is not an endpoint
         };
         let v = m.value;
         if v["type"] != "message" {
             continue;
         }
-        assert_eq!(v["metadata"]["kind"], json!(PRESENCE_EXTENSION_KIND));
-        assert_eq!(v["frame_model"], json!(PRESENCE_EXTENSION_KIND));
+        let kind = v["metadata"]["kind"].as_str().unwrap().to_owned();
+        assert!(
+            [PRESENCE_START_KIND, PRESENCE_REOPEN_KIND, PRESENCE_END_KIND].contains(&kind.as_str()),
+            "unknown record kind on the presence stream: {kind}"
+        );
+        assert_eq!(v["frame_model"], json!(kind));
         assert_eq!(v["gated"], json!(false));
         assert!(v.get("content").is_none() || v["content"].is_null());
         let iv = &v["metadata"]["last_interval"];
         seen.push(Seen {
+            open: iv["open"].as_bool().unwrap(),
             emitter: v["emitter_id"].as_str().unwrap().to_owned(),
             t_start_s: iv["t_start_s"].as_f64().unwrap(),
             t_end_s: iv["t_end_s"].as_f64().unwrap(),
             t_ns: v["t_ns"].as_i64().unwrap(),
+            kind,
         });
-        assert_eq!(iv["open"], json!(true), "an extension is an open interval");
     }
     assert!(
         !seen.is_empty(),
-        "no presence extension was published at all — the box would still be poll-gated"
+        "no presence endpoint was published at all — the box would still be poll-gated"
     );
-    eprintln!("[T-388] {} extensions published", seen.len());
 
-    // T-354: the envelope's `t_ns` is the same instant as `t_end_s`, in integer Unix nanoseconds.
+    // T-354: the envelope's `t_ns` is the instant the record is about, in integer Unix nanoseconds
+    // — the interval's start for an opening record, its measured end for a closing one.
     for e in &seen {
+        let about = if e.open { e.t_start_s } else { e.t_end_s };
         assert!(
-            (e.t_ns as f64 * 1e-9 - e.t_end_s).abs() < 1e-6,
-            "t_ns and t_end_s disagree: {} vs {}",
-            e.t_ns,
-            e.t_end_s
+            (e.t_ns as f64 * 1e-9 - about).abs() < 1e-6,
+            "t_ns disagrees with the endpoint it names: {} vs {about}",
+            e.t_ns
         );
+        assert_eq!(e.open, e.kind != PRESENCE_END_KIND);
         assert!(e.t_end_s >= e.t_start_s);
     }
 
     let rel = |t_s: f64| t_s - t0_ns as f64 * 1e-9;
 
-    // ---- (2) the control that matters: nothing is claimed after the tone stopped ----
+    // ---- (3) the control that matters: nothing is claimed after the tone stopped ----
     let worst = seen
         .iter()
         .map(|e| rel(e.t_end_s))
         .fold(f64::NEG_INFINITY, f64::max);
     assert!(
         worst <= STOPS_AT_S + STOP_SLACK_S,
-        "a box extended to {worst:.3} s, past the {STOPS_AT_S} s the emission stopped: the push \
-         drew ahead of what was observed"
+        "a record named {worst:.3} s, past the {STOPS_AT_S} s the emission stopped: the stream \
+         published a presumption instead of the measured end"
     );
-    // And the run really did keep going afterwards, so the assertion above had something to catch:
-    // the stream had a third of the recording left to publish a later time in and did not.
+    // And the run really did keep going afterwards, so the assertion above had something to catch.
     const {
         assert!(RUN_S - STOPS_AT_S > 3.0);
     }
 
-    // ---- (1) latency: the busiest emitter's box tracked the live edge ----
+    // ---- (1) + (2): the keyed emitter opens once, closes once, and caps at the measured end ----
     let busiest = {
         let mut counts = std::collections::HashMap::<&str, usize>::new();
         for e in &seen {
@@ -219,34 +233,41 @@ fn a_live_signals_box_tracks_the_live_edge_and_stops_when_the_emission_does() {
             .map(|(id, _)| id.to_owned())
             .unwrap()
     };
-    let ends: Vec<f64> = seen
-        .iter()
-        .filter(|e| e.emitter == busiest)
-        .map(|e| rel(e.t_end_s))
-        .collect();
-    assert!(
-        ends.len() >= 4,
-        "one emitter should be extended repeatedly while it keys, got {}",
-        ends.len()
-    );
-    let mut step = 0.0f64;
-    for w in ends.windows(2) {
-        assert!(w[1] >= w[0], "an observed end went backwards: {w:?}");
-        step = step.max(w[1] - w[0]);
-    }
-    let last = *ends.last().unwrap();
+    let mine: Vec<&Seen> = seen.iter().filter(|e| e.emitter == busiest).collect();
+    let opens = mine.iter().filter(|e| e.open).count();
+    let ends: Vec<&&Seen> = mine.iter().filter(|e| !e.open).collect();
     eprintln!(
-        "[T-388] busiest emitter: {} extensions, worst step {step:.3} s, last end {last:.3} s \
-         (tone stops at {STOPS_AT_S} s)",
+        "[T-410] {} endpoints published over {} emitters; the keyed emitter: {opens} opening, {} \
+         closing (tone keys 0.5 s off {KEY_PERIOD_S} s, stops at {STOPS_AT_S} s)",
+        seen.len(),
+        seen.iter()
+            .map(|e| e.emitter.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        ends.len(),
+    );
+
+    // (1) Endpoints only. Under contract A this emitter alone produced one record per tick for the
+    // eight seconds it was keying; under contract B a continuing interval is not news.
+    assert_eq!(opens, 1, "the interval opened more than once: {mine:?}");
+
+    // (2) The 0.5 s key-offs are inside the 1 s idle floor, so they close nothing. Eight of them
+    // must not become eight intervals — a silence shorter than the gap is not evidence of absence.
+    assert!(
+        ends.len() <= 1,
+        "the keying's own off-halves closed the interval {} times: {mine:?}",
         ends.len()
     );
-    assert!(
-        step <= MAX_STEP_S,
-        "the box top advanced in steps of {step:.3} s — the poll it replaces was 5 s, the target ~1 s"
+
+    // (3) And when it did end, it ended where the tone actually stopped.
+    let end = ends.first().expect(
+        "the emission stopped with a third of the recording left and the interval never closed — \
+         under ADR-0019 that box runs to the live edge over four seconds of silent air",
     );
+    let capped = rel(end.t_end_s);
+    eprintln!("[T-410] closed at {capped:.3} s against a {STOPS_AT_S} s stop");
     assert!(
-        STOPS_AT_S - last <= MAX_LAG_S,
-        "the box top ended {:.3} s behind the last air, not the ~1 s target",
-        STOPS_AT_S - last
+        (STOPS_AT_S - capped).abs() <= MAX_LAG_S,
+        "the box capped at {capped:.3} s, not within {MAX_LAG_S} s of the {STOPS_AT_S} s stop"
     );
 }

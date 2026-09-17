@@ -79,7 +79,7 @@ The bug it fixes: the inventory answers "what has **ever** been seen here" while
 
 Each in-window row draws a **box** spanning the spectrum trace and the waterfall: `(f_lo..f_hi) × (presence interval ∩ window)`, one per intersecting interval.
 
-- A persisting signal's box **grows** along the time axis as its open interval advances with the live edge.
+- A persisting signal's box **grows** along the time axis as its open interval advances with the live edge. **Since T-410 ([ADR-0019](adr/0019-presence-as-an-interval-with-endpoints.md)) an open interval's box reaches the live edge itself**, and caps only when the emission is detected to have stopped — with the span above the last measured end drawn as the **open cap**, lighter and ruled, so the assumed air is never presented as measured air. See the T-410 section below.
 - A one-off burst's box is a few milliseconds tall and stays that way. Bursts finally look like bursts.
 - A chirp gets the **bounding box** of its sweep (ADR-0017 §1.3 — a swept polyline is a later refinement, deliberately not in the plan).
 - The **focused** row keeps the existing draggable-edge yellow box from the docs/15 §7 scope above, so the user-band drag (T-191) is unaffected.
@@ -328,6 +328,56 @@ not new geometry (T-362), so this path cannot move a box sideways. The client re
 would shorten a box, or that would bridge a silence between two separate stretches of air. Producer
 side, the rate is capped at 32 records per 250 ms tick — 128/s — whatever the band is doing;
 what a tick leaves out simply grows on the poll as before.
+
+
+### The box runs to the live edge until an END is detected (T-410)
+
+**The user, 2026-09-16, inverting the constraint above deliberately.** T-388's rule — *a box drawn
+to the live edge on the assumption the signal is still there is a claim about air nobody measured* —
+treated presence as an **accumulation of observations**. The user's model treats it as an **interval
+with endpoints**: the box runs from its start straight to the live edge and caps only on a real
+detected end, so the measurement is the START plus the **absence of an END**. That is how tracking
+works; a track is open until it closes. Both are coherent, they are different contracts, and
+[ADR-0019](adr/0019-presence-as-an-interval-with-endpoints.md) records why the second was chosen.
+
+**What it buys.** Contract A could never say the one thing a live spectrum display exists to say —
+*this signal is on the air now* — because "now" is always after the last measurement, and the only
+way to shorten that lag was a record per open emitter per tick, forever. Contract B says it in three
+records over a signal's whole life, and says nothing at all while a signal merely continues.
+
+**Where the honesty burden went, since it did not go away.** Two rules carry it, and both are in the
+render pass:
+
+- **The box shows where measurement stops.** `t_end_s` is no longer the box's top; it is the
+  boundary between the measured body and the **open cap**, which is drawn lighter, with a rule
+  across it, and **grows visibly as the silence grows**. A suspected end is therefore legible
+  without being acted on — there is deliberately no third "suspected" state, because one that
+  re-tested presence is what the user rejected and one that changed the box's extent would make the
+  top jitter on every missed frame.
+- **An END names the measured end**, so the box **retracts** to the truth rather than stopping where
+  the assumption had reached. The over-claim is transient: **≤ 1.25 s** normally, **≤ 5 s** if the
+  END is lost and the 5 s poll is what caps it.
+
+**The end detector became the accuracy of the display, and it was worse than it looked.** An
+interval closes after one idle gap of *observed* silence — but hk-api passed `IdleGap::conservative()`
+everywhere, so the gap was **60 s** on every live band, and a box under contract B would have
+over-claimed a full minute. The gap is now **measured** off the IQ ring's tune history per band
+(`IdleGap::from_coverage`): 1 s where the receiver never looked away, `2 ×` the revisit period where
+it did, 60 s only where no coverage was recorded at all. That is the CLAUDE.md coverage-map invariant
+applied to absence as well as to observation.
+
+**Rendering.** `TimeBox` gains `openEnded`, and `placeTimeBoxes` puts an open box's top at
+**rows-back 0 — the newest row of the very pass that is drawing it**, never a live-edge timestamp
+computed on the poll. That keeps T-362's structural guarantee intact: there is still no second clock
+and no stored screen coordinate, and the cap's boundary rides the same per-row mapping as everything
+else. `assumedFrom` (a fraction of the box's own height) is what the shader shades, so the renderer
+is never told a time.
+
+**What the client refuses, now.** Two of T-388's three refusals stand: a row with no interval
+conjures no box, and nothing may shorten the **measured** extent. The third — *an update whose span
+starts after the end on screen is refused as non-contiguous* — is replaced by **REOPEN**: the
+returning signal gets its own box at once, and the silence between them is drawn as a gap instead of
+being represented by a box that quietly stopped moving. Same honesty, one tick instead of one poll.
 
 ### The last four surfaces: three are live-only and now say so, one had a route already (T-387)
 

@@ -42,13 +42,24 @@ export interface BoxStyle {
  * `Waterfall.setView`'s zoom window is expressed in, so a zoom moves a box and the rows under it by
  * construction. `tLo`/`tHi` are **absolute capture time** (Unix s), older edge first. `title` is the
  * hover description; it is text, never a position.
+ *
+ * `openEnded` is T-410/ADR-0019: the box's interval has not ended, so it runs from `tLo` **to the
+ * live edge**, and `tHi` is then the last instant presence was actually *measured* rather than the
+ * box's top. The live edge is not a timestamp the supplier passes in — it is rows-back 0, the
+ * newest row this pass is drawing — which keeps the whole box in the render pass's own mapping
+ * (T-362) instead of reintroducing a second clock evaluated on the poll. The span above `tHi` is
+ * the **open cap**: assumption, not measurement, and `placeTimeBoxes` reports where it begins
+ * ([[PlacedBox.assumedFrom]]) so it can be drawn as assumption.
  */
 export interface TimeBox {
   id: string;
   u0: number;
   u1: number;
   tLo: number;
+  /** The newest **measured** edge. The box's top too, unless `openEnded`. */
   tHi: number;
+  /** The interval is open: draw to the live edge, with everything past `tHi` as the open cap. */
+  openEnded?: boolean;
   style: BoxStyle;
   title?: string;
 }
@@ -61,6 +72,10 @@ export interface PlacedBox {
   x1: number;
   y0: number;
   y1: number;
+  /** Where measurement stops and the open cap begins, as a fraction of the box's own height from
+   * its **newest** edge (0 = the whole box is assumption, 1 = none of it is). 1 for a closed box.
+   * Presentation reads it to draw the cap differently; nothing here decides how. */
+  assumedFrom: number;
   style: BoxStyle;
 }
 
@@ -88,11 +103,18 @@ export function placeTimeBoxes(
     if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
     const [x0, x1] = widen((lo - u0) / du, (hi - u0) / du, minW);
     if (!(x1 > 0) || !(x0 < 1)) continue; // wholly outside the zoom window
-    const [y0, y1] = widen(ys[0], ys[1], minH);
-    out.push({ id: b.id, x0, x1, y0, y1, style: b.style });
+    // An open interval's top is the newest row this pass is drawing — the live edge — not a time
+    // the supplier computed. `ys[0]` stays the *measured* end, which is where the open cap starts.
+    const measuredTop = ys[0], top = b.openEnded ? 0 : measuredTop;
+    const [y0, y1] = widen(top, ys[1], minH);
+    const h = y1 - y0;
+    const assumedFrom = b.openEnded && h > 0 ? clamp01((y1 - measuredTop) / h) : 1;
+    out.push({ id: b.id, x0, x1, y0, y1, assumedFrom, style: b.style });
   }
   return out;
 }
+
+const clamp01 = (v: number) => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1);
 
 /** [a, b] grown about its centre to at least `min` wide. */
 function widen(a: number, b: number, min: number): [number, number] {
@@ -114,7 +136,9 @@ export function boxAt(boxes: readonly TimeBox[], u: number, tS: number): TimeBox
   if (!Number.isFinite(u) || !Number.isFinite(tS)) return null;
   for (let i = boxes.length - 1; i >= 0; i--) {
     const b = boxes[i];
-    if (u >= Math.min(b.u0, b.u1) && u <= Math.max(b.u0, b.u1) && tS >= b.tLo && tS <= b.tHi) return b;
+    // An open box is hittable over its whole drawn extent, open cap included: what is on screen is
+    // what a pointer resolves to, or the box the viewer clicks is not the box they can see.
+    if (u >= Math.min(b.u0, b.u1) && u <= Math.max(b.u0, b.u1) && tS >= b.tLo && (b.openEnded || tS <= b.tHi)) return b;
   }
   return null;
 }

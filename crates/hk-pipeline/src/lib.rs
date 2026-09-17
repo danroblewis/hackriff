@@ -94,8 +94,9 @@ pub use events::Candidate;
 pub use family::{Explanation, FamilyPrior, explain_emitter, explanations};
 pub use inventory::{CONFIRM_RULE, ConfirmPolicy, Inventory, TrackInventory};
 pub use presence::{
-    MAX_EXTENSIONS_PER_TICK, PRESENCE_EXTENSION_KIND, PRESENCE_MESSAGE_SCHEMA, PRESENCE_PUSH_NS,
-    PRESENCE_STREAM_ID, PresenceExtension, PresenceStream,
+    MAX_EVENTS_PER_TICK, PRESENCE_END_KIND, PRESENCE_MESSAGE_SCHEMA, PRESENCE_PUSH_NS,
+    PRESENCE_REOPEN_KIND, PRESENCE_START_KIND, PRESENCE_STREAM_ID, PresenceEvent,
+    PresenceEventKind, PresenceStream, interval_closed,
 };
 pub use recorder::{
     RECORDING_DEFAULT_S, RECORDING_LABEL_MAX, RECORDING_MAX_BYTES, RECORDING_MAX_S, RecordingStatus,

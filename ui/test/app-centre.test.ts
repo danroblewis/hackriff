@@ -75,7 +75,7 @@ function drawn(b: TimeBox | undefined, c: RowClock, uw: readonly [number, number
   if (!p) return null;
   return {
     leftPct: p.x0 * 100, widthPct: (p.x1 - p.x0) * 100,
-    rowTopPct: p.y0 * 100, rowHeightPct: (p.y1 - p.y0) * 100,
+    rowTopPct: p.y0 * 100, rowHeightPct: (p.y1 - p.y0) * 100, assumedFrom: p.assumedFrom,
     topPct: (c.specFrac + p.y0 * (1 - c.specFrac)) * 100,
     heightPct: (p.y1 - p.y0) * (1 - c.specFrac) * 100,
   };
@@ -161,17 +161,33 @@ test("presenceBoxes (T-261, ADR-0017 TM-4): centre/width from f_lo/f_hi, time ex
   // straight off the API, with no screen coordinate to go stale between polls (T-362).
   assert.deepEqual([t.tLo, t.tHi], [995, 1000]);
   near(t.u0, ax.hzToFrac(ax.fullView(G), 99_900_000)); near(t.u1, ax.hzToFrac(ax.fullView(G), 100_100_000));
+  assert.equal(t.openEnded, true, "T-410: an open interval's box runs to the live edge");
   const b = drawn(t, clock)!;
   near(b.leftPct, 45); near(b.widthPct, 10); // same frequency placement as placeExtent/confirmedBands
   const expected = ax.timeSpanRows(995, 1000, clock.rowsBackAt, 512)!;
-  near(b.topPct, (0.35 + expected[0] * 0.65) * 100); near(b.heightPct, (expected[1] - expected[0]) * 0.65 * 100);
-  // `t_end_s` is the newest row's own start time, which is the boundary below it: the emission
-  // covered row 1 and not row 0, so the box starts one row down, not at the top of the pane.
-  near(b.topPct, (0.35 + (1 / 512) * 0.65) * 100, 1e-9);
+  // T-410 (ADR-0019 §1): the top is the LIVE EDGE — rows-back 0, the newest row this pass is
+  // drawing — not `t_end_s`. Before T-410 it sat one row down, because `t_end_s` is the newest
+  // row's own start time and the emission covered row 1 and not row 0. That one-row shortfall was
+  // the whole shape of contract A, and it is the thing the user replaced: the box now reaches the
+  // top of the pane while the interval is open.
+  near(b.topPct, 0.35 * 100, 1e-9);
+  near(b.heightPct, expected[1] * 0.65 * 100);
+  // …and where measurement stops is reported rather than hidden (ADR-0019 §2): the open cap runs
+  // from `t_end_s` to the live edge, and `assumedFrom` is where it begins as a fraction of the
+  // box's own height from its newest edge.
+  const capRows = expected[0];              // the measured end, in pane fractions from the top
+  near(b.assumedFrom, (expected[1] - capRows) / expected[1]);
+  assert.ok(b.assumedFrom < 1, "an open box has an open cap, and says where it starts");
   // The next poll's t_end_s advanced (still open, more evidence arrived): the SAME box, redrawn,
   // is taller — nothing here is animated, it is only a fresh call with the API's new numbers.
   const grown = drawn(presenceBoxes([row("a", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1004, true))], G, null)[0], rowClock(steady(1004, 512, 0.04), 25))!;
   assert.ok(grown.heightPct > b.heightPct, "the open interval's box grew");
+  // A CLOSED interval is unchanged: it ends at its measured end, and claims no open cap at all.
+  const closed = presenceBoxes([row("z", 99_900_000, 100_100_000, "confirmed", 1, null, iv(995, 1000, false))], G, null)[0];
+  assert.equal(closed.openEnded, false);
+  const cb = drawn(closed, clock)!;
+  near(cb.topPct, (0.35 + expected[0] * 0.65) * 100);
+  assert.equal(cb.assumedFrom, 1, "nothing about a closed box is assumption");
 });
 
 test("presenceBoxes: never fabricates a box — no interval, no presence at all, or the focused row (kept on the full-height bracket instead)", () => {
