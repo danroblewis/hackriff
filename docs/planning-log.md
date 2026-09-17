@@ -4347,3 +4347,58 @@ But the framing of the row is **mine, reconstructed**, and the user should check
 seventh truncated message today; one earlier reconstruction (B0.666) put a frame on a suite that the
 user then had to retract, so the rule I am now following is to do the unambiguous part, mark the
 inferred part, and say so.
+
+### B0.673 — six merges, one revert, and two capabilities that were silently dead (2026-09-17)
+
+**T-399 / T-401** (`bea22c2`, `2e19775`). T-399 gave the receiver-line survey a caller and **proved
+T-394's premise**: on a capture with **no artefact record at all**, the survey blind-measured 34 lines
+including T-382's family, now at **623.3 Hz** rather than 655.75 — it is free-running, so it *moved*.
+The per-capture records could never have covered that; the measurement does. Time-to-first-detection
+was **unchanged** (0.0 s, 482 detections on branch and stock main) because the survey runs concurrently
+from the first block, not at capture start. T-401 then bounded four latencies **on the capture clock**,
+needing no instrumentation — `first_seen`, the classification and lifecycle histories and the decode
+links already carried the timestamps. **The measurement was always there; nothing read it.**
+
+**T-403, merged and reverted** (`1aeefee`, `0465926`). My gate passed it — lint, 190 + 247 crate tests,
+acceptance **48 passed** — and the same 48 tests then gave **47 passed / 1 failed on main**. Its live
+confirm route **races T-398's pilot-lock route**. I did not update the failing test, because T-398's
+assertion encodes an intent: a pilot-locked station should be confirmed **by its pilot lock**, which is
+positive evidence that it *is* WFM, where continuity-plus-width says only "something modulated has been
+on air". If B wins, the reason recorded is the weaker one *even when the stronger was available*.
+**The lesson for the gate: a single acceptance run cannot rule out a race.** Running the affected suite
+twice is now standing practice for anything touching decision ordering, and it is in every brief since.
+
+**T-404** (`3d37ccf`) fixed all seven observation-dependent features, **none reclassified**, exempt list
+17 → 10 — and **top-1 went UP 0.029** (0.9187 → 0.9480). The direction is opposite to T-312's for the
+opposite reason: T-312 withdrew a **leak** and cost accuracy; this withdrew **variance** and gained it.
+A cumulant reading 0.09 on one seed and 0.93 on the next forces an enormous fitted σ that costs every
+class sharing the dimension. Its diagnosis corrected the ticket: the defect is not the frequency offset
+but the **estimator** of it, whose error *grows as the record shrinks*, so no better derotation makes a
+whole-record coherent sum length-free. It also found a confound **in the guard itself** — synth gave
+every FSK generator a preamble over the first 10–35 %, so an N/8 prefix was entirely preamble and the
+full record mostly data: **two emissions, not two observations.**
+
+**T-410** (`f6a2dd8`, **ADR-0019**) turned presence into an interval with endpoints, and the ticket's
+real content was a bug nobody had named: **the end detector was sixty seconds late everywhere in the
+served path**, because `hk-api` passed `IdleGap::conservative()` at all four sites and the pipeline
+derives a gap only when a bandit plan is configured — which a live dwell never is. Under the new
+contract every live box would have over-claimed a full minute. Fixed by treating the revisit period as
+a **measurement** already in the ring's tune journal: 60 s → **≤1.25 s**. Two honesty devices worth
+keeping: the renderer **draws the assumption as an assumption** (an open cap that grows visibly as the
+silence grows — the coverage grey rule on the time axis), and the END carries the **measured** end, so
+a box **retracts to the truth** rather than stopping where the assumption reached.
+
+**T-322** (`2653f1a`) wired `hk-gnss` **around** the blind-path boundary rather than through it, and
+found the second silently-dead capability of the day: the default acquisition threshold is sized for a
+short profile while the code-phase cell count scales with sample rate — 2046 at minimum, **20 000 at
+20 Msps** — so acquisition returned **all 32 satellites out of pure noise**. Every dwell would have
+reported an intact constellation and **the jamming assessment would never have fired**. It fixed its own
+call site and left the crate default, correctly scoped; **T-414** now carries that, with a preference
+recorded: **refusing an unsound config beats defaulting to one.** Its guard did not merely stay green —
+it **gained a clause for the door the task opened**, and the agent watched that clause fail before
+scoping it past the `cfg(test)` blocks.
+
+**The pattern across today**: two capabilities that would have reported success forever (GNSS
+acquisition, and `cyclic_db` before T-394), two features measuring the observation rather than the
+signal, one confirm rule evaluated only on track close, and one end detector a minute late. **Every one
+was found by a measurement someone was told to take, not by a test that was already failing.**
