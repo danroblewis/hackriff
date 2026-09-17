@@ -10588,6 +10588,18 @@ tasks:
       Do NOT add a retry (T-344's standing instruction) and do not add names to heavy-serial - T-383
       already measured that as the wrong lever.
     notes: |
+      CORRECTION BY THE COORDINATOR, SAME DAY: my headline above overstates the result. The
+      "2298/2298 at --test-threads 8" run was ONE run. A later 8-thread run on a different diff
+      (T-300's, entirely inside hk-detect) FAILED on hk-pipeline::view_pause_keeps_capture, which
+      then passed 0/8 isolated and 2302/2302 on the immediate re-run at the same 8 threads.
+      So the honest claim is: 8 THREADS IS BETTER, NOT SUFFICIENT. The rate drops sharply but does
+      not reach zero, which is what you would expect if concurrency AMPLIFIES the underlying defect
+      rather than being it. That matters for the DoD: picking a thread count is worth doing on the
+      measured evidence, but it must not be sold as a fix, and it must not reduce the urgency of
+      T-430 and T-433, which are the actual defects. A test that only passes on an idle machine is
+      wrong even when the machine is usually idle.
+      Measured so far, all on this box: default 28 threads -> 3 consecutive full runs, 3 DIFFERENT
+      failures. 8 threads -> 3 full runs, 1 failure (2298/2298, then 1, then 2302/2302).
       This does not replace T-430 or T-433. Those are individual tests bounding quantities whose
       range they never measured, and they should still be fixed - a test that only passes on an idle
       machine is wrong even if the machine is usually idle. This ticket is about the harness making
