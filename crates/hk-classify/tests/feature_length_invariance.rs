@@ -1,5 +1,10 @@
 //! **A feature named as a property of the signal must not move when the signal is watched for
-//! less time** (T-313).
+//! less time** (T-313), **and must not reorder two emissions when they are heard more loudly**
+//! (T-429).
+//!
+//! Two axes of *the observation*, in one file. The first varies the record length at a fixed SNR;
+//! the second varies the SNR at a fixed record length. They need different assertions, for a
+//! reason stated under "The second axis" below, and each keeps its own exemption list.
 //!
 //! # Why this test exists
 //!
@@ -100,6 +105,81 @@
 //! nothing to explain. Removing the confound at its source is not the same as widening a tolerance
 //! to cover it; with the preamble left on, the same ladder over the **old** feature code still fails
 //! 51 comparisons across the cumulant family and the mode count, so nothing was given up.
+//!
+//! # The second axis: the receiver (T-429)
+//!
+//! Everything above holds the SNR at [`SNR_DB`] and varies the record. That is the right choice
+//! for isolating the record — and it makes the guard **structurally blind to a feature that
+//! measures the SNR rather than the signal**, which passes every run because at a fixed 25 dB
+//! there is nothing for it to track. Two such features were found the hard way on one day:
+//! `sigma_af` (T-249: `cw` required `sigma_af < 0.02`, written from noiseless physics, against an
+//! IF estimator that is noise-limited — the conjunct could not fire below ~28 dB and cost a whole
+//! class its top-1) and `duty` (T-427: the fraction of samples over *the snippet's own* mean
+//! envelope, which for a sparse train is dominated by the off time, so the noise clears the
+//! threshold). **Both are among the thirty features above, and both pass the length axis.**
+//!
+//! ## "Does not move with SNR" is the wrong assertion, and the right one is an ordering
+//!
+//! Every estimator's **variance** grows as the SNR falls: that is physics, not a defect. What must
+//! not move is the **expectation** — but measured on this grid, nearly every feature's expectation
+//! moves too, and legitimately: the noise is *part of the record*, so a normalised cumulant is
+//! attenuated by the noise in its normaliser, a flatness tends to 1, a line-over-floor statistic
+//! is an SNR by construction. An assertion of flat expectation would exempt twenty-five features
+//! of thirty, which is a rubber stamp.
+//!
+//! The statement that separates the two, and which both defects violate, is about **order**:
+//!
+//! > A feature named as a property of the signal may *move* with the SNR. It may not **rank two
+//! > emissions one way at one SNR and the other way at another**. A dimension that says a
+//! > 5 %-duty radar train is busier than a 33 %-duty PPM train at 15 dB and quieter at 20 dB is
+//! > not measuring duty, whatever its spread — and any constant written across it is a constant
+//! > on the receiver, not on the transmitter.
+//!
+//! This is scale-free (no per-feature tolerance is fitted for it at all), it is the *within-family*
+//! comparison the class call actually makes, and it distinguishes the two cases the ticket names
+//! by construction:
+//!
+//! - **spread widens, expectation stable** → at low SNR the pair stops being *resolved* and simply
+//!   drops out of the comparison. Honest degradation is not a failure.
+//! - **expectation slides** → the pair stays resolved and comes back with the opposite sign. The
+//!   feature states confidently opposite things about the same two emitters.
+//!
+//! A pair is **resolved** on a feature at an SNR when the two class means are further apart than
+//! [`RESOLVED_SIGMA`] times the spread of the *difference of two single draws*,
+//! `sqrt(sd_a² + sd_b²)`. Single draws, not standard errors of the mean: the classifier decides
+//! from **one** snippet, so the difference it can act on is one two single snippets would show —
+//! and it keeps the criterion independent of how many seeds this file happens to run, which a
+//! standard error would not be. Seeds therefore buy **a reliable spread estimate**, not
+//! sensitivity: [`SNR_SEEDS`] is 24, where a sample sd carries ~15 % of its own error, and the
+//! finding set is measured stable there (identical at 10, 12 and 24 seeds, and identical on a
+//! 4-, 5- and 7-rung ladder; at 6 and 8 seeds three further pairs flicker in and out, which is the
+//! sd estimate wobbling, not the features moving).
+//!
+//! ## What it found: seven, and the first two are the two that motivated it
+//!
+//! Over 24 features × 28 within-family class pairs × 5 rungs — 854 of 3 238 comparisons resolved —
+//! [`SNR_ORDER_EXCEPTIONS`] is the audited list, each entry carrying its mechanism and the measured
+//! ladder. `duty` reproduces T-427's published table (`pulse` 0.658 / 0.539 / 0.197 / 0.142 /
+//! 0.051 here against their 0.655 / 0.538 / 0.200 / 0.143 / 0.051) and `sigma_af` reproduces
+//! T-249's (`cw` 0.206 at 10 dB against their 0.170–0.207, 0.047 at 20 against their 0.038–0.050),
+//! which is the check that this is measuring the same thing those two tickets measured.
+//!
+//! The list is asserted as an **exact set**: an inversion that is not declared fails, *and* a
+//! declared inversion that no longer reproduces fails. So fixing one makes its exemption disappear
+//! from a diff by force rather than by discipline, which is the one improvement this axis makes on
+//! the length axis's method.
+//!
+//! **C14 is not run on this axis.** Its six features (`cyclic_db`, `obw_over_rs` and the four
+//! `blind_*` scores) are all exempt in [`NOISE_STATISTICS`] below — a family score is *evidence*,
+//! and evidence is supposed to grow with the SNR — and skipping the estimator that feeds only them
+//! is what makes 2 520 waveforms cost 8 s instead of 82 s. Measured: with C14 on and off, the other
+//! 24 features are **bit-identical** across all 1 764 rows of the probe grid, and the six are the
+//! only columns that differ.
+//!
+//! Unlike the length axis, the **packet preamble stays on** here. It is off above because
+//! truncation cuts into it and compares two different emissions; nothing is truncated here, every
+//! rung sees the whole record, and `SynthConfig::new` is the geometry the shipped densities are
+//! fitted at.
 
 use hk_classify::features::{
     FEATURE_NAMES, FeatureInput, IF_LOCAL_WINDOW, MIN_SAMPLES, feature_fft_len, features,
@@ -107,8 +187,12 @@ use hk_classify::features::{
 use hk_classify::symbols::SymbolEstimator;
 use hk_classify::synth::{Class, DEV_SEEDS, SynthConfig, generate};
 
-/// SNR the invariance is measured at: well above every family gate, so what moves is the record
-/// length and not the noise.
+/// SNR the **length** axis is measured at: well above every family gate, so what moves is the
+/// record length and not the noise.
+///
+/// Holding this fixed is what isolates the record, and it is why the length axis is structurally
+/// blind to a feature that measures the SNR instead of the signal — which is the second axis
+/// below (T-429), where this constant becomes the variable and the record length is what is held.
 const SNR_DB: f64 = 25.0;
 
 /// Denominators of the truncation ladder: the full record, then halvings. Same ladder T-328 used.
@@ -928,5 +1012,447 @@ fn a_classs_own_family_score_survives_truncation() {
          off-family half of these scores and must not be widened to cover this half.\n\n{}",
         failures.len(),
         failures.join("\n\n"),
+    );
+}
+
+// ============================================================================================
+// The second axis (T-429): the RECEIVER. The record length is held; the SNR is the variable.
+// ============================================================================================
+
+/// SNR rungs, dB. Spans the operating range both defects were measured over — from the lowest
+/// family gate (`analog`/`pulsed`/`ofdm`/`css` gate at 10 dB) to 10 dB above the highest
+/// (`fsk`/`ook-ask` at 20 dB) — so a crossing anywhere a family is allowed to answer is inside it.
+///
+/// The finding set is **measured insensitive to the ladder**: a 4-rung (10/15/20/30), this 5-rung
+/// and a 7-rung (adding 12.5 and 17.5) ladder return the identical seven inversions at 10, 12 and
+/// 24 seeds. Five rungs is the cheapest of the three that still shows where each crossing sits.
+const SNR_LADDER: &[f64] = &[10.0, 15.0, 20.0, 25.0, 30.0];
+
+/// Waveforms per class per rung.
+///
+/// Seeds buy a **reliable spread estimate**, not sensitivity — [`RESOLVED_SIGMA`] is stated over
+/// the spread of single draws, which does not shrink with the seed count, so adding seeds cannot
+/// make more pairs fail by itself. 24 is where a sample standard deviation carries about 15 % of
+/// its own error and the finding set stops moving: identical at 10, 12 and 24 seeds, where at 6
+/// and 8 three further pairs flicker in and out (`cyclic_db` analog am/cw, `carrier_line_db`
+/// analog cw/ssb, `sigma_af` analog am/nbfm and am/wfm) — the sd estimate wobbling, not the
+/// features moving.
+const SNR_SEEDS: u64 = 24;
+
+/// How far apart two class means must be, in units of the spread of a **difference of two single
+/// draws** `sqrt(sd_a² + sd_b²)`, before this file will say the feature told them apart.
+///
+/// Single draws rather than standard errors of the mean, for two reasons. The classifier decides
+/// from **one** snippet, so the difference it can act on is the one two single snippets would
+/// show. And a standard error would make the criterion a function of [`SNR_SEEDS`], so the guard's
+/// sensitivity would depend on how long this file is willing to run — exactly the "tolerance
+/// fitted to the harness" the length axis's first rule forbids.
+///
+/// 3 is the same one-sided ~3σ allowance every constant above uses.
+const RESOLVED_SIGMA: f64 = 3.0;
+
+/// Waveforms that must report a value at a rung before the rung is used. Below this the class is
+/// simply not compared there: an abstention is the honest answer and this file never treats one as
+/// a failure (the length axis's rule, unchanged).
+const SNR_MIN_PRESENT: usize = 3;
+
+/// Features exempt from the SNR axis **by name**, and why each is a statistic of the noise.
+///
+/// The length axis's rule holds verbatim: nothing may be added here without saying which property
+/// of the receiver it is a statistic of, and every entry carries a measurement. All six are also
+/// in [`OBSERVATION_STATISTICS`] — for a *different* mechanism there (they move with the record)
+/// than here (they move with the noise), which is why both lists name them rather than one
+/// deferring to the other.
+///
+/// All six come from C14, and **C14 is not run on this axis at all** — which is what makes the
+/// 2 520-waveform ladder cost 8 s rather than 82. Measured before relying on it: with the symbol
+/// estimator on and off, the other 24 features are bit-identical across all 1 764 rows of the
+/// probe grid, and these six are the only columns that differ.
+const NOISE_STATISTICS: &[(&str, &str)] = &[
+    (
+        "cyclic_db",
+        "significance of C14's strongest cyclic line, in dB above its own whitened floor. A line's \
+         excess over the noise floor is a signal-to-noise ratio BY DEFINITION - it is the quantity \
+         a detector thresholds to decide whether the line is there - so it rises with the SNR by \
+         construction, and no ordering of two emissions on it is meaningful across rungs. \
+         Measured at 6 seeds before it fell below the resolution bound at 24: analog am/cw \
+         inverts, am reading 4.6 dB over cw at 10 dB and 3.1 dB under it at 30.",
+    ),
+    (
+        "obw_over_rs",
+        "OBW99 over C14's symbol-rate estimate. The numerator is a property of the emission; the \
+         DENOMINATOR is an estimate whose winning cyclic line is chosen against a noise-referenced \
+         floor, so when the noise changes which line wins, Rs jumps by an integer factor and the \
+         ratio with it. Exempt as a C14 statistic, exactly as on the length axis, and for the same \
+         reason: the fix is T-311's, and this entry exists so that fixing it removes an exemption.",
+    ),
+    (
+        "blind_ook",
+        "C14's OOK family score. A family score is EVIDENCE, and evidence is supposed to grow with \
+         the SNR: T-311 gave every veto in it a transition as wide as its own statistic's 3-sigma, \
+         and a statistic's 3-sigma is a function of the noise. A detector that answered equally \
+         confidently at 10 dB and 30 dB would be the defect. Measured: `ook` reads 0.59 at 10 dB \
+         and 1.00 from 20 dB up, the ramp the design asks for.",
+    ),
+    (
+        "blind_fsk",
+        "C14's FSK family score, and the same design: seven gated factors over the two \
+         instantaneous-frequency clusters, each ramped across its own statistic's spread, which \
+         the noise sets. Measured: `ppm`'s off-family read moves 0.18 across the ladder, which is \
+         a detector's response to a signal it was not built for at two noise levels - nothing \
+         entitles that to be ordered.",
+    ),
+    (
+        "blind_bpsk",
+        "C14's BPSK family score. The x-squared carrier-line coherence underneath it is \
+         bias-corrected against a null that is itself a noise quantity (T-311), so the score is a \
+         calibrated statement ABOUT the noise the line stands in. Same mechanism as blind_ook.",
+    ),
+    (
+        "blind_qpsk",
+        "C14's QPSK family score, the x-to-the-fourth form of blind_bpsk and exempt for the same \
+         mechanism. Measured on the length axis at 0.9 -> 0.18 off-family; on this axis it is the \
+         ramp width that moves, because the ramp is stated in the coherence's own 3-sigma.",
+    ),
+];
+
+/// One audited exception to [`a_feature_ranks_two_emissions_the_same_way_however_loudly_they_were_heard`].
+///
+/// Scoped to the **pair**, not the feature: `duty` inverts exactly one of the 28 within-family
+/// class pairs, and exempting the whole feature would throw away the other 27 pairs' worth of
+/// guard. The name being exempted is `feature @ family: a vs b`.
+struct OrderException {
+    feature: &'static str,
+    a: Class,
+    b: Class,
+    /// The mechanism, and the measured ladder that shows it. Never "what it currently does".
+    why: &'static str,
+}
+
+/// Every within-family class pair whose order this axis found inverting, with its mechanism.
+///
+/// **Asserted as an exact set.** An inversion that is not here fails the test; an entry here that
+/// no longer reproduces *also* fails it, naming the entry to delete. That is the one thing this
+/// axis does better than the length axis's method rather than differently: "fixing one makes the
+/// exemption disappear from a diff" stops being a discipline and becomes a failing test.
+///
+/// Read the grouping before the entries. Five of the seven are the **same three mechanisms**:
+/// an envelope threshold set by the record's own mean (`duty`, `low_fraction`), a statistic
+/// measured against the noise floor (`carrier_line_db`, `gamma_max`), and a cumulant normalised by
+/// the total power (`c42_norm`, twice). Two of those five are the defects that motivated the
+/// ticket; the other three had not been reported.
+const SNR_ORDER_EXCEPTIONS: &[OrderException] = &[
+    OrderException {
+        feature: "duty",
+        a: Class::Ppm,
+        b: Class::Pulse,
+        why: "T-427, and the case this axis was built for. `duty` counts samples over 0.5x the \
+              snippet's OWN mean envelope, and for a sparse train that mean is dominated by the \
+              OFF time, so the threshold collapses toward the noise and the noise clears it. \
+              Measured, 24 seeds: pulse (true duty 0.05) 0.658 / 0.539 / 0.197 / 0.142 / 0.051 and \
+              ppm (true 0.333) 0.471 / 0.413 / 0.400 / 0.392 / 0.391 over 10/15/20/25/30 dB - \
+              reproducing T-427's published 0.655 / 0.538 / 0.200 / 0.143 / 0.051. They CROSS \
+              between 15 and 20 dB and below it the 5%-duty radar train reads busier than the \
+              33%-duty PPM train. FIXABLE AT SOURCE, and not fixed here: a noise-referenced or \
+              two-mode threshold would remove it, which moves a family-level admissibility number \
+              (PULSED_MAX_DUTY) and is T-431's, not this ticket's. The exemption says only that \
+              nothing may be decided from this feature's ORDER inside `pulsed`.",
+    },
+    OrderException {
+        feature: "sigma_af",
+        a: Class::Am,
+        b: Class::Cw,
+        why: "T-249, the second case this axis was built for. The instantaneous frequency of noise \
+              is near-uniform on (-pi, pi], so a measured sigma_af is sqrt(emission^2 + c/rho) - a \
+              clean 1/sqrt(rho) law on a feature NAMED as a frequency excursion. `am` has \
+              essentially no excursion of its own (0.004 rad/sample at 30 dB) so it is ENTIRELY \
+              noise-limited and slides 1.067 -> 0.004, a 250-fold move; `cw`'s keying transitions \
+              floor it at 0.019 so it slides only 11-fold, 0.206 / 0.078 / 0.047 / 0.030 / 0.019, \
+              reproducing T-249's measured 0.170-0.207 at 10 dB and 0.038-0.050 at 20. The two \
+              cross between 10 and 20 dB: the carrier with NO frequency excursion reads the LARGER \
+              excursion at 10 dB. T-249's `cw` conjunct `sigma_af < 0.02` was written against the \
+              30 dB end and could not fire below ~28 dB, which is this entry stated as a constant.",
+    },
+    OrderException {
+        feature: "low_fraction",
+        a: Class::Ppm,
+        b: Class::Pulse,
+        why: "FOUND BY THIS AXIS, not previously reported: the SAME defect as `duty` one threshold \
+              down. `low_fraction` counts samples UNDER 0.3x the snippet's own mean envelope, and \
+              for a sparse train that mean is again dominated by the off time, so the noise lifts \
+              the off samples over a threshold that has itself collapsed. A 5%-duty train should \
+              read ~0.95 at every SNR; measured, pulse reads 0.132 / 0.233 / 0.334 / 0.656 / 0.888 \
+              and ppm 0.321 / 0.462 / 0.508 / 0.506 / 0.506, crossing between 20 and 25 dB - so at \
+              and below 20 dB the sparse train reads as having FEWER quiet samples than the busy \
+              one. Same fix and same owner as `duty` (T-431); filed rather than changed here \
+              because it moves the same family-level numbers.",
+    },
+    OrderException {
+        feature: "carrier_line_db",
+        a: Class::Ppm,
+        b: Class::Pulse,
+        why: "INHERENT, and the feature's own definition says so: T-404 defines it as the \
+              strongest line's excess over the peak a band of PURE NOISE would have shown at that \
+              segment count. An excess over the noise is an SNR, so raising the SNR raises it, and \
+              two emissions can only be ordered on it at a fixed noise level. Measured: pulse \
+              20.99 / 25.37 / 28.42 / 29.88 / 30.56 dB - +9.6 dB over 20 dB of SNR, the line \
+              rising against a fixed floor - against ppm flat at 23.0-23.6, whose strongest line \
+              is its frame rate rather than a carrier and so sits at a fixed distance from its own \
+              sidebands. Not fixable without changing what the dimension means.",
+    },
+    OrderException {
+        feature: "gamma_max",
+        a: Class::Am,
+        b: Class::Cw,
+        why: "INHERENT, same shape as carrier_line_db: peak-to-mean of the ENVELOPE spectrum is a \
+              signal-to-noise ratio of the envelope - the numerator is the modulation's line, the \
+              denominator includes the broadband contribution the noise makes to the envelope. \
+              `am` is a single envelope tone, so its peak-to-mean is bounded only by the noise and \
+              slides 11.2 / 122.5 / 157.4 / 161.5 / 162.3; `cw`'s keyed envelope spreads its \
+              energy over keying harmonics, so no single line dominates and it holds 54.6 / 60.3 / \
+              63.0 / 63.3 / 63.2. They cross between 10 and 20 dB. The dimension is doing its job; \
+              what is forbidden is a constant across it.",
+    },
+    OrderException {
+        feature: "c42_norm",
+        a: Class::Am,
+        b: Class::Cw,
+        why: "INHERENT, and the law is exact. C42 is a fourth CUMULANT, to which Gaussian noise \
+              contributes zero, while the normaliser C21 is the TOTAL power, signal plus noise - \
+              so the measured value is the emission's attenuated by (rho/(1+rho))^2. CHECKED, not \
+              assumed: `cw` reads -1.254 / -1.366 / -1.404 / -1.418 / -1.425, i.e. 0.880 / 0.959 / \
+              0.985 / 0.995 / 1.000 of its 30 dB value, against the law's 0.828 / 0.942 / 0.982 / \
+              0.996 / 1.000. `am` is attenuated far harder at 10 dB (-0.503 against -1.889, a \
+              factor 0.27) because its envelope TROUGHS reach the noise there, which is the same \
+              mechanism T-249 recorded for `am` being read as `ssb` at 10 dB. The pair crosses \
+              between 10 and 15 dB. De-noising the normaliser with the measured SNR is possible \
+              and would change the feature's meaning and FEATURES_VERSION with it.",
+    },
+    OrderException {
+        feature: "c42_norm",
+        a: Class::Am,
+        b: Class::Wfm,
+        why: "The same attenuation, against a second partner: `wfm` is constant-envelope so it \
+              holds -0.930 / -1.001 / -1.026 / -1.035 / -1.038 (0.896 of its 30 dB value at 10 dB, \
+              the law's 0.828) while `am` collapses to -0.503, crossing between 10 and 15 dB. Two \
+              entries and not one because the guard's unit is the PAIR: `am` inverts against both \
+              of the analog classes whose 30 dB value lies between its 10 dB and 30 dB readings, \
+              and folding them into one name would hide which pairs were measured.",
+    },
+];
+
+/// Mean and sample (n-1) standard deviation.
+fn mean_sd(v: &[f64]) -> (f64, f64) {
+    let n = v.len() as f64;
+    let m = v.iter().sum::<f64>() / n;
+    let var = v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (n - 1.0);
+    (m, var.sqrt())
+}
+
+/// Every feature is either asserted on the SNR axis or named as a noise statistic, and nothing is
+/// silently neither — the completeness rule of the length axis, applied to the second axis.
+#[test]
+fn every_feature_is_either_snr_order_preserving_or_a_named_noise_statistic() {
+    // The asserted set is "every feature not exempt by name", so on this axis a new dimension is
+    // asserted by default rather than unclassified — the opposite default from the length axis,
+    // and the safe one: a feature added without a thought about the receiver gets guarded, not
+    // skipped. What must stay visible in a diff is the exemption.
+    let asserted = FEATURE_NAMES
+        .iter()
+        .filter(|name| !NOISE_STATISTICS.iter().any(|(n, _)| n == *name))
+        .count();
+    assert_eq!(
+        asserted + NOISE_STATISTICS.len(),
+        FEATURE_NAMES.len(),
+        "features@{} changed size without this axis noticing",
+        hk_classify::features::FEATURES_VERSION,
+    );
+    for (name, why) in NOISE_STATISTICS {
+        assert!(
+            FEATURE_NAMES.contains(name),
+            "{name} is exempt from the SNR axis but is not a feature: delete the exemption"
+        );
+        assert!(
+            why.len() > 80,
+            "{name} is exempt from the SNR axis without saying which property of the NOISE it is a \
+             statistic of. An exemption without a measurement is not an exemption."
+        );
+    }
+    for e in SNR_ORDER_EXCEPTIONS {
+        assert!(
+            FEATURE_NAMES.contains(&e.feature),
+            "{} has an order exception but is not a feature",
+            e.feature
+        );
+        assert!(
+            !NOISE_STATISTICS.iter().any(|(n, _)| *n == e.feature),
+            "{} is both exempt wholesale and has a per-pair exception: pick one",
+            e.feature
+        );
+        assert!(
+            e.a.family() == e.b.family() && e.a.family().is_some(),
+            "{}: {:?} and {:?} are not in one family, so no within-family call compares them",
+            e.feature,
+            e.a,
+            e.b
+        );
+        assert!(
+            e.why.len() > 80,
+            "{} {:?}/{:?} is excepted without a mechanism and a measurement",
+            e.feature,
+            e.a,
+            e.b
+        );
+    }
+}
+
+/// The guard: a feature may move with the SNR, but it may not **reorder two emissions** as the SNR
+/// changes. See the module header for why this, and not flat expectation, is the assertion.
+#[test]
+fn a_feature_ranks_two_emissions_the_same_way_however_loudly_they_were_heard() {
+    let asserted: Vec<&str> = FEATURE_NAMES
+        .iter()
+        .copied()
+        .filter(|n| !NOISE_STATISTICS.iter().any(|(x, _)| x == n))
+        .collect();
+
+    // [class][rung][feature] -> (mean, sd) over SNR_SEEDS waveforms, or None where fewer than
+    // SNR_MIN_PRESENT of them reported a value.
+    let mut stats: Vec<Vec<Vec<Option<(f64, f64)>>>> = Vec::new();
+    for class in Class::TAXONOMY {
+        let mut per_rung = Vec::new();
+        for snr in SNR_LADDER {
+            let mut draws: Vec<Vec<f64>> = vec![Vec::new(); asserted.len()];
+            for seed in DEV_SEEDS.start..DEV_SEEDS.start + SNR_SEEDS {
+                // The packet preamble stays ON: nothing is truncated here, so it is not a confound,
+                // and `SynthConfig::new` is the geometry the shipped densities are fitted at.
+                let s = generate(*class, &SynthConfig::new(*snr, seed));
+                // `symbols: None` — C14 is not run; its six features are exempt by name in
+                // NOISE_STATISTICS and are the ONLY columns that change when it is omitted.
+                let f = features(&FeatureInput {
+                    samples: &s.samples,
+                    sample_rate_hz: s.sample_rate_hz,
+                    obw_hz: Some(s.obw_hz),
+                    snr_db: Some(*snr),
+                    symbols: None,
+                });
+                for (i, name) in asserted.iter().enumerate() {
+                    if let Some(v) = f.get(name) {
+                        draws[i].push(v);
+                    }
+                }
+            }
+            per_rung.push(
+                draws
+                    .iter()
+                    .map(|d| (d.len() >= SNR_MIN_PRESENT).then(|| mean_sd(d)))
+                    .collect(),
+            );
+        }
+        stats.push(per_rung);
+    }
+
+    // Within-family class pairs: the comparison a within-family class call actually makes.
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for i in 0..Class::TAXONOMY.len() {
+        for j in i + 1..Class::TAXONOMY.len() {
+            let (a, b) = (Class::TAXONOMY[i], Class::TAXONOMY[j]);
+            if a.family().is_some() && a.family() == b.family() {
+                pairs.push((i, j));
+            }
+        }
+    }
+
+    let mut compared = 0usize;
+    let mut resolved = 0usize;
+    let mut found: Vec<(usize, usize, usize, String)> = Vec::new();
+    for (fi, name) in asserted.iter().enumerate() {
+        for &(i, j) in &pairs {
+            let mut signs: Vec<(f64, i8)> = Vec::new();
+            let mut table = String::new();
+            for (r, snr) in SNR_LADDER.iter().enumerate() {
+                let (Some((ma, sa)), Some((mb, sb))) = (stats[i][r][fi], stats[j][r][fi]) else {
+                    continue;
+                };
+                compared += 1;
+                let apart = ma - mb;
+                let spread = RESOLVED_SIGMA * (sa * sa + sb * sb).sqrt();
+                table.push_str(&format!(
+                    "\n      {snr:>4.0} dB  {:>10.4} +- {:<8.4} vs {:>10.4} +- {:<8.4}  apart \
+                     {apart:>9.4}, resolved at {spread:.4}{}",
+                    ma,
+                    sa,
+                    mb,
+                    sb,
+                    if apart.abs() > spread { "  <-" } else { "" },
+                ));
+                if apart.abs() > spread {
+                    resolved += 1;
+                    signs.push((*snr, if apart > 0.0 { 1 } else { -1 }));
+                }
+            }
+            if signs.iter().any(|(_, s)| *s > 0) && signs.iter().any(|(_, s)| *s < 0) {
+                found.push((fi, i, j, table));
+            }
+        }
+    }
+
+    // The ladder must still be a ladder: if generation or the resolution bound collapsed, an empty
+    // finding set would look like a pass.
+    assert!(
+        compared > 3000 && resolved > 700,
+        "only {compared} comparisons and {resolved} resolved: the SNR ladder collapsed, so an \
+         empty result would mean nothing"
+    );
+    eprintln!(
+        "SNR axis: {} features x {} within-family pairs x {} rungs, {compared} comparisons, \
+         {resolved} resolved, {} inversions",
+        asserted.len(),
+        pairs.len(),
+        SNR_LADDER.len(),
+        found.len(),
+    );
+
+    // Exact-set comparison, both ways.
+    let mut undeclared = Vec::new();
+    let mut matched = vec![false; SNR_ORDER_EXCEPTIONS.len()];
+    for (fi, i, j, table) in &found {
+        let (name, a, b) = (asserted[*fi], Class::TAXONOMY[*i], Class::TAXONOMY[*j]);
+        match SNR_ORDER_EXCEPTIONS.iter().position(|e| {
+            e.feature == name && ((e.a == a && e.b == b) || (e.a == b && e.b == a))
+        }) {
+            Some(k) => matched[k] = true,
+            None => undeclared.push(format!(
+                "{name:<20} {} {a:?} vs {b:?}: ranks them one way at one SNR and the other way at \
+                 another.{table}",
+                a.family().unwrap_or("?"),
+            )),
+        }
+    }
+    let stale: Vec<String> = SNR_ORDER_EXCEPTIONS
+        .iter()
+        .zip(&matched)
+        .filter(|(_, m)| !**m)
+        .map(|(e, _)| format!("{:<20} {:?} vs {:?}", e.feature, e.a, e.b))
+        .collect();
+
+    assert!(
+        undeclared.is_empty(),
+        "{} feature(s) named as a property of the signal REORDER two emissions of one family as \
+         the SNR changes. The feature is reading the noise, and any constant written across it is \
+         a constant on the receiver (T-249's `sigma_af < 0.02`, T-427's `duty > 0.25`). Either fix \
+         the estimator, or add it to SNR_ORDER_EXCEPTIONS with the mechanism AND the measured \
+         ladder - an exemption without a measurement is not an exemption.\n\n{}",
+        undeclared.len(),
+        undeclared.join("\n\n"),
+    );
+    assert!(
+        stale.is_empty(),
+        "{} declared SNR order exception(s) no longer reproduce. If the estimator was fixed, \
+         DELETE the entry - that is the point of listing them by name. If it was not, something \
+         moved the resolution bound and the guard just got weaker without anyone deciding to \
+         weaken it.\n\n{}",
+        stale.len(),
+        stale.join("\n"),
     );
 }
