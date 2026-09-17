@@ -8400,6 +8400,24 @@ tasks:
     parallel_group: M3A
     deps: [T-398]
     notes: |
+      COORDINATOR CHECK 2026-09-17, read-only, while T-416 ran: the branch has NOT rotted.
+      96 commits have landed on main since eb29365 branched (merge-base d10fad2) and
+      `git merge-tree --write-tree main task-t402` produces a tree with NO CONFLICTS. Every
+      one of the six files T-402 touches has had ZERO commits on main in that span
+      (hk-demod/tests/signal_062_dense_fm.rs, hk-dsp/tests/signal_062_wfm_ddc.rs,
+      hk-pipeline/tests/signal_062_dense_fm_pipeline.rs, py/hkpy/synth/scenarios.py,
+      tests/e2e/.../inventory_lifecycle.rs, tests/e2e/.../overlap.rs). So there is nothing to
+      rebase and no conflict to resolve - the hold has only ever been semantic.
+      AND THE SEMANTICS ARE NOW PRECISE. The red assertion, confirm_latency.rs:143, is NOT in
+      T-402's diff - T-402 regulates the synthetic WFM fixture's peak deviation, which changes
+      what the pipeline sees, which makes a DIFFERENT test fail. That test asserts
+      `latest_linked_demodulation_for_emitter(id)` is Some: "the measurement that declined to
+      confirm is still recorded". Its very next assertion is that a mono station reports no
+      pilot. T-416's commit is titled "a mono FM station has no pilot to find, and a refusal now
+      leaves a record" - i.e. T-416 is aimed at exactly these two lines.
+      SO THE MERGE SEQUENCE IS: gate and merge T-416, then immediately re-attempt eb29365 with
+      no rebase needed. If confirm_latency is still red after T-416, the user has already ruled
+      on what happens next: treat it as a real remaining defect to FIX, not a block.
       T-398, third synthetic gap. The synthetic WFM scene is TONE-MODULATED, so its
       occupied bandwidth is ~103 kHz where real program-modulated FM measures ~221 kHz.
       That puts it BELOW the project's own WIDEBAND_FM_OBW_HZ lower edge of 106 kHz -
