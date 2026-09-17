@@ -1849,23 +1849,48 @@ fn events_and_presence_serve_the_durable_catalogue() {
         );
     }
     // Same emitter: this route and the inventory row must agree field for field — except
-    // `silence_s`, which on an unwindowed query is a reading of the live clock and so advances
-    // between two HTTP calls. Asserting bit equality there would assert the clock cannot tick; the
-    // invariant that matters is that the two surfaces agree on liveness and on the decayed rank.
+    // `silence_s` and the `confidence` derived from it, both of which on an unwindowed query are a
+    // reading of the live clock and so advance between two HTTP calls. Asserting bit equality there
+    // would assert the clock cannot tick; the invariant that matters is that the two surfaces agree
+    // on liveness and on the decayed rank.
+    //
+    // **`confidence` joined that list at T-410, and it is the fix working.** It used to be bit-equal
+    // by accident: the idle gap was `IdleGap::conservative()` — 60 s — on every surface, so any
+    // silence under a minute sat on the flat part of the decay law and both calls read exactly 1.0.
+    // Now the gap is *measured* off the run's tune history (ADR-0019 §3), so on a continuously
+    // dwelt band it is 1 s, a few-second silence is genuinely decayed, and a few milliseconds of
+    // clock between two calls moves it. Equality here would now be asserting the 60 s default back.
     let (st, one) = get(addr, &format!("/api/inventory/{id}"));
     assert_eq!(st, 200, "{one}");
-    let without_silence = |p: &serde_json::Value| {
+    let clock_read = |p: &serde_json::Value| {
         let mut p = p.clone();
-        p.as_object_mut()
-            .expect("presence is an object")
-            .remove("silence_s");
+        let o = p.as_object_mut().expect("presence is an object");
+        o.remove("silence_s");
+        o.remove("confidence");
         p
     };
     assert_eq!(
-        without_silence(&track["presence"]),
-        without_silence(&one["presence"]),
+        clock_read(&track["presence"]),
+        clock_read(&one["presence"]),
         "the track route and the row serve the same projection: {track} vs {one}"
     );
+    // And the decayed rank still agrees between them, to the width of the clock tick between the
+    // two calls — which is the property the bit-equality was standing in for.
+    let (track_conf, row_conf) = (
+        track["presence"]["confidence"].as_f64(),
+        one["presence"]["confidence"].as_f64(),
+    );
+    assert_eq!(
+        track_conf.is_none(),
+        row_conf.is_none(),
+        "both surfaces rank the row: {track} vs {one}"
+    );
+    if let (Some(a), Some(b)) = (track_conf, row_conf) {
+        assert!(
+            (a - b).abs() < 0.05,
+            "the same decayed rank up to the clock ticking between two calls: {a} vs {b}"
+        );
+    }
     let (track_silence, row_silence) = (
         track["presence"]["silence_s"].as_f64(),
         one["presence"]["silence_s"].as_f64(),

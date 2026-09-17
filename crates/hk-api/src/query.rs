@@ -22,7 +22,7 @@ use hk_model::attention::baseline::SiteKey;
 use hk_model::ids::SiteId;
 use hk_model::{
     AnnotationAuthor, AnnotationTarget, ArtifactKind, Demodulation, FreqRange, IdentityAccess,
-    IdentityScheme, IdleGap, InventoryEntry, InventoryIdentity, InventoryQuery, KnownStatus,
+    IdentityScheme, InventoryEntry, InventoryIdentity, InventoryQuery, KnownStatus,
     LifecycleAuthor, LifecycleState, Presence, RelationVisibility, RepoError, Repository,
     StatusAuthor, TimeRange, Timestamp, cluster_label,
 };
@@ -34,6 +34,8 @@ use hk_store::{
     FloorFlags, FloorProduct, FloorVsTime, ProvenanceSummary, Pyramid, RegionHistory, RegionQuery,
     Resolution,
 };
+
+use crate::coverage::ObservedCoverage;
 
 /// Decoded query parameters, in request order.
 pub type Params = [(String, String)];
@@ -1073,20 +1075,30 @@ fn reason_is_identity_free(author: StatusAuthor) -> bool {
 /// ignoring `cursor`/`limit`, so a caller can show a count past one page. It is an efficient
 /// indexed `COUNT(*)` for every filter but a `tag` outside `hk_model::TAG_VOCABULARY`, which is
 /// capped (see `count_inventory`'s docs) and can then read as a lower bound.
-pub fn inventory_json(repo: &Repository, q: &Params) -> Result<Value, ApiError> {
+pub fn inventory_json(
+    state: &crate::http::ApiState,
+    repo: &Repository,
+    q: &Params,
+) -> Result<Value, ApiError> {
     let query = parse_inventory_query(q)?;
     // T-263 (ADR-0017 TM-7): an unwindowed caller's own live edge, for a scrubbed-back view.
     let at = parse_presence_at(q, query.time)?;
     let failed = |_| ApiError::new(500, "inventory query failed");
     let page = repo.query_inventory(&query).map_err(failed)?;
     let total = repo.count_inventory(&query).map_err(failed)?;
+    // T-410 (ADR-0019 §3): the tune history behind every row's idle gap, read once for the whole
+    // page and then asked per band. It is the projection window, not the selection window, that
+    // matters — an unwindowed Confirmed list still renders liveness, against all of time up to its
+    // live edge — so it is built from the same `presence_window` those rows are projected through.
+    let coverage = ObservedCoverage::of(state, presence_window(query.time, at).0);
     let mut entries = Vec::with_capacity(page.entries.len());
     for entry in &page.entries {
         // ADR-0017 TM-2: the query's own window scopes each row's `presence` and
         // `family_in_window`. The rows themselves are already selected by the same window, in the
         // same predicate (`InventoryQuery::time`, interval overlap), so the list and the liveness
         // it renders can never disagree.
-        entries.push(inventory_entry_json_at(repo, entry, query.time, at).map_err(failed)?);
+        entries
+            .push(inventory_entry_json_at(repo, entry, query.time, at, &coverage).map_err(failed)?);
     }
     // T-320: the grouping, computed here because only the list knows what is in view. A client
     // must not derive it — the UI is a thin client over this contract (CLAUDE.md) — and only the
@@ -1238,10 +1250,19 @@ const ALL_TIME_START_NS: i64 = i64::MIN / 2;
 /// **select** rows and scope their projections; `at` scopes the projection alone and selects
 /// nothing. It is refused beside `t0`/`t1`, whose `t1` is already the caller's live edge.
 ///
-/// The idle gap is [`IdleGap::conservative`]: hk-api does not know the scheduler's revisit period,
-/// and an unknown revisit takes the 60 s end of `IdleGap`'s rule, never a shorter gap — a shorter
-/// gap would claim an absence that was not observed (T-262, ADR-0017 §11 q4).
-fn presence_window(window: Option<TimeRange>, at: Option<Timestamp>) -> (TimeRange, Timestamp) {
+/// **The idle gap is measured, not defaulted** (T-410, ADR-0019 §3). It used to be
+/// [`IdleGap::conservative`] here on the grounds that hk-api does not know the scheduler's revisit
+/// period. The principle was right — a shorter gap would claim an absence that was not observed
+/// (T-262, ADR-0017 §11 q4) — but the premise was wrong: a receiver's revisit period is a
+/// *measurement*, recorded in the IQ ring's tune history, and a dwell on one centre revisits its
+/// band every STFT frame. Taking 60 s there was not conservatism but discarding a measurement the
+/// run had in hand, and once a box runs to the live edge until an END is detected (ADR-0019 §1) it
+/// was a box over-claiming a minute of silent air. [`ObservedCoverage`] reads the history;
+/// `conservative()` is kept for its real meaning, **nobody recorded whether the receiver looked**.
+pub(crate) fn presence_window(
+    window: Option<TimeRange>,
+    at: Option<Timestamp>,
+) -> (TimeRange, Timestamp) {
     match window {
         Some(w) => (w, w.end),
         None => {
@@ -1323,7 +1344,17 @@ pub(crate) fn presence_json(p: &Presence) -> Value {
 }
 
 pub fn inventory_entry_json(repo: &Repository, entry: &InventoryEntry) -> Result<Value, RepoError> {
-    inventory_entry_json_at(repo, entry, None, None)
+    inventory_entry_json_at(repo, entry, None, None, &ObservedCoverage::default())
+}
+
+/// [`inventory_entry_json`] for a caller that has the run's tune history in hand (T-410): the
+/// single-row routes, so one row read on its own reports the same liveness the list reports for it.
+pub fn inventory_entry_json_with_coverage(
+    repo: &Repository,
+    entry: &InventoryEntry,
+    coverage: &ObservedCoverage,
+) -> Result<Value, RepoError> {
+    inventory_entry_json_at(repo, entry, None, None, coverage)
 }
 
 /// [`inventory_entry_json_at`] with no caller-named live edge (the wall clock decides `open`).
@@ -1332,7 +1363,7 @@ pub fn inventory_entry_json_in_window(
     entry: &InventoryEntry,
     window: Option<TimeRange>,
 ) -> Result<Value, RepoError> {
-    inventory_entry_json_at(repo, entry, window, None)
+    inventory_entry_json_at(repo, entry, window, None, &ObservedCoverage::default())
 }
 
 /// [`inventory_entry_json`] with the request's time window, which adds ADR-0017 TM-2's two
@@ -1357,6 +1388,7 @@ pub fn inventory_entry_json_at(
     entry: &InventoryEntry,
     window: Option<TimeRange>,
     at: Option<Timestamp>,
+    coverage: &ObservedCoverage,
 ) -> Result<Value, RepoError> {
     {
         let e = &entry.emitter;
@@ -1483,7 +1515,12 @@ pub fn inventory_entry_json_at(
         // emitter's own `first_seen`/`last_seen` are a *hull* and never an extent, so this — not
         // they — is what a caller reads for "is it on air, and for how long".
         let (span, now) = presence_window(window, at);
-        let presence = presence_json(&repo.presence(e.id, span, IdleGap::conservative(), now)?);
+        // T-410 (ADR-0019 §3): the idle gap is **measured** off this band's coverage, not defaulted
+        // to the 60 s unknown. It closes this row's interval, so it is also how long the row's box
+        // runs to the live edge before capping — 60 s on a band the receiver never looked away from
+        // was a box over-claiming a minute of silent air.
+        let gap = coverage.idle_gap(e.freq(), span);
+        let presence = presence_json(&repo.presence(e.id, span, gap, now)?);
         // ADR-0017 §7.1: the same arbitration ladder over the rows inside the window. `family`
         // above stays the all-time answer — identity evidence is time-invariant — and this says
         // whether anything *in these minutes* re-evidenced it. `null` when nothing did, so a

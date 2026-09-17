@@ -1,4 +1,4 @@
-# Stream-output contract (v1.2)
+# Stream-output contract (v1.3)
 
 **Status:** Engineering (T-016, T-014, T-022a, T-043, T-060). Implements [ADR-0004](adr/0004-stream-output-contract.md) (PROVISIONAL) and the plugin IPC of [ADR-0003](adr/0003-process-plugin-model.md). Code: `crates/hk-stream/` (contract; re-exported as `hk_api::stream`), `crates/hk-plugins/` (plugin host), `crates/hk-api/` (WebSocket bridge and read-only HTTP endpoints, §10), `hk stream-tail` (sample consumer). Revised after the T-016/T-014 review (input-class ceiling, metadata allowlist, own-key local-only, gated spectrum cap, process groups, consumer cap), again after the independent re-probe (locality enforced per consumer, metadata policy on publishers, per-row spectrum enforcement, tighter allowlist defaults), and again after T-022a shipped the WebSocket bridge (§10 mapping and auth, §11 residuals).
 
@@ -8,8 +8,9 @@ One contract serves two uses:
 
 ## 1. Versioning
 
-- Every stream opens with a header carrying `"schema": "hackriff.stream"` and `"version": "<major>.<minor>"`. This document is **1.2**: 1.1 (1.0 plus the optional header `audio` profile and the binary `status` record type, T-043, §12) plus the inspector streams of §14 (ADR-0011, T-089): the `frame`, `status` and `edit` message record types and the optional header `inspector` object. The optional header `stage` object (§14.4) is added with stage streams (T-088).
-- **1.2 also adds the `presence` stream (§15, T-388)**: a new `messages` stream, which is additive — a reader that does not know it simply does not subscribe to it.
+- Every stream opens with a header carrying `"schema": "hackriff.stream"` and `"version": "<major>.<minor>"`. This document is **1.3**: 1.1 (1.0 plus the optional header `audio` profile and the binary `status` record type, T-043, §12) plus the inspector streams of §14 (ADR-0011, T-089): the `frame`, `status` and `edit` message record types and the optional header `inspector` object. The optional header `stage` object (§14.4) is added with stage streams (T-088).
+- **1.2 added the `presence` stream (§15, T-388)**: a new `messages` stream, additive — a reader that does not know it simply does not subscribe to it.
+- **1.3 changes what that stream carries (§15, T-410, [ADR-0019](adr/0019-presence-as-an-interval-with-endpoints.md))**: presence becomes an **interval with endpoints**, so the records are `presence-start` / `presence-reopen` / `presence-end` and `presence-extension` is retired. This is **not** additive — it replaces record kinds on an existing stream — so the stream's own `message_schema` is bumped from `hackriff.presence/1` to `hackriff.presence/2` rather than the document's minor version pretending nothing moved. A contract-A consumer then sees a schema it does not know, instead of silently ignoring every endpoint. The stream's *framing* is untouched, which is why this is a minor document version and a per-stream schema major.
 - **Minor versions** may only add:
   - optional header fields;
   - optional message-record fields;
@@ -17,7 +18,7 @@ One contract serves two uses:
 
   Readers must ignore unknown fields and skip record types they don't know.
 - **A major version** changes framing or existing semantics. Readers refuse a major version they don't speak.
-- **One field was renamed in 1.2, and it is the only one (T-354).** JSON record envelopes spell the record time `t_ns`, not `t` (§5.1). A rename is not on the additive list above, so this is stated rather than slipped in:
+- **One field was renamed in 1.2, and it is still the only one (T-354).** JSON record envelopes spell the record time `t_ns`, not `t` (§5.1). A rename is not on the additive list above, so this is stated rather than slipped in:
   - **The value did not change**, only its name: the same `i64` Unix nanoseconds, in the same place. Nothing about framing or semantics moved, so nothing warranted a major bump, which readers are required to *refuse* — a disproportionate answer to a field name.
   - **Reading stays backward compatible.** Every reader in this contract accepts `t` wherever it accepts `t_ns` (`hk_stream::inspector::FrameRecord` carries `#[serde(alias = "t")]`; the reference reader and the capture frame index try `t_ns` then `t`). That is load-bearing, not courtesy: §14.7 stores decoded captures as the byte stream itself, so recordings written before 1.2 are still on disk and must still seek and re-parse.
   - **Writing is not.** A 1.2 producer emits only `t_ns`. A reader written against 1.0/1.1 that requires `t` breaks — *loudly* (a missing key, not a wrong number), which is the failure this contract prefers.
@@ -848,104 +849,160 @@ Served over `/ws/open/<name>` (§12.1) and TCP `open/<name>` (§13.1), with the 
 - `inspector?capture=<id>[&from_frame=<n>][&field_map=<recipe_id>@<version>:<map_id>]`: replay, optionally re-parsed, of a recorded decoded stream. **Served (T-092):** frame records from frame `n` by index seek, paced to the consumer, stream id `capture/<id>`; see docs/api.md "Decoded captures".
 - `stage?pipeline=<id>&node=<node>[&port=<port>][&view=raw|spectrum|sync_search|eye]`: a stage stream (§14.4).
 
-## 15. The presence stream: live box growth (1.2, T-388)
+## 15. The presence stream: interval endpoints (1.3, T-388 → T-410)
 
-**Stream id `presence`** (`/ws/presence`), `messages` kind, `message_schema` `hackriff.presence/1`,
+**Stream id `presence`** (`/ws/presence`), `messages` kind, `message_schema` **`hackriff.presence/2`**,
 `content_class` `unrestricted`, listed by `GET /api/streams`. Published by `hk-pipeline`
 (`crates/hk-pipeline/src/presence.rs`) from the detection writer thread.
 
-### 15.1 Why there is a stream at all
+### 15.1 Two contracts, and which one this is
 
-The user, live testing 2026-09-16: *"a live signal box extends UP slowly."* Detection was never the
-bottleneck — the tracker advances an open track's end (`t_last_end`) on **every STFT frame**. What
-was slow was everything between that and the screen, and it was two lazy links in series:
+T-388 built this stream under **contract A — presence is an accumulation of observations**. A box's
+top was the newest *measured* end, and a record per open emitter per tick pushed it forward. It
+existed because a box top sat 5–10 s behind the live edge: two lazy links in series, the 5 s live
+offer (`LIVE_OFFER_NS`) and the 5 s `GET /api/inventory` poll.
 
-| link | cadence |
-|---|---|
-| tracker advances `t_last_end` | per frame |
-| detect reader flushes a `WriteBatch` | 0.5 s (`flush_interval_s`) |
-| **open track offered to the inventory** (`LIVE_OFFER_NS`) | **5 s** |
-| writer thread stores it | ≤ 200 ms |
-| UI `GET /api/inventory` poll | **5 s** |
+T-410 replaced it with **contract B — presence is an interval with endpoints** (ADR-0019). The box
+runs from its start **straight to the live edge** and caps only on a real detected END, so the
+measurement is the START event plus the **absence of an END**. The stream therefore carries
+**START / END / REOPEN** and **never a per-poll presence bump**; a continuing interval publishes
+nothing at all, so over a band of steady carriers this stream is silent.
 
-So a box top sat between 5 s and 10 s behind the live edge. Shortening either link alone leaves the
-other; this stream removes both by carrying the extension on its own path. **The 5 s offer and the
-5 s poll are unchanged** and still do their jobs — creating the row, arbitrating, merging, confirming
-it, and serving a *window*. The stream only ever extends a row that is already on screen.
+**The 5 s offer and the 5 s poll are unchanged** and still do their jobs — creating the row,
+arbitrating, merging, confirming it, and serving a *window*. What changed is that the poll may now
+**cap** a box as well as extend one: it is the backstop for a lost END (§15.5).
 
 ### 15.2 What a record may say
 
-**A box may only extend as far as presence has actually been observed.** The time published is the
-end of the last burst the detector *measured* (`hk_detect::LiveExtent::t_end_ns`, the tracker's
-`t_last_end`), never a clock read and never an assumption that a signal heard a moment ago is still
-transmitting. The consequence is the property that matters: **an emission that stops stops
-extending**, within one tick, because the tracker stops advancing that field and this stream can only
-repeat the end it was given.
+**The stream says what was measured, never what is presumed.** An END carries the *measured* end
+(`hk_detect::LiveExtent::t_end_ns`, the tracker's `t_last_end`) — the end of the last burst the
+detector saw, never the instant the end was decided and never a clock read. So a box that has been
+running to the live edge **retracts** to the truth when the END lands, rather than stopping wherever
+the assumption had reached.
 
-Client-side extrapolation — drawing the box to the live edge because a signal *was* there a second
-ago — would be faster still and would be a claim about air nobody measured. That is why the fix is a
-push. It is the same rule as `Coverage::of` (T-368) refusing to spell "never looked" as "looked and
-it was quiet", and as an absent row meaning out-of-window rather than deleted (T-385).
+The presumption lives entirely in the renderer, where it is **drawn as presumption**: the span from
+the last measured end to the live edge is the box's *open cap*, drawn lighter with a rule where
+measurement stops, and it grows visibly as the silence grows (`ui/src/timebox.ts`,
+`ui/src/waterfall.ts`). This is the same rule as `Coverage::of` (T-368) refusing to spell "never
+looked" as "looked and it was quiet", moved onto the time axis.
+
+**The end detector.** An interval closes after one idle gap of **observed** silence — the rule
+`hk_model::presence` owns, for the reason it owns: *a gap shorter than the revisit period is not
+evidence of absence, because the receiver was not listening.* `LiveExtent` carries that silence in
+two clocks (observed and wall), so the producer can tell the two cases apart:
+
+| the receiver | gap | closes after |
+|---|---|---|
+| never looked away (observed silence accounts for the wall silence) | `MIN_IDLE_GAP_S`, 1 s | **1 s**, plus ≤ one tick |
+| looked away (a sweep, a retune) | `MAX_IDLE_GAP_S`, 60 s | 60 observed s — in practice the 5 s poll closes it first |
+
+On a live dwell — the whole of Explore — the stream and the poll close at the same instant, because
+both are `now − t_end > 1 s` on the same timestamps. On a sweep the poll closes first. **The stream
+can be late; it can never be the reason a box stays open.**
 
 ### 15.3 Record shape
 
 ```json
 {"type":"message","seq":7,"t_ns":1757774400123456789,"emitter_id":"0199…",
- "content_class":"unrestricted","gated":false,"frame_model":"presence-extension",
- "metadata":{"kind":"presence-extension",
-             "last_interval":{"t_start_s":1757774390.1,"t_end_s":1757774400.12,"open":true}}}
+ "content_class":"unrestricted","gated":false,"frame_model":"presence-end",
+ "metadata":{"kind":"presence-end",
+             "last_interval":{"t_start_s":1757774390.1,"t_end_s":1757774400.12,"open":false}}}
 ```
 
-- The envelope is §5.1's, unchanged. `t_ns` is the extension's own end instant — integer Unix
-  nanoseconds, never a bare `t` (§1, T-354) — and is the same instant as `metadata.last_interval.t_end_s`.
+- `metadata.kind` and `frame_model` are one of **`presence-start`**, **`presence-reopen`** or
+  **`presence-end`**. `presence-extension` is retired, and the schema bump to `/2` is what stops a
+  contract-A consumer silently ignoring every endpoint on the stream.
+- The envelope is §5.1's, unchanged. `t_ns` is the instant the record is *about* — the interval's
+  start for an opening record, its measured end for a closing one — integer Unix nanoseconds, never
+  a bare `t` (§1, T-354).
 - `metadata.last_interval` is deliberately the **same object** `GET /api/inventory` serves as
   `presence.last_interval`: the same three field names in the same `_s` seconds unit
   (`docs/api.md`), so a client assigns it rather than converting it and the fast surface cannot
   invent a shape the slow one would disagree with.
-- `open` is always `true`: a record exists because the tracker still holds that track open. It is
-  stated on the wire, never inferred on the client.
-- **No frequency.** A presence extension is new *time*, not new geometry (T-362: a box is a band
-  fraction plus two absolute capture times). The box's edges came from the row and are not restated,
-  so this path can never move a box sideways.
+- `open` is `true` on `presence-start`/`presence-reopen` and `false` on `presence-end`. It is stated
+  on the wire, never inferred on the client, and a record whose `open` disagrees with its `kind` is
+  malformed.
+- **No frequency.** An endpoint is new *time*, not new geometry (T-362: a box is a band fraction
+  plus two absolute capture times). The box's edges came from the row and are not restated, so this
+  path can never move a box sideways.
 - `content` is never present: there is no content, only timing — of exactly the class
   `/api/inventory`'s own `presence` object already carries unconditionally.
 
-### 15.4 Which tracks are published, and which are not
+### 15.4 START, REOPEN, and which tracks are published
 
-One record per open track per tick, for tracks the inventory has already given a row
-(`Inventory::emitter_of_track`, written where a live offer or a chain write resolves one). **A track
-with no row publishes nothing**: an extension names an emitter, and a track with no row has no box to
-extend.
+**START versus REOPEN is an identity question; whether there is a new interval at all is an absence
+question.** Neither threshold is picked:
 
-The set of *extents* is wider than the set of live *offers*: an offer decides whether to create a
-row, so it is strict (several bursts, a settled fate) and excludes exactly the continuous carriers a
-broadcast band is full of, which are one long burst and enter the inventory through a chain instead.
-An extent creates nothing, so the row lookup is the only gate it needs.
+```
+silence ≤ idle gap                          → the same interval continues; NO RECORD
+silence > idle gap, same emitter            → presence-reopen: a new interval, a SECOND box
+silence > idle gap, no existing emitter     → presence-start
+```
 
-A track that closes, merges or joins a hop set is forgotten at once and publishes nothing further:
-its box stops at the last end measured, and the close's own sighting is what the next poll serves.
+The gap is the same constant, derived the same way, as the one that closes an interval (§15.2). A
+REOPEN never stretches a box across the silence — it replaces `last_interval`, so the returning
+signal gets its own box and the gap between them is drawn as a gap. The two kinds render identically;
+the label exists so a consumer can tell a returning emitter from a new one without re-querying.
 
-### 15.5 Rate, and what bounds it
+Endpoints are published only for tracks the inventory has already given a row
+(`Inventory::emitter_of_track`). **A track with no row publishes nothing**: a record names an
+emitter, and a track with no row has no box. The set of *extents* is wider than the set of live
+*offers* — an offer decides whether to *create* a row, so it is strict and excludes exactly the
+continuous carriers a broadcast band is full of; an extent creates nothing, so the row lookup is the
+only gate it needs.
 
-Two gates, both producer-side:
+A track that closes, merges or joins a hop set **publishes its END**: an emitter this stream has
+announced open and then sees no extent for is ended at the last measured end it was announced with.
+That is what makes "there is no path that produces no END" true — and it is suppressed when the
+extent batch was at its cap, since absence from a truncated list is not evidence a track closed.
+
+**A track that returns after its own END publishes nothing more.** The tracker joins bursts across
+its `idle_timeout_s` (60 observed s), far past the gap a box caps at, so the same track reappears
+after the END; but its extent carries `t_first`, the track's *first* burst, not the resumption.
+Publishing that as a new interval's start would claim the silence the END was just drawn for, so the
+stream stays quiet and the 5 s poll serves the new interval with the start it actually has. A **new
+track** bound to the same emitter is different, and does publish a `presence-reopen`: its `t_first`
+is its own first burst, which is a correct interval start. That is what makes the reopen/new-start
+distinction the **tracker's** continuity judgement rather than a threshold chosen on this stream.
+
+### 15.5 Rate, truncation, and the backstop
+
+Two producer-side gates, unchanged:
 - at most one tick per **250 ms** of stream time (`PRESENCE_PUSH_NS`), and
-- at most **32** records in a tick (`MAX_EXTENSIONS_PER_TICK`).
+- at most **32** records in a tick (`MAX_EVENTS_PER_TICK`).
 
 That is a hard ceiling of **128 records/s**, however busy the band is, because the cap is on records
-and not on tracks. Beyond it, the tracks left out of a tick are not extended in it (counted as
-`/detect/presence_extensions_truncated`); their boxes grow on the 5 s poll as before. The tick keeps
-the newest ends — the boxes closest to the live edge are the ones being watched grow. Beyond that,
-§7's backpressure is unchanged: a slow consumer is dropped, never the survey.
+and not on tracks.
+
+**The truncation policy changed with the contract.** Under A a record left out of a tick cost only
+freshness, so dropping it was right. Under B a dropped END costs an over-claim of silent air — so
+within a tick **ENDs are published before STARTs and REOPENs**, and what does not fit is **carried to
+the next tick** rather than discarded (counted as `/detect/presence_extensions_truncated`). §7's
+backpressure is otherwise unchanged: a slow consumer is dropped, never the survey.
+
+**The backstop, and the bound it puts on a missed END.** A consumer that loses an END — dropped as
+slow, socket closed, paused — is corrected by the next `GET /api/inventory`, which serves
+`presence.last_interval` with `open: false`. So the worst a viewer sees is a box over-claiming **≤ 5 s**
+of silent air, against **≤ 1.25 s** typically. This works only because both surfaces close on the
+same measured gap (§15.2): a poll that still read `open` for 60 s would re-open every box the stream
+closed.
 
 ### 15.6 Consumers
 
 Only a **following** view subscribes. A paused or scrubbed view is answering about a fixed past
-window; its rows are already complete for that window and a push has nothing to add, so the socket is
+window; every interval's endpoints there are already known and served by the poll, so the socket is
 closed and that path stays on the poll (`ui/src/app/explore/presence-stream.ts`). The client applies
-a record to a row it already holds, and refuses in three cases (`ui/src/presence.ts`): no interval on
-the row (nothing to extend, and none is conjured), an end at or behind the one held (a reordered
-record can never shorten a box), and a span starting *after* the end held (a different stretch of air
-with silence in between — bridging it would assert the emitter transmitted through the gap).
+a record to a row it already holds, and refuses (`ui/src/presence.ts`, ADR-0019 §7):
+
+- **no interval on the row** — nothing to cap or open, and none is conjured; rows are created by the
+  poll, never by the stream;
+- **anything that would shorten the measured extent** — an END at or before the end already held, or
+  an opening record that would move a live interval's start later. Capping the open cap is not
+  shortening: that span was assumption standing in for a measurement.
+
+T-388's third refusal — *a span starting after the end held is refused, and the box waits for the
+poll* — is **removed**, replaced by REOPEN (§15.4). The silence is still never claimed; it is now
+drawn as a gap between two boxes rather than hidden behind a box that quietly stopped moving.
 
 ## Sources
 

@@ -5851,7 +5851,7 @@ tasks:
     milestone: M3
     title: 'blind_* family scores jump 0.10 to 1.00 between window sizes: a lock/no-lock transition fed
       to a Gaussian as a continuous value'
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-281
@@ -8095,7 +8095,7 @@ tasks:
   - id: T-397
     title: The frequency navigator survey strip must fold with max-hold and share the waterfall's intensity scaling
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: UI
     core_interface: true
@@ -8363,6 +8363,11 @@ tasks:
       DO NOT resolve this by relaxing T-401's 4 s bound: it is a difference of two
       capture timestamps chosen against a measured 1.00 s, and loosening it to fit a
       regression would enshrine exactly what the harness exists to catch.
+      SEQUENCING (T-404, merged 3d37ccf): it refit BOTH density files and bumped
+      features@5 -> features@6. If this ticket refits after its scene change it must
+      refit ON TOP of that, not race it. T-404 also added SynthConfig::packet_preamble
+      (default true) to hk-classify synth - nowhere near the WFM bandwidth, but it is
+      the same file family.
 
   - id: T-403
     title: A station with no pilot and no identity still confirms at the end of the recording
@@ -8423,7 +8428,7 @@ tasks:
   - id: T-404
     title: Six more features measure the observation, and three of them are one defect
     milestone: M3
-    status: in-progress
+    status: done
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -8459,7 +8464,7 @@ tasks:
   - id: T-405
     title: The frequency navigator's view box goes; coverage shading makes the tuned window self-evident
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     core_interface: true
@@ -8645,7 +8650,7 @@ tasks:
   - id: T-410
     title: Presence is an interval with endpoints, not an accumulation of observations - box runs to the live edge until an END is detected
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -8696,7 +8701,7 @@ tasks:
   - id: T-411
     title: The left time-overview renders at the old 12px buffer size, so a few cells stretch into blocks
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     core_interface: true
@@ -8798,6 +8803,39 @@ tasks:
       T-340's control stays green: changing what the wheel MEANS must not change what it
       can REACH - no wheel on either bar reaches a device route.
 
+  - id: T-413
+    title: Is a detected end provisional and revocable, and if so over what silence?
+    milestone: M2-hardening
+    status: blocked
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: [T-410]
+    blocked_on: >-
+      the user, a decision they may not know they need to make. CLAUDE.md carries the line "a detected
+      end is provisional and revocable", which T-410 satisfied only in the narrow sense and flagged
+      rather than decided (ADR-0019 section 6.1). Nobody can widen it without the user choosing what a
+      dropout is, because the two readings in the repo genuinely conflict.
+    notes: |
+      T-410 satisfies the line for every silence SHORTER THAN THE IDLE GAP: no END is
+      emitted, so there is nothing to revoke. The question is whether it must hold for
+      LONGER silences too - i.e. whether an emitter that goes quiet and returns should
+      have its presence intervals JOINED after the fact.
+      THE CONFLICT, and it is real rather than a wording problem: joining across longer
+      silences contradicts ADR-0017's settled reading of the ISM case, where fifty 30 s
+      bursts are FIFTY INTERVALS and not one - which has a test. And T-410's own
+      observation is the sharp end of it: ANY WINDOW WIDE ENOUGH TO REJOIN A REAL
+      DROPOUT IS WIDE ENOUGH TO SWALLOW A BURST CADENCE.
+      So this is not "add revocation". It is: what is a dropout, as distinct from a
+      signal that stopped? Plausible answers the user might choose between - the same
+      emitter identity resuming within some multiple of its own established cadence
+      (which makes the window a property of the emitter rather than a constant); or
+      never, with a reopen always drawing a second box and the gap shown, which is what
+      T-410 shipped.
+      Whatever is chosen must keep the property T-410 established: the silence is never
+      CLAIMED. Drawing two boxes with a visible gap already tells the truth; joining
+      them would assert continuity through air that was measured empty.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

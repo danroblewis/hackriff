@@ -322,6 +322,18 @@ pub struct SynthConfig {
     pub lo_offset_hz: f64,
     /// Amplitude imbalance between I and Q, fraction.
     pub iq_imbalance: f64,
+    /// Whether the packet classes open with their alternating preamble.
+    ///
+    /// **True everywhere the corpus is generated**, because a real FSK burst is a packet and the
+    /// preamble's discrete lines are part of what `carrier_line_db` and `flatness` see. It exists
+    /// to be turned **off** by `tests/feature_length_invariance.rs`, which asks whether a feature
+    /// moves when one emission is watched for less time — a question that has no answer while the
+    /// first tenth to third of the record is a *different* emission from the rest. Measured there:
+    /// with the preamble on, a prefix ladder reads `c20_norm` 0.371 over the whole record against
+    /// 0.152 over its first quarter, which is the preamble and not the record length. Turning it
+    /// off costs the guard nothing it was measuring and removes the confound at its source, rather
+    /// than by widening a tolerance to cover it.
+    pub packet_preamble: bool,
 }
 
 impl SynthConfig {
@@ -336,6 +348,7 @@ impl SynthConfig {
             // ≈ 0.16 cycles over 16 384 samples at 1 Msps.
             lo_offset_hz: 10.0,
             iq_imbalance: 0.01,
+            packet_preamble: true,
         }
     }
 }
@@ -419,7 +432,7 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
     let fs = analysis_rate(class, cfg.sample_rate_hz);
     // Symbol rate varies with the seed so the densities never learn one rate.
     let rate = 25e3 + 75e3 * rng.unit();
-    let (mut x, design_bw) = waveform(class, &mut rng, n, fs, rate);
+    let (mut x, design_bw) = waveform(class, &mut rng, n, fs, rate, cfg.packet_preamble);
     normalise(&mut x);
 
     // Noise at the requested in-band SNR: N₀ = σ²/fs, so σ² = P_s·fs/(BW·10^(SNR/10)).
@@ -552,7 +565,14 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
 }
 
 /// The waveform and its design bandwidth (used only to scale the noise to the requested SNR).
-fn waveform(class: Class, rng: &mut Rng, n: usize, fs: f64, rate: f64) -> (Vec<Complex64>, f64) {
+fn waveform(
+    class: Class,
+    rng: &mut Rng,
+    n: usize,
+    fs: f64,
+    rate: f64,
+    preamble: bool,
+) -> (Vec<Complex64>, f64) {
     match class {
         Class::Am => (am(rng, n, fs, 0.7), 9e3),
         Class::Nbfm => {
@@ -578,7 +598,7 @@ fn waveform(class: Class, rng: &mut Rng, n: usize, fs: f64, rate: f64) -> (Vec<C
         // any fixture.
         Class::Fsk2 => {
             let h = 0.4 + 1.2 * rng.unit();
-            let pre = 0.1 + 0.25 * rng.unit();
+            let pre = (0.1 + 0.25 * rng.unit()) * f64::from(u8::from(preamble));
             (
                 cpfsk(rng, n, fs, rate, 2, rate * h / 2.0, 0.0, pre),
                 rate * (1.0 + h),
@@ -587,7 +607,7 @@ fn waveform(class: Class, rng: &mut Rng, n: usize, fs: f64, rate: f64) -> (Vec<C
         Class::Gfsk => {
             let h = 0.3 + 0.6 * rng.unit();
             let bt = 0.3 + 0.3 * rng.unit();
-            let pre = 0.1 + 0.25 * rng.unit();
+            let pre = (0.1 + 0.25 * rng.unit()) * f64::from(u8::from(preamble));
             (
                 gfsk(rng, n, fs, rate, rate * h / 2.0, bt, pre),
                 rate * (1.0 + h),
@@ -596,7 +616,7 @@ fn waveform(class: Class, rng: &mut Rng, n: usize, fs: f64, rate: f64) -> (Vec<C
         // MSK is the h = 0.5 case by definition (ADR-0016 §1), so its index is not a free
         // parameter and stays fixed.
         Class::Msk => {
-            let pre = 0.1 + 0.25 * rng.unit();
+            let pre = (0.1 + 0.25 * rng.unit()) * f64::from(u8::from(preamble));
             (
                 cpfsk(rng, n, fs, rate, 2, rate * 0.25, 0.0, pre),
                 1.5 * rate,
@@ -604,7 +624,7 @@ fn waveform(class: Class, rng: &mut Rng, n: usize, fs: f64, rate: f64) -> (Vec<C
         }
         Class::Fsk4 => {
             let h = 0.4 + 1.0 * rng.unit();
-            let pre = 0.1 + 0.25 * rng.unit();
+            let pre = (0.1 + 0.25 * rng.unit()) * f64::from(u8::from(preamble));
             (
                 cpfsk(rng, n, fs, rate, 4, rate * h / 2.0, 0.0, pre),
                 rate * (1.0 + 1.5 * h),

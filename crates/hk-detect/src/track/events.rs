@@ -105,6 +105,23 @@ pub struct LiveExtent {
     /// **End of the last burst actually measured**, stream ns — never a clock read. A track that
     /// has gone quiet keeps the end it went quiet at.
     pub t_end_ns: i64,
+    /// Silence since [`Self::t_end_ns`] that the receiver **actually observed**, stream ns
+    /// (T-410, ADR-0019 §3). 0 while the track is still bursting.
+    ///
+    /// This is wall silence passed through the tracker's coverage, so it counts only time the
+    /// front end was looking at this region — the tracker's own idle test (`maintain`) is the same
+    /// quantity against a longer timeout. It is the end detector's input, and it is here rather
+    /// than computed downstream because the coverage that normalises it lives in the tracker and
+    /// nowhere else: a consumer comparing `now − t_end_ns` would call a sweep's absence between
+    /// visits "silence" and close an interval nobody heard stop.
+    pub observed_silence_ns: i64,
+    /// Wall-clock silence since [`Self::t_end_ns`], stream ns.
+    ///
+    /// Carried beside the observed figure because the *pair* is what says whether the receiver
+    /// looked away at all: equal (within the coverage's own slack) means it never did, and only
+    /// then can an interval be closed at the [`hk_model::MIN_IDLE_GAP_S`] floor rather than
+    /// deferred to the conservative gap.
+    pub wall_silence_ns: i64,
 }
 
 /// A track with every C10 feature, including those docs/07's `Track` does not store yet.

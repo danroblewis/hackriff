@@ -1,31 +1,53 @@
-// Live presence extensions (T-388): the `presence` stream's records, and the one rule for applying
-// one to an inventory row that is already on screen.
+// Live presence **endpoints** (T-410, ADR-0019): the `presence` stream's records, and the one rule
+// for applying one to an inventory row that is already on screen.
 //
-// Why this exists. A live signal's box grew in steps of ten seconds: the backend committed an open
-// track's presence every 5 s and the UI polled `/api/inventory` every 5 s, two lazy links in
-// series. The backend now publishes how far each open emitter's presence **has been observed** on
-// its own stream (docs/stream-contract.md §15), and this file is everything the client does with it.
+// Why this exists, and what changed. T-388 built this under **contract A — presence is an
+// accumulation of observations**: the box's top was the newest *measured* end, and a record per
+// open emitter per tick pushed it forward. It could never over-claim, and it could never say the
+// one thing a live spectrum display exists to say — *this signal is on the air now*.
 //
-// What it must never do, which is the whole point of pushing rather than guessing. A box may only
-// extend as far as presence was actually measured. Nothing here reads a clock, and nothing here
-// interpolates between records: `t_end_s` is copied from the record, never advanced towards the live
-// edge, so a signal that stops has a box that stops. Drawing to the live edge on the assumption the
-// signal is still there would be a claim about air nobody measured — the same rule as the coverage
-// map's grey, which refuses to spell "never looked" as "looked and it was quiet".
+// The user replaced it with **contract B — presence is an interval with endpoints**. The box runs
+// from its start straight to the live edge and caps only on a real detected END, so the measurement
+// is the START event plus the **absence of an END**. The stream therefore carries START / END /
+// REOPEN and nothing at all while an interval merely continues — never a per-poll presence bump.
 //
-// Presentation-free and DOM-free, so both rules are unit-tested directly.
+// What keeps that honest, here and next door. A box drawn to the live edge is a claim about air
+// nobody measured, so:
+//
+//   * the span above the last measured end is drawn as the **open cap** — lighter, with a rule
+//     where measurement stops (`timebox.ts`, `waterfall.ts`) — and it grows visibly as the silence
+//     grows, so a suspected end is legible without being acted on;
+//   * nothing here reads a clock and nothing here interpolates. `t_end_s` is copied from the
+//     record, never advanced: it is the *boundary* of the cap, and the cap's own top is placed by
+//     the render pass at the newest row it is drawing (T-362);
+//   * an END carries the **measured** end, so capping is the box retracting to the truth rather
+//     than stopping wherever the assumption had reached.
+//
+// Presentation-free and DOM-free, so every rule is unit-tested directly.
 
 import type { PresenceInterval, Row } from "./inventory";
 
-/** `metadata.kind` of a presence extension, and the `frame_model` beside it (hk-pipeline). */
-export const PRESENCE_EXTENSION_KIND = "presence-extension";
-/** The stream the extensions arrive on (`/ws/presence`, `GET /api/streams`). */
+/** `metadata.kind` of an opening record for an emitter's first interval. */
+export const PRESENCE_START_KIND = "presence-start";
+/** …for a later interval on an emitter that has been on the air before. */
+export const PRESENCE_REOPEN_KIND = "presence-reopen";
+/** …of a closing record, at the interval's measured end. */
+export const PRESENCE_END_KIND = "presence-end";
+/** The stream the endpoints arrive on (`/ws/presence`, `GET /api/streams`). */
 export const PRESENCE_STREAM_ID = "presence";
 
-/** One extension: which emitter, and the `presence.last_interval` object the backend now serves for
- * it. The interval is the same three fields `/api/inventory` returns, so it is assigned, not
- * rebuilt. */
-export interface PresenceExtension {
+/** Which endpoint a record announces. */
+export type PresenceEventKind = typeof PRESENCE_START_KIND | typeof PRESENCE_REOPEN_KIND | typeof PRESENCE_END_KIND;
+
+const KINDS: readonly string[] = [PRESENCE_START_KIND, PRESENCE_REOPEN_KIND, PRESENCE_END_KIND];
+
+/**
+ * One endpoint: which emitter, which endpoint, and the `presence.last_interval` object the backend
+ * serves for it. The interval is the same three fields `/api/inventory` returns, so it is assigned,
+ * not rebuilt.
+ */
+export interface PresenceEvent {
+  kind: PresenceEventKind;
   emitterId: string;
   interval: PresenceInterval;
 }
@@ -37,44 +59,63 @@ const num = (v: unknown): number | null => (typeof v === "number" && Number.isFi
  * marker, a record of another kind, a malformed line. `null` means "nothing to apply", never "apply
  * something approximate".
  */
-export function parsePresenceExtension(text: string): PresenceExtension | null {
+export function parsePresenceEvent(text: string): PresenceEvent | null {
   let j: Record<string, unknown>;
   try { j = JSON.parse(text) as Record<string, unknown>; } catch { return null; }
   if (j.type !== "message") return null;
   const meta = j.metadata as Record<string, unknown> | undefined;
-  if (!meta || meta.kind !== PRESENCE_EXTENSION_KIND) return null;
+  const kind = meta?.kind;
+  if (typeof kind !== "string" || !KINDS.includes(kind)) return null;
   const emitterId = typeof j.emitter_id === "string" ? j.emitter_id : null;
-  const iv = meta.last_interval as Record<string, unknown> | undefined;
+  const iv = meta?.last_interval as Record<string, unknown> | undefined;
   if (!emitterId || !iv) return null;
   const t0 = num(iv.t_start_s), t1 = num(iv.t_end_s);
   if (t0 === null || t1 === null || typeof iv.open !== "boolean") return null;
-  return { emitterId, interval: { t_start_s: t0, t_end_s: t1, open: iv.open } };
+  // `open` is stated by the record and must agree with the kind it arrived as; a record that
+  // disagrees with itself is a malformed record, not a judgement call to make here.
+  if (iv.open !== (kind !== PRESENCE_END_KIND)) return null;
+  return { kind: kind as PresenceEventKind, emitterId, interval: { t_start_s: t0, t_end_s: t1, open: iv.open } };
 }
 
 /**
- * The row's `presence` with this extension applied, or `null` when it must not be applied — in
- * which case the row is left exactly as the last poll served it.
+ * The row's `presence` with this endpoint applied, or `null` when it must not be applied — in which
+ * case the row is left exactly as the last poll served it.
  *
- * Three refusals, each of them a thing the box would otherwise claim without evidence:
+ * **The refusals, under contract B.** T-388 had three; ADR-0019 §7 keeps two and replaces the third.
  *
- * 1. **No interval on the row.** `last_interval: null` means no presence interval intersects the
- *    window being viewed; there is no box, and one conjured from an extension would be a rectangle
- *    the windowed query did not return.
- * 2. **Not newer.** An extension at or behind the end already held is dropped rather than applied,
- *    so a reordered or replayed record can never shorten a box.
- * 3. **Not contiguous.** An extension whose span starts *after* the end on screen describes a
- *    different stretch of air, with silence in between (a new track bound to the same emitter after
- *    a gap). Stretching the box across that gap would assert the emitter was transmitting through
- *    it. The box waits for the poll, which serves the new interval as its own.
+ * 1. **No interval on the row.** *(Kept verbatim.)* `last_interval: null` means no presence
+ *    interval intersects the window being viewed; there is no box, and one conjured from a record
+ *    would be a rectangle the windowed query did not return. Rows are created by the poll, never by
+ *    the stream.
+ * 2. **Nothing may shorten the measured extent.** *(Kept, restated.)* An END at or before an end
+ *    already held is dropped, so a reordered or replayed record cannot pull a box's measured edge
+ *    backwards, and an opening record may not move a live interval's start later. Capping the open
+ *    cap is **not** shortening: that span was assumption standing in for a measurement, and the END
+ *    is the measurement it was standing in for.
+ * 3. ~~**Not contiguous.**~~ *(Removed.)* An extension whose span started after the end on screen
+ *    used to be refused, because stretching the box across the silence would assert the emitter
+ *    transmitted through it. A REOPEN does not stretch anything: it **replaces** `last_interval`
+ *    with the new one, so the returning signal gets its own box and the silence between them is
+ *    drawn as a gap rather than hidden behind a box that quietly stopped moving. Same honesty, and
+ *    the box arrives on the next tick instead of on the next poll. The earlier interval is not
+ *    lost — it is History's, and the windowed poll still serves it.
  *
- * `t_start_s` is deliberately left as the row had it: the row's interval may have begun before the
- * track this extension came from, and an extension is only ever news about the newest edge.
+ * A START/REOPEN's `t_start_s` is taken from the record, since a new interval is a new start; a
+ * continuing interval's is deliberately left as the row had it, because the row's interval may have
+ * begun before the track this record came from.
  */
-export function extendPresence(row: Pick<Row, "presence">, ext: PresenceExtension): Row["presence"] | null {
+export function applyPresenceEvent(row: Pick<Row, "presence">, ev: PresenceEvent): Row["presence"] | null {
   const p = row.presence;
   const iv = p?.last_interval;
-  if (!p || !iv) return null;
-  if (!(ext.interval.t_end_s > iv.t_end_s)) return null;
-  if (ext.interval.t_start_s > iv.t_end_s) return null;
-  return { ...p, last_interval: { ...iv, t_end_s: ext.interval.t_end_s, open: ext.interval.open } };
+  if (!p || !iv) return null; // (1)
+  if (ev.kind === PRESENCE_END_KIND) {
+    // (2): an END may only ever state an end at or past the measured one already held.
+    if (!(ev.interval.t_end_s >= iv.t_end_s)) return null;
+    if (!iv.open && ev.interval.t_end_s <= iv.t_end_s) return null; // already closed here
+    return { ...p, last_interval: { ...iv, t_end_s: ev.interval.t_end_s, open: false } };
+  }
+  // (3): an opening record whose interval is the one already on screen is not news — contract B
+  // says nothing while an interval continues, so this is a replay.
+  if (ev.interval.t_start_s <= iv.t_start_s) return null;
+  return { ...p, last_interval: { ...ev.interval } };
 }
