@@ -8552,7 +8552,7 @@ tasks:
   - id: T-408
     title: The coverage tile pyramid and the full-spectrum-over-time view - design before building
     milestone: M5
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: DESIGN
     core_interface: true
@@ -9061,6 +9061,46 @@ tasks:
         and must not be what happens.
       Ties to T-341 (achievable-config snapping).
 
+  - id: T-419
+    title: Two coverage folds round partial coverage UP, so half-scanned spectrum reads as fully covered
+    milestone: M2-hardening
+    status: todo
+    priority: high
+    parallel_group: STORE
+    core_interface: true
+    model: opus
+    deps: [T-408]
+    acceptance: |
+      Found by T-408 while designing the tile pyramid. IT IS A LIVE DEFECT IN SHIPPED
+      CODE, not a design note, which is why it is its own ticket.
+      (1) Tile::fold_child sets `self.obs_s[i] = best_obs` (hk-store history/tile.rs
+      ~877-913), where best_obs is the MAX across the f_factor child frequency cells.
+      A parent whose left half was observed for the full minute and whose right half
+      was NEVER OBSERVED reads FULLY COVERED. At f_factor 2 over four folds, a level-4
+      cell can claim full coverage on ONE SIXTEENTH of its frequency extent.
+      CORRECT RULE, per T-408: sum obs_s over children and divide by the parent's own
+      extent. observed_s is foldable; DUTY IS NOT.
+      (2) OverviewCell::fold does `coverage += ...` then `/= sources` - a mean over
+      source cells, exact only when they are equal-duration AND wholly inside the
+      output cell. The second fails because `overview` lays a fractional grid and
+      assigns a source cell to every output cell it overlaps, UNWEIGHTED: a 1% overlap
+      counts as much as 100%.
+      WHY THIS IS THE SAME DEFECT AS T-397, one axis over: there the fold WAS a max at
+      every level and the INPUT was a Welch average, so a burst lost 30 dB before the
+      first max ran. Here the input is honest and the FOLD rounds up. Both produce a
+      number that claims more than was measured, and both are invisible from the wire,
+      which declares its semantics correctly in each case.
+      WHY IT MATTERS NOW: it is currently fit for its purpose - a narrow-band "is there
+      history here" query, where an optimistic answer costs little. It is FATAL to the
+      big view (T-408), whose entire point in the user's words is "mostly GREY =
+      unobserved, and that grey is the point: you see WHERE you have scanned". A
+      pyramid founded on a fold that rounds up paints the spectrum as scanned. T-408's
+      section 7 puts this at step 3, BEFORE the view scheme, for that reason.
+      CONTROL, and it is the one T-408 named: prove a level against LEVEL 0, never
+      against its parent - a parent-vs-child assertion proves only that the fold is a
+      max, which is T-397's exact blind spot.
+      Check what currently depends on the optimistic answer before changing it: the
+      narrow-band query this was built for may have calibrated around it.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
