@@ -3534,3 +3534,53 @@ T-314 measured its residual, pinned it with a test that asserts the **broken** b
 the decision is baked into the stored cell, so no read-side filter can undo it) and **T-371**, which
 T-359 made urgent: cohorts now split, so one subject shows two indistinguishable slots rows with
 different numbers and no field saying why.
+
+### B0.657 — T-368 merged, and the user generalises its rule to the whole UI (2026-09-16)
+
+Merged at `0b93e5f`, with T-376 folded in.
+
+**Two tune histories already existed and neither had ever been read as coverage.** The IQ ring
+journal opens a segment on every provenance change, so retunes are segment boundaries by
+construction — it is literally *"for each interval, which centre/span/rate and which device"*. The
+observation log is the long-horizon half. No new ledger, no schema change. Four other candidates were
+inspected and rejected for stated reasons: `provenance` is content-hash-deduped and **timeless**,
+`survey` is run-coarse, `track_segment` has boundaries but no config values, and `TunedLo` is never
+persisted.
+
+**One correction made at merge.** `Coverage::of` refuses zero spans, a non-positive sampled duration
+or a non-positive window, and the doc claimed `Sampled` "has no public constructor of its own, so
+there is no second door". Its fields are all `pub`, so `Coverage::Observed(Sampled { spans: 0, … })`
+was exactly that second door — the ticket's whole thesis, spellable in one struct literal. `Sampled`
+is now `#[non_exhaustive]`: fields stay readable, which is the point, but `Coverage::of` is the only
+way in from outside the crate. Behaviour never depended on it (the sole construction site is
+`Coverage::of` itself), so this is a claim made true rather than a bug fixed — but a false claim
+guarding a core invariant is worth ten lines.
+
+T-376's ruling on retune is the agent's and I would not have improved it: **an untouched viewport
+follows the tune centre; a user-framed one stays put and is only re-clamped**, because re-centring
+under a deliberate gesture would undo it. The viewport floors at one capture window, since a survey
+frame narrower than the live window would claim resolution the front end cannot open. It also
+declined to add a background-drag pan on the frequency bar, because that gesture is already
+region-zoom there, and said so rather than quietly picking one.
+
+**Then the user generalised the rule.** New `CLAUDE.md` invariant: every surface — waterfall, both
+navigators, the Candidate/Confirmed lists, the output/decode panels — is a view over one
+(time × frequency) window and **must display all the data it has for it**; empty only where data
+genuinely does not exist. They name three symptoms and say they are **one failure**: *"the black Live
+waterfall, the fixed-size grey block, and the empty sidebars"*. T-368 closed the first two. **The
+sidebars are still open and are the one on screen**, so T-379 went out at `high`.
+
+Its brief is an **audit before a fix**: census every surface, then answer the question that actually
+matters — when the window is scrubbed into history, do the lists **re-derive** from the ring/pyramid
+or merely **empty**? Those look identical on screen and are opposite bugs. And it names the temptation
+to refuse: making a sidebar non-empty by showing stale or all-time rows would satisfy the letter and
+break the time-scoping invariant. The fix is to fetch what exists for the window, not to widen the
+window. T-368's `Coverage` type is the honest machinery for "genuinely does not exist", and the brief
+points at it rather than letting a second notion of emptiness grow.
+
+**T-380** files the companion invariant: one view window even with multiple SDRs — extra front ends
+widen coverage, never split the view. It carries a tension I made explicit rather than leaving for
+someone to trip over: drawing a cell captured by device B into a view centred on device A's tune is a
+**display** union and is legitimate; asserting the two devices saw the same emitter is an **identity**
+claim and is not. It depends on T-378, since coverage cannot say which device looked where over the
+long horizon until observation-log spans carry a device.
