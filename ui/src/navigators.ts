@@ -208,6 +208,91 @@ export function stripCells(px: number, max: number): number {
   return Math.min(cap, Math.max(1, Math.round(px)));
 }
 
+// ---------------------------------------------------------------------------
+// Input arithmetic: one gesture, several devices (T-407 / T-412)
+// ---------------------------------------------------------------------------
+//
+// **The requirement that binds the two tickets together:** a pinch is the touch equivalent of the
+// wheel, and a touch drag is the existing pan. So the input layer's whole job is to reduce *every*
+// device — mouse wheel, trackpad, two fingers — to the **same two numbers** the bars already act
+// on: a **zoom factor** (> 1 zooms in, exactly `axis.wheelFactor`'s convention) and a **pan
+// delta**. Nothing below decides what a zoom or a pan *means*; `zoomWithin` and the time bar's own
+// targets do that, unchanged, for whichever device produced the number. Forking a touch path off
+// the mouse path is how the two drift, and is the thing these functions exist to make impossible.
+//
+// Everything here is CSS pixels in and a dimensionless number out — no DOM, no measurement.
+
+/** Pixels one wheel "line" and one wheel "page" are taken to be, matching `axis.wheelFactor`'s own
+ * scaling so a notch means the same travel to a pan as it does to a zoom. */
+const LINE_PX = 16, PAGE_PX = 400;
+/** The most one event may claim, so a flung trackpad cannot jump the whole window in a frame — the
+ * same clamp `axis.wheelFactor` applies before it exponentiates. */
+const WHEEL_CLAMP_PX = 400;
+
+/**
+ * A wheel event's `deltaY` in CSS pixels, whatever unit it arrived in (pixels, lines, pages).
+ *
+ * `axis.wheelFactor` does this normalisation privately on its way to a zoom factor; a wheel that
+ * **pans** needs the same travel in the same units, and duplicating the scaling by eye is how one
+ * notch would come to mean two different distances on one bar.
+ */
+export function wheelPx(deltaY: number, deltaMode = 0): number {
+  if (!Number.isFinite(deltaY)) return 0;
+  const px = deltaY * (deltaMode === 1 ? LINE_PX : deltaMode === 2 ? PAGE_PX : 1);
+  return Math.max(-WHEEL_CLAMP_PX, Math.min(WHEEL_CLAMP_PX, px));
+}
+
+/** Wheel travel that pans by one whole viewed span — so an ordinary notch (~100 px) moves about a
+ * quarter of what is on screen, and the view stays recognisable between notches. */
+export const WHEEL_PAN_PX = 400;
+
+/** The pan, as a fraction of **the span being viewed**, that `deltaY` asks for. Positive `deltaY`
+ * (scrolling down) moves forward; negative (scrolling up) moves back — on the time bar, whose
+ * oldest end is at the top, that is *scroll up = back toward older*, which is the direction the
+ * waterfall's own time axis runs. */
+export const wheelPanFrac = (deltaY: number, deltaMode = 0) => wheelPx(deltaY, deltaMode) / WHEEL_PAN_PX;
+
+/** The smallest spread a pinch is credited with, so two fingers meeting cannot divide by zero. */
+const PINCH_FLOOR_PX = 1;
+
+/** The distance between two pointers along one axis. */
+export const pinchSpread = (a: number, b: number) => Math.abs(a - b);
+
+/**
+ * The zoom factor a pinch has reached, **in the units `axis.wheelFactor` returns**: > 1 zooms in.
+ *
+ * That shared convention is the point. A pinch and a wheel notch are two ways of naming one number,
+ * so both bars' zooms take a factor and neither knows which device produced it — the touch path and
+ * the mouse path are the same arithmetic, not two implementations that agree today.
+ */
+export function pinchFactor(startSpreadPx: number, spreadPx: number): number {
+  if (!(startSpreadPx > 0) || !Number.isFinite(spreadPx)) return 1;
+  return Math.max(PINCH_FLOOR_PX, Math.abs(spreadPx)) / startSpreadPx;
+}
+
+/** Travel (px) along a bar's **own** axis that makes a press a deliberate drag rather than a tap.
+ *
+ * A finger is not a mouse: it lands over several pixels and wobbles while it lifts. At the mouse's
+ * threshold a tap on the frequency bar reads as a region select — and a region select on that bar
+ * retunes the radio on release with no confirmation (T-392), so the threshold is the difference
+ * between a fat-fingered tap and an unasked-for tune. */
+export const DRAG_PX = 6, TOUCH_DRAG_PX = 16;
+export const dragThresholdPx = (pointerType: string) => (pointerType === "mouse" ? DRAG_PX : TOUCH_DRAG_PX);
+
+/** How far outside a thin marker a press still grabs it. Zero for a mouse (the marker's own edge is
+ * the target); a finger's worth for touch, which is what makes a 9 px view marker draggable at all
+ * without redrawing it (T-407, "larger hit targets"). */
+export const TOUCH_GRAB_PX = 12;
+export const grabTolerancePx = (pointerType: string) => (pointerType === "mouse" ? 0 : TOUCH_GRAB_PX);
+
+/** Whether a press at `px` along the bar's axis grabs a marker spanning `[lo, hi]` px, given the
+ * tolerance its input device earns. Pure: the caller measures, this decides. */
+export function grabsMarker(lo: number, hi: number, px: number, tolPx: number): boolean {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || !Number.isFinite(px)) return false;
+  const t = Math.max(0, tolPx);
+  return px >= Math.min(lo, hi) - t && px <= Math.max(lo, hi) + t;
+}
+
 /** The value at fraction `f` (0 = `lo`) of an extent; clamped into it. */
 export function valueAt(ext: Range, f: number): number {
   const x = Math.min(1, Math.max(0, Number.isFinite(f) ? f : 0));

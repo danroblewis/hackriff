@@ -114,3 +114,23 @@
    reason as the time bar's overview: repeating a served cell across pixels shows what was measured,
    while interpolating between them invents a value. Grey cells in it are never-observed spectrum. */
 .freqnav .fn-survey { position: absolute; inset: 0; width: 100%; height: 100%; display: block; image-rendering: pixelated; border-radius: 2px; }
+
+/* T-407: the two bars on touch. *"The left + bottom scrubber bars are hard to use on touch —
+   everything else is fine on mobile."*
+
+   The `touch-action: none` on `.freqnav` / `.timenav` above is the "no accidental page scroll" half,
+   and it is deliberately **scoped to the two bars**: a blanket rule on `body` would make the whole
+   page unscrollable on a phone, which is the trap in this ticket. Everything outside these two
+   slots keeps the browser's own scrolling; the controls inside them opt back in with
+   `touch-action: manipulation` so a tap on LIVE or the retune offer is still a fast tap.
+
+   The rest is hit-target size, and only where the pointer is coarse — a mouse loses nothing. The
+   marker's *grab* area is widened in JS (`grabTolerancePx`), not here, so the drawn marker is
+   unchanged; this gives it a floor so there is something to see under the finger, and grows the two
+   buttons, which at 9.5px/1px padding are about 14px tall — under any thumb. */
+@media (pointer: coarse) {
+  .timenav .tn-view { min-height: 20px; }
+  .timenav .tn-track { inset: 15px 6px 30px; }
+  .timenav .tn-live { padding: 6px 4px; }
+  .freqnav .fn-offer { padding: 7px 12px; }
+}

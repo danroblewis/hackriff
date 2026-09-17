@@ -28,17 +28,18 @@ import { readFileSync } from "node:fs";
 import * as ax from "../src/axis";
 import { snapState, type NavigationGrid } from "../src/navigation";
 import {
-  activeWindows, bandKey, clampInto, clockRangeText, clockText, coverageRequest, defaultViewport,
-  dimSegments, litSegments, panWithin, placeOn, regionFromDrag, sameBand, spanOf, spectrumExtent,
-  stripCells, surveyCells, surveyViewport, timeExtent, timelineRequest, unobservedCount, valueAt,
-  zoomWithin, type CoverageCell, type CoverageResponse, type Range,
+  DRAG_PX, TOUCH_DRAG_PX, TOUCH_GRAB_PX, activeWindows, bandKey, clampInto, clockRangeText,
+  clockText, coverageRequest, defaultViewport, dimSegments, dragThresholdPx, grabTolerancePx,
+  grabsMarker, litSegments, panWithin, pinchFactor, pinchSpread, placeOn, regionFromDrag, sameBand,
+  spanOf, spectrumExtent, stripCells, surveyCells, surveyViewport, timeExtent, timelineRequest,
+  unobservedCount, valueAt, zoomWithin, type CoverageCell, type CoverageResponse, type Range,
 } from "../src/navigators";
 import { CMAP_GLSL, CMAP_STOPS, cmapBytes } from "../src/cmap";
 import { captureWindow, currentSpan } from "../src/app/capture/timeline";
 import {
   applyFreqZoom, applyTimeTarget, freqHoverText, freqPan, freqSelectText, freqZoomTarget,
-  goLiveFromNav, timeDetailText, timeDragText, timeHoverText, timePanTarget, timeWheelTarget,
-  timeZoomTarget,
+  goLiveFromNav, timeDetailText, timeDragText, timeHoverText, timePanTarget, timeWheelPan,
+  timeWheelTarget, timeZoomTarget,
 } from "../src/app/centre/navigators";
 import { mountPresenceStream } from "../src/app/explore/presence-stream";
 import { mounts } from "../src/app/centre";
@@ -762,9 +763,13 @@ test("T-367 control: dragging the vertical bar changes only time — the frequen
   // A pan keeps the span it is reviewing — it moves along time, it does not rescale it.
   const kept = timePanTarget(ext, { live: false, tS: t1 - 300, spanS: 20 }, -0.1);
   assert.equal(!kept.live && kept.spanS, 20);
-  // Past the oldest edge it clamps, exactly as the frequency bar clamps at the band edge.
+  // Past the oldest edge it clamps, exactly as the frequency bar clamps at the band edge — and
+  // T-412: it clamps the **window**, not its end instant, so the 20 s being reviewed stops with all
+  // 20 s inside the capture (`ext.lo + 20`) rather than hanging half off an edge with nothing
+  // behind it. The span is what must survive the clamp; see the fixed-span suite below.
   const oldest = timePanTarget(ext, { live: false, tS: t1 - 300, spanS: 20 }, -10);
-  near(!oldest.live ? oldest.tS : NaN, ext.lo);
+  near(!oldest.live ? oldest.tS : NaN, ext.lo + 20);
+  assert.equal(!oldest.live && oldest.spanS, 20);
 
   // Wheel: the span changes, the instant stays on the bar, and still no frequency moves.
   const beforeWheel = ctx.store.get();
@@ -1448,4 +1453,340 @@ test("T-397: the bottom bar asks for a MINI-WATERFALL — time rows and frequenc
     !/strip\.width = survey\.length;\s*\n\s*strip\.height = 1;/.test(src),
     "a single row stretched to the bar's height is the bug",
   );
+});
+
+// ---------------------------------------------------------------------------
+// T-412: on the time axis the wheel PANS; span-zoom is the secondary gesture
+// T-407: the bars on touch — one arithmetic, bigger targets, no page scroll
+// ---------------------------------------------------------------------------
+//
+// The user's correction: *"the TIME axis wheel should PAN / SCROLL THROUGH TIME — wheel up/down
+// moves the viewed window earlier/later, keeping the duration/span FIXED — NOT zoom the time
+// window. The user scrolls through time constantly and rarely resizes, so time-span zoom moves to a
+// deliberate secondary gesture (Ctrl/Cmd + wheel, or drag-select-to-zoom). Direction matches the
+// waterfall time axis: scroll up = back toward older. Frequency-axis wheel stays zoom."*
+//
+// And beside it: *"the left + bottom scrubber bars are hard to use on touch (everything else is
+// fine on mobile) — larger hit targets, proper touch drag/pinch, no accidental page scroll."*
+//
+// They are one suite because they are one requirement: **a pinch is the touch equivalent of the
+// wheel and a touch drag is the existing pan**, so whatever pan/zoom split T-412 lands, every input
+// device must resolve to the same arithmetic rather than growing a second copy of it. The controls
+// below are therefore not "the gestures work" — they are:
+//
+//  - the span **survives** a pan into either end (the mirror of the bug being replaced);
+//  - a pinch and a wheel produce **the same factor** and land in the same function;
+//  - and changing what a gesture *means* changed nothing about what it can **reach** (T-340).
+
+/** The capture window these use: ten minutes of retained IQ ending at `T1`. */
+const T1 = 1_789_300_920;
+const timeExt = (): Range => timeExtent({ t0S: T1 - 600, t1S: T1, spanS: 600 })!;
+
+test("T-412: the time wheel PANS at a fixed span, and scroll up goes back toward older", () => {
+  const ext = timeExt();
+  const cur = { live: false, tS: T1 - 300, spanS: 20 };
+
+  // Scroll UP (deltaY < 0, the browser's sign for a wheel rolled away from the user) goes EARLIER.
+  // This bar draws oldest at the top, so up-the-bar is back in time — the direction the waterfall's
+  // own time axis runs, which is what the user asked it to match.
+  const up = timeWheelPan(ext, cur, -100);
+  assert.equal(up.live, false);
+  assert.ok(!up.live && up.tS < cur.tS, "scrolling up must move back toward older");
+  // Scroll DOWN goes later, and by the same distance: one gesture, symmetric.
+  const down = timeWheelPan(ext, cur, 100);
+  assert.ok(!down.live && down.tS > cur.tS, "scrolling down must move forward toward newer");
+  near((!up.live ? cur.tS - up.tS : 0), (!down.live ? down.tS - cur.tS : 0), 1e-9);
+
+  // THE PROPERTY: the span is untouched by any amount of wheel, in either direction. This is the
+  // whole of "keeping the duration/span FIXED — NOT zoom the time window".
+  for (const dy of [-400, -100, -37, -1, 1, 37, 100, 400]) {
+    const t = timeWheelPan(ext, cur, dy);
+    assert.equal(t.live ? 20 : t.spanS, 20, `a wheel of ${dy} resized the reviewed span`);
+  }
+  // Nor do the wheel's other units — lines and pages scale to pixels, they do not become a zoom.
+  for (const mode of [0, 1, 2]) {
+    const t = timeWheelPan(ext, cur, -3, mode);
+    assert.equal(t.live ? 20 : t.spanS, 20);
+  }
+  // A notch is a fraction of WHAT IS ON SCREEN, not of the whole retention: reviewing 20 s inside a
+  // 600 s capture, one notch must be tens of seconds at most or every scroll is a jump elsewhere.
+  const step = !up.live ? cur.tS - up.tS : Infinity;
+  assert.ok(step > 0 && step <= 20, `one notch moved ${step}s of a 20s window`);
+  // …and the step scales with the window: a 200 s window steps ten times as far as a 20 s one.
+  const wide = timeWheelPan(ext, { live: false, tS: T1 - 300, spanS: 200 }, -100);
+  near(!wide.live ? T1 - 300 - wide.tS : NaN, step * 10, 1e-6);
+
+  // A nonsense delta is inert rather than a jump to an edge.
+  const inert = timeWheelPan(ext, cur, Number.NaN);
+  assert.deepEqual(inert, { live: false, tS: cur.tS, spanS: 20 });
+
+  // THE CONTROL that fails a wheel still wired to the zoom: `timeWheelTarget` — the arithmetic the
+  // plain wheel used to run — changes the span on the same input, and the two are not the same.
+  const zoomed = timeWheelTarget(ext, cur, ax.wheelFactor(-100, 0));
+  assert.notEqual(zoomed.live ? null : zoomed.spanS, 20, "the secondary gesture must still resize");
+});
+
+test("T-412: panning into either end of the capture window CLAMPS WITHOUT SHRINKING THE SPAN", () => {
+  // The bug being replaced was a gesture that resized when the user meant to move. Its mirror — a
+  // pan that resizes at the edges — is the one this must not introduce, and the edges are exactly
+  // where an end-clamped cursor would have done it: clamping only the reviewed *instant* to
+  // `ext.lo` leaves the window `[ext.lo - span, ext.lo]` half outside a capture that has nothing
+  // there, so `spanS` would still say 20 s while ten of them were of nothing.
+  const ext = timeExt();
+  for (const spanS of [1, 20, 200, 599]) {
+    for (const dy of [-4000, -400, 400, 4000]) {
+      let cur = { live: false, tS: T1 - 300, spanS };
+      // Wheel hard into one end, many notches, the way a user actually scrolls to the edge.
+      for (let i = 0; i < 40; i++) {
+        const t = timeWheelPan(ext, cur, dy);
+        if (t.live) { cur = { live: false, tS: ext.hi, spanS }; break; }
+        cur = { live: false, tS: t.tS, spanS: t.spanS ?? spanS };
+      }
+      assert.equal(cur.spanS, spanS, `panning ${dy} with a ${spanS}s window resized it`);
+      // And the window it stopped on is wholly inside the retained capture: both ends, not just one.
+      assert.ok(cur.tS <= ext.hi + 1e-6, `${cur.tS} is past the live edge`);
+      assert.ok(cur.tS - spanS >= ext.lo - 1e-6, `a ${spanS}s window ended at ${cur.tS}, before the capture starts`);
+    }
+  }
+
+  // A single enormous pan lands in the same place as forty small ones: the clamp is a property of
+  // the target, not of how it was approached.
+  const far = timePanTarget(ext, { live: false, tS: T1 - 300, spanS: 20 }, -100);
+  assert.deepEqual(far, { live: false, tS: ext.lo + 20, spanS: 20 });
+  // The newest end is `live`, not a window pinned one span short of it.
+  assert.deepEqual(timePanTarget(ext, { live: false, tS: T1 - 300, spanS: 20 }, 100), { live: true });
+  // A span wider than the whole capture cannot be kept, and says so by going live rather than by
+  // silently becoming a shorter window.
+  assert.deepEqual(timePanTarget(ext, { live: false, tS: T1 - 100, spanS: 5000 }, -1), { live: true });
+  // A live cursor is reviewing no span at all, so there is nothing to preserve: it keeps null.
+  const fromLive = timePanTarget(ext, { live: true, tS: 0, spanS: null }, -0.5);
+  assert.deepEqual(fromLive, { live: false, tS: T1 - 300, spanS: null });
+});
+
+test("T-407/T-412: a pinch and a wheel are ONE arithmetic — the same factor into the same function", () => {
+  // `pinchFactor` answers in `axis.wheelFactor`'s own units (> 1 zooms in), which is what lets the
+  // two share a zoom instead of each carrying a copy of it.
+  assert.equal(pinchFactor(100, 200), 2);          // fingers apart: zoom in
+  assert.equal(pinchFactor(200, 100), 0.5);        // fingers together: zoom out
+  assert.equal(pinchFactor(100, 100), 1);          // no movement: no zoom
+  assert.ok(ax.wheelFactor(-100, 0) > 1 && ax.wheelFactor(100, 0) < 1, "…the same direction the wheel uses");
+  // Degenerate inputs are inert, never a division by zero or a jump to an edge.
+  for (const [a, b] of [[0, 50], [-1, 50], [100, Number.NaN]]) assert.equal(pinchFactor(a, b), 1);
+  assert.ok(Number.isFinite(pinchFactor(100, 0)) && pinchFactor(100, 0) > 0, "fingers meeting must not divide by zero");
+  assert.equal(pinchSpread(10, 40), 30);
+  assert.equal(pinchSpread(40, 10), 30);
+
+  // A pinch to the same factor a wheel notch reaches produces the SAME target, on both bars. Not
+  // "they agree today" — they are the literal same call, which the source check below pins.
+  const ext = timeExt(), cur = { live: false, tS: T1 - 100, spanS: 40 };
+  const f = ax.wheelFactor(-100, 0);
+  assert.deepEqual(timeWheelTarget(ext, cur, pinchFactor(100, 100 * f)), timeWheelTarget(ext, cur, f));
+  const b = spectrumExtent(GRID.frequency)!, v = surveyViewport(b, null, false, 100e6, 2.4e6)!;
+  assert.deepEqual(zoomWithin(b, v, 0.5, pinchFactor(100, 100 * f), 2.4e6), zoomWithin(b, v, 0.5, f, 2.4e6));
+
+  const src = readFileSync("src/app/centre/navigators.ts", "utf8");
+  const at = (n: string) => { const i = src.indexOf(`function ${n}(`); assert.ok(i > 0, n); return i; };
+  const freqMount = src.slice(at("mountFreqNav"), at("mountTimeNav"));
+  const timeMount = src.slice(at("mountTimeNav"), src.indexOf("export const navigatorMounts"));
+
+  // ONE zoom per bar, and both the wheel handler and the pinch handler call it by name. A second
+  // implementation of either bar's zoom is the drift this ticket exists to prevent.
+  for (const [mount, fn, bar] of [[freqMount, "zoomFreqBy", "frequency"], [timeMount, "zoomTimeBy", "time"]] as const) {
+    assert.equal(mount.split(`const ${fn} = `).length, 2, `${bar}: ${fn} must be defined exactly once`);
+    assert.ok(new RegExp(`onPinch:[^\\n]*${fn}`).test(mount), `${bar}: the pinch must go through ${fn}`);
+    // The wheel listener's body names it too.
+    const wheel = mount.slice(mount.indexOf('addEventListener("wheel"'));
+    assert.ok(wheel.includes(fn), `${bar}: the wheel must go through ${fn}`);
+  }
+  // The frequency bar's zoom is still `zoomWithin` about the pointer, and the time bar's is still
+  // `timeWheelTarget` — T-412 moved which input reaches the zoom, not the zoom.
+  assert.ok(freqMount.includes("zoomWithin(b, ext,"), "the frequency zoom arithmetic is unchanged");
+  assert.ok(timeMount.includes("timeWheelTarget(ext, cursorNow(), factor)"), "the time zoom arithmetic is unchanged");
+  // And a touch drag is the existing pan: `attachBar`'s pan branch is the only one, shared by both.
+  assert.equal(src.split("function attachBar(").length, 2, "one pointer path for mouse and touch");
+
+  // A pinch arrives over many frames, and what the tracker hands on is the INCREMENT since the last
+  // one — because the zoom it feeds reads the bar's current state, which is exactly what a wheel
+  // notch does to it. So the increments must compose back to the absolute factor, or a slow pinch
+  // and a fast one to the same spread would finish somewhere different.
+  assert.match(src, /const step = abs \/ pinchLast;\s*\n\s*pinchLast = abs;/);
+  let composed = 1, prev = 1;
+  for (const spread of [110, 150, 220, 260, 300]) {
+    const abs = pinchFactor(100, spread);
+    composed *= abs / prev;
+    prev = abs;
+  }
+  near(composed, pinchFactor(100, 300), 1e-12);
+  // The absolute is measured from where the fingers STARTED, never from the last frame: a ratio of
+  // successive frames would accumulate its own rounding across a long pinch.
+  assert.match(src, /pinchFrom = pinchSpread\(xs\[0\], xs\[1\]\)/);
+});
+
+test("T-412: the SECONDARY time zoom is ctrl/cmd + wheel, and the plain wheel is the pan", () => {
+  const src = readFileSync("src/app/centre/navigators.ts", "utf8");
+  const timeMount = src.slice(src.indexOf("function mountTimeNav("), src.indexOf("export const navigatorMounts"));
+  const wheel = timeMount.slice(timeMount.indexOf('addEventListener("wheel"'));
+  const body = wheel.slice(0, wheel.indexOf("{ passive: false }"));
+
+  // The split, in the handler: the modifier picks the zoom, everything else pans. ctrl+wheel is
+  // also exactly what a trackpad pinch sends, so the secondary gesture and the touch gesture are
+  // one event on a laptop rather than two code paths.
+  assert.match(body, /e\.ctrlKey \|\| e\.metaKey/);
+  assert.match(body, /zoomTimeBy\(/);
+  assert.match(body, /else[\s\S]*timeWheelPan\(/);
+  // The regression: an unconditional zoom on the plain wheel, which is what this replaced.
+  assert.ok(
+    !/e\.preventDefault\(\);\s*\n\s*applyTimeTarget\(store, timeWheelTarget\(/.test(body),
+    "the plain time wheel must not zoom the span",
+  );
+  // The other bar is untouched: *"frequency-axis wheel stays zoom"*, with no modifier needed.
+  const freqMount = src.slice(src.indexOf("function mountFreqNav("), src.indexOf("function mountTimeNav("));
+  const fWheel = freqMount.slice(freqMount.indexOf('addEventListener("wheel"'));
+  assert.ok(!/ctrlKey|metaKey/.test(fWheel.slice(0, fWheel.indexOf("{ passive: false }"))),
+    "the frequency wheel must zoom with no modifier");
+  // Drag-select-to-zoom on the time bar — the other secondary gesture the user named — still exists.
+  assert.ok(timeMount.includes("timeZoomTarget("), "a dragged region must still zoom the time span");
+});
+
+test("T-407: a TAP and a CROSS-AXIS STROKE cannot command the radio", () => {
+  // The failure mode this ticket could introduce. T-392 made a region select on the frequency bar
+  // retune on release WITH NO CONFIRMATION, and on touch that is far easier to trigger by accident
+  // than with a mouse: a finger lands over several pixels and wobbles as it lifts, and a reflexive
+  // page-scroll stroke lands on a bar that has `touch-action: none`.
+  //
+  // Two things stop it, and both are arithmetic rather than judgement:
+
+  // (1) The threshold is the INPUT DEVICE'S. A 6 px mouse threshold applied to a finger turns a tap
+  //     into a drag, and a drag on this bar is a tune.
+  assert.equal(dragThresholdPx("mouse"), DRAG_PX);
+  assert.equal(DRAG_PX, 6);
+  for (const t of ["touch", "pen", ""]) {
+    assert.equal(dragThresholdPx(t), TOUCH_DRAG_PX);
+    assert.ok(TOUCH_DRAG_PX > DRAG_PX, "a finger must need more travel than a mouse");
+  }
+
+  // (2) Travel is measured along the BAR'S OWN AXIS. It was `clientX + clientY`, so a stroke ACROSS
+  //     a bar counted as travel ALONG it — a swipe down the horizontal frequency bar reached the
+  //     threshold and committed a near-zero-width region. Each bar now names its own axis.
+  const src = readFileSync("src/app/centre/navigators.ts", "utf8");
+  assert.ok(!src.includes("e.clientX + e.clientY"), "travel must not mix the two axes");
+  const freqMount = src.slice(src.indexOf("function mountFreqNav("), src.indexOf("function mountTimeNav("));
+  const timeMount = src.slice(src.indexOf("function mountTimeNav("), src.indexOf("export const navigatorMounts"));
+  assert.match(freqMount, /axisPx: \(e\) => e\.clientX/);
+  assert.match(timeMount, /axisPx: \(e\) => e\.clientY/);
+  assert.match(src, /Math\.abs\(d\.axisPx\(e\) - downPx\) >= threshold/);
+  assert.match(src, /threshold = dragThresholdPx\(e\.pointerType\)/);
+
+  // (3) A PINCH never selects. Two fingers on the frequency bar must zoom the survey frame, not
+  //     tune the radio to wherever they finished — so a second pointer cancels the press outright
+  //     instead of falling through to the committed branch.
+  assert.match(src, /if \(mode && mode !== "pinch"\) d\.onCancel\(\)/);
+  const end = src.slice(src.indexOf("const end = (e: PointerEvent)"));
+  assert.match(end, /if \(mode === "pinch"\) d\.onCancel\(\);\s*\n\s*else if \(mode === "pan"\)/);
+
+  // …and the committed branch — the one path from either bar to the front end — is still reached
+  // only by a single pointer released on the bar after passing its threshold.
+  assert.match(end, /else if \(moved && e\.type === "pointerup"\) d\.onRegion\(startFrac, d\.frac\(e\), true\)/);
+
+  // What a tap actually resolves to, through the same functions the mount calls: no region at all,
+  // so no plan, so nothing to post.
+  const ext = spectrumExtent(GRID.frequency)!;
+  assert.equal(regionFromDrag(ext, 0.42, 0.42), null);
+  assert.equal(freqZoomTarget(GRID, G, regionFromDrag(ext, 0.42, 0.42), true).kind, "none");
+});
+
+test("T-340 CONTROL, under the new gestures: no wheel, pan or pinch on either bar reaches a device route", async () => {
+  // The constraint that cannot bend, re-run against every input T-407/T-412 added. Changing what a
+  // gesture MEANS must not change what it can REACH.
+  const { ctx, calls } = deviceSpyCtx();
+  const ext = timeExt();
+  const b = spectrumExtent(GRID.frequency)!;
+  const cur = GRID.frequency!.current!;
+
+  // A ±1.0 drag of the whole 6 GHz bar — T-340's own control, unchanged.
+  for (const df of [1, -1]) ctx.store.set(setLiveView(freqPan(G, ctx.store.get().live.view!, b, df).view));
+
+  // Wheel-panning the time bar from end to end, then wheel-zooming and pinch-zooming it.
+  let t = { live: false, tS: T1 - 300, spanS: 20 };
+  for (const dy of [-400, -400, -400, 400, 400, 400, 400]) {
+    const next = timeWheelPan(ext, t, dy);
+    applyTimeTarget(ctx.store, next);
+    t = next.live ? { live: false, tS: ext.hi, spanS: 20 } : { live: false, tS: next.tS, spanS: next.spanS ?? 20 };
+  }
+  for (const factor of [pinchFactor(100, 400), pinchFactor(400, 100), ax.wheelFactor(-100, 0)]) {
+    applyTimeTarget(ctx.store, timeWheelTarget(ext, t, factor));
+  }
+
+  // Pinch-zooming the frequency bar, in and out, to both stops.
+  let v = surveyViewport(b, null, false, cur.center_hz, cur.span_hz)!;
+  for (const [a, z] of [[100, 800], [800, 20], [50, 50]]) {
+    v = zoomWithin(b, v, 0.5, pinchFactor(a, z), cur.span_hz);
+    assert.ok(v.lo >= b.lo && v.hi <= b.hi && spanOf(v) >= cur.span_hz - 1e-6);
+  }
+
+  assert.deepEqual(calls, [], "no wheel, pan or pinch on either bar may reach the control API");
+  // …and not because nothing happened: the time cursor moved and the frame changed.
+  assert.equal(ctx.store.get().time.live, false);
+  assert.notDeepEqual(v, surveyViewport(b, null, false, cur.center_hz, cur.span_hz));
+
+  // The one gesture that may still reach it does, unchanged — so the control above is a property of
+  // the continuous gestures, not of a client that stopped calling anything.
+  const outside = regionFromDrag(b, (432.0e6 - b.lo) / spanOf(b), (432.4e6 - b.lo) / spanOf(b))!;
+  await applyFreqZoom(ctx, freqZoomTarget(GRID, G, outside, true));
+  assert.ok(calls.some((c) => c.path === "/api/control/center"), "region-select must still retune");
+});
+
+test("T-407: no accidental page scroll — and the suppression is SCOPED TO THE TWO BARS", () => {
+  const centre = readFileSync("src/app/centre/centre.css", "utf8");
+  const base = readFileSync("src/app/base.css", "utf8");
+
+  // A drag on a bar must not scroll the page, which on touch means `touch-action` on the bar.
+  assert.match(centre, /\.freqnav \{[^}]*touch-action: none/);
+  assert.match(centre, /\.timenav \{[^}]*touch-action: none/);
+
+  // THE TRAP, and the control for it: getting this wrong makes the WHOLE PAGE unscrollable on a
+  // phone. So no rule outside the two bars may suppress touch scrolling — not on the document, not
+  // on a wildcard, not on a panel. `.live-canvas` is the waterfall's own (pre-existing, T-051) and
+  // is itself a gesture surface, not a scroll container.
+  for (const m of base.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}@]+)\{[^{}]*touch-action[^{}]*\}/g)) {
+    assert.match(m[1].trim(), /^\.live-canvas$/, `touch-action outside a gesture surface: ${m[1].trim()}`);
+  }
+  for (const m of centre.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}@]+)\{[^{}]*touch-action[^{}]*\}/g)) {
+    assert.match(m[1].trim(), /^\.(specwf|axis|freqnav|timenav)\b/, `touch-action outside the bars: ${m[1].trim()}`);
+  }
+  // The controls inside the bars opt back in, so a tap on LIVE or the retune offer is a fast tap
+  // rather than a 300 ms wait or a swallowed press.
+  assert.match(centre, /\.timenav \.tn-live \{[^}]*touch-action: manipulation/);
+  assert.match(centre, /\.freqnav \.fn-offer \{[^}]*touch-action: manipulation/);
+});
+
+test("T-407: larger hit targets, and only where the pointer is coarse", () => {
+  // The marker's GRAB area is widened in code, not in the paint: the drawn marker is T-397/T-411's
+  // and this ticket does not touch rendering. A mouse gets exactly the marker's own edge.
+  assert.equal(grabTolerancePx("mouse"), 0);
+  assert.equal(grabTolerancePx("touch"), TOUCH_GRAB_PX);
+  assert.ok(TOUCH_GRAB_PX > 0);
+  // A thin marker — 9 px of a long bar, which is what `placeOn`'s 1.5 % minimum comes to — is
+  // missable by a finger and hittable once the tolerance is added.
+  assert.equal(grabsMarker(300, 309, 296, 0), false, "a mouse hits the marker, not near it");
+  assert.equal(grabsMarker(300, 309, 296, TOUCH_GRAB_PX), true, "a finger just above it still grabs it");
+  assert.equal(grabsMarker(300, 309, 305, 0), true);
+  assert.equal(grabsMarker(300, 309, 400, TOUCH_GRAB_PX), false, "…but not from anywhere on the bar");
+  assert.equal(grabsMarker(Number.NaN, 309, 305, 0), false, "an unmeasurable marker is not grabbed");
+
+  const src = readFileSync("src/app/centre/navigators.ts", "utf8");
+  const timeMount = src.slice(src.indexOf("function mountTimeNav("), src.indexOf("export const navigatorMounts"));
+  assert.match(timeMount, /grabsMarker\(r\.top, r\.bottom, e\.clientY, grabTolerancePx\(e\.pointerType\)\)/);
+
+  // And the two buttons, which at the resting font are about 14 px tall, grow for a coarse pointer
+  // only — a mouse layout loses nothing, which is why this is a media query and not a resize.
+  const centre = readFileSync("src/app/centre/centre.css", "utf8");
+  const coarse = centre.slice(centre.indexOf("@media (pointer: coarse)"));
+  assert.ok(coarse.length > 0, "the touch sizing must be behind (pointer: coarse)");
+  for (const sel of [".timenav .tn-live", ".freqnav .fn-offer", ".timenav .tn-view"]) {
+    assert.ok(coarse.includes(sel), `${sel} must get a touch-sized target`);
+  }
+  // T-391 made the bars 92 px, which is what makes a usable target possible at all; the touch rules
+  // must fit inside that rather than growing the bars again.
+  assert.match(readFileSync("src/app/base.css", "utf8"), /grid-template-rows: minmax\(0,1fr\) 26px 92px 92px/);
 });
