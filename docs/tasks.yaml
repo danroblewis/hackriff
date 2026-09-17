@@ -8269,7 +8269,7 @@ tasks:
   - id: T-402
     title: Our own synthetic WFM is too narrow to trigger our own WFM occupancy rule
     milestone: M3
-    status: in-progress
+    status: blocked
     priority: normal
     parallel_group: M3A
     deps: [T-398]
@@ -8284,6 +8284,20 @@ tasks:
       constant.
       Fix the generator so synthetic WFM is program-modulated to a realistic deviation,
       and check what else silently depended on the narrow scene.
+      HELD, NOT DONE (coordinator, 2026-09-16). Work is complete and committed on
+      branch task-t402 (eb29365), gate otherwise green, milestones green - but it
+      leaves confirm_latency::t398_wfm_without_pilot_does_not_take_the_fast_route
+      RED: on the now-wider NoPilotNoRds scene (159 kHz) FAMILY ASSIGNMENT takes
+      14.00 s against T-401's 4.0 s budget. Merging it would put a red test on main.
+      14.00 s is exactly the scene length, which is the same end-of-recording
+      signature T-398 found for CONFIRMATION - so this is either the same defect
+      T-403 is fixing (in which case its fix turns this green) or a SECOND
+      end-of-recording dependency on the family path, which wants its own ticket.
+      T-403 has been asked to say which. Merge after it reports.
+      DO NOT resolve this by relaxing T-401's 4 s bound: it is a difference of two
+      capture timestamps chosen against a measured 1.00 s, and loosening it to fit a
+      regression would enshrine exactly what the harness exists to catch.
+
   - id: T-403
     title: A station with no pilot and no identity still confirms at the end of the recording
     milestone: M3
