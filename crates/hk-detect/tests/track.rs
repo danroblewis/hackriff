@@ -1293,9 +1293,6 @@ fn inband_flicker_inside_a_continuous_station_is_a_fragment_not_an_emitter() {
     recs.sort_by_key(|r| r.frames.end);
     // T-109 live offers: the staggered flickers hop-link each other under the default config
     // (never offered while linked), so a hop-disabled twin isolates the live in-band rule.
-    // T-403 added the on-air alternative to the burst count; the in-band rule is independent of
-    // which clause admitted a track, so a fragment stays unofferable under either.
-    const LIVE_ON_AIR_S: f64 = 2.0;
     let mut no_hop = TrackerConfig::default();
     no_hop.hop.enabled = false;
     let mut twin = Tracker::new(no_hop);
@@ -1313,7 +1310,7 @@ fn inband_flicker_inside_a_continuous_station_is_a_fragment_not_an_emitter() {
                     .map(|s| s.burst_count)
             };
             let live = twin.summaries();
-            twin.live_offers_into(4, LIVE_ON_AIR_S, &mut offered);
+            twin.live_offers_into(4, &mut offered);
             assert!(near(&live, station).is_some(), "the station is still open");
             for k in [0, 3] {
                 assert!(
@@ -1332,7 +1329,7 @@ fn inband_flicker_inside_a_continuous_station_is_a_fragment_not_an_emitter() {
                     "flicker {k} is offered"
                 );
             }
-            tr.live_offers_into(4, LIVE_ON_AIR_S, &mut offered);
+            tr.live_offers_into(4, &mut offered);
             for k in [0, 3] {
                 assert_eq!(
                     near(&offered, flickers[k].0),

@@ -784,19 +784,13 @@ impl Tracker {
 
     /// T-109: summaries of the open, confirmed tracks whose inventory fate is settled enough to
     /// offer before they close, into `out` (cleared first; summaries are built only for these):
-    /// at least `min_bursts` bursts **or** at least `min_on_air_s` of air (T-403 — see
-    /// [`Tracker::offerable_live`]), no hop link and no hop set, formed or pending (a member's
+    /// at least `min_bursts` bursts, no hop link and no hop set, formed or pending (a member's
     /// inventory row is its hop set's), and not an in-band fragment of a live or recently closed
     /// continuous host (the T-101 rule, evaluated now against the live host set).
-    pub fn live_offers_into(
-        &self,
-        min_bursts: u64,
-        min_on_air_s: f64,
-        out: &mut Vec<TrackSummary>,
-    ) {
+    pub fn live_offers_into(&self, min_bursts: u64, out: &mut Vec<TrackSummary>) {
         out.clear();
         for i in 0..self.slots.len() {
-            if self.offerable_live(i, min_bursts, min_on_air_s) {
+            if self.offerable_live(i, min_bursts) {
                 out.push(self.summary(i, None));
             }
         }
@@ -805,20 +799,11 @@ impl Tracker {
     /// The predicate [`Tracker::live_offers_into`] and [`Tracker::live_extents_into`] share, so the
     /// fast extent of a track can never describe one the slow offer would not have made an entry
     /// for.
-    ///
-    /// **T-403 added the `min_on_air_s` alternative to the burst count**, and it is the clause a
-    /// continuous carrier passes. A broadcast station is *one long burst*, so it never reaches
-    /// `min_bursts` however long it transmits: before T-403 it was never offered, its inventory row
-    /// came from a chain if one claimed it, and if none did — a mode the chain rejected, an
-    /// admission race lost — it had no row at all until its track idled out. The two clauses ask
-    /// the same question of different emitters: several bursts is evidence for a repeating one,
-    /// seconds of unbroken air is evidence for a continuous one. Every other clause (live, not
-    /// tentative, no hop link or set, not an in-band fragment) is unchanged and applies to both.
-    fn offerable_live(&self, i: usize, min_bursts: u64, min_on_air_s: f64) -> bool {
+    fn offerable_live(&self, i: usize, min_bursts: u64) -> bool {
         let s = &self.slots[i];
         s.live
             && !s.tentative
-            && (s.bursts >= min_bursts || s.on_ns as f64 / NS >= min_on_air_s)
+            && s.bursts >= min_bursts
             && s.hop_links == 0
             && s.hop_set.is_none()
             && !self.inband_fragment(i, true)
@@ -2531,7 +2516,6 @@ impl Tracker {
                 0.0
             },
             confirmed_detections: s.confirmed,
-            bin_hz: s.bin_hz,
             next_burst_eta: period
                 .map(|p| Timestamp::from_unix_nanos(s.t_last_start + (p.period_s * NS) as i64)),
             closed,

@@ -28,20 +28,17 @@
 //!   by at least `min_valid_decodes` CRC-valid decodes. Structural identities
 //!   (`structural_schemes`, e.g. the blind framer's `other:hk-framing` signature) are not
 //!   transmitter identities and do not count.
-//! - **Continuous and trusted:** a track with at least `min_on_air_s` on air, duty cycle at least
-//!   `min_duty_cycle`, at most `max_suspect_fraction` suspect members (spur, image, IMD, clipping)
-//!   and at least `min_confirmed_detections` trust-confirmed detections. **T-403:** weighed while
-//!   the track is still open as well as when it closes, under two further clauses an open life must
-//!   also satisfy — no suspect members at all, and a width of several analysis bins, which a CW
-//!   receiver line cannot have.
+//! - **Continuous and trusted:** a closed track with at least `min_on_air_s` on air, duty cycle at
+//!   least `min_duty_cycle`, at most `max_suspect_fraction` suspect members (spur, image, IMD,
+//!   clipping) and at least `min_confirmed_detections` trust-confirmed detections.
 //! - **Verified emission (T-398):** a demodulation in `verified_modes` whose subcarrier loop
 //!   *locked* — for WFM, the 19 kHz stereo pilot tracked by the PLL to within
 //!   `pilot_tolerance_hz`, at `min_lock_quality` or better, inside `verified_bandwidth_hz` of
 //!   occupied bandwidth.
 //!
 //! The third route exists because the first two left a permanently-on emitter with **no live route
-//! at all**: its "continuous and trusted" evidence used to be weighed only when its track *closed*,
-//! so a station that never stops transmitting and carries no decodable identity stayed a candidate
+//! at all**: its "continuous and trusted" evidence is only weighed when its track *closes*, so a
+//! station that never stops transmitting and carries no decodable identity stayed a candidate
 //! until the track idled out (`idle_timeout_s`, 60 s) — tens of seconds after a human, or the
 //! demodulator itself, could see what it was. It is a short-circuit on *positive* evidence rather
 //! than a relaxation of the other two: a locked pilot is a coherent subcarrier at a standardised
@@ -142,22 +139,6 @@ pub trait Inventory: Send {
         Ok(())
     }
 
-    /// T-403: an open track the live offer would **not** make an entry for, because it is one long
-    /// burst — a continuous carrier — re-weighed against the confirmation rule.
-    ///
-    /// **It creates nothing.** Where [`Self::live_track`] offers a sighting and may bring an entry
-    /// into being, this only re-reads the rule for an entry something else already made; a track
-    /// with no [`Self::emitter_of_track`] binding is skipped. That is T-388's gate, for the same
-    /// reason: the strict offer predicate excludes exactly the continuous carriers a broadcast band
-    /// is full of, and reusing it here would leave the signals this exists for undecided.
-    fn live_trust(
-        &mut self,
-        _repo: &mut Repository,
-        _summary: &TrackSummary,
-    ) -> Result<(), RepoError> {
-        Ok(())
-    }
-
     /// The emitter whose inventory row `track`'s observations are recorded against, when this
     /// inventory has given it one (T-388).
     ///
@@ -201,39 +182,6 @@ pub struct ConfirmPolicy {
     pub max_suspect_fraction: f64,
     /// Trust-confirmed member detections needed. Default 1.
     pub min_confirmed_detections: u64,
-    /// T-403: weigh [`Self::continuous`] on a track that is **still open**, under the extra clauses
-    /// below. False leaves route B close-only, as it was before T-403.
-    pub live_continuous: bool,
-    /// T-403: narrowest an open track may be and still take the live continuous route, in analysis
-    /// bins of the detector's own resolution. Default 8.
-    ///
-    /// **This is the clause that keeps "continuous" from meaning "confirm anything that stays on".**
-    /// A receiver-generated line — a reference harmonic, an LO relative, a clock harmonic, a comb
-    /// tooth — is CW, so the only width it can *measure* is the analysis window's: the tracker
-    /// floors a member's width at one bin (`width = obw.max(bin_hz)`), and 99 % of a Hann-windowed
-    /// tone's energy lies inside its 4-bin main lobe (the first sidelobe is 31 dB down), so an
-    /// OBW99 of a pure tone cannot reach past it.
-    ///
-    /// **Measured, not assumed, and measured across level** — `latency::
-    /// t403_a_continuous_unmodulated_line_never_confirms_live` generates the line and its receiver
-    /// artefacts at four powers spanning 28 dB and reads the widths the detector gives them: 2 to 4
-    /// bins throughout, **flat in level**, because the OBW99 of a windowed tone is a property of the
-    /// window rather than of the tone's strength. So a line cannot widen its way past this clause by
-    /// being loud. Eight bins is twice the widest a tone can measure; a modulated emission is well
-    /// past it — the WFM scene measures 66 kHz at 4687.5 Hz bins, 14 of them.
-    ///
-    /// A genuinely narrowband emission (a CW beacon, a slow data burst) fails this clause and takes
-    /// the **closed** route exactly as it did before: the fallback is the old rule, not a lower bar.
-    pub min_live_bandwidth_bins: f64,
-    /// T-403: largest share of suspect member detections on the **live** route. Default 0, i.e.
-    /// none at all.
-    ///
-    /// Deliberately stricter than [`Self::max_suspect_fraction`]: every RF-domain artefact verdict
-    /// the detector can reach without the scheduler's help — ref-harmonic, DC, clock-harmonic,
-    /// comb, LO-relative, spur-map, image, IMD, compression, clipping — vetoes the fast route
-    /// outright, while a closed track keeps the tolerance it has always had. The live route is
-    /// route B's evidence read earlier, and every one of its clauses is at least as strict.
-    pub max_live_suspect_fraction: f64,
     /// T-398: confirm on a **verified emission** — a demodulated mode whose subcarrier loop
     /// actually locked. See [`ConfirmPolicy::decide`] for why this is positive evidence and not a
     /// lowered threshold.
@@ -270,9 +218,6 @@ impl Default for ConfirmPolicy {
             min_duty_cycle: 0.8,
             max_suspect_fraction: hk_detect::track::inventory::SUSPECT_FRACTION,
             min_confirmed_detections: 1,
-            live_continuous: true,
-            min_live_bandwidth_bins: 8.0,
-            max_live_suspect_fraction: 0.0,
             verified: true,
             verified_modes: vec!["wfm".into()],
             min_lock_quality: 0.6,
@@ -308,7 +253,7 @@ impl VerifiedEmission {
     }
 }
 
-/// Trust and occupancy of a track, closed or still open.
+/// Trust and occupancy of a closed track.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrackTrust {
     /// On-air time, s.
@@ -319,14 +264,6 @@ pub struct TrackTrust {
     pub suspect_fraction: f64,
     /// Trust-confirmed member detections.
     pub confirmed_detections: u64,
-    /// T-403: whether the track has closed. `false` is a life still being lived, which route B may
-    /// only weigh under the extra clauses of [`ConfirmPolicy::decide`].
-    pub closed: bool,
-    /// T-403: the track's representative bandwidth, Hz.
-    pub bandwidth_hz: f64,
-    /// T-403: the analysis resolution its members were measured at, Hz
-    /// ([`TrackSummary::bin_hz`]): the scale [`Self::bandwidth_hz`] has to be read against.
-    pub bin_hz: f64,
 }
 
 impl TrackTrust {
@@ -338,17 +275,7 @@ impl TrackTrust {
                 .then(|| (summary.on_time_s / summary.observed_s).min(1.0)),
             suspect_fraction: summary.suspect_fraction,
             confirmed_detections: summary.confirmed_detections,
-            closed: summary.closed.is_some(),
-            bandwidth_hz: summary.track.bandwidth_hz,
-            bin_hz: summary.bin_hz,
         }
-    }
-
-    /// The track's bandwidth in analysis bins, or `None` when the resolution is unusable (zero,
-    /// negative or not a number) — a missing measurement refuses, never passes.
-    pub fn bandwidth_bins(&self) -> Option<f64> {
-        (self.bin_hz.is_finite() && self.bin_hz > 0.0 && self.bandwidth_hz.is_finite())
-            .then(|| self.bandwidth_hz / self.bin_hz)
     }
 }
 
@@ -371,32 +298,9 @@ impl ConfirmPolicy {
     ///
     /// **A — decoded identity.** A CRC-valid decode carrying a transmitter identity.
     ///
-    /// **B — continuous and trusted.** A track that was on air long enough, at a high enough duty
-    /// cycle, with few enough suspect members and enough trust-confirmed detections.
-    ///
-    /// **B-live (T-403).** The same four clauses, weighed while the track is still open. Route B
-    /// used to demand the close, and the reason given was that a duty cycle is only meaningful over
-    /// a finished life — but a station that never stops transmitting *has* no close until the
-    /// `idle_timeout_s`, so route B's own thresholds were met about 2 s in and the decision waited
-    /// out the recording. An emitter with neither a pilot to lock (route C) nor an identity to
-    /// decode (route A) had no live route at all, and confirmed at whatever second the recording
-    /// happened to end.
-    ///
-    /// The danger route C did not have is that **continuity and duty cycle are exactly what a
-    /// strong receiver artefact also has**: this receiver's own reference harmonic is on air for
-    /// ever at duty cycle 1.00. So the live form is not route B with the waiting removed. It adds
-    /// two clauses, both strictly tighter than the closed route's:
-    ///
-    /// - **No suspect members at all** ([`Self::max_live_suspect_fraction`], default 0) rather than
-    ///   up to half. Every RF artefact verdict the detector reaches on its own — ref-harmonic, DC,
-    ///   clock-harmonic, comb, LO-relative, spur-map, image, IMD, compression, clipping — vetoes it.
-    /// - **A modulated width** ([`Self::min_live_bandwidth_bins`]): the track must be many analysis
-    ///   bins wide. A receiver line is CW and cannot be — measured across 28 dB of level, a tone and
-    ///   the artefacts it produces span 2 to 4 bins and do not widen with strength, because the
-    ///   OBW99 of a windowed tone belongs to the window.
-    ///
-    /// When either fails, nothing fires and the *closed* route decides exactly as it did before —
-    /// a fallback to the old rule, never a lowered bar. The measurement is written either way.
+    /// **B — continuous and trusted.** A *closed* track that was on air long enough, at a high
+    /// enough duty cycle, with few enough suspect members. It needs the close because a duty cycle
+    /// is only meaningful over a finished life; an open track re-offers with `track: None`.
     ///
     /// **C — verified emission (T-398).** A demodulation whose subcarrier loop *locked*. This is
     /// the fast route, and it is deliberately **not** route B with lower numbers: it confirms on
@@ -427,60 +331,23 @@ impl ConfirmPolicy {
                 "decoded identity ({scheme}) carried by {n} CRC-valid decode(s)"
             ));
         }
-        if let Some(reason) = self.continuous_reason(ev.track) {
-            return Some(reason);
+        if self.continuous
+            && let Some(tr) = ev.track
+            && let Some(duty) = tr.duty_cycle
+            && tr.on_air_s >= self.min_on_air_s
+            && duty >= self.min_duty_cycle
+            && tr.suspect_fraction <= self.max_suspect_fraction
+            && tr.confirmed_detections >= self.min_confirmed_detections
+        {
+            return Some(format!(
+                "continuous and trusted: {:.1} s on air, duty cycle {duty:.2}, {:.0} % suspect, \
+                 {} trust-confirmed detection(s)",
+                tr.on_air_s,
+                tr.suspect_fraction * 100.0,
+                tr.confirmed_detections
+            ));
         }
         self.verified_reason(ev.verified.as_ref())
-    }
-
-    /// Routes B and B-live: the reason a continuous, trusted track confirms, or `None`.
-    ///
-    /// The four accumulation clauses are common to both and are the ones this rule has always
-    /// had. What the track's state changes is what else must hold, not how much of them is enough.
-    fn continuous_reason(&self, track: Option<TrackTrust>) -> Option<String> {
-        if !self.continuous {
-            return None;
-        }
-        let tr = track?;
-        let duty = tr.duty_cycle?;
-        if tr.on_air_s.is_nan()
-            || tr.on_air_s < self.min_on_air_s
-            || duty.is_nan()
-            || duty < self.min_duty_cycle
-            || tr.suspect_fraction.is_nan()
-            || tr.suspect_fraction > self.max_suspect_fraction
-            || tr.confirmed_detections < self.min_confirmed_detections
-        {
-            return None;
-        }
-        let live = if tr.closed {
-            String::new()
-        } else {
-            // T-403: the extra clauses an unfinished life must also satisfy. Each is a positive
-            // measurement that must be present; a missing or NaN one refuses.
-            if !self.live_continuous {
-                return None;
-            }
-            if tr.suspect_fraction.is_nan() || tr.suspect_fraction > self.max_live_suspect_fraction
-            {
-                return None;
-            }
-            let bins = tr.bandwidth_bins()?;
-            if bins.is_nan() || bins < self.min_live_bandwidth_bins {
-                return None;
-            }
-            format!(
-                ", {:.0} kHz wide ({bins:.0} analysis bins), still on air",
-                tr.bandwidth_hz / 1e3
-            )
-        };
-        Some(format!(
-            "continuous and trusted: {:.1} s on air, duty cycle {duty:.2}, {:.0} % suspect, \
-             {} trust-confirmed detection(s){live}",
-            tr.on_air_s,
-            tr.suspect_fraction * 100.0,
-            tr.confirmed_detections
-        ))
     }
 
     /// Route C: the reason a locked demodulation confirms, or `None`. Every clause is a positive
@@ -701,20 +568,11 @@ impl TrackInventory {
     }
 
     /// Reviews a candidate against the policy; confirms it when the evidence holds.
-    ///
-    /// `at` is the capture instant the evidence reaches, when the caller knows it — the end of the
-    /// observation the decision was taken on. Without it the emitter's `last_seen` is used, which
-    /// is where the sightings have reached and can lag the evidence: a live review (T-403) weighs a
-    /// track that has been on air for seconds longer than the last sighting recorded, and stamping
-    /// the change with `last_seen` would claim the decision was available before the evidence for
-    /// it existed. A confirmation's timestamp is read as "when in the signal the system decided",
-    /// so it must never be earlier than the measurement it was decided on.
     fn review(
         &mut self,
         repo: &mut Repository,
         emitter: EmitterId,
         track: Option<TrackTrust>,
-        at: Option<Timestamp>,
     ) -> Result<(), RepoError> {
         if !self.policy.enabled {
             return Ok(());
@@ -739,8 +597,7 @@ impl TrackInventory {
         let Some(reason) = self.policy.decide(&evidence) else {
             return Ok(());
         };
-        let last_seen = repo.emitter(id)?.last_seen;
-        let t = at.map_or(last_seen, |a| a.max(last_seen));
+        let t = repo.emitter(id)?.last_seen;
         if repo
             .change_emitter_lifecycle(
                 id,
@@ -821,12 +678,7 @@ impl Inventory for TrackInventory {
             return Ok(());
         };
         sighting.classification = track_family(summary).classification(sighting.seen.end);
-        // T-403: still `None` here, deliberately. This offer may *create* the entry, and T-109 can
-        // withdraw it again when the track turns out to be a fragment, a hop-set member or a merge
-        // — but only while it is an untouched candidate, so confirming on the offer that made it
-        // would defeat the retraction. An open life is weighed instead through
-        // [`Inventory::live_trust`], whose tracks are disjoint from these by construction and which
-        // creates nothing.
+        // No auto-confirmation on a partial life: the close re-offers with the full evidence.
         let (emitter, created) = self.offer(repo, &sighting, None)?;
         if created {
             self.provisional.insert(summary.track.id, emitter);
@@ -850,29 +702,6 @@ impl Inventory for TrackInventory {
             self.bind(track, id);
         }
         self.touch(repo, id, None)
-    }
-
-    fn live_trust(
-        &mut self,
-        repo: &mut Repository,
-        summary: &TrackSummary,
-    ) -> Result<(), RepoError> {
-        if summary.closed.is_some() || summary.inband_fragment {
-            return Ok(());
-        }
-        // The gate: only a track this inventory has already given a row. Nothing is created, no
-        // sighting is recorded, and a track nothing has claimed costs one hash lookup.
-        let Some(emitter) = self.emitter_of_track(summary.track.id) else {
-            return Ok(());
-        };
-        // The evidence reaches the end of the last burst the tracker measured, which is later than
-        // the last sighting recorded against the entry; the change is stamped there, not earlier.
-        self.review(
-            repo,
-            emitter,
-            Some(TrackTrust::of(summary)),
-            Some(summary.track.time.end),
-        )
     }
 
     fn emitter_of_track(&self, track: TrackId) -> Option<EmitterId> {
@@ -952,7 +781,7 @@ impl TrackInventory {
             explain_emitter(repo, table, id)?;
         }
         self.characterise(repo, id, trust)?;
-        self.review(repo, id, trust, None)?;
+        self.review(repo, id, trust)?;
         self.resolve_overlaps(repo, id)
     }
 
@@ -1038,7 +867,6 @@ mod tests {
             inband_fragment: false,
             suspect_fraction: 0.0,
             confirmed_detections: bursts,
-            bin_hz: 1e3,
             next_burst_eta: None,
             closed,
         }
@@ -1241,24 +1069,12 @@ mod tests {
         assert_eq!(inv.retracted, 1);
     }
 
-    /// A closed track that satisfies route B.
     fn steady() -> TrackTrust {
         TrackTrust {
             on_air_s: 4.9,
             duty_cycle: Some(0.98),
             suspect_fraction: 0.0,
             confirmed_detections: 12,
-            closed: true,
-            bandwidth_hz: 150e3,
-            bin_hz: 4687.5,
-        }
-    }
-
-    /// The same evidence on a track that is **still open** (T-403).
-    fn steady_live() -> TrackTrust {
-        TrackTrust {
-            closed: false,
-            ..steady()
         }
     }
 
@@ -1345,138 +1161,6 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "min_duty_cycle": 0.5 })).unwrap();
         assert_eq!(parsed.min_duty_cycle, 0.5);
         assert_eq!(parsed.min_on_air_s, 2.0);
-    }
-
-    /// T-403 route B-live. The evidence route B has always asked for, weighed while the track is
-    /// still open — and the two clauses that keep "continuous" from meaning "confirm anything that
-    /// stays on".
-    ///
-    /// The control is the one the ticket is about: **this receiver's own reference harmonic is
-    /// continuous at duty cycle 1.00 for ever**, so every accumulation clause route B has is
-    /// satisfied by it and always will be. It must not confirm live.
-    #[test]
-    fn t403_an_open_track_confirms_only_on_a_modulated_width_with_no_suspect_members() {
-        let p = ConfirmPolicy::default();
-        let ev = |track| ConfirmEvidence {
-            identity: None,
-            track: Some(track),
-            verified: None,
-        };
-        // The case the ticket exists for: a station with no pilot and no identity, still on air.
-        let reason = p
-            .decide(&ev(steady_live()))
-            .expect("an open, continuous, trusted, modulated track confirms");
-        assert!(reason.starts_with("continuous"), "{reason}");
-        assert!(
-            reason.contains("still on air"),
-            "the reason says the life was unfinished: {reason}"
-        );
-        assert!(
-            reason.contains("32 analysis bins"),
-            "and what made it an emission rather than a line: {reason}"
-        );
-
-        // A CW receiver line: on air for ever, duty 1.00, never a suspect flag raised against it
-        // because no rule listed its frequency — and a handful of analysis bins wide, which is all
-        // an unmodulated line can measure. Every accumulation clause route B has is satisfied.
-        let line = TrackTrust {
-            on_air_s: 600.0,
-            duty_cycle: Some(1.0),
-            suspect_fraction: 0.0,
-            confirmed_detections: 600,
-            closed: false,
-            bandwidth_hz: 4687.5,
-            bin_hz: 4687.5,
-        };
-        assert_eq!(
-            p.decide(&ev(line)),
-            None,
-            "a continuous CW line must not confirm live however long it stays on"
-        );
-        // And it must not confirm by staying on longer, which is the failure mode a lowered
-        // threshold would have had.
-        assert_eq!(
-            p.decide(&ev(TrackTrust {
-                on_air_s: 86_400.0,
-                confirmed_detections: 86_400,
-                ..line
-            })),
-            None,
-            "a day of it is still one bin wide"
-        );
-        // The same line once its track closes still takes the closed route, exactly as before
-        // T-403: this ticket removed no protection, and added none, from the route that existed.
-        assert!(
-            p.decide(&ev(TrackTrust {
-                closed: true,
-                ..line
-            }))
-            .is_some(),
-            "the closed route is unchanged, for better and worse"
-        );
-
-        // Each live-only clause, removed one at a time from a signal that otherwise confirms.
-        for (what, t) in [
-            (
-                "one suspect member in ten",
-                TrackTrust {
-                    suspect_fraction: 0.1,
-                    ..steady_live()
-                },
-            ),
-            (
-                // The widest a pure tone was measured at over 28 dB of level (the e2e control's
-                // table): the clause has to refuse this, not merely the one-bin case.
-                "four bins wide, a tone's main lobe",
-                TrackTrust {
-                    bandwidth_hz: 4.0 * 4687.5,
-                    ..steady_live()
-                },
-            ),
-            (
-                "seven bins wide, just under the floor",
-                TrackTrust {
-                    bandwidth_hz: 7.0 * 4687.5,
-                    ..steady_live()
-                },
-            ),
-            (
-                "no resolution measured",
-                TrackTrust {
-                    bin_hz: 0.0,
-                    ..steady_live()
-                },
-            ),
-            (
-                "a NaN resolution",
-                TrackTrust {
-                    bin_hz: f64::NAN,
-                    ..steady_live()
-                },
-            ),
-            (
-                "a NaN width",
-                TrackTrust {
-                    bandwidth_hz: f64::NAN,
-                    ..steady_live()
-                },
-            ),
-        ] {
-            assert_eq!(p.decide(&ev(t)), None, "{what}");
-            // …and the same evidence on a closed track decides as it always did.
-            assert!(
-                p.decide(&ev(TrackTrust { closed: true, ..t })).is_some(),
-                "{what}: the fallback is the old rule, not a lowered bar"
-            );
-        }
-
-        // The live route is switchable off on its own, leaving route B close-only as before T-403.
-        let close_only = ConfirmPolicy {
-            live_continuous: false,
-            ..ConfirmPolicy::default()
-        };
-        assert_eq!(close_only.decide(&ev(steady_live())), None);
-        assert!(close_only.decide(&ev(steady())).is_some());
     }
 
     /// T-398 route C. Each case removes exactly one piece of positive evidence from a signal that

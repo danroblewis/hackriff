@@ -40,20 +40,15 @@
 //! *published*) is deliberately **not** bounded here: it is a property of the machine, and T-398
 //! measured it separately for exactly that reason.
 //!
-//! **T-403 turned this module's one pending assertion into a bound.** Time-to-Confirmed for a
-//! station with neither a pilot to lock nor an identity to decode was reported and not asserted,
-//! because the continuous-and-trusted route was still weighed on track close alone and that variant
-//! confirmed at the end of the recording whatever its length — 14.00 s in a 14 s scene. Bounding it
-//! then would have made the suite red for a defect T-401 did not fix, and loosening the bound to
-//! fit would have enshrined it. The route is now weighed live, the number is 3.00 s, and all three
-//! variants take the same budget.
-//!
-//! One `REPORTED, NOT ASSERTED` line remains, and it belongs to a different ticket:
-//! **family-assignment** for [`Degradation::NoPilotNoRds`]. The generator's WFM is tone-modulated
-//! to about 103 kHz, under the 106 kHz lower edge of the wideband-FM occupancy window, so at most
-//! seeds nothing names it — T-402's defect, in the scene rather than in the pipeline. The two
-//! variants that can reach a family bound it. That is the repo's `truth_report` convention (report
-//! the gap, say why, name the owner) applied to latency.
+//! One latency is deliberately **reported and not bounded**: time-to-Confirmed for a station with
+//! neither a pilot to lock nor an identity to decode
+//! (`confirm_latency::t398_wfm_without_pilot_does_not_take_the_fast_route`). T-398 short-circuited
+//! only the pilot-locked case; the continuous-and-trusted route is still weighed on track close
+//! alone, so that variant confirms at the end of the recording whatever its length — 14.00 s in a
+//! 14 s scene. Bounding it would make the suite red for a defect this ticket does not fix, and
+//! loosening the bound to fit would enshrine it, so the number is printed on every run instead.
+//! That is the repo's existing `truth_report` convention (report the gap, say why) applied to
+//! latency.
 //!
 //! # Why a degraded fixture
 //!
@@ -394,7 +389,8 @@ pub fn wfm_scene(seed: u64, how: Degradation) -> SynthRequest {
 pub struct Measured {
     /// The four latencies, capture clock, from the recording's start.
     pub latencies: Latencies,
-    /// Measured bandwidth of the matched emitter, Hz.
+    /// Measured bandwidth of the matched emitter, Hz; read through `Debug` in failure messages.
+    #[allow(dead_code)]
     pub bandwidth_hz: f64,
     /// Keeps the run's data directory alive while the caller reads it.
     pub _dir: crate::common::TempDir,
@@ -454,7 +450,6 @@ pub const DECODE_BUDGET_S: f64 = 6.0;
 // The tests.
 
 const T401: &str = "T-401";
-const T403: &str = "T-403";
 
 /// Best case — the scene shape every other synthetic WFM test in the suite uses. All four
 /// outcomes are bounded, including the decode, which only this variant can reach.
@@ -489,163 +484,5 @@ fn t401_a_station_with_no_identity_to_decode_still_resolves_within_budget() {
         l.decodes, 0,
         "[{T401}] this scene carries no RDS, so a decode of any kind would mean something read an \
          identity that is not on the air. Measured: {l}"
-    );
-}
-
-/// T-403: the same station again with **neither** kind of fast evidence — mono, so no pilot to
-/// lock, and no RDS, so no identity to decode. It has only continuity and duty cycle to offer, and
-/// those are properties a strong receiver artefact shares, so this is the variant where a wrong fix
-/// would show up as "confirm anything that stays on".
-///
-/// Its time-to-Confirmed is bounded here on the same budget as the other two. Until T-403 it could
-/// not be: the continuous-and-trusted route was weighed only when a track closed, and a station
-/// that never stops transmitting has no close until the idle timeout, so this variant confirmed at
-/// the end of the recording whatever its length (14.00 s in this 14 s scene). T-401 reported that
-/// number rather than asserting it — the suite's one deliberate unbounded latency.
-#[test]
-fn t403_a_station_with_neither_pilot_nor_identity_still_resolves_within_budget() {
-    let Some(m) = run_wfm("t403-no-pilot-no-rds", 4013, Degradation::NoPilotNoRds) else {
-        return;
-    };
-    let l = &m.latencies;
-    l.require(T403, Outcome::FirstDetection, DETECT_BUDGET_S);
-    let confirmed = l.require(T403, Outcome::Confirmed, CONFIRM_BUDGET_S);
-    // The budget alone would not have caught the defect in a short scene — a close-only decision in
-    // a 4 s recording lands inside 5 s by accident. What says the decision tracked the *evidence*
-    // is that it came well before the end of the recording, and that its reason names a life still
-    // being lived rather than a track that closed.
-    assert!(
-        confirmed < SCENE_S / 2.0,
-        "[{T403}] confirmed at {confirmed:.2} s of a {SCENE_S:.0} s scene: a time-to-Confirmed that \
-         tracks the recording length rather than the evidence is the close-only defect, whatever \
-         the budget says. Measured: {l}"
-    );
-    let reason = l.confirmed_reason.as_deref().unwrap_or_default();
-    assert!(
-        reason.starts_with("continuous") && reason.contains("still on air"),
-        "[{T403}] with no pilot and no identity the only route left is the continuous one, weighed \
-         live; got: {reason}"
-    );
-    assert_eq!(
-        l.decodes, 0,
-        "[{T403}] this scene carries no RDS. Measured: {l}"
-    );
-
-    // Family: **bounded when it happens, reported with its reason when it does not.** On the
-    // generator as it stands the WFM is tone-modulated to about 103 kHz, under the 106 kHz lower
-    // edge of `family::WIDEBAND_FM_OBW_HZ`, and the detector measures 66 kHz of it — so at most
-    // seeds the occupancy map declines to name it and the chain rejects the mode too. That is
-    // T-402's defect, in the scene rather than in the pipeline, and asserting it unconditionally
-    // would make this test red for a bug it does not fix.
-    //
-    // It is *not* a second end-of-recording defect, which is the question T-402's wider scene
-    // raised. Run against a composite scaled to the 75 kHz deviation a real limiter enforces
-    // (155 kHz measured, 33 analysis bins), this same test reads **family at 1.00 s** and confirm
-    // at 3.00 s. Before T-403 it read 14.00 s for both, and for one reason: a continuous carrier
-    // got no live sighting at all, so the `track_family` classification a sighting carries — and
-    // the confirmation weighed beside it — arrived only when the track closed. One defect, one
-    // fix. So the bound below is written to take effect the moment the scene is wide enough to
-    // reach a family, with no further edit.
-    match l.family_s {
-        Some(_) => {
-            l.require(T403, Outcome::Family, FAMILY_BUDGET_S);
-        }
-        None => eprintln!(
-            "[{T403}] REPORTED, NOT ASSERTED: no family was ever assigned to a {:.0} kHz emission \
-             that is a broadcast FM station — the scene is narrower than the WFM occupancy window \
-             (T-402), so neither the occupancy map nor the chain would name it. Confirmation does \
-             not depend on it, and the bound above takes effect as soon as the scene is wide \
-             enough. Measured: {l}",
-            m.bandwidth_hz / 1e3
-        ),
-    }
-}
-
-/// T-403's control, and the one the ticket turns on: **a continuous, unmodulated line must not
-/// take the live route however long it stays on.**
-///
-/// Route C could demand a *lock*, which is positive evidence nothing else produces. Route B has
-/// only continuity and duty cycle, and those are exactly what a strong receiver artefact has —
-/// this receiver's own 10 MHz reference harmonic is on air for ever at duty cycle 1.00, and so is
-/// its LO leakage, its sample-clock comb and every switching-supply tooth. Weighing route B live
-/// without a discriminator would confirm all of them as emitters.
-///
-/// A pure CW tone in white noise is that shape, generated rather than hoped for: continuous for the
-/// whole scene, unmodulated, and — because a tone has no occupied bandwidth of its own — no wider
-/// than the analysis window can make it look. Nothing in this run may be confirmed by the live
-/// continuous route. Blind: the assertion is over every emitter the run produced, and never
-/// consults the scene's truth to find one.
-///
-/// **This scene is where `ConfirmPolicy::min_live_bandwidth_bins` was measured.** Run at four tone
-/// powers spanning 28 dB, the widths the detector measured for the line and for the receiver
-/// artefacts it produced were, at 4687.5 Hz bins:
-///
-/// | tone power | measured widths |
-/// |---|---|
-/// | −30 dBFS | 14.1 kHz ×5, 18.8 kHz |
-/// | −16 dBFS | 14.1 kHz ×5, 18.8 kHz |
-/// | −6 dBFS  | 9.4 kHz, 14.1 kHz ×3, 18.8 kHz ×2 |
-/// | −2 dBFS  | 14.1 kHz ×5, 18.8 kHz |
-///
-/// — 2 to 4 bins throughout, and **flat in level**: an OBW99 of a windowed tone is a property of
-/// the window, not of how strong the tone is, because 99 % of a Hann-windowed tone's energy is
-/// inside its 4-bin main lobe at any level (the first sidelobe is −31 dB down). So a line cannot
-/// widen its way past the clause by being loud, which is what a threshold picked to fit one
-/// measurement would have risked.
-#[test]
-fn t403_a_continuous_unmodulated_line_never_confirms_live() {
-    let request = SynthRequest::new("tone")
-        .seed(4031)
-        .datatype(Datatype::Cf32Le)
-        .param("sample_rate", 2.4e6)
-        .param("center_hz", 100.8e6)
-        .param("offset_hz", OFFSET_HZ)
-        .param("duration_s", SCENE_S)
-        .param("power_dbfs", -16.0)
-        .param("noise_dbfs", -60.0);
-    let out = match SynthRequest::generate(&request) {
-        Ok(out) => out,
-        Err(e) if e.is_unavailable() && !hk_e2e::synth::require_synth() => {
-            eprintln!("SKIP t403-cw-line: {e}");
-            return;
-        }
-        Err(e) => panic!("[{T403}] synthetic scenario generation failed: {e}"),
-    };
-    let fx = out.fixture(0).unwrap();
-    let t0 = recording_start(&fx);
-    let run = blind_replay(&out.recordings[0], "t403-cw-line", BlindSource::default());
-    let r = repo(&run.dir.0);
-    let entries = r
-        .query_inventory(&hk_model::InventoryQuery::default())
-        .expect("the inventory is readable")
-        .entries;
-    assert!(
-        !entries.is_empty(),
-        "[{T403}] a strong CW line must still be *detected* and catalogued — refusing the fast \
-         confirmation is not refusing to see it"
-    );
-    let mut live_confirms = Vec::new();
-    for e in &entries {
-        let l = Latencies::measure(&r, e.emitter.id, t0);
-        eprintln!(
-            "[{T403}] CW line entry at {:.4} MHz, {:.1} kHz wide: {l}",
-            e.emitter.f_center_hz / 1e6,
-            e.emitter.bandwidth_hz / 1e3
-        );
-        if let Some(reason) = l.confirmed_reason.as_deref()
-            && reason.contains("still on air")
-        {
-            live_confirms.push(format!(
-                "{:.4} MHz at {:?} s: {reason}",
-                e.emitter.f_center_hz / 1e6,
-                l.confirmed_s
-            ));
-        }
-    }
-    assert!(
-        live_confirms.is_empty(),
-        "[{T403}] an unmodulated continuous line took the live continuous route, which is what a \
-         receiver's own reference harmonic, LO leakage or clock comb would do — so the route is \
-         confirming anything that stays on: {live_confirms:?}"
     );
 }

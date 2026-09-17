@@ -78,27 +78,6 @@ const LIVE_OFFER_NS: i64 = 5_000_000_000;
 /// Bursts an open track needs before it is offered live (T-109): a repeating emitter, not a
 /// one-off or a continuous carrier (those enter at close, as before).
 const LIVE_MIN_BURSTS: u64 = 4;
-/// Air an open track needs before it is offered live when it has too few bursts to qualify that
-/// way (T-403), s.
-///
-/// **This is what gets a continuous carrier an inventory row before its track closes.** A broadcast
-/// station is one long burst, so [`LIVE_MIN_BURSTS`] never admits it; its row used to come from a
-/// chain, and when no chain claimed it — a mode the chain rejected, an admission race lost — it had
-/// no row at all until the idle timeout, which is tens of seconds of an obvious, strong signal
-/// missing from the Candidate list. Two seconds is the same air the confirmation rule's continuous
-/// route asks for, so the row exists no later than the first moment a decision could be taken on
-/// it, and (the duty cycle still being short of the rule's threshold that early) the user sees the
-/// candidate before the system confirms it.
-const LIVE_MIN_ON_AIR_S: f64 = 2.0;
-/// Open tracks are re-weighed against the confirmation rule at most this often, stream ns (T-403).
-///
-/// Faster than [`LIVE_OFFER_NS`] on purpose. An offer **writes** — a sighting, and possibly a new
-/// inventory row — so it is paced at 5 s; a review only re-reads the rule for a row that already
-/// exists, and for an entry that is no longer a candidate it costs two indexed lookups and stops.
-/// The cadence is a floor under the latency: the evidence route B asks for is complete about 2 s
-/// into a continuous emission, and at 5 s the decision would wait three seconds longer than the
-/// measurement did — the shape of the defect this exists to fix, one order of magnitude smaller.
-const LIVE_REVIEW_NS: i64 = 1_000_000_000;
 /// Open tracks whose observed extent one flush may carry to the writer (T-388). The presence
 /// stream caps what it publishes again; this only bounds the batch.
 const MAX_LIVE_EXTENTS: usize = 256;
@@ -140,10 +119,6 @@ struct WriteBatch {
     closed: Vec<TrackEvent>,
     /// Open confirmed channel tracks offered to the inventory before they close (T-109).
     live: Vec<TrackSummary>,
-    /// T-403: open tracks the offer predicate excludes **only** for having too few bursts — the
-    /// continuous carriers — re-weighed against the confirmation rule. Disjoint from `live`, and
-    /// creates nothing: the inventory reviews only a track it already gave a row.
-    live_reviews: Vec<TrackSummary>,
     /// The **observed** time extent of every track the same predicate would offer, collected on
     /// every flush rather than every `LIVE_OFFER_NS` (T-388): what the presence stream publishes so
     /// a live signal's box grows without waiting for the next database offer. Times come from the
@@ -168,7 +143,6 @@ impl WriteBatch {
             && self.tracks.is_empty()
             && self.closed.is_empty()
             && self.live.is_empty()
-            && self.live_reviews.is_empty()
             && self.live_extents.is_empty()
             && self.floor.is_empty()
             && self.capture_name.is_none()
@@ -180,7 +154,6 @@ impl WriteBatch {
             tracks,
             mut closed,
             live,
-            live_reviews,
             live_extents,
             mut floor,
             now_ns,
@@ -192,11 +165,6 @@ impl WriteBatch {
         if !live.is_empty() {
             // Only the newest offer matters: each summary supersedes the older one of its track.
             self.live = live;
-        }
-        if !live_reviews.is_empty() {
-            // Same rule: a review is a snapshot of a life still being lived, so a carried-over
-            // older one would weigh less evidence than has already been measured.
-            self.live_reviews = live_reviews;
         }
         if !live_extents.is_empty() {
             // Same rule, and more so: an extent is a *latest observed end*, so a carried-over older
@@ -310,12 +278,6 @@ struct DetectNode {
     links_seen: usize,
     last_flush_ns: Option<i64>,
     live_offered_ns: Option<i64>,
-    live_reviewed_ns: Option<i64>,
-    /// T-403: tracks already offered, so one that becomes offerable between grid ticks gets its
-    /// row on the review cadence instead of waiting out `LIVE_OFFER_NS`. Rebuilt from the offerable
-    /// set on every grid tick, so it is bounded by the tracker's open slots and forgets closed
-    /// tracks by construction.
-    offered: HashSet<TrackId>,
     /// Reused for the tracker's live offers (T-109).
     live_buf: Vec<TrackSummary>,
     /// Scratch for [`MAX_LIVE_EXTENTS`] open-track extents (T-388), reused every flush.
@@ -385,8 +347,6 @@ impl DetectNode {
             links_seen: 0,
             last_flush_ns: None,
             live_offered_ns: None,
-            live_reviewed_ns: None,
-            offered: HashSet::new(),
             live_buf: Vec::new(),
             extent_buf: Vec::new(),
             now_ns: 0,
@@ -713,57 +673,22 @@ impl DetectNode {
         };
         // T-109: a channel that keeps keying (a pager net, a repeating beacon) never idles out, so
         // its track would reach the inventory only when the run stops. Offer open confirmed
-        // channel tracks with a few bursts (T-403: **or** seconds of unbroken air) and a settled
-        // fate (no hop link or set, not an in-band fragment) every `LIVE_OFFER_NS`; the sighting is
-        // keyed by the track, so a re-offer (and the final close) adds only new bursts, and the
-        // inventory retracts the entry when the track ends with no sighting after all.
-        //
-        // T-403: the same summaries are also **reviewed** against the confirmation rule, on their
-        // own faster cadence — see `LIVE_REVIEW_NS`. One pass builds them for both, so the extra
-        // cadence costs the summaries and nothing else.
-        let live_now = self.namer.named() && !self.finishing;
-        let offer_now = live_now
+        // channel tracks with a few bursts and a settled fate (no hop link or set, not an in-band
+        // fragment) every `LIVE_OFFER_NS`; the sighting is keyed by the track, so a re-offer (and
+        // the final close) adds only new bursts, and the inventory retracts the entry when the
+        // track ends with no sighting after all.
+        let live = if self.namer.named()
+            && !self.finishing
             && self
                 .live_offered_ns
-                .is_none_or(|t| self.now_ns - t >= LIVE_OFFER_NS);
-        let review_now = live_now
-            && self
-                .live_reviewed_ns
-                .is_none_or(|t| self.now_ns - t >= LIVE_REVIEW_NS);
-        if offer_now || review_now {
-            self.tracker
-                .live_offers_into(LIVE_MIN_BURSTS, LIVE_MIN_ON_AIR_S, &mut self.live_buf);
-        }
-        // Crosses to the writer thread: allocates only when something is offered or reviewed.
-        //
-        // T-403: a track that becomes offerable just after a flush used to wait most of
-        // `LIVE_OFFER_NS` for its first row, because the cadence is a global grid rather than a
-        // per-track one. That whole wait is in front of every later decision about it, so a track
-        // that has never been offered is offered on the review cadence instead; the 5 s grid then
-        // governs the re-offers, which is where the repeated database work actually is.
-        let live = if offer_now {
+                .is_none_or(|t| self.now_ns - t >= LIVE_OFFER_NS)
+        {
             self.live_offered_ns = Some(self.now_ns);
-            self.offered.clear();
-            self.offered
-                .extend(self.live_buf.iter().map(|s| s.track.id));
-            self.live_buf.clone()
-        } else if review_now {
-            let fresh: Vec<TrackSummary> = self
-                .live_buf
-                .iter()
-                .filter(|s| !self.offered.contains(&s.track.id))
-                .cloned()
-                .collect();
-            self.offered.extend(fresh.iter().map(|s| s.track.id));
-            fresh
-        } else {
-            Vec::new()
-        };
-        let live_reviews = if review_now {
-            self.live_reviewed_ns = Some(self.now_ns);
+            self.tracker
+                .live_offers_into(LIVE_MIN_BURSTS, &mut self.live_buf);
+            // Crosses to the writer thread: allocates only when something is offered.
             self.live_buf.drain(..).collect()
         } else {
-            self.live_buf.clear();
             Vec::new()
         };
         // T-388: every flush, not every `LIVE_OFFER_NS`. The extents are the same tracks under the
@@ -781,7 +706,6 @@ impl DetectNode {
             tracks: std::mem::take(&mut self.batch),
             closed,
             live,
-            live_reviews,
             live_extents,
             floor: std::mem::take(&mut self.pending_floor),
             now_ns: self.now_ns,
@@ -872,8 +796,6 @@ struct Writer {
     tracks: TrackBatch,
     closed: Vec<TrackEvent>,
     live: Vec<TrackSummary>,
-    /// T-403: the latest live reviews, replaced by each batch the same way the offers are.
-    live_reviews: Vec<TrackSummary>,
     /// The latest observed extents (T-388), replaced by each batch and published by [`Writer::write`].
     live_extents: Vec<LiveExtent>,
     /// The `presence` stream: track→emitter bindings the offers teach it, and the tick gate.
@@ -915,7 +837,6 @@ impl Writer {
             tracks: TrackBatch::new(),
             closed: Vec::new(),
             live: Vec::new(),
-            live_reviews: Vec::new(),
             live_extents: Vec::new(),
             presence,
             floor: Vec::new(),
@@ -932,7 +853,6 @@ impl Writer {
             tracks,
             closed,
             live,
-            live_reviews,
             live_extents,
             floor,
             now_ns,
@@ -950,9 +870,6 @@ impl Writer {
         self.closed.extend(closed);
         if !live.is_empty() {
             self.live = live;
-        }
-        if !live_reviews.is_empty() {
-            self.live_reviews = live_reviews;
         }
         if !live_extents.is_empty() {
             self.live_extents = live_extents;
@@ -1042,9 +959,7 @@ impl Writer {
                         false
                     }
                 };
-            if tracks_stored
-                && !(self.closed.is_empty() && self.live.is_empty() && self.live_reviews.is_empty())
-            {
+            if tracks_stored && !(self.closed.is_empty() && self.live.is_empty()) {
                 let mut inv = shared
                     .inventory
                     .lock()
@@ -1054,15 +969,6 @@ impl Writer {
                 // the inventory can retract it (T-109).
                 for s in self.live.drain(..) {
                     if inv.live_track(&mut repo, &s).is_err() {
-                        inc(&dc.db_errors);
-                    }
-                }
-                // T-403: then the reviews. They create nothing, so their order against the
-                // offers does not matter; they run before the closes for the same reason the
-                // offers do — a close must be able to supersede a live decision, never the
-                // reverse.
-                for s in self.live_reviews.drain(..) {
-                    if inv.live_trust(&mut repo, &s).is_err() {
                         inc(&dc.db_errors);
                     }
                 }
