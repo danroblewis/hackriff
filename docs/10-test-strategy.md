@@ -207,19 +207,68 @@ check that asserts it would have caught it.*
 as an "equipment self-test" and implied frequency calibration. That framing is withdrawn by the user:
 a frequency-reference check is a minor optional extra at most, and is not the point.*
 
-### UI-only merge gate (user, 2026-09-16)
+### The merge gate: `just gate` (T-396, user 2026-09-16)
 
-A merge that changes **only** files under `ui/` and touches **neither `crates/` nor `docs/api.md`** is
-gated on **`just lint` + `just test-ui`** alone, skipping `just test` (T1-T4) and `just acceptance`.
+**Run `just gate`.** It inspects the diff, classifies it, prints the decision, and runs exactly the
+suites that class needs. The rule lives in the runner, not in each agent's judgement, so the same diff
+gets the same gate whoever ran it - which is the difference between a convention and a gate.
 
-The reasoning is the thin-client architecture: all signal logic lives in the backend, the backend is
-contract-tested (T-079), and **no acceptance test drives the browser** - the e2e suites run through the
-**device interface**. So a ui-only change cannot move the Rust signal path, and running those suites
-against one proves nothing while costing minutes per iteration.
+| classification | suites |
+|---|---|
+| files only under `ui/` (and not `crates/` or `docs/api.md`) | `just test-ui` |
+| anything touching `crates/` or `docs/api.md` | `just lint` + `just test` + `just acceptance-ci` |
+| `docs/` only | nothing - see below |
+| `py/` only | `just lint-py` + `just test-py` |
+| **anything else** | **the full gate** |
 
-**Anything touching `crates/` or `docs/api.md` is not ui-only** and keeps the full gate, because the
-API contract or the signal path may have moved. `just test` + `just acceptance` remain the
-periodic/milestone check and the gate for every backend or contract change.
+**Classification fails closed.** A path matching no class runs the full gate, never the cheapest. This
+is the repo's own principle applied to its own tooling: `BiasTee::Unknown` is not `Off`,
+`Coverage::Unobserved` is not quiet, `Encryption::Unknown` is not clear - nothing said is never
+permissive. Three cases a naive version gets wrong, each deliberate:
+
+- **`fixtures/` is full.** It is acceptance *input*, and the suites read fixture metadata (T-317,
+  T-373 and T-382 all changed it).
+- **The `justfile` and `.github/` are full.** They *are* the gate. A gate that could classify a change
+  to itself as cheap could certify its own weakening.
+- **`py/hkpy/gate.py` and `py/tests/test_gate.py` are full**, not `py`-only, for the same reason.
+
+`tests/`, `plugins/`, `.config/`, `recipes/`, `Cargo.*`, repo-root files and any new top-level
+directory are unclassified and therefore full.
+
+**The ui-only case keeps its original reasoning**: the thin-client architecture means all signal logic
+lives in the backend, the backend is contract-tested (T-079), and **no acceptance test drives the
+browser** - the e2e suites run through the **device interface**. So a ui-only change cannot move the
+Rust signal path, and running those suites against one proves nothing while costing minutes per
+iteration. It gets `just test-ui` (npm ci + build + `tsc --noEmit` + the `ui/test` suites); this repo's
+`just lint` is lint-rust + lint-py and has no JS/TS linter, so the UI's lint equivalent is the
+typecheck already inside `test-ui`.
+
+**`docs`-only runs nothing, and says so.** There is no link checker and no markdown linter in this
+repo. The gate prints that rather than implying a check it does not perform; adding a dependency to
+satisfy a word in a table would be the wrong trade.
+
+**Where the decision comes from.** By default: the merge base with `main` (not `main` itself - a moved
+main makes unrelated files look changed) plus everything uncommitted, including untracked files.
+`--base REF`, `--staged`, `--worktree` and `--files a b c` override it; `--dry-run` prints the decision
+and runs nothing. In GitHub Actions, a pull request uses `origin/$GITHUB_BASE_REF`; a **push** has no
+base worth trusting and runs the full gate, so `main` - the branch everything else is measured against
+- is always verified whole. Renames and deletions count as touching the path (both sides of a rename).
+An empty diff is a printed no-op, not an accidental full run.
+
+**It always prints its decision before running anything**, including the deciding files: a silent
+classifier is a worse version of the judgement it replaces, because nobody can see or challenge the
+choice. For a full gate it prints the files that *forced* it, which is the answerable question.
+
+**Both CI jobs call it.** `test` runs `just gate --phase check`, `acceptance` runs
+`just gate --phase acceptance` - one classifier, one diff, two halves of one answer, so the jobs cannot
+disagree about what changed. `acceptance-ci` stays a separate job on purpose: the two run in parallel
+on separate runners, it needs no Node or nextest, and an acceptance failure is a different signal from
+a unit-test failure. Running `just lint` + `just test` + `just acceptance-ci` by hand remains the
+periodic/milestone check.
+
+The classifier is a pure function in `py/hkpy/gate.py`; `py/tests/test_gate.py` asserts the *chosen
+suites* for each class, the fail-closed case (`newdir/x.rs` -> full), the three `fixtures/` /
+`justfile` / `.github/` cases, and mixtures (`ui/` + `crates/` -> full).
 
 **The gap this leaves - and the full gate left it too.** Contract tests assert that the *server* serves
 a route correctly; nothing asserts that the *client* asks for the right thing. T-367 found the time
