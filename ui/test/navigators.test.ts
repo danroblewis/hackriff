@@ -29,10 +29,11 @@ import * as ax from "../src/axis";
 import { snapState, type NavigationGrid } from "../src/navigation";
 import {
   activeWindows, bandKey, clampInto, clockRangeText, clockText, coverageRequest, defaultViewport,
-  litSegments, panWithin, placeOn, regionFromDrag, sameBand, spanOf, spectrumExtent, surveyCells,
-  surveyViewport, timeExtent, timelineRequest, unobservedCount, valueAt, zoomWithin,
-  type CoverageCell, type CoverageResponse, type Range,
+  dimSegments, litSegments, panWithin, placeOn, regionFromDrag, sameBand, spanOf, spectrumExtent,
+  stripCells, surveyCells, surveyViewport, timeExtent, timelineRequest, unobservedCount, valueAt,
+  zoomWithin, type CoverageCell, type CoverageResponse, type Range,
 } from "../src/navigators";
+import { CMAP_GLSL, CMAP_STOPS, cmapBytes } from "../src/cmap";
 import { captureWindow, currentSpan } from "../src/app/capture/timeline";
 import {
   applyFreqZoom, applyTimeTarget, freqHoverText, freqPan, freqSelectText, freqZoomTarget,
@@ -1302,4 +1303,149 @@ test("T-393: no clock of the browser's own reaches either navigator module", () 
       assert.ok(!src.includes(word), `${f} must not contain "${word}"`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// T-397 / T-405 / T-411: how the two bars RENDER
+// ---------------------------------------------------------------------------
+//
+// The user, live-testing: *"the left overview is badly pixelated"*, *"the bottom strip is one row
+// stretched"*, *"there are yellow/red peaks not showing because averaging washes them out"*, and
+// *"the strips are cyan/teal, not the waterfall's colours"*. Four complaints, three of them about
+// this file's callers and one about the pipeline (`hk-pipeline`'s `history_welch`, whose own test
+// measures the max-hold end to end).
+//
+// The three rendering properties, each with the control that stops a degenerate fix passing:
+//
+//  1. **The buffer is the bar's own size, not a constant.** `stripCells` returns one cell per pixel
+//     — control: it must *change* with the pixel count, so a fix that upsized the canvas while
+//     still asking for six cells fails.
+//  2. **One colour ramp in `ui/src`.** The stops live in `cmap.ts`, the shader is generated from
+//     them, and no other module under `src/` may contain a ramp — control: the distinctive stop
+//     literals appear in exactly one file.
+//  3. **The ramp actually reaches yellow, red and white.** The old strip ramp was cyan at every
+//     input, which is why a peak could not look like one — control: `cmapBytes(0.75)` is yellow and
+//     `cmapBytes(1)` is white, so a cyan-only ramp cannot pass.
+
+test("T-411/T-397: a strip's render buffer is one cell per pixel of the bar, never a constant", () => {
+  // The bug: 6 frequency cells stretched across an 80 px bar (the time navigator) and 1 row
+  // stretched down a 64 px bar (the frequency navigator).
+  assert.equal(stripCells(80, 512), 80);
+  assert.equal(stripCells(64, 4096), 64);
+  assert.equal(stripCells(400, 4096), 400);
+  // THE CONTROL: it must move with the bar. A function that returned a constant — the defect —
+  // gives the same answer for both of these.
+  assert.notEqual(stripCells(80, 512), stripCells(12, 512));
+  // Capped at what the route will answer, and never zero.
+  assert.equal(stripCells(9000, 512), 512);
+  assert.equal(stripCells(0.4, 512), 1);
+  // No layout yet (before first paint) asks for the cap, not one cell: asking for one cell would
+  // bake the blockiness back in for the first poll.
+  assert.equal(stripCells(0, 512), 512);
+  assert.equal(stripCells(NaN, 256), 256);
+});
+
+test("T-405: the frequency bar dims what is NOT being captured, instead of drawing a view box", () => {
+  const ext: Range = { lo: 0, hi: 100 };
+  const win = (lo: number, hi: number) => ({ center_hz: (lo + hi) / 2, span_hz: hi - lo, f_lo_hz: lo, f_hi_hz: hi });
+  const one = activeWindows({ windows: [win(40, 60)] });
+  const dim = dimSegments(one, ext);
+  // Two dim spans, one either side; the window itself is left alone. That region at full strength
+  // IS the tuned window — there is no second rectangle saying so.
+  assert.equal(dim.length, 2);
+  assert.deepEqual(dim.map((d) => [Math.round(d.startPct), Math.round(d.sizePct)]), [[0, 40], [60, 40]]);
+  // Exactly the complement of the lit segments, from the same reported list.
+  const lit = litSegments(one, ext);
+  assert.equal(lit.length, 1);
+  assert.ok(Math.abs(dim[0].sizePct + lit[0].sizePct + dim[1].sizePct - 100) < 1e-9);
+
+  // Nothing reported: the whole bar dims. That is the honest picture of a server capturing nowhere
+  // — never an assumption that there is one window somewhere.
+  assert.deepEqual(dimSegments(activeWindows(null), ext), [{ startPct: 0, sizePct: 100 }]);
+  assert.deepEqual(dimSegments(activeWindows({ windows: [] }), ext), [{ startPct: 0, sizePct: 100 }]);
+  // Two front ends on adjacent ranges leave no seam between them.
+  const two = activeWindows({ windows: [win(0, 50), win(50, 100)] });
+  assert.deepEqual(dimSegments(two, ext), []);
+  assert.deepEqual(dimSegments(one, null), []);
+
+  // And the box is gone from the markup and the stylesheet, not merely hidden.
+  const src = readFileSync("src/app/centre/navigators.ts", "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.ok(!src.includes("fn-view"), "the persistent view box must be removed, not hidden");
+  assert.ok(src.includes("fn-draft"), "the transient drag draft stays — drag-to-retune is unchanged");
+  const css = readFileSync("src/app/centre/centre.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.ok(!css.includes(".fn-view"), "no style may remain for a box nothing draws");
+  assert.match(css, /\.freqnav \.fn-dim \{/);
+});
+
+test("T-397: the two strips and the waterfall share ONE colour ramp, and it reaches yellow, red and white", () => {
+  // The symptom the user reported: the strips were cyan whatever the value, because their ramp ran
+  // dark-teal → cyan and stopped. Cyan is the stop at x ≈ 0.45 of the real ramp, so a strip that
+  // only ever reached the middle of it IS that teal band.
+  const [, cyanG, cyanB] = cmapBytes(0.45);
+  assert.ok(cyanG > 150 && cyanB > 180, `0.45 should be cyan: ${cmapBytes(0.45)}`);
+  const [yr, yg, yb] = cmapBytes(0.7);
+  assert.ok(yr > 200 && yg > 180 && yb < 80, `0.7 should be yellow: ${cmapBytes(0.7)}`);
+  const [rr, rg, rb] = cmapBytes(0.9);
+  assert.ok(rr > 200 && rg < 90 && rb < 60, `0.9 should be red: ${cmapBytes(0.9)}`);
+  assert.deepEqual(cmapBytes(1), [255, 255, 255], "the top of the ramp is white");
+  assert.deepEqual(cmapBytes(0), [0, 0, 10], "and the bottom is near-black");
+  // Clamped, and a non-finite input reads as the bottom rather than wrapping.
+  assert.deepEqual(cmapBytes(9), cmapBytes(1));
+  assert.deepEqual(cmapBytes(-9), cmapBytes(0));
+  assert.deepEqual(cmapBytes(NaN), cmapBytes(0));
+
+  // The GLSL the waterfall compiles is GENERATED from the same stops, so the shader and the canvas
+  // cannot drift: every stop's colour appears in it, in order.
+  for (const [, c] of CMAP_STOPS) {
+    const vec = `vec3(${c.map((v) => (Number.isInteger(v) ? v.toFixed(1) : String(v))).join(",")})`;
+    assert.ok(CMAP_GLSL.includes(vec), `${vec} missing from the generated shader ramp`);
+  }
+
+  // THE CONTROL on duplication: the ramp exists in exactly one module under src/. A third copy — the
+  // quickest fix, and the reason two renderings disagreed in the first place — fails here.
+  const files = [
+    "src/waterfall.ts", "src/app/centre/navigators.ts", "src/app/centre/live-spectrum.ts",
+    "src/app/centre/review-render.ts", "src/axis.ts", "src/timebox.ts",
+  ];
+  for (const f of files) {
+    const src = readFileSync(f, "utf8");
+    assert.ok(!/vec3 cmap\(float/.test(src), `${f} must not define a second ramp`);
+    assert.ok(!src.includes("0.05,0.1,0.55"), `${f} must not carry the ramp's stops`);
+  }
+  // The waterfall takes the generated one, and the strips take the byte form of the same stops.
+  assert.match(readFileSync("src/waterfall.ts", "utf8"), /CMAP\s*=\s*CMAP_GLSL/);
+  const nav = readFileSync("src/app/centre/navigators.ts", "utf8");
+  assert.match(nav, /cmapBytes\(shade\)/);
+  // ...and no longer the hand-rolled teal arithmetic it used to paint both strips with.
+  assert.ok(!/120 \+ 110 \*/.test(nav), "the cyan-only ramp must be gone from the strips");
+});
+
+test("T-397: the bottom bar asks for a MINI-WATERFALL — time rows and frequency cells — over the same window as the time bar", () => {
+  // The guard class CLAUDE.md names: assert the request the client BUILDS, not only what it renders
+  // (T-367's bug was a perfectly-rendered answer to the wrong question).
+  //
+  // `/api/timeline`'s `columns` is its TIME axis and `rows` its FREQUENCY axis, so a mini-waterfall
+  // R rows tall and N cells wide is `columns=R&rows=N`. No second axis had to be added anywhere:
+  // `RegionHistory::overview` already folds both, which is the projection docs/16 §3 asks the
+  // survey bar to be.
+  const band = { loHz: 88e6, hiHz: 108e6 };
+  const req = timelineRequest(band, 64, 380);
+  assert.ok(req.includes("columns=64") && req.includes("rows=380"), req);
+  // The frequency cells of both halves must match, or column f of one is not column f of the other.
+  const cov = coverageRequest({ lo: band.loHz, hi: band.hiHz }, 380, null)!;
+  assert.ok(cov.includes("cells=380"), cov);
+
+  const src = readFileSync("src/app/centre/navigators.ts", "utf8");
+  // Both bars size their request from their own element, not from a constant.
+  assert.match(src, /stripCells\(track\.clientWidth/);
+  assert.match(src, /stripCells\(track\.clientHeight/);
+  assert.ok(!src.includes("const TIME_COLUMNS"), "the fixed 160 x 6 grid must be gone");
+  assert.ok(!src.includes("const TIME_ROWS"), "the fixed 160 x 6 grid must be gone");
+  // And the bottom strip's canvas is nt rows tall, not one row stretched by CSS.
+  assert.match(src, /strip\.height = nt/);
+  assert.ok(
+    !/strip\.width = survey\.length;\s*\n\s*strip\.height = 1;/.test(src),
+    "a single row stretched to the bar's height is the bug",
+  );
 });

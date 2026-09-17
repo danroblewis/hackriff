@@ -90,6 +90,45 @@ fn tally(h: &HistoryCounters, folded: &[Result<FloorIngest, StoreError>]) {
     }
 }
 
+/// The Welch settings **this reader** averages with, and the one line in the whole chain that
+/// decides whether the pyramid's "max-hold" is a max-hold of measurements or a max-hold of means
+/// (T-397).
+///
+/// # The bug this function exists to have fixed
+///
+/// Every layer downstream of here is an honest maximum and says so: `Tile::add_value` keeps
+/// `max = max(max, pk_db)`, `Tile::fold_child` rolls parents up as max-of-max,
+/// `RegionHistory::overview` folds cells with `OverviewCell::fold` (also a max), and both
+/// `/api/timeline` and `/api/coverage` serve `"fold": "max-hold"` with
+/// [`crate::history`]-independent prose about it. All of that was true. What was false was the
+/// *input*: this reader set `holds = false`, so [`hk_dsp::Spectrum::max_hold`] came back **empty**,
+/// [`hk_store::FrameInput::from_dsp`] therefore set `peak: None`, and
+/// `FloorProduct::ingest`'s `let peak = frame.peak.unwrap_or(frame.psd)` quietly substituted the
+/// **Welch-averaged PSD**.
+///
+/// A history frame averages `K = fs / (hop · history_rows_per_s)` segments — order a thousand at
+/// 20 Msps and 10 rows/s — so a burst occupying one segment was attenuated by ~10·log10(K) ≈ 30 dB
+/// before the first `max` ever ran. Maxing averages is not max-holding: the peak was gone. That is
+/// exactly the user's report — *"yellow/red peaks not showing because averaging washes them out"* —
+/// and it is why the strips could never reach the top of the colour ramp whatever ramp they used.
+///
+/// The fix is not a second max anywhere. It is to let the per-segment max the accumulator already
+/// knows how to keep actually reach the store, through the `peak` field that has always been wired
+/// for it. `psd` is untouched, so percentiles, the floor tracker and occupancy see exactly what
+/// they saw before; only `max_db` changes, and it changes from a mean to the maximum it claims to
+/// be.
+///
+/// Cost: two extra O(bins) passes per segment in [`hk_dsp::welch::Accumulators::add`], against an
+/// N·log N FFT on the same segment — and the accumulation is CPU-side for every compute provider,
+/// so no backend path changes. SK stays off; it is not read from this chain.
+pub(crate) fn history_welch(fft_len: usize) -> WelchConfig {
+    let mut welch = WelchConfig::new(fft_len);
+    // ON, deliberately: `max_hold` is what the pyramid's `max_db` is a max *of*. See above.
+    welch.holds = true;
+    welch.spectral_kurtosis = false;
+    welch
+}
+
 /// T-136: the site a frame at sample time `t` is folded under: the attention service's assignment
 /// peeked at `t` (never advancing or persisting the state machine; only the occupancy close does),
 /// `unassigned` without a service.
@@ -103,9 +142,7 @@ pub(crate) fn run(
     product: Arc<Mutex<FloorProduct>>,
     attention: Option<Arc<AttentionService>>,
 ) -> anyhow::Result<()> {
-    let mut welch = WelchConfig::new(shared.fft_len);
-    welch.holds = false;
-    welch.spectral_kurtosis = false;
+    let welch = history_welch(shared.fft_len);
     let rows = shared.cfg.settings.history_rows_per_s.max(0.01);
     let k = ((shared.fs / (welch.hop() as f64 * rows)).round() as usize).max(1);
     let mut stft_cfg = StftConfig::new(welch, k);
@@ -204,4 +241,222 @@ pub(crate) fn run(
         .map_err(|e| anyhow::anyhow!("history checkpoint: {e}"))?;
     update_tiles(&shared, &p);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hk_core::ProvenanceHandle;
+    use hk_model::{
+        ClockSource, FreqRange, Provenance, SampleTime, TimeRange, TimestampMethod, Tune,
+    };
+    use hk_store::{FrameInput, Pyramid, PyramidConfig, RegionQuery, Resolution};
+    use num_complex::Complex32;
+
+    const S: i64 = 1_000_000_000;
+    const T0: i64 = 1_789_300_800 * S;
+    const FS: f64 = 2_048_000.0;
+    const CENTER: f64 = 100_000_000.0;
+    /// Bins, and so the segment length. Small, so the test is quick.
+    const N: usize = 256;
+    /// Segments averaged into one history frame. The real chain runs ~1000 at 20 Msps and
+    /// 10 rows/s; 64 is enough to make an average and a maximum ~18 dB apart.
+    const K: usize = 64;
+
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "hk-pipeline-{tag}-{}-{:?}",
+                std::process::id(),
+                std::time::Instant::now()
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn provenance() -> ProvenanceHandle {
+        ProvenanceHandle::new(Provenance {
+            device_id: "synthetic:t397".into(),
+            tune: Tune {
+                center_hz: CENTER,
+                sample_rate_hz: FS,
+                lna_db: 0.0,
+                vga_db: 0.0,
+                amp_on: false,
+                bandwidth_hz: FS,
+            },
+            quantisation_limited: false,
+            overload: false,
+            temperature_c: None,
+            antenna_port: None,
+            bias_tee: hk_model::BiasTee::Unknown,
+            clock_source: ClockSource::Internal,
+            clock_locked: true,
+            calibration_state_ref: None,
+            spur_mask_ref: None,
+            timestamp_method: TimestampMethod::Synthetic,
+            timestamp_error_budget_ns: Some(0),
+            capture_artefacts: Vec::new(),
+        })
+    }
+
+    /// `K` segments' worth of samples in which **exactly one** segment carries a strong tone at DC
+    /// and the rest are silent: a burst one averaging interval long, the shape of every signal in
+    /// the 902–928 MHz playground the user calls the canonical case.
+    fn one_segment_burst(hop: usize) -> Vec<Complex32> {
+        // The STFT hops by `hop`, so segment `i` spans `[i·hop, i·hop + N)`. Filling the window of
+        // one segment only is enough: neighbours see part of it, which only helps the mean.
+        let mut v = vec![Complex32::new(0.0, 0.0); K * hop + N];
+        let burst = K / 2;
+        for x in &mut v[burst * hop..burst * hop + N] {
+            *x = Complex32::new(1.0, 0.0);
+        }
+        v
+    }
+
+    /// Runs `welch` over the burst and returns `(psd peak dB, max-hold peak dB)` of the first full
+    /// frame, per Hz. The max-hold is empty when holds are off, and then reads as the PSD — which
+    /// is exactly the substitution the store makes.
+    fn frame_peaks(welch: WelchConfig) -> (f32, f32) {
+        let mut stft = hk_dsp::StftProcessor::new(StftConfig::new(welch, K)).unwrap();
+        let prov = provenance();
+        let samples = one_segment_burst(welch.hop());
+        let mut got = None;
+        stft.push(
+            InputInfo {
+                time: SampleTime {
+                    sample_index: 0,
+                    host_time: Timestamp::from_unix_nanos(T0),
+                },
+                discontinuity: Discontinuity::STREAM_START,
+                dropped_before: 0,
+                provenance: &prov,
+            },
+            &samples,
+            |frame: &SpectrumFrame| {
+                if got.is_some() {
+                    return;
+                }
+                let s = &frame.spectrum;
+                let peak =
+                    |v: &[f32]| 10.0 * v.iter().copied().fold(0.0f32, f32::max).max(1e-30).log10();
+                let mean_db = peak(&s.psd);
+                let hold_db = if s.max_hold.len() == s.psd.len() {
+                    peak(&s.max_hold)
+                } else {
+                    mean_db
+                };
+                got = Some((mean_db, hold_db));
+            },
+        );
+        got.expect("no full frame")
+    }
+
+    /// **T-397's measurement, not a declaration.** `/api/coverage` and `/api/timeline` both state
+    /// `"fold": "max-hold"`, and the fold really was one — but the values it folded had already
+    /// been averaged, because this reader turned the per-segment holds off. This asserts what the
+    /// user actually sees: a burst lasting one averaging interval reaches the pyramid's `max_db`
+    /// **at its own level**, not `10·log10(K)` below it.
+    ///
+    /// The control is the old configuration. With `holds = false` the same signal, the same STFT
+    /// and the same ingest land ~18 dB lower (≈ `10·log10(64)`), so the assertion below is
+    /// load-bearing rather than a tautology about a strong tone.
+    #[test]
+    fn t397_the_history_chain_stores_the_burst_peak_and_not_the_average_of_it() {
+        let welch = history_welch(N);
+        assert!(
+            welch.holds,
+            "the whole point: the per-segment holds are kept"
+        );
+        assert!(!welch.spectral_kurtosis, "SK is not read from this chain");
+
+        let (mean_db, hold_db) = frame_peaks(welch);
+        let mut washed = welch;
+        washed.holds = false;
+        let (_, substituted_db) = frame_peaks(washed);
+
+        // The mutation: with holds off, `FrameInput::from_dsp` has no peak to offer and the store
+        // maxes the *mean* instead. That is the ~10·log10(K) the user was losing.
+        let expect_loss = 10.0 * (K as f32).log10();
+        assert_eq!(
+            substituted_db, mean_db,
+            "holds off must substitute the averaged PSD: {substituted_db} vs {mean_db}"
+        );
+        assert!(
+            hold_db - substituted_db > 0.5 * expect_loss,
+            "the burst peak must stand above the average by most of {expect_loss:.1} dB, \
+             got {hold_db:.1} vs {substituted_db:.1}"
+        );
+
+        // And the peak survives the whole store path: ingest → level-0 tile → query.
+        let dir = TempDir::new("t397");
+        let mut p = Pyramid::open(&dir.0, PyramidConfig::default()).unwrap();
+        let prov = provenance();
+        let samples = one_segment_burst(welch.hop());
+        let mut stft = hk_dsp::StftProcessor::new(StftConfig::new(welch, K)).unwrap();
+        let mut frames = 0;
+        stft.push(
+            InputInfo {
+                time: SampleTime {
+                    sample_index: 0,
+                    host_time: Timestamp::from_unix_nanos(T0),
+                },
+                discontinuity: Discontinuity::STREAM_START,
+                dropped_before: 0,
+                provenance: &prov,
+            },
+            &samples,
+            |frame: &SpectrumFrame| {
+                p.ingest(&FrameInput::from_dsp(frame)).unwrap();
+                frames += 1;
+            },
+        );
+        assert!(frames >= 1, "no frame ingested");
+        p.seal_through(Timestamp::from_unix_nanos(T0 + 3600 * S))
+            .unwrap();
+        let h = p
+            .query(&RegionQuery {
+                freq: FreqRange::centered(CENTER, 0.5 * FS),
+                time: TimeRange::new(
+                    Timestamp::from_unix_nanos(T0),
+                    Timestamp::from_unix_nanos(T0 + 60 * S),
+                ),
+                resolution: Resolution::Level(0),
+            })
+            .unwrap();
+        let served = h
+            .cells
+            .iter()
+            .filter(|c| c.observed() && c.max_db.is_finite())
+            .map(|c| c.max_db)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            served.is_finite(),
+            "the pyramid served no observed cell for the burst"
+        );
+        // The served maximum is the frame's max-hold, within the store's 0.01 dB rounding and the
+        // per-Hz density offset the ingest applies uniformly to both. Comparing the *gap* keeps
+        // that offset out of it: what matters is that the burst stands proud of the mean by the
+        // averaging gain, which is the property the strips render.
+        let quiet = h
+            .cells
+            .iter()
+            .filter(|c| c.observed() && c.p_low_db.is_finite())
+            .map(|c| c.p_low_db)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            served - quiet > 0.5 * expect_loss,
+            "the stored max must be a max-hold, not a max of means: {served:.1} over {quiet:.1}"
+        );
+    }
 }
