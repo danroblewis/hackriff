@@ -1,0 +1,682 @@
+{
+  "url": "http://127.0.0.1:18790",
+  "at": "2026-09-17T20:18:35.788Z",
+  "items": {
+    "one_context": {
+      "canvases": 1,
+      "gl2": true,
+      "ver": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+      "contexts": 1,
+      "scissorSets": 4,
+      "panes": 4,
+      "checks": [
+        {
+          "pass": true,
+          "what": "exactly one <canvas> in the document"
+        },
+        {
+          "pass": true,
+          "what": "exactly one WebGL2 context"
+        },
+        {
+          "pass": true,
+          "what": "one gl.viewport+gl.scissor per pane per frame"
+        }
+      ]
+    },
+    "shared_lru": {
+      "uploads": 95,
+      "fetches": 95,
+      "uniqueTileKeys": 95,
+      "acquiresThisFrame": 116,
+      "maxPanesSharingATile": 8,
+      "resident": 95,
+      "residentMB": 18.68,
+      "panes": 8,
+      "hits": 33872,
+      "misses": 116,
+      "distinctKeysEverRequested": 95,
+      "uploadMs": 2.5,
+      "drawCalls": 157,
+      "counterfactual_per_pane_cache_MB": 149.44,
+      "checks": [
+        {
+          "pass": true,
+          "what": "every fetched tile uploaded exactly once"
+        },
+        {
+          "pass": true,
+          "what": "uploads (95) never exceed DISTINCT tile keys ever requested (95)"
+        },
+        {
+          "pass": true,
+          "what": "at least one tile really is shown in several panes"
+        },
+        {
+          "pass": true,
+          "what": "acquires exceed distinct keys: the sharing is real"
+        },
+        {
+          "pass": true,
+          "what": "per-tile GPU upload under 5 ms"
+        }
+      ],
+      "upload_ms_per_tile": 0.026
+    },
+    "grey_and_tiers": {
+      "total": 1444860,
+      "grey": 796885,
+      "coloured": 639571,
+      "dark": 8404,
+      "greyFrac": 0.5515309441745221,
+      "topColours": [
+        [
+          "0,0,2",
+          226840
+        ],
+        [
+          "1,0,3",
+          96537
+        ],
+        [
+          "0,0,3",
+          67761
+        ],
+        [
+          "2,0,3",
+          55654
+        ],
+        [
+          "0,0,1",
+          48965
+        ],
+        [
+          "3,0,3",
+          24289
+        ],
+        [
+          "4,1,3",
+          19720
+        ],
+        [
+          "7,6,5",
+          13322
+        ]
+      ],
+      "distinctColourBuckets": 47,
+      "checks": [
+        {
+          "pass": true,
+          "what": "most of a 6 GHz x retention canvas is honestly grey"
+        },
+        {
+          "pass": true,
+          "what": "observed data actually renders"
+        },
+        {
+          "pass": true,
+          "what": "more than one tier's palette is present"
+        }
+      ]
+    },
+    "per_axis_levels": {
+      "on_store_floor_ladder": {
+        "levels": [
+          {
+            "id": "p0",
+            "spanF": 2400000,
+            "spanT": 20000000000,
+            "lf": 0,
+            "lt": 0
+          },
+          {
+            "id": "p1",
+            "spanF": 600000000,
+            "spanT": 20000000000,
+            "lf": 7,
+            "lt": 0
+          },
+          {
+            "id": "p2",
+            "spanF": 2400000,
+            "spanT": 2400000000000,
+            "lf": 0,
+            "lt": 2
+          }
+        ],
+        "independent": true,
+        "sameTimeDiffFreq": true,
+        "sameFreqDiffTime": true
+      },
+      "on_docs16_v0_ladder": {
+        "levels": [
+          {
+            "id": "p0",
+            "spanF": 2400000,
+            "spanT": 20000000000,
+            "lf": 0,
+            "lt": 0
+          },
+          {
+            "id": "p1",
+            "spanF": 600000000,
+            "spanT": 20000000000,
+            "lf": 4,
+            "lt": 0
+          },
+          {
+            "id": "p2",
+            "spanF": 2400000,
+            "spanT": 2400000000000,
+            "lf": 0,
+            "lt": 0
+          }
+        ],
+        "ladder": {
+          "f0": 100000,
+          "t0": 128000000000
+        },
+        "sameTimeDiffFreq": true,
+        "sameFreqDiffTime": false
+      },
+      "checks": [
+        {
+          "pass": true,
+          "what": "two panes at the same level_t resolve DIFFERENT level_f"
+        },
+        {
+          "pass": true,
+          "what": "two panes at the same level_f resolve DIFFERENT level_t"
+        },
+        {
+          "pass": true,
+          "what": "FINDING F1: on docs/16 §6.2's OWN V0 ladder level_t NEVER varies - 128 s cells are coarser than any pane"
+        }
+      ]
+    },
+    "minimap": {
+      "minimap": {
+        "id": "minimap",
+        "level": {
+          "lf": 7,
+          "lt": 0
+        },
+        "follow": true,
+        "spanF": 5999000000,
+        "spanT": 120000000000,
+        "centerF": 3000500000,
+        "centerT": 1789676279979466000
+      },
+      "tuned": [
+        {
+          "device_id": "mock:hackrf:0000000000000000d2b861dc263bc293",
+          "f_lo": 99600000,
+          "f_hi": 102000000
+        }
+      ],
+      "deviceId": "mock:hackrf:0000000000000000d2b861dc263bc293",
+      "checks": [
+        {
+          "pass": true,
+          "what": "minimap spans the whole device range"
+        },
+        {
+          "pass": true,
+          "what": "minimap resolves to a near-coarsest frequency level (measured 7 of 7)"
+        },
+        {
+          "pass": true,
+          "what": "at least one live SDR segment is known"
+        }
+      ]
+    },
+    "per_pane_follow": {
+      "followMoved": true,
+      "pausedHeld": true,
+      "followDelta": 2000213248,
+      "checks": [
+        {
+          "pass": true,
+          "what": "a following pane advances with the live edge"
+        },
+        {
+          "pass": true,
+          "what": "a paused pane's time window does not move - VIEW state only"
+        }
+      ]
+    },
+    "live_edge": {
+      "invalidated": 32,
+      "firstKey": "0/0/63/6990923",
+      "obs0": 11712,
+      "obs1": 17280,
+      "firstMeta": {
+        "lf": 0,
+        "lt": 0,
+        "fb": 63,
+        "tb": 6990923,
+        "f0": 100800000,
+        "f1": 102400000,
+        "t0": 1789676288,
+        "t1": 1789676544,
+        "err": null,
+        "requested": {
+          "nt": 256,
+          "nf": 256
+        },
+        "served": {
+          "nt": 256,
+          "nf": 256,
+          "level": 0,
+          "t_cell_s": 1,
+          "f_cell_hz": 6250
+        },
+        "shortfall": {
+          "t": 1,
+          "f": 1
+        },
+        "source": "spectrum-history",
+        "live": false,
+        "tier": 2,
+        "observed_cells": 11712,
+        "range_db": {
+          "lo": -77.63999938964844,
+          "hi": -50.41999816894531
+        },
+        "build_ms": 922.77
+      },
+      "secondMeta": {
+        "lf": 0,
+        "lt": 0,
+        "fb": 63,
+        "tb": 6990923,
+        "f0": 100800000,
+        "f1": 102400000,
+        "t0": 1789676288,
+        "t1": 1789676544,
+        "err": null,
+        "requested": {
+          "nt": 256,
+          "nf": 256
+        },
+        "served": {
+          "nt": 256,
+          "nf": 256,
+          "level": 0,
+          "t_cell_s": 1,
+          "f_cell_hz": 6250
+        },
+        "shortfall": {
+          "t": 1,
+          "f": 1
+        },
+        "source": "spectrum-history",
+        "live": false,
+        "tier": 2,
+        "observed_cells": 17280,
+        "range_db": {
+          "lo": -77.63999938964844,
+          "hi": -50.41999816894531
+        },
+        "build_ms": 2500.11
+      },
+      "ladder": {
+        "f0": 6250,
+        "t0": 1000000000
+      },
+      "retention_s": 120,
+      "retention_per_finest_cell": 0.008333333333333333,
+      "docs16_v0_retention_per_finest_cell": 1.0666666666666667,
+      "checks": [
+        {
+          "pass": true,
+          "what": "the growing-edge tiles are identified and invalidated on refresh"
+        },
+        {
+          "pass": true,
+          "what": "re-requesting the edge tile never LOSES observed cells"
+        },
+        {
+          "pass": true,
+          "what": "the edge tile GAINS observed cells as capture continues (live == finest growing edge). FAILS AFTER ANY RETUNE - see REPORT.md finding F4: the pyramid stops receiving frames while the IQ ring keeps filling, so this measures F4, not the renderer. Verified growing (2688 -> 4750 cells) on a backend that has NOT been retuned."
+        }
+      ]
+    },
+    "retune": {
+      "before": [
+        {
+          "device_id": "mock:hackrf:0000000000000000d2b861dc263bc293",
+          "f_lo": 99600000,
+          "f_hi": 102000000
+        }
+      ],
+      "dest": 900800000,
+      "offered": true,
+      "noAutoRetune": true,
+      "retune": {
+        "requested": {
+          "pane": "p0",
+          "center_hz": 900800000,
+          "span_hz": 2000000
+        },
+        "device_id": "mock:hackrf:0000000000000000d2b861dc263bc293",
+        "action": "retune",
+        "calls": [
+          "/api/control/center:200"
+        ]
+      },
+      "after": [
+        {
+          "device_id": "mock:hackrf:0000000000000000d2b861dc263bc293",
+          "f_lo": 899600000,
+          "f_hi": 902000000
+        }
+      ],
+      "deviceId": "mock:hackrf:0000000000000000d2b861dc263bc293",
+      "edgeInvalidated": 15,
+      "checks": [
+        {
+          "pass": true,
+          "what": "panning left an OFFER and issued NO device call"
+        },
+        {
+          "pass": true,
+          "what": "the explicit action retuned, typed action + device_id recorded"
+        },
+        {
+          "pass": true,
+          "what": "the tuned segment moved by more than 100 MHz"
+        }
+      ]
+    },
+    "pane_scaling": {
+      "ladder": "stress: 2 kHz x 40 ms level-0 cells",
+      "rows": [
+        {
+          "panes": 1,
+          "p50": 1.6,
+          "p95": 2.1,
+          "drawCalls": 116,
+          "tilesDrawn": 110,
+          "grey": 0,
+          "uniqueTileKeys": 110,
+          "acquires": 110,
+          "resident": 143,
+          "residentMB": 28.11,
+          "uploads": 143,
+          "evictions": 0,
+          "refetchAfterEvict": 0
+        },
+        {
+          "panes": 2,
+          "p50": 1.6,
+          "p95": 2,
+          "drawCalls": 118,
+          "tilesDrawn": 107,
+          "grey": 0,
+          "uniqueTileKeys": 107,
+          "acquires": 107,
+          "resident": 161,
+          "residentMB": 31.65,
+          "uploads": 161,
+          "evictions": 0,
+          "refetchAfterEvict": 0
+        },
+        {
+          "panes": 4,
+          "p50": 1.5,
+          "p95": 2,
+          "drawCalls": 133,
+          "tilesDrawn": 112,
+          "grey": 0,
+          "uniqueTileKeys": 111,
+          "acquires": 112,
+          "resident": 180,
+          "residentMB": 35.39,
+          "uploads": 180,
+          "evictions": 0,
+          "refetchAfterEvict": 0
+        },
+        {
+          "panes": 8,
+          "p50": 1.7,
+          "p95": 2.2,
+          "drawCalls": 163,
+          "tilesDrawn": 122,
+          "grey": 0,
+          "uniqueTileKeys": 120,
+          "acquires": 122,
+          "resident": 192,
+          "residentMB": 37.75,
+          "uploads": 208,
+          "evictions": 16,
+          "refetchAfterEvict": 0
+        },
+        {
+          "panes": 12,
+          "p50": 1.7,
+          "p95": 2.1,
+          "drawCalls": 195,
+          "tilesDrawn": 134,
+          "grey": 0,
+          "uniqueTileKeys": 121,
+          "acquires": 134,
+          "resident": 192,
+          "residentMB": 37.75,
+          "uploads": 237,
+          "evictions": 45,
+          "refetchAfterEvict": 0
+        },
+        {
+          "panes": 16,
+          "p50": 1.4,
+          "p95": 1.8,
+          "drawCalls": 235,
+          "tilesDrawn": 154,
+          "grey": 0,
+          "uniqueTileKeys": 134,
+          "acquires": 154,
+          "resident": 192,
+          "residentMB": 37.75,
+          "uploads": 250,
+          "evictions": 58,
+          "refetchAfterEvict": 0
+        },
+        {
+          "panes": 24,
+          "p50": 1.4,
+          "p95": 1.9,
+          "drawCalls": 276,
+          "tilesDrawn": 155,
+          "grey": 0,
+          "uniqueTileKeys": 131,
+          "acquires": 155,
+          "resident": 192,
+          "residentMB": 37.75,
+          "uploads": 293,
+          "evictions": 101,
+          "refetchAfterEvict": 0
+        },
+        {
+          "panes": 32,
+          "p50": 1.5,
+          "p95": 1.9,
+          "drawCalls": 331,
+          "tilesDrawn": 170,
+          "grey": 0,
+          "uniqueTileKeys": 141,
+          "acquires": 170,
+          "resident": 192,
+          "residentMB": 37.75,
+          "uploads": 305,
+          "evictions": 113,
+          "refetchAfterEvict": 0
+        },
+        {
+          "panes": 48,
+          "p50": 1.7,
+          "p95": 2.2,
+          "drawCalls": 447,
+          "tilesDrawn": 206,
+          "grey": 0,
+          "uniqueTileKeys": 154,
+          "acquires": 206,
+          "resident": 192,
+          "residentMB": 37.75,
+          "uploads": 367,
+          "evictions": 175,
+          "refetchAfterEvict": 0
+        }
+      ],
+      "checks": [
+        {
+          "pass": true,
+          "what": "16 panes inside a 60 Hz budget (p95 1.8 ms)"
+        },
+        {
+          "pass": true,
+          "what": "32 panes inside a 30 Hz budget (p95 1.9 ms)"
+        }
+      ]
+    },
+    "lru_cost": {
+      "rows": [
+        {
+          "budget": 512,
+          "p50": 1.7,
+          "p95": 3,
+          "resident": 220,
+          "residentMB": 43.25,
+          "uploads": 220,
+          "evictions": 0,
+          "refetchAfterEvict": 0,
+          "thrashRatio": 0,
+          "msPerUpload": 0.01,
+          "greyTiles": 0,
+          "uniqueTileKeys": 208
+        },
+        {
+          "budget": 256,
+          "p50": 1.6,
+          "p95": 2.2,
+          "resident": 220,
+          "residentMB": 43.25,
+          "uploads": 220,
+          "evictions": 0,
+          "refetchAfterEvict": 0,
+          "thrashRatio": 0,
+          "msPerUpload": 0.01,
+          "greyTiles": 0,
+          "uniqueTileKeys": 211
+        },
+        {
+          "budget": 128,
+          "p50": 12.6,
+          "p95": 14.8,
+          "resident": 128,
+          "residentMB": 25.17,
+          "uploads": 5643,
+          "evictions": 5515,
+          "refetchAfterEvict": 5432,
+          "thrashRatio": 0.963,
+          "msPerUpload": 0.009,
+          "greyTiles": 101,
+          "uniqueTileKeys": 208
+        },
+        {
+          "budget": 64,
+          "p50": 12.8,
+          "p95": 15.3,
+          "resident": 64,
+          "residentMB": 12.58,
+          "uploads": 5975,
+          "evictions": 5911,
+          "refetchAfterEvict": 5756,
+          "thrashRatio": 0.963,
+          "msPerUpload": 0.009,
+          "greyTiles": 144,
+          "uniqueTileKeys": 208
+        },
+        {
+          "budget": 32,
+          "p50": 13.3,
+          "p95": 20.6,
+          "resident": 32,
+          "residentMB": 6.29,
+          "uploads": 5712,
+          "evictions": 5680,
+          "refetchAfterEvict": 5501,
+          "thrashRatio": 0.963,
+          "msPerUpload": 0.008,
+          "greyTiles": 179,
+          "uniqueTileKeys": 208
+        },
+        {
+          "budget": 16,
+          "p50": 15,
+          "p95": 26.3,
+          "resident": 16,
+          "residentMB": 3.15,
+          "uploads": 5629,
+          "evictions": 5613,
+          "refetchAfterEvict": 5418,
+          "thrashRatio": 0.963,
+          "msPerUpload": 0.007,
+          "greyTiles": 198,
+          "uniqueTileKeys": 208
+        }
+      ],
+      "tile_bytes": 196608,
+      "checks": [
+        {
+          "pass": true,
+          "what": "a budget above the working set never thrashes"
+        },
+        {
+          "pass": true,
+          "what": "a budget below the working set DOES thrash (measured, not assumed)"
+        }
+      ]
+    },
+    "no_divergence": {
+      "paneA": [
+        34,
+        32,
+        85
+      ],
+      "paneB": [
+        34,
+        32,
+        85
+      ],
+      "minimap": [
+        34,
+        32,
+        85
+      ],
+      "identicalAcrossPanes": true,
+      "identicalOnMinimap": true,
+      "sameLevel": true,
+      "mainLevel": {
+        "lf": 2,
+        "lt": 1
+      },
+      "minimapLevel": {
+        "lf": 2,
+        "lt": 1
+      },
+      "checks": [
+        {
+          "pass": true,
+          "what": "the same data at the same zoom is the same pixel in two panes"
+        },
+        {
+          "pass": true,
+          "what": "the MINIMAP (the old bottom scrubber) at the SAME level produces the same pixel - T-397 cannot recur"
+        }
+      ]
+    }
+  },
+  "notes": [],
+  "console": []
+}
