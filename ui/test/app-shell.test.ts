@@ -13,7 +13,7 @@ import { mounts as dock } from "../src/app/dock";
 import { mounts as explore } from "../src/app/explore";
 import { mounts as history } from "../src/app/history";
 import { mounts as review } from "../src/app/review";
-import { apiConnFor, backoffMs, parseSpectrumRecord, wsUrl } from "../src/app/net";
+import { apiConnFor, backoffMs, openStream, parseSpectrumRecord, STREAM_SCHEMA, wsUrl } from "../src/app/net";
 import { deviceFrom } from "../src/app/shell";
 
 const html = readFileSync("src/app/index.html", "utf8");
@@ -66,6 +66,51 @@ test("spectrum records: data, gated, dropped, unknown, short", () => {
   assert.deepEqual(x, { type: "dropped", seq: 9, count: 5, gated: false });
   assert.deepEqual(parseSpectrumRecord(record(3, 0, 10, 0n, null)), { type: "other", seq: 10 });
   assert.equal(parseSpectrumRecord(new ArrayBuffer(8)), null);
+});
+
+// T-417: a stream id outlives its publishers. A retune (or a re-plumb) finishes the publisher and
+// offers the next one under the same id, and the bridge carries the connection across rather than
+// dropping the browser — so the client must read a LATER header on the same socket as a header.
+// Reading it as a record would be worse than the disconnect it replaces: rows of the new window
+// would be drawn against the old geometry.
+test("a later stream header on a live socket is a new header, not a record", () => {
+  class FakeWs {
+    static last: FakeWs | null = null;
+    binaryType = "";
+    onmessage: ((ev: { data: unknown }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    closed = false;
+    constructor(readonly url: string) { FakeWs.last = this; }
+    close() { this.closed = true; }
+  }
+  const g = globalThis as unknown as Record<string, unknown>;
+  const prevWs = g.WebSocket, prevLoc = g.location;
+  g.WebSocket = FakeWs;
+  g.location = { protocol: "http:", host: "127.0.0.1:8789" };
+  try {
+    const headers: Record<string, unknown>[] = [], texts: string[] = [];
+    let closes = 0;
+    openStream("/ws/spectrum/live", "tok", {
+      onHeader: (h) => headers.push(h),
+      onText: (t) => texts.push(t),
+      onClose: () => { closes++; },
+    });
+    const ws = FakeWs.last!;
+    const header = (centerHz: number) => JSON.stringify({ schema: STREAM_SCHEMA, stream_id: "spectrum/live", kind: "spectrum", center_hz: centerHz });
+    ws.onmessage!({ data: header(100.8e6) });
+    // A messages stream's records are text too, and are NOT headers: no record carries `schema`.
+    ws.onmessage!({ data: `${JSON.stringify({ t: 1, metadata: { kind: "END" }, content: null })}\n` });
+    // The seam: the producer re-offered the stream at the new centre, on this same connection.
+    ws.onmessage!({ data: header(101.8e6) });
+    assert.equal(headers.length, 2);
+    assert.equal(headers[1].center_hz, 101.8e6);
+    assert.deepEqual(texts.length, 1, "the record went to onText, not onHeader");
+    assert.equal(closes, 0, "a re-plumb is not a disconnect");
+    assert.equal(ws.closed, false);
+  } finally {
+    g.WebSocket = prevWs;
+    g.location = prevLoc;
+  }
 });
 
 test("device slice from a replay control state", () => {
