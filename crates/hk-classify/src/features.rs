@@ -19,6 +19,19 @@
 //!
 //! Cost is µs–ms per snippet on one CPU core (ADR-0007 places this per event, off the ring and
 //! DSP threads).
+//!
+//! # Which of these are properties of the signal, and which of the observation
+//!
+//! `tests/feature_length_invariance.rs` is the answer, and it is executable: every dimension of
+//! [`FEATURE_NAMES`] is either asserted to survive truncation of one waveform inside a derived
+//! tolerance, or named in that file's `OBSERVATION_STATISTICS` with the mechanism that makes it a
+//! statistic of the capture and the measurement that showed it. A new dimension that is in neither
+//! list fails the test, so the choice cannot be made silently — which is how all seven of the
+//! defects the audit (T-281) found were introduced. Sixteen of the thirty are currently exempt;
+//! seven of those were found by that test rather than by a ticket, including `c20_norm`,
+//! `c40_norm` and `c42_norm`, which share **one** defect (`C20 = mean(x²)` is a coherent sum, so
+//! its integration loss is the residual carrier offset times the record length) and will recover
+//! together.
 
 use hk_dsp::{WelchConfig, WindowKind, welch};
 use hk_estimate::blind::SymbolParameters;
@@ -83,7 +96,29 @@ use num_complex::{Complex32, Complex64};
 /// 4-FSK 0.56), while the mode count is what survives that and fails instead when the levels are
 /// only two. Neither is a gate — both are density dimensions, so what they change is how far a
 /// snippet sits from `wfm`, not what any rule is allowed to conclude.
-pub const FEATURES_VERSION: u32 = 4;
+///
+/// **5 (T-312):** the five spectral features — `flatness`, `symmetry`, `carrier_line_db`,
+/// `sk_mean` and `gamma_max` — are now measured at a **fixed** transform length
+/// ([`FEATURE_FFT_LEN`]) instead of one derived from the snippet. No definition moved; the
+/// yardstick did, which is the same class of defect by a different route, and it reached further
+/// than the ticket that found it supposed.
+///
+/// `fft_len` was `(n/8).next_power_of_two().clamp(64, 1024)`, so a shape measured in bins was
+/// measured against a bin width set by the record length. That was already known to make one
+/// emission read differently when watched twice. What was **not** known is that it also splits the
+/// fitted corpus: [`crate::synth`]'s normalised snippets are 2328–16 384 samples depending on class
+/// *and seed*, so under the old rule `am`, `nbfm`, `cw`, `bpsk`, `qpsk` and the rest were fitted
+/// entirely at `fft_len` 512 while `wfm`, `ofdm`, `chirp`, `ppm` and `pulse` were fitted entirely
+/// at 1024 — and `ssb`, `fsk2`, `fsk4`, `ook`, `dsb-sc` and `vsb-am` were fitted at **both, mixed
+/// by seed**. A single Gaussian per class was being fitted over a mixture of two resolutions, with
+/// the mixture proportion decided by where the generator's decimation happened to land. Every one
+/// of those classes changes value here, which is why this is a version and a refit rather than a
+/// repair.
+///
+/// The bump follows the T-286 precedent rather than setting a new rule: a feature that stops
+/// measuring the wrong thing gets a version, because a stored `features@N` vector has to identify
+/// one computation.
+pub const FEATURES_VERSION: u32 = 5;
 
 /// Bins guarded either side of the carrier when measuring `symmetry`: the **main-lobe half-width
 /// of the analysis window**, which [`spectral_features`] configures as [`WindowKind::Hann`].
@@ -132,6 +167,111 @@ pub const DEROTATE_MIN_COHERENCE: f64 = 0.3;
 /// line trivially 0 dB — both meaningless, and both wrong in the direction of "this looks like
 /// noise". Widening the window to its neighbourhood keeps the comparison honest.
 pub const MIN_SHAPE_BINS: usize = 16;
+
+/// The analysis transform length every spectral feature is measured at, **independent of the
+/// snippet length** (T-312).
+///
+/// # Why it is pinned
+///
+/// It used to be `(n/8).next_power_of_two().clamp(64, 1024)`, so a snippet shorter than 8192
+/// samples was analysed at a *coarser* frequency resolution than a longer one: `flatness`,
+/// `symmetry`, `carrier_line_db`, `sk_mean` and `gamma_max` (which sizes its PSD the same way in
+/// [`psd_of_real`]) were each measured against a yardstick that changed with how long the emission
+/// happened to be watched. A shape measured in bins is not a property of the emission when the bin
+/// width moves; it is a property of the observation. That is the defect family T-281 audited, and
+/// this was its seventh instance.
+///
+/// # Pinning, not per-resolution densities
+///
+/// The ticket allowed either. Pinning is chosen for a reason that is not convenience:
+///
+/// **What pinning trades away is bias for variance, and only variance can be absorbed by a fitted
+/// density.** The product `fft_len × segments ≈ n` is fixed by the record, so one of the two has to
+/// move with `n`. Letting the *transform* move changes the quantity being estimated — a Hann bin is
+/// 8× wider at `n = 1024` than at `n = 8192`, so `flatness` and `carrier_line_db` have different
+/// *expected values* at the two lengths, and no amount of fitting reconciles them. Letting the
+/// *segment count* move leaves the estimand fixed and changes only the estimator's spread about it,
+/// which a Gaussian class density already models as its own σ. A length-dependent bias is a
+/// different measurement; length-dependent variance is the same measurement, less certainly.
+///
+/// Per-resolution-band densities were the alternative and are rejected on cost, not on principle:
+/// they multiply every fitted model by the number of bands, split the fitting corpus between them,
+/// and put the band into [`hk_model::classify::ClassProvenance`] so two readings of one emitter can
+/// be told apart — all to keep a resolution that the measurement above says is not worth keeping.
+///
+/// # What the pinned length costs a short burst
+///
+/// `sk_mean` is the one feature that pays. Spectral kurtosis is estimated **across segments**
+/// ([`hk_dsp::sk`]); its standard deviation on noise is `sqrt(4M²/((M−1)(M+2)(M+3)))` for `M`
+/// segments, so at 50 % overlap a 16 384-sample snippet gives `M = 31` (σ 0.34), 4096 gives
+/// `M = 7` (σ 0.62), 2048 gives `M = 3` (σ 0.78), and 1024 gives `M = 1`, where
+/// [`hk_dsp::sk::estimate`] returns `NaN` and the feature **abstains**. Under the old sizing the
+/// same snippets kept `M ≈ 15` throughout by shrinking the transform instead — a steadier number,
+/// but a steady estimate of a moving quantity. Abstention is the honest outcome and the module's
+/// existing rule: [`crate::density`] scores the class over the dimensions that are present.
+///
+/// The other four spectral features lose resolution *cells*, not resolution: a 2048-sample burst
+/// is analysed over 1024 bins from 3 segments instead of 256 bins from 15, so `flatness` and
+/// `sk_mean` are noisier while `symmetry` and `carrier_line_db` — both ratios of a line to its
+/// neighbourhood — get *better*, because the line is no longer smeared across a bin 8× too wide.
+///
+/// # Value
+///
+/// 1024 is the old clamp ceiling, which is what every snippet of 8192 samples or more already used.
+/// Every fitted density, the whole ADR-0016 §7 grid and `crate::synth`'s 16 384-sample default are
+/// therefore **bit-identical** across this change, and no refit is needed: the pin moves only the
+/// short snippets that were wrong. Choosing any other value would have changed every fitted mean at
+/// once for no measured gain — the same reason T-281 left the clamp alone.
+pub const FEATURE_FFT_LEN: usize = 1024;
+
+/// Welch segments the spectral features require before they are measured at all.
+///
+/// Pinning [`FEATURE_FFT_LEN`] fixes *what* is measured; it does not fix how many segments a given
+/// record yields, and `flatness`, `carrier_line_db` and `gamma_max` are **non-linear** functionals
+/// of the periodogram, so their estimator carries a small-sample bias that depends on the segment
+/// count `M`. For `flatness` that bias is exactly known: an `M`-averaged periodogram bin is
+/// `Gamma(M)/M`, so the geometric/arithmetic ratio of a flat band converges to
+/// `exp(ψ(M) − ln M) ≈ 1 − 1/(2M)` rather than to 1 — **0.98 at M = 31, 0.94 at M = 8, 0.84 at
+/// M = 3 and 0.56 at M = 1**.
+///
+/// Three is where that stops being a correction and starts being the answer. At `M = 1` the
+/// estimate is a raw periodogram: the 44 % geometric-mean bias is larger than the range `flatness`
+/// separates classes over (measured on `wfm`, 5430 samples, the one-segment prefix reads 0.156
+/// against 0.729 from seven segments of the same waveform), the per-bin variance is 100 %, and
+/// [`hk_dsp::sk::estimate`] is undefined below `M = 2` by construction. A record that cannot supply
+/// three segments cannot supply a spectral shape, and the honest report is the module's standing
+/// one — abstain, and let [`crate::density`] score the class over the dimensions that are present.
+///
+/// At 50 % overlap this asks for `1024 + 2×512 = 2048` samples. Nothing in the fitted corpus is
+/// shorter (the shortest normalised snippet `crate::synth` produces is 2328 samples), so this
+/// removes no fitted dimension; it removes the four spectral features from bursts under ~2 ms at
+/// the classifier's normalised rate, which previously got them from a transform 4–8× too coarse.
+pub const FEATURE_MIN_SEGMENTS: usize = 3;
+
+/// Whether `n` samples can supply [`FEATURE_MIN_SEGMENTS`] segments of `fft_len` at 50 % overlap.
+fn enough_segments(n: usize, fft_len: usize) -> bool {
+    n >= fft_len + (FEATURE_MIN_SEGMENTS - 1) * (fft_len / 2)
+}
+
+/// The transform length `n` samples are analysed with: [`FEATURE_FFT_LEN`] whenever the record can
+/// supply it, and otherwise the largest power of two that fits.
+///
+/// Below [`FEATURE_FFT_LEN`] the *record itself* is the resolution limit — a 512-sample burst
+/// cannot be resolved to 1024 bins by any choice made here — so the residual length dependence in
+/// `[MIN_SAMPLES, FEATURE_FFT_LEN)` is physics rather than a decision. [`spectral_features`] says
+/// so out loud with the `spectrum_resolution_limited` reason code, which is what the ticket's
+/// "say which band a measurement came from" asks for, applied to the one band where it is
+/// unavoidable.
+pub fn feature_fft_len(n: usize) -> usize {
+    if n >= FEATURE_FFT_LEN {
+        return FEATURE_FFT_LEN;
+    }
+    let mut len = 64;
+    while len * 2 <= n {
+        len *= 2;
+    }
+    len
+}
 
 /// Window over which the instantaneous frequency's level structure is measured **about the
 /// carrier's local trend**, in samples (`if_local_bimodality`, `if_local_modality`).
@@ -496,30 +636,18 @@ fn cumulant_features(f: &mut Features, x: &[Complex64]) {
 
 /// Spectral flatness, symmetry, carrier line and mean spectral kurtosis over the occupied band.
 ///
-/// # The analysis resolution itself moves with the snippet length below n = 8192 (T-281)
-///
-/// `fft_len` is `(n/8).next_power_of_two().clamp(64, 1024)`, so a snippet shorter than 8192
-/// samples is analysed at a *coarser* frequency resolution than a longer one. Every feature below
-/// — and `gamma_max`, which sizes its PSD the same way in [`psd_of_real`] — is therefore measured
-/// against a different yardstick depending on how long the emission was watched.
-///
-/// Measured on one 16 290-sample `noise-like` snippet at 25 dB, relative spread of each feature
-/// over three prefixes where `fft_len` varies (2036 / 4072 / 8145) against four prefixes where it
-/// is pinned at 1024 (8192 / 10240 / 12288 / 16290):
-///
-/// | feature | spread, `fft_len` varying | spread, `fft_len` pinned |
-/// |---|---|---|
-/// | `c42_norm` | 1.111 | 0.728 |
-/// | `cp_corr` | 0.710 | 0.324 |
-/// | `sk_mean` | 0.045 | 0.009 |
-/// | `flatness` | 0.006 | 0.017 |
-///
-/// Pinning the transform removes most of the movement in the shape features but not all of it, so
-/// the resolution change is *a* cause and not the only one. The clamp is left alone: widening it
-/// would change every fitted density mean at once. Recorded, not tuned.
+/// The analysis transform is [`FEATURE_FFT_LEN`], **not** a function of the snippet length; see
+/// [`feature_fft_len`] for why, and for what the pin costs a burst too short to supply it.
 fn spectral_features(f: &mut Features, input: &FeatureInput<'_>) {
     let n = input.samples.len();
-    let fft_len = (n / 8).next_power_of_two().clamp(64, 1024).min(n);
+    let fft_len = feature_fft_len(n);
+    if fft_len < FEATURE_FFT_LEN {
+        f.reasons.push("spectrum_resolution_limited".into());
+    }
+    if !enough_segments(n, fft_len) {
+        f.reasons.push("spectrum_too_few_segments".into());
+        return;
+    }
     let cfg = WelchConfig {
         fft_len,
         overlap: fft_len / 2,
@@ -962,11 +1090,14 @@ fn cyclic_prefix_correlation(x: &[Complex64]) -> f64 {
 }
 
 /// Welch PSD of a real sequence (used for γ_max), or `None` when it is too short.
+///
+/// Sized by [`feature_fft_len`], for the reason given there: γ_max is a peak-to-mean over bins, so
+/// a bin width that moves with the record makes it a statistic of the record.
 fn psd_of_real(v: &[f64]) -> Option<Vec<f64>> {
-    let fft_len = (v.len() / 8)
-        .next_power_of_two()
-        .clamp(64, 1024)
-        .min(v.len());
+    let fft_len = feature_fft_len(v.len());
+    if !enough_segments(v.len(), fft_len) {
+        return None;
+    }
     let samples: Vec<Complex32> = v.iter().map(|x| Complex32::new(*x as f32, 0.0)).collect();
     let cfg = WelchConfig {
         fft_len,
