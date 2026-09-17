@@ -4,9 +4,11 @@
 // every other MUI panel.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
-  DEFAULT_SPAN_S, defaultRegion, emptyText, eventRowView, eventsQuery, lastedText, summaryText,
-  trackQuery, type CatalogueEmitter, type CatalogueEvent, type CataloguePage,
+  DEFAULT_SPAN_S, INDEPENDENT_PERIOD_NOTE, defaultRegion, defaultRegionNote, emptyText,
+  eventRowView, eventsQuery, lastedText, summaryText, trackQuery,
+  type CatalogueEmitter, type CatalogueEvent, type CataloguePage,
 } from "../src/app/history/catalogue";
 
 const emitter = (over: Partial<CatalogueEmitter> = {}): CatalogueEmitter => ({
@@ -37,14 +39,71 @@ const page = (over: Partial<CataloguePage> = {}): CataloguePage => ({
 
 test("defaultRegion opens on the live view over the last day", () => {
   const r = defaultRegion({ live: { loHz: 100e6, hiHz: 102e6 }, device: { centerHz: null, sampleRateHz: null } }, 1000);
-  assert.deepEqual(r, { fLoHz: 100e6, fHiHz: 102e6, t0: 1000 - DEFAULT_SPAN_S, t1: 1000 });
+  assert.deepEqual(r, { kind: "region", region: { fLoHz: 100e6, fHiHz: 102e6, t0: 1000 - DEFAULT_SPAN_S, t1: 1000 } });
 });
 
-test("defaultRegion falls back to the tuned band, and is null with nothing tuned", () => {
+test("defaultRegion falls back to the tuned band, and opens on nothing with nothing tuned", () => {
   const r = defaultRegion({ live: null, device: { centerHz: 101e6, sampleRateHz: 2e6 } }, 5);
-  assert.equal(r?.fLoHz, 100e6);
-  assert.equal(r?.fHiHz, 102e6);
-  assert.equal(defaultRegion({ live: null, device: { centerHz: null, sampleRateHz: null } }, 5), null);
+  assert.equal(r.kind === "region" && r.region.fLoHz, 100e6);
+  assert.equal(r.kind === "region" && r.region.fHiHz, 102e6);
+  assert.deepEqual(defaultRegion({ live: null, device: { centerHz: null, sampleRateHz: null } }, 5), { kind: "no-band" });
+});
+
+// ---- T-386: the period opens on the CAPTURE clock, and the surface says which window it answers
+// about ----------------------------------------------------------------------------------------
+
+/** The capture clock these fixtures run on, deliberately far from any wall clock (T-379). */
+const CAPTURE_EDGE_S = 1_789_297_847;
+
+test("T-386 THE PROPERTY: the period the catalogue opens on ends at the capture clock's live edge", () => {
+  // The sixth site of the T-379 bug. This surface opened on `Date.now() / 1000`, so on a capture
+  // running 3.5 days from wall time it opened on a day the receiver was never switched on for —
+  // and then showed the user an empty catalogue as the surface's first impression.
+  const d = defaultRegion({ live: { loHz: 100e6, hiHz: 102e6 }, device: { centerHz: null, sampleRateHz: null } }, CAPTURE_EDGE_S);
+  assert.equal(d.kind, "region");
+  assert.equal(d.kind === "region" && d.region.t1, CAPTURE_EDGE_S);
+  assert.equal(d.kind === "region" && d.region.t0, CAPTURE_EDGE_S - DEFAULT_SPAN_S);
+  // The property, not the value: whatever clock the capture runs on, the catalogue opens on THAT.
+  assert.ok(d.kind === "region" && Math.abs(d.region.t1 - Date.now() / 1000) > 1000, "the capture clock, never Date.now()");
+});
+
+test("T-386 THE CONTROL: with no capture clock reported the surface opens on NO period rather than a plausible one", () => {
+  // Without this the property is satisfiable by always producing *some* period, which is exactly
+  // how the bug survived five earlier findings: a window was always produced, on the wrong clock.
+  const d = defaultRegion({ live: { loHz: 100e6, hiHz: 102e6 }, device: { centerHz: null, sampleRateHz: null } }, null);
+  assert.deepEqual(d, { kind: "no-clock" });
+  // And the two missing answers say different things: no band tuned is not no clock reported.
+  assert.notEqual(defaultRegionNote({ kind: "no-clock" }), defaultRegionNote({ kind: "no-band" }));
+  assert.match(defaultRegionNote({ kind: "no-clock" }), /capture clock/i);
+});
+
+test("T-386: the History surface states, standingly, that it is NOT the view window", () => {
+  // The decision: History stays independent of the cursor (CLAUDE.md puts the durable all-time
+  // record in a separate surface, and workflow #3 is "choose a region"). T-387's obligation then
+  // applies instead of T-379's: a surface answering about its own window must say which one.
+  assert.match(INDEPENDENT_PERIOD_NOTE, /not the window the waterfall is showing/);
+  const src = readFileSync("src/app/history/index.ts", "utf8");
+  // Standing, not conditional: it is put in the DOM once, never set from a render branch.
+  assert.match(src, /this\.scope\b/, "the note has its own element");
+  assert.ok(!/scope\.textContent\s*=/.test(src), "the scope note must never be swapped out by a render path");
+  assert.match(src, /this\.scope, this\.note/, "and it sits above the answer it qualifies");
+  // The capture clock, and not a one-shot: opening the surface before the first `/api/timeline`
+  // answer must not leave it permanently on "no period reported".
+  assert.match(src, /defaultRegion\(\{ live: s\.live\.view, device: s\.device \}, liveEdgeS\(s\)\)/);
+  assert.match(src, /if \(d\.kind !== "region"\) \{[^}]*return; \}\s*\n\s*this\.loaded = true;/, "`loaded` latches only on success");
+  assert.match(src, /store\.select\(\(s\) => `\$\{liveEdgeS\(s\)\}/, "and it retries when a clock is first reported");
+});
+
+test("T-386 CLOCK GUARD: no clock of the browser's own reaches the History modules", () => {
+  // The structural half of the capture-clock property (T-393's guard, extended to this surface):
+  // `defaultRegion` cannot start reading wall time again in a later edit without this failing.
+  // ISO formatting of a *served* absolute time is not a clock and is deliberately not listed.
+  for (const f of ["src/app/history/catalogue.ts", "src/app/history/index.ts", "src/history.ts"]) {
+    const src = readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    for (const word of ["Date.now", "performance.now", "toLocaleTimeString", "getTimezoneOffset"]) {
+      assert.ok(!src.includes(word), `${f} must not contain "${word}"`);
+    }
+  }
 });
 
 // ---- queries ----

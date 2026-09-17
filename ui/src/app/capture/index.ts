@@ -15,10 +15,10 @@ import { selectionStoreFor } from "../explore/selections";
 import { focusSelection } from "../explore/slice";
 import { goLive, reviewAt, setCaptureCollapsed, setCaptureWindow, toast, type AppState } from "../state";
 import {
-  DRAG_PX, agoText, bufferedSpan, captureWindow, coverageText, currentSpan, durationText, eventMarkTitle,
-  eventMarks, observedFraction, overviewShade, pctForAgo, scrubDataNote, scrubToTime, selectionSpans, timeRegionName,
-  timeWindowFromScrub, type CaptureWindow, type CoverageGap, type EventRow, type OverviewResponse,
-  type TimelineResponse,
+  DRAG_PX, agoText, bandKey, bufferedSpan, captureWindow, coverageText, currentSpan, durationText,
+  eventMarkTitle, eventMarks, observedFraction, overviewShade, pctForAgo, scrubDataNote, scrubToTime,
+  selectionSpans, timeRegionName, timeWindowFromScrub, type CaptureWindow, type CoverageGap,
+  type EventRow, type OverviewResponse, type TimelineResponse,
 } from "./timeline";
 
 /** Columns and frequency rows the band asks the backend to fold the capture window onto: the cells
@@ -147,10 +147,25 @@ function mount(el: HTMLElement, ctx: AppContext) {
   store.select((s) => s.selections.list, renderSelSpans, { immediate: true });
   store.select((s) => s.focus, renderSelSpans);
 
-  let coverageFraction: number | null = null;
-  // `null` = not answered yet, which is "unknown" and never "nothing" (T-164/T-207/T-284).
-  let coverageGaps: CoverageGap[] | null = null;
-  let eventRows: EventRow[] | null = null;
+  // ---- the band's content, tagged with the band it answers about (T-386) ----
+  //
+  // Everything below is *about a frequency range*: the overview grid, the observed fraction, the
+  // coverage gaps, the event marks. The capture **window** (`win`, the time axis) is not — the
+  // ring's retention is the same whatever the radio is tuned to — which is why only these carry a
+  // key. An answer whose key is not the band on screen is another window's data and is not drawn:
+  // `null` here is the honest "not answered yet", which every renderer below already reads as
+  // *unknown* rather than *nothing* (T-164/T-207/T-284).
+  interface BandContent {
+    key: string;
+    grid: OverviewResponse | null;
+    fraction: number | null;
+    gaps: CoverageGap[] | null;
+    events: EventRow[] | null;
+  }
+  let content: BandContent | null = null;
+  const currentKey = () => bandKey(spanOf(store.get()));
+  /** The content, but only while it is an answer about the band now on screen. */
+  const shown = (): BandContent | null => (content && content.key === currentKey() ? content : null);
 
   const renderNote = () => {
     const t = store.get().time;
@@ -165,15 +180,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
     }
     // T-263: what the scrubbed window is actually backed by. "Nothing was on the air" and "no data
     // for this window" are different claims, and the note says which one applies.
-    const data = t.live ? "" : scrubDataNote(t.tS, false, win, coverageGaps);
+    const c = shown();
+    const data = t.live ? "" : scrubDataNote(t.tS, false, win, c?.gaps ?? null);
     // T-395: LIVE is on the time navigator now, so the note points at where the control actually is.
-    noteRest.textContent = ` · ${coverageText(coverageFraction, win?.spanS ?? null)}${data ? ` · ${data}` : ""} · press LIVE on the time bar to return`;
+    noteRest.textContent = ` · ${coverageText(c?.fraction ?? null, win?.spanS ?? null)}${data ? ` · ${data}` : ""} · press LIVE on the time bar to return`;
   };
   store.select((s) => s.time, renderNote, { immediate: true });
 
   // T-263: past events and what the ring holds. A mark is one timespan a row reported; it carries
   // no liveness, because a `recurrence` appearance never measured one (see timeline.ts).
   const renderMarks = () => {
+    const eventRows = shown()?.events ?? null;
     marksLayer.replaceChildren(...(eventRows === null || win === null ? [] : eventMarks(eventRows, win.t1S, win.spanS).map((m) => {
       const e = h("div", { class: `cap-mark ${m.state}`, title: eventMarkTitle(m, win!.t1S) });
       e.style.left = `${m.leftPct}%`;
@@ -224,8 +241,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
     ctx.putImageData(img, 0, 0);
   };
 
-  startPoll(async () => {
+  /** Everything the band draws, from whatever content is an answer about the band on screen. */
+  const renderAll = () => {
+    renderBand(shown()?.grid ?? null);
+    renderMarks();
+    renderNote();
+    renderSelSpans();
+    // The band's own label says how long it is, so a reconfigured retention is visible as a
+    // different window rather than as the same box holding different data.
+    band.title = win ? `Capture window: ${durationText(win.spanS)} of retained IQ` : "No capture window on this server";
+  };
+
+  const loadBand = async () => {
     const span = spanOf(store.get());
+    const key = bandKey(span);
     // The capture window is asked for even with nothing tuned: the band can say how long it spans
     // before it can say what was in it.
     const q = span ? `?f_lo=${span.loHz}&f_hi=${span.hiHz}&columns=${COLUMNS}&rows=${ROWS}` : "";
@@ -236,29 +265,37 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // survey strip, the waterfall's backfill — reads its live edge from here, on the capture clock,
     // instead of each inventing one from `Date.now()`.
     store.set(setCaptureWindow(win));
-    renderBand(tl?.grid ?? null);
-    coverageFraction = observedFraction(tl?.grid);
+    const next: BandContent = { key, grid: tl?.grid ?? null, fraction: observedFraction(tl?.grid), gaps: null, events: null };
+    content = next;
+    renderAll();
     if (win && span) {
       // T-263: gaps and the events over the capture window — both asked for over the window the
       // backend just reported, so the marks and the band can never disagree about what it spans.
       const hist = await client
         .get<HistoryResponse>(`/api/history?f_lo=${span.loHz}&f_hi=${span.hiHz}&t0=${win.t0S}&t1=${win.t1S}&max_t=${COLUMNS}`)
         .catch(() => null);
-      coverageGaps = hist?.coverage_summary?.gaps ?? null;
+      next.gaps = hist?.coverage_summary?.gaps ?? null;
       const inv = await client
         .get<{ entries: EventRow[] }>(
           `/api/inventory?f_lo=${span.loHz}&f_hi=${span.hiHz}&t0=${win.t0S}&t1=${win.t1S}&limit=200`,
         )
         .catch(() => null);
-      if (inv) eventRows = inv.entries;
+      if (inv) next.events = inv.entries;
     }
-    renderMarks();
-    renderNote();
-    renderSelSpans();
-    // The band's own label says how long it is, so a reconfigured retention is visible as a
-    // different window rather than as the same box holding different data.
-    band.title = win ? `Capture window: ${durationText(win.spanS)} of retained IQ` : "No capture window on this server";
-  }, 60_000);
+    renderAll();
+  };
+
+  // T-386: the poll is restarted when the band changes rather than waiting out its minute, because
+  // `startPoll` runs its task immediately. Settling first (the same 250 ms rule `live-spectrum.ts`
+  // scrubs on) keeps a pinch-zoom from firing three requests per frame; until the answer lands,
+  // `shown()` returns null and the panel renders *unknown* rather than the band the view has left.
+  let stopBand = startPoll(loadBand, 60_000);
+  let bandTimer = 0;
+  store.select((s) => bandKey(spanOf(s)), () => {
+    renderAll(); // the previous band's grid, coverage and marks stop being drawn at once
+    clearTimeout(bandTimer);
+    bandTimer = window.setTimeout(() => { stopBand(); stopBand = startPoll(loadBand, 60_000); }, 250);
+  });
 
   // ---- Record IQ (GAP 1 interim for "Export clip from the buffer") ----
   let session: RecordSession | null = null;

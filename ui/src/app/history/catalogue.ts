@@ -76,16 +76,64 @@ export interface Region { fLoHz: number; fHiHz: number; t0: number; t1: number }
 export const DEFAULT_SPAN_S = 24 * 3600;
 
 /**
+ * **This surface is deliberately NOT scoped to the view window** (T-386), and says so on its face.
+ *
+ * T-386 asked the prior question of the whole-UI window rule for the four surfaces T-379/T-384 left
+ * on a clock of their own, and this one answers *independent*, for four reasons:
+ *
+ * 1. CLAUDE.md's own invariant puts it outside: Explore is "time-scoped to the view", while "the
+ *    durable all-time record lives in a **separate** history surface (workflow #3), where ephemera
+ *    are catalogued as past events with a timespan".
+ * 2. Workflow #3 is "**choose a region** and see what activity was seen there over time". Choosing
+ *    the period *is* the surface's function; the form is its window control. Slaving it to the
+ *    cursor would delete the feature, not scope it.
+ * 3. The view window is bounded by the IQ ring's retention — seconds to minutes. The catalogue's
+ *    whole point is the periods beyond that, so following the cursor would make most of the durable
+ *    record unreachable from the surface that exists to reach it.
+ * 4. It is a separate **mode**, not a panel beside a scrubbed waterfall, so the adjacency that made
+ *    the live-only panels misleading (T-387) does not apply.
+ *
+ * What *is* borrowed from T-387 is the honesty move: a surface that answers about its own window
+ * must **say which window**, standingly, not only when it happens to be empty.
+ */
+export const INDEPENDENT_PERIOD_NOTE =
+  "History is the durable all-time catalogue: it answers about the period in this form, not the window the waterfall is showing.";
+
+/** Why the surface could not open on a period of its own — two different missing answers, and the
+ * note must not render one as the other. */
+export type DefaultRegion =
+  | { kind: "region"; region: Region }
+  /** Nothing is tuned and no view exists, so there is no band to open on. */
+  | { kind: "no-band" }
+  /** No capture clock has been reported, so there is no honest instant to end the period at. */
+  | { kind: "no-clock" };
+
+/**
  * The region and period to open on: the live view's own span (else the device's tuned band) over
- * the last [[DEFAULT_SPAN_S]]. Already-known UI state only — no measurement is made here. `null`
- * when nothing is tuned yet and there is no view to take a band from.
+ * the [[DEFAULT_SPAN_S]] ending at `edgeS`. Already-known UI state only — no measurement here.
+ *
+ * `edgeS` is the **capture clock's** live edge (`explore/inventory.ts` `liveEdgeS`), never
+ * `Date.now()`. This surface opened on `Date.now() / 1000` until T-386, which is the sixth site of
+ * the bug T-379 found: on a fixture 3.5 days from wall time the catalogue opened on a 24 h period
+ * the capture never covered, so it loaded an empty answer about a window nothing had ever sampled
+ * and put the user in front of it as the surface's first impression. A null edge is *unknown* and
+ * the form is left for the user to fill, because inventing the period is what caused it.
  */
 export function defaultRegion(
   input: { live: { loHz: number; hiHz: number } | null; device: { centerHz: number | null; sampleRateHz: number | null } },
-  nowS: number,
-): Region | null {
+  edgeS: number | null,
+): DefaultRegion {
   const span = currentSpan(input);
-  return span === null ? null : { fLoHz: span.loHz, fHiHz: span.hiHz, t0: nowS - DEFAULT_SPAN_S, t1: nowS };
+  if (span === null) return { kind: "no-band" };
+  if (edgeS === null || !Number.isFinite(edgeS)) return { kind: "no-clock" };
+  return { kind: "region", region: { fLoHz: span.loHz, fHiHz: span.hiHz, t0: edgeS - DEFAULT_SPAN_S, t1: edgeS } };
+}
+
+/** What the surface says when it cannot open on a period of its own. */
+export function defaultRegionNote(d: Exclude<DefaultRegion, { kind: "region" }>): string {
+  return d.kind === "no-band"
+    ? "Tune the receiver, or type a region and period."
+    : "No capture clock reported yet — type a period to search the catalogue.";
 }
 
 /** `GET /api/events` for a region, a lifecycle filter and an optional page cursor. */

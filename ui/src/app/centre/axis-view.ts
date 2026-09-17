@@ -9,7 +9,7 @@ import * as ax from "../../axis";
 import { attachAxisGestures } from "../../controls/gestures";
 import type { AppContext } from "../context";
 import { h } from "../dom";
-import { applyDeviceAction, retuneAction, retuneLabel, setRetuneOffer, viewHooks } from "./view";
+import { applyDeviceAction, centreView, centreViewKey, retuneAction, retuneLabel, setRetuneOffer, viewHooks } from "./view";
 
 export interface Tick { leftPct: number; label: string }
 
@@ -49,7 +49,10 @@ export function mountAxis(el: HTMLElement, ctx: AppContext) {
   el.replaceChildren();
   const render = () => {
     const s = ctx.store.get();
-    const ts = tickModel(s.live.view, el.clientWidth);
+    // T-386: the same view the overlays are placed in, so brackets never draw over an unlabelled
+    // axis (and vice versa) — the ticks fall back to the tuned band before a stream header, exactly
+    // as the boxes above them do.
+    const ts = tickModel(centreView(s), el.clientWidth);
     const nodes: HTMLElement[] = ts.map((t) => {
       const e = h("div", { class: "c-tick" }, h("span", {}, t.label));
       e.style.left = `${t.leftPct}%`;
@@ -78,6 +81,7 @@ export function mountAxis(el: HTMLElement, ctx: AppContext) {
   ctx.store.select((s) => s.live.view, schedule, { immediate: true });
   ctx.store.select((s) => s.live.retuneOffer, schedule);
   ctx.store.select((s) => s.device.deviceId, schedule);
+  ctx.store.select(centreViewKey, schedule); // T-386: a device answer moves the view too
   if (typeof ResizeObserver !== "undefined") new ResizeObserver(schedule).observe(el);
   attachAxisGestures(el, viewHooks(ctx));
 }

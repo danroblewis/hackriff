@@ -3,6 +3,9 @@
 // (CLAUDE.md "Product vision" §4).
 import { toast } from "../state";
 import { sameCursor } from "../centre/review-render";
+// T-386: the sidebar filters selections against the *same* frequency view the centre pane places
+// its boxes in — one definition, so a header-less session cannot list one set and draw another.
+import { centreView, centreViewKey } from "../centre/view";
 import type { AppContext, AreaMounts, MountFn } from "../context";
 import { h } from "../dom";
 import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
@@ -17,10 +20,14 @@ import {
 } from "./focus";
 import {
   clusterChip, deleteEntry, emptyListText, loadInventoryRows, nextInventorySort, promoteEntry,
-  recurrenceDots, renderedInventory, rowChips, rowSeenText, sortInventoryRows, type Row,
+  recurrenceDots, renderedInventory, rowChips, rowSeenText, sortInventoryRows, viewWindow,
+  windowKey, type Row,
 } from "./inventory";
 import { mountPresenceStream } from "./presence-stream";
-import { foundInside, selectionStoreFor, sortSelections, type Selection } from "./selections";
+import {
+  foundInside, selectionStoreFor, selectionsEmptyText, selectionsInWindow, sortSelections,
+  type Selection,
+} from "./selections";
 import {
   clusterLoadErrorText, clusterSummary, fetchCluster, fetchSignatureMatch, signatureMatchSummary,
   type Cluster, type SignatureMatch,
@@ -159,9 +166,12 @@ const mountInventory: MountFn = (el, ctx) => {
 
 const mountSelections: MountFn = (el, ctx) => {
   selectionStoreFor(ctx); // creates the shared store and mirrors it into state.selections
-  const head = h("div", { class: "side-sel-head" }, h("div", { class: "h" }, "Selections ", h("em", {}, "drag on the waterfall")));
+  const head = h("div", { class: "side-sel-head" }, h("div", { class: "h" }, "Selections ", h("em", {}, "this window")));
   const list = h("div", { class: "sel-list" });
-  el.replaceChildren(head, list);
+  // T-386: what the window left out, when it left something out. A selection filtered away is
+  // elsewhere, not gone, and the count says so rather than the list silently shrinking.
+  const elsewhere = h("div", { class: "tab-note hint" });
+  el.replaceChildren(head, elsewhere, list);
   bindContextTrigger(list, (x, y, target) => {
     const selEl = target.closest<HTMLElement>(".sel[data-sel]");
     const sel = selEl?.dataset.sel ? ctx.store.get().selections.list.find((s) => s.id === selEl.dataset.sel) : undefined;
@@ -178,12 +188,31 @@ const mountSelections: MountFn = (el, ctx) => {
     }, h("b", {}, s.name), h("span", { class: "mono" }, `${fmtMHz(s.f_lo, 2)}–${fmtMHz(s.f_hi, 2)}`));
   }
 
+  // T-386: the sidebar is a view of the window, like every other surface. It used to render the
+  // page's whole set — every frequency, all time — beside a waterfall showing one band's twenty
+  // seconds, which is the window rule broken by *widening*: the panel looked full by answering a
+  // bigger question than the one on screen. The split is `selectionsInWindow`, and the centre
+  // view's boxes take the same `listed` collection (T-389's one-collection rule).
   function render() {
-    const sels = sortSelections(ctx.store.get().selections.list);
-    list.replaceChildren(...(sels.length ? sels.map(renderRow) : [h("div", { class: "empty" }, "Drag across the waterfall to mark a region.")]));
+    const s = ctx.store.get();
+    const split = selectionsInWindow(sortSelections(s.selections.list), centreView(s), viewWindow(s));
+    list.replaceChildren(...(split.listed.length
+      ? split.listed.map(renderRow)
+      : [h("div", { class: "empty" }, selectionsEmptyText(split))]));
+    const away = split.outside + split.undecidable;
+    elsewhere.textContent = split.listed.length && away
+      ? `${away} more selection${away === 1 ? "" : "s"} outside this window`
+      : "";
   }
 
-  ctx.store.select((s) => [s.selections.list, s.focus] as const, render, { immediate: true, eq: (a, b) => a[0] === b[0] && a[1] === b[1] });
+  // The window moves for reasons the selection list never sees — the live edge advancing, a scrub,
+  // a retune — so this subscribes to `windowKey` as well (T-384): a panel watching only its own
+  // data goes on answering about the window it was mounted in.
+  ctx.store.select(
+    (s) => [s.selections.list, s.focus, `${windowKey(s)}|${centreViewKey(s)}`] as const,
+    render,
+    { immediate: true, eq: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] },
+  );
 };
 
 // ---- focus panel ----

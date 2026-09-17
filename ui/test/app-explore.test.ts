@@ -15,13 +15,16 @@ import {
 import {
   clearUserBand, clusterChip, confirmedFilters, DEFAULT_ROW_RATE_HZ, emptyListText, liveEdgeS,
   loadInventoryRows, nextInventorySort, recurrenceDots, renderedInventory, rowChips, rowSeenText,
-  setUserBand, sortInventoryRows, viewFilters, viewWindow, waterfallSpanS,
+  setUserBand, sortInventoryRows, viewFilters, viewWindow, WAITING_FOR_WINDOW, waterfallSpanS,
   type Classification, type Row,
 } from "../src/app/explore/inventory";
 import { bracketLayout, presenceBoxes } from "../src/app/centre/overlays";
 import * as ax from "../src/axis";
 import { WATERFALL_ROWS } from "../src/waterfall";
-import { foundInside, listenAllTargets, recordSelectionClip, type Selection } from "../src/app/explore/selections";
+import {
+  foundInside, listenAllTargets, recordSelectionClip, selectionsEmptyText, selectionsInWindow,
+  type Selection,
+} from "../src/app/explore/selections";
 import {
   focusSelection, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal, setInventoryError,
   setInventoryRows, setInventorySort, setInventoryTab, setSelections,
@@ -798,6 +801,116 @@ test("fetchEmitterLookup: reads the entry's own lifecycle state; a 404 is `gone`
 
   const offline = fakeClient({ get: () => { throw { status: 503, code: "unavailable", message: "no signal inventory" }; } });
   assert.equal(await fetchEmitterLookup(offline, "e1"), "failed", "a server that could not answer never means deleted");
+});
+
+// ---- T-386: the selections sidebar is a view of the window --------------------------------
+//
+// It used to render `selections.list` whole — every frequency, all time — beside a waterfall
+// showing one band's twenty seconds, and it loaded once and never re-read the cursor. That is the
+// whole-UI window rule broken by *widening*: the panel looked full by answering a bigger question
+// than the one on screen.
+
+const sel = (over: Partial<Selection> = {}): Selection => ({
+  id: "s1", name: "region", f_lo: 101.2e6, f_hi: 101.4e6, tags: [], links: [],
+  created: CAPTURE_EDGE_S, updated: CAPTURE_EDGE_S, ...over,
+});
+
+const VIEW = { loHz: 100e6, hiHz: 102e6 };
+const WINDOW = { t0: CAPTURE_EDGE_S - 20, t1: CAPTURE_EDGE_S };
+
+test("T-386 THE CONTROL THAT MATTERS: a window that DOES hold selections renders them, asserted on ids", () => {
+  // Without this every assertion below is satisfiable by a sidebar that shows nothing and explains
+  // itself beautifully. Both kinds are here: a timed selection inside the window, and an untimed
+  // one whose frequency overlaps the view.
+  const inside = sel({ id: "timed-in", t_lo: CAPTURE_EDGE_S - 10, t_hi: CAPTURE_EDGE_S - 5 });
+  const anytime = sel({ id: "untimed-in", f_lo: 100.5e6, f_hi: 100.7e6 });
+  const split = selectionsInWindow([inside, anytime], VIEW, WINDOW);
+  assert.deepEqual(split.listed.map((s) => s.id), ["timed-in", "untimed-in"]);
+  assert.equal(split.outside, 0);
+  assert.equal(split.undecidable, 0);
+  assert.equal(selectionsEmptyText(split), "Drag across the waterfall to mark a region.");
+});
+
+test("T-386 THE PROPERTY: a selection outside this (time × frequency) window is not listed, and is disclosed as elsewhere", () => {
+  const otherBand = sel({ id: "far", f_lo: 915.1e6, f_hi: 915.3e6 });
+  const otherTime = sel({ id: "long-ago", t_lo: CAPTURE_EDGE_S - 4000, t_hi: CAPTURE_EDGE_S - 3900 });
+  const split = selectionsInWindow([otherBand, otherTime], VIEW, WINDOW);
+  assert.deepEqual(split.listed, []);
+  assert.equal(split.outside, 2);
+  // Elsewhere, never gone: the empty state names the count and says how to reach them.
+  assert.match(selectionsEmptyText(split), /2 selections, none in this window/);
+});
+
+test("T-386: an UNTIMED selection is in every window its frequency overlaps — filtering it out would be the same bug pointing the other way", () => {
+  // A frequency-only mark claims no time extent ("this band, whenever"), so dropping it on a time
+  // window it never claimed is "we have it but didn't render it" — the failure the rule names.
+  const anytime = sel({ id: "untimed" });
+  for (const w of [WINDOW, { t0: 0, t1: 1 }, null]) {
+    assert.deepEqual(selectionsInWindow([anytime], VIEW, w).listed.map((s) => s.id), ["untimed"], `window ${JSON.stringify(w)}`);
+  }
+  // And it is still frequency-scoped: another band is another window.
+  assert.deepEqual(selectionsInWindow([anytime], { loHz: 900e6, hiHz: 930e6 }, WINDOW).listed, []);
+});
+
+test("T-386: with no window known a TIMED selection is undecidable, never 'outside' — and the list says so in the shared words", () => {
+  // The third state T-379 exists for. "No window was asked about" is not a finding about where the
+  // selection is, and the sentence is the one every window-scoped surface shares (T-387).
+  const timed = sel({ id: "timed", t_lo: 1, t_hi: 2 });
+  const split = selectionsInWindow([timed], VIEW, null);
+  assert.deepEqual(split, { listed: [], outside: 0, undecidable: 1 });
+  assert.equal(selectionsEmptyText(split), WAITING_FOR_WINDOW);
+  assert.equal(selectionsEmptyText(split, "boom"), "boom", "an error outranks every window state");
+});
+
+test("T-386: no view known filters nothing on frequency, rather than everything", () => {
+  const a = sel({ id: "a", f_lo: 1e6, f_hi: 2e6 }), b = sel({ id: "b", f_lo: 915e6, f_hi: 916e6 });
+  assert.deepEqual(selectionsInWindow([a, b], null, WINDOW).listed.map((s) => s.id), ["a", "b"]);
+});
+
+test("T-386/T-389: the sidebar list and the centre's selection boxes derive from ONE filtered collection", () => {
+  // Two parallel filters that happen to agree are not an invariant — T-389's rule, applied to the
+  // surface T-389 did not touch. `live-spectrum.ts` must take `selectionsInWindow`'s own `listed`,
+  // not `s.selections.list`, for both the full-height boxes and the timed ones in the render pass.
+  const src = readFileSync("src/app/centre/live-spectrum.ts", "utf8");
+  assert.match(src, /const sels = selectionsInWindow\(/, "the centre view derives the same split");
+  assert.match(src, /selectionBoxes\(sels\.listed,/, "the untimed boxes come from the split");
+  assert.match(src, /selectionTimeBoxes\(sels\.listed,/, "and so do the timed ones");
+  assert.ok(!/selectionBoxes\(s\.selections\.list/.test(src), "never the unfiltered list");
+  assert.ok(!/selectionTimeBoxes\(s\.selections\.list/.test(src), "never the unfiltered list");
+
+  const idx = readFileSync("src/app/explore/index.ts", "utf8");
+  // The whole window, both axes: a split asked for with `null, null` would satisfy the shape and
+  // render the same all-time list the panel used to.
+  assert.match(
+    idx,
+    /selectionsInWindow\(sortSelections\(s\.selections\.list\), centreView\(s\), viewWindow\(s\)\)/,
+    "the sidebar renders the same split, over this view and this window",
+  );
+  assert.match(idx, /list\.replaceChildren\(\.\.\.\(split\.listed\.length/, "and renders `listed`, not the raw list");
+  // And it re-reads when either axis of the window moves, not only when the selections do (T-384).
+  assert.match(idx, /windowKey\(s\)\}\|\$\{centreViewKey\(s\)\}/);
+  // The centre view asks the same question of the same two axes: `v` there IS `centreView(s)`.
+  assert.match(src, /selectionsInWindow\(s\.selections\.list, v, viewWindow\(s\)\)/);
+  assert.match(src, /const s = store\.get\(\), v = centreView\(s\)/);
+});
+
+test("T-386 CLOCK GUARD: no clock of the browser's own reaches the Explore sidebar modules", () => {
+  // T-393's guard, extended to the modules T-386 touched. `viewWindow`/`liveEdgeS` already put
+  // this sidebar on the capture clock (T-379); this is the structural half, so the window the
+  // selections and the lists are filtered against cannot regress to wall time in a later edit.
+  const clocks = ["Date.now", "performance.now", "toLocaleTimeString", "getTimezoneOffset"];
+  const bare = (f: string) => readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  for (const f of ["src/app/explore/selections.ts", "src/app/explore/index.ts"]) {
+    for (const word of clocks) assert.ok(!bare(f).includes(word), `${f} must not contain "${word}"`);
+  }
+  // `inventory.ts` keeps exactly one `Date.now`, and it is not a capture time: `loadedAtS` records
+  // whether this *page* has completed a load, which is what tells "Loading…" from an empty answer.
+  // Nothing measured, windowed or compared against a capture stamp may use it — so it is named
+  // rather than exempted wholesale, and the other three clocks are banned outright.
+  const inv = bare("src/app/explore/inventory.ts");
+  for (const word of clocks.slice(1)) assert.ok(!inv.includes(word), `inventory.ts must not contain "${word}"`);
+  assert.equal(inv.match(/Date\.now/g)?.length, 1, "the one page-lifecycle stamp, and no second clock");
+  assert.match(inv, /setInventoryRows\(rows, Date\.now\(\) \/ 1000\)/, "and it is that one");
 });
 
 // ---- layout: actions reachable without horizontal scroll (T-148) ----
