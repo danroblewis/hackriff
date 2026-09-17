@@ -9101,6 +9101,53 @@ tasks:
       max, which is T-397's exact blind spot.
       Check what currently depends on the optimistic answer before changing it: the
       narrow-band query this was built for may have calibrated around it.
+  - id: T-420
+    title: The waterfall truncates to a sliver instead of scaling to the selected span
+    milestone: M2-hardening
+    status: todo
+    priority: high
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-334, T-338]
+    acceptance: |
+      USER, re-sent 2026-09-17 - THE EARLIER VERSION NEVER BECAME A TICKET and was
+      most likely lost to the message truncation that has hit this session repeatedly.
+      Filed now.
+      THE BUG: the timeline (left time navigator) selector shows only a TINY SLIVER of
+      data in the waterfall when a range is selected; the rest is empty.
+      THE FIX, against the CLAUDE.md invariant "Time is zoomable; the waterfall scales
+      to the selected span":
+      (1) THE DEFAULT time span must FILL the waterfall height (roughly rows /
+          rows_per_s), not a few-second sliver.
+      (2) SELECTING A RANGE re-scales the waterfall so that span FILLS the display -
+          span-matched resolution, which T-334 ALREADY SERVES.
+      Likely UI-only; confirm with just gate rather than assuming.
+      THE INVARIANT NAMES THIS EXACT FAILURE. CLAUDE.md: "the waterfall's time
+      resolution (pixels / rows per second) is a function of the chosen span, and the
+      backend serves history at a resolution matching it (the tiered spectrum-history
+      pyramid), so ZOOMING IN TIME RE-SCALES RATHER THAN TRUNCATES." The bug is that it
+      truncates.
+      WHAT ALREADY EXISTS, so this is wiring rather than new machinery:
+      - T-334 serves span-matched resolution and distinguishes live-IQ-backed detail
+        from survey/history overview via resolution.source.
+      - T-342 made columns an explicit TIME-AXIS BUDGET with resolution.budget, and
+        stated the rule this bug violates: A BUDGET NEVER TRUNCATES THE WINDOW. Where
+        there are fewer source cells than columns it replicates and says so.
+      - T-397 solved the same shape one bar over: the navigator strips asked for a fixed
+        cell count and got blockiness, and stripCells now asks ONE CELL PER PIXEL on
+        each axis so every drawn cell is one the backend folded. The main waterfall
+        wants the equivalent relationship between its row count and the chosen span.
+      HONESTY CONSTRAINT, and it is the reason this is core_interface: filling the
+      display must come from ASKING FOR THE RIGHT RESOLUTION, never from stretching or
+      interpolating what arrived. T-411 established that upsampling in the client is how
+      blockiness happens, and T-334's rule is that the view must never imply detail the
+      front end did not capture. A long span filled by a coarse tier is honest and must
+      SAY it is survey/history overview; the same span filled by interpolating a sliver
+      is not.
+      Control: a span with genuinely less data behind it than the display has rows
+      still fills honestly - replicated and labelled - rather than either stretching or
+      leaving the rest empty.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
