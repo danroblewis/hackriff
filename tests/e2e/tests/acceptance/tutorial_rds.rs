@@ -402,6 +402,7 @@ fn signal_062_recipe_match_ranks_rds_top_for_the_blindly_found_station() {
     let (emitter, _, _) = found_blind(s.addr(), &truth, 0.0);
 
     // The measurements accumulate as the run proceeds, so wait for the ranking to settle.
+    const MIN_SCORE: f64 = 0.6;
     let deadline = Instant::now() + LIMIT;
     let v = loop {
         let (code, v) = s.call(
@@ -410,12 +411,19 @@ fn signal_062_recipe_match_ranks_rds_top_for_the_blindly_found_station() {
             None,
         );
         assert_eq!(code, 200, "[{TAG}] {v}");
-        if v["recipes"][0]["id"] == json!("rds") {
+        // T-403: settle on the **score**, not merely on the ranking. An entry now reaches the
+        // inventory as soon as the tracker has seen a couple of seconds of it, before any chain has
+        // measured a family or a pilot, and rds already ranks top on bandwidth and continuity alone
+        // at that point. Breaking on the ranking would assert on a row whose measurements have not
+        // arrived yet — the deadline below still fails the run if they never do.
+        if v["recipes"][0]["id"] == json!("rds")
+            && v["recipes"][0]["score"].as_f64().unwrap_or(0.0) >= MIN_SCORE
+        {
             break v;
         }
         assert!(
             Instant::now() < deadline,
-            "[{TAG}] rds never ranked top. measured {} offered {} ruled out {}",
+            "[{TAG}] rds never ranked top at {MIN_SCORE}. measured {} offered {} ruled out {}",
             v["measured"],
             v["recipes"],
             v["ruled_out"]
@@ -429,7 +437,7 @@ fn signal_062_recipe_match_ranks_rds_top_for_the_blindly_found_station() {
         best["score"], best["outcome"], v["measured"]
     );
     assert!(
-        best["score"].as_f64().unwrap() >= 0.6,
+        best["score"].as_f64().unwrap() >= MIN_SCORE,
         "[{TAG}] ranked top but weakly: {best}"
     );
     assert!(

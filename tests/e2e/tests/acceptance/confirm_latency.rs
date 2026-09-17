@@ -21,6 +21,13 @@
 //!   reach Confirmed by the verified route. That is what makes the fast path a short-circuit on
 //!   positive evidence rather than a lowered threshold: remove the evidence and the fast path
 //!   disappears, leaving the slow routes exactly as they were.
+//!
+//! **T-403** finished the second of those. Its time-to-Confirmed was the suite's one deliberate
+//! `REPORTED, NOT ASSERTED` line, because the continuous-and-trusted route was still weighed only
+//! on track close and the mono station therefore confirmed at 14.00 s of a 14 s scene — a number
+//! that tracked the recording length rather than the evidence. That route is now weighed live as
+//! well, under two clauses a receiver's own continuous line cannot satisfy, and the reported line
+//! is an assertion: 3.00 s, inside the same budget the other two variants take.
 
 use hk_e2e::{Fixture, synth_or_skip};
 use hk_model::EmitterId;
@@ -33,6 +40,7 @@ use crate::latency::{
 };
 
 const T398: &str = "T-398";
+const T403: &str = "T-403";
 
 /// The emitter whose measured extent matches the scene's single truth station, and the truth item.
 fn matched(fx: &Fixture, rows: &[serde_json::Value]) -> (EmitterId, f64) {
@@ -83,31 +91,40 @@ fn t398_wfm_without_pilot_does_not_take_the_fast_route() {
     l.require(T398, Outcome::FirstDetection, DETECT_BUDGET_S);
     l.require(T398, Outcome::Family, FAMILY_BUDGET_S);
 
-    // Time-to-Confirmed is **reported, not bounded**, for this variant only, and this is the one
-    // place in the suite where that is deliberate. T-398 short-circuited the *pilot-locked* case;
-    // the continuous-and-trusted route it left alone is still weighed only when a track closes, so
-    // a station with no pilot and no identity confirms at the end of the recording however long
-    // the recording is. Bounding it here would make this test red for a defect this ticket does
-    // not fix, and loosening the bound to fit would enshrine it. Printing it keeps the number in
-    // the log of every run, which is exactly what the suite lacked before T-401.
-    if let Some(confirmed) = l.confirmed_s {
-        eprintln!(
-            "[{T398}] REPORTED, NOT ASSERTED: no-pilot no-identity WFM confirmed at {confirmed:.2} \
-             s of capture in a {SCENE_S:.0} s scene — the continuous-and-trusted route is still \
-             close-only, so this number tracks the recording length rather than the evidence."
-        );
-    }
+    // T-403: **this line was the pending assertion, and it is now a bound.** T-401 left
+    // time-to-Confirmed reported and unasserted for this variant alone, because the
+    // continuous-and-trusted route was still weighed only when a track closed: a station with no
+    // pilot and no identity confirmed at the end of the recording however long the recording was
+    // (14.00 s in this 14 s scene), and bounding it would have made the suite red for a defect
+    // that ticket did not fix. The route is now weighed live, so the number tracks the evidence
+    // instead of the recording length and takes the same budget as the other two variants.
+    let confirmed = l.require(T398, Outcome::Confirmed, CONFIRM_BUDGET_S);
+    assert!(
+        confirmed < SCENE_S / 2.0,
+        "[{T398}] time-to-Confirmed must track the evidence, not the recording length: {confirmed:.2} \
+         s in a {SCENE_S:.0} s scene is the shape of the close-only defect, whatever the budget says"
+    );
 
-    // It may still confirm — a continuous carrier is allowed to earn it the slow way — but never
-    // on evidence it does not carry. Nothing may be confirmed as a family the measurement did not
-    // support (the exploration-first rule).
-    if let Some(reason) = l.confirmed_reason.as_deref() {
-        assert!(
-            !reason.contains("verified"),
-            "[{T398}] a mono WFM station has no 19 kHz pilot to lock, so the verified-emission \
-             route must not fire on it; got: {reason}"
-        );
-    }
+    // And it confirmed on evidence it actually carries. Nothing may be confirmed as a family the
+    // measurement did not support (the exploration-first rule): with no pilot and no RDS on air the
+    // only route left is the continuous one, so neither of the fast, positive-evidence routes may
+    // have fired.
+    let reason = l.confirmed_reason.as_deref().unwrap_or_default();
+    assert!(
+        !reason.contains("verified"),
+        "[{T398}] a mono WFM station has no 19 kHz pilot to lock, so the verified-emission route \
+         must not fire on it; got: {reason}"
+    );
+    assert!(
+        reason.starts_with("continuous"),
+        "[{T398}] with no pilot and no identity the continuous route is the only one left; got: \
+         {reason}"
+    );
+    assert!(
+        reason.contains("still on air"),
+        "[{T403}] and it was decided on a life still being lived, not on a track that closed at the \
+         end of the scene; got: {reason}"
+    );
 
     // Refusing to confirm is not the same as discarding the evidence. What the demodulator
     // measured is recorded either way — mode, bandwidth, and the absent lock, with the window it
