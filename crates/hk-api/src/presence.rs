@@ -122,9 +122,12 @@ fn interval_json(i: &PresenceInterval) -> Value {
     json!({
         "t_start_s": ts_s(i.time.start),
         "t_end_s": ts_s(i.time.end),
-        // Backend-computed: a client never derives a timespan from two fields it was handed.
+        // Backend-computed: a client never derives a timespan from two fields it was handed — and
+        // since T-413 it could not, because the extent may hold silence a revoked end rejoined and
+        // `duration_s` is the extent **less** that silence.
         "duration_s": i.duration_s(),
         "open": i.open,
+        "revoked_s": i.revoked_s(),
         "count": i.count,
         "sources": i.sources,
         "f_center_hz": i.f_center_hz,

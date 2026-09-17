@@ -11,6 +11,11 @@
 // is the START event plus the **absence of an END**. The stream therefore carries START / END /
 // REOPEN and nothing at all while an interval merely continues — never a per-poll presence bump.
 //
+// T-413 added REVOKE, which makes the END *provisional*: a signal that resumes within one idle gap
+// of a detected end nulls it and the ONE interval continues, on the same row, rather than splitting
+// into two boxes. The interval then carries `revoked_s`, the silence it was rejoined across, which
+// is what stops "one interval" being read as "on air throughout".
+//
 // What keeps that honest, here and next door. A box drawn to the live edge is a claim about air
 // nobody measured, so:
 //
@@ -31,15 +36,22 @@ import type { PresenceInterval, Row } from "./inventory";
 export const PRESENCE_START_KIND = "presence-start";
 /** …for a later interval on an emitter that has been on the air before. */
 export const PRESENCE_REOPEN_KIND = "presence-reopen";
-/** …of a closing record, at the interval's measured end. */
+/** …of a closing record, at the interval's measured end. **Provisional**: revocable for one idle
+ * gap (T-413). */
 export const PRESENCE_END_KIND = "presence-end";
+/** …**withdrawing** an END published within the last idle gap: the signal came back inside the
+ * revocation window, so the interval it capped is the SAME interval and is open again (T-413,
+ * ADR-0019 §6.1). Never a new interval — that is [[PRESENCE_REOPEN_KIND]], which draws a second
+ * box. */
+export const PRESENCE_REVOKE_KIND = "presence-revoke";
 /** The stream the endpoints arrive on (`/ws/presence`, `GET /api/streams`). */
 export const PRESENCE_STREAM_ID = "presence";
 
 /** Which endpoint a record announces. */
-export type PresenceEventKind = typeof PRESENCE_START_KIND | typeof PRESENCE_REOPEN_KIND | typeof PRESENCE_END_KIND;
+export type PresenceEventKind =
+  | typeof PRESENCE_START_KIND | typeof PRESENCE_REOPEN_KIND | typeof PRESENCE_END_KIND | typeof PRESENCE_REVOKE_KIND;
 
-const KINDS: readonly string[] = [PRESENCE_START_KIND, PRESENCE_REOPEN_KIND, PRESENCE_END_KIND];
+const KINDS: readonly string[] = [PRESENCE_START_KIND, PRESENCE_REOPEN_KIND, PRESENCE_END_KIND, PRESENCE_REVOKE_KIND];
 
 /**
  * One endpoint: which emitter, which endpoint, and the `presence.last_interval` object the backend
@@ -74,7 +86,11 @@ export function parsePresenceEvent(text: string): PresenceEvent | null {
   // `open` is stated by the record and must agree with the kind it arrived as; a record that
   // disagrees with itself is a malformed record, not a judgement call to make here.
   if (iv.open !== (kind !== PRESENCE_END_KIND)) return null;
-  return { kind: kind as PresenceEventKind, emitterId, interval: { t_start_s: t0, t_end_s: t1, open: iv.open } };
+  const revoked = num(iv.revoked_s);
+  return {
+    kind: kind as PresenceEventKind, emitterId,
+    interval: { t_start_s: t0, t_end_s: t1, open: iv.open, ...(revoked === null ? {} : { revoked_s: revoked }) },
+  };
 }
 
 /**
@@ -103,6 +119,16 @@ export function parsePresenceEvent(text: string): PresenceEvent | null {
  * A START/REOPEN's `t_start_s` is taken from the record, since a new interval is a new start; a
  * continuing interval's is deliberately left as the row had it, because the row's interval may have
  * begun before the track this record came from.
+ *
+ * **A REVOKE (T-413) is neither an opening nor a closing record and takes neither path.** It says
+ * the END just applied is withdrawn: the *same* interval is open again, so the row's own
+ * `t_start_s` is kept — a REVOKE that claims a **later** start is addressed to an interval this row
+ * is not holding and is refused under (1)'s reasoning, and one that would pull the measured end
+ * backwards is refused under (2). Re-opening is not a claim about air: the box goes back to running
+ * to the live edge with the open cap above its measured end, exactly as before the END. What *is*
+ * new is `revoked_s` — measured silence inside the interval — which the box is drawn with so a
+ * rejoined span never reads as continuous transmission. It only ever grows, because the stream
+ * reports the silence it could show and the poll reports the whole of it.
  */
 export function applyPresenceEvent(row: Pick<Row, "presence">, ev: PresenceEvent): Row["presence"] | null {
   const p = row.presence;
@@ -113,6 +139,12 @@ export function applyPresenceEvent(row: Pick<Row, "presence">, ev: PresenceEvent
     if (!(ev.interval.t_end_s >= iv.t_end_s)) return null;
     if (!iv.open && ev.interval.t_end_s <= iv.t_end_s) return null; // already closed here
     return { ...p, last_interval: { ...iv, t_end_s: ev.interval.t_end_s, open: false } };
+  }
+  if (ev.kind === PRESENCE_REVOKE_KIND) {
+    if (ev.interval.t_start_s > iv.t_start_s) return null; // a later interval, not the one held
+    if (ev.interval.t_end_s < iv.t_end_s) return null; // (2)
+    const revoked = Math.max(iv.revoked_s ?? 0, ev.interval.revoked_s ?? 0);
+    return { ...p, last_interval: { ...iv, t_end_s: ev.interval.t_end_s, open: true, revoked_s: revoked } };
   }
   // (3): an opening record whose interval is the one already on screen is not news — contract B
   // says nothing while an interval continues, so this is a replay.

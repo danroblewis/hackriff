@@ -219,14 +219,28 @@ const rgba = (c: readonly [number, number, number], a: number) => [c[0], c[1], c
  * the air for minutes has a presence interval longer than the waterfall holds, so its top and
  * bottom edges are off-pane and the vertical border is all there is to see.
  */
-export function presenceStyle(state: "candidate" | "confirmed", open: boolean, chirp: boolean): BoxStyle {
+/** `approximate` hatches the fill: this rectangle is known to approximate the thing it covers. Two
+ * cases carry it, and they are the same statement about the same rectangle —
+ *
+ * - **chirp**: a swept carrier drawn as its bounding box, not its diagonal truth (ADR-0017 §1.3);
+ * - **a revoked end** (T-413): the interval was rejoined across silence the receiver *measured*,
+ *   so part of the span the box covers is known to be empty.
+ *
+ * The revoked case deliberately does **not** reuse the open cap's treatment (lighter fill, broken
+ * top edge), though it is the obvious thing to reach for. The open cap means *not yet measured*;
+ * a revoked gap is measured, and measured **empty**. Spelling "looked and it was quiet" as "never
+ * looked" is the coverage map's grey rule inverted (T-368, ADR-0019 §2) — the one substitution this
+ * product refuses — and a broken border would in any case read as two boxes, which is exactly what
+ * the user's ruling says this is not. One interval, one continuous border, and a fill that says it
+ * approximates. */
+export function presenceStyle(state: "candidate" | "confirmed", open: boolean, approximate: boolean): BoxStyle {
   const confirmed = state === "confirmed";
   const c = confirmed ? TEAL : LAV;
   return {
     fill: rgba(c, confirmed ? 0.18 : 0.08), border: rgba(c, 1),
     top: open ? rgba(AMBER, 1) : rgba(c, 1), borderPx: confirmed ? 2 : 1,
     topPx: open ? (confirmed ? 3 : 2) : (confirmed ? 2 : 1),
-    dashPx: confirmed ? 0 : 4, hatch: chirp,
+    dashPx: confirmed ? 0 : 4, hatch: approximate,
   };
 }
 
@@ -238,6 +252,11 @@ export interface PresenceBox extends TimeBox {
    * taxonomy `css` {chirp}) — the one case ADR-0017 §1.3 names where this rectangle is known to
    * misrepresent the signal (a swept carrier drawn as its bounding box, not the diagonal truth). */
   chirp: boolean;
+  /** Measured silence inside this interval whose detected end a resumption revoked (T-413,
+   * `presence.last_interval.revoked_s`). `0` for almost every box. When it is not, the box is one
+   * interval — the user's ruling — over a span the receiver measured partly empty, so it hatches
+   * and says so rather than drawing that air as transmission. Read off the API, never derived. */
+  revokedS: number;
   label: string;
 }
 
@@ -262,11 +281,16 @@ export function presenceBoxes(rows: readonly Row[], g: ax.Geometry, focusedId: s
     const iv = r.presence?.last_interval;
     if (!iv) continue;
     const label = ax.fmtMHz(r.f_center_hz, 1e3), chirp = r.family === "css";
+    // T-413: silence inside this interval that a revoked end rejoined. The interval is one
+    // interval — the box does not break — but the span it covers is not continuous transmission,
+    // and the fill says so rather than going solid over air measured empty.
+    const revoked = iv.revoked_s ?? 0;
     out.push({
       id: r.id, state: r.state, u0: bandFrac(g, r.f_lo_hz), u1: bandFrac(g, r.f_hi_hz),
       tLo: iv.t_start_s, tHi: iv.t_end_s, openEnded: iv.open, open: iv.open, chirp, label,
-      style: presenceStyle(r.state, iv.open, chirp),
-      title: `${label} MHz · ${r.state}${iv.open ? " · on air (open to the live edge; measured to the rule)" : ""}${chirp ? " · bounding box (chirp: a swept carrier drawn as its extent, not its sweep)" : ""}`,
+      revokedS: revoked,
+      style: presenceStyle(r.state, iv.open, chirp || revoked > 0),
+      title: `${label} MHz · ${r.state}${iv.open ? " · on air (open to the live edge; measured to the rule)" : ""}${revoked > 0 ? ` · one interval across a revoked end (${revoked.toFixed(1)} s of measured silence inside it, not counted as air)` : ""}${chirp ? " · bounding box (chirp: a swept carrier drawn as its extent, not its sweep)" : ""}`,
     });
   }
   return out;
