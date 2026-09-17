@@ -4515,3 +4515,52 @@ question actually being asked. A fourth arrived the same day from the other dire
 test that timed **53.2 s alone yesterday and 21.1 s alone today** against a fixed 60 s budget. A bound
 over a quantity that swings 2.5× is not measuring the code either. **T-383** now carries all five
 instances with **T-344** folded in, because they are one problem.
+
+### B0.676 — the number was real, and it described a commit that never existed (2026-09-17)
+
+**T-415** (`c6798c9`) answered a question I had posed wrongly. I had assumed the stale M3 baseline was
+one of two things: I misread it, or two numbers share a name. It was **a third**, and it is the one
+worth knowing about. T-415 checked out the exact commit T-404 merged (`3d37ccf`) and ran
+`just acceptance-m3`: it measures **0.9345**, not 0.9480 — on code **byte-identical** to T-404's own
+branch tip (`b3fac0e`) for every file in `hk-classify` and `hk-estimate`, with the harness reproducing
+to four decimal places. So the figure was **real and accurately transcribed**; it was a **pre-commit
+measurement that predated the last edit folded into its own squashed merge commit** and was never re-run
+after it. **The merged code never scored 0.9480 — the number described a tree that never became `main`.**
+
+No amount of careful reading catches that, because nothing in the report is wrong. The only defence is
+**re-deriving at merge time** rather than trusting a commit message's figure, which is what ADR-0016
+**§7.1** now tells a brief to do. §7.1 states one canonical set with a **population named per figure**,
+and keeps the distinction the failure modes need: known top-1/top-2 has **no** population split, while
+unknown-recall/false-known does — the full 396-snippet held-out grid is the gate's ruling, and the
+216-snippet reading over the six generators §7's prose enumerates is **recorded but not used**. It also
+writes down T-419's stash-and-measure protocol as standing practice.
+
+**T-421** (`6a37221`) landed `docs/16` §7 **step 1** — the record-derived answer gains a time axis — and
+needed **no new data and no new type**. The journal and observation-log readers already carried whole
+`(t0, t1)` intervals per segment and per hop visit: *the collapse was entirely in the fold.* It carried
+T-419's level-0 control whole, and added one guard beyond the brief that earns its place:
+`rasterising_directly_onto_a_coarse_grid_is_not_the_fold` **measures** both answers on one sixteenth of a
+band — direct **1.0**, folded **0.0625**. Rasterising wide still answers *"did anything look anywhere in
+here"*, which is exactly why the pyramid must rasterise fine and fold down. That difference is now pinned
+by a test rather than left in a comment. It also declined to spell §5.4's **fourth state** as grey, and
+left the `Coverage` variant to the caller that knows where the horizon is.
+
+**T-409** (`4333b47`) turned the ticket's own open question into a number. `NudgeGeometry.landing` says
+where a signal **currently on DC** ends up, as a fraction of the way to the window edge: ⅛ → 0.25,
+¼ → 0.50, ½ → **1.00**. So the half-span nudge drops a centred signal **exactly at the band edge**, in
+the anti-alias skirt — it trades one hazard for the other, which is the opposite of what the feature
+exists to do. The button stays (it is the honest stride for stepping along a band), marked amber, naming
+¼ as the offset that clears both — ¼ being T-418's derived midpoint of the usable half-band. Clamping is
+**refused per button** rather than applied: T-392's `containsCenter`-not-`snapCenter` distinction kept,
+with a test asserting `snapCenter` *would* have returned a shorter centre, so it cannot be quietly
+undrawn later.
+
+**Two gaps in my own bookkeeping, both now tickets.** Sweeping `docs/16` §7 after step 1 landed showed
+**steps 2, 4, 5 and 7 have no tickets** — the same gap that left step 1 unfiled until this morning;
+**T-423** is step 2 and carries the §5.4 decision. And merging T-415 measured something about the gate:
+**every gate I run classifies full**, because `tools/` and an untracked diagnostic capture trip the
+fail-closed rule. Both rules are individually right; their combination makes the diff-aware gate
+**always-full in the one tree it was built to help**, for files that can never be part of any merge.
+T-415 should have run *nothing* and would have cost seven minutes. `--staged` gives the honest answer for
+a merge gate — but narrowing a gate is precisely what T-396 says must not happen by habit, so it is
+**T-424**, a decision to write down rather than one to drift into.
