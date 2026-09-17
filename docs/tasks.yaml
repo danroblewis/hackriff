@@ -10544,6 +10544,58 @@ tasks:
       and sweeping only that assumption flipped qam16 from 21/21 to 0/21 while qam64 went 14/14 to
       10/14. If these flips share that cause, this may be the same defect seen from the family side
       rather than a new one. Check before assuming it is new.
+  - id: T-436
+    milestone: CI
+    title: The suite is green at --test-threads 8 and flaky at nextest's default 28 - the coordinator's gate runs at the flaky one
+    status: todo
+    priority: high
+    parallel_group: CI
+    deps: [T-383]
+    found_by: 'coordinator (2026-09-17), after three consecutive gate runs on one clean diff each failed on a DIFFERENT test'
+    acceptance: |
+      MEASURED, ON ONE TREE, ONE DIFF, IN ONE SITTING. Gating T-426 (a pub(crate) change inside
+      hk-api plus docs and a contract test), three consecutive full runs at nextest's DEFAULT
+      concurrency each failed on a DIFFERENT timing-sensitive test:
+        run 1  hk-plugins::readsb readsb_wedge_message_ends_the_wrapper_without_waiting_for_the_child
+        run 2  hk-cli::api_contract coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows...
+        run 3  hk-cli::api_contract the_band_collapsed_activity_series_is_measured_and_states_its_fold
+      Each passes in isolation (5/5, 10/10 at load 13.5, 6/6 respectively). Then the SAME tree, the
+      SAME tests, with only concurrency changed:
+        cargo nextest run --workspace --test-threads 8  ->  2298/2298 PASSED, NO EXCLUSIONS.
+      T-426's own agent independently reported the same thing: 2181/2181 at --test-threads 8, and
+      four runs at default concurrency each failing a rotating set (24 hk-plugins, then 24, then
+      decoded_capture alone, then readsb alone). T-300's agent measured the mechanism directly:
+      hk-plugins' 43 tests pass in 8.9 s isolated versus 24-43 s PER TEST during a concurrent run.
+      WHY THE DEFAULT IS WRONG HERE. nextest defaults test-threads to the core count (28). Many of
+      these tests are not CPU-bound units - they start `hk serve`, spawn plugin subprocesses, drive
+      real-time-paced replays and bound wall-clock latencies. Twenty-eight of those at once on a box
+      that ALSO has up to four Rust-building agents by design (CLAUDE.md, T-144) is oversubscription
+      of exactly the resource they measure. The heavy-serial group does not help: T-383 established
+      that `max-threads = 1` serialises the group against ITSELF within one invocation and does
+      nothing about the ~27 tests running concurrently outside it.
+      THE COST IS PAID EVERY MERGE. Each false red costs a 7-12 minute re-run, plus the judgement of
+      deciding it was false - and the judgement is the expensive part, because dismissing a red is
+      exactly the habit that lets a real one through. Today it also cost three separate agents time
+      they spent proving failures were not theirs.
+      DoD: decide and encode the concurrency the Rust suite runs at. The obvious candidate is a
+      `test-threads` setting in .config/nextest.toml, which would apply to CI and every agent as
+      well as to me. MEASURE THE COST: 8 threads took 1403 s wall clock against the default's ~1450 s
+      when it completes, so on this box the slower setting appears to be FREE or nearly so - verify
+      that, because "it is slower but correct" and "it is the same speed and correct" are different
+      arguments and only one needs a trade-off discussion.
+      Consider whether the right number is a fixed 8, a fraction of the core count, or different for
+      CI (a dedicated runner, nothing else on the box) than for the dev Mac (four agents by design).
+      Do NOT add a retry (T-344's standing instruction) and do not add names to heavy-serial - T-383
+      already measured that as the wrong lever.
+    notes: |
+      This does not replace T-430 or T-433. Those are individual tests bounding quantities whose
+      range they never measured, and they should still be fixed - a test that only passes on an idle
+      machine is wrong even if the machine is usually idle. This ticket is about the harness making
+      that latent wrongness fire constantly, and about the coordinator's per-merge check being the
+      place it fires hardest.
+      The T-430 coverage test's failure here reproduced its known signature exactly: row 1 picking up
+      6.8 ms of capture from the live edge read by a previous HTTP round-trip, the same figure T-425
+      measured.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
