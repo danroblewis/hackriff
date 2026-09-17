@@ -418,7 +418,7 @@ tasks:
     effort: medium
     dod: fixtures captured, annotated, checksummed, referenced by the acceptance tests
   - id: T-026
-    milestone: M7
+    milestone: MJETSON
     title: GPU polyphase channelizer (CUDA PfbBackend) on the Jetson
     status: deferred
     deferred: "user 2026-09-14: GPU work is Mac-first; CUDA PFB deferred to the Jetson phase; not blocked and not a gate for any milestone"
@@ -3493,7 +3493,7 @@ tasks:
     effort: medium
     core_interface: true
   - id: T-216
-    milestone: M7
+    milestone: MJETSON
     title: "Jetson phase: TensorRT provider for hk-ml plus on-device fine-tuning from labelled captures"
     status: blocked
     priority: normal

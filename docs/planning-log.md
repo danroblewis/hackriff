@@ -4313,3 +4313,37 @@ of twelve**, not 82.
 alone in 53.2 s against a **60 s** timeout. Three instances now, and they are one problem — **a timeout
 is a statement about the machine, not the code.** T-401 is establishing the capture-clock pattern for
 exactly this reason and its shape should be reused rather than the numbers raised.
+
+### B0.672 — MJETSON: the Jetson work becomes its own milestone, and the hardware-last rule is written down (2026-09-16)
+
+The user asked for a **MJETSON** milestone and for the Jetson-tagged tickets to move into it. Done:
+**T-026** (CUDA polyphase channelizer) and **T-216** (TensorRT provider for `hk-ml` plus on-device
+fine-tuning) both moved from M7, which now holds **no** Jetson work — it is enclosure, low-power and
+TX again, which is what it was always meant to be. I had rehomed those two into M7 earlier today at
+the user's request, on the reasoning that M7 was "when hardware work begins"; a milestone of their own
+is better, because the Jetson gate is a **purchase**, not a phase of device polish, and mixing them
+made M7 look blocked when only part of it is.
+
+`docs/11` §2 gains the MJETSON row after M7, and §3 gains the ordering note the user asked for:
+
+> **Hardware last, and hardware never a prerequisite.** The milestones needing hardware nobody has yet
+> are the tail — M6 (a second/coherent SDR), M7 (enclosure, low-power, TX), MJETSON (the purchase) and
+> M8 (the field check, which needs a real radio and ambient air). **Nothing earlier may depend on any
+> of them existing.**
+
+The GPU rule is the pattern and worth stating as evidence rather than aspiration: new GPU work
+implements the **Mac provider first** behind the compute-provider conformance suite, so MJETSON is a
+CUDA **port onto a proven suite** rather than a bring-up. **T-026 has sat deferred for months and cost
+nothing** — that is the test of the rule working, and it is why a hardware milestone can be parked
+without stalling anything.
+
+**No MJETSON tasks scheduled**, per the instruction, and none should be until the hardware exists.
+
+**A caveat on provenance.** The user's message reached this session **truncated** — the surviving text
+began mid-word at *"…ware-last ordering"*. The instructions that arrived were unambiguous (create the
+milestone, move the tickets, update the table, ordering notes and log, schedule nothing), and the row's
+*content* is drawn from the two tickets' own text plus the existing Mac-first GPU rule in `CLAUDE.md`.
+But the framing of the row is **mine, reconstructed**, and the user should check it. This is the
+seventh truncated message today; one earlier reconstruction (B0.666) put a frame on a suite that the
+user then had to retract, so the rule I am now following is to do the unambiguous part, mark the
+inferred part, and say so.
