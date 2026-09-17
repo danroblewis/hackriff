@@ -274,6 +274,39 @@ test("placeTimeBoxes: a sub-pixel box is widened about its own centre, never mov
   near(p.x1 - p.x0, min, 1e-12);
 });
 
+test("T-410: an OPEN box runs to the live edge, and reports where measurement stops", () => {
+  // Rows 0..63, newest first. The interval's measured end is row 10's boundary; the live edge is
+  // row 0. Under contract A the box stopped at row 10; under ADR-0019 it reaches the top, and the
+  // span between is the open cap — assumption, reported so it can be drawn as assumption.
+  const times = [...Array(64)].map((_, k) => T0 - k * P);
+  const back = (t: number) => rowsBackAt((k) => times[k] ?? NaN, times.length, t);
+  const closed = box(times[20], times[10], 0.3, 0.7);
+  const open: TimeBox = { ...closed, openEnded: true };
+
+  const [c] = placeTimeBoxes([closed], back, ROWS, 0, 1);
+  const [o] = placeTimeBoxes([open], back, ROWS, 0, 1);
+  assert.equal(c.assumedFrom, 1, "a closed box claims no unmeasured air at all");
+  near(o.y1, c.y1, 1e-12); // the older edge is the same measurement in both
+  assert.equal(o.y0, 0, "the open box's top is rows-back 0 — the live edge of this very pass");
+  assert.ok(o.y0 < c.y0, "and it is taller than the closed one by exactly the open cap");
+  // `assumedFrom` is the measured end as a fraction of the box's own height from its newest edge,
+  // so the shader can shade the cap without ever being told a time.
+  near(o.assumedFrom, (o.y1 - c.y0) / (o.y1 - o.y0), 1e-12);
+  assert.ok(o.assumedFrom > 0 && o.assumedFrom < 1);
+  // And the cap grows with the silence: an older measured end leaves more of the box assumed.
+  const [older] = placeTimeBoxes([{ ...open, tHi: times[30] }], back, ROWS, 0, 1);
+  assert.ok(older.assumedFrom < o.assumedFrom, "a longer silence is a visibly larger open cap");
+});
+
+test("T-410: an open box is hittable over its whole drawn extent, open cap included", () => {
+  // What is on screen is what a pointer resolves to. A closed box stops at its end, as before.
+  const closed = box(T0, T0 + 1, 0.3, 0.7);
+  const open: TimeBox = { ...closed, openEnded: true };
+  assert.equal(boxAt([closed], 0.5, T0 + 2), null);
+  assert.equal(boxAt([open], 0.5, T0 + 2)?.id, "a", "inside the open cap is inside the box");
+  assert.equal(boxAt([open], 0.5, T0 - 1), null, "but never before it started");
+});
+
 test("boxAt: hit-testing is containment in the boxes' own axes, topmost first — never a remembered rectangle", () => {
   const under = box(T0, T0 + 1, 0.3, 0.7);
   const over: TimeBox = { ...box(T0, T0 + 1, 0.4, 0.6), id: "b" };

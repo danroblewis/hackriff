@@ -175,3 +175,57 @@ fn the_detector_takes_no_known_signal_input() {
         );
     }
 }
+
+/// **The door T-322 opened, and the lock on it.**
+///
+/// The exception now has a production caller: `hk_pipeline::gnss` schedules an L1 dwell, runs
+/// acquisition on it, and delivers the result to C30 through `hk_context::gnss_service`. Those two
+/// files are the only places in the product that carry a known-code-led result, and neither is on
+/// the blind path — `hk-pipeline` composes everything, so a dependency check cannot say anything
+/// useful about it.
+///
+/// What *can* be said is what the result is allowed to become. A Gold code correlating must never
+/// put a row in the inventory: that is the same leak as the forbidden dependency edge, arriving by
+/// a different door. So neither file may name a `Detection`, an `Emitter`, an inventory, or the
+/// detector crate. Evidence, not detection — checked, not remembered.
+#[test]
+fn the_gnss_caller_cannot_launder_an_acquisition_into_the_inventory() {
+    const CARRIERS: [(&str, &str); 2] = [
+        ("hk-pipeline", "gnss.rs"),
+        ("hk-context", "gnss_service.rs"),
+    ];
+    const FORBIDDEN: [&str; 5] = ["Detection", "Emitter", "Inventory", "hk_detect", "TrackId"];
+    let mut offenders = Vec::new();
+    for (krate, file) in CARRIERS {
+        let path = workspace_root()
+            .join("crates")
+            .join(krate)
+            .join("src")
+            .join(file);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        // The module's own `#[cfg(test)]` block asserts these shapes are *absent*; naming them in
+        // order to forbid them is not a violation. Everything before it is production code.
+        let production = text.split("#[cfg(test)]").next().unwrap_or(&text);
+        for (n, line) in production.lines().enumerate() {
+            let code = line.trim_start();
+            // Doc comments argue about the rule; they are not violations of it.
+            if code.starts_with("//") {
+                continue;
+            }
+            for bad in FORBIDDEN {
+                if code.contains(bad) {
+                    offenders.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the GNSS caller names an inventory object:\n{}\n\
+         A known-code acquisition reaches C30 as Evidence::Value on an anomaly the blind path \
+         already opened. Minting a Detection, an Emitter or an inventory row from a correlating \
+         Gold code is the leak this boundary exists to prevent (ADR-0018, T-322).",
+        offenders.join("\n")
+    );
+}

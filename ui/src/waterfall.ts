@@ -407,17 +407,26 @@ void main(){ vec2 q = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1)
     `#version 300 es
 precision mediump float;
 uniform vec2 uSizePx; uniform vec4 uFill, uBorder, uTop;
-uniform float uBorderPx, uTopPx, uDashPx, uHatch; in vec2 vQ; out vec4 o;
+uniform float uBorderPx, uTopPx, uDashPx, uHatch, uAssumedFrom; in vec2 vQ; out vec4 o;
 void main(){
   vec2 px = vQ * uSizePx;
   float w = max(uBorderPx, 1.0), tw = max(w, uTopPx);
   bool side = px.x <= w || uSizePx.x - px.x <= w;
   bool top = uSizePx.y - px.y <= tw;
   bool edge = side || top || px.y <= w;
+  // T-410 (ADR-0019 §2): above the last MEASURED end the box is assumption, not measurement, and
+  // must not read as the same claim. The rule marking where the two meet, then a lighter fill and
+  // a broken border over the open cap, so the assumed span is legible and grows visibly with the
+  // silence. Presentation of a distinction the data makes — never a decision taken here.
+  float mY = uAssumedFrom * uSizePx.y;
+  bool assumed = uAssumedFrom < 1.0 && px.y > mY;
+  if (uAssumedFrom < 1.0 && abs(px.y - mY) <= w * 0.5 && !side) { o = vec4(uBorder.rgb, uBorder.a * 0.8); return; }
   if (edge && uDashPx > 0.0 && mod(side ? px.y : px.x, 2.0 * uDashPx) > uDashPx) edge = false;
+  if (edge && assumed && !top && mod(px.y, 8.0) > 3.5) edge = false;
   if (edge) { o = top ? uTop : uBorder; return; }
+  vec4 fill = assumed ? vec4(uFill.rgb, uFill.a * 0.35) : uFill;
   o = (uHatch > 0.5 && mod(px.x + px.y, 6.0) < 1.5)
-    ? vec4(mix(uFill.rgb, vec3(1.0), 0.35), max(uFill.a, 0.22)) : uFill;
+    ? vec4(mix(fill.rgb, vec3(1.0), 0.35), max(fill.a, 0.22)) : fill;
 }`);
     this.progs.dpx = prog(VS_FULL, `#version 300 es
 precision highp float; precision highp int;
@@ -554,6 +563,7 @@ void main(){
       gl.uniform1f(b.u.uTopPx, s.topPx * dpr);
       gl.uniform1f(b.u.uDashPx, s.dashPx * dpr);
       gl.uniform1f(b.u.uHatch, s.hatch ? 1 : 0);
+      gl.uniform1f(b.u.uAssumedFrom, p.assumedFrom);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
     gl.disable(gl.BLEND);

@@ -42,6 +42,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
+use hk_core::scheduler::bandit::ScheduledDwell;
 use hk_core::scheduler::{
     ArmStatus, AttentionStatus, Lease, Poi, PoiKey, Purpose, ScheduleStep, Scheduler,
     SchedulerConfig, SchedulerError, StepApplier, SyntheticClock, Verification,
@@ -242,6 +243,9 @@ pub(crate) struct SchedState {
     /// The pipeline's rate (every step's, leases included).
     fs: f64,
     regions: Vec<FreqRange>,
+    /// T-322: the C36 L1 dwell service. C04 is asked for a recurring L1 dwell at construction
+    /// (only when the plan already covers L1), and this is armed when a granted step is applied.
+    gnss: Arc<crate::gnss::GnssDwell>,
 }
 
 impl SchedState {
@@ -297,7 +301,7 @@ impl SchedState {
             }
             None => None,
         };
-        Ok(Self {
+        let state = Self {
             scheduler,
             applier: StepApplier::new(control),
             generation: switch.generation(),
@@ -316,7 +320,49 @@ impl SchedState {
             track_decodes: Arc::default(),
             fs,
             regions: plan.regions.iter().map(|r| r.freq).collect(),
-        })
+            gnss: Arc::default(),
+        };
+        Ok(state)
+    }
+
+    /// T-322: adopts the run's C36 service and **asks C04 for the L1 dwell**. Called once, right
+    /// after construction, like [`SchedState::attach_hub`].
+    pub(crate) fn attach_gnss(&mut self, gnss: Arc<crate::gnss::GnssDwell>, t0: Timestamp) {
+        self.gnss = gnss;
+        self.request_gnss_dwell(t0);
+    }
+
+    /// **C04 asks for the L1 dwell** (T-322, ADR-0018): a recurring scheduled dwell at GPS L1, at
+    /// the pipeline's rate, on the tier-3 scheduled-plan path.
+    ///
+    /// It is requested **only when the run's own scan plan already covers L1**. That is the whole
+    /// gate, and it is deliberately not a flag: a survey that never looks at L-band has no reason
+    /// to retune there, and a run that does cover it has every reason. Nothing about the request
+    /// is GNSS-shaped from the scheduler's side — it is a centre, a rate and a duration, checked
+    /// against the source's capabilities like any other. A refusal (a source that cannot reach
+    /// 1575 MHz, a full table) leaves the counter at zero and the reader never armed.
+    fn request_gnss_dwell(&mut self, t0: Timestamp) {
+        let center = self.gnss.config().center_hz;
+        if !self
+            .regions
+            .iter()
+            .any(|r| r.lo_hz <= center && center < r.hi_hz)
+        {
+            return;
+        }
+        let cfg = *self.gnss.config();
+        let dwell = ScheduledDwell {
+            id: crate::gnss::GNSS_SCHEDULED_TARGET,
+            center_hz: center,
+            rate_hz: self.fs,
+            gains: None,
+            duration_ns: cfg.dwell_ns,
+            due: t0,
+            every_ns: Some(cfg.every_ns),
+        };
+        if self.scheduler.schedule_dwell(dwell).is_ok() {
+            self.gnss.record_request();
+        }
     }
 
     /// T-127: publishes snapshots to `hub` and serves its lease commands.
@@ -644,6 +690,16 @@ impl SchedState {
             self.recent.pop_front();
         }
         self.recent.push_back(step);
+        // T-322: a granted L1 dwell arms the `hk-gnss` reader for exactly this window. This is
+        // the only path to an acquisition, so the cadence is one per dwell C04 granted.
+        if step.purpose
+            == (Purpose::Scheduled {
+                target: crate::gnss::GNSS_SCHEDULED_TARGET,
+            })
+        {
+            self.gnss
+                .arm(hk_model::TimeRange::new(step.t_start, step.t_end()));
+        }
         if let (Purpose::Bandit { .. }, true) = (step.purpose, self.bandit.is_some()) {
             let arm = self.scheduler.arm_key_of(&step);
             if self

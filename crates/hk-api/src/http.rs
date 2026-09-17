@@ -1112,7 +1112,7 @@ fn inventory(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
     let repo = repo
         .lock()
         .map_err(|_| ApiError::new(500, "inventory store poisoned"))?;
-    query::inventory_json(&repo, &req.query)
+    query::inventory_json(state, &repo, &req.query)
 }
 
 /// `/api/events` (T-264, ADR-0017 TM-8): the durable catalogue of events in a region over a time

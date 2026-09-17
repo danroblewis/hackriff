@@ -970,31 +970,44 @@ impl Writer {
             || !self.floor.is_empty()
     }
 
-    /// T-388: one presence tick — publish how far each open track's presence has been observed,
-    /// for the tracks the inventory has already given a row.
+    /// T-410 (ADR-0019): one presence tick — publish the **endpoints** of each open track's
+    /// interval, for the tracks the inventory has already given a row. A continuing interval
+    /// publishes nothing.
     ///
     /// Deliberately **not** part of [`Writer::write`] and **not** in [`Writer::has_work`]: this
     /// writes nothing to the repository and must not make the writer take the lock (or count a
     /// batch) on a run where the only thing happening is that a signal is still on the air. It runs
     /// once per loop iteration and gates itself to `PRESENCE_PUSH_NS`.
+    ///
+    /// **An empty extent list is not "nothing to say".** Under T-388's contract it was, because
+    /// every record extended something; under ADR-0019 it means *everything stopped*, which is the
+    /// most important thing this stream ever says — so the tick runs whenever the stream still
+    /// holds an open interval, and only the truly idle case returns early.
     fn publish_presence(&mut self) {
-        if self.live_extents.is_empty() || !self.presence.due(self.now_ns) {
+        if (self.live_extents.is_empty() && !self.presence.has_state())
+            || !self.presence.due(self.now_ns)
+        {
             return;
         }
+        // A batch at the cap may have been truncated, so absence from it is not evidence a track
+        // closed (`PresenceStream::plan`). Below the cap the list is the whole live set.
+        let complete = self.live_extents.len() < MAX_LIVE_EXTENTS;
         // The inventory is the one place that knows which emitter a track's row is, and the lock is
         // taken only for that lookup: no repository work, no writes.
-        let (published, truncated) = {
+        let (published, deferred) = {
             let inv = self
                 .shared
                 .inventory
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             self.presence
-                .tick(self.now_ns, &self.live_extents, |t| inv.emitter_of_track(t))
+                .tick(self.now_ns, &self.live_extents, complete, |t| {
+                    inv.emitter_of_track(t)
+                })
         };
         let dc = &self.shared.counters.detect;
         add(&dc.presence_extensions, published as u64);
-        add(&dc.presence_extensions_truncated, truncated as u64);
+        add(&dc.presence_extensions_truncated, deferred as u64);
     }
 
     /// One write pass (see the module docs for the order and the retry rules).

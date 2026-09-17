@@ -18,6 +18,10 @@ hk-demod.workspace = true
 hk-detect.workspace = true
 hk-dsp.workspace = true
 hk-estimate.workspace = true
+# T-322: the C36 caller. `src/gnss.rs` is the ONE place that names both hk-gnss and the pipeline,
+# and it is not on the blind detection path — hk-detect/hk-core/hk-dsp/hk-estimate still do not
+# depend on hk-gnss, which is what crates/hk-gnss/tests/blind_path_boundary.rs enforces (ADR-0018).
+hk-gnss.workspace = true
 hk-model.workspace = true
 hk-plugins.workspace = true
 # T-085: recipe runtime (T-088/T-092/T-093, `src/recipes/`).

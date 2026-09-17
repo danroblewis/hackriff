@@ -1,30 +1,43 @@
-// T-388 (the user's bug from live testing, 2026-09-16): a live signal's box extended UP slowly.
+// T-410 (ADR-0019): the presence stream carries an interval's ENDPOINTS, and the box runs to the
+// live edge until an END caps it.
 //
-// The measured chain was two lazy links in series — the backend committed an open track's presence
-// every 5 s (`LIVE_OFFER_NS`) and the UI polled `/api/inventory` every 5 s — so a box top sat
-// between 5 s and 10 s behind the live edge. The fix is a push, and these tests are about the two
-// halves of "fast, without inventing anything":
+// T-388 built this under contract A — presence as an accumulation of observations, one record per
+// open emitter per tick pushing the measured top forward. The user replaced it with contract B:
+// presence is an interval with endpoints, so the measurement is the START plus the ABSENCE of an
+// END, and a continuing interval says nothing at all.
 //
-//   a. **latency**: an extension applied to a row moves its box top to the pushed instant, with no
-//      poll involved — asserted against the ~1 s target with numbers;
-//   b. **the control that matters**: a signal that stops stops extending. A push that keeps a box
-//      growing after an emission ended is exactly the fabrication the honesty constraint forbids,
-//      and a latency test alone does not catch it.
+// What these assert:
 //
-// Plus the refusals: no row, no interval, a reordered record, and a record that would bridge a
-// silence. Every one of them leaves the row exactly as the poll served it.
+//   a. **an opening record opens a box that runs to the live edge**, and a continuing interval
+//      produces no record to apply — the per-poll bump is gone, not merely slower;
+//   b. **the control that matters, moved**: under contract A it was "a stopped emission stops
+//      extending"; under contract B the box would over-claim to the live edge, so it is now "an END
+//      caps the box AT THE MEASURED END" — the box retracts to the truth rather than stopping
+//      wherever the assumption had reached;
+//   c. the refusals ADR-0019 §7 keeps (no interval conjures no box; nothing shortens the measured
+//      extent) and the one it replaces (a record after a silence no longer waits for the poll — it
+//      REOPENS, as its own box, with the silence drawn as a gap).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { extendPresence, parsePresenceExtension, PRESENCE_EXTENSION_KIND } from "../src/presence";
+import {
+  applyPresenceEvent, parsePresenceEvent,
+  PRESENCE_END_KIND, PRESENCE_REOPEN_KIND, PRESENCE_START_KIND,
+} from "../src/presence";
 import type { Presence, Row } from "../src/inventory";
 
 /** One `presence` record as `hk-pipeline::presence` publishes it (docs/stream-contract.md §15). */
-const record = (emitter: string, t0: number, t1: number, open = true) => JSON.stringify({
-  type: "message", seq: 3, t_ns: Math.round(t1 * 1e9), emitter_id: emitter,
-  content_class: "unrestricted", gated: false, frame_model: PRESENCE_EXTENSION_KIND,
-  metadata: { kind: PRESENCE_EXTENSION_KIND, last_interval: { t_start_s: t0, t_end_s: t1, open } },
-});
+const record = (emitter: string, kind: string, t0: number, t1: number) => {
+  const open = kind !== PRESENCE_END_KIND;
+  return JSON.stringify({
+    type: "message", seq: 3, t_ns: Math.round((open ? t0 : t1) * 1e9), emitter_id: emitter,
+    content_class: "unrestricted", gated: false, frame_model: kind,
+    metadata: { kind, last_interval: { t_start_s: t0, t_end_s: t1, open } },
+  });
+};
+const start = (e: string, t0: number, t1: number) => record(e, PRESENCE_START_KIND, t0, t1);
+const reopen = (e: string, t0: number, t1: number) => record(e, PRESENCE_REOPEN_KIND, t0, t1);
+const end = (e: string, t0: number, t1: number) => record(e, PRESENCE_END_KIND, t0, t1);
 
 const presence = (t0: number, t1: number, open = true): Presence => ({
   intervals: 1, on_air_s: t1 - t0, last_interval: { t_start_s: t0, t_end_s: t1, open },
@@ -34,111 +47,107 @@ const presence = (t0: number, t1: number, open = true): Presence => ({
 const row = (p: Presence | undefined): Pick<Row, "presence"> => ({ presence: p });
 
 // ---------------------------------------------------------------------------
-// (a) latency: the box top reaches the pushed instant without a poll
+// (a) endpoints only: an opening record, then silence while the interval runs
 // ---------------------------------------------------------------------------
 
-test("T-388: an extension moves the box top to the observed live edge, within ~1 s and with no poll", () => {
-  // The band's live edge is t = 1000.0; the last poll was a while ago and left the box at 995.0.
-  const LIVE_EDGE_S = 1000.0, POLLED_END_S = 995.0;
-  const r = row(presence(990.0, POLLED_END_S));
-  assert.equal(
-    LIVE_EDGE_S - r.presence!.last_interval!.t_end_s, 5.0,
-    "before the push, the box top lags by a whole inventory poll",
-  );
-
-  // The backend publishes how far presence has now been OBSERVED. Detection runs per frame and the
-  // detect reader flushes every 0.5 s, so the newest observed end trails the live edge by at most
-  // one flush — this stands in for that: 1000.0 minus a 0.4 s-old measurement.
-  const OBSERVED_END_S = 999.6;
-  const ext = parsePresenceExtension(record("e1", 992.0, OBSERVED_END_S))!;
-  const after = extendPresence(r, ext)!;
-
-  assert.equal(after.last_interval!.t_end_s, OBSERVED_END_S);
-  const lag = LIVE_EDGE_S - after.last_interval!.t_end_s;
-  assert.ok(lag <= 1.0, `box top must track the live edge within ~1 s, lags ${lag} s`);
-  assert.ok(lag < 5.0 / 4, `and by a large margin over the 5 s poll it replaces (${lag} s)`);
-  // The older edge is untouched: an extension is news about the newest edge only. The row's
-  // interval may have begun before the track the extension came from.
-  assert.equal(after.last_interval!.t_start_s, 990.0, "t_start_s is the row's, not the record's");
-  assert.equal(after.last_interval!.open, true);
+test("T-410: an opening record leaves the interval OPEN, which is what makes the box run to the live edge", () => {
+  const r = row(presence(990.0, 995.0, false));
+  const after = applyPresenceEvent(r, parsePresenceEvent(reopen("e1", 1010.0, 1010.2))!)!;
+  assert.equal(after.last_interval!.open, true, "open is the claim the box is drawn from");
+  assert.equal(after.last_interval!.t_start_s, 1010.0, "a new interval brings its own start");
+  assert.equal(after.last_interval!.t_end_s, 1010.2, "and its measured end, where the open cap begins");
 });
 
-test("T-388: a run of extensions grows the box monotonically, each to its own observed end", () => {
-  let p: Presence | null = presence(990.0, 995.0);
-  const ends = [996.5, 997.0, 998.25, 999.5];
-  for (const t1 of ends) {
-    p = extendPresence(row(p!), parsePresenceExtension(record("e1", 992.0, t1))!);
-    assert.ok(p, `extension to ${t1} must apply`);
-    assert.equal(p!.last_interval!.t_end_s, t1);
-  }
-  assert.equal(p!.last_interval!.t_start_s, 990.0, "the box grew downward in time only");
-});
-
-// ---------------------------------------------------------------------------
-// (b) the control that matters: a signal that STOPS stops extending
-// ---------------------------------------------------------------------------
-
-test("T-388: a stopped emission stops extending — the box top stays at the last OBSERVED end", () => {
-  // The emitter goes off the air at 999.5. The tracker stops advancing its end, so every later
-  // record repeats that same instant (hk-pipeline's `LiveExtent::t_end_ns` is `t_last_end`, never a
-  // clock read). The box must not move again, however long the stream stays open.
-  const STOPPED_AT_S = 999.5;
-  let p: Presence = extendPresence(row(presence(990.0, 995.0)),
-    parsePresenceExtension(record("e1", 992.0, STOPPED_AT_S))!)!;
-  assert.equal(p.last_interval!.t_end_s, STOPPED_AT_S);
-
-  for (let i = 0; i < 40; i++) { // ten seconds of ticks at the 250 ms push period
-    const again = extendPresence(row(p), parsePresenceExtension(record("e1", 992.0, STOPPED_AT_S))!);
-    assert.equal(again, null, "a repeated end is not an extension");
-  }
-  assert.equal(p.last_interval!.t_end_s, STOPPED_AT_S, "the box stops where the evidence stops");
-
-  // And once the track closes, the backend unbinds it and publishes nothing for it at all; the next
-  // poll carries the closed interval. Nothing here has to know that — there is simply no record.
-});
-
-test("T-388: an out-of-order or replayed record never shortens a box", () => {
-  const p = presence(990.0, 999.0);
-  assert.equal(extendPresence(row(p), parsePresenceExtension(record("e1", 992.0, 997.0))!), null);
-  assert.equal(extendPresence(row(p), parsePresenceExtension(record("e1", 992.0, 999.0))!), null);
-});
-
-test("T-388: an extension that would bridge a silence is refused — the box waits for the poll", () => {
-  // A new track bound to the same emitter after a gap: its span starts AFTER the end on screen.
-  // Stretching the box across that gap would assert the emitter transmitted through it.
+test("T-410: a continuing interval produces nothing to apply — there is no per-tick bump left", () => {
+  // Contract A pushed one record per tick for as long as the signal stayed on the air, and every
+  // one of them moved the box. Contract B says nothing: the box is already at the live edge.
   const p = presence(990.0, 995.0);
-  assert.equal(extendPresence(row(p), parsePresenceExtension(record("e1", 1010.0, 1012.0))!), null);
-  // Contiguous (the span overlaps the end on screen) is the case that does apply.
-  assert.ok(extendPresence(row(p), parsePresenceExtension(record("e1", 994.5, 996.0))!));
+  for (let i = 0; i < 40; i++) { // ten seconds of ticks at the 250 ms push period
+    assert.equal(
+      applyPresenceEvent(row(p), parsePresenceEvent(start("e1", 990.0, 995.0 + i * 0.25))!), null,
+      "an opening record for the interval already on screen is a replay, not news",
+    );
+  }
+  assert.equal(p.last_interval!.t_end_s, 995.0, "and the row is exactly as the poll served it");
 });
 
-test("T-388: a row with no interval in the window gets no box conjured for it", () => {
+// ---------------------------------------------------------------------------
+// (b) the control that matters, moved: an END caps the box at the MEASURED end
+// ---------------------------------------------------------------------------
+
+test("T-410: an END caps the box at the measured end, not at the instant it was decided", () => {
+  // The emission stopped at 999.5. The end detector needs one idle gap (1 s under a live dwell) of
+  // observed silence to say so, so the END arrives around 1000.5 — but it names 999.5, so the box
+  // RETRACTS to where the detector last heard it instead of keeping the second it had assumed.
+  const STOPPED_AT_S = 999.5;
+  const p = presence(990.0, 999.5);
+  const after = applyPresenceEvent(row(p), parsePresenceEvent(end("e1", 990.0, STOPPED_AT_S))!)!;
+  assert.equal(after.last_interval!.open, false, "closed: the box stops running to the live edge");
+  assert.equal(after.last_interval!.t_end_s, STOPPED_AT_S, "at the measured end, never at now");
+  // Replayed or duplicated, it changes nothing further.
+  assert.equal(applyPresenceEvent(row(after), parsePresenceEvent(end("e1", 990.0, STOPPED_AT_S))!), null);
+});
+
+test("T-410: nothing may shorten the measured extent — refusal 2, restated for endpoints", () => {
+  const p = presence(990.0, 999.0);
+  // An END naming an earlier end than the one already measured would pull the box's measured edge
+  // backwards. A reordered or replayed record cannot do that.
+  assert.equal(applyPresenceEvent(row(p), parsePresenceEvent(end("e1", 990.0, 997.0))!), null);
+  // An opening record for an interval starting at or before the one on screen cannot move its
+  // start later either.
+  assert.equal(applyPresenceEvent(row(p), parsePresenceEvent(start("e1", 985.0, 999.0))!), null);
+  // But an END at or past the measured end applies, and CAPPING is not shortening: the span above
+  // it was assumption standing in for this very measurement.
+  assert.ok(applyPresenceEvent(row(p), parsePresenceEvent(end("e1", 990.0, 999.0))!));
+});
+
+test("T-410: a record after a silence REOPENS as its own box — it never bridges the gap", () => {
+  // T-388's third refusal dropped this on the floor and waited for the poll. ADR-0019 §7 replaces
+  // it: the returning signal gets its own interval immediately, and because `last_interval` is
+  // REPLACED rather than stretched, no box ever spans the silence.
+  const p = presence(990.0, 995.0, false);
+  const after = applyPresenceEvent(row(p), parsePresenceEvent(reopen("e1", 1010.0, 1012.0))!)!;
+  const iv = after.last_interval!;
+  assert.equal(iv.t_start_s, 1010.0, "the new interval starts where the signal came back");
+  assert.equal(iv.t_end_s, 1012.0);
+  assert.ok(iv.t_start_s > 995.0, "and the 15 s of silence is between two boxes, not inside one");
+});
+
+test("T-410: a row with no interval in the window gets no box conjured for it — refusal 1, verbatim", () => {
   const none: Presence = { intervals: 0, on_air_s: 0, last_interval: null, liveness: "absent", ended_t_s: null };
-  assert.equal(extendPresence(row(none), parsePresenceExtension(record("e1", 990.0, 999.0))!), null);
-  assert.equal(extendPresence(row(undefined), parsePresenceExtension(record("e1", 990.0, 999.0))!), null);
+  assert.equal(applyPresenceEvent(row(none), parsePresenceEvent(start("e1", 990.0, 999.0))!), null);
+  assert.equal(applyPresenceEvent(row(undefined), parsePresenceEvent(start("e1", 990.0, 999.0))!), null);
+  assert.equal(applyPresenceEvent(row(none), parsePresenceEvent(end("e1", 990.0, 999.0))!), null);
 });
 
 // ---------------------------------------------------------------------------
-// parsing: only a presence extension is one
+// parsing: only a presence endpoint is one
 // ---------------------------------------------------------------------------
 
-test("T-388: only a well-formed presence-extension record parses; everything else is nothing to apply", () => {
-  assert.ok(parsePresenceExtension(record("e1", 1, 2)));
+test("T-410: only a well-formed endpoint record parses; everything else is nothing to apply", () => {
+  for (const good of [start("e1", 1, 2), reopen("e1", 1, 2), end("e1", 1, 2)]) {
+    assert.ok(parsePresenceEvent(good), good);
+  }
+  const meta = (m: unknown) => JSON.stringify({ type: "message", emitter_id: "e1", metadata: m });
   const bad = [
     '{"type":"dropped","first_seq":4,"count":2,"t_ns":1}',
-    JSON.stringify({ type: "message", emitter_id: "e1", metadata: { kind: "dwell" } }),
-    JSON.stringify({ type: "message", metadata: { kind: PRESENCE_EXTENSION_KIND, last_interval: { t_start_s: 1, t_end_s: 2, open: true } } }),
-    JSON.stringify({ type: "message", emitter_id: "e1", metadata: { kind: PRESENCE_EXTENSION_KIND, last_interval: { t_start_s: 1, t_end_s: 2 } } }),
-    JSON.stringify({ type: "message", emitter_id: "e1", metadata: { kind: PRESENCE_EXTENSION_KIND, last_interval: { t_start_s: 1, t_end_s: "soon", open: true } } }),
+    meta({ kind: "dwell" }),
+    meta({ kind: "presence-extension", last_interval: { t_start_s: 1, t_end_s: 2, open: true } }),
+    JSON.stringify({ type: "message", metadata: { kind: PRESENCE_START_KIND, last_interval: { t_start_s: 1, t_end_s: 2, open: true } } }),
+    meta({ kind: PRESENCE_START_KIND, last_interval: { t_start_s: 1, t_end_s: 2 } }),
+    meta({ kind: PRESENCE_START_KIND, last_interval: { t_start_s: 1, t_end_s: "soon", open: true } }),
+    // A record that disagrees with itself: the kind says closed, the interval says open.
+    meta({ kind: PRESENCE_END_KIND, last_interval: { t_start_s: 1, t_end_s: 2, open: true } }),
+    meta({ kind: PRESENCE_START_KIND, last_interval: { t_start_s: 1, t_end_s: 2, open: false } }),
     "not json at all",
   ];
-  for (const b of bad) assert.equal(parsePresenceExtension(b), null, b);
+  for (const b of bad) assert.equal(parsePresenceEvent(b), null, b);
 });
 
-/** The thin-client rule (CLAUDE.md), and the honesty constraint this task exists for: the fast path
- * must not be where a clock, a rate or a signal constant sneaks in. `Date.now` is named explicitly —
- * a box drawn to the browser's idea of now is the client-side extrapolation the push replaces. */
-test("T-388: no clock, no signal logic and no RF constant in the presence modules", () => {
+/** The thin-client rule (CLAUDE.md), and the honesty constraint sharpened by ADR-0019: the box now
+ * runs to the live edge, so it matters more than ever that the live edge is the render pass's own
+ * newest row and never a clock read here. `Date.now` is named explicitly. */
+test("T-410: no clock, no signal logic and no RF constant in the presence modules", () => {
   for (const f of ["src/presence.ts", "src/app/explore/presence-stream.ts"]) {
     const src = readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
     for (const word of ["_db", "dbfs", "snr", "occupancy", "noise", "e6", "e9", "Date.now", "performance.now", "rowRate", "rowsPerS"]) {
@@ -152,7 +161,7 @@ test("T-388: no clock, no signal logic and no RF constant in the presence module
 // the paused control: a frozen view is untouched while pushes arrive
 // ---------------------------------------------------------------------------
 //
-// The scope rule (T-388): the live/following view only. A paused or scrubbed view answers about a
+// The scope rule (unchanged by T-410): the live/following view only. A paused or scrubbed view answers about a
 // fixed past window — which T-379/T-384 wired to the view window — and a push has nothing to offer
 // there. So these drive the real socket module through a WebSocket stub and assert the pair:
 // following applies a record, paused does not subscribe at all and its rows do not move.
@@ -204,19 +213,19 @@ function harness(live: boolean) {
 const endOf = (store: { get(): { inventory: { rows: Record<string, unknown> } } }) =>
   (store.get().inventory.rows.e1 as { presence: Presence }).presence.last_interval!.t_end_s;
 
-test("T-388: a FOLLOWING view subscribes and a pushed extension moves the box top", async () => {
+test("T-410: a FOLLOWING view subscribes and a pushed END caps the box", async () => {
   const h = harness(true);
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(h.gets(), 1, "discovery asked once");
   const sock = FakeSocket.open[0];
   assert.ok(sock && sock.url.includes("/ws/presence"), "subscribed to the presence stream");
   sock.deliver(JSON.stringify({ schema: "hackriff.stream", stream_id: "presence" })); // header
-  sock.deliver(record("e1", 992.0, 999.6));
-  assert.equal(endOf(h.store), 999.6);
+  sock.deliver(end("e1", 990.0, 999.6));
+  assert.equal(endOf(h.store), 999.6, "the END capped the box at the measured end");
   h.stop();
 });
 
-test("T-388: a PAUSED view never subscribes, and its rows are unchanged while pushes arrive", async () => {
+test("T-410: a PAUSED view never subscribes, and its rows are unchanged while pushes arrive", async () => {
   const h = harness(false);
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(h.gets(), 0, "a frozen view asks for no stream at all");
@@ -225,7 +234,7 @@ test("T-388: a PAUSED view never subscribes, and its rows are unchanged while pu
   h.stop();
 });
 
-test("T-388: pausing a following view closes the socket; going live re-subscribes", async () => {
+test("T-410: pausing a following view closes the socket; going live re-subscribes", async () => {
   const h = harness(true);
   await new Promise((r) => setTimeout(r, 0));
   const sock = FakeSocket.open[0];
@@ -233,7 +242,7 @@ test("T-388: pausing a following view closes the socket; going live re-subscribe
   h.store.set(reviewAt(900));
   assert.ok(sock.closed, "paused: the push stops arriving, and the poll owns the window again");
   // A record that somehow lands after the pause is still not applied.
-  sock.deliver(record("e1", 992.0, 999.9));
+  sock.deliver(end("e1", 990.0, 999.9));
   assert.equal(endOf(h.store), 995.0);
   h.store.set(goLive());
   await new Promise((r) => setTimeout(r, 0));

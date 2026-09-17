@@ -6069,7 +6069,7 @@ tasks:
     milestone: M5
     title: 'hk-gnss is reachable only from its own tests: nothing schedules an L1 dwell, so the acquisition
       path has no caller'
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-274
@@ -8095,8 +8095,8 @@ tasks:
   - id: T-397
     title: The frequency navigator survey strip must fold with max-hold and share the waterfall's intensity scaling
     milestone: M2-hardening
-    status: todo
-    priority: normal
+    status: in-progress
+    priority: high
     parallel_group: UI
     core_interface: true
     model: opus
@@ -8464,7 +8464,7 @@ tasks:
   - id: T-405
     title: The frequency navigator's view box goes; coverage shading makes the tuned window self-evident
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     core_interface: true
@@ -8650,7 +8650,7 @@ tasks:
   - id: T-410
     title: Presence is an interval with endpoints, not an accumulation of observations - box runs to the live edge until an END is detected
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -8701,7 +8701,7 @@ tasks:
   - id: T-411
     title: The left time-overview renders at the old 12px buffer size, so a few cells stretch into blocks
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     core_interface: true
@@ -8802,6 +8802,106 @@ tasks:
       wheel must resolve to the SAME arithmetic rather than forking.
       T-340's control stays green: changing what the wheel MEANS must not change what it
       can REACH - no wheel on either bar reaches a device route.
+
+  - id: T-414
+    title: hk-gnss's own default acquisition threshold still finds 32 satellites in noise
+    milestone: M5
+    status: todo
+    priority: high
+    parallel_group: M5A
+    core_interface: true
+    model: opus
+    deps: [T-322]
+    acceptance: |
+      T-322 found this while wiring the caller and fixed it AT THE CALLER, deliberately
+      leaving hk-gnss's own default alone ("this is the caller sizing its own search").
+      That was the right call for that ticket and it leaves a loaded gun in the crate.
+      THE DEFECT: AcquisitionConfig's default peak-to-mean bar of 2.5 is sized for a
+      short profile, but the number of code-phase cells is the rate's samples per 1 ms
+      period - 2046 at minimum rate, 4000 at 4 Msps, 20000 at 20 Msps. At the higher
+      rates the bar is far below the noise-only maximum, so ACQUISITION RETURNS ALL 32
+      SATELLITES OUT OF PURE NOISE. T-322 measured exactly that before fixing its own
+      call site.
+      WHY IT MATTERS EVEN THOUGH THE ONE CALLER IS NOW CORRECT: a default that is wrong
+      at most sample rates is a trap for the second caller, and the failure is SILENT
+      and INVERTED - it reports an intact constellation, so a jamming assessment built
+      on it never fires. A capability that always says "fine" is worse than one that is
+      absent, because absence is visible.
+      THE FIX SHAPE, per T-322's own: compute the bar from profile length and
+      non-coherent block count for a STATED false-alarm rate, and check it against a
+      Monte Carlo of noise-only Gamma profiles rather than a chosen constant. That work
+      exists in hk_pipeline::gnss::acquisition_threshold - the question is whether it
+      belongs in hk-gnss as the default (so no caller can get it wrong) or whether the
+      crate should REFUSE a config whose bar is unsound for its rate.
+      Prefer refusing over defaulting if the two conflict: a wrong number that runs is
+      what this ticket is about.
+      Control: noise-only IQ at 2, 4 and 20 Msps yields ZERO acquisitions at the default;
+      planted PRNs at 20 dB under the floor are still recovered by number.
+  - id: T-413
+    title: Is a detected end provisional and revocable, and if so over what silence?
+    milestone: M2-hardening
+    status: in-progress
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: [T-410]
+    notes: |
+      T-410 satisfies the line for every silence SHORTER THAN THE IDLE GAP: no END is
+      emitted, so there is nothing to revoke. The question is whether it must hold for
+      LONGER silences too - i.e. whether an emitter that goes quiet and returns should
+      have its presence intervals JOINED after the fact.
+      THE CONFLICT, and it is real rather than a wording problem: joining across longer
+      silences contradicts ADR-0017's settled reading of the ISM case, where fifty 30 s
+      bursts are FIFTY INTERVALS and not one - which has a test. And T-410's own
+      observation is the sharp end of it: ANY WINDOW WIDE ENOUGH TO REJOIN A REAL
+      DROPOUT IS WIDE ENOUGH TO SWALLOW A BURST CADENCE.
+      So this is not "add revocation". It is: what is a dropout, as distinct from a
+      signal that stopped? Plausible answers the user might choose between - the same
+      emitter identity resuming within some multiple of its own established cadence
+      (which makes the window a property of the emitter rather than a constant); or
+      never, with a reopen always drawing a second box and the gap shown, which is what
+      T-410 shipped.
+      Whatever is chosen must keep the property T-410 established: the silence is never
+      CLAIMED. Drawing two boxes with a visible gap already tells the truth; joining
+      them would assert continuity through air that was measured empty.
+      USER RULING 2026-09-17 - ANSWERED, UNBLOCKED:
+      YES, a detected end is REVOCABLE. Reuse the EXISTING idle-gap constant as the
+      silence tolerance - clamp(2 x revisit_period, 1 s, 60 s), the same one
+      presence/confidence already uses. NO NEW PARAMETER.
+      THE RULE: if the signal resumes within idle-gap of the detected end, NULL THE END
+      and keep the ONE interval open (same row, per T-262 revival). If the silence
+      exceeds idle-gap before it resumes, the end STANDS and a resumption is a
+      genuinely NEW interval/event.
+      This matches the unified model: assume ongoing to the live edge, a detected end
+      caps it, a resumption within tolerance re-opens it. The user may override the
+      tolerance later.
+      ONE AMBIGUITY THE IMPLEMENTER MUST RESOLVE FIRST, flagged by the coordinator
+      rather than guessed - it decides whether revocation can ever fire at all:
+      T-410 emits END only AFTER a full idle-gap of silence (presence.rs: an interval is
+      open while `now - t_end <= idle_gap`). So by the time an END exists, the silence
+      since the MEASURED end is ALREADY exactly idle-gap. Measuring the revocation
+      window from the measured end therefore makes it unreachable: any resumption after
+      an END is by construction more than idle-gap after the measured end.
+      The only reading in which the rule has effect is that the window runs from THE END
+      EVENT (the decision instant), giving:
+        silence < idle-gap        -> no END is emitted at all (already true, T-410)
+        idle-gap .. 2 x idle-gap  -> END fired, then REVOKED, one interval
+        silence > 2 x idle-gap    -> END stands, resumption is a new interval
+      Adopt that reading unless the user says otherwise, and STATE IT IN THE ADR, because
+      it means the effective join tolerance is 2 x idle-gap even though only one constant
+      exists.
+      THE PROPERTY THAT MUST SURVIVE (T-410, ADR-0017): the silence is never CLAIMED.
+      A revoked end joins one interval across a gap the receiver was LISTENING through
+      and measured empty - so the joined interval asserts presence through measured
+      silence, which is exactly what the open-cap rendering exists to avoid asserting.
+      Decide how the join is DRAWN: the honest option is that the rejoined span keeps
+      the open-cap treatment (lighter fill, broken border) over the revoked gap, so the
+      row is one interval but the silence still reads as unmeasured-through rather than
+      solid.
+      ADR-0017's ISM reading must stay green: fifty 30 s bursts are FIFTY intervals.
+      With contiguous coverage the idle gap is 1 s, so a 30 s cadence is far outside
+      2 x idle-gap and unaffected - confirm that test still passes rather than assuming.
 
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

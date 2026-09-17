@@ -41,8 +41,9 @@ use serde_json::{Map, Value, json};
 use crate::control::{
     Applied, CtlRequest, CtlResponse, Fail, dispatch, ok, only, refuse_route, required, text,
 };
+use crate::coverage::ObservedCoverage;
 use crate::http::ApiState;
-use crate::query::{inventory_entry_json, user_band_json};
+use crate::query::{inventory_entry_json_with_coverage, user_band_json};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Action {
@@ -129,12 +130,20 @@ fn repo_fail(e: RepoError) -> Fail {
 }
 
 /// The live entry `id` stands for, as the API serves it, and its state.
-fn entry(repo: &Repository, id: EmitterId) -> Result<(EmitterId, Value, LifecycleState), Fail> {
+fn entry(
+    state: &ApiState,
+    repo: &Repository,
+    id: EmitterId,
+) -> Result<(EmitterId, Value, LifecycleState), Fail> {
     let live = repo.live_emitter_id(id).map_err(repo_fail)?;
     let e = repo
         .emitter_with_access(live, IdentityAccess::Standard)
         .map_err(repo_fail)?;
-    let row = inventory_entry_json(repo, &e).map_err(repo_fail)?;
+    // T-410 (ADR-0019 §3): the same measured idle gap the list uses, so one row read on its own
+    // never reports a different liveness — or a differently-capped box — from the same row in
+    // `/api/inventory`.
+    let coverage = ObservedCoverage::of(state, crate::query::presence_window(None, None).0);
+    let row = inventory_entry_json_with_coverage(repo, &e, &coverage).map_err(repo_fail)?;
     Ok((live, row, e.lifecycle))
 }
 
@@ -142,7 +151,7 @@ fn read(state: &ApiState, action: Action) -> Result<Value, Fail> {
     match action {
         Action::Get(id) => {
             let repo = store(state)?;
-            entry(&repo, id).map(|(_, row, _)| row)
+            entry(state, &repo, id).map(|(_, row, _)| row)
         }
         _ => Err(Fail::new(500, "failed", "not a read")),
     }
@@ -179,7 +188,7 @@ fn apply(
     };
     let why = reason(body, why)?;
     let mut repo = store(state)?;
-    let (live, _, before) = entry(&repo, id)?;
+    let (live, _, before) = entry(state, &repo, id)?;
     if before == LifecycleState::Deleted {
         return Err(repo_fail(RepoError::NotFound {
             kind: "emitter",
@@ -196,7 +205,7 @@ fn apply(
             Timestamp::now(),
         )
         .map_err(repo_fail)?;
-    let (_, row, after) = entry(&repo, live)?;
+    let (_, row, after) = entry(state, &repo, live)?;
     let old = json!({ "id": live.to_string(), "state": before });
     let new = json!({ "id": live.to_string(), "state": after, "changed": change.is_some() });
     Ok(match action {
@@ -229,7 +238,7 @@ fn apply_band(
     };
     let why = opt_reason(body)?;
     let mut repo = store(state)?;
-    let (live, before_row, state_before) = entry(&repo, id)?;
+    let (live, before_row, state_before) = entry(state, &repo, id)?;
     if state_before == LifecycleState::Deleted {
         return Err(repo_fail(RepoError::NotFound {
             kind: "emitter",
@@ -250,7 +259,7 @@ fn apply_band(
             (audit(old.as_ref()), audit(None), old.is_some())
         }
     };
-    let (_, row, _) = entry(&repo, live)?;
+    let (_, row, _) = entry(state, &repo, live)?;
     let body = match edges {
         Some(_) => json!({ "user_band": row["user_band"], "entry": row }),
         None => json!({ "cleared": cleared, "entry": row }),

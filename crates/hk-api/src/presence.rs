@@ -31,8 +31,7 @@
 use std::sync::{MutexGuard, PoisonError};
 
 use hk_model::{
-    EmitterId, IdentityAccess, IdleGap, PresenceInterval, RepoError, Repository, TimeRange,
-    Timestamp,
+    EmitterId, IdentityAccess, PresenceInterval, RepoError, Repository, TimeRange, Timestamp,
 };
 use serde_json::{Value, json};
 
@@ -140,12 +139,18 @@ fn read(state: &ApiState, id: EmitterId, q: &[(String, String)]) -> Result<Value
     // that has never been on the air". Through the **gated** read like every other inventory
     // lookup in this crate (`inventory_api::hk_api_never_calls_the_ungated_emitter_getters`): the
     // identity it returns is not served here at all, and asking for it ungated would be a way in.
-    repo.emitter_with_access(live, IdentityAccess::Standard)
+    let emitter = repo
+        .emitter_with_access(live, IdentityAccess::Standard)
         .map_err(repo_fail)?;
     let now = w.map_or_else(Timestamp::now, |w| w.end);
-    let all = repo
-        .presence_intervals(live, IdleGap::conservative(), now)
-        .map_err(repo_fail)?;
+    // T-410 (ADR-0019 §3): the gap is measured off this band's tune history, exactly as
+    // `/api/inventory` measures it, so the two surfaces close an interval at the same instant. The
+    // band comes from the row already read through the **gated** getter above — the ungated one is
+    // not a shortcut worth taking for a frequency (`hk_api_never_calls_the_ungated_emitter_getters`).
+    let span = w.unwrap_or_else(|| crate::query::presence_window(None, None).0);
+    let gap =
+        crate::coverage::ObservedCoverage::of(state, span).idle_gap(emitter.emitter.freq(), span);
+    let all = repo.presence_intervals(live, gap, now).map_err(repo_fail)?;
     let selected: Vec<&PresenceInterval> = match w {
         Some(w) => all.iter().filter(|i| i.time.overlaps(&w)).collect(),
         None => all.iter().collect(),
@@ -162,15 +167,8 @@ fn read(state: &ApiState, id: EmitterId, q: &[(String, String)]) -> Result<Value
         .map(interval_json)
         .collect();
     // The same idle gap the intervals above were closed under — and the one `/api/inventory` reads
-    // with — so the projection cannot contradict the track it accompanies. hk-api does not know the
-    // scheduler's revisit period, and a shorter gap would claim an absence nobody observed.
-    let projected = hk_model::presence_in_window(
-        &all,
-        w.unwrap_or_else(|| {
-            TimeRange::new(Timestamp::from_unix_nanos(i64::MIN / 2), Timestamp::now())
-        }),
-        IdleGap::conservative(),
-    );
+    // with — so the projection cannot contradict the track it accompanies.
+    let projected = hk_model::presence_in_window(&all, span, gap);
     Ok(json!({
         "emitter": live.to_string(),
         "window": w.map(|w| json!({"t0_s": ts_s(w.start), "t1_s": ts_s(w.end)})),
