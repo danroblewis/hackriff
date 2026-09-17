@@ -8552,7 +8552,7 @@ tasks:
   - id: T-408
     title: The coverage tile pyramid and the full-spectrum-over-time view - design before building
     milestone: M5
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: DESIGN
     core_interface: true
@@ -8947,7 +8947,7 @@ tasks:
   - id: T-416
     title: A real mono FM station is not recognised as WFM, and the rejection leaves no trace
     milestone: M3
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -8983,7 +8983,7 @@ tasks:
   - id: T-417
     title: A retune tears the stream down; consumers should keep receiving across it
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
