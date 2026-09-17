@@ -783,6 +783,106 @@ The ring journal opens a new segment on **every** provenance change, so retunes 
 
 A record that names no device — every record written before T-378, and any source that states no identity — stays `"unknown"`, and is **never** read as the radio that happens to be running now. `sources[]` therefore reports two numbers per record kind: `spans`, how many it contributed, and `named_spans`, how many of those actually named a front end. `device_known` is the measured `named_spans == spans`, not a declaration about the record kind, so a log still holding pre-T-378 lines says so. A source with no spans still appears, so a client can tell *this record had nothing here* from *this record was not consulted*.
 
+### `GET /api/tiles` — one tile of the unified surface, at independent `(level_f, level_t)` (T-438, [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5 / §8)
+
+Query parameters: `level_f`&`level_t`&`f_index`&`t_index` (**required**, integers ≥ 0), `scheme` (`view` — the default — or a store scheme id), `device` (`any` by default, or a device id), `cells` (8…256, default 256).
+
+One route serves every viewport — the panes, the zoomable minimap and the live edge — because they are **projections of the same pyramid**, and one route is what stops them ever disagreeing on one screen ([docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5, strengthened by §8: there is no live-versus-history split left to keep consistent).
+
+```jsonc
+{
+  "key": { "device": "any", "device_named": false, "scheme": "view",
+           "level_f": 3, "level_t": 5, "f_index": 139, "t_index": 218427, "cells": 256 },
+  "extent": { "f_lo_hz": 1779200000.0, "f_hi_hz": 1792000000.0, "f_cell_hz": 50000.0,
+              "t0_s": 1789300736.0, "t1_s": 1789309926.0, "t_cell_s": 32.0, "nt": 256, "nf": 256 },
+  "axes": { "frequency": { "levels": 20, "cell_hz": 50000.0, "tile_hz": 12800000.0 },
+            "time":      { "levels": 15, "cell_s": 32.0, "tile_s": 8192.0 },
+            "store_node": null,
+            "independent": "level_f and level_t are independent coordinates: …" },
+  "grid": { "nt": 256, "nf": 256, "t0_s": …, "t_cell_s": 32.0, "f_lo_hz": …, "f_cell_hz": 50000.0,
+            "max_db": [-102.4, null, "…"], "occupancy_max": ["…"], "coverage": ["…"], "frames": ["…"],
+            "cells": 65536, "observed_cells": 4096, "range_db": { "lo": -138.2, "hi": -91.0 },
+            "unit": "dbfs", "percentiles": "unknown: a de-welded fold cannot split …",
+            "semantics": { "…": "…" } },
+  "coverage": { "grid": {"…": "…"}, "devices": ["…"], "any": {"…": "…"}, "horizon": {"…": "…"},
+                "sources": ["…"],
+                "selected": { "device": "any", "named": false, "present": true, "rule": "…" },
+                "rule": "record-derived: …" },
+  "resolution": {
+    "source": "spectrum-history", "live": false, "statement": "…",
+    "answered": { "level": 2, "levels": 5, "f_cell_hz": 25000.0, "t_cell_s": 900.0,
+                  "exact_node": false },
+    "candidates": [2, 3, 4], "tried": [2],
+    "fold": { "frequency": { "source_cell": 25000.0, "tile_cell": 50000.0, "source_cells": 512,
+                             "served": 256, "direction": "folded", "replicated": false },
+              "time":      { "source_cell": 9.0e11, "tile_cell": 3.2e10, "source_cells": 10,
+                             "served": 256, "direction": "replicated", "replicated": true },
+              "rule": "the served grid is ALWAYS the tile's own cells x cells; …" },
+    "budget": { "max_source_cells_per_lock": 500000, "max_source_cells_per_tile": 2000000,
+                "statement": "these bound WORK, never resolution: …" },
+    "grey_rule": "grey is decided by `coverage`, never by this block: …"
+  },
+  "cost": { "build_ms": 11.6, "source_cells": 65536, "chunks": 1,
+            "in_flight": 1, "in_flight_limit": 4, "statement": "…" }
+}
+```
+
+#### The key, and what `device` and `scheme` do in it
+
+[docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §8.3 named four parts — `(level_f, level_t, f_block, t_block)`. §6.3 already required a fifth, and **retrofitting a key is the expensive kind of change**, so both extra parts are here from the start.
+
+- **`scheme` is the lattice the address is expressed in**, and it is what makes *"no such node"* an answerable question rather than a theoretical one.
+  - `scheme=view` (default) is the de-welded view lattice. Node `(0, 0)` is the open pyramid's **own level-0 cell** and each axis doubles **independently**, so every `(level_f, level_t)` inside the axes is a node. Frequency runs up to a tile wide enough to put 1 MHz–6 GHz in two tiles; time up to a tile a month tall (§6.2's V7 corner, kept).
+  - `scheme=<n>` addresses a store scheme's own levels, read off the geometry by T-434's `Geometry::f_axis`/`t_axis`. **A welded ladder is the *diagonal* of its own lattice**, so `(level_f 0, level_t 3)` on scheme 1 has no node and is a `404` that says so — never a silent snap to a level whose time cell is a day.
+  - `axes.store_node` is the store level whose cells are *exactly* this tile's, or `null` when the tile sits off the ladder's diagonal and is therefore folded rather than read whole.
+- **`device` is whose coverage decides this tile's grey.** Coverage is device-local (T-259/T-305, §6.3), so it belongs in the key and never in a cell. `any` is the union and keeps `device_named: false`, so a merged plane can never wear one radio's identity; `coverage.selected` echoes the choice, and `present: false` says a named front end contributed no record over this tile — a coverage answer, not a missing one.
+
+**The view lattice's floor is the store's, not §6.2's.** §6.2 put node (0, 0) at 100 kHz × **128 s** against a 120 s IQ retention, which puts the entire live view inside one time cell and pins `level_t` at 0 for every realistic pane — the de-welding buying nothing on the axis it exists for (T-437 finding **F1**). Anchoring at the open pyramid's level-0 cell is that fix.
+
+#### The budget is a fold target, never a level selector (T-437 finding F2)
+
+T-437 measured the defect on [`/api/history`](#get-apihistory--region-over-time-grid-t-017-aware-042): same window, same band, only `max_f` changed — `max_f=384` served 38 784/38 784 cells observed, `max_f=256` served 384/576 (**67 %**). Tightening the *frequency* budget 1.5× cost **34× of time resolution and greyed a third of the window**, because `max_f` picks a *level*. That is a grey-honesty violation caused by level choice, which [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §4 does not name: §4 guards the fold, and the fold is fine — here a cell reads *unobserved* while level 0 holds the measurement.
+
+This route cannot express that bug, for four reasons, in order of how much they rest on judgement:
+
+1. **There is no caller-supplied per-axis cell budget at all.** The tile's grid is always exactly `cells × cells` laid on the tile's own extent; the *address is* the budget. So `level_f` and `level_t` are structurally independent — changing one cannot move the other's cell size by a rounding, which is exactly what F2 did.
+2. **The level is chosen finest-affordable-first**, never coarsest-adequate. Folding a finer level onto the tile's grid can never grey a cell that level holds: the fold is a max and a sum, so an output cell is observed if *any* source cell inside it was. Only the other direction — a source cell **coarser** than the tile's own, which repeats one measured value across output cells — is a claim, and `resolution.fold.<axis>.direction` states it per axis (`exact` / `folded` / `replicated`) and downgrades `source` to `survey-overview`.
+3. **Candidates are ordered by cell *area*, explicitly, never by level index.** T-434's warning: index order is a coarseness order only for a ladder — in a lattice node (1, 0) outranks (0, 3) in index while being *finer* in time. Area is a total order that agrees with the partial coarsening order, so it can never put a coarser level first.
+4. **When a level holds nothing the read walks coarser** through the remaining candidates (T-426's rule, in the direction this route's preference makes meaningful: the byte budget evicts the finest tiles first, §5.5). `resolution.answered.level` is the tier that **actually answered**, `resolution.candidates` every affordable level and `resolution.tried` every one consulted — a silent fallback would trade one lie for another.
+
+`resolution.budget` carries the two work bounds so nothing has to be inferred from the grid: `max_source_cells_per_lock` bounds one history lock hold, `max_source_cells_per_tile` bounds a whole request. **Both bound work, not resolution.**
+
+#### Cost, and the two caps
+
+T-437 measured rendering at p95 2.2 ms for 48 panes and tile **production** at ~500 ms per tile — three orders of magnitude apart — so production is what this route is designed against. Measured server-side through the real store and the real fold: **11.6 ms** for a 256 × 256 tile, 1.4 ms at 64 × 64. A 208-tile screen is therefore ~2.4 s of production, which is a **prefetch-order and precompute** problem, not a rendering one.
+
+- **`cost.chunks` is the number of history lock holds this tile took.** The read is chunked into whole output rows, re-acquiring the lock per chunk, so a tile fan-out at the live edge can never lock ingest out for a whole tile — the report builder's ≤ 256-row discipline, applied to §5.5's cap (3).
+- **`cost.in_flight_limit` is server backpressure**, chosen against `hk-store`'s lock behaviour rather than a browser's connection limit: the history store is behind one mutex, so concurrent tile reads serialise on it anyway and a deeper queue only lengthens the stretch during which ingest competes for it. Over the cap the answer is `503` **naming the cap**, which is what lets a client cancel tiles for a viewport it has left (§5.5's cap (1) is LIFO with viewport cancellation) instead of waiting.
+
+#### What a tile does not carry
+
+- **No emitters** (§5.3). Identity gating is per-caller and a tile is not; a sealed tile is immutable and an emitter set never is. The highlight layer is [`/api/tiles/events`](#get-apitilesevents--the-coarse-zoom-event-aggregate-t-438-docs16-53) below.
+- **No percentiles.** De-welding costs them (T-434): a tile keeps one histogram per frequency cell over the whole tile, which is the parent cell's histogram *only* when a child tile is exactly one parent time cell — the weld. `grid.percentiles` says `unknown` rather than approximating a distribution; the noise floor stays a scheme-1 question, asked through [`/api/history`](#get-apihistory--region-over-time-grid-t-017-aware-042).
+- **Never `live-iq`.** This route reads the pyramid, exactly as `/api/history` and `/api/timeline` do. T-439 adds the growing edge; claiming live here first would be the stronger claim with no evidence.
+
+### `GET /api/tiles/events` — the coarse-zoom event aggregate (T-438, [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §5.3)
+
+The same address as `/api/tiles` (plus the `/api/inventory` `state` filter), answering counts instead of spectra:
+
+```jsonc
+{ "key": { "…": "…" }, "extent": { "…": "…" },
+  "counts": [0, 0, 3, "…"], "total": 12, "placed": 11,
+  "emitters_scanned": 7, "emitters_truncated": false,
+  "rule": "ONE COUNT PER EVENT, placed at the cell holding its START. …",
+  "not_a_tile_channel": "counts change with every append to the observation ledger, …" }
+```
+
+`/api/events` caps at 500 expanded emitters and pages events, so a zoom-0 box of 6 GHz × 30 days hits that cap on every pan — §5.3 named the aggregate form and filed it as new work. It is **not** a tile channel: counts change with every append to the observation ledger, so sealing them into a tile would spend the immutability the tile storage was bought for.
+
+**One count per event, placed at the cell holding its start.** An event is a presence interval with its own extent (CLAUDE.md invariant 1). Counting it once per row it crosses would inflate a long emission into a busy band, and scaling a sub-cell burst up to be visible would fabricate a timespan — the precise thing `/api/events` refuses when it computes `duration_s` itself. An event that began before this tile, or whose centre lies off its band, is counted in `total` and **not placed**; `placed` is what the grid holds, and clamping it to an edge would put activity in a cell it never occupied. An interval with no measured centre has no column and is likewise counted, not placed.
+
+`counts` is row-major on **exactly** the tile's axes (`nt` time rows × `nf` frequency cells, earliest row and lowest frequency first), so a client indexes it with the tile's own index.
+
 ### `GET /api/status` — pipeline counters (T-027)
 
 Opaque, per-build JSON object of counters (source samples, chain stats, control-loop stats under `"control"`, listen/chain admission under `"listen"`/`"budget"` when the pipeline exposes them, …). Never content, never an identity. `404` when this server has no pipeline status function attached (e.g. a bare bridge with no composed pipeline).

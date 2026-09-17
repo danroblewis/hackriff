@@ -10,6 +10,8 @@
 //! | `/api/streams` | GET | token | Discovery (T-060): offered streams (id, kind, class, geometry, format), on-demand openers, the TCP stream address. Never content. |
 //! | `/api/history?f_lo&f_hi&t0&t1[&max_cells][&format][&stat]` | GET | token | T-017 region-over-time grid ([`crate::query`]); T-116 `format=csv` (hackrf_sweep) / `format=png` (waterfall) |
 //! | `/api/timeline?[f_lo&f_hi][&columns][&rows]` | GET | token | T-338 the capture window (the IQ ring's retention, **not** the history horizon) and the compressed overview waterfall drawn on it ([`crate::timeline`]) |
+//! | `/api/tiles?level_f&level_t&f_index&t_index[&scheme][&device][&cells]` | GET | token | T-438 one tile of the unified surface, addressed by **independent** `(level_f, level_t)` ([`crate::tiles`]) |
+//! | `/api/tiles/events?…` | GET | token | T-438 the coarse-zoom event aggregate on the same address — a count per cell, never a tile channel (`docs/16` §5.3) |
 //! | `/api/floor?f_lo&f_hi&t0&t1[&max_steps]` | GET | token | T-021 floor vs time ([`crate::query`]) |
 //! | `/api/inventory?[f_lo&f_hi][&t0&t1][&state][&status][&tag][&scheme][&family][&cursor][&limit]` | GET | token | T-018 signal inventory, identity-gated ([`crate::query::inventory_json`]); `state` = T-078 lifecycle |
 //! | `/api/inventory/<id>[/promote\|/band]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-078 one entry, promote a candidate, delete; T-191 set/clear the user band ([`crate::inventory`]) |
@@ -123,6 +125,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     // T-368: the coverage map - which front end actually sampled which frequency, so a view greys
     // only what was never observed
     ("GET", "/api/coverage"),
+    // T-438: one tile of the unified surface, addressed by INDEPENDENT (level_f, level_t), and the
+    // coarse-zoom event aggregate that a tile deliberately does not carry (docs/16 §5.3)
+    ("GET", "/api/tiles"),
+    ("GET", "/api/tiles/events"),
     ("GET", "/api/status"),
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
@@ -330,6 +336,12 @@ pub struct ApiState {
     /// T-166: the region watch behind `GET /api/selections/{id}/watch`
     /// ([`crate::selections::WatchControl`]); `None` answers 503.
     pub watch: Option<Arc<dyn crate::selections::WatchControl>>,
+    /// T-438: tile reads in flight, the ingest-backpressure cap of `docs/16` §5.5 (cap 3).
+    ///
+    /// Per **state**, not a `static`: two servers in one process must not share a cap, and a cap
+    /// that leaks across tests is a cap nobody can assert. Cloning the state shares the counter,
+    /// which is what makes it a server-wide cap rather than a per-request one.
+    pub tiles_in_flight: Arc<AtomicUsize>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -939,6 +951,8 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         | "/api/navigation"
         | "/api/timeline"
         | "/api/coverage"
+        | "/api/tiles"
+        | "/api/tiles/events"
         | "/api/report"
         | "/api/status"
         | "/api/taxonomy"
@@ -985,6 +999,13 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         // T-368: observed-versus-unobserved is computed from the tune history - what the front end
         // actually sampled - so grey means genuinely unobserved and never "quiet".
         "/api/coverage" => crate::coverage::coverage_json(state, &req.query),
+        // T-438: the panes, the minimap and the live edge are projections of ONE pyramid, so they
+        // read one route and cannot disagree on one screen. `(level_f, level_t)` are independent.
+        "/api/tiles" => crate::tiles::tiles_json(state, &req.query),
+        // docs/16 §5.3: a tile never carries emitters (identity gating is per-caller and a sealed
+        // tile is immutable), so the coarse-zoom highlight layer is a count per cell, computed on
+        // demand on the same address.
+        "/api/tiles/events" => crate::tiles::tile_events_json(state, &req.query),
         "/api/status" => state
             .status
             .as_ref()
