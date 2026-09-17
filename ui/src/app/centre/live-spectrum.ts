@@ -19,7 +19,7 @@ import type { NewSelection } from "../../selections";
 import { MARK_DROP, MARK_GATED, Waterfall } from "../../waterfall";
 import type { AppContext } from "../context";
 import { h } from "../dom";
-import { setUserBand } from "../explore/inventory";
+import { liveEdgeS, setUserBand } from "../explore/inventory";
 import { selectionStoreFor } from "../explore/selections";
 import { focusSelection, focusSignal, patchInventoryRow } from "../explore/slice";
 import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
@@ -32,6 +32,7 @@ import {
   type BandEdge, type DcMask, type DragPoint, type RowClock, type Span,
 } from "./overlays";
 import { historyMaxCells, historyQuery, historyRows, historyWindow, parseHistory, sameCursor } from "./review-render";
+import { setLiveEdge } from "./slice";
 import { applyDeviceAction, geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retuneAction, setLiveView, viewHooks } from "./view";
 
 interface StreamInfo { stream_id: string; kind: string; remote_permitted: boolean }
@@ -447,6 +448,10 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       live: {
         streamId: String(hd.stream_id ?? ""), centerHz: g.centerHz, bandwidthHz: g.bandwidthHz, bins: g.bins, rowRateHz: rate,
         view: nextView(g, s.live.view, retuned ? s.live.pendingView : null), pendingView: retuned ? null : s.live.pendingView,
+        // A retune re-plumbs the stream, and the first rows of the new geometry have not arrived:
+        // the old band's edge is not this band's, so it goes back to *unknown* (T-379) rather than
+        // standing in for a window nothing has yet sampled at this centre.
+        edgeTS: retuned ? null : s.live.edgeTS,
         // A new geometry answers whatever the last pan asked about, so the standing offer is stale
         // (T-343): never leave a button that would retune to where the radio already is.
         retuneOffer: retuned ? null : s.live.retuneOffer,
@@ -465,6 +470,10 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       if (!fresh) wf.reset(); // rows of the previous tune don't line up with the new axis
     }
     if (!store.get().time.live && (retuned || fresh)) queueReview();
+    // T-379: the new band has a past too. A retune used to leave a black ring until live rows
+    // refilled it, while `/api/history` held the band's recent minutes all along — the same
+    // "we have it but didn't render it" as the go-Live wipe above it.
+    else if (retuned && !fresh) void backfillLive();
     say("");
     schedule();
   };
@@ -488,6 +497,10 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     lastSeq = r.seq;
     if (r.gated) { wf.mark(MARK_GATED); return; }
     if (r.discontinuity) wf.mark(MARK_DROP);
+    // T-379: the live edge on the capture clock, published for every surface that has to window on
+    // it. Written whether or not the view is live — pausing freezes the *view*, never the capture,
+    // so the edge keeps advancing while the user inspects a past window.
+    if (Number.isFinite(r.tS)) store.set(setLiveEdge(r.tS));
     if (r.row && store.get().time.live) wf.push(r.row, r.tS); // reviewing: the history render instead
   };
 
@@ -549,6 +562,38 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
     }
   }
 
+  /**
+   * Fills the ring from history up to the live edge, so going Live shows the band's recent past
+   * instead of black (T-379; CLAUDE.md: *"Switching to Live for a frequency range backfills from
+   * history … instead of starting black as if the device just powered on"*).
+   *
+   * `reset()` alone was the black Live waterfall the whole-UI window rule names: it writes `-1e30`,
+   * which is not the `UNOBSERVED_DB` grey sentinel, so the shader painted the bottom of the colour
+   * ramp over rows the spectrum-history pyramid could have answered for. The rows arrive with the
+   * served grid's own times, so live pushes continue from the head on the same absolute-time axis —
+   * no row is ever placed from a period assumed here (ADR-0017 TM-1).
+   *
+   * Best effort by design: with no live edge, no geometry or no history, the ring stays as `reset()`
+   * left it and live rows fill it as they arrive — the old behaviour, not a worse one.
+   */
+  async function backfillLive() {
+    const g = geom(), w = wf;
+    const edge = liveEdgeS(store.get());
+    if (!g || !w || edge === null) return;
+    const seq = ++reviewSeq;
+    const full = ax.fullView(g), { t0, t1 } = historyWindow(edge, w.rows, livePeriodS(), null);
+    try {
+      const grid = parseHistory(await ctx.client.get(
+        historyQuery(full, t0, t1, historyMaxCells(w.texWidth, w.rows), w.rows, w.texWidth),
+      ));
+      // A scrub, a retune or a reconnect during the fetch wins: the rows would be of the wrong
+      // window, and stale rows on the live axis are exactly what this is meant to prevent.
+      if (seq !== reviewSeq || !store.get().time.live || wf !== w || !grid) return;
+      const out = historyRows(grid, full, w.texWidth, w.rows);
+      if (out.rows.length) { w.setRows(out.rows, out.times); schedule(); }
+    } catch { /* no history for this band: live rows fill the ring as they arrive */ }
+  }
+
   store.select((s) => s.time, (t) => {
     if (t.live) {
       reviewSeq++;
@@ -558,6 +603,7 @@ export function mountLiveSpectrum(el: HTMLElement, ctx: AppContext) {
       review("");
       el.classList.remove("reviewing");
       schedule();
+      void backfillLive();
       return;
     }
     el.classList.add("reviewing");

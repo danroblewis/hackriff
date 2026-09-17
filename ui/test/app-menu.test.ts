@@ -218,6 +218,9 @@ test("signalMenuItems: Delete DELETEs the entry, then reloads both inventory tab
     del: (path) => { calls.push(`DELETE ${path}`); return {}; },
     get: (path) => { calls.push(`GET ${path}`); return { entries: [], next_cursor: null }; },
   });
+  // T-379: a reload needs a live edge on the **capture** clock to name its window; without one it
+  // declines to ask rather than inventing a browser-clock window that would select nothing.
+  ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25, edgeTS: 1_789_297_847 } }));
   signalMenuItems(ctx, makeRow({ id: "e7" })).find((i) => i.id === "delete")!.onSelect();
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(calls[0], "DELETE /api/inventory/e7");

@@ -161,6 +161,18 @@ Three consequences for this ADR's model:
 
 The two horizons stay distinct: the **lists** reach back over SQLite retention, the **grid** over the spectrum-history pyramid's (tiered, lossy), and the waterfall's lossless detail over the **IQ ring's** much shorter window. `resolution.source` on the response names which tier answered. Wire form: `docs/api.md` "Span-matched resolution"; data model: docs/07 §4.1.
 
+#### 2.4.1.1 The window is the whole UI's, and the clock under it is the capture's (T-379)
+
+§2.4.1's first consequence — *the window is a request parameter, not a client-side filter* — has a companion the user stated as a cross-cutting rule (CLAUDE.md, 2026-09-16): **every surface is a view over the one (time range × frequency range) window, and must display all the data it has for that window.** Grey or empty is permitted *only* where data genuinely does not exist.
+
+Three rules this ADR is held to, on every time-scoped surface:
+
+1. **One window.** The Candidate list, the waterfall grid, the survey strip and the capture band all name the same `[t0, t1]`. A surface with a window of its own is a bug even when its own query is correct: a flat one-hour review window beside a twenty-second waterfall lists emitters that are nowhere on screen and hides ones that are.
+2. **The live edge is the capture clock's.** §2.3's liveness is *as of a named instant*, and that instant is served — the newest spectrum row's own timestamp, else the capture window's end, else **unknown**. A client clock is not a substitute for it in either direction: windowing on `Date.now()` against a replay whose stamps are days away selects nothing, and the resulting empty list is indistinguishable from a quiet band.
+3. **Unknown is a third state, and it is not empty.** A surface that cannot name its window must ask nothing and say so. Sending a plausible window instead is how "we have it but didn't render it" becomes invisible — the query succeeds, returns zero rows, and the screen reads as a finding.
+
+Emptiness is therefore reported with its cause: *not fetched* (no window), *unobserved* (`GET /api/coverage` says nothing sampled that window — §2.4's honest grey, on a list instead of a grid), or *observed and quiet* (the only one that is a statement about the air). The coverage claim reuses `hk_store::Coverage`, whose observed-constructor refuses to mint an observation out of a zero span, rather than a second notion of emptiness maintained beside it.
+
 #### 2.4.2 One shared time axis (T-337; the user's time/waterfall invariant 1)
 
 §2.4.1 settled the *resolution* half of the thin-client line. This settles the *timestamp* half, and it is the invariant that makes §1.2's box mean anything: *for the current view there is a single canonical mapping between absolute capture time and screen position, and everything time-varying is laid out through it and moves together — waterfall rows, every signal box, selections, the time cursor, the scrubber playhead. Overlays are anchored in capture time, never at fixed screen coordinates.* The user names the failure mode explicitly: **a box drifting out of step with the waterfall's rows-per-second is a violation of this, not a cosmetic bug.**

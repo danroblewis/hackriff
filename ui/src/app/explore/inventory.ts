@@ -3,11 +3,12 @@
 // fits, and adds the richer row fields docs/api.md `/api/inventory` serves — `classification`,
 // `explanations`, `refined` — that the old page's `Row` never needed.
 import { deleteEntry, inventoryQuery, promoteEntry, rowListenTarget, type ActionResult, type Filters, type InventoryClient, type Recurrence as BaseRecurrence, type Row as BaseRow, type UserBand } from "../../inventory";
+import { surveyCells, type CoverageResponse } from "../../navigators";
 import { WATERFALL_ROWS } from "../../waterfall";
 import type { AppContext } from "../context";
 import { apiErrorText } from "./format";
-import { setInventoryRows } from "./slice";
-import type { InventoryTab, InventorySortKey } from "./slice";
+import { setInventoryRows, setInventoryWindow } from "./slice";
+import type { InventoryTab, InventorySortKey, WindowCoverage } from "./slice";
 
 export { promoteEntry, deleteEntry, rowListenTarget };
 export type { ActionResult, Filters, UserBand };
@@ -90,21 +91,34 @@ export async function fetchInventoryPage(client: InventoryClient, state: Invento
   return client.get<Page>(inventoryQuery(state, f, cursor));
 }
 
-/** How long the review-mode inventory query looks back from the reviewed instant (§3.3: the
- * inventory adds `t0`/`t1` while reviewing; no fixed window is specified, so this picks one hour of
- * context, matching the capture band's default scale). */
-export const REVIEW_WINDOW_S = 3600;
-
 /** Row rate assumed before the spectrum header has arrived — hk-pipeline's `spectrum_rows_per_s`,
  * and the same fallback `centre/live-spectrum.ts` uses for its own row period. */
 export const DEFAULT_ROW_RATE_HZ = 25;
 
-/** The state [[waterfallSpanS]] and [[candidateWindow]] read: geometry and clock, nothing measured.
- * `AppState` satisfies it structurally. */
+/** The state [[waterfallSpanS]], [[liveEdgeS]] and [[viewWindow]] read: geometry and the
+ * capture clock, nothing measured. `AppState` satisfies it structurally. */
 export interface WindowState {
-  live: { view: { loHz: number; hiHz: number } | null; rowRateHz: number | null };
+  live: { view: { loHz: number; hiHz: number } | null; rowRateHz: number | null; edgeTS: number | null };
   device: { rowsPerS: number | null };
-  time: { live: boolean; tS?: number };
+  time: { live: boolean; tS?: number; spanS?: number | null };
+  captureWindow: { t0S: number; t1S: number; spanS: number } | null;
+}
+
+/**
+ * The live edge, on the **capture clock**: the newest spectrum row's own time, else the capture
+ * window's end, else `null` for *unknown* (T-379).
+ *
+ * `Date.now()` is not an answer and is never a fallback here. A replay, the mock SDR on a
+ * time-compressed scene, and any source whose stamps are not the host's run on a clock of their
+ * own; the fixture that exposed this sat 3.5 days from wall time, so a 20 s window ending at
+ * browser-now selected nothing while five candidates stood in the store and four of them fell
+ * inside the very same 20 s of capture. An empty list produced that way is
+ * empty-because-not-fetched — the failure the whole-UI window rule names — and it is
+ * indistinguishable on screen from a genuinely quiet band. Returning `null` makes the UI say
+ * *unknown* instead of inventing a window.
+ */
+export function liveEdgeS(state: WindowState): number | null {
+  return state.live.edgeTS ?? state.captureWindow?.t1S ?? null;
 }
 
 /** Seconds of time the waterfall is showing: its ring height over the row rate (≈ 20.5 s at the
@@ -115,12 +129,31 @@ export function waterfallSpanS(state: WindowState): number {
   return WATERFALL_ROWS / Math.max(1e-3, rate);
 }
 
-/** The `[t0, t1]` the **Candidate** list is scoped to: the span the waterfall shows, ending at the
- * live edge — or at the reviewed instant, looking back [[REVIEW_WINDOW_S]], when scrubbed back
- * (ADR-0013 §3.3, ADR-0017 §2.1). */
-export function candidateWindow(state: WindowState, nowS: number): { t0: number; t1: number } {
-  if (!state.time.live && state.time.tS !== undefined) return { t0: state.time.tS - REVIEW_WINDOW_S, t1: state.time.tS };
-  return { t0: nowS - waterfallSpanS(state), t1: nowS };
+/** The UI's one time window: `[t0, t1]` on the capture clock. */
+export interface ViewWindow { t0: number; t1: number }
+
+/**
+ * The `[t0, t1]` the **Candidate** list is scoped to — **the window the waterfall is showing, and
+ * nothing else** (ADR-0013 §3.3, ADR-0017 §2.1; CLAUDE.md's whole-UI window rule).
+ *
+ * This is deliberately the same arithmetic as the waterfall's own `historyWindow` (T-340): the span
+ * the time navigator dragged when it asked for one, else the span the rows on screen cover. It used
+ * to be a flat `REVIEW_WINDOW_S = 3600` while reviewing, which is a *second* window — the list then
+ * answered about an hour while every other surface answered about the twenty seconds under it,
+ * listing candidates that were nowhere on the waterfall and, once a span longer than an hour was
+ * dragged, omitting ones that were. One window means one window.
+ *
+ * `null` is **unknown**: no live edge has been reported yet ([[liveEdgeS]]). The caller must then
+ * say so rather than fall back to a window of its own — the whole point is that a fabricated window
+ * renders as emptiness that looks exactly like a quiet band.
+ */
+export function viewWindow(state: WindowState): ViewWindow | null {
+  const span = state.time.spanS !== undefined && state.time.spanS !== null && state.time.spanS > 0
+    ? state.time.spanS
+    : waterfallSpanS(state);
+  if (!state.time.live && state.time.tS !== undefined) return { t0: state.time.tS - span, t1: state.time.tS };
+  const edge = liveEdgeS(state);
+  return edge === null ? null : { t0: edge - span, t1: edge };
 }
 
 /** The frequency filters both lists share — the tuned/zoomed view span. Deliberately carries no
@@ -159,13 +192,21 @@ export function confirmedFilters(state: WindowState): Filters {
  * stations vanish from Explore the moment they went off the air.
  *
  * **Scrubbing back re-derives both lists** (T-263, TM-7) from the same two queries: the Candidate
- * window follows the scrubbed instant ([[candidateWindow]]) and the Confirmed query names it as its
+ * window follows the scrubbed instant ([[viewWindow]]) and the Confirmed query names it as its
  * own live edge ([[confirmedFilters]]). Neither list is filtered here — the client chooses only
  * *which window to ask about*. */
-export async function loadInventoryRows(ctx: AppContext, onMore: (tab: InventoryTab, more: boolean) => void, nowS: number = Date.now() / 1000): Promise<void> {
+export async function loadInventoryRows(ctx: AppContext, onMore: (tab: InventoryTab, more: boolean) => void): Promise<void> {
   const state = ctx.store.get();
   const f = viewFilters(state);
-  const w = candidateWindow(state, nowS);
+  const w = viewWindow(state);
+  // T-379: no live edge reported yet — the window is *unknown*. Asking unwindowed would list
+  // all-time candidates (widening the window, which breaks time-scoping) and asking on the
+  // browser's clock would list none; both lie. So neither query is made up, and the list says
+  // "unknown" instead of "nothing".
+  if (!w) {
+    ctx.store.set(setInventoryWindow(null));
+    return;
+  }
   const [confirmed, candidate] = await Promise.all([
     fetchInventoryPage(ctx.client, "confirmed", confirmedFilters(state)),
     fetchInventoryPage(ctx.client, "candidate", { ...f, t0: w.t0, t1: w.t1 }),
@@ -174,7 +215,45 @@ export async function loadInventoryRows(ctx: AppContext, onMore: (tab: Inventory
   onMore("candidate", !!candidate.next_cursor);
   const rows: Record<string, Row> = {};
   for (const r of [...confirmed.entries, ...candidate.entries]) rows[r.id] = r;
+  // The window's own coverage, asked for only when the list came back empty — the one case where
+  // the difference between "nothing was on the air" and "nothing ever looked here" is the whole
+  // message. It is the backend's `Coverage` (T-368), read as served; nothing here decides it.
+  const coverage = candidate.entries.length === 0 ? await windowCoverage(ctx.client, state, w) : "observed";
   ctx.store.set(setInventoryRows(rows, Date.now() / 1000));
+  ctx.store.set(setInventoryWindow({ t0: w.t0, t1: w.t1, coverage }));
+}
+
+/** What the current window's frequency range is, for a coverage question about exactly it. */
+function windowBand(state: WindowState): { lo: number; hi: number } | null {
+  const v = state.live.view;
+  return v && v.hiHz > v.loHz ? { lo: v.loHz, hi: v.hiHz } : null;
+}
+
+/**
+ * Whether the front end ever sampled this (time × frequency) window, straight from
+ * `GET /api/coverage` (T-368): `"observed"`, `"unobserved"`, or `null` for *not known*.
+ *
+ * The route's own rule is `grey a cell if and only if its state is "unobserved"`, and its
+ * `Coverage::of` refuses to mint an observation out of a zero span — so there is no parallel notion
+ * of emptiness invented here. One cell, because the question is about the window as a whole: it is
+ * unobserved only when **no** part of the band was sampled in it.
+ */
+async function windowCoverage(
+  client: InventoryClient, state: WindowState, w: { t0: number; t1: number },
+): Promise<WindowCoverage> {
+  const band = windowBand(state);
+  if (!band || !(w.t1 > w.t0)) return null;
+  try {
+    const body = await client.get<CoverageResponse>(
+      `/api/coverage?f_lo=${band.lo}&f_hi=${band.hi}&cells=1&t0=${w.t0}&t1=${w.t1}`,
+    );
+    const cells = surveyCells(body);
+    // Not asked about, or served nothing: unknown. Never "unobserved" by default — that would be a
+    // measurement claim made out of a missing answer.
+    return cells.length === 0 ? null : cells.some((c) => c.state === "observed") ? "observed" : "unobserved";
+  } catch {
+    return null;
+  }
 }
 
 // ---- user band (T-191 route, T-193 draggable box edges) ----
@@ -228,6 +307,36 @@ export function nextInventorySort(current: { key: InventorySortKey; dir: 1 | -1 
 export function sortInventoryRows(rows: readonly Row[], key: InventorySortKey, dir: 1 | -1): Row[] {
   const f = SORT_VALUE[key];
   return [...rows].sort((a, b) => (f(a) - f(b)) * dir);
+}
+
+// ---- the empty state ----
+
+/** The state [[emptyListText]] reads. `AppState["inventory"]` satisfies it structurally. */
+export interface EmptyState { window: { coverage: WindowCoverage } | null; loadedAtS: number | null; error: string | null }
+
+/**
+ * What an empty Candidate/Confirmed list says, and it must never be one sentence (T-379).
+ *
+ * The whole-UI window rule permits a surface to render empty **only where data genuinely does not
+ * exist**, which makes the two emptinesses different claims:
+ *
+ * | state | what it means | sentence |
+ * |---|---|---|
+ * | no window known | the UI does not know which window to ask about | "Waiting for the capture window…" |
+ * | window unobserved | nothing ever looked here | "Nothing was observed in this window — no data, not a quiet band." |
+ * | window observed | the receiver listened and heard nothing | "Nothing on the air in this window." |
+ * | coverage unknown | the window was asked about; whether it was sampled is not known | "Nothing listed for this window." |
+ *
+ * Only the third is a finding. Rendering the first or second as the third invents an
+ * absence-of-signal result out of an absence of measurement — the same error the waterfall's grey
+ * rule exists to stop, on this surface.
+ */
+export function emptyListText(s: EmptyState): string {
+  if (s.error) return s.error;
+  if (s.window === null) return s.loadedAtS === null ? "Loading…" : "Waiting for the capture window…";
+  if (s.window.coverage === "unobserved") return "Nothing was observed in this window — no data, not a quiet band.";
+  if (s.window.coverage === "observed") return "Nothing on the air in this window.";
+  return "Nothing listed for this window.";
 }
 
 // ---- row view model ----

@@ -12,10 +12,29 @@ export type Focus = { kind: "none" } | { kind: "signal"; id: string } | { kind: 
 
 export type InventoryTab = "confirmed" | "candidate";
 export type InventorySortKey = "freq" | "last_seen" | "count" | "bandwidth";
+
+/** Whether the front end ever sampled the listed window, as `GET /api/coverage` served it (T-368);
+ * `null` is **not known**, which is neither of the other two and must never be rendered as either. */
+export type WindowCoverage = "observed" | "unobserved" | null;
+
+/**
+ * The window the lists were last asked about, and what the backend says was sampled in it (T-379).
+ *
+ * This exists so an empty sidebar can say *which* emptiness it is. Three states, kept apart:
+ * `null` — no window was asked about (no live edge reported yet); `coverage: "unobserved"` — the
+ * window was asked about and nothing ever looked there; `coverage: "observed"` — the receiver was
+ * listening and heard nothing. Only the last is a finding about the air. Collapsing them is the
+ * failure the whole-UI window rule names: "we have it but didn't render it" and "there was nothing
+ * to render" look identical on screen and are opposite bugs.
+ */
+export interface InventoryWindow { t0: number; t1: number; coverage: WindowCoverage }
+
 export interface InventorySlice {
   tab: InventoryTab; sort: { key: InventorySortKey; dir: 1 | -1 };
   /** Rows of the current view's span, by id (the `/api/inventory` row shape, unmodified). */
   rows: Readonly<Record<string, InventoryRow>>;
+  /** The window those rows are of, or `null` while it is unknown (see [[InventoryWindow]]). */
+  window: InventoryWindow | null;
   loadedAtS: number | null; error: string | null;
 }
 
@@ -25,7 +44,7 @@ export interface ExploreState { focus: Focus; inventory: InventorySlice; selecti
 
 export const exploreInitial = (): ExploreState => ({
   focus: { kind: "none" },
-  inventory: { tab: "confirmed", sort: { key: "freq", dir: 1 }, rows: {}, loadedAtS: null, error: null },
+  inventory: { tab: "confirmed", sort: { key: "freq", dir: 1 }, rows: {}, window: null, loadedAtS: null, error: null },
   selections: { list: [], sync: "" },
 });
 
@@ -50,6 +69,15 @@ export const setInventoryRows = (rows: Readonly<Record<string, InventoryRow>>, l
 });
 
 export const setInventoryError = (error: string) => (s: AppState): Partial<AppState> => ({ inventory: { ...s.inventory, error } });
+
+/** Records the window the lists were asked about, or `null` for *no window known* (T-379). Setting
+ * `null` also clears the rows: rows are only ever rows *of a window*, so keeping the previous
+ * window's rows on screen beside a "window unknown" note would be the stale-list bug T-263 fixed. */
+export const setInventoryWindow = (window: InventoryWindow | null) => (s: AppState): Partial<AppState> => ({
+  inventory: window === null
+    ? { ...s.inventory, window: null, rows: {} }
+    : { ...s.inventory, window },
+});
 
 /** T-187: optimistic delete — drops one row from the loaded set immediately, before the server has
  * confirmed the `DELETE`. A no-op if the row is already gone (e.g. a reload raced it out). */

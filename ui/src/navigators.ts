@@ -329,11 +329,22 @@ export interface CoverageResponse {
   any?: { cells?: CoverageCell[] | null } | null;
 }
 
-/** The `GET /api/coverage` request for the strip across `ext`, or `null` when there is no spectrum
- * extent to ask about — and then the bar draws no strip rather than one over an assumed range. */
-export function coverageRequest(ext: Range | null, cells: number): string | null {
+/**
+ * The `GET /api/coverage` request for the strip across `ext`, or `null` when there is no spectrum
+ * extent to ask about — and then the bar draws no strip rather than one over an assumed range.
+ *
+ * T-379: `window` names the **time** range the strip is of. The route has always taken `t0`/`t1`
+ * and defaults them to the server's live capture window, so omitting them pinned the bar to the
+ * live edge: scrubbed an hour back, the bottom bar answered "these bands were observed" about a
+ * time nobody was looking at, and greyed bands that *were* observed at the reviewed instant. Both
+ * edge navigators are views over the one window, so the frequency one carries it too. `null` keeps
+ * the route's own default, which is correct only while the view is live.
+ */
+export function coverageRequest(ext: Range | null, cells: number, window: { t0: number; t1: number } | null = null): string | null {
   if (!ext || !(ext.hi > ext.lo) || !(cells >= 1)) return null;
-  return `/api/coverage?f_lo=${ext.lo}&f_hi=${ext.hi}&cells=${Math.round(cells)}`;
+  const q = `/api/coverage?f_lo=${ext.lo}&f_hi=${ext.hi}&cells=${Math.round(cells)}`;
+  const w = window && Number.isFinite(window.t0) && Number.isFinite(window.t1) && window.t1 > window.t0 ? window : null;
+  return w ? `${q}&t0=${w.t0}&t1=${w.t1}` : q;
 }
 
 /** The union strip the backend served. `[]` when it served none — *not asked yet*, which the bar

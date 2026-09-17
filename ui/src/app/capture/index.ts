@@ -13,7 +13,7 @@ import { h } from "../dom";
 import { startPoll } from "../net";
 import { selectionStoreFor } from "../explore/selections";
 import { focusSelection } from "../explore/slice";
-import { goLive, reviewAt, toast, type AppState } from "../state";
+import { goLive, reviewAt, setCaptureWindow, toast, type AppState } from "../state";
 import {
   DRAG_PX, agoText, bufferedSpan, captureWindow, coverageText, currentSpan, durationText, eventMarkTitle,
   eventMarks, observedFraction, overviewShade, pctForAgo, scrubDataNote, scrubToTime, selectionSpans, timeRegionName,
@@ -209,6 +209,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const q = span ? `?f_lo=${span.loHz}&f_hi=${span.hiHz}&columns=${COLUMNS}&rows=${ROWS}` : "";
     const tl = await client.get<TimelineResponse>(`/api/timeline${q}`).catch(() => null);
     win = captureWindow(tl);
+    // T-379: the window the band is laid out on is the *whole UI's* window, so it goes in the store
+    // rather than staying local to this mount. Every other surface — the inventory lists, the
+    // survey strip, the waterfall's backfill — reads its live edge from here, on the capture clock,
+    // instead of each inventing one from `Date.now()`.
+    store.set(setCaptureWindow(win));
     renderBand(tl?.grid ?? null);
     coverageFraction = observedFraction(tl?.grid);
     if (win && span) {

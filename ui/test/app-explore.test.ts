@@ -10,9 +10,9 @@ import { readFileSync } from "node:fs";
 import type { AppContext } from "../src/app/context";
 import { decodeActionLabel, emitterStreamAddress, recordEmitterClip, selectionSummary } from "../src/app/explore/focus";
 import {
-  candidateWindow, clearUserBand, clusterChip, confirmedFilters, DEFAULT_ROW_RATE_HZ, loadInventoryRows,
-  nextInventorySort, recurrenceDots, REVIEW_WINDOW_S, rowChips, rowSeenText, setUserBand,
-  sortInventoryRows, viewFilters, waterfallSpanS, type Classification, type Row,
+  clearUserBand, clusterChip, confirmedFilters, DEFAULT_ROW_RATE_HZ, emptyListText, liveEdgeS,
+  loadInventoryRows, nextInventorySort, recurrenceDots, rowChips, rowSeenText, setUserBand,
+  sortInventoryRows, viewFilters, viewWindow, waterfallSpanS, type Classification, type Row,
 } from "../src/app/explore/inventory";
 import { WATERFALL_ROWS } from "../src/waterfall";
 import { foundInside, listenAllTargets, recordSelectionClip, type Selection } from "../src/app/explore/selections";
@@ -310,13 +310,25 @@ test("deleting a confirmed row with a user-band override (T-193) drops its box; 
 
 // ---- the viewed window: Candidates scoped, Confirmed always listed (T-260, ADR-0017 §2.1/§2.2) ----
 
-/** A ctx whose client records every inventory path and answers per `state=` tab. */
-function windowCtx(pages: Partial<Record<"confirmed" | "candidate", Row[]>> = {}) {
+/** The capture clock the fixtures run on, deliberately far from any wall clock — the fixture that
+ * exposed T-379 sat 3.5 days from `Date.now()`, and every window test here has to fail if a browser
+ * clock creeps back in. */
+const CAPTURE_EDGE_S = 1_789_297_847;
+
+/** A ctx whose client records every path, answers `/api/inventory` per `state=` tab and
+ * `/api/coverage` with the given cell state (T-379). */
+function windowCtx(
+  pages: Partial<Record<"confirmed" | "candidate", Row[]>> = {},
+  coverage: "observed" | "unobserved" | "none" = "observed",
+) {
   const paths: string[] = [];
   const store = createStore(initialState());
   const client = {
     get: async <T>(path: string): Promise<T> => {
       paths.push(path);
+      if (path.startsWith("/api/coverage")) {
+        return (coverage === "none" ? { any: { cells: [] } } : { any: { cells: [{ state: coverage }] } }) as T;
+      }
       const tab = new URLSearchParams(path.slice(path.indexOf("?") + 1)).get("state") as "confirmed" | "candidate";
       return { entries: pages[tab] ?? [], next_cursor: null } as T;
     },
@@ -327,41 +339,85 @@ function windowCtx(pages: Partial<Record<"confirmed" | "candidate", Row[]>> = {}
     assert.ok(p, `no ${tab} query was sent`);
     return new URLSearchParams(p.slice(p.indexOf("?") + 1));
   };
-  return { ctx, store, paths, paramsFor };
+  /** Puts the UI at a live edge on the **capture** clock, the way the spectrum stream does. */
+  const atLiveEdge = (tS = CAPTURE_EDGE_S) => store.set((s) => ({ live: { ...s.live, edgeTS: tS } }));
+  return { ctx, store, paths, paramsFor, atLiveEdge };
 }
 
 test("waterfallSpanS: the ring height over the row rate, header rate first, then the device, then the default", () => {
-  const base = { live: { view: null, rowRateHz: null }, device: { rowsPerS: null }, time: { live: true } };
+  const base = winState();
   assert.equal(waterfallSpanS(base), WATERFALL_ROWS / DEFAULT_ROW_RATE_HZ, "≈ 20.5 s at 25 rows/s");
-  assert.equal(waterfallSpanS({ ...base, live: { view: null, rowRateHz: 64 } }), WATERFALL_ROWS / 64);
-  assert.equal(waterfallSpanS({ ...base, device: { rowsPerS: 10 } }), WATERFALL_ROWS / 10, "the device rate when no header has arrived");
+  assert.equal(waterfallSpanS(winState({ rowRateHz: 64 })), WATERFALL_ROWS / 64);
+  assert.equal(waterfallSpanS(winState({ rowsPerS: 10 })), WATERFALL_ROWS / 10, "the device rate when no header has arrived");
   assert.equal(
-    waterfallSpanS({ ...base, live: { view: null, rowRateHz: 64 }, device: { rowsPerS: 10 } }),
+    waterfallSpanS(winState({ rowRateHz: 64, rowsPerS: 10 })),
     WATERFALL_ROWS / 64,
     "the stream header wins over the device poll",
   );
 });
 
-test("candidateWindow: the waterfall's span ending at the live edge; the review window when scrubbed back", () => {
-  const live = { live: { view: null, rowRateHz: 25 }, device: { rowsPerS: null }, time: { live: true } };
-  assert.deepEqual(candidateWindow(live, 1000), { t0: 1000 - WATERFALL_ROWS / 25, t1: 1000 });
-  const reviewing = { ...live, time: { live: false, tS: 500 } };
-  assert.deepEqual(candidateWindow(reviewing, 1000), { t0: 500 - REVIEW_WINDOW_S, t1: 500 }, "the reviewed instant, not now");
+// ---- T-379: one window, on the capture clock ----
+
+/** A `WindowState` with everything unset, so each test names only what it is about. */
+function winState(over: {
+  view?: { loHz: number; hiHz: number } | null; rowRateHz?: number | null; edgeTS?: number | null;
+  rowsPerS?: number | null; time?: { live: boolean; tS?: number; spanS?: number | null };
+  captureWindow?: { t0S: number; t1S: number; spanS: number } | null;
+} = {}) {
+  return {
+    live: { view: over.view ?? null, rowRateHz: over.rowRateHz ?? null, edgeTS: over.edgeTS ?? null },
+    device: { rowsPerS: over.rowsPerS ?? null },
+    time: over.time ?? { live: true },
+    captureWindow: over.captureWindow ?? null,
+  };
+}
+
+test("liveEdgeS: the stream's own row time, then the capture window, then UNKNOWN — never a browser clock", () => {
+  // The bug this is the fix for: the live edge was `Date.now() / 1000`. A replay, the mock SDR on a
+  // time-compressed scene, or any source whose stamps are not the host's runs on a clock of its own
+  // — the fixture behind this task was 3.5 days off wall time — so a 20 s window ending at
+  // browser-now asked about a range the capture never covered.
+  const win = { t0S: CAPTURE_EDGE_S - 120, t1S: CAPTURE_EDGE_S, spanS: 120 };
+  assert.equal(liveEdgeS(winState({ edgeTS: CAPTURE_EDGE_S + 3, captureWindow: win })), CAPTURE_EDGE_S + 3, "the stream's row time is freshest");
+  assert.equal(liveEdgeS(winState({ captureWindow: win })), CAPTURE_EDGE_S, "the capture window when no row has arrived");
+  assert.equal(liveEdgeS(winState()), null, "and UNKNOWN when neither has answered — not `now`");
+});
+
+test("THE PROPERTY: the Candidate window is the window the waterfall shows, on the capture clock", () => {
+  const live = winState({ rowRateHz: 25, edgeTS: CAPTURE_EDGE_S });
+  assert.deepEqual(viewWindow(live), { t0: CAPTURE_EDGE_S - WATERFALL_ROWS / 25, t1: CAPTURE_EDGE_S });
+
+  // Scrubbed back: the reviewed instant, over the *same* span the waterfall renders — not a
+  // separate review constant. `REVIEW_WINDOW_S = 3600` was a second window: the list answered about
+  // an hour while every other surface answered about the 20 s under it.
+  const reviewing = winState({ rowRateHz: 25, edgeTS: CAPTURE_EDGE_S, time: { live: false, tS: 500 } });
+  assert.deepEqual(viewWindow(reviewing), { t0: 500 - WATERFALL_ROWS / 25, t1: 500 }, "the reviewed instant, not now");
+
+  // A span dragged on the time navigator is the window, on this surface too (T-340).
+  const dragged = winState({ rowRateHz: 25, time: { live: false, tS: 500, spanS: 600 } });
+  assert.deepEqual(viewWindow(dragged), { t0: 500 - 600, t1: 500 }, "the dragged span, exactly — the waterfall's own historyWindow");
+});
+
+test("THE CONTROL: with no live edge reported, the window is UNKNOWN rather than a plausible one", () => {
+  // Without this the property is satisfiable by always producing *some* window — which is precisely
+  // how the empty sidebar happened: a window was always produced, and it was on the wrong clock.
+  assert.equal(viewWindow(winState({ rowRateHz: 25 })), null);
+  assert.equal(viewWindow(winState({ rowRateHz: 25, time: { live: true } })), null);
 });
 
 test("viewFilters carries the frequency span and deliberately no time (the window belongs to the Candidate query alone)", () => {
-  const f = viewFilters({ live: { view: { loHz: 99.6e6, hiHz: 102e6 }, rowRateHz: 25 }, device: { rowsPerS: null }, time: { live: true } });
+  const f = viewFilters(winState({ view: { loHz: 99.6e6, hiHz: 102e6 }, rowRateHz: 25 }));
   assert.deepEqual(f, { fLoHz: 99.6e6, fHiHz: 102e6 });
 });
 
 test("LIVE: the Candidate query carries the waterfall window; the Confirmed query carries no t0/t1 at all", async () => {
   const { ctx, paramsFor } = windowCtx();
-  ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25, view: { loHz: 99.6e6, hiHz: 102e6 } } }));
-  await loadInventoryRows(ctx, () => {}, 1_789_549_614);
+  ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25, edgeTS: CAPTURE_EDGE_S, view: { loHz: 99.6e6, hiHz: 102e6 } } }));
+  await loadInventoryRows(ctx, () => {});
 
   const cand = paramsFor("candidate");
-  assert.equal(Number(cand.get("t1")), 1_789_549_614, "the candidate window ends at the live edge");
-  assert.equal(Number(cand.get("t0")), 1_789_549_614 - WATERFALL_ROWS / 25, "and starts one waterfall span back");
+  assert.equal(Number(cand.get("t1")), CAPTURE_EDGE_S, "the candidate window ends at the live edge");
+  assert.equal(Number(cand.get("t0")), CAPTURE_EDGE_S - WATERFALL_ROWS / 25, "and starts one waterfall span back");
   assert.equal(cand.get("f_lo"), String(99.6e6), "the frequency span is sent on both lists");
 
   const conf = paramsFor("confirmed");
@@ -373,12 +429,13 @@ test("LIVE: the Candidate query carries the waterfall window; the Confirmed quer
 test("THE SAFETY VALVE: a confirmed station that has been quiet for hours stays listed while candidates are window-scoped", async () => {
   // The regression this guards against: scoping Confirmed to the window too would make the user's
   // own confirmed stations disappear from Explore the moment they stopped transmitting.
-  const nowS = 1_789_549_614;
+  const nowS = CAPTURE_EDGE_S;
   const quiet = makeRow({ id: "quiet", state: "confirmed", last_seen_s: nowS - 6 * 3600, first_seen_s: nowS - 9 * 3600 });
   const onAir = makeRow({ id: "onair", state: "candidate", last_seen_s: nowS - 2 });
-  const { ctx, store, paramsFor } = windowCtx({ confirmed: [quiet], candidate: [onAir] });
+  const { ctx, store, paramsFor, atLiveEdge } = windowCtx({ confirmed: [quiet], candidate: [onAir] });
   ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25 } }));
-  await loadInventoryRows(ctx, () => {}, nowS);
+  atLiveEdge(nowS);
+  await loadInventoryRows(ctx, () => {});
 
   const rows = store.get().inventory.rows;
   assert.ok(rows.quiet, "the quiet confirmed station is still listed, six hours off the air");
@@ -393,12 +450,14 @@ test("THE SAFETY VALVE: a confirmed station that has been quiet for hours stays 
 });
 
 test("reviewing: the Candidate window follows the scrubbed instant; Confirmed stays unwindowed there too", async () => {
-  const { ctx, paramsFor } = windowCtx();
-  ctx.store.set(reviewAt(1_789_540_000));
-  await loadInventoryRows(ctx, () => {}, 1_789_549_614);
+  const { ctx, paramsFor, atLiveEdge } = windowCtx();
+  ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25 } }));
+  atLiveEdge();
+  ctx.store.set(reviewAt(CAPTURE_EDGE_S - 9614));
+  await loadInventoryRows(ctx, () => {});
   const cand = paramsFor("candidate");
-  assert.equal(Number(cand.get("t1")), 1_789_540_000);
-  assert.equal(Number(cand.get("t0")), 1_789_540_000 - REVIEW_WINDOW_S);
+  assert.equal(Number(cand.get("t1")), CAPTURE_EDGE_S - 9614);
+  assert.equal(Number(cand.get("t0")), CAPTURE_EDGE_S - 9614 - WATERFALL_ROWS / 25, "the waterfall's own span, not a review constant");
   assert.equal(paramsFor("confirmed").get("t0"), null, "a quiet confirmed station does not vanish while reviewing either");
 });
 
@@ -409,21 +468,22 @@ test("scrubbed back: Confirmed names the scrubbed instant as its live edge, and 
   // have the second — windowing it is the §2.2 regression — so it sends `at` instead. Without it a
   // scrubbed-back Confirmed row would read the liveness it has *now*, disagreeing with every other
   // surface on screen.
-  const base = { live: { view: { loHz: 99.6e6, hiHz: 102e6 }, rowRateHz: 25 }, device: { rowsPerS: null } };
-  assert.deepEqual(confirmedFilters({ ...base, time: { live: true } }), { fLoHz: 99.6e6, fHiHz: 102e6 }, "no `at` at the live edge");
-  const scrubbed = confirmedFilters({ ...base, time: { live: false, tS: 1_789_540_000 } });
+  const view = { loHz: 99.6e6, hiHz: 102e6 };
+  assert.deepEqual(confirmedFilters(winState({ view, rowRateHz: 25 })), { fLoHz: 99.6e6, fHiHz: 102e6 }, "no `at` at the live edge");
+  const scrubbed = confirmedFilters(winState({ view, rowRateHz: 25, time: { live: false, tS: 1_789_540_000 } }));
   assert.equal(scrubbed.at, 1_789_540_000);
   assert.equal(scrubbed.t0, undefined, "still no window: a window would filter the catalogue");
   assert.equal(scrubbed.t1, undefined);
 });
 
 test("THE SAFETY VALVE HOLDS WHILE SCRUBBED: a station quiet during the scrubbed window stays listed", async () => {
-  const nowS = 1_789_549_614, tS = nowS - 6 * 3600;
+  const nowS = CAPTURE_EDGE_S, tS = nowS - 6 * 3600;
   const quiet = makeRow({ id: "quiet", state: "confirmed", last_seen_s: nowS - 30, first_seen_s: nowS - 9 * 3600 });
-  const { ctx, store, paramsFor } = windowCtx({ confirmed: [quiet], candidate: [] });
+  const { ctx, store, paramsFor, atLiveEdge } = windowCtx({ confirmed: [quiet], candidate: [] });
   ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25 } }));
+  atLiveEdge(nowS);
   ctx.store.set(reviewAt(tS));
-  await loadInventoryRows(ctx, () => {}, nowS);
+  await loadInventoryRows(ctx, () => {});
 
   assert.ok(store.get().inventory.rows.quiet, "the confirmed catalogue survives the scrub");
   const conf = paramsFor("confirmed");
@@ -431,6 +491,83 @@ test("THE SAFETY VALVE HOLDS WHILE SCRUBBED: a station quiet during the scrubbed
   assert.equal(Number(conf.get("at")), tS, "but its liveness is re-derived as of the scrubbed instant");
   // The asymmetry still lives in the request, never in client-side filtering of the answer.
   assert.equal(Number(paramsFor("candidate").get("t1")), tS);
+});
+
+// ---- T-379: which emptiness is it? ----
+
+test("THE DISTINGUISHING TEST: not-fetched, unobserved and observed-but-quiet are three different states", async () => {
+  // The whole point. All three render an empty list, and on the old code all three said "Nothing
+  // here yet." Two of them are bugs or non-findings; only the third is a statement about the air.
+
+  // 1. Not fetched: no live edge, so no window — and therefore NO QUERY AT ALL.
+  const notFetched = windowCtx({ candidate: [makeRow({ id: "c1", state: "candidate" })] });
+  await loadInventoryRows(notFetched.ctx, () => {});
+  assert.equal(notFetched.paths.length, 0, "nothing is asked about a window the UI cannot name");
+  assert.equal(notFetched.store.get().inventory.window, null, "and the window is recorded as unknown");
+  assert.equal(emptyListText(notFetched.store.get().inventory), "Loading…");
+
+  // 2. Unobserved: a window was asked about, and the coverage map says nothing ever looked there.
+  const unobserved = windowCtx({ candidate: [] }, "unobserved");
+  unobserved.ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25, view: { loHz: 99.6e6, hiHz: 102e6 } } }));
+  unobserved.atLiveEdge();
+  await loadInventoryRows(unobserved.ctx, () => {});
+  assert.equal(unobserved.store.get().inventory.window?.coverage, "unobserved");
+  assert.equal(
+    emptyListText(unobserved.store.get().inventory),
+    "Nothing was observed in this window — no data, not a quiet band.",
+  );
+
+  // 3. Observed and quiet: the receiver was listening here and heard nothing. The only finding.
+  const quiet = windowCtx({ candidate: [] }, "observed");
+  quiet.ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25, view: { loHz: 99.6e6, hiHz: 102e6 } } }));
+  quiet.atLiveEdge();
+  await loadInventoryRows(quiet.ctx, () => {});
+  assert.equal(quiet.store.get().inventory.window?.coverage, "observed");
+  assert.equal(emptyListText(quiet.store.get().inventory), "Nothing on the air in this window.");
+
+  // Three states, three sentences — and the three are pairwise different, which is the property a
+  // single "Nothing here yet." could never satisfy.
+  const texts = [notFetched, unobserved, quiet].map((c) => emptyListText(c.store.get().inventory));
+  assert.equal(new Set(texts).size, 3, `three distinguishable empty states, got ${JSON.stringify(texts)}`);
+});
+
+test("a coverage answer that never came is UNKNOWN, never 'unobserved'", () => {
+  // "Not asked about" must not harden into a measurement claim. An absent answer is the one case
+  // where the sidebar says the least, because a wrong "nothing ever looked here" is an
+  // absence-of-signal finding invented out of an absence of an HTTP response.
+  assert.equal(emptyListText({ window: { coverage: null }, loadedAtS: 1, error: null }), "Nothing listed for this window.");
+  assert.equal(emptyListText({ window: null, loadedAtS: 1, error: null }), "Waiting for the capture window…");
+  assert.equal(emptyListText({ window: null, loadedAtS: null, error: null }), "Loading…");
+  assert.equal(emptyListText({ window: { coverage: "observed" }, loadedAtS: 1, error: "boom" }), "boom", "an error is never dressed as emptiness");
+});
+
+test("THE CONTROL THAT MATTERS: a window that DOES hold data renders its rows, not an empty state", async () => {
+  // Without this, every assertion above is satisfiable by a sidebar that is always empty and merely
+  // explains itself well. This is the empirical finding restated as a test: the fixture behind
+  // T-379 had five candidates in the store and four of them inside the 21 s window under the
+  // waterfall, while the query the UI actually sent returned zero.
+  const rows = [makeRow({ id: "c1", state: "candidate" }), makeRow({ id: "c2", state: "candidate", f_center_hz: 100_100_000 })];
+  const { ctx, store, paramsFor, atLiveEdge } = windowCtx({ candidate: rows, confirmed: [] });
+  ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25, view: { loHz: 99.6e6, hiHz: 102e6 } } }));
+  atLiveEdge();
+  await loadInventoryRows(ctx, () => {});
+
+  const listed = Object.values(store.get().inventory.rows);
+  assert.deepEqual(listed.map((r) => r.id).sort(), ["c1", "c2"], "the window's rows are on screen");
+  // On values: the window actually sent is the capture clock's, so rows stamped on that clock fall
+  // inside it. A browser-clock window would have been ~306,000 s away from these timestamps.
+  const t0 = Number(paramsFor("candidate").get("t0")), t1 = Number(paramsFor("candidate").get("t1"));
+  for (const r of rows) assert.ok(r.last_seen_s >= t0 - 1e6 && t1 >= t0, `row ${r.id} is of the window that was asked about`);
+  assert.ok(Math.abs(t1 - CAPTURE_EDGE_S) < 1e-9, "and that window ends at the capture clock's live edge");
+  assert.equal(store.get().inventory.window?.coverage, "observed");
+});
+
+test("a non-empty list never pays for a coverage question", async () => {
+  const { ctx, paths, atLiveEdge } = windowCtx({ candidate: [makeRow({ id: "c1", state: "candidate" })] });
+  ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25, view: { loHz: 99.6e6, hiHz: 102e6 } } }));
+  atLiveEdge();
+  await loadInventoryRows(ctx, () => {});
+  assert.ok(!paths.some((p) => p.startsWith("/api/coverage")), "coverage is asked only when the answer would change what is said");
 });
 
 // ---- layout: actions reachable without horizontal scroll (T-148) ----

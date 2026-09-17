@@ -693,8 +693,32 @@ test("T-368: the survey strip asks about the spectrum extent the bar spans, and 
   assert.equal(coverageRequest(null, 512), null);
   assert.equal(coverageRequest({ lo: 10, hi: 10 }, 512), null);
   assert.equal(coverageRequest(ext, 0), null);
-  // It never asks for a time range: this bar is the frequency axis (T-367).
-  assert.ok(!path.includes("t0="), "the frequency navigator never scrubs time");
+  // With no window it sends none, and the route then uses the server's live capture window.
+  assert.ok(!path.includes("t0="), "no window asked for, the route's own default stands");
+});
+
+test("T-379: the survey is of the WINDOW on screen — it carries the time range without scrubbing it", () => {
+  // The bar is the frequency axis and still never scrubs time (T-367): it reads the window, it does
+  // not set it. But it is a view over the one (time × frequency) window, so it has to *ask about*
+  // that window. Omitting `t0`/`t1` pinned it to the server's live edge, so scrubbed an hour back
+  // the bottom bar reported coverage for a time nobody was looking at — and greyed bands that had
+  // in fact been observed at the reviewed instant.
+  const ext = spectrumExtent(GRID.frequency)!;
+  const w = { t0: 1_789_297_727, t1: 1_789_297_847 };
+  const q = new URLSearchParams(coverageRequest(ext, 512, w)!.split("?")[1]);
+  assert.equal(q.get("t0"), String(w.t0), "the window's start, on the capture clock");
+  assert.equal(q.get("t1"), String(w.t1));
+  assert.equal(q.get("f_lo"), String(ext.lo), "and still the bar's own frequency extent");
+
+  // Two different windows produce two different requests — the property that makes a scrub visible
+  // at all. Without it, every window would be answered with the live edge's cells.
+  const other = { t0: w.t0 - 3600, t1: w.t1 - 3600 };
+  assert.notEqual(coverageRequest(ext, 512, w), coverageRequest(ext, 512, other));
+
+  // A malformed window is not sent at all, rather than being sent as a range that selects nothing.
+  for (const bad of [{ t0: 5, t1: 5 }, { t0: 9, t1: 1 }, { t0: NaN, t1: 2 }]) {
+    assert.ok(!coverageRequest(ext, 512, bad)!.includes("t0="), `${JSON.stringify(bad)} is not a window`);
+  }
 });
 
 // ---------------------------------------------------------------------------
