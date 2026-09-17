@@ -9312,7 +9312,7 @@ tasks:
   - id: T-422
     title: fsk and qam16 have the same class-level defect cw and ssb had - a hand-written table and a misordered density
     milestone: M3
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: M3A
     deps: [T-249]
