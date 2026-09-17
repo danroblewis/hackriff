@@ -81,8 +81,9 @@
 # defects like these. Every failure T-430 and T-433 root-caused was reachable on an IDLE
 # machine (the coverage one at 10–20 % per run at zero load), so a lower thread count would
 # only have made them rarer and harder to diagnose — which is what happened for months. The
-# number below buys back the 7–12 minutes a false red costs per merge; it buys nothing else.
-# A test that only passes on an idle machine is still wrong. Keep filing them.
+# number below buys back the 7–12 minutes a false red costs per merge, and some wall clock
+# with it; it does not make one test correct. A test that only passes on an idle machine is
+# still wrong. Keep filing them — and expect them to surface more slowly now.
 #
 # MEASURED, on the dev Mac (28 logical CPUs), `--workspace --exclude hk-e2e`:
 #   - default (28) : three consecutive full runs on ONE clean diff, three DIFFERENT
@@ -90,15 +91,31 @@
 #                    independently saw four more runs fail a rotating set. T-300's measured
 #                    the mechanism: hk-plugins' 43 tests take 8.9 s for all 43 in isolation
 #                    and 24–43 s PER TEST inside a concurrent run.
-#   - 8            : 1403 s wall (coordinator), against ~1450 s for the default WHEN IT
-#                    COMPLETES AT ALL — so the cap is free or nearly so, not a trade. That
-#                    it can be free is not a coincidence: the run's critical path is the
-#                    `heavy-serial` group, which is max-threads = 1 at any setting, so
-#                    capping the parallelism OUTSIDE the group takes contention off the
-#                    serial tests roughly as fast as it takes overlap away from the rest.
-#                    (An A/B on this box is contended by construction — up to four agents
-#                    build on it by design — so treat these as the same number, not as a
-#                    12 % win.)
+#
+# THE COST IS NEGATIVE. This was expected to be a trade — "slower but correct" — and it is
+# not one. Back-to-back on one tree, warm, nothing else changed (T-436's own A/B; the
+# coordinator separately measured 1403 s at 8 against ~1450 s at the default over a wider
+# scope, same direction):
+#
+#                          8 threads        28 threads (nextest's default here)
+#     result               2205/2205 PASS   1 FAILED  (view_pause_keeps_capture)
+#     nextest run time         234.3 s          279.6 s      (+19 %)
+#     wall clock incl. list    279 s            449 s        (+61 %)
+#     CPU-seconds of test        1312 s           1909 s     (+45 % for the SAME tests)
+#
+# THE DEFAULT IS SLOWER *AND* FLAKIER, and the reason is structural rather than lucky:
+#
+#     heavy-serial group   224.1 s / 266 tests   279.4 s / 266 tests
+#     everything else     1088.2 s / 1939       1629.2 s / 1940
+#
+# The `heavy-serial` group is max-threads = 1 at ANY setting, so its 224 s IS the run's
+# critical path — 96 % of the 234 s run at 8 threads, and 100 % of the 279 s run at 28.
+# The other 1939 tests are not on the critical path at either setting (1088 s spread over
+# 7 free threads is 155 s; 1629 s over 27 is 60 s). So raising the parallelism outside the
+# group cannot shorten the run — there is nothing left to overlap with — and it does
+# lengthen it, by taking CPU away from the one-at-a-time tests that ARE the critical path:
+# the same 266 serial tests cost 224 s at 8 and 279 s at 28. That is also the whole flake
+# mechanism in one line, since those are the tests that bound wall-clock latencies.
 #   - corroborating, from an investigation that was not looking for a thread count at all
 #     (T-257, docs/10 §3.4): nextest `LEAK` lines here are a macOS pipe(2)/FD_CLOEXEC race
 #     between concurrently SPAWNING test processes, and they scale with spawn concurrency
@@ -107,9 +124,13 @@
 #     independently measured discontinuity in the same place.
 #   - 8            : still not zero. One 8-thread run passed 2298/2298 with no exclusions;
 #                    a later one failed once (view_pause_keeps_capture, then 0/8 isolated)
-#                    and passed 2302/2302 on the immediate re-run at the same 8. Tally:
-#                    28 → 3 runs, 3 failures; 8 → 3 runs, 1 failure. BETTER, NOT SUFFICIENT
-#                    — which is the point of "WHAT THIS IS NOT" above.
+#                    and passed 2302/2302 on the immediate re-run at the same 8. With this
+#                    ticket's run the tally is 28 → 4 runs, 4 failures; 8 → 4 runs, 1
+#                    failure. BETTER, NOT SUFFICIENT — the point of "WHAT THIS IS NOT".
+#                    Note WHICH test failed at 28 above: view_pause_keeps_capture, the same
+#                    one that failed the one 8-thread run. It is a live defect and the cap
+#                    has just made it rarer. Somebody still has to go and measure what it
+#                    waits for.
 #
 # WHY 8 AND NOT num-cpus/4, OR 28. Nothing here scales with the core count; it scales with
 # how much of the box is someone else's. On this box that is fixed by policy, not by
