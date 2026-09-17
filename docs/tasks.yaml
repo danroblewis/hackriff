@@ -10296,6 +10296,49 @@ tasks:
       number can tell which draw it came from.
       Do not "fix" it by making all the draws agree - they are legitimately different samples,
       and §7.1's answer is that a brief quotes ~0.95 with the draw sd, not a fourth decimal.
+  - id: T-433
+    milestone: M2-hardening
+    title: concurrent_demod asserts dropped == 0 on a real-time chain, a quantity whose range under contended CPU has never been measured
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    deps: [T-383]
+    found_by: 'T-427 (2026-09-17) with the perf record attached; a second instance seen by T-406 the same hour'
+    acceptance: |
+      T-383 established this repo's standing rule, now in .config/nextest.toml: A TEST MAY NOT BOUND
+      A QUANTITY WHOSE NATURAL RANGE IT HAS NOT MEASURED. Three tests still do.
+      PRIMARY: tests/e2e/tests/concurrent_demod.rs asserts `dropped == 0` in four places
+      (lines 379, 416, 516 and the per-stream check) on a chain that is running in REAL TIME. Zero
+      dropped samples is not a property of the code - it is a property of the machine keeping up.
+      T-427 caught it with the perf record attached, which is why this ticket can state the regime
+      rather than guess it:
+        FAILING run: dropped 63, load average 34.85 on 28 cores, cpu_load 0.817, age_s 129.1,
+          latency_ms_max 61.7, the whole acceptance step taking 132 s.
+        PASSING runs: cpu_load 0.53, age_s 1.35, dropped 0, the same step in 8.68 s.
+      So the test drops samples when the box is oversubscribed - which is the coordinator's normal
+      state, since up to four agents build concurrently by design (CLAUDE.md, T-144). Re-running
+      `just acceptance-ci` on an idle box gave exit 0, 3/3.
+      SECOND INSTANCE, same hour, different test: T-406 saw hk-pipeline::view_pause_keeps_capture
+      fail once at 99.6% of its target ("2490368 samples over a phase of 2500000"). It did not
+      assume - 5/5 green isolated, the hk-pipeline suite 3x clean on the merge base and 7x on its
+      branch (6 clean) - and then removed the only plausible mechanism anyway by replaying UNPACED
+      rather than in real time, getting bit-identical results in 2.2 s. THAT IS THE SHAPE OF THE
+      FIX and it is already proven in-tree: a test that does not need real-time pacing should not
+      pay for it.
+      DoD: measure the range of `dropped` under deliberate load (T-383's method: generate the load,
+      do not wait for luck), then either remove the real-time dependence as T-406 did, or assert
+      what is actually invariant. DO NOT simply raise the bound to a number that passes today -
+      that is the same error T-425 was forbidden from making in the other direction.
+      Note the honest counter-argument and address it rather than dismissing it: `dropped == 0` on
+      a real-time chain is a MEANINGFUL product assertion - the whole point of the always-on
+      capture path is that it does not lose samples - so the answer may be that this assertion
+      belongs in a HIL/bench tier (T5/T6 in docs/10) where the machine is not contended, and that
+      the CI-tier test should replay unpaced and assert on content instead. Say which, and why.
+    notes: |
+      Related but distinct: T-383's finding that heavy-serial's `max-threads = 1` serialises the
+      group against ITSELF within one nextest invocation and does nothing about the ~27 tests
+      outside it, nor about four agents building on the same box. Adding a name to that list will
+      not fix this one either.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
