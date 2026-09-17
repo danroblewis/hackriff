@@ -18,28 +18,34 @@
 //! tolerances, each derived from what the estimator can do at that record length, and an exemption
 //! list by name.**
 //!
-//! # It found six more on its first run
+//! # It found seven more on its first run, and T-404 fixed all seven
 //!
-//! None of them by accident, which is the point. Each is recorded in [`OBSERVATION_STATISTICS`]
-//! with the mechanism and the measurement, so that fixing one makes an exemption **disappear from
-//! a diff**:
+//! None of them by accident, which is the point. Each was recorded in [`OBSERVATION_STATISTICS`]
+//! with the mechanism and the measurement, so that fixing one would make an exemption **disappear
+//! from a diff** — and that is what happened. The exempt list went from **seventeen to ten** and
+//! [`RULES`] from thirteen to twenty:
 //!
-//! | feature | mechanism |
-//! |---|---|
-//! | `c20_norm` | a coherent sum, so its loss is the residual carrier offset **times** the record |
-//! | `c40_norm` | the same sum at four times the offset, losing coherence twice as fast |
-//! | `c42_norm` | subtracts `|C20|²`, so it inherits the above algebraically — 93 % attributed |
-//! | `cp_corr` | a maximum over lags, whose **null** level falls as `1/sqrt(record)` |
-//! | `if_slope_r2` | any smooth process is better fitted by a line over a shorter window |
-//! | `if_local_modality` | a mode **count** off a histogram, which invents and loses whole modes |
-//! | `carrier_line_db` | a peak-over-median, biased in the segment count that T-312 left moving |
+//! | feature | mechanism it had | what it does now |
+//! |---|---|---|
+//! | `c20_norm` | a coherent sum, so its loss is the residual offset **times** the record | sums over a fixed block ([`hk_classify::features::CUMULANT_BLOCK`]) and combines the blocks incoherently |
+//! | `c40_norm` | the same sum at four times the offset | the same block |
+//! | `c42_norm` | subtracts `|C20|²`, so it inherited the above — 93 % attributed | recovers with the other two, as the attribution predicted |
+//! | `cp_corr` | a maximum over lags, whose **null** falls as `1/sqrt(record)` | reports each lag as a bias-corrected coherence, whose null is 0 |
+//! | `if_slope_r2` | a maximum over whichever window lengths happened to fit | all three window lengths or an abstention |
+//! | `if_local_modality` | a mode **count** off a raw histogram, aggregated by a median of integers | a kernel-smoothed histogram, aggregated by a mean |
+//! | `carrier_line_db` | a peak-over-median, biased in the segment count T-312 left moving | the line's excess over the peak a band of pure **noise** would have shown at that segment count |
 //!
-//! The last two are the ones worth noticing. `if_local_modality` was added by T-298 **as the
-//! length-free replacement** for `if_modality`, and inherited the defect through its estimator
-//! instead of through its reference — the replacement for an observation statistic was one.
-//! `carrier_line_db` is the residue T-312 knew it was leaving: pinning the transform fixes *what*
-//! is measured and leaves the segment count moving, which only matters for the two features that
-//! are order statistics rather than sums.
+//! Two are worth noticing. `if_local_modality` was added by T-298 **as the length-free
+//! replacement** for `if_modality`, and inherited the defect through its estimator instead of
+//! through its reference — the replacement for an observation statistic was one. `carrier_line_db`
+//! is the residue T-312 knew it was leaving: pinning the transform fixes *what* is measured and
+//! leaves the segment count moving, which only matters for the features that are order statistics
+//! rather than sums.
+//!
+//! Three of the seven — `cp_corr`, `if_slope_r2` and `carrier_line_db` — have a **null** that moved
+//! rather than a value, and on a single waveform a moving null can hide inside the estimator's own
+//! spread at the short end. `features::tests::the_null_levels_do_not_move_with_the_record` asserts
+//! that property directly, because this file is the wrong instrument for it.
 //!
 //! # The two rules that make this a guard and not a rubber stamp
 //!
@@ -61,8 +67,21 @@
 //! not regeneration: every prefix is a **prefix of the same samples**, so the emission, the noise
 //! draw, the carrier offset and the gain are identical and the only thing that changed is how long
 //! it was watched. That is the comparison the defect family is about — one emitter, seen twice.
+//!
+//! One thing had to change for that claim to be true, and T-404 found it while clearing the
+//! cumulants: the **packet preamble is turned off** (`SynthConfig::packet_preamble`). `synth` gives
+//! every FSK generator an alternating preamble over the first 10–35 % of the record, so an N/8
+//! prefix of an FSK burst is entirely preamble and the full record is mostly data — two different
+//! emissions, not two observations of one, and the cumulants say so loudly. Measured on one 2-FSK
+//! waveform with the block fix in: prefixes read `c20_norm` 0.371 / 0.182 / 0.152 / 0.176, the full
+//! record standing apart from every rung, where suffixes (all data) read 0.182 / 0.152 / 0.176 with
+//! nothing to explain. Removing the confound at its source is not the same as widening a tolerance
+//! to cover it; with the preamble left on, the same ladder over the **old** feature code still fails
+//! 51 comparisons across the cumulant family and the mode count, so nothing was given up.
 
-use hk_classify::features::{FEATURE_NAMES, FeatureInput, MIN_SAMPLES, feature_fft_len, features};
+use hk_classify::features::{
+    FEATURE_NAMES, FeatureInput, IF_LOCAL_WINDOW, MIN_SAMPLES, feature_fft_len, features,
+};
 use hk_classify::symbols::SymbolEstimator;
 use hk_classify::synth::{Class, DEV_SEEDS, SynthConfig, generate};
 
@@ -76,8 +95,9 @@ const SNR_DB: f64 = 25.0;
 /// densities are fitted at**, 2328–16 384 normalised samples depending on class, rather than a
 /// length chosen to make the ladder convenient. A rung shorter than [`MIN_SAMPLES`] is skipped
 /// because `features` abstains wholesale there, and a rung where an individual feature abstains
-/// (the spectral four under `FEATURE_MIN_SEGMENTS`) is simply not compared: an abstention is the
-/// honest answer, not a failure, and this file never treats it as one.
+/// (the spectral four under `FEATURE_MIN_SEGMENTS`, `if_slope_r2` under its window floor) is simply
+/// not compared: an abstention is the honest answer, not a failure, and this file never treats it
+/// as one.
 const PREFIX_DIVISORS: &[usize] = &[2, 4, 8];
 
 /// Samples per **independent look** at the modulation.
@@ -100,6 +120,22 @@ const K_ORDER4: f64 = 9.80;
 
 /// 3σ standard error of a **proportion**: `sd = sqrt(p(1−p)/n) ≤ 0.5/sqrt(n)`, so `3·0.5`.
 const K_PROPORTION: f64 = 1.5;
+
+/// 3σ standard error of the **median** of `n` draws of a statistic whose own spread is at most 0.5
+/// — which is every statistic bounded to a unit interval. The sample median's asymptotic standard
+/// error is `1.253/sqrt(n)` times the draws' standard deviation, so this is `3 · 1.253 · 0.5`.
+const K_BOUNDED_MEDIAN: f64 = 1.88;
+
+/// 3σ standard error of the **mean** of `n` draws whose own spread is at most 0.5: `3 · 0.5`. The
+/// same bound as [`K_PROPORTION`] and for the same reason, stated separately because what it
+/// bounds here is the per-window spread of a mode count over the gap of one whole mode, not the
+/// variance of a Bernoulli.
+const K_BOUNDED_MEAN: f64 = 1.5;
+
+/// dB per unit relative error, `10/ln 10`. A feature reported in dB moves this much for a given
+/// relative error of the ratio underneath it, so its tolerance is this times the relative-error
+/// constant of that ratio.
+const DB_PER_RELATIVE: f64 = 4.343;
 
 /// Bins a spectral shape feature averages over. [`hk_classify::features`] widens the occupied band
 /// to at least `MIN_SHAPE_BINS = 16`, so 16 is the floor — using the floor rather than the actual
@@ -181,91 +217,6 @@ const OBSERVATION_STATISTICS: &[(&str, &str)] = &[
          different projection of it. T-311.",
     ),
     (
-        "c20_norm",
-        "|C20|/C21, and C20 = mean(x^2) is a COHERENT SUM over the record. Derotation leaves a \
-         residual carrier offset d; x^2 spins at 2d, so the sum's integration loss is set by the \
-         PRODUCT of that residual and the record length, and the residual only falls as \
-         1/sqrt(n) while the accumulated phase grows as n - so the loss grows as sqrt(n). FOUND \
-         BY THIS TEST (T-313), not previously known. Measured on one `pulse` waveform, seed 0, \
-         truncation only: 0.825 at N/8, 0.801 at N/4, 0.737 at N/2 and 0.079 over the full 16 384 \
-         samples - the same emission, decaying towards zero purely by being watched longer, with \
-         the derotation decision identical (coherence 0.999-1.000) at every rung. The fix is a \
-         residual-offset estimate good enough that 2*d*n stays under a radian at the longest \
-         record, or cumulants averaged over fixed-length blocks; either is new DSP and a refit, so \
-         it is named here rather than smuggled into T-312.",
-    ),
-    (
-        "c40_norm",
-        "|C40|/C21^2, and C40 = mean(x^4) - 3*C20^2 is the same coherent sum at FOUR times the \
-         residual offset, so it loses coherence twice as fast as c20_norm. FOUND BY THIS TEST \
-         (T-313). Measured on `pulse` seed 1: 3.20 / 3.33 / 3.59 at N/8, N/4, N/2 and 16.73 over \
-         the full record. features.rs already records that 'even a fraction of a cycle costs real \
-         discrimination' for these cumulants; what was not recorded is that the fraction of a \
-         cycle is proportional to the record, which makes the dimension a statistic of the \
-         observation. Same fix as c20_norm, same task.",
-    ),
-    (
-        "carrier_line_db",
-        "10*log10(strongest bin / band median) over an M-averaged periodogram. BOTH ends are \
-         order statistics - a maximum and a median over the bins the band happens to hold - so \
-         unlike `symmetry`, which is a ratio of SUMS and unbiased in M, this one carries a \
-         small-sample bias in the SEGMENT COUNT, and the segment count is a property of the \
-         record. T-312 pinned the transform, which fixes the yardstick but leaves this: a 4072- \
-         sample prefix of one 2-FSK waveform reads 32.05 dB where the full 16 290 samples read \
-         14.13 dB, a 17.9 dB move on a dimension that separates carrier-present from \
-         carrier-absent by about 20 dB. FOUND BY THIS TEST (T-313). The fix is either a \
-         bias-corrected peak-over-floor (a CFAR statistic rather than a raw ratio) or a segment \
-         floor high enough for the ratio to settle, and both need a refit and a section 7 run.",
-    ),
-    (
-        "if_local_modality",
-        "the count of instantaneous-frequency modes about the carrier's local trend. The QUANTITY \
-         is a property of the emission - a 2-FSK keys two levels however long it is watched - but \
-         the ESTIMATOR is a 48-bin histogram scored by prominence, and a histogram of a shorter \
-         record has fewer counts per bin, so it invents and loses whole modes: measured on one \
-         waveform per class with only the record truncated, `nbfm` reads 1 mode over 2328 samples \
-         and 2 over the first 1164; `gfsk`, `msk` and `2fsk` read 2 over the full record and 4 \
-         over a quarter of it; `ook` reads 1 and 3. FOUND BY THIS TEST (T-313), and it matters \
-         more than the rest because T-298 added this pair as the LENGTH-FREE replacement for \
-         `if_modality` - so the replacement inherited the defect in a new form, through its \
-         estimator rather than through its reference. `if_local_bimodality`, the continuous half \
-         of the same pair, is asserted and passes, so the fix is a mode count built like it \
-         (a continuous statistic thresholded once) rather than a count read off a histogram.",
-    ),
-    (
-        "c42_norm",
-        "C42/C21^2, and C42 = mean(|x|^4) - |C20|^2 - 2*C21^2 SUBTRACTS the coherent sum that \
-         c20_norm is, so it inherits that sum's decay with the record algebraically even though \
-         its own leading term, mean(|x|^4), is offset-immune. FOUND BY THIS TEST (T-313), and \
-         attributed rather than guessed: on one `ook` waveform truncated to N/2, c42_norm moves \
-         -0.137 -> -0.911 while |C20/C21|^2 moves 0.187 -> 0.910, so the C20 term accounts for \
-         0.723 of the 0.774 move - 93 % of it. All three normalised cumulants therefore share ONE \
-         defect and recover together when it is fixed; this is not three problems.",
-    ),
-    (
-        "cp_corr",
-        "the largest cyclic-prefix autocorrelation peak. For the one class that HAS a cyclic \
-         prefix this is a real detection; for the other twenty it is the maximum of a correlation \
-         against noise over eleven candidate lags, and the null level of such a maximum falls as \
-         1/sqrt(record length) - so a short burst of any class reads a cyclic prefix it does not \
-         have. FOUND BY THIS TEST (T-313). Measured on one 2-FSK waveform, truncation only: 0.535 \
-         at N/8, 0.440 at N/4 and 0.110 over the full 16 290 samples, a 4.9x move against the \
-         1/sqrt(8) = 0.35 the null law predicts for an 8x length change. The fix is to report the \
-         peak as a SIGNIFICANCE against its own null level rather than as a raw correlation, \
-         which is a new statistic and a refit.",
-    ),
-    (
-        "if_slope_r2",
-        "R^2 of a straight-line fit to the smoothed instantaneous frequency over the WHOLE \
-         record. A shorter window of any smooth process is better approximated by a straight \
-         line, so this rises as the record shortens for reasons that have nothing to do with \
-         whether the carrier is sweeping - which is what the dimension exists to say. FOUND BY \
-         THIS TEST (T-313): one `wfm` waveform reads 0.440 over 5430 samples and 0.790 over the \
-         first 678, i.e. a wideband FM carrier looks like a linear chirp once you stop watching \
-         it. The length-free form is a fit over a FIXED window with the residual taken across \
-         windows, which is what `if_local_bimodality` already does for the level statistic.",
-    ),
-    (
         "obw_over_rs",
         "OBW99 divided by C14's symbol-rate estimate. OBW and the true Rs are both properties of \
          the emission, but the DENOMINATOR is C14's estimate, which inherits the window \
@@ -314,6 +265,13 @@ enum Looks {
     /// `sqrt(4M²/((M−1)(M+2)(M+3)))` ([`hk_dsp::sk::std_dev`]) — so the tolerance is *computed*
     /// rather than assumed, and no constant is needed.
     SpectralKurtosis,
+    /// Whole [`IF_LOCAL_WINDOW`]-sample windows of instantaneous frequency the feature takes a
+    /// median over. `frequency_features` keeps a pair only when both its samples clear the
+    /// Azzouz–Nandi envelope threshold, so the usable count is `n·duty²/IF_LOCAL_WINDOW` — the same
+    /// squared duty [`Looks::SamplePairs`] carries, divided by the window rather than by
+    /// [`SAMPLES_PER_LOOK`]. These are the aggregators whose error falls with how many *windows*
+    /// there were, not with how many samples.
+    LocalWindows,
 }
 
 struct Rule {
@@ -461,6 +419,96 @@ const RULES: &[Rule] = &[
               moments, hence fourth order; the median across windows is what makes the record \
               length drop out.",
     },
+    // ---- The seven T-313 found on its first run, fixed by T-404 and asserted from here on. ----
+    Rule {
+        feature: "c20_norm",
+        basis: Basis::Abs(1.0),
+        looks: Looks::Samples,
+        k: K_ORDER2,
+        why: "|Ĉ20|/C21, now accumulated over CUMULANT_BLOCK-sample blocks and combined \
+              incoherently, so the coherence loss a residual carrier offset costs the sum is set by \
+              the BLOCK and not by the record (T-404). Bounded to [0, 1] by Cauchy-Schwarz, so 1.0 \
+              is its scale; a second-order per-sample moment, so K_ORDER2 over the independent \
+              draws the record carries. What is left for this to cover is the residual offset's own \
+              estimation error, which falls as 1/sqrt(n) and so cannot outrun a 1/sqrt(n) \
+              tolerance.",
+    },
+    Rule {
+        feature: "c40_norm",
+        basis: Basis::RelFloor(0.5),
+        looks: Looks::Samples,
+        k: K_ORDER4,
+        why: "|Ĉ40|/C21², the same block-wise sum at four times the residual offset (T-404). A \
+              fourth-order moment ratio, hence K_ORDER4, and relative because the feature spans \
+              0.05 (noise-like) to 2.4 (cw) and a statistic sitting at 2 is entitled to forty times \
+              the absolute wander of one sitting at 0.05. The floor is the gap the dimension exists \
+              to resolve — BPSK near 2 against QPSK near 1 against the noise floor — so a waveform \
+              passing through zero does not get a tolerance of zero with it.",
+    },
+    Rule {
+        feature: "c42_norm",
+        basis: Basis::RelFloor(0.5),
+        looks: Looks::Samples,
+        k: K_ORDER4,
+        why: "Ĉ42/C21². Its own leading term mean(|x|⁴) was always offset-immune; what made it \
+              move was the |C20|² it subtracts, which is now the block-wise quantity above — so \
+              this recovers with the other two rather than separately, which is what T-313's 93 % \
+              attribution predicted. Fourth-order and signed, so the same relative basis and floor \
+              as c40_norm.",
+    },
+    Rule {
+        feature: "cp_corr",
+        basis: Basis::Abs(1.0),
+        looks: Looks::Samples,
+        k: K_ORDER2,
+        why: "the largest cyclic-prefix autocorrelation peak, each lag now reported as a \
+              bias-corrected coherence — (r² − 1/k)/(1 − 1/k) — so the null level a lag with no \
+              cyclic prefix behind it reads is 0 at every record length instead of 1/sqrt(k) \
+              (T-404). A correlation coefficient, so 1.0 is the scale. The statistic is a \
+              DIFFERENCE of two such coherences, each with null standard error 1/sqrt(k), and \
+              K_ORDER2 is exactly 3·sqrt(2) — the 3σ allowance for a difference of two. \
+              Looks::Samples counts n/4 where the products carry about n/2, which makes the \
+              tolerance conservative by sqrt(2) rather than fitted.",
+    },
+    Rule {
+        feature: "if_slope_r2",
+        basis: Basis::Abs(1.0),
+        looks: Looks::LocalWindows,
+        k: K_BOUNDED_MEDIAN,
+        why: "R² of a straight-line fit to the smoothed instantaneous frequency, taken as the best \
+              median within-window R² over ALL THREE of RAMP_WINDOWS or not at all (T-404) — a \
+              maximum over whichever lengths happened to fit was a different estimand at every \
+              record length, and biased in the direction that makes the defect. Bounded to [0, 1], \
+              so 1.0 is the scale, and what remains is the sampling error of a median over however \
+              many 512-sample windows the record held.",
+    },
+    Rule {
+        feature: "if_local_modality",
+        basis: Basis::Abs(1.0),
+        looks: Looks::LocalWindows,
+        k: K_BOUNDED_MEAN,
+        why: "the count of instantaneous-frequency modes about the carrier's local trend, read off \
+              a kernel-smoothed histogram rather than a raw 48-bin one (T-404), so the estimator no \
+              longer invents and loses whole modes as the counts per bin thin out. The scale is ONE \
+              WHOLE MODE, which is the gap the dimension exists to resolve: 1 for an angle \
+              modulation, 2 for a keyed pair, 4 for a 4-FSK. A MEAN over windows, not a median: a \
+              median of integers flips whole as the window count changes parity, which is a \
+              reading of the record. So K_BOUNDED_MEAN, and a move of a whole mode fails wherever \
+              the record held three windows or more.",
+    },
+    Rule {
+        feature: "carrier_line_db",
+        basis: Basis::Abs(DB_PER_RELATIVE),
+        looks: Looks::Segments,
+        k: K_ORDER2,
+        why: "the strongest line's excess over what a band of pure noise would have peaked at, \
+              10·log10(1 + peak/median − null) with the null taken from the Wilson-Hilferty \
+              quantile of Gamma(M) (T-404). The raw peak-over-median was an order statistic whose \
+              upward bias is set by the segment count, which is the one property of the record \
+              T-312's transform pin left moving. What remains is the sampling error of the peak bin \
+              itself, a second-order statistic over M segments, converted from relative error to dB \
+              by DB_PER_RELATIVE.",
+    },
 ];
 
 /// Segments a record of `n` samples yields at the pinned transform and 50 % overlap.
@@ -496,6 +544,10 @@ impl Rule {
             }
             Looks::Segments => scale * self.k / segments(n).max(1.0).sqrt(),
             Looks::SegmentBins => scale * self.k / (segments(n).max(1.0) * MIN_SHAPE_BINS).sqrt(),
+            Looks::LocalWindows => {
+                let windows = (n as f64 * duty * duty / IF_LOCAL_WINDOW as f64).max(1.0);
+                scale * self.k / windows.sqrt()
+            }
             Looks::SpectralKurtosis => {
                 let m = segments(n).max(2.0) as u32;
                 // Two named corrections on top of the Gaussian-noise formula, both from what the
@@ -562,7 +614,14 @@ fn signal_features_survive_truncation_of_one_waveform() {
     let mut compared = 0usize;
     for class in Class::TAXONOMY {
         for seed in DEV_SEEDS.start..DEV_SEEDS.start + 3 {
-            let s = generate(*class, &SynthConfig::new(SNR_DB, seed));
+            // **The packet preamble is off** — see [`SynthConfig::packet_preamble`]. It is a
+            // deliberate non-stationarity, 10–35 % of the record, and truncating into it compares
+            // two different emissions rather than two observations of one.
+            let cfg = SynthConfig {
+                packet_preamble: false,
+                ..SynthConfig::new(SNR_DB, seed)
+            };
+            let s = generate(*class, &cfg);
             let n_full = s.samples.len();
             let ratio = s.symbol_sample_rate_hz / s.sample_rate_hz;
             let measure = |c14: &mut SymbolEstimator, take: usize| {
@@ -581,10 +640,10 @@ fn signal_features_survive_truncation_of_one_waveform() {
                     symbols: symbols.as_ref(),
                 })
             };
-            let full = measure(&mut c14, n_full);
+            let reference = measure(&mut c14, n_full);
             // The emission's own on-fraction, measured over the full record and used below to
             // convert samples into independent looks.
-            let duty = full.get("duty").unwrap_or(1.0).clamp(0.05, 1.0);
+            let duty = reference.get("duty").unwrap_or(1.0).clamp(0.05, 1.0);
             for div in PREFIX_DIVISORS {
                 let take = n_full / div;
                 if take < MIN_SAMPLES {
@@ -592,7 +651,8 @@ fn signal_features_survive_truncation_of_one_waveform() {
                 }
                 let cut = measure(&mut c14, take);
                 for rule in RULES {
-                    let (Some(a), Some(b)) = (full.get(rule.feature), cut.get(rule.feature)) else {
+                    let (Some(a), Some(b)) = (reference.get(rule.feature), cut.get(rule.feature))
+                    else {
                         continue;
                     };
                     compared += 1;
