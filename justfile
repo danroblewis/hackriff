@@ -31,6 +31,8 @@ default:
 # `--phase check|acceptance` runs half the chosen suites (how CI's two jobs split it).
 #
 # `just lint` + `just test` + `just acceptance-ci` by hand remain the periodic/milestone check.
+#
+# THE merge gate (T-396): classify the diff, print the decision, run exactly the suites it needs.
 gate *args:
     uv run --locked --project py python -m hkpy.gate {{args}}
 
