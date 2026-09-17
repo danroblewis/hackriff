@@ -89,3 +89,8 @@
 .timenav .tn-overview { position: absolute; inset: 0; width: 100%; height: 100%; display: block; image-rendering: pixelated; }
 .timenav .tn-view { position: absolute; left: -1px; right: -1px; box-sizing: border-box; border: 1px solid var(--amber); background: var(--amber-soft); cursor: grab; }
 .timenav .tn-draft { position: absolute; left: -1px; right: -1px; box-sizing: border-box; border: 1px dashed var(--amber); background: var(--amber-soft); pointer-events: none; }
+
+/* T-368: the frequency navigator's survey strip. Upscaled, never smoothed, for the same reason as
+   the time bar's overview: repeating a served cell across pixels shows what was measured, while
+   interpolating between them invents a value. Grey cells in it are never-observed spectrum. */
+.freqnav .fn-survey { position: absolute; inset: 0; width: 100%; height: 100%; display: block; image-rendering: pixelated; border-radius: 2px; }

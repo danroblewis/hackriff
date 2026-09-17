@@ -44,6 +44,16 @@
 //     frequency range and its gestures move only the time cursor; the horizontal bar's content is
 //     the survey across the spectrum and its gestures move only the frequency view. Neither reads
 //     the other's gesture, and neither writes the other's slice.
+//  5. **(T-368) Grey means genuinely unobserved.** The frequency bar's survey strip is the backend
+//     coverage map (`GET /api/coverage`), not an energy picture: over the device-available spectrum
+//     most cells were never tuned to, and shading them from energy alone would paint never-observed
+//     spectrum as *quiet*. `state` decides grey and nothing else does; a `shade` of zero is a
+//     measured quiet cell and is drawn on the ramp, not grey.
+//  6. **(T-376) The frequency bar has a viewport of its own**, opening centred on the current tune
+//     rather than on the middle of a 1 MHz–6 GHz range (where a 2.4 MHz window is invisible, not
+//     off-centre). The wheel zooms that viewport about the pointer with the waterfall's own
+//     `wheelFactor`; an untouched viewport follows the tune, a user-framed one stays put. No wheel
+//     and no pan on either bar reaches the device — property 1 is unchanged by it.
 //
 // Everything below is placement, gesture and styling. Which states are achievable, which windows
 // are active and what the capture window spans are all backend answers (`ui/src/navigators.ts` is
@@ -54,8 +64,9 @@ import {
   detailLabel, snapState, snapTimeCell, type DetailSource, type HistoryTier, type NavigationGrid,
 } from "../../navigation";
 import {
-  activeWindows, bandKey, litSegments, placeOn, regionFromDrag, spanOf, spectrumExtent, timeExtent,
-  timelineRequest, type Band, type Range,
+  activeWindows, bandKey, coverageRequest, litSegments, placeOn, regionFromDrag, spanOf,
+  spectrumExtent, surveyCells, surveyViewport, timeExtent, timelineRequest, unobservedCount,
+  zoomWithin, type Band, type CoverageCell, type CoverageResponse, type Range,
 } from "../../navigators";
 import {
   captureWindow, currentSpan, durationText, overviewShade,
@@ -86,6 +97,10 @@ const TIME_ROWS = 6;
  * (T-367). A drag moves the view on every pointer event; this coalesces the storm into one request
  * without the bar lagging behind a settled selection. */
 export const BAND_SETTLE_MS = 250;
+
+/** Cells the frequency navigator asks the coverage map to fold the spectrum onto (T-368): what the
+ * survey strip draws, one cell to one pixel column, upscaled but never smoothed. */
+export const SURVEY_CELLS = 512;
 
 // ---------------------------------------------------------------------------
 // Frequency navigator — pure decisions
@@ -299,16 +314,76 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
   const { store, client } = ctx;
   el.replaceChildren();
 
+  // T-368: the survey strip. Its cells are the backend's coverage map, so the bar can show what
+  // was actually sampled across the spectrum and grey only what nothing ever looked at.
+  const strip = h("canvas", {
+    class: "fn-survey", role: "img",
+    "aria-label": "Survey coverage across the device-available spectrum; grey is never observed",
+  }) as HTMLCanvasElement;
   const litLayer = h("div", { class: "fn-lit-layer" });
   const marker = h("div", { class: "fn-view", title: "The frequency window on screen — drag to pan it" });
   const draft = h("div", { class: "fn-draft", hidden: true });
   const label = h("span", { class: "fn-label" });
   const offerBtn = h("button", { class: "fn-offer", type: "button" }, "");
   offerBtn.hidden = true;
-  const track = h("div", { class: "fn-track" }, litLayer, marker, draft, offerBtn);
+  const track = h("div", { class: "fn-track" }, strip, litLayer, marker, draft, offerBtn);
   el.replaceChildren(track, label);
 
-  const extent = (): Range | null => spectrumExtent(store.get().navGrid.grid?.frequency ?? null);
+  // T-376: the bar has a viewport of its own. `bounds` is the whole device-available spectrum as
+  // the front end reported it (the union of `ranges_hz`); `extent` is the slice of it on the bar.
+  const bounds = (): Range | null => spectrumExtent(store.get().navGrid.grid?.frequency ?? null);
+  /** The viewport the user last zoomed to, and whether they ever did. An untouched viewport
+   * follows the tune centre; a touched one is left where they put it (see `surveyViewport`). */
+  let viewport: Range | null = null;
+  let viewportTouched = false;
+  const tuned = () => store.get().navGrid.grid?.frequency?.current ?? null;
+  const extent = (): Range | null => {
+    const t = tuned();
+    viewport = surveyViewport(bounds(), viewport, viewportTouched, t?.center_hz, t?.span_hz);
+    return viewport;
+  };
+
+  /** The strip the backend last served, and the extent it was served for — so a readout never
+   * describes a spectrum range the drawn pixels are not of. */
+  let survey: CoverageCell[] = [];
+  /** The extent the drawn strip was asked for, so a viewport change re-asks rather than restretching
+   * cells of one range across another. */
+  let surveyFor = "";
+
+  const drawSurvey = () => {
+    const c = strip.getContext("2d");
+    if (!c) return;
+    if (survey.length === 0) {
+      // Not asked yet, or nothing served: draw nothing. An empty strip is not a strip of
+      // unobserved cells — the bar has been told neither that something looked nor that nothing did.
+      strip.width = strip.height = 1;
+      c.clearRect(0, 0, 1, 1);
+      return;
+    }
+    strip.width = survey.length;
+    strip.height = 1;
+    const img = c.createImageData(survey.length, 1);
+    for (let i = 0; i < survey.length; i++) {
+      const cell = survey[i];
+      const p = i * 4;
+      const v = cell.state === "observed" ? cell.shade : undefined;
+      if (cell.state !== "observed") {
+        // Never observed: grey. Never the low end of the ramp — nothing looked here, which is not
+        // the same finding as looking and seeing nothing.
+        img.data[p] = img.data[p + 1] = img.data[p + 2] = 110;
+        img.data[p + 3] = 70;
+      } else if (v === null || v === undefined) {
+        // Sampled, but no level retained for it: a flat tint, distinct from grey and from the ramp.
+        img.data[p] = 55; img.data[p + 1] = 85; img.data[p + 2] = 95; img.data[p + 3] = 150;
+      } else {
+        img.data[p] = Math.round(20 + 40 * v);
+        img.data[p + 1] = Math.round(120 + 110 * v);
+        img.data[p + 2] = Math.round(130 + 90 * v);
+        img.data[p + 3] = Math.round(70 + 185 * v);
+      }
+    }
+    c.putImageData(img, 0, 0);
+  };
 
   offerBtn.addEventListener("click", () => {
     const offer = store.get().live.retuneOffer;
@@ -347,8 +422,14 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
     }
 
     const n = s.navGrid.windows.length;
+    // T-368: how much of the spectrum was never looked at, from the served coverage. `null` (not
+    // asked yet) says so rather than reporting nothing observed.
+    const grey = unobservedCount(survey);
+    const coverage = grey === null || surveyFor !== (ext ? `${ext.lo}:${ext.hi}` : "")
+      ? "coverage unknown"
+      : `${grey} of ${survey.length} never observed`;
     label.textContent = ext
-      ? `${fmtEdges(ext.lo, ext.hi)} MHz · ${s.navGrid.loaded ? `${n} active capture window${n === 1 ? "" : "s"}` : "capture windows unknown"}`
+      ? `${fmtEdges(ext.lo, ext.hi)} MHz · ${s.navGrid.loaded ? `${n} active capture window${n === 1 ? "" : "s"}` : "capture windows unknown"} · ${coverage}`
       : s.navGrid.loaded ? "no navigable spectrum reported (no live front end)" : "navigation grid not loaded";
   };
 
@@ -393,24 +474,48 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
   });
   let panOverflow = 0;
 
-  // Wheel zooms the main view's frequency axis about the pointer. A view gesture; the front end's
-  // own span is a device action and lives in the SDR control panel.
+  // T-376: the wheel zooms **this bar's own viewport** about the pointer, with the same
+  // `ax.wheelFactor` the waterfall uses, so the gesture matches. Zooming about the pointer pans as
+  // it scales, which is how the bar is moved along the spectrum. It writes no store slice and
+  // reaches no device route — a survey frame is not a tune (T-343), and T-340's control still
+  // holds: no pan and no wheel on either bar can move the radio.
   track.addEventListener("wheel", (e) => {
-    const s = store.get();
-    const g = s.live.centerHz !== null && s.live.bandwidthHz !== null && s.live.bins !== null
-      ? { centerHz: s.live.centerHz, bandwidthHz: s.live.bandwidthHz, bins: s.live.bins } : null;
+    const b = bounds();
     const ext = extent();
-    if (!g || !s.live.view || !ext || e.deltaY === 0) return;
+    if (!b || !ext || e.deltaY === 0) return;
     e.preventDefault();
-    const hz = ext.lo + ax.pointerFrac(e.clientX, track.getBoundingClientRect()) * spanOf(ext);
-    const at = ax.hzToFrac(s.live.view, hz);
-    store.set(setLiveView(ax.zoomAt(g, s.live.view, Math.min(1, Math.max(0, at)), ax.wheelFactor(e.deltaY, e.deltaMode))));
+    const at = ax.pointerFrac(e.clientX, track.getBoundingClientRect());
+    // Never narrower than one capture window: a survey frame inside the live window would claim to
+    // resolve the spectrum more finely than the front end can open it (T-341's rule, on this axis).
+    const floor = tuned()?.span_hz ?? spanOf(b) / SURVEY_CELLS;
+    viewport = zoomWithin(b, ext, Math.min(1, Math.max(0, at)), ax.wheelFactor(e.deltaY, e.deltaMode), floor);
+    viewportTouched = true;
+    render();
+    void refreshSurvey();
   }, { passive: false });
+
+  /** Re-asks for the strip when the viewport it is drawn on has moved (or nothing is drawn yet). */
+  async function refreshSurvey() {
+    const ext = extent();
+    const path = coverageRequest(ext, SURVEY_CELLS);
+    if (!path) return;
+    const key = ext ? `${ext.lo}:${ext.hi}` : "";
+    const body = await client.get<CoverageResponse>(path).catch(() => null);
+    if (!body) return;
+    survey = surveyCells(body);
+    surveyFor = key;
+    drawSurvey();
+    render();
+  }
 
   store.select((s) => s.navGrid, render, { immediate: true });
   store.select((s) => s.live.view, render);
   store.select((s) => s.live.retuneOffer, render);
   store.select((s) => s.device.deviceId, render);
+  // The tune moved: an untouched viewport follows it, so the strip it is drawn on has to follow too.
+  store.select((s) => s.navGrid.grid?.frequency?.current?.center_hz ?? null, () => {
+    if (!viewportTouched) void refreshSurvey();
+  });
 
   // The one poll that fills the navigation slice, read by both navigators.
   startPoll(async () => {
@@ -418,6 +523,12 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
     if (!body) return;
     store.set(setNavigation({ frequency: body.frequency ?? null, time: body.time ?? null }, activeWindows(body)));
   }, 15_000);
+
+  // T-368: the survey strip's own poll. It asks about the **viewport** the bar is showing, so the
+  // cells it draws are of exactly the range under them — zooming out re-asks over the wider range
+  // rather than restretching one range's cells across another. Whether a cell is observed is
+  // decided by the route from the tune history; nothing here infers it from the values it holds.
+  startPoll(refreshSurvey, 15_000);
 }
 
 // ---------------------------------------------------------------------------

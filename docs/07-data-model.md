@@ -444,6 +444,41 @@ Each axis errs in the direction where the user loses *choice* rather than *truth
 
 The wire form is `GET /api/navigation` and `resolution.source` on `GET /api/history` (`docs/api.md`); the UI consequences are docs/14; the navigation surfaces that consume the grid are ADR-0017's Explore/History split and the edge navigators (T-340), the capture timeline (T-338).
 
+### 4.4 The coverage map: grey means genuinely unobserved (T-368)
+
+§4.3 stops a view **claiming** detail the front end never captured. This is the other half of the same honesty: a view may **show** what the front end did capture, and must grey only what it did not.
+
+> **The waterfall shows the data that exists for the selected (time, frequency); grey means genuinely unobserved.** … This requires the backend to keep a **coverage map derived from the SDR configuration/tune history** — for each interval, which centre/span/rate (and which device) was active — so observed-vs-unobserved is computed from what was actually sampled, and the frequency navigator's survey view is built from that same coverage. (User invariant, 2026-09-16.)
+
+#### The three states, and why the third is a type and not a null
+
+| State | Meaning | Model |
+|---|---|---|
+| 1 | observed, and there was energy | `Coverage::Observed(Sampled)`, level high |
+| 2 | observed, and it was **quiet** — a finding | `Coverage::Observed(Sampled)`, level low |
+| 3 | **never observed** — no claim either way | `Coverage::Unobserved` |
+
+States 2 and 3 are the pair that gets collapsed, and collapsing them is how a view comes to report "nothing here" about spectrum nothing ever looked at — an absence-of-signal finding invented out of an absence of measurement. So the model makes state 3 **unrepresentable as state 2**: `Sampled` has no value meaning "nothing was sampled" (`hk_store::coverage::Sampled::new` refuses a zero span count or a zero sampled duration and yields `Unobserved`), and on the wire an unobserved cell carries **no measurement keys at all** rather than null ones. Same rule as `BiasTee::Unknown` ≠ `Off` and `Encryption::Unknown` ≠ clear: *nothing said is never permissive.*
+
+A fourth thing exists and is deliberately distinct: **observed, level not retained** (`shade: null` on an observed cell) — the radio sampled here but the spectrum-history pyramid keeps no value for it. Drawn as neither grey nor the bottom of the ramp.
+
+#### Coverage is device-local
+
+Coverage is a fact about **one front end** (§2's provenance rule; T-259/T-305). Two radios covering disjoint ranges are two coverage grids, each unobserved exactly where the other looked — never merged into a claim that either saw both. `Device::Unknown` is its own device, not a wildcard: a span whose record did not name the radio is evidence that *something* looked, never that a *particular* front end did. A union across devices exists only as an explicitly-requested, explicitly-labelled `Device::Any`.
+
+#### Derived from provenance already written, not a new ledger
+
+No new record is journalled. Two existing ones already say "for each interval, which centre/span/rate was active"; one of them also says which device.
+
+| Source | Interval | Centre/span/rate | Device | Horizon |
+|---|---|---|---|---|
+| **IQ ring journal** (§2's `Recording`/ADR-0014 ring segments) — a new segment on **every** provenance change, so retunes are segment boundaries by construction | yes | yes | **yes** (`Provenance::device_id`) | the ring's configured retention |
+| **Observation log** (`DwellRecord`/`SweepRecord`, ADR-0012 §1; `ObservedWindow::covered()` already removes the DC notch) | yes | yes | **no** (`device_id` is not on these records today) | 30 days |
+
+This is the gap the model still carries, and it is worth stating plainly: the long-horizon tune history does not record which radio made it. Until `DwellRecord`/`SweepRecord` carry a device, coverage older than the IQ ring is attributed to `Device::Unknown` — honest, and weaker than it needs to be. Adding `device_id` to those two records (with `serde(default)`, so existing logs read back as unknown rather than as a device) is the change that closes it.
+
+The wire form is `GET /api/coverage` (`docs/api.md`); the surface it fills is docs/14's frequency navigator; the rule it serves is ADR-0017 §2.4.5.
+
 ## 5. Worked examples
 
 ### 5.1 Science — natural radio noise-floor survey (SPACE-050)

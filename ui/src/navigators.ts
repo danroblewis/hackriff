@@ -292,3 +292,121 @@ export function timelineRequest(band: Band | null, columns: number, rows: number
   const q = `columns=${columns}&rows=${rows}`;
   return bandKey(band) ? `/api/timeline?f_lo=${band!.loHz}&f_hi=${band!.hiHz}&${q}` : `/api/timeline?${q}`;
 }
+
+// ---------------------------------------------------------------------------
+// The frequency navigator's survey strip: `GET /api/coverage` (T-368)
+// ---------------------------------------------------------------------------
+//
+// The user's invariant: *"the waterfall shows the data that exists for the selected (time,
+// frequency); grey means genuinely unobserved … the frequency navigator's survey view is built from
+// that same coverage."*
+//
+// The bar spans the whole device-available spectrum, most of which the radio has never been tuned
+// to. Filling it from energy alone would paint never-observed spectrum as **quiet**, which is an
+// absence-of-signal finding invented out of an absence of measurement. So the strip's cells come
+// from the backend's coverage map, which decides observed-versus-unobserved from the tune history,
+// and this file only says where each cell goes.
+//
+// Nothing here decides what grey means. The route states the rule (`resolution.grey_rule`), and the
+// three cases a cell can be in are a backend distinction carried through to the pixel.
+
+/** One cell of the survey strip, exactly as `GET /api/coverage` serves it (docs/api.md).
+ *
+ * An **unobserved** cell has no measurement keys at all — not null ones — so there is no field here
+ * that can be misread as a low value. `shade` is present only on an observed cell, and `null` there
+ * means *sampled, level not retained*: a third case, drawn as neither grey nor the ramp's bottom. */
+export interface CoverageCell {
+  /** `"observed"` (the front end was tuned here) or `"unobserved"` (nothing ever looked). */
+  state: "observed" | "unobserved";
+  /** Where on the served scale this cell sits, 0…1; absent or `null` when no level is retained. */
+  shade?: number | null;
+}
+
+/** The parts of `GET /api/coverage` this bar reads. */
+export interface CoverageResponse {
+  grid?: { cells: number; f_lo_hz: number; f_cell_hz: number } | null;
+  /** The deliberate union across front ends, labelled `"any"` by the route. */
+  any?: { cells?: CoverageCell[] | null } | null;
+}
+
+/** The `GET /api/coverage` request for the strip across `ext`, or `null` when there is no spectrum
+ * extent to ask about — and then the bar draws no strip rather than one over an assumed range. */
+export function coverageRequest(ext: Range | null, cells: number): string | null {
+  if (!ext || !(ext.hi > ext.lo) || !(cells >= 1)) return null;
+  return `/api/coverage?f_lo=${ext.lo}&f_hi=${ext.hi}&cells=${Math.round(cells)}`;
+}
+
+/** The union strip the backend served. `[]` when it served none — *not asked yet*, which the bar
+ * draws as nothing at all, never as a band of unobserved cells it was not told about. */
+export function surveyCells(body: CoverageResponse | null | undefined): CoverageCell[] {
+  const c = body?.any?.cells;
+  return Array.isArray(c) ? c : [];
+}
+
+/** How many of `cells` were never observed — the readout beside the strip. `null` for an empty
+ * strip, because "not asked yet" is not "nothing observed". */
+export function unobservedCount(cells: readonly CoverageCell[]): number | null {
+  return cells.length === 0 ? null : cells.filter((c) => c.state !== "observed").length;
+}
+
+// ---------------------------------------------------------------------------
+// The frequency navigator's own viewport (T-376)
+// ---------------------------------------------------------------------------
+//
+// The user: *"the bottom FREQUENCY bar surveys the whole device-available range but its VIEW is
+// CENTRED ON THE CURRENT TUNE CENTRE by default — so starting at centre 100.8 MHz means the bottom
+// bar is centred around 100.8 MHz (not the 1–6 GHz midpoint), and you wheel-zoom out to see more of
+// the range or in to narrow it."*
+//
+// Before this the bar's extent *was* the whole reported spectrum, fixed. On a 1 MHz–6 GHz front end
+// a 2.4 MHz capture window is then four ten-thousandths of the bar: not off-centre, invisible. So
+// the bar gets a viewport of its own — a range inside `bounds` that the wheel zooms and that the
+// drawn segments, the view marker and the survey strip are all placed on.
+//
+// **No bound here is a constant.** `bounds` is the union of `ranges_hz` as the device reported it,
+// and the default span is a multiple of the front end's *own* current window. Nothing in this file
+// knows what band the radio is on.
+
+/** How many capture windows wide the bar opens by default. Wide enough that the survey around the
+ * tune is worth reading, narrow enough that the window is a visible fraction of the bar. */
+export const SURVEY_SPAN_WINDOWS = 50;
+
+/**
+ * The bar's default viewport: `SURVEY_SPAN_WINDOWS` capture windows wide, **centred on the tune
+ * centre**, clamped inside `bounds`.
+ *
+ * Falls back to the whole of `bounds` when the front end reports no current tune — with nothing to
+ * centre on, the honest frame is the whole reported range rather than a guessed middle.
+ */
+export function defaultViewport(
+  bounds: Range | null,
+  centerHz: number | null | undefined,
+  spanHz: number | null | undefined,
+): Range | null {
+  if (!bounds || !(bounds.hi > bounds.lo)) return null;
+  if (!Number.isFinite(centerHz as number) || !Number.isFinite(spanHz as number) || !((spanHz as number) > 0)) {
+    return { ...bounds };
+  }
+  const half = Math.min(((spanHz as number) * SURVEY_SPAN_WINDOWS) / 2, spanOf(bounds) / 2);
+  return clampInto(bounds, { lo: (centerHz as number) - half, hi: (centerHz as number) + half });
+}
+
+/**
+ * The viewport to draw on now.
+ *
+ * **An untouched viewport follows the tune centre; a viewport the user has zoomed or panned does
+ * not.** The default frame answers *where am I*, so it should move when the radio does; once the
+ * user has deliberately framed a region, re-centring under them would undo the gesture they just
+ * made. A touched viewport is only clamped back inside `bounds`, never re-placed.
+ */
+export function surveyViewport(
+  bounds: Range | null,
+  current: Range | null,
+  touched: boolean,
+  centerHz: number | null | undefined,
+  spanHz: number | null | undefined,
+): Range | null {
+  if (!bounds || !(bounds.hi > bounds.lo)) return null;
+  if (touched && current && current.hi > current.lo) return clampInto(bounds, current);
+  return defaultViewport(bounds, centerHz, spanHz);
+}

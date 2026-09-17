@@ -120,6 +120,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     // T-338: the capture window (the IQ ring's retention, not the history horizon) and the
     // compressed overview waterfall drawn on it
     ("GET", "/api/timeline"),
+    // T-368: the coverage map - which front end actually sampled which frequency, so a view greys
+    // only what was never observed
+    ("GET", "/api/coverage"),
     ("GET", "/api/status"),
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
@@ -937,6 +940,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         | "/api/analysis/strongest"
         | "/api/navigation"
         | "/api/timeline"
+        | "/api/coverage"
         | "/api/report"
         | "/api/status"
         | "/api/taxonomy"
@@ -980,6 +984,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         // T-338: the scrubber's span is the IQ ring's retention — the capture window — and the
         // band it draws is a measurement made here, not a reduction made in the client.
         "/api/timeline" => crate::timeline::timeline_json(state, &req.query),
+        // T-368: observed-versus-unobserved is computed from the tune history - what the front end
+        // actually sampled - so grey means genuinely unobserved and never "quiet".
+        "/api/coverage" => crate::coverage::coverage_json(state, &req.query),
         "/api/status" => state
             .status
             .as_ref()

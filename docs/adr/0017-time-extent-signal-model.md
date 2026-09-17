@@ -210,6 +210,26 @@ Wire form: `docs/api.md` "The capture window, and the overview drawn on it"; dat
 
 ---
 
+#### 2.4.5 Grey means genuinely unobserved: the coverage map (T-368; the user's time/waterfall invariant)
+
+> **The waterfall shows the data that exists for the selected (time, frequency); grey means genuinely unobserved.** The view renders whatever samples are actually available for the current time-and-frequency selection, and greys only cells that were **truly never observed** — never a fixed-size grey placeholder. Switching to **Live** for a frequency range **backfills from history** (ring / spectrum-history pyramid) instead of starting black as if the device just powered on. This requires the backend to keep a **coverage map derived from the SDR configuration/tune history** — for each interval, which centre/span/rate (and which device) was active — so observed-vs-unobserved is computed from what was actually sampled, and the frequency navigator's survey view is built from that same coverage.
+
+§2.4.3 stops a window **claiming** detail it never captured. This is its other half: the window may **show** what it did capture, and must grey only what it did not.
+
+**Decision.** Three states, and the third is a distinct value at every layer:
+
+1. observed, and there was energy;
+2. observed, and it was **quiet** — a real, reportable finding;
+3. **never observed** — no claim either way, and the only thing that is grey.
+
+States 2 and 3 are the pair that collapses, and collapsing them invents an absence-of-signal finding out of an absence of measurement. So state 3 is made **unrepresentable as state 2**: `hk_store::coverage::Sampled` has no value meaning "nothing was sampled" — its only constructor refuses a zero span count or a zero sampled duration and yields `Coverage::Unobserved` — and on the wire (`GET /api/coverage`) an unobserved cell carries **no measurement keys at all**, not null ones. This is the `BiasTee::Unknown` ≠ `Off` rule (§ADR-0013, T-325) applied to observation itself: *nothing said is never permissive.* A fourth case is kept distinct rather than folded in: **observed, level not retained** (`shade: null` on an observed cell).
+
+**Device-local.** Coverage is a fact about one front end. Two radios covering disjoint ranges are two grids, each unobserved where the other looked; `Device::Unknown` is its own device and never answers for a named one; a union exists only as an explicitly-requested, explicitly-labelled `Device::Any`. Merging them would be the claim T-259/T-305 exist to forbid.
+
+**Derived, not journalled.** The map is read out of provenance that is already written: the **IQ ring journal** (a segment per provenance change, so a segment per retune, each naming the device) over the ring's retention, and the **observation log**'s `DwellRecord`/`SweepRecord` windows (ADR-0012 §1) over 30 days. The second records no `device_id` today, so its spans are `unknown` — honest, and the one gap this decision leaves open (§11).
+
+**Consequence for the frequency navigator.** Its survey strip is built from this map and from nothing else, and the bar gained a viewport centred on the current tune (T-376) precisely so a user can zoom out toward the whole device range — which is the moment a coverage-blind strip would paint never-observed spectrum as quiet.
+
 ## 3. Invariant 3 — Candidate / Confirmed / History
 
 | Surface | Object | Scope | Question it answers |
@@ -376,6 +396,7 @@ No conflict. `CandidatePipeline` rows hang off the emitter and are interpretatio
 | §2.20 Selection | Note that `t_lo`/`t_hi` already make a selection a time–frequency region; a timeline drag is the existing object. |
 | §2.21 Classification | One sentence: `family_in_window` is an additive projection of the same rank; the ladder is unchanged. |
 | §4 | The central region-over-time query gains presence intervals as its event source, beside Detection and Track. |
+| **New §4.4 Coverage map** (T-368) | Observed-versus-unobserved is computed from the tune history (IQ ring journal + observation log), per device, with `Coverage::Unobserved` a distinct value from an observed-and-quiet cell. Records the open gap: `DwellRecord`/`SweepRecord` carry no `device_id`, so coverage beyond the ring is `Device::Unknown`. |
 
 ### 8.2 An emitter that is a set of disjoint events
 

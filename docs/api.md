@@ -38,6 +38,7 @@
 | GET | `/api/analysis/strongest` | token | `f_lo`, `f_hi` (Hz), `window_s`? (default 5, max 300) | T-079 strongest observed signal in the band over the recent window (below) | 400 invalid region/window, 404 no history store |
 | GET | `/api/navigation` | token | `center_hz`+`span_hz`? (together; `span_hz` > 0), `t_cell_s`? | T-341 the achievable `(centre, span)` grid and the history tiers; with a requested state, the nearest realizable one and its live-IQ/overview claim (below) | 400 a non-finite number, or `center_hz`/`span_hz` given apart |
 | GET | `/api/timeline` | token | `f_lo`+`f_hi`? (Hz, together), `columns`? (1…4096, default 96), `rows`? (1…512, default 1). **No `t0`/`t1`** — the time extent is the ring's, not the caller's | T-338 the capture window (the IQ ring's configured retention) and the compressed overview waterfall drawn on it (below) | 400 unknown parameter, a half-given band, or a column/row budget out of range; 404 no spectrum history on this server |
+| GET | `/api/coverage` | token | `f_lo`+`f_hi` (Hz, **required**), `cells`? (1…4096, default 256), `t0`+`t1`? (Unix s, together; default the capture window) | T-368 the coverage map: which front end actually sampled which frequency, so a view greys only what was **never observed** (below) | 400 unknown parameter, a missing or half-given band, a half-given window, or a cell budget out of range; 404 no capture window and no `t0`/`t1` given |
 | GET | `/api/status` | token | – | Pipeline counters (opaque, per-build; never content) | 401, 404 no status on this server |
 
 None of these are audited (`GET` requests never are). All are capped in result size as noted per route.
@@ -557,6 +558,81 @@ So the tier is chosen from the **time** axis — the coarsest tier whose cells a
 #### The detail claim
 
 `resolution` is T-334's block with T-341's three-valued `source` ([Live-IQ detail versus overview](#live-iq-detail-versus-overview-t-341)). The timeline's *horizon* is the ring's; its *pixels* are the pyramid's, so it claims `"spectrum-history"` — or `"survey-overview"` for a span no single capture window could hold — and **never `"live-iq"`**, exactly as `/api/history` does not. `resolution.horizon` repeats `"iq-ring"` beside it, because those are two different questions with two different answers: *which retention does this picture span* and *which tier drew it*.
+
+### `GET /api/coverage` — the coverage map: grey means genuinely unobserved (T-368)
+
+Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `cells` (1…4096, default 256), `t0`&`t1` (Unix s, given together; default the capture window this server holds).
+
+**The rule, from the user** (CLAUDE.md, "Time, the waterfall, and the live view"):
+
+> **The waterfall shows the data that exists for the selected (time, frequency); grey means genuinely unobserved.** The view renders whatever samples are actually available for the current time-and-frequency selection, and greys only cells that were truly never observed — never a fixed-size grey placeholder. … This requires the backend to keep a **coverage map derived from the SDR configuration/tune history** — for each interval, which centre/span/rate (and which device) was active — so observed-vs-unobserved is computed from what was actually sampled, and the frequency navigator's survey view is built from that same coverage.
+
+[`/api/navigation`](#get-apinavigation--the-achievable-centre-span-grid-t-341) stopped the view *claiming* detail the front end never captured. This is the other half: the view may *show* what the front end did capture, and must grey only what it did not. Between them sits the failure this route exists to prevent — **painting never-observed spectrum as quiet**, which invents an absence-of-signal finding out of an absence of measurement.
+
+```jsonc
+{
+  "region": { "lo_hz": 88000000.0, "hi_hz": 108000000.0 },
+  "window": { "t0_s": 1789300320.0, "t1_s": 1789300920.0, "span_s": 600.0,
+              "source": "capture-window" },   // or "requested" when t0/t1 were given
+  "grid":   { "cells": 4, "f_lo_hz": 88000000.0, "f_cell_hz": 5000000.0 },
+  "devices": [{                                // one entry per front end that actually sampled here
+    "device": "hackrf:0000000000000000a06063c8234e925f",
+    "named": true,                             // false for the "unknown" and "any" labels
+    "observed_cells": 2, "unobserved_cells": 2, "observed_fraction": 0.5,
+    "cells": [
+      // 1. observed, and there was energy
+      { "state": "observed", "spans": 1, "observed_s": 600.0, "duty": 1.0,
+        "last_s": 1789300920.0, "center_hz": 100800000.0, "sample_rate_hz": 2400000.0,
+        "shade": 0.87 },
+      // 2. observed, and it was quiet — a real, reportable finding
+      { "state": "observed", "spans": 1, "observed_s": 600.0, "duty": 1.0,
+        "last_s": 1789300920.0, "center_hz": 100800000.0, "sample_rate_hz": 2400000.0,
+        "shade": 0.0 },
+      // 3. never observed — no claim either way. This is the grey cell.
+      { "state": "unobserved" },
+      // observed, but the history keeps no level here: neither grey nor the ramp's bottom
+      { "state": "observed", "spans": 2, "observed_s": 41.5, "duty": 0.069,
+        "last_s": 1789300880.0, "center_hz": 104000000.0, "sample_rate_hz": 2400000.0,
+        "shade": null }
+    ]
+  }],
+  "any": { "device": "any", "named": false, "observed_cells": 3, "unobserved_cells": 1, "cells": [ … ] },
+  "sources": [
+    { "kind": "iq-ring",         "spans": 37, "device_known": true,  "available": true },
+    { "kind": "observation-log", "spans": 12, "device_known": false, "available": true }
+  ],
+  "resolution": { "source": "survey-overview", "live": false, "statement": "…",
+                  "served_span_hz": 20000000.0, "max_live_span_hz": 20000000.0,
+                  "grey_rule": "grey a cell if and only if its state is \"unobserved\"" }
+}
+```
+
+#### Three states, and the third cannot be spelled as the second
+
+| State | Meaning | On the wire |
+|---|---|---|
+| 1 | observed, and there was energy | `"state": "observed"` with a high `shade` |
+| 2 | observed, and it was **quiet** — a finding | `"state": "observed"` with a low `shade` |
+| 3 | **never observed** — no claim either way | `"state": "unobserved"`, **and no measurement keys at all** |
+
+The pair that gets collapsed is 2 and 3, and collapsing them is how a view comes to report "nothing here" about spectrum nothing ever looked at. So an unobserved cell carries **no `shade`, no `duty`, no `observed_s`** — not `null` ones. That is stronger than a nullable number, because there is no field a client can read as zero: the absence is structural. It is the same rule as `bias_tee: "unknown"` ≠ `"off"` — **nothing said is never permissive** — and it holds in the type as well as the JSON: `hk_store::coverage::Sampled::new` refuses to mint an observation out of a zero span count or a zero sampled duration, and hands back `Coverage::Unobserved` instead.
+
+`shade: null` on an **observed** cell is a different thing again: sampled, but the spectrum history keeps no level for it. A client draws that differently from grey and differently from the bottom of the ramp. **Grey is `state == "unobserved"` and nothing else**, which is what `resolution.grey_rule` says in the response.
+
+#### Device-local, never unioned
+
+Coverage is a fact about **one front end**. `devices[]` holds one grid per radio that actually sampled in the region, and two radios covering disjoint ranges come back as two grids, each unobserved exactly where the other looked — never merged into a claim that either one saw both (T-259/T-305: device-local physics reads the device). `"unknown"` is its own device, not a wildcard: a span whose record did not name the radio is evidence that *something* looked, never that a *particular* front end did, so it never satisfies a query for a named one. `any` is the deliberate union and is labelled `"any"` with `"named": false`, so nothing can mistake it for one radio's coverage.
+
+#### Where the map comes from: provenance already written
+
+Nothing new is journalled for this. Two records already say "for each interval, which centre/span/rate was active", and one of them also says which device:
+
+| Source | Interval | Centre/span/rate | Device | Horizon |
+|---|---|---|---|---|
+| IQ ring journal ([`/api/iqbuffer`](#rolling-iq-capture-buffer-t-157) segments, ADR-0014) | yes | yes | **yes** (`device_id`) | the ring's retention |
+| observation log (`DwellRecord`/`SweepRecord`, ADR-0012 §1) | yes | yes (`ObservedWindow`) | no | 30 days |
+
+The ring journal opens a new segment on **every** provenance change, so retunes are segment boundaries by construction — it is already a tune history, and it is the only one that names the radio. The observation log reaches far beyond the ring but records no `device_id` today, so its spans are `"unknown"`. `sources[]` reports both, including when one contributed nothing, so a client can tell *this record had nothing here* from *this record was not consulted*.
 
 ### `GET /api/status` — pipeline counters (T-027)
 
