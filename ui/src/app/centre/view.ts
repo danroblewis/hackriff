@@ -24,7 +24,7 @@
 import * as ax from "../../axis";
 import { ControlError } from "../../controls/client";
 import type { ViewHooks } from "../../controls/gestures";
-import { snapCenter } from "../../navigation";
+import { snapCenter, type DetailPlan } from "../../navigation";
 import { currentSpan } from "../capture/timeline";
 import type { AppContext } from "../context";
 import { toast } from "../shell-slice";
@@ -203,6 +203,30 @@ export async function applyDeviceAction(ctx: AppContext, action: DeviceAction): 
   } catch (e) {
     store.set((s) => ({ live: { ...s.live, pendingView: null } }));
     store.set(toast(retuneErrorText(e)));
+  }
+}
+
+/**
+ * Asks the spectrum reader for a **longer transform** (T-418) — the resolution half of a narrow
+ * selection, and deliberately **not** a device action.
+ *
+ * `POST /api/control/display` is a view control: the reader rebuilds its STFT at the next chunk
+ * boundary, and nothing about the front end moves. No oscillator, no re-plumb, no settle gap, no
+ * `device` key on the answer and none in the audit log — which is exactly why it is not in
+ * `app-centre.test.ts`'s `DEVICE_ROUTES` and why T-343's "only an explicit device action reaches
+ * the front end" is untouched by it. It lives here beside [`applyDeviceAction`] because this module
+ * owns the control-plane calls the centre view makes, not because it is one of them.
+ *
+ * A null plan is "leave the transform alone" — no bounds reported, or the size in force is already
+ * right — and makes no request. A failure is reported and swallowed: the zoom itself succeeded, and
+ * a coarser row than asked for is a worse picture, not a broken one.
+ */
+export async function applyDisplayDetail(ctx: AppContext, plan: DetailPlan | null): Promise<void> {
+  if (!plan || !Number.isFinite(plan.fftSize) || plan.fftSize <= 0) return;
+  try {
+    await ctx.client.post("/api/control/display", { fft_size: plan.fftSize });
+  } catch (e) {
+    ctx.store.set(toast(`Zoomed, but the resolution could not be raised: ${e instanceof Error ? e.message : String(e)}`));
   }
 }
 
