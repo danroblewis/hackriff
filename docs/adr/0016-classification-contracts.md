@@ -108,12 +108,20 @@ pub struct ClassProvenance {
 |---|---|---|---|---|---|
 | fsk, ook-ask | 20 dB (partial 15) — S5 | +3 dB | 0.6 | 0.5 | off |
 | psk-qam | 15 dB — S5 (synthetic only) | order: +5 dB | 0.6 | 0.5 | off |
-| analog | 10 dB — *unverified* (Azzouz–Nandi synthetic) | wfm/nbfm/am +0; ssb/cw +5 | 0.6 | 0.5 | off |
+| analog | 10 dB — *unverified* (Azzouz–Nandi synthetic) | **+3 dB** — dev-measured (T-249) | 0.6 | 0.5 | off |
 | css, ofdm, pulsed | 10 dB — *unverified* | +0 | 0.6 | 0.5 | off |
 | dsss | 10 dB — *unverified* | — | 0.7 | 0.4 | off |
 | noise-like | none (SK/flatness test) | — | 0.7 | — | off |
 
 Below a gate, a family contributes no likelihood mass, so its mass moves to `unknown` with reason `low_snr`. `coarse` can still be set. Continuous signals integrate: the gate applies to the SNR of the analysed extent (S5: RDS rate is trusted at 0 dB over ≥ 0.25 s).
+
+**The analog class gate was `wfm/nbfm/am +0; ssb/cw +5`, an a-priori guess, and the measurement refutes its shape as well as its values (T-249).** `FamilyThresholds` carries one class gate per family rather than per class, so the split was never implemented and the whole family ran at +0 — which is where every analog class error lived. Sweeping the **dev** seeds at 1 dB steps (5 classes × 24 seeds = 120 snippets per step), with the within-family call taken from the fitted class-conditional densities:
+
+| in-band SNR, dB | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 20 |
+|---|---|---|---|---|---|---|---|---|---|
+| class correct | 0.508 | 0.667 | 0.733 | 0.883 | 0.983 | **1.000** | 1.000 | 1.000 | 1.000 |
+
+13 dB is the lowest step at which the call is exact, and it stays exact at every step above — so the gate is **+3 dB over the 10 dB family gate**, uniform across the five classes. The guess was wrong about *which* classes are fragile: `ssb` and `cw` are named correctly at every SNR from 13 dB, and the class that needs the margin is **`am`**, whose envelope troughs go into the noise at 10 dB so that its carrier stops dominating its band and the snippet genuinely measures like a suppressed-carrier emission. Below the gate the class is withheld (reason `below_class_gate`) while the family call stands, per §2's rule that an unmeasurable quantity is absent rather than wrong.
 
 ## 3. Fusion with C17 priors
 

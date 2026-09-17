@@ -355,3 +355,121 @@ fn noise_is_never_called_a_communication_family() {
         "noise called a comm family {rate:.3} of the time"
     );
 }
+
+/// **The analog family names the class it found, or names none — never the wrong one** (T-249).
+///
+/// This is the within-family half of the floors above, which the family-level cells cannot see: a
+/// snippet counted as a correct `analog` call can still be handed a wrong class name, and until
+/// T-249 two of the five were wrong essentially always. Measured on this same blind acceptance
+/// grid, at and above the analog gate: `cw` top-1 **0.000** with a wrong class **every time**, and
+/// `ssb` top-1 0.000 with wrong 1.000/0.917 — both confidently called `am`.
+///
+/// Two defects, both in the hand-written conjunctions that named analog classes:
+/// - `cw` required `sigma_af < 0.02`, a bound below the noise floor of the instantaneous-frequency
+///   estimator at this gate (measured 0.170–0.207 at 10 dB, falling as 1/√ρ), so it never fired.
+/// - `am` used `carrier_line_db > 14` as its "there is a carrier" term, but that feature is a CFAR
+///   strongest-line statistic and a suppressed-carrier SSB emission's loudest audio tone reads
+///   28–40 dB on it — so `am` and `ssb` tied at 0.7 and the tie broke alphabetically.
+///
+/// Both are gone: the order comes from the class-conditional densities, which are fitted per class
+/// on the **dev** split at this geometry, and the class is withheld below the family's class gate.
+/// The assertions below are the properties, not the numbers: every analog class is nameable, and a
+/// name is only given where the measurement supports one.
+#[test]
+fn the_analog_class_call_is_right_or_absent_but_never_confidently_wrong() {
+    let mut c14 = SymbolEstimator::new();
+    let mut seed = ACCEPTANCE_SEED_BASE + 500_000;
+    let analog = [Class::Am, Class::Nbfm, Class::Wfm, Class::Ssb, Class::Cw];
+    let gate = 10.0_f64;
+    let class_gate = thresholds_of("analog")
+        .expect("analog thresholds")
+        .class_gate_db;
+    assert!(
+        class_gate > 0.0,
+        "analog runs its class call at its own family gate, where the dev sweep measures the \
+         within-family accuracy at 0.733 (T-249)"
+    );
+
+    let mut named = 0usize;
+    let mut right = 0usize;
+    let mut wrong = 0usize;
+    let mut per_class: Vec<(&str, usize, usize, usize)> = Vec::new();
+    for class in analog {
+        let (mut n, mut ok, mut bad) = (0usize, 0usize, 0usize);
+        for offset in [class_gate, class_gate + 5.0] {
+            for _ in 0..TRIALS {
+                seed += 1;
+                let c = classify_one(&mut c14, class, gate + offset, seed);
+                c.validate().expect("contract");
+                if c.family != "analog" {
+                    continue; // a family-level abstention; the family floors above judge those
+                }
+                n += 1;
+                match c.class.as_ref() {
+                    Some(call) if call.label == class.label() => ok += 1,
+                    Some(_) => bad += 1,
+                    None => {}
+                }
+            }
+        }
+        named += n;
+        right += ok;
+        wrong += bad;
+        per_class.push((class.label(), n, ok, bad));
+    }
+    for (label, n, ok, bad) in &per_class {
+        eprintln!(
+            "[T-249] {label:<5} at/above class gate: n {n:>3}, correct {ok:>3}, wrong {bad:>3}"
+        );
+    }
+    assert!(named >= 40, "too few analog calls to judge: {named}");
+
+    // **No confident wrong name.** This is the binding property: abstention is free here, a wrong
+    // name is not. Measured after T-249 over the full T-213 grid, the analog class wrong-label rate
+    // at and above the gate is 0.0056 (one snippet in 180), against 0.350 before.
+    let wrong_rate = wrong as f64 / named as f64;
+    assert!(
+        wrong_rate <= 0.05,
+        "analog class wrong-label {wrong_rate:.3}: {per_class:?}"
+    );
+
+    // **Every class is nameable.** `cw` and `ssb` were both at exactly zero, which no accuracy
+    // floor on the family could show.
+    for (label, _, ok, _) in &per_class {
+        assert!(
+            *ok > 0,
+            "{label} was never named correctly at or above its class gate: {per_class:?}"
+        );
+    }
+    assert!(
+        right as f64 / named as f64 >= 0.80,
+        "analog class top-1 {:.3}: {per_class:?}",
+        right as f64 / named as f64
+    );
+
+    // **Below the class gate the name is withheld, not guessed.** At the family gate itself the dev
+    // sweep measures the within-family call at 0.733, so nothing is reported there.
+    let mut below = 0usize;
+    for class in analog {
+        for _ in 0..TRIALS {
+            seed += 1;
+            let c = classify_one(&mut c14, class, gate + class_gate - 1.0, seed);
+            if c.family != "analog" {
+                continue;
+            }
+            below += 1;
+            assert!(
+                c.class.is_none(),
+                "{} named {:?} below the class gate",
+                class.label(),
+                c.class
+            );
+            assert!(
+                c.reasons.iter().any(|r| r == "below_class_gate"),
+                "no reason recorded for the withheld class: {:?}",
+                c.reasons
+            );
+        }
+    }
+    eprintln!("[T-249] below the class gate: {below} analog calls, all class-abstaining");
+}

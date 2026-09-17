@@ -38,7 +38,31 @@ pub const THRESHOLDS: &[FamilyThresholds] = &[
     FamilyThresholds {
         family: "analog",
         snr_gate_db: Some(10.0),
-        class_gate_db: 0.0,
+        // **3 dB, derived on the dev split** (T-249), where it was 0.0 — the only class-naming
+        // family with no margin at all over its own family gate, and the only place any analog
+        // class error remained once the class call moved onto the fitted densities.
+        //
+        // Every wrong analog class call on either split sits at exactly 10 dB, the family gate, and
+        // every one is a confusion with `ssb`: at that SNR an AM envelope's troughs go into the
+        // noise and the carrier stops dominating its own band, so the snippet genuinely measures
+        // like a suppressed-carrier emission. Sweeping the dev seeds at 1 dB steps (5 classes × 24
+        // seeds = 120 snippets per step) puts the lock point sharply:
+        //
+        // ```text
+        //   SNR dB   8      9     10     11     12     13     14     15     20
+        //   correct  0.508  0.667 0.733  0.883  0.983  1.000  1.000  1.000  1.000
+        // ```
+        //
+        // 13 dB is the lowest step at which the within-family call is **exact**, and it stays exact
+        // every step above. 3 dB over the 10 dB family gate is that point — the same margin `fsk`
+        // and `ook-ask` already carry, arrived at independently here. Below it the class is not
+        // reported at all (reason `below_class_gate`): the family call still stands, because the
+        // family-level evidence is unaffected, and the class is withheld rather than guessed. This
+        // is the T-297/T-311/T-312 rule — a quantity the measurement cannot resolve is absent, not
+        // reported as a wrong value — applied to the within-family name.
+        //
+        // The number comes from the **dev** seeds only; the acceptance split is never read for it.
+        class_gate_db: 3.0,
         min_confidence: 0.6,
         open_set_max: 0.5,
     },

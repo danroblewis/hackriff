@@ -285,18 +285,24 @@ pub struct ClassGuess {
 
 /// The within-family class of `family`, or `None` when the features cannot separate its classes.
 ///
-/// `model` supplies the class-conditional densities (the psk-qam order is read from them),
-/// `obw_hz` is the C13 occupied bandwidth (analog needs it to tell broadcast FM from narrowband),
-/// and `mod_index_h` the C14 modulation index (FSK needs it to name MSK).
+/// `model` supplies the class-conditional densities (the `psk-qam` and `analog` orders are both
+/// read from them), and `mod_index_h` the C14 modulation index (FSK needs it to name MSK).
+///
+/// It **no longer takes the C13 occupied bandwidth** (T-249). That parameter existed for one
+/// arm — the `wfm`/`nbfm` split, which the removed `analog_classes` made by testing
+/// `obw_hz > 100e3` — and nothing else read it. The densities separate the two on their own
+/// (measured: `wfm` 36/36 and `nbfm` 35/36 by density arg-max on the blind acceptance seeds),
+/// through the several dimensions on which a broadcast multiplex and a voice channel differ, so
+/// carrying an unused bandwidth into this call would only invite a second, disagreeing opinion
+/// about which of them a snippet is.
 pub fn class_guess(
     family: &str,
     features: &Features,
     model: &DensityModel,
-    obw_hz: Option<f64>,
     mod_index_h: Option<f64>,
 ) -> Option<ClassGuess> {
     let scores: Vec<(&str, f64)> = match family {
-        "analog" => analog_classes(features, obw_hz),
+        "analog" => density_classes("analog", features, model)?,
         "ook-ask" => {
             let low = features.get("low_fraction")?;
             // OOK spends a fifth of its symbols at zero; multi-level ASK never goes fully off.
@@ -307,7 +313,7 @@ pub fn class_guess(
             }
         }
         "fsk" => fsk_classes(features, mod_index_h),
-        "psk-qam" => psk_qam_classes(features, model)?,
+        "psk-qam" => density_classes("psk-qam", features, model)?,
         "ofdm" => vec![("ofdm", 0.95)],
         "css" => vec![("chirp", 0.95)],
         "dsss" => vec![("dsss", 0.95)],
@@ -326,59 +332,43 @@ pub fn class_guess(
     normalise_classes(scores)
 }
 
-fn analog_classes(features: &Features, obw_hz: Option<f64>) -> Vec<(&'static str, f64)> {
-    let carrier = features.get("carrier_line_db").unwrap_or(0.0);
-    let sigma_af = features.get("sigma_af").unwrap_or(0.0);
-    // `symmetry` is sideband balance **about a carrier**, and is measured only where there is one
-    // to measure it about (T-286, [`crate::features::CARRIER_MIN_FRACTION`]). Its absence is
-    // therefore positive evidence that the carrier is suppressed — which is what `ssb` means.
-    let has_carrier = features.get("symmetry").is_some();
-    let flatness = features.get("flatness").unwrap_or(0.0);
-    let low = features.get("low_fraction").unwrap_or(0.0);
-    let env_cv = features.get("env_cv").unwrap_or(0.0);
-    let mut v = Vec::new();
-    // CW: a keyed carrier — strong line, silent gaps, essentially no frequency excursion.
-    v.push((
-        "cw",
-        if carrier > 20.0 && low > 0.15 && sigma_af < 0.02 {
-            0.8
-        } else {
-            0.05
-        },
-    ));
-    // SSB: a suppressed carrier, one sideband, a peaky spectrum and a deeply varying envelope.
-    //
-    // It is **not** named from `symmetry`, which is what this rule used to do. That feature needs a
-    // carrier as its reference and SSB is precisely the case with none, so the rule was firing on
-    // noise — the defect T-248 recorded and left, and which bit once `symmetry` became real: `wfm`
-    // (σ 0.53 about zero, and no carrier line either) started being called `ssb`. What identifies
-    // SSB instead is what is left when the carrier is gone: `nbfm`/`wfm` are far flatter (0.48 /
-    // 0.77 against `ssb`'s 0.11) and far less amplitude-varying (env_cv 0.12 / 0.21 against 0.48),
-    // and `cw` is the keyed one (`low`).
-    v.push((
-        "ssb",
-        if !has_carrier && env_cv > 0.35 && flatness < 0.35 && low < 0.15 {
-            0.7
-        } else {
-            0.05
-        },
-    ));
-    // AM: carrier plus a varying envelope.
-    v.push((
-        "am",
-        if carrier > 14.0 && env_cv > 0.2 && low < 0.15 {
-            0.7
-        } else {
-            0.1
-        },
-    ));
-    // FM: constant envelope; broadcast FM is the wide one (Carson ≈ 180–220 kHz).
-    let fm = if env_cv < 0.25 { 0.7 } else { 0.1 };
-    let wide = obw_hz.is_some_and(|o| o > 100e3);
-    v.push(("wfm", if wide { fm } else { fm * 0.15 }));
-    v.push(("nbfm", if wide { fm * 0.15 } else { fm }));
-    v
-}
+// There was an `analog_classes` hand-written score table here — five conjunctions of feature
+// thresholds, one per analog class, each scoring 0.7–0.8 when it fired and 0.05–0.1 when it did
+// not. It is gone rather than retuned (T-249), for the same reason the `PSK_QAM_CUMULANTS` table
+// above went: **the conjunctions were unreachable or degenerate at the geometry this stage
+// actually runs at**, and the evidence that names these classes correctly was already fitted and
+// sitting unused in the class-conditional densities.
+//
+// What it did, measured on the blind acceptance grid at and above the analog gate (10 dB):
+// `cw` top-1 **0.000** with wrong-label **1.000**, and `ssb` top-1 **0.000** with wrong-label
+// 1.000 / 0.917. Both were called `am`. The family call was correct throughout — the system knew
+// it was analog and then named the wrong class inside it, confidently.
+//
+// **`cw` could not be named at all.** Its conjunction required `sigma_af < 0.02`, written from the
+// noiseless physics ("a keyed carrier has essentially no frequency excursion"). The instantaneous
+// -frequency estimator is **noise-limited**, and at the analog gate the noise is far above that
+// bound: measured σ_af on the keyed carrier is 0.170–0.207 at 10 dB, 0.068–0.092 at 15 dB and
+// 0.038–0.050 at 20 dB — a clean 1/√ρ law (halving per 6 dB), so the threshold is not reached
+// until roughly 28 dB SNR, 18 dB above the gate. The conjunct therefore *never* fired, `cw` scored
+// the 0.05 floor against `am`'s and `nbfm`'s 0.1, and every `cw` snippet in the grid was named
+// something else. A constant taken from the modulation's definition is only admissible if the
+// measurement can resolve it; this one was below its own noise floor.
+//
+// **`ssb` lost an exact tie to `am`.** `am`'s conjunction tested `carrier_line_db > 14.0` as its
+// "there is a carrier" term, but `carrier_line_db` is a CFAR *strongest-line* statistic
+// ([`crate::features`], T-404), not a carrier detector: a suppressed-carrier SSB emission's
+// loudest audio tone reads 28–40 dB on it. So at 15 and 20 dB both conjunctions fired, `ssb`
+// scored 0.7 and `am` scored 0.7, and the tie broke alphabetically — which is why the baseline's
+// `ssb` top-2 was 0.75/0.58 while its top-1 was 0.000: the right answer was there, one place down,
+// losing a coin toss.
+//
+// What replaces both is [`density_classes`] over the same fitted densities `psk-qam` already used.
+// They are fitted per class on the **dev** split at this exact geometry, so they describe what
+// these features really measure on a keyed carrier and on a suppressed-carrier voice signal rather
+// than what a textbook says they would. Measured before any change, as the arg-max of the shipped
+// densities over the five analog classes on the blind acceptance seeds: **168/180 = 0.933**, with
+// `cw` 36/36 and `ssb` 36/36 correct and margins of 25–60 nats. The separating evidence was
+// already on disk; only the call site was not reading it.
 
 fn fsk_classes(features: &Features, mod_index_h: Option<f64>) -> Vec<(&'static str, f64)> {
     let modality = features.get("if_modality").unwrap_or(2.0);
@@ -410,19 +400,27 @@ fn fsk_classes(features: &Features, mod_index_h: Option<f64>) -> Vec<(&'static s
     v
 }
 
-/// The psk-qam order, from the class-conditional densities (ADR-0016 §4.3) rather than from the
-/// textbook cumulant pairs that oversampling has already destroyed (see the note above).
+/// The within-family order of `family`, from the class-conditional densities (ADR-0016 §4.3)
+/// rather than from a hand-written table of feature thresholds. `psk-qam` uses it because the
+/// textbook cumulant pairs that oversampling destroyed cannot rank constellations (see the note
+/// above); `analog` uses it because the conjunctions it replaced could not name `cw` or `ssb` at
+/// all (T-249, see the note above `fsk_classes`).
 ///
 /// **Why this is the right evidence.** The densities are fitted on the dev grid at *this* analysis
 /// geometry, so each class's dimensions describe what the feature really measures on that
-/// modulation rather than what theory says a symbol-rate sample would. Two dimensions carry the
-/// separation the cumulant table could not:
+/// modulation rather than what theory says a symbol-rate sample would. For `psk-qam`, two
+/// dimensions carry the separation the cumulant table could not:
 /// - `c20_norm` — the **second**-order structure, which survives pulse shaping because a real
 ///   constellation keeps `E[x²] ≠ 0` however it is filtered. On the dev grid it reaches 0.97 on
 ///   `bpsk` while every rotationally symmetric class stays under 0.10, which is what makes `bpsk`
 ///   nameable at all.
 /// - `c42_norm` — measured at −0.78 for `qpsk`/`8psk` against −0.47 for `qam64`, separating the
 ///   PSK orders from the dense QAM ones.
+///
+/// For `analog` the separation is spread across the envelope, keying and spectral dimensions
+/// jointly rather than resting on any one threshold, which is exactly why the conjunctions failed
+/// and a fitted density does not: measured arg-max over the five analog classes on the blind
+/// acceptance seeds is 168/180, with `cw` and `ssb` each 36/36.
 ///
 /// **Why the spread is bounded.** The ratio between two classes is clamped to [`MAX_LOG_LR`], the
 /// same 19:1 bound the post-sync verifier applies to its own likelihoods and for the same reason:
@@ -433,9 +431,13 @@ fn fsk_classes(features: &Features, mod_index_h: Option<f64>) -> Vec<(&'static s
 ///   snippet measured too few dimensions to score at all, sits at the 19:1 floor — low, but still
 ///   a hypothesis the verifier and any later stage can recover. That is the failure this replaces.
 /// - **The call cannot be confidently wrong.** With four rivals at the floor the top class reaches
-///   at most `1/(1 + 4/19)` ≈ 0.83, so a psk-qam class call never reports p ≥ 0.9.
-fn psk_qam_classes(features: &Features, model: &DensityModel) -> Option<Vec<(&'static str, f64)>> {
-    let classes = HK_MOD_V1.family("psk-qam")?.classes;
+///   at most `1/(1 + 4/19)` ≈ 0.83, so such a class call never reports p ≥ 0.9.
+fn density_classes(
+    family: &str,
+    features: &Features,
+    model: &DensityModel,
+) -> Option<Vec<(&'static str, f64)>> {
+    let classes = HK_MOD_V1.family(family)?.classes;
     let scored: Vec<(&'static str, Option<f64>)> = classes
         .iter()
         .map(|c| (*c, model.score_class(c, features).map(|s| s.log_evidence)))
@@ -568,9 +570,7 @@ mod tests {
         let tax = &HK_MOD_V1;
         for fam in tax.families {
             let f = feats(Class::Fsk2, 25.0, 9);
-            if let Some(g) =
-                class_guess(fam.name, &f, DensityModel::builtin(), Some(40e3), Some(0.5))
-            {
+            if let Some(g) = class_guess(fam.name, &f, DensityModel::builtin(), Some(0.5)) {
                 assert!(fam.classes.contains(&g.label.as_str()), "{}", g.label);
                 for lp in &g.dist {
                     assert!(fam.classes.contains(&lp.label.as_str()), "{}", lp.label);
@@ -592,7 +592,6 @@ mod tests {
             &feats(Class::Bpsk, 30.0, 4),
             DensityModel::builtin(),
             None,
-            None,
         )
         .unwrap();
         assert_eq!(bpsk.label, "bpsk", "{:?}", bpsk.dist);
@@ -612,7 +611,6 @@ mod tests {
             "analog",
             &feats(Class::Wfm, 30.0, 4),
             DensityModel::builtin(),
-            Some(200e3),
             None,
         )
         .unwrap();
@@ -621,7 +619,6 @@ mod tests {
             "analog",
             &feats(Class::Nbfm, 30.0, 4),
             DensityModel::builtin(),
-            Some(16e3),
             None,
         )
         .unwrap();
@@ -631,7 +628,6 @@ mod tests {
                 "not-a-family",
                 &feats(Class::Ook, 30.0, 4),
                 DensityModel::builtin(),
-                None,
                 None
             ),
             None
