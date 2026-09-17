@@ -350,3 +350,83 @@ fn t369_every_stacked_pair_still_served_carries_a_recorded_verdict() {
         eprintln!("[{T369}] contested and left alone, with reasons: {v:?}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// T-390: one emission where there is one emission — the skirt geometry, on served rows.
+// ---------------------------------------------------------------------------------------------
+
+const T390: &str = "T-390";
+
+/// **The property, with the measured edges.** Drive the user's real 45 s FM capture through the
+/// mock SDR device and read `/api/inventory`: over each broadcast station the truth list holds,
+/// **exactly one** served row's band intersects that station's occupied band, and no served row's
+/// band lies inside a far wider concurrent row's band.
+///
+/// Blind: the truth edges are read only here, in the assertion, and the emission is found by
+/// detection alone. What they pin is the failure the user saw on the live band — dotted candidate
+/// boxes sitting in a confirmed station's skirt, and stacked on each other. Measured on this
+/// fixture (hk replay, 2026-09-16), the station at 101.2988 MHz reports continuous 1000 ms
+/// components 140 kHz wide at SNR 22–26 dB and −17 dBFS; in the same seconds the detector also
+/// emits 6 ms, 1–3 bin components at SNR 3.7–7.6 dB and −37.7 to −45.3 dBFS at 101.26115,
+/// 101.36517, 101.37074 and 101.38125 MHz, and the 99.6994 MHz station (89 kHz, SNR 13–17 dB,
+/// −29 dBFS) draws the same 6–8 ms, SNR 5.2–6.9 dB boxes across 99.62812–99.65783 and
+/// 99.73143–99.73898 MHz. Every one of them is 12–29 dB below its parent and one to two frames
+/// long against its 45 s: that emission's own skirt. None of them may reach the inventory as a
+/// row of its own, and the station must not be split by them either.
+///
+/// The counterpart guard is `t219_two_distinct_adjacent_stations_are_never_collapsed` above: this
+/// test may never be satisfied by collapsing two genuinely distinct emitters (T-233).
+#[test]
+fn t390_one_row_per_station_and_no_row_inside_a_wider_one() {
+    let Some(run) = crate::signal_062::fm_run() else {
+        return;
+    };
+    let rows = inventory_rows(&run.dir.0);
+    let stations = run.fx.of_kind("wfm-broadcast");
+    assert!(!stations.is_empty(), "[{T390}] the truth list has stations");
+
+    for station in stations {
+        let (lo, hi) = (station.f_lo_hz, station.f_hi_hz);
+        let over: Vec<(f64, f64)> = rows
+            .iter()
+            .map(row_band)
+            .filter(|&(a, b)| a.max(lo) < b.min(hi))
+            .collect();
+        eprintln!(
+            "[{T390}] station {:.5}..{:.5} MHz: {} served row(s) over it: {:?}",
+            lo / 1e6,
+            hi / 1e6,
+            over.len(),
+            over.iter()
+                .map(|&(a, b)| (a / 1e6, b / 1e6))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            over.len(),
+            1,
+            "[{T390}] one emission, one row over its occupied band — not the station plus its \
+             skirt boxes"
+        );
+    }
+
+    // And the containment geometry the user sees as a dotted box drawn inside a solid one: no
+    // served row's band lies within a concurrent row's band that is far wider. The width ratio is
+    // the tracker's own in-band fragment gate, which is what keeps two adjacent broadcast stations
+    // (whose bands genuinely overlap, but within a factor of 4) two rows.
+    for (i, j) in stacked(&rows) {
+        let ((alo, ahi), (blo, bhi)) = (row_band(&rows[i]), row_band(&rows[j]));
+        let (narrow, wide) = if ahi - alo <= bhi - blo {
+            ((alo, ahi), (blo, bhi))
+        } else {
+            ((blo, bhi), (alo, ahi))
+        };
+        let ratio = (wide.1 - wide.0) / (narrow.1 - narrow.0).max(f64::MIN_POSITIVE);
+        assert!(
+            !(wide.0 <= narrow.0 && narrow.1 <= wide.1 && ratio >= 4.0),
+            "[{T390}] a {:.1} kHz row served inside a {:.1} kHz row {ratio:.1}x wider: \
+             {narrow:?} inside {wide:?}",
+            (narrow.1 - narrow.0) / 1e3,
+            (wide.1 - wide.0) / 1e3
+        );
+    }
+}

@@ -1380,6 +1380,139 @@ fn inband_flicker_inside_a_continuous_station_is_a_fragment_not_an_emitter() {
     }
 }
 
+/// **T-390: the skirt box that straddles the host's crossing.** The host span is built from the
+/// host's *mean* threshold-crossing offsets, and skirt flicker is by definition the frames in which
+/// the emission crossed threshold further out than that mean — so the flicker box lands astride the
+/// edge, and testing its **centre** for containment lets about half of it through.
+///
+/// The geometry here is measured, not invented. Replaying the user's 45 s FM capture of 2026-09-15
+/// (`fixtures/hackrf/capture-2026-09-15-fm-band`) through the mock device, the confirmed 99.6994 MHz
+/// WFM station reports continuous 1000 ms components ≈92 kHz wide (89 kHz OBW) at SNR 13–17 dB and
+/// −29 dBFS, present in every second of the capture; in the *same* seconds the detector also emits
+/// 6–8 ms, 4-bin components at SNR 5.2–6.9 dB and −40 to −46 dBFS whose bands straddle the station's
+/// mean lower crossing — 99.63677–99.65552, 99.63111–99.65454, 99.63466–99.65810 MHz — every one of
+/// them **centred just outside it**. They are 12–17 dB down on their parent and one to two frames
+/// long against its 45 s: that station's own skirt, not three emitters.
+///
+/// So: a flicker box that *touches* the host's occupied band is a piece of it. One that does not —
+/// the same box moved 30 kHz further out, into air the periodogram measures as flat noise — is not,
+/// and keeps its own inventory entry. The reach is the fragment's own measured width; there is no
+/// new threshold.
+#[test]
+fn t390_skirt_flicker_straddling_the_hosts_crossing_is_a_fragment() {
+    let prov = provenance(100e6, FS, 24.0);
+    // The station, as the detector measures it: 89 kHz OBW inside a ±46 kHz threshold-crossing box,
+    // continuous, SNR 15 dB.
+    let station = 99.7015e6;
+    let (px_off, obw, nb) = (46e3, 89e3, 18.0);
+    // The host span the rule tests against: the mean crossing plus `freq_tolerance_bins` bins.
+    let cfg = TrackerConfig::default();
+    let host_lo = station - px_off - cfg.freq_tolerance_bins * (2.0 * px_off / nb);
+    // The measured flicker width: 18.75 kHz, 4 bins of this capture's 4.6875 kHz detector RBW.
+    let fw = 18.75e3;
+
+    // One tracker per case, so the flickers — which sit within a few tens of kHz of each other —
+    // cannot couple through lobe aggregation or hop linking and the geometry is what is on trial.
+    let run = |fc: f64| -> Vec<TrackSummary> {
+        let mut tr = Tracker::new(TrackerConfig::default());
+        let mut ev = Vec::new();
+        let mut recs: Vec<DetectionRecord> = Vec::new();
+        for chunk in 0..5u64 {
+            let mut r = rec(
+                &prov,
+                100 * chunk,
+                100,
+                station,
+                obw,
+                if chunk == 4 {
+                    CloseReason::Ended
+                } else {
+                    CloseReason::MaxDuration
+                },
+                chunk > 0,
+            );
+            r.detection.snr_mean_db = 15.0;
+            r.detection.snr_peak_db = 15.0;
+            r.f_lo_hz = station - px_off;
+            r.f_hi_hz = station + px_off;
+            recs.push(r);
+        }
+        for frame0 in [75u64, 150, 260, 330, 410] {
+            let mut r = rec(&prov, frame0, 2, fc, fw, CloseReason::Ended, false);
+            r.detection.snr_mean_db = 6.8;
+            r.detection.snr_peak_db = 6.8;
+            r.f_lo_hz = fc - 0.5 * fw;
+            r.f_hi_hz = fc + 0.5 * fw;
+            recs.push(r);
+        }
+        recs.sort_by_key(|r| r.frames.end);
+        for r in &recs {
+            tr.push_detection(r, &mut |e| ev.push(e));
+        }
+        tr.finish(&mut |e| ev.push(e));
+        ev.into_iter()
+            .filter_map(|e| match e {
+                TrackEvent::Closed(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Three flickers of the measured width, weak (SNR 6.8 dB, 8.2 dB under the station) and 20 ms
+    // long:
+    //   straddle — centred 6 kHz *outside* the crossing, band overlapping it: the measured case;
+    //   beyond   — the same box 30 kHz further out, touching nothing: an emitter of its own;
+    //   inside   — centred within the crossing: a fragment before T-390 and after it.
+    let flickers = [
+        ("straddle", host_lo - 6e3, true),
+        ("beyond", host_lo - 30e3, false),
+        ("inside", host_lo + 6e3, true),
+    ];
+    for (why, fc, is_fragment) in flickers {
+        let closed = run(fc);
+        eprintln!(
+            "[T-390] {why} (host crossing {host_lo:.1} Hz): {:?}",
+            closed
+                .iter()
+                .map(|s| (s.track.f_center_hz, s.burst_count, s.inband_fragment))
+                .collect::<Vec<_>>()
+        );
+        let at = |f: f64| {
+            closed
+                .iter()
+                .find(|s| (s.track.f_center_hz - f).abs() < 5e3)
+                .unwrap_or_else(|| panic!("[T-390] {why}: no closed track at {f}: {closed:?}"))
+        };
+        assert!(
+            !at(station).inband_fragment,
+            "[T-390] {why}: the station is no fragment"
+        );
+        let s = at(fc);
+        assert_eq!(
+            s.inband_fragment, is_fragment,
+            "[T-390] {why} flicker at {fc:.1} Hz (host crossing {host_lo:.1} Hz)"
+        );
+        assert_eq!(
+            hk_detect::track::inventory::track_sighting(s).is_some(),
+            !is_fragment,
+            "[T-390] {why}: inventory entry iff it is an emitter of its own"
+        );
+    }
+    // The straddling flicker really is centred outside the host's crossing — i.e. the old
+    // centre-containment test would have let it through — and it is only its own measured width
+    // that reaches back into the emission.
+    let straddle = flickers[0].1;
+    assert!(straddle < host_lo, "[T-390] centred outside the crossing");
+    assert!(
+        straddle + 0.5 * fw > host_lo,
+        "[T-390] but its band touches it"
+    );
+    assert!(
+        flickers[1].1 + 0.5 * fw < host_lo,
+        "[T-390] and the guard case touches nothing"
+    );
+}
+
 /// T-102: a weak narrowband emitter one channel (200–300 kHz) off a strong continuous WFM station
 /// (333 kHz OBW in a 408 kHz threshold-crossing box, as the detector measures a real one) is no
 /// in-band fragment of the station: it keeps its own inventory entry, on either side, steady or
