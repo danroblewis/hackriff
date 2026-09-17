@@ -187,18 +187,28 @@ export function viewFilters(state: WindowState): Filters {
 
 /**
  * The filters the **Confirmed** list is queried with (T-263, ADR-0017 TM-7): [[viewFilters]] plus
- * `at` — the caller's own live edge — while scrubbed back.
+ * `at` — the caller's own live edge — **always**, live or scrubbed (T-389).
  *
  * Still no `t0`/`t1`, and that is the whole point. A window *selects* rows, so windowing Confirmed
  * is exactly the regression §2.2 forbids: a catalogue entry that was quiet during the scrubbed
  * window would vanish. `at` carries the other half of what a window meant — it scopes the
  * `presence` projection and selects nothing — so the row stays listed and reads the liveness it had
- * *then* instead of the liveness it has now. Without it a scrubbed-back Confirmed list would mark
- * rows `live` from the wall clock while every other surface showed a past window.
+ * *then* instead of the liveness it has now.
+ *
+ * **Live is not the exception it looked like** (T-389, the user's "confirmed boxes never draw").
+ * Without `at`, `/api/inventory` scopes an unwindowed row's `presence` against `Timestamp::now()`
+ * — the server's **wall clock** — while the Candidate rows beside it and every box on the waterfall
+ * are placed on the **capture clock**. Two clocks on one surface is the whole of T-379, surviving on
+ * the half T-379 did not touch: measured on a replay 3.6 days from wall time, the same three
+ * confirmed rows read `liveness: "ended"`, `open: false` unwindowed and `liveness: "live"`,
+ * `open: true` with `at` — so the presence box lost its open (amber) edge and the list called a
+ * transmitting station silent. The live edge is the capture clock's ([[liveEdgeS]]), never
+ * `Date.now()`; `null` (no edge known yet) sends nothing rather than inventing one.
  */
 export function confirmedFilters(state: WindowState): Filters {
   const f = viewFilters(state);
-  if (!state.time.live && state.time.tS !== undefined) f.at = state.time.tS;
+  const at = !state.time.live && state.time.tS !== undefined ? state.time.tS : liveEdgeS(state);
+  if (at !== null) f.at = at;
   return f;
 }
 
@@ -242,6 +252,62 @@ export async function loadInventoryRows(ctx: AppContext, onMore: (tab: Inventory
   const coverage = candidate.entries.length === 0 ? await windowCoverage(ctx.client, state, w) : "observed";
   ctx.store.set(setInventoryRows(rows, Date.now() / 1000));
   ctx.store.set(setInventoryWindow({ t0: w.t0, t1: w.t1, coverage }));
+}
+
+// ---- the one collection both Explore surfaces derive from (T-389) --------------------------
+//
+// The user's rule: *the list and the liveness/boxes it renders must never disagree.* They already
+// read the same `inventory.rows`, and that was not enough — they read it through **two predicates**.
+// The list counted every row of a state; the waterfall additionally required a presence extent to
+// draw from, so a row with `last_interval: null` was listed and drew nothing, silently. Two filters
+// that happen to agree today are not an invariant.
+//
+// So the split happens **once**, here, and each surface takes a field of the result. `listed` is
+// what the list renders and counts; `boxed` is exactly what gets a box; `noExtent` is the only
+// permitted difference between them, and it is named and countable rather than inferred from a
+// missing rectangle. The arithmetic that holds by construction, and that the test asserts:
+//
+//     listed.candidate.length + listed.confirmed.length
+//       === boxed.length + noExtent.length + (focused row in the collection ? 1 : 0)
+//
+// The focused row is the third term because it keeps its full-height bracket/band instead of a
+// presence box (T-193/T-261, ADR-0017 TM-4) — a deliberate substitution, not a dropped row.
+
+/** The rows of the current window, split once for every surface that renders them (T-389). */
+export interface RenderedInventory {
+  /** What the Explore lists render and count, by tab. */
+  listed: { candidate: Row[]; confirmed: Row[] };
+  /** The rows that draw a presence box on the waterfall — a strict subset of `listed`. */
+  boxed: Row[];
+  /** Listed rows carrying no `presence.last_interval`, so there is no measured extent to draw.
+   * Never a fabricated box; the disagreement is disclosed instead (docs/api.md `presence`). */
+  noExtent: Row[];
+  /** The focused row, when it is one of the listed rows: it draws its own full-height overlay
+   * rather than a presence box, so it is in `listed` and never in `boxed`. */
+  focused: Row | null;
+}
+
+/**
+ * Splits the loaded rows into what each Explore surface renders — the single filtered collection
+ * the list count and the waterfall's box count both come from (T-389).
+ *
+ * Nothing here decides whether a row *qualifies*: the window predicate is the backend's, already
+ * applied by [[loadInventoryRows]]'s queries (thin-client rule). This only routes rows the server
+ * already listed to the surface that draws them.
+ */
+export function renderedInventory(
+  rows: Readonly<Record<string, Row>> | readonly Row[], focusedId: string | null,
+): RenderedInventory {
+  const all: readonly Row[] = Array.isArray(rows) ? (rows as readonly Row[]) : Object.values(rows as Readonly<Record<string, Row>>);
+  const out: RenderedInventory = { listed: { candidate: [], confirmed: [] }, boxed: [], noExtent: [], focused: null };
+  for (const r of all) {
+    if (r.state !== "candidate" && r.state !== "confirmed") continue;
+    out.listed[r.state].push(r);
+    if (r.id === focusedId) { out.focused = r; continue; }
+    if (r.presence?.last_interval) out.boxed.push(r);
+    else out.noExtent.push(r);
+  }
+  return out;
 }
 
 /** What the current window's frequency range is, for a coverage question about exactly it. */

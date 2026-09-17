@@ -46,16 +46,28 @@ export function placeExtent(v: ax.View, loHz: number, hiHz: number, minFrac = 0)
   return { leftPct: left * 100, widthPct: w * 100 };
 }
 
-export type BracketState = "candidate";
+export type BracketState = "candidate" | "confirmed";
 export interface Bracket extends Span { id: string; state: BracketState; active: boolean; narrow: boolean; label: string }
 
-/** Brackets for the candidate rows in view (deleted rows never), the focused one last so it draws
- * on top. `widthPx` is the live view's width, for the narrow-label rule. Confirmed rows no longer
- * draw a bracket here: they get the full-height [[confirmedBands]] box instead (T-193). */
+/**
+ * Brackets for the Candidate **and Confirmed** rows in view (deleted rows never), the focused one
+ * last so it draws on top. `widthPx` is the live view's width, for the narrow-label rule.
+ *
+ * Confirmed is back here (T-389). T-193 replaced the confirmed bracket with the full-height
+ * [[confirmedBands]] box; T-261 then narrowed that box to the **focused** row and gave every other
+ * one the waterfall's time-extent presence box. Between them an *unselected* Confirmed row was left
+ * with no marker in the spectrum pane at all — which is the user's report exactly: "the confirmed
+ * box appears only after clicking the row". The presence box is a waterfall overlay and, for a
+ * station that has been on the air for minutes, it spans the whole pane, so nothing box-shaped is
+ * visible there either. A bracket costs nothing (`.bk.confirmed` is already styled teal in
+ * centre.css and was dead code), it is the same affordance candidates get, and it makes an
+ * unselected confirmed signal clickable on the spectrum. Edge-dragging is untouched: it resolves
+ * against [[confirmedBands]], which the caller still feeds the focused row alone.
+ */
 export function bracketLayout(rows: readonly Row[], v: ax.View, widthPx: number, focusedId: string | null): Bracket[] {
   const out: Bracket[] = [];
   for (const r of rows) {
-    if (r.state !== "candidate") continue;
+    if (r.state !== "candidate" && r.state !== "confirmed") continue;
     const p = placeExtent(v, r.f_lo_hz, r.f_hi_hz, MIN_BRACKET_FRAC);
     if (!p) continue;
     out.push({
@@ -189,15 +201,26 @@ const LAV = [0.639, 0.584, 0.878] as const;
 const AMBER = [0.941, 0.647, 0.259] as const;
 const rgba = (c: readonly [number, number, number], a: number) => [c[0], c[1], c[2], a] as const;
 
-/** The style a Candidate/Confirmed presence box draws with: `open` (still on the air) marks the
+/**
+ * The style a Candidate/Confirmed presence box draws with: `open` (still on the air) marks the
  * newest edge amber and thickens it; `chirp` hatches the fill, since ADR-0017 §1.3 names a swept
- * carrier drawn as its bounding box as an approximation, not the truth. Presentation only. */
+ * carrier drawn as its bounding box as an approximation, not the truth. Presentation only.
+ *
+ * Confirmed is drawn **heavier** than Candidate (T-389). It used to be the lighter of the two: a
+ * 1 px solid border at 10 % fill against a candidate's 1 px *dashed* border, and dashes read as a
+ * box where two thin lines read as nothing — which is the wrong way round, since a confirmed
+ * emitter is the stronger claim. It matters most for exactly the case the user hit: a station on
+ * the air for minutes has a presence interval longer than the waterfall holds, so its top and
+ * bottom edges are off-pane and the vertical border is all there is to see.
+ */
 export function presenceStyle(state: "candidate" | "confirmed", open: boolean, chirp: boolean): BoxStyle {
-  const c = state === "confirmed" ? TEAL : LAV;
+  const confirmed = state === "confirmed";
+  const c = confirmed ? TEAL : LAV;
   return {
-    fill: rgba(c, state === "confirmed" ? 0.1 : 0.08), border: rgba(c, 1),
-    top: open ? rgba(AMBER, 1) : rgba(c, 1), borderPx: 1, topPx: open ? 2 : 1,
-    dashPx: state === "candidate" ? 4 : 0, hatch: chirp,
+    fill: rgba(c, confirmed ? 0.18 : 0.08), border: rgba(c, 1),
+    top: open ? rgba(AMBER, 1) : rgba(c, 1), borderPx: confirmed ? 2 : 1,
+    topPx: open ? (confirmed ? 3 : 2) : (confirmed ? 2 : 1),
+    dashPx: confirmed ? 0 : 4, hatch: chirp,
   };
 }
 

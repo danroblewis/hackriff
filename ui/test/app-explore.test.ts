@@ -14,9 +14,12 @@ import {
 } from "../src/app/explore/focus";
 import {
   clearUserBand, clusterChip, confirmedFilters, DEFAULT_ROW_RATE_HZ, emptyListText, liveEdgeS,
-  loadInventoryRows, nextInventorySort, recurrenceDots, rowChips, rowSeenText, setUserBand,
-  sortInventoryRows, viewFilters, viewWindow, waterfallSpanS, type Classification, type Row,
+  loadInventoryRows, nextInventorySort, recurrenceDots, renderedInventory, rowChips, rowSeenText,
+  setUserBand, sortInventoryRows, viewFilters, viewWindow, waterfallSpanS,
+  type Classification, type Row,
 } from "../src/app/explore/inventory";
+import { bracketLayout, presenceBoxes } from "../src/app/centre/overlays";
+import * as ax from "../src/axis";
 import { WATERFALL_ROWS } from "../src/waterfall";
 import { foundInside, listenAllTargets, recordSelectionClip, type Selection } from "../src/app/explore/selections";
 import {
@@ -427,6 +430,129 @@ test("LIVE: the Candidate query carries the waterfall window; the Confirmed quer
   assert.equal(conf.get("t0"), null, "Confirmed is never time-filtered (ADR-0017 §2.2)");
   assert.equal(conf.get("t1"), null, "Confirmed is never time-filtered (ADR-0017 §2.2)");
   assert.equal(conf.get("f_lo"), String(99.6e6), "but it is still scoped to the view's frequency span");
+  // T-389: and it names the live edge even while live. Not time-filtered is not the same as not
+  // saying when "now" is — see the test below for what omitting it costs.
+  assert.equal(Number(conf.get("at")), CAPTURE_EDGE_S, "the Confirmed list names its live edge on the capture clock");
+});
+
+test("T-389 — TWO CLOCKS ON ONE SURFACE: the live Confirmed query names its live edge, so its liveness is not the wall clock's", async () => {
+  // The bug the user saw as "confirmed presence boxes never draw". `at` was sent only while
+  // scrubbed, so a LIVE Confirmed query carried no live edge at all — and `/api/inventory` then
+  // scopes an unwindowed row's `presence` against `Timestamp::now()`, the server's wall clock,
+  // while the Candidate rows beside it and every box on the waterfall are on the capture clock.
+  // Measured against a running server on a replay 312,021 s from wall time, the same three
+  // confirmed rows answered:
+  //     no `at`  : liveness=ended, last_interval.open=false   <- what the UI actually sent
+  //     at=edge  : liveness=live,  last_interval.open=true    <- the truth of that capture instant
+  // So the presence box lost its open (amber) edge and the list called a transmitting station
+  // silent. This is T-379's defect on the half T-379 did not touch, and T-379's own tests could not
+  // catch it: they asserted `at` for the *scrubbed* case and, for the live case, asserted only that
+  // `t0`/`t1` were absent — never that a live edge was named at all.
+  const { ctx, paramsFor, atLiveEdge } = windowCtx();
+  ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25 } }));
+  atLiveEdge(CAPTURE_EDGE_S);
+  await loadInventoryRows(ctx, () => {});
+  const conf = paramsFor("confirmed");
+  assert.equal(Number(conf.get("at")), CAPTURE_EDGE_S);
+  // The property, not the value: whatever clock the capture runs on, the Confirmed list asks about
+  // THAT instant. A browser-clock answer here would be ~312,000 s away from it.
+  assert.ok(Math.abs(Number(conf.get("at")) - Date.now() / 1000) > 1000, "the capture clock, never Date.now()");
+  // And it is still the *only* thing carried: `at` scopes, it never selects (docs/api.md).
+  assert.equal(conf.get("t0"), null);
+  assert.equal(conf.get("t1"), null);
+});
+
+// ---- T-389: the list and the boxes derive from ONE filtered collection ----------------------
+//
+// The user's rule, verbatim: *the list and the liveness/boxes it renders must never disagree.* Both
+// surfaces already read `inventory.rows`; that was not enough, because they read it through two
+// predicates — the list counted every row of a state, the waterfall additionally demanded a
+// presence extent. Two filters that happen to agree today are not an invariant, so the split
+// happens once (`renderedInventory`) and each surface takes a field of the result.
+
+/** A geometry wide enough that every row below is in view, so the test is about the split. */
+const T389_G: ax.Geometry = { centerHz: 100_000_000, bandwidthHz: 4_000_000, bins: 1024 };
+const T389_V: ax.View = { loHz: 98_000_000, hiHz: 102_000_000 };
+const iv = (t0: number, t1: number, open = true) => ({ intervals: 1, on_air_s: t1 - t0, last_interval: { t_start_s: t0, t_end_s: t1, open }, liveness: open ? "live" : "ended", ended_t_s: null, silence_s: 0, confidence: 1 });
+
+test("THE STRUCTURAL RULE (T-389): list count = box count + noExtent + focused, over one collection", () => {
+  // A deliberately awkward mix: two candidates and two confirmed with extents, one of each without,
+  // a focused row (which substitutes its full-height overlay for a box), and a `deleted` row that
+  // belongs to neither surface.
+  const rows = [
+    makeRow({ id: "c1", state: "candidate", f_center_hz: 99_000_000, presence: iv(100, 118) }),
+    makeRow({ id: "c2", state: "candidate", f_center_hz: 99_500_000, presence: iv(104, 120) }),
+    makeRow({ id: "c3", state: "candidate", f_center_hz: 99_700_000 }),                        // no presence at all
+    makeRow({ id: "k1", state: "confirmed", f_center_hz: 100_500_000, presence: iv(60, 120) }),
+    makeRow({ id: "k2", state: "confirmed", f_center_hz: 101_000_000, presence: iv(90, 120) }),
+    makeRow({ id: "k3", state: "confirmed", f_center_hz: 101_500_000, presence: { ...iv(1, 2), last_interval: null } }),
+    makeRow({ id: "gone", state: "deleted", f_center_hz: 100_100_000, presence: iv(100, 120) }),
+  ] as Row[];
+
+  for (const focusedId of [null, "k1", "c1", "c3"]) {
+    const r = renderedInventory(rows, focusedId);
+    const listed = r.listed.candidate.length + r.listed.confirmed.length;
+    const boxes = presenceBoxes(r.boxed, T389_G, focusedId);
+    assert.equal(
+      listed, boxes.length + r.noExtent.length + (r.focused ? 1 : 0),
+      `focus=${focusedId}: every listed row draws a box, carries no extent, or is the focused row`,
+    );
+    // Not merely equal in count: `boxed` is a SUBSET of what the list shows, so the waterfall can
+    // never draw a box for something the list does not name. This is the direction the user saw
+    // broken — several boxes beside a heading that said "1".
+    const names = new Set([...r.listed.candidate, ...r.listed.confirmed].map((x) => x.id));
+    for (const b of boxes) assert.ok(names.has(b.id), `box ${b.id} is one of the listed rows`);
+    assert.ok(!names.has("gone"), "a deleted row is on neither surface");
+    // And the brackets, the third view of the same rows, name exactly the listed set too.
+    const bk = bracketLayout([...r.listed.candidate, ...r.listed.confirmed], T389_V, 1440, focusedId);
+    assert.deepEqual(bk.map((x) => x.id).sort(), [...names].sort(), "one bracket per listed row");
+  }
+});
+
+test("T-389: a row with no measured extent is DISCLOSED as one, never dropped and never faked", () => {
+  // The honest half of the rule. A confirmed station quiet since before the ring, or a legacy row
+  // with no presence track, has no timespan to draw — inventing a rectangle for it would be a
+  // measurement claim (docs/api.md `presence`). It stays listed and lands in `noExtent`, so the
+  // difference between the two counts has a name and a count rather than being inferred from a
+  // missing rectangle.
+  const quiet = makeRow({ id: "quiet", state: "confirmed" }) as Row;
+  const r = renderedInventory([quiet], null);
+  assert.deepEqual(r.listed.confirmed.map((x) => x.id), ["quiet"], "still listed — §2.2's safety valve");
+  assert.deepEqual(r.boxed, []);
+  assert.deepEqual(r.noExtent.map((x) => x.id), ["quiet"]);
+  assert.deepEqual(presenceBoxes(r.boxed, T389_G, null), [], "and no box is fabricated for it");
+});
+
+test("T-389: an UNSELECTED confirmed row is drawn — it used to have no marker in the spectrum pane at all", () => {
+  // The user's symptom (1): "the confirmed box appears only after clicking the row". T-193 replaced
+  // the confirmed bracket with the full-height band box; T-261 then narrowed that box to the
+  // FOCUSED row and gave every other one the waterfall's presence box. Between them an unselected
+  // confirmed row lost every marker in the spectrum pane, and its waterfall box — for a station on
+  // air longer than the ring holds — spans the whole pane, so nothing box-shaped shows there
+  // either. The bracket is back, and it is the thing that makes an unselected confirmed row
+  // visible and clickable.
+  const rows = [
+    makeRow({ id: "k", state: "confirmed", f_lo_hz: 100_400_000, f_hi_hz: 100_600_000, presence: iv(60, 120) }),
+    makeRow({ id: "c", state: "candidate", f_lo_hz: 99_400_000, f_hi_hz: 99_600_000, presence: iv(110, 120) }),
+  ] as Row[];
+  const bk = bracketLayout(rows, T389_V, 1440, null);
+  assert.deepEqual(bk.map((x) => [x.id, x.state, x.active]), [["k", "confirmed", false], ["c", "candidate", false]]);
+  // And the confirmed presence box is the heavier of the two, not the lighter: a solid 2 px border
+  // where a candidate has a 1 px dashed one, because two thin lines read as nothing where dashes
+  // read as a box.
+  const boxes = presenceBoxes(rows, T389_G, null);
+  const conf = boxes.find((b) => b.id === "k")!, cand = boxes.find((b) => b.id === "c")!;
+  assert.ok(conf.style.borderPx > cand.style.borderPx, "confirmed is drawn heavier than candidate");
+  assert.ok(conf.style.fill[3] > cand.style.fill[3]);
+  assert.equal(conf.style.dashPx, 0);
+});
+
+test("T-389: no live edge known yet sends no `at` at all — a made-up 'now' is worse than none", async () => {
+  // The same rule `viewWindow` follows: unknown is said, never invented. Here it cannot even be
+  // reached through the Candidate path (no edge ⇒ no window ⇒ no queries), so the guard is on
+  // `confirmedFilters` directly.
+  assert.equal(confirmedFilters(winState({ rowRateHz: 25, time: { live: true } })).at, undefined);
+  assert.equal(confirmedFilters(winState({ rowRateHz: 25, edgeTS: CAPTURE_EDGE_S, time: { live: true } })).at, CAPTURE_EDGE_S);
 });
 
 test("THE SAFETY VALVE: a confirmed station that has been quiet for hours stays listed while candidates are window-scoped", async () => {
