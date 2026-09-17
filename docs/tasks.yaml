@@ -7855,7 +7855,7 @@ tasks:
   - id: T-391
     title: The navigators sit in 12px tracks; make both as thick as the Capture panel, and make that panel collapsible
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: UI
     deps: [T-376]
@@ -7882,7 +7882,7 @@ tasks:
   - id: T-392
     title: A region selected on the frequency navigator should retune to cover it, not report that it is outside the window
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: UI
     core_interface: true
