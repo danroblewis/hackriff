@@ -135,11 +135,19 @@ impl Latencies {
         let first_family = classifications
             .iter()
             .find(|c| !c.classification.family.eq_ignore_ascii_case(UNKNOWN));
-        let confirmed = r
+        // T-403: **when** it was confirmed is the first transition into Confirmed; **why** it is
+        // confirmed is the latest row, because the reason strengthens as better evidence arrives
+        // (`Repository::restate_emitter_lifecycle`). Reading the reason off the first row would
+        // report whichever route happened to arrive first — the very thing that made the recorded
+        // explanation a function of host load rather than of the signal.
+        let lifecycle: Vec<_> = r
             .emitter_lifecycle_history(id)
             .expect("lifecycle history is readable")
             .into_iter()
-            .find(|c| c.state == LifecycleState::Confirmed);
+            .filter(|c| c.state == LifecycleState::Confirmed)
+            .collect();
+        let confirmed = lifecycle.first();
+        let explanation = lifecycle.last();
         let decodes = r
             .decode_evidence_for_emitter(id)
             .expect("decoder evidence is readable");
@@ -163,8 +171,8 @@ impl Latencies {
             first_detection_s: Some(since(t0, emitter.first_seen)),
             family_s: first_family.map(|c| since(t0, c.classification.t)),
             family: first_family.map(|c| c.classification.family.clone()),
-            confirmed_s: confirmed.as_ref().map(|c| since(t0, c.t)),
-            confirmed_reason: confirmed.map(|c| c.reason),
+            confirmed_s: confirmed.map(|c| since(t0, c.t)),
+            confirmed_reason: explanation.map(|c| c.reason.clone()),
             first_decode_s: attached.map(|t| since(t0, t)),
             first_decode_frame_s: decodes
                 .iter()

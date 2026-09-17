@@ -336,9 +336,6 @@ pub struct TrackTrust {
     /// (`chains::EmissionClaims::measuring`), so a stronger, more specific answer about it is on
     /// its way. Only a live review sets it; a closed track is past the question.
     pub measuring: bool,
-    /// T-403: this is the **first** review at which the continuous evidence is complete, so the
-    /// specific routes have not yet had an interval in which to answer. Only a live review sets it.
-    pub settling: bool,
 }
 
 impl TrackTrust {
@@ -354,18 +351,12 @@ impl TrackTrust {
             bandwidth_hz: summary.track.bandwidth_hz,
             bin_hz: summary.bin_hz,
             measuring: false,
-            settling: false,
         }
     }
 
-    /// With the two live-review facts set: whether a chain holds this emission as the review runs,
-    /// and whether this is the first review at which the continuous evidence was complete.
-    pub fn in_a_live_review(self, measuring: bool, settling: bool) -> Self {
-        Self {
-            measuring,
-            settling,
-            ..self
-        }
+    /// With [`Self::measuring`] set: a chain holds this emission as the review runs.
+    pub fn measured_by_a_chain(self, measuring: bool) -> Self {
+        Self { measuring, ..self }
     }
 
     /// The track's bandwidth in analysis bins, or `None` when the resolution is unusable (zero,
@@ -386,6 +377,26 @@ pub struct ConfirmEvidence {
     /// T-398: the emitter's latest demodulation session, if a chain has run one
     /// ([`Repository::latest_linked_demodulation_for_emitter`]).
     pub verified: Option<VerifiedEmission>,
+}
+
+/// T-403: which rule confirmed an entry, strongest first — the order the reasons rank in.
+///
+/// An entry is confirmed by whichever rule is satisfied **first**, and the rules are not satisfied
+/// at the same time: a continuous emission's occupancy evidence is complete about two seconds in,
+/// while a demodulator's pilot lock needs a window of signal and lands later by an amount that
+/// depends on host load. So the first reason recorded is not always the best one available, and
+/// this is what lets a later, stronger one replace it
+/// (`Repository::restate_emitter_lifecycle`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConfirmRoute {
+    /// **B — continuous and trusted.** Real evidence, but weaker *in kind*: it says "something
+    /// modulated has been on air steadily", not what the emission is.
+    Continuous,
+    /// **C — verified emission.** A demodulated mode whose subcarrier loop locked: "this is an FM
+    /// broadcast station, and here is its pilot".
+    Verified,
+    /// **A — decoded identity.** A CRC-valid decode carrying the transmitter's own identifier.
+    Identity,
 }
 
 impl ConfirmPolicy {
@@ -439,6 +450,12 @@ impl ConfirmPolicy {
     /// decodable identity (no RDS, weak RDS, or a chain that lost the admission race) stayed a
     /// candidate until its track idled out, tens of seconds later. That is the ~40 s the user saw.
     pub fn decide(&self, ev: &ConfirmEvidence) -> Option<String> {
+        self.decide_route(ev).map(|(_, reason)| reason)
+    }
+
+    /// [`Self::decide`] with the route that produced the reason, so a later, stronger route can
+    /// replace an earlier, weaker one.
+    pub fn decide_route(&self, ev: &ConfirmEvidence) -> Option<(ConfirmRoute, String)> {
         if !self.enabled {
             return None;
         }
@@ -447,17 +464,34 @@ impl ConfirmPolicy {
             && !self.structural_schemes.contains(&scheme.as_string())
             && *n >= self.min_valid_decodes.max(1)
         {
-            return Some(format!(
-                "decoded identity ({scheme}) carried by {n} CRC-valid decode(s)"
+            return Some((
+                ConfirmRoute::Identity,
+                format!("decoded identity ({scheme}) carried by {n} CRC-valid decode(s)"),
             ));
         }
         // T-403: route C before route B. When both are in hand the *specific* measurement is what
         // gets recorded — a pilot lock says "this is an FM broadcast station", where continuity
         // and width say only "something modulated has been on air steadily".
         if let Some(reason) = self.verified_reason(ev.verified.as_ref()) {
-            return Some(reason);
+            return Some((ConfirmRoute::Verified, reason));
         }
         self.continuous_reason(ev.track, ev.verified.as_ref())
+            .map(|reason| (ConfirmRoute::Continuous, reason))
+    }
+
+    /// The route a recorded reason came from, for comparing an entry's current explanation against
+    /// a newly available one. Reasons are this rule's own strings; anything else is unrecognised
+    /// and never outranks what is there.
+    pub fn route_of(reason: &str) -> Option<ConfirmRoute> {
+        if reason.starts_with("decoded identity") {
+            Some(ConfirmRoute::Identity)
+        } else if reason.starts_with("verified ") {
+            Some(ConfirmRoute::Verified)
+        } else if reason.starts_with("continuous and trusted") {
+            Some(ConfirmRoute::Continuous)
+        } else {
+            None
+        }
     }
 
     /// Routes B and B-live: the reason a continuous, trusted track confirms, or `None`.
@@ -492,21 +526,18 @@ impl ConfirmPolicy {
             if !self.live_continuous {
                 return None;
             }
-            // T-403: **the fallback yields.** Route B is the route of last resort; route C is the
-            // specific one. Where both can eventually fire, route C's evidence arrives later by
-            // construction — a demodulator needs a window of signal before it can report a lock,
-            // measured here at one review interval behind the point where continuity and width are
-            // already complete. So route B does not decide the first time its evidence is ready:
-            // `settling` is false only once the emitter has been carried through a review with the
-            // same continuous evidence, which gives any chain measuring it a full interval to
-            // record what it found.
+            // T-403: **the fallback does not pre-empt a measurement in flight.** While a chain
+            // actually holds this emission (`chains::EmissionClaims::measuring`) the specific
+            // answer is being made, so route B stays out of the way until the demodulation exists.
+            // Bounded by the chain's own life rather than by a timer: a chain that rejects the mode
+            // releases the emission and route B decides on the next review.
             //
-            // `measuring` is the sharper half of the same rule and needs no wait at all: while a
-            // chain actually holds this emission the answer is in flight, so route B stays out of
-            // the way until the demodulation exists however long that takes — bounded by the
-            // chain's own life, because a chain that rejects the mode releases the emission and
-            // route B decides on the next review.
-            if v.is_none() && (tr.measuring || tr.settling) {
+            // This is a courtesy, not the guarantee. Waiting cannot *be* the guarantee — a chain
+            // under load reports later in the capture, so any wait long enough to be safe on an
+            // idle host is too short on a busy one, which is exactly how the route race was found.
+            // What makes the recorded reason independent of arrival is that it can strengthen
+            // afterwards (see [`Self::decide_route`] and `Repository::restate_emitter_lifecycle`).
+            if tr.measuring && v.is_none() {
                 return None;
             }
             if tr.suspect_fraction.is_nan() || tr.suspect_fraction > self.max_live_suspect_fraction
@@ -581,9 +612,6 @@ pub struct TrackInventory {
     /// at, so a re-offer that measured nothing new costs one comparison instead of a match and a
     /// clustering pass. Bounded with [`Self::run`].
     characterised: HashMap<EmitterId, (u64, u64)>,
-    /// T-403: tracks a live review has already weighed, so route B's first look only arms it
-    /// ([`ConfirmPolicy::decide`]). Bounded like [`Self::run`].
-    settling: HashSet<TrackId>,
     /// T-109: open tracks whose live offer created their entry; removed when the track closes,
     /// merges or joins a hop set (every open track ends in one of those).
     provisional: HashMap<TrackId, EmitterId>,
@@ -600,6 +628,8 @@ pub struct TrackInventory {
     pub created: u64,
     /// Candidates confirmed by the rule.
     pub confirmed: u64,
+    /// T-403: confirmations whose recorded reason was replaced by a stronger route's.
+    pub restated: u64,
     /// Same-emission merges (T-082).
     pub merged: u64,
     /// T-219: candidates recorded as suppressed by an overlapping Confirmed entry.
@@ -636,13 +666,13 @@ impl TrackInventory {
             run: VecDeque::new(),
             run_set: HashSet::new(),
             characterised: HashMap::new(),
-            settling: HashSet::new(),
             provisional: HashMap::new(),
             bound: HashMap::new(),
             retracted: 0,
             sightings: 0,
             created: 0,
             confirmed: 0,
+            restated: 0,
             merged: 0,
             suppressed: 0,
             duplicates: 0,
@@ -772,9 +802,13 @@ impl TrackInventory {
             return Ok(());
         }
         let id = repo.live_emitter_id(emitter)?;
-        if repo.emitter_lifecycle_state(id)? != LifecycleState::Candidate {
-            return Ok(());
-        }
+        // T-403: a Confirmed entry is still reviewed, for its *reason* only. See below.
+        let state = repo.emitter_lifecycle_state(id)?;
+        let confirmed = match state {
+            LifecycleState::Candidate => false,
+            LifecycleState::Confirmed => true,
+            _ => return Ok(()),
+        };
         let evidence = ConfirmEvidence {
             identity: repo.identity_decode_evidence(id)?,
             track,
@@ -788,11 +822,37 @@ impl TrackInventory {
                 None
             },
         };
-        let Some(reason) = self.policy.decide(&evidence) else {
+        let Some((route, reason)) = self.policy.decide_route(&evidence) else {
             return Ok(());
         };
         let last_seen = repo.emitter(id)?.last_seen;
         let t = at.map_or(last_seen, |a| a.max(last_seen));
+        if confirmed {
+            // **The reason strengthens; the confirmation time does not.** An entry is confirmed by
+            // whichever route is satisfied first, and the routes are not satisfied at the same
+            // time — occupancy evidence is complete about two seconds into a continuous emission,
+            // a pilot lock lands when the demodulator has had its window, and how much later that
+            // is depends on how loaded the host is. Left alone, the recorded explanation is
+            // whichever route won a race: the same capture reads "continuous and trusted" on a
+            // busy machine and "verified wfm emission" on an idle one, with nothing about the
+            // signal different. Recording the stronger reason when it arrives is what makes the
+            // explanation a function of the evidence rather than of arrival order.
+            //
+            // Only upwards, and only over this rule's own reasons: an unrecognised one (a user's
+            // promotion) is never overwritten.
+            let held = repo
+                .emitter_lifecycle_history(id)?
+                .pop()
+                .and_then(|c| ConfirmPolicy::route_of(&c.reason));
+            if held.is_some_and(|h| route > h)
+                && repo
+                    .restate_emitter_lifecycle(id, LifecycleAuthor::Auto, CONFIRM_RULE, &reason, t)?
+                    .is_some()
+            {
+                self.restated += 1;
+            }
+            return Ok(());
+        }
         if repo
             .change_emitter_lifecycle(
                 id,
@@ -920,18 +980,10 @@ impl Inventory for TrackInventory {
         };
         // The evidence reaches the end of the last burst the tracker measured, which is later than
         // the last sighting recorded against the entry; the change is stamped there, not earlier.
-        // T-403: the first review at which this emitter's continuous evidence is complete only
-        // *arms* route B; the next one may fire it. Remembering the track rather than the emitter
-        // keeps this bounded with the rest of the run memory, and a track is the thing whose
-        // evidence is being weighed.
-        let settling = self.settling.insert(summary.track.id);
-        if self.settling.len() > RUN_MEMORY {
-            self.settling.clear();
-        }
         self.review(
             repo,
             emitter,
-            Some(TrackTrust::of(summary).in_a_live_review(measuring, settling)),
+            Some(TrackTrust::of(summary).measured_by_a_chain(measuring)),
             Some(summary.track.time.end),
         )
     }
@@ -1313,7 +1365,6 @@ mod tests {
             bandwidth_hz: 150e3,
             bin_hz: 4687.5,
             measuring: false,
-            settling: false,
         }
     }
 
@@ -1366,21 +1417,19 @@ mod tests {
             .expect("still confirms");
         assert!(closed.starts_with("verified"), "{closed}");
 
-        // The first live look at complete continuous evidence only arms route B.
-        let settling = TrackTrust {
-            settling: true,
-            ..steady_live()
-        };
+        // The routes rank, and the ranking is what lets a later, stronger reason replace an
+        // earlier, weaker one rather than the first arrival deciding for good.
+        assert!(ConfirmRoute::Identity > ConfirmRoute::Verified);
+        assert!(ConfirmRoute::Verified > ConfirmRoute::Continuous);
         assert_eq!(
-            p.decide(&ev(settling, None)),
-            None,
-            "route B does not decide the first time its evidence is ready — that is the interval              the demodulator needs to report"
+            ConfirmPolicy::route_of(&both),
+            Some(ConfirmRoute::Verified),
+            "a recorded reason is readable back as the route that wrote it"
         );
-        // …but a lock already in hand is not made to wait for it.
-        assert!(
-            p.decide(&ev(settling, Some(locked())))
-                .is_some_and(|r| r.starts_with("verified")),
-            "the specific route never waits on the fallback's settling"
+        assert_eq!(
+            ConfirmPolicy::route_of("promoted by the user"),
+            None,
+            "a reason this rule did not write is never outranked by it"
         );
         // While a chain holds the emission the answer is in flight, however long it takes.
         let measuring = TrackTrust {
@@ -1404,7 +1453,7 @@ mod tests {
         assert!(
             p.decide(&ev(steady_live(), None))
                 .is_some_and(|r| r.starts_with("continuous")),
-            "nothing is measuring it and it has settled, so the fallback decides"
+            "nothing is measuring it, so the fallback decides"
         );
     }
 
@@ -1534,7 +1583,6 @@ mod tests {
             bandwidth_hz: 4687.5,
             bin_hz: 4687.5,
             measuring: false,
-            settling: false,
         };
         assert_eq!(
             p.decide(&ev(line)),

@@ -1396,15 +1396,30 @@ pub fn inventory_entry_json_at(
             }
             v
         });
-        let lifecycle = repo.emitter_lifecycle_history(e.id)?.pop().map(|c| {
-            let show = !withheld || c.author == LifecycleAuthor::Auto;
+        // T-403: the **transition** into the current state, carrying the **latest** reason for it.
+        // The two are not always the same row: a confirmation's reason may strengthen after the
+        // fact (`Repository::restate_emitter_lifecycle`) — an entry is confirmed by whichever rule
+        // is satisfied first, and a demodulator's evidence lands after an occupancy rule's — and
+        // those rows carry `state == previous` because nothing changed state. So `state`,
+        // `previous`, `author`, `actor` and `t_s` come from the row that actually made the
+        // transition, while `reason` is the best explanation the run has reached. Taking the last
+        // row whole would report `previous: "confirmed"`, which is true of that row and false of
+        // the entry.
+        let history = repo.emitter_lifecycle_history(e.id)?;
+        let lifecycle = history.last().map(|latest| {
+            let changed = history
+                .iter()
+                .rev()
+                .find(|c| c.state != c.previous)
+                .unwrap_or(latest);
+            let show = !withheld || latest.author == LifecycleAuthor::Auto;
             json!({
-                "state": c.state,
-                "previous": c.previous,
-                "author": c.author,
-                "actor": c.actor,
-                "t_s": ts_s(c.t),
-                "reason": show.then_some(c.reason.as_str()),
+                "state": changed.state,
+                "previous": changed.previous,
+                "author": changed.author,
+                "actor": changed.actor,
+                "t_s": ts_s(changed.t),
+                "reason": show.then_some(latest.reason.as_str()),
                 "reason_withheld": !show,
             })
         });
