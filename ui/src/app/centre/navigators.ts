@@ -200,12 +200,18 @@ export const SURVEY_CELLS = 512;
 
 /** Writes one cell at byte offset `p`. `shade` is the served 0…1 position, or `null` when there is
  * no level for the cell; `observed` then decides tint-versus-grey. */
-function paintCell(data: Uint8ClampedArray, p: number, shade: number | null, observed: boolean) {
+function paintCell(data: Uint8ClampedArray, p: number, shade: number | null, state: CoverageCell["state"]) {
   if (shade !== null) {
     const [r, g, b] = cmapBytes(shade);
     data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = 255;
-  } else if (observed) {
+  } else if (state === "observed") {
     data[p] = 55; data[p + 1] = 85; data[p + 2] = 95; data[p + 3] = 150;
+  } else if (state === "unknown") {
+    // T-423's fourth state: the server no longer holds a record either way. Grey is the claim
+    // *nothing looked*, so this must not borrow it — and the bar's own rule for "not told" is to
+    // draw nothing at all, which is exactly what this is. (A distinct hatched fill, per T-413, is
+    // T-405's follow-up once the strip reads the per-(t, f) plane.)
+    data[p] = data[p + 1] = data[p + 2] = data[p + 3] = 0;
   } else {
     data[p] = data[p + 1] = data[p + 2] = 110; data[p + 3] = 70;
   }
@@ -978,7 +984,7 @@ function mountFreqNav(el: HTMLElement, ctx: AppContext) {
       const flat = observed && cell.shade !== null && cell.shade !== undefined ? cell.shade : null;
       for (let t = 0; t < nt; t++) {
         const i = t * nf + f;
-        paintCell(img.data, i * 4, grid ? overviewShade(grid, i) : flat, observed);
+        paintCell(img.data, i * 4, grid ? overviewShade(grid, i) : flat, cell.state);
       }
     }
     c.putImageData(img, 0, 0);
@@ -1302,7 +1308,7 @@ function mountTimeNav(el: HTMLElement, ctx: AppContext) {
       // A cell nothing was folded into is `null` here — never observed over this bar's own window,
       // so grey, and never the ramp's low end. Everything else goes through the waterfall's ramp
       // against the range the backend measured for the grid (T-397).
-      paintCell(img.data, i * 4, overviewShade(grid, i), false);
+      paintCell(img.data, i * 4, overviewShade(grid, i), "unobserved");
     }
     c.putImageData(img, 0, 0);
   };

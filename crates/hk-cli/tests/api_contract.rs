@@ -5620,7 +5620,10 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
     // The rule is stated in the response rather than left to the client to invent.
     assert_eq!(
         tuned["resolution"]["grey_rule"],
-        json!("grey a cell if and only if its state is \"unobserved\""),
+        json!(
+            "grey a cell if and only if its state is \"unobserved\"; \"unknown\" is not grey and \
+             not a level — draw it as a fourth thing (hatching, per T-413)"
+        ),
         "{tuned}"
     );
     // T-342: and so is the SHADE's rule. A 0–1 number normalised against a range the response never
@@ -5714,6 +5717,14 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
     assert_eq!(v["window"]["span_s"], json!(1.0), "{v}");
     // A window in 1970 saw nothing, whatever the band: the map is time-scoped, not a band property.
     assert_eq!(v["any"]["observed_cells"], json!(0), "{v}");
+    // T-423: and it does not say it was *never looked at* either. 1970 lies before the oldest
+    // record this server still holds, so the honest answer is the fourth state — "we no longer know
+    // whether we looked" — which is a different value from grey and carries no measurement keys.
+    assert_eq!(v["any"]["unknown_cells"], json!(4), "{v}");
+    assert_eq!(v["any"]["unobserved_cells"], json!(0), "{v}");
+    for c in v["any"]["cells"].as_array().expect("cells") {
+        assert_eq!(*c, json!({ "state": "unknown" }), "{v}");
+    }
 
     let (st, _) = call(
         addr,
@@ -5723,6 +5734,261 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
         Some("{}"),
     );
     assert_eq!(st, 405);
+    stop_server(serving);
+}
+
+/// T-423, `docs/16` §7 step 2: **the coverage answer gains a time axis, and the wire can say the
+/// fourth state.**
+///
+/// T-368 served a *column* — one row over the whole window — so a band the radio watched for ten
+/// seconds of a minute came back `observed` for the whole minute. T-405's survey bar and T-411's
+/// time navigator both read that as *"sampled, level not retained"* for a cell the radio was
+/// demonstrably tuned away from at that instant. T-421 built the per-(t, f) computation; this is it
+/// reaching the wire.
+///
+/// Four properties, each asserted on a **value** and each with its control (T-315):
+///
+///  1. **Per cell, not per column.** Over a window whose first row is inside capture and whose
+///     later rows are not, row 0 is observed *against its own row* and the later rows are
+///     `unobserved` with no measurement key at all. The **control** is the same window at
+///     `rows=1`: it still says `observed`, which is exactly the answer that was wrong.
+///  2. **The fold is grounded against the rows, not against a parent.** The column's `observed_s`
+///     equals the **sum** of the rows' and its `duty` is re-derived against the column's own
+///     extent — so a column at duty ≈ 1/6 and a row at duty ≈ 1 describe the same seconds. A
+///     parent-vs-child comparison would pass on a rounded-up fold; this cannot (T-419/T-421).
+///  3. **The fourth state is sayable, and it is not grey.** A window before the oldest surviving
+///     record answers `"unknown"` — *we no longer know whether we looked* — never `"unobserved"`,
+///     which claims nothing looked. The **control** is property 1's later rows: inside the horizon
+///     the same absence of coverage reads `"unobserved"`. Two windows, two different values, so
+///     neither is a constant.
+///  4. **Device stays in the key.** Every per-device grid carries the full `nt × nf` plane and the
+///     union wears `"any"` with `"named": false` (T-259/T-305).
+///
+/// And the same coverage plane on `/api/timeline`, aligned cell-for-cell with the grid it drew.
+#[test]
+fn coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it_looked() {
+    // One row's duration. The window below is six of them: one inside capture, five after the live
+    // edge, so rows 2..6 stay un-sampled for at least `ROW_S` seconds after the edge is read.
+    const ROW_S: f64 = 3.0;
+    const ROWS: usize = 6;
+    const CELLS: usize = 4;
+
+    let (_dir_guard, serving, addr) = start_server_retaining(Some(120.0));
+    let (lo, hi) = (
+        FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
+        FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0,
+    );
+
+    // The window is built from the capture the server reports, not from wall clock: a replay runs
+    // on its own clock (T-125), and a window anchored to `now` would ask about the future.
+    let mut edge = 0.0f64;
+    let mut buffered_t0 = 0.0f64;
+    wait_for(
+        "the ring to buffer more than one row of capture",
+        Duration::from_secs(90),
+        || {
+            let (st, got) = get(addr, "/api/timeline");
+            let b = &got["window"]["buffered"];
+            match (st, b["t0_s"].as_f64(), b["t1_s"].as_f64()) {
+                (200, Some(a), Some(z)) if z - a > ROW_S + 0.5 => {
+                    buffered_t0 = a;
+                    edge = z;
+                    true
+                }
+                _ => false,
+            }
+        },
+    );
+    let (t0, t1) = (edge - ROW_S, edge - ROW_S + ROW_S * ROWS as f64);
+    let band = format!("f_lo={lo}&f_hi={hi}&cells={CELLS}&t0={t0}&t1={t1}");
+
+    // ---- 1. per cell, not per column ----
+    let (st, g) = get(addr, &format!("/api/coverage?{band}&rows={ROWS}"));
+    assert_eq!(st, 200, "{g}");
+    assert_eq!(g["grid"]["rows"], json!(ROWS), "{g}");
+    assert_eq!(g["grid"]["cells"], json!(CELLS), "{g}");
+    assert!(
+        (g["grid"]["t_cell_s"].as_f64().expect("t_cell_s") - ROW_S).abs() < 1e-6,
+        "{g}"
+    );
+    let cells = g["any"]["cells"].as_array().expect("cells").clone();
+    assert_eq!(cells.len(), ROWS * CELLS, "{g}");
+
+    // Row 0 is inside capture: observed against ITS OWN row, not against the whole window.
+    let mut row0_observed_s = 0.0f64;
+    for c in &cells[..CELLS] {
+        assert_eq!(
+            c["state"],
+            json!("observed"),
+            "row 0 is inside capture: {g}"
+        );
+        let duty = c["duty"].as_f64().expect("duty");
+        assert!(
+            duty > 0.9 && duty <= 1.0,
+            "row 0's duty is against the row, so it is ~1, not ~1/{ROWS}: {c} in {g}"
+        );
+        let obs = c["observed_s"].as_f64().expect("observed_s");
+        assert!((obs - ROW_S * duty).abs() < 1e-6, "{c} in {g}");
+        assert_eq!(c["sample_rate_hz"].as_f64(), Some(FIXTURE_RATE_HZ), "{c}");
+        assert_eq!(c["center_hz"].as_f64(), Some(FIXTURE_CENTER_HZ), "{c}");
+        row0_observed_s = obs;
+    }
+    // Rows 2.. begin at least ROW_S after the live edge this window was built from, so the radio
+    // cannot have reached them: genuinely grey, and carrying nothing readable as a zero.
+    for (i, c) in cells.iter().enumerate().skip(2 * CELLS) {
+        assert_eq!(
+            *c,
+            json!({ "state": "unobserved" }),
+            "cell {i} is past the live edge and inside the record horizon: {g}"
+        );
+    }
+
+    // ---- 2. the column is the SUM of the rows, and its duty is re-derived ----
+    // The control for property 1, and the answer T-405/T-411 were reading: at rows=1 the very same
+    // window still says "observed" for all of it.
+    let (st, col) = get(addr, &format!("/api/coverage?{band}&rows=1"));
+    assert_eq!(st, 200, "{col}");
+    assert_eq!(col["grid"]["rows"], json!(1), "{col}");
+    let c0 = &col["any"]["cells"].as_array().expect("cells")[0];
+    assert_eq!(
+        c0["state"],
+        json!("observed"),
+        "the column answer calls the whole window sampled — this is the bug the time axis fixes: \
+         {col}"
+    );
+    let col_obs = c0["observed_s"].as_f64().expect("observed_s");
+    let col_duty = c0["duty"].as_f64().expect("duty");
+    // Grounded against the rows themselves (level 0), never against a coarser answer: the summed
+    // seconds match, and the duty is those seconds over the COLUMN's own extent.
+    let summed: f64 = (0..ROWS)
+        .filter_map(|r| cells[r * CELLS]["observed_s"].as_f64())
+        .sum();
+    assert!(
+        (summed - row0_observed_s).abs() < 1e-6,
+        "only row 0 was sampled, so the rows sum to row 0: {g}"
+    );
+    assert!((col_obs - summed).abs() < 0.05, "{col} vs {g}");
+    assert!(
+        (col_duty - col_obs / (t1 - t0)).abs() < 1e-6,
+        "the column's duty is its seconds over its own extent: {col}"
+    );
+    assert!(
+        col_duty < 0.25,
+        "a column covering one row of {ROWS} is ~1/{ROWS} sampled, not 1: {col}"
+    );
+
+    // ---- 3. the fourth state, and it is a DIFFERENT value from grey ----
+    // Three hours before the live edge: before the ring's buffer and before the observation log's
+    // oldest surviving hour. No record can say either way, so `unobserved` would be a claim nothing
+    // supports.
+    let (ot0, ot1) = (edge - 3.0 * 3600.0 - 600.0, edge - 3.0 * 3600.0);
+    let (st, old) = get(
+        addr,
+        &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells={CELLS}&rows=4&t0={ot0}&t1={ot1}"),
+    );
+    assert_eq!(st, 200, "{old}");
+    let oldest = old["horizon"]["oldest_record_s"]
+        .as_f64()
+        .expect("the horizon names the oldest surviving record");
+    assert!(
+        oldest > ot1,
+        "this window is wholly before the oldest record ({oldest}): {old}"
+    );
+    assert_eq!(old["horizon"]["unknown_rows"], json!(4), "{old}");
+    assert_eq!(old["horizon"]["rows"], json!(4), "{old}");
+    assert_eq!(old["any"]["unknown_cells"], json!(4 * CELLS), "{old}");
+    assert_eq!(old["any"]["unobserved_cells"], json!(0), "{old}");
+    assert_eq!(old["any"]["observed_cells"], json!(0), "{old}");
+    for c in old["any"]["cells"].as_array().expect("cells") {
+        // No measurement keys, exactly like grey — and a different value from grey.
+        assert_eq!(*c, json!({ "state": "unknown" }), "{old}");
+        assert_ne!(*c, json!({ "state": "unobserved" }), "{old}");
+    }
+    // The pair that makes neither a constant: the same absence of coverage, inside the horizon,
+    // came back `unobserved` in property 1 above.
+    assert_ne!(cells[5 * CELLS], old["any"]["cells"][0], "{g} vs {old}");
+    // And the horizon block inside the live window says the opposite, so `unknown_rows` is measured
+    // rather than always-on.
+    assert_eq!(g["horizon"]["unknown_rows"], json!(0), "{g}");
+
+    // ---- 4. device stays in the key, with the time axis intact per device ----
+    assert_eq!(g["any"]["device"], json!("any"), "{g}");
+    assert_eq!(g["any"]["named"], json!(false), "{g}");
+    let named: Vec<&Value> = g["devices"]
+        .as_array()
+        .expect("devices")
+        .iter()
+        .filter(|d| d["named"] == json!(true))
+        .collect();
+    assert!(!named.is_empty(), "the ring journal names the radio: {g}");
+    for d in &named {
+        let dc = d["cells"].as_array().expect("device cells");
+        assert_eq!(
+            dc.len(),
+            ROWS * CELLS,
+            "one plane per device, not a column: {d}"
+        );
+        assert_eq!(dc[0]["state"], json!("observed"), "{d}");
+        assert_eq!(dc[5 * CELLS]["state"], json!("unobserved"), "{d}");
+    }
+
+    // ---- the same plane on /api/timeline, aligned with the grid it drew ----
+    let (columns, rows) = (32usize, 4usize);
+    let (st, tl) = get(
+        addr,
+        &format!("/api/timeline?f_lo={lo}&f_hi={hi}&columns={columns}&rows={rows}"),
+    );
+    assert_eq!(st, 200, "{tl}");
+    let cov = &tl["coverage"];
+    assert_eq!(cov["grid"]["nt"], json!(columns), "{tl}");
+    assert_eq!(cov["grid"]["nf"], json!(rows), "{tl}");
+    assert_eq!(cov["grid"]["aligned"], json!(true), "{tl}");
+    let tcells = cov["any"]["cells"].as_array().expect("coverage cells");
+    assert_eq!(tcells.len(), columns * rows, "{tl}");
+    // The timeline spans the ring's configured retention, which reaches back before this run began.
+    // Column 0 is therefore before capture, and the last column is at the live edge: the matched
+    // pair, on the timeline's own axis.
+    let t_cell = cov["grid"]["t_cell_s"].as_f64().expect("t_cell_s");
+    let g0 = cov["grid"]["t0_s"].as_f64().expect("t0_s");
+    assert!(
+        buffered_t0 > g0 + t_cell,
+        "this assertion needs a ring that has not filled its retention: {tl}"
+    );
+    for c in &tcells[..rows] {
+        assert_ne!(
+            c["state"],
+            json!("observed"),
+            "column 0 is before this run's capture began: {tl}"
+        );
+        // Whichever of the two non-observed states it is, it carries no measurement.
+        assert!(
+            c["state"] == json!("unobserved") || c["state"] == json!("unknown"),
+            "{c} in {tl}"
+        );
+        assert_eq!(c.as_object().expect("cell").len(), 1, "{c} in {tl}");
+    }
+    for c in &tcells[(columns - 1) * rows..] {
+        assert_eq!(
+            c["state"],
+            json!("observed"),
+            "the live edge is sampled: {tl}"
+        );
+        assert!(c["duty"].as_f64().unwrap_or(0.0) > 0.0, "{c}");
+        assert_eq!(c["sample_rate_hz"].as_f64(), Some(FIXTURE_RATE_HZ), "{c}");
+        // No `shade` here: the timeline carries its own levels in `grid.max_db`, and a null would
+        // read as "sampled, level not retained" — a claim this plane is not making.
+        assert!(c.get("shade").is_none(), "{c}");
+    }
+
+    // ---- refusals: the new budget is bounded like every other one ----
+    for bad in [
+        format!("f_lo={lo}&f_hi={hi}&rows=0"),
+        format!("f_lo={lo}&f_hi={hi}&rows=99999"),
+        format!("f_lo={lo}&f_hi={hi}&rows=x"),
+    ] {
+        let (st, v) = get(addr, &format!("/api/coverage?{bad}"));
+        assert_eq!(st, 400, "expected 400 for {bad}: {v}");
+    }
     stop_server(serving);
 }
 

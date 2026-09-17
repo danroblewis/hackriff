@@ -275,6 +275,9 @@ pub fn timeline_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         "window": window_json(&w, &reason),
         "region": freq.map(|f| json!({"lo_hz": f.lo_hz, "hi_hz": f.hi_hz})),
         "grid": Value::Null,
+        // Record-derived coverage, per drawn cell (T-423). Null for the same reason `grid` is:
+        // with no capture window and no band there is nothing to be honest about.
+        "coverage": Value::Null,
         "resolution": Value::Null,
     });
     // No band or no region means no picture — and that is said as `null`, not drawn as an empty
@@ -296,8 +299,16 @@ pub fn timeline_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
             resolution_json(&r, &region, columns, rows, levels, max_live),
         ))
     })?;
+    let window = hk_model::TimeRange::new(
+        hk_model::Timestamp::from_unix_nanos(region.t0_ns),
+        hk_model::Timestamp::from_unix_nanos(region.t1_ns),
+    );
     if let Some(obj) = out.as_object_mut() {
         obj.insert("grid".into(), grid);
+        obj.insert(
+            "coverage".into(),
+            crate::coverage::overlay_json(state, f, window, columns, rows),
+        );
         obj.insert("resolution".into(), resolution);
     }
     Ok(out)

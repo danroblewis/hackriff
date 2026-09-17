@@ -480,8 +480,11 @@ export function timelineRequest(band: Band | null, columns: number, rows: number
  * that can be misread as a low value. `shade` is present only on an observed cell, and `null` there
  * means *sampled, level not retained*: a third case, drawn as neither grey nor the ramp's bottom. */
 export interface CoverageCell {
-  /** `"observed"` (the front end was tuned here) or `"unobserved"` (nothing ever looked). */
-  state: "observed" | "unobserved";
+  /** `"observed"` (the front end was tuned here), `"unobserved"` (nothing ever looked), or
+   * `"unknown"` (T-423: before the oldest surviving tune record — *we no longer know whether we
+   * looked*). `"unknown"` is **not** grey: grey is a measurement claim and this is the absence of
+   * one, so it is never counted or drawn as `"unobserved"`. */
+  state: "observed" | "unobserved" | "unknown";
   /** Where on the served scale this cell sits, 0…1; absent or `null` when no level is retained. */
   shade?: number | null;
 }
@@ -519,9 +522,13 @@ export function surveyCells(body: CoverageResponse | null | undefined): Coverage
 }
 
 /** How many of `cells` were never observed — the readout beside the strip. `null` for an empty
- * strip, because "not asked yet" is not "nothing observed". */
+ * strip, because "not asked yet" is not "nothing observed".
+ *
+ * Only `"unobserved"` counts. A `"unknown"` cell (T-423) is not a never-observed one: it is the
+ * server saying it no longer holds a record either way, and folding it in here would report a
+ * forgotten band as a measured-empty one — the collapse the route's fourth state exists to stop. */
 export function unobservedCount(cells: readonly CoverageCell[]): number | null {
-  return cells.length === 0 ? null : cells.filter((c) => c.state !== "observed").length;
+  return cells.length === 0 ? null : cells.filter((c) => c.state === "unobserved").length;
 }
 
 // ---------------------------------------------------------------------------

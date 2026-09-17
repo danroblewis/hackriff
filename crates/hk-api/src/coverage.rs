@@ -36,6 +36,57 @@
 //! history kept no level for it — sampled, level not retained — and a client must draw that
 //! differently from grey. **Grey is `state == "unobserved"` and nothing else.**
 //!
+//! # The time axis (T-423, `docs/16` §7 step 2)
+//!
+//! T-368 served a **column**: one row over the whole window, answering *"was this band sampled
+//! anywhere in it"*. A view drawing a waterfall needs a **cell** — *"was it sampled **then**"* —
+//! and the difference is not cosmetic: a cell in a band the radio demonstrably watched, at an
+//! instant it was tuned somewhere else, came back `observed` and read to the survey bar (T-405)
+//! and the time navigator (T-411) as *"sampled, level not retained"* rather than grey.
+//!
+//! `rows` is that axis. T-421 already built the whole computation in
+//! [`hk_store::coverage`] — [`hk_store::coverage::grid_over`] and its `by_device_over` /
+//! `union_grid_over` wrappers lay `nt × nf` cells on the window and put each through the same
+//! [`Coverage::of`], with the **row's own** extent as its window. This route only asks for it and
+//! serves it; there is no second rasteriser here. `rows = 1` (the default) is T-368's answer
+//! unchanged, bit for bit.
+//!
+//! # The fourth state: `"unknown"` — *we no longer know whether we looked*
+//!
+//! `docs/16` §5.4. Two horizons cross. The spectrum-history pyramid has **no age limit** (a rolling
+//! byte budget); the IQ ring holds minutes and the observation log expires at 30 days. So a cell can
+//! hold a measurement whose coverage record is gone — and, more commonly, a *row* can lie before any
+//! surviving record at all. `unobserved` claims *nothing looked*, which is a claim no record
+//! supports there. Painting it grey spells "never looked" for spectrum whose records were merely
+//! discarded: [`Coverage::of`]'s sin, one horizon out.
+//!
+//! So the wire has a fourth value, `"state": "unknown"`, carrying **no measurement keys** by the
+//! same structural rule as `unobserved`, and `horizon` beside it saying where the boundary is and
+//! how many rows fell before it — so a client can check the claim rather than take it. The
+//! vocabulary is the house one: `bias_tee: "unknown"` ≠ `"off"`, [`Device::Unknown`] ≠ a wildcard —
+//! **nothing said is never permissive.**
+//!
+//! It is a **wire** state and deliberately not a third [`Coverage`] variant. Three reasons, and
+//! `docs/16` §5.4 asks for them to be stated:
+//!
+//! 1. **The fold has no input for it.** [`Coverage`] is computed from spans; a span does not carry
+//!    the horizon that produced it, and [`Coverage::of`] — the one construction site, whose whole
+//!    job is refusing to mint an observation out of nothing — would have to be handed a horizon it
+//!    cannot check to decide a question it was never asked. Only the caller that *read* the
+//!    records knows how far back they reach. That caller is this module.
+//! 2. **It is a property of a row, not of a cell.** A discarded record takes every frequency with
+//!    it, so the state is *"these rows are before our memory"*. A per-cell variant would let one
+//!    grid say "unknown at 100 MHz, unobserved at 101 MHz" in the *same row*, which is
+//!    unrepresentable in reality. [`hk_store::CoverageGrid::unknown_rows_before`] is the right
+//!    shape, and it already exists (T-421).
+//! 3. **A variant is a break for every consumer, to say something none of them could compute.**
+//!    Derived here it is one line, checkable against `horizon`, and `Coverage`'s deliberate
+//!    two-variant design — which is what makes state 3 unrepresentable as state 2 — stays intact.
+//!
+//! An **observed** cell is never re-labelled: a surviving measurement is itself proof we looked, so
+//! it stays `observed` past the horizon (`docs/16` §5.4, explicitly). Only `unobserved` can become
+//! `unknown`, and only on a row wholly before the oldest surviving record.
+//!
 //! # Where the map comes from: provenance already written
 //!
 //! Nothing new is journalled for this. Two records already say "for each interval, which
@@ -58,11 +109,13 @@
 //!
 //! | Method | Path | Query | Answers |
 //! |---|---|---|---|
-//! | GET | `/api/coverage` | `f_lo`&`f_hi` (Hz, required), `cells`? (1…4096, default 256), `t0`&`t1`? (Unix s; default the capture window) | `{region, window, grid, devices, any, sources, resolution}` |
+//! | GET | `/api/coverage` | `f_lo`&`f_hi` (Hz, required), `cells`? (1…4096, default 256), `rows`? (1…4096, default 1), `t0`&`t1`? (Unix s; default the capture window) | `{region, window, grid, devices, any, horizon, sources, resolution}` |
 
 use hk_model::attention::observation::{ObservationRecord, ObservedWindow};
 use hk_model::{FreqRange, TimeRange, Timestamp};
-use hk_store::coverage::{Coverage, CoverageGrid, CoverageSpan, Device, MAX_COVERAGE_CELLS};
+use hk_store::coverage::{
+    Coverage, CoverageGrid, CoverageSpan, Device, MAX_COVERAGE_CELLS, MAX_COVERAGE_ROWS,
+};
 use hk_store::observation::{MAX_RECORD_LIMIT, ObservationStore, RecordQuery};
 use serde_json::{Value, json};
 
@@ -71,6 +124,10 @@ use crate::query::{ApiError, Params, count, parse_freq_only};
 
 /// Frequency cells the survey strip is drawn in when the caller names none.
 pub const DEFAULT_CELLS: usize = 256;
+
+/// Time rows when the caller names none: one row over the whole window — T-368's column answer,
+/// unchanged, so a caller that never heard of the time axis gets exactly what it got before.
+pub const DEFAULT_ROWS: usize = 1;
 
 /// Segments read from the IQ ring journal for one answer.
 const RING_SEGMENTS: usize = 10_000;
@@ -267,34 +324,186 @@ fn observation_spans(
     (out, named)
 }
 
-/// One cell's JSON. An unobserved cell carries **no measurement keys**, so there is nothing a
-/// client can read as a zero level or a zero occupancy.
-fn cell_json(c: &Coverage, shade: Option<f32>) -> Value {
-    match c.sampled() {
-        None => json!({ "state": "unobserved" }),
-        Some(s) => json!({
-            "state": "observed",
-            "spans": s.spans,
-            "observed_s": s.observed_ns as f64 * 1e-9,
-            "duty": s.duty,
-            "last_s": s.last.as_unix_nanos() as f64 * 1e-9,
-            "center_hz": s.center_hz,
-            "sample_rate_hz": s.sample_rate_hz,
-            // The level the spectrum history holds here, normalised to this answer's own observed
-            // range so the client never picks a colour scale from the numbers it happens to hold.
-            // `null` = sampled, level not retained — drawn differently from grey, never as grey and
-            // never as the bottom of the ramp.
-            "shade": shade.map(|v| json!(v)).unwrap_or(Value::Null),
-        }),
+/// The tune history behind one answer, and **how far back it reaches**.
+///
+/// Both halves come from records that already exist; neither is a new ledger. The second half is
+/// the one T-423 added, and it is what lets a cell say `"unknown"` instead of grey: see this
+/// module's header on the fourth state.
+pub(crate) struct Evidence {
+    /// Every span from every consulted source, device-local, unmerged.
+    pub spans: Vec<CoverageSpan>,
+    ring: usize,
+    ring_named: usize,
+    log: usize,
+    log_named: usize,
+    ring_available: bool,
+    log_available: bool,
+    /// The earliest instant **any** consulted source still holds a record for; `None` when no
+    /// source holds one at all.
+    ///
+    /// `min`, not `max`: a row is knowable if *at least one* record reaches it. The IQ ring's
+    /// journal opens a segment on every provenance change, so within what the ring still buffers
+    /// an absence of segment really is "this front end was not tuned here"; the observation log
+    /// drops whole hour segments, so its oldest surviving segment's hour start is exactly the
+    /// instant past which its silence stops being evidence. Before the earlier of the two, neither
+    /// record can speak, and `unobserved` would be a claim nothing supports.
+    pub oldest_record: Option<Timestamp>,
+}
+
+impl Evidence {
+    /// Reads both tune histories over `freq × window`, and each one's reach.
+    pub(crate) fn collect(state: &ApiState, freq: FreqRange, window: TimeRange) -> Self {
+        let mut spans = ring_spans(state, freq, window);
+        let ring = spans.len();
+        let ring_named = spans.iter().filter(|s| s.device.is_named()).count();
+        let mut log_named = 0;
+        if let Some(store) = state.observations.as_ref() {
+            let (log_spans, named) = observation_spans(store, freq, window);
+            log_named = named;
+            spans.extend(log_spans);
+        }
+        let log = spans.len() - ring;
+        Evidence {
+            spans,
+            ring,
+            ring_named,
+            log,
+            log_named,
+            ring_available: state.iq_buffer.is_some(),
+            log_available: state.observations.is_some(),
+            oldest_record: oldest_record(state),
+        }
+    }
+
+    /// Which tune histories answered, how many of each one's spans actually named the radio, and
+    /// whether every span it contributed did. `device_known` is **measured, not declared**
+    /// (T-378): a log still holding records written before devices were logged reports them as the
+    /// unattributed spans they are instead of claiming a device-local horizon it has not got. A
+    /// source with no spans still appears, so a client can tell "this record had nothing here"
+    /// from "this record was not consulted".
+    fn sources_json(&self) -> Value {
+        json!([
+            { "kind": "iq-ring", "spans": self.ring, "named_spans": self.ring_named,
+              "device_known": self.ring_named == self.ring,
+              "available": self.ring_available },
+            { "kind": "observation-log", "spans": self.log, "named_spans": self.log_named,
+              "device_known": self.log_named == self.log,
+              "available": self.log_available },
+        ])
+    }
+
+    /// How many leading rows of `g` lie wholly before the record horizon — the rows whose
+    /// `unobserved` cells must be served as `"unknown"` instead.
+    ///
+    /// With **no** surviving record anywhere, every row is beyond the horizon: a server that has
+    /// forgotten (or never had) its tune history cannot say the radio was not there, and greying
+    /// the window would be precisely the claim this route exists to refuse.
+    fn unknown_rows(&self, g: &CoverageGrid) -> usize {
+        match self.oldest_record {
+            Some(t) => g.unknown_rows_before(t),
+            None => g.nt,
+        }
+    }
+
+    /// The horizon block: the boundary, where it came from, and what lies before it.
+    fn horizon_json(&self, g: &CoverageGrid) -> Value {
+        let unknown = self.unknown_rows(g);
+        json!({
+            // Unix s, or null when nothing on this server holds a tune record at all.
+            "oldest_record_s": self.oldest_record.map(|t| t.as_unix_nanos() as f64 * 1e-9),
+            // Leading rows of the grid that lie wholly before it — the rows whose unobserved cells
+            // are served as `"unknown"`. Served so a client can check the states it was sent.
+            "unknown_rows": unknown,
+            "rows": g.nt,
+            "rule": "a row wholly before `oldest_record_s` has no surviving record either way, so \
+                its unsampled cells are \"unknown\" (we no longer know whether we looked), never \
+                \"unobserved\" (nothing looked). An observed cell is never relabelled: a surviving \
+                measurement is itself proof we looked.",
+            "state_rule": "\"unknown\" carries no measurement keys, exactly like \"unobserved\", \
+                and must be drawn as neither grey nor a level — forgetting is not a measurement of \
+                nothing.",
+        })
     }
 }
 
-fn grid_json(g: &CoverageGrid, shades: Option<&[Option<f32>]>) -> Value {
+/// The earliest instant either tune history still holds a record for — the record horizon.
+///
+/// The IQ ring reports what it actually buffers; the observation log retains whole hour segments
+/// and drops whole hour segments, so its oldest hour's start is the exact boundary. A source that
+/// is absent, or holds nothing, contributes no reach — it is not evidence of anything.
+fn oldest_record(state: &ApiState) -> Option<Timestamp> {
+    let ring = crate::timeline::capture_window(state)
+        .0
+        .buffered
+        .map(|(t0, _)| (t0 * 1e9).round() as i64);
+    let log = state.observations.as_ref().and_then(|s| {
+        s.hours()
+            .into_iter()
+            .min()
+            .map(|h| h.saturating_mul(hk_store::observation::segment::HOUR_NS))
+    });
+    match (ring, log) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (x, y) => x.or(y),
+    }
+    .map(Timestamp::from_unix_nanos)
+}
+
+/// One cell's JSON.
+///
+/// An unobserved cell carries **no measurement keys**, so there is nothing a client can read as a
+/// zero level or a zero occupancy — and an `"unknown"` cell (this module's fourth state) carries
+/// none either, for the same reason and one horizon out.
+///
+/// `shade` is `None` when the caller has no shading to attach, in which case the key is **absent**
+/// rather than `null`: on this route `shade: null` already means *sampled, level not retained*, so
+/// a route that carries its own levels (`/api/timeline`) must not appear to be making that claim.
+fn cell_json(c: &Coverage, shade: Option<Option<f32>>, beyond_horizon: bool) -> Value {
+    match c.sampled() {
+        // Only `unobserved` can become `unknown`. An observed cell stays observed past the
+        // horizon: the measurement is the proof.
+        None if beyond_horizon => json!({ "state": "unknown" }),
+        None => json!({ "state": "unobserved" }),
+        Some(s) => {
+            let mut v = json!({
+                "state": "observed",
+                "spans": s.spans,
+                "observed_s": s.observed_ns as f64 * 1e-9,
+                "duty": s.duty,
+                "last_s": s.last.as_unix_nanos() as f64 * 1e-9,
+                "center_hz": s.center_hz,
+                "sample_rate_hz": s.sample_rate_hz,
+            });
+            if let (Some(shade), Some(obj)) = (shade, v.as_object_mut()) {
+                // The level the spectrum history holds here, normalised to this answer's own
+                // observed range so the client never picks a colour scale from the numbers it
+                // happens to hold. `null` = sampled, level not retained — drawn differently from
+                // grey, never as grey and never as the bottom of the ramp.
+                obj.insert(
+                    "shade".into(),
+                    shade.map(|x| json!(x)).unwrap_or(Value::Null),
+                );
+            }
+            v
+        }
+    }
+}
+
+/// One grid's JSON, with `unknown_rows` leading rows served as the fourth state.
+///
+/// `unknown_rows` is a **row** count because the horizon is a time: a discarded record takes every
+/// frequency with it (this module's header, reason 2).
+fn grid_json(g: &CoverageGrid, shades: Option<&[Option<f32>]>, unknown_rows: usize) -> Value {
+    let mut unknown_cells = 0usize;
     let cells: Vec<Value> = g
         .cells
         .iter()
         .enumerate()
-        .map(|(i, c)| cell_json(c, shades.and_then(|s| s.get(i)).copied().flatten()))
+        .map(|(i, c)| {
+            let beyond = g.nf > 0 && i / g.nf < unknown_rows;
+            unknown_cells += usize::from(beyond && !c.is_observed());
+            cell_json(c, shades.map(|s| s.get(i).copied().flatten()), beyond)
+        })
         .collect();
     json!({
         "device": g.device.as_str(),
@@ -302,7 +511,11 @@ fn grid_json(g: &CoverageGrid, shades: Option<&[Option<f32>]>) -> Value {
         // radios, and a client must not attribute their coverage to a device.
         "named": g.device.is_named(),
         "observed_cells": g.observed_cells(),
-        "unobserved_cells": g.unobserved_cells(),
+        // Cells that are genuinely grey: nothing looked, and a surviving record says so. The
+        // `"unknown"` cells are **not** counted here — they are the fourth state, and adding them
+        // in would be the collapse this route exists to refuse.
+        "unobserved_cells": g.unobserved_cells() - unknown_cells,
+        "unknown_cells": unknown_cells,
         "observed_fraction": g.observed_fraction(),
         "cells": cells,
     })
@@ -327,21 +540,29 @@ struct StripShades {
 /// The level the spectrum history holds for each cell of the strip, normalised to the strip's own
 /// observed range. `None` per cell where the history has nothing.
 ///
-/// The fold is a **max-hold over the whole window** — [`hk_store::RegionHistory::overview`] with
-/// `nt = 1`, the frequency-axis twin of the timeline's band-collapsed series (T-342) — so a brief
-/// emission still lights its column instead of being averaged away.
+/// The fold is a **max-hold** — [`hk_store::RegionHistory::overview`] over `rows × cells`, the
+/// frequency-axis twin of the timeline's band-collapsed series (T-342) — so a brief emission still
+/// lights its cell instead of being averaged away. At `rows = 1` it is a max-hold over the whole
+/// window, T-368's strip unchanged; at `rows > 1` it is per (time, frequency) cell, laid out
+/// row-major exactly as the coverage grid is, so the two line up cell for cell.
 ///
 /// This is only the *shading*: it never decides observed-versus-unobserved. A cell the radio
 /// demonstrably sampled but whose level the pyramid no longer keeps is observed with no shade, and
 /// a cell the pyramid happens to hold a value for is still grey if no tune ever covered it.
-fn shades(state: &ApiState, freq: FreqRange, window: TimeRange, cells: usize) -> StripShades {
+fn shades(
+    state: &ApiState,
+    freq: FreqRange,
+    window: TimeRange,
+    rows: usize,
+    cells: usize,
+) -> StripShades {
     let region = crate::query::Region {
         freq,
         t0_ns: window.start.as_unix_nanos(),
         t1_ns: window.end.as_unix_nanos(),
     };
     crate::http::with_history(state, |p| {
-        Ok(crate::query::overview_read(p, &region, 1, cells)?.grid)
+        Ok(crate::query::overview_read(p, &region, rows, cells)?.grid)
     })
     .map(|o| StripShades {
         values: o
@@ -359,42 +580,41 @@ fn shades(state: &ApiState, freq: FreqRange, window: TimeRange, cells: usize) ->
         scale: Some(crate::query::scale_str(o.unit)),
     })
     .unwrap_or_else(|_| StripShades {
-        values: vec![None; cells],
+        values: vec![None; rows * cells],
         range_db: None,
         scale: None,
     })
 }
 
-/// `GET /api/coverage?f_lo&f_hi[&cells][&t0&t1]`.
+/// `GET /api/coverage?f_lo&f_hi[&cells][&rows][&t0&t1]`.
 pub fn coverage_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
-    const ALLOWED: [&str; 6] = ["f_lo", "f_hi", "cells", "t0", "t1", "token"];
+    const ALLOWED: [&str; 7] = ["f_lo", "f_hi", "cells", "rows", "t0", "t1", "token"];
     if let Some((k, _)) = q.iter().find(|(k, _)| !ALLOWED.contains(&k.as_str())) {
         return Err(ApiError::new(
             400,
-            format!("unknown parameter {k:?} (allowed: f_lo, f_hi, cells, t0, t1)"),
+            format!("unknown parameter {k:?} (allowed: f_lo, f_hi, cells, rows, t0, t1)"),
         ));
     }
     let cells = count(q, "cells", DEFAULT_CELLS, MAX_COVERAGE_CELLS)?;
+    let rows = count(q, "rows", DEFAULT_ROWS, MAX_COVERAGE_ROWS)?;
     let freq = parse_freq_only(q)?
         .ok_or_else(|| ApiError::new(400, "f_lo and f_hi are required, in Hz"))?;
     let (window, window_source) = window_of(state, q)?;
 
-    let mut spans = ring_spans(state, freq, window);
-    let ring = spans.len();
-    let ring_named = spans.iter().filter(|s| s.device.is_named()).count();
-    let mut log_named = 0;
-    if let Some(store) = state.observations.as_ref() {
-        let (log_spans, named) = observation_spans(store, freq, window);
-        log_named = named;
-        spans.extend(log_spans);
-    }
-    let log = spans.len() - ring;
+    let evidence = Evidence::collect(state, freq, window);
+    let spans = &evidence.spans;
 
-    let shades = shades(state, freq, window, cells);
-    let any = hk_store::coverage::union_grid(&spans, freq, window, cells);
-    let devices: Vec<Value> = hk_store::coverage::by_device(&spans, freq, window, cells)
+    // The grid T-421 built, asked for with the time axis kept. `rows = 1` is T-368's column.
+    let any = hk_store::coverage::union_grid_over(spans, freq, window, rows, cells);
+    // The realised row count: `grid_over` reduces the time axis rather than the frequency one when
+    // the product exceeds its cap, and says which `nt` it built. Everything below is laid out on
+    // that, not on what was asked for.
+    let nt = any.nt;
+    let shades = shades(state, freq, window, nt, cells);
+    let unknown_rows = evidence.unknown_rows(&any);
+    let devices: Vec<Value> = hk_store::coverage::by_device_over(spans, freq, window, nt, cells)
         .iter()
-        .map(|g| grid_json(g, Some(&shades.values)))
+        .map(|g| grid_json(g, Some(&shades.values), evidence.unknown_rows(g)))
         .collect();
 
     let source = crate::navigation::live_window_verdict(
@@ -410,13 +630,27 @@ pub fn coverage_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
             // Where the window came from: the caller, or the capture window this server holds.
             "source": window_source,
         },
-        "grid": { "cells": cells, "f_lo_hz": any.f_lo_hz, "f_cell_hz": any.f_cell_hz },
+        // The grid every `cells` array is laid out on: **row-major, earliest row first, low
+        // frequency first**. `rows` is the realised time axis (T-423) — `rows = 1` is T-368's
+        // single column over the whole window, and is what a caller that names no `rows` gets.
+        "grid": {
+            "cells": cells,
+            "rows": nt,
+            "requested_rows": rows,
+            "f_lo_hz": any.f_lo_hz,
+            "f_cell_hz": any.f_cell_hz,
+            "t0_s": any.window.start.as_unix_nanos() as f64 * 1e-9,
+            "t_cell_s": any.t_cell_ns as f64 * 1e-9,
+            "order": "row-major: cells[t * cells + f], earliest row first, low frequency first",
+        },
         // One entry per front end that actually sampled here, never merged. Empty means nothing on
         // this server can say what was sampled — which is **not** the same as "nothing was".
         "devices": devices,
         // The deliberate union, labelled `"any"` so it can never be mistaken for one radio's
         // coverage (T-259/T-305: device-local physics reads the device).
-        "any": grid_json(&any, Some(&shades.values)),
+        "any": grid_json(&any, Some(&shades.values), unknown_rows),
+        // Where this server's memory of *whether it looked* runs out (`docs/16` §5.4, T-423).
+        "horizon": evidence.horizon_json(&any),
         // What a `shade` **is** (T-342): the fold that produced it, the scale it is relative to,
         // and the range that scale spans. Before this block a shade was a 0–1 number normalised
         // against a range the response never named, so the same energy could read as two
@@ -424,7 +658,11 @@ pub fn coverage_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         "shade": {
             "fold": "max-hold",
             "rule": crate::query::MAX_HOLD_RULE,
-            "statistic": "max-hold over the whole window, per frequency cell",
+            "statistic": if nt > 1 {
+                "max-hold over each time row, per (time, frequency) cell"
+            } else {
+                "max-hold over the whole window, per frequency cell"
+            },
             "scale": shades.scale,
             "range_db": shades.range_db.map(|(lo, hi)| json!({"lo": lo, "hi": hi})),
             "normalisation": "0 at `range_db.lo`, 1 at `range_db.hi`, linear in dB and clamped",
@@ -436,33 +674,85 @@ pub fn coverage_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
                 unknown, not zero, and not the bottom of the scale",
         },
         // Which tune histories answered, how many of each one's spans actually named the radio,
-        // and whether every span it contributed did. `device_known` is **measured, not declared**
-        // (T-378): a log still holding records written before devices were logged reports them as
-        // the unattributed spans they are instead of claiming a device-local horizon it has not
-        // got. A source with no spans still appears, so a client can tell "this record had nothing
-        // here" from "this record was not consulted".
-        "sources": [
-            { "kind": "iq-ring", "spans": ring, "named_spans": ring_named,
-              "device_known": ring_named == ring,
-              "available": state.iq_buffer.is_some() },
-            { "kind": "observation-log", "spans": log, "named_spans": log_named,
-              "device_known": log_named == log,
-              "available": state.observations.is_some() },
-        ],
+        // and whether every span it contributed did (see `Evidence::sources_json`).
+        "sources": evidence.sources_json(),
         "resolution": {
             "source": source.as_str(),
             "live": source.is_live(),
             "statement": source.statement(),
             "served_span_hz": freq.width_hz(),
             "max_live_span_hz": crate::http::max_live_span_hz(state),
-            // Grey is decided here and nowhere else.
-            "grey_rule": "grey a cell if and only if its state is \"unobserved\"",
+            // Grey is decided here and nowhere else — and `"unknown"` is not grey. Forgetting
+            // whether we looked is a different claim from having looked and found nothing, and
+            // collapsing the two is the dishonesty this route exists to refuse (`docs/16` §5.4).
+            "grey_rule": "grey a cell if and only if its state is \"unobserved\"; \"unknown\" is \
+                not grey and not a level — draw it as a fourth thing (hatching, per T-413)",
             // And the shade is measured here and nowhere else: what it means, and against what,
             // is the `shade` block above (T-342).
             "shade_rule": "shade is the max-hold over the window, normalised over `shade.range_db`; \
                 it never decides observed-versus-unobserved",
         },
     }))
+}
+
+/// The record-derived coverage plane for a grid someone else drew — `/api/timeline`'s overlay
+/// (T-423, `docs/16` §7 step 2).
+///
+/// # Why the timeline needs this when its grid already has a `coverage` array
+///
+/// They answer different questions, and only one of them decides grey.
+///
+/// - `grid.coverage` is **frame** coverage: the fraction of the drawn cell for which the tiered
+///   spectrum-history pyramid still holds frames. It is `0` both where the radio never looked and
+///   where the pyramid's byte budget evicted what it saw — and those are not the same thing.
+/// - `coverage.*` here is **record**-derived: the fraction of the cell the front end was actually
+///   **tuned to**, read from the IQ ring journal and the observation log. A cell with no frames but
+///   a covering tune record was *sampled, level not retained*; a cell with neither was never looked
+///   at; a cell with neither, before the record horizon, is `"unknown"`.
+///
+/// The grid is laid out on exactly the same axes as `grid` — `nt = columns` time rows, `nf = rows`
+/// frequency cells, row-major — so a client indexes one with the other's index. When the cap in
+/// [`hk_store::coverage::grid_over`] reduces the time axis, `grid.nt`/`grid.nf` here say what was
+/// realised and `aligned` says whether it still matches; a realised grid is never implied.
+pub(crate) fn overlay_json(
+    state: &ApiState,
+    freq: FreqRange,
+    window: TimeRange,
+    columns: usize,
+    rows: usize,
+) -> Value {
+    let evidence = Evidence::collect(state, freq, window);
+    let any = hk_store::coverage::union_grid_over(&evidence.spans, freq, window, columns, rows);
+    let devices: Vec<Value> =
+        hk_store::coverage::by_device_over(&evidence.spans, freq, window, any.nt, any.nf)
+            .iter()
+            // No shades: the timeline carries its own levels in `grid.max_db`, and a `shade: null`
+            // here would read as "sampled, level not retained" — a claim this block is not making.
+            .map(|g| grid_json(g, None, evidence.unknown_rows(g)))
+            .collect();
+    json!({
+        "grid": {
+            "nt": any.nt,
+            "nf": any.nf,
+            "t0_s": any.window.start.as_unix_nanos() as f64 * 1e-9,
+            "t_cell_s": any.t_cell_ns as f64 * 1e-9,
+            "f_lo_hz": any.f_lo_hz,
+            "f_cell_hz": any.f_cell_hz,
+            // Whether this plane lines up cell-for-cell with `grid` above.
+            "aligned": any.nt == columns && any.nf == rows,
+            "order": "row-major: cells[t * nf + f], earliest row first, low frequency first — the \
+                same layout as `grid`",
+        },
+        "devices": devices,
+        "any": grid_json(&any, None, evidence.unknown_rows(&any)),
+        "horizon": evidence.horizon_json(&any),
+        "sources": evidence.sources_json(),
+        "rule": "record-derived: whether the front end was TUNED to this cell, from the IQ ring \
+            journal and the observation log. `grid.coverage` is a different measurement — the \
+            fraction for which the spectrum-history pyramid still holds frames — and is 0 both \
+            where nothing looked and where the budget evicted what it saw. Grey is decided here: \
+            grey a cell if and only if its state is \"unobserved\".",
+    })
 }
 
 /// The window: the caller's `t0`/`t1` when both are given, else the capture window this server
@@ -754,7 +1044,7 @@ mod tests {
     fn an_unobserved_cell_carries_no_measurement_keys_at_all() {
         // The wire form of state 3: nothing a client can read as a zero level, a zero duty or a
         // zero occupancy. Not a null measurement — no measurement.
-        let v = cell_json(&Coverage::Unobserved, Some(0.9));
+        let v = cell_json(&Coverage::Unobserved, Some(Some(0.9)), false);
         assert_eq!(v, json!({ "state": "unobserved" }));
         assert!(v.get("duty").is_none());
         assert!(v.get("observed_s").is_none());
@@ -765,7 +1055,7 @@ mod tests {
     fn an_observed_cell_states_the_sampling_that_makes_it_observed() {
         let c =
             hk_store::coverage::Coverage::of(2, 30_000_000_000, 60_000_000_000, t(1030), 1e8, 2e6);
-        let v = cell_json(&c, None);
+        let v = cell_json(&c, Some(None), false);
         assert_eq!(v["state"], json!("observed"));
         assert_eq!(v["spans"], json!(2));
         // Floating seconds, so compare as a number rather than by JSON equality.
@@ -778,6 +1068,9 @@ mod tests {
         // Sampled, level not retained: an explicit null on an *observed* cell, which is a
         // different thing from grey and must be drawn differently.
         assert_eq!(v["shade"], Value::Null);
-        assert_ne!(v["state"], cell_json(&Coverage::Unobserved, None)["state"]);
+        assert_ne!(
+            v["state"],
+            cell_json(&Coverage::Unobserved, Some(None), false)["state"]
+        );
     }
 }
