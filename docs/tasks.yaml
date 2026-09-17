@@ -8479,6 +8479,59 @@ tasks:
       The invariants it must not lose are in section 4, and the one the user is already
       feeling is that FOLDING NEVER LOWERS A VALUE - that is what makes a peak survive
       downsampling, and its absence is T-405's washed-out yellow and red peaks.
+  - id: T-409
+    title: Tuning nudge buttons - move a signal off the DC spike without losing it from the band
+    milestone: M2-hardening
+    status: todo
+    priority: normal
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    deps: [T-343, T-392]
+    acceptance: |
+      USER 2026-09-16. Add TUNING NUDGE buttons: shift the tuned centre left/right by a
+      fraction of the window width, offering 1/8, 1/4 and 1/2 of the CURRENT TUNED SPAN.
+      MOTIVATION, which is a real RF problem and not a convenience: a signal sitting at
+      the centre frequency lands on the DC/LO-leakage spike and cannot be cleanly
+      demodulated or decoded. Nudging moves it off DC while keeping it in band.
+      This repo has measured that spike repeatedly: T-317 identified DC/LO leakage as a
+      ruled-out cause and the detector flags spur_reason on it; T-382 measured the
+      8 kHz host comb's offset RELATIVE TO TUNER DC (-678.048 Hz on one capture); the
+      2026-09-15 fixture's own tuner-DC box is one of the boxes T-394 leaves above
+      20 dB. The spike is real, it is ours, and it sits exactly where a user naturally
+      tunes.
+      IMPLEMENTATION: each nudge is a retune via the existing POST /api/control/center
+      (centre +/- fraction x span), so it is a DEVICE ACTION but UI-wise a small control
+      set near the frequency controls / navigator: left/right x {1/8, 1/4, 1/2}.
+      Batch with the UI polish (T-405, T-407). UI-ONLY GATE if it only calls the
+      existing endpoint - confirm with just gate rather than assuming.
+      THREE THINGS TO GET RIGHT, none of them obvious from the ask:
+      (1) SNAP. The achievable centres are a grid (T-341's center_step_hz;
+      HACKRF_ONE_TUNING_STEP_HZ is 30 MHz / 2^20 = 28.6102294921875 Hz). centre +
+      fraction x span is not generally on it, so the nudge must snap - and then the
+      actual shift differs slightly from the advertised fraction. Reuse T-341's
+      snapState arithmetic; do not re-derive it.
+      (2) CLAMPING IS NOT FREE, and the user's word for it deserves a second look. At
+      the edge of the device range a clamped nudge MOVES LESS THAN THE BUTTON SAYS, so
+      the control lies quietly. T-392 met this exact problem and chose deliberately:
+      containsCenter is NOT snapCenter, precisely because snapping walks an out-of-band
+      request inward and would call every out-of-range centre achievable at the band
+      edge. Prefer DISABLING a nudge that cannot be taken in full, or showing what it
+      will actually do, over silently clamping. If you do clamp, say so in the UI.
+      (3) 1/2 SPAN MAY BE THE WORST OPTION for the signal being rescued. Moving a
+      centred signal by half the span puts it at the BAND EDGE, where the anti-alias
+      filter rolls off - out of the DC spike and into the skirt. Consider whether the
+      offered fractions want a note, or whether the largest one is a trap for the case
+      this feature exists to fix.
+      THE CONSTRAINT THAT MUST HOLD: T-340's control asserts that no PAN and no WHEEL
+      reaches a device route (a +/-1.0 drag of the whole 6 GHz bar through a spy client,
+      calls empty). A button is an explicit, discrete action like T-392's region-select
+      on release, so it may command the radio - but it must go through T-343's gated,
+      typed DeviceAction with device_id recorded, one capture at a time and the settle
+      gap honoured. Do not add a second path to the device.
+      Control worth having: a nudge and its opposite return the tune to where it
+      started (modulo one snap step), so the buttons are navigable rather than a
+      one-way drift.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
