@@ -1124,6 +1124,8 @@ An armed watch offers every emission the pipeline first sights inside the extent
 
 `GET /api/selections/{id}/watch` answers `{selection_id, watch, armed, alerts, suppressed, alerted_total, suppressed_total}`. `alerts[]` is `{anomaly_id, emitter, f_lo, f_hi, t, reason}` and `suppressed[]` is `{emitter, reason ("deferred" | "already-alerted"), relation ("suppressed-by" | "duplicate-of" | "artifact-of" | null), artifact ("image" | "harmonic" | "intermod" | null), source, t, explanation}`, both oldest first and bounded (256 alerts, 64 suppressed). Counters are per run and also appear in `/api/status` as `watch_alerts` and `watch_suppressed`. `404 not_found` for an unknown selection, `503 unavailable` with no watch service.
 
+- **`t` is bare and carries Unix seconds** — the units convention's default, so no `_ns` rename applies here (T-370 audit): `hk_api::selections::WatchAlertView`/`WatchSkipView` declare `t: f64`, and `crates/hk-cli/src/pipeline.rs`'s `PipelineWatch::report` converts each `hk_pipeline::alarms::WatchAlertRecord`/`WatchSkipRecord`'s raw-nanosecond `Timestamp` to seconds (`secs(a.t)`) before it ever reaches this crate — the internal record and the view served here are different types, one nanosecond-native, one already seconds. This route was previously unreachable by `every_serialized_time_declares_its_unit` (no selection existed for it to address on a fresh server), so the value had never been swept and asserted; the sweep now creates one first and covers it.
+
 ## Output recordings (T-061)
 
 Record a selection's, emitter's or band's bits, symbols, WAV audio and/or IQ to files on the device; stop, list, download.

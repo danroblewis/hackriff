@@ -8040,7 +8040,14 @@ fn scan_times(v: &Value, path: &str, key: &str, out: &mut Vec<String>) {
 }
 
 /// The routes this sweep can reach on a fresh server, with parameters that actually return data.
-fn time_law_routes(now: f64, emitter: Option<&str>) -> Vec<String> {
+///
+/// T-370: `selection` extends the sweep to selection-scoped routes exactly as `emitter` already
+/// does for the inventory-scoped ones — `GET /api/selections/{id}` and
+/// `GET /api/selections/{id}/watch` are otherwise unreachable on a fresh server (no selection
+/// exists to address), so a field only that route serves is not swept at all. This is the second
+/// field the sweep missed for a reachability reason rather than a listing error, the same class
+/// T-354 named for the stream-contract field.
+fn time_law_routes(now: f64, emitter: Option<&str>, selection: Option<&str>) -> Vec<String> {
     let (t0, t1) = (now - 3600.0, now + 3600.0);
     // Wide box for the paged/listing routes; the fixture's own band for the ones with
     // band \u00d7 span budgets (occupancy `span`, coverage channel tiling).
@@ -8099,6 +8106,12 @@ fn time_law_routes(now: f64, emitter: Option<&str>) -> Vec<String> {
             format!("/api/signatures/match?emitter={id}"),
         ]);
     }
+    if let Some(id) = selection {
+        r.extend([
+            format!("/api/selections/{id}"),
+            format!("/api/selections/{id}/watch"),
+        ]);
+    }
     r
 }
 
@@ -8122,9 +8135,25 @@ fn every_serialized_time_declares_its_unit() {
             .map(str::to_string);
         emitter.is_some()
     });
+    // T-370: a selection also has to exist for `/api/selections/{id}[/watch]` to be reachable —
+    // the same reachability gap `emitter` above closes for the inventory-scoped routes, and the
+    // one the sweep missed the stream-contract field for (T-354).
+    let (st, created) = post(
+        addr,
+        "/api/selections",
+        &json!({
+            "name": "time-law-sweep",
+            "f_lo": FIXTURE_CENTER_HZ - 1.0e5,
+            "f_hi": FIXTURE_CENTER_HZ + 1.0e5,
+        })
+        .to_string(),
+    );
+    assert_eq!(st, 201, "{created}");
+    let selection = created["id"].as_str().map(str::to_string);
+    assert!(selection.is_some(), "{created}");
     let mut bad: Vec<String> = Vec::new();
     let mut checked = 0usize;
-    for r in time_law_routes(unix_now(), emitter.as_deref()) {
+    for r in time_law_routes(unix_now(), emitter.as_deref(), selection.as_deref()) {
         let (st, v) = get(addr, &r);
         assert_eq!(st, 200, "{r} answered {st}: {v}");
         checked += 1;
