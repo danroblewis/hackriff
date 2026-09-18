@@ -13447,7 +13447,8 @@ tasks:
   - id: T-475
     milestone: MCANVAS
     title: The trace is a plain line - restore the classic phosphor look, coloured by the waterfall ramp with afterglow
-    status: in-progress
+    status: done
+    commit: a3fa5ba3
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-457]
@@ -14626,7 +14627,7 @@ tasks:
   - id: T-494
     milestone: MLIVE
     title: affordable_levels admits nodes materialize refuses, so the ladder cannot deepen past 4 x 4
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -14671,7 +14672,7 @@ tasks:
   - id: T-495
     milestone: MLIVE
     title: A live tile panned off-screen and back serves a STALE cache - its middle is gray and never fills
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CANVAS-FE
     core_interface: true
@@ -14770,7 +14771,7 @@ tasks:
   - id: T-497
     milestone: MLIVE
     title: A retune tears the live capture down again - the server stays up and the live view never recovers
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -14869,7 +14870,7 @@ tasks:
   - id: T-499
     milestone: MLIVE
     title: On stream loss some tiles render PURPLE and re-render left-to-right in a loop
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: []
