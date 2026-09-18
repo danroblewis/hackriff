@@ -6880,6 +6880,7 @@ tasks:
       edge only for `following` viewports, T-460). The only lever on the 13% is "nothing subscribed at all",
       i.e. the headless scheduled-survey case, filed as T-489. Finding recorded in the spectrum.rs module
       header.'
+    commit: "19aec9b"
   - id: T-489
     milestone: M2-hardening
     title: An unwatched spectrum stream still pays for its FFT, which is 13% of pipeline CPU on a headless
@@ -14149,7 +14150,7 @@ tasks:
   - id: T-488
     milestone: M3
     title: frequency_features takes the SAME broken strong-envelope subset, over seven IF dimensions - the third instance
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: M3A
     depends_on: [T-447]
