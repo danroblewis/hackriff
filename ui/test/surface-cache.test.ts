@@ -666,3 +666,125 @@ test("an unreadable 200 is an ANSWER: a decode failure is terminal too", async (
   assert.equal(h.cache.stats.terminalFailures, 1);
   assert.match(h.cache.refusalFor(a) ?? "", /coverage has no plane/, "the decoder's own words survive");
 });
+
+// ——— T-490: the refresh lane is PER COST CLASS, so a cheap tenant is not charged an expensive one ———
+//
+// **The finding this exists to preserve, because it is not obvious and cost a day to find.**
+// `ui/e2e/live-edge.e2e.mjs` passed on `main` for a reason unrelated to what it asserts: the
+// minimap's address was a **permanent 400** (the view lattice named 12 x 15 levels over a 4 x 4
+// store — T-482), so T-479's terminal rule asked it once and never again, and the refresh lane plus
+// all four in-flight slots belonged to the live pane. Declare the ceiling, and the minimap becomes
+// a servable, *following* viewport that queues here beside the pane. Measured in the browser, same
+// gestures, same box, only the server binary differing:
+//
+//   main   0/0 x68 @69ms    1/1 x3 @513ms   11/0 x2 @153ms   (73 requests, 5/5 samples drawn)
+//   before 9/0 x16 @725ms   0/0 x14 @183ms  9/1 x8 @398ms    (41 requests, 2/5 drawn — FLAT)
+//   after  0/0 x45 @128ms   9/0 x18 @650ms  9/1 x8 @660ms    (74 requests, 5/5 drawn)
+//
+// So the next person to see the minimap go quiet should not conclude the lane is fine because this
+// test is green: **check what the minimap's address is answering first.**
+//
+// The mechanism is T-460's own `serverMs` bug one level up, and its `done` handler already argues
+// the principle: a mean that folds in the minimap's coarse read charges the live edge for a tile it
+// is not. The fix there was to measure the lane's own cost on its own request — but the *lane* was
+// still a mixture, so a 725 ms coarse revalidation set a 2.2 s gate on a 183 ms fine one.
+//
+// **Fairness is a sixth property, not a replacement.** T-460's five still hold and are still
+// asserted above: only the live-edge address, only for a FOLLOWING viewport, only at the level it
+// was drawn at, never inside one `tCellNs(level_t)`, and one revalidation in flight into a slot the
+// ordinary queue could not use. This adds: and each cost class gets its own turn and its own clock.
+
+/** A coarse live-edge tile and the viewport drawing it — the minimap's shape, at `level_f = 9`. */
+const COARSE_LEVEL_F = 9;
+const coarseTile = (fIndex = 0) => addr(fIndex, 0, COARSE_LEVEL_F, 0);
+/** `wide` tiles across, because a minimap is many tiles and that is what a single FIFO starves on. */
+const coarseView = (wide = 1): Viewport => ({
+  box: { f0Hz: 0, f1Hz: LAT.f0Hz * 2 ** COARSE_LEVEL_F * LAT.cells * wide, t0Ns: EDGE_NS - 100e9, t1Ns: EDGE_NS },
+  levelF: COARSE_LEVEL_F, levelT: 0,
+});
+
+/**
+ * Run the live loop with `views` following, answering a fine tile at once and a coarse one only
+ * after `coarseMs` of simulated time — the measured 37 ms against 246 ms, exaggerated so the effect
+ * cannot be a rounding.
+ *
+ * Returns each level's **revalidations** — total fetches minus one first fetch per distinct address.
+ * Counting raw fetches would fold in the ordinary queue's initial misses, which are a different
+ * mechanism: eight coarse tiles cost eight misses whatever the lane does, and an assertion over the
+ * sum reads as lane behaviour while measuring queue depth. (It did, on the first draft of this.)
+ */
+async function liveMixed(h: ReturnType<typeof harness>, clock: { t: number }, ms: number,
+  views: Viewport[], coarseMs: number, coarseWide = 1) {
+  const issuedAt = new Map<string, number>();
+  const isCoarse = (k: string) => parseKey(k)!.levelF === COARSE_LEVEL_F;
+  for (let step = 0; step < ms / 100; step++) {
+    clock.t += 100;
+    h.cache.beginFrame();
+    for (const v of views) {
+      if (v.levelF !== COARSE_LEVEL_F) { h.cache.acquire(edgeTile()); continue; }
+      for (let i = 0; i < coarseWide; i++) h.cache.acquire(coarseTile(i));
+    }
+    h.cache.setViewports(LAT, views);
+    h.cache.endFrame();
+    h.cache.refreshEdge(LAT, EDGE_NS, views);
+    await flush();
+    for (const [key, w] of [...h.waiting]) {
+      if (!issuedAt.has(key)) issuedAt.set(key, clock.t);
+      if (isCoarse(key) && clock.t - issuedAt.get(key)! < coarseMs) continue;
+      issuedAt.delete(key);
+      w.resolve(data(parseKey(key)!));
+      h.waiting.delete(key);
+      await flush();
+    }
+  }
+  const per = (lf: number) => {
+    const at = h.calls.filter((k) => parseKey(k)!.levelF === lf);
+    return at.length - new Set(at).size;
+  };
+  return { fine: per(0), coarse: per(COARSE_LEVEL_F) };
+}
+
+test("an expensive lane beside it does not slow the live edge's own refresh", async () => {
+  const alone = { t: 0 };
+  const h1 = harness({ inFlight: 4, now: () => alone.t, serverMsGuess: 20 });
+  const solo = await liveMixed(h1, alone, 10_000, [edgeView()], 800);
+
+  const together = { t: 0 };
+  const h2 = harness({ inFlight: 4, now: () => together.t, serverMsGuess: 20 });
+  const mixed = await liveMixed(h2, together, 10_000, [edgeView(), coarseView()], 800);
+
+  // Non-vacuity: the expensive lane has to have actually run, or this measures nothing.
+  assert.ok(mixed.coarse > 1, `the coarse lane was asked ${mixed.coarse} time(s) — it must refresh too`);
+  // **The claim.** The live edge's cadence is a property of the live edge, not of what else is on
+  // screen. Before T-490 one shared `refreshNextIssue` made `mixed.fine` a fraction of `solo.fine`.
+  assert.ok(mixed.fine >= solo.fine * 0.6,
+    `the live edge refreshed ${mixed.fine} times with an expensive lane beside it against ` +
+    `${solo.fine} times alone — an unrelated viewport's cost must not set the live edge's cadence`);
+});
+
+test("…and the lanes take TURNS, so a WIDE coarse viewport cannot queue ahead of the live edge", async () => {
+  // **Why this needs a wide coarse viewport, and what it caught.** Written with ONE coarse tile it
+  // passed against a deliberately collapsed single lane — the cheap lane re-queues on its own
+  // cadence, so `fine > coarse` came out true under FIFO too, and the test was a sound proof of an
+  // adjacent claim. A minimap is not one tile; it is ~19 across the device range, which is exactly
+  // what a single FIFO starves on: nineteen 650 ms entries ahead of the live edge is 12 s of
+  // nothing. Round-robin is the property, and this is the shape that can see it.
+  const run = async (wide: number) => {
+    const clock = { t: 0 };
+    const h = harness({ inFlight: 4, now: () => clock.t, serverMsGuess: 20 });
+    return liveMixed(h, clock, 10_000, [edgeView(), coarseView(wide)], 400, wide);
+  };
+  const narrow = await run(1);
+  const wide = await run(8);
+
+  // Non-vacuity: the wide run must really have more coarse addresses in the lane.
+  assert.ok(wide.coarse >= narrow.coarse,
+    `coarse revalidations ${narrow.coarse} -> ${wide.coarse}: widening must not shrink the lane`);
+  // **The claim, and the one FIFO cannot satisfy.** Under a single queue, eight coarse addresses sit
+  // ahead of the live edge and it waits eight turns — at the measured 650 ms each that is 5 s of no
+  // rows. Round-robin makes it wait ONE turn, so the live edge's rate is unmoved by how DEEP the
+  // other lane is. A lane's rate is a share of its own cost, never of another lane's depth.
+  assert.ok(wide.fine >= narrow.fine * 0.8,
+    `the live edge revalidated ${narrow.fine} times beside one coarse tile and ${wide.fine} times ` +
+    "beside eight — another viewport's queue depth must not set the live edge's cadence");
+});
