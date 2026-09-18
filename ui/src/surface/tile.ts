@@ -14,7 +14,7 @@
 
 import { buildRequest, errorFrom } from "../controls/client";
 import { CELL } from "./cellrule";
-import { keyOf, tileUrl, type Lattice, type TileAddr } from "./lattice";
+import { keyOf, latticeFrom, tileUrl, type Lattice, type TileAddr } from "./lattice";
 
 /** Bytes one decoded cell occupies on the GPU: R16F measurement + R8 state. */
 export const BYTES_PER_CELL = 3;
@@ -66,7 +66,10 @@ export interface TileData {
 export interface TileResponse {
   key: { device: string; scheme: string | number; level_f: number; level_t: number; f_index: number; t_index: number; cells: number };
   extent: { nt: number; nf: number };
-  axes: { frequency: { levels: number; cell_hz: number }; time: { levels: number; cell_s: number } };
+  axes: {
+    frequency: { levels: number; cell_hz: number; max_level?: number };
+    time: { levels: number; cell_s: number; max_level?: number };
+  };
   grid: {
     nt: number; nf: number; max_db: (number | null)[]; range_db?: { lo: number; hi: number } | null;
     /** Per-cell folded frame count. The evidence that separates [[CELL.AWAITING]] from
@@ -254,14 +257,14 @@ export function probeAddr(device = "any", scheme = "view"): TileAddr {
   return { device, scheme, levelF: 0, levelT: 0, fIndex: 0, tIndex: 0, cells: 8 };
 }
 
-/** The lattice, read off a probe response. See [[latticeFrom]] for why the client never picks it. */
+/**
+ * The lattice, read off a probe response, at the `cells` the view will render at.
+ *
+ * **One implementation, in `lattice.ts`.** This was a second copy of [[latticeFrom]]'s arithmetic,
+ * differing only in taking `cells` from the caller instead of the response — which is exactly the
+ * drift shape `cellrule.ts` was rewritten to avoid, and it is why the route's `max_level` reached
+ * one reader and not the other (T-480). It delegates now.
+ */
 export function latticeOf(resp: TileResponse, cells: number): Lattice {
-  return {
-    scheme: String(resp.key.scheme),
-    cells,
-    f0Hz: resp.axes.frequency.cell_hz / 2 ** resp.key.level_f,
-    t0Ns: (resp.axes.time.cell_s * 1e9) / 2 ** resp.key.level_t,
-    levelsF: resp.axes.frequency.levels,
-    levelsT: resp.axes.time.levels,
-  };
+  return latticeFrom(resp, cells);
 }
