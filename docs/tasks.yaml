@@ -11481,7 +11481,7 @@ tasks:
   - id: T-444
     milestone: MCANVAS
     title: Retune-on-pan - panning a pane to un-tuned spectrum offers or triggers a retune
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     core_interface: true
@@ -11515,15 +11515,42 @@ tasks:
       COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
       harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
       with uncommitted work.
+    commit: "25375b7"
+    result: |
+      DONE. §8.4's "offers OR triggers" resolves to OFFERS, and the choice is FORCED rather than
+      preferred: T-340's control drags +/-1.0 of the whole 6 GHz surface through a spy client and
+      asserts an EMPTY CALL LIST, and T-442 re-asserted that shape over the entire pane
+      vocabulary. A pane's pan is a pan. retune.ts computes an offer from pane state - pure
+      arithmetic, reaching nothing - and only acceptPaneRetune moves a radio, through T-343's one
+      gate with the typed DeviceAction the backend records device_id against.
+      T-407'S LESSON TAKEN STRUCTURALLY, NOT AS A BETTER THRESHOLD. Both its failures were a
+      continuous pointer stream misread as a committing act. So acceptPaneRetune RE-DERIVES THE
+      OFFER AT THE INSTANT OF THE COMMIT and refuses ("moved") if the planned (centre, span)
+      changed - a pan INVALIDATES a pending offer rather than silently re-aiming it. THE RADIO
+      GOES WHERE THE BUTTON SAID, OR NOWHERE.
+      Three ways there is nothing to offer, each a statement: a live window already CONTAINS the
+      pane (containment, not overlap); the pane is NOT showing the growing edge, since a retune
+      cannot change what was already captured; or no grid was reported.
+      AT THE BAND EDGE: disabled with its reason, never clamped (T-409's rule) - which is why the
+      plan tests containsCenter rather than snapCenter, since snapCenter would walk an out-of-band
+      request inward and call every out-of-range centre achievable. A pane past the top still GETS
+      an offer, because it is genuinely un-tuned, but plan.ok is false with center_out_of_range.
+      EDGE-TILE INVALIDATION, two things beyond the spike: COARSER LEVELS GO TOO, or the
+      upscaled-ancestor fallback keeps drawing the old tuning under the new one; and an IN-FLIGHT
+      fetch is marked STALE rather than aborted, because it lands AFTER the retune and insert
+      would otherwise accept it into the slot just emptied. applyDeviceAction now returns whether
+      the front end TOOK the action, because "only after a real retune" cannot be read off a toast.
+      Configuration is retunePlan's throughout, asserted on the plan AND on the source: retune.ts
+      contains no RF constant and no second copy of the arithmetic.
   - id: T-445
     milestone: MCANVAS
     title: The cutover - retire both edge scrubbers and the separate history view
-    status: in-progress
+    status: todo
     priority: normal
     parallel_group: CANVAS-FE
     core_interface: true
     model: opus
-    deps: [T-441, T-442, T-443, T-444]
+    deps: [T-439, T-441, T-442, T-443, T-444]
     use_cases: [AWARE-011, AWARE-042]
     found_by: 'MCANVAS decomposition (user directive, 2026-09-17)'
     acceptance: |
@@ -11548,6 +11575,12 @@ tasks:
       a home on the canvas or is explicitly reported as dropped with the user's sign-off needed;
       docs/api.md, docs/14 and ui/CONTROLS.md updated; the UI suite green.
     notes: |
+      DEPENDENCY ADDED 2026-09-17, caught before launch: T-439 (live-edge tiles) was missing from
+      the deps and belongs there. This ticket retires the LIVE waterfall as well as the scrubbers -
+      §8.5's "the live-vs-history split disappears" - and T-439 is what makes "live is the finest
+      growing edge" actually true. Retiring the live surface before T-439 lands would leave the
+      product with no live view at all. The decomposition had the renderer chain right and this
+      one edge wrong.
       TESTING PROTOCOL (CLAUDE.md, after T-416/T-426/T-430 each stalled on it): the agent runs
       TARGETED tests only - `just test-crate <crate>` or `just test-one <name>` for what its diff
       touches - and HANDS BACK when they pass. NEVER `just gate`, never the full suite. The
@@ -11643,7 +11676,7 @@ tasks:
   - id: T-447
     milestone: M3
     title: phase_features and derotate take their strong-envelope subset over the same broken mean rule T-431 just fixed
-    status: in-progress
+    status: todo
     priority: normal
     parallel_group: M3A
     deps: [T-431]
