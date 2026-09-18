@@ -11792,7 +11792,7 @@ tasks:
   - id: T-447
     milestone: M3
     title: phase_features and derotate take their strong-envelope subset over the same broken mean rule T-431 just fixed
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: M3A
     deps: [T-431]
@@ -13536,7 +13536,7 @@ tasks:
   - id: T-483
     milestone: MLIVE
     title: PROVE THE GAP - the canvas finest-live tier must reproduce the old waterfall's image for the same window, and today it will not
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     core_interface: true
@@ -13683,6 +13683,62 @@ tasks:
       stays T-460, then T-483/T-484 (fidelity), then the canvas e2e (T-481).
       Depends on T-483/T-484 because the fidelity work decides what the finest live tier actually
       renders, and a shadow tier drawn against the wrong finest tier would have to be redone.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-486
+    milestone: MCANVAS
+    title: Follow-live has no dead zone - a 1 px time-pan drops out of live, and a release near the top re-pauses
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    depends_on: [T-472]
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER-REPORTED UX BUG. The follow-live -> pause transition has NO DEAD ZONE: a 1 px time-pan
+      drops the pane out of live, and releasing near the top - as a new row appends under the cursor
+      - re-pauses even when the user plainly meant to return to live.
+      THE FIX: a SNAP-TO-LIVE DEAD ZONE at the live edge, about 10 px or a few rows. A pane STAYS IN
+      or SNAPS BACK TO follow while its time viewport is within the dead zone of the live edge, and
+      only COMMITS TO PAUSE when dragged BEYOND it. On drag release within the zone, PIN TO THE LIVE
+      EDGE - do not leave it a few pixels short, because a pane that is nearly-following is exactly
+      the state that produces the second half of this bug.
+      THIS IS A THRESHOLD ON THE FOLLOW/PAUSE STATE, NOT ON THE PAN, AND THE DISTINCTION IS THE
+      TICKET. T-456 made the drag unthresholded and that stays: the view still moves 1:1 with the
+      pointer from the first pixel. What gains a threshold is the DERIVED STATE - whether the pane is
+      following - which is a function of where the viewport ended up, not of how the pointer moved.
+      DO NOT REACH FOR T-407'S LESSON HERE BY REFLEX. T-407 found two ways a finger could retune the
+      radio because a threshold was applied to A POINTER STREAM (a 6 px gate that made a tap a drag,
+      and travel measured as clientX + clientY). This threshold is on the VIEW WINDOW against the
+      live edge, reads no pointer, and commands no device. Different thing. But T-407's positive rule
+      still applies to any distance you do measure: a distance, never a sum of axes.
+      HYSTERESIS IS THE PART MOST LIKELY TO BE GOT WRONG. A zone that both HOLDS follow and SNAPS
+      BACK to it will oscillate at its own boundary if entry and exit use the same threshold - the
+      pane flaps between following and paused while the edge advances through it. Asymmetric
+      thresholds (leave follow at N px, re-enter at M < N) are the standard answer; whatever is
+      chosen, demonstrate it does not flap, with the live edge ADVANCING during the test rather than
+      static.
+      PIXELS OR ROWS - DECIDE AND SAY WHICH, BECAUSE THEY DIVERGE WITH ZOOM. "~10 px" and "a few
+      rows" are the same thing at level 0 (1 s cells) and wildly different five levels out, where ten
+      pixels can be minutes of capture. A pixel threshold is a gesture affordance and stays constant
+      to the hand; a row threshold is a claim about data and stays constant to the signal. Pick one,
+      justify it, and state what happens at the other extreme.
+      INTERACTION WITH T-460, WHICH JUST LANDED: the live-edge refresh runs ONLY for a FOLLOWING
+      viewport - that is one of the three constraints that make it cheap by construction. Widening
+      what counts as following therefore widens what gets refreshed. That is correct and probably
+      desirable, but it is a real coupling: say what it does to the refresh budget, and keep T-460's
+      property that no visible fetch is starved.
+      PAUSE FREEZES THE VIEW, NOT THE CAPTURE - unchanged. Capture, the ring and detection are
+      always-on, and nothing here may touch them.
+      DoD: a 1 px time-pan leaves the pane following; a drag beyond the zone commits to pause; a
+      release inside the zone pins exactly to the live edge; no flapping with the edge advancing,
+      demonstrated rather than argued; the pixels-versus-rows choice is stated with its reason; and
+      T-456's unthresholded pan is unchanged, with T-340's control passing verbatim.
+    notes: |
+      Filed 2026-09-18 from user report. Depends on T-472 because that ticket is currently editing
+      the same gesture arithmetic (panes.ts and wheelZoom) and the two would collide.
+      NOTE FOR THE BROWSER TIER (T-478): a following pane's chrome readout carries its offset from
+      the live edge, and that offset DRIFTS with wall-clock lag. Since this ticket is precisely about
+      small offsets from the live edge, do not assert follow/pause state from the readout string -
+      read `data-following`, which is what the T-478 projection already does.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
