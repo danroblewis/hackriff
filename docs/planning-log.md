@@ -4975,6 +4975,56 @@ shipping it.
 guard whose comment was right and whose precedence was not, and a gate classifying the wrong diff. The
 other three were measurements overturning assumptions nobody had tested.
 
+### B0.684 — two states the type cannot spell, and a mark that must not promise arrival (2026-09-17)
+
+**T-442** (`75c7ebe`) answered T-347's finding structurally rather than carefully. T-347 established
+that **a run-wide boolean cannot represent N viewers**; T-442's answer is that **the fix is not a better
+flag, it is no flag**:
+
+```ts
+| { live: true;  spanNs }              // pinned to the edge — NO centre of its own
+| { live: false; centerNs; spanNs };   // frozen on an absolute capture instant
+```
+
+A following pane has **no centre** because it borrows the edge, re-derived every frame. So *"scrubbed
+but not paused"* and *"paused with a stale centre beside a live window"* are states **the type cannot
+express**. `freezeAt()` is a **coordinate change, not a mode change** — it writes down the window
+already showing, so the frame you pause on is `deepEqual` to the frame before it.
+
+Isolation was proved three ways, and the third settles it: a spy `fetch` over every pane operation sees
+an **empty call list**. **Pausing is, on the wire, nothing** — which is exactly what makes it unable to
+reach another pane, another browser, or the radio.
+
+**T-441** (`445fbef`) named the fifth state — *observed-but-not-yet-measured* — and its reasoning is the
+part to keep. The mark is **sparse dots**, and the rule is **the mark must not promise arrival**:
+T-446's defect wrote exactly this cell (coverage `observed`, `frames_late` climbing, nothing ever
+written) for **an hour of capture time**, and a "loading" spinner **would have made that invisible**. It
+also rejected the alternative discriminator — *is this cell near the live edge?* — as a guess about the
+future, which is precisely what this state must not assert. The discriminator it used is already on the
+wire and needs no clock: coverage `observed`, `max_db` null, **`frames == 0`**.
+
+It proved the tiers **in a frame** rather than on flags, replaying recorded GL ops — including the bytes
+actually uploaded to the samplers — through the CPU half of the table the shader is generated from, and
+asserting on **pixel histograms**. Three tiers give three pairwise-different pictures of identical
+measurements, **yet the ramp never moves**, because a tier inks only the pixels it draws on.
+
+**The merge gate caught a real integration defect between them**, which is what it exists for: T-442
+landed while T-441 was in flight, its fixtures predate `measured`, and `sourceCellPx` threw. **The
+agent's diagnosis beat mine.** I framed it as a missing field; the real bug is that `sourceCellPx` runs
+inside `drawRegion`, so the throw propagated out of `render` and **blanked every pane**, not the one
+tile — worth fixing whichever field is absent.
+
+**And it argued against my suggested fix, correctly.** I proposed drawing no survey lattice when
+`measured` is absent. It pointed out that **a survey-overview tile with no mark is pixel-identical to a
+live-iq tile**, so suppressing the tier mark is not the weaker claim — it *erases* the tier rather than
+being imprecise about the pitch, which is a different and louder falsehood. It fell back to the tile's
+own served grid instead: the rule `decodeTile` already applies, in one more place, rather than a second
+policy.
+
+**The pattern across both:** the strongest fixes this week have made bad states **unrepresentable**
+rather than guarded — no pause flag to desynchronise, one grey literal in the shader, a mark that cannot
+imply a future. That is the same move as `Coverage::Unobserved` not being spellable as quiet.
+
 ## Open for the user (current)
 
 Kept current by the coordinator; the planning-phase list near the top of this file is the 2026-09-13
