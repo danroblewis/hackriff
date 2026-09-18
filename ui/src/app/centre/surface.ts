@@ -45,6 +45,7 @@ import {
   markAt, markQuads, normalizeRegion, pendingMarkBox, pointOn, selectionMarkBoxes, signalMarkBoxes,
   type MarkBox, type MarkRegion,
 } from "../../surface/marks";
+import { rangeLabel } from "../../surface/legend";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
 import {
   acceptPaneRetune, offerAcceptable, offerLabel, paneRetuneOffer, type PaneRetuneOffer,
@@ -88,12 +89,18 @@ function mount(el: HTMLElement, ctx: AppContext) {
     class: "mini sf-tracebtn on", type: "button", "aria-pressed": "true",
     title: "The spectrum trace above each viewport: the slice across frequency at that viewport's own time position, and the max-hold over its whole window. Both are drawn on the surface's one measured dB range.",
   }, "Trace");
-  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn,
+  // T-470: the display range is anchored by default, so the same measured dB is the same colour at
+  // every zoom — and so is the trace's y axis, which reads the same range. This is the opt-in escape
+  // hatch for digging into weak signals, and the label beside it states the range and which way
+  // round it is — a fixed scale is honest only if it is quoted.
+  const contrastBtn = h("button", { class: "mini sf-contrast", type: "button" }, "Auto-contrast: off");
+  const rangeEl = h("span", { class: "sf-range", role: "status" });
+  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn,
     h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved.", onclick: () => preview?.split("columns") }, "Split ⇔"),
     h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => preview?.closeActive() }, "Close"),
     h("button", { class: "mini", type: "button", title: "Zoom the active viewport out to the device-available spectrum over the whole record horizon.", onclick: () => preview?.fitToSurface() }, "Whole surface"),
     offerEl);
-  el.replaceChildren(h("div", { class: "sf-bar" }, actions, hoverEl), stage, traceEl, chrome, note);
+  el.replaceChildren(h("div", { class: "sf-bar" }, actions, rangeEl, hoverEl), stage, traceEl, chrome, note);
 
   let preview: SurfacePreview | null = null;
   let windows: ActiveWindow[] = [];
@@ -151,14 +158,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // `toClip`, y through `Surface.lo`/`hi`, the one *measured* display range the ramp is relative to.
   // It shares no renderer state: the quads go to `overlay.ts`, which has no sampler and no ramp.
   //
-  // **Why there is no manual dB range.** The old waterfall carried `setScale(auto, lo, hi)` and
-  // **nothing ever called it** — a repo-wide search at the cutover commit finds the definition and no
-  // caller, so the cutover retired an unreachable control rather than a feature in use. And the range
-  // it would have overridden is measured: the tiles report their own `range_db` and the surface
-  // tracks it. Letting a hand-set pair of numbers stand in for that is a user overriding a
-  // measurement, which is the move this product declines by default. The honest control is to *say*
-  // the range, which the readout below does, so a surprising picture is diagnosable instead of
-  // paintable-over.
+  // **Why there is still no manual dB range, and what T-470 changed.** The old waterfall carried
+  // `setScale(auto, lo, hi)` and **nothing ever called it** — a repo-wide search at the cutover
+  // commit finds the definition and no caller — so the cutover retired an unreachable control rather
+  // than a feature in use. A hand-set pair of numbers standing in for a measured range is a user
+  // overriding a measurement, and that is still declined.
+  //
+  // What T-470 corrected is *which* measurement. The range was tracked from the tiles **currently on
+  // screen**, so navigating re-coloured measurements that had not changed ("colours animate and
+  // shift when I zoom"). It is now a stated span below a peak measured once over the region, so the
+  // same dB is the same colour at every zoom — and so is this trace's y axis, which reads that same
+  // pair. `Auto-contrast` is the opt-in way back to tracking, and it is a *contrast* control rather
+  // than a hand-set scale: it still colours from a measurement, just from the visible one. The honest
+  // part is unchanged — the range is **said**, by the readout below and by the label in the bar, so a
+  // surprising picture is diagnosable instead of paintable-over.
   let traceOn = true;
   const fmtDb = (db: number) => `${db.toFixed(1)} dB`;
   const fmtDur = (s: number) => (s < 1 ? `${(s * 1000).toFixed(0)} ms` : s < 90 ? `${s.toFixed(1)} s` : `${(s / 60).toFixed(1)} min`);
@@ -212,7 +225,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
         holdPk
           ? `max-hold over ${fmtDur(spanS)} · peak ${fmtDb(holdPk.db)} at ${fmtHz(holdPk.hz)}`
           : `max-hold over ${fmtDur(spanS)} — ${empty}`,
-        `scale ${fmtDb(s.lo)} … ${fmtDb(s.hi)}, measured from the served tiles and shared with the ramp`,
+        // T-470: one scale for the trace's y axis and the ramp, and it says which of the two ways it
+        // was decided. It used to read "measured from the served tiles" — true of the viewport-
+        // tracking range, and exactly what stopped being true when the scale stopped following the
+        // viewport. `app-trace.e2e.mjs` asserts this sentence, and was updated with it.
+        `scale ${fmtDb(s.lo)} … ${fmtDb(s.hi)}, ${s.range.mode === "anchored"
+          ? "measured over the region and anchored there"
+          : "measured from the tiles on screen (auto-contrast)"}, shared with the ramp`,
       ].join(" · "));
     }
     return out;
@@ -441,6 +460,29 @@ function mount(el: HTMLElement, ctx: AppContext) {
     };
     renderLive();
     store.select((s) => s.time.live, renderLive);
+
+    // ---- the colour scale (T-470). A view control; it reaches no route and no device. ----
+    const renderRange = () => {
+      const p = preview;
+      if (!p) return;
+      const r = p.range;
+      rangeEl.textContent = rangeLabel(r);
+      contrastBtn.textContent = r.mode === "anchored" ? "Auto-contrast: off" : "Auto-contrast: on";
+      contrastBtn.classList.toggle("on", r.mode === "auto");
+      contrastBtn.setAttribute("aria-pressed", r.mode === "auto" ? "true" : "false");
+      contrastBtn.title = r.mode === "anchored"
+        ? "The display range is anchored to the region, so the same measured dB is the same colour at every zoom — at the cost of clipping outside it. Press to track what is on screen instead."
+        : "The display range tracks the tiles currently on screen: nothing clips, but the same signal changes colour as you navigate. Press to go back to the anchored range.";
+    };
+    contrastBtn.addEventListener("click", () => {
+      preview?.setAutoScale(preview.range.mode === "anchored");
+      renderRange();
+    });
+    renderRange();
+    // Auto-contrast moves the range every frame, so the statement follows it rather than only the
+    // press: a label quoting a range the surface no longer draws with is worse than no label. At the
+    // chrome cadence, not the frame's — it is a sentence, and the anchored mode never changes it.
+    startPoll(async () => renderRange(), 1000);
   })();
 
   // The one poll that fills the navigation slice: the achievable-centre grid the retune offer plans

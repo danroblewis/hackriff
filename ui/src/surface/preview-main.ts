@@ -14,8 +14,9 @@ import { h } from "../app/dom";
 import { takeToken } from "../app/net";
 import { fmtShare } from "./bootstrap";
 import { attachSurfaceInput } from "./input";
-import { legendEntries, swatchPixels } from "./legend";
+import { legendEntries, rangeEntry, rangeLabel, swatchPixels, type LegendEntry } from "./legend";
 import { SurfacePreview, isBackpressure, probeSurface } from "./preview";
+import type { DisplayRange } from "./surface";
 
 const SWATCH_W = 54, SWATCH_H = 22;
 
@@ -30,22 +31,40 @@ const text = (el: HTMLElement, s: string) => { if (el.textContent !== s) el.text
 /** A capture instant, as a local wall clock — the axis is absolute capture time throughout. */
 const at = (ns: number) => new Date(ns / 1e6).toLocaleString();
 
-function mountLegend(root: HTMLElement): void {
-  for (const e of legendEntries()) {
-    const canvas = h("canvas", { class: "sp-swatch", width: SWATCH_W, height: SWATCH_H });
-    const ctx = canvas.getContext("2d");
-    if (ctx) {
-      const img = ctx.createImageData(SWATCH_W, SWATCH_H);
-      img.data.set(swatchPixels(e, SWATCH_W, SWATCH_H));
-      ctx.putImageData(img, 0, 0);
-    }
-    root.append(h("div", { class: "sp-legend-row", "data-mark": e.key },
-      canvas,
-      h("div", { class: "sp-legend-text" },
-        h("b", {}, e.label),
-        h("span", {}, e.note)),
-    ));
+function legendRow(e: LegendEntry): HTMLElement {
+  const canvas = h("canvas", { class: "sp-swatch", width: SWATCH_W, height: SWATCH_H });
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    const img = ctx.createImageData(SWATCH_W, SWATCH_H);
+    img.data.set(swatchPixels(e, SWATCH_W, SWATCH_H));
+    ctx.putImageData(img, 0, 0);
   }
+  return h("div", { class: "sp-legend-row", "data-mark": e.key },
+    canvas,
+    h("div", { class: "sp-legend-text" },
+      h("b", {}, e.label),
+      h("span", {}, e.note)),
+  );
+}
+
+function mountLegend(root: HTMLElement): void {
+  for (const e of legendEntries()) root.append(legendRow(e));
+}
+
+/** The scale row, re-rendered whenever the range or its mode changes (T-470). Kept separate from the
+ * static key: it is the one row whose *content* is a live number rather than a rule. */
+function mountRangeRow(root: HTMLElement): (r: DisplayRange) => void {
+  let last = "";
+  let row: HTMLElement | null = null;
+  return (r: DisplayRange) => {
+    const key = `${r.lo}|${r.hi}|${r.mode}|${r.source}`;
+    if (key === last) return;
+    last = key;
+    const next = legendRow(rangeEntry(r));
+    if (row) row.replaceWith(next);
+    else root.prepend(next);
+    row = next;
+  };
 }
 
 function fail(message: string, detail = ""): void {
@@ -93,6 +112,7 @@ async function main(): Promise<void> {
     ...probe.degraded.map((d) => h("li", { class: "sp-degraded" }, d)),
   );
   mountLegend(slot("legend"));
+  const showRange = mountRangeRow(slot("legend"));
 
   const canvas = slot("canvas") as HTMLCanvasElement;
   let preview: SurfacePreview;
@@ -106,7 +126,25 @@ async function main(): Promise<void> {
   // ——— controls. Every one of these is a view change; none reaches the front end. ———
   const button = (label: string, title: string, fn: () => void) =>
     h("button", { type: "button", class: "sp-btn", title, onclick: fn }, label);
+  // The one control that can make two zooms disagree about a colour, so it is a deliberate press and
+  // it says which way round it is (T-470).
+  const contrast = h("button", { type: "button", class: "sp-btn", "data-slot": "contrast" }) as HTMLButtonElement;
+  const renderContrast = () => {
+    const r = preview.range;
+    contrast.textContent = r.mode === "anchored" ? "Auto-contrast: off" : "Auto-contrast: on";
+    contrast.title = r.mode === "anchored"
+      ? "The display range is anchored to the region, so the same measured dB is the same colour at every zoom — at the cost of clipping outside it. Press to track what is on screen instead."
+      : "The display range tracks the tiles currently on screen: nothing clips, but the same signal changes colour as you navigate. Press to go back to the anchored range.";
+    contrast.setAttribute("aria-pressed", r.mode === "auto" ? "true" : "false");
+    showRange(r);
+  };
+  contrast.addEventListener("click", () => {
+    preview.setAutoScale(preview.range.mode === "anchored");
+    renderContrast();
+  });
+  renderContrast();
   slot("actions").replaceChildren(
+    contrast,
     button("Fit to coverage", "Put the active pane back on the region the backend reported as observed.", () => preview.fitToCoverage()),
     button("Whole surface", "Zoom the active pane out to the device-available spectrum over the whole record horizon.", () => preview.fitToSurface()),
     button("Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved.", () => preview.split("columns")),
@@ -146,8 +184,11 @@ async function main(): Promise<void> {
       `queue ${preview.view.surface.cache.queueDepth}`,
       `~${preview.view.surface.cache.serverEstimateMs.toFixed(0)} ms/tile`,
       `${s.uploads} uploads · ${s.evictions} evicted · ${s.cancelled} cancelled · ${s.abandoned} abandoned · ${s.busyRefusals} backpressure · ${s.failures} failed`,
-      f ? `display range ${preview.view.surface.lo.toFixed(1)}…${preview.view.surface.hi.toFixed(1)} dBFS` : "",
+      f ? rangeLabel(preview.range) : "",
     ].filter(Boolean).join("  ·  "));
+    // Auto-contrast moves the range every frame, so the key's scale row follows it here rather than
+    // only on the press — a legend that states a range it no longer draws with is worse than none.
+    showRange(preview.range);
   }, 500);
 }
 

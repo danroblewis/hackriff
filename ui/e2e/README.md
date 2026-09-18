@@ -64,6 +64,7 @@ Two of those deserve a note:
 | `app-surface.e2e.mjs` | **T-445's guard**, on **`/` — the page the user actually opens.** The cutover put this renderer on the app's critical path and deleted the waterfall it replaces, so "the app comes up" stopped being a property of an additive preview. Different bundle (`--splitting`), different entry, different mount: passing `surface-load` says nothing about it. Also asserts the retired slots are absent, the rest of Explore is present, and that a drag moves the view while reaching no device route. |
 | `surface-nav.e2e.mjs` | **T-454's guard** — the in-flight cap and the AIMD contract. Plus **T-456's**: the four navigation gestures, and the modifier the browser actually delivered. |
 | `surface-contention.e2e.mjs` | **T-454's bootstrap half**: a second tab must be able to open while the first saturates the route. |
+| `surface-colour.e2e.mjs` | **T-470's guard**, on `/surface.html`: the same measured dB is the same colour at every zoom. Splits the surface, zooms **one** viewport through six states across four pyramid levels, and requires the other — same box, same level, same tiles, all checked from the page's own readout — to stay **byte-identical**. Its control is a mode switch, not a fault injection: see below. |
 | `surface-region.e2e.mjs` | **T-458's guard**, on `/`: shift+drag marks out a region. Reads the `shiftKey` flag *on the `pointerdown` the canvas received* before concluding anything from the view, asserts the viewport does **not** move under a stroke, and re-states T-340's control over the new gesture. Its non-vacuity is recorded in the file header: `selftest.mjs` cannot hold these faults, because it builds only the `/surface.html` bundle and this file (like `app-surface`) drives the app. |
 | `selftest.mjs` | Reintroduces each defect in a scratch copy of `ui/src` and requires the suite to go red. |
 
@@ -101,8 +102,9 @@ Measured on the dev Mac, warm (`hk` already built, `npm ci` a no-op):
 | `surface-load.e2e.mjs` | ~2.5 s |
 | `app-surface.e2e.mjs` | ~3.5 s |
 | `surface-region.e2e.mjs` | ~3.5 s (one browser and one app page shared by the file) |
+| `surface-colour.e2e.mjs` | ~26 s (twelve settle-and-screenshot cycles; it compares whole panes) |
 | `surface-nav.e2e.mjs` | ~22 s (8 s of it the deliberate steady-state window) |
-| **`npm run e2e` total** | **~32 s** |
+| **`npm run e2e` total** | **~60 s** |
 | `npm run e2e:selftest` (baseline + 5 faults) | ~4 min |
 
 Cold, `just test-ui-e2e` also pays `cargo build -p hk-cli --bin hk` and `npm ci`.
@@ -184,7 +186,31 @@ Recorded here rather than silently worked around, because they are the tier doin
    `/api/tiles` and waits for it** (measured: ~48 s of record against a 16 s floor, after a ~24 s
    wait when that file is run alone; no wait at all in a full run, where it goes last) instead of
    assuming it from the run order. Stated in the test rather than hidden.
-4. **A CDP wheel cannot answer an OS question.** T-456 needed to know whether ctrl+wheel reaches the
+4. **`startBackend` would adopt another worktree's server** (T-470). The readiness loop waits for
+   *anything* to answer `/surface.html` on its port, and with up to four agents running at once the
+   default 8791 is routinely already taken — so the suite drove **another worktree's bundle**,
+   reporting on code the run never built. It cost three runs of a new guard failing against a page
+   that contained none of the code under test, and it can fail the other way just as easily: a green
+   about somebody else's build. `startBackend` now steps to the next free port before spawning
+   (`freePort`), says so, and fails closed if none is free. The port was always internal — callers
+   use the returned `origin` — so nothing else had to change.
+5. **The obvious colour test asks the adjacent question, and the obvious control is a flake.**
+   T-470's claim is *"the same measured dB is the same colour at every zoom"*, but zooming changes
+   which pyramid level answers, so a cell's measurement legitimately changes with zoom and "zoom in,
+   check the pixels match" would assert something false. Hence the split-pane form: the viewport that
+   did **not** move is showing the same numbers from the same tiles, so its pixels may not move at
+   all. Three further things were measured rather than assumed, each after the test caught itself:
+   zooming *in* from the opening view changes no level (the panes open at the lattice's finest), so
+   the run zooms **out and back**; a pane whose stand-ins are still resolving repaints for reasons
+   that have nothing to do with colour, so residency is read from `.hk-surface-counts` and pinned at
+   every step; and **switching auto-contrast on is not a reliable fault generator** — it tracks the
+   union over *every* tile on screen, and the pane deliberately not moving usually pins both ends, so
+   a zoom of the other pane moved the range on 3 runs in 4 and 0 % on the fourth. The control is
+   therefore the *sensitivity* of the comparison — switching mode changes the range and nothing else,
+   and repaints 14–23 % of the very pixels that stayed byte-identical through six zooms. That is
+   deterministic, and it is the stronger statement: not "the fault can appear" but "had the range
+   moved at all, every assertion would have failed".
+6. **A CDP wheel cannot answer an OS question.** T-456 needed to know whether ctrl+wheel reaches the
    page, and the harness can only dispatch at the renderer — macOS's Accessibility ctrl+scroll zoom
    consumes the event in the window server, where nothing in a browser can see it. So the test
    reports what the browser *did* deliver (ctrl arrives, `defaultPrevented`, no page zoom) and the
