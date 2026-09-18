@@ -14,7 +14,7 @@ import { h } from "../app/dom";
 import { takeToken } from "../app/net";
 import { fmtShare } from "./bootstrap";
 import { legendEntries, swatchPixels } from "./legend";
-import { SurfacePreview, probeSurface, wheelAxes, zoomFactor } from "./preview";
+import { SurfacePreview, isBackpressure, probeSurface, wheelAxes, zoomFactor } from "./preview";
 
 const SWATCH_W = 54, SWATCH_H = 22;
 
@@ -65,8 +65,16 @@ async function main(): Promise<void> {
   try {
     probe = await probeSurface((path) => client.get(path));
   } catch (e) {
-    fail("The surface could not be addressed.",
-      `${e instanceof Error ? e.message : String(e)} — GET /api/tiles is what states the view lattice, and a client that guessed one would be addressing a pyramid that does not exist.`);
+    // Backpressure is not a broken surface, and after the retries it is the only thing left to say:
+    // something else — another tab, or this page's own abandoned reads from before a reload — is
+    // holding the route's four tile slots. Reloading is the whole remedy.
+    if (isBackpressure(e)) {
+      fail("The tile route is busy producing for someone else.",
+        "GET /api/tiles refused every attempt: tile production takes the history lock, and its slots are shared with every other viewport and tab. Nothing is wrong with the surface — reload in a moment.");
+    } else {
+      fail("The surface could not be addressed.",
+        `${e instanceof Error ? e.message : String(e)} — GET /api/tiles is what states the view lattice, and a client that guessed one would be addressing a pyramid that does not exist.`);
+    }
     return;
   }
 
@@ -172,9 +180,12 @@ async function main(): Promise<void> {
     text(status, [
       `${preview.view.panes.count} pane${preview.view.panes.count === 1 ? "" : "s"} + map`,
       `${preview.view.surface.cache.residentTiles} tiles resident (${(preview.view.surface.cache.residentBytes / 1048576).toFixed(1)} MB)`,
-      `${preview.view.surface.cache.inFlightCount}/${preview.view.surface.cache.inFlightLimit} in flight`,
+      // The abandoned count is shown next to the in-flight one because it is the same budget: an
+      // aborted request keeps costing the route a slot until its read finishes (T-454).
+      `${preview.view.surface.cache.inFlightCount}+${preview.view.surface.cache.abandonedSlots}/${preview.view.surface.cache.inFlightLimit} in flight`,
       `queue ${preview.view.surface.cache.queueDepth}`,
-      `${s.uploads} uploads · ${s.evictions} evicted · ${s.cancelled} cancelled · ${s.busyRefusals} backpressure · ${s.failures} failed`,
+      `~${preview.view.surface.cache.serverEstimateMs.toFixed(0)} ms/tile`,
+      `${s.uploads} uploads · ${s.evictions} evicted · ${s.cancelled} cancelled · ${s.abandoned} abandoned · ${s.busyRefusals} backpressure · ${s.failures} failed`,
       f ? `display range ${preview.view.surface.lo.toFixed(1)}…${preview.view.surface.hi.toFixed(1)} dBFS` : "",
     ].filter(Boolean).join("  ·  "));
   }, 500);
