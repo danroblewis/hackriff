@@ -13416,7 +13416,7 @@ tasks:
   - id: T-475
     milestone: MCANVAS
     title: The trace is a plain line - restore the classic phosphor look, coloured by the waterfall ramp with afterglow
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-457]
@@ -13919,7 +13919,7 @@ tasks:
   - id: T-484
     milestone: MLIVE
     title: The live/tuned tier must render at live-IQ FFT resolution - the pyramid stays coarse only for zoom-out and history
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -13981,6 +13981,39 @@ tasks:
       the user asked for the proof first, and because a fix whose test was written afterwards tends
       to be tested against itself.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "5fe4f2d"
+    result: |
+      DONE - THE USER'S DETAIL COMPLAINT IS CLOSED. 66.5 -> 1.0 FFT cells per canvas cell; floor lift
+      +10.5 -> +0.1 dB; contrast lost 4.5/5.0/1.6 -> 0.1 dB; wave variation retained 19 %/3 % -> 98 %/100 %
+      over the same 74 rows; per-cell error 10.6/15.9 -> 0.0/0.0 dB over 6278/5694 cells instead of
+      128/120. T-483's four #[ignore] lines are deleted; canvas_fidelity 5/5, control still passing.
+      NEITHER OF THE BRIEF'S OPTIONS AS WRITTEN. (b) was ruled out by T-483: the frames reaching the
+      pyramid were history.rs's OWN STFT - 512 bins at 10 rows/s, max-held - COARSER THAN THE DISPLAY
+      STREAM BEFORE ANY CELL FOLD. The fix changes the SOURCE in three parts: spectrum.rs pushes the
+      DISPLAY frames into the view lattice's writer queue; class.rs::row_plan turns per-segment Welch holds
+      OFF (nothing read them, and they cost a measured +8.2 dB of floor lift alone); history.rs
+      view_geometry sizes node (0,0) to that plan's own bin and row. ONE RENDERER, A DIFFERENT SOURCE - and
+      it REMOVES a duplication: the canvas was drawing a second STFT's view of samples the display STFT had
+      already transformed. Scheme 1 unchanged, so T-397's max-hold stands for timeline/coverage/floor.
+      RESIDENCY FALLS: 5.8 MB / 0.29 MB/MHz at a 20 MHz edge against T-453's 18 MB / 0.91, because
+      f_cell = fs/fft_len makes the tuned span exactly one level-0 block at any rate. Writes rise with the
+      cell rate, OFF the capture thread: 25 532 cells/s against 384.
+      THREE MEASUREMENT CORRECTIONS IN T-483's FILE, EACH PROVED INERT by re-running the modified test
+      against the stashed pre-fix source - still 66.5 cells, +10.5 dB, 19 %/3 %. The improvement is not the
+      test being loosened.
+      A REAL DEFECT FOUND ON THE WAY, WHICH THE FIX MADE VISIBLE: Preview.drag pans BOTH axes on every
+      pointer move, so a frequency-only drag arrives as panFreq(dx) then panTime(id, 0) - and panTime ran
+      freezeAt BEFORE looking at the delta. A SCRUB OF ZERO FROZE THE PANE. It predates this branch; at a
+      1 s floor the pane sat inside the 250 ms grace long enough that nothing noticed. panTime(id, 0) is
+      now a no-op; one nanosecond is still a scrub. surface-retune.e2e.mjs is BYTE-FOR-BYTE UNCHANGED - the
+      test was right, the product was not - and the guard is asserted through the pane's own isFollowing,
+      not through a retune control, because the property is about pausing and the control was the messenger.
+      IT DECLINED TO OVER-CLAIM THE HONESTY TIER: it did NOT make the route say live-iq, because that enum
+      is defined by live_window_verdict as a claim about SPAN shared by four routes. It is now an
+      under-claim, recorded in code and docs rather than silently changed.
+      Zoom-out costs more tiles (8/150/600 against 2/21/24); the 4 x 6 ladder that would repair it breaks
+      T-482's ceiling because affordable_levels admits nodes materialize refuses. Filed as T-494.
+      Gate: full, passed.
   - id: T-485
     milestone: MCANVAS
     title: A SHADOW tier - echo an earlier scan into unobserved cells, render-time only, never stored and never detected on
@@ -14040,7 +14073,7 @@ tasks:
   - id: T-486
     milestone: MCANVAS
     title: Follow-live has no dead zone - a 1 px time-pan drops out of live, and a release near the top re-pauses
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-472]
@@ -14538,6 +14571,244 @@ tasks:
     notes: |
       Filed 2026-09-18 from T-484's report. The numbers are pinned by a standing guard T-484 left in
       place, so neither the cost nor its repair can move unnoticed.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-495
+    milestone: MLIVE
+    title: A live tile panned off-screen and back serves a STALE cache - its middle is gray and never fills
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      USER-REPORTED, REPRODUCIBLE, IN THE LIVE VIEW. A horizontal band of gray appears WITHIN a tile -
+      a gap in the middle of otherwise-present rows - and NEVER FILLS.
+      REPRO, from the user: load tuned to 100.8 MHz; retune to 101.99; pan RIGHT so the new tile is in
+      view, staying in Live; pan LEFT so it goes OFF-SCREEN, still Live; pan RIGHT so it is back in
+      view. Rows from the first on-screen period are present, rows from the second are present, and
+      THE ROWS THAT ARRIVED WHILE IT WAS OFF-SCREEN are gray forever.
+      THE SENTENCE THAT NAMES THE DEFECT: a resident live tile is not "fresh" just because it is
+      RESIDENT - its freshness is its COVERAGE UP TO THE LIVE EDGE. The cache's residency test
+      answers a different question from the one the renderer needs.
+      THIS IS T-460'S SIBLING, ONE AXIS OVER. T-460 found TileCache.acquire() returning a resident
+      tile unconditionally and invalidateEdge() with exactly one call site, so the live EDGE was
+      fetched once and frozen. That was fixed for the GROWING edge. This is a live tile whose MIDDLE
+      went stale while off-screen - the same "resident implies current" assumption, for a tile that
+      is not at the edge any more but is still unsealed.
+      FIX DIRECTION: a live / unsealed tile must be RE-FETCHED when it re-enters the viewport, or
+      kept refreshed off-screen while near the live edge, so its coverage is complete on return.
+      KEEP T-460's FIVE PROPERTIES, which T-490 and T-491 have since built on: only the live-edge
+      address; only for a FOLLOWING viewport; only at the level it was drawn at; never more often
+      than one tCellNs(level_t); one revalidation in flight, into a slot the ordinary queue could not
+      use - plus T-490's per-level lanes and T-491's minimum-of-recent-completions clock. A re-entry
+      refetch is a SIXTH case, not a licence to reopen any of them. Say explicitly which path a
+      re-entry fetch takes and why it cannot starve a visible fetch.
+      SEALED VERSUS UNSEALED IS THE DISCRIMINATOR AND MUST BE READ FROM THE ANSWER, NOT GUESSED. A
+      sealed tile genuinely cannot change and re-fetching it would be waste; an unsealed one can. The
+      route already distinguishes them - use what it says rather than inferring from the address or
+      from how long ago it was fetched.
+      REGRESSION CASE IN THE CANVAS E2E: pan a live tile off-screen and back, assert NO GRAY GAP and
+      that the middle fills. Note the trap - a test that only checks the tile is drawn would pass
+      today, because the stale tile IS drawn; the claim is about its COVERAGE, so assert the absence
+      of unobserved cells in a span the server has data for, not that pixels exist.
+      DoD: the user's exact six-step repro produces no gap; the sealed/unsealed distinction is read
+      from the route's own answer; T-460's five properties and T-490/T-491's lane machinery are shown
+      intact; and the e2e regression asserts coverage rather than presence.
+    notes: |
+      Filed 2026-09-18 from /tmp/claude-501/live-tile-gap-brief.md. HIGH: user-facing, reproducible,
+      and in the live view the user has been waiting on.
+      WATCH FOR THE PREMISE BEING WRONG - five tickets this session disproved their own. In
+      particular T-491 found "the initial fill holds the refresh precondition false" was measurably
+      false (every bail had refreshDepth == 0). MEASURE what the client actually does on re-entry
+      before designing the fix: does it refetch and get a stale answer, or not refetch at all?
+      T-484 is in the merge queue and changes the finest tier from a 1 s time cell to the display row
+      rate, so the size of the gap in rows will change by ~25x. Re-measure after it lands.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-496
+    milestone: MCANVAS
+    title: Capture width is changeable but not discoverable - it is a side effect of zoom-then-retune
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    depends_on: [T-476]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      USER-REPORTED UX GAP. The capture WIDTH (span) IS changeable today: zoom the frequency axis to
+      the span you want, then press Retune, and `smallestCoveringSpan` sets the width. But that is an
+      IMPLICIT SIDE EFFECT of two other gestures, and nothing on screen says so - a user who wants a
+      narrower capture has no way to discover that zoom-then-retune is how you ask for one.
+      WHAT TO ADD: an explicit, discoverable capture-width control. Candidates the user named - the
+      frequency navigator's region-select setting the span directly, or a preset list, or an explicit
+      span input. Pick one and say why; a preset list and a free input are different claims about how
+      precisely a user can ask.
+      THE EXISTING BEHAVIOUR IS CORRECT AND MUST NOT BE BROKEN. T-476 made retune a PERSISTENT
+      per-pane control precisely because retuning to a zoomed viewport RAISES RESOLUTION THERE, and
+      that path stays. This ticket adds a way to SAY the width, it does not replace the way that
+      already works.
+      SNAP TO ACHIEVABLE, AND SAY SO. CLAUDE.md's discretized-navigation invariant binds any control
+      that names a span: it must resolve to a REALIZABLE configuration and snap to the nearest one,
+      bounded by the instantaneous bandwidth and the tuning step. A span wider than one live window
+      is survey-history overview, not live IQ - T-476's "stated and disabled with a reason" is the
+      existing vocabulary for that and should be reused rather than reinvented.
+      DEVICE RULES UNCHANGED: a width change is a retune, so one capture at a time, settle gap,
+      provenance and device_id recorded, and T-444's rule that the target RE-DERIVES AT THE INSTANT
+      OF COMMIT. T-340's control - no pan and no wheel reaches a device route - must pass VERBATIM;
+      an explicit control is a discrete press, not a threshold on a pointer stream (T-407).
+      WATCH THE ONE-CONTROL RULE: the surface has two hosts, and a second way to set the span is a
+      second place for it to be wrong. Whatever is added should compute its target through the same
+      `smallestCoveringSpan` path the retune control already uses, so the two cannot disagree - the
+      defect family T-445 spent a milestone closing.
+      DoD: the width is settable without zooming first; the control states the span it will ask for
+      and the one it actually got when they differ; unachievable spans are stated and disabled rather
+      than hidden; T-340 passes verbatim; and one target-derivation path, demonstrated rather than
+      asserted.
+    notes: |
+      Filed 2026-09-18 from user feedback. Depends on T-476, whose persistent per-pane retune control
+      is the natural home for this and whose refusal wording should be reused.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-497
+    milestone: MLIVE
+    title: A retune tears the live capture down again - the server stays up and the live view never recovers
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      USER-REPORTED, CRITICAL, AND A REGRESSION OF T-417. Retuning stops the live view updating and
+      IT NEVER RECOVERS. `hk serve` stays up - the process is alive and answering - so this is not a
+      crash; it is the stream going and not coming back.
+      T-417 ESTABLISHED THE REQUIREMENT AND IT HAS NOT CHANGED: a retune MUST NOT DISCONNECT STREAM
+      CONSUMERS. A settle gap is fine - a break in the data is expected and honest while the front
+      end moves - but THE CONNECTION SHOULD SURVIVE, and the UI's spectrum websocket should reconnect
+      gracefully across a re-plumb rather than erroring.
+      THE SUSPECT, AND IT IS A HYPOTHESIS TO TEST RATHER THAN A CONCLUSION: T-476 made retune a
+      PERSISTENT per-pane control, which added a new path to the same device action. If that path
+      does not carry the stream over the way T-417's fix did, the symptom returns. BUT MEASURE
+      BEFORE BELIEVING IT - five tickets this session disproved their own premise, and the
+      alternative is live: T-484 has just changed what the finest tier renders and where its rows
+      come from (`spectrum.rs` now pushes display frames into the view lattice), so "the live view
+      stops updating" could be the tile path rather than the stream.
+      THE DISCRIMINATING QUESTION, ASK IT FIRST: after a retune, IS THE WEBSOCKET STILL CONNECTED AND
+      STILL DELIVERING ROWS? That splits it cleanly.
+        - Socket dead or erroring -> T-417's defect is back, in whichever retune path is now reached.
+        - Socket alive and delivering, view still frozen -> the rows are arriving and something
+          downstream is not drawing them, which is a different fix entirely and closer to T-495.
+      Report which, with the evidence, before changing anything.
+      WHAT T-399 ALREADY TELLS YOU: replumb reuses the SAME still-open device, so the device is not
+      closing - which points at the readers and their publishers rather than at the source. T-417's
+      own investigation started there.
+      REGRESSION IN THE CANVAS E2E, and make it assert the right thing: retune, then the stream keeps
+      flowing AND live rows keep arriving IN THE NEW REGION. A test that only checks the socket is
+      open would pass with a silent stream; a test that only checks rows exist would pass on the rows
+      from before the retune. Assert rows arriving AFTER the retune, at the NEW centre - T-487's held
+      observation and T-460's pixel-in-the-fresh-strip technique are the two instruments that already
+      work for this.
+      DO NOT REGRESS WHAT THE RETUNE PATHS GUARANTEE: T-444's target re-derives at the instant of
+      commit; T-476's `block: "past"` and its `sameTarget` comparison; T-340's control that no pan and
+      no wheel reaches a device route, VERBATIM. One capture at a time, settle gap, provenance and
+      device_id recorded. Receive only.
+      DoD: the user's retune leaves the live view updating and it recovers on its own; the answer to
+      the discriminating question is stated with evidence; the e2e asserts rows arriving after the
+      retune at the new centre; and T-417's original guard - whatever form it took - is shown still
+      to hold, or its absence is the finding.
+    notes: |
+      Filed 2026-09-18 from a user report. HIGH and user-facing: the retune features and this defect
+      are the same experience, which is exactly why T-417 was urgent a day ago.
+      T-417's GUARD SURVIVES AND IS GREEN: `a_retune_keeps_connected_stream_consumers_connected` is
+      still at crates/hk-cli/tests/api_contract.rs:3191 and passes in every full gate this session.
+      THAT IS THE MOST INTERESTING FACT AVAILABLE and it sharpens the ticket: the property T-417
+      asserted is still true at the level it asserts it, so EITHER the new retune path does not go
+      through what that guard covers, OR the user's symptom is not a disconnected consumer at all.
+      Establish which before writing any fix - a guard that is green while the user sees the defect
+      it names is either testing the wrong path or testing the wrong subject, and both are findings.
+      T-417 is also marked done with NO COMMIT RECORDED on the board; worth noting when reading its
+      history.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-498
+    milestone: MCANVAS
+    title: The retune label states only the CENTRE, not the SPAN it will capture
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    depends_on: [T-476]
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER-REPORTED. The persistent retune control names the centre frequency it will tune to and
+      SAYS NOTHING ABOUT THE WIDTH - but a retune sets the width too, via `smallestCoveringSpan`. So
+      the user presses a button that changes two things and is told about one.
+      ADD THE SPAN TO THE LABEL: "retune to 101.99 MHz, 2.4 MHz wide" rather than "retune to
+      101.99 MHz". Lives in T-476's chrome.ts label.
+      SAY THE SPAN IT WILL ACTUALLY GET, NOT THE ONE ASKED FOR. The span snaps to an achievable
+      configuration (the discretized-navigation invariant), so the number in the label must be the
+      SNAPPED one - the width the front end will really capture. A label naming the requested span
+      while delivering a different one is worse than no label, and it is the exact shape T-409 closed
+      for the nudge buttons: the actual move is named, and the difference from the advertised
+      fraction is NOT absorbed.
+      THIS IS ALSO THE DISCOVERABILITY HALF OF T-496. That ticket adds a way to SET the width; this
+      one makes the width the current path already sets VISIBLE. Doing this first is cheap and may
+      change what T-496 needs to build - a user who can see the width they are about to get may find
+      zoom-then-retune sufficient. Say whether it does.
+      KEEP T-476'S REFUSAL WORDING INTACT: when the control is stated-and-disabled (span wider than
+      one live window, no grid, frozen behind the edge), those sentences already explain themselves
+      and must not be crowded out by a span the user cannot have.
+      DoD: the label names both centre and span; the span is the snapped, achievable one and is shown
+      to equal what the retune actually commits; the disabled wordings are unchanged; and T-476's
+      existing e2e assertions still pass, with the label check updated rather than loosened.
+    notes: |
+      Filed 2026-09-18 from user feedback. Small, and lives in the chrome label plus its test - but
+      the "snapped, not requested" requirement is what makes it worth writing down rather than doing
+      casually.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-499
+    milestone: MLIVE
+    title: On stream loss some tiles render PURPLE and re-render left-to-right in a loop
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER-REPORTED, follow-on of T-497. When the stream dies, some tiles render PURPLE and keep
+      RE-RENDERING LEFT TO RIGHT IN A LOOP. A page refresh clears it.
+      TWO DEFECTS, AND THEY MUST BE FIXED SEPARATELY BECAUSE EITHER CAN OUTLIVE THE OTHER:
+      (1) A COLOUR NO MEASUREMENT CAN PRODUCE. Purple is out of the colormap's range, so something -
+      NaN, an absent value, a malformed body - is reaching the ramp and being mapped as if it were a
+      number. THE ANSWER IS GREY, WHICH ALREADY MEANS UNOBSERVED, and the rule this breaks is the
+      one the whole surface rests on: the screen distinguishes what was measured from what was not.
+      A colour that means neither is worse than a gap, because a user cannot tell it is not data.
+      BUT DO NOT SIMPLY CLAMP. Grey for "we asked and got nothing usable" must stay distinguishable
+      from grey for "nothing was ever sampled here" - cellrule.ts's "not loaded is not unobserved"
+      and T-441's AWAITING are the existing vocabulary, and T-479 had to make the same distinction
+      for a terminal 4xx. Say which you used and why.
+      (2) A RENDER/RETRY LOOP ON THE ERROR STATE. The left-to-right sweep is the renderer re-asking
+      and re-drawing rather than settling. T-479 established the rule for exactly this: RETRYABLE IS
+      THE ENUMERATED CASE AND TERMINAL IS THE DEFAULT, because the defect there was special-casing
+      one status so everything else fell through to retry. A dead stream is not a busy server, and
+      re-asking cannot revive it.
+      ROBUST INDEPENDENTLY OF T-497. This must hold even when the stream loss is legitimate - a
+      device unplugged, a replay ending, a server restart. T-497 stops one cause; this ticket makes
+      the client behave when ANY cause occurs, and the two must not be merged into one fix.
+      MEASURE WHERE THE BAD VALUE ENTERS BEFORE CHANGING THE RAMP. The candidates are distinct and
+      have different fixes: a NaN in the decoded plane; an absent cell read as a number; a partial or
+      malformed body that decode should have rejected (T-460 found TileDecodeError being retried
+      because it carried no status - the same family); or the ramp receiving a value outside lo..hi
+      and wrapping. Name which, with evidence. A clamp at the shader that hides a NaN upstream is the
+      adjacent-question fix.
+      DoD: a killed stream produces grey and no purple, demonstrated by killing the backend under the
+      browser tier rather than by simulating it; no re-render thrash, measured as draw calls settling
+      rather than "it looked still"; the two greys stay distinguishable; and the fix holds for a
+      cause unrelated to retune.
+    notes: |
+      Filed 2026-09-18 from user feedback, alongside T-497 (the retune stream teardown that produces
+      the condition). Deliberately NOT dependent on it: a stream can die for reasons no retune fix
+      will prevent, and a renderer that only behaves when the server behaves is not robust.
+      T-487's harness can kill and restart the backend under a live page, which is the instrument for
+      the DoD's "demonstrated rather than simulated".
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
