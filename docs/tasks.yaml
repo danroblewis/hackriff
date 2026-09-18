@@ -14428,6 +14428,51 @@ tasks:
       Filed by the coordinator 2026-09-18 from a first-hand gate failure. Related: T-492, the same
       run's other plugin failure - a genuinely missing artefact rather than a race.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-494
+    milestone: MLIVE
+    title: affordable_levels admits nodes materialize refuses, so the ladder cannot deepen past 4 x 4
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-484]
+    use_cases: [AWARE-011]
+    acceptance: |
+      FOUND BY T-484 AND MEASURED, NOT INFERRED. Its fidelity fix costs more tiles on a zoom-out -
+      8/150/600 for three viewports against 2/21/24 before. A deeper ladder would repair that:
+      4 x 6 costs 8/20/316, BETTER than the coarse floor on a band sweep. IT IS NOT SHIPPED, because
+      it breaks T-482's declared ceiling.
+      THE GAP IS BETWEEN TWO PREDICATES THAT DISAGREE: affordable_levels admits node (0,2) as cheap
+      to READ, while materialize refuses it as expensive to BUILD, and `servable` does not close
+      that gap. So every depth whose ceiling has max_t >= 2 refuses at its own corner. Measured:
+      4 x 4 passes the contract test; 4 x 5, 5 x 4, 3 x 6, 4 x 6 and 7 x 7 ALL FAIL IDENTICALLY, and
+      7 x 7 collapses the ceiling to (0,0).
+      THIS IS THE SAME SHAPE AS T-482's OWN FINDING one level down: the route declared a lattice it
+      could not serve because the address space and the store disagreed. Here two predicates about
+      the SAME store disagree with each other, and the ceiling - which is checked cell-by-cell
+      against tile_read - correctly refuses to paper over it.
+      TWO PARTS, IN ORDER:
+      (1) MAKE BUILDABILITY PART OF THE AFFORDABILITY PREDICATE, so a level admitted as readable is
+      one that can actually be built within the fold budget. T-482's materialize_cost_bound already
+      computes the build side on an empty store - the worst store a read can meet - so the pieces
+      exist; what is missing is that affordable_levels does not consult it.
+      (2) ONLY THEN take the depth to 4 x 6, and re-measure the zoom-out tile counts.
+      DO NOT DO (2) WITHOUT (1). Deepening while the predicates disagree is exactly what T-482
+      measured as making things WORSE - the coarse corners stay unbackable at every depth and the
+      cost of failing rises 100x.
+      DO NOT WEAKEN T-482's CEILING TEST to accommodate a deeper ladder. It is checked cell-by-cell
+      against what tile_read actually does, sound everywhere and conservative at 4 of 180; that
+      soundness is the property being preserved.
+      DoD: affordable_levels and materialize agree - demonstrated over the whole lattice, not at
+      sample points; the ceiling stays true at the new depth with its cell-by-cell check unchanged;
+      the zoom-out tile counts re-measured against T-484's 8/150/600 and the predicted 8/20/316; and
+      T-484's fidelity numbers unmoved (1.0 cells per canvas cell, +0.1 dB floor, 98 %/100 %
+      variation retained).
+    notes: |
+      Filed 2026-09-18 from T-484's report. The numbers are pinned by a standing guard T-484 left in
+      place, so neither the cost nor its repair can move unnoticed.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
