@@ -258,6 +258,57 @@ test-ui:
     npm run typecheck
     npm test
 
+# The BROWSER tier: drive /surface in headless Chrome against a real `hk serve` over a recorded
+# fixture, and assert on what is drawn and what is requested (T-455).
+#
+# Why this exists at all. Two defects in two days passed every other suite:
+#   T-450  the renderer COULD NOT LOAD IN A BROWSER. `cellrule.ts` compiled its predicates with
+#          `new Function` at module scope and `hk serve` sends `default-src 'self'` with no
+#          `unsafe-eval`, so the module threw while being evaluated — while T-441 had proved that
+#          same module's shader against a CPU rule on 114973 of 115200 pixels. A correct proof
+#          about code that could never run where the product runs.
+#   T-454  the tile route's `503` backpressure reaching the user, in a client that already had a
+#          cap, an AbortController per request and measured cancellation.
+# Neither is reachable by a pixel-rasterizer test or a node unit test: one needs a CSP, the other
+# needs real concurrent fetches from a real render loop. That is the gap this tier closes, and it
+# closes it at the standard the unit tier already holds — pixel histograms and the requests the
+# client actually made, never "it did not throw" (see ui/e2e/README.md).
+#
+# Why a SEPARATE recipe rather than folding it into `test-ui`: `test-ui` is the fast check every
+# `ui/` edit pays (npm ci + esbuild + `tsc --noEmit` + node suites, tens of seconds, no Rust, no
+# browser). This one needs the `hk` binary and a Chrome. Conflating them would make the cheap check
+# expensive for every typo. It is wired into the gate's ACCEPTANCE phase for both the `ui` and
+# `full` classes — an opt-in tier is one people skip, and a tier that does not run is worse than
+# none because it looks like coverage.
+#
+# Dependencies: none new. The CDP driver is `ui/e2e/cdp.mjs` (node 24's built-in WebSocket), and it
+# uses whatever Chrome the machine already has — the ms-playwright cache on the dev Mac,
+# `google-chrome` on a GitHub runner image. Set CHROME=/path/to/chrome to override.
+test-ui-e2e:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+        echo "test-ui-e2e: node/npm not found — the browser gate cannot run, so it fails rather than passing." >&2
+        exit 1
+    fi
+    # The tier drives the PRODUCT's server, so the CSP and the /api/tiles backpressure under test
+    # are the real ones rather than a mock's restatement of them.
+    if [ -z "${HK_BIN:-}" ] && [ ! -x target/release/hk ] && [ ! -x target/debug/hk ]; then
+        echo "test-ui-e2e: building the hk binary the browser tier serves from..." >&2
+        cargo build -p hk-cli --bin hk
+    fi
+    cd ui
+    npm ci --no-audit --no-fund --prefer-offline
+    npm run build
+    npm run e2e
+
+# `just test-ui-e2e`'s own non-vacuity check: put each known defect back, rebuild a patched copy of
+# ui/src into a scratch dist, and require the suite to go RED — reporting which guard caught it, and
+# saying INCONCLUSIVE for any guard that was already failing without the fault. `ui/src` is never
+# modified. Not part of any gate: it is how you check the gate still works, ~2 minutes.
+test-ui-e2e-selftest:
+    cd ui && npm run e2e:selftest
+
 # Serve the web UI over a replayed recording, e.g. `just serve fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta --loop`
 serve fixture *args:
     cargo run -p hk-cli --bin hk -- serve --replay "{{fixture}}" {{args}}
