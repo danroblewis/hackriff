@@ -116,7 +116,8 @@
 //! IF estimator that is noise-limited — the conjunct could not fire below ~28 dB and cost a whole
 //! class its top-1) and `duty` (T-427: the fraction of samples over *the snippet's own* mean
 //! envelope, which for a sparse train is dominated by the off time, so the noise clears the
-//! threshold). **Both are among the thirty features above, and both pass the length axis.**
+//! threshold; fixed at source by T-431). **Both are among the thirty features above, and both
+//! pass the length axis.**
 //!
 //! ## "Does not move with SNR" is the wrong assertion, and the right one is an ordering
 //!
@@ -155,14 +156,20 @@
 //! 4-, 5- and 7-rung ladder; at 6 and 8 seeds three further pairs flicker in and out, which is the
 //! sd estimate wobbling, not the features moving).
 //!
-//! ## What it found: seven, and the first two are the two that motivated it
+//! ## What it found: seven, and the first two are the two that motivated it — five remain
 //!
 //! Over 24 features × 28 within-family class pairs × 5 rungs — 854 of 3 238 comparisons resolved —
 //! [`SNR_ORDER_EXCEPTIONS`] is the audited list, each entry carrying its mechanism and the measured
-//! ladder. `duty` reproduces T-427's published table (`pulse` 0.658 / 0.539 / 0.197 / 0.142 /
+//! ladder. `duty` reproduced T-427's published table (`pulse` 0.658 / 0.539 / 0.197 / 0.142 /
 //! 0.051 here against their 0.655 / 0.538 / 0.200 / 0.143 / 0.051) and `sigma_af` reproduces
 //! T-249's (`cw` 0.206 at 10 dB against their 0.170–0.207, 0.047 at 20 against their 0.038–0.050),
 //! which is the check that this is measuring the same thing those two tickets measured.
+//!
+//! **Two of the seven are gone (T-431), which is the mechanism working.** `duty` and
+//! `low_fraction` were the two fixable ones — an envelope threshold referenced to the record's own
+//! mean — and referencing them to the emission's own on level instead
+//! (`features::on_level`) removed both inversions at source. Five remain, every one of them a
+//! statistic that *is* an SNR, where no fix exists short of not ordering on it.
 //!
 //! The list is asserted as an **exact set**: an inversion that is not declared fails, *and* a
 //! declared inversion that no longer reproduces fails. So fixing one makes its exemption disappear
@@ -490,16 +497,19 @@ const RULES: &[Rule] = &[
         basis: Basis::Abs(1.0),
         looks: Looks::Samples,
         k: K_PROPORTION,
-        why: "the fraction of samples whose envelope is under 0.3 of the mean - a proportion, so \
-              its scale is 1 and its error is binomial. A keyed emission's gaps are part of the \
-              emission, so what a shorter record may change is only which draws it saw.",
+        why: "the fraction of samples whose envelope is under 0.3 of the emission's own ON level \
+              (T-431; it was 0.3 of the record's mean, which for a mostly-off emission is set by \
+              the off time) - a proportion, so its scale is 1 and its error is binomial. A keyed \
+              emission's gaps are part of the emission, so what a shorter record may change is \
+              only which draws it saw.",
     },
     Rule {
         feature: "duty",
         basis: Basis::Abs(1.0),
         looks: Looks::Samples,
         k: K_PROPORTION,
-        why: "fraction of samples above half the mean envelope: a proportion, binomial error. \
+        why: "fraction of samples above half the emission's own ON level (T-431; it was half the \
+              record's mean envelope, which measured the SNR): a proportion, binomial error. \
               NOTE this is the per-snippet envelope duty, not `Track.duty_cycle`, which IS an \
               observation statistic (T-288) and lives in hk-model.",
     },
@@ -679,11 +689,15 @@ impl Rule {
             Looks::Samples => {
                 // Only the samples where the emission is ON carry it, and every per-sample feature
                 // here says so explicitly: the phase, frequency and cumulant features are taken
-                // over the Azzouz-Nandi strong-envelope subset. A pulse train at 14 % duty gives a
-                // seventh of the independent looks a continuous emission of the same length does,
-                // so its statistics are entitled to sqrt(7) times the wander. `duty` is the
+                // over the Azzouz-Nandi strong-envelope subset. A pulse train at 5 % duty gives a
+                // twentieth of the independent looks a continuous emission of the same length
+                // does, so its statistics are entitled to sqrt(20) times the wander. `duty` is the
                 // feature's own full-record value - a signal property, asserted below in its own
-                // right - not a number chosen to make this pass.
+                // right - not a number chosen to make this pass. T-431 made that value the
+                // emission's ON fraction rather than the fraction over half the record's mean, so
+                // the looks counted here are now looks AT THE EMISSION: at 25 dB `pulse` read
+                // 0.142 and reads 0.050, and the 0.092 difference was noise samples over a
+                // collapsed threshold, which carry no look at the signal.
                 scale * self.k / (n as f64 * duty / SAMPLES_PER_LOOK).sqrt()
             }
             Looks::Segments => scale * self.k / segments(n).max(1.0).sqrt(),
@@ -1118,9 +1132,9 @@ const NOISE_STATISTICS: &[(&str, &str)] = &[
 
 /// One audited exception to [`a_feature_ranks_two_emissions_the_same_way_however_loudly_they_were_heard`].
 ///
-/// Scoped to the **pair**, not the feature: `duty` inverts exactly one of the 28 within-family
-/// class pairs, and exempting the whole feature would throw away the other 27 pairs' worth of
-/// guard. The name being exempted is `feature @ family: a vs b`.
+/// Scoped to the **pair**, not the feature: when this axis was built `duty` inverted exactly one
+/// of the 28 within-family class pairs, and exempting the whole feature would have thrown away the
+/// other 27 pairs' worth of guard. The name being exempted is `feature @ family: a vs b`.
 struct OrderException {
     feature: &'static str,
     a: Class,
@@ -1136,29 +1150,21 @@ struct OrderException {
 /// axis does better than the length axis's method rather than differently: "fixing one makes the
 /// exemption disappear from a diff" stops being a discipline and becomes a failing test.
 ///
-/// Read the grouping before the entries. Six of the seven fall into **three mechanisms**:
-/// an envelope threshold set by the record's own mean (`duty`, `low_fraction`), a statistic
-/// measured against the noise floor (`carrier_line_db`, `gamma_max`), and a cumulant normalised by
-/// the total power (`c42_norm`, twice); `sigma_af` is the seventh, an IF estimator that is
-/// noise-limited on a feature named as a frequency excursion. Two of the seven are the defects
-/// that motivated the ticket; three of the rest had not been reported at all.
+/// Read the grouping before the entries. Four of the five fall into **two mechanisms**: a statistic
+/// measured against the noise floor (`carrier_line_db`, `gamma_max`) and a cumulant normalised by
+/// the total power (`c42_norm`, twice); `sigma_af` is the fifth, an IF estimator that is
+/// noise-limited on a feature named as a frequency excursion. All five are inherent to what the
+/// statistic is — an SNR cannot be ordered at two SNRs — which is why they are the ones left.
+///
+/// **Two entries have been deleted, by this mechanism working as designed (T-431).** `duty` and
+/// `low_fraction` were the two defects that motivated this axis, both fractions over an envelope
+/// threshold set by the *record's own mean*, which for a mostly-off emission is set by the off
+/// time. That was fixable at source and T-431 fixed it: both are now taken against the emission's
+/// own on level (`features::on_level`), `pulse` reads 0.050 / 0.950 at every rung from 10 to 30 dB
+/// against a true 0.050 / 0.950, and the `ppm`-vs-`pulse` order no longer inverts on either. The
+/// exact-set assertion is what made that a completion check rather than a discipline: leaving
+/// either entry behind fails the test naming it.
 const SNR_ORDER_EXCEPTIONS: &[OrderException] = &[
-    OrderException {
-        feature: "duty",
-        a: Class::Ppm,
-        b: Class::Pulse,
-        why: "T-427, and the case this axis was built for. `duty` counts samples over 0.5x the \
-              snippet's OWN mean envelope, and for a sparse train that mean is dominated by the \
-              OFF time, so the threshold collapses toward the noise and the noise clears it. \
-              Measured, 24 seeds: pulse (true duty 0.05) 0.658 / 0.539 / 0.197 / 0.142 / 0.051 and \
-              ppm (true 0.333) 0.471 / 0.413 / 0.400 / 0.392 / 0.391 over 10/15/20/25/30 dB - \
-              reproducing T-427's published 0.655 / 0.538 / 0.200 / 0.143 / 0.051. They CROSS \
-              between 15 and 20 dB and below it the 5%-duty radar train reads busier than the \
-              33%-duty PPM train. FIXABLE AT SOURCE, and not fixed here: a noise-referenced or \
-              two-mode threshold would remove it, which moves a family-level admissibility number \
-              (PULSED_MAX_DUTY) and is T-431's, not this ticket's. The exemption says only that \
-              nothing may be decided from this feature's ORDER inside `pulsed`.",
-    },
     OrderException {
         feature: "sigma_af",
         a: Class::Am,
@@ -1173,20 +1179,6 @@ const SNR_ORDER_EXCEPTIONS: &[OrderException] = &[
               cross between 10 and 20 dB: the carrier with NO frequency excursion reads the LARGER \
               excursion at 10 dB. T-249's `cw` conjunct `sigma_af < 0.02` was written against the \
               30 dB end and could not fire below ~28 dB, which is this entry stated as a constant.",
-    },
-    OrderException {
-        feature: "low_fraction",
-        a: Class::Ppm,
-        b: Class::Pulse,
-        why: "FOUND BY THIS AXIS, not previously reported: the SAME defect as `duty` one threshold \
-              down. `low_fraction` counts samples UNDER 0.3x the snippet's own mean envelope, and \
-              for a sparse train that mean is again dominated by the off time, so the noise lifts \
-              the off samples over a threshold that has itself collapsed. A 5%-duty train should \
-              read ~0.95 at every SNR; measured, pulse reads 0.132 / 0.233 / 0.334 / 0.656 / 0.888 \
-              and ppm 0.321 / 0.462 / 0.508 / 0.506 / 0.506, crossing between 20 and 25 dB - so at \
-              and below 20 dB the sparse train reads as having FEWER quiet samples than the busy \
-              one. Same fix and same owner as `duty` (T-431); filed rather than changed here \
-              because it moves the same family-level numbers.",
     },
     OrderException {
         feature: "carrier_line_db",
