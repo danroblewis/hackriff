@@ -31,10 +31,13 @@
 //     has colours to lose;
 //  3. the zoomed half must be seen to change PYRAMID LEVEL across the run, from the page's own
 //     per-viewport readout — so the run really spans several zoom levels;
-//  4. and the whole sequence is then repeated with **auto-contrast switched on**, where the
-//     untouched half MUST change. That is the fault that violates the property while satisfying
-//     every other assertion in the file, driven in the product, through the same gestures: if step 4
-//     ever goes quiet, the rest of this file is measuring nothing.
+//  4. and the CONTROL: switching contrast mode changes the range **and nothing else** — same panes,
+//     same boxes, same levels, same tiles, all read from the page's own per-viewport readout — and
+//     repaints 18-73 % of the very pixels that stayed byte-identical through six zooms. So had the
+//     range moved at all, every assertion above would have failed. (The obvious control — repeat the
+//     gestures with the fault switched on — was measured firing 3 runs in 4 and rejected: auto-
+//     contrast tracks the union over *every* tile on screen, and the pane deliberately not moving
+//     usually pins both ends of it. That measurement is still taken, and reported, but not gated on.)
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
@@ -343,8 +346,12 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
   // That is deterministic, it is the same measurement as the claim, and it is a stronger statement
   // than the flaky one: not "the fault can appear" but "had the range moved by any comparable
   // amount, every assertion above would have failed".
+  // Read the viewports IMMEDIATELY BEFORE the press: the control's subject is the toggle, so the two
+  // readouts have to bracket the toggle and nothing else.
+  const preToggleReadout = await readout(page);
   await page.click(`document.querySelector('[data-slot="contrast"]')`);
   await page.frames(4);
+  const postToggleReadout = await readout(page);
   const autoLegend = await page.$text('.sp-legend-row[data-mark="range"]');
   assert.match(autoLegend, /Auto-contrast/, "the opt-in contrast mode is not reachable from the page");
   assert.match(autoLegend, /changes colour as you zoom/i, "auto-contrast does not state ITS trade");
@@ -359,14 +366,40 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
   const autoBase = autoSettled.img;
   const autoBaseReadout = await readout(page);
 
-  // The control itself. Nothing moved but the scale, and the untouched pane's residency is checked
-  // the same way as in the loop above, so this is a like-for-like comparison of the same pixels.
-  for (const was of levels[0]) {
-    if (was.viewport !== "pane") continue;
-    const is = autoBaseReadout.find((r) => r.id === was.id);
-    assert.ok(is && is.where === was.where && is.level === was.level,
-      "switching contrast mode moved a viewport; it must change the scale and nothing else");
-  }
+  // **The control itself: nothing moved but the scale.**
+  //
+  // The two readouts **bracket the toggle**, and that is the whole of this fix. The first version
+  // compared against `levels[0]` — captured before the six zoom gestures — so it asserted two things
+  // at once: that the toggle moved nothing (the control), *and* that a six-step zoom round trip
+  // returns a pane to exactly where it started (not the control, not something T-470 provides, and
+  // not true in general: T-480 clamps an address to what the lattice can serve, and a step that
+  // clamps on the way out does not un-clamp on the way back). The unrelated conjunct is removed;
+  // "and nothing else" is untouched and now covers exactly the interval it names.
+  //
+  // It reports **which viewport and which field**, because a bare boolean here cost a merge: the
+  // failure said "a viewport moved" and named neither, so nothing could be concluded from it.
+  // Checked at BOTH instants, and they are two different claims:
+  //   - across the press itself (four frames): the toggle moved nothing;
+  //   - across the press *and the settle*: nothing moved before the pixels below were read, so the
+  //     `sensitivity` comparison is a comparison of colours and not of viewports.
+  // Naming which interval moved is the point — the failure that cost a merge said "a viewport moved"
+  // and named neither the viewport, the field, nor the interval.
+  const assertUnmoved = (before, after, when) => {
+    for (const was of before) {
+      if (was.viewport !== "pane") continue;
+      const is = after.find((r) => r.id === was.id);
+      assert.ok(is, `${was.id} vanished from the readout ${when}; ` +
+        `rows now: ${after.map((r) => r.id).join(", ") || "(none)"}`);
+      assert.equal(is.where, was.where,
+        `a viewport moved ${when}: ${was.id} was looking at "${was.where}" and is now at "${is.where}". ` +
+        "Switching contrast mode must change the scale and nothing else.");
+      assert.equal(is.level, was.level,
+        `a viewport's level changed ${when}: ${was.id} drew at "${was.level}" and now draws at ` +
+        `"${is.level}". Switching contrast mode must change the scale and nothing else.`);
+    }
+  };
+  assertUnmoved(preToggleReadout, postToggleReadout, "across the contrast toggle");
+  assertUnmoved(preToggleReadout, autoBaseReadout, "between the contrast toggle and the settled frame");
   const sensitivity = diff(base, autoBase, left);
   assert.ok(sensitivity.share > 0.05,
     `changing the display range repainted only ${(sensitivity.share * 100).toFixed(2)} % of this ` +
