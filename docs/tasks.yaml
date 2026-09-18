@@ -11678,6 +11678,7 @@ tasks:
       invariants' new homes tabulated at the end), docs/api.md (both routes), ui/CONTROLS.md
       (the retired-widget rows re-pointed + a "what the cutover removed" table; T-456's navigation
       section untouched). Verified: `just test-ui` 40/40, `just test-ui-e2e` 4/4, tsc clean.
+    commit: "19d9bed"
   - id: T-446
     milestone: MCANVAS
     title: After a retune the spectrum-history pyramid stops recording, permanently - the ring advances and coverage says observed, but nothing is written
@@ -12458,6 +12459,85 @@ tasks:
       goes red on "a drag must pan the FREQUENCY axis"; binding time to ctrl goes red on "alt + wheel
       moved the FREQUENCY axis".
       Gate: ui class - test-ui 39/39, test-ui-e2e 3/3 in 50.9 s.
+  - id: T-457
+    milestone: MCANVAS
+    title: The instantaneous spectrum trace has no home on the canvas - a trace is one frame ACROSS frequency, not a zoom level
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    depends_on: [T-445]
+    use_cases: [AWARE-011]
+    acceptance: |
+      T-445 FINDING 1, REPORTED RATHER THAN DROPPED, AND IT NEEDS THE USER'S RULING FIRST.
+      The cutover retired the live FFT plot that sat above the old waterfall, and with it the
+      client-side MAX-HOLD and the MANUAL dB RANGE. The agent's reason for not giving it a home is
+      the load-bearing part and should be checked before any design: THE SURFACE DRAWS FOLDED CELLS
+      OVER TIME; A TRACE IS THIS FRAME ACROSS FREQUENCY. It is a different quantity, not a finer
+      zoom level of the same one, so "just zoom in" is not an answer.
+      Max-hold is the sharper case: it is an accumulator over frames, which is the shape docs/16
+      already owns for the pyramid - so ask whether max-hold belongs in the tile ladder (a
+      max-reduction tier beside the mean one) rather than in a client-side buffer that dies with
+      the view. The manual dB range is a honesty question: the surface's ramp is measured, and a
+      hand-set range is a user overriding a measurement, which this product does deliberately
+      rarely.
+      DO NOT BUILD UNTIL THE USER RULES on whether the trace returns at all. Recording it as a
+      ticket is what keeps the report from becoming a silent deletion.
+    notes: |
+      Filed by the coordinator at T-445's merge (19d9bed). The ticket exists so the capability has
+      an owner whichever way the ruling goes.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-ui`, `just test-ui-e2e` - then
+      HAND BACK. Never `just gate`; the coordinator gates at merge.
+  - id: T-458
+    milestone: MCANVAS
+    title: Drag-to-select and T-193's draggable Confirmed-band edges have no gesture - drag now pans
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    depends_on: [T-445, T-456]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      T-445 FINDING 2, REPORTED RATHER THAN DROPPED. T-456 made DRAG = PAN, which is what the user
+      asked for; the cost is that the gesture region-select used to own is taken. Selections are
+      still CREATED from the capture band's time drag and are still DRAWN on the surface, so this
+      is not a lost feature so much as a lost INPUT - except for one part that IS lost: T-193's
+      user-band override now has NO SETTER AT ALL.
+      THE SETTER IS THE PART THAT CANNOT WAIT ON TASTE. A stored override with no way to set it is
+      dead state, and dead state that a reader still honours is worse than no feature - decide
+      whether T-193's override is kept (and given an input) or retired (and its state removed with
+      the reader). Report which, with evidence about who reads it.
+      THE GESTURE IS A DESIGN CALL FOR THE USER: a modifier-held drag, a mode toggle, or a
+      right-drag. Whatever is chosen must not disturb what T-456 and T-444 established - T-340's
+      control (no pan and no wheel reaches a device route) passes VERBATIM, and a pan still
+      invalidates a pending retune offer at the instant of commit. T-407's lesson applies directly,
+      since this adds a second meaning to a pointer stream: measure travel as a DISTANCE, never as
+      dx + dy, and never let a tap become a drag.
+    notes: |
+      Filed by the coordinator at T-445's merge (19d9bed).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-459
+    milestone: MCANVAS
+    title: Axis ticks with labels - each viewport states its window as a readout, and a readout is not a ruler
+    status: todo
+    priority: low
+    parallel_group: CANVAS-FE
+    depends_on: [T-445]
+    use_cases: [AWARE-011]
+    acceptance: |
+      T-445 FINDING 3, REPORTED RATHER THAN DROPPED, and the smallest of the three. The retired
+      surfaces drew labelled axis ticks; the canvas states each viewport's window and level in its
+      chrome line instead. That is a READOUT, not a RULER: it says where the edges are but gives no
+      intermediate marks to read a feature's frequency or age off the screen.
+      WHAT MAKES IT NON-TRIVIAL AND WHY IT IS NOT JUST "ADD TICKS": the axes are INDEPENDENTLY
+      LEVELLED (T-434/T-438/T-440) and each pane has its own window, so ticks are per-pane and
+      per-axis, and the interval must be chosen from the level actually DRAWN - the same quantity
+      the chrome already reports off the PaneReport. Ticks derived from anything else would be a
+      second opinion about the view, which is the drift family this milestone just closed.
+      Honesty applies: a tick interval finer than the cell size drawn would imply resolution the
+      hardware did not capture, which docs/16's honesty tiers forbid.
+    notes: |
+      Filed by the coordinator at T-445's merge (19d9bed). Low priority - the chrome line already
+      answers "where am I", and the missing capability is "what is THAT".
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
