@@ -13767,7 +13767,7 @@ tasks:
   - id: T-482
     milestone: MLIVE
     title: /api/tiles declares a 12 x 15 lattice and 400s a large part of it - the route must say how far it can actually be READ
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -13816,6 +13816,29 @@ tasks:
       aggravates it. Until this ticket lands, T-479's terminal-4xx handling is what keeps the console
       quiet.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "209c41b"
+    result: |
+      DONE, AND OPTION (b) WAS REFUTED BY MEASUREMENT. Probing the same addresses on 4x4, 6x6 and 8x8
+      stores: (9,1) OK at 51.9 ms on the shipped 4x4 and REFUSED on both deeper ones; (5,5) OK at 39.5 ms,
+      refused after 1147.9 ms at 6x6 and 4410.5 ms at 8x8. Deepening admits far more candidates,
+      finest-affordable-first picks a FINE node, and folding it needs vastly more than the 1024-tile
+      budget - the coarse corners stay unbackable AT EVERY DEPTH and THE COST OF FAILING RISES 100x. So
+      the lattice stays larger than the store and the ceiling is the honest statement of it.
+      THE CEILING IS (9,1), computed against BOTH refusals including a new Pyramid::materialize_cost_bound
+      taken on an EMPTY store - the worst store a read can meet, since an existing tile costs no fold
+      budget. THE LOAD-BEARING EVIDENCE IS NOT THE WALK: the pure predicate is checked CELL BY CELL against
+      what tile_read actually does over the whole 12 x 15 lattice - sound everywhere, conservative at 4 of
+      180. Three geometries walked with 0 refused, and the box is maximal (one level past it on either
+      axis genuinely refuses).
+      WHAT A BOX LOSES IS STATED rather than hidden: work goes as tile AREA, so the true bound is an
+      anti-diagonal. (9,1) and (5,5) are both servable and both maximal and NO BOX HOLDS BOTH; covering
+      6 GHz x tens of minutes costs 32 tiles at (9,1) against 118 at (5,5). On the wire and in docs/api.md.
+      THE BROWSER TIER CAUGHT ITS FIRST VERSION: the ceiling was quoted for THAT ANSWER'S `cells`, but the
+      client bootstraps from a cheap cells=8 probe and renders at 256, so it read back (11,9) and 69
+      ADDRESSES INSIDE THAT BOX WERE REFUSED. Now stated for the route's own 256-cell unit - the widest it
+      accepts, so it can never over-claim for a smaller one.
+      MEASURED WITHOUT A SHIM: aggressive zoom-out 117 requests / 107 refused -> 9 requests / ZERO 4xx, and
+      the minimap's first paint moves from the unbackable 10/0 to 9/0.
   - id: T-483
     milestone: MLIVE
     title: PROVE THE GAP - the canvas finest-live tier must reproduce the old waterfall's image for the same window, and today it will not
@@ -14185,7 +14208,7 @@ tasks:
   - id: T-490
     milestone: MLIVE
     title: One global refresh lane priced by the LAST revalidation starves a cheap live pane behind an expensive coarse one
-    status: todo
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     core_interface: true
@@ -14239,6 +14262,37 @@ tasks:
       broken, which is the only reason the test is currently green. Neither is acceptable, so the two
       go together.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "209c41b"
+    result: |
+      DONE. UN-MASKED BY T-482 AND PROVED RATHER THAN GUESSED. MAIN'S live-edge TEST PASSED BECAUSE THE
+      MINIMAP WAS BROKEN: its address was a permanent 400, asked once by T-479's terminal rule, so the
+      refresh lane and all four in-flight slots belonged to the live pane - 68 refreshes at 69 ms. Make it
+      servable and it costs 246 ms, 2 097 152 source cells and 37 history-lock holds against the live
+      pane's 37 ms / 65 536 / 1, and BOTH STARVATION PATHS FIRE AT ONCE: the pane's own latency 69 ->
+      183 ms (contention on the same mutex) and its count 68 -> 14 (the lane pricing itself off 246 ms
+      revalidations). Total 73 -> 41 requests - the RATE LIMITER, not the in-flight cap, which stayed at
+      peak 4 throughout.
+      THE ROOT IS T-460's serverMs BUG ONE LEVEL UP: T-460 fixed the MEASUREMENT (a mean that folds in the
+      minimap's coarse read charges the live edge for a tile it is not) but the LANE was still a mixture -
+      a minimap is a FOLLOWING viewport, so its tiles queue beside the pane's.
+      FIX: ONE LANE PER LEVEL - the cost class - round-robin, each charged its own measured service time.
+      BOTH HALVES ARE LOAD-BEARING AND ASSERTED SEPARATELY, because either alone still stalls: a per-lane
+      gate without round-robin hands the single in-flight slot to whatever queued first, and round-robin
+      without a per-lane gate still prices every lane off the expensive one. After: 0/0 x44 @129ms, 73
+      requests, 5/5 drawn, dominant background back to main's 29 %.
+      T-460's FIVE PROPERTIES ALL UNCHANGED and still asserted; fairness is the SIXTH.
+      IT TOOK THE LANE, NOT THE TILE'S COST, on measurement: the 37 lock holds are TILE_MAX_SOURCE_CELLS
+      doing its job - a LOCK-HOLD bound, so reducing the count means enlarging the holds, which is what it
+      exists to prevent - and the 2M source cells come from affordable_levels, which is T-426/T-434/T-437-F2's
+      honesty defence and was left untouched.
+      ITS SELFTEST CAUGHT A BAD GUARD, which is the point of running it: collapsing laneOf to a constant
+      reddened the cost guard (8 -> 3 revalidations) but left the DEPTH guard GREEN, because it counted the
+      ordinary queue's initial misses alongside revalidations - A SOUND PROOF OF THE ADJACENT QUESTION. It
+      now counts revalidations only and asserts the property FIFO cannot satisfy.
+      THE FINDING IS IN THE CODE beside refreshLanes: if the live edge goes quiet, check what the
+      minimap's address is answering before concluding anything about this lane - A VIEWPORT THAT IS
+      FAILING IS ALSO A VIEWPORT THAT COSTS NOTHING, and from inside the lane the two are
+      indistinguishable. A named residual it did NOT fix is filed as T-491.
   - id: T-491
     milestone: MLIVE
     title: The minimap's INITIAL FILL holds the refresh lane's precondition false for ~10 s - a weaker form of the same trap
