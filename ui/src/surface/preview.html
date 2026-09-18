@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hackriff — unified surface (preview)</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="surface.css">
+</head>
+<body class="sp-body">
+<!-- T-450: a PREVIEW of the unified surface (docs/16 §8), served at /surface.html.
+
+     It mounts ui/src/surface/ — T-440's renderer core, T-441's cell marks, T-442's pane model,
+     T-443's minimap-as-viewport and chrome — against the live GET /api/tiles, over RECORDED
+     HISTORY only. It does not read the live edge (T-439) and it is not the cutover (T-445).
+
+     It is additive: the app at / is untouched, shares no state with this page, and imports
+     nothing from it. -->
+<div class="sp">
+  <header class="sp-bar">
+    <div class="sp-brand">hack<span>riff</span> <em>surface preview</em></div>
+    <div class="sp-badge" title="This view reads the spectrum-history pyramid. The time axis does not advance and no viewport follows a live edge.">historical · the edge does not advance</div>
+    <div class="sp-edge" data-slot="edge">…</div>
+    <div class="sp-actions" data-slot="actions"></div>
+  </header>
+
+  <p class="sp-note" data-slot="note">Addressing the surface…</p>
+  <p class="sp-census" data-slot="census"></p>
+
+  <div class="sp-stage" data-slot="stage">
+    <canvas data-slot="canvas" aria-label="The unified surface: panes above, the whole-surface map along the bottom"></canvas>
+  </div>
+
+  <div class="sp-help">
+    <b>Drag</b> pans · <b>Wheel</b> zooms time · <b>Shift + wheel</b> zooms frequency · <b>Alt + wheel</b> zooms both ·
+    <b>Double-click the map</b> sends the active pane there. The two axes resolve to their own pyramid levels, stated per viewport below.
+    Nothing on this page moves the radio.
+  </div>
+
+  <div class="sp-chrome" data-slot="chrome" aria-label="Per-viewport level readout"></div>
+
+  <div class="sp-cols">
+    <section class="sp-legend" data-slot="legend" aria-label="What each mark claims"></section>
+    <section class="sp-about">
+      <h2>Where these numbers came from</h2>
+      <ul class="sp-prov" data-slot="provenance"></ul>
+      <p class="sp-status" data-slot="status"></p>
+      <p class="sp-foot">
+        No active-capture segment is drawn here: that mark belongs at the live edge, and this
+        preview does not read the live edge. The map's rectangles are the panes, drawn as strokes so
+        they can never tint the measurement underneath.
+      </p>
+    </section>
+  </div>
+</div>
+<script type="module" src="surface.js"></script>
+</body>
+</html>

@@ -306,6 +306,26 @@ test("the generated shader is the only implementation: one grey, one tier rule, 
   for (const [name, expr] of Object.entries(PATTERNS)) {
     assert.equal(fs.split(expr).length - 1, 1, `pattern ${name} is written ${fs.split(expr).length - 1} times in the shader`);
   }
+  // …and `patternHit` really computes that same expression. T-450 had to replace the module-scope
+  // `new Function` that used to guarantee this by construction — `hk serve`'s own CSP has no
+  // `unsafe-eval`, so evaluating it took the whole renderer down the first time a browser loaded
+  // this module. The eval moved HERE, where it is allowed, and the guarantee became an assertion:
+  // a drifting transcription now fails a test instead of being made impossible by a construct the
+  // product cannot run.
+  for (const [name, expr] of Object.entries(PATTERNS)) {
+    const evaled = new Function("px", "p", "fract", `return (${expr});`) as
+      (px: { x: number; y: number }, p: { x: number; y: number }, fract: (v: number) => number) => boolean;
+    const fract = (v: number) => v - Math.floor(v);
+    for (const pitch of [3, 5, 7, 8, 9, 10, 14.5]) {
+      for (let y = -4; y < 32; y++) {
+        for (let x = -4; x < 32; x++) {
+          const px = { x: x + 0.5, y: y + 0.5 }, p = { x: pitch, y: pitch * 0.75 };
+          assert.equal(patternHit(name as keyof typeof PATTERNS, px, p), evaled(px, p, fract),
+            `pattern ${name} disagrees with its GLSL at (${px.x}, ${px.y}) pitch ${pitch}`);
+        }
+      }
+    }
+  }
   // The tier rule is generated, and `live-iq` really is the unmarked branch.
   assert.match(fs, /vec3 tierMark\(int t, vec3 col, vec2 px, vec2 srcPx\)/);
   assert.match(fs, new RegExp(`if \\(t == ${TIER.LIVE_IQ}\\) return col;`));
