@@ -15285,7 +15285,7 @@ tasks:
   - id: T-510
     milestone: MSDR
     title: Multi-source capture composition - one Pipeline spawning N source/ring/capture-thread sets into the shared per-device stores
-    status: in-progress
+    status: todo
     priority: high
     parallel_group: SDR
     core_interface: true
@@ -15314,6 +15314,19 @@ tasks:
       writing the shared stores with correct per-device provenance; N=1 unchanged; measured
       per-row cost at N=1 vs N=2 recorded.
     notes: |
+      PAUSED 2026-09-18 by the user (budget; scan + fog-of-war took priority). Resumes after the weekly
+      reset (Sun 02:00). CHECKPOINT: branch task-t510 @ 96d073a3 builds clean, untested. Handover:
+      the seam was where the survey said for STORAGE (history keys by frame device_id, per-device floor,
+      coverage from ring segments), plus three things it missed - (1) the shared pyramids have ONE
+      forward-only watermark, so all devices in a run must share a clock (live radios do; replays
+      generally don't); (2) the end-of-run seal must happen ONCE after every device drains, not by
+      the first reader to finish; (3) each extra device needs its own Counters or it overwrites the
+      primary's live state. WIP: src/devices.rs (ExtraSource/RunDevice, validate/start/finish),
+      Pipeline::start -> start_multi, Shared.seal_at_end, Common.aux/defer_seal/sealed, per-device
+      iqbuffer dirs, source/history cpu_ns counters. N=1 baseline: ~11.1 ms CPU per Msample on the
+      capture thread, 13.0-13.6 ms per history row, 273-279 MB peak. NEXT: N=2 in
+      tests/multi_source.rs, then two_mock_front_ends_share_the_stores, then targeted tests + the
+      threading/cost note. T-508 also changed run.rs (supervise recovery) - rebase before resuming.
       Filed 2026-09-18 from /tmp/claude-501/multi-sdr-brief.md (planning log B0.690). Paced to ONE
       builder slot: the user is near the weekly budget cap and retune/live fixes keep priority.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
@@ -15413,6 +15426,135 @@ tasks:
       assertion. T-507 moved the ceiling test's walk to the tuned band to avoid depending on this.
     notes: |
       Filed 2026-09-18 from T-507's report; T-494's area, which has now merged.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-516
+    milestone: MSCAN
+    title: Scan is built - make it discoverable and satisfying - verify the Survey-sweep panel end to end and add a one-click "scan everything"
+    status: todo
+    priority: high
+    parallel_group: SCAN
+    model: sonnet
+    depends_on: [T-517]
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER TOP PRIORITY 2026-09-18 (with fog-of-war). THE SCAN IS ALREADY BUILT - do NOT rebuild it:
+      T-406 engine, T-452 in-app trigger and UI, T-439 live-edge tiles, T-457/T-460. GET/POST
+      /api/control/scan works live (it priced a full 1 MHz-6 GHz sweep on the demo). The "Survey
+      sweep" fieldset (From/To/Dwell + Start/Stop) is at ui/src/app/review/device.ts:74-191, model
+      ui/src/controls/model.ts:60-360.
+      (1) VERIFY END TO END on the mock that the panel is reachable in the shipped UI and that starting
+      a sweep visibly fills the canvas in real time.
+      (2) ONE-CLICK "SCAN EVERYTHING": empty From/To already means the whole range; default the
+      one-click to a FAST dwell (~0.2-0.5 s) AND the COARSE step from T-517, so a full pass is
+      minutes, not the 13 hours 12 s/step costs today. The pricing line already shows the time
+      cost; it must show the one-click's.
+      UI-only here (test-ui gate); T-517 carries the step parameter.
+    notes: |
+      Filed 2026-09-18 from /tmp/claude-501/scan-fog-brief.md. LOW-priority follow-up, deferred: the
+      Survey-sweep panel should not live under the Device panel - give it its own home later (user,
+      "works for now").
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-517
+    milestone: MSCAN
+    title: A step-width (coarse/fine) control for the sweep - advance by the usable window, not ~1.5 MHz, so a full pass is ~10x fewer hops
+    status: in-progress
+    priority: high
+    parallel_group: SCAN
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER, 2026-09-18, after finding the Survey-sweep panel. Today the scan steps ~1.5 MHz per hop,
+      ~4000 steps for 1 MHz-6 GHz - why a full pass takes forever - although the HackRF window is
+      ~15-20 MHz and the config already has usable_fraction=0.75 (=> ~15 MHz usable) and
+      max_span_hz=20 MHz. MEASURE the actual hop first: confirm where the 1.5 MHz comes from.
+      Add a step-width (or coarse/fine "resolution") parameter through GET/POST /api/control/scan into
+      the scan plan (CompiledPlan tiling). COARSE advances by about the full usable window (~15 MHz,
+      ~400 steps, ~10x faster); FINE keeps small overlapping steps for detail. The planner snaps to
+      achievable configurations as today.
+      FREQUENCY RESOLUTION IS UNCHANGED: FFT bins per window stay fine; coarse means fewer redundant
+      hops, not blurrier data - assert it (bin width identical coarse vs fine) so nobody later reads
+      "coarse" as permission to degrade.
+      Add the control to the sweep panel next to From/To/Dwell; the pricing line shows the cost, so
+      the user sees coarse = fast. docs/api.md + api_contract.rs move together (T-079), assert values.
+    notes: |
+      Filed 2026-09-18. The one-click default to COARSE lives in T-516.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-519
+    milestone: MSCAN
+    title: "Fog-of-war 2A: a last-known (carry-forward) query and a shadow plane on the tile route"
+    status: in-progress
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER TOP PRIORITY 2026-09-18. Today a cell with no data for the viewed (t, f) renders GREY. The
+      user wants a THIRD state: a cell observed at SOME past time shows its MOST-RECENT-KNOWN spectrum
+      in a very dim colormap ("shadow"); grey stays ONLY for never-observed. Semantics (user): swept
+      then departed = shadow; never swept = grey; re-swept = re-illuminated to full brightness.
+      THE DATA GAP: the backend keeps recency (Sampled.last) and max-hold (overview(), strongest ever)
+      but NOT last-known-value-carried-forward. Add it.
+      (1) A QUERY-TIME FOLD beside RegionHistory::overview() in crates/hk-store/src/history/query.rs
+      (near :245-254, :388-406): per frequency cell, the NEWEST observed max_db and its timestamp at
+      or before the viewport time, over the retained horizon - last-write-wins by time, reading the
+      same pyramid. No new maintained structure and no per-arriving-row cost (the T-453 constraint).
+      It must reach OUTSIDE the viewed tile's time extent: a column observed only before t0 has no
+      cell in [t0, t1]. Measure the query's cost on a device-wide viewport.
+      (2) Carry it on the tile route: a shadow / last_db plane (+ age) beside grid.max_db in
+      crates/hk-api/src/tiles.rs (near :94-119). docs/api.md + api_contract.rs together (T-079);
+      assert the VALUE (T-315), including that a never-observed column carries NO shadow.
+      (3) A short ADR note beside ADR-0017/0019 recording the "last-known / stale" honesty tier and
+      confirming GREY'S MEANING IS UNCHANGED. A note, not a gate.
+      DoD: the route answers a shadow value exactly where a cell was observed before and nothing where
+      it never was; cost measured; api.md, contract test and ADR note landed. Reviewed before merge.
+    notes: |
+      Filed 2026-09-18 from /tmp/claude-501/scan-fog-brief.md. Option (b), a maintained per-frequency
+      structure, is deliberately NOT built yet.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-520
+    milestone: MSCAN
+    title: "Fog-of-war 2B: the client's SHADOW tier - a dim last-known ramp, unmistakable from live, grey untouched"
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: [T-519]
+    use_cases: [AWARE-011]
+    acceptance: |
+      ui/src/surface/cellrule.ts: add CELL.SHADOW (a 6th state, :31-65) and a CELL_MARKS entry
+      (:158-166) of a NEW kind (e.g. shadow-ramp): sample cmap(x) then multiply brightness far down,
+      optionally age-graded (older = darker). The GLSL is generated from those tables (:367-411) - no
+      hand shader math. GREY STAYS FLAT AND ONLY FOR UNOBSERVED - the invariant is preserved, and a
+      shadow must be UNMISTAKABLE from a live observed cell (a hard brightness ceiling and/or a subtle
+      texture). ui/src/surface/tile.ts decodeTile (:172-220): coverage=unobserved WITH a
+      carried-forward value => CELL.SHADOW with that value; no value => grey. Widen
+      ui/test/surface-honesty.test.ts for the new mark (it is not grey, not on the live ramp's
+      brightness range, not the unknown hatch, not REFUSED_MARK). Reuse cmap.ts unchanged.
+      Land together with T-519 so the effect is visible.
+    notes: |
+      Filed 2026-09-18. Touches the honesty model - Opus, reviewed.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-521
+    milestone: MSCAN
+    title: "Fog-of-war 2C: the standing guard - sweep then leave = shadow, never swept = grey, re-sweep = bright"
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    model: sonnet
+    depends_on: [T-519, T-520]
+    use_cases: [AWARE-011]
+    acceptance: |
+      Through the MOCK SDR (the e2e rule): sweep a band, move away - that band renders SHADOW (dim);
+      a band never swept stays GREY; a re-sweep re-illuminates it to full brightness. Measured in
+      pixels in a real browser against the server's own coverage and shadow planes. This is the
+      standing guard that grey = genuinely unobserved still holds and a shadow appears ONLY where
+      the air was truly observed before.
+    notes: |
+      Filed 2026-09-18.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening

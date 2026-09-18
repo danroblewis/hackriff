@@ -5497,3 +5497,21 @@ A–D are device-agnostic and buildable now; only E needs the hardware.
 **Pacing.** The user is near the weekly budget cap (resets Sunday 02:00), so MSDR takes **one builder
 slot**: T-510 starts now; the rest follow it serially. The retune/live/phosphor user-visible fixes keep
 priority for the other slots.
+
+### B0.691 — Reprioritised: scan UI + fog-of-war first; MSDR paused until the budget resets (2026-09-18)
+
+The user moved **full-spectrum scan UX** and **fog-of-war shadow tiles** to the top, to land before the
+weekly budget runs low; **MSDR is paused** until the reset (Sun 02:00). T-510 was stopped at the end
+of its turn and checkpointed (task-t510 @ 96d073a3, builds, untested); its handover is on the board.
+Retune/live/phosphor user-visible fixes keep flowing.
+
+**Scan is already built** (T-406/T-452/T-439), so milestone MSCAN is small there: T-516 verifies the
+Survey-sweep panel end to end and adds a one-click "scan everything" (fast dwell, coarse step), and
+T-517 adds the step-width control the user asked for after finding the panel — today's ~1.5 MHz hop is
+~4000 steps for 1 MHz–6 GHz against a ~15 MHz usable window; coarse is ~10× fewer hops **at unchanged
+FFT resolution**. **Fog-of-war is the net-new work:** a third honesty state — observed before, not now
+— shown as a dim last-known spectrum, with grey kept for never-observed only (swept then departed =
+shadow; never swept = grey; re-swept = bright). T-519 (2A) adds the missing carry-forward query as a
+query-time fold (no per-row capture cost) and a shadow plane on the tile route, plus a short ADR note;
+T-520 (2B) the client tier; T-521 (2C) the standing e2e guard. Sequence 2A → 2B → 2C, 2A+2B landing
+together so the effect is visible.
