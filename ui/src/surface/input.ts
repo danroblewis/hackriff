@@ -6,15 +6,19 @@
 // their own wheel handler, they disagreed about direction and factor, and the disagreement was the
 // bug. Two hosts with one handler cannot reproduce it; two hosts with two handlers eventually will.
 //
-// So this file is the single answer to: where is the pointer, which viewport is under it, and what
-// does a drag or a wheel do to that viewport. Everything it calls is `SurfacePreview`'s, which is
-// arithmetic over `PaneModel` — T-442 asserted the whole gesture vocabulary against a spy client and
-// saw an **empty call list**, and that property is unchanged by having one more caller.
+// So this file is the single answer to: where is the pointer, and which viewport is under it.
+// **What the gesture MEANS is still not decided here** — `wheelZoom` (in `preview.ts`) reads the
+// modifier bits and the deltas, and this file forwards the event and places the result. That split
+// is T-456's, and it is what makes "one handler" worth anything: a host that re-read `deltaY` would
+// be a second opinion about a wheel even while sharing a listener. Everything it calls is
+// `SurfacePreview`'s, which is arithmetic over `PaneModel` — T-442 asserted the whole gesture
+// vocabulary against a spy client and saw an **empty call list**, and that property is unchanged by
+// having one more caller.
 //
 // Screen y runs down and the drawing buffer's runs up, so the vertical delta is negated exactly
 // once, here, and every consumer below is in one convention.
 
-import { type SurfacePreview, wheelAxes, zoomFactor } from "./preview";
+import { type SurfacePreview, wheelZoom } from "./preview";
 
 /** A point in drawing-buffer coordinates, GL convention (origin bottom-left). */
 export interface GlPoint { x: number; y: number }
@@ -36,9 +40,19 @@ export interface SurfaceInputOptions {
   onContext?: (p: GlPoint, e: MouseEvent) => void;
 }
 
-/** Travel, in device px, past which a pointer stream is a drag rather than a click. The same 6 px
- * the retired waterfall used, and measured as a **distance** — T-407 found `clientX + clientY`,
- * under which a stroke *across* an axis counted as travel *along* it. */
+/**
+ * Travel, in CSS px, past which a pointer stream that has already panned is **not also a click**.
+ *
+ * Read what this is not. T-456 removed the drag *threshold*: a drag pans from its first move, a
+ * zero-pixel move moves the view by zero, and nothing accumulates toward a decision — which is
+ * T-407's lesson, since that defect was a 6 px threshold turning a tap into a drag. This constant
+ * gates only whether `onClick` fires on release, and a click here focuses a row. It **cannot reach
+ * a device**: the retune is a separate, explicit press (T-444), and `acceptPaneRetune` re-derives
+ * its target at the instant of the commit precisely so no pointer stream can aim it.
+ *
+ * It is a **distance** (`Math.hypot`), never `dx + dy`: T-407's second defect was travel summed
+ * across axes, so a stroke *across* one counted as travel *along* it.
+ */
 export const DRAG_PX = 6;
 
 /**
@@ -92,14 +106,26 @@ export function attachSurfaceInput(
   const onCancel = () => { dragging = null; };
   const onLeave = (e: PointerEvent) => { if (!dragging) opts.onHover?.(null, e); };
 
+  // **Every wheel over the canvas is the surface's, whatever is held down (T-456).**
+  //
+  // The listener is `{ passive: false }` precisely so this `preventDefault` binds, and it is
+  // unconditional: ctrl+wheel is the browser's page-zoom shortcut and cmd+wheel is Safari's, so a
+  // conditional one would let a user who reached for ctrl zoom the *document* on top of the surface.
+  // What it cannot do is reach past the browser — macOS's own ctrl+scroll zoom (Accessibility →
+  // Zoom) consumes the event before any `wheel` is dispatched, which is why `wheelAxes` puts the
+  // time axis on ALT and leaves ctrl to fall through to the uniform gesture (where a trackpad pinch,
+  // which Chrome and Safari deliver as ctrl+wheel, also belongs).
+  //
+  // `wheelZoom` is the whole of the interpretation, deltas included: shift-held on macOS arrives as
+  // a *horizontal* scroll with `deltaY === 0`, so a host reading `deltaY` itself would make the
+  // frequency axis inert on a real Mac while every synthesised test passed.
   const onWheel = (e: WheelEvent) => {
     e.preventDefault();
     const p = point(e);
-    const f = zoomFactor(e.deltaY, e.deltaMode);
-    const axes = wheelAxes(e);
-    if (preview.onMap(p)) { preview.wheelMap(p, f, axes); moved(); return; }
+    const { factor, axes } = wheelZoom(e);
+    if (preview.onMap(p)) { preview.wheelMap(p, factor, axes); moved(); return; }
     const pane = preview.paneAt(p);
-    if (pane) { preview.activePane = pane; preview.wheel(pane, p, f, axes); moved(); }
+    if (pane) { preview.activePane = pane; preview.wheel(pane, p, factor, axes); moved(); }
   };
 
   const onDbl = (e: MouseEvent) => {

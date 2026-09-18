@@ -57,11 +57,11 @@ Two of those deserve a note:
 |---|---|
 | `cdp.mjs` | Dependency-free Chrome DevTools Protocol driver. Finds a Chrome; launches headless. |
 | `png.mjs` | Minimal PNG decoder + `census()`, the colour histogram the pixel assertions use. |
-| `harness.mjs` | `Browser`/`Page`: navigation, console and exception capture, network recording with concurrency watches, gestures (drag, wheel, click, double-click), screenshots, named waits. |
+| `harness.mjs` | `Browser`/`Page`: navigation, console and exception capture, network recording with concurrency watches, gestures (drag, wheel **with real modifier bits**, click, double-click), screenshots, named waits. |
 | `backend.mjs` | Starts `hk serve` over the fixture; `assertRealCsp`; `tileCost`. |
 | `run.mjs` | One backend, shared; one node process per `*.e2e.mjs`; prints the runtime of each. |
 | `surface-load.e2e.mjs` | **T-450's guard.** |
-| `surface-nav.e2e.mjs` | **T-454's guard** — the in-flight cap and the AIMD contract. |
+| `surface-nav.e2e.mjs` | **T-454's guard** — the in-flight cap and the AIMD contract. Plus **T-456's**: the four navigation gestures, and the modifier the browser actually delivered. |
 | `surface-contention.e2e.mjs` | **T-454's bootstrap half**: a second tab must be able to open while the first saturates the route. |
 | `selftest.mjs` | Reintroduces each defect in a scratch copy of `ui/src` and requires the suite to go red. |
 
@@ -172,6 +172,18 @@ Recorded here rather than silently worked around, because they are the tier doin
    30–48 of ~1 400 requests refused, all surfaced. **Fixed by T-454**: peak is now exactly 4, and
    the residual is 1–2 discovery refusals, none of them surfaced as a failure. See the section
    above for how that was established rather than assumed.
-3. **Time zoom is structurally clamped on a seconds-long fixture** (the whole record is already on
-   screen at the lattice's finest time level), which is why `surface-nav` exercises the time wheel
-   but requires movement only on the frequency axis. Stated in the test rather than hidden.
+3. **Time zoom is clamped until the record outgrows the zoom floor.** A pane may not magnify below
+   `minCells` (16) level-0 cells — 16 × 1 s on this lattice — while the surface's time extent is
+   however much of the recording `--replay --loop` has ingested so far, which grows in real time.
+   Early in a run the two are the same size and the time axis is correctly clamped in both
+   directions. T-456's test therefore **measures that premise from `/api/navigation` and
+   `/api/tiles` and waits for it** (measured: ~48 s of record against a 16 s floor, after a ~24 s
+   wait when that file is run alone; no wait at all in a full run, where it goes last) instead of
+   assuming it from the run order. Stated in the test rather than hidden.
+4. **A CDP wheel cannot answer an OS question.** T-456 needed to know whether ctrl+wheel reaches the
+   page, and the harness can only dispatch at the renderer — macOS's Accessibility ctrl+scroll zoom
+   consumes the event in the window server, where nothing in a browser can see it. So the test
+   reports what the browser *did* deliver (ctrl arrives, `defaultPrevented`, no page zoom) and the
+   product puts the time axis on **alt/option** for the reason the harness cannot test. Reading the
+   modifier that arrived — rather than only that the view zoomed — is the whole point of the probe
+   listener there.

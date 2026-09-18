@@ -11569,7 +11569,7 @@ tasks:
   - id: T-445
     milestone: MCANVAS
     title: The cutover - retire both edge scrubbers and the separate history view
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CANVAS-FE
     core_interface: true
@@ -11810,7 +11810,7 @@ tasks:
   - id: T-449
     milestone: M2-hardening
     title: presence_push's opens-once test fails 1 in 5 IN ISOLATION - not load, and a different test from the one T-383 cleared
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     deps: [T-383]
@@ -11933,7 +11933,7 @@ tasks:
   - id: T-451
     milestone: M2-hardening
     title: decoded_capture's segments_roll test fails 2 in 10 AT THE CAPPED THREAD COUNT, and it is already in heavy-serial
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     deps: [T-448, T-436]
@@ -12293,7 +12293,7 @@ tasks:
   - id: T-456
     milestone: MCANVAS
     title: Google-Maps navigation on the surface - drag pans, plain wheel zooms BOTH axes, modifiers give one axis
-    status: todo
+    status: in-progress
     priority: medium
     parallel_group: CANVAS-FE
     deps: [T-454, T-455]

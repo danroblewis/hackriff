@@ -116,9 +116,12 @@ async function main(): Promise<void> {
   );
 
   // ——— pointer ———
-  // T-445 moved this to `./input.ts`, because the cutover gives the surface a **second** host (the
-  // app's Explore centre) and a second copy of "what a wheel means" is T-412's wheel-zoom mismatch
-  // waiting to happen. One handler, two mounts.
+  //
+  // **T-445 moved the handlers to `./input.ts`, and T-456's semantics went with them.** The cutover
+  // gives this surface a *second* host — the app's Explore centre — and two hosts each doing their
+  // own wheel and drag arithmetic is T-412's wheel-zoom mismatch rebuilt. So the listeners are
+  // registered in one file, the meaning of a wheel is `preview.ts`'s `wheelZoom`, and this page and
+  // the app cannot disagree about either.
   attachSurfaceInput(canvas, preview);
 
   // ——— size, and the loop ———

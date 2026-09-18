@@ -22,7 +22,7 @@
 //     needed one before.
 
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 import test from "node:test";
 
@@ -33,7 +33,7 @@ import { GREY } from "../src/surface/cellrule";
 import { legendEntries, swatchPixels } from "../src/surface/legend";
 import type { Lattice, TileAddr } from "../src/surface/lattice";
 import { ControlError } from "../src/controls/client";
-import { ORIENT_CELLS, ORIENT_ROWS, SurfacePreview, isBackpressure, probeSurface, wheelAxes, zoomFactor, type SurfaceProbe } from "../src/surface/preview";
+import { ORIENT_CELLS, ORIENT_ROWS, SurfacePreview, isBackpressure, probeSurface, wheelAxes, wheelDelta, wheelZoom, zoomFactor, type SurfaceProbe } from "../src/surface/preview";
 import { stubGl } from "./surface-glstub";
 
 const S = 1e9;
@@ -376,11 +376,11 @@ test("pan and zoom work on BOTH axes, at levels that move INDEPENDENTLY", () => 
   const id = preview.activePane;
   const base = preview.frame().reports.find((r) => r.id === id)!;
 
-  // A wheel with no modifier zooms time only: the time level moves, the frequency level does not.
-  preview.wheel(id, { x: 600, y: 400 }, 64, wheelAxes({}));
+  // ALT is the time axis (T-456), and it leaves the frequency level alone.
+  preview.wheel(id, { x: 600, y: 400 }, 64, wheelAxes({ altKey: true }));
   const timeOnly = preview.frame().reports.find((r) => r.id === id)!;
   assert.ok(timeOnly.levelT > base.levelT, "time did not zoom");
-  assert.equal(timeOnly.levelF, base.levelF, "a time wheel moved the FREQUENCY level: the axes are welded again");
+  assert.equal(timeOnly.levelF, base.levelF, "an alt wheel moved the FREQUENCY level: the axes are welded again");
 
   // Shift is the frequency axis, and it leaves the time level alone.
   preview.wheel(id, { x: 600, y: 400 }, 8, wheelAxes({ shiftKey: true }));
@@ -388,9 +388,71 @@ test("pan and zoom work on BOTH axes, at levels that move INDEPENDENTLY", () => 
   assert.ok(freqToo.levelF > timeOnly.levelF);
   assert.equal(freqToo.levelT, timeOnly.levelT);
 
-  assert.deepEqual(wheelAxes({ altKey: true }), { freq: true, time: true });
   assert.ok(zoomFactor(100) > 1 && zoomFactor(-100) < 1, "scrolling down zooms out");
   assert.equal(zoomFactor(1e9), 4, "a flung trackpad cannot zoom a whole pyramid in one event");
+});
+
+test("T-456: a plain wheel is a UNIFORM zoom that still leaves the two axes independently levelled", () => {
+  const { preview } = harness();
+  const id = preview.activePane;
+  const before = preview.frame();
+  const b = before.views.find((v) => v.id === id)!.box;
+  const bl = before.reports.find((r) => r.id === id)!;
+
+  // One factor, both axes, anchored on the cursor. `64` is a big step so both levels have to move.
+  preview.wheel(id, { x: 600, y: 400 }, 64, wheelAxes({}));
+  const after = preview.frame();
+  const a = after.views.find((v) => v.id === id)!.box;
+  const al = after.reports.find((r) => r.id === id)!;
+  assert.ok(a.f1Hz - a.f0Hz > b.f1Hz - b.f0Hz, "a plain wheel must zoom FREQUENCY as well as time");
+  assert.ok(a.t1Ns - a.t0Ns > b.t1Ns - b.t0Ns, "a plain wheel must zoom TIME as well as frequency");
+  assert.ok(al.levelF > bl.levelF && al.levelT > bl.levelT, "both levels should have moved on a 64x step");
+
+  // **The gesture is uniform; the LEVELS are not welded by it.** The two axes are different physical
+  // quantities with different cell sizes, so one factor lands them on different level indices — and
+  // that is the property T-434 de-welded for. A uniform gesture that collapsed them to one level
+  // would make `levelF === levelT` here, whatever the surface looked like.
+  assert.notEqual(al.levelF, al.levelT,
+    "one uniform gesture produced ONE level for both axes: the levels have been re-welded");
+  // …and each axis is still clamped on its own: zooming far out pins frequency to the surface's
+  // whole extent while time is pinned to the record, two independent floors reached separately.
+  preview.wheel(id, { x: 600, y: 400 }, 1e6, wheelAxes({}));
+  const w = preview.frame().views.find((v) => v.id === id)!.box;
+  assert.equal(w.f1Hz - w.f0Hz, BOUNDS.f1Hz - BOUNDS.f0Hz);
+  assert.equal(w.t1Ns - w.t0Ns, BOUNDS.t1Ns - BOUNDS.t0Ns);
+});
+
+test("T-456: the modifier table, and the shift-held wheel that arrives as a HORIZONTAL scroll", () => {
+  // Plain — including a trackpad pinch, which Chrome and Safari deliver as ctrl+wheel — is uniform.
+  assert.deepEqual(wheelAxes({}), { freq: true, time: true });
+  assert.deepEqual(wheelAxes({ ctrlKey: true }), { freq: true, time: true },
+    "ctrl is deliberately unbound: a pinch arrives as ctrl+wheel and must zoom both axes");
+  assert.deepEqual(wheelAxes({ metaKey: true }), { freq: true, time: true });
+  assert.deepEqual(wheelAxes({ shiftKey: true }), { freq: true, time: false });
+  assert.deepEqual(wheelAxes({ altKey: true }), { freq: false, time: true });
+  // Both modifiers names both axes, which is the uniform gesture — not a fourth, undefined one.
+  assert.deepEqual(wheelAxes({ shiftKey: true, altKey: true }), { freq: true, time: true });
+
+  // macOS delivers a shift-held wheel as a horizontal scroll: the scroll is in `deltaX` and
+  // `deltaY` is 0. Reading `deltaY` alone would make the frequency axis inert on a real Mac.
+  assert.equal(wheelDelta({ deltaX: -240, deltaY: 0, shiftKey: true }), -240);
+  assert.equal(wheelDelta({ deltaX: 0, deltaY: -240, shiftKey: true }), -240,
+    "…and a shift wheel that did NOT get swapped must still work");
+  // The dominant delta, never the sum: T-407's `clientX + clientY` mistake, not repeated.
+  assert.equal(wheelDelta({ deltaX: -240, deltaY: -30, shiftKey: true }), -240);
+  assert.equal(wheelDelta({ deltaX: -30, deltaY: -240, shiftKey: true }), -240);
+  // Without shift, a horizontal swipe is a scroll and not a zoom, so `deltaX` is ignored outright.
+  assert.equal(wheelDelta({ deltaX: -240, deltaY: 0 }), 0);
+  assert.equal(zoomFactor(wheelDelta({ deltaX: -240, deltaY: 0 })), 1, "…which is a zoom of exactly nothing");
+
+  // `wheelZoom` is the one call a host makes, so the whole gesture is decided in one place.
+  const mac = wheelZoom({ deltaX: -240, deltaY: 0, deltaMode: 0, shiftKey: true });
+  assert.deepEqual(mac.axes, { freq: true, time: false });
+  assert.ok(mac.factor < 1, "a macOS shift+wheel must zoom IN on frequency, not stand still");
+  assert.deepEqual(wheelZoom({ deltaY: -240 }).axes, { freq: true, time: true });
+  assert.deepEqual(wheelZoom({ deltaY: -240, altKey: true }).axes, { freq: false, time: true });
+  // Line and page deltaModes are normalised the same way for every host.
+  assert.equal(wheelZoom({ deltaY: 15, deltaMode: 1 }).factor, zoomFactor(15, 1));
 });
 
 test("a drag keeps the data under the pointer: both axes, both signs", () => {
@@ -535,6 +597,38 @@ test("T-445 INVERTS T-450's ADDITIVE CLAIM: the app mounts THIS host, and there 
   assert.match(pkg.scripts["build:surface"], /preview-main\.ts.*--outfile=dist\/surface\.js/s);
   assert.ok(existsSync("src/surface/preview.html"), "the preview page still exists beside the app");
   assert.ok(!SRC("src/app/index.html").includes("surface.js"), "…and the app still loads its own bundle, not the page's");
+});
+
+/**
+ * **T-456: whoever hosts this surface, the wheel means the same thing.**
+ *
+ * This is a claim about *every* host, not about the one that exists today, and it is written as a
+ * source assertion for that reason: the cutover adds a second host, and two hosts each doing their
+ * own wheel arithmetic is T-412's wheel-zoom mismatch rebuilt from parts. The failure mode is
+ * silent — `zoomFactor(e.deltaY, e.deltaMode)` compiles, runs, and makes shift+wheel inert on
+ * macOS, where a shift-held wheel arrives in `deltaX` — so nothing else in this suite would catch
+ * it. The same goes for `preventDefault`: a host that forgets it hands ctrl+wheel to the browser's
+ * page zoom, which is the one thing a `{ passive: false }` listener exists to stop.
+ */
+test("T-456: every wheel listener on the surface goes through wheelZoom, and preventDefaults", () => {
+  const dir = "src/surface";
+  const hosts = readdirSync(dir)
+    .filter((f) => f.endsWith(".ts"))
+    .map((f) => [join(dir, f), SRC(join(dir, f))] as const)
+    .filter(([, src]) => /addEventListener\(\s*["']wheel["']/.test(src));
+  assert.ok(hosts.length > 0, "no wheel listener was found at all, so this guard is asserting nothing");
+  for (const [file, src] of hosts) {
+    assert.match(src, /wheelZoom\(/,
+      `${file} registers a wheel listener without calling wheelZoom(): the gesture's meaning must ` +
+      "come from preview.ts, or this host and the other one will disagree about what a wheel does");
+    assert.ok(!/\be\.deltaY\b|\be\.deltaX\b|\be\.shiftKey\b|\be\.altKey\b/.test(src),
+      `${file} reads the wheel's deltas or modifier bits itself — that decision belongs to ` +
+      "wheelZoom(), which is the only copy of it");
+    assert.match(src, /passive:\s*false/,
+      `${file}'s wheel listener is not registered { passive: false }, so its preventDefault cannot bind`);
+    assert.match(src, /preventDefault\(\)/,
+      `${file} does not preventDefault its wheel: ctrl+wheel and cmd+wheel would zoom the PAGE`);
+  }
 });
 
 test("the preview reaches the renderer it was built to mount, rather than a copy of it", () => {

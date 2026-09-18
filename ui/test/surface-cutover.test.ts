@@ -154,10 +154,19 @@ test("T-412: there is ONE wheel/drag handler, and every mount of the surface goe
   assert.deepEqual(wheelers, ["src/controls/gestures.ts", "src/surface/input.ts"].filter((f) => existsSync(f)),
     "a second wheel interpretation has appeared");
   // The zoom arithmetic itself has one definition, which is what "one wheel" has to mean to be
-  // worth anything: the handler calls `zoomFactor`/`wheelAxes` rather than carrying its own.
+  // worth anything: the shared handler calls T-456's `wheelZoom` rather than carrying its own.
+  // Reading a delta or a modifier bit here would be a second opinion about a wheel even while
+  // sharing a listener — and on macOS a shift-held wheel arrives as a HORIZONTAL scroll with
+  // `deltaY === 0`, so a host that read `deltaY` itself would make the frequency axis inert on a
+  // real Mac while every synthesised test passed. `surface-preview.test.ts` holds the same guard
+  // over every wheel registrar under src/surface/; this is its half of the cutover's claim.
   const input = readFileSync("src/surface/input.ts", "utf8");
-  assert.match(input, /import \{ type SurfacePreview, wheelAxes, zoomFactor \} from ".\/preview"/);
+  assert.match(input, /import \{ type SurfacePreview, wheelZoom \} from ".\/preview"/);
   assert.ok(!/Math\.exp\(/.test(input), "the factor is not recomputed here");
+  const code = bare("src/surface/input.ts");
+  for (const bit of ["deltaY", "deltaX", "deltaMode", "shiftKey", "altKey", "ctrlKey", "metaKey"]) {
+    assert.ok(!code.includes(bit), `input.ts reads \`${bit}\` itself — that is a second wheel semantics`);
+  }
 });
 
 // ---------------------------------------------------------------------------

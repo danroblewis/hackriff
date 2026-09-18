@@ -140,20 +140,20 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // shape T-454 lives in: a viewport change that invalidates the whole working set and demands a
   // new one at once.
   //
-  // **The TIME wheel is exercised but not required to move the view**, and that is a statement
-  // about this fixture rather than a softened assertion. The surface's time extent is the record,
-  // which here is seconds long, so the pane sits at the lattice's finest time level (`level_t` 0)
-  // with the whole record already on screen: there is no finer level to zoom into and nothing
-  // beyond the record to zoom out to, so a correct client clamps in both directions. Demanding
-  // movement would fail on correct code; ignoring the axis would leave its requests untested. So
-  // the wheels are delivered, their requests counted with all the others, and which axes actually
-  // moved is reported. Frequency, which has ten levels of room here, carries the strict assertion.
+  // A plain wheel is the UNIFORM zoom since T-456, so it moves the view on this fixture whatever
+  // the time axis does — the frequency axis has ten levels of room here and carries the movement.
+  // **The time axis alone is a weaker witness**, and that is a fact about this fixture rather than a
+  // softened assertion: the surface's time extent is the ingested record and a pane may not magnify
+  // below `minCells` level-0 cells (16 × 1 s here), so a young record leaves the time axis clamped
+  // in both directions. Which axes actually moved is asserted per modifier, with the premise
+  // measured first, in the T-456 test below; here the wheels are delivered and their requests are
+  // counted with all the others.
   await step("drag-pan", () => page.drag(mid, { x: mid.x - 260, y: mid.y + 120 }, 12));
   await step("jump to the whole surface", () => page.click(BUTTON("Whole surface")));
-  await step("wheel zoom in (time)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, -240); }, { mustMove: false });
+  await step("wheel zoom in (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, -240); });
   await step("shift+wheel zoom in (frequency)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, -240, { shift: true }); });
   await step("shift+wheel zoom out (frequency)", async () => { for (let i = 0; i < 3; i++) await page.wheel(mid, 240, { shift: true }); });
-  await step("wheel zoom out (time)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, 240); }, { mustMove: false });
+  await step("wheel zoom out (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, 240); });
   // The map along the bottom is a viewport too, and it opens showing the whole surface — so
   // *dragging* it is clamped for the same reason the time wheel is. Double-clicking it is not:
   // that is the page's discrete "send the active pane there", which moves the pane across the
@@ -294,4 +294,268 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   t.diagnostic(ended === before
     ? "the view ended where it started, as \"Fit to coverage\" intends"
     : "the view ended somewhere other than its opening box");
+});
+
+// ———————————————————————————————————————————————————————————————————————————————————————————————
+// T-456: GOOGLE-MAPS NAVIGATION, AND THE MODIFIER THE BROWSER ACTUALLY DELIVERED
+// ———————————————————————————————————————————————————————————————————————————————————————————————
+//
+// The user asked for four gestures — drag pans both axes, plain wheel zooms both about the cursor,
+// shift+wheel takes frequency, and a modifier takes time — and named the risk in the same breath:
+// **ctrl+wheel is captured by macOS and by browsers, so confirm the chosen modifier actually works
+// in a real browser.** That is why this test is here rather than in `ui/test`: a unit test hands
+// `{ altKey: true }` to a function and learns nothing about whether a browser would ever produce it.
+//
+// So every wheel below is dispatched through CDP with real **modifier bits** (Alt 1, Ctrl 2, Meta 4,
+// Shift 8), which the browser turns back into `altKey`/`ctrlKey`/… on the `WheelEvent` the page
+// receives — and a probe listener in the page **reads the modifier that arrived** and reports it.
+// The distinction is the one this milestone keeps getting wrong: *an assertion that the view zoomed
+// is not an assertion that the browser delivered your modifier.* Both are made, separately.
+//
+// ——— WHAT THIS CANNOT PROVE, STATED BEFORE THE GREEN ———
+//
+// A CDP event enters at the **renderer**. It therefore cannot answer the question that decided the
+// binding: macOS's Accessibility → Zoom setting *"Use scroll gesture with modifier keys to zoom"*
+// defaults to ^Control and, when enabled, consumes ctrl+scroll in the **window server** — no `wheel`
+// is dispatched to any browser, so there is nothing to `preventDefault` and nothing for this test to
+// observe. No in-browser harness can distinguish that from the user not having scrolled.
+//
+// That is why the time axis is on **ALT/OPTION** and ctrl is deliberately left unbound, and why the
+// ctrl case below gathers evidence rather than asserting a binding. The second reason is visible
+// here though: Chrome and Safari deliver a trackpad **pinch** as a wheel with `ctrlKey` set, so a
+// ctrl binding would make a pinch zoom one axis. Unbound, it falls into the uniform gesture.
+//
+// ——— THE PREMISE THIS TEST MEASURES BEFORE IT USES IT ———
+//
+// A pane may not magnify below `minCells` (16) level-0 cells (`panes.ts`), which on this lattice is
+// 16 × 1 s = 16 s, and the surface's time extent is the record `hk serve --replay --loop` has
+// ingested so far — it grows in real time. A young record leaves the time axis clamped in both
+// directions, and then "the plain wheel moved the time axis" would fail on correct code. So the room
+// is **measured from the server's own numbers and waited for**, not assumed from where this file
+// happens to sit in the run order.
+
+/** `minCells` in ui/src/surface/panes.ts: the zoom floor, in level-0 cells. Restated, and asserted
+ * against the server's own cell size below rather than against a second copy of the cell size. */
+const MIN_CELLS = 16;
+/**
+ * How much room above that floor the time axis needs before a two-step wheel can be seen to move it.
+ *
+ * Two and a half floors: two wheel steps are a factor of 0.487, so 2.5 × 16 s = 40 s → 19.5 s, which
+ * lands clear of the clamp rather than on it. Deliberately not higher — the record grows at whatever
+ * rate the replay is ingested, so a bound that needs a minute of history is a bound that fails on a
+ * runner whose ingest lags wall-clock, and this premise must be reachable there too.
+ */
+const TIME_ROOM = 2.5;
+
+/** The surface's time extent and zoom floor, from the two routes that state them. */
+async function timeRoom() {
+  const get = async (p) => {
+    const r = await fetch(`${ORIGIN}${p}${p.includes("?") ? "&" : "?"}token=${TOKEN}`);
+    if (!r.ok) throw new Error(`GET ${p} → ${r.status}`);
+    return r.json();
+  };
+  const nav = await get("/api/navigation");
+  const tile = await get("/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8");
+  const latestS = nav?.time?.latest_s;
+  const oldestS = tile?.coverage?.horizon?.oldest_record_s;
+  const cellS = nav?.time?.min_t_cell_s;
+  if (![latestS, oldestS, cellS].every((v) => typeof v === "number" && Number.isFinite(v))) {
+    throw new Error(`the server did not state the surface's time extent or its finest cell: ` +
+      `latest=${latestS} oldest=${oldestS} cell=${cellS}`);
+  }
+  return { extentS: latestS - oldestS, floorS: MIN_CELLS * cellS };
+}
+
+/** The pane row of the chrome — not the map, which is a viewport too and moves for other reasons. */
+const PANE_ROW = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+  if (!v) return null;
+  const where = v.querySelector('.hk-surface-where')?.textContent ?? '';
+  const level = v.querySelector('.hk-surface-level')?.textContent ?? '';
+  const parts = where.split(' · ');
+  return { freq: parts[0] ?? '', time: parts[1] ?? '', level };
+})()`;
+
+/**
+ * Record every wheel the browser dispatches, **as the page receives it**.
+ *
+ * Registered on `window`, passive, so it runs after the canvas's own non-passive listener and its
+ * `defaultPrevented` reports whether the page actually suppressed the browser's default — which for
+ * ctrl+wheel and cmd+wheel is page zoom. `devicePixelRatio` and `visualViewport.scale` are recorded
+ * so that suppression can be checked against the browser rather than against the page's own claim.
+ */
+const INSTALL_PROBE = `(() => {
+  window.__wheels = [];
+  window.__zoomBase = { dpr: window.devicePixelRatio,
+                        scale: window.visualViewport ? window.visualViewport.scale : null };
+  window.addEventListener("wheel", (e) => window.__wheels.push({
+    shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey,
+    deltaX: e.deltaX, deltaY: e.deltaY, deltaMode: e.deltaMode,
+    prevented: e.defaultPrevented,
+    slot: e.target && e.target.getAttribute ? e.target.getAttribute("data-slot") : null,
+  }), { passive: true });
+  return true;
+})()`;
+
+const ZOOM_NOW = `JSON.stringify({ dpr: window.devicePixelRatio,
+  scale: window.visualViewport ? window.visualViewport.scale : null, base: window.__zoomBase })`;
+
+test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach the page", async (t) => {
+  // ——— the premise, measured and waited for ———
+  let room = await timeRoom();
+  const waitedFrom = Date.now();
+  while (room.extentS < TIME_ROOM * room.floorS && Date.now() - waitedFrom < 120000) {
+    await new Promise((r) => setTimeout(r, 2000));
+    room = await timeRoom();
+  }
+  t.diagnostic(`time axis: ${room.extentS.toFixed(0)} s of record against a ${room.floorS.toFixed(0)} s ` +
+    `zoom floor (${(room.extentS / room.floorS).toFixed(1)} floors)` +
+    (Date.now() - waitedFrom > 2000 ? `, after waiting ${((Date.now() - waitedFrom) / 1000).toFixed(0)} s for the record to grow` : ""));
+  assert.ok(room.extentS >= TIME_ROOM * room.floorS,
+    `the recording has only ${room.extentS.toFixed(0)} s of record against a ${room.floorS.toFixed(0)} s ` +
+    "zoom floor, so the time axis is clamped in both directions and a uniform zoom CANNOT be seen to " +
+    "move it. This is the premise, not the claim: without it a green run would prove nothing about " +
+    "the time half of the gesture.");
+
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page();
+  await page.goto(`${ORIGIN}/surface.html#token=${TOKEN}`);
+  await page.waitForSurfaceMounted();
+  await page.waitFor("the first tile textures to be uploaded",
+    `(${STATUS}.match(/(\\d+) uploads/)?.[1] | 0) > 0`, { timeoutMs: 90000 });
+  assert.equal(await page.eval(INSTALL_PROBE), true);
+
+  const rect = await page.$rect('[data-slot="canvas"]');
+  const mid = { x: rect.x + rect.w / 2, y: rect.y + rect.h * 0.35 };
+  const read = async () => page.eval(PANE_ROW);
+  const levels = (row) => row.level.match(/level (\d+)\/(\d+)/)?.slice(1).map(Number) ?? [NaN, NaN];
+
+  /**
+   * Put both axes back on the whole surface — the state with the most room to zoom INTO, on both
+   * axes, which is what every wheel gesture below needs.
+   *
+   * `inSteps` then zooms uniformly back in. A pan needs the opposite of what a zoom needs: on the
+   * whole surface the window already *is* the surface, so `PaneModel.normalise` clamps the centre
+   * on both axes and a drag is correctly a no-op. Two uniform steps leave ~half the surface off
+   * screen on each axis, which is room to pan into.
+   */
+  const reset = async (inSteps = 0) => {
+    await page.click(BUTTON("Whole surface"));
+    await page.frames(4);
+    for (let i = 0; i < inSteps; i++) await page.wheel(mid, -240);
+    if (inSteps) await page.frames(4);
+    await page.eval("window.__wheels = []");
+    return read();
+  };
+
+  /** One gesture, from a stated starting window: what the view did, and what the browser delivered. */
+  const gesture = async (what, run, { inSteps = 0 } = {}) => {
+    const was = await reset(inSteps);
+    await run();
+    await page.frames(6);
+    const now = await read();
+    const wheels = JSON.parse(await page.eval("JSON.stringify(window.__wheels)"));
+    t.diagnostic(`${what}: freq ${was.freq} → ${now.freq} · time ${was.time} → ${now.time} · ${now.level}`);
+    t.diagnostic(`${what}: ${wheels.length} wheel event(s) reached the page` +
+      (wheels.length ? `, first { shift:${wheels[0].shift} alt:${wheels[0].alt} ctrl:${wheels[0].ctrl} ` +
+        `meta:${wheels[0].meta} deltaX:${wheels[0].deltaX} deltaY:${wheels[0].deltaY} ` +
+        `defaultPrevented:${wheels[0].prevented} target:${wheels[0].slot} }` : ""));
+    return { was, now, wheels, freqMoved: now.freq !== was.freq, timeMoved: now.time !== was.time };
+  };
+
+  // ——— 1. DRAG PANS BOTH AXES ———
+  // Diagonal, so a handler that fed one component to both axes — or measured travel as the sum of
+  // the two, which is T-407's defect — would show up as the wrong axis moving.
+  const drag = await gesture("drag (diagonal)", () =>
+    page.drag(mid, { x: mid.x - 240, y: mid.y + 140 }, 12), { inSteps: 2 });
+  assert.ok(drag.freqMoved, "a drag must pan the FREQUENCY axis");
+  assert.ok(drag.timeMoved, "a drag must pan the TIME axis: both axes, in one gesture");
+  assert.deepEqual(levels(drag.now), levels(drag.was), "a pan must not change either pyramid level");
+
+  // ——— 2. PLAIN WHEEL: UNIFORM ZOOM, BOTH AXES ———
+  const plain = await gesture("plain wheel", async () => {
+    for (let i = 0; i < 2; i++) await page.wheel(mid, -240);
+  });
+  assert.equal(plain.wheels.length, 2, "the browser did not deliver the plain wheels to the page at all");
+  assert.ok(plain.wheels.every((w) => !w.shift && !w.alt && !w.ctrl && !w.meta),
+    `a plain wheel arrived carrying a modifier: ${JSON.stringify(plain.wheels)}`);
+  assert.ok(plain.wheels.every((w) => w.prevented),
+    "the page did not preventDefault a wheel over the canvas — the browser is free to scroll or zoom the page under it");
+  assert.ok(plain.freqMoved, "a plain wheel must zoom the FREQUENCY axis: it is the uniform gesture");
+  assert.ok(plain.timeMoved, "a plain wheel must zoom the TIME axis too — that is what 'uniform' means");
+
+  // …AND THE AXES ARE STILL INDEPENDENTLY LEVELLED. One gesture, one factor, two axes — but two
+  // levels, resolved separately from two different cell sizes. A uniform gesture that collapsed the
+  // pyramid to a single level would make these equal, which is exactly the re-welding T-434 undid.
+  const [lf, lt] = levels(plain.now);
+  t.diagnostic(`after the uniform zoom the pane is at level ${lf}/${lt} — one gesture, two levels`);
+  assert.ok(Number.isFinite(lf) && Number.isFinite(lt), `the chrome did not state a level: "${plain.now.level}"`);
+  assert.notEqual(lf, lt,
+    `one uniform gesture left both axes at level ${lf}: the frequency and time levels have been welded together`);
+
+  // ——— 3. SHIFT + WHEEL: FREQUENCY ONLY ———
+  const shift = await gesture("shift + wheel", async () => {
+    for (let i = 0; i < 2; i++) await page.wheel(mid, -240, { shift: true });
+  });
+  assert.ok(shift.wheels.length > 0 && shift.wheels.every((w) => w.shift),
+    `the browser did not deliver shiftKey on the wheel: ${JSON.stringify(shift.wheels)}`);
+  assert.ok(shift.freqMoved, "shift + wheel must zoom frequency");
+  assert.equal(shift.timeMoved, false,
+    `shift + wheel moved the TIME axis (${shift.was.time} → ${shift.now.time}): the axes are welded`);
+
+  // ——— 4. ALT / OPTION + WHEEL: TIME ONLY ———
+  // The binding the whole ticket turns on, and the one a unit test cannot speak for.
+  const alt = await gesture("alt + wheel", async () => {
+    for (let i = 0; i < 2; i++) await page.wheel(mid, -240, { alt: true });
+  });
+  assert.ok(alt.wheels.length > 0, "the browser delivered NO wheel event at all when alt was held — " +
+    "alt+wheel is being consumed before the page sees it, and the time axis has no modifier");
+  assert.ok(alt.wheels.every((w) => w.alt && !w.ctrl && !w.shift),
+    `the modifier that ARRIVED was not alt: ${JSON.stringify(alt.wheels)}`);
+  assert.ok(alt.wheels.every((w) => w.prevented), "an alt wheel over the canvas was not preventDefaulted");
+  assert.ok(alt.timeMoved, `alt + wheel must zoom TIME (it stayed at ${alt.was.time})`);
+  assert.equal(alt.freqMoved, false,
+    `alt + wheel moved the FREQUENCY axis (${alt.was.freq} → ${alt.now.freq}): the axes are welded`);
+
+  // ——— 5. CTRL + WHEEL: EVIDENCE, NOT A BINDING ———
+  // Ctrl is deliberately unbound, so the claim here is only what that implies: whatever the browser
+  // does deliver must fall into the uniform gesture, and the PAGE must not be zoomed underneath the
+  // surface. The renderer-level answer below is reported for exactly what it is worth — it says
+  // nothing about the window server, which is the reason the binding is alt.
+  const ctrl = await gesture("ctrl + wheel (unbound: expected to behave as a plain wheel)", async () => {
+    for (let i = 0; i < 2; i++) await page.wheel(mid, -240, { ctrl: true });
+  });
+  const zoom = JSON.parse(await page.eval(ZOOM_NOW));
+  t.diagnostic(`ctrl + wheel: devicePixelRatio ${zoom.base.dpr} → ${zoom.dpr}, ` +
+    `visualViewport.scale ${zoom.base.scale} → ${zoom.scale}`);
+  assert.equal(zoom.dpr, zoom.base.dpr,
+    "ctrl + wheel over the canvas zoomed the PAGE: the listener's preventDefault is not binding");
+  assert.equal(zoom.scale, zoom.base.scale, "ctrl + wheel pinch-zoomed the page under the surface");
+  if (ctrl.wheels.length === 0) {
+    t.diagnostic("ctrl + wheel: the browser delivered NO wheel to the page — which is precisely the " +
+      "failure mode that put the time axis on alt, observed here at the renderer rather than at the OS.");
+  } else {
+    assert.ok(ctrl.wheels.every((w) => w.ctrl), `ctrlKey did not arrive: ${JSON.stringify(ctrl.wheels)}`);
+    assert.ok(ctrl.wheels.every((w) => w.prevented),
+      "a ctrl wheel over the canvas was not preventDefaulted, so the browser's page zoom is live");
+    assert.ok(ctrl.freqMoved && ctrl.timeMoved,
+      "ctrl is unbound, so a ctrl wheel must be the uniform gesture — this is the path a trackpad " +
+      `pinch takes (freq moved: ${ctrl.freqMoved}, time moved: ${ctrl.timeMoved})`);
+  }
+
+  // ——— and none of it broke the page ———
+  assert.equal(await page.$count(".sp-fail"), 0, `a failure card appeared: ${await page.$text(".sp-fail")}`);
+  assert.deepEqual(page.exceptions, [], "uncaught exception during the gesture run");
+
+  // The gestures leave the pane on the whole surface, of which 0.8 % was ever sampled — so a census
+  // there measures the fixture's coverage, not the renderer, and would read a correct picture as a
+  // flat fill. "Fit to coverage" is the page's own way back to the region the backend reported as
+  // observed, which is the only window where "is it still drawing?" is a question about drawing.
+  await page.click(BUTTON("Fit to coverage"));
+  await page.frames(8);
+  await new Promise((r) => setTimeout(r, 1200));
+  const shots = await page.shot(path.join(ART, "surface-gestures.png"));
+  const c = census(shots, { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h) });
+  assert.ok(c.distinct >= 32 && c.dominantShare < 0.92,
+    `after the gestures the canvas is a flat fill: ${c.distinct} colours, dominant ${c.dominant} at ${(c.dominantShare * 100).toFixed(1)} %`);
 });
