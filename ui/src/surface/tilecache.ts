@@ -157,11 +157,17 @@ export interface Viewport {
 /**
  * What the cache can answer. **`pending` is not a cell state** — see ui/src/surface/cellrule.ts.
  *
- * `failed` marks a place the route answered *no* to permanently (T-479). It is carried on `pending`
- * rather than as a third kind deliberately: "not loaded" is already structurally distinct from
- * "never observed" — the renderer clears a place to `PENDING` and only a `coverage` state byte can
- * produce grey — so a failed place is already visibly not an unobserved one, which is the claim that
- * matters. The flag says *which* not-loaded it is, for a caller that wants to mark it further.
+ * `failed` marks a place **this client asked about and has no usable answer for**: the route refused
+ * it permanently (T-479), or the route is silent and the client is waiting out its backoff (T-499).
+ * It is carried on `pending` rather than as a third kind deliberately: "not loaded" is already
+ * structurally distinct from "never observed" — the renderer clears a place to `PENDING` and only a
+ * `coverage` state byte can produce grey — so a failed place is already visibly not an unobserved
+ * one, which is the claim that matters.
+ *
+ * The flag says *which* not-loaded it is, and since T-499 the renderer draws the difference
+ * (`REFUSED_MARK`, ui/src/surface/cellrule.ts). That is the point of keeping the two apart: `pending`
+ * means *wait*, `failed` means *nothing is coming until something changes*, and a mark that says
+ * "loading" over a dead server is the same defect as `AWAITING` promising arrival (T-441).
  */
 export type Residency<T> =
   | { readonly kind: "resident"; readonly entry: TileEntry<T> }
@@ -245,6 +251,10 @@ export interface TileCacheStats {
    * merely that the live-edge lane is running — and because it is bounded: at most one per tile.
    */
   edgeRefreshCompletions: number;
+  /** Failures that carried **no answer at all** — the server said nothing (T-499). Counted apart
+   * from `failures` because they are the only retryable outcome left, and so the only one whose
+   * rate is a property of this client's policy rather than of the route's. */
+  silentFailures: number;
 }
 
 const MB = 1024 * 1024;
@@ -282,6 +292,31 @@ const laneOf = (a: TileAddr): string => `${a.levelF}/${a.levelT}`;
 /** How often [[TileCache.refreshEdge]] may walk the resident set, ms. The walk is cheap; doing it
  * at frame rate would still be 60× more often than the finest tile can change. */
 const EDGE_SCAN_MS = 250;
+
+/**
+ * **The silence backoff** (T-499): after a failure that carried no answer at all, how long before
+ * this client may touch the route again, and the ceiling that wait doubles up to.
+ *
+ * T-479 made everything the server *said* terminal, which leaves exactly one retryable outcome —
+ * *the server said nothing* — and that outcome was paced by the render loop: `acquire` runs for
+ * every place on every frame, so a socket that refuses every connection is asked again at frame
+ * rate. Measured in a browser with `hk serve` SIGKILLed under a live page (`ui/e2e/canvas-journey`
+ * test 4): **56 failed requests in the first 5 s and 55 in the second** — flat, no decay, which is
+ * the definition of a retry loop rather than a client winding down. (The ticket carries 182/181
+ * from the rig it was filed on; the shape is the number that matters, and the shape is *flat*.)
+ *
+ * The backoff is on the **transport, not the place**, and that is the whole point: "connection
+ * refused" is not a fact about a tile address, it is a fact about the server, so a per-key retry
+ * schedule would still have let 30 viewport tiles each run their own ladder and multiply the wire
+ * traffic by 30. One gate, doubling per consecutive silence to [[OFFLINE_MAX_BACKOFF_MS]], and
+ * **one probe at a time while it is armed** ([[TileCache.effectiveLimit]]) — half-open, the standard
+ * shape — so the cost of a dead server is one request per interval instead of four.
+ *
+ * It is not terminal, and must not become terminal: a server that restarts *is* a change of answer,
+ * which is exactly [[retryable]]'s enumeration. A client that gave up for the session would need a
+ * page reload to come back, and that is the defect one step further on.
+ */
+const OFFLINE_BACKOFF_MS = 500, OFFLINE_MAX_BACKOFF_MS = 30_000;
 
 /** One request the client is waiting on, and what it is being counted against. */
 interface InFlight {
@@ -410,12 +445,18 @@ export class TileCache<T> {
   /** Consecutive refusals, for the backoff; and completions since the last one, for the recovery. */
   private refusals = 0;
   private goodRuns = 0;
+  /** Consecutive failures that carried **no answer at all**, and the instant the gate they arm
+   * opens (T-499). Zero means the route is answering, and every path here reads `silences > 0`
+   * rather than a second flag, so "are we backing off" has one source. */
+  private silences = 0;
+  private silentUntil = 0;
   /** Measured mean production time, ms. See [[observe]]. */
   private serverMs: number;
   readonly stats: TileCacheStats = {
     uploads: 0, hits: 0, misses: 0, evictions: 0, refetchAfterEvict: 0, requests: 0,
     failures: 0, busyRefusals: 0, cancelled: 0, abandoned: 0, overBudgetFrames: 0, distinctKeys: 0,
     edgeRefreshes: 0, edgeRefreshApplied: 0, terminalFailures: 0, edgeRefreshCompletions: 0,
+    silentFailures: 0,
   };
 
   constructor(
@@ -486,7 +527,10 @@ export class TileCache<T> {
     const why = this.terminal.get(key);
     if (why !== undefined) return { kind: "pending", failed: true };
     this.schedule(addr);
-    return { kind: "pending" };
+    // **Asked, and no usable answer came back** — the other half of [[Residency.failed]] (T-499).
+    // The place is still queued (recovery needs it to be), but while the route is silent it is not
+    // *arriving*, and a renderer that draws it as "loading" is promising what it cannot deliver.
+    return this.silences > 0 ? { kind: "pending", failed: true } : { kind: "pending" };
   }
 
   /** Why this place will never be drawn, or `null`. `"…"` is the route's own words (T-479). */
@@ -804,13 +848,34 @@ export class TileCache<T> {
     this.refreshQueued.clear();
     this.refreshedAt.clear();
     this.terminal.clear();
+    this.silences = 0;
+    this.silentUntil = 0;
   }
+
+  /**
+   * How many requests may be outstanding **right now**: the AIMD cap, or **one** while the route is
+   * silent (T-499).
+   *
+   * While the gate is armed the client is probing, not working, and a probe is one request. Four
+   * would learn exactly the same thing at four times the cost — and four times the console noise the
+   * user reported.
+   */
+  private get effectiveLimit(): number {
+    return this.silences > 0 ? 1 : this.limit;
+  }
+
+  /** Whether this client is waiting out a silent route (T-499) — for a readout, and for the tests
+   * that assert the wire goes quiet rather than merely slower. */
+  get silent(): boolean { return this.silences > 0; }
 
   private pump(): void {
     if (this.now() < this.busyUntil) return;
+    // **Nothing at all while the silence gate is armed** (T-499). The queue keeps filling — it is
+    // deduplicated and bounded — so recovery is immediate on the frame after the gate opens.
+    if (this.now() < this.silentUntil) return;
     // The budget is what the ROUTE has out on this client's behalf — the requests being waited on
     // *and* the ones walked away from, which it is still producing. See [[abandonedSlots]].
-    while (this.inflight.size + this.abandonedSlots < this.limit && this.queue.length) {
+    while (this.inflight.size + this.abandonedSlots < this.effectiveLimit && this.queue.length) {
       const next = this.nextAddr();
       if (!next) break; // every viewport is at its share; the rest of the queue waits
       const { addr, owner } = next;
@@ -849,7 +914,12 @@ export class TileCache<T> {
     if (this.refreshing.size) return;
     const t = this.now();
     if (t < this.busyUntil) return;
-    if (this.inflight.size + this.abandonedSlots >= this.limit) return;
+    // While the gate is armed, nothing — and once it opens, this lane is allowed to *be* the probe
+    // (T-499). It has to be: with every tile resident the ordinary queue is empty, so gating the
+    // refresh on `silences > 0` would mean a client that never touches the route again until the
+    // user moves a pane. The recovery has to be able to happen with nobody touching anything.
+    if (t < this.silentUntil) return;
+    if (this.inflight.size + this.abandonedSlots >= this.effectiveLimit) return;
     const picked = this.nextRefresh(t);
     if (!picked) return;
     const { lane, addr } = picked;
@@ -1053,6 +1123,10 @@ export class TileCache<T> {
    * back, up to the ceiling the server named. The additive-increase half of AIMD. */
   private succeeded(): void {
     this.refusals = 0;
+    // The route answered, so it is not silent. One completion clears the whole ladder: the gate
+    // exists to stop asking a server that is not there, and this one demonstrably is (T-499).
+    this.silences = 0;
+    this.silentUntil = 0;
     if (this.limit >= this.ceiling) { this.goodRuns = 0; return; }
     if (++this.goodRuns >= RECOVER_AFTER) { this.limit++; this.goodRuns = 0; }
   }
@@ -1094,7 +1168,15 @@ export class TileCache<T> {
     if (!retryable(err)) {
       this.terminal.set(keyOf(addr), describeFailure(err));
       this.stats.terminalFailures++;
+      return false;
     }
+    // **The server said nothing, so back off the transport** (T-499). Terminal would be wrong — a
+    // server that comes back is a changed answer — but so is asking again on the next frame, which
+    // is what the render loop does unless something here says when. See [[OFFLINE_BACKOFF_MS]].
+    this.stats.silentFailures++;
+    this.silences++;
+    this.silentUntil = this.now() +
+      Math.min(OFFLINE_MAX_BACKOFF_MS, OFFLINE_BACKOFF_MS * 2 ** (this.silences - 1));
     return false;
   }
 

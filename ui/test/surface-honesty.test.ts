@@ -17,7 +17,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BACKDROP, CELL, CELL_MARKS, CELL_RULE_GLSL, GREY, PENDING, markFor } from "../src/surface/cellrule";
+import { BACKDROP, CELL, CELL_MARKS, CELL_RULE_GLSL, GREY, PENDING, REFUSED_MARK, markFor, type Rgb } from "../src/surface/cellrule";
+import { cmap } from "../src/cmap";
 import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { Surface, type PaneView } from "../src/surface/surface";
 import { TileCache } from "../src/surface/tilecache";
@@ -93,6 +94,65 @@ test("the rule in TypeScript and the rule in GLSL are the same rule, because one
       assert.notDeepEqual([...c], [...GREY], `state ${s} draws THE grey`);
     }
   }
+});
+
+// ——— T-499: the mark for "asked, and no usable answer came back" ———
+//
+// The ticket's premise was that the user's purple is an out-of-range number reaching the ramp. It is
+// not, and the measurement says what it is instead: `CELL_MARKS[CELL.UNKNOWN]`'s ink, rgb(112,77,133),
+// drawn from a perfectly well-formed 200 whose `coverage` said every cell was `unknown` — which is
+// what `hk-api` serves for EVERY row when no record survives anywhere (`unknown_rows` -> `g.nt`).
+// Browser measurement, `hk serve` restarted under a live page with a fresh data dir: **54.3 % of the
+// pane that ink at +3 s, 20.4 % at +8 s, 9.3 % at +15 s, 0 at +25 s** — decaying exactly as the new
+// server re-accumulated records, which is the signature of a coverage answer and not of a ramp.
+//
+// So the ramp is innocent, and what this file gets from T-499 is the *other* half: the state the
+// client itself is in when it cannot get an answer. That was drawn as PENDING — "loading" — which is
+// a promise of arrival it cannot keep, and it is one mark away from the grey the whole surface rests
+// on. It gets its own mark, in neither vocabulary.
+
+test("the refused mark is neither THE grey, nor on the ramp, nor the `unknown` hatch", () => {
+  const parts: Rgb[] = [REFUSED_MARK.rgb, REFUSED_MARK.ink];
+  for (const c of parts) {
+    assert.notDeepEqual([...c], [...GREY],
+      "'I asked and got nothing usable' must never be spelled as 'the radio never looked'");
+    // Not anywhere on the measurement ramp, at any position: a refusal is not a level.
+    for (let i = 0; i <= 200; i++) {
+      assert.ok(!near(cmap(i / 200), [...c]), `the refused mark is cmap(${i / 200}) — it would read as a measurement`);
+    }
+    // Not magenta, by the e2e's own predicate: the one legitimately magenta mark here is `unknown`,
+    // and a second one would make `canvas-journey`'s magenta count unable to tell them apart.
+    const [r, g, b] = c.map((v) => Math.round(v * 255));
+    assert.ok(!(r > g + 20 && b > g + 20 && (r + b) / 2 > 60),
+      `the refused mark is magenta (${r},${g},${b}), which is what the user reported seeing`);
+  }
+  // …and it is visibly not PENDING either, or "wait" and "nothing is coming" are one mark again.
+  assert.notDeepEqual([...REFUSED_MARK.ink], [...PENDING]);
+  assert.ok(!CELL_MARKS.some((m) => m.kind === "pattern" && m.pattern === REFUSED_MARK.pattern),
+    "no cell state may share the refused mark's shape: they can be on one screen at one time");
+});
+
+test("a place the route refused draws the refused mark, and NEVER grey", async () => {
+  const g = stubGl(W, H);
+  const surface = new Surface(
+    g.canvas, LAT,
+    (tex) => new TileCache(tex, () => Promise.reject(Object.assign(new Error("bad node"), { status: 400 })),
+      { budgetBytes: 96 * 1024 * 1024, inFlight: 4, now: () => 0 }),
+    { pinParents: false },
+  );
+  surface.setScale(-100, -60);
+  surface.render([pane("a", 0)]);
+  await flush();
+  const reports = surface.render([pane("a", 0)]);
+  assert.ok(reports[0].refused > 0, "a refused place must be counted as refused, not as pending");
+  assert.equal(reports[0].pending, 0, "…and not as both");
+  // Nothing in the frame is grey, and the refused draws carry no flat colour at all — they are a
+  // generated pattern, so there is no constant here that could drift into being one.
+  for (const c of g.clears()) assert.ok(!near(c.args, [...GREY]));
+  for (const d of g.draws()) assert.ok(!(d.u?.uFlat && near(d.u.uFlat, [...GREY])));
+  const fs = g.shaders.find((s) => s.includes("refusedMark"))!;
+  assert.equal(fs.split(`vec3(${GREY.join(",")})`).length - 1, 1,
+    "the refused branch added a second grey to the shader");
 });
 
 test("ONE canvas, ONE context — which is what makes the cache shareable at all", () => {

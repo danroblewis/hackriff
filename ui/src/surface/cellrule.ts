@@ -90,6 +90,10 @@ export const PATTERNS = {
   dots: "fract(px.x / p.x) < 0.34 && fract(px.y / p.y) < 0.34",
   /** Axis-aligned rules. The `survey-overview` tier, drawn at the **true measured cell pitch**. */
   grid: "fract(px.x / p.x) < 0.10 || fract(px.y / p.y) < 0.10",
+  /** **Both** diagonals: an X. The refused mark ([[REFUSED_MARK]], T-499) — the one mark that is a
+   * statement about *this client's* last request rather than about the radio, and the only one on
+   * the surface that is neither a single diagonal, nor dots, nor a lattice. */
+  cross: "fract((px.x + px.y) / p.x) < 0.22 || fract((px.y - px.x) / p.x) < 0.22",
 } as const;
 
 export type PatternName = keyof typeof PATTERNS;
@@ -124,6 +128,7 @@ const COMPILED: Readonly<Record<PatternName, PatternFn>> = {
   hatchUp: (px, p, fr) => fr((px.y - px.x) / p.x) < 0.5,
   dots: (px, p, fr) => fr(px.x / p.x) < 0.34 && fr(px.y / p.y) < 0.34,
   grid: (px, p, fr) => fr(px.x / p.x) < 0.10 || fr(px.y / p.y) < 0.10,
+  cross: (px, p, fr) => fr((px.x + px.y) / p.x) < 0.22 || fr((px.y - px.x) / p.x) < 0.22,
 };
 
 /** Is this pixel on the pattern? The same expression the shader runs, evaluated on the CPU. */
@@ -245,10 +250,42 @@ export type DrawKind =
   | "fallback"
   /** Nothing resident and no ancestor: the tile has not arrived. Drawn as [[PENDING]], which is a
    * mark again, and never grey. */
-  | "pending";
+  | "pending"
+  /** **Asked, and no usable answer came back** (T-499): the route refused the place permanently
+   * (T-479), or the server is unreachable and this client is waiting out its backoff. Drawn as
+   * [[REFUSED_MARK]]. */
+  | "refused";
 
 /** The mark for "we have not loaded this yet" — a memory/latency fact, visibly not the grey. */
 export const PENDING: Rgb = [0.07, 0.075, 0.1];
+
+/**
+ * **The mark for a place this client asked about and got nothing usable for** (T-499).
+ *
+ * # Why this is not grey, and not a clamp
+ *
+ * Grey is this surface's one claim that *the radio never looked*, and it is emitted only from a
+ * coverage state byte the server wrote (the rule at the top of this file). "I asked and the answer
+ * was unusable" is a fact about **this client's last request**, not about the radio, so it cannot
+ * be spelled in that vocabulary at all — it belongs in [[DrawKind]], beside [[PENDING]], which is
+ * already the lane for "not loaded is not unobserved".
+ *
+ * It needs to be **its own** mark rather than [[PENDING]] because the two are different in the one
+ * way a user acts on: `pending` is *wait*, `refused` is *nothing is coming until something changes*.
+ * A dead stream painted as `pending` is a progress bar that never finishes — the same defect as
+ * T-441's `AWAITING`, whose whole point is that a mark must not promise arrival it cannot make.
+ *
+ * The shape is an **X** ([[PATTERNS.cross]]), at a coarse pitch, over the pending ground: no other
+ * mark on this surface is a cross, and the ink is a neutral slate — deliberately **not** magenta, so
+ * it can never be confused with `unknown`'s hatch (whose ink is what T-499's user saw), and far from
+ * anything on [[cmap]]'s ramp, so it can never read as a level.
+ */
+export const REFUSED_MARK = {
+  rgb: [0.07, 0.075, 0.1] as Rgb,
+  ink: [0.34, 0.36, 0.4] as Rgb,
+  pattern: "cross" as PatternName,
+  pitchPx: 14,
+} as const;
 
 /** The mark for a place no pane covers (between panes). Not a claim about anything. */
 export const BACKDROP: Rgb = [0.04, 0.04, 0.05];
@@ -351,6 +388,7 @@ export const CELL_RULE_GLSL: string = (() => {
   });
 
   const f = FALLBACK_MARK;
+  const r = REFUSED_MARK;
   return `
 ${pats.join("\n")}
 
@@ -365,5 +403,16 @@ ${tier.join("\n")}
 vec3 fallbackMark(vec3 col, vec2 px) {
   vec3 c = mix(col, ${vec3(f.washTo)}, ${num(f.wash)});
   return ${patFn(f.pattern)}(px, ${vec2(f.pitchPx)}) ? c * ${num(keep(f.darken))} : c;
+}
+
+vec3 refusedMark(vec2 px) {
+  return ${patFn(r.pattern)}(px, ${vec2(r.pitchPx)}) ? ${vec3(r.ink)} : ${vec3(r.rgb)};
 }`;
 })();
+
+/** The refused mark on the CPU — the same expression `refusedMark` compiles to, for the tests and
+ * for anything that must reason about a refused place off-GPU. */
+export function refusedPixel(px: Vec2): [number, number, number] {
+  const hit = patternHit(REFUSED_MARK.pattern, px, { x: REFUSED_MARK.pitchPx, y: REFUSED_MARK.pitchPx });
+  return [...(hit ? REFUSED_MARK.ink : REFUSED_MARK.rgb)] as [number, number, number];
+}

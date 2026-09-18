@@ -82,9 +82,13 @@ export interface PaneReport {
   readonly tiles: number;
   readonly fallbacks: number;
   readonly pending: number;
+  /** Places drawn as [[REFUSED_MARK]]: asked for, and no usable answer came back (T-499). They are
+   * **not** counted in `pending` — "wait" and "nothing is coming" are different states, and a
+   * readout that folds them together is the progress bar that never finishes. */
+  readonly refused: number;
 }
 
-const KIND_TILE = 0, KIND_FLAT = 1;
+const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
 
 /** How the one display range was decided. `anchored` is the default and is zoom-invariant. */
 export type RangeMode = "anchored" | "auto";
@@ -169,6 +173,10 @@ ${CMAP_GLSL}
 ${CELL_RULE_GLSL}
 void main() {
   if (uKind == ${KIND_FLAT}) { frag = vec4(uFlat, 1.0); return; }
+  // **Asked, and no usable answer came back** (T-499). A statement about this client's last request,
+  // so it is drawn from its own mark and never from a cell state: nothing here can reach cellMark,
+  // and therefore nothing here can produce THE grey.
+  if (uKind == ${KIND_REFUSED}) { frag = vec4(refusedMark(vQ * uSizePx), 1.0); return; }
   vec2 px = vQ * uSizePx;
   int s = int(floor(texture(uState, vUv).r * 255.0 + 0.5));
   float v = texture(uValue, vUv).r;
@@ -382,7 +390,7 @@ export class Surface {
       const { levelF, levelT } = levelsFor(this.lattice, pane.box, r.w, r.h);
       viewports.push({ box: pane.box, levelF, levelT });
       const addrs = tilesFor(this.lattice, pane.box, levelF, levelT, pane.device ?? "any");
-      let tiles = 0, fallbacks = 0, pending = 0;
+      let tiles = 0, fallbacks = 0, pending = 0, refused = 0;
       for (const a of addrs) {
         const res = this.cache.acquire(a);
         if (res.kind === "resident") {
@@ -400,6 +408,11 @@ export class Surface {
         }
         const stand = this.fallbackFor(a);
         if (stand) { this.drawRegion(pane, extentOf(this.lattice, a), stand, "fallback", r); fallbacks++; }
+        // **`pending` and `refused` are drawn apart** (T-499). A place with no usable answer is not
+        // waiting for one — the route refused it, or the server is unreachable and this client is
+        // backing off — and painting it as PENDING is a progress bar that never finishes. Neither
+        // branch can produce grey: both are [[DrawKind]]s, and grey comes only from a state byte.
+        else if (res.failed) { this.drawRefused(pane, extentOf(this.lattice, a), r); refused++; }
         else { this.drawFlat(pane, extentOf(this.lattice, a), PENDING, r); pending++; }
       }
       // §5.5's second pin, and a **coarse-first fill**. These go on the queue *after* the pane's
@@ -412,7 +425,7 @@ export class Surface {
           this.cache.prefetch(a);
         }
       }
-      reports.push({ id: pane.id, levelF, levelT, tiles, fallbacks, pending });
+      reports.push({ id: pane.id, levelF, levelT, tiles, fallbacks, pending, refused });
     }
     gl.disable(gl.SCISSOR_TEST);
     if (this.autoScale && lo < hi) {
@@ -477,6 +490,20 @@ export class Surface {
     gl.uniform1f(this.u.uFallback, 0);
     gl.uniform2f(this.u.uSrcPx, 1, 1);
     gl.uniform3f(this.u.uFlat, rgb[0], rgb[1], rgb[2]);
+    gl.uniform4f(this.u.uRect, clip[0], clip[1], clip[2], clip[3]);
+    gl.uniform2f(this.u.uSizePx, ((clip[2] - clip[0]) / 2) * rect.w, ((clip[3] - clip[1]) / 2) * rect.h);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    this.drawCalls++;
+  }
+
+  /** The refused mark over `region` (T-499): asked for, no usable answer. Patterned, so it reads as
+   * texture rather than as a level — and, like every mark here, never grey. */
+  private drawRefused(pane: PaneView, region: Box, rect: PaneRect): void {
+    const gl = this.gl;
+    const clip = toClip(region, pane.box);
+    gl.uniform1i(this.u.uKind, KIND_REFUSED);
+    gl.uniform1f(this.u.uFallback, 0);
+    gl.uniform2f(this.u.uSrcPx, 1, 1);
     gl.uniform4f(this.u.uRect, clip[0], clip[1], clip[2], clip[3]);
     gl.uniform2f(this.u.uSizePx, ((clip[2] - clip[0]) / 2) * rect.w, ((clip[3] - clip[1]) / 2) * rect.h);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
