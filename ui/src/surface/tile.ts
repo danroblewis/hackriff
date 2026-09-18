@@ -19,7 +19,7 @@ import { keyOf, tileUrl, type Lattice, type TileAddr } from "./lattice";
 /** Bytes one decoded cell occupies on the GPU: R16F measurement + R8 state. */
 export const BYTES_PER_CELL = 3;
 
-/** The honesty tier the route says answered. T-441 owns how the three are drawn. */
+/** The honesty tier the route says answered. T-441 draws the three distinctly (see cellrule.ts). */
 export type Tier = "live-iq" | "spectrum-history" | "survey-overview";
 
 /** Per-axis fold direction, straight off `resolution.fold.<axis>.direction`. */
@@ -42,6 +42,17 @@ export interface TileData {
    * "stated level" §8.5a requires instead of pretending two viewports agree. */
   readonly answeredLevel: number;
   readonly fold: { readonly frequency: FoldDirection; readonly time: FoldDirection };
+  /**
+   * How many cells along each axis the front end **actually measured** across this tile —
+   * `min(fold.<axis>.source_cells, served)`, defaulting to the tile's own grid.
+   *
+   * On a `replicated` axis this is smaller than `nf`/`nt`, and the difference *is* the claim the
+   * tile would otherwise make silently: 10 source time cells stretched across 256 served ones is
+   * not 256 measurements. The renderer draws the survey-overview lattice at exactly this pitch, so
+   * a replicated tile shows the resolution it has instead of a smooth upscale of it (docs/16 §4,
+   * T-342's rule, T-411's failure).
+   */
+  readonly measured: { readonly nf: number; readonly nt: number };
   /** Observed range of this tile's own measurements, or null — never used as a colour scale here
    * (that is one shared range across every pane), only reported. */
   readonly rangeDb: { readonly lo: number; readonly hi: number } | null;
@@ -56,7 +67,12 @@ export interface TileResponse {
   key: { device: string; scheme: string | number; level_f: number; level_t: number; f_index: number; t_index: number; cells: number };
   extent: { nt: number; nf: number };
   axes: { frequency: { levels: number; cell_hz: number }; time: { levels: number; cell_s: number } };
-  grid: { nt: number; nf: number; max_db: (number | null)[]; range_db?: { lo: number; hi: number } | null };
+  grid: {
+    nt: number; nf: number; max_db: (number | null)[]; range_db?: { lo: number; hi: number } | null;
+    /** Per-cell folded frame count. The evidence that separates [[CELL.AWAITING]] from
+     * [[CELL.NO_LEVEL]] — see [[decodeTile]]. */
+    frames?: (number | null)[];
+  };
   coverage?: {
     grid?: { nt: number; nf: number };
     any?: { cells: { state: string }[] };
@@ -66,7 +82,10 @@ export interface TileResponse {
   resolution: {
     source: string;
     answered?: { level: number };
-    fold?: { frequency?: { direction: string }; time?: { direction: string } };
+    fold?: {
+      frequency?: { direction: string; source_cells?: number; served?: number };
+      time?: { direction: string; source_cells?: number; served?: number };
+    };
   };
   cost?: { in_flight_limit?: number };
 }
@@ -105,9 +124,26 @@ export function capFromRefusal(message: string): number | null {
  * Decodes one response into the two planes.
  *
  * The state plane is built from `coverage` — the route's own grey authority — and the measurement
- * only decides between `OBSERVED` and `NO_LEVEL` *within* an observed cell. That ordering matters:
- * a `null` in `max_db` means the pyramid kept no level here, which is a different statement from
- * "nothing looked", and collapsing the two is exactly the lie §4 forbids.
+ * only decides *within* an observed cell. That ordering matters: a `null` in `max_db` means the
+ * pyramid holds no level here, which is a different statement from "nothing looked", and collapsing
+ * the two is exactly the lie §4 forbids.
+ *
+ * **Observed with no level splits in two**, on evidence the wire already carries (T-441):
+ *
+ * | `coverage` | `grid.max_db` | `grid.frames` | state | the claim |
+ * |---|---|---|---|---|
+ * | `observed` | a number | – | `OBSERVED` | a measurement |
+ * | `observed` | `null` | `0` | `AWAITING` | we looked; **nothing has been folded here** |
+ * | `observed` | `null` | `> 0`, or absent | `NO_LEVEL` | we looked; no level is in hand |
+ *
+ * `frames == 0` is the whole discriminator, and it needs neither a clock nor a prediction — which
+ * matters, because the alternative ("is this cell near the live edge?") is a guess about the
+ * future, and the one thing the fifth state must not do is promise arrival. T-446's defect wrote
+ * exactly this cell for an hour of capture time and never filled it.
+ *
+ * **The default is the claim that says least.** A tile without per-cell frame counts decodes to
+ * `NO_LEVEL`, never `AWAITING`: the more specific state is granted only on positive evidence, the
+ * same direction as `BiasTee::Unknown` is not `Off`.
  */
 export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
   const nf = resp.extent?.nf ?? resp.grid?.nf, nt = resp.extent?.nt ?? resp.grid?.nt;
@@ -118,6 +154,8 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     throw new TileDecodeError(`tile ${keyOf(addr)}: grid.max_db has ${db?.length ?? "no"} cells, expected ${n}`);
   }
   const cov = coverageCells(addr, resp);
+  const frames = resp.grid?.frames;
+  const counted = Array.isArray(frames) && frames.length === n ? frames : null;
   const value = new Float32Array(n);
   const state = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
@@ -125,12 +163,21 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     if (s === "unobserved") { state[i] = CELL.UNOBSERVED; value[i] = NaN; continue; }
     if (s === "unknown") { state[i] = CELL.UNKNOWN; value[i] = NaN; continue; }
     const v = db[i];
-    if (typeof v === "number" && Number.isFinite(v)) { state[i] = CELL.OBSERVED; value[i] = v; }
-    else { state[i] = CELL.NO_LEVEL; value[i] = NaN; }
+    if (typeof v === "number" && Number.isFinite(v)) { state[i] = CELL.OBSERVED; value[i] = v; continue; }
+    value[i] = NaN;
+    state[i] = counted && counted[i] === 0 ? CELL.AWAITING : CELL.NO_LEVEL;
   }
   const src = String(resp.resolution?.source ?? "");
   if (!TIERS.includes(src)) throw new TileDecodeError(`tile ${keyOf(addr)}: unknown honesty tier ${src || "(none)"}`);
   const dir = (d: unknown): FoldDirection => (DIRECTIONS.includes(String(d)) ? (String(d) as FoldDirection) : "exact");
+  // `source_cells` is how many cells the fold READ, `served` how many it wrote. A replicated axis
+  // read fewer than it served, and that count is the tile's real resolution on that axis. Absent or
+  // nonsensical, the tile's own grid stands — claiming *less* measured detail than we can show
+  // would be its own kind of invention.
+  const measured = (f: { source_cells?: number; served?: number } | undefined, cells: number): number => {
+    const src = f?.source_cells;
+    return typeof src === "number" && Number.isFinite(src) && src > 0 ? Math.min(Math.round(src), cells) : cells;
+  };
   return {
     addr,
     key: keyOf(addr),
@@ -141,6 +188,10 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     tier: src as Tier,
     answeredLevel: Number(resp.resolution?.answered?.level ?? -1),
     fold: { frequency: dir(resp.resolution?.fold?.frequency?.direction), time: dir(resp.resolution?.fold?.time?.direction) },
+    measured: {
+      nf: measured(resp.resolution?.fold?.frequency, nf),
+      nt: measured(resp.resolution?.fold?.time, nt),
+    },
     rangeDb: resp.grid?.range_db ?? null,
     bytes: n * BYTES_PER_CELL,
     serverInFlightLimit: typeof resp.cost?.in_flight_limit === "number" ? resp.cost.in_flight_limit : null,

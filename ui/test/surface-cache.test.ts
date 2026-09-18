@@ -24,6 +24,7 @@ function data(a: TileAddr, bytes = BYTES): TileData {
     value: new Float32Array([-90, NaN, -70, NaN]),
     state: new Uint8Array([CELL.OBSERVED, CELL.UNOBSERVED, CELL.OBSERVED, CELL.UNKNOWN]),
     tier: "spectrum-history", answeredLevel: 1, fold: { frequency: "exact", time: "exact" },
+    measured: { nf: 2, nt: 2 },
     rangeDb: { lo: -100, hi: -60 }, bytes, serverInFlightLimit: null,
   };
 }

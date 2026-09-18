@@ -11,7 +11,14 @@ export interface GlOp {
   kind: "viewport" | "scissor" | "clear" | "draw";
   args: number[];
   u?: Record<string, number[]>;
+  /** For a draw: the texture bound to each sampler unit at that instant, so a test can rasterise
+   * the frame from the bytes that were really uploaded rather than from the ones it hoped were
+   * (T-441 — "assert on what is drawn, not on a flag"). */
+  units?: Record<number, Upload | undefined>;
 }
+
+/** One uploaded texture: its format, size and the bytes `texSubImage2D` was handed. */
+export interface Upload { fmt: number; w: number; h: number; data: ArrayLike<number> }
 
 interface Prog { id: number; shaders: string[]; uniforms: string[] }
 
@@ -26,13 +33,16 @@ export function stubGl(w = 800, h = 600) {
   const shaders: string[] = [];
   const textures: object[] = [];
   const deleted: object[] = [];
-  const uploads: { fmt: number; w: number; h: number; data: ArrayLike<number> }[] = [];
+  const uploads: Upload[] = [];
+  const texData = new Map<object, Upload>();
+  const bound = new Map<number, object>();
   const values = new Map<object, number[]>();
   const locs = new Map<string, object>();
   let current: Prog | null = null;
   let nextProg = 0;
   let clearColor = [0, 0, 0, 1];
   let lastTex: object | null = null;
+  let unit = 0;
 
   const snapshot = (p: Prog | null): Record<string, number[]> => {
     const out: Record<string, number[]> = {};
@@ -47,12 +57,15 @@ export function stubGl(w = 800, h = 600) {
     getExtension: () => null,
     createTexture: () => { const t = { id: textures.length }; textures.push(t); return t; },
     deleteTexture: (t: object) => { deleted.push(t); },
-    bindTexture: (_target: number, t: object) => { lastTex = t; },
-    texStorage2D: (_t: number, _l: number, fmt: number, tw: number, th: number) => { uploads.push({ fmt, w: tw, h: th, data: [] }); },
+    bindTexture: (_target: number, t: object) => { lastTex = t; bound.set(unit, t); },
+    texStorage2D: (_t: number, _l: number, fmt: number, tw: number, th: number) => {
+      const up: Upload = { fmt, w: tw, h: th, data: [] };
+      uploads.push(up);
+      if (lastTex) texData.set(lastTex, up);
+    },
     texSubImage2D: (..._a: unknown[]) => {
       const data = _a[_a.length - 1] as ArrayLike<number>;
       if (uploads.length) uploads[uploads.length - 1].data = data;
-      void lastTex;
     },
     texParameteri: () => undefined,
     pixelStorei: () => undefined,
@@ -85,13 +98,15 @@ export function stubGl(w = 800, h = 600) {
     useProgram: (p: Prog) => { current = p; },
     uniform1i: setU, uniform1f: setU, uniform2f: setU, uniform3f: setU, uniform4f: setU,
     enable: () => undefined, disable: () => undefined,
-    activeTexture: () => undefined,
+    activeTexture: (u: number) => { unit = u - K.TEXTURE0; },
     viewport: (...a: number[]) => { ops.push({ kind: "viewport", args: a }); },
     scissor: (...a: number[]) => { ops.push({ kind: "scissor", args: a }); },
     clearColor: (...a: number[]) => { clearColor = a; },
     clear: () => { ops.push({ kind: "clear", args: clearColor.slice() }); },
     drawArrays: (mode: number, first: number, count: number) => {
-      ops.push({ kind: "draw", args: [mode, first, count], u: snapshot(current) });
+      const units: Record<number, Upload | undefined> = {};
+      for (const [u, t] of bound) units[u] = texData.get(t);
+      ops.push({ kind: "draw", args: [mode, first, count], u: snapshot(current), units });
     },
   };
   const gl = new Proxy(base, {
@@ -109,6 +124,7 @@ export function stubGl(w = 800, h = 600) {
   } as unknown as HTMLCanvasElement;
   return {
     gl, ops, canvas, shaders, uploads, textures, deleted,
+    width: w, height: h,
     contextCount: () => contexts,
     draws: () => ops.filter((o) => o.kind === "draw"),
     clears: () => ops.filter((o) => o.kind === "clear"),
