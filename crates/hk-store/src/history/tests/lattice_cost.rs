@@ -93,6 +93,34 @@ fn a_lattice_costs_about_four_times_its_finest_level_not_sixteen() {
     p.seal_through(ts(T0 + secs * S)).unwrap();
     let root = dir.0.join("history").join(format!("s{}", sh.scheme));
 
+    // **T-453, and it is the whole point of the ticket: none of that cost has been paid yet.**
+    //
+    // Everything below weighs the lattice a *viewer of every node* produces. `docs/16` §5.2 decided
+    // the coarse nodes are built on demand, so after a full run with nobody watching, capture has
+    // written node (0, 0) and nothing else — which is what makes the 4× of §6.4a a cost of
+    // *looking* rather than a cost of *capturing*, and the lattice's node count a reach decision
+    // rather than a gate-time one.
+    let unread: u64 = (0..sh.f_levels * sh.t_levels)
+        .map(|l| level_files(&root, l).0)
+        .sum();
+    let finest_tiles = level_files(&root, sh.index(0, 0)).0;
+    println!(
+        "\n  T-453: after the whole run, unread, the lattice holds {unread} tiles — \
+         {finest_tiles} of them node (0, 0)'s"
+    );
+    assert!(finest_tiles > 0, "capture must still write its own product");
+    assert_eq!(
+        unread, finest_tiles,
+        "a coarse node nobody has asked for must not exist on disk (docs/16 §5.2)"
+    );
+
+    // Now ask for every node, which is what the rest of this test is measuring the cost of.
+    let whole = FreqRange::new(0.0, n_bins as f64 * 100_000.0);
+    let span = TimeRange::new(ts(T0), ts(T0 + secs * S));
+    for l in 0..sh.f_levels * sh.t_levels {
+        p.materialize(l, whole, span).unwrap();
+    }
+
     let mut per_node = vec![(0u64, 0u64); sh.f_levels * sh.t_levels];
     println!("\n  level_f  level_t   f cell    t cell     tiles      bytes   B/tile  B/cell");
     let mut total = 0u64;

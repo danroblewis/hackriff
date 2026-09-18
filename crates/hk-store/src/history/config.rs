@@ -163,6 +163,22 @@ pub struct PyramidConfig {
     pub retention_overrides: Vec<RetentionOverride>,
     /// zstd level for tile payloads (T-116, format 2); `None` stores payloads uncompressed.
     pub compression_level: Option<i32>,
+    /// **Coarse nodes are produced on demand, not at every seal** (`docs/16` §5.2, T-453).
+    ///
+    /// `false` (a ladder): every seal folds the sealed tile into its consumers immediately, so the
+    /// whole ladder is a by-product of capture. That is right for scheme 1, whose coarser levels
+    /// step ×60, ×15, ×4, ×24 in time and so seal almost nothing — the whole ladder totals ≈1.02×
+    /// level 0's tile writes.
+    ///
+    /// `true` (a de-welded lattice): capture writes **only the levels nothing produces** — node
+    /// (0, 0) — and every coarser node is produced when a read asks for it, by
+    /// [`super::Pyramid::materialize`]. A ×2 lattice has one tile series per time level and one per
+    /// frequency level, so eager folding costs ≈4× a ladder's tile writes *per second of capture*
+    /// (`docs/16` §6.4a) — and on a narrow capture it is worse than that, because a
+    /// frequency-coarser node's tile seals on the same watermark as its producer's however few
+    /// frequency blocks the capture actually spans. **On demand is what §5.2 decided, and what
+    /// makes the lattice's node count a reach decision rather than a gate-time one.**
+    pub coarse_on_demand: bool,
 }
 
 impl Default for PyramidConfig {
@@ -212,6 +228,7 @@ impl Default for PyramidConfig {
             byte_budget: 8 << 30,
             retention_overrides: Vec::new(),
             compression_level: Some(3),
+            coarse_on_demand: false,
         }
     }
 }
@@ -467,6 +484,10 @@ impl PyramidConfig {
             t_cell: shape.t_cell,
             f_cells_per_block: shape.cells_per_block,
             levels: shape.levels(),
+            // `docs/16` §5.2, T-453: a lattice's coarse nodes are produced when a read asks for
+            // them, never at every seal. See [`PyramidConfig::coarse_on_demand`] for what eager
+            // folding costs a lattice and why it costs a ladder nothing.
+            coarse_on_demand: true,
             ..Self::default()
         }
     }

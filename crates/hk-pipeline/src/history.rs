@@ -204,9 +204,18 @@ pub const VIEW_T_CELLS_PER_BLOCK: u32 = 64;
 /// pays. A welded ladder's coarser levels are vastly coarser in *time* — scheme 1 steps ×60, ×15,
 /// ×4, ×24 — so they write almost nothing and the total is ~1.02× level 0. A de-welded ×2 lattice
 /// has one tile series per time level, giving ~2× on the time axis and ~2× on the frequency axis:
-/// **~4× scheme 1's tile writes, by construction**, and the eager fold at every seal is itself a
-/// deviation from `docs/16` §5.2, which decided *precomputed at seal time, on demand at the live
-/// edge* (T-453).
+/// **~4× scheme 1's tile writes, by construction** — and worse than that on a *narrow* capture,
+/// where a frequency-coarser node's tile seals on the same watermark as its producer's however few
+/// frequency blocks the capture spans, so the frequency arm costs a full ×4 rather than ×2.
+///
+/// The eager fold at every seal was itself a deviation from `docs/16` §5.2, which decided
+/// *precomputed at seal time, on demand at the live edge*. **T-453 fixed it**
+/// ([`hk_store::PyramidConfig::coarse_on_demand`]): capture writes node (0, 0) only, and the ~4×
+/// above is what a viewer of every node pays rather than what every second of capture pays. Same
+/// suite, same box, comparing the ten targets' own test time (so no build is counted): **160.4 s
+/// against 190.6 s**, and the M0 slice inside it **33.5 s against 54.1 s** — against T-439's
+/// lattice-off control of **32.9 s**, which is to say the lattice now costs the gate nothing
+/// measurable.
 ///
 /// **It is invisible on the product and amplified only by the harness.** One acceptance run costs
 /// 10.5 s against 10.0 s with the lattice off — within noise — because a device runs *one*
@@ -237,10 +246,28 @@ pub const VIEW_F_CELLS_PER_BLOCK: u32 = 1024;
 /// cost about 80 s per merge, on a gate that runs every merge this milestone, for reach nothing
 /// can back.
 ///
+/// # What T-453 changed, and what it did not
+///
+/// T-453 made the coarse nodes **lazy** ([`hk_store::PyramidConfig::coarse_on_demand`],
+/// `docs/16` §5.2): capture writes node (0, 0) and nothing else, and a coarse node is folded by the
+/// read that asks for it — sealed on the way when its own time block has elapsed, so it is
+/// precomputed for every reader after the first. The measured consequence is that **neither of the
+/// two costs above scales with the node count any more**. The M0 slice went from **54.1 s to
+/// 33.5 s** against a lattice-off control of 32.9 s; `hk-pipeline`'s own suite from **262 s to
+/// 75 s**, because `live_edge_tiles` no longer waits on capture to fold the off-diagonal nodes; and
+/// the resident accumulator floor from **2.28 MB/MHz to 0.91 MB/MHz** (bound 3.65 → 0.91), which is
+/// one tile row instead of one per time level. So this constant is a **reach** decision again,
+/// which is exactly what the ticket was for.
+///
+/// It is still 4, because the *other* half of the argument is unchanged: T-438 found the nodes
+/// beyond this ladder address a surface nothing can serve, and reach nothing can back is not worth
+/// having at any price. Growing it now costs what the extra reach is worth rather than what the
+/// gate charges for it.
+///
 /// **This is a configuration, not a contract.** The alternative of ×4 steps per axis reaches the
 /// same node count by changing [`hk_store::ViewLattice`]'s own shape for every future consumer;
-/// that is a contract change, and the right time to consider it is after T-453 has made the coarse
-/// nodes lazy and the real access pattern has been measured.
+/// that is a contract change, and the right time to consider it is when the real access pattern has
+/// been measured.
 pub const VIEW_LEVELS: usize = 4;
 
 /// The view lattice this run opens: `f_cell_hz` × 1 s at node (0, 0), doubling independently on
@@ -255,15 +282,19 @@ pub const VIEW_LEVELS: usize = 4;
 /// |---|---|---|
 /// | finest tile | 25.6 MHz × **9.1 h** | 6.4 MHz × **64 s** (scheme 1's own tile shape) |
 /// | accumulator | ~3 MB | ~2.9 MB |
-/// | per MHz of tuned span, peak | — | **2.28 MB** (~46 MB at a 20 MHz live edge) |
-/// | per MHz of tuned span, bound | — | **3.65 MB** (~73 MB) |
+/// | per MHz of tuned span, peak and bound | — | **0.91 MB** (~18 MB at a 20 MHz live edge) |
 ///
-/// The surprise in that measurement, and the reason the number is a measurement rather than
-/// arithmetic: **only the `level_f = 0` column stays resident.** A frequency-coarser node has the
-/// *same* time cell as its producer, so the fold that fills it runs inside the producer's seal —
-/// after the watermark has already passed that tile's end — and it is sealed in the same pass
-/// instead of being left open. Residency is one tile row per **time** level, not per node, which
-/// is an eighth of the obvious estimate.
+/// T-439 measured 2.28 MB/MHz peak against a 3.65 MB/MHz bound, and the reason those were
+/// measurements rather than arithmetic was that **only the `level_f = 0` column stayed resident**:
+/// a frequency-coarser node has the *same* time cell as its producer, so the fold that filled it
+/// ran inside the producer's seal and it was sealed in the same pass instead of being left open.
+/// Residency was one tile row per **time** level, not per node.
+///
+/// **T-453 collapsed that to one row** (plus one, inside `seal_lag`, while a tile's successor has
+/// been created and it has not yet been written). With the coarse nodes built on demand
+/// ([`hk_store::PyramidConfig::coarse_on_demand`]) capture opens node (0, 0)'s accumulator and no
+/// other, whichever axis a node coarsens — so the floor above is the **whole lattice's**, and it
+/// does not move when the lattice grows.
 ///
 /// `view_f_cell_hz` is the knob and it divides all of that linearly (a 25 kHz floor is ~18 MB at a
 /// 20 MHz live edge, worst case). It is a **frequency** knob deliberately: the time floor is F1's
