@@ -108,18 +108,45 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
     t.diagnostic(`t+${s.at}s  newest rows: ${s.c.distinct} distinct, dominant ${s.c.dominant} at ` +
       `${(s.c.dominantShare * 100).toFixed(0)} % — ${s.ok ? "drawn" : "FLAT"}`);
   }
+  // Diagnostics, NOT the claim: a tile being re-fetched is not a row appearing on screen. They run
+  // BEFORE the assertion, because a diagnostic that only appears when the claim PASSES is useless
+  // exactly when it is needed — T-482 had to reorder this to find out which addresses a failing run
+  // was asking for. The claim itself is unchanged.
+  const asked = page.requests.filter((r) => r.url.includes("/api/tiles"));
+  const repeats = new Map();
+  for (const r of asked) repeats.set(r.url, (repeats.get(r.url) ?? 0) + 1);
+  const top = [...repeats.values()].sort((a, b) => b - a)[0] ?? 0;
+  t.diagnostic(`${asked.length} tile requests, the most-asked address ${top} times, peak ${tiles.peak} in flight`);
+  // **Which addresses, by level, with how long each took on the wire.** A live pane that stopped
+  // drawing because the client stopped asking, and one starved by the client spending its budget
+  // elsewhere, are identical in pixels and different here. The latency column separates the two ways
+  // the second can happen: a client rate-limited by the *cost* of the last revalidation starves the
+  // cheap level while the cheap level's own latency stays flat; a server whose history lock is held
+  // by an expensive read makes the cheap level slow too. T-482 needed exactly this pair of numbers —
+  // level 0 went x68 @69 ms to x14 @183 ms when a coarse viewport came back to life beside it.
+  const byLevel = new Map();
+  for (const r of asked) {
+    const q = new URL(r.url).searchParams;
+    const k = `${q.get("level_f")}/${q.get("level_t")}`;
+    byLevel.set(k, (byLevel.get(k) ?? 0) + 1);
+  }
+  const msByLevel = new Map();
+  for (const r of asked) {
+    const q = new URL(r.url).searchParams;
+    const k = `${q.get("level_f")}/${q.get("level_t")}`;
+    if (r.endedMs && r.startedMs) (msByLevel.get(k) ?? msByLevel.set(k, []).get(k)).push(r.endedMs - r.startedMs);
+  }
+  const med = (a) => (a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : NaN);
+  t.diagnostic(`levels asked (level_f/level_t, count, median ms on the wire): ${[...byLevel]
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, n]) => `${k} x${n} @${med(msByLevel.get(k) ?? []).toFixed?.(0) ?? "?"}ms`).join("   ")}`);
+
   const drawn = samples.filter((s) => s.ok).length;
   assert.ok(drawn >= 4,
     `the newest rows of a following pane were a real render in only ${drawn} of 5 samples over 20 s ` +
     "of capture. This is T-460: the rows were recorded and served, and the client stopped asking.\n  " +
     samples.map((s) => `t+${s.at}s ${s.c.distinct} distinct / dominant ${(s.c.dominantShare * 100).toFixed(0)} %`).join("\n  "));
 
-  // Diagnostics, NOT the claim: a tile being re-fetched is not a row appearing on screen.
-  const asked = page.requests.filter((r) => r.url.includes("/api/tiles"));
-  const repeats = new Map();
-  for (const r of asked) repeats.set(r.url, (repeats.get(r.url) ?? 0) + 1);
-  const top = [...repeats.values()].sort((a, b) => b - a)[0] ?? 0;
-  t.diagnostic(`${asked.length} tile requests, the most-asked address ${top} times, peak ${tiles.peak} in flight`);
   assert.ok(tiles.peak <= Number(process.env.HK_E2E_TILE_LIMIT || 4),
     `peak ${tiles.peak} tile requests in flight, above the route's cap — the refresh lane took slots it may not`);
   assert.deepEqual(page.exceptions, [], "uncaught exception while the live view ran");
