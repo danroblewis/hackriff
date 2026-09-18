@@ -775,9 +775,17 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     );
 
     // /api/status: pipeline counters, never content.
+    let before = unix_now();
     let (st, v) = get(addr, "/api/status");
+    let after = unix_now();
     assert_eq!(st, 200, "{v}");
     assert!(is_object(&v), "{v}");
+    // T-351: `t` is the server's own wall clock at the instant this response was built, bare-named
+    // Unix seconds — asserted by VALUE against the test's own clock, bracketing the request, not
+    // merely that the field is present (T-315's point: a shape check would not catch a stale or
+    // frozen clock).
+    let t = v["t"].as_f64().expect("t (server clock, s): {v}");
+    assert!((before - 1.0..=after + 1.0).contains(&t), "t={t}: {v}");
     // T-132: the baseline memory bound (docs/api.md `attention`).
     for field in [
         "memory_bytes",
@@ -7376,7 +7384,14 @@ fn observation_log_routes_answer_as_documented() {
     assert!(is_array(&v["records"]) && is_array(&v["geometries"]), "{v}");
     assert!(v["next_cursor"].is_null());
     assert_eq!(v["truncated"], false);
-    assert_eq!(v["f_lo"], 100_000_000.0);
+    // T-355: the echoed box is `f_lo_hz`/`f_hi_hz`, matching every other envelope-level frequency
+    // field on this API (inventory rows, tiles, `/api/analysis/strongest`, …) instead of the bare
+    // `f_lo`/`f_hi` this route used to answer with alone. Asserted by VALUE, not shape, so the
+    // field cannot be renamed or dropped again without this test failing (T-315's point applied
+    // here too).
+    assert_eq!(v["f_lo_hz"], 100_000_000.0, "{v}");
+    assert_eq!(v["f_hi_hz"], 101_000_000.0, "{v}");
+    assert!(v.get("f_lo").is_none() && v.get("f_hi").is_none(), "{v}");
     for key in [
         "offered",
         "dropped",
@@ -7395,6 +7410,10 @@ fn observation_log_routes_answer_as_documented() {
         &format!("/api/observations/coverage?{q}&channel_hz=250000&tau_s=0.01,0.1&min_gap_s=1"),
     );
     assert_eq!(status, 200, "{v}");
+    // T-355: same rename as `/api/observations` above, same route family.
+    assert_eq!(v["f_lo_hz"], 100_000_000.0, "{v}");
+    assert_eq!(v["f_hi_hz"], 101_000_000.0, "{v}");
+    assert!(v.get("f_lo").is_none() && v.get("f_hi").is_none(), "{v}");
     let totals = &v["totals"];
     assert_eq!(totals["n_visits"], 0);
     assert_eq!(totals["n_visits_activity_independent"], 0);
@@ -7578,9 +7597,21 @@ fn attention_sites_baselines_candidates_and_weights_answer_as_documented() {
     assert!(is_array(&v["baselines"]) && v["slot"].is_u64(), "{v}");
     // T-333: every listed baseline discloses the bias-tee cohort its levels belong to, always as
     // one of the three states — never omitted, so "unknown" reads as a cohort, not as a gap.
+    // T-315: and the receive-chain cohort (T-303/T-314) it belongs to, the same tagged `ChainKey`
+    // shape `/api/baselines/slots` asserts below — never absent, never a bare id. Before this, the
+    // key was documented (docs/api.md) but only the response SHAPE was contract-tested
+    // (`is_array(v["baselines"])`), so the field could be renamed or dropped without a test
+    // failing: documentation, not a contract. (This server is a fresh site with no baselines, so
+    // this loop is vacuous, exactly as the slots one below; the non-vacuous assertion against a
+    // real fold is `hk_pipeline::attention::tests::*` where `AttentionService::in_memory` folds
+    // under `ChainKey::Unknown`.)
     for b in v["baselines"].as_array().into_iter().flatten() {
         assert!(
             matches!(b["bias_tee"].as_str(), Some("unknown" | "off" | "on")),
+            "{b}"
+        );
+        assert!(
+            matches!(b["chain"]["kind"].as_str(), Some("unknown" | "device")),
             "{b}"
         );
     }
@@ -8009,7 +8040,14 @@ fn scan_times(v: &Value, path: &str, key: &str, out: &mut Vec<String>) {
 }
 
 /// The routes this sweep can reach on a fresh server, with parameters that actually return data.
-fn time_law_routes(now: f64, emitter: Option<&str>) -> Vec<String> {
+///
+/// T-370: `selection` extends the sweep to selection-scoped routes exactly as `emitter` already
+/// does for the inventory-scoped ones — `GET /api/selections/{id}` and
+/// `GET /api/selections/{id}/watch` are otherwise unreachable on a fresh server (no selection
+/// exists to address), so a field only that route serves is not swept at all. This is the second
+/// field the sweep missed for a reachability reason rather than a listing error, the same class
+/// T-354 named for the stream-contract field.
+fn time_law_routes(now: f64, emitter: Option<&str>, selection: Option<&str>) -> Vec<String> {
     let (t0, t1) = (now - 3600.0, now + 3600.0);
     // Wide box for the paged/listing routes; the fixture's own band for the ones with
     // band \u00d7 span budgets (occupancy `span`, coverage channel tiling).
@@ -8068,6 +8106,12 @@ fn time_law_routes(now: f64, emitter: Option<&str>) -> Vec<String> {
             format!("/api/signatures/match?emitter={id}"),
         ]);
     }
+    if let Some(id) = selection {
+        r.extend([
+            format!("/api/selections/{id}"),
+            format!("/api/selections/{id}/watch"),
+        ]);
+    }
     r
 }
 
@@ -8091,9 +8135,25 @@ fn every_serialized_time_declares_its_unit() {
             .map(str::to_string);
         emitter.is_some()
     });
+    // T-370: a selection also has to exist for `/api/selections/{id}[/watch]` to be reachable —
+    // the same reachability gap `emitter` above closes for the inventory-scoped routes, and the
+    // one the sweep missed the stream-contract field for (T-354).
+    let (st, created) = post(
+        addr,
+        "/api/selections",
+        &json!({
+            "name": "time-law-sweep",
+            "f_lo": FIXTURE_CENTER_HZ - 1.0e5,
+            "f_hi": FIXTURE_CENTER_HZ + 1.0e5,
+        })
+        .to_string(),
+    );
+    assert_eq!(st, 201, "{created}");
+    let selection = created["id"].as_str().map(str::to_string);
+    assert!(selection.is_some(), "{created}");
     let mut bad: Vec<String> = Vec::new();
     let mut checked = 0usize;
-    for r in time_law_routes(unix_now(), emitter.as_deref()) {
+    for r in time_law_routes(unix_now(), emitter.as_deref(), selection.as_deref()) {
         let (st, v) = get(addr, &r);
         assert_eq!(st, 200, "{r} answered {st}: {v}");
         checked += 1;

@@ -959,7 +959,7 @@ The same address as `/api/tiles` (plus the `/api/inventory` `state` filter), ans
 
 ### `GET /api/status` — pipeline counters (T-027)
 
-Opaque, per-build JSON object of counters (source samples, chain stats, control-loop stats under `"control"`, listen/chain admission under `"listen"`/`"budget"` when the pipeline exposes them, …). Never content, never an identity. `404` when this server has no pipeline status function attached (e.g. a bare bridge with no composed pipeline).
+Opaque, per-build JSON object of counters (source samples, chain stats, control-loop stats under `"control"`, listen/chain admission under `"listen"`/`"budget"` when the pipeline exposes them, …), plus one field this route itself adds: **`t`**, the server's own wall clock (`Timestamp::now`, not the run's sample clock) at the instant the response was built — bare name, Unix seconds, per the units convention (T-351). Without it a caller could not tell a fresh read from a cached one, or measure its own clock skew against this device. Never content, never an identity. `404` when this server has no pipeline status function attached (e.g. a bare bridge with no composed pipeline).
 
 **Compute providers (T-056, ADR-0007)** are reported under `"compute"`. They are chosen once per run and never change mid-run.
 
@@ -1123,6 +1123,8 @@ An armed watch offers every emission the pipeline first sights inside the extent
 **Alerts carry their reasoning and are reversible, never an automatic action.** Raising one tunes nothing, records nothing and changes no other row; alerts are dismissed and re-opened through `/api/anomalies/{id}/dismiss|reopen` like any other anomaly; and disarming the watch stops new alerts while keeping every alert already raised, with its reasoning and history. Suppressed activity is disclosed rather than dropped silently, the same stance ADR-0012 §7.3 takes towards alarm suppressions.
 
 `GET /api/selections/{id}/watch` answers `{selection_id, watch, armed, alerts, suppressed, alerted_total, suppressed_total}`. `alerts[]` is `{anomaly_id, emitter, f_lo, f_hi, t, reason}` and `suppressed[]` is `{emitter, reason ("deferred" | "already-alerted"), relation ("suppressed-by" | "duplicate-of" | "artifact-of" | null), artifact ("image" | "harmonic" | "intermod" | null), source, t, explanation}`, both oldest first and bounded (256 alerts, 64 suppressed). Counters are per run and also appear in `/api/status` as `watch_alerts` and `watch_suppressed`. `404 not_found` for an unknown selection, `503 unavailable` with no watch service.
+
+- **`t` is bare and carries Unix seconds** — the units convention's default, so no `_ns` rename applies here (T-370 audit): `hk_api::selections::WatchAlertView`/`WatchSkipView` declare `t: f64`, and `crates/hk-cli/src/pipeline.rs`'s `PipelineWatch::report` converts each `hk_pipeline::alarms::WatchAlertRecord`/`WatchSkipRecord`'s raw-nanosecond `Timestamp` to seconds (`secs(a.t)`) before it ever reaches this crate — the internal record and the view served here are different types, one nanosecond-native, one already seconds. This route was previously unreachable by `every_serialized_time_declares_its_unit` (no selection existed for it to address on a fresh server), so the value had never been swept and asserted; the sweep now creates one first and covers it.
 
 ## Output recordings (T-061)
 
@@ -1610,7 +1612,7 @@ Where and when the radio actually observed, and why: one `DwellRecord` per non-s
 
 ```json
 {
-  "f_lo": 100000000.0, "f_hi": 102000000.0, "t0": 1789300800.0, "t1": 1789300860.0,
+  "f_lo_hz": 100000000.0, "f_hi_hz": 102000000.0, "t0": 1789300800.0, "t1": 1789300860.0,
   "records": [
     { "record": "sweep", "schema": 1, "survey_id": "…", "plan_version": 1, "site": { "kind": "unassigned" },
       "geometry": 1234567890123, "span": { "start_ns": 1789300800000000000, "end_ns": 1789300860000000000 },
@@ -1635,12 +1637,13 @@ Where and when the radio actually observed, and why: one `DwellRecord` per non-s
 - `tier`: `interactive`, `pinned-lease`, `scheduled-plan`, `bandit` or `background-sweep` (sweep records are `background-sweep`). A sweep record matches when any visited hop's `usable` overlaps the box; `geometries` holds every geometry the page's sweep records reference.
 - `limit` defaults to 1000, at most 10000; `next_cursor` (a record offset) is set when more records match.
 - Times inside records (`span`, `planned`, `observed`, and `totals.span`) are hk-model `TimeRange`s, so each is `{start_ns, end_ns}` — integer Unix **nanoseconds**, named per the units convention. The top-level `t0`/`t1` and `gaps` are seconds.
+- **`f_lo_hz`/`f_hi_hz`** (T-355; previously bare `f_lo`/`f_hi`, which the units convention above already required for the `_ns`/`_s` time family but had not been applied to frequency): the requested box, echoed in Hz. Matches `FreqRange`'s own field names (`lo_hz`/`hi_hz`), prefixed the way every other envelope-level frequency field on this API already is (`f_lo_hz`/`f_hi_hz` on inventory rows, tiles, `/api/analysis/strongest`, …), so a field can no longer be renamed or dropped without a contract test failing.
 
 `GET /api/observations/coverage` → `200`:
 
 ```json
 {
-  "f_lo": 100990000.0, "f_hi": 101010000.0, "t0": 1789300800.0, "t1": 1789300860.0,
+  "f_lo_hz": 100990000.0, "f_hi_hz": 101010000.0, "t0": 1789300800.0, "t1": 1789300860.0,
   "totals": { "freq": { "lo_hz": 100990000.0, "hi_hz": 101010000.0 }, "span": { "start_ns": 1789300800000000000, "end_ns": 1789300860000000000 },
               "n_visits": 58, "n_visits_activity_independent": 58,
               "observed_s": { "interactive": 0.0, "pinned_lease": 0.0, "scheduled_plan": 0.0, "bandit": 0.0, "background_sweep": 2.9 },
@@ -1923,7 +1926,7 @@ Both errors grow **linearly with age**, so a box drawn from a declared rate walk
 
 - **`snr_db`/`peak_dbfs` on an inventory row are undated.** They are the newest linked `Detection`'s numbers with its `TimeRange` stripped at the API boundary (`query.rs`), so a client cannot tell whether an SNR is two seconds or two days old. Detections are not a served record kind at all — there is no `/api/detections`.
 - **Nanoseconds still reach the wire where an hk-model struct is serialized directly** — `/api/occupancy` `interval`/`fco_window`, `/api/observations` record `span`/`planned`/`observed`, `SignatureMatch`, `Classification`, `refined`, the site record and the whole of `SurveyReport` — but they are no longer *silent* about it (T-349): every such field now ends in `_ns` and the units convention above states the law, so a field carrying nanoseconds beside one carrying seconds is legible rather than a 31-year trap. What has **not** been done is converting them, which would mean a second schema beside the stored one; the reasons are in the convention. The one field that was outside the law — stream records' `t`, nanoseconds declared by the stream contract rather than by its name — is now inside it: T-354 renamed it `t_ns` in stream contract 1.2, so nothing this API serves carries an absolute time under a name that misdeclares its unit.
-- **`/api/status` carries no server timestamp**, and scheduler leases carry `duration_s` with no start or expiry.
+- **Scheduler leases carry `duration_s` with no start or expiry** (T-351; the `/api/status` half of this gap is fixed, above — `t`). A lease's remaining time is not derivable from what `GET /api/scheduler`/`GET /api/scheduler/leases` serve, which is exactly the inference the shared-time-axis invariant forbids. Fixing it means serving an absolute expiry the served `Lease` does not carry today: `hk_core::scheduler::core::Scheduler` computes one internally (`ActiveLease::until`, set from `now + duration_ns` when the lease is added) but `Scheduler::leases()` strips it back down to the bare request-shaped `Lease` before hk-pipeline's `SchedulerView` and hk-api's `lease_json` ever see it — so the fix is a shape change to `hk_core::scheduler::bandit::tiers::Lease`/`Scheduler::leases()` and to how `crates/hk-pipeline/src/control.rs` builds `SchedulerView`, not an hk-api-only rename.
 
 ## Listen as an audio pipeline (planned, MAUTO; ADR-0011 §8, ADR-0015 §12)
 
