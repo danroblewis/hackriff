@@ -138,7 +138,7 @@ Below a gate, a family contributes no likelihood mass, so its mass moves to `unk
 ## 4. Classical cascade (C15, T-199/T-200)
 
 1. **Input.** A `NormalisedSnippet` (hk-estimate, CFO-corrected, resampled) plus the C13 `ParameterSet`, C14 `SymbolParameters` and C16 result when present. The raw snippet is kept. Suspect detections (clipped, IMD, image) still classify, but they carry `suspect-input` and never mint signatures (§5).
-2. **Features** (`hk-classify/src/features.rs`, one vector, `features_version` = `hk_classify::FEATURES_VERSION`; **`features@8` today** — 1 → 2 (T-248) and 2 → 3 (T-286) both redefined `symmetry`; 3 → 4/5/6 are recorded at the constant itself; 6 → 7 (T-431) referenced `duty` and `low_fraction` to the emission's on level; 7 → 8 (T-447) referenced the Azzouz–Nandi **strong-envelope subset** σ_ap, σ_dp and the de-rotation are measured over to the same on level. Read the constant's own doc comment for each step; this list goes stale and the constant cannot). Each feature is a value or an abstention reason:
+2. **Features** (`hk-classify/src/features.rs`, one vector, `features_version` = `hk_classify::FEATURES_VERSION`; **`features@9` today** — 1 → 2 (T-248) and 2 → 3 (T-286) both redefined `symmetry`; 3 → 4/5/6 are recorded at the constant itself; 6 → 7 (T-431) referenced `duty` and `low_fraction` to the emission's on level; 7 → 8 (T-447) referenced the Azzouz–Nandi **strong-envelope subset** σ_ap, σ_dp and the de-rotation are measured over to the same on level; 8 → 9 (T-488) referenced the **instantaneous-frequency** subset, and with it all seven `if_*`/`sigma_af` dimensions, to that same on level — the third and last site of the rule. Read the constant's own doc comment for each step; this list goes stale and the constant cannot). Each feature is a value or an abstention reason:
    - Azzouz–Nandi γ_max, σ_ap, σ_dp, σ_aa, σ_af, P;
    - normalised cumulants C̃₂₀, C̃₄₀, C̃₄₂, and μ₄₂;
    - instantaneous-frequency histogram modality and levels;
@@ -441,6 +441,66 @@ that no longer silently degrades as the SNR falls — not because it bought a nu
 honest headline is that **"0.63 of the record instead of 0.05" was a property of the
 subset's size and not of anything computed from it**, which is the same class of error as
 §7.2's and T-480's: evidence that is sound about an adjacent quantity.
+
+**Moved by T-488 (2026-09-18), and this is the site where the count *was* the statistic.**
+`features@9` takes the **instantaneous-frequency** subset against the same on level,
+closing the third and last site of T-431's rule — seven dimensions at once (`sigma_af`,
+`if_std_norm`, `if_bimodality`, `if_modality`, `if_slope_r2`, `if_local_bimodality`,
+`if_local_modality`, all statistics of one `fi` vector). Measured on the merge base and on
+the branch back to back on one machine, both density files refitted, and the refit
+re-verified deterministic on the unmodified tree first (re-running `fit-densities`
+reproduces the checked-in files **byte for byte**, so the whole density diff is
+attributable to the feature):
+
+| Figure | merge base (T-447) | T-488 | move |
+|---|---|---|---|
+| **Unknown recall / false-known (the gate's draw)** | 0.9444 / 0.0556 = 374/396 | 0.9621 / 0.0379 = 381/396 | **+0.0177 = 2.1 draw sd — but inside §7.2's ±0.02 band, so NOT a finding** |
+| Known top-1 / top-2 | 0.9325 / 0.9861 | 0.9306 / 0.9861 | −0.0019 (3 snippets of 1 656) / 0 |
+| Wrong-label overall / worst bin | 0.0032 / 0.0333 | 0.0024 / 0.0333 | −0.0008 (better) / 0 |
+| Per-family, per-SNR-bin top-1 (40 rows) | — | — | 9 rows move, all by 1–4 snippets, in both directions; `pulsed` at its gate 0.96 → **1.00**, `psk-qam` at gate+0 0.97 → 0.90 (its 4 lost snippets go to `unknown`, not to a wrong label — the bin's wrong-label rate is unchanged) |
+| Unknown recall, **harness** draw (§7.2's second reading, *not* the gate) | 0.937 | 0.947 | +0.010 ≈ 1.2 draw sd |
+| └ `psk-qam` open set, 72 snippets | 0.833 | 0.861 | +2 snippets |
+| └ `analog` open set, 72 snippets | 0.847 | 0.875 | +2 snippets |
+
+Every floor is met. **Every figure above is inside the draw's own spread, so the honest
+verdict is "no regression", not "an improvement".** The gate's +0.0177 is the largest move
+any of the three fixes has produced and it is still under the ±0.02 that §7.2 fixes as the
+threshold for a signal; settling it would take the gate's draw re-run at several seed
+bases, as §7.2 did, not a fourth decimal place on one.
+
+**What *is* a result is the feature, and it is the opposite of T-447's.** T-447's premise
+was sound and its blast radius nil because `derotate` sums phasors and weights each pair by
+its own magnitude. Every dimension here is an **unweighted** statistic of the selected
+pairs, so the subset's count is exactly what they average over, and the defect was total: a
+5 %-duty `pulse` read `sigma_af` **1.7181 rad/sample at 10 dB against π/√3 = 1.8138**, the
+standard deviation of a variate uniform on (−π, π] — the emission's "frequency excursion"
+was the phase of pure noise, to within 5 % of the closed form for pure noise, on a
+dimension named as an excursion. It now reads 0.1001 / 0.0565 / 0.0324 / 0.0190 / 0.0120
+across the 10–30 dB ladder, falling by 1.77 / 1.74 / 1.71 / 1.58 per 5 dB rung against the
+noise-limited law's 10^(5/20) = 1.778 — the *right* law, because a rectangular pulse train
+has no excursion of its own. `pulse`'s `if_bimodality` went from 0.498 / 0.472 / 0.211 /
+0.161 / 0.412 — a shape statistic with no monotonicity at all, describing the noise's
+distribution at 10 dB and the emission's at 30 — to 0.327 / 0.329 / 0.332 / 0.329 / 0.338.
+
+**The density diff is attributable dimension by dimension.** Of the 598 fitted dimensions
+of the above-gate model, the **146 instantaneous-frequency dimensions moved and the other
+452 moved by exactly 0.0000 σ** — including every cumulant, which independently confirms
+the de-rotation decision is untouched (`derotate` does not read `fi`). Largest moves:
+`pulse`'s `sigma_af` 1.3073 → 0.0519 (3.0 σ) and its `if_std_norm` 0.2640 → 0.0106 (2.8 σ),
+against T-447's largest of 0.05 σ anywhere. One dimension leaves the below-gate model:
+`pulse`'s `if_slope_r2` now abstains, because a 5 %-duty train honestly has too few on–on
+pairs to fill the ramp windows.
+
+**`sigma_af`'s `SNR_ORDER_EXCEPTIONS` entry survives, measured rather than assumed.** The
+subset fix removes the off-gap noise from every *keyed* class (`cw` 0.206 → 0.148 at 10 dB,
+`pulse` 1.718 → 0.100, `ppm` 0.321 → 0.094) and leaves the `am`-vs-`cw` inversion standing,
+because `am` is **continuous**: it has no off gaps to exclude, its subset barely moves
+(1.067 → 1.030 at 10 dB), and what limits it is the phase noise in the troughs of its own
+envelope. Selecting the right samples cannot repair a feature whose reading, on a class with
+no excursion of its own, *is* the noise. Two independent defects in one dimension, one fixed
+and one not — the same shape as T-447's σ_ap/σ_dp finding. The exact-set assertion in
+`tests/feature_length_invariance.rs` is what turned "does it still reproduce?" into a test
+rather than a belief: no new inversion appeared, and none of the other four entries moved.
 
 ### 7.2 `just acceptance-m3` prints three held-out readings, and only one is the gate (T-428)
 
