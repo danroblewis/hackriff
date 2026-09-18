@@ -40,6 +40,16 @@ export interface TileEntry<T> {
   pinnedFrame: number;
 }
 
+/**
+ * One viewport as the cache understands it: the box being looked at **and the levels it is drawing
+ * at**. The levels are not decoration — see [[TileCache.setViewports]].
+ */
+export interface Viewport {
+  readonly box: Box;
+  readonly levelF: number;
+  readonly levelT: number;
+}
+
 /** What the cache can answer. **`pending` is not a cell state** — see ui/src/surface/cellrule.ts. */
 export type Residency<T> = { readonly kind: "resident"; readonly entry: TileEntry<T> } | { readonly kind: "pending" };
 
@@ -207,9 +217,20 @@ export class TileCache<T> {
    * The viewports that still matter. Queued tiles outside every one are dropped and in-flight ones
    * are aborted — §5.5's "viewport-change cancellation", which is what makes the in-flight cap a
    * latency control rather than a queue the user waits out.
+   *
+   * **A viewport is a box AND its levels, and both halves are load-bearing** (T-443). The predicate
+   * was extent-only, which was sound while every viewport was a pane at a comparable zoom; the
+   * minimap broke it the moment it arrived, because it is *another viewport* spanning nearly the
+   * whole surface, so every fine-level tile for a viewport the user had left still intersected it
+   * and **cancellation silently stopped cancelling anything**. Matching the level too restores it:
+   * a tile is wanted when some viewport is drawing at its level — or one step coarser, which is the
+   * parent pin the renderer prefetches and must not immediately cancel.
    */
-  setViewports(lat: Lattice, boxes: readonly Box[]): void {
-    const wanted = (a: TileAddr) => boxes.some((b) => intersects(lat, a, b));
+  setViewports(lat: Lattice, viewports: readonly Viewport[]): void {
+    const wanted = (a: TileAddr) => viewports.some((v) =>
+      a.levelF >= v.levelF && a.levelF <= v.levelF + 1 &&
+      a.levelT >= v.levelT && a.levelT <= v.levelT + 1 &&
+      intersects(lat, a, v.box));
     const keep: TileAddr[] = [];
     for (const a of this.queue) {
       if (wanted(a)) keep.push(a);

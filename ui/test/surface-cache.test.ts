@@ -138,9 +138,29 @@ test("a viewport change cancels the tiles it left, and only those", async () => 
   h.cache.endFrame();
   await flush();
   const tileHz = 6250 * 256;
-  h.cache.setViewports(LAT, [{ f0Hz: 0, f1Hz: tileHz, t0Ns: 0, t1Ns: 1e9 * 256 }]);
+  h.cache.setViewports(LAT, [{ box: { f0Hz: 0, f1Hz: tileHz, t0Ns: 0, t1Ns: 1e9 * 256 }, levelF: 0, levelT: 0 }]);
   assert.equal(h.cache.queueDepth, 1, "only tile 0 intersects the new viewport");
   assert.ok(h.cache.stats.cancelled >= 2);
+});
+
+test("a viewport is a box AND its levels: a coarse viewport over everything does not keep fine tiles alive", async () => {
+  // T-443: the minimap is another viewport spanning nearly the whole surface, so an extent-only
+  // predicate made every fine tile intersect something forever and cancellation stopped cancelling.
+  const h = harness({ inFlight: 1 });
+  h.cache.beginFrame();
+  for (let i = 0; i < 4; i++) h.cache.acquire(addr(i, 0, 0, 0)); // a pane's own, fine level
+  h.cache.endFrame();
+  await flush();
+  const whole = { f0Hz: 0, f1Hz: 6e9, t0Ns: 0, t1Ns: 1e9 * 4096 };
+  h.cache.setViewports(LAT, [{ box: whole, levelF: 8, levelT: 6 }]); // the map, and only the map
+  assert.equal(h.cache.queueDepth, 0, "a fine tile no viewport is drawing at is not wanted, however wide the map is");
+  // …and the map's own tiles, plus the parent it pins one level coarser, survive.
+  h.cache.beginFrame();
+  h.cache.acquire(addr(0, 0, 8, 6));
+  h.cache.prefetch(addr(0, 0, 9, 7));
+  h.cache.endFrame();
+  h.cache.setViewports(LAT, [{ box: whole, levelF: 8, levelT: 6 }]);
+  assert.ok(h.cache.queueDepth + h.cache.inFlightCount >= 2, "the viewport's own level and its pinned parent must both survive");
 });
 
 test("the route's 503 is an ANSWER: adopt the cap it names, back off, keep wanting the tile", async () => {

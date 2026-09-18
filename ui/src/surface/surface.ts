@@ -29,7 +29,7 @@ import {
   ancestorsOf, extentOf, keyOf, levelsFor, tilesFor,
   type Box, type Lattice, type TileAddr,
 } from "./lattice";
-import { TileCache, type TileEntry, type TileTextures } from "./tilecache";
+import { TileCache, type TileEntry, type TileTextures, type Viewport } from "./tilecache";
 import type { TileData } from "./tile";
 
 /** A pane's pixel rectangle, in **GL convention**: origin at the bottom-left of the drawing buffer. */
@@ -247,6 +247,10 @@ export class Surface {
     gl.uniform1f(this.u.uHi, this.hi);
 
     const reports: PaneReport[] = [];
+    // The boxes AND the levels each was drawn at, for the cache's cancellation predicate: a box on
+    // its own cannot say a tile is no longer wanted once one viewport (the minimap) is the size of
+    // the surface. See TileCache.setViewports.
+    const viewports: Viewport[] = [];
     let lo = Infinity, hi = -Infinity;
     for (const pane of panes) {
       const r = pane.rect;
@@ -261,6 +265,7 @@ export class Surface {
       gl.clear(gl.COLOR_BUFFER_BIT);
 
       const { levelF, levelT } = levelsFor(this.lattice, pane.box, r.w, r.h);
+      viewports.push({ box: pane.box, levelF, levelT });
       const addrs = tilesFor(this.lattice, pane.box, levelF, levelT, pane.device ?? "any");
       let tiles = 0, fallbacks = 0, pending = 0;
       for (const a of addrs) {
@@ -295,7 +300,7 @@ export class Surface {
       this.lo += 0.15 * (lo - 8 - this.lo);
       this.hi += 0.15 * (hi + 3 - this.hi);
     }
-    this.cache.setViewports(this.lattice, panes.map((p) => p.box));
+    this.cache.setViewports(this.lattice, viewports);
     this.cache.endFrame();
     this.lastFrame = reports;
     return reports;
