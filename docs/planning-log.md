@@ -5084,7 +5084,7 @@ assumed a timed-out command was dead. None of them announced itself.
 
 Kept current by the coordinator; the planning-phase list near the top of this file is the 2026-09-13
 record and is not this. Everything here is **blocking something real** — nothing is parked here for
-tidiness. Last swept **2026-09-17**.
+tidiness. Last swept **2026-09-17** (after the MCANVAS decomposition).
 
 **Needs you at the bench (physical, cannot be delegated):**
 
@@ -5118,6 +5118,28 @@ tidiness. Last swept **2026-09-17**.
   Four options are laid out in docs/17 §6 with what each buys and costs; **no recommendation is made and
   no floor was moved**. Your standing rule (floors do not move to accommodate a capability) rules out the
   one option that actually fixes genuine short bursts, which is the heart of the call.
+
+**Visible behaviour changes agents flagged for your eye (not blocking; say if you want them different):**
+
+- **A scrubbed view now reads `❚❚ PAUSED`** (T-347, T-442). Under the new model scrubbing *is* pausing —
+  a pane's time window is its pause state, with no separate flag — so the label is the design statement
+  rather than a mislabel. But it is the one wording the agent thought you might want changed.
+- **A minimap lit segment sits at the live edge in time, not pinned to the top of the strip** (T-443).
+  "Currently live" is true *now*, so **a minimap scrubbed into the past lights nothing**. The
+  alternative — a bar always at the top — is the fixed-screen-coordinate overlay your own time-axis
+  invariant forbids, so this follows from your rule; it is still a visible change if you expected the
+  bar always present.
+- **The default full-device view is nearly empty** (T-437 measured **99.4 % grey** before history
+  accumulates, settling to 55.2 %). That is §8 working as intended — *the shape of what is not grey is
+  the survey* — but it means the first screen is mostly empty, and the cutover (T-445) has to decide
+  what carries orientation there.
+- **A narrow drag now always retunes when a narrower achievable window exists** (T-418), even for a
+  modest 2.4 → 2.0 MHz gain, costing a real settle gap per drag. That follows your instruction
+  verbatim ("snaps to the narrowest achievable instantaneous window"); if it proves too eager in use
+  the fix is a threshold, not a change to the arithmetic.
+- **The ½-span nudge button is marked amber** (T-409). Measured: it lands a centred signal exactly at
+  the band edge, in the anti-alias skirt — trading the DC spike for the other hazard. It is kept
+  because it is the honest stride for stepping along a band, with ¼ marked ideal.
 
 **Sign-off, not blocking (work proceeds on the provisional text):**
 
