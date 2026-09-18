@@ -869,6 +869,25 @@ test("no signal logic, no clock and no route in the trace module", () => {
   }
 });
 
+test("T-475: the trace's own pass has NO SAMPLER — it can colour, but it can never read a tile", () => {
+  // The property T-457 used to get from `overlay.ts` having no ramp, re-established where it now
+  // has to live. A trace that carries a measurement colour cannot be drawn by a program incapable of
+  // one, so the argument "it cannot tint a measurement because it cannot express a colour" is gone.
+  // What replaces it is stronger and is checked here: the trace program cannot READ a measurement,
+  // cannot express `cellrule.ts`'s grey, its tier hatching or its fallback mark, and takes its colour
+  // as a vertex attribute computed by `trace.ts` from the ONE ramp module. The repo-wide half — that
+  // no second module defines a ramp — is `ui/test/surface-cutover.test.ts`'s, and it walks `src/`,
+  // so it already covers this file.
+  const src = readFileSync("src/surface/tracepass.ts", "utf8");
+  const bare = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.ok(!/sampler2D|texture\(/.test(bare), "the trace program must have no sampler");
+  assert.ok(!/vec3 cmap\(float|CELL_RULE_GLSL|cellMark|tierMark|fallbackMark/.test(bare),
+    "…and no cell rule: it cannot draw a grey, a tier mark or a fallback hatch");
+  assert.match(bare, /in vec4 aRgba/, "its colour arrives as a vertex attribute, not as a ramp it owns");
+  // And the data pass is not reachable from it: it binds no texture and shares no display range.
+  assert.ok(!/uLo|uHi|bindTexture/.test(bare), "the trace pass must not touch the data pass's state");
+});
+
 test("the renderer's one display range is what the trace reads — Surface still owns it", () => {
   const g = stubGl(64, 64);
   const s = new Surface(g.canvas, VIEW_LAT, (tex) => new TileCache(tex, (a) => Promise.resolve(stubTile(a)), { now: () => 0 }));

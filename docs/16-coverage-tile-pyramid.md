@@ -1067,11 +1067,12 @@ IS finishing MCANVAS"* — and then widened it. The trace is **not** pinned to *
 > exists. And it is per viewport: each split pane gets its own trace at its own time position.
 
 **Where it lives.** A strip is carved off the **top of each pane's rectangle** in
-`SurfaceView.frame()` (`tracePx`), and the quads go through the existing `overlay.ts` pass — the
-program with no sampler and no ramp, so the trace still cannot tint a measurement. Carved, never
-painted over: an overlay covering the newest rows would falsify "the top of the pane is the newest
-row", which every mark on this surface is placed through. The arithmetic is `ui/src/surface/trace.ts`
-and it is pure; the mount composes it in `ui/src/app/centre/surface.ts`.
+`SurfaceView.frame()` (`tracePx`). Carved, never painted over: an overlay covering the newest rows
+would falsify "the top of the pane is the newest row", which every mark on this surface is placed
+through. The arithmetic is `ui/src/surface/trace.ts` and it is pure; the mount composes it in
+`ui/src/app/centre/surface.ts`. T-457 drew it through the existing `overlay.ts` pass — the program
+with no sampler and no ramp — and argued from that that the trace could not tint a measurement;
+**T-475 retired that argument and replaced it** (§8.5d).
 
 **What it shares, which is the axes and only the axes.** x goes through the renderer's own `toClip`
 against the pane's own box, so a peak on the trace sits above the column it paints. y goes through
@@ -1151,6 +1152,77 @@ therefore written to need **neither** ticket: `paneAtPoint()` is a pure function
 property asserted over a grid of points is *"turning the trace on may not shrink the set of points a
 gesture can start from."* It names no gesture, it holds for any future decoration carved out of a
 pane, and on the broken code it fails with 2 380 lost points.
+
+### 8.5d The classic analyser look: amplitude colour, a smooth line, afterglow (T-475, 2026-09-18)
+
+The user's verdict on §8.5c's trace: *"it works, but looks bad vs the classic one — a plain line,
+missing everything"*. Three things were missing.
+
+**1. Amplitude colour, from the one ramp.** A trace vertex at `db` is `cmap((db − lo) / (hi − lo))` —
+the same expression the tile shader computes (`cellMark(s, (v − uLo) / max(uHi − uLo, 1e-6), px)`),
+against the same `lo`/`hi`. So the same dB is the same colour on the trace and in the cells under it,
+and the trace and the waterfall become one picture rather than a plot beside one. The ramp is
+**imported** from `ui/src/cmap.ts`; T-397's repo-wide "exactly one module defines a ramp" guard is
+untouched.
+
+**The architectural consequence, faced rather than worked around.** §8.5c's honesty argument was
+*"the overlay program has no sampler and no ramp, therefore a trace cannot tint a measurement"*. A
+series carrying a measurement colour cannot be drawn by a program incapable of one, and putting a
+ramp into `overlay.ts` would put one into the pass that draws every box, pane rectangle and lit
+segment — the shape of T-397 and of the T-437 wash-over-the-sample trap. So the trace got **its own
+pass**, `ui/src/surface/tracepass.ts`, and the two properties the old argument protected are
+re-established structurally:
+
+- **The data pass is untouched.** The trace program is bound only after `Surface.render` has
+  submitted every tile draw, and `ui/test/surface-trace.test.ts` still asserts the data draws are
+  byte-identical with the trace on and off — no flag, as before.
+- **A trace cannot be mistaken *for* tile data.** Not for want of a colour, but because it is
+  scissored into a rectangle **carved off** the pane and its program **has no sampler**: it cannot
+  read a tile and cannot express `cellrule.ts`'s grey, its tier hatching or its fallback mark.
+
+And within the strip, the same one-ramp discipline: **exactly one line is drawn from the ramp, and it
+is the one the readout describes.** The max-hold keeps a flat magenta (off the ramp entirely — no
+point on the ramp has a high red *and* a high blue with a low green) and the afterglow and bloom are
+neutral grey. Four ramp-coloured lines would be *more* confusable with the cells below, not less.
+
+**2. A smooth, anti-aliased curve.** §8.5c emitted one axis-aligned quad per column — literally a
+staircase, which is the "looks like pixels" the user reported. `tracePaths` now runs a **monotone
+cubic** (Fritsch–Carlson) through the column centres and the pass strokes it with a mitred, feathered
+edge.
+
+The user ruled on the honesty objection and the ruling is binding: *this is line rendering, not faked
+tile resolution*. The declare-your-resolution rule exists so a zoomed **waterfall** never implies
+cells the hardware did not sample; drawing a curve through samples that genuinely exist is ordinary
+plotting. What still binds is the narrow, checkable part §8.5c already implemented: **a column
+nothing answered for emits nothing, and the smoothing never crosses one** — a `NaN` splits the
+columns into runs, each run is its own path, and a lone column is a flat tick across its own measured
+extent. Fritsch–Carlson is chosen for the same reason rather than for looks: it passes exactly
+through every sample and **cannot overshoot past the samples bracketing it**, where a Catmull-Rom
+rings *below* a noise floor either side of a spike — inventing a quieter measurement at a frequency
+where the radio reported something else.
+
+**3. Phosphor persistence, from the pane's own window.** `persistenceSlices` reads the rows just
+before the pane's time position out of the **pyramid** — cell `k` back from the slice's own cell, at
+the level the pane was drawn at, so they come from the very tiles the pane just rendered and cost no
+fetch. A row whose cell starts before the pane's window is dropped, not clamped.
+
+That derivation is the whole difference between a feature that survives a scrub and one that only
+works live. The naive version is a client-side ring of whatever frames the page received, which shows
+the last few seconds of *wall clock* behind a viewport parked in the past — the same defect as a
+trace pinned to now, one layer down. `ui/e2e/app-trace.e2e.mjs` demonstrates it **while scrubbed**: a
+viewport held 3 s behind the live edge states `afterglow 4 × 80 ms` at its own past instant, and the
+achromatic ink is drawn clear of the current line in 27 of 293 columns — shadows that are other rows,
+not a halo on this one.
+
+**What the browser tier measures.** On a viewport whose slice comes from the pyramid, the slice *is*
+the row of cells at the top of the pane (`sliceColumns` is `maxHoldColumns` over a one-cell window),
+so the trace and the waterfall are two renderings of the same cells and the colours must be **equal**,
+not similar. Measured: **265/293 = 90 %** of drawn trace columns carry a colour the cells below them
+also carry, against a **0 %** negative control matching each column against one a third of a viewport
+away. (Against the live row the comparison would be the adjacent-question mistake — one frame against
+a max-hold over a whole cell.) That measurement is also why `SLICE_PX` is 3 and not 2: the pass
+feathers coverage over the outermost device pixel, so a 2 px line has almost no fully-covered core and
+every pixel of it sits 9–12/255 off the identical cell below.
 
 ### 8.5a What the spike proved, and the three places §8 and §6 were wrong (T-437, 2026-09-17)
 
