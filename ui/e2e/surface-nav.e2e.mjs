@@ -140,20 +140,29 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // shape T-454 lives in: a viewport change that invalidates the whole working set and demands a
   // new one at once.
   //
-  // A plain wheel is the UNIFORM zoom since T-456, so it moves the view on this fixture whatever
-  // the time axis does — the frequency axis has ten levels of room here and carries the movement.
-  // **The time axis alone is a weaker witness**, and that is a fact about this fixture rather than a
-  // softened assertion: the surface's time extent is the ingested record and a pane may not magnify
-  // below `minCells` level-0 cells (16 × 1 s here), so a young record leaves the time axis clamped
-  // in both directions. Which axes actually moved is asserted per modifier, with the premise
-  // measured first, in the T-456 test below; here the wheels are delivered and their requests are
-  // counted with all the others.
+  // **The two UNIFORM wheels are `mustMove: false`, and T-472 is why.**
+  //
+  // This note used to read: "a plain wheel moves the view on this fixture whatever the time axis
+  // does — the frequency axis has ten levels of room here and carries the movement." T-472 deleted
+  // that property deliberately. A plain wheel now stops when EITHER axis reaches a bound, because a
+  // gesture in which frequency carries on alone is exactly the aspect-ratio drift the user reported.
+  // This file runs first, against a young record: the surface's time extent is whatever has been
+  // ingested so far and a pane may not magnify below `minCells` level-0 cells (16 × 1 s here), so
+  // the time axis is often pinned in both directions before the first wheel — and a uniform wheel is
+  // then correctly a no-op, for the same reason the map drag below is.
+  //
+  // This is a **narrower premise, not a softer assertion**: the wheels are still delivered and their
+  // requests still counted with the rest of the storm, the step still records whether it moved (it
+  // is printed either way), and every claim about which axes a wheel moves is made in the T-456 and
+  // T-472 tests below, each of which establishes its own premise first rather than assuming one.
   await step("drag-pan", () => page.drag(mid, { x: mid.x - 260, y: mid.y + 120 }, 12));
   await step("jump to the whole surface", () => page.click(BUTTON("Whole surface")));
-  await step("wheel zoom in (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, -240); });
+  await step("wheel zoom in (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, -240); },
+    { mustMove: false });
   await step("shift+wheel zoom in (frequency)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, -240, { shift: true }); });
   await step("shift+wheel zoom out (frequency)", async () => { for (let i = 0; i < 3; i++) await page.wheel(mid, 240, { shift: true }); });
-  await step("wheel zoom out (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, 240); });
+  await step("wheel zoom out (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, 240); },
+    { mustMove: false });
   // The map along the bottom is a viewport too, and it opens showing the whole surface — so
   // *dragging* it is clamped for the same reason the time wheel is. Double-clicking it is not:
   // that is the page's discrete "send the active pane there", which moves the pane across the
@@ -558,4 +567,208 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
   const c = census(shots, { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h) });
   assert.ok(c.distinct >= 32 && c.dominantShare < 0.92,
     `after the gestures the canvas is a flat fill: ${c.distinct} colours, dominant ${c.dominant} at ${(c.dominantShare * 100).toFixed(1)} %`);
+});
+
+
+// ———————————————————————————————————————————————————————————————————————————————————————————————
+// T-472: AT EITHER BOUND, A PLAIN WHEEL MOVES NEITHER AXIS
+// ———————————————————————————————————————————————————————————————————————————————————————————————
+//
+// The user's report, against T-456's uniform zoom: past the Y-axis limit the gesture keeps scaling X
+// while Y is clamped, so the aspect ratio drifts, the view jumps, and the frequency axis has to be
+// shift-scrolled back **every time**. The fix stops both axes together when either runs out.
+//
+// ——— WHAT THIS TEST IS EVIDENCE OF, SAID BEFORE THE GREEN ———
+//
+// *A zoom being clamped is not the same as the aspect ratio being preserved.* The old code clamped
+// too — per axis, which is exactly how the ratio drifted. The **ratio** property is therefore not
+// asserted here: it is asserted over the whole reachable range of the gesture in
+// `ui/test/surface-aspect.test.ts` (19 440 wheels over a grid of surfaces, starting windows, cursor
+// anchors and every factor a wheel can produce — 7 705 violations through the per-axis gesture, 0
+// through this one). What a browser adds, and only a browser can, is that **the real event reaches
+// the real host and the real host does this** — the T-450 lesson, where a module that could not load
+// in a browser had been proved correct on 114 973 pixels.
+//
+// So the claim here is the bound behaviour, as three facts that only mean something together:
+//
+//   (a) at the stop, a plain wheel moves NEITHER axis;
+//   (b) at that same stop, **alt+wheel inward also moves nothing** — so it is the TIME axis that ran
+//       out; and
+//   (c) at that same stop, **shift+wheel inward still moves frequency** — so the frequency axis had
+//       room, and (a) is therefore the LOCK stopping the gesture rather than frequency's own clamp.
+//
+// Without (c), (a) is satisfied by a view zoomed out to everything on both axes, which is precisely
+// where the old code ended up: it dragged frequency on to its own floor after time had stopped.
+//
+// ——— THE WITNESSES, AND WHY EACH ONE CAN SPEAK ———
+//
+// The stated pyramid level is **useless as a time witness on this fixture**, and that is measured
+// rather than assumed: the whole record is a few tens of seconds against a ~500 px pane, so the time
+// axis resolves to level 0 at every span it can hold, and `level 10/0 → level 3/0` across a fourteen
+// -step zoom is a frequency story with a constant beside it. A test that had read the level for
+// "time did not move" would have been green for a gesture that moved time freely — T-448's shape,
+// where the gate guaranteed every counter except the one asserted.
+//
+// So time is read from the pane's offset-from-the-edge, and T-478's trap is handled by **checking
+// its premise instead of asserting the habit**: that offset drifts with wall-clock lag when a pane
+// is FOLLOWING a live edge, and an `equal` on it then goes red under load while a `notEqual` can go
+// green on drift alone. This page has no live edge to follow — `SurfacePreview.edgeNs` resolves once
+// from `GET /api/navigation` and every viewport opens frozen — so the offset here is pure view
+// state. That is not taken on trust: the readout is sampled twice across real frames with nothing
+// touching it, and the test fails if it moved.
+//
+// And "nothing moved" is worthless if nothing was delivered, so every gesture's wheel events are
+// read back from the page's own probe and checked for the modifier bits the browser actually set.
+
+/**
+ * A cap on the zoom-in walk, not a claim about where it stops.
+ *
+ * Where it stops is fixture-dependent — it is `log(time floor / time extent)` in wheel steps — and
+ * this file must not restate it, because a cap tuned to the fixture is a second copy of a number the
+ * server owns. It only has to be larger than that, and the assertion that matters is (c): with the
+ * lock removed the walk runs on to FREQUENCY's floor instead, and shift+wheel is then dead too.
+ */
+const MAX_STEPS = 60;
+/**
+ * How many modifier wheels a single-axis probe uses.
+ *
+ * Not one: a single step can move a span by less than the readout's own resolution, and "it did not
+ * change" would then be evidence of nothing. Four steps are 4.2x out and 0.24x in.
+ */
+const PROBE_STEPS = 4;
+
+test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt each still move one", async (t) => {
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page();
+  await page.goto(`${ORIGIN}/surface.html#token=${TOKEN}`);
+  await page.waitForSurfaceMounted();
+  await page.waitFor("the first tile textures to be uploaded",
+    `(${STATUS}.match(/(\\d+) uploads/)?.[1] | 0) > 0`, { timeoutMs: 90000 });
+  assert.equal(await page.eval(INSTALL_PROBE), true);
+
+  const rect = await page.$rect('[data-slot="canvas"]');
+  // Off-centre on both axes, so the two anchors differ and a gesture that fed one to both would show.
+  const at = { x: rect.x + rect.w * 0.42, y: rect.y + rect.h * 0.35 };
+  const read = async () => page.eval(PANE_ROW);
+  const same = (a, b) => a.freq === b.freq && a.time === b.time && a.level === b.level;
+  const show = (r) => `${r.freq} · ${r.time} · ${r.level}`;
+
+  // ——— the premise that licenses reading the time offset at all (T-478) ———
+  const idle0 = await read();
+  await page.frames(12);
+  await new Promise((r) => setTimeout(r, 1200));
+  await page.frames(12);
+  const idle1 = await read();
+  assert.ok(same(idle0, idle1),
+    `the pane's readout moved with NO gesture touching it (${show(idle0)} → ${show(idle1)}). On a page ` +
+    "that follows a live edge the offset drifts with wall-clock lag, and then neither an equal nor a " +
+    "notEqual on it means anything — this preview is supposed to hold a fixed edge.");
+
+  /** One wheel, and everything the readout says. */
+  const wheel = async (mods = {}, deltaY = -240) => {
+    const was = await read();
+    await page.eval("window.__wheels = []");
+    await page.wheel(at, deltaY, mods);
+    await page.frames(4);
+    const now = await read();
+    const wheels = JSON.parse(await page.eval("JSON.stringify(window.__wheels)"));
+    return { was, now, wheels, moved: !same(was, now) };
+  };
+
+  /** `PROBE_STEPS` wheels of one kind, reported as one move — see [[PROBE_STEPS]]. */
+  const probe = async (mods, deltaY) => {
+    const was = await read();
+    await page.eval("window.__wheels = []");
+    for (let i = 0; i < PROBE_STEPS; i++) await page.wheel(at, deltaY, mods);
+    await page.frames(6);
+    const now = await read();
+    const wheels = JSON.parse(await page.eval("JSON.stringify(window.__wheels)"));
+    assert.equal(wheels.length, PROBE_STEPS,
+      `the browser delivered ${wheels.length} of ${PROBE_STEPS} wheels for ${JSON.stringify(mods)} — ` +
+      "a gesture that did not arrive cannot be evidence that it moved nothing");
+    assert.ok(wheels.every((w) => w.prevented), "a wheel over the canvas was not preventDefaulted");
+    return { was, now, wheels };
+  };
+
+  // ——— out to the whole surface, then wheel IN until the uniform gesture stops ———
+  await page.click(BUTTON("Whole surface"));
+  await page.frames(4);
+  t.diagnostic(`whole surface: ${show(await read())}`);
+
+  let steps = 0;
+  for (let i = 0; i < MAX_STEPS; i++) {
+    const w = await wheel({});
+    assert.equal(w.wheels.length, 1, "the browser did not deliver the plain wheel to the page");
+    assert.ok(!w.wheels[0].shift && !w.wheels[0].alt && !w.wheels[0].ctrl && !w.wheels[0].meta,
+      `a plain wheel arrived carrying a modifier: ${JSON.stringify(w.wheels[0])}`);
+    assert.ok(w.wheels[0].prevented, "the page did not preventDefault a wheel over the canvas");
+    if (!w.moved) break;
+    steps++;
+  }
+  const held = await read();
+  t.diagnostic(`plain wheel in: ${steps} step(s), then it stopped at ${show(held)}`);
+
+  // Non-vacuity in the first direction: the gesture does something before it stops. A wheel wired to
+  // nothing would satisfy every "did not move" below.
+  assert.ok(steps > 0,
+    "the plain wheel moved the view on none of its steps, so 'it stops at the bound' is a statement " +
+    "about a gesture that never worked");
+  assert.ok(steps < MAX_STEPS,
+    `the plain wheel was still moving the view after ${MAX_STEPS} steps — it never stopped, so ` +
+    "nothing below is being tested at a bound");
+
+  // ——— (a) AT THE BOUND, A PLAIN WHEEL MOVES NEITHER AXIS ———
+  for (let i = 0; i < 3; i++) {
+    const w = await wheel({});
+    assert.equal(w.wheels.length, 1, "a plain wheel at the bound was not delivered, so this proves nothing");
+    assert.equal(w.now.freq, held.freq,
+      `a plain wheel at the bound moved the FREQUENCY axis (${held.freq} → ${w.now.freq}). This is the ` +
+      "reported bug: one axis is clamped, the other keeps scaling, and the aspect ratio drifts.");
+    assert.equal(w.now.time, held.time,
+      `a plain wheel at the bound moved the TIME axis (${held.time} → ${w.now.time})`);
+    assert.equal(w.now.level, held.level, `a plain wheel at the bound changed the stated level`);
+  }
+
+  // ——— (b) IT IS TIME THAT RAN OUT: four alt wheels inward move nothing either ———
+  const altIn = await probe({ alt: true }, -240);
+  assert.ok(altIn.wheels.every((w) => w.alt && !w.shift && !w.ctrl),
+    `the modifier that ARRIVED was not alt: ${JSON.stringify(altIn.wheels)}`);
+  assert.equal(altIn.now.time, held.time,
+    `${PROBE_STEPS} alt wheels inward still moved the time axis (${held.time} → ${altIn.now.time}), so ` +
+    "the plain wheel above did not stop because TIME ran out. This run reached some other bound, and " +
+    "(c) below would be measuring the wrong thing.");
+  assert.equal(altIn.now.freq, held.freq, "alt + wheel moved the FREQUENCY axis: the axes are welded");
+
+  // ——— (c) FREQUENCY HAD ROOM: shift inward still moves it, and only it ———
+  // The assertion that makes (a) mean something. Without it, "a plain wheel moved neither axis" is
+  // equally true of the old code once BOTH axes are pinned — which is where the old code went, by
+  // dragging frequency down to its own floor after time had already stopped. (Measured: with the
+  // lock removed this same walk runs to that floor instead, and shift is then dead here too.)
+  const shiftIn = await probe({ shift: true }, -240);
+  assert.ok(shiftIn.wheels.every((w) => w.shift),
+    `the browser did not deliver shiftKey on the wheel: ${JSON.stringify(shiftIn.wheels)}`);
+  assert.notEqual(shiftIn.now.freq, held.freq,
+    `shift + wheel did not move the frequency axis either (${held.freq}). Frequency is at its own ` +
+    "bound too, so the plain wheel above was stopped by the pane rather than by the lock — and the " +
+    "escape hatch the user reaches for is dead.");
+  assert.equal(shiftIn.now.time, held.time,
+    `shift + wheel moved the TIME axis (${held.time} → ${shiftIn.now.time}): the axes are welded`);
+  t.diagnostic(`shift + wheel at the lock: ${held.freq} → ${shiftIn.now.freq} (frequency had room all along)`);
+
+  // ——— (d) …AND ALT STILL SKEWS THE OTHER WAY, deliberately ———
+  // Only shift and alt may change the aspect ratio, and this pair is also what says the axes are
+  // still INDEPENDENT: alt moves time and leaves the frequency window exactly where it was. The fix
+  // that would quietly undo T-434/T-438/T-440 — keeping the pixels square by welding the two axes
+  // together — cannot produce either (c) or (d).
+  const base = await read();
+  const altOut = await probe({ alt: true }, 240);
+  t.diagnostic(`alt + wheel outward: time ${base.time} → ${altOut.now.time}, frequency ${altOut.now.freq}`);
+  assert.notEqual(altOut.now.time, base.time,
+    `${PROBE_STEPS} alt wheels outward did not move the time axis (${base.time}): it is welded shut`);
+  assert.equal(altOut.now.freq, base.freq,
+    `alt + wheel outward moved the FREQUENCY axis (${base.freq} → ${altOut.now.freq})`);
+
+  assert.equal(await page.$count(".sp-fail"), 0, `a failure card appeared: ${await page.$text(".sp-fail")}`);
+  assert.deepEqual(page.exceptions, [], "uncaught exception during the bound run");
 });
