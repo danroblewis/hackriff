@@ -393,20 +393,35 @@ test("every viewport is FROZEN at open: this preview has no live edge to follow"
 // not load. So this drives the real `SurfacePreview.frame()` loop and asks whether the address was
 // asked for twice.
 //
-// The edge is deliberately held STILL here. That is not a weaker test, it is the defect itself: the
-// address a following pane resolves changes only when the edge crosses a tile boundary, which at
-// `level_t = 0` is once every 256 seconds, and for all of that time the rows being recorded were
-// served and never requested. A fixed edge reproduces exactly that window. Whether the rows then
-// appear on the screen is `ui/e2e/live-edge.e2e.mjs`'s subject — a tile being re-fetched is not a
-// row being drawn, and this tier cannot tell the two apart.
+// The edge **grows, slowly enough to stay inside one tile** ([[LIVE_EDGE_NS_PER_MS]]), which is the
+// window the defect lives in: the address a following pane resolves changes only when the edge
+// crosses a tile boundary — at `level_t = 0`, once every 256 seconds — and for all of that time the
+// rows being recorded were served and never requested.
+//
+// **It was held STILL, and since T-495 that would test nothing.** Freshness is no longer "is the edge
+// inside this tile" but "was this copy asked for at an edge that already reached everything it could
+// hold", so an edge that never moves correctly produces no second request: there is provably no new
+// row to fetch. A still edge is not a live edge, and a guard built on one would be measuring the
+// harness. Whether the rows then appear on the screen is `ui/e2e/live-edge.e2e.mjs`'s subject — a
+// tile being re-fetched is not a row being drawn, and this tier cannot tell the two apart.
 
 /** A lattice whose time cells are milliseconds, so the refresh cadence — one cell — is testable in
  * a test's lifetime rather than in the product's 1 s. Nothing else about it is special. */
 const LIVE_LAT: Lattice = { scheme: "view", cells: 64, f0Hz: 6250, t0Ns: 1e6, levelsF: 20, levelsT: 15 };
+/**
+ * Capture ns the reported edge advances per millisecond of wall time.
+ *
+ * Small on purpose. A tile here is 64 ms of capture, and the subject is a tile that stays the same
+ * ADDRESS while its newest rows are written — so over a 700 ms run the edge must move far enough to
+ * be worth re-asking for (it moves ~35 ms, thirty-five 1 ms cells) and not so far that the pane
+ * scrolls into a new tile and the re-ask becomes an ordinary miss.
+ */
+const LIVE_EDGE_NS_PER_MS = 5e4;
 
 function liveHarness({ live = true } = {}) {
   const g = stubGl(1200, 600);
   const asked: TileAddr[] = [];
+  const t0 = Date.now();
   const fetchFn = async (url: string) => {
     const a = parseTileUrl(url);
     asked.push(a);
@@ -419,7 +434,7 @@ function liveHarness({ live = true } = {}) {
   const preview = new SurfacePreview({
     canvas: g.canvas, probe, token: "t", fetchFn, chrome: null, minimapPx: 120,
     // The ONE difference between the two arms: whether a growing edge is reported in at all.
-    edge: live ? () => probe.origin.edgeNs : null,
+    edge: live ? () => probe.origin.edgeNs + (Date.now() - t0) * LIVE_EDGE_NS_PER_MS : null,
   });
   return { g, preview, asked };
 }

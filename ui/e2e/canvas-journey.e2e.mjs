@@ -23,6 +23,8 @@
 //   3. OFF AND BACK — the pane's grey share **for the identical stated viewport, before and after**
 //                     the round trip, with the server asked whether it gained coverage in between.
 //                     The trap is that the stale tile IS drawn: the claim is COVERAGE, not presence.
+//                     **It reaches T-460's half of that and not T-495's** — a 13 s round trip cannot
+//                     finish a 256 s tile — which its own header measures and says.
 //   4. STREAM LOSS  — the composited framebuffer's magenta pixel count (given a measured premise
 //                     that no `unknown` coverage — the one legitimately purple mark on this surface
 //                     — is in the window), and **counted** texture uploads and failed requests
@@ -956,6 +958,27 @@ test("2. a retune keeps the stream alive, and live rows keep arriving at the NEW
 // absolute threshold — which would be a claim about the fixture — is not needed. A resident tile
 // whose middle went stale while off-screen returns with rows the server holds drawn as "never
 // looked", and that is exactly an INCREASE in this share.
+//
+// ——— WHAT THIS TEST CANNOT REACH, MEASURED (T-495) ———
+//
+// **It passed before T-495 was fixed, and that is not a bug in it — it is the half of the defect a
+// browser run of this length cannot get to.** T-495's mechanism is that a live tile's *eligibility*
+// for revalidation ends when the live edge crosses the tile's own end, so a tile that spent the last
+// of its own life off screen keeps whatever the server had when it was last looked at, forever. The
+// edge has to LEAVE the tile for that to happen.
+//
+// It cannot here. A pane draws at `RENDER_CELLS` = 256 cells of the lattice's 1 s base cell, so one
+// level-0 tile is **256 s of capture**; the round trip below is ~13 s (printed by the diagnostic, so
+// the claim is checkable from the output rather than taken from this comment). The edge therefore
+// never leaves the tile, T-460's live-edge refresh covers the whole trip, and the measured grey share
+// is 0.00 % before and 0.00 % after. What this test IS a property of is that: **T-460's refresh
+// survives a pan away and back.** Worth having, and not the T-495 case.
+//
+// The case where eligibility expires is guarded in `ui/test/surface-cache.test.ts` ("a live tile
+// panned off screen and back fills in"), which drives the same six gestures through the cache over
+// an 8 s tile so the boundary is crossed, in both arms — the edge still inside on return (which
+// always worked) and the edge gone past it (which never re-asked). Making this tier reach it would
+// mean a 256 s browser run, which is four times the whole file's budget.
 test("3. a live tile panned off-screen and back shows no grey gap: its coverage is complete on return",
   async (t) => {
     const { page, backend } = await journey();
@@ -1051,6 +1074,15 @@ test("3. a live tile panned off-screen and back shows no grey gap: its coverage 
     t.diagnostic(`residency after the round trip after ${afterRes.ms} ms: ${afterRes.counts}`);
     const afterG = await sampleGrey(page, body, { n: 4, gapMs: 1500 });
     const afterPix = afterG.last;
+    // **The reach of this tier, printed rather than asserted** (see the header). A level-0 tile is
+    // `RENDER_CELLS` x the lattice's base time cell; the round trip has to be longer than that for
+    // the tile to finish while it is away, which is the T-495 case.
+    // `RENDER_CELLS` (256, ui/src/surface/preview.ts) x this backend's base time cell — `axes.time.
+    // cell_s`, which `/api/tiles` reports as 1.0 s here.
+    const TILE_S = 256;
+    t.diagnostic(`round trip ${(tBack - tAway).toFixed(0)} s against a level-0 tile of ${TILE_S} s: the live ` +
+      "edge did NOT leave the tile, so this measures T-460's refresh surviving the trip, not T-495's " +
+      "expired eligibility (guarded in ui/test/surface-cache.test.ts)");
     t.diagnostic(`back on screen ${spanOf(afterWin)}: ${(afterG.mean * 100).toFixed(2)} % THE grey ` +
       `(mean of ${afterG.text}), ${afterPix.census.distinct} distinct; ` +
       `by vertical tenth (newest first) ${afterPix.bandsText}`);
