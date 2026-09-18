@@ -38,7 +38,7 @@
 // (CLAUDE.md's whole-UI window rule), and renders the retune control T-444 computes — persistent
 // and per-pane since T-476. The only device route it can reach is through `acceptPaneRetune` →
 // `applyDeviceAction`, T-343's one gate, on an explicit button press.
-import { activeWindows, type ActiveWindow } from "../../navigators";
+import { activeWindows, timeExtent, type ActiveWindow } from "../../navigators";
 import type { NavigationGrid } from "../../navigation";
 import { attachSurfaceInput, type GlPoint } from "../../surface/input";
 import {
@@ -59,6 +59,8 @@ import {
 } from "../../surface/trace";
 import type { OverlayQuad } from "../../surface/minimap";
 import { liveRow } from "./live-edge";
+import { recordIqButton, startCaptureClock } from "./capture-clock";
+import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
 import { openSelectionMenu, openSignalMenu } from "../menu";
@@ -90,6 +92,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
   const traceEl = h("div", { class: "sf-trace", role: "status" });
+  // T-506: the IQ horizon and the retention bound, said in words beside the two rules that draw
+  // them. The data-* attributes are the same numbers the rules were drawn from on the same frame,
+  // so ui/e2e can check the pixels against them rather than against a second calculation.
+  const ringEl = h("div", { class: "sf-ring", role: "status" });
   const liveBtn = h("button", { class: "mini sf-live", type: "button" }, "Live");
   const traceBtn = h("button", {
     class: "mini sf-tracebtn on", type: "button", "aria-pressed": "true",
@@ -101,11 +107,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // round it is — a fixed scale is honest only if it is quoted.
   const contrastBtn = h("button", { class: "mini sf-contrast", type: "button" }, "Auto-contrast: off");
   const rangeEl = h("span", { class: "sf-range", role: "status" });
-  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn,
+  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn, recordIqButton(ctx),
     h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved.", onclick: () => preview?.split("columns") }, "Split ⇔"),
     h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => preview?.closeActive() }, "Close"),
-    h("button", { class: "mini", type: "button", title: "Zoom the active viewport out to the device-available spectrum over the whole record horizon.", onclick: () => preview?.fitToSurface() }, "Whole surface"));
-  el.replaceChildren(h("div", { class: "sf-bar" }, actions, rangeEl, hoverEl), stage, traceEl, chrome, note);
+    h("button", { class: "mini", type: "button", title: "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", onclick: () => preview?.fitToSurface() }, "Whole surface"));
+  el.replaceChildren(h("div", { class: "sf-bar" }, actions, rangeEl, hoverEl), stage, traceEl, ringEl, chrome, note);
 
   let preview: SurfacePreview | null = null;
   let windows: ActiveWindow[] = [];
@@ -127,6 +133,52 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const s = store.get();
     const tS = s.live.edgeTS ?? s.captureWindow?.t1S ?? null;
     return tS === null ? 0 : tS * S_TO_NS;
+  };
+
+  // ---- the capture clock (T-379), re-homed from the retired Capture panel (T-506) ----
+  // The only writer of `state.captureWindow`. Started with the mount, not after the surface boots:
+  // the inventory lists and the History default period read it too, and a surface that failed to
+  // address must not take their live edge down with it.
+  startCaptureClock(ctx);
+
+  // ---- the IQ horizon and the retention bound (T-506) ----
+  //
+  // Two rules across every pane, from the ring window `GET /api/timeline` reports, laid out through
+  // the pane's own mapping on the same frame as the rows (`ringRuleQuads` → `toClip`). The edge is
+  // the one the panes are drawn to, so the retention bound advances with the rows, not on the poll.
+  // The readout says the same thing in words for the active pane, including which side of the IQ
+  // horizon that pane's own time position is on — the playback invariant's "no audio past the
+  // ring", stated where the user is looking rather than in a panel below it.
+  const ringQuads = (pane: PaneView, edge: number): OverlayQuad[] => {
+    const s = store.get();
+    const rules = ringRules(s.captureWindow, edge > 0 ? edge / S_TO_NS : null);
+    const p = preview;
+    if (p && pane.id === p.activePane) {
+      const following = p.view.panes.isFollowing(pane.id);
+      const posS = pane.box.t1Ns / S_TO_NS;
+      const backing = iqBackingAt(posS, following, rules);
+      const w = s.captureWindow;
+      const held = w?.buffered ? Math.max(0, w.buffered.t1S - (rules?.iqS ?? w.buffered.t0S)) : null;
+      setText(ringEl, !rules
+        ? "IQ ring: this server has not reported a capture window, so where raw IQ ends is unknown"
+        : `IQ ring: ${held === null ? "holds nothing yet" : `holds ${durationText(held)}`} of a ${durationText(rules.spanS)} retention`
+          + ` — green line: oldest IQ${rules.iqS === null ? " (none yet)" : ` ${clock(rules.iqS)}`}`
+          + `; magenta dashes: retention bound ${clock(rules.retentionS)}`
+          + ` · this viewport: ${iqNote(backing)}`);
+      const scale = canvas.height > 0 ? canvas.clientHeight / canvas.height : 1;
+      const d = ringEl.dataset;
+      d.retentionS = rules ? String(rules.retentionS) : "";
+      d.iqS = rules?.iqS != null ? String(rules.iqS) : "";
+      d.backing = backing;
+      d.paneT0S = String(pane.box.t0Ns / S_TO_NS);
+      d.paneT1S = String(pane.box.t1Ns / S_TO_NS);
+      // The pane's rectangle in CSS px from the canvas's top-left (PaneRect is GL, bottom-left).
+      d.paneTopPx = String((canvas.height - pane.rect.y - pane.rect.h) * scale);
+      d.paneHPx = String(pane.rect.h * scale);
+      d.paneLeftPx = String(pane.rect.x * scale);
+      d.paneWPx = String(pane.rect.w * scale);
+    }
+    return ringRuleQuads(rules, pane.box, pane.rect);
   };
 
   // ---- the marks: per frame, from the state they describe ----
@@ -287,8 +339,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // ---- mirror the active viewport into the app's one window (CLAUDE.md's whole-UI window rule) ----
   // The inventory lists, the focus panel and the decode captures all scope themselves through
   // `state.live.view` + `state.time` (`explore/inventory.ts`'s `viewWindow`). Writing the viewport
-  // there is what keeps them answering about what is on screen; it is the same state the capture
-  // band's scrub writes, so there is one time cursor with two editors, not two cursors.
+  // there is what keeps them answering about what is on screen. Since T-506 retired the capture
+  // band's scrub, the viewport is the time cursor's only editor.
   let lastMirror = "";
   function mirror(): void {
     const p = preview;
@@ -428,6 +480,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // formatter that reaches for the host's timezone is one keystroke from a fallback that reaches
   // for the host's *time* — which on a replay or a time-compressed scene is not this data's time.
   const at = (ns: number) => `${new Date(ns / 1e6).toISOString().slice(11, 19)}Z`;
+  const clock = (sec: number) => at(sec * S_TO_NS);
 
   function hitAt(x: number, y: number): { pane: PaneView; mark: MarkBox | null; fHz: number; tNs: number } | null {
     const hit = paneUnder(x, y);
@@ -481,7 +534,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         widthActions, onWidthAction: pressWidth,
         edge: () => edgeNs() || probe.origin.edgeNs,
         windows: () => windows,
-        marks: (pane, edge) => markQuads(boxesFor(pane), edge, pane.box, pane.rect),
+        // The ring rules first, so a signal box or selection that crosses one is drawn over it.
+        marks: (pane, edge) => [...ringQuads(pane, edge), ...markQuads(boxesFor(pane), edge, pane.box, pane.rect)],
         trace: traceFor, tracePx: TRACE_PX,
       });
     } catch (e) {
@@ -489,6 +543,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
       return;
     }
     say(probe.note);
+
+    // T-506: the time extent always reaches the retained capture window (T-338's span), and further
+    // back only where spectrum history exists. `timeExtent` is the ring's window and nothing else;
+    // the floor only ever moves older, so a pane is never yanked by a poll.
+    store.select((s) => s.captureWindow, (w) => {
+      const ext = timeExtent(w);
+      if (ext && preview) preview.extendTimeFloor(ext.lo * S_TO_NS);
+    }, { immediate: true });
 
     detach = attachSurfaceInput(canvas, preview, {
       onView: () => { mirror(); },

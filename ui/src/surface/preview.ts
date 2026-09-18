@@ -557,7 +557,28 @@ export class SurfacePreview {
     if (Number.isFinite(v) && v > this.edgeSeen) this.edgeSeen = v;
     return this.edgeSeen;
   }
-  get bounds(): Box { return this.probe.origin.bounds; }
+  get bounds(): Box { return this.boundsNow ?? this.probe.origin.bounds; }
+  private boundsNow: Box | null = null;
+
+  /**
+   * Extend the surface's time extent back to `t0Ns`, never forward (T-506).
+   *
+   * The probe sizes the time axis from the record horizon (`surfaceBounds`). On a young server that
+   * is seconds old, which would leave the **retained capture window** — the IQ ring's configured
+   * retention, which the canvas absorbed from the retired Capture panel (T-338) — partly
+   * unreachable: its bound would sit below the floor, and neither it nor the IQ horizon could be
+   * panned to. The host passes the window's start here, so the extent is always at least the
+   * retention window and, once history outgrows it, the history horizon as before. The span added
+   * is drawn by the one cell rule like any other (grey / unknown where nothing was recorded) — this
+   * widens where a pane may look, never what is claimed there.
+   */
+  extendTimeFloor(t0Ns: number): boolean {
+    const b = this.bounds;
+    if (!Number.isFinite(t0Ns) || !(t0Ns < b.t0Ns)) return false;
+    this.boundsNow = { ...b, t0Ns };
+    this.view.setBounds(this.boundsNow);
+    return true;
+  }
 
   /** Draw one frame. With no `windows` supplier the list is empty — the preview reads no live edge,
    * and a lit segment placed from a fixed historical instant would be a live claim with no live

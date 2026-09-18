@@ -360,21 +360,24 @@ export function clampInto(bounds: Range, v: Range): Range {
 
 // ---- the time navigator's extent, and why it is the capture window ----
 
-/** The `window` of `GET /api/timeline`, as `app/capture/timeline.ts` parses it. */
+/** The `window` of `GET /api/timeline`, as `app/centre/capture-window.ts` parses it. */
 export interface CaptureWindowLike { t0S: number; t1S: number; spanS: number }
 
 /**
- * The extent a **time** navigator spans: exactly the retained capture window (T-338) — the IQ
- * ring's configured retention, `[t0_s, t1_s]`, which is `span_s` long.
+ * The retained capture window as a time range: exactly the IQ ring's configured retention (T-338),
+ * `[t0_s, t1_s]`, which is `span_s` long.
  *
- * `null` when the server reported no capture window: the bar then scrubs nothing rather than
- * offering times with no capture behind them.
+ * `null` when the server reported no capture window: nothing then claims a span with no capture
+ * behind it.
  *
  * **Not the history horizon.** `GET /api/history` reaches back over the spectrum-history pyramid —
  * tiered, lossy, and in general far longer — and `/api/navigation`'s `time` block describes that
- * one. Sizing this bar from either would put positions on it that the ring has already overwritten,
- * which is the exact failure T-338 removed from the capture band (a hard-coded 48 h against a
- * two-minute ring). This module never reads those fields.
+ * one. This function never reads those fields, so a range it returns is the ring's and nothing else.
+ *
+ * T-506: the time navigator this was written for is retired, and its caller is now the canvas
+ * (`app/centre/surface.ts`), which uses it as the floor of the surface's time extent — the retained
+ * window is always reachable, however young the spectrum history is. The history horizon may extend
+ * the extent *further back* (the canvas is also the history view, docs/16 §8), never shorten it.
  */
 export function timeExtent(w: CaptureWindowLike | null): Range | null {
   if (!w || !Number.isFinite(w.t0S) || !Number.isFinite(w.t1S) || !(w.spanS > 0)) return null;

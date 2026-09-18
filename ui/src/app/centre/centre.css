@@ -15,7 +15,11 @@
   border-bottom: 1px solid var(--line); background: var(--panel);
   font: 11px var(--mono); color: var(--muted); min-width: 0;
 }
-.sf-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* T-506: the actions never shrink. With `min-width: 0` they did, and the range sentence beside them
+   was then painted over the buttons that overflowed — measured in a browser at 1440 px, the centre
+   of "Whole surface" hit-tested to `.sf-range`, so a real click did nothing. The sentence is the
+   thing that yields: it already ellipsises. */
+.sf-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 /* T-470: the colour scale, stated. It sits next to the actions rather than at the far end because a
    fixed range that clips is only honest if the range is read, not hunted for. */
 .sf-range { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -60,4 +64,14 @@
   border-top: 1px solid var(--line); background: var(--panel);
   font: 10.5px var(--mono); color: var(--muted); padding: 4px 12px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* T-506: the IQ horizon and the retention bound, in words, beside the two rules that draw them on
+   every pane (green solid: oldest IQ; magenta dashed: retention bound). The swatches repeat the
+   rules' own inks so the sentence can be matched to the line without a legend. Wraps rather than
+   truncating: "no IQ and no audio" is the clause that must never be cut off. */
+.sf-ring {
+  border-top: 1px solid var(--line); background: var(--panel);
+  font: 10.5px var(--mono); color: var(--muted); padding: 4px 12px;
+  overflow-wrap: anywhere;
 }

@@ -6,7 +6,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { ControlError } from "../src/controls/client";
 import type { ControlState } from "../src/controls/model";
-import { mounts as capture } from "../src/app/capture";
 import { mounts as centre } from "../src/app/centre";
 import { mounts as decode } from "../src/app/decode";
 import { mounts as dock } from "../src/app/dock";
@@ -24,7 +23,7 @@ const css = cssImports.map((f) => readFileSync(`src/app/${f}`, "utf8")).join("\n
 // strip) and the two edge navigators "timenav"/"freqnav" — with ONE: "surface".
 // T-409's "nudge" stays: the tuning-nudge buttons in the top bar, beside the Go to control they sit
 // next to and the Centre readout they change.
-const SLOTS = ["inventory", "selections", "surface", "nudge", "capture", "focus", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue"];
+const SLOTS = ["inventory", "selections", "surface", "nudge", "focus", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue"];
 const replayState = JSON.parse(readFileSync("test/control_state_replay.json", "utf8")) as ControlState;
 
 test("backoff doubles from 250 ms and caps at 10 s", () => {
@@ -140,12 +139,12 @@ test("the app page has every panel slot once, and the mode toggle", () => {
 });
 
 test("every panel slot is mounted by exactly one area index", () => {
-  const names = [explore, centre, capture, decode, dock, review, history].flatMap((m) => Object.keys(m));
+  const names = [explore, centre, decode, dock, review, history].flatMap((m) => Object.keys(m));
   assert.deepEqual([...names].sort(), [...SLOTS].sort());
 });
 
 test("app.css is an import list: base first, then one file per area", () => {
-  assert.deepEqual(cssImports, ["base.css", "explore/explore.css", "centre/centre.css", "capture/capture.css", "dock/dock.css", "decode/decode.css", "decode/inspector.css", "explore/output-panel.css", "review/review.css", "history/history.css", "menu/menu.css"]);
+  assert.deepEqual(cssImports, ["base.css", "explore/explore.css", "centre/centre.css", "dock/dock.css", "decode/decode.css", "decode/inspector.css", "explore/output-panel.css", "review/review.css", "history/history.css", "menu/menu.css"]);
   assert.doesNotMatch(entryCss.replace(/\/\*[\s\S]*?\*\//g, "").replace(/@import "[^"]+";/g, ""), /\S/, "no rules in app.css itself");
 });
 

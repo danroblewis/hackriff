@@ -134,7 +134,7 @@ export function liveEdgeS(state: WindowState): number | null {
  *
  * T-445: this used to be the live waterfall's ring height over its row rate, and it was the *only*
  * definition of "how much time is on screen". The unified surface names its own span on both arms
- * of the cursor (`capture/slice.ts`), so this is now a fallback for the moment before the first
+ * of the cursor (`centre/capture-slice.ts`), so this is now a fallback for the moment before the first
  * viewport has reported, not a second opinion about the window. It stays pinned to the row rate
  * rather than becoming a constant, because that is what it means: the period of the data.
  */

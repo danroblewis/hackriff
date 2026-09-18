@@ -732,6 +732,25 @@ test("fit-to-coverage returns the active pane to the opened window after a pan i
   assert.equal(p.time.live, false, "coming back must not re-pin the pane to an edge this view does not read");
 });
 
+test("T-506: the time floor extends back to the retained capture window, and never moves forward", () => {
+  // The canvas absorbed the Capture panel's retention window (T-338). On a young server the record
+  // horizon is seconds old, so without this the retention bound and the IQ horizon would sit below
+  // the surface's floor where no pane could reach them.
+  const { preview } = harness();
+  const id = preview.activePane;
+  const b0 = preview.bounds;
+  assert.equal(preview.extendTimeFloor(b0.t0Ns + 5 * S), false, "a newer floor would shrink the extent");
+  assert.deepEqual(preview.bounds, b0);
+  assert.equal(preview.extendTimeFloor(Number.NaN), false);
+  const fullBefore = (() => { preview.view.panes.zoomTime(id, 1e9); return preview.view.panes.get(id)!.time.spanNs; })();
+  assert.equal(preview.extendTimeFloor(b0.t0Ns - 120 * S), true);
+  assert.equal(preview.bounds.t0Ns, b0.t0Ns - 120 * S, "the floor moved back to the window's start");
+  assert.deepEqual({ ...preview.bounds, t0Ns: b0.t0Ns }, b0, "and nothing else about the extent changed");
+  preview.view.panes.zoomTime(id, 1e9);
+  assert.ok(preview.view.panes.get(id)!.time.spanNs >= fullBefore + 120 * S - 1,
+    "a pane can now zoom out over the whole retained window");
+});
+
 test("split gives two viewports onto ONE surface, and the last pane never closes", () => {
   const { preview } = harness();
   preview.frame();

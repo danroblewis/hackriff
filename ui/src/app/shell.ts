@@ -62,9 +62,9 @@ export function mountShell(ctx: AppContext) {
   }, { immediate: true });
 
   // Per-viewer prefs (a convenience only; storage may be unavailable).
-  store.select((s) => `${s.mode}|${s.theme}|${s.captureCollapsed}`, () => {
-    const { mode, theme, captureCollapsed } = store.get();
-    try { localStorage.setItem(PREFS_KEY, JSON.stringify({ mode, theme, captureCollapsed } satisfies Prefs)); } catch { /* storage unavailable */ }
+  store.select((s) => `${s.mode}|${s.theme}`, () => {
+    const { mode, theme } = store.get();
+    try { localStorage.setItem(PREFS_KEY, JSON.stringify({ mode, theme } satisfies Prefs)); } catch { /* storage unavailable */ }
   });
 
   // Review drawer toggle (T-155 fills the drawer)

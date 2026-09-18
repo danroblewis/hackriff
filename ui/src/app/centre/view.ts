@@ -25,7 +25,7 @@ import * as ax from "../../axis";
 import { ControlError } from "../../controls/client";
 import type { ViewHooks } from "../../controls/gestures";
 import { snapCenter, type DetailPlan } from "../../navigation";
-import { currentSpan } from "../capture/timeline";
+import { currentSpan } from "./capture-window";
 import type { AppContext } from "../context";
 import { toast } from "../shell-slice";
 import type { AppState } from "../state";
@@ -47,7 +47,7 @@ export function geometryOfLive(l: Pick<LiveSlice, "centerHz" | "bandwidthHz" | "
  * `/api/inventory` was answering with rows for exactly the band the device reports. That is "we
  * have it but didn't render it" with a single point of failure in front of it.
  *
- * The tuned band is the same fallback the capture band and the History surface already take
+ * The tuned band is the same fallback Record IQ and the History surface already take
  * ([[currentSpan]]), so this adds no new source of truth: it reads `/api/control/state`'s own
  * centre and sample rate. `null` stays *unknown* — nothing is invented when neither has answered.
  *
