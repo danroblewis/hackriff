@@ -296,10 +296,24 @@ export class Page {
     }
   }
 
-  async wheel(at, deltaY, { shift = false } = {}) {
+  /**
+   * A wheel at a point, with real modifier bits (T-456).
+   *
+   * CDP's `modifiers` is a bitmask — **Alt 1, Ctrl 2, Meta 4, Shift 8** — and the browser turns it
+   * back into `altKey`/`ctrlKey`/`metaKey`/`shiftKey` on the `WheelEvent` the page receives. That
+   * is the point of dispatching it this way rather than constructing a `WheelEvent` in the page: the
+   * flags under test are ones the browser set, not ones the test wrote.
+   *
+   * **What it still cannot prove.** A CDP event enters at the renderer, so it cannot answer whether
+   * the *operating system* would have delivered the gesture at all — macOS's Accessibility zoom
+   * consumes ctrl+scroll before any browser sees it. `surface-nav.e2e.mjs` says so where it uses
+   * this, rather than letting a green run imply more than it measured.
+   */
+  async wheel(at, deltaY, { shift = false, alt = false, ctrl = false, meta = false, deltaX = 0 } = {}) {
+    const modifiers = (alt ? 1 : 0) | (ctrl ? 2 : 0) | (meta ? 4 : 0) | (shift ? 8 : 0);
     await this.conn.send("Input.dispatchMouseEvent", {
-      type: "mouseWheel", x: at.x, y: at.y, deltaX: 0, deltaY,
-      modifiers: shift ? 8 : 0, pointerType: "mouse",
+      type: "mouseWheel", x: at.x, y: at.y, deltaX, deltaY,
+      modifiers, pointerType: "mouse",
     }, this.sessionId);
   }
 
