@@ -7565,7 +7565,7 @@ tasks:
   - id: T-374
     title: Nothing can say "these emitters are harmonics of one fundamental nobody can see"
     milestone: M3
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: M3B
     core_interface: true
@@ -7589,6 +7589,49 @@ tasks:
       It must be able to say NO. A fit over enough emitters will always find some f0;
       the control is a set of unrelated real emitters that must NOT be declared a
       family. Per T-233, evidence that can only merge is not evidence.
+    commit: "8e223c1"
+    result: |
+      DONE - AND THE NEGATIVE CONTROL REJECTED ITS OWN FIRST DESIGN, which is the result. The first
+      residual tolerance was 10 % of the narrowest member's width, justified by "an oscillator harmonic's
+      width IS its frequency noise, so the line wanders by about its own width" - TRUE, AND A PROPERTY
+      ONLY A MEMBER OF A REAL FAMILY HAS. Applied to a 180 kHz broadcast station it granted a 15 kHz
+      window to a centre measurable to a kilohertz: 555 OF 1000 randomly drawn, wholly unrelated FM-band
+      populations were declared harmonic families. Fix: the tolerance is the TIGHTER of 5 ppm (family-
+      agnostic, same form as relate::center_uncertainty_hz) and the width fraction, plus an absolute
+      origin gate. After, over 1000 trials x 4 regimes: FM band 0.5550 -> 0.0000; VHF 0.0050 -> 0.0000;
+      UHF 0.0010 -> 0.0010; narrow lines 0.0000; 20 unrelated emitters 0.0800 -> 0.0050.
+      IT REFUSED TO COUNT THREE INDEPENDENT CHECKS. off_by_one(d) proves the RESIDUAL CANNOT CHOOSE A
+      LABELLING: shifting every index leaves the slope unchanged and EVERY RESIDUAL BIT-IDENTICAL
+      (assert_eq! on f64s, not a tolerance), moving only the intercept by exactly d*f0, because n - nbar is
+      invariant under a uniform shift. So only "a family passes through the origin" can pin the indices,
+      recorded as TWO numbers: origin_sigmas is self-scaling and therefore WEAK - the control caught it
+      acquitting a spurious family 174 kHz off origin at 1.65 sigma, because its intercept carried 105 kHz
+      of standard error - paired with origin_fraction = |b|/f0 <= 0.01, which has no such escape.
+      index_pin = se(b)/f0 is the non-vacuity number. THE MODULE DOCS SAY PLAINLY that the residual and
+      the intercept are TWO READINGS OF ONE FIT and that the grouping step partly selects for a small b;
+      the genuinely independent evidence is the WIDTH and the LINE SHAPE.
+      THE WIDTH EVIDENCE DOES NOT SEPARATE AT T-317'S LEVERAGE, AND THE TEST ASSERTS THAT IT DOES NOT:
+      index leverage 45/43 = 1.047, so w ~ n and w = const differ by 4.7 % against 15 % measured scatter,
+      and WidthEvidence::separates is FALSE there. It confirms the SCALE - 28 kHz is 43 x 134 Hz of one
+      oscillator's noise (w/n = 138/120/137 Hz, ratio 1.150, sigma0 = 131.7 Hz) - not the SLOPE. A
+      separate test shows it DOES separate over n = 3..12.
+      NOT REUSING emitter_relation IS ARGUED: every row there names a source_id - one emitter deferring to
+      another, PAIRWISE - while a family's cause HAS NO ROW and the claim binds three-plus emitters at
+      once. A nullable source plus a synthetic emitter for the fundamental would put a NEVER-MEASURED
+      FREQUENCY into the inventory.
+      POSITIVE CONTROL reconstructs T-317 BLIND among real unrelated stations: f0 = 2.336398 MHz, residual
+      190.7 Hz against a 525.7 tolerance, intercept 71.7 +/- 10 277 Hz, 0.01 sigma and 3.07e-5 of a
+      fundamental from origin, index_pin 0.0044.
+      NON-VACUITY: all 39 711 three-member index sets in 2..=64 enumerated for the worst reachable
+      index_pin (0.0247 at n = 62,63,64, against INDEX_PIN_MAX 0.1), so every residual-passing set is
+      pinned BY CONSTRUCTION - stated as a proof, not tuned into a firing case; and every one of the 11
+      FamilyRejection variants has a case only it rejects, with the test failing if a variant is added
+      without one.
+      FOR LATER: the reusable part is the SHAPE, not the arithmetic - a claim over a SET, against a cause
+      with NO ROW, with corroboration from a column the fit never touched. FamilyMember carries line_shape
+      already, which is the multipath hook.
+      Gate: full, passed. Migration 0014, docs/07 section 2.32, C40 updated with the boundary against
+      hk_detect::comb (lines INSIDE one detection vs separate emitters in different bands).
   - id: T-375
     title: 50 ohm terminator capture - is the oscillator family radiated or conducted?
     milestone: M2-hardening
@@ -14144,6 +14187,43 @@ tasks:
       alone means a red live-edge gate for every subsequent merge; holding T-482 keeps the minimap
       broken, which is the only reason the test is currently green. Neither is acceptable, so the two
       go together.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-491
+    milestone: MLIVE
+    title: The minimap's INITIAL FILL holds the refresh lane's precondition false for ~10 s - a weaker form of the same trap
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    depends_on: [T-490]
+    use_cases: [AWARE-011]
+    acceptance: |
+      A NAMED RESIDUAL, reported by T-490 rather than left as run-to-run noise. In 3 of 13 runs the
+      live-edge test's `t+8s` sample is FLAT - ALWAYS THE FIRST SAMPLE, NEVER A LATER ONE.
+      MECHANISM, measured: the minimap's INITIAL FILL is ~19 ORDINARY-QUEUE MISSES, not revalidations,
+      so for the first several seconds there is no spare slot and pumpRefresh's `inflight < limit`
+      precondition is held false BY LEGITIMATELY BUSY VISIBLE WORK. T-490's per-level lanes do not
+      help, because the contention is not between lanes - it is between the refresh lane and the
+      ordinary queue.
+      THIS IS T-460'S OWN WARNING RECURRING IN A WEAKER FORM: "a precondition something unrelated can
+      hold false forever is not a safety property." Here it is ~10 s rather than forever, which is
+      why it passes at 4/5 inside the assertion's deliberate tolerance - but the shape is identical
+      and the first seconds of a session are exactly when a user is looking.
+      WHY T-490 DID NOT FIX IT, and this is the constraint to respect: the obvious fix is to let the
+      refresh lane take a slot FROM the ordinary queue, which would REPLACE T-460's property 5 - one
+      revalidation in flight, into a slot the ordinary queue could not use. That property is what
+      makes the refresh cheap by construction and keeps it from starving visible fetches. Do not
+      trade it away casually; if it must change, say what replaces it and show no visible fetch is
+      starved.
+      A CHEAPER ANGLE WORTH MEASURING FIRST: the minimap's initial fill is ~19 misses because it
+      opens on a coarse address with nothing resident. Does it need all 19 before the first draw, or
+      could it draw progressively from what arrives? That would shorten the window without touching
+      the lane's properties at all.
+      DoD: the first sample is drawn in 13 of 13 runs under load; whichever route is taken, T-460's
+      five properties are shown still to hold (or the one that changed is named with its replacement
+      and its evidence); and no visible fetch is starved, measured.
+    notes: |
+      Filed 2026-09-18 from T-490's report. Second-order: the live edge advances correctly from ~10 s
+      onward; this is the opening window only.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
