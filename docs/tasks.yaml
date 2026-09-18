@@ -13424,6 +13424,58 @@ tasks:
       the bug. If any of those three slips, this can still be written against the DEFECT and left
       failing, but say so explicitly rather than weakening an assertion to make it pass.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-482
+    milestone: MLIVE
+    title: /api/tiles declares a 12 x 15 lattice and 400s a large part of it - the route must say how far it can actually be READ
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      FOUND BY T-480, WHICH DISPROVED ITS OWN TICKET'S PREMISE. T-479/T-480 assumed the client was
+      computing addresses OUTSIDE the lattice. It is not: `level_f=10, t_index=218471` - the address
+      from the user's console flood - IS INSIDE THE DECLARED LATTICE. `/api/tiles` declares
+      `axes.frequency.levels = 12` and `axes.time.levels = 15`, and then 400s a large part of that
+      grid: every level_f >= 10, and roughly level_f + level_t > 10.
+      Two distinct server refusals were reproduced against a real hk serve: "no store level can back
+      this tile inside the work budget" and "building level 1 here needs more than 1024 tiles of
+      folding". The root is that the VIEW ADDRESS lattice is 12 x 15 while the STORE behind it is
+      VIEW_LEVELS = 4 deep per axis (hk-pipeline/src/history.rs), so the coarse corner is NAMED BUT
+      UNBACKABLE.
+      THE SERVABLE SET IS AN AREA CONSTRAINT (tile Hz x tile s), NOT A PER-AXIS LEVEL BOUND, which
+      T-480 verified by moving `cells`: level 10 fails at cells=256 and SUCCEEDS at 128, and level 9
+      at 256 is the same extent and succeeds.
+      SO THE CLIENT WAS OBEYING THE ONLY BOUND ANYONE STATES, AND THAT BOUND IS WRONG. A client
+      cannot clamp to a bound nobody declares. This is "nothing said is never permissive" inverted:
+      the route said MORE than it could deliver, and every client that believed it was punished.
+      WHAT THIS TICKET OWES: the route declares, per axis, how far up it can actually be READ -
+      `axes.{frequency,time}.max_level` in axes_json (crates/hk-api/src/tiles.rs), with docs/api.md
+      and its contract test moving together (T-079). THE CLIENT HALF IS ALREADY DONE: T-480 reads
+      the optional field and falls back to `levels - 1` when absent, so this is purely the server
+      side.
+      TWO CANDIDATE SHAPES, from T-480's investigation - it is NOT cheaply computable from
+      affordable_levels alone, because the binding constraint at level 10 is hk-store's materialize
+      budget: (a) walk down from the top once per process via tile_read and cache the answer;
+      (b) fix the deeper root - VIEW_LEVELS = 4 against a 12 x 15 address lattice - which needs
+      T-453-style ingest measurement and is the honest fix if the numbers allow it.
+      MEASURED TARGET, from T-480's browser run: as shipped, an aggressive zoom-out makes 117 tile
+      requests of which 107 are refused 400. Told the ceiling (level_f 0..9, level_t 0..5, injected
+      as max_level), the same gesture makes 12 requests with ZERO 4xx. That is the number to
+      reproduce without a shim.
+      DoD: the route declares a per-axis readable ceiling that is TRUE - every address inside it is
+      servable, demonstrated rather than asserted; docs/api.md and api_contract.rs updated together;
+      and the aggressive zoom-out produces zero 4xx with no client-side shim.
+    notes: |
+      Filed 2026-09-18 from T-480's report. T-480 deliberately did not edit tiles.rs because T-467
+      owned it and was in flight; T-467 has since landed, so the file is free.
+      NOTE THE OTHER HALF OF THE FLOOD: T-480 found the minimap sits at level 10/0 ON FIRST PAINT,
+      with no gesture at all - so the flood is not gesture-driven and T-472's aspect drift only
+      aggravates it. Until this ticket lands, T-479's terminal-4xx handling is what keeps the console
+      quiet.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
