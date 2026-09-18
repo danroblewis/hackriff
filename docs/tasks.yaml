@@ -11894,6 +11894,66 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
       FILTERSET TRAP worth knowing: `-E 'test(<file name>)'` matches NOTHING and exits non-zero,
       which reads as a failure. Use `binary(<file>)` for a whole file.
+  - id: T-452
+    milestone: MCANVAS
+    title: An in-app scan trigger - the iterative-scan ENGINE exists but `hk serve` deliberately never drives the scheduler
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: [T-406, T-450]
+    use_cases: [AWARE-042, AWARE-011]
+    found_by: 'the user, 2026-09-17 - wants to start a survey sweep from the app, not only at server launch'
+    acceptance: |
+      USER REQUEST. Expose T-406's iterative scan as a LIVE CONTROL: an API (e.g.
+      POST /api/scan with a range and dwell_s) plus a UI control to start and stop a survey sweep
+      on demand, so the frequency navigator / canvas coverage PRE-POPULATES - grey turning lit as
+      the sweep steps.
+      THE ENGINE IS DONE AND THIS IS NOT MERELY A ROUTE OVER IT. T-406 built
+      hk_core::scheduler::IterativeScan as a DWELL POLICY over the existing scheduler: a
+      ScanPolicy::DwellOnly plan with a configurable region_dwell_ns, written into
+      extra.scheduler.region_dwell_s so the plan carries its own policy through a --plan JSON
+      round-trip, with SchedulerConfig::from_plan reading it back and no second code path. It is
+      reachable as --survey-dwell SECONDS on `hk run`, `hk replay` and `hackriffd`.
+      THE ACTUAL OBSTACLE, and it is deliberate: `hk serve` - the mode the UI talks to - NEVER
+      DRIVES THE SCHEDULER. crates/hk-cli/src/serve.rs:139 says so in a comment and sets
+      schedule: false. T-406 noted it too and correctly did not change it. So this ticket is a
+      DESIGN DECISION about that stance, not plumbing, and the decision must be made explicitly
+      rather than by deleting the line.
+      THE QUESTION THE DESIGN MUST ANSWER: a sweep and interactive tuning BOTH WANT TO OWN THE
+      RADIO. If a scan is stepping and the user pans a pane to un-tuned spectrum (T-444's
+      retune-on-pan), who wins, and how does the user know? Both go through T-343's gated typed
+      DeviceAction, one capture at a time - so the mechanism is there, and the POLICY is missing.
+      Candidate answers to weigh rather than assume: the scan yields to an explicit user act and
+      says so; the scan is paused and resumable; or the user act is refused while a scan holds the
+      radio. The honesty rule applies either way - if a user action is refused or deferred, SAY
+      SO, do not silently drop it (T-409's clamped-nudge lesson, one layer up).
+      WHAT MUST NOT REGRESS: T-340's control (no pan and no wheel reaches a device route), T-343's
+      single gated path with device_id recorded, one capture at a time and the settle gap
+      honoured, and the always-on invariant - a scan must not stop or slow capture, the ring or
+      detection.
+      COVERAGE HONESTY, which is the whole point of the feature: T-406 already made a dwell step
+      write ONE RECORD PER STEP with its true band and interval, because a coarse record spanning
+      a pass rasterises as "the whole band, the whole time". That is what makes grey-turning-lit
+      truthful rather than decorative. Do not add a second accumulator; the canvas reads the same
+      coverage plane.
+      DoD: a sweep can be started and stopped from the app; coverage visibly fills as it steps;
+      the arbitration policy between scan and interactive tuning is decided, documented and
+      asserted; docs/api.md and crates/hk-cli/tests/api_contract.rs move together (T-079),
+      asserting the field's VALUE not the response shape (T-315).
+    notes: |
+      SEQUENCING, from the user: do NOT jump ahead of T-450 (the preview route) or T-439 (live-edge
+      tiles). This is slotted into MCANVAS behind them - the scan is much more compelling once
+      there is a surface to watch it fill, and T-450 is what makes that visible.
+      Read T-406's result field first; it is the engine's own account, including the budget line it
+      prints (401 steps x 12 s = a 4812 s pass over 5999 MHz, duty 0.249%) and the finding that a
+      step catches anything during its own dwell and NOTHING during the other 4800 s. A live
+      control should probably show that arithmetic, since a user starting a 6 GHz sweep at a 15 s
+      dwell is committing to ~80 minutes.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-cli`,
+      `just test-crate hk-core`, `just test-ui`, `just test-one <name>` - then HAND BACK. Never
+      `just gate`; the coordinator gates at merge.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
