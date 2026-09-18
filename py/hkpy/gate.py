@@ -93,7 +93,7 @@ PHASES = (PHASE_ALL, PHASE_CHECK, PHASE_ACCEPTANCE)
 SUITES: dict[str, dict[str, tuple[tuple[str, ...], ...]]] = {
     FULL: {
         PHASE_CHECK: (("just", "lint"), ("just", "test")),
-        PHASE_ACCEPTANCE: (("just", "acceptance-ci"),),
+        PHASE_ACCEPTANCE: (("just", "acceptance-ci"), ("just", "test-ui-e2e")),
     },
     UI: {
         # `just test-ui` is npm ci + build + `tsc --noEmit` + the ui/test suites. The
@@ -101,7 +101,18 @@ SUITES: dict[str, dict[str, tuple[tuple[str, ...], ...]]] = {
         # the UI's lint equivalent is the typecheck already inside test-ui; running clippy
         # over the workspace for a change to a .ts file proves nothing it could break.
         PHASE_CHECK: (("just", "test-ui"),),
-        PHASE_ACCEPTANCE: (),
+        # `just test-ui-e2e` (T-455) is the browser tier: headless Chrome over a real
+        # `hk serve`, asserting on what /surface draws and what it requests. It is in the
+        # ACCEPTANCE phase, not CHECK, because it needs the `hk` binary and a browser
+        # while `test-ui` needs neither — putting it in CHECK would make every `.ts` typo
+        # pay for a Rust build. It runs for the `full` class too: this is the only suite
+        # that notices when a backend change breaks the page that consumes it.
+        #
+        # It is not optional, and that is the point of the ticket that added it. Two
+        # defects in two days (T-450's CSP throw at module scope, T-454's 503 reaching the
+        # user) passed every suite this repo had, and a verification tier nobody is
+        # obliged to run is worse than none, because it looks like coverage.
+        PHASE_ACCEPTANCE: (("just", "test-ui-e2e"),),
     },
     DOCS: {
         # No link checker and no markdown linter exist in this repo, and adding a
@@ -124,6 +135,7 @@ _COMMAND_ORDER = (
     ("just", "test-ui"),
     ("just", "test-py"),
     ("just", "acceptance-ci"),
+    ("just", "test-ui-e2e"),
 )
 
 _GATE_SELF = "the gate itself — it must not be able to weaken itself"

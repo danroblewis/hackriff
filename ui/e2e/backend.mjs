@@ -1,0 +1,145 @@
+// The real backend, under the browser tier (T-455).
+//
+// **Why `hk serve` and not a node mock.** T-450's defect was that the built bundle threw during
+// module evaluation because `hk serve` sends `default-src 'self'` with no `unsafe-eval`. That
+// header is a constant in `crates/hk-api/src/http.rs`. A node mock would have to restate it, which
+// makes a second copy of the load-bearing fact — the exact drift shape `cellrule.ts` was rewritten
+// to avoid. So this tier runs the product's own server, over a **recorded** fixture, and the header
+// under test is the one the product ships. `assertRealCsp` below then checks the server actually
+// sent the no-`unsafe-eval` policy, so a future loosening of the CSP cannot quietly make T-450's
+// guard vacuous.
+//
+// The fixture is a SigMF recording replayed through `--replay`; nothing here touches a radio and
+// nothing here can retune one.
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const UI_DIR = path.resolve(fileURLToPath(import.meta.url), "../..");
+export const REPO = path.resolve(UI_DIR, "..");
+
+/** Ports this suite may never take: the user's live-HackRF demo and the stream/API ports beside it. */
+const FORBIDDEN = new Set([8788, 8789, 8899, 8900]);
+
+export const DEFAULT_FIXTURE = "fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta";
+
+function hkBinary() {
+  if (process.env.HK_BIN) {
+    if (!existsSync(process.env.HK_BIN)) throw new Error(`HK_BIN=${process.env.HK_BIN} does not exist`);
+    return process.env.HK_BIN;
+  }
+  for (const p of ["target/release/hk", "target/debug/hk"]) {
+    const abs = path.join(REPO, p);
+    if (existsSync(abs)) return abs;
+  }
+  throw new Error(
+    "no `hk` binary. Build it once (`cargo build -p hk-cli --bin hk`) or set HK_BIN=/path/to/hk.\n" +
+    "This tier drives the product's own server so the CSP and the /api/tiles backpressure under\n" +
+    "test are the real ones; see the header of ui/e2e/backend.mjs.",
+  );
+}
+
+/**
+ * Start `hk serve` over a recorded fixture and wait until it is answering.
+ *
+ * Returns `{ origin, token, stop(), log() }`. `stop()` is idempotent and always kills the child.
+ */
+export async function startBackend({
+  port = Number(process.env.HK_E2E_PORT ?? 8791),
+  fixture = process.env.HK_E2E_FIXTURE ?? DEFAULT_FIXTURE,
+  // HK_E2E_UI_DIST is how `selftest.mjs` points the product's own server at a DELIBERATELY BROKEN
+  // build, to prove this suite can still tell the difference.
+  uiDist = process.env.HK_E2E_UI_DIST ?? path.join(UI_DIR, "dist"),
+  token = "hke2e0123456789abcdef",
+} = {}) {
+  if (FORBIDDEN.has(port)) {
+    throw new Error(`port ${port} is reserved (the user's live-HackRF demo and its stream port); pick another`);
+  }
+  if (!existsSync(path.join(uiDist, "surface.html"))) {
+    throw new Error(`${uiDist}/surface.html is missing — run \`npm run build\` in ui/ first`);
+  }
+  const bin = hkBinary();
+  const dataDir = mkdtempSync(path.join(tmpdir(), "hk-e2e-data-"));
+  const proc = spawn(bin, [
+    "serve",
+    "--replay", path.join(REPO, fixture),
+    "--loop",
+    "--bind", `127.0.0.1:${port}`,
+    "--data-dir", dataDir,
+    "--ui-dist", uiDist,
+  ], {
+    cwd: REPO,
+    // HK_STREAM_TCP is pinned away from the default as well: `hk serve` also runs a TCP stream
+    // server, whose default is 8788 — the port beside the user's live-HackRF demo. `:0` asks the
+    // OS for an ephemeral one, so this tier can never take a port anything else wants.
+    env: { ...process.env, HK_TOKEN: token, HK_STREAM_TCP: "127.0.0.1:0" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let log = "";
+  proc.stdout.on("data", (d) => { log += d; });
+  proc.stderr.on("data", (d) => { log += d; });
+  let exited = null;
+  proc.on("exit", (code, sig) => { exited = `hk serve exited early (code ${code}, signal ${sig})`; });
+
+  const origin = `http://127.0.0.1:${port}`;
+  const stop = () => {
+    try { proc.kill("SIGKILL"); } catch { /* already gone */ }
+    try { rmSync(dataDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  };
+
+  for (let i = 0; i < 400; i++) {
+    if (exited) { stop(); throw new Error(`${exited}\n${log.slice(-2000)}`); }
+    try {
+      const r = await fetch(`${origin}/surface.html`);
+      if (r.ok) return { origin, token, dataDir, stop, log: () => log, proc };
+    } catch { /* not listening yet */ }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  stop();
+  throw new Error(`hk serve did not come up on ${origin} in 20 s:\n${log.slice(-2000)}`);
+}
+
+/**
+ * The header T-450 died on, asserted at the source rather than assumed.
+ *
+ * If someone adds `unsafe-eval` to the product's CSP, `surface-load.e2e.mjs` would keep passing
+ * while proving nothing — so the guard checks its own premise first.
+ */
+export async function assertRealCsp(origin) {
+  const r = await fetch(`${origin}/surface.html`);
+  const csp = r.headers.get("content-security-policy") ?? "";
+  if (!/default-src\s+'self'/.test(csp)) {
+    throw new Error(`the server did not send a default-src 'self' CSP, so the T-450 guard proves nothing: ${csp || "(no header)"}`);
+  }
+  if (/unsafe-eval/.test(csp)) {
+    throw new Error(`the product CSP now allows unsafe-eval, so the T-450 guard is vacuous: ${csp}`);
+  }
+  return csp;
+}
+
+/**
+ * `/api/tiles`' own declared backpressure cap — the number the client must obey, from the server.
+ *
+ * Retries a `503`: a just-started `hk serve` is ingesting the recording and holding the history
+ * lock, so the route legitimately refuses for the first seconds. Obeying the refusal is exactly
+ * what the route asks a client to do, and a harness that could not do it would be a poor witness
+ * against a client that cannot either.
+ */
+export async function tileCost(origin, token, { timeoutMs = 60000 } = {}) {
+  const q = new URLSearchParams({
+    token, level_f: "0", level_t: "0", f_index: "0", t_index: "0", cells: "8",
+  });
+  const t0 = Date.now();
+  for (;;) {
+    const r = await fetch(`${origin}/api/tiles?${q}`);
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) return j.cost ?? {};
+    if (r.status !== 503 || Date.now() - t0 > timeoutMs) {
+      throw new Error(`GET /api/tiles failed (${r.status}) after ${Date.now() - t0} ms: ${JSON.stringify(j).slice(0, 400)}`);
+    }
+    await new Promise((res) => setTimeout(res, 250));
+  }
+}

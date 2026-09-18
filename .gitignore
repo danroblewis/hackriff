@@ -4,6 +4,8 @@ py/.venv/
 .venv/
 node_modules/
 ui/dist/
+ui/e2e/artifacts/
+ui/.e2e-selftest/
 *.pyc
 __pycache__/
 .DS_Store

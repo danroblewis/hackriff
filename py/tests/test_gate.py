@@ -42,16 +42,21 @@ def suites(*paths, phase="all"):
 def test_ui_only_runs_the_ui_suite_alone():
     d = classify(["ui/src/app/time_nav.ts", "ui/test/run.mjs", "ui/package.json"])
     assert d.label == UI
-    assert [" ".join(c) for c in d.commands()] == ["just test-ui"]
-    # And nothing in the acceptance phase, so CI's acceptance job is a fast no-op.
-    assert d.commands(PHASE_ACCEPTANCE) == []
+    assert [" ".join(c) for c in d.commands()] == ["just test-ui", "just test-ui-e2e"]
+    # The check phase stays the cheap one — npm + tsc + the node suites — and the browser
+    # tier (T-455) lands in acceptance, where the suites that need a built binary live.
+    assert [" ".join(c) for c in d.commands(PHASE_CHECK)] == ["just test-ui"]
+    assert [" ".join(c) for c in d.commands(PHASE_ACCEPTANCE)] == ["just test-ui-e2e"]
 
 
 def test_crates_run_the_full_gate():
     d = classify(["crates/hk-detect/src/lib.rs"])
     assert d.label == FULL
     assert [" ".join(c) for c in d.commands(PHASE_CHECK)] == ["just lint", "just test"]
-    assert [" ".join(c) for c in d.commands(PHASE_ACCEPTANCE)] == ["just acceptance-ci"]
+    assert [" ".join(c) for c in d.commands(PHASE_ACCEPTANCE)] == [
+        "just acceptance-ci",
+        "just test-ui-e2e",
+    ]
 
 
 def test_api_contract_doc_is_full_not_docs():
@@ -61,6 +66,7 @@ def test_api_contract_doc_is_full_not_docs():
         "just lint",
         "just test",
         "just acceptance-ci",
+        "just test-ui-e2e",
     ]
 
 
@@ -160,6 +166,7 @@ def test_ui_plus_crates_is_full():
         "just lint",
         "just test",
         "just acceptance-ci",
+        "just test-ui-e2e",
     ]
 
 
@@ -167,7 +174,7 @@ def test_ui_plus_docs_runs_the_union_not_the_full_gate():
     # Neither class can move the Rust path, so the union is the honest answer.
     d = classify(["ui/src/app/main.ts", "docs/14-ui-rewrite.md"])
     assert d.label == "ui+docs"
-    assert [" ".join(c) for c in d.commands()] == ["just test-ui"]
+    assert [" ".join(c) for c in d.commands()] == ["just test-ui", "just test-ui-e2e"]
 
 
 def test_ui_plus_py_runs_both_cheap_suites():
@@ -177,6 +184,7 @@ def test_ui_plus_py_runs_both_cheap_suites():
         "just lint-py",
         "just test-ui",
         "just test-py",
+        "just test-ui-e2e",
     ]
 
 
@@ -241,6 +249,7 @@ def test_merge_gate_without_a_merge_in_progress_fails_closed_to_full():
         "just lint",
         "just test",
         "just acceptance-ci",
+        "just test-ui-e2e",
     ]
 
 
@@ -307,6 +316,7 @@ def test_forced_full_prints_its_reason():
         "just lint",
         "just test",
         "just acceptance-ci",
+        "just test-ui-e2e",
     ]
 
 

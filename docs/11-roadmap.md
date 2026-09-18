@@ -87,7 +87,7 @@ Ordered by shared-core coverage ([docs/06 §4.2](06-capability-map.md)): widen t
 | **M6** | Localization | RSSI walk-mapping (C31) first; coherent DF / passive radar (C32/C35) only with a second/coherent SDR (the generic device interface from M0b is the seam for it) | RSSI is native; the rest are `needs-other-sdr` | S7 |
 | **M7** | Device hardening + TX | on-device screen/enclosure UI, low-power tuning, TX experiments (C37, opt-in, gated behind M0b's authenticated control API) | polish and the opt-in transmit path last | S6 |
 | **MJETSON** | Jetson compute phase | CUDA ports of the GPU work already proven on the Mac provider (T-026, the PFB channelizer), the **TensorRT provider for `hk-ml`** and on-device fine-tuning from labelled captures (T-216) | **hardware-last**: every GPU capability is implemented and conformance-tested against the **Mac provider first** (wgpu/Metal or Accelerate), so the Jetson phase is a *port* onto a proven conformance suite rather than a bring-up. Nothing before it may depend on the Jetson existing. | **Gate: Jetson purchase** (user hardware; T-026 and T-216 both `needs: hardware`) |
-| **M8** | Field check (software acceptance / user-simulation) | browser-driven E2E over the **live app** on real hardware + ambient AM/FM, proving the whole workflow end to end: signals appear (Candidate *and* Confirmed), they can be tuned to, **decoding works — RDS on FM is the headline**, and **no duplicate bands** appear. A curated subset of the existing e2e and unit assertions, reused where they map, run against the live app rather than the mock device. Body: [§4 below](#5-field-check-software-acceptance--user-simulation-m8). | **field confidence that the SOFTWARE works** before trusting it on novel signals. A productized HIL **T5/T6** tier: **never gates CI**. New dep: **Playwright**. *Sub-note, deferred and explicitly not now:* a lighter **power-on self-test** running automatically at boot, downstream of this manual check. | **Gate: real hardware** |
+| **M8** | Field check (software acceptance / user-simulation) | browser-driven E2E over the **live app** on real hardware + ambient AM/FM, proving the whole workflow end to end: signals appear (Candidate *and* Confirmed), they can be tuned to, **decoding works — RDS on FM is the headline**, and **no duplicate bands** appear. A curated subset of the existing e2e and unit assertions, reused where they map, run against the live app rather than the mock device. Body: [§4 below](#5-field-check-software-acceptance--user-simulation-m8). | **field confidence that the SOFTWARE works** before trusting it on novel signals. A productized HIL **T5/T6** tier: **never gates CI**. New dep: none — it reuses `ui/e2e/` (T-455), the browser tier already in the repo. *Sub-note, deferred and explicitly not now:* a lighter **power-on self-test** running automatically at boot, downstream of this manual check. | **Gate: real hardware** |
 
 ## 3. What this ordering optimises
 
@@ -134,7 +134,16 @@ works. **Keep it separate from, and labeled apart from, the blind suites**, whos
 from that discipline.
 
 - **Tier: productized T5/T6 (HIL / field). It never gates CI.**
-- **New dependency: a browser-automation harness (Playwright).**
+- ~~**New dependency: a browser-automation harness (Playwright).**~~ **No longer a new dependency, and
+  M8 should not grow a second harness (T-455).** `ui/e2e/` already drives the real page in headless
+  Chrome and asserts on what is drawn (pixel histograms of the composited page) and what is
+  requested (CDP `Network` events) — exactly what M8 needs. The only axis M8 adds is *which backend*:
+  a live HackRF instead of `hk serve --replay <fixture>`, which is one argument to `startBackend()`.
+  It also added **no npm package**: the CDP driver is ~120 lines over node 24's built-in `WebSocket`,
+  running whatever Chrome the machine already has, so Playwright's ~170 MB browser download and CI
+  cache are not on M8's bill either. Two harnesses would mean two drivers, two sets of waits and two
+  answers to "did it render" — the T-441/T-450 drift shape, applied to the verification tier itself.
+  See `ui/e2e/README.md`.
 - **Placement: after or alongside M7.** Not scheduled now.
 
 *Note: step 6 is the same property the user is currently seeing fail live (see T-369, T-390) — a field
