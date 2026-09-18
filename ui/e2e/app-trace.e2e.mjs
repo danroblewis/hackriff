@@ -50,6 +50,8 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
 const TRACE_PX = 96;
 /** `TRACE_COLUMNS` in ui/src/surface/trace.ts. */
 const TRACE_COLUMNS = 256;
+/** `GLOW_PX` in ui/src/surface/trace.ts: the bloom's stroke width, which also hugs the line. */
+const GLOW_PX = 7;
 
 /**
  * The tap. Observes the wire, and — only when a check asks it to — **holds** the page's view of it.
@@ -162,22 +164,46 @@ function statedSlice(trace) {
 }
 
 /**
- * Where the trace was drawn in the strip, by colour.
+ * Where the trace was drawn in the strip, and **which series each pixel belongs to** (T-475).
  *
- * The strip is the top `TRACE_PX` device px of the canvas — the pane is that much shorter and the
- * map is along the bottom — and the only things drawn there are the two series over `BACKDROP`
- * (rgb 10,10,13). So any bright pixel is ink: blue-dominant is the slice, red-dominant the max-hold.
+ * The strip is the top `TRACE_PX` device px of the canvas — the pane is that much shorter and the map
+ * is along the bottom — and four things are drawn in it over `BACKDROP` (rgb 10,10,13): the current
+ * slice, its bloom, the afterglow rows, and the max-hold. T-457's separator (`b > r` is the slice)
+ * died with the plain line: the slice now carries the **waterfall's ramp**, so its peak is yellow or
+ * white and its floor is blue, and a single channel comparison says nothing about which series a
+ * pixel is.
+ *
+ * The separator that replaces it needs no second copy of the ramp and no test-only flag, because the
+ * product code makes it structural (see `TraceStyle.shade` in ui/src/surface/trace.ts): **exactly one
+ * line on the strip is drawn from the ramp.** So
+ *
+ *  - **the afterglow and the bloom are neutral grey** — achromatic, `max − min ≈ 0`;
+ *  - **the max-hold is magenta**, which is off the ramp entirely: no point on the ramp has a high red
+ *    *and* a high blue with a low green (`ui/test/surface-trace.test.ts` asserts that of every point
+ *    on the ramp, so this classification cannot quietly stop being true);
+ *  - **the current slice is everything else that is bright** — chromatic, or near-white at the very
+ *    top of the ramp, which no grey here can reach because the mono ramp stops at 0.6.
  */
+const CHROMA = (r, g, b) => Math.max(r, g, b) - Math.min(r, g, b);
+const isHoldInk = (r, g, b) => r > g * 1.3 && b > g * 1.3 && r + g + b > 150;
+const isRampInk = (r, g, b) => r + g + b >= 120 && (CHROMA(r, g, b) >= 30 || r + g + b >= 620)
+  && !isHoldInk(r, g, b);
+const isGreyInk = (r, g, b) => r + g + b >= 60 && CHROMA(r, g, b) < 12;
+
 function strip(img, rect) {
   const x0 = Math.round(rect.x), y0 = Math.round(rect.y), w = Math.round(rect.w);
   const cols = new Array(w).fill(-1);       // topmost slice pixel per column, -1 = none
-  let slicePx = 0, holdPx = 0;
+  const ink = new Array(w).fill(null);      // and the colour it was drawn in
+  let slicePx = 0, holdPx = 0, greyPx = 0;
   for (let x = 0; x < w; x++) {
     for (let y = 0; y < TRACE_PX; y++) {
       const d = ((y0 + y) * img.width + (x0 + x)) * 4;
       const r = img.data[d], g = img.data[d + 1], b = img.data[d + 2];
-      if (r + g + b < 180) continue;
-      if (b > r) { slicePx++; if (cols[x] < 0) cols[x] = y; } else if (r > b) holdPx++;
+      if (isHoldInk(r, g, b)) { holdPx++; continue; }
+      if (isRampInk(r, g, b)) {
+        slicePx++;
+        if (cols[x] < 0) { cols[x] = y; ink[x] = [r, g, b]; }
+      } else if (isGreyInk(r, g, b)) greyPx++;
     }
   }
   let peakCol = -1, peakY = Infinity, lowY = -1;
@@ -186,7 +212,66 @@ function strip(img, rect) {
     if (cols[x] < peakY) { peakY = cols[x]; peakCol = x; }
     if (cols[x] > lowY) lowY = cols[x];
   }
-  return { w, cols, slicePx, holdPx, peakCol, peakY, lowY, drawn: cols.filter((v) => v >= 0).length };
+  return { w, cols, ink, slicePx, holdPx, greyPx, peakCol, peakY, lowY,
+    drawn: cols.filter((v) => v >= 0).length };
+}
+
+/**
+ * The colours the WATERFALL painted just under the strip, across one **pooled trace column**.
+ *
+ * Two extents, and both are the honest ones rather than conveniences:
+ *
+ *  - **Across:** a trace column is `viewport / TRACE_COLUMNS` screen px wide (3.2 px here) and pools
+ *    by MAX over every cell in it — at this zoom a frequency cell is about one px, so the colour the
+ *    trace draws is the loudest of a handful of cells. Reading a single screen px would be asking
+ *    whether the trace drew the cell at its centre, which is not what a max-pool claims.
+ *  - **Down:** the slice is the pyramid's row at the pane's own time position, which is the top cell
+ *    of the pane. A few rows of pixels covers it at any of the tiers this view resolves to.
+ */
+function cellColours(img, rect, x, halfPx, rows) {
+  const y0 = Math.round(rect.y) + TRACE_PX;
+  const out = [];
+  for (let dx = -halfPx; dx <= halfPx; dx++) {
+    const x0 = Math.round(rect.x) + x + dx;
+    if (x0 < Math.round(rect.x) || x0 >= Math.round(rect.x + rect.w)) continue;
+    for (let y = 2; y < 2 + rows; y++) {
+      const d = ((y0 + y) * img.width + x0) * 4;
+      out.push([img.data[d], img.data[d + 1], img.data[d + 2]]);
+    }
+  }
+  return out;
+}
+
+/**
+ * **The colour of the stroke's CORE**, not of its feathered edge.
+ *
+ * `tracepass.ts` fades coverage over the last device pixel of the stroke, so the topmost drawn pixel
+ * of a line is a partial blend with the backdrop — a real property of an anti-aliased line and
+ * exactly the wrong pixel to compare against a cell. The core is the fullest-coverage RAMP pixel
+ * within a stroke of the top; the ramp-ink filter matters because an afterglow row can cross the
+ * slice, and grey at the top of the ramp's scale is brighter than the ramp's own dark end, so
+ * "the brightest pixel in the stroke" alone would sometimes return a shadow.
+ */
+function coreInk(img, rect, x, top) {
+  const x0 = Math.round(rect.x) + x, y0 = Math.round(rect.y);
+  let best = null, bestSum = -1;
+  for (let y = top; y <= top + 3 && y < TRACE_PX; y++) {
+    const d = ((y0 + y) * img.width + x0) * 4;
+    const c = [img.data[d], img.data[d + 1], img.data[d + 2]];
+    if (!isRampInk(c[0], c[1], c[2])) continue;
+    const sum = c[0] + c[1] + c[2];
+    if (sum > bestSum) { bestSum = sum; best = c; }
+  }
+  return best ?? [0, 0, 0];
+}
+
+/** Closest match, as a max-channel distance, between one colour and a set of them. */
+function nearestDist(c, set) {
+  let best = Infinity;
+  for (const o of set) {
+    best = Math.min(best, Math.max(Math.abs(c[0] - o[0]), Math.abs(c[1] - o[1]), Math.abs(c[2] - o[2])));
+  }
+  return best;
 }
 
 /**
@@ -214,6 +299,85 @@ function topWithin(cols, centrePx, widthPx) {
  * One definition, because the two must agree. A wait that establishes one state and an assertion
  * that accepts another is the whole defect this file was rewritten for.
  */
+/**
+ * **The state both T-475 checks need, in the two forms `heldObservation` wants** — one definition,
+ * for the same reason `LIVE_FRAME_EXPR` is one: a wait that establishes one state and an assertion
+ * that accepts another is the defect this file was rewritten for.
+ *
+ * Three conditions, all read inside the page off one DOM read and one tap read so there is no round
+ * trip between them:
+ *
+ *  - **the slice comes from a pyramid cell**, not the live row — which is what makes the trace and
+ *    the top row of the waterfall two renderings of *the same cells*;
+ *  - **it has a peak to state**, i.e. a tile is actually in hand. A frozen window can sit where none
+ *    is, and then the strip is empty: a true statement about a frame these checks are not about
+ *    (T-487's lesson, applied to one more precondition);
+ *  - **its instant is at least `lagS` behind the newest row the socket delivered**, so "this viewport
+ *    is in the past" is legible at the second resolution the readout prints.
+ *
+ * Getting there needs no drag: "pause freezes the view, not the capture", so pressing Live and
+ * waiting *is* capture walking away from a held window. That is also why this does not depend on how
+ * far one pan happens to travel — which is the thing that has moved twice under this file already.
+ */
+const CELL_SLICE_RE = /slice [\d:]+Z \(\d[^)]*(ms|s|min) cell\) · peak/;
+const scrubbedExpr = (lagS) => `(() => {
+  const txt = document.querySelector('.sf-trace')?.textContent ?? "";
+  const m = /slice (\\d\\d):(\\d\\d):(\\d\\d)Z \\(\\d[^)]*(ms|s|min) cell\\) · peak/.exec(txt);
+  const r = window.__hkTap?.recent?.[window.__hkTap.recent.length - 1];
+  if (!m || !r) return false;
+  const at = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+  const now = new Date(r.tS * 1000);
+  const nowS = now.getUTCHours() * 3600 + now.getUTCMinutes() * 60 + now.getUTCSeconds();
+  return nowS - at >= ${lagS};
+})()`;
+
+/**
+ * **Park a viewport on an observed pyramid cell behind the live edge** — by RE-ESTABLISHING the
+ * state, never by waiting for it.
+ *
+ * Pressing Live once and waiting looks like it should work and does not, and the way it fails is
+ * worth writing down because it is the same shape as T-487's. A viewport freezes on the instant it
+ * was following, which is the cell the pipeline is *still writing*; if the pyramid never ends up with
+ * an observed cell there, the frozen window sits over a hole **for ever**, and every extra second of
+ * waiting only widens the gap to the live edge without changing the cell being asked about. Measured:
+ * a 90 s wait ended with the viewport 86 s in the past reading `nothing observed across this span`,
+ * while the identical predicate in the test below was satisfied in 3 s — the difference being luck
+ * about which second each one happened to freeze on.
+ *
+ * So each attempt returns to the growing edge, waits for a live frame that HAS a peak (data is
+ * arriving), freezes there, and gives the pyramid a bounded moment to answer for that cell. A failed
+ * attempt freezes somewhere else rather than waiting longer in the same hole.
+ */
+async function scrubOntoCell(page, lagS, tries = 8) {
+  await page.waitFor("the spectrum socket to deliver rows the tap can see",
+    "(window.__hkTap?.rows ?? 0) > 3 && !!window.__hkTap.geom", { timeoutMs: 60000 });
+  let last = "";
+  for (let i = 0; i < tries; i++) {
+    // Back to the growing edge. `.sf-live` toggles, so this presses until the trace says it is
+    // drawing the live frame rather than assuming one press means one direction.
+    for (let k = 0; k < 3; k++) {
+      // `page.eval` returns the VALUE, not its string form — comparing against "true" here silently
+      // clicked three times every attempt and left the viewport frozen, waiting for a live frame.
+      if ((await page.eval(LIVE_FRAME_EXPR)) === true) break;
+      await page.click(`document.querySelector('.sf-live')`);
+      await page.frames(8);
+    }
+    await page.waitFor("the trace to state a live-frame slice with a peak", LIVE_FRAME_EXPR,
+      { timeoutMs: 30000 });
+    await page.click(`document.querySelector('.sf-live')`);
+    try {
+      await page.waitFor(`a pyramid-cell slice at least ${lagS} s behind the live edge`,
+        scrubbedExpr(lagS), { timeoutMs: 12000 });
+      return i + 1;
+    } catch (e) {
+      last = String((e && e.message) || e);
+      await page.frames(4);
+    }
+  }
+  throw new Error("could not park a viewport on an OBSERVED pyramid cell behind the live edge after " +
+    `${tries} attempts — the last freeze landed somewhere the history has no cell: ${last}`);
+}
+
 const LIVE_FRAME_EXPR =
   `/slice [\\d:]+Z \\(live frame\\) · peak/.test(document.querySelector('.sf-trace')?.textContent ?? "")`;
 const isLiveFrame = (snap) => /slice [\d:]+Z \(live frame\) · peak/.test(snap.trace);
@@ -365,9 +529,11 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
   // held with **zero** slack, top-row equal to top-row, every time.
   const expected = ((slice.hz - win.f0Hz) / win.spanHz) * s.w;
   const colPx = s.w / TRACE_COLUMNS;
-  // A stroke is `thickPx` device px tall (`traceQuads`), so the top of one column may sit a stroke
-  // below another's and still be the same drawn value. That, and nothing else, is the slack.
-  const strokePx = 2;
+  // A stroke is `SLICE_PX` device px across with a pixel of feather either side (`tracepass.ts`), so
+  // the top of one column may sit a stroke below another's and still be the same drawn value. That,
+  // and nothing else, is the slack. A smooth curve also passes BETWEEN the column centres, so a
+  // neighbouring pooled column's ink may ride a fraction of a stroke higher than its own sample.
+  const strokePx = 4;
   const { top: topStated, a: loPx, b: hiPx } = topWithin(s.cols, expected, colPx);
   t.diagnostic(`highest drawn sample at column ${s.peakCol} (row ${s.peakY} of ${TRACE_PX}); ` +
     `the stated peak ${(slice.hz / 1e6).toFixed(4)} MHz is pooled column ${expected.toFixed(1)} ` +
@@ -472,6 +638,87 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   assert.deepEqual(page.exceptions, [], "uncaught exception while measuring the trace's extent");
 });
 
+test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below it", async (t) => {
+  // **The ticket's first requirement, read off a real framebuffer.** The unit tier proves the trace
+  // asks `cmap` for `(db - lo) / (hi - lo)`; that would still pass if the shader under it used a
+  // different ramp, a different range, or a different normalisation — which is exactly the divergence
+  // T-397 was (two ramps, one of them stopping at cyan) and exactly what a pixel comparison catches.
+  //
+  // **What makes the comparison exact.** The claim is about one dB, so the two readings have to be of
+  // the same number. A trace drawn from the LIVE ROW is one frame and the cell below it is a max-hold
+  // over that cell's whole duration — legitimately different dB, so comparing those would be the
+  // adjacent-question mistake this milestone keeps making. On a viewport whose slice comes from the
+  // PYRAMID, the slice IS the row of cells at the top of the pane's window (`sliceColumns` is
+  // `maxHoldColumns` over a one-cell window), so the trace and the top row of the waterfall are two
+  // renderings of *the same cells* — and the colours must match, not merely look similar.
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page(undefined, { initScript: TAP });
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  const { rect } = await page.waitForCanvas(".sf-canvas",
+    (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
+
+  // Freeze the viewport. "Pause freezes the view, not the capture", so the live row keeps arriving
+  // and walks out of the frozen top cell on its own — at which point the slice comes from the
+  // pyramid and the comparison above is between two readings of one set of cells.
+  const parked = await scrubOntoCell(page, 2);
+  const obs = await heldObservation(page, path.join(ART, "app-trace-colour.png"), {
+    what: "the trace to be drawn from a pyramid cell at least 2 s behind the live edge, with a peak",
+    expr: scrubbedExpr(2),
+    accept: (snap) => CELL_SLICE_RE.test(snap.trace),
+    timeoutMs: 20000,
+  });
+  t.diagnostic(`parked on an observed cell on attempt ${parked}`);
+  const s = strip(obs.img, rect);
+  t.diagnostic(`readout: ${obs.snap.trace}`);
+  t.diagnostic(`strip ink: ${s.slicePx} ramp px, ${s.holdPx} max-hold px, ${s.greyPx} afterglow/bloom px`);
+  assert.ok(s.drawn > 20, `only ${s.drawn} of ${s.w} columns carry ramp ink — nothing to compare`);
+
+  // Column by column: the colour the TRACE drew, against the colours the WATERFALL drew in that same
+  // screen column, in the top rows of the pane — the cell the slice is a slice of.
+  const halfPx = Math.max(1, Math.round(s.w / TRACE_COLUMNS / 2) + 1);
+  const ROWS = 6;
+  let compared = 0, matched = 0, worst = 0;
+  const misses = [];
+  for (let x = 0; x < s.w; x++) {
+    if (s.cols[x] < 0) continue;
+    compared++;
+    const ink = coreInk(obs.img, rect, x, s.cols[x]);
+    const cells = cellColours(obs.img, rect, x, halfPx, ROWS);
+    const d = nearestDist(ink, cells);
+    if (d <= 8) { matched++; worst = Math.max(worst, d); }
+    else if (misses.length < 3) misses.push({ x, d, ink, cells: cells.slice(0, 8) });
+  }
+  const rate = matched / Math.max(1, compared);
+  t.diagnostic(`${s.drawn}/${s.w} columns drawn; ${matched}/${compared} trace columns carry a colour the cells below them also carry ` +
+    `(worst matched distance ${worst}/255)${misses.length ? `; first misses ${JSON.stringify(misses)}` : ""}`);
+  assert.ok(rate >= 0.8,
+    `only ${(rate * 100).toFixed(1)}% of trace columns are painted a colour the waterfall paints at ` +
+    `the same frequency. The trace and the cells below it are using different ramps or different ` +
+    `ranges — which is T-397, in the one place T-475 exists to join up. First misses: ` +
+    JSON.stringify(misses));
+
+  // **The control, and it is the whole reason the number above means anything.** Match every column's
+  // trace colour against a DISTANT column's cells instead. If a near-match were easy — because the
+  // strip is one colour, or the waterfall is — this would score as well as the real comparison, and
+  // the test would be measuring the ramp's coarseness rather than the trace's colour.
+  let shuffled = 0;
+  for (let x = 0; x < s.w; x++) {
+    if (s.cols[x] < 0) continue;
+    const far = (x + Math.floor(s.w / 3)) % s.w;
+    if (nearestDist(coreInk(obs.img, rect, x, s.cols[x]), cellColours(obs.img, rect, far, halfPx, ROWS)) <= 8) shuffled++;
+  }
+  const shuffledRate = shuffled / Math.max(1, compared);
+  t.diagnostic(`negative control: ${shuffled}/${compared} = ${(shuffledRate * 100).toFixed(1)}% match a ` +
+    `column a third of the viewport away`);
+  assert.ok(rate > shuffledRate + 0.2,
+    `the colour match is ${(rate * 100).toFixed(1)}% at the right frequency and ` +
+    `${(shuffledRate * 100).toFixed(1)}% at the wrong one — that gap is too small for the match to be ` +
+    "about frequency at all, so this comparison proves nothing");
+  await page.eval("window.__hkTap.resume()");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while comparing trace and cell colours");
+});
+
 test("a drag that STARTS IN THE TRACE STRIP pans the pane — the strip is a readout, not a hole", async (t) => {
   // The T-457 × T-458 merge break, in the tier that would have caught it end to end. The strip is
   // carved off the top of the pane's rectangle; before the fix, `paneAt` walked only the drawn pane
@@ -573,5 +820,120 @@ test("a viewport scrubbed into the past traces THAT instant, from the pyramid, a
   assert.match(after.source, /\d.* (ms|s|min) cell/,
     `the source is "${after.source}" — a slice from the pyramid must say the cell duration it folds, ` +
     "so a max over a second is not passed off as an instant");
+
   assert.deepEqual(page.exceptions, [], "uncaught exception while scrubbing");
+});
+
+test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demonstrated while SCRUBBED", async (t) => {
+  // **The half a client-side persistence buffer cannot do.** "Several fading lines appeared" is
+  // satisfied by a ring of whatever frames the page happened to receive — which shows the last few
+  // seconds of WALL CLOCK behind a viewport parked in the past, the same defect as a trace pinned to
+  // now, one layer down. So this is asserted on a viewport that has left the live edge by a margin
+  // the second-resolution readout can express, and the claim is that the glow is back THERE.
+  //
+  // How the viewport gets there: pausing is enough. "Pause freezes the view, not the capture", so the
+  // wait below is capture walking away from a held window — the honest way to produce the state, with
+  // no reliance on how far one pan happens to travel.
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page(undefined, { initScript: TAP });
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  const { rect } = await page.waitForCanvas(".sf-canvas",
+    (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
+  const LAG_S = 2;
+  const parked = await scrubOntoCell(page, LAG_S);
+  const obs = await heldObservation(page, path.join(ART, "app-trace-afterglow.png"), {
+    what: `the viewport to be tracing a pyramid cell at least ${LAG_S} s behind the live edge`,
+    expr: scrubbedExpr(LAG_S),
+    accept: (snap) => CELL_SLICE_RE.test(snap.trace),
+    timeoutMs: 20000,
+  });
+  t.diagnostic(`parked on an observed cell on attempt ${parked}`);
+  const snap = obs.snap;
+  const m = /slice ([\d:]+)Z \(([^)]+)\)/.exec(snap.trace);
+  assert.ok(m, `the trace stated no slice: ${JSON.stringify(snap.trace)}`);
+  const newest = snap.tap.recent[snap.tap.recent.length - 1];
+  assert.ok(newest, "the tap saw no rows, so 'capture never stopped' is not established");
+  const nowZ = new Date(newest.tS * 1000).toISOString().slice(11, 19);
+  t.diagnostic(`readout: ${snap.trace}`);
+  t.diagnostic(`the viewport is tracing ${m[1]}Z; the socket's newest row is ${nowZ}Z`);
+  assert.ok(m[1] < nowZ, `the viewport is not scrubbed: tracing ${m[1]}Z with the edge at ${nowZ}Z`);
+
+  // ---- what the readout claims ----
+  const glow = /afterglow (\d+) × ([\d.]+ (?:ms|s|min)) back to ([\d:]+)Z/.exec(snap.trace);
+  assert.ok(glow, `no afterglow is stated on a scrubbed viewport: ${JSON.stringify(snap.trace)}`);
+  t.diagnostic(`afterglow: ${glow[1]} rows of ${glow[2]}, back to ${glow[3]}Z`);
+  assert.ok(Number(glow[1]) >= 1, "the readout claims no glowing rows");
+  assert.equal(glow[2], m[2].replace(" cell", ""),
+    "an afterglow row must be the same kind of cell as the slice — it is the row before it, at the " +
+    "level the pane was drawn at, not a window of its own");
+  // **The claim.** The glow is back where the VIEWPORT is, not where capture is. A buffer of
+  // recently-arrived frames would be glowing at the live edge, which is where this is not.
+  assert.ok(glow[3] <= m[1] && glow[3] < nowZ,
+    `the afterglow reaches back to ${glow[3]}Z behind a slice at ${m[1]}Z, with the live edge at ` +
+    `${nowZ}Z. On a scrubbed viewport the glow must be in the viewport's past, not at the edge.`);
+
+  // ---- and what the pixels show ----
+  //
+  // The afterglow and the bloom are the only ACHROMATIC ink in the strip (`TraceStyle.shade`), so a
+  // grey pixel there is a shadow and a chromatic one is the current slice. That separation is what
+  // lets this count them without a second copy of the ramp.
+  const s = strip(obs.img, rect);
+  t.diagnostic(`strip: ${s.slicePx} ramp px (current slice), ${s.greyPx} achromatic px ` +
+    `(afterglow + bloom), ${s.holdPx} max-hold px`);
+  assert.ok(s.slicePx > 20, "the current slice is not drawn, so there is nothing for a glow to be behind");
+  assert.ok(s.greyPx > 40,
+    `only ${s.greyPx} achromatic pixels in the strip — the readout claims ${glow[1]} glowing rows and ` +
+    "nothing is drawn behind the line");
+
+  // ---- and where the rest of the claim is asserted, and WHY it is not asserted here ----
+  //
+  // "The shadows are four EARLIER ROWS, not four copies of this one" is the other half, and two
+  // attempts to read it off the framebuffer both measured the wrong thing. First a count of columns
+  // whose shadow sits clear of the line: 27, 25 and 7 on three identical runs, because consecutive
+  // rows of a steady FM band genuinely are similar and the count was measuring the weather. Then the
+  // shape of the offset distribution, which survived one tree and died in the next: with T-484
+  // reverted a row is a 1 s max-hold rather than a 40 ms one, so rows are smoother still, and the
+  // spread collapsed from 21–30 px to 7.
+  //
+  // The second failure is the informative one, because it is not an instrument problem. **A shadow
+  // that coincides with the current line is hidden by construction**: it is a SHADOW_PX stroke drawn
+  // UNDER a wider, fully opaque core. So the visible separation between the glow and the line is a
+  // fact about how much the band moved in that window — real, and nothing to do with whether the
+  // afterglow is derived from the pane's own past. Any pixel threshold over it is a fixture liveliness
+  // meter wearing a feature's name, which is the exact class of proof this milestone keeps producing.
+  //
+  // So it is asserted where it is deterministic: `ui/test/surface-trace.test.ts` drives
+  // `persistenceSlices` over a fixture of four rows at four known dB and asserts the VALUES — at the
+  // edge the glow is the three rows before the newest, scrubbed one cell back it is the two before
+  // THAT and never contains the newest, and the two answers differ. What this tier adds, and the
+  // unit tier cannot, is that the whole chain runs in a browser on a viewport genuinely behind the
+  // live edge: the readout above, and the ink below.
+  //
+  // The separation is still measured, and reported, because a future tree where it collapses to zero
+  // is worth seeing in the log even though it is not a failure.
+  const x0 = Math.round(rect.x), y0 = Math.round(rect.y);
+  const offsets = [];
+  for (let x = 0; x < s.w; x++) {
+    if (s.cols[x] < 0) continue;
+    let topGrey = -1;
+    for (let y = 0; y < TRACE_PX && topGrey < 0; y++) {
+      const d = ((y0 + y) * obs.img.width + (x0 + x)) * 4;
+      const r = obs.img.data[d], g = obs.img.data[d + 1], b = obs.img.data[d + 2];
+      if (isGreyInk(r, g, b)) topGrey = y;
+    }
+    if (topGrey >= 0) offsets.push(s.cols[x] - topGrey);
+  }
+  assert.ok(offsets.length > 50, `only ${offsets.length} columns carry any grey to measure`);
+  const hist = new Map();
+  for (const o of offsets) hist.set(o, (hist.get(o) ?? 0) + 1);
+  const mode = [...hist.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  const away = offsets.filter((o) => Math.abs(o - mode) >= 2).length;
+  t.diagnostic(`DIAGNOSTIC (not asserted — see above): topmost-grey offset above the line: mode ` +
+    `${mode} px (the bloom's own edge is (GLOW_PX − SLICE_PX)/2 = 2), ${hist.size} distinct values, ` +
+    `max ${Math.max(...offsets)}, ${((away / offsets.length) * 100).toFixed(1)}% of columns ≥ 2 px ` +
+    "off the mode — this is how lively the band was across these rows, not whether the glow is the " +
+    "rows before this one");
+  await page.eval("window.__hkTap.resume()");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while measuring the afterglow");
 });

@@ -16,9 +16,19 @@
 //    one coarse tile built as their max give the **same** trace. That is what licenses the client to
 //    reduce at all, and it is a property of `max` as `hk-api`'s `MAX_HOLD_RULE` defines it — not an
 //    observation that today's numbers happen to agree.
-//  - **`traceQuads`** — about *the two shared axes*. x is asserted against `toClip` itself (the
-//    function the tiles are placed with), not against a recomputation of its arithmetic; y is
-//    asserted against the surface's `lo`/`hi`, including that moving them moves the trace.
+//  - **`tracePaths`** — about *the three shared readings of one scale*. x is asserted against
+//    `toClip` itself (the function the tiles are placed with), not against a recomputation of its
+//    arithmetic; y is asserted against the surface's `lo`/`hi`, including that moving them moves the
+//    trace; and since T-475 **colour** is asserted to be `cmap` of the *same* normalisation the tile
+//    shader computes, so "the same dB is the same colour" is an equality rather than an impression.
+//  - **the smoothing (T-475)** — about *the values the curve passes through*, never about vertex
+//    counts. A curve with more vertices is not a curve drawn through the same measurements, and that
+//    is precisely the adjacent-question trap this milestone keeps falling into. So: every measured
+//    column is ON the curve, every interpolated point lies between the two samples that bracket it,
+//    and a gap is still a gap.
+//  - **`persistenceSlices`** — about *the afterglow being a function of the pane's window*. The rows
+//    it returns move when the pane's time position moves, which is the difference between afterglow
+//    that survives a scrub and a client-side buffer of whatever arrived while the page was open.
 //  - **`SurfaceView`** — about *the strip being carved out of the pane rather than painted over it*,
 //    and about the data pass being byte-identical with the trace on and off.
 //
@@ -37,9 +47,11 @@ import { Surface, toClip, type PaneRect } from "../src/surface/surface";
 import { TileCache } from "../src/surface/tilecache";
 import type { TileData } from "../src/surface/tile";
 import {
-  HOLD_INK, LiveRow, SLICE_INK, levelFrac, liveFrameFits, maxHoldColumns, peakOf, sampleFrame,
-  sliceColumns, sliceWindow, traceQuads, type LiveFrame,
+  HOLD_INK, LiveRow, SHADOW_ALPHA, TRACE_SUBDIV, levelFrac, liveFrameFits, maxHoldColumns, peakOf,
+  persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths,
+  type LiveFrame, type TracePath,
 } from "../src/surface/trace";
+import { cmap } from "../src/cmap";
 import { SurfaceView } from "../src/surface/view";
 import { stubGl } from "./surface-glstub";
 
@@ -53,6 +65,23 @@ const STRIP: PaneRect = { x: 0, y: 500, w: 1000, h: 96 };
 const LO = -110, HI = -40;
 
 const near = (a: number, b: number, eps = 1e-9) => assert.ok(Math.abs(a - b) <= eps, `${a} ≉ ${b}`);
+
+/** Every point of a set of paths, flattened: clip x/y and the linear RGB the vertex carries. */
+function pointsOf(paths: readonly TracePath[]): { x: number; y: number; rgb: [number, number, number] }[] {
+  const out: { x: number; y: number; rgb: [number, number, number] }[] = [];
+  for (const p of paths) {
+    for (let i = 0; i < p.xy.length / 2; i++) {
+      out.push({ x: p.xy[2 * i], y: p.xy[2 * i + 1], rgb: [p.rgb[3 * i], p.rgb[3 * i + 1], p.rgb[3 * i + 2]] });
+    }
+  }
+  return out;
+}
+
+/** A point's y read back as a dB against a display range — the inverse of the trace's y mapping. */
+const dbOf = (y: number, lo = LO, hi = HI) => lo + ((y + 1) / 2) * (hi - lo);
+
+/** A flat-ink style, so a test about geometry is not also a test about colour. */
+const INK = { ink: [1, 1, 1] as const };
 
 /** A frame across the pane's own band, flat at `floor` with a spike of `db` at `atHz`. */
 function frame(bins: number, floor: number, atHz: number, db: number, tNs = T0 - S): LiveFrame {
@@ -104,10 +133,19 @@ test("outside the tuned band is a GAP, not a floor — there is no current frame
     assert.equal(Number.isFinite(cols[c]), overlaps,
       `column ${c} (${lo / 1e6}–${hi / 1e6} MHz) ${overlaps ? "overlaps" : "does not overlap"} the tuned band`);
   }
-  // And a gap draws nothing at all: a line through it would invent the value the radio never took.
-  const q = traceQuads(cols, wide, STRIP, LO, HI, SLICE_INK, "trace-slice", "p");
-  assert.ok(q.length > 0 && q.length < 200, `${q.length} quads for ${cols.filter(Number.isFinite).length} answered columns`);
-  assert.equal(q.length, cols.filter((v) => Number.isFinite(v)).length);
+  // And a gap draws nothing at all: a curve through it would invent the value the radio never took.
+  // The check is on the drawn EXTENT rather than on a count, because the line is smooth now (T-475):
+  // the measured columns form one contiguous run, so they are ONE path, and no point of it may sit in
+  // a column the row did not answer for. Smoothing that bridged a gap would show up here as a point
+  // out past the band edge; nothing about vertex count would.
+  const paths = tracePaths(cols, wide, STRIP, LO, HI, "trace-slice", "p", INK);
+  assert.equal(paths.length, 1, "the answered columns are contiguous, so they are ONE curve");
+  const hzOf = (x: number) => wide.f0Hz + ((x + 1) / 2) * (wide.f1Hz - wide.f0Hz);
+  for (const pt of pointsOf(paths)) {
+    const hz = hzOf(pt.x);
+    assert.ok(hz >= 99.6e6 - colHz && hz <= 102e6 + colHz,
+      `the curve reaches ${(hz / 1e6).toFixed(3)} MHz, outside the tuned band it was drawn from`);
+  }
 });
 
 test("the live row is preferred only INSIDE the cell the slice asks about — a scrubbed pane gets no line from now", () => {
@@ -261,7 +299,8 @@ test("a column no resident tile answers for stays a GAP — a budget cannot manu
   assert.deepEqual([...cols].slice(0, 4), [-77, -77, -77, -77]);
   assert.ok([...cols].slice(4).every((v) => Number.isNaN(v)),
     "an absent tile is 'not loaded', which is not 'quiet' and not the bottom of the scale");
-  assert.equal(traceQuads(cols, box, STRIP, LO, HI, HOLD_INK, "trace-hold", "p").length, 4);
+  assert.equal(tracePaths(cols, box, STRIP, LO, HI, "trace-hold", "p", INK).length, 1,
+    "four answered columns and four gaps make ONE curve over the answered half");
 });
 
 test("only rows INSIDE the window contribute — a max-hold is over the viewport's own time range", () => {
@@ -330,9 +369,21 @@ test("the slice spans the WHOLE viewport, stitched from every tile that answers"
   assert.deepEqual([...left].slice(0, 4), [...all].slice(0, 4), "losing the right tile changed the left");
   assert.ok([...left].slice(4).every((v) => Number.isNaN(v)),
     `the unobserved half is ${JSON.stringify([...left].slice(4))} — unobserved is not quiet and is not the bottom of the scale`);
-  const drawn = (c: Float32Array) => traceQuads(c, box, STRIP, LO, HI, SLICE_INK, "trace-slice", "p").length;
-  assert.equal(drawn(left), 4, "four columns of data draw four samples and nothing spans the gap");
-  assert.equal(drawn(all), 8, "and restoring the tile makes them appear — the absence was about the data");
+  // The drawn EXTENT, in the box's own frequency terms — the question a smooth line makes sharper
+  // than a quad count ever could: does the curve stop at the data, or reach across the gap?
+  const reach = (c: Float32Array) => {
+    const pts = pointsOf(tracePaths(c, box, STRIP, LO, HI, "trace-slice", "p", INK));
+    if (!pts.length) return null;
+    const xs = pts.map((p) => p.x);
+    return { lo: Math.min(...xs), hi: Math.max(...xs) };
+  };
+  near(reach(left)!.lo, -1);
+  near(reach(left)!.hi, 0,
+    // the midpoint of the box: the curve must stop dead at the edge of the data, not reach into the
+    // half nothing answered for.
+    1e-9);
+  near(reach(all)!.lo, -1);
+  near(reach(all)!.hi, 1, 1e-9);   // restoring the tile makes it span the window
 });
 
 test("a slice at an instant nothing covers is entirely absent, not a flat line at the floor", () => {
@@ -341,67 +392,280 @@ test("a slice at an instant nothing covers is entirely absent, not a flat line a
   // 100 s in: the tile spans 0–20 s, so nothing was observed at that instant.
   const cols = sliceColumns(LAT, peeker(new Map([[keyOf(a), d]])) as never, box, 0, 0, "any", 4, 100 * S);
   assert.ok([...cols].every((v) => Number.isNaN(v)));
-  assert.equal(traceQuads(cols, box, STRIP, LO, HI, SLICE_INK, "trace-slice", "p").length, 0);
+  assert.equal(tracePaths(cols, box, STRIP, LO, HI, "trace-slice", "p", INK).length, 0);
   assert.equal(peakOf(cols, box), null, "and there is no peak to state — the readout says so instead");
 });
 
 // ---------------------------------------------------------------------------
-// traceQuads: the two shared axes
+// T-475 persistenceSlices: the afterglow is a function of the PANE'S WINDOW
+// ---------------------------------------------------------------------------
+//
+// What these are a property of: **which rows the glow is made of**, never that a glow was drawn.
+// "Several fading lines appeared" is satisfied by a client-side ring buffer of whatever arrived while
+// the page was open — which shows the last few seconds of WALL CLOCK over a pane scrubbed to last
+// hour, the same defect as a trace pinned to now, one layer down. So every test below moves the
+// pane's time position and asserts the VALUES change with it.
+
+/** Four 5 s rows over 2.4 MHz, each row flat at its own dB, so a row is identifiable by value. */
+const ROWS = [-90, -80, -70, -60];
+function rowTile() {
+  const a: TileAddr = { device: "any", scheme: "view", levelF: 0, levelT: 0, fIndex: 0, tIndex: 0, cells: 4 };
+  const v: number[] = [];
+  for (const db of ROWS) for (let c = 0; c < 4; c++) v.push(db);
+  return peeker(new Map([[keyOf(a), tileOf(a, 4, 4, v)]]));
+}
+const ROW_BOX = { f0Hz: 0, f1Hz: 2.4e6, t0Ns: 0, t1Ns: 20 * S };
+const glowAt = (tAtNs: number, box = ROW_BOX) =>
+  persistenceSlices(LAT, rowTile() as never, box, 0, 0, "any", 4, tAtNs);
+
+test("the afterglow is the rows just before the PANE'S instant — and it MOVES when the pane does", () => {
+  // At the edge, the slice is the newest row (−60) and the glow is the three before it, newest first.
+  const live = glowAt(20 * S);
+  assert.deepEqual(live.map((g) => g.cols[0]), [-70, -80, -90]);
+  assert.deepEqual(live.map((g) => g.age), [1, 2, 3]);
+  assert.deepEqual(live.map((g) => g.tAtNs / S), [15, 10, 5], "each shadow states the instant its cell ends");
+  // **"Four EARLIER rows, not four copies of this one"**, stated as the equality it is. This is the
+  // half `ui/e2e/app-trace.e2e.mjs` deliberately does NOT assert from pixels: a shadow that coincides
+  // with the current line is drawn under a wider opaque core and is invisible by construction, so how
+  // far the glow separates on screen is a fact about how much the band moved, not about where the
+  // rows came from. Two pixel thresholds over that were written and both measured the fixture's
+  // liveliness instead (27/25/7 columns on identical runs; then a spread that collapsed when a 40 ms
+  // row became a 1 s one). Here it is deterministic.
+  const sliceNow = sliceColumns(LAT, rowTile() as never, ROW_BOX, 0, 0, "any", 4, 20 * S);
+  assert.equal(sliceNow[0], -60, "the slice is the newest row");
+  assert.ok(!live.some((g) => g.cols[0] === sliceNow[0]), "a shadow is repeating the current row");
+  assert.equal(new Set(live.map((g) => g.cols[0])).size, live.length, "two shadows are the same row");
+
+  // **Scrubbed back one cell — this is the whole claim.** The glow is now the rows before THAT
+  // instant, and the newest row (−60) is nowhere in it: it is in the pane's future. A buffer of
+  // recently-arrived frames would still be glowing with −60 here, and would look entirely convincing.
+  const past = glowAt(15 * S);
+  assert.deepEqual(past.map((g) => g.cols[0]), [-80, -90]);
+  assert.ok(!past.some((g) => g.cols[0] === -60),
+    "a viewport in the past is glowing with a row it is not showing — that is now, drawn behind then");
+  // …and the two are genuinely different answers to the same call, which is what makes the first
+  // assertion non-vacuous: the function is reading its `tAtNs` argument, not a constant.
+  assert.notDeepEqual(live.map((g) => g.cols[0]), past.map((g) => g.cols[0]));
+});
+
+test("a shadow whose row is outside the pane's window is DROPPED, not clamped", () => {
+  // The strip is a view over this pane's window. Glowing with a row the pane is not showing would be
+  // the gap rule inverted — data drawn where the viewport says it is not looking.
+  const narrow = glowAt(20 * S, { ...ROW_BOX, t0Ns: 10 * S });
+  assert.deepEqual(narrow.map((g) => g.cols[0]), [-70],
+    "only the one earlier row that is inside the window may glow");
+  assert.deepEqual(glowAt(10 * S).map((g) => g.cols[0]), [-90]);
+  assert.deepEqual(glowAt(5 * S).map((g) => g.cols[0]), [],
+    "the oldest row is the slice itself: there is nothing before it in this window to glow");
+});
+
+test("the glow FADES, and a row nothing answered for does not glow at all", () => {
+  const live = glowAt(20 * S);
+  for (let i = 1; i < live.length; i++) {
+    assert.ok(live[i].alpha < live[i - 1].alpha, "the afterglow must decay with age, not hold");
+  }
+  assert.ok(live[0].alpha < 0.5, "the newest shadow must stay well under the current trace's weight");
+  assert.deepEqual(live.map((g) => g.alpha), SHADOW_ALPHA.slice(0, live.length));
+  // No tile resident: the honest answer is no glow. A floor, or the newest row repeated, would each
+  // be a claim about a row nobody has.
+  assert.deepEqual(persistenceSlices(LAT, peeker(new Map()) as never, ROW_BOX, 0, 0, "any", 4, 20 * S), []);
+});
+
+// ---------------------------------------------------------------------------
+// tracePaths: three readings of ONE scale — x, y, and (T-475) colour
 // ---------------------------------------------------------------------------
 
 test("the x mapping is the DATA PASS's own toClip — not arithmetic that resembles it", () => {
   const n = 8;
   const cols = new Float32Array(n).fill(-70);
-  const q = traceQuads(cols, PANE, STRIP, LO, HI, SLICE_INK, "trace-slice", "p");
+  const pts = pointsOf(tracePaths(cols, PANE, STRIP, LO, HI, "trace-slice", "p", { ...INK, subdiv: 1 }));
   const colHz = (PANE.f1Hz - PANE.f0Hz) / n;
+  // Every column's CENTRE is a point on the curve, at the x `toClip` puts that column at.
   for (let c = 0; c < n; c++) {
     const [x0, , x1] = toClip(
       { f0Hz: PANE.f0Hz + c * colHz, f1Hz: PANE.f0Hz + (c + 1) * colHz, t0Ns: PANE.t0Ns, t1Ns: PANE.t1Ns }, PANE);
-    near(q[c].clip[0], x0);
-    near(q[c].clip[2], x1);
+    const mid = (x0 + x1) / 2;
+    assert.ok(pts.some((p) => Math.abs(p.x - mid) < 1e-9),
+      `no point at column ${c}'s centre (${mid}), where toClip places it`);
   }
-  // The columns tile the pane with no gap and no overlap, so the trace is over the whole window.
-  near(q[0].clip[0], -1);
-  near(q[n - 1].clip[2], 1);
+  // The curve tiles the pane with no gap and no overlap, so the trace is over the whole window.
+  near(Math.min(...pts.map((p) => p.x)), -1);
+  near(Math.max(...pts.map((p) => p.x)), 1);
   const src = readFileSync("src/surface/trace.ts", "utf8");
   assert.match(src, /import \{ toClip/, "and it imports it rather than reimplementing it");
 });
 
 test("the y mapping is the SURFACE's one measured range — the same lo/hi the ramp is relative to", () => {
   const yOf = (db: number, lo = LO, hi = HI) => {
-    const q = traceQuads(Float32Array.from([db]), PANE, STRIP, lo, hi, SLICE_INK, "trace-slice", "p")[0];
-    return { bottom: q.clip[1], top: q.clip[3], mid: (q.clip[1] + q.clip[3]) / 2 };
+    const pts = pointsOf(tracePaths(Float32Array.from([db]), PANE, STRIP, lo, hi, "trace-slice", "p", INK));
+    return pts[0].y;
   };
-  near(yOf(LO).bottom, -1, 1e-9);           // the floor of the scale sits on the floor of the strip
-  near(yOf(HI).top, 1, 1e-9);               // and its top on the top
-  near(yOf((LO + HI) / 2).mid, 0, 1e-9);    // linear in between, like the ramp
-  assert.ok(yOf(-70).mid < yOf(-50).mid, "louder is higher");
+  near(yOf(LO), -1, 1e-9);                 // the floor of the scale sits on the floor of the strip
+  near(yOf(HI), 1, 1e-9);                  // and its top on the top
+  near(yOf((LO + HI) / 2), 0, 1e-9);       // linear in between, like the ramp
+  assert.ok(yOf(-70) < yOf(-50), "louder is higher");
   // Moving the range moves the trace: it is reading the surface's numbers, not carrying its own.
-  assert.notEqual(yOf(-70).mid, yOf(-70, -90, -30).mid);
+  assert.notEqual(yOf(-70), yOf(-70, -90, -30));
   // Out of range clamps into the strip rather than drawing outside it or vanishing.
-  near(yOf(-200).bottom, -1, 1e-9);
-  near(yOf(0).top, 1, 1e-9);
-  assert.ok(yOf(-200).top <= 1 && yOf(0).bottom >= -1, "a stroke is never drawn outside its strip");
+  near(yOf(-200), -1, 1e-9);
+  near(yOf(0), 1, 1e-9);
   assert.equal(levelFrac(-200, LO, HI), 0);
   assert.equal(levelFrac(0, LO, HI), 1);
 });
 
-test("a NaN column draws NOTHING, and an unchanged input draws BYTE-IDENTICAL quads", () => {
-  const cols = Float32Array.from([-70, Number.NaN, -60, Number.NaN]);
-  const q = traceQuads(cols, PANE, STRIP, LO, HI, HOLD_INK, "trace-hold", "p");
-  assert.equal(q.length, 2);
-  assert.deepEqual(q.map((x) => x.kind), ["trace-hold", "trace-hold"]);
-  assert.deepEqual(traceQuads(cols, PANE, STRIP, LO, HI, HOLD_INK, "trace-hold", "p"), q);
+test("T-475: a vertex's COLOUR is the waterfall's ramp at the SAME normalisation the tile shader uses", () => {
+  // The user's ask, stated as an equality rather than an impression: "the same dB must be the same
+  // colour on the trace as in the cells beneath it". The tile shader computes
+  // `cellMark(s, (v - uLo) / max(uHi - uLo, 1e-6), px)`, and for an OBSERVED cell `cellMark` is
+  // `cmap(x)` — so the claim is that a trace vertex at `db` is `cmap((db - lo) / (hi - lo))`, from
+  // the SAME module, with nothing in between.
+  const dbs = [-110, -100, -92.5, -85, -70, -55, -44, -40];
+  const pts = pointsOf(tracePaths(Float32Array.from(dbs), PANE, STRIP, LO, HI, "trace-slice", "p", { subdiv: 1 }));
+  for (const db of dbs) {
+    const want = cmap((db - LO) / (HI - LO));
+    const got = pts.find((p) => Math.abs(dbOf(p.y) - db) < 1e-6);
+    assert.ok(got, `no vertex at ${db} dB`);
+    for (let k = 0; k < 3; k++) near(got.rgb[k], want[k], 1e-6);
+  }
+  // …and it really is the ramp and not a coincidence: the ramp's ends and middle are different
+  // colours, and the trace reproduces that difference.
+  const lowest = pts.find((p) => Math.abs(dbOf(p.y) - -110) < 1e-6)!;
+  const highest = pts.find((p) => Math.abs(dbOf(p.y) - -40) < 1e-6)!;
+  for (let k = 0; k < 3; k++) { near(lowest.rgb[k], cmap(0)[k], 1e-6); near(highest.rgb[k], cmap(1)[k], 1e-6); }
+  assert.notDeepEqual(lowest.rgb, highest.rgb, "the ramp's ends are different colours, and so is the trace's");
+  // The ONE definer rule (T-397/T-445) holds with nothing weakened: the colour is imported, not
+  // re-stated. `ui/test/surface-cutover.test.ts` holds the repo-wide half of this.
+  const src = readFileSync("src/surface/trace.ts", "utf8");
+  assert.match(src, /import \{ cmap \} from "\.\.\/cmap"/, "the ramp must be imported, never copied");
+  assert.ok(!/0\.05\s*,\s*0\.1\s*,\s*0\.55/.test(src), "trace.ts must not carry stops of its own");
 });
 
-test("every trace quad is a STROKE, so the overlay pass still cannot wash a measurement", () => {
-  const cols = new Float32Array(256).fill(-70);
-  for (const q of traceQuads(cols, PANE, STRIP, LO, HI, SLICE_INK, "trace-slice", "p", { thickPx: 2 })) {
-    const hPx = ((q.clip[3] - q.clip[1]) / 2) * STRIP.h;
-    assert.ok(hPx <= 4 + 1e-6, `a trace sample is ${hPx} px tall — that is a fill, not a stroke`);
-  }
-  assert.notDeepEqual(SLICE_INK, HOLD_INK, "the two series must be distinguishable");
+test("T-475: the colour follows the RANGE, because the cells below it do", () => {
+  // The same dB against a different measured range is a different colour in the waterfall (T-470's
+  // whole subject), so it must be a different colour on the trace. A trace that had cached a colour,
+  // or carried a scale of its own, would hold still here while the picture under it changed.
+  const one = pointsOf(tracePaths(Float32Array.from([-70]), PANE, STRIP, LO, HI, "t", "p", {}))[0];
+  const two = pointsOf(tracePaths(Float32Array.from([-70]), PANE, STRIP, -90, -30, "t", "p", {}))[0];
+  assert.notDeepEqual(one.rgb, two.rgb);
+  const want = cmap((-70 - -90) / (-30 - -90));
+  for (let k = 0; k < 3; k++) near(two.rgb[k], want[k], 1e-6);
 });
+
+// ---------------------------------------------------------------------------
+// T-475: the line is SMOOTH — and it is smooth THROUGH THE MEASUREMENTS
+// ---------------------------------------------------------------------------
+//
+// The trap named in the brief: *a trace that looks smoother is not a trace that is drawing the same
+// measurements.* Every test here therefore asserts the VALUES the curve passes through. Vertex
+// counts appear only where the claim is literally about density, and never on their own.
+
+test("every measured column is ON the curve — smoothing adds points, it does not move samples", () => {
+  const dbs = [-100, -95, -60, -44, -70, -88, -86, -99];
+  const cols = Float32Array.from(dbs);
+  const pts = pointsOf(tracePaths(cols, PANE, STRIP, LO, HI, "trace-slice", "p", INK));
+  const n = cols.length;
+  const colHz = (PANE.f1Hz - PANE.f0Hz) / n;
+  for (let c = 0; c < n; c++) {
+    const [x0, , x1] = toClip(
+      { f0Hz: PANE.f0Hz + c * colHz, f1Hz: PANE.f0Hz + (c + 1) * colHz, t0Ns: PANE.t0Ns, t1Ns: PANE.t1Ns }, PANE);
+    const at = pts.filter((p) => Math.abs(p.x - (x0 + x1) / 2) < 1e-9);
+    assert.equal(at.length, 1, `column ${c} should contribute exactly one sample point`);
+    near(dbOf(at[0].y), dbs[c], 1e-4);
+  }
+});
+
+test("the curve NEVER OVERSHOOTS its bracketing samples — a monotone cubic, not a ringing spline", () => {
+  // A Catmull-Rom through a flat noise floor with one spike rings BELOW the floor on either side of
+  // it — a quieter measurement than the radio reported, at a frequency where it reported something
+  // else. That is inventing a value, which is the one thing smoothing may not do. Fritsch–Carlson
+  // cannot: the interpolant is monotone wherever the data is.
+  const dbs = [-100, -100, -100, -42, -100, -100, -100, -100];
+  const cols = Float32Array.from(dbs);
+  const paths = tracePaths(cols, PANE, STRIP, LO, HI, "trace-slice", "p", INK);
+  const pts = pointsOf(paths);
+  const n = cols.length;
+  const colHz = (PANE.f1Hz - PANE.f0Hz) / n;
+  const centre = (c: number) => {
+    const [x0, , x1] = toClip(
+      { f0Hz: PANE.f0Hz + c * colHz, f1Hz: PANE.f0Hz + (c + 1) * colHz, t0Ns: PANE.t0Ns, t1Ns: PANE.t1Ns }, PANE);
+    return (x0 + x1) / 2;
+  };
+  for (const p of pts) {
+    // Which interval is this point in, and what do its two ends measure?
+    let i = 0;
+    while (i < n - 2 && p.x > centre(i + 1) + 1e-12) i++;
+    const a = Math.min(dbs[i], dbs[i + 1]), b = Math.max(dbs[i], dbs[i + 1]);
+    const db = dbOf(p.y);
+    assert.ok(db >= a - 1e-4 && db <= b + 1e-4,
+      `a point at ${db.toFixed(2)} dB sits outside the ${a}…${b} dB its neighbours measured — ` +
+      "the smoothing invented a value");
+  }
+  // The floor is never breached ANYWHERE, which is the same claim said the blunt way.
+  assert.ok(pts.every((p) => dbOf(p.y) >= -100 - 1e-4), "the curve dipped below the measured floor");
+  assert.ok(pts.some((p) => Math.abs(dbOf(p.y) - -42) < 1e-4), "…and the spike is still on it");
+});
+
+test("the staircase is GONE: consecutive points step gently, where per-column quads jumped", () => {
+  // The user's report was "looks like pixels", and a per-column quad trace is literally a flight of
+  // stairs: each column is drawn at one constant height, so the whole change between two columns
+  // happens in a single vertical edge. This asserts the shape rather than the vertex count — the
+  // largest step between two consecutive points must be a fraction of the largest step between two
+  // consecutive COLUMNS, which is the size of the staircase's riser.
+  const dbs = [-100, -90, -80, -70, -60, -50, -44, -40];
+  const cols = Float32Array.from(dbs);
+  const pts = pointsOf(tracePaths(cols, PANE, STRIP, LO, HI, "trace-slice", "p", INK));
+  let biggestPoint = 0;
+  for (let i = 1; i < pts.length; i++) biggestPoint = Math.max(biggestPoint, Math.abs(pts[i].y - pts[i - 1].y));
+  let biggestColumn = 0;
+  for (let c = 1; c < dbs.length; c++) {
+    biggestColumn = Math.max(biggestColumn, Math.abs(levelFrac(dbs[c], LO, HI) - levelFrac(dbs[c - 1], LO, HI)) * 2);
+  }
+  assert.ok(biggestPoint < biggestColumn / 2,
+    `the largest step on the curve is ${biggestPoint} of a riser of ${biggestColumn} — still a staircase`);
+  // Density, said as what it is: points per measured interval, which is TRACE_SUBDIV by definition.
+  assert.ok(pts.length >= (dbs.length - 1) * TRACE_SUBDIV, `${pts.length} points over ${dbs.length} columns`);
+  // The control: with no subdivision it IS the polyline through the samples, and the biggest step
+  // is back to a riser. So the test above is measuring the smoothing, not the y mapping.
+  const raw = pointsOf(tracePaths(cols, PANE, STRIP, LO, HI, "trace-slice", "p", { ...INK, subdiv: 1 }));
+  let biggestRaw = 0;
+  for (let i = 1; i < raw.length; i++) biggestRaw = Math.max(biggestRaw, Math.abs(raw[i].y - raw[i - 1].y));
+  assert.ok(biggestRaw > biggestPoint * 2, "the comparison is vacuous — subdivision changed nothing");
+});
+
+test("a lone column between two gaps is a tick ACROSS ITS OWN EXTENT — not a point, not a reach", () => {
+  const cols = Float32Array.from([Number.NaN, -60, Number.NaN, -80, Number.NaN]);
+  const paths = tracePaths(cols, PANE, STRIP, LO, HI, "trace-slice", "p", INK);
+  assert.equal(paths.length, 2, "two answered columns, two gaps between them, two curves");
+  const colW = 2 / 5;
+  for (const [i, want] of [[0, -60], [1, -80]] as const) {
+    const pts = pointsOf([paths[i]]);
+    assert.ok(pts.every((p) => Math.abs(dbOf(p.y) - want) < 1e-4), "a lone sample is flat at its own value");
+    near(Math.max(...pts.map((p) => p.x)) - Math.min(...pts.map((p) => p.x)), colW, 1e-6);
+  }
+});
+
+test("a NaN column draws NOTHING, and an unchanged input draws BYTE-IDENTICAL geometry", () => {
+  const cols = Float32Array.from([-70, Number.NaN, -60, Number.NaN]);
+  const a = tracePaths(cols, PANE, STRIP, LO, HI, "trace-hold", "p", INK);
+  assert.equal(a.length, 2);
+  assert.deepEqual(a.map((x) => x.kind), ["trace-hold", "trace-hold"]);
+  assert.deepEqual(tracePaths(cols, PANE, STRIP, LO, HI, "trace-hold", "p", INK), a);
+});
+
+test("a trace is a STROKE with a width, so it can never be a wash over the pane it describes", () => {
+  const cols = new Float32Array(256).fill(-70);
+  for (const p of tracePaths(cols, PANE, STRIP, LO, HI, "trace-slice", "p", { widthPx: 2.2 })) {
+    assert.ok(p.widthPx > 0 && p.widthPx <= 8, `a ${p.widthPx} px stroke is a fill, not a line`);
+  }
+  // The max-hold is off the ramp entirely, so the two series are still tellable apart by colour —
+  // which `ui/e2e/app-trace.e2e.mjs` relies on to separate them in the framebuffer.
+  const [hr, hg, hb] = HOLD_INK;
+  for (let x = 0; x <= 1.0001; x += 0.02) {
+    const [r, g, b] = cmap(x);
+    assert.ok(Math.hypot(r - hr, g - hg, b - hb) > 0.25,
+      `the max-hold's ink is on the ramp at x=${x.toFixed(2)} — the two series would be confusable`);
+  }
+}); 
 
 // ---------------------------------------------------------------------------
 // The strip is carved out of the pane, not painted over it
@@ -431,7 +695,7 @@ test("the strip is taken out of the pane's RECTANGLE — it never covers the new
   const seen: { paneId: string; strip: PaneRect; levelF: number; levelT: number; paneRect: PaneRect }[] = [];
   const { view } = viewWith(96, (pane, _edge, report, strip) => {
     seen.push({ paneId: pane.id, strip, levelF: report.levelF, levelT: report.levelT, paneRect: pane.rect });
-    return traceQuads(new Float32Array(32).fill(-70), pane.box, strip, LO, HI, SLICE_INK, "trace-slice", pane.id);
+    return tracePaths(new Float32Array(32).fill(-70), pane.box, strip, LO, HI, "trace-slice", pane.id);
   });
   const f = view.frame(T0, []);
   assert.equal(seen.length, view.panes.count, "once per pane, and not for the minimap");
@@ -462,10 +726,15 @@ test("the strip is taken out of the pane's RECTANGLE — it never covers the new
 test("the data pass is byte-identical with the trace on and off — a trace cannot tint a measurement", () => {
   const run = (on: boolean) => {
     const { g, view } = viewWith(on ? 96 : 0,
-      on ? (pane, _e, _r, strip) => traceQuads(new Float32Array(64).fill(-70), pane.box, strip, LO, HI, SLICE_INK, "trace-slice", pane.id) : null);
+      on ? (pane, _e, _r, strip) => tracePaths(new Float32Array(64).fill(-70), pane.box, strip, LO, HI, "trace-slice", pane.id) : null);
     view.frame(T0, []);
-    // The data program is the one with a sampler; `overlay.ts`'s has none, and this file's quads go
-    // through it. Only the uniforms of the *data* draws are compared.
+    // The data program is the one with a sampler and a display range; neither `overlay.ts`'s nor
+    // `tracepass.ts`'s has one. Only the uniforms of the *data* draws are compared.
+    //
+    // T-475 is why this test is worth more than it was. The trace now carries a MEASUREMENT COLOUR —
+    // the same ramp as the cells — so "a trace cannot tint a measurement" can no longer rest on the
+    // pass being incapable of colour. It rests on this: the tile draws were all submitted before the
+    // trace program was ever bound, and they are bit-for-bit the same whether or not it runs.
     const ops = g.ops.filter((o) => o.kind === "draw" && o.u && "uLo" in o.u).map((o) => JSON.stringify(o.u));
     view.dispose();
     return ops;
@@ -611,6 +880,25 @@ test("no signal logic, no clock and no route in the trace module", () => {
   }
 });
 
+test("T-475: the trace's own pass has NO SAMPLER — it can colour, but it can never read a tile", () => {
+  // The property T-457 used to get from `overlay.ts` having no ramp, re-established where it now
+  // has to live. A trace that carries a measurement colour cannot be drawn by a program incapable of
+  // one, so the argument "it cannot tint a measurement because it cannot express a colour" is gone.
+  // What replaces it is stronger and is checked here: the trace program cannot READ a measurement,
+  // cannot express `cellrule.ts`'s grey, its tier hatching or its fallback mark, and takes its colour
+  // as a vertex attribute computed by `trace.ts` from the ONE ramp module. The repo-wide half — that
+  // no second module defines a ramp — is `ui/test/surface-cutover.test.ts`'s, and it walks `src/`,
+  // so it already covers this file.
+  const src = readFileSync("src/surface/tracepass.ts", "utf8");
+  const bare = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.ok(!/sampler2D|texture\(/.test(bare), "the trace program must have no sampler");
+  assert.ok(!/vec3 cmap\(float|CELL_RULE_GLSL|cellMark|tierMark|fallbackMark/.test(bare),
+    "…and no cell rule: it cannot draw a grey, a tier mark or a fallback hatch");
+  assert.match(bare, /in vec4 aRgba/, "its colour arrives as a vertex attribute, not as a ramp it owns");
+  // And the data pass is not reachable from it: it binds no texture and shares no display range.
+  assert.ok(!/uLo|uHi|bindTexture/.test(bare), "the trace pass must not touch the data pass's state");
+});
+
 test("the renderer's one display range is what the trace reads — Surface still owns it", () => {
   const g = stubGl(64, 64);
   const s = new Surface(g.canvas, VIEW_LAT, (tex) => new TileCache(tex, (a) => Promise.resolve(stubTile(a)), { now: () => 0 }));
@@ -619,7 +907,7 @@ test("the renderer's one display range is what the trace reads — Surface still
   // `setScale` exists for tests and for a future caller; the app deliberately does not call it (the
   // manual dB range is not coming back — see `ui/src/app/centre/surface.ts`). What matters here is
   // that `lo`/`hi` are the numbers a trace is drawn against, wherever they came from.
-  const q = traceQuads(Float32Array.from([-75]), PANE, STRIP, s.lo, s.hi, SLICE_INK, "trace-slice", "p");
-  near((q[0].clip[1] + q[0].clip[3]) / 2, 0, 1e-6);
+  const pts = pointsOf(tracePaths(Float32Array.from([-75]), PANE, STRIP, s.lo, s.hi, "trace-slice", "p", INK));
+  near(pts[0].y, 0, 1e-6);
   s.dispose();
 });

@@ -53,8 +53,8 @@ import {
 } from "../../surface/retune";
 import type { PaneRect, PaneReport, PaneView } from "../../surface/surface";
 import {
-  HOLD_INK, SLICE_INK, TRACE_COLUMNS, liveFrameFits, maxHoldColumns, peakOf, sampleFrame, sliceColumns,
-  sliceWindow, traceQuads,
+  GLOW_PX, HOLD_INK, HOLD_PX, SHADOW_PX, SLICE_PX, TRACE_COLUMNS, liveFrameFits, maxHoldColumns,
+  peakOf, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
 } from "../../surface/trace";
 import type { OverlayQuad } from "../../surface/minimap";
 import { liveRow } from "./live-edge";
@@ -174,19 +174,24 @@ function mount(el: HTMLElement, ctx: AppContext) {
   let traceOn = true;
   const fmtDb = (db: number) => `${db.toFixed(1)} dB`;
   const fmtDur = (s: number) => (s < 1 ? `${(s * 1000).toFixed(0)} ms` : s < 90 ? `${s.toFixed(1)} s` : `${(s / 60).toFixed(1)} min`);
-  const traceFor = (pane: PaneView, _edgeNs: number, report: PaneReport, strip: PaneRect): OverlayQuad[] => {
+  const traceFor = (pane: PaneView, _edgeNs: number, report: PaneReport, strip: PaneRect): TracePath[] => {
     const p = preview;
     if (!p) return [];
     const s = p.view.surface;
     const dev = pane.device ?? "any";
     const n = Math.max(16, Math.min(TRACE_COLUMNS, Math.floor(strip.w)));
-    const out: OverlayQuad[] = [];
+    const out: TracePath[] = [];
 
     // The max-hold, over this viewport's WHOLE window, from the tiles it just drew at the level it
     // drew them. Not an accumulator: the pyramid's cells ARE max-holds (hk-api's `MAX_HOLD_RULE`),
     // so panning to an hour ago shows that hour's peak instead of restarting from nothing.
+    //
+    // It keeps a FLAT ink (T-475), and that is the one place the ramp deliberately does not reach:
+    // the max-hold answers a different question over a different interval than the slice, so giving
+    // both the ramp would put two identically-coloured lines on one strip.
     const hold = maxHoldColumns(s.lat, s.cache, pane.box, report.levelF, report.levelT, dev, n);
-    out.push(...traceQuads(hold, pane.box, strip, s.lo, s.hi, HOLD_INK, "trace-hold", pane.id));
+    out.push(...tracePaths(hold, pane.box, strip, s.lo, s.hi, "trace-hold", pane.id,
+      { ink: [HOLD_INK[0], HOLD_INK[1], HOLD_INK[2]], alpha: HOLD_INK[3], widthPx: HOLD_PX }));
 
     // The slice, at this viewport's own time position. The live row is preferred only where it is
     // genuinely finer — inside the cell the slice is asking about — and the pyramid answers
@@ -198,7 +203,28 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const slice = live && fr
       ? sampleFrame(fr, pane.box, n)
       : sliceColumns(s.lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);
-    out.push(...traceQuads(slice, pane.box, strip, s.lo, s.hi, SLICE_INK, "trace-slice", pane.id));
+
+    // **The afterglow** (T-475): the rows just before THIS pane's time position, oldest first so the
+    // newest shadow sits on top of the older ones and the current slice on top of all of them. They
+    // come from the pyramid at the level the pane drew — the same cells under the strip — so a pane
+    // scrubbed into last hour glows with last hour, which is the whole point of deriving them from
+    // the window instead of from a buffer of whatever the page received.
+    const shadows = persistenceSlices(s.lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);
+    for (const sh of [...shadows].reverse()) {
+      out.push(...tracePaths(sh.cols, pane.box, strip, s.lo, s.hi, "trace-glow", pane.id,
+        { alpha: sh.alpha, widthPx: SHADOW_PX, shade: "mono" }));
+    }
+
+    // The current slice, twice: a wide neutral bloom under a full-opacity ramp-coloured core. The
+    // core's centre is exactly `cmap((db - lo) / (hi - lo))` — the same argument, the same ramp and
+    // the same range as the cell at that dB below it — which is the equality
+    // `ui/e2e/app-trace.e2e.mjs` reads off the framebuffer. The bloom is grey on purpose: it is a
+    // glow, not a second reading, and keeping it achromatic leaves exactly one measurement colour on
+    // the strip (see `TraceStyle.shade`).
+    out.push(...tracePaths(slice, pane.box, strip, s.lo, s.hi, "trace-bloom", pane.id,
+      { alpha: 0.18, widthPx: GLOW_PX, shade: "mono" }));
+    out.push(...tracePaths(slice, pane.box, strip, s.lo, s.hi, "trace-slice", pane.id,
+      { alpha: 1, widthPx: SLICE_PX }));
 
     // The readout, for the pane gestures apply to. Written here rather than on the poll for the same
     // reason the quads are: it describes the frame that was just drawn. It names the SOURCE, because
@@ -224,6 +250,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
         holdPk
           ? `max-hold over ${fmtDur(spanS)} · peak ${fmtDb(holdPk.db)} at ${fmtHz(holdPk.hz)}`
           : `max-hold over ${fmtDur(spanS)} — ${empty}`,
+        // **The afterglow says which instants it is**, because "several fading lines" is otherwise
+        // unfalsifiable decoration: the sentence names the rows, and they are rows of THIS pane's
+        // window, so a scrubbed viewport states past instants and a following one states recent
+        // ones. `app-trace.e2e.mjs` reads this back while scrubbed, which is the demonstration the
+        // ticket asks for and the one a live-only persistence buffer could not make.
+        shadows.length
+          ? `afterglow ${shadows.length} × ${fmtDur((win.t1Ns - win.t0Ns) / S_TO_NS)} back to ${at(shadows[shadows.length - 1].tAtNs - (win.t1Ns - win.t0Ns))}`
+          : "afterglow — no earlier row in this window",
         // T-470: one scale for the trace's y axis and the ramp, and it says which of the two ways it
         // was decided. It used to read "measured from the served tiles" — true of the viewport-
         // tracking range, and exactly what stopped being true when the scale stopped following the
