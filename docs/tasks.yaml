@@ -12052,7 +12052,7 @@ tasks:
   - id: T-451
     milestone: M2-hardening
     title: decoded_capture's segments_roll test fails 2 in 10 AT THE CAPPED THREAD COUNT, and it is already in heavy-serial
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     deps: [T-448, T-436]
@@ -12086,6 +12086,36 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
       FILTERSET TRAP worth knowing: `-E 'test(<file name>)'` matches NOTHING and exits non-zero,
       which reads as a failure. Use `binary(<file>)` for a whole file.
+    commit: "1c337ea"
+    result: |
+      DONE - TEST BUG, and the mechanism is proven BY REPRODUCTION rather than by argument. Only
+      crates/hk-pipeline/tests/decoded_capture.rs changed; no product code.
+      Some(9787) is `produced - 1`, the RecipeRuntime's stats.frames. The capture store sits BEHIND the
+      publisher as an egress consumer on its own writer thread and MUST NEVER BLOCK THE PIPELINE, so it
+      can end short two ways: its bounded ring drops AND COUNTS a frame offered while full, or at stream
+      end a recorder still draining after the 5 s drain_timeout is closed and its queue discarded.
+      NOTHING THE TEST CONTROLS BOUNDS `produced`: it is wall time for the recorder to write 8 segments x
+      an unpaced producer rate, so it stretches with disk latency while the producer, which never waits
+      for the recorder, does not. Injecting latency into the recorder's OWN FILE WRITES walks all three
+      regimes - 3-5 ms: produced 3 939-6 003, gap 0, dropped 0; 7-10 ms: 7 969-11 393, gap 333-751,
+      dropped 1 146-1 763; 12+ ms: 12 745-42 019, drain-timeout. 9 788 SITS IN THE MIDDLE ROW and the old
+      assertion fails there reproducibly. So the flake is not "the machine was slow": it is A VALUE
+      COMPARISON AGAINST A QUANTITY TWO LOSSY BOUNDARIES AWAY.
+      THE REPLACEMENT SAYS STRUCTURALLY WHAT ASSERTION #5 WAS FOR: every survivor but the highest-numbered
+      ended by ROLLING into its successor, and the highest is the one the stream itself ended on. Then the
+      store's real tail guarantee - NEITHER LOSS IS SILENT: on the clean path, gap <= the newest segment's
+      counted drops. WITH NO DROPS THAT INEQUALITY IS THE OLD EQUALITY, EXACTLY, which is the normal case
+      in every measured run.
+      THE LINE-379 SIBLING SHARES THE CAUSE, stated generally: the test read the recorder's state at a
+      moment gated by A DIFFERENT PARTY'S PROGRESS. 542 gated on the producer; 379 waited for the LIVE
+      CONSUMER to see 40 frames then asserted the RECORDER had opened its capture - two independent
+      consumer threads with no ordering between them.
+      Non-vacuity by injection, each caught by its named guard. 20 clean crate runs after the fix, 10 at 8
+      threads and 10 at 28.
+      ONE FINDING IT REFUSED TO SMUGGLE IN: drain-timeout discards the recorder's queued records WITHOUT
+      COUNTING them - flagged via end_reason so not silent, but the books balance only on the ring path.
+      Filed as T-465.
+      Gate: full, passed.
   - id: T-452
     milestone: MCANVAS
     title: An in-app scan trigger - the iterative-scan ENGINE exists but `hk serve` deliberately never drives the scheduler
@@ -13608,7 +13638,7 @@ tasks:
   - id: T-482
     milestone: MLIVE
     title: /api/tiles declares a 12 x 15 lattice and 400s a large part of it - the route must say how far it can actually be READ
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -13888,7 +13918,7 @@ tasks:
   - id: T-487
     milestone: MCANVAS
     title: app-trace's peak-argmax compares a readout and a framebuffer captured at DIFFERENT instants
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     depends_on: []
@@ -13925,6 +13955,41 @@ tasks:
     notes: |
       Filed 2026-09-18 by the coordinator after it blocked T-476's gate. Second flake in this tier to
       block the queue; the first was T-478's live-edge drift, whose first fix was backwards.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-488
+    milestone: M3
+    title: frequency_features takes the SAME broken strong-envelope subset, over seven IF dimensions - the third instance
+    status: todo
+    priority: normal
+    parallel_group: M3A
+    depends_on: [T-447]
+    use_cases: [SIGNAL-062]
+    acceptance: |
+      THE THIRD INSTANCE, measured and left by T-447 exactly as T-431 left the second. T-431 fixed
+      `duty` and `low_fraction`; T-447 fixed `phase_features` and `derotate`; `frequency_features`
+      SELECTS THE SAME SUBSET WITH THE SAME BROKEN RULE - 0.5 x mean(a) rather than the emission's
+      own ON LEVEL - for SEVEN IF dimensions. Recorded at the site in code by T-447.
+      WHY IT IS ITS OWN TICKET AND NOT A WIDENING: `sigma_af` is one of the five surviving
+      SNR_ORDER_EXCEPTIONS, which is A LIVE CLAIM this would move. That is a wider blast radius than
+      the phase pair and deserves its own before/after, which is the same reasoning T-431 used to
+      leave T-447 alone.
+      THE FIX IS ALREADY WRITTEN: T-447's `strong_envelope_threshold(a) = 0.5 * on_level(a, mean(a))`
+      is four lines and is the same construction. Check that before designing anything.
+      LEARN FROM T-447'S RESULT RATHER THAN ASSUMING ITS SHAPE. T-447's premise reproduced exactly
+      (subset 0.662 at 10 dB against a true 0.050) AND ITS PREDICTED BLAST RADIUS DID NOT HAPPEN -
+      gate figures moved by 0.0000 - because `derotate` SUMS PHASORS, so the 90 % of the subset that
+      was noise carried only 11 % of the magnitude. THAT IS A PROPERTY OF THE SUBSET'S COUNT, NOT OF
+      ANYTHING COMPUTED FROM IT. Frequency features may or may not be weighted the same way; measure,
+      do not infer from T-447.
+      FLOORS AND METHOD: ADR-0016 section 7.1, and READ 7.2 FIRST - held-out figures carry a 0.0084
+      draw sd, so a +/-0.02 move is NOISE. Measure merge base and branch BACK TO BACK (T-419), and
+      verify the density refit is deterministic on an unmodified tree first, as T-447 did - that is
+      what makes "no move" a measurement rather than an absence.
+      Pin properties with closed forms, not figures.
+    notes: |
+      Filed by the coordinator 2026-09-18 from T-447's report. Depends on T-447 because it lands the
+      shared helper (and T-431, which T-447 also carries - T-431 was marked done but its commit
+      06e4b7d never reached main).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
