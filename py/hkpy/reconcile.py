@@ -28,7 +28,11 @@ What it reports per in-progress ticket, all read from git, never guessed:
                completely different in the worktree. Calling a busy agent "no work" would be the
                same false claim this tool exists to catch.
   NO WORK      the branch exists, with no commits and a clean worktree -> nothing has been done.
-  NO BRANCH    no branch at all -> nothing was ever started, or it was cleaned up.
+  LANDED       no branch, but main carries a commit naming this ticket -> it was merged and its
+               branch was cleaned up. THIS IS THE ONE THAT KEPT PRODUCING PHANTOMS: removing a
+               worktree after a merge is the documented reclaim step, so a finished ticket ends up
+               looking exactly like one that never started. Reported loudly for that reason.
+  NO BRANCH    no branch and nothing on main names it -> nothing was ever started.
 
 Staleness is the age of the newest commit on the branch (or of the worktree's newest modified file
 when nothing is committed yet), because "in-progress and untouched for hours" is the signal that
@@ -171,13 +175,22 @@ class Finding:
 
     @property
     def needs_attention(self) -> bool:
-        return self.state in ("MERGED", "AHEAD")
+        return self.state in ("MERGED", "AHEAD", "LANDED")
 
 
 def inspect(t: Ticket, now: float) -> Finding:
     br = branch_for(t.id)
     if br is None:
-        return Finding(t, None, "NO BRANCH", 0, None)
+        # A deleted branch is ambiguous: merged-and-cleaned-up, or never started. Ask main whether
+        # it carries a commit that names this ticket - the merge subjects here are "Merge T-nnn: ..."
+        # and result commits "T-nnn: ...", so the id in a subject is a reliable signal and a far
+        # better answer than shrugging.
+        # Plain id, not a \b word boundary: git's ERE does not support \b and SILENTLY MATCHES
+        # NOTHING, which made every landed ticket read as never-started - the bug this branch of the
+        # function exists to fix, reintroduced inside the fix. Ids are T-nnn and the board is in the
+        # 400s, so a bare id cannot collide until there is a four-digit ticket.
+        named = _git("log", "main", "--oneline", "--grep", t.id, "-n", "1")
+        return Finding(t, None, "LANDED" if named else "NO BRANCH", 0, None)
     ahead_txt = _git("rev-list", "--count", f"main..{br}")
     ahead = int(ahead_txt) if ahead_txt.isdigit() else 0
     ts = _git("log", "-1", "--format=%ct", br)
@@ -215,14 +228,14 @@ def render(findings: list[Finding]) -> str:
     w = max(len(f.ticket.id) for f in findings)
     lines = [f"reconcile: {len(findings)} in-progress ticket(s) on the board\n"]
     for f in sorted(findings, key=lambda f: (not f.needs_attention, f.ticket.id)):
-        mark = "!!" if f.state == "MERGED" else ("->" if f.state == "AHEAD" else "  ")
+        mark = "!!" if f.state in ("MERGED", "LANDED") else ("->" if f.state == "AHEAD" else "  ")
         ahead = (f"~{f.ahead}" if f.state == "WORKING" else f"+{f.ahead}") if f.ahead else "  "
         lines.append(
             f"  {mark} {f.ticket.id:<{w}}  {f.state:<9} {ahead:>3}  last {_age(f.age_s):>5}"
             f"  {f.branch or '(no branch)'}"
         )
         lines.append(f"       {f.ticket.title[:96]}")
-    merged = [f for f in findings if f.state == "MERGED"]
+    merged = [f for f in findings if f.state in ("MERGED", "LANDED")]
     ahead = [f for f in findings if f.state == "AHEAD"]
     lines.append("")
     if merged:

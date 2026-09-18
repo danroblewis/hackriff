@@ -545,12 +545,93 @@ test("T-456: a plain wheel is a UNIFORM zoom that still leaves the two axes inde
   // would make `levelF === levelT` here, whatever the surface looked like.
   assert.notEqual(al.levelF, al.levelT,
     "one uniform gesture produced ONE level for both axes: the levels have been re-welded");
-  // …and each axis is still clamped on its own: zooming far out pins frequency to the surface's
-  // whole extent while time is pinned to the record, two independent floors reached separately.
+  // …and each axis is still clamped on its own — **but a PLAIN wheel now stops when EITHER of them
+  // does** (T-472). This assertion is inverted rather than deleted, on T-347's precedent: what it
+  // protected is still true and is asserted immediately below (the clamps are per-axis, and shift
+  // still reaches the surface's whole extent). What changed is the *gesture*. Letting frequency run
+  // on to 6 GHz while time sat pinned at the record is precisely the defect the user reported — the
+  // proportions of the picture drift under a gesture that promised to scale both equally, the view
+  // jumps, and the frequency axis has to be shift-scrolled back by hand after every wheel.
+  const at = preview.frame().views.find((v) => v.id === id)!.box;
+  const ratio = (x: typeof at) => (x.f1Hz - x.f0Hz) / (x.t1Ns - x.t0Ns);
   preview.wheel(id, { x: 600, y: 400 }, 1e6, wheelAxes({}));
   const w = preview.frame().views.find((v) => v.id === id)!.box;
-  assert.equal(w.f1Hz - w.f0Hz, BOUNDS.f1Hz - BOUNDS.f0Hz);
-  assert.equal(w.t1Ns - w.t0Ns, BOUNDS.t1Ns - BOUNDS.t0Ns);
+  assert.equal(w.t1Ns - w.t0Ns, BOUNDS.t1Ns - BOUNDS.t0Ns, "time should be pinned to the record's extent");
+  assert.ok(w.f1Hz - w.f0Hz < BOUNDS.f1Hz - BOUNDS.f0Hz,
+    "a plain wheel carried frequency to the surface's whole 6 GHz while time was already pinned at " +
+    "the record: the uniform zoom did not stop with the axis that ran out, so the aspect ratio drifted");
+  assert.ok(Math.abs(ratio(w) / ratio(at) - 1) < 1e-9,
+    `the plain wheel changed the pane's aspect ratio (${ratio(at)} → ${ratio(w)} Hz/ns)`);
+
+  // Shift is the escape hatch the user asked for, and the ONLY way to widen frequency past the lock.
+  preview.wheel(id, { x: 600, y: 400 }, 1e6, wheelAxes({ shiftKey: true }));
+  const s = preview.frame().views.find((v) => v.id === id)!.box;
+  assert.equal(s.f1Hz - s.f0Hz, BOUNDS.f1Hz - BOUNDS.f0Hz, "shift + wheel must still reach the whole surface");
+  assert.equal(s.t1Ns - s.t0Ns, w.t1Ns - w.t0Ns, "shift + wheel moved the time axis");
+});
+
+/**
+ * **T-472, through the host: a plain wheel over a pane is `PaneModel.zoomBoth`, and nothing else.**
+ *
+ * `ui/test/surface-aspect.test.ts` carries the quantified ratio property over the pane model. What
+ * is left to show here is that the wheel path a host actually takes reaches it — the same reason
+ * T-456's semantics live in `preview.ts` rather than in `input.ts`, and the same failure mode: the
+ * arithmetic can be right while the gesture routes around it.
+ *
+ * The minimap is asserted too, because it is a viewport and gets the viewport's gesture. Wheeling it
+ * with its own pair of clamps would be a second opinion about what a plain wheel means, which is the
+ * whole class of defect (T-412) the single-host rule exists to prevent.
+ */
+test("T-472: a plain wheel through the preview stops with the first axis to run out, on panes and on the map", () => {
+  const { preview } = harness();
+  const id = preview.activePane;
+  preview.frame();
+  const boxOfPane = () => preview.frame().views.find((v) => v.id === id)!.box;
+  /**
+   * The ratio is read from the pane's **spans**, not from `f1 − f0` of its box.
+   *
+   * The box is `boxOf` applied to exactly these spans, so it is the same window — but reconstructing
+   * a span as `(c + s/2) − (c − s/2)` at 100 MHz with a 2 MHz window loses bits to cancellation, and
+   * that residue is an artefact of the witness rather than a drift in the view. Measuring it here
+   * would be asserting a property of double-precision subtraction, which is the adjacent-question
+   * mistake this ticket was warned about.
+   */
+  const ratio = (p: { freq: { spanHz: number }; time: { spanNs: number } }) => p.freq.spanHz / p.time.spanNs;
+  const paneNow = () => preview.view.panes.get(id)!;
+  const at = { x: 300, y: 500 }; // deliberately off-centre: the anchors are separate, and stay so
+
+  // Wheel out to the bound, recording the ratio at every step. The claim is about the WHOLE gesture,
+  // not its endpoints: a lock that let the ratio drift and then restored it would look identical at
+  // the ends and wrong in the hand.
+  const r0 = ratio(paneNow());
+  const drift: number[] = [];
+  for (let i = 0; i < 24; i++) {
+    preview.wheel(id, at, zoomFactor(240), wheelAxes({}));
+    drift.push(Math.abs(ratio(paneNow()) / r0 - 1));
+  }
+  assert.ok(Math.max(...drift) < 1e-9,
+    `the aspect ratio drifted by up to ${(Math.max(...drift) * 100).toExponential(2)} % across 24 plain wheels`);
+
+  // At the bound the gesture is refused outright — neither axis moves, in either direction.
+  const held = boxOfPane();
+  preview.wheel(id, at, zoomFactor(240), wheelAxes({}));
+  assert.deepEqual(boxOfPane(), held, "a plain wheel at the bound moved the pane");
+  assert.equal(preview.view.panes.lockedZoomFactor(id, zoomFactor(240)), 1);
+  // …and it is TIME that ran out, with frequency still short of the surface — so the stop is the
+  // lock's, not the frequency clamp's. Without this the assertion above would also pass on a pane
+  // that had simply zoomed out to everything.
+  assert.ok(held.f1Hz - held.f0Hz < BOUNDS.f1Hz - BOUNDS.f0Hz,
+    "frequency reached the whole surface, so this is not the case the lock is about");
+  assert.equal(held.t1Ns - held.t0Ns, BOUNDS.t1Ns - BOUNDS.t0Ns);
+
+  // The map takes the same gesture through the same model — one opinion about a wheel, not two.
+  const mapNow = () => preview.view.minimap.state();
+  const m0 = ratio(mapNow()), mSpan0 = mapNow().freq.spanHz;
+  for (let i = 0; i < 8; i++) preview.wheelMap({ x: 200, y: 8 }, zoomFactor(-240), wheelAxes({}));
+  assert.ok(Math.abs(ratio(mapNow()) / m0 - 1) < 1e-9,
+    "a plain wheel over the minimap changed its aspect ratio: the map has its own idea of the gesture");
+  assert.ok(mapNow().freq.spanHz < mSpan0,
+    "the minimap did not zoom at all, so the assertion above is vacuous");
 });
 
 test("T-456: the modifier table, and the shift-held wheel that arrives as a HORIZONTAL scroll", () => {

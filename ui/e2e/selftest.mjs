@@ -94,6 +94,23 @@ export const __selftestMark = __selftestPredicate(1);
     },
   },
   {
+    // T-472, and the smallest edit that is it: take the uniform branch out of `SurfacePreview.wheel`
+    // and the two axes go back to taking the same factor and each clamping alone — which is exactly
+    // T-456 as shipped, not a mutant. The guard sees it as a plain wheel that keeps widening
+    // frequency long after the time axis has stopped.
+    name: "t472-per-axis-uniform-zoom",
+    expect: "surface-nav.e2e.mjs",
+    what: "T-472: a plain wheel hands the same factor to both axes and lets each clamp on its own, " +
+      "so past the end of the record time pins while frequency keeps scaling — the aspect ratio " +
+      "drifts, the view jumps, and the user has to shift-scroll the frequency axis back every time.",
+    file: "surface/preview.ts",
+    patch: (src) => {
+      const from = "    if (axes.freq && axes.time) { this.view.panes.zoomBoth(id, factor, fx, ty); return; }\n";
+      if (!src.includes(from)) throw new Error("selftest: anchor not found in preview.ts: zoomBoth");
+      return src.replace(from, "    // injected by ui/e2e/selftest.mjs — no aspect lock; each axis clamps alone\n");
+    },
+  },
+  {
     // The bootstrap half, found by this tier before T-454 landed: `probeSurface` makes one
     // `/api/tiles` call to learn the lattice, and treating its `503` as fatal meant one busy tab
     // could stop a second one from opening at all. Removing the retry restores that.

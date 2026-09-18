@@ -240,6 +240,77 @@ export class PaneModel {
     this.update(id, (p) => ({ ...p, freq: { centerHz, spanHz } }));
   }
 
+  // ——— T-472: the uniform gesture, and the aspect ratio it must never change ———
+
+  /**
+   * **The part of `factor` that BOTH axes can take.** `1` when either of them is already at a bound.
+   *
+   * This is the whole of T-472. [[zoomFreq]] and [[zoomTime]] each clamp on their own — which is
+   * right, and is what T-434 de-welded them for — but a *uniform* gesture that hands the same
+   * requested factor to both and lets each clamp separately **stops being uniform the moment one of
+   * them saturates**: the user zooms out past the end of the record, time pins to the retained
+   * window, frequency keeps widening, and the picture's aspect ratio walks away under a gesture that
+   * promised to preserve it. That was the reported bug, and the recovery — shift-scroll the
+   * frequency axis back — had to be performed by hand after every wheel.
+   *
+   * So the requested factor is reduced, *before* either axis is touched, to the one both can honour:
+   * the **realized** factor of each axis (what its span would actually become, over what it is now),
+   * taken at whichever is nearer 1. Zooming out that is the smaller, zooming in the larger. Applying
+   * it then lands each axis strictly inside its own clamp, so neither clamp fires and both spans
+   * scale by exactly the same number — which is the aspect ratio, preserved by construction rather
+   * than by a tolerance.
+   *
+   * **What it does NOT do, and this is the distinction the ticket turns on.** It constrains *the
+   * gesture*, never the pyramid. The two axes remain independently levelled: they are still moved by
+   * two separate calls with two separate anchors, still clamped separately, and still resolve their
+   * own levels from their own cell sizes — so after a plain wheel `levelF` and `levelT` legitimately
+   * differ, which is what `levelDivergenceNote` exists to say. A fix that collapsed the levels to
+   * make the pixels square would undo T-434/T-438/T-440.
+   *
+   * **Why a centre clamp is not a stop.** The bound that matters here is the *span* bound, because
+   * the aspect ratio is a ratio of spans. [[normalise]]'s centre clamp moves a window without
+   * changing either span, so it cannot skew the picture — and treating it as a stop would make it
+   * impossible to zoom out to the whole surface from anywhere near an edge, which is a worse gesture
+   * than the one being fixed.
+   */
+  lockedZoomFactor(id: string, factor: number): number {
+    const p = this.panes.get(id);
+    if (!p || !Number.isFinite(factor) || factor <= 0) return 1;
+    const gf = p.freq.spanHz > 0 ? this.freqSpanAfter(p, factor) / p.freq.spanHz : 1;
+    const gt = p.time.spanNs > 0 ? this.timeSpanAfter(p, factor) / p.time.spanNs : 1;
+    if (factor > 1) return Math.max(1, Math.min(gf, gt));
+    if (factor < 1) return Math.min(1, Math.max(gf, gt));
+    return 1;
+  }
+
+  /**
+   * **The plain wheel: one factor, both axes, and the aspect ratio held.**
+   *
+   * The two axes are still two calls with two anchors — see [[lockedZoomFactor]] for why that is the
+   * point rather than an implementation detail. A locked factor of exactly 1 returns without calling
+   * either, so at a bound the pane's record is left *identical*, not recomputed into something
+   * floating-point-equal: `(c + k) − k` is not always `c`, and a gesture that is supposed to do
+   * nothing must do nothing.
+   */
+  zoomBoth(id: string, factor: number, anchorF = 0.5, anchorT = 1): void {
+    const f = this.lockedZoomFactor(id, factor);
+    if (f === 1) return;
+    this.zoomFreq(id, f, anchorF);
+    this.zoomTime(id, f, anchorT);
+  }
+
+  /** The span [[zoomFreq]] would actually leave, clamps and all. Mirrors it plus [[normalise]]. */
+  private freqSpanAfter(p: PaneState, factor: number): number {
+    const fullF = this.bounds.f1Hz - this.bounds.f0Hz;
+    return clamp(clamp(p.freq.spanHz * factor, this.minSpanHz, fullF), Math.min(this.minSpanHz, fullF), fullF);
+  }
+
+  /** The same for [[zoomTime]]. Its ceiling is the record, which grows, so it is read per call. */
+  private timeSpanAfter(p: PaneState, factor: number): number {
+    const fullT = Math.max(this.minSpanNs, this.timeTop() - this.bounds.t0Ns);
+    return clamp(clamp(p.time.spanNs * factor, this.minSpanNs, fullT), Math.min(this.minSpanNs, fullT), fullT);
+  }
+
   // ——— time: the same window is the pause state ———
 
   /**
