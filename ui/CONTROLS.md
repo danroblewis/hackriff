@@ -11,8 +11,8 @@ Standard control sets of [SDR++](https://github.com/AlexandreRouma/SDRPlusPlus),
 | Gains LNA/VGA/amp (HackRF source in all three) | `POST /api/control/gains` | Named stages from `device.gain_stages`; generic names for other devices |
 | Bias tee (SDR++, SDRangel HackRF source) | `POST /api/control/bias_tee` | Confirm with a DC-on-antenna warning |
 | FFT size, averaging, refresh/waterfall rate (all) | `POST /api/control/display` | Limits hard-coded from hk-pipeline (not in the state body) |
-| Waterfall min/max, auto-level (SDR++, SigDigger) | client (`surface/surface.ts`) | The display range tracks what the served tiles actually hold (`range_db`), shared by every viewport so two panes cannot shade the same energy differently. **T-445 dropped the manual dB entry** with the retired waterfall — see the findings note below |
-| Peak / max hold (SDRangel, SigDigger) | backend (the tile fold) | Max-hold is what a coarser cell *is* (T-342): a level-n cell is the maximum over the level-0 cells under it, folded server-side. **T-445 dropped the client-side max-hold trace** with the spectrum plot — see the findings note below |
+| Waterfall min/max, auto-level (SDR++, SigDigger) | client (`surface/surface.ts`) | The display range tracks what the served tiles actually hold (`range_db`), shared by every viewport so two panes cannot shade the same energy differently, and now by the spectrum trace as well. **The manual dB entry is not coming back (T-457):** `Waterfall.setScale(auto, lo, hi)` existed but had *no caller* at the cutover, so T-445 retired an unreachable control rather than a feature in use; and a hand-set range overrides a measurement, which this product declines by default. The honest control is to **state** the range, which the trace readout does |
+| Peak / max hold (SDRangel, SigDigger) | backend (the tile fold), drawn client-side (T-457) | Max-hold is what a coarser cell *is* (T-342): a level-n cell is the maximum over the level-0 cells under it, folded server-side. T-457 draws it as the second trace series by reducing the tiles a viewport **already has**, over that viewport's own window — **no accumulator and no new ladder tier**, because the ladder's only reduction already is max-hold and a max of max-holds is a max-hold |
 | Bookmarks / frequency manager, markers (SDR++, SDRangel, SigDigger) | `/api/bookmarks` | Add from a click or a selection; jump zooms, or retunes on request |
 | Freeze / pause (SDRangel spectrum, SigDigger) | client (the surface's Live/Paused button, per viewport) | T-347: holding the view is the client's own time cursor — the same state a scrub leaves — so it is per-viewer and reaches no route. The run-wide `/api/control/pause` is gone: it froze every connected browser's waterfall at once. T-442 made it per **viewport**: a pane's pause *is* its time window, so freezing is a coordinate change and not a mode, and "scrubbed but not paused" is not a state the type can spell |
 | Record baseband (SDR++ recorder, SDRangel file sink) | `POST /api/control/record/start`, `stop` | Refused under content-forbidding classes (409 `refused`) |
@@ -87,14 +87,16 @@ they carried did not disappear with them:
 | Frequency navigator: lit segment per active capture window | The map's per-SDR live segments, read through the same `activeWindows` (T-443) |
 | Frequency navigator: region-select → retune | The **Retune** offer beside the viewport (T-444). It is an offer and a separate press, and it refuses (`"moved"`) if the viewport moved after the label was drawn |
 | Review drawer → "Spectrum grid" (region over time) | The surface. That tab drew `GET /api/history` with a second, hand-written colormap — T-397's divergence, in the repo twice |
+| The live FFT plot above the waterfall | The **trace strip** above each viewport (T-457, `surface/trace.ts`): the spectrum at that viewport's own time position, plus the max-hold over its window |
 | The live waterfall's frequency axis strip | **No home yet** — see below |
 
-**Three things had no home on the canvas. One is now settled; two still need a decision rather than
-a quiet deletion:**
+**Three things had no home on the canvas. Two are now settled; one still needs a decision rather
+than a quiet deletion:**
 
-1. **The instantaneous spectrum trace** (the live FFT plot above the old waterfall), and with it the
-   client-side **max-hold** and the **manual dB range entry**. The surface draws folded cells over
-   time; a live trace of the current frame is a different picture, not a zoom level of this one.
+1. ~~**The instantaneous spectrum trace**, the client-side **max-hold** and the **manual dB range
+   entry**~~ — **settled by T-457.** The trace is back as a strip above each viewport (see *The
+   spectrum trace* below); max-hold is drawn from the tile fold; the manual dB range is deliberately
+   not restored.
 2. ~~**Drag-to-select a region** and the **Confirmed band's draggable edges**~~ — **settled by
    T-458.** The gesture is **shift + drag** (see *Navigating the surface* above). A stroke is a new
    `POST /api/selections` region, or — after "Adjust band" on a Confirmed row — that row's new
@@ -103,6 +105,38 @@ a quiet deletion:**
    which is one gesture instead of two hit-targets and works at 400 px. "Reset band" still clears it.
 3. **Frequency and time axis ticks with labels.** The old `.axis` strip is gone; the surface states
    each viewport's window and level in its chrome line, which is a readout rather than a ruler.
+
+### The spectrum trace, restored and time-addressable (T-457)
+
+A strip is carved off the **top of each viewport's rectangle** — never painted over it, because an
+overlay covering the newest rows would make "the top of the pane is the newest row" false. In it:
+
+- **slice** — the spectrum across the whole viewport **at that viewport's own time position**
+  (`box.t1Ns`). Following the edge, that is the newest delivered row, straight off the spectrum
+  stream; scrubbed into the past, it is the pyramid's row of cells at that instant. The readout
+  names which, and the cell's duration when it is a cell, so a max over a second is never passed off
+  as an instant. A trace pinned to *now* is the naive version and is explicitly not what this is.
+- **max-hold** — the column-wise maximum over the viewport's **whole** window.
+
+Both are drawn only where data exists: a column nothing answered for emits nothing, because
+*unobserved is not quiet* and a line across a gap claims a measurement nobody took. Both share the
+surface's two axes — x through the renderer's own `toClip`, y through the one measured display range
+the ramp uses — so a peak on the trace sits above the column it paints. The **Trace** button hides
+the strip and gives the space back to the viewport.
+
+**The strip is a READOUT, not a control: it passes every pointer event through to its pane.** A
+press, drag, wheel, hover, click or right-click that lands in the strip is treated as one at the
+**top edge of the pane below it** — the same frequency, at the pane's newest instant, which is
+exactly the instant the strip is a spectrum of. So drag still pans, shift+drag still marks out a
+region, plain/shift/alt wheel still zoom as *Navigating the surface* says: nothing about a gesture
+changes because it started a few pixels higher.
+
+The alternative — the strip handling pointers with a meaning of its own — was rejected twice over.
+The obvious meaning for a vertical drag on a dB axis is *set the display range by hand*, which is
+the control this table says is deliberately not restored; and a second gesture vocabulary on one
+canvas is T-412's wheel-zoom mismatch waiting to happen. Saying this explicitly is the point: when
+the strip was neither — when it simply resolved to no pane — it silently swallowed **every** drag
+that began in it, which is how T-457 and T-458 broke on merge while each was green alone.
 
 **Skipped, and why:**
 - **Transmit** (SDRangel TX device sets, replay-to-TX): receive only; the API has no TX route (C37 gated).

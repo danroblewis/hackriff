@@ -15,20 +15,41 @@
 //  2. **The tuned geometry** (centre, bandwidth, bins, row rate) that the control panel, the tuning
 //     nudges, the bookmarks and the retune gate all read off `state.live`.
 //
-// So this module opens the same socket the waterfall used and **throws every row away**. It writes
-// headers and timestamps into the store; it owns no DOM and renders nothing. That is worth saying
-// out loud because it is an honest inefficiency: a full spectrum stream is being consumed for its
-// timestamps. A lighter live-edge source is a backend question (there is no route that pushes just
-// the edge), and inventing one in the client would mean guessing the edge between polls — which is
-// the substitution this repo refuses everywhere else.
+// So this module opened the same socket the waterfall used and **threw every row away**, writing
+// only headers and timestamps into the store. T-457 took the third thing back — and only the third
+// thing:
 //
-// It also keeps `conn.spectrum`, which the shell shows: the socket's health is still the honest
-// signal for "is this server producing", even though nothing draws its output.
+//  3. **The newest row itself** (`./trace.ts`'s [[LiveRow]]). The cutover's finding 1 is that the
+//     surface draws *folded cells over time* while a trace is *this frame across frequency*: a cell
+//     is a fold over at least one row, so the instantaneous trace is the one quantity on that screen
+//     no tile can supply. It is kept in a one-row holder and **not** in the app store — rows arrive
+//     tens of times a second, and the retired live view's own note ("spectrum rows go straight to
+//     `Waterfall.push` and never enter the store") is the reason. Only the newest row is retained:
+//     this is not the client-side accumulator T-457 declined to build, and it answers no question
+//     about the past. The past is the pyramid's, and the trace's max-hold reads it from the tiles.
+//
+// The stream is therefore no longer consumed purely for its timestamps, which was the honest
+// inefficiency this header used to admit. A lighter live-edge source is still a backend question;
+// with a trace on the screen there is now less reason to want one.
+//
+// It also keeps `conn.spectrum`, which the shell shows: the socket's health is the honest signal for
+// "is this server producing".
 import * as ax from "../../axis";
+import { LiveRow } from "../../surface/trace";
 import type { AppContext } from "../context";
 import { apiConnFor, backoffMs, openStream, parseSpectrumRecord, type StreamSocket } from "../net";
 import { setLiveEdge } from "./slice";
 import { nextView } from "./view";
+
+/**
+ * The newest spectrum row, shared with the centre's trace.
+ *
+ * A module singleton because `mountLiveEdge` is already mounted exactly once, by `./index.ts`'s own
+ * `edgeStarted` latch, and because a row must not travel through the store (see above). The centre
+ * mount reads it inside its per-frame callback, never on a poll — a trace laid out on the poll
+ * cadence beside a per-frame scroll is T-388 on the other axis.
+ */
+export const liveRow = new LiveRow();
 
 /** The `/api/streams` fields this needs (docs/api.md discovery). */
 interface StreamInfo { stream_id: string; kind: string; remote_permitted: boolean }
@@ -58,6 +79,10 @@ export function mountLiveEdge(ctx: AppContext): () => void {
     const rate = typeof hd.sample_rate_hz === "number" ? hd.sample_rate_hz : 25;
     const prev = geom();
     const retuned = !prev || prev.centerHz !== g.centerHz || prev.bandwidthHz !== g.bandwidthHz || prev.bins !== g.bins;
+    // A retune re-plumbs the stream, and the row held here is of the band that has just ended. Drop
+    // it for the same reason `edgeTS` goes back to null: a picture of the old band drawn over the new
+    // one is not a stale picture, it is a false one.
+    if (retuned) liveRow.clear();
     store.set((s) => ({
       conn: { ...s.conn, spectrum: "live", message: "" },
       live: {
@@ -77,13 +102,28 @@ export function mountLiveEdge(ctx: AppContext): () => void {
     }));
   };
 
-  // The rows themselves are dropped on the floor: this module draws nothing. Only the record's own
-  // absolute time is kept, and only when it is finite. Written whether or not any viewport is
-  // following — pausing freezes a *view*, never the capture, so the edge keeps advancing while the
-  // user inspects a past window.
+  // The record's own absolute time, and the record's own row. Both are written whether or not any
+  // viewport is following — pausing freezes a *view*, never the capture, so the edge keeps advancing
+  // and the newest frame keeps being the newest frame while the user inspects a past window. (What
+  // a *paused* pane does with that row is the trace's decision, not this one's: see
+  // `./surface.ts`'s `traceFor`, which refuses to draw a frame outside the window it would sit on.)
   const onBinary = (buf: ArrayBuffer) => {
     const r = parseSpectrumRecord(buf);
-    if (r?.type === "data" && Number.isFinite(r.tS)) store.set(setLiveEdge(r.tS));
+    if (r?.type !== "data" || !Number.isFinite(r.tS)) return;
+    store.set(setLiveEdge(r.tS));
+    // A gated row carries no samples (`row === null`); it is a statement about the gate, not a
+    // spectrum, so the last real frame stands rather than being replaced by nothing.
+    const g = geom();
+    if (r.row && g && r.row.length > 0) {
+      liveRow.set({
+        f0Hz: g.centerHz - g.bandwidthHz / 2,
+        f1Hz: g.centerHz + g.bandwidthHz / 2,
+        // Copied, not aliased: `parseSpectrumRecord` returns a view onto the socket's buffer, which
+        // the next message reuses. A retained view would silently become the next row.
+        db: new Float32Array(r.row),
+        tNs: r.tS * 1e9,
+      });
+    }
   };
 
   async function connect() {

@@ -41,7 +41,7 @@ import type { OverlayQuad } from "./minimap";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache, type Viewport } from "./tilecache";
-import type { PaneView, TilePlanes } from "./surface";
+import type { PaneRect, PaneReport, PaneView, TilePlanes } from "./surface";
 import { SurfaceView, type SurfaceFrame } from "./view";
 
 /** Cells per tile edge the preview renders at — the route's own default, and the size the cache
@@ -173,8 +173,56 @@ export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureO
 const describe = (e: unknown): string =>
   e instanceof ControlError ? `HTTP ${e.status} ${e.code}` : e instanceof Error ? e.message : String(e);
 
-/** A pointer position in the drawing buffer, GL convention: origin **bottom-left**. */
+/** A pointer position in the drawing buffer, GL convention: origin **bottom-left**.
+ *
+ * Deliberately NOT exported: `ui/src/surface/input.ts` already exports this name, and two exported
+ * spellings of one idea is the drift this directory keeps closing. Callers pass object literals. */
 interface GlPoint { readonly x: number; readonly y: number }
+
+const inRect = (r: PaneRect, p: GlPoint): boolean =>
+  p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h;
+
+/**
+ * **Which pane a pointer belongs to — and the rule that the trace strip is part of its pane.**
+ *
+ * T-457 carves a strip off the top of each pane's rectangle for the spectrum trace. **The strip is a
+ * readout, not a control: it passes every pointer event through to the pane it describes.** A point
+ * in it resolves to that pane, and callers clamp it into the pane's own rectangle, so it reads as a
+ * point on the pane's **top edge** — the same frequency, at the pane's newest instant, which is
+ * exactly the instant the strip is a spectrum *of*. Nothing about a gesture changes because it
+ * started a few pixels higher.
+ *
+ * The alternative — the strip handling pointers itself with a meaning of its own — was rejected
+ * twice over: the obvious meaning for a vertical drag on a dB axis is *set the display range by
+ * hand*, which is the control T-457 deliberately did not restore; and a second gesture vocabulary on
+ * one canvas is T-412's wheel-zoom mismatch waiting to happen.
+ *
+ * **Why this is a function and not two lines inside `paneAt`.** T-457 and T-458 were each green
+ * alone and broke on merge: one changed the geometry the other's gestures are measured in, and the
+ * strip became a hole that swallowed every drag starting in it — not only the new region stroke, but
+ * plain and alt drags that T-456 had settled. The invariant that catches that class is *"turning the
+ * trace on may not shrink the set of points a gesture can start from"*, and it is only checkable if
+ * the resolution is a pure function of a frame. `ui/test/surface-trace.test.ts` asserts it over a
+ * grid of points, with and without the strip, knowing nothing about any particular gesture.
+ */
+export function paneAtPoint(frame: SurfaceFrame | null, minimapId: string, p: GlPoint): string | null {
+  for (const v of frame?.views ?? []) {
+    if (v.id === minimapId) continue;
+    if (inRect(v.rect, p)) return v.id;
+  }
+  for (const t of frame?.traces ?? []) {
+    if (inRect(t.rect, p)) return t.id;
+  }
+  return null;
+}
+
+/** `p` clamped into `rect`. A point in a pane's trace strip becomes a point on its top edge. */
+export function clampToRect(rect: PaneRect, p: GlPoint): GlPoint {
+  return {
+    x: Math.min(Math.max(p.x, rect.x), rect.x + rect.w),
+    y: Math.min(Math.max(p.y, rect.y), rect.y + rect.h),
+  };
+}
 
 /** Wheel steps to a zoom factor. `> 1` zooms out, matching `PaneModel`'s own convention. */
 export function zoomFactor(deltaY: number, deltaMode = 0): number {
@@ -358,6 +406,17 @@ export interface PreviewOptions {
    * nothing drawn here can tint a measurement.
    */
   marks?: ((pane: PaneView, edgeNs: number) => readonly OverlayQuad[]) | null;
+  /**
+   * **The instantaneous spectrum trace** (T-457): quads for the strip carved off the top of each
+   * pane. Like `marks`, a function called per frame — but handed the `PaneReport` the data pass just
+   * produced as well, so the reduction behind it is at the level the picture beneath it was drawn at.
+   *
+   * The historical preview passes none. A trace of *this frame* needs a stream, and this host is
+   * deliberately the one that reads no live edge.
+   */
+  trace?: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly OverlayQuad[]) | null;
+  /** Height of that strip, device px. 0 draws no trace and gives the space back to the pane. */
+  tracePx?: number;
 }
 
 /**
@@ -398,6 +457,8 @@ export class SurfacePreview {
       freq: probe.opening.freq,
       spanNs: probe.opening.spanNs,
       marks: opts.marks ?? null,
+      trace: opts.trace ?? null,
+      tracePx: opts.tracePx ?? 0,
     });
     // **Freeze everything at open, unless an edge was reported in.** A following viewport borrows
     // the growing edge; without one there is nothing to borrow, so nothing follows (T-450's
@@ -506,14 +567,9 @@ export class SurfacePreview {
     return !!r && p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h;
   }
 
-  /** The pane under a point, or null. */
+  /** The pane under a point, or null. See [[paneAtPoint]] for what "under" includes. */
   paneAt(p: GlPoint): string | null {
-    for (const v of this.lastFrame?.views ?? []) {
-      if (v.id === this.view.minimap.id) continue;
-      const r = v.rect;
-      if (p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h) return v.id;
-    }
-    return null;
+    return paneAtPoint(this.lastFrame, this.view.minimap.id, p);
   }
 
   private rectOf(id: string): { x: number; y: number; w: number; h: number } | null {
