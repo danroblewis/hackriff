@@ -23,11 +23,12 @@ import * as ax from "../src/axis";
 
 import {
   foundInside, listenAllTargets, recordSelectionClip, selectionsEmptyText, selectionsInWindow,
-  type Selection,
+  selectionStoreFor, type Selection,
 } from "../src/app/explore/selections";
+import { commitRegion, regionDestination, regionIsReal } from "../src/app/explore/region";
 import {
-  focusSelection, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal, setInventoryError,
-  setInventoryRows, setInventorySort, setInventoryTab, setSelections,
+  focusSelection, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal, setBandEdit,
+  setInventoryError, setInventoryRows, setInventorySort, setInventoryTab, setSelections,
 } from "../src/app/explore/slice";
 import { createStore } from "../src/app/store";
 import { initialState, reviewAt } from "../src/app/state";
@@ -966,4 +967,118 @@ test("index.html: inventory and selections sit inside the left sidebar aside; th
   assert.match(region, /data-slot="inventory"/, "inventory slot not in the sidebar");
   assert.match(region, /data-slot="selections"/, "selections slot not in the sidebar");
   assert.doesNotMatch(region, /data-slot="live"/, "the live waterfall/spectrum must stay in the centre area");
+});
+
+// ---------------------------------------------------------------------------
+// T-458: where a region stroke goes
+// ---------------------------------------------------------------------------
+//
+// T-193's user-band override was left with **no setter at all** when T-456 gave the drag to
+// panning — stored state that `surface/marks.ts` still honoured (it draws the override in place of
+// the measured extent) and nothing could cause. The override is kept, and shift+drag is its input.
+// These are the two destinations one gesture now has, and the branch between them, because a branch
+// that is wrong in either direction is silent: a stroke that rewrites a signal's band when the user
+// meant a selection, or one that makes a selection when they had just asked to adjust a band.
+
+const REGION = { f0Hz: 101.2e6, f1Hz: 101.4e6, t0Ns: 1_789_300_000e9, t1Ns: 1_789_300_005e9 };
+const MHz = (hz: number) => `${(hz / 1e6).toFixed(4)} MHz`;
+
+function regionCtx(over: { put?: (p: string, b?: unknown) => unknown } = {}) {
+  const store = createStore(initialState());
+  const calls: { method: string; path: string; body?: unknown }[] = [];
+  const client = {
+    put: async <T>(path: string, body?: unknown): Promise<T> => {
+      calls.push({ method: "PUT", path, body });
+      if (over.put) return over.put(path, body) as T;
+      throw new Error(`unexpected PUT ${path}`);
+    },
+    post: async <T>(path: string, body?: unknown): Promise<T> => { calls.push({ method: "POST", path, body }); return {} as T; },
+    del: async <T>(path: string): Promise<T> => { calls.push({ method: "DELETE", path }); return {} as T; },
+  };
+  return { store, calls, ctx: { store, client } as unknown as AppContext };
+}
+
+test("regionDestination: unarmed is a selection; armed is that row's band; armed-but-gone is NEITHER", () => {
+  const rows = { e1: makeRow({ id: "e1" }) };
+  assert.deepEqual(regionDestination(null, rows), { kind: "selection" });
+  assert.deepEqual(regionDestination("e1", rows), { kind: "band", id: "e1" });
+  // The inventory is scoped to the viewed window, so a user can arm "Adjust band", scrub away and
+  // then stroke. Falling back to "selection" there would silently do something else with the
+  // stroke; falling back to "band" would write an override for a row we can no longer see.
+  assert.deepEqual(regionDestination("gone", rows), { kind: "stale", id: "gone" });
+});
+
+test("regionIsReal refuses what clamping to the pane could have flattened", () => {
+  assert.equal(regionIsReal(REGION), true);
+  assert.equal(regionIsReal({ ...REGION, f1Hz: REGION.f0Hz }), false);
+  assert.equal(regionIsReal({ ...REGION, t1Ns: REGION.t0Ns }), false);
+});
+
+test("commitRegion ARMED: PUTs the stroke as that row's band, patches the row, and DISARMS", async () => {
+  const entry = makeRow({ id: "e1", user_band: { f_lo: REGION.f0Hz, f_hi: REGION.f1Hz, set_at: 1, actor: "fp", reason: null, reason_withheld: false } });
+  const { store, calls, ctx } = regionCtx({ put: () => ({ user_band: entry.user_band, entry }) });
+  store.set(setInventoryRows({ e1: makeRow({ id: "e1" }) }, 0));
+  store.set(setBandEdit("e1"));
+
+  commitRegion(ctx, REGION, MHz);
+  assert.equal(store.get().bandEdit, null, "the arming must clear on the stroke, not linger for the next one");
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.deepEqual(calls, [{ method: "PUT", path: "/api/inventory/e1/band", body: { f_lo: REGION.f0Hz, f_hi: REGION.f1Hz } }]);
+  assert.deepEqual(store.get().inventory.rows.e1.user_band, entry.user_band, "the override lands without waiting for a poll");
+  assert.match(store.get().toast.text, /^Band set: /);
+  assert.deepEqual(store.get().focus, { kind: "none" }, "an armed stroke must not ALSO make and focus a selection");
+});
+
+test("commitRegion ARMED and refused: the SERVER's reason is shown, and the arming is still cleared", async () => {
+  const { store, ctx } = regionCtx({ put: () => { throw { code: "invalid", message: "band does not overlap the measured extent" }; } });
+  store.set(setInventoryRows({ e1: makeRow({ id: "e1" }) }, 0));
+  store.set(setBandEdit("e1"));
+  commitRegion(ctx, REGION, MHz);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.match(store.get().toast.text, /band does not overlap the measured extent/);
+  // An override left armed after a failed commit would fire on the user's next unrelated stroke —
+  // the same class of problem as the setter-less override: state acting when nobody asked it to.
+  assert.equal(store.get().bandEdit, null);
+});
+
+test("commitRegion ARMED for a row that scrolled out: no PUT, no selection, and it says so", async () => {
+  const { store, calls, ctx } = regionCtx();
+  store.set(setBandEdit("gone"));
+  commitRegion(ctx, REGION, MHz);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(calls, [], "neither destination is right, so neither is taken");
+  assert.match(store.get().toast.text, /no longer in this window/);
+  assert.equal(store.get().bandEdit, null);
+});
+
+test("commitRegion UNARMED: the stroke becomes a selection with BOTH extents, and focuses it", () => {
+  // The other destination, and the one the whole gesture exists for. A selection carries the time
+  // extent too — a region is a time-frequency event, never a band "for all time" (CLAUDE.md's
+  // signal model) — so the seconds are asserted, not just the edges.
+  const { store, ctx } = regionCtx();
+  assert.equal(store.get().bandEdit, null);
+  commitRegion(ctx, REGION, MHz);
+
+  // Read back through the store that was written, not through `state.selections`: the page's
+  // `SelectionStore` is a module singleton whose subscriber is bound to whichever context created
+  // it, so mirroring into *this* context's state is an accident of which test ran first. The focus
+  // write is this context's own, so that is asserted directly.
+  const focus = store.get().focus;
+  assert.equal(focus.kind, "selection", "the new region is what you are now looking at");
+  const sel = selectionStoreFor(ctx).get(focus.kind === "selection" ? focus.id : "");
+  assert.ok(sel, "an unarmed stroke must make a selection");
+  assert.equal(sel.f_lo, REGION.f0Hz);
+  assert.equal(sel.f_hi, REGION.f1Hz);
+  assert.equal(sel.t_lo, REGION.t0Ns / 1e9);
+  assert.equal(sel.t_hi, REGION.t1Ns / 1e9);
+  assert.match(store.get().toast.text, /^Region: /);
+});
+
+test("commitRegion UNARMED: a degenerate stroke commits nothing at all", () => {
+  const { store, calls, ctx } = regionCtx();
+  commitRegion(ctx, { ...REGION, f1Hz: REGION.f0Hz }, MHz);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(store.get().focus, { kind: "none" }, "nothing was made, so nothing is focused");
+  assert.equal(store.get().toast.text, "");
 });

@@ -148,7 +148,7 @@ export interface OverlayQuad {
   readonly rgba: readonly [number, number, number, number];
   /** `signal-box` and `selection-box` are T-445's in-pane marks (`./marks.ts`); the other two are
    * the map's own. All four are strokes, and `overlay.ts` can draw nothing else. */
-  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box";
+  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "pending-region";
   /** The pane id, or the device id, this mark is about. */
   readonly id: string;
 }

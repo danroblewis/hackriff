@@ -64,6 +64,7 @@ Two of those deserve a note:
 | `app-surface.e2e.mjs` | **T-445's guard**, on **`/` — the page the user actually opens.** The cutover put this renderer on the app's critical path and deleted the waterfall it replaces, so "the app comes up" stopped being a property of an additive preview. Different bundle (`--splitting`), different entry, different mount: passing `surface-load` says nothing about it. Also asserts the retired slots are absent, the rest of Explore is present, and that a drag moves the view while reaching no device route. |
 | `surface-nav.e2e.mjs` | **T-454's guard** — the in-flight cap and the AIMD contract. Plus **T-456's**: the four navigation gestures, and the modifier the browser actually delivered. |
 | `surface-contention.e2e.mjs` | **T-454's bootstrap half**: a second tab must be able to open while the first saturates the route. |
+| `surface-region.e2e.mjs` | **T-458's guard**, on `/`: shift+drag marks out a region. Reads the `shiftKey` flag *on the `pointerdown` the canvas received* before concluding anything from the view, asserts the viewport does **not** move under a stroke, and re-states T-340's control over the new gesture. Its non-vacuity is recorded in the file header: `selftest.mjs` cannot hold these faults, because it builds only the `/surface.html` bundle and this file (like `app-surface`) drives the app. |
 | `selftest.mjs` | Reintroduces each defect in a scratch copy of `ui/src` and requires the suite to go red. |
 
 ## Dependencies: none new
@@ -99,6 +100,7 @@ Measured on the dev Mac, warm (`hk` already built, `npm ci` a no-op):
 | `surface-contention.e2e.mjs` | ~7 s |
 | `surface-load.e2e.mjs` | ~2.5 s |
 | `app-surface.e2e.mjs` | ~3.5 s |
+| `surface-region.e2e.mjs` | ~3.5 s (one browser and one app page shared by the file) |
 | `surface-nav.e2e.mjs` | ~22 s (8 s of it the deliberate steady-state window) |
 | **`npm run e2e` total** | **~32 s** |
 | `npm run e2e:selftest` (baseline + 5 faults) | ~4 min |

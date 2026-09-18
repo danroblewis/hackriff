@@ -27,8 +27,9 @@ import { readFileSync } from "node:fs";
 import { CELL } from "../src/surface/cellrule";
 import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import {
-  CANDIDATE_MARK, CONFIRMED_MARK, OPEN_EDGE_MARK, markAt, markQuads, pointOn, quadSizePx,
-  selectionMarkBoxes, signalMarkBoxes, type MarkBox,
+  CANDIDATE_MARK, CONFIRMED_MARK, OPEN_EDGE_MARK, PENDING_MARK, SELECTION_MARK, markAt, markQuads,
+  normalizeRegion, pendingMarkBox, pointOn, quadSizePx, selectionMarkBoxes, signalMarkBoxes,
+  type MarkBox,
 } from "../src/surface/marks";
 import { Surface, toClip, type PaneRect } from "../src/surface/surface";
 import { TileCache } from "../src/surface/tilecache";
@@ -322,4 +323,46 @@ test("no signal logic, no RF constant and no clock in the marks module", () => {
     assert.ok(["1e9"].includes(m[0]), `marks.ts names an RF-looking constant: ${m[0]}`);
   }
   assert.ok(!/inventory|selections\.ts|explanation|classif/i.test(src), "it decides nothing about what a signal IS");
+});
+
+// ---------------------------------------------------------------------------
+// The region being stroked out (T-458)
+// ---------------------------------------------------------------------------
+
+test("normalizeRegion orders BOTH axes, so a stroke made up-left is the same rectangle as one made down-right", () => {
+  const p = { fHz: 100.1e6, tNs: T0 - 5 * S }, q = { fHz: 100.9e6, tNs: T0 - 2 * S };
+  const forward = normalizeRegion(p, q);
+  assert.deepEqual(normalizeRegion(q, p), forward, "the corner order the hand happened to use is not data");
+  assert.deepEqual(normalizeRegion({ fHz: q.fHz, tNs: p.tNs }, { fHz: p.fHz, tNs: q.tNs }), forward);
+  assert.equal(forward.f0Hz, 100.1e6);
+  assert.equal(forward.f1Hz, 100.9e6);
+  assert.equal(forward.t0Ns, T0 - 5 * S);
+  assert.equal(forward.t1Ns, T0 - 2 * S);
+});
+
+test("the pending band is drawn by the SAME pass as every other mark, in ink no measurement can wear", () => {
+  const r = normalizeRegion({ fHz: 100.9e6, tNs: T0 - 2 * S }, { fHz: 100.1e6, tNs: T0 - 5 * S });
+  assert.deepEqual(pendingMarkBox(null), [], "no stroke, no band");
+
+  const box = pendingMarkBox(r);
+  assert.equal(box.length, 1);
+  assert.equal(box[0].kind, "pending-region", "a stroke in progress is not yet a selection, and does not claim to be");
+  assert.notEqual(box[0].t1Ns, null,
+    "a stroke has two ends the user made: it has nothing to say about the live edge");
+  assert.equal(box[0].open, false);
+  assert.deepEqual(box[0].rgba, PENDING_MARK);
+
+  // Same call, same pane, same frame: the band is placed by `toClip` like the boxes it is drawn
+  // over, which is what stops it lagging the pointer by a poll (T-388's shape).
+  const quads = markQuads(box, T0, PANE, RECT);
+  assert.ok(quads.length > 0, "the band must actually be submitted");
+  for (const q of quads) assert.equal(q.kind, "pending-region");
+  const [x0, y0, x1, y1] = toClip({ f0Hz: r.f0Hz, f1Hz: r.f1Hz, t0Ns: r.t0Ns, t1Ns: r.t1Ns }, PANE);
+  assert.ok(quads.some((q) => Math.abs(q.clip[0] - x0) < 1e-9), "the left edge sits where toClip puts it");
+  assert.ok(quads.some((q) => Math.abs(q.clip[2] - x1) < 1e-9));
+  assert.ok(quads.some((q) => Math.abs(q.clip[1] - y0) < 1e-9));
+  assert.ok(quads.some((q) => Math.abs(q.clip[3] - y1) < 1e-9));
+
+  // And it cannot be confused with a selection that exists: different ink, different kind.
+  assert.notDeepEqual(PENDING_MARK, SELECTION_MARK);
 });

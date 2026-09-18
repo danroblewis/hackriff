@@ -174,19 +174,30 @@ test("signalMenuItems: Promote appears only for candidates; Delete's wording fol
   assert.equal(candidate.find((i) => i.id === "delete")!.label, "Delete");
 });
 
-test("signalMenuItems: Adjust band focuses the signal and hints at dragging the box edges (T-193)", () => {
+// T-458 made this item ARM the next region stroke rather than describe a gesture. T-456 gave the
+// drag to panning and the cutover retired the box's edge handles, so the old hint — "drag the
+// yellow box's left/right edges on the live view" — named two things that no longer existed, and
+// T-193's override was left with a reader and no setter at all. The assertion that the item *arms*
+// is the one that keeps that from happening again: a menu item that only toasts is how the override
+// came to be unreachable.
+test("signalMenuItems: Adjust band ARMS the next region stroke for that row (T-193/T-458)", () => {
   const ctx = fakeCtx();
   const confirmed = signalMenuItems(ctx, makeRow({ id: "e9", state: "confirmed" })).find((i) => i.id === "adjust-band")!;
-  assert.equal(confirmed.hint, "drag the yellow box's edges");
+  assert.equal(confirmed.hint, "then shift-drag the new band");
+  assert.equal(ctx.store.get().bandEdit, null, "nothing is armed until the item is chosen");
   confirmed.onSelect();
   assert.deepEqual(ctx.store.get().focus, { kind: "signal", id: "e9" });
-  assert.match(ctx.store.get().toast.text, /^Adjust band: focused/);
+  assert.equal(ctx.store.get().bandEdit, "e9", "the item must arm the stroke, not merely describe one");
+  assert.match(ctx.store.get().toast.text, /^Adjust band: shift-drag/);
 
+  // A candidate has no band to override, so it arms nothing — the refusal is a state, not just a
+  // sentence: arming a row whose override the backend would reject is dead state with extra steps.
   const candidate = signalMenuItems(fakeCtx(), makeRow({ id: "e9", state: "candidate" })).find((i) => i.id === "adjust-band")!;
   assert.equal(candidate.hint, "promote it first");
   const ctx2 = fakeCtx();
   signalMenuItems(ctx2, makeRow({ id: "e9", state: "candidate" })).find((i) => i.id === "adjust-band")!.onSelect();
   assert.match(ctx2.store.get().toast.text, /^Adjust band: promote/);
+  assert.equal(ctx2.store.get().bandEdit, null, "a candidate must not arm a band override");
 });
 
 test("signalMenuItems: Reset band appears only when a user band is set, and DELETEs it via the band route", async () => {

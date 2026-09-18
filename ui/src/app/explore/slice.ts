@@ -40,10 +40,24 @@ export interface InventorySlice {
 
 export interface SelectionsSlice { list: readonly Selection[]; sync: string }
 
-export interface ExploreState { focus: Focus; inventory: InventorySlice; selections: SelectionsSlice }
+/**
+ * The Confirmed signal whose band the next region stroke sets, or `null` for none (T-458).
+ *
+ * T-193's user-band override was left with **no setter at all** when T-456 gave the drag to panning
+ * — stored state a reader still honoured (`surface/marks.ts` draws the override in place of the
+ * measured extent) and nothing could cause. The override is kept, and this is its input: "Adjust
+ * band" on a Confirmed row arms it, the next shift+drag on the surface is that row's new band
+ * instead of a new selection, and the arming clears either way.
+ *
+ * It is a **named target**, not a guess from what is focused or from where the stroke began: a
+ * band override rewrites what the user is shown about a specific emitter, so which emitter must be
+ * something the user said rather than something the gesture inferred.
+ */
+export interface ExploreState { focus: Focus; bandEdit: string | null; inventory: InventorySlice; selections: SelectionsSlice }
 
 export const exploreInitial = (): ExploreState => ({
   focus: { kind: "none" },
+  bandEdit: null,
   inventory: { tab: "confirmed", sort: { key: "freq", dir: 1 }, rows: {}, window: null, loadedAtS: null, error: null },
   selections: { list: [], sync: "" },
 });
@@ -58,6 +72,10 @@ export const focusSignal = (id: string) => (s: AppState): Partial<AppState> => {
 };
 
 export const focusSelection = (id: string) => (): Partial<AppState> => ({ focus: { kind: "selection", id } });
+
+/** Arms (or disarms, with `null`) the next region stroke as a band override for that row — see
+ * [[ExploreState.bandEdit]]. */
+export const setBandEdit = (id: string | null) => (): Partial<AppState> => ({ bandEdit: id });
 
 export const setInventoryTab = (tab: InventoryTab) => (s: AppState): Partial<AppState> => ({ inventory: { ...s.inventory, tab } });
 

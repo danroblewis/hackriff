@@ -27,6 +27,7 @@ to two axes.
 | Gesture | Effect |
 |---|---|
 | Drag | Pans **both** axes. No threshold, and each axis takes its own component of the travel |
+| **Shift + drag** | Marks out a **region** (T-458) — a new selection, or the new band for a signal armed by "Adjust band". The view does **not** pan while one is being drawn |
 | Wheel | Zooms **both** axes, uniformly, about the cursor |
 | Shift + wheel | Zooms **frequency (X)** only |
 | Alt / Option + wheel | Zooms **time (Y)** only |
@@ -46,6 +47,32 @@ unbound puts a pinch in the uniform branch, where it belongs. Every wheel over t
 so the frequency axis takes whichever delta actually carried the scroll — the dominant one, never
 the sum (T-407's `clientX + clientY`).
 
+**Why shift+drag for a region, and why it does not collide with shift+wheel.** A wheel and a
+captured pointer drag are disjoint event streams: no event can be claimed by both bindings, and you
+cannot be mid-gesture in both. The two readings are one idea rather than two — shift confines the
+gesture to a *region of frequency* instead of sliding the whole view. The three alternatives were
+rejected for reasons the page cannot see at runtime, which is the class of failure T-456 rejected
+ctrl+wheel for:
+
+- **Ctrl+drag** is macOS's secondary click. The browser sends `contextmenu` and `button === 2`, so
+  the stroke silently becomes "open the menu" — the same invisible failure as ctrl+scroll, in its
+  pointer form.
+- **Alt/Option+drag** is Chrome's copy-drag modifier, is grabbed by common Linux window managers to
+  move the window, and already means *time axis* on the wheel — the one real collision available.
+- **Right-drag** would have to fight the context menu, this surface's only route to
+  Promote / Delete / Adjust band / Reset band.
+- **A mode toggle** is a state you can be in without noticing; the surface already has one
+  (Live/Paused). A mode is still right for naming *which* signal a band override applies to, where
+  the target has to be stated anyway — that is what "Adjust band" arms.
+
+The modifier is latched at the press and never re-read, so letting go of shift mid-stroke cannot
+turn the region into a pan of the view it is being drawn on. A **tap is never a region**: the gate is
+the net press-to-release displacement as a `Math.hypot` distance (never `dx + dy`, T-407's own
+defect, which cancels to zero on an ordinary down-left stroke) plus a non-degenerate extent on both
+axes. All of this is confirmed against a real Chrome in `ui/e2e/surface-region.e2e.mjs`, which reads
+the `shiftKey` flag *on the event the canvas received* rather than inferring it from what the view
+did.
+
 ## What T-445's cutover removed, and where each thing went
 
 The two bespoke edge scrubbers (the left time navigator and the bottom frequency navigator) and the
@@ -62,15 +89,18 @@ they carried did not disappear with them:
 | Review drawer → "Spectrum grid" (region over time) | The surface. That tab drew `GET /api/history` with a second, hand-written colormap — T-397's divergence, in the repo twice |
 | The live waterfall's frequency axis strip | **No home yet** — see below |
 
-**Three things have no home on the canvas, and they need a decision rather than a quiet deletion:**
+**Three things had no home on the canvas. One is now settled; two still need a decision rather than
+a quiet deletion:**
 
 1. **The instantaneous spectrum trace** (the live FFT plot above the old waterfall), and with it the
    client-side **max-hold** and the **manual dB range entry**. The surface draws folded cells over
    time; a live trace of the current frame is a different picture, not a zoom level of this one.
-2. **Drag-to-select a region** (`POST /api/selections` from the waterfall) and the **Confirmed
-   band's draggable edges** (T-193's user-band override). On this surface a drag pans (T-456), so a
-   selection gesture needs a modifier or a mode that is not yet designed. Selections can still be
-   made from the **capture band's** time drag, and are drawn on the surface as stroked boxes.
+2. ~~**Drag-to-select a region** and the **Confirmed band's draggable edges**~~ — **settled by
+   T-458.** The gesture is **shift + drag** (see *Navigating the surface* above). A stroke is a new
+   `POST /api/selections` region, or — after "Adjust band" on a Confirmed row — that row's new
+   `PUT /api/inventory/{id}/band` override. The **edge handles** T-193 drew are not coming back:
+   the override is now set by marking out the band you want rather than by dragging two handles,
+   which is one gesture instead of two hit-targets and works at 400 px. "Reset band" still clears it.
 3. **Frequency and time axis ticks with labels.** The old `.axis` strip is gone; the surface states
    each viewport's window and level in its chrome line, which is a readout rather than a ruler.
 

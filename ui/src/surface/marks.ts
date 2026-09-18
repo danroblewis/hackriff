@@ -44,6 +44,10 @@ export const FOCUS_ALPHA = 1;
  * live edge — which is why it is marked differently from a measured end.
  */
 export const OPEN_EDGE_MARK: readonly [number, number, number, number] = [0.98, 0.82, 0.25, 1];
+/** A region being stroked out but not yet committed (T-458): white, so it reads as the pointer's
+ * own mark rather than as a claim about the air, and cannot be mistaken for the amber a selection
+ * that exists is drawn in. */
+export const PENDING_MARK: readonly [number, number, number, number] = [1, 1, 1, 0.9];
 
 export interface MarkStyle {
   /** Edge thickness, device px. */
@@ -63,7 +67,7 @@ export interface MarkStyle {
  * came off the API, and `t1Ns === null` means *open at the live edge*, never *unknown*. */
 export interface MarkBox {
   readonly id: string;
-  readonly kind: "signal-box" | "selection-box";
+  readonly kind: "signal-box" | "selection-box" | "pending-region";
   readonly f0Hz: number;
   readonly f1Hz: number;
   readonly t0Ns: number;
@@ -234,6 +238,45 @@ export function pointOn(paneBox: Box, rect: PaneRect, xPx: number, yPx: number):
     fHz: paneBox.f0Hz + u * (paneBox.f1Hz - paneBox.f0Hz),
     tNs: paneBox.t0Ns + v * (paneBox.t1Ns - paneBox.t0Ns),
   };
+}
+
+// ---- the region being stroked out (T-458) ----
+
+/** A rectangle in surface coordinates, ordered low-to-high on both axes. */
+export interface MarkRegion { f0Hz: number; f1Hz: number; t0Ns: number; t1Ns: number }
+
+/**
+ * The two corners of a region stroke, ordered.
+ *
+ * **One ordering, used twice.** The box that is drawn while the pointer is down and the region that
+ * is committed on release both come through here, so a stroke made upward or leftward cannot end up
+ * drawn as one rectangle and committed as another — the drift-between-two-implementations failure
+ * this milestone exists to close, in miniature.
+ */
+export function normalizeRegion(
+  a: { fHz: number; tNs: number }, b: { fHz: number; tNs: number },
+): MarkRegion {
+  return {
+    f0Hz: Math.min(a.fHz, b.fHz), f1Hz: Math.max(a.fHz, b.fHz),
+    t0Ns: Math.min(a.tNs, b.tNs), t1Ns: Math.max(a.tNs, b.tNs),
+  };
+}
+
+/**
+ * The pending region as a box for [[markQuads]], or nothing when there is no stroke in progress.
+ *
+ * It goes through the **same** pass as every other mark rather than a second overlay of its own —
+ * T-388's box-jump was precisely a second layout beside the first, and a rubber band that lagged
+ * the pointer by a poll would be that defect wearing a different hat. `t1Ns` is never `null`: a
+ * stroke has two ends the user made, so it has nothing to say about the live edge.
+ */
+export function pendingMarkBox(region: MarkRegion | null): MarkBox[] {
+  if (!region) return [];
+  return [{
+    id: "pending", kind: "pending-region",
+    f0Hz: region.f0Hz, f1Hz: region.f1Hz, t0Ns: region.t0Ns, t1Ns: region.t1Ns,
+    rgba: PENDING_MARK, open: false,
+  }];
 }
 
 /** The widest a mark may be in device px and still be a stroke rather than a wash — the assertion
