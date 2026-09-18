@@ -13059,6 +13059,54 @@ tasks:
       Filed by the coordinator 2026-09-17 from T-457's report. Affects only --loop replays, which are
       a test/e2e convenience rather than a product mode - hence normal, not high.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-475
+    milestone: MCANVAS
+    title: The trace is a plain line - restore the classic phosphor look, coloured by the waterfall ramp with afterglow
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    depends_on: [T-457]
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER FEEDBACK on T-457's trace: it works, but "looks bad vs the classic one - a plain line,
+      missing everything". Three things bring back the classic analyser look. PRIOR ART IS T-152, the
+      old MUI spectrum trace - read it before designing.
+      1. COLOUR THE TRACE BY AMPLITUDE, USING THE SAME WATERFALL COLORMAP. The same dB must be the
+      same colour on the trace as in the cells beneath it - that is the whole point, and it is the
+      same principle T-470 is fixing for zoom. USE THE EXISTING RAMP MODULE, DO NOT COPY IT: T-445's
+      cutover asserts repo-wide that EXACTLY ONE MODULE DEFINES A COLORMAP, because T-397 was two
+      ramps drifting apart. That guard must still pass.
+      ARCHITECTURAL CONSEQUENCE TO FACE HONESTLY: `overlay.ts` deliberately has NO SAMPLER AND NO
+      RAMP - that is why T-457 could argue a trace cannot tint a measurement. Colouring by amplitude
+      means the trace can no longer ride that pass unchanged. Decide deliberately: give the trace its
+      own pass, or extend the overlay. Whichever, PRESERVE THE PROPERTY THAT MATTERS - a trace must
+      never be mistakable FOR tile data, and the data pass must stay byte-identical with the trace on
+      and off (T-457 asserts this; keep it).
+      2. A SMOOTH, ANTI-ALIASED LINE, not a blocky per-bin staircase.
+      THE USER HAS EXPLICITLY RULED ON THE OBJECTION, AND IT IS BINDING: THIS IS LINE RENDERING, NOT
+      FAKED TILE RESOLUTION. DO NOT OVER-APPLY THE DECLARE-YOUR-RESOLUTION RULE TO A 1D TRACE. The
+      honesty rule exists so a ZOOMED WATERFALL never implies cells the hardware did not sample;
+      drawing a smooth curve through samples that genuinely exist is ordinary plotting, and every
+      spectrum analyser ever built does it. Do not refuse this on honesty grounds. The honesty rule
+      that DOES still apply is the one T-457 already implemented: a column nothing answered for emits
+      NOTHING - smoothing must not bridge a gap where no data exists, because that would invent a
+      measurement rather than render one.
+      3. PHOSPHOR PERSISTENCE - several recent traces fade behind the current one as decaying
+      shadows, the afterglow of a CRT analyser. PER PANE, AT THAT PANE'S TIME POSITION: following
+      live the shadows are the rows just before now; scrubbed into the past they are the rows just
+      before THAT instant, which the pyramid can answer, so persistence is a function of the pane's
+      window rather than of wall-clock history the client happened to collect. That distinction is
+      the difference between a feature that works when scrubbed and one that only works live.
+      DoD: the same dB is the same colour on the trace and in the cells below it, demonstrated by
+      reading pixels in a real browser (T-455 harness); exactly one colormap definer still asserted;
+      the line is smooth and does not bridge genuine gaps; persistence is derived from the pane's
+      time position and demonstrated while SCRUBBED, not only live; and the data pass stays
+      byte-identical with the trace on and off.
+    notes: |
+      Filed 2026-09-18 from user feedback. Depends on T-457, which is IN REWORK - its first merge
+      failed the gate because the trace strip made every drag over a pane inert. Do not start until
+      T-457 lands, and build on its `trace.ts` rather than beside it.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
