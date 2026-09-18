@@ -11741,6 +11741,42 @@ tasks:
     notes: |
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-pipeline`,
       `just test-one <name>` - then HAND BACK. Never `just gate`; the coordinator gates at merge.
+  - id: T-449
+    milestone: M2-hardening
+    title: presence_push's opens-once test fails 1 in 5 IN ISOLATION - not load, and a different test from the one T-383 cleared
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    deps: [T-383]
+    found_by: 'coordinator (2026-09-17), gating T-439 - measured in isolation after it failed under load'
+    acceptance: |
+      hk-pipeline::presence_push::a_live_signals_box_opens_once_and_caps_at_the_measured_end fails
+      **1 of 5 runs IN ISOLATION** (--test-threads 1, nothing else building). That is not the load
+      family, and it is the measurement that makes this a ticket rather than another instance.
+      WHY IT IS NOT WHAT T-383 ALREADY CLEARED. T-383 investigated presence_push as the fourth
+      instance of the load-flake family and found the reported test -
+      a_live_signals_box_tracks_the_live_edge_and_stops_when_the_emission_does - had been DELETED
+      by ADR-0019/T-410, while the current file published BYTE-IDENTICAL output 6/6 at load 57. It
+      concluded the file was not timing-sensitive and deliberately did NOT add it to heavy-serial.
+      That conclusion was right about the test it measured. THIS IS A DIFFERENT TEST IN THE SAME
+      FILE, and it behaves differently.
+      T-439 independently ran the control that matters: with its own feature disabled
+      (view_history: false) presence_push STILL FAILED, so it is not T-439's either.
+      DoD follows the rules this file has earned. T-383: a test may not bound a quantity whose
+      natural range it has not measured - so measure what "opens once and caps at the measured
+      end" actually bounds, and over what range. T-430: three sibling bounds moved in WHOLE
+      16384-SAMPLE CAPTURE BLOCKS, so every figure three agents reported was a constant rather
+      than a measurement of the machine - check whether this one is quantised the same way.
+      T-446: check WHICH CLOCK the patience is measured in, because a test patient in wall clock
+      but unbounded in capture time will pass a broken build.
+      Report before/after rates over at least 10 runs IN ISOLATION (that is where the signal is,
+      unusually for this family) and at least 10 under deliberate load.
+      No retry (T-344's standing instruction), no bound raised to a number that passes today
+      (T-425's), and do not weaken what it asserts - the claim is load-bearing, since a box that
+      opens twice or caps early is the presence model getting the emission wrong.
+    notes: |
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-pipeline`,
+      `just test-one <name>` - then HAND BACK. Never `just gate`; the coordinator gates at merge.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
