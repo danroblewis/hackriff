@@ -47,7 +47,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, PoisonError, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use hk_core::{Discontinuity, ReadOutcome};
@@ -151,19 +151,66 @@ pub const VIEW_SCHEME: u16 = 2;
 /// it was introduced for. The floor is the decision, not the ratio.
 pub const VIEW_T_CELL: Duration = Duration::from_secs(1);
 
-/// Cells per tile on both axes of the view lattice.
+/// **Time** cells per tile at every node, and the answer to T-434's RAM caveat.
 ///
-/// **64, not `docs/16` §6.2's 256, and this is the answer to T-434's RAM caveat.** A level-0 tile
-/// is an in-memory accumulator for its whole duration ([`hk_store::Pyramid`] keeps one open map per
-/// level), so the block height is *residency*: §6.2's V(0, 0) holds a tile open for **9.1 h** at
-/// ~3 MB, which is fine for a survey and wrong for a growing edge. At 64 × 64 the finest node's
-/// tile spans **64 s** and costs **~191 KB** — 512× less residency and 17× less memory per tile —
-/// and the client's tile stays 256 × 256 output cells regardless, because `/api/tiles` lays its
-/// grid on the tile's own extent and reads however many store blocks that covers (T-438).
+/// A level-0 tile is an in-memory accumulator for the whole of its duration ([`hk_store::Pyramid`]
+/// keeps one open map per level), so the block *height* is **residency**: `docs/16` §6.2's V(0, 0)
+/// holds a tile open for **9.1 h** at ~3 MB, which is fine for a survey and wrong for a growing
+/// edge. At 64 time cells the finest node's tile spans **64 s** — 512× less residency — and the
+/// client's tile stays 256 × 256 output cells regardless, because `/api/tiles` lays its grid on the
+/// tile's own extent and reads however many store blocks that covers (T-438).
+pub const VIEW_T_CELLS_PER_BLOCK: u32 = 64;
+
+/// **Frequency** cells per tile at every node — scheme 1's own 1024, and deliberately NOT the same
+/// number as [`VIEW_T_CELLS_PER_BLOCK`].
 ///
-/// Uniformity across the lattice is what matters for §5.5's budget (a tile *count* is a byte
-/// count), and every node here is 64 × 64.
-pub const VIEW_CELLS_PER_BLOCK: u32 = 64;
+/// # The regression this constant exists to have fixed
+///
+/// The two axes were first set together at 64, on the reasoning that §6.2 wanted uniform tiles and
+/// that a smaller block is cheaper. The second half is only true of the axis that costs memory.
+/// Resident accumulator is `(span / f_cell) × t_cells_per_block × 44 B` — **independent of the
+/// frequency blocking**, because a narrower block means proportionally more of them. What the
+/// frequency blocking does set is the **number of tile files**, and that is paid at every seal:
+/// 64 cells is a 400 kHz block, so a 21 MHz capture holds 53 level-0 blocks against scheme 1's 4,
+/// and the fold cascade multiplies that across all 64 nodes — about **840 tiles written** at the
+/// end-of-run seal instead of ~64.
+///
+/// Measured, M0 acceptance (50 runs, same box, back to back): **162.8 s** wall with 64-cell
+/// frequency blocks against **31.7 s** with the view lattice off — 5.1× — for **identical user
+/// CPU** (331 s vs 333 s) and unchanged peak RSS (6.42 GB vs 6.28 GB). Same CPU and 5× the wall
+/// clock is not compute and not memory: every run was blocked on per-file I/O at teardown, ~2.6 s
+/// of it, which is ~3 ms × 840 files. Four tests that act on a *live, unpaced, looping* run —
+/// Listen's admission cap and the RDS and POCSAG recipe starts — then failed on wall-clock waits,
+/// and they were the only four that do that.
+///
+/// The bytes were never the problem and are not changed by this: total sealed cells depend on the
+/// span and the duration, not on how they are cut into files. Only the file count changes, and
+/// 1024 makes it scheme 1's. The cost is edge waste on a narrow capture — a 500 kHz window still
+/// rounds up to one 6.4 MHz block of cells — which is the direction to spend it in, because the
+/// live edge this scheme exists for is wide.
+///
+/// # What it did NOT fix, and the number that is intrinsic
+///
+/// Widening the blocking recovered only about a quarter of the regression, and neither did moving
+/// the writes to their own thread (102 s) nor sealing through the last frame (112.7 s). Varying the
+/// **node count** did: a 4 × 4 lattice ran the same suite in 62.6 s against 8 × 8's 112.7 s and the
+/// control's 32.9 s, i.e. roughly **1.5 s of suite wall per lattice node**.
+///
+/// That is not a defect, it is the **de-welding's running cost, and nobody had costed it**. T-434
+/// measured a lattice at about 4× its finest level *on disk* and accepted that; the same 4× applies
+/// to **tile write operations per second of capture**, and that is the part a running pipeline
+/// pays. A welded ladder's coarser levels are vastly coarser in *time* — scheme 1 steps ×60, ×15,
+/// ×4, ×24 — so they write almost nothing and the total is ~1.02× level 0. A de-welded ×2 lattice
+/// has eight time levels each writing its own tile series, giving 2× on the time axis and 2× on the
+/// frequency axis: **~4× scheme 1's tile writes, by construction**.
+///
+/// **It is invisible on the product and amplified only by the harness.** One acceptance run costs
+/// 10.5 s against 10.0 s with the lattice off — within noise — because a device runs *one*
+/// pipeline. The suite runs 28 concurrently on one volume, several of them replaying
+/// **time-compressed 48 h scenes**, so tile writes scale with stream duration and 28 pipelines'
+/// worth contend for one disk. Opening the 64-level pyramid without writing it costs nothing
+/// (31.4 s), which is what isolates the cost to the writes.
+pub const VIEW_F_CELLS_PER_BLOCK: u32 = 1024;
 
 /// Frequency and time levels of the view lattice. 8 × 8 = 64 nodes, which is exactly
 /// [`hk_store::history::MAX_LEVELS`]: frequency reaches ×128 the floor and time reaches 128 s
@@ -182,8 +229,8 @@ pub const VIEW_LEVELS: usize = 8;
 ///
 /// | | `docs/16` §6.2's V(0, 0) | this floor |
 /// |---|---|---|
-/// | finest tile | 25.6 MHz × **9.1 h** | 400 kHz × **64 s** |
-/// | accumulator | ~3 MB | **187 KB** |
+/// | finest tile | 25.6 MHz × **9.1 h** | 6.4 MHz × **64 s** (scheme 1's own tile shape) |
+/// | accumulator | ~3 MB | ~2.9 MB |
 /// | per MHz of tuned span, peak | — | **2.28 MB** (~46 MB at a 20 MHz live edge) |
 /// | per MHz of tuned span, bound | — | **3.65 MB** (~73 MB) |
 ///
@@ -209,7 +256,9 @@ pub fn view_lattice(f_cell_hz: f64) -> ViewLattice {
         scheme: VIEW_SCHEME,
         f_cell_hz,
         t_cell: VIEW_T_CELL,
-        cells_per_block: VIEW_CELLS_PER_BLOCK,
+        // Sets both axes; `view_config` overrides the frequency one. `ViewLattice` has a single
+        // knob because §6.2 assumed uniform tiles; the measurement above is why they differ.
+        cells_per_block: VIEW_T_CELLS_PER_BLOCK,
         f_levels: VIEW_LEVELS,
         t_levels: VIEW_LEVELS,
     }
@@ -219,6 +268,10 @@ pub fn view_lattice(f_cell_hz: f64) -> ViewLattice {
 /// before calibration), a coarse rollup histogram, and the run's own byte budget.
 pub fn view_config(f_cell_hz: f64) -> PyramidConfig {
     PyramidConfig {
+        // The frequency blocking is a FILE-COUNT decision and the time blocking a MEMORY one, so
+        // they are set separately. See [`VIEW_F_CELLS_PER_BLOCK`] for the measurement that
+        // separated them.
+        f_cells_per_block: VIEW_F_CELLS_PER_BLOCK,
         histogram: HistogramConfig {
             lo_db: -200.0,
             step_db: 5.0,
@@ -228,99 +281,200 @@ pub fn view_config(f_cell_hz: f64) -> PyramidConfig {
     }
 }
 
-/// Frames held while a tile read holds the view pyramid (about a minute at 10 rows/s, matching
+/// Frames the view writer may hold (about a minute at 10 rows/s, matching
 /// [`HISTORY_QUEUE_FRAMES`]).
 pub(crate) const VIEW_QUEUE_FRAMES: usize = HISTORY_QUEUE_FRAMES;
 
-/// What one [`ViewIngest::ingest`] did.
-#[derive(Debug, Default)]
-pub(crate) struct ViewIngested {
-    /// Frames folded by this call (this one, plus anything queued before it).
-    pub folded: u64,
-    /// Frames folded behind the watermark — the direct reading of T-446's defect.
-    pub late: u64,
-    /// Frames the pyramid refused.
-    pub rejected: u64,
-    /// The pyramid was busy: this frame was queued instead.
-    pub deferred: bool,
-    /// Queued frames dropped beyond the capacity.
-    pub dropped: u64,
+/// The view pyramid's writer: **its own thread**, because the fold is not the expensive part —
+/// the seal is, and the seal must not land on a thread that gates capture.
+///
+/// # The regression this type exists to have fixed
+///
+/// The first version folded on the history reader's own thread, protected only by a try-lock so a
+/// `/api/tiles` reader could never park it. That protects against the *reader* and misses the
+/// writer: `Pyramid::ingest` seals, encodes, zstd-compresses and writes tiles **inline**, and the
+/// history reader holds a [`crate::gate`] cursor, so in a gated run capture cannot advance past the
+/// slowest reader. Every tile boundary therefore stopped the ring for as long as the write took.
+/// Scheme 1 has the same shape and gets away with it; a 64-node lattice writes about ten times as
+/// much and does not.
+///
+/// Measured, M0 acceptance (50 runs, same box, back to back): **162.8 s** wall folding on the
+/// reader thread against **31.7 s** with the view lattice off — 5.1× — for **identical user CPU**
+/// (331 s vs 333 s) and unchanged peak RSS. Same CPU, five times the wall clock, is not compute and
+/// not memory: the runs were *waiting*. Widening the frequency blocking 16× (fewer, larger files)
+/// recovered only 26 % of it, which is what ruled out per-file overhead and pointed at the thread
+/// the work was on rather than the shape of the work. The four tests that failed in the
+/// coordinator's gate were exactly the four that act on a **live, unpaced, looping** run and wait in
+/// wall clock for stream time to advance — Listen's admission cap, and the RDS and POCSAG recipe
+/// starts.
+///
+/// So the frames cross a thread boundary and the growing edge is written behind it. The history
+/// reader's per-frame cost becomes a clone and a push; nothing it does can block on a tile write,
+/// a zstd pass, or an `/api/tiles` reader.
+///
+/// **Drop-oldest, not drop-newest**, past [`VIEW_QUEUE_FRAMES`]: the newest frame is the growing
+/// edge, which is the whole point of the surface. That is why this is a `VecDeque` behind a
+/// `Condvar` rather than a `sync_channel`, which can only refuse the newest.
+pub(crate) struct ViewWriter {
+    shared: Arc<ViewQueue>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Folds live-chain frames into the view pyramid **without ever waiting for a reader** — the
-/// always-on invariant, in the one place T-439 could have broken it.
-///
-/// `/api/tiles` holds this pyramid's lock per chunk (T-438 re-acquires it per output-row chunk
-/// precisely so a fan-out cannot lock ingest out for a whole tile), but "short" is not "never", and
-/// the history reader is on the same thread that drains the ring. So this only ever *tries* the
-/// lock: a frame that finds it held is queued and folded, in arrival order, by the next call that
-/// gets it. Beyond the capacity the **oldest** are dropped and counted — dropping the newest would
-/// stall the growing edge, which is the one thing the surface is for.
-///
-/// This is [`hk_store::FloorIngestQueue`]'s contract applied to a bare [`Pyramid`]; it is a
-/// separate type only because that one folds a *pair* (spectrum + floor frame) into a
-/// `FloorProduct`, and the view scheme stores the uncalibrated frame alone.
-#[derive(Debug)]
-pub(crate) struct ViewIngest {
-    /// A queued frame keeps **its own** origin, so a deferred frame is still recorded as of the
-    /// time and front end it was taken at (T-133), not the one that happened to drain it.
+#[derive(Default)]
+struct ViewQueueState {
+    /// A queued frame keeps **its own** origin, so a deferred frame is recorded as of the time and
+    /// front end it was taken at (T-133), not whenever the writer got to it.
     pending: VecDeque<(SpectrumFrame, FrameOrigin)>,
+    /// Set once the reader has handed over everything; `Some(true)` also asks for the final seal.
+    finish: Option<bool>,
+}
+
+struct ViewQueue {
+    state: Mutex<ViewQueueState>,
+    wake: Condvar,
     capacity: usize,
 }
 
-impl ViewIngest {
-    pub(crate) fn new(capacity: usize) -> Self {
-        Self {
-            pending: VecDeque::new(),
+impl ViewWriter {
+    /// Starts the writer thread for `view`.
+    pub(crate) fn start(
+        view: Arc<Mutex<Pyramid>>,
+        shared: Arc<Shared>,
+        capacity: usize,
+    ) -> anyhow::Result<Self> {
+        let q = Arc::new(ViewQueue {
+            state: Mutex::new(ViewQueueState::default()),
+            wake: Condvar::new(),
             capacity: capacity.max(1),
-        }
+        });
+        let (qt, st) = (Arc::clone(&q), Arc::clone(&shared));
+        let thread = std::thread::Builder::new()
+            .name("hk-view".into())
+            .spawn(move || view_writer(&qt, &view, &st))?;
+        Ok(Self {
+            shared: q,
+            thread: Some(thread),
+        })
     }
 
-    fn fold(p: &mut Pyramid, frame: &SpectrumFrame, origin: FrameOrigin, out: &mut ViewIngested) {
-        match p.ingest(&FrameInput::from_dsp(frame).with_origin(origin)) {
-            Ok(IngestOutcome::Folded) => out.folded += 1,
-            Ok(IngestOutcome::Late) => out.late += 1,
-            Err(_) => out.rejected += 1,
+    /// Hands `frame` to the writer. Never blocks, never waits on the pyramid.
+    pub(crate) fn push(&self, h: &HistoryCounters, frame: &SpectrumFrame, origin: FrameOrigin) {
+        let mut st = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        st.pending.push_back((frame.clone(), origin));
+        let mut dropped = 0;
+        while st.pending.len() > self.shared.capacity {
+            st.pending.pop_front();
+            dropped += 1;
         }
+        drop(st);
+        add(&h.view_dropped, dropped);
+        self.shared.wake.notify_one();
     }
 
-    /// Folds `frame` (and anything queued before it) if the pyramid's lock is free **now**.
-    pub(crate) fn ingest(
-        &mut self,
-        view: &Mutex<Pyramid>,
-        frame: &SpectrumFrame,
-        origin: FrameOrigin,
-    ) -> ViewIngested {
-        let mut out = ViewIngested::default();
-        let mut guard = match view.try_lock() {
-            Ok(g) => g,
-            Err(TryLockError::Poisoned(e)) => e.into_inner(),
-            Err(TryLockError::WouldBlock) => {
-                self.pending.push_back((frame.clone(), origin));
-                while self.pending.len() > self.capacity {
-                    self.pending.pop_front();
-                    out.dropped += 1;
-                }
-                out.deferred = true;
-                return out;
+    /// Drains what is queued, seals when `seal` (T-446's **one** decision, passed in rather than
+    /// recomputed), checkpoints, and joins.
+    pub(crate) fn finish(mut self, seal: bool) {
+        {
+            let mut st = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            st.finish = Some(seal);
+        }
+        self.shared.wake.notify_all();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for ViewWriter {
+    /// A run that unwinds still stops the thread; it just does not seal, because an unfinished
+    /// segment must not advance a monotonic watermark (T-446).
+    fn drop(&mut self) {
+        if let Some(t) = self.thread.take() {
+            {
+                let mut st = self
+                    .shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                st.finish.get_or_insert(false);
             }
-        };
-        self.drain_into(&mut guard, &mut out);
-        Self::fold(&mut guard, frame, origin, &mut out);
-        out
-    }
-
-    fn drain_into(&mut self, p: &mut Pyramid, out: &mut ViewIngested) {
-        for (f, o) in self.pending.drain(..) {
-            Self::fold(p, &f, o, out);
+            self.shared.wake.notify_all();
+            let _ = t.join();
         }
     }
+}
 
-    /// Folds what is left under a lock the caller already holds (end of stream).
-    pub(crate) fn drain(&mut self, p: &mut Pyramid) -> ViewIngested {
-        let mut out = ViewIngested::default();
-        self.drain_into(p, &mut out);
-        out
+/// The writer thread: fold, and at the end seal (if asked) and checkpoint.
+///
+/// The thread takes the pyramid's lock **per batch**, not per frame, so a `/api/tiles` reader
+/// interleaves with it at batch granularity and neither waits long for the other. Nothing here can
+/// reach the ring.
+fn view_writer(q: &ViewQueue, view: &Mutex<Pyramid>, shared: &Shared) {
+    let h = &shared.counters.history;
+    let mut batch: Vec<(SpectrumFrame, FrameOrigin)> = Vec::new();
+    loop {
+        let finish = {
+            let mut st = q.state.lock().unwrap_or_else(PoisonError::into_inner);
+            while st.pending.is_empty() && st.finish.is_none() {
+                st = q.wake.wait(st).unwrap_or_else(PoisonError::into_inner);
+            }
+            batch.extend(st.pending.drain(..));
+            st.finish
+        };
+        if !batch.is_empty() {
+            let mut p = view.lock().unwrap_or_else(PoisonError::into_inner);
+            let (mut folded, mut late, mut rejected) = (0u64, 0u64, 0u64);
+            for (f, o) in batch.drain(..) {
+                match p.ingest(&FrameInput::from_dsp(&f).with_origin(o)) {
+                    Ok(IngestOutcome::Folded) => folded += 1,
+                    Ok(IngestOutcome::Late) => late += 1,
+                    Err(_) => rejected += 1,
+                }
+            }
+            add(&h.view_frames, folded);
+            add(&h.view_late, late);
+            add(&h.view_rejected, rejected);
+            update_view_tiles(shared, &p);
+        }
+        if let Some(seal) = finish {
+            let mut p = view.lock().unwrap_or_else(PoisonError::into_inner);
+            if seal && let Some(t) = p.latest_frame_end() {
+                // **Through the last frame, NOT an hour past it — and that is the whole
+                // difference between 70 ms and 1288 ms.**
+                //
+                // Scheme 1's run-end seal adds an hour of slack so that every partially-filled
+                // tile is forced shut and a finished replay's history is complete on disk at every
+                // level. That is 9 files for a five-rung ladder. For a 64-node lattice the same
+                // gesture seals every node's current tile however little of it was observed:
+                // measured on a 10 s, 21 MHz run, **273 files and 1288 ms to persist 0.1 MB**,
+                // against scheme 1's 9 files and 67 ms. The bytes were never the cost; the file
+                // creations are, and under the acceptance suite's 28 concurrent runs they
+                // serialise on one volume — 31.7 s of suite became 162.8 s, and the four tests
+                // that failed were exactly the four that wait in wall clock on a live run.
+                //
+                // Sealing through the last frame costs 70 ms, the same as scheme 1, and loses
+                // nothing that was measured: level 0's open tiles are written by `checkpoint`
+                // below, and a coarse node fills when a finer tile actually completes — which is
+                // what a growing edge does anyway. Forcing it early would write an 8192 s tile to
+                // record ten seconds, and call it sealed.
+                //
+                // The monotonic watermark still applies: a segment that CONTINUES must not seal at
+                // all (T-446), which is why `seal` arrives from the reader rather than being
+                // decided here.
+                let _ = p.seal_through(t);
+            }
+            let _ = p.checkpoint();
+            update_view_tiles(shared, &p);
+            return;
+        }
     }
 }
 
@@ -358,8 +512,16 @@ pub(crate) fn run(
     let mut queue = FloorIngestQueue::new(HISTORY_QUEUE_FRAMES);
     // T-439: the same frames, into the de-welded view lattice. One STFT, one floor tracker, one
     // origin — the live edge and the history are the SAME write, which is exactly §8's claim that
-    // there is no live-versus-history path to keep consistent.
-    let mut view_queue = ViewIngest::new(VIEW_QUEUE_FRAMES);
+    // there is no live-versus-history path to keep consistent. The WRITING happens on
+    // [`ViewWriter`]'s own thread, because this one gates capture and a tile seal must not.
+    let view_writer = match view {
+        Some(v) => Some(ViewWriter::start(
+            v,
+            Arc::clone(&shared),
+            VIEW_QUEUE_FRAMES,
+        )?),
+        None => None,
+    };
     let mut reader = shared.ring.reader_at(0);
     let cursor = shared.gate.register(0);
     let mut buf = vec![Complex::<i8>::default(); 1 << 16];
@@ -383,17 +545,10 @@ pub(crate) fn run(
         }
         add(&h.frames_dropped, r.dropped);
         tally(h, &r.folded);
-        // T-439: the growing edge. Never blocking — `ViewIngest` only tries the lock, so a tile
-        // fan-out cannot hold up the thread that is draining the ring.
-        if let Some(v) = view.as_deref() {
-            let g = view_queue.ingest(v, frame, origin);
-            add(&h.view_frames, g.folded);
-            add(&h.view_late, g.late);
-            add(&h.view_rejected, g.rejected);
-            add(&h.view_dropped, g.dropped);
-            if g.deferred {
-                inc(&h.view_deferred);
-            }
+        // T-439: the growing edge. A clone and a push — no lock on the pyramid, no tile write, no
+        // zstd, nothing that a reader or the disk can make slow. This thread holds a gate cursor.
+        if let Some(w) = view_writer.as_ref() {
+            w.push(h, frame, origin);
         }
         let dur = (frame.sample_count as f64 * 1e9 / frame.spectrum.sample_rate_hz) as i64;
         last_end = frame.t.host_time.saturating_add_nanos(dur);
@@ -402,9 +557,6 @@ pub(crate) fn run(
             if let Ok(p) = product.try_lock() {
                 frames_since_update = 0;
                 update_tiles(&shared, &p);
-            }
-            if let Some(Ok(v)) = view.as_deref().map(Mutex::try_lock) {
-                update_view_tiles(&shared, &v);
             }
         }
     };
@@ -473,23 +625,13 @@ pub(crate) fn run(
     update_tiles(&shared, &p);
     drop(p);
     // T-439 + T-446: the view pyramid ends its segment under the **same** decision, read from the
-    // same `seal`. Recomputing the condition here would be a second place for `&&`/`||` to bind
+    // same `seal`. Recomputing the condition there would be a second place for `&&`/`||` to bind
     // wrongly and for a re-plumb to advance a monotonic watermark an hour past the last frame —
-    // the defect T-446 measured, which would silently stop the growing edge after the first
-    // retune and so falsify §8's central claim.
-    if let Some(v) = view.as_deref() {
-        let mut v = v.lock().unwrap_or_else(PoisonError::into_inner);
-        let g = view_queue.drain(&mut v);
-        add(&h.view_frames, g.folded);
-        add(&h.view_late, g.late);
-        add(&h.view_rejected, g.rejected);
-        if seal {
-            v.seal_through(last_end.saturating_add_nanos(3_600_000_000_000))
-                .map_err(|e| anyhow::anyhow!("sealing view history: {e}"))?;
-        }
-        v.checkpoint()
-            .map_err(|e| anyhow::anyhow!("view history checkpoint: {e}"))?;
-        update_view_tiles(&shared, &v);
+    // the defect T-446 measured, which would silently stop the growing edge after the first retune
+    // and so falsify §8's central claim. `finish` drains, seals-or-not, checkpoints and joins, so
+    // every view counter is final before this returns.
+    if let Some(w) = view_writer {
+        w.finish(seal);
     }
     Ok(())
 }

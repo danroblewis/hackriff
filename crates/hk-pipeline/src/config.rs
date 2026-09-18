@@ -125,11 +125,15 @@ pub struct PipelineSettings {
     /// it is the one that costs memory.
     ///
     /// **Measured** (`tests/live_edge_tiles.rs`, at this default): a peak of **2.28 MB of resident
-    /// accumulator per MHz of tuned span**, against a bound of **3.65 MB/MHz** — one 187 KB tile
-    /// row per *time* level — so a 20 MHz live edge is **~46 MB measured, 73 MB worst case**, and
-    /// the finest tile stays open for **64 s** against `docs/16` §6.2's 9.1 h. The cost is linear
-    /// in the span and inversely linear in this setting, so a 25 kHz floor divides all of it by
-    /// four.
+    /// accumulator per MHz of tuned span**, against a bound of **3.65 MB/MHz** — one tile row per
+    /// *time* level — so a 20 MHz live edge is **~46 MB measured, 73 MB worst case**, and the
+    /// finest tile stays open for **64 s** against `docs/16` §6.2's 9.1 h. The cost is linear in
+    /// the span and inversely linear in this setting, so a 25 kHz floor divides all of it by four.
+    ///
+    /// Turning the lattice **off** is not a way to save memory — it is the switch for the *write*
+    /// cost, which is the one that showed up: a de-welded ×2 lattice writes ~4× a welded ladder's
+    /// tiles per second of capture, measured at ~1.5 s of M0-acceptance wall per node. See
+    /// [`crate::history::VIEW_F_CELLS_PER_BLOCK`].
     pub view_f_cell_hz: f64,
     /// On-demand listening limits (T-066).
     pub listen: ListenSettings,

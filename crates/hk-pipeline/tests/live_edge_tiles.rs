@@ -39,7 +39,9 @@ use std::time::{Duration, Instant};
 use common::*;
 use hk_model::{FreqRange, TimeRange, Timestamp};
 use hk_pipeline::class::window_class;
-use hk_pipeline::history::{VIEW_CELLS_PER_BLOCK, VIEW_LEVELS, VIEW_SCHEME};
+use hk_pipeline::history::{
+    VIEW_F_CELLS_PER_BLOCK, VIEW_LEVELS, VIEW_SCHEME, VIEW_T_CELLS_PER_BLOCK,
+};
 use hk_pipeline::{Pipeline, PipelineConfig, SourceInfo, TrackInventory, replay_plan};
 use hk_store::{Pyramid, RegionQuery, Resolution};
 use serde_json::json;
@@ -136,7 +138,7 @@ fn the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture()
         assert_eq!(g.level_at(3, 0), Some(node(3, 0) as usize));
         assert_eq!(
             g.levels[node(0, 0) as usize].nt,
-            VIEW_CELLS_PER_BLOCK as usize
+            VIEW_T_CELLS_PER_BLOCK as usize
         );
     }
 
@@ -222,9 +224,9 @@ fn the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture()
     let folded = counters.history.view_frames.load(Ordering::Relaxed);
     assert!(folded > before.1, "no frames reached the view lattice");
     assert!(finest > 0);
-    // Deferred frames are expected and fine — that is the try-lock working. DROPPED frames are
-    // not: the queue is a minute deep at 10 rows/s, and losing the growing edge to a reader would
-    // be the same failure as blocking it, spelled differently.
+    // The writer being behind is expected and fine. DROPPED frames are not: the queue is a minute
+    // deep at 10 rows/s, and losing the growing edge would be the same failure as blocking for it,
+    // spelled differently.
     assert_eq!(
         counters.history.view_dropped.load(Ordering::Relaxed),
         0,
@@ -300,24 +302,45 @@ fn the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture()
 
     // ---- 5. the off-diagonal nodes carry the live edge's own measurements ----
     //
-    // Coarser nodes are fed by folding SEALED finer tiles, and the end of a run that does not
-    // continue seals through the last frame. So finishing the run is what fills them — and it is
-    // also the assertion that T-439's segment-end path reaches the view pyramid at all.
+    // Coarser nodes are fed by folding **sealed** finer tiles, so this waits for a finest tile to
+    // complete in capture time rather than forcing it: the run-end seal goes through the last
+    // frame and no further, deliberately (see `history::view_writer` — the hour of slack scheme 1
+    // uses writes 273 files to persist 0.1 MB on a 64-node lattice). A node (0, 0) tile is
+    // `VIEW_T_CELLS_PER_BLOCK` seconds, so one completes on its own shortly after that much stream
+    // time, and the fold into (0, 1) and (1, 0) follows.
+    let tile_ns = VIEW_T_CELLS_PER_BLOCK as i64 * 1_000_000_000;
+    let want = 3 * tile_ns;
+    let deadline = Instant::now() + LIMIT;
+    while stream_now() - mark < want {
+        assert!(
+            ctl.wait_emitted(ctl.emitted() + PHASE_SAMPLES, LIMIT),
+            "the run stopped delivering samples while waiting for a finest tile to complete"
+        );
+        assert!(Instant::now() < deadline, "capture never reached {want} ns");
+    }
+    for (lf, lt) in [(0usize, 1usize), (1, 0), (1, 1)] {
+        let deadline = Instant::now() + LIMIT;
+        loop {
+            if observed_at(&view, node(lf, lt), CENTER, mark) > 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "view-lattice node ({lf}, {lt}) holds nothing for the band the run was tuned to \
+                 after {:.0} s of capture: the coarse end is still folding out of scheme 1's \
+                 ladder, which is the gap T-438 named",
+                (stream_now() - mark) as f64 / 1e9
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    // And the finest node still holds what it held: folding up never consumed it.
+    assert!(observed_at(&view, node(0, 0), CENTER, mark) > 0);
+
     ctl.finish();
     let (summary, fired) = wait_guarded(handle, LIMIT);
     assert!(!fired, "the run had to be stopped by the watchdog");
     assert!(summary.errors.is_empty(), "{:?}", summary.errors);
-
-    for (lf, lt) in [(0usize, 1usize), (1, 0), (1, 1)] {
-        let n = observed_at(&view, node(lf, lt), CENTER, mark);
-        assert!(
-            n > 0,
-            "view-lattice node ({lf}, {lt}) holds nothing for the band the run was tuned to: the \
-             coarse end is still folding out of scheme 1's ladder, which is the gap T-438 named"
-        );
-    }
-    // And the finest node still holds what it held: folding up never consumed it.
-    assert!(observed_at(&view, node(0, 0), CENTER, mark) > 0);
 
     // Tiles really reached disk under the view scheme's own root.
     assert!(
@@ -335,8 +358,9 @@ fn the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture()
 /// `docs/16` §6.2's V(0, 0) keeps a level-0 tile open for **9.1 h per 25.6 MHz block** at ~3 MB of
 /// accumulator: fine for a survey, wrong for a growing edge, because a level-0 tile is an
 /// in-memory accumulator for the whole of its duration. The shipped floor keeps the 1 s time cell
-/// (F1) and shrinks the *block* to 64 × 64, so the finest node's tile spans **64 s** at ~187 KB —
-/// 512× less residency, 17× less memory per tile.
+/// (F1) and shrinks the block's **height** to 64 time cells, so the finest node's tile spans
+/// **64 s** rather than 9.1 h — 512× less residency. Its *width* stays scheme 1's 1024 cells,
+/// because that axis buys file count rather than memory (see [`VIEW_F_CELLS_PER_BLOCK`]).
 ///
 /// What a device must be sized for is the whole lattice, though, and this measures it through a
 /// real pyramid. It tracks the **peak** rather than a final snapshot deliberately: which nodes hold
@@ -357,10 +381,14 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     /// Bytes of per-cell accumulator in one `hk_store` tile cell: `count` u32, `max`/`occ_max`/
     /// `p_lo`/`p_hi` f32, `sum_lin`/`obs_s`/`occ_s` f64.
     const BYTES_PER_CELL: usize = 4 + 4 * 4 + 3 * 8;
-    /// Tuned span to measure at. Cost is linear in it — one more block per node per 400 kHz — so
-    /// the per-MHz coefficient is what extrapolates to a live edge.
-    const SPAN_HZ: f64 = 800.0e3;
-    const F_LO: f64 = 100.0e6;
+    /// Tuned span to measure at: **exactly one level-0 frequency block**, so no edge rounding is
+    /// folded into the coefficient. Cost is linear in the span — one more block per node per
+    /// 6.4 MHz — so the per-MHz figure is what extrapolates to a live edge.
+    const SPAN_HZ: f64 = 6.4e6;
+    /// Block-aligned, so the coefficient is not inflated by a straddled boundary. Misalignment
+    /// costs up to one extra block per node and is a real cost of wide blocks — it is just not the
+    /// thing this measures.
+    const F_LO: f64 = 102.4e6;
     /// Stream seconds to run. Enough for the finest four time levels to open, seal and fold, which
     /// is what exercises the mechanism; the bound below is arithmetic over all eight, and the peak
     /// measured here is asserted against it.
@@ -382,7 +410,8 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     let n = (SPAN_HZ / f_cell) as usize;
     let psd = vec![1e-9f32; n];
     let t0 = radio::T0_NS;
-    let per_tile = nf * VIEW_CELLS_PER_BLOCK as usize * BYTES_PER_CELL + nf * bins * 4;
+    assert_eq!(nf, VIEW_F_CELLS_PER_BLOCK as usize);
+    let per_tile = nf * VIEW_T_CELLS_PER_BLOCK as usize * BYTES_PER_CELL + nf * bins * 4;
 
     let resident = |p: &Pyramid| -> (usize, usize, usize) {
         let g = p.geometry();
@@ -418,7 +447,10 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     }
 
     let g = p.geometry().clone();
-    let blocks = (SPAN_HZ / (f_cell * f64::from(VIEW_CELLS_PER_BLOCK))).ceil();
+    // Blocks the span actually covers, counted the way the store tiles them (aligned to the
+    // epoch of frequency, not to the span's own lower edge).
+    let bw = f_cell * f64::from(VIEW_F_CELLS_PER_BLOCK);
+    let blocks = ((F_LO + SPAN_HZ) / bw).ceil() - (F_LO / bw).floor();
     let bound = VIEW_LEVELS as f64 * blocks * per_tile as f64;
     let mb = |b: f64| b / (1 << 20) as f64;
     let per_mhz = |b: f64| mb(b) / (SPAN_HZ / 1e6);
@@ -428,7 +460,7 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
          {:.2} MB/MHz\n  bound (one tile row per TIME level, all {} of them): {:.1} MB, \
          {:.2} MB/MHz -> {:.0} MB at a {:.0} MHz live edge",
         f_cell / 1e3,
-        VIEW_CELLS_PER_BLOCK,
+        VIEW_T_CELLS_PER_BLOCK,
         g.n_levels(),
         SPAN_HZ / 1e6,
         mb(peak_bytes as f64),
@@ -448,8 +480,8 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
         "the finest node's tile spans 64 s, not docs/16 §6.2's 9.1 h"
     );
     assert!(
-        (150_000..250_000).contains(&per_tile),
-        "~187 KB per tile, got {per_tile}"
+        (2_500_000..3_500_000).contains(&per_tile),
+        "~2.9 MB per tile — scheme 1's own level-0 tile shape, got {per_tile}"
     );
     // The mechanism, over the WHOLE run rather than at its end: a frequency-coarser node is
     // written and sealed inside its producer's seal, so it never holds an open accumulator. If this

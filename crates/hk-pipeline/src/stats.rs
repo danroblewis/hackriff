@@ -177,9 +177,8 @@ counter_group!(
         view_late,
         /// View-lattice frames the pyramid refused.
         view_rejected,
-        /// View-lattice frames queued because a tile read held the pyramid.
-        view_deferred,
-        /// View-lattice frames dropped past the queue's capacity.
+        /// View-lattice frames dropped past the writer queue's capacity — the writer thread is
+        /// more than a minute behind, which on a growing edge means the disk is the bottleneck.
         view_dropped,
         /// View-lattice tiles written.
         view_tiles_written,
