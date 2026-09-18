@@ -20,6 +20,31 @@
 //     ~2.4 s. Everything expensive here is therefore about *order* and *not asking twice*: a LIFO
 //     queue so a fast pan serves where the user now is, cancellation for viewports they have left,
 //     an in-flight cap matching the server's own, and one request per key however many panes want it.
+//
+// ## T-454: why the cap did not hold, and what replaced it
+//
+// The user saw the route's own `503` text. The cap and the cancellation in this file were both
+// running — T-450 measured 26 tiles resident against **17 268 cancelled in 75 s** — and that number
+// *is* the defect rather than evidence against it. Three things were wrong, all of them the same
+// mistake: **treating a local count as if it described the server.**
+//
+//  1. **An abort does not give the server its slot back.** `hk-api` serves on blocking
+//     `std::net` threads (`crates/hk-api/src/lib.rs`, "Threads, not tokio"): a closed socket is
+//     noticed when the response is *written*, so `tiles_json` keeps its [`TileSlot`] and keeps the
+//     history lock until the read finishes — 11.4 ms for a fine tile, **5.2 s** for the map's
+//     level-10 one. Aborting freed this client's slot instantly and pumped a replacement, so a drag
+//     issued and abandoned requests at frame rate while the server's four slots filled with work
+//     nobody was waiting for. The cap here counted 4; the route was holding dozens. So an abandoned
+//     request is now **charged to the budget until it is expected to have finished** ([[abandon]]),
+//     with the expectation *measured* from completions rather than assumed. That turns the issue
+//     rate from "as fast as we can draw" into "as fast as the server is observed to serve".
+//  2. **Adopting the named cap was a no-op.** `TILE_MAX_IN_FLIGHT` is a constant 4 and this cache
+//     started at 4, so `min(4, 4)` changed nothing — and the number is a **server-wide** budget
+//     across every pane, every tab and the bootstrap probe, not an allowance for one client. A
+//     refusal is now AIMD: **halve on refusal, recover one slot per [[RECOVER_AFTER]] successes**,
+//     with the server's number kept as the *ceiling* it actually is.
+//  3. **The coarse viewport could starve the fine ones.** One 5.2 s map tile holding a slot is a
+//     quarter of the budget for five seconds. Issue is now shared between viewports ([[nextAddr]]).
 
 import { extentOf, intersects, keyOf, tCellNs, type Box, type Lattice, type TileAddr } from "./lattice";
 import { TileBusyError, type TileData } from "./tile";
@@ -75,15 +100,28 @@ export interface TileCacheOptions {
    * budget is a memory decision and nothing else.
    */
   budgetBytes?: number;
-  /** Outstanding requests. Defaults to the route's own `TILE_MAX_IN_FLIGHT`; a `503` naming a
-   * smaller cap lowers it, because the cap is ingest backpressure and the server owns it. */
+  /**
+   * Outstanding requests **this client starts with**, and the ceiling it may recover to. Defaults
+   * to the route's own `TILE_MAX_IN_FLIGHT`.
+   *
+   * It is a starting point, not the operating value: the route's number is a budget shared by every
+   * viewport, every tab and the bootstrap probe, so the share belonging to this cache can only be
+   * discovered by being refused. See [[failed]].
+   */
   inFlight?: number;
   /** Queue depth. A fast pan can enqueue thousands; the oldest (bottom of the LIFO) are the ones
    * the user has already left, so they are the ones dropped. */
   maxQueue?: number;
   now?: () => number;
-  /** Delay after a `503` before the queue is pumped again, ms. */
+  /** Delay after a `503` before the queue is pumped again, ms. Doubles per consecutive refusal. */
   busyBackoffMs?: number;
+  /**
+   * First guess at how long the server takes to produce one tile, ms — replaced by measurement as
+   * soon as anything completes. It only decides how hard the first drag pushes before the cache has
+   * seen a single answer, so the default is deliberately nearer the map's 5.2 s than a fine tile's
+   * 11.4 ms: guessing *fast* and being wrong is the failure this exists to stop.
+   */
+  serverMsGuess?: number;
 }
 
 export interface TileCacheStats {
@@ -96,6 +134,9 @@ export interface TileCacheStats {
   failures: number;
   busyRefusals: number;
   cancelled: number;
+  /** In-flight requests this client walked away from. Each one is still costing the route a slot,
+   * which is why it is counted separately from the queued drops in `cancelled`. */
+  abandoned: number;
   /** Frames on which the pins alone exceeded the budget: the pane is asking for more than the
    * budget can hold, and the honest response is to keep drawing, not to grey anything. */
   overBudgetFrames: number;
@@ -103,6 +144,25 @@ export interface TileCacheStats {
 }
 
 const MB = 1024 * 1024;
+
+/** Consecutive completed requests before the cap recovers one slot. The additive half of AIMD. */
+export const RECOVER_AFTER = 8;
+/**
+ * Floor on what an abandoned request is charged, ms: the route's **measured** cost for one 256²
+ * tile (T-438). A request cannot have cost the server nothing, and charging zero is what let the
+ * frame loop become a request pump.
+ */
+const MIN_RESIDUAL_MS = 12;
+/** Bounds on the measured service-time estimate, ms: a fine tile's 11.4 ms and the map's 5.2 s. */
+const MIN_SERVER_MS = 11, MAX_SERVER_MS = 6000;
+
+/** One request the client is waiting on, and what it is being counted against. */
+interface InFlight {
+  readonly ctrl: AbortController | null;
+  readonly startedAt: number;
+  /** Index into the viewports of the last [[TileCache.setViewports]], or -1 for none. */
+  readonly owner: number;
+}
 
 export class TileCache<T> {
   readonly budgetBytes: number;
@@ -112,7 +172,12 @@ export class TileCache<T> {
   private map = new Map<string, TileEntry<T>>();
   private queue: TileAddr[] = [];
   private queued = new Set<string>();
-  private inflight = new Map<string, AbortController | null>();
+  private inflight = new Map<string, InFlight>();
+  /** When each abandoned request is expected to stop costing the route a slot. See [[abandon]]. */
+  private abandonedUntil: number[] = [];
+  /** The viewports issue is shared between, and the lattice they are expressed in. */
+  private viewports: readonly Viewport[] = [];
+  private lat: Lattice | null = null;
   private evicted = new Set<string>();
   private everRequested = new Set<string>();
   /** Keys whose in-flight fetch was overtaken by a retune: the data that arrives describes the old
@@ -123,9 +188,16 @@ export class TileCache<T> {
   private bytes = 0;
   private busyUntil = 0;
   private limit: number;
+  /** The most this client may recover to: the server's own number, never raised by anything here. */
+  private ceiling: number;
+  /** Consecutive refusals, for the backoff; and completions since the last one, for the recovery. */
+  private refusals = 0;
+  private goodRuns = 0;
+  /** Measured mean production time, ms. See [[observe]]. */
+  private serverMs: number;
   readonly stats: TileCacheStats = {
     uploads: 0, hits: 0, misses: 0, evictions: 0, refetchAfterEvict: 0, requests: 0,
-    failures: 0, busyRefusals: 0, cancelled: 0, overBudgetFrames: 0, distinctKeys: 0,
+    failures: 0, busyRefusals: 0, cancelled: 0, abandoned: 0, overBudgetFrames: 0, distinctKeys: 0,
   };
 
   constructor(
@@ -134,9 +206,10 @@ export class TileCache<T> {
     opts: TileCacheOptions = {},
   ) {
     this.budgetBytes = opts.budgetBytes ?? 96 * MB;
-    this.limit = opts.inFlight ?? 4;
+    this.ceiling = this.limit = Math.max(1, opts.inFlight ?? 4);
     this.maxQueue = opts.maxQueue ?? 4096;
     this.busyBackoffMs = opts.busyBackoffMs ?? 200;
+    this.serverMs = clamp(opts.serverMsGuess ?? 400, MIN_SERVER_MS, MAX_SERVER_MS);
     this.now = opts.now ?? (() => Date.now());
   }
 
@@ -145,6 +218,24 @@ export class TileCache<T> {
   get inFlightLimit(): number { return this.limit; }
   get inFlightCount(): number { return this.inflight.size; }
   get queueDepth(): number { return this.queue.length; }
+  /** What the measurements say one tile costs the route, ms. */
+  get serverEstimateMs(): number { return this.serverMs; }
+
+  /**
+   * Requests this client aborted that the route is presumed to still be producing.
+   *
+   * These occupy the budget exactly as outstanding ones do, because on the server they *are*
+   * outstanding: `hk-api` notices a closed socket when it writes the response, not when the client
+   * stops listening. Pruning is done here rather than on a timer so the count needs no clock of its
+   * own and is exact at the only moment it is read.
+   */
+  get abandonedSlots(): number {
+    if (this.abandonedUntil.length) {
+      const t = this.now();
+      this.abandonedUntil = this.abandonedUntil.filter((until) => until > t);
+    }
+    return this.abandonedUntil.length;
+  }
 
   /** A new render frame: pins from the previous one lapse. */
   beginFrame(): void { this.frame++; }
@@ -230,20 +321,42 @@ export class TileCache<T> {
    * parent pin the renderer prefetches and must not immediately cancel.
    */
   setViewports(lat: Lattice, viewports: readonly Viewport[]): void {
-    const wanted = (a: TileAddr) => viewports.some((v) =>
-      a.levelF >= v.levelF && a.levelF <= v.levelF + 1 &&
-      a.levelT >= v.levelT && a.levelT <= v.levelT + 1 &&
-      intersects(lat, a, v.box));
+    this.lat = lat;
+    this.viewports = viewports;
+    const wanted = (a: TileAddr) => viewports.some((v) => this.wants(lat, v, a));
     const keep: TileAddr[] = [];
     for (const a of this.queue) {
       if (wanted(a)) keep.push(a);
       else { this.queued.delete(keyOf(a)); this.stats.cancelled++; }
     }
     this.queue = keep;
-    for (const [key, ctrl] of this.inflight) {
+    for (const [key, f] of this.inflight) {
       const a = parseKey(key);
-      if (a && !wanted(a) && ctrl) { ctrl.abort(); this.stats.cancelled++; }
+      if (a && !wanted(a) && f.ctrl) { f.ctrl.abort(); this.stats.cancelled++; this.abandon(f); }
     }
+  }
+
+  /** Is this tile one that viewport is drawing — at its level, or one step coarser (the pin)? */
+  private wants(lat: Lattice, v: Viewport, a: TileAddr): boolean {
+    return a.levelF >= v.levelF && a.levelF <= v.levelF + 1 &&
+      a.levelT >= v.levelT && a.levelT <= v.levelT + 1 &&
+      intersects(lat, a, v.box);
+  }
+
+  /**
+   * Charge an aborted request to the budget until the route is expected to be done with it.
+   *
+   * The abort reaches the browser, not `hk-api`: its handler discovers the closed socket when it
+   * writes, so the [`TileSlot`] and the history lock stay held for the rest of the read. Releasing
+   * this cache's slot at the moment of the abort is therefore a *claim about the server that is
+   * false*, and it is the claim that turned a 60 Hz drag into a 60 Hz request pump. The charge is
+   * the measured mean minus however long this one has already run, never below
+   * [[MIN_RESIDUAL_MS]] — zero is the one answer that cannot be right.
+   */
+  private abandon(f: InFlight): void {
+    const left = Math.max(MIN_RESIDUAL_MS, this.serverMs - (this.now() - f.startedAt));
+    this.abandonedUntil.push(this.now() + left);
+    this.stats.abandoned++;
   }
 
   /**
@@ -307,8 +420,9 @@ export class TileCache<T> {
     for (const e of this.map.values()) this.tex.destroy(e.tex);
     this.map.clear();
     this.bytes = 0;
-    for (const [, c] of this.inflight) c?.abort();
+    for (const [, f] of this.inflight) f.ctrl?.abort();
     this.inflight.clear();
+    this.abandonedUntil = [];
     this.queue = [];
     this.queued.clear();
     this.stale.clear();
@@ -316,13 +430,18 @@ export class TileCache<T> {
 
   private pump(): void {
     if (this.now() < this.busyUntil) return;
-    while (this.inflight.size < this.limit && this.queue.length) {
-      const addr = this.queue.pop()!; // LIFO: the most recently wanted tile first
+    // The budget is what the ROUTE has out on this client's behalf — the requests being waited on
+    // *and* the ones walked away from, which it is still producing. See [[abandonedSlots]].
+    while (this.inflight.size + this.abandonedSlots < this.limit && this.queue.length) {
+      const next = this.nextAddr();
+      if (!next) return; // every viewport is at its share; the rest of the queue waits
+      const { addr, owner } = next;
       const key = keyOf(addr);
       this.queued.delete(key);
       if (this.map.has(key) || this.inflight.has(key)) continue;
       const ctrl = typeof AbortController === "function" ? new AbortController() : null;
-      this.inflight.set(key, ctrl);
+      const started = this.now();
+      this.inflight.set(key, { ctrl, startedAt: started, owner });
       if (this.evicted.has(key)) this.stats.refetchAfterEvict++;
       // The request is off the in-flight list BEFORE anything is re-queued, or `schedule` would see
       // its own request still outstanding and silently drop the retry.
@@ -333,6 +452,8 @@ export class TileCache<T> {
       };
       void this.source(addr, ctrl?.signal).then(
         (data) => {
+          this.observe(started);
+          this.succeeded();
           // A tile the retune overtook is requeued, not kept: `insert` says which happened, and the
           // requeue has to run in `done`, after the key leaves the in-flight map, or `schedule`
           // would see this very request still outstanding and silently drop the retry.
@@ -340,24 +461,87 @@ export class TileCache<T> {
           try { requeue = !this.insert(addr, data); } catch { this.stats.failures++; }
           done(requeue);
         },
-        (err) => done(this.failed(addr, err, ctrl?.signal.aborted ?? false)),
+        (err) => done(this.failed(addr, err, started, ctrl?.signal.aborted ?? false)),
       );
     }
   }
 
+  /**
+   * The next tile to ask for: **LIFO, but shared between viewports**.
+   *
+   * LIFO alone answers "where is the user now"; it does not answer "which viewport". T-450 measured
+   * why that matters — the map's level-10 tile takes **5.2 s and 9.5 MB**, so one coarse read holds
+   * a quarter of the budget for five seconds while the panes show pending. Each viewport therefore
+   * gets `limit / viewports` slots (at least one), and the scan skips a tile whose viewports are
+   * all at their share rather than dropping it: it is still wanted, just not next.
+   *
+   * With no viewports yet — before the first frame reports any — this is exactly the old `pop()`.
+   */
+  private nextAddr(): { addr: TileAddr; owner: number } | null {
+    const lat = this.lat, vs = this.viewports;
+    if (!lat || !vs.length) {
+      const addr = this.queue.pop();
+      return addr ? { addr, owner: -1 } : null;
+    }
+    const share = Math.max(1, Math.floor(this.limit / vs.length));
+    const held = new Array<number>(vs.length).fill(0);
+    for (const f of this.inflight.values()) if (f.owner >= 0 && f.owner < held.length) held[f.owner]++;
+    for (let i = this.queue.length - 1; i >= 0; i--) {
+      const addr = this.queue[i];
+      let orphan = true;
+      for (let v = 0; v < vs.length; v++) {
+        if (!this.wants(lat, vs[v], addr)) continue;
+        orphan = false;
+        if (held[v] < share) { this.queue.splice(i, 1); return { addr, owner: v }; }
+      }
+      // Wanted by no viewport at all: `setViewports` has not seen it yet, so it belongs to no
+      // share and is issued on the global budget alone.
+      if (orphan) { this.queue.splice(i, 1); return { addr, owner: -1 }; }
+    }
+    return null;
+  }
+
+  /** Fold one completed request into the measured service time. Refusals are excluded: a `503`
+   * returns at once and would teach the estimate that tiles are free. */
+  private observe(startedAt: number): void {
+    const d = this.now() - startedAt;
+    if (!(d >= 0)) return;
+    this.serverMs = clamp(this.serverMs + 0.25 * (d - this.serverMs), MIN_SERVER_MS, MAX_SERVER_MS);
+  }
+
+  /** A completion: the refusal streak is over, and every [[RECOVER_AFTER]] of them buys a slot
+   * back, up to the ceiling the server named. The additive-increase half of AIMD. */
+  private succeeded(): void {
+    this.refusals = 0;
+    if (this.limit >= this.ceiling) { this.goodRuns = 0; return; }
+    if (++this.goodRuns >= RECOVER_AFTER) { this.limit++; this.goodRuns = 0; }
+  }
+
   /** Whether the tile is still wanted after `err`. */
-  private failed(addr: TileAddr, err: unknown, aborted: boolean): boolean {
+  private failed(addr: TileAddr, err: unknown, startedAt: number, aborted: boolean): boolean {
     // An abort is this cache's own doing — the viewport moved — so it is neither a failure nor a
-    // reason to ask again.
+    // reason to ask again. It is not free either: the route is still producing the tile, and
+    // `setViewports` has already charged it.
     if (aborted) return false;
     if (err instanceof TileBusyError) {
-      // Not an error: the route is telling the client it is asking for too many at once, and
-      // naming the number. Adopt it, back off, and keep wanting the tile.
+      // Not an error: the route is telling the client it is asking for too many at once.
+      //
+      // **The number it names is the whole server's budget, not this client's allowance** — every
+      // pane, every other tab and the bootstrap probe draw on the same four slots, and an abandoned
+      // read holds one until it finishes. So the number is kept as a *ceiling* and the operating
+      // cap is halved: the share that belongs to this cache is not something either side knows, it
+      // is something backing off finds. Recovery is [[succeeded]]; together they are AIMD.
       this.stats.busyRefusals++;
-      if (err.limit && err.limit > 0) this.limit = Math.min(this.limit, err.limit);
-      this.busyUntil = this.now() + this.busyBackoffMs;
+      if (err.limit && err.limit > 0) this.ceiling = Math.min(this.ceiling, err.limit);
+      this.limit = Math.max(1, Math.min(Math.floor(this.limit / 2), this.ceiling));
+      this.goodRuns = 0;
+      this.refusals = Math.min(this.refusals + 1, 4);
+      // The refusal itself cost the server nothing, but whatever is holding the slots has not
+      // finished — so wait longer each time rather than re-asking on the same cadence.
+      this.busyUntil = this.now() + this.busyBackoffMs * 2 ** (this.refusals - 1);
       return true;
     }
+    this.observe(startedAt);
     this.stats.failures++;
     return false;
   }
@@ -367,7 +551,12 @@ export class TileCache<T> {
     const key = keyOf(addr);
     if (this.stale.delete(key)) return false;
     if (this.map.has(key)) return true; // never upload the same tile twice
-    if (data.serverInFlightLimit && data.serverInFlightLimit > 0) this.limit = Math.min(this.limit, data.serverInFlightLimit);
+    // `cost.in_flight_limit` is the same server-wide number the refusal names, so it sets the
+    // ceiling — it is not permission to run at it.
+    if (data.serverInFlightLimit && data.serverInFlightLimit > 0) {
+      this.ceiling = Math.min(this.ceiling, data.serverInFlightLimit);
+      this.limit = Math.min(this.limit, this.ceiling);
+    }
     const tex = this.tex.upload(data);
     this.stats.uploads++;
     // A tile that has just arrived is pinned for the frame it arrived on: it cost the server 11.4 ms
@@ -401,6 +590,8 @@ export class TileCache<T> {
 }
 
 const levelDistance = <T>(e: TileEntry<T>) => e.addr.levelF + e.addr.levelT;
+
+const clamp = (v: number, lo: number, hi: number) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : lo);
 
 /** The inverse of [[keyOf]], for cancelling in-flight requests by viewport. */
 export function parseKey(key: string): TileAddr | null {

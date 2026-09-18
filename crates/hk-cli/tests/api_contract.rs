@@ -6527,6 +6527,19 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     );
     assert_eq!(fine["axes"]["store_node"], json!(0), "{fine}");
     assert_eq!(fine["resolution"]["tried"], json!([0]), "{fine}");
+    // T-439: the growing edge. `scheme=view` reads the view-scheme pyramid the live chain writes,
+    // and its node (0, 0) is the same 6.25 kHz x 1 s cell scheme 1's level 0 is — so nothing about
+    // the finest address moved, only what stands behind the coarser ones.
+    assert_eq!(
+        fine["resolution"]["answered"]["store"],
+        json!("view-lattice"),
+        "{fine}"
+    );
+    assert_eq!(
+        fine["resolution"]["answered"]["levels"],
+        json!(16),
+        "the view lattice is 4 x 4 nodes, not a 5-rung ladder: {fine}"
+    );
     for axis in ["frequency", "time"] {
         assert_eq!(
             fine["resolution"]["fold"][axis]["direction"],
@@ -6605,9 +6618,27 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         "{coarse_t}"
     );
     assert_eq!(coarse_t["extent"]["f_cell_hz"], json!(f_cell), "{coarse_t}");
-    // Off scheme 1's diagonal (fine frequency, coarse time), so this pair has no store node and is
-    // folded rather than read whole — which is the whole reason the view lattice exists.
-    assert_eq!(coarse_t["axes"]["store_node"], Value::Null, "{coarse_t}");
+    // **T-439: fine frequency + coarse time is a REAL NODE now.** This is the address scheme 1
+    // cannot express at all — a welded ladder is the diagonal of its own lattice — and before the
+    // pipeline opened a view-scheme pyramid it had no store behind it, so it was folded out of
+    // scheme 1's ladder and `store_node` was null. It is the load-bearing gap T-438 named, and it
+    // is closed by the LIVE CHAIN writing this lattice's finest node: the same frames, one write,
+    // no live-versus-history path (docs/16 §8.1).
+    assert_eq!(
+        coarse_t["resolution"]["answered"]["store"],
+        json!("view-lattice"),
+        "the view lattice must be the store that answers a view address: {coarse_t}"
+    );
+    assert_eq!(
+        coarse_t["axes"]["store_node"],
+        json!(2),
+        "(level_f 0, level_t 2) is node 0*8+2 of the 8x8 view lattice: {coarse_t}"
+    );
+    // The node existing does not mean the read uses it: the rule is **finest affordable first**
+    // (T-438), and node (0, 0) is affordable here and finer in time, so it answers and its cells
+    // fold onto the tile's. Folding a finer source invents nothing and greys nothing — it is the
+    // only direction that is free. `exact_node: false` alongside a non-null `store_node` is that
+    // preference showing, not a missing node.
     assert_eq!(
         coarse_t["resolution"]["answered"]["exact_node"],
         json!(false),
@@ -6622,6 +6653,13 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         coarse_t["grid"]["observed_cells"].as_u64().unwrap() > 0 && observed_fine > 0,
         "{coarse_t}"
     );
+    // The same node addressed through scheme 1 is a 404 that says why — the two schemes answer the
+    // same question differently and neither snaps.
+    let (st, v) = get(
+        addr,
+        &format!("/api/tiles?scheme=1&level_f=0&level_t=2&f_index=0&t_index=0&cells={N}"),
+    );
+    assert_eq!(st, 404, "{v}");
 
     // ---- "no such node": a welded ladder is the DIAGONAL of its own lattice (T-434) ----
     let (st, v) = get(
@@ -6644,6 +6682,14 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["key"]["scheme"], json!("1"), "{v}");
     assert_eq!(v["axes"]["store_node"], json!(0), "{v}");
+    // …and it reads the spectrum-history pyramid, not the view lattice. `scheme` names ONE store
+    // (T-439): a numeric scheme is never answered out of another scheme's tiles.
+    assert_eq!(
+        v["resolution"]["answered"]["store"],
+        json!("spectrum-history"),
+        "{v}"
+    );
+    assert_eq!(v["resolution"]["answered"]["levels"], json!(5), "{v}");
     // Past the end of an axis is the other "no such node", and names both extents.
     let (st, v) = get(addr, &tile(99, 0, 0, 0));
     assert_eq!(st, 404, "{v}");

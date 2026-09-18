@@ -8,8 +8,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CELL } from "../src/surface/cellrule";
-import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
-import { TileCache, parseKey, type TileCacheOptions } from "../src/surface/tilecache";
+import { keyOf, tileUrl, type Lattice, type TileAddr } from "../src/surface/lattice";
+import { RECOVER_AFTER, TileCache, parseKey, type TileCacheOptions, type Viewport } from "../src/surface/tilecache";
 import { TileBusyError, type TileData } from "../src/surface/tile";
 
 const LAT: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 20, levelsT: 15 };
@@ -33,15 +33,26 @@ const flush = () => new Promise((r) => setImmediate(r));
 
 function harness(opts: TileCacheOptions = {}) {
   const calls: string[] = [];
+  /** The URL each request would actually be sent to — assert on what is REQUESTED (T-442/T-454). */
+  const urls: string[] = [];
   const waiting = new Map<string, { resolve: (d: TileData) => void; reject: (e: unknown) => void }>();
   let uploads = 0, destroys = 0;
   const cache = new TileCache<{ id: number }>(
     { upload: () => ({ id: uploads++ }), destroy: () => { destroys++; } },
-    (a) => new Promise<TileData>((resolve, reject) => { calls.push(keyOf(a)); waiting.set(keyOf(a), { resolve, reject }); }),
+    // The signal is honoured, because the whole of T-454 is what an abort does and does not do.
+    (a, signal) => new Promise<TileData>((resolve, reject) => {
+      calls.push(keyOf(a));
+      urls.push(tileUrl(a));
+      waiting.set(keyOf(a), { resolve, reject });
+      signal?.addEventListener("abort", () => {
+        waiting.delete(keyOf(a));
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      });
+    }),
     { now: () => 0, ...opts },
   );
   return {
-    cache, calls, waiting,
+    cache, calls, urls, waiting,
     uploads: () => uploads,
     destroys: () => destroys,
     async settle(a: TileAddr, bytes = BYTES) {
@@ -204,6 +215,142 @@ test("the residency answer is never a cell state", async () => {
   // `pending` is not in CELL, and CELL's codes are not residencies. The type system says so; this
   // says it again where a future edit would have to notice.
   assert.ok(!Object.values(CELL).some((v) => String(v) === r.kind));
+});
+
+// ——— T-454: the cap did not hold, and none of these would have caught it ———
+
+const TILE_HZ = 6250 * 256, TILE_NS = 1e9 * 256;
+const paneView = (from: number, to: number): Viewport =>
+  ({ box: { f0Hz: from * TILE_HZ, f1Hz: to * TILE_HZ, t0Ns: 0, t1Ns: TILE_NS }, levelF: 0, levelT: 0 });
+
+test("an abort does NOT hand the route its slot back, so a drag cannot pump requests", async () => {
+  // The mechanism behind T-450's 26 resident against 17 268 cancelled. `hk-api` serves on blocking
+  // threads: it discovers the closed socket when it writes the response, so an aborted read keeps
+  // its TileSlot and the history lock until it finishes. Freeing the client's slot at the abort let
+  // every frame of a drag issue a fresh request against slots the server was still holding — four
+  // locally, dozens on the route, and the refusal the user saw.
+  let clock = 0;
+  const h = harness({ inFlight: 2, now: () => clock, serverMsGuess: 100 });
+  h.cache.beginFrame();
+  h.cache.acquire(addr(0));
+  h.cache.acquire(addr(1));
+  h.cache.setViewports(LAT, [paneView(0, 2)]);
+  h.cache.endFrame();
+  await flush();
+  assert.deepEqual(h.urls, [tileUrl(addr(1)), tileUrl(addr(0))], "two slots, two requests");
+
+  // The user pans. Both in-flight tiles are left behind — and the route is still making them.
+  h.cache.beginFrame();
+  h.cache.acquire(addr(8));
+  h.cache.acquire(addr(9));
+  h.cache.setViewports(LAT, [paneView(8, 10)]);
+  h.cache.endFrame();
+  await flush();
+  assert.equal(h.cache.stats.abandoned, 2);
+  assert.equal(h.cache.abandonedSlots, 2, "still costing the route, so still costing the budget");
+  assert.equal(h.urls.length, 2,
+    "asking for two more here is exactly how four server slots became forty — and then a 503");
+
+  // Once they are expected to have finished, the tiles the user is actually looking at go out.
+  clock = 101;
+  h.cache.beginFrame();
+  h.cache.acquire(addr(8));
+  h.cache.acquire(addr(9));
+  h.cache.setViewports(LAT, [paneView(8, 10)]);
+  h.cache.endFrame();
+  await flush();
+  assert.deepEqual(h.urls.slice(2), [tileUrl(addr(9)), tileUrl(addr(8))],
+    "and only the still-visible ones are retried");
+});
+
+test("the cap in force is never exceeded, even when the budget is shared with another client", async () => {
+  // The route's cap is SERVER-WIDE (hk-api's TileSlot on ApiState): a second tab holding two of the
+  // four leaves two, and a client counting only its own four is over the budget while believing it
+  // is under it. The refusal is the only thing that says so, so it must be acted on, not displayed.
+  const FREE = 2;
+  let open = 0, maxOpen = 0, refusals = 0;
+  const done: (() => void)[] = [];
+  let clock = 0;
+  const cache = new TileCache<{ id: number }>(
+    { upload: () => ({ id: 0 }), destroy: () => {} },
+    (a) => {
+      if (open >= FREE) {
+        refusals++;
+        return Promise.reject(new TileBusyError(4, "too many tile reads in flight (limit 4)"));
+      }
+      open++;
+      maxOpen = Math.max(maxOpen, open);
+      return new Promise<TileData>((resolve) => done.push(() => { open--; resolve(data(a)); }));
+    },
+    { inFlight: 4, budgetBytes: 64 * BYTES, busyBackoffMs: 10, now: () => clock, serverMsGuess: 20 },
+  );
+
+  for (let frame = 0; frame < 40; frame++) {
+    clock += 16; // one animation frame
+    cache.beginFrame();
+    for (let i = 0; i < 8; i++) cache.acquire(addr(i));
+    cache.setViewports(LAT, [paneView(0, 8)]);
+    cache.endFrame();
+    await flush();
+    done.shift()?.(); // the route finishes one tile
+    await flush();
+  }
+  assert.ok(maxOpen <= FREE + 1,
+    `the client kept ${maxOpen} reads open against a route with ${FREE} free slots`);
+  assert.ok(cache.inFlightLimit <= FREE + 1, `converged to ${cache.inFlightLimit}, not to its own guess of 4`);
+  const before = refusals;
+  for (let frame = 0; frame < 20; frame++) {
+    clock += 16;
+    cache.beginFrame();
+    for (let i = 0; i < 8; i++) cache.acquire(addr(i));
+    cache.setViewports(LAT, [paneView(0, 8)]);
+    cache.endFrame();
+    await flush();
+    done.shift()?.();
+    await flush();
+  }
+  assert.equal(refusals, before, "once converged the client stops being refused at all");
+});
+
+test("recovery is EARNED: the halved cap climbs back, and never past the number the route named", async () => {
+  const h = harness({ inFlight: 4, busyBackoffMs: 0 });
+  h.cache.beginFrame();
+  h.cache.acquire(addr(0));
+  h.cache.endFrame();
+  await flush();
+  await h.fail(addr(0), new TileBusyError(4, "too many tile reads in flight (limit 4)"));
+  assert.equal(h.cache.inFlightLimit, 2,
+    "the route's 4 is EVERYONE's budget — adopting it as this client's allowance was `min(4, 4)`, a no-op");
+  assert.equal(h.cache.stats.busyRefusals, 1);
+  assert.equal(h.cache.stats.failures, 0);
+
+  // The refusal re-queued the tile and the pump reissued it; that plus RECOVER_AFTER-1 more
+  // completions is one run of successes, and buys back exactly one slot.
+  await h.settle(addr(0));
+  for (let i = 1; i < RECOVER_AFTER; i++) {
+    h.cache.beginFrame();
+    h.cache.acquire(addr(i));
+    h.cache.endFrame();
+    await flush();
+    await h.settle(addr(i));
+  }
+  assert.equal(h.cache.inFlightLimit, 3, "one slot per run of successes, not a jump back to the guess");
+  assert.ok(h.cache.inFlightLimit <= 4);
+});
+
+test("a coarse viewport cannot hold the whole budget while the panes wait", async () => {
+  // T-450 measured the map's level-10 tile at 5.2 s and 9.5 MB. LIFO alone says "the most recently
+  // wanted tile", and the map's are enqueued last, so both slots went to five-second reads.
+  const h = harness({ inFlight: 2 });
+  const map: Viewport = { box: { f0Hz: 0, f1Hz: 2e9, t0Ns: 0, t1Ns: 2e13 }, levelF: 8, levelT: 6 };
+  h.cache.beginFrame();
+  for (let i = 0; i < 4; i++) h.cache.acquire(addr(i, 0, 0, 0)); // the pane's own tiles
+  for (let i = 0; i < 4; i++) h.cache.acquire(addr(i, 0, 8, 6)); // the map's, wanted last
+  h.cache.setViewports(LAT, [paneView(0, 4), map]);
+  h.cache.endFrame();
+  await flush();
+  assert.deepEqual(h.urls, [tileUrl(addr(3, 0, 8, 6)), tileUrl(addr(3, 0, 0, 0))],
+    "one slot each: the map is a viewport, not a priority");
 });
 
 test("keys round-trip, so an in-flight request can be tested against a viewport", () => {

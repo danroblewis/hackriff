@@ -287,6 +287,15 @@ pub struct ApiState {
     /// Spectrum-history pyramid for `/api/history`. When absent, the floor product's uncalibrated
     /// (dBFS) pyramid answers instead.
     pub history: Option<Arc<Mutex<Pyramid>>>,
+    /// T-439: the **view-scheme** pyramid — `docs/16` §8.2's de-welded lattice, written by the
+    /// live chain at its finest node. `/api/tiles?scheme=view` reads it; every other route reads
+    /// [`Self::history`] / [`Self::floor`] as before.
+    ///
+    /// It is a *separate* handle, not a second pyramid inside the floor product, for the reason
+    /// T-037b gave: `/api/history` and `/api/floor` hold the product's lock for a whole query, and
+    /// the growing edge must not be behind that lock. `None` leaves the tile route folding out of
+    /// scheme 1's welded ladder exactly as it did before T-439.
+    pub view_history: Option<Arc<Mutex<Pyramid>>>,
     /// Calibrated floor product for `/api/floor`.
     pub floor: Option<Arc<Mutex<FloorProduct>>>,
     /// Signal inventory (C27, T-018) for `/api/inventory`. Read through `query_inventory` only.

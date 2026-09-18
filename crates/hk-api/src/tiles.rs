@@ -14,8 +14,12 @@
 //! four; §6.3 already required `device`, and retrofitting a key is the expensive kind of change,
 //! so both are here from the start.
 //!
-//! - **`scheme` is the lattice the address is expressed in**, and it is what makes *"no such node"*
-//!   answerable. `scheme=view` (the default) is the de-welded view lattice: node `(0, 0)` is the
+//! - **`scheme` is the lattice the address is expressed in — and, since T-439, which store answers
+//!   it.** The two cannot come apart: asking for the view lattice while reading scheme 1's ladder
+//!   is exactly the gap T-438 left, where the coarse nodes had nothing behind them and fell back on
+//!   a level whose time cell is a day. [`tile_store`] is the one mapping, and a server with no view
+//!   pyramid open behaves as it did before.
+//!   `scheme=view` (the default) is the de-welded view lattice: node `(0, 0)` is the
 //!   open pyramid's **own level-0 cell** and each axis doubles independently, so every
 //!   `(level_f, level_t)` in range is a node. `scheme=<n>` addresses a store scheme's own ladder
 //!   through [`Geometry::axes_of`]/[`Geometry::level_at`] — and a **welded ladder is the diagonal**
@@ -30,6 +34,19 @@
 //! and every realistic pane finer than it, so `level_t` pinned at 0 and the de-welding bought
 //! nothing on the axis it was introduced for (T-437 finding F1). Anchoring at the open pyramid's
 //! level-0 cell is that fix, and it is the geometry the spike actually ran on.
+//!
+//! # Where the tiles come from (T-439)
+//!
+//! From the **live chain**, and from nothing else. `hk_pipeline::history` folds each history frame
+//! into the view pyramid's level 0 as it folds it into scheme 1, so the finest node *is* the
+//! growing edge where hardware is currently tuned — `docs/16` §8.1's leap, which is why this route
+//! has no live-specific branch and no live-versus-history seam to keep consistent. A tile at that
+//! edge covers exactly what was sampled: the cells the front end's band and the frame's own
+//! duration reach, and no others (T-406's rule). The newest cells of a growing tile are routinely
+//! *observed but not yet measured* — the radio is demonstrably tuned there and the fold has not
+//! caught up — and that is neither grey nor T-423's `"unknown"`: `coverage` says observed, this
+//! route's `grid` has no cell yet, and the difference is visible because the two planes are served
+//! separately.
 //!
 //! # How this avoids `/api/history`'s budget-as-level-selector defect (F2)
 //!
@@ -185,6 +202,72 @@ fn too_many_in_flight() -> ApiError {
              viewport you have left and retry the ones you still want"
         ),
     )
+}
+
+/// Which open pyramid a tile address resolves against (T-439).
+///
+/// `scheme` was already *the lattice the address is expressed in*; with a view-scheme pyramid open
+/// it is also **which store answers**, and the two cannot come apart — asking for the view lattice
+/// and reading scheme 1's ladder is precisely the gap T-438 left: the coarse nodes had no store
+/// behind them and fell back on a ladder whose time cell is a day.
+///
+/// The choice is one function so there is exactly one mapping, and so a server with no view
+/// pyramid behaves as it did before (everything resolves against [`ApiState::history`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileStore {
+    /// The de-welded view lattice ([`ApiState::view_history`]), whose finest node is the live edge.
+    View,
+    /// The spectrum-history pyramid `/api/history` answers from (scheme 1).
+    Main,
+}
+
+/// Picks the store for this address. `scheme=view` (and the default) uses the view pyramid when
+/// one is open; a numeric `scheme` uses whichever open pyramid *is* that scheme, so `scheme=2`
+/// and `scheme=view` name the same store and cannot disagree.
+pub fn tile_store(state: &ApiState, q: &Params) -> TileStore {
+    let Some(v) = state.view_history.as_ref() else {
+        return TileStore::Main;
+    };
+    match param(q, "scheme") {
+        None | Some("view") => TileStore::View,
+        Some(other) => match other.parse::<u16>() {
+            Ok(n) => {
+                let is_view = v
+                    .lock()
+                    .map(|p| p.config().scheme == n)
+                    .unwrap_or_else(|e| e.into_inner().config().scheme == n);
+                if is_view {
+                    TileStore::View
+                } else {
+                    TileStore::Main
+                }
+            }
+            // Unparseable: `parse_key` refuses it, and the geometry it refuses against is
+            // immaterial. Main keeps the pre-T-439 message.
+            Err(_) => TileStore::Main,
+        },
+    }
+}
+
+/// Runs `f` on the pyramid `store` names.
+pub(crate) fn with_tile_history<T>(
+    state: &ApiState,
+    store: TileStore,
+    f: impl FnOnce(&hk_store::Pyramid) -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    match store {
+        TileStore::Main => crate::http::with_history(state, f),
+        TileStore::View => {
+            let p = state
+                .view_history
+                .as_ref()
+                .ok_or_else(|| ApiError::new(404, "no view-scheme history on this server"))?;
+            let p = p
+                .lock()
+                .map_err(|_| ApiError::new(500, "view history store poisoned"))?;
+            f(&p)
+        }
+    }
 }
 
 /// The lattice a tile address is expressed in.
@@ -468,10 +551,15 @@ pub struct TileRead {
 
 /// Reads one tile, chunked by whole output rows so no single history lock hold exceeds
 /// [`TILE_MAX_SOURCE_CELLS`].
-fn read_level(state: &ApiState, key: &TileKey, level: u8) -> Result<TileRead, ApiError> {
+fn read_level(
+    state: &ApiState,
+    store: TileStore,
+    key: &TileKey,
+    level: u8,
+) -> Result<TileRead, ApiError> {
     let cells = key.cells;
     let (rows_per_chunk, nf_src, level_f_cell, level_t_cell) =
-        crate::http::with_history(state, |p| {
+        with_tile_history(state, store, |p| {
             let g = &p.geometry().levels[level as usize];
             let (_, nf) = dims(p.geometry(), level as usize, &key.region);
             let rows_per_out = (key.t_cell_ns as f64 / g.t_cell_ns as f64).ceil() + 1.0;
@@ -499,7 +587,7 @@ fn read_level(state: &ApiState, key: &TileKey, level: u8) -> Result<TileRead, Ap
         );
         // One lock hold per chunk: the history mutex is released between chunks so a tile fan-out
         // at the live edge never holds it for a whole tile (docs/16 §5.5 cap 3).
-        let part = crate::http::with_history(state, |p| {
+        let part = with_tile_history(state, store, |p| {
             let h = p
                 .query(&RegionQuery {
                     freq: key.region.freq,
@@ -552,9 +640,8 @@ fn read_level(state: &ApiState, key: &TileKey, level: u8) -> Result<TileRead, Ap
 }
 
 /// Reads one tile: the finest affordable level, walking **coarser** only when a level holds nothing.
-pub fn tile_read(state: &ApiState, key: &TileKey) -> Result<TileRead, ApiError> {
-    let candidates =
-        crate::http::with_history(state, |p| Ok(affordable_levels(p.geometry(), key)))?;
+pub fn tile_read(state: &ApiState, store: TileStore, key: &TileKey) -> Result<TileRead, ApiError> {
+    let candidates = with_tile_history(state, store, |p| Ok(affordable_levels(p.geometry(), key)))?;
     if candidates.is_empty() {
         return Err(ApiError::new(
             400,
@@ -567,7 +654,7 @@ pub fn tile_read(state: &ApiState, key: &TileKey) -> Result<TileRead, ApiError> 
     let mut tried = Vec::new();
     let mut first: Option<TileRead> = None;
     for &level in &listed {
-        let mut got = read_level(state, key, level)?;
+        let mut got = read_level(state, store, key, level)?;
         tried.push(level);
         if got.grid.observed_cells > 0 {
             got.tried = tried;
@@ -594,9 +681,12 @@ fn tier(key: &TileKey, r: &TileRead, max_live_span_hz: Option<f64>) -> DetailSou
     if replicated {
         return DetailSource::SurveyOverview;
     }
-    // Never `live-iq`: this route reads the pyramid, exactly as /api/history and /api/timeline do.
-    // T-439 adds the growing edge; until then claiming live here would be the stronger claim with
-    // no evidence.
+    // Never `live-iq`, and **T-439 does not change that**. T-439 makes the finest node of the view
+    // lattice the growing edge — "live" is a viewport, not a mode (docs/16 §8.1) — but a tile is
+    // still a *pyramid* read, served at a level's cell size, and `DetailSource::LiveIq` means
+    // exactly "live IQ from the front end at the resolution shown". A 6.25 kHz × 1 s cell is not
+    // that, however recently it was written. Claiming otherwise would trade §4's honesty rule for
+    // a word, and the ring is where a client goes for live-IQ resolution.
     match crate::navigation::live_window_verdict(key.region.freq.width_hz(), max_live_span_hz) {
         DetailSource::LiveIq => DetailSource::SpectrumHistory,
         other => other,
@@ -701,10 +791,11 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     let Some(slot) = TileSlot::acquire(&state.tiles_in_flight) else {
         return Err(too_many_in_flight());
     };
-    let key = crate::http::with_history(state, |p| parse_key(p.geometry(), q))?;
+    let store = tile_store(state, q);
+    let key = with_tile_history(state, store, |p| parse_key(p.geometry(), q))?;
     let started = std::time::Instant::now();
-    let r = tile_read(state, &key)?;
-    let levels = crate::http::with_history(state, |p| Ok(p.geometry().n_levels()))?;
+    let r = tile_read(state, store, &key)?;
+    let levels = with_tile_history(state, store, |p| Ok(p.geometry().n_levels()))?;
     let max_live = crate::http::max_live_span_hz(state);
     let source = tier(&key, &r, max_live);
     let window = key.window();
@@ -757,6 +848,14 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
                 "f_cell_hz": r.src_f_cell_hz,
                 "t_cell_s": r.src_t_cell_ns as f64 / 1e9,
                 "exact_node": key.store_node == Some(r.level as usize),
+                // T-439: WHICH pyramid answered. `view-lattice` is the de-welded scheme the live
+                // chain writes its finest node of, so a fine-frequency/coarse-time address is a
+                // real node rather than a fold out of a ladder's diagonal. There is no separate
+                // live path — this says which surface, never whether it was "live".
+                "store": match store {
+                    TileStore::View => "view-lattice",
+                    TileStore::Main => "spectrum-history",
+                },
             },
             "candidates": r.candidates,
             "tried": r.tried,
@@ -819,7 +918,7 @@ pub fn tile_events_json(state: &ApiState, q: &Params) -> Result<Value, ApiError>
     if let Some((k, _)) = q.iter().find(|(k, _)| !ALLOWED.contains(&k.as_str())) {
         return Err(bad(&format!("unknown parameter {k:?}")));
     }
-    let key = crate::http::with_history(state, |p| parse_key(p.geometry(), q))?;
+    let key = with_tile_history(state, tile_store(state, q), |p| parse_key(p.geometry(), q))?;
     let repo = state
         .inventory
         .as_ref()
@@ -1191,7 +1290,7 @@ mod tests {
             ]),
         )
         .unwrap();
-        let r = tile_read(state, &key).unwrap();
+        let r = tile_read(state, TileStore::Main, &key).unwrap();
         (key, r)
     }
 
@@ -1302,7 +1401,7 @@ mod tests {
             ]),
         )
         .unwrap();
-        let r = tile_read(&state, &key).unwrap();
+        let r = tile_read(&state, TileStore::Main, &key).unwrap();
         assert_eq!(r.grid.observed_cells, 0);
         assert!(r.grid.range_db.is_none(), "no scale from nothing");
         assert_eq!(
@@ -1409,7 +1508,12 @@ mod tests {
                     ]),
                 )
                 .unwrap();
-                std::hint::black_box(tile_read(&state, &key).unwrap().grid.observed_cells);
+                std::hint::black_box(
+                    tile_read(&state, TileStore::Main, &key)
+                        .unwrap()
+                        .grid
+                        .observed_cells,
+                );
             }
             let mean_ms = started.elapsed().as_secs_f64() * 1e3 / n as f64;
             eprintln!(
