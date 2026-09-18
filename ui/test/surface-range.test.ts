@@ -91,20 +91,13 @@ async function settle(surface: Surface, id: string, box: Box, frames = 6): Promi
   }
 }
 
-// ——— 1. the default is AUTO-CONTRAST (user, 2026-09-18), and the anchored mode is one call away ———
-//
-// T-470 made auto-contrast opt-in and this section asserted that default. THE USER HAS REVERSED THAT
-// RULING and accepts the trade it was protecting against: colours shift on zoom, and contrast on the
-// data in front of them is worth more. So the assertion is INVERTED, not deleted (T-347's
-// precedent) — the stable-colour property below is still asserted in full, now through the anchored
-// mode a host selects rather than through the default nobody sets.
+// ——— 1. the default is anchored, and nothing drawn can move it ———
 
-test("a Surface opens in AUTO-CONTRAST, and its range still has stated provenance", () => {
+test("a Surface opens ANCHORED to a stated range, not tracking whatever is on screen", () => {
   const { surface } = harness();
-  assert.equal(surface.autoScale, true, "the default is no longer the user's chosen auto-contrast");
-  assert.deepEqual({ lo: surface.lo, hi: surface.hi }, { lo: FALLBACK_RANGE.lo, hi: FALLBACK_RANGE.hi },
-    "a Surface with nothing on screen still opens on the stated fallback, not on nothing");
-  assert.equal(surface.range.mode, "auto");
+  assert.equal(surface.autoScale, false, "the default mapping is viewport-dependent again");
+  assert.deepEqual({ lo: surface.lo, hi: surface.hi }, { lo: FALLBACK_RANGE.lo, hi: FALLBACK_RANGE.hi });
+  assert.equal(surface.range.mode, "anchored");
   assert.equal(surface.range.source, FALLBACK_RANGE_SOURCE,
     "a range with no provenance is a number the legend cannot make honest");
 });
@@ -141,26 +134,13 @@ async function guardDrive(surface: Surface): Promise<void> {
     "one pane's zoom re-coloured the other pane, which is showing the same data it was");
 }
 
-test("THE GUARD, inverted: with the user's default, the viewport DOES decide the colours", async () => {
-  // The claim this file was written to defend now lives in the test below, where a host has
-  // anchored the range. Here the subject is the DEFAULT, and the user's stated choice is that it
-  // tracks what is on screen — so the assertion is that it moves, and moves in the direction the
-  // tiles do. Asserting movement rather than deleting the test keeps the default honest: a silent
-  // return to anchored-by-default would fail here, and a mapping that ignored the tiles entirely
-  // would fail here too.
+test("THE GUARD: a Surface nobody configured does not let the viewport decide the colours", async () => {
   const { surface } = harness();
-  const before = { ...surface.range };
-  await settle(surface, "a", QUIET);
-  const quiet = { lo: surface.lo, hi: surface.hi };
-  await settle(surface, "a", LOUD);
-  const loud = { lo: surface.lo, hi: surface.hi };
-  assert.ok(loud.lo > quiet.lo + 5 && loud.hi > quiet.hi + 5,
-    `the default did not track the viewport: ${JSON.stringify(quiet)} → ${JSON.stringify(loud)}`);
-  assert.equal(surface.range.mode, "auto");
-  assert.notEqual(quiet.lo, before.lo, "the fallback was never left, so nothing was tracked");
+  await guardDrive(surface);
+  assert.deepEqual({ lo: surface.lo, hi: surface.hi }, { lo: FALLBACK_RANGE.lo, hi: FALLBACK_RANGE.hi });
 });
 
-test("THE GUARD PROPER: with a host's measured anchor in force, zoom cannot re-colour a pane", async () => {
+test("THE GUARD, with a host's measured anchor in force", async () => {
   const { surface } = harness();
   surface.setScale(-95, -45, "measured once over the observed region");
   await guardDrive(surface);
@@ -168,11 +148,9 @@ test("THE GUARD PROPER: with a host's measured anchor in force, zoom cannot re-c
 });
 
 test("NON-VACUITY: the same drive, with the defect restored, moves the range every time", async () => {
-  // Non-vacuity for THE GUARD PROPER above: the same drive, with auto-contrast switched back on
-  // after anchoring, must move the range every time. If this ever stops observing movement, the
-  // anchored guard is asserting nothing and the fixture (not the product) is what changed.
-  // (Until 2026-09-18 this was also the fault injection for the default; the user has since made
-  // auto-contrast the default, so that half now lives in the inverted test above.)
+  // This is the fault the guard above exists for — `autoScale` left on by default — driven through
+  // the identical sequence. If this test ever stops observing movement, the guard above is asserting
+  // nothing and the fixture (not the product) is what changed.
   const { surface } = harness();
   surface.setScale(-95, -45, "anchored");
   surface.setAutoScale(true);

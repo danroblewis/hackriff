@@ -211,23 +211,12 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
 
   // The legend states the scale, in the mode it is actually in. A fixed range can clip, and the
   // only thing that makes that honest rather than merely consistent is saying so where it is read.
-  // THE DEFAULT IS AUTO-CONTRAST (user, 2026-09-18) — it was anchored when T-470 wrote this file.
-  // The page therefore opens tracking the viewport, and this test's subject is the ANCHORED scale's
-  // stability, so it selects that mode explicitly instead of inheriting it. That is the honest
-  // shape anyway: the claim is "an anchored scale does not move under zoom", and a test that got
-  // anchored for free could never say whether the mode or the default was doing the work.
-  const openLegend = await page.$text('.sp-legend-row[data-mark="range"]');
-  assert.ok(openLegend, "the key does not state the display range at all; rows present: "
+  const legend = await page.$text('.sp-legend-row[data-mark="range"]');
+  assert.ok(legend, "the key does not state the display range at all; rows present: "
     + await page.eval(`[...document.querySelectorAll(".sp-legend-row")].map((r) => r.getAttribute("data-mark")).join(",") || "(none)"`)
     + " · actions: " + await page.$text('[data-slot="actions"]'));
-  assert.match(openLegend, /Auto-contrast/, "the page opened in a mode that is not the user's chosen default");
-  assert.match(openLegend, /changes colour as you zoom/i, "the default mode does not state ITS trade");
-
-  await page.click(`document.querySelector('[data-slot="contrast"]')`);
-  await page.frames(4);
-  const legend = await page.$text('.sp-legend-row[data-mark="range"]');
   assert.match(legend, /Display range · -?\d+\.\d+ … -?\d+\.\d+ dBFS/, `the scale row states no range: ${legend}`);
-  assert.match(legend, /Anchored/, "selecting the anchored mode did not take");
+  assert.match(legend, /Anchored/, "the page opened in a mode that is not the anchored default");
   assert.match(legend, /clipped/, "the anchored mode does not state the trade it makes");
 
   // ——— two viewports onto one surface ———
