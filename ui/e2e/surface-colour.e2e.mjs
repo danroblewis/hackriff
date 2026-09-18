@@ -126,22 +126,79 @@ function diff(a, b, rect) {
 }
 
 /**
- * Screenshot until two consecutive frames agree over `rect`, so an assertion lands on a settled
- * surface rather than on whichever tile happened to be in flight.
+ * Screenshot until two consecutive frames agree over **every named subject**, so an assertion lands
+ * on a settled surface rather than on whichever tile happened to be in flight.
+ *
+ * ## The subjects are the two PANES, and the minimap is deliberately not one of them (T-500)
+ *
+ * This used to settle over the whole canvas, which failed as "zoom 1 never settled: 1320 of 839 916
+ * px, worst channel sum 24" while T-484 had the finest time level at the display row rate (~25
+ * rows/s) instead of a 1 s cell. T-484 is reverted at the time of writing and T-501 will bring it
+ * back, so the condition is not hypothetical and the measurement below was taken **against T-484's
+ * own branch** (`de758d17`), at exactly the point that failed — immediately after zoom 1 — over 60
+ * screenshots 250 ms apart:
+ *
+ * ```
+ * LEFT  pane (held):   59/59 consecutive pairs agreed · 0 px · worst channel sum 0
+ * RIGHT pane (zoomed): 59/59 consecutive pairs agreed · 0 px · worst channel sum 0
+ * MINIMAP:             19/59 agreed · mean 899 px · WORST CHANNEL SUM 24 · all of it in y 610..729
+ * WHOLE CANVAS:        19/59 agreed · mean 899 px · worst channel sum 24 · all of it in y 610..729
+ * ```
+ *
+ * The whole canvas and the map strip are the *same numbers*, down to the reported failure's own
+ * `worst 24`: **every** residual pixel on the canvas was in the map. Nothing was re-colouring — both
+ * panes were byte-identical for fifteen seconds — and no pane was advancing either, because
+ * `preview-main.ts` passes no `edgeFn`, so `Surface` freezes every viewport at open and sets
+ * `minimap.setFollowing(false)`. There is no live edge in this page at all.
+ *
+ * The cause is **residency**. The readout over the same samples walks 29 distinct states, the map
+ * going `0 tiles · 126 coarse stand-ins · 3 pending` → `43 tiles · 85 coarse stand-ins · 1 pending`,
+ * resolving roughly one stand-in per 250 ms against an in-flight cap of 4, each swap repainting a
+ * tile-wide column over the map's full height. At 40 ms cells the map's level has ~25× the addresses
+ * it has at 1 s cells, so ~128 stand-ins take ~30 s — and a zoom evicts from the LRU the panes share,
+ * restarting it. Two consecutive frames then agree on the whole canvas only ~32 % of the time, which
+ * is why this was a rare red rather than a permanent one: the 20 s budget is ~80 polls, so the
+ * timeout is the tail of a coin-flip process, and it gets likelier with load, with an older record
+ * and with every eviction.
+ *
+ * And this file already knew the map never reaches residency: `waitResident` below exempts it in so
+ * many words ("it is 6 GHz wide and always has stand-ins"). Asking the whole canvas to stop changing
+ * was asking for a state the file itself documents as unreachable — a property of the instrument,
+ * not of the product.
+ *
+ * **The instrument changed, and the claim did not.** Every assertion in this file reads `left` or
+ * `right`; not one reads the map. Settling on exactly those two rects is the precondition the
+ * assertions actually need, and for them it is *stronger* than the old whole-canvas wait was, not
+ * weaker — it is the same zero over the same pixels, no longer conditioned on a third viewport
+ * that is still loading. No tolerance was widened: T-470's claim below is still `held.pixels === 0`
+ * over all 316 478 px of the held pane, and the round trip is still byte-identity.
+ *
+ * **What this does NOT buy, so that T-501 does not read it as more than it is.** The subjects here
+ * are two *frozen* panes, so "two consecutive frames agree" is a reachable state for them. It would
+ * not be for a pane that follows a fast live edge: a following pane repaints every row period, and
+ * a frame-diff settle over one is unreachable by construction, not marginal. If a later change gives
+ * this page an `edgeFn`, the panes stop being valid subjects for this instrument and the comparison
+ * needs a different shape — freezing the subject pane for the duration of the comparison, or the
+ * frame-averaged reading T-481's canvas journey adopted for exactly this reason.
  *
  * It **reports** rather than throws when it cannot settle: a surface that never stops changing is a
- * finding the assertions below should get to describe, not a harness timeout with no evidence.
+ * finding the assertions below should get to describe, not a harness timeout with no evidence — and
+ * it names **which subject** did not settle, because "the surface never settled" over a rect
+ * containing three viewports is what cost this file two weeks of being red for the wrong reason.
  */
-async function settle(page, rect, { timeoutMs = 20000, everyMs = 250 } = {}) {
+async function settle(page, subjects, { timeoutMs = 20000, everyMs = 250 } = {}) {
+  const list = Array.isArray(subjects) ? subjects : [subjects];
   const t0 = Date.now();
   let prev = await page.shot();
   for (;;) {
     await new Promise((r) => setTimeout(r, everyMs));
     const next = await page.shot();
-    const d = diff(prev, next, rect);
+    const ds = list.map(({ name, rect }) => ({ name, ...diff(prev, next, rect) }));
     prev = next;
-    if (d.pixels === 0) return { img: next, settled: true, ms: Date.now() - t0 };
-    if (Date.now() - t0 > timeoutMs) return { img: next, settled: false, ms: Date.now() - t0, last: d };
+    if (ds.every((d) => d.pixels === 0)) return { img: next, settled: true, ms: Date.now() - t0 };
+    if (Date.now() - t0 > timeoutMs) {
+      return { img: next, settled: false, ms: Date.now() - t0, last: ds.filter((d) => d.pixels > 0) };
+    }
   }
 }
 
@@ -230,6 +287,10 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
   const left = { x: box.x + INSET, y: box.y + INSET, w: half - 2 * INSET, h: panesH - 2 * INSET };
   const right = { x: box.x + half + INSET, y: box.y + INSET, w: half - 2 * INSET, h: panesH - 2 * INSET };
   const all = { x: box.x, y: box.y, w: box.w, h: box.h };
+  /** What `settle` waits on: the two panes, which are the only rects anything below asserts over.
+   * The map strip is excluded for the reason measured in `settle`'s header — it is still resolving
+   * stand-ins throughout, and it is not a subject of this file. */
+  const panes = [{ name: "held pane", rect: left }, { name: "zoomed pane", rect: right }];
   // Zoom at the centre of the RIGHT half. Which pane that is, is not assumed: the wheel goes to the
   // viewport under the cursor (`input.ts`), so the half containing the cursor is the one that moves.
   const at = { x: right.x + right.w / 2, y: right.y + right.h / 2 };
@@ -237,8 +298,8 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
   // Residency first, pixels second. Until the panes hold their own tiles, a repaint is a stand-in
   // arriving, and no conclusion about colour can be drawn from one.
   await waitResident(page);
-  const first = await settle(page, all);
-  assert.ok(first.settled, `the surface never settled: ${JSON.stringify(first.last)}`);
+  const first = await settle(page, panes);
+  assert.ok(first.settled, `a pane never settled: ${JSON.stringify(first.last)}`);
   const base = first.img;
   const baseCensus = census(base, left);
   assert.ok(baseCensus.distinct >= 32 && baseCensus.dominantShare < 0.92 && baseCensus.meanLuma > 8,
@@ -276,7 +337,7 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
     await page.wheel(at, delta, ZOOM_MODS);
     await page.frames(4);
     await waitResident(page);
-    const s = await settle(page, all);
+    const s = await settle(page, panes);
     assert.ok(s.settled, `zoom ${step} never settled: ${JSON.stringify(s.last)}`);
     const shot = s.img;
     const now = await readout(page);
@@ -321,7 +382,7 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
     const moved = diff(prev, shot, right);
     if (moved.share > 0.05) repainted++;
     t.diagnostic(`zoom ${step} (Δ${delta}): zoomed half repainted ${(moved.share * 100).toFixed(1)} %, ` +
-      `held half ${held.pixels} px · ${levelsOf(now)}`);
+      `held half ${held.pixels} px · settled in ${s.ms} ms · ${levelsOf(now)}`);
     levels.push(now);
     prev = shot;
   }
@@ -380,7 +441,7 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
   // to contain, and a run where it barely moved would report the fault as absent. The whole
   // six-step sequence re-crosses four levels, so if the scale follows the viewport at all, it shows.
   await waitResident(page);
-  const autoSettled = await settle(page, all, { timeoutMs: 25000 });
+  const autoSettled = await settle(page, panes, { timeoutMs: 25000 });
   const autoBase = autoSettled.img;
   const autoBaseReadout = await readout(page);
 
@@ -436,7 +497,7 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
     await page.wheel(at, delta, ZOOM_MODS);
     await page.frames(4);
     await waitResident(page);
-    const s = await settle(page, all, { timeoutMs: 25000 });
+    const s = await settle(page, panes, { timeoutMs: 25000 });
     const now = await readout(page);
     // Only count a step where a pane genuinely stayed put, with the same tiles under it — otherwise
     // the number would be residency, not colour.
@@ -467,7 +528,7 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
   // differences, and it is the one an "anchor" has to satisfy to mean anything: the scale is a
   // property of the region, so returning to it returns the colours exactly.
   await waitResident(page);
-  const closed = await settle(page, all, { timeoutMs: 25000 });
+  const closed = await settle(page, panes, { timeoutMs: 25000 });
   const back = diff(base, closed.img, left);
   assert.equal(back.pixels, 0,
     `after the round trip the untouched viewport differs from its first frame by ${back.pixels} of ` +
