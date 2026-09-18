@@ -253,13 +253,47 @@ impl Source for Lent {
     }
 }
 
+/// **How long a re-plumb may wait for the window it asked for before it stops waiting** (T-497).
+///
+/// The settle gap after a retune is honest and expected — the front end is moving, and blocks
+/// still in the pipe describe the tuning that has ended, so [`WindowGuard`] drops them. What was
+/// missing is a **bound**: `expect` was cleared only by a block that matched to within 1 Hz, so a
+/// device that never reports that window had **every block dropped for ever**. Capture went silent
+/// and stayed silent while `hk serve` answered normally, `run.finished` stayed false and
+/// `replumbing` stayed false — the user's report, three times: *"the live capture dies on retune
+/// and never recovers"*.
+///
+/// That state is reachable without anything exotic. [`crate::run`] does not fabricate it;
+/// `hk_core`'s HackRF driver applies a posted control **field by field and returns on the first
+/// `SourceError`** (`apply_change`: rate, then baseband filter, then gains, then centre), so a
+/// failed baseband-filter write leaves the new *rate* in the block provenance and the centre never
+/// applied — exactly one component of `expect` off, for ever. [`replumb`]'s own failure path is the
+/// second door: it reverts a failed `apply_window` with `let _ =`, and then starts a segment
+/// expecting the window the revert may not have restored.
+///
+/// So the wait is bounded and the bound is generous: whole seconds, orders of magnitude longer than
+/// any real in-flight block (a HackRF block is milliseconds), so a device that *is* going to arrive
+/// always arrives first and nothing about a normal retune changes. Past it the guard stops
+/// demanding the requested window and admits on the **class** check alone.
+///
+/// **The class check is the legal guardrail and does not move.** Giving up on `expect` is giving up
+/// on "is this the window we asked for", never on "may this content reach a ring gated for another
+/// class". A device sitting on a restricted-class window still produces no blocks, which is correct
+/// and is the documented behaviour.
+pub const WINDOW_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Keeps a segment to its class (legal guardrail; see the module docs): drops blocks until the
 /// requested window arrives, then any block whose window has another class. A dropped block is
 /// returned empty (the capture thread skips empty blocks); the next admitted block carries `GAP`.
+///
+/// The wait for the requested window is bounded by [`WINDOW_SETTLE_TIMEOUT`]; the class check is
+/// not bounded by anything, because it is the legal guardrail.
 struct WindowGuard {
     inner: Box<dyn Source>,
     class: ContentClass,
     expect: Option<(f64, f64)>,
+    /// When the segment started waiting for `expect`. `None` when there is nothing to wait for.
+    waiting_since: Option<Instant>,
     dropped: bool,
     stats: Arc<ControlStats>,
 }
@@ -275,6 +309,7 @@ impl WindowGuard {
             inner,
             class,
             expect,
+            waiting_since: expect.map(|_| Instant::now()),
             dropped: false,
             stats: Arc::clone(stats),
         })
@@ -287,9 +322,19 @@ impl WindowGuard {
         );
         if let Some((c, r)) = self.expect {
             if (center - c).abs() > 1.0 || (rate - r).abs() > 1.0 {
-                return self.reject();
+                // T-497: the settle gap is bounded. Past the bound the front end is where it is,
+                // and a view of the window it is actually on beats silence for ever over the window
+                // it was asked for. The give-up is counted, not swallowed.
+                let waited = self
+                    .waiting_since
+                    .is_some_and(|t| t.elapsed() >= WINDOW_SETTLE_TIMEOUT);
+                if !waited {
+                    return self.reject();
+                }
+                inc(&self.stats.window_settle_timeouts);
             }
             self.expect = None;
+            self.waiting_since = None;
         }
         if window_class(center, rate) != self.class {
             return self.reject();
@@ -543,6 +588,11 @@ pub struct ControlStats {
     pub retunes_in_place: AtomicU64,
     /// Blocks the window guard dropped (not yet the requested window, or another class).
     pub blocks_dropped_window: AtomicU64,
+    /// Re-plumbs whose requested window never arrived, so the guard stopped waiting for it
+    /// ([`WINDOW_SETTLE_TIMEOUT`], T-497). Non-zero means the front end is **not** on the window
+    /// the control plane asked for, and capture resumed on the one it is actually on rather than
+    /// staying silent for ever. It is a defect signal, not a normal outcome.
+    pub window_settle_timeouts: AtomicU64,
     /// Manual recordings started.
     pub recordings_started: AtomicU64,
     /// Manual recordings refused by the content class.
@@ -1327,8 +1377,26 @@ fn replumb(common: &Common, old: Arc<Shared>, req: &Replumb) -> Result<Replumbed
         ),
         Err(e) => {
             // Back to the window the old segment had (its class still holds there).
-            let _ = apply_window(common.switch.as_ref(), req.from, req.to);
-            (req.from, old_class, Err(ControlFailure::Source(e)))
+            //
+            // **T-497: the revert's own failure is reported, not discarded.** It used to be
+            // `let _ =`, and then the segment started `expect`ing `req.from` — a window the revert
+            // had just failed to restore. [`WindowGuard`] would then drop every block for ever
+            // (it now gives up after [`WINDOW_SETTLE_TIMEOUT`] instead), and the caller was told
+            // only about the first failure, so "the retune was refused and the radio is back where
+            // it was" and "the retune was refused and nobody knows where the radio is" read
+            // identically. They are not the same fact.
+            match apply_window(common.switch.as_ref(), req.from, req.to) {
+                Ok(()) => (req.from, old_class, Err(ControlFailure::Source(e))),
+                Err(back) => (
+                    req.from,
+                    old_class,
+                    Err(ControlFailure::Failed(format!(
+                        "the retune failed ({e}) and restoring the previous window failed too \
+                         ({back}): the front end may not be on {} Hz / {} Hz",
+                        req.from.0, req.from.1
+                    ))),
+                ),
+            }
         }
     };
     cfg.source_class = class;
@@ -1440,6 +1508,11 @@ impl PipelineController {
                 "replumbs": get(&stats.replumbs),
                 "retunes_in_place": get(&stats.retunes_in_place),
                 "blocks_dropped_window": get(&stats.blocks_dropped_window),
+                // T-497: non-zero means a re-plumb's requested window never arrived and capture
+                // resumed on whatever the front end is actually on. Served rather than kept
+                // internal, because "the radio is not where you asked it to be" is exactly the kind
+                // of thing this product refuses to render as if it were.
+                "window_settle_timeouts": get(&stats.window_settle_timeouts),
                 "recordings_started": get(&stats.recordings_started),
                 "recordings_refused_class": get(&stats.recordings_refused_class),
             }),

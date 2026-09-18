@@ -111,8 +111,8 @@ pub use refine::RefineSettings;
 pub use run::{
     ControlFailure, ControlStats, ControlStatus, DeviceReplay, Pipeline, PipelineController,
     PipelineHandle, REPLUMB_TIMEOUT, Replay, ResolutionSummary, RetuneOutcome, RunSummary,
-    SourceFactory, SourceInfo, Stopper, open_mock_replay, open_replay, replay_block_len,
-    replay_once,
+    SourceFactory, SourceInfo, Stopper, WINDOW_SETTLE_TIMEOUT, open_mock_replay, open_replay,
+    replay_block_len, replay_once,
 };
 pub use stats::Counters;
 pub use survey::{ReceiverSurvey, SurveyCadence, SurveyCounts};
