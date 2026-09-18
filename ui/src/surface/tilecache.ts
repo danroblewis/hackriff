@@ -94,6 +94,24 @@
 // `source`, and the answer replaces the resident tile in place ([[insert]]); nothing here invents a
 // row, and the stale copy stays on screen and drawn until the new one lands, so the refresh cannot
 // flash grey. T-468's row-push route is the durable fix; this restores the guarantee now.
+//
+// ## T-495: eligibility, not re-entry — the same assumption one axis over
+//
+// The user's report was a **band of grey in the middle of a tile that never fills**: retune, pan onto
+// the newly-live tile, pan away, pan back, and the rows recorded while it was off screen are grey for
+// the rest of the session. It reads like a cache that hands back a stale copy on re-entry, and it is
+// not. Driven through this cache the client makes **no request at all** on re-entry — and would make
+// two if the live edge happened to still be inside the tile. The measurement and the rule are on
+// [[TileCache.behindTheEdge]]; the one-sentence version is that T-460 made a live tile eligible for
+// revalidation *while the edge is inside it*, and that eligibility expires permanently the moment the
+// edge crosses the tile's end. A tile that spent the last of its own life off screen therefore keeps
+// whatever the server had when it was last looked at, and the rest of its span stays `unobserved` —
+// grey, and honest, and served before the rows existed.
+//
+// So freshness is not residency and it is not "at the edge" either: **a copy is fresh when the edge
+// it was asked at had already reached the end of what it could hold**, which is `extent.t1_s` from
+// the route's own answer. That test seals a tile exactly once and forever, so the fix costs one extra
+// request per tile per lifetime and cannot become a poll.
 
 import { extentOf, intersects, keyOf, tCellNs, type Box, type Lattice, type TileAddr } from "./lattice";
 import { TileBusyError, TileDecodeError, type TileData } from "./tile";
@@ -112,6 +130,18 @@ export interface TileEntry<T> {
   lastUsed: number;
   /** Frame number this tile was last pinned on. Pinned tiles are never evicted (§5.5's two pins). */
   pinnedFrame: number;
+  /**
+   * **The live edge, in capture ns, at the instant this copy was ASKED FOR** (T-495).
+   *
+   * How far into its own span the answer can possibly hold rows for — and therefore the whole of
+   * what "fresh" means for a tile. See [[TileCache.behindTheEdge]].
+   *
+   * At issue rather than at arrival, and that direction is the bug: the answer was built at some
+   * instant between the two, so the edge at arrival **over-states** what the copy contains, and an
+   * over-statement is exactly a tile marked finished while a gap is still in it. Under-stating costs
+   * at most one extra request.
+   */
+  edgeAtFetchNs: number;
 }
 
 /**
@@ -208,6 +238,13 @@ export interface TileCacheStats {
   edgeRefreshApplied: number;
   /** Places the route answered *no* to permanently, and that are never asked for again (T-479). */
   terminalFailures: number;
+  /**
+   * Of [[edgeRefreshes]], the ones issued for a tile the live edge has **already passed** (T-495):
+   * the completing re-ask that closes a tile whose last rows were recorded while it was off screen.
+   * Counted separately because it is the number that says the T-495 gap is being filled rather than
+   * merely that the live-edge lane is running — and because it is bounded: at most one per tile.
+   */
+  edgeRefreshCompletions: number;
 }
 
 const MB = 1024 * 1024;
@@ -351,6 +388,18 @@ export class TileCache<T> {
    */
   private refreshCosts = new Map<string, number[]>();
   private nextEdgeScan = 0;
+  /**
+   * The newest capture instant the surface has been told about, as of the last [[refreshEdge]] —
+   * stamped onto every tile this cache asks for, so a resident copy knows how much of its own span
+   * it can possibly hold (T-495).
+   *
+   * `-Infinity` until an edge is reported, which makes every tile fetched before then *behind* and
+   * therefore re-askable once. That is the conservative direction and the only safe one: "we do not
+   * know whether this copy is complete" is not "it is complete", the same rule as
+   * `BiasTee::Unknown` is not `Off`. It costs at most one extra request per tile, and only for
+   * tiles a following viewport is drawing.
+   */
+  private edgeNs = Number.NEGATIVE_INFINITY;
   private clock = 0;
   private frame = 0;
   private bytes = 0;
@@ -366,7 +415,7 @@ export class TileCache<T> {
   readonly stats: TileCacheStats = {
     uploads: 0, hits: 0, misses: 0, evictions: 0, refetchAfterEvict: 0, requests: 0,
     failures: 0, busyRefusals: 0, cancelled: 0, abandoned: 0, overBudgetFrames: 0, distinctKeys: 0,
-    edgeRefreshes: 0, edgeRefreshApplied: 0, terminalFailures: 0,
+    edgeRefreshes: 0, edgeRefreshApplied: 0, terminalFailures: 0, edgeRefreshCompletions: 0,
   };
 
   constructor(
@@ -569,6 +618,7 @@ export class TileCache<T> {
    */
   invalidateEdge(lat: Lattice, edgeNs: number, box?: Box): number {
     if (!Number.isFinite(edgeNs)) return 0;
+    if (edgeNs > this.edgeNs) this.edgeNs = edgeNs;
     let n = 0;
     for (const e of [...this.map.values()]) {
       if (this.atEdge(lat, e.addr, edgeNs, box) && this.invalidate(e.addr)) n++;
@@ -601,7 +651,10 @@ export class TileCache<T> {
    * *measured* service time. Returns how many were queued, for the tests and the stats.
    */
   refreshEdge(lat: Lattice, edgeNs: number, following: readonly Viewport[]): number {
-    if (!Number.isFinite(edgeNs) || !following.length) return 0;
+    if (!Number.isFinite(edgeNs)) return 0;
+    // Stamped even when nothing is following, because it is what the NEXT fetch records about itself.
+    if (edgeNs > this.edgeNs) this.edgeNs = edgeNs;
+    if (!following.length) return 0;
     const t = this.now();
     if (t < this.nextEdgeScan) return 0;
     this.nextEdgeScan = t + EDGE_SCAN_MS;
@@ -609,12 +662,13 @@ export class TileCache<T> {
     for (const e of this.map.values()) {
       const key = e.key;
       if (this.refreshing.has(key) || this.refreshQueued.has(key) || this.inflight.has(key)) continue;
-      if (!this.atEdge(lat, e.addr, edgeNs)) continue;
+      if (!this.behindTheEdge(lat, e, edgeNs)) continue;
       if (!following.some((v) => this.drawnBy(lat, v, e.addr))) continue;
       // The newest cell of a tile is one cell tall, so a re-ask inside that period cannot come back
       // with a row the copy in hand does not already have. This is the cadence, and it scales itself
       // with the zoom: 1 s at level 0, 32 s five levels out.
       if (t < (this.refreshedAt.get(key) ?? 0) + tCellNs(lat, e.addr.levelT) / 1e6) continue;
+      if (edgeNs >= this.endOf(lat, e)) this.stats.edgeRefreshCompletions++;
       const lane = laneOf(e.addr);
       const q = this.refreshLanes.get(lane);
       if (q) q.push(e.addr); else this.refreshLanes.set(lane, [e.addr]);
@@ -623,6 +677,84 @@ export class TileCache<T> {
     }
     if (n) this.pump();
     return n;
+  }
+
+  /**
+   * **Where the route says this tile's span ends, in ns.**
+   *
+   * The answer's own `extent.t1_s` wherever it stated one, and otherwise the same number computed
+   * from the address — which is where the route computes it from too, so the fallback is exact
+   * rather than a guess. The answer is preferred because the answer is the party that decided it,
+   * and because a client that only ever trusts its own arithmetic cannot notice the route disagreeing.
+   */
+  private endOf(lat: Lattice, e: TileEntry<T>): number {
+    return e.data.t1Ns ?? extentOf(lat, e.addr).t1Ns;
+  }
+
+  /**
+   * **Is this resident copy behind the data that now exists for it?** (T-495.)
+   *
+   * This is the question the renderer needs, and [[acquire]]'s residency answers a different one.
+   * The rule is one line — *a copy is fresh when the edge it was asked at already reached the end of
+   * what it could hold* — and everything below is why the previous rule, "is the live edge still
+   * inside this tile", is not that question.
+   *
+   * ## The defect, measured
+   *
+   * T-460 fixed the **growing** edge: a live tile was fetched once and frozen, so a following pane
+   * redrew the same rows for the 256 s it took to scroll into a new address. The fix made the tile
+   * eligible for revalidation *while the edge was inside it* — [[atEdge]]. That is sound for as long
+   * as the pane is looking at it, and it has a hole one axis over, which is what the user found:
+   *
+   * > *retune; pan RIGHT so the new tile is in view, staying in Live; pan LEFT so it goes OFF-SCREEN;
+   * > pan RIGHT so it is back. The rows that arrived while it was off screen are grey forever.*
+   *
+   * Driven through this cache with a 1 s cell and an 8 s tile, thirty frames away and forty back
+   * (`ui/test/surface-cache.test.ts`, "a live tile panned off screen and back"):
+   *
+   * ```
+   *                                    fetches of the tile under test
+   *                                    on screen   while away   AFTER RE-ENTRY
+   * the edge is still inside it on return   3            0            2     <- T-460's case, fine
+   * the edge LEFT it while it was away      3            0            0     <- grey forever
+   * ```
+   *
+   * Nothing about re-entry was broken. **The tile simply stopped being eligible while nobody was
+   * looking**, and eligibility never came back: `atEdge` goes false the instant the edge crosses the
+   * tile's own end, and there is no other path in this file that can ask for a resident key. The
+   * copy in hand held rows to wherever the edge was at its last on-screen refresh, and the rows
+   * between there and the tile's end were served — honestly, at the time — as `unobserved`. Measured
+   * against a real server, a 32 s live tile read 2.5 s in answers three rows `observed` and
+   * **twenty-nine `unobserved`**: THE grey. It is true when it is served and it is a lie one second
+   * later, and only never asking again makes the lie permanent.
+   *
+   * The tile above it in time is a *different address*, so it is an ordinary miss on return and
+   * arrives complete — which is exactly the shape the user described: present, a band of grey,
+   * present.
+   *
+   * ## Why this predicate, and why it cannot become a poll
+   *
+   * `edgeAtFetchNs` rises with every fetch and `min(edge, end)` is capped by the tile's own end, so
+   * the test is **monotone and terminating**: once a copy is taken at an edge past the tile's end it
+   * is fresh for the rest of the session and can never be asked for again. That is the sealed /
+   * unsealed distinction the ticket demands, read from the route's stated extent ([[endOf]]) rather
+   * than from the address or from how long ago the copy was taken. In steady state it costs **one**
+   * extra request per tile per lifetime: the completing re-ask after the edge leaves.
+   *
+   * **All six of the properties above this one still hold**, because this changes *which* resident
+   * tiles are eligible and nothing else. Only the live-edge address (this is that address, later);
+   * only for a FOLLOWING viewport (the `drawnBy` test below is untouched); only at the level it is
+   * drawn at; never more often than one `tCellNs(level_t)`; one revalidation in flight, into a slot
+   * the ordinary queue could not use; per-level lanes on their own measured clocks. A re-entering
+   * tile takes the ordinary refresh lane, which is why it cannot starve a visible fetch:
+   * [[pumpRefresh]] runs at the end of [[pump]], after the queue has had first refusal on every slot.
+   *
+   * A **frozen** pane's tiles are still out of scope, because the caller only offers following
+   * viewports — the same narrowing T-460 chose, and widening it is not needed for this defect.
+   */
+  private behindTheEdge(lat: Lattice, e: TileEntry<T>, edgeNs: number): boolean {
+    if (e.addr.scheme !== lat.scheme) return false;
+    return e.edgeAtFetchNs < Math.min(edgeNs, this.endOf(lat, e));
   }
 
   /** Is this tile one that viewport is **drawing**, at exactly its level? Unlike [[wants]] this
@@ -822,6 +954,10 @@ export class TileCache<T> {
     const key = keyOf(addr);
     const ctrl = typeof AbortController === "function" ? new AbortController() : null;
     const started = this.now();
+    // **The edge as it is NOW, not as it will be when the answer lands** (T-495): the answer is
+    // built somewhere between the two, so this under-states what the copy holds, and under-stating
+    // costs a request while over-stating leaves a permanent gap. See [[TileEntry.edgeAtFetchNs]].
+    const edgeAtFetchNs = this.edgeNs;
     this.inflight.set(key, { ctrl, startedAt: started, owner });
     if (this.evicted.has(key)) this.stats.refetchAfterEvict++;
     // The request is off the in-flight list BEFORE anything is re-queued, or `schedule` would see
@@ -863,7 +999,7 @@ export class TileCache<T> {
         // requeue has to run in `done`, after the key leaves the in-flight map, or `schedule`
         // would see this very request still outstanding and silently drop the retry.
         let requeue = false;
-        try { requeue = !this.insert(addr, data); } catch { this.stats.failures++; }
+        try { requeue = !this.insert(addr, data, edgeAtFetchNs); } catch { this.stats.failures++; }
         done(requeue);
       },
       (err) => done(this.failed(addr, err, started, ctrl?.signal.aborted ?? false)),
@@ -963,7 +1099,7 @@ export class TileCache<T> {
   }
 
   /** Take a fetched tile. **False means "ask again"**: the tuning changed while it was in flight. */
-  private insert(addr: TileAddr, data: TileData): boolean {
+  private insert(addr: TileAddr, data: TileData, edgeAtFetchNs: number): boolean {
     const key = keyOf(addr);
     if (this.stale.delete(key)) return false;
     const prev = this.map.get(key);
@@ -987,7 +1123,7 @@ export class TileCache<T> {
     }
     // A tile that has just arrived is pinned for the frame it arrived on: it cost the server 11.4 ms
     // and evicting it before it has been drawn once would spend that twice.
-    this.map.set(key, { key, addr, data, tex, lastUsed: ++this.clock, pinnedFrame: this.frame });
+    this.map.set(key, { key, addr, data, tex, lastUsed: ++this.clock, pinnedFrame: this.frame, edgeAtFetchNs });
     this.bytes += data.bytes;
     this.refreshedAt.set(key, this.now());
     this.evict();

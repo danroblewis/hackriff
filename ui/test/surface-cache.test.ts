@@ -18,9 +18,12 @@ const BYTES = 192 * 1024; // one 256^2 tile: R16F measurement + R8 state
 const addr = (fIndex: number, tIndex = 0, levelF = 0, levelT = 0): TileAddr =>
   ({ device: "any", scheme: "view", levelF, levelT, fIndex, tIndex, cells: 256 });
 
-function data(a: TileAddr, bytes = BYTES): TileData {
+/** `t1Ns` is what the ROUTE said this tile's span ends at (`extent.t1_s`), and `null` — the default
+ * here — is a route that did not say, which [[TileCache]] must fall back from rather than treat as
+ * "sealed". Both arms are exercised by the T-495 guard below. */
+function data(a: TileAddr, bytes = BYTES, t1Ns: number | null = null): TileData {
   return {
-    addr: a, key: keyOf(a), nf: 2, nt: 2,
+    addr: a, key: keyOf(a), nf: 2, nt: 2, t1Ns,
     value: new Float32Array([-90, NaN, -70, NaN]),
     state: new Uint8Array([CELL.OBSERVED, CELL.UNOBSERVED, CELL.OBSERVED, CELL.UNKNOWN]),
     tier: "spectrum-history", answeredLevel: 1, fold: { frequency: "exact", time: "exact" },
@@ -373,11 +376,21 @@ test("keys round-trip, so an in-flight request can be tested against a viewport"
 // tile is never served from cache indefinitely, that the re-ask is bounded by the period the data
 // can change in, and that it can never take a slot from something the user is waiting for.
 
-/** A live-edge tile: its extent straddles `EDGE_NS`, so `atEdge` holds. */
+/** A live-edge tile: its extent straddles `EDGE_NS`, so it is still being written. */
 const EDGE_NS = 200e9;
+/**
+ * **The edge at a given point on the simulated clock: it GROWS, because a live edge does** (T-495).
+ *
+ * It was a constant, which was harmless while eligibility was "is the edge inside this tile" and is
+ * not any more: since T-495 a copy is fresh once it was asked for at an edge that already reached
+ * everything it could hold, so **an edge that never moves correctly produces no second refresh** —
+ * there is provably no new row to fetch. A cadence measured against a frozen edge would therefore be
+ * measuring the harness. One millisecond of clock is one millisecond of capture time.
+ */
+const edgeAt = (clockMs: number) => EDGE_NS + clockMs * 1e6;
 const edgeTile = (fIndex = 0, levelT = 0) => addr(fIndex, 0, 0, levelT);
-const edgeView = (levelT = 0): Viewport =>
-  ({ box: { f0Hz: 0, f1Hz: TILE_HZ, t0Ns: EDGE_NS - 100e9, t1Ns: EDGE_NS }, levelF: 0, levelT });
+const edgeView = (levelT = 0, edgeNs = EDGE_NS): Viewport =>
+  ({ box: { f0Hz: 0, f1Hz: TILE_HZ, t0Ns: edgeNs - 100e9, t1Ns: edgeNs }, levelF: 0, levelT });
 
 /**
  * Run `ms` of simulated time in 100 ms steps, drawing a frame each step and answering every fetch
@@ -393,7 +406,7 @@ async function live(h: ReturnType<typeof harness>, clock: { t: number }, ms: num
     for (const f of tiles) if (h.cache.acquire(edgeTile(f, levelT)).kind === "pending") everPending++;
     h.cache.setViewports(LAT, [edgeView(levelT)]);
     h.cache.endFrame();
-    if (refresh) h.cache.refreshEdge(LAT, EDGE_NS, [edgeView(levelT)]);
+    if (refresh) h.cache.refreshEdge(LAT, edgeAt(clock.t), [edgeView(levelT, edgeAt(clock.t))]);
     await flush();
     for (const [key, w] of [...h.waiting]) {
       w.resolve(data(parseKey(key)!));
@@ -451,6 +464,143 @@ test("…and the CONTROL: without the policy, the very same loop asks exactly on
   }
   assert.deepEqual(frozen.calls, [keyOf(edgeTile())], "a frozen viewport refreshes nothing");
 });
+
+// ——— T-495: a live tile panned OFF SCREEN and back, whose middle never fills ———
+//
+// The user's report, in their own six steps: *load tuned to 100.8 MHz; retune to 101.99; pan RIGHT so
+// the new tile is in view, staying in Live; pan LEFT so it goes OFF-SCREEN, still Live; pan RIGHT so
+// it is back in view. Rows from the first on-screen period are present, rows from the second are
+// present, and the rows that arrived while it was off-screen are grey forever.*
+//
+// **It reads like a stale cache on re-entry and it is not.** Driven through this cache the client
+// makes no request at all on re-entry — and would make two if the edge happened still to be inside
+// the tile. The two arms are the whole finding, and they are the two runs below:
+//
+// ```
+//                                          fetches of the tile under test
+//                                    on screen   while away   AFTER RE-ENTRY
+//   the edge is still inside it           3            0            2    <- T-460's case, fine
+//   the edge LEFT it while it was away    3            0            0    <- grey forever
+// ```
+//
+// Nothing about re-entry was broken. `atEdge` — "is the live edge still inside this tile" — went
+// false permanently while nobody was looking, and no other path in `tilecache.ts` can ask again for
+// a resident key. The copy in hand then holds rows only to wherever the edge was at its last
+// on-screen refresh; the rest of its span was served as `unobserved`, which is THE grey, and is
+// honest at the instant it is served. Measured against a real `hk serve`: a 32 s live tile read 2.5 s
+// in answers three rows `observed` and **twenty-nine `unobserved`**.
+//
+// The tile ABOVE it in time is a different address, so on return it is an ordinary miss and arrives
+// complete — which is exactly the present / grey / present sandwich the user described.
+
+/** 1 s cells, 8 to a tile: an 8 s tile, so the edge can cross out of it inside a test. */
+const SMALL: Lattice = { scheme: "view", cells: 8, f0Hz: 6250, t0Ns: 1e9, levelsF: 20, levelsT: 15 };
+const SMALL_TILE_NS = 8e9, SMALL_TILE_HZ = 6250 * 8;
+const smallTile = (fIndex: number, tIndex: number): TileAddr =>
+  ({ device: "any", scheme: "view", levelF: 0, levelT: 0, fIndex, tIndex, cells: 8 });
+/**
+ * One pane, anchored at the edge. The time window is **deliberately taller than the tile**, so the
+ * tile stays on screen for the whole run: the subject here is the cache's eligibility rule, and a
+ * tile that simply scrolled out of the viewport would stop being asked for on a different rule
+ * entirely and make the run vacuous. In the product the relation is the other way round — a level-0
+ * tile is 256 s against a window of tens of seconds — which changes only how long the stale band is
+ * visible, never whether it fills.
+ */
+const smallView = (fIndex: number, edgeNs: number): Viewport => ({
+  box: { f0Hz: fIndex * SMALL_TILE_HZ, f1Hz: (fIndex + 1) * SMALL_TILE_HZ, t0Ns: edgeNs - 60e9, t1Ns: edgeNs },
+  levelF: 0, levelT: 0,
+});
+
+/**
+ * The user's six steps, as frames: on screen, away while the edge advances, back on screen.
+ *
+ * `stated` is whether the route's answer carries `extent.t1_s`. Both arms must behave identically —
+ * the fallback computes the same number from the address, which is where the route computes it from
+ * too — and that is asserted rather than assumed.
+ */
+async function offAndBack(awayFrames: number, stated: boolean) {
+  const clock = { t: 0 };
+  const h = harness({ inFlight: 4, now: () => clock.t, serverMsGuess: 20 });
+  const UNDER_TEST = smallTile(3, 0);              // spans 0…8 s
+  const ABOVE = smallTile(3, 1);                   // spans 8…16 s: the next address up
+  const end = (a: TileAddr) => (a.tIndex + 1) * SMALL_TILE_NS;
+  let edgeNs = 3e9;                                // 3 s in: the edge is inside UNDER_TEST
+  const count = (a: TileAddr) => h.calls.filter((k) => k === keyOf(a)).length;
+
+  const frames = async (n: number, fIndex: number, draw: TileAddr[]) => {
+    for (let i = 0; i < n; i++) {
+      clock.t += 400;
+      edgeNs += 400e6;                             // a live edge GROWS; a still one has no new rows
+      h.cache.beginFrame();
+      for (const a of draw) h.cache.acquire(a);
+      h.cache.setViewports(SMALL, [smallView(fIndex, edgeNs)]);
+      h.cache.endFrame();
+      h.cache.refreshEdge(SMALL, edgeNs, [smallView(fIndex, edgeNs)]);
+      await flush();
+      for (const [key, w] of [...h.waiting]) {
+        const a = parseKey(key)!;
+        w.resolve(data(a, BYTES, stated ? end(a) : null));
+        h.waiting.delete(key);
+        await flush();
+      }
+    }
+  };
+
+  await frames(8, 3, [UNDER_TEST]);                // steps 1–3: on screen, following
+  const onScreen = count(UNDER_TEST);
+  await frames(awayFrames, 40, []);                // step 4: off screen, rows still arriving
+  const away = count(UNDER_TEST) - onScreen;
+  const edgeOnReturn = edgeNs;                     // was the tile finished before the user came back?
+  await frames(20, 3, [UNDER_TEST, ABOVE]);        // step 5: back, same window
+  const back = count(UNDER_TEST) - onScreen - away;
+  await frames(20, 3, [UNDER_TEST, ABOVE]);        // …and then left alone
+  const settled = count(UNDER_TEST) - onScreen - away - back;
+  return { h, onScreen, away, back, settled, edgeOnReturn, endNs: end(UNDER_TEST),
+    residency: h.cache.acquire(UNDER_TEST, false).kind };
+}
+
+for (const stated of [true, false]) {
+  const how = stated ? "with the route stating extent.t1_s" : "with the route stating no extent (the address stands in)";
+  test(`a live tile panned off screen and back fills in — ${how}`, async () => {
+    // **The subject: the edge leaves the tile while it is off screen.** 30 frames is 12 s of capture
+    // over an 8 s tile, so it is finished by the time the user pans back and `atEdge` can never be
+    // true for it again.
+    const gone = await offAndBack(30, stated);
+    assert.ok(gone.edgeOnReturn > gone.endNs,
+      "the edge had not left the tile by the time the user panned back — this run has no subject");
+
+    // The trap the ticket names: the stale tile IS resident, so residency proves nothing.
+    assert.equal(gone.residency, "resident",
+      "the tile was evicted, so this run measures the ordinary miss path and not T-495");
+    // Nothing polls a tile nobody is looking at: that half of the policy is unchanged.
+    assert.equal(gone.away, 0, "an off-screen tile was re-fetched — a refresh is for what is on screen");
+
+    // **THE CLAIM.** Coming back into view, the copy in hand is missing every row recorded since it
+    // was last asked for, and the client asks again. Before T-495 this was 0, for the rest of the
+    // session.
+    assert.ok(gone.back >= 1,
+      `the tile was fetched ${gone.back} time(s) after coming back into view, with ` +
+      `${(gone.edgeOnReturn - gone.endNs) / 1e9} s of capture past its own end while it was away. This is T-495: a ` +
+      "resident live tile is not fresh just because it is resident — its freshness is its coverage " +
+      "up to the live edge.");
+    assert.ok(gone.h.cache.stats.edgeRefreshCompletions >= 1,
+      "the completing re-ask was not counted, so the fix is not the one that ran");
+
+    // **…and it SEALS.** The re-ask is taken at an edge past the tile's own end, so the copy now
+    // covers everything it ever can and is never asked for again. That is what stops a fix for a
+    // never-fills bug becoming the poll T-460 forbade: one extra request per tile, per lifetime.
+    assert.equal(gone.settled, 0,
+      `the tile was re-fetched ${gone.settled} more time(s) after it was complete — a sealed tile ` +
+      "cannot change, and re-asking for it is pure waste");
+
+    // **The control, and the reason the bug was invisible:** with the edge still inside the tile on
+    // return, T-460's rule already covered it and the same six gestures look fine.
+    const inside = await offAndBack(2, stated);
+    assert.ok(inside.edgeOnReturn < inside.endNs,
+      "the control's edge had left the tile by the time it came back — it is not a control");
+    assert.ok(inside.back >= 1, "T-460's own case regressed: a tile still at the edge must re-ask");
+  });
+}
 
 test("the refresh is bounded by the period the data can change in, per level", async () => {
   // A tile's newest row is one cell tall, so a re-ask inside `tCellNs(level_t)` cannot return a row
@@ -548,11 +698,11 @@ test("a retune still wins over a refresh in flight", async () => {
   const h = harness({ inFlight: 4, now: () => clock.t, serverMsGuess: 20 });
   await live(h, clock, 1_500);
   clock.t += 2_000;
-  h.cache.refreshEdge(LAT, EDGE_NS, [edgeView()]);
+  h.cache.refreshEdge(LAT, edgeAt(clock.t), [edgeView(0, edgeAt(clock.t))]);
   await flush();
   assert.equal(h.cache.inFlightCount, 1, "a refresh should be in flight to be overtaken");
 
-  assert.equal(h.cache.invalidateEdge(LAT, EDGE_NS), 1, "the retune drops the resident edge tile");
+  assert.equal(h.cache.invalidateEdge(LAT, edgeAt(clock.t)), 1, "the retune drops the resident edge tile");
   const uploads = h.uploads();
   await h.settle(edgeTile());
   assert.equal(h.uploads(), uploads, "the old tuning's tile was uploaded by the refresh path");
@@ -698,8 +848,8 @@ test("an unreadable 200 is an ANSWER: a decode failure is terminal too", async (
 const COARSE_LEVEL_F = 9;
 const coarseTile = (fIndex = 0) => addr(fIndex, 0, COARSE_LEVEL_F, 0);
 /** `wide` tiles across, because a minimap is many tiles and that is what a single FIFO starves on. */
-const coarseView = (wide = 1): Viewport => ({
-  box: { f0Hz: 0, f1Hz: LAT.f0Hz * 2 ** COARSE_LEVEL_F * LAT.cells * wide, t0Ns: EDGE_NS - 100e9, t1Ns: EDGE_NS },
+const coarseView = (wide = 1, edgeNs = EDGE_NS): Viewport => ({
+  box: { f0Hz: 0, f1Hz: LAT.f0Hz * 2 ** COARSE_LEVEL_F * LAT.cells * wide, t0Ns: edgeNs - 100e9, t1Ns: edgeNs },
   levelF: COARSE_LEVEL_F, levelT: 0,
 });
 
@@ -726,7 +876,9 @@ async function liveMixed(h: ReturnType<typeof harness>, clock: { t: number }, ms
     }
     h.cache.setViewports(LAT, views);
     h.cache.endFrame();
-    h.cache.refreshEdge(LAT, EDGE_NS, views);
+    // The edge grows; the boxes do not need to, because a viewport's overlap with these tiles is
+    // what `drawnBy` reads and that is unchanged by where the newest row is.
+    h.cache.refreshEdge(LAT, edgeAt(clock.t), views);
     await flush();
     for (const [key, w] of [...h.waiting]) {
       if (!issuedAt.has(key)) issuedAt.set(key, clock.t);
@@ -823,7 +975,7 @@ async function liveOneSlow(h: ReturnType<typeof harness>, clock: { t: number }, 
     h.cache.acquire(edgeTile());
     h.cache.setViewports(LAT, [edgeView()]);
     h.cache.endFrame();
-    h.cache.refreshEdge(LAT, EDGE_NS, [edgeView()]);
+    h.cache.refreshEdge(LAT, edgeAt(clock.t), [edgeView()]);
     await flush();
     for (const [key, w] of [...h.waiting]) {
       if (!issuedAt.has(key)) issuedAt.set(key, clock.t);

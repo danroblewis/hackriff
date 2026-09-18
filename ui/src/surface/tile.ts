@@ -38,6 +38,25 @@ export interface TileData {
   readonly key: string;
   readonly nf: number;
   readonly nt: number;
+  /**
+   * **`extent.t1_s`: where the route says this tile's time span ENDS, in ns** — or `null` when the
+   * answer did not say (T-495).
+   *
+   * It is the discriminator between a tile that can still change and one that cannot, and it has to
+   * be read from the answer rather than guessed. A tile whose own span is entirely behind the live
+   * edge is finished and re-asking for it is waste; one whose span still reaches past the edge is
+   * **being written right now**, and a copy of it taken earlier is missing every row recorded since.
+   * Measured against a real server: a 32 s live tile fetched 2.5 s in answers `observed` for three
+   * rows and **`unobserved` for the other twenty-nine** — THE grey — because at the instant of the
+   * read the radio genuinely had not reached them. That grey is honest when it is served and becomes
+   * a lie the moment capture continues, so what makes it a *permanent* lie is only ever failing to
+   * ask again.
+   *
+   * `null` is not "sealed": [[TileCache]] falls back to the same number computed from the address,
+   * which is where the route computes it from too. The answer is preferred because the answer is the
+   * party that decided it.
+   */
+  readonly t1Ns: number | null;
   /** Row-major `[t * nf + f]`, earliest row first, lowest frequency first — the route's own order.
    * `NaN` wherever the state plane does not say `OBSERVED`; never a sentinel that could be read as
    * a level. */
@@ -72,7 +91,7 @@ export interface TileData {
 /** The shape this client reads. Structural, and only the fields it actually uses. */
 export interface TileResponse {
   key: { device: string; scheme: string | number; level_f: number; level_t: number; f_index: number; t_index: number; cells: number };
-  extent: { nt: number; nf: number };
+  extent: { nt: number; nf: number; t0_s?: number; t1_s?: number };
   axes: {
     frequency: { levels: number; cell_hz: number; max_level?: number };
     time: { levels: number; cell_s: number; max_level?: number };
@@ -216,6 +235,9 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     key: keyOf(addr),
     nf,
     nt,
+    // Seconds on the wire, ns everywhere in this client. A response that omits it, or states
+    // something unreadable, says nothing — and nothing said is not "sealed" (see [[TileData.t1Ns]]).
+    t1Ns: Number.isFinite(resp.extent?.t1_s) ? Math.round((resp.extent!.t1_s as number) * 1e9) : null,
     value,
     state,
     tier: src as Tier,

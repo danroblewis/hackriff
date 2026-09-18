@@ -81,6 +81,19 @@ function resp(over: Partial<TileResponse> = {}): TileResponse {
   };
 }
 
+test("T-495: `extent.t1_s` is carried through, and a route that does not state it says NOTHING", () => {
+  // The discriminator between a tile that can still be written and one that is finished, which the
+  // cache must read from the ANSWER rather than infer from the address or from how long ago the copy
+  // was taken. Seconds on the wire, ns in this client.
+  assert.equal(decodeTile(ADDR, resp({ extent: { nt: 2, nf: 2, t0_s: 1789300736, t1_s: 1789300992 } })).t1Ns,
+    1789300992e9);
+  // **`null` is not "sealed".** An answer without the field made no claim, and the cache falls back
+  // to the same number computed from the address rather than treating silence as permission to stop
+  // asking — the `BiasTee::Unknown` is not `Off` direction, applied to freshness.
+  assert.equal(decodeTile(ADDR, resp()).t1Ns, null);
+  assert.equal(decodeTile(ADDR, resp({ extent: { nt: 2, nf: 2, t1_s: Number.NaN } })).t1Ns, null);
+});
+
 test("the fifth state: observed, zero frames folded — NOT unknown, NOT grey, NOT 'level not retained'", () => {
   // The live edge, as T-446 measured it post-fix: the radio is demonstrably tuned here (duty up to
   // 1.0) and the pyramid has written nothing yet. Cell 0 has a level; cell 1 was folded from two
