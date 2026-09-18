@@ -14,7 +14,7 @@
 // named condition in `harness.mjs` (`waitFor`), which is the honest form anyway — a flaky sleep
 // would be the thing that gets this tier disabled.
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
@@ -70,13 +70,18 @@ export async function launch({ port = 19455, width = 1440, height = 900, headles
     `--window-size=${width},${height}`,
     "--no-first-run", "--no-default-browser-check", "--disable-extensions",
     "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
-    // A real GPU-backed WebGL2 context. The surface is a WebGL2 renderer; a swiftshader fallback
-    // would still be a real context, but ANGLE/Metal is what the product runs on.
+    // A real WebGL2 context: the platform's own ANGLE backend (Metal here, GL on a CI runner),
+    // with the software rasterizer allowed as a fallback so a headless box with no GPU still
+    // renders rather than silently drawing nothing. Both are real contexts running the real
+    // shader; what this tier must not do is accept a page that draws nothing at all.
     "--use-angle=default", "--enable-unsafe-swiftshader",
     "about:blank",
   ];
   if (headless) args.unshift("--headless=new");
-  const proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe"] });
+  // `detached` puts Chrome in its own process group so `kill()` below can take the whole tree.
+  // SIGKILL on the parent alone leaves its ~20 renderer and GPU children reparented and running,
+  // and a test tier that leaks twenty processes per run is a test tier people disable.
+  const proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe"], detached: true });
   let stderr = "";
   proc.stderr.on("data", (d) => { stderr += d; });
 
@@ -88,8 +93,15 @@ export async function launch({ port = 19455, width = 1440, height = 900, headles
       break;
     } catch { await new Promise((r) => setTimeout(r, 50)); }
   }
-  if (!ws) { proc.kill("SIGKILL"); throw new Error(`chrome did not start: ${stderr.slice(0, 2000)}`); }
+  if (!ws) { killTree(proc); throw new Error(`chrome did not start: ${stderr.slice(0, 2000)}`); }
   return { proc, exe, port, wsUrl: ws, profile };
+}
+
+function killTree(proc) {
+  // The group first (negative pid), then the parent as a fallback for a platform where the group
+  // is gone but the process is not.
+  try { process.kill(-proc.pid, "SIGKILL"); } catch { /* group already gone */ }
+  try { proc.kill("SIGKILL"); } catch { /* already gone */ }
 }
 
 class Conn {
@@ -131,5 +143,6 @@ export async function connect(wsUrl) {
 }
 
 export function kill(browser) {
-  try { browser.proc.kill("SIGKILL"); } catch { /* already gone */ }
+  killTree(browser.proc);
+  try { rmSync(browser.profile, { recursive: true, force: true }); } catch { /* best effort */ }
 }

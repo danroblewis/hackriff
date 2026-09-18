@@ -96,9 +96,9 @@ Measured on the dev Mac, warm (`hk` already built, `npm ci` a no-op):
 |---|---|
 | `hk serve` up + surface history ready + cap read | ~1–2 s |
 | `surface-load.e2e.mjs` | ~2 s |
-| `surface-nav.e2e.mjs` | ~12 s |
-| **`npm run e2e` total** | **~15 s** |
-| `npm run e2e:selftest` (baseline + 2 faults) | ~2 min |
+| `surface-nav.e2e.mjs` | ~13–15 s |
+| **`npm run e2e` total** | **~16–19 s** |
+| `npm run e2e:selftest` (baseline + 2 faults) | ~80 s |
 
 Cold, `just test-ui-e2e` also pays `cargo build -p hk-cli --bin hk` and `npm ci`.
 
