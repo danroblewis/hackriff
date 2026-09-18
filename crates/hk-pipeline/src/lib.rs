@@ -66,7 +66,11 @@ pub mod reports; // T-121
 mod capture;
 mod dc_twin; // T-174
 mod detect;
-mod history;
+/// T-439: the spectrum-history reader, and the **view lattice** it opens and grows. Public for the
+/// geometry constants the surface is addressed in ([`history::view_lattice`] and its floor), which
+/// `hk-cli` and the tile tests read rather than re-deriving — a second spelling of the floor would
+/// be a new drift surface.
+pub mod history;
 pub mod iqbuffer; // T-157
 mod recorder;
 mod run;

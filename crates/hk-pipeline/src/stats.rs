@@ -170,6 +170,21 @@ counter_group!(
         frames_deferred,
         /// Queued frames dropped because a query held the product past the queue's capacity.
         frames_dropped,
+        /// T-439: frames folded into the de-welded **view** lattice (the growing edge).
+        view_frames,
+        /// View-lattice frames folded behind the watermark — T-446's reading, on the second
+        /// pyramid: a non-zero value here means a segment end sealed a run that continues.
+        view_late,
+        /// View-lattice frames the pyramid refused.
+        view_rejected,
+        /// View-lattice frames queued because a tile read held the pyramid.
+        view_deferred,
+        /// View-lattice frames dropped past the queue's capacity.
+        view_dropped,
+        /// View-lattice tiles written.
+        view_tiles_written,
+        /// View-lattice bytes written.
+        view_bytes_written,
     }
 );
 

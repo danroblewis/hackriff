@@ -245,6 +245,17 @@ test-group = 'heavy-serial'
 filter = 'package(hk-pipeline) and binary(iterative_scan_device)'
 test-group = 'heavy-serial'
 
+# T-439: the live-edge tile tests. `the_live_chain_grows…` drives a whole pipeline and asserts that
+# capture keeps advancing WHILE a competing thread holds the view pyramid — a contention test, so
+# it must not be contended by 7 unrelated tests as well. Per the rule above, its waits are measured
+# rather than guessed: 2.2 s wall against a 180 s deadline, and every wait is on stream-time
+# progress the radio is being asked to deliver, not on a fixed sleep.
+# `the_view_lattices_floor_costs…` bounds no wall clock at all and is here only because it shares a
+# binary; it ingests 700 stream-seconds through a 64-node lattice in ~10 s.
+[[profile.default.overrides]]
+filter = 'package(hk-pipeline) and binary(live_edge_tiles)'
+test-group = 'heavy-serial'
+
 # =========================================================================================
 # THE CI RUNNER IS NOT THIS BOX (T-436).
 #
