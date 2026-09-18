@@ -138,7 +138,7 @@ Below a gate, a family contributes no likelihood mass, so its mass moves to `unk
 ## 4. Classical cascade (C15, T-199/T-200)
 
 1. **Input.** A `NormalisedSnippet` (hk-estimate, CFO-corrected, resampled) plus the C13 `ParameterSet`, C14 `SymbolParameters` and C16 result when present. The raw snippet is kept. Suspect detections (clipped, IMD, image) still classify, but they carry `suspect-input` and never mint signatures (§5).
-2. **Features** (`hk-classify/src/features.rs`, one vector, `features_version` = `hk_classify::FEATURES_VERSION`; `features@3` today, 1 → 2 in T-248 and 2 → 3 in T-286, both redefining `symmetry`). Each feature is a value or an abstention reason:
+2. **Features** (`hk-classify/src/features.rs`, one vector, `features_version` = `hk_classify::FEATURES_VERSION`; **`features@8` today** — 1 → 2 (T-248) and 2 → 3 (T-286) both redefined `symmetry`; 3 → 4/5/6 are recorded at the constant itself; 6 → 7 (T-431) referenced `duty` and `low_fraction` to the emission's on level; 7 → 8 (T-447) referenced the Azzouz–Nandi **strong-envelope subset** σ_ap, σ_dp and the de-rotation are measured over to the same on level. Read the constant's own doc comment for each step; this list goes stale and the constant cannot). Each feature is a value or an abstention reason:
    - Azzouz–Nandi γ_max, σ_ap, σ_dp, σ_aa, σ_af, P;
    - normalised cumulants C̃₂₀, C̃₄₀, C̃₄₂, and μ₄₂;
    - instantaneous-frequency histogram modality and levels;
@@ -372,6 +372,75 @@ same output. Before concluding anything from a mismatch, check §7.2's table tha
 figures came from the same printed reading — and if the gap is under ±0.02 on the
 open-set figures, it is inside the draw's own sampling spread and is not a finding at
 all.**
+
+**Moved by T-431 (2026-09-17), measured both sides.** `features@7` references `duty` and
+`low_fraction` to the emission's own on level instead of the record's mean envelope, which
+changes every class's value on two of the thirty dimensions and required a refit of both
+density files. Re-derived with the command above, on the merge base and on the branch, on
+one machine back to back:
+
+| Figure | merge base | T-431 | move |
+|---|---|---|---|
+| Known top-1 / top-2 | 0.9345 / 0.9861 | 0.9325 / 0.9861 | −0.0020 / 0 |
+| Wrong-label, overall | 0.0040 | 0.0032 | −0.0008 (better) |
+| Wrong-label, worst bin | 0.0333 | 0.0333 | 0 |
+| Unknown recall / false-known (gate's draw) | 0.9520 / 0.0480 = 377/396 | 0.9444 / 0.0556 = 374/396 | −0.0076, **under the 0.0084 draw sd of §7.2** |
+
+Every floor is met. The whole of the unknown-recall move is `psk-qam`'s open set
+(0.875 → 0.819 over its 72 held-out `apsk16`/`pi4-dqpsk` snippets); every other family's
+open set is unchanged to three decimals. Against it, the defect the ticket existed to fix:
+`pulse` at the `pulsed` gate goes from top-1 **0.00 / unknown 1.00** to top-1 **0.92**, and
+the `pulsed` family at that rung from 0.50 to 0.96, because a 5 %-duty radar train is no
+longer denied its own family for being always on. Quote **these** figures as the baseline
+from here; the rows above remain the reading at `651335f`. One coincidence to not be
+caught by: 0.9444 is also what the merge base's *harness* draw printed (§7.2's second
+reading). Both columns above are the gate's line, at the two commits.
+
+**Not moved by T-447 (2026-09-17), and that is the result.** `features@8` takes the
+Azzouz–Nandi **strong-envelope subset** — the samples `phase_features` and `derotate`
+measure over — against the same on level, closing the third and last site of the rule
+T-431 fixed. T-431's own note predicted this would move σ_ap, σ_dp *and every cumulant*.
+Measured on the merge base and on the branch, back to back on one machine, with both
+density files refitted (and the refit verified deterministic: re-running `fit-densities`
+on the unmodified tree reproduces the checked-in files **byte for byte**, so the whole
+density diff is attributable to the feature):
+
+| Figure | merge base (T-431) | T-447 | move |
+|---|---|---|---|
+| **Unknown recall / false-known (the gate's draw)** | 0.9444 / 0.0556 = 374/396 | 0.9444 / 0.0556 = 374/396 | **0.0000** |
+| Known top-1 / top-2 | 0.9325 / 0.9861 | 0.9325 / 0.9861 | 0 / 0 |
+| Wrong-label overall / worst bin | 0.0032 / 0.0333 | 0.0032 / 0.0333 | 0 / 0 |
+| Per-family, per-SNR-bin top-1 (40 rows) | — | — | every row identical |
+| Held-out abstention per generator (11 rows) | — | — | every row identical |
+| Unknown recall, **harness** draw (§7.2's second reading, *not* the gate) | 0.934 | 0.937 | +0.003 |
+| └ of which `psk-qam`'s open set, 72 snippets | 0.819 | 0.833 | +0.014 = one snippet |
+
+So **one snippet of 396 changed outcome, in a draw that is not the gate**, against a draw
+sd of 0.0084: nothing here is a result in either direction, and the gate's own line did
+not move at all. The largest move in the refitted densities is `pulse`'s `sigma_ap` mean at
+**0.05 σ**; no dimension of the 598 moves more than 0.1 σ.
+
+**Why the predicted blast radius did not materialise, measured rather than assumed.** The
+premise — a 5 %-duty train's "strong envelope" holds 0.662 of the record at 10 dB instead
+of 0.050 — reproduces exactly, and is a statement about the **count** of that subset.
+Neither consumer is count-weighted in the way that count suggests:
+
+- `derotate` sums *phasors*, so each pair enters weighted by its own magnitude. Over the
+  same `pulse` snippets the 90 % of the subset that was noise carried **11 %** of Σ|z|
+  (13 959 → 12 350), the coherence it feeds went 0.881 → 0.995 against a
+  `DEROTATE_MIN_COHERENCE` of **0.30** — so the de-rotate/don't decision was never in
+  question at either reading — and the removed ramp moved by 4 × 10⁻⁴ rad/sample. That is
+  why the cumulants, which depend on that decision and that ramp, do not move.
+- σ_ap and σ_dp are dominated by the **other** defect in the same two features (T-240): the
+  phase is unwrapped cumulatively, so the noise's walk through every off gap is already
+  inside the value at each on sample before any subset is taken. With the corrected subset
+  `pulse` still reads σ_dp 41–87 rad at 10 dB across six seeds.
+
+The change is kept because it is correct and free — one rule, stated once, and a subset
+that no longer silently degrades as the SNR falls — not because it bought a number. The
+honest headline is that **"0.63 of the record instead of 0.05" was a property of the
+subset's size and not of anything computed from it**, which is the same class of error as
+§7.2's and T-480's: evidence that is sound about an adjacent quantity.
 
 ### 7.2 `just acceptance-m3` prints three held-out readings, and only one is the gate (T-428)
 

@@ -6843,7 +6843,7 @@ tasks:
   - id: T-348
     milestone: M2-hardening
     title: A paused view costs the same CPU as a playing one, which matters on battery
-    status: todo
+    status: in-progress
     priority: low
     deps:
     - T-339
@@ -7565,7 +7565,7 @@ tasks:
   - id: T-374
     title: Nothing can say "these emitters are harmonics of one fundamental nobody can see"
     milestone: M3
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: M3B
     core_interface: true
@@ -10640,7 +10640,7 @@ tasks:
       naming the stale one.
       So this ticket is not "fix a gate constant" - it is fix the estimator at both of its
       thresholds, and the gate follows.
-    commit: 06e4b7d
+    commit: "b85071d"  # was 06e4b7d, which never reached main until T-447 carried it
     result: |
       FIXED THE ESTIMATOR, not the constant - which is what the ticket preferred and what the evidence
       supported.
@@ -11792,7 +11792,7 @@ tasks:
   - id: T-447
     milestone: M3
     title: phase_features and derotate take their strong-envelope subset over the same broken mean rule T-431 just fixed
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: M3A
     deps: [T-431]
@@ -11826,6 +11826,41 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-classify`,
       `just test-crate hk-estimate`, `just test-one <name>` - then HAND BACK. Never `just gate`; the
       coordinator gates once at merge.
+    commit: "b85071d"
+    result: |
+      DONE - THE PREMISE REPRODUCES EXACTLY AND THE PREDICTED BLAST RADIUS DOES NOT, which is the result.
+      T-431's construction was reusable VERBATIM: a four-line strong_envelope_threshold(a) =
+      0.5 * on_level(a, mean(a)) called from derotate and phase_features. features@7 -> 8, both density
+      files refitted.
+      GATE FIGURES MOVED BY 0.0000: unknown recall / false-known 0.9444 / 0.0556 unchanged; known top-1 /
+      top-2, wrong-label overall / worst bin, all 40 per-family-per-bin rows and 11 abstention rows every
+      one identical. Largest density move across 598 dimensions: 0.05 sigma. The only movement is in the
+      HARNESS DRAW (ADR 7.2's second reading, NOT the gate): 0.934 -> 0.937, and psk-qam open set
+      0.819 -> 0.833 = ONE SNIPPET of 396. NOTHING EXCEEDS THE 0.0084 DRAW SD.
+      THE MECHANISM: DEROTATE SUMS PHASORS, so each pair is weighted by its own magnitude - the 90 % of
+      the subset that was noise carried 11 % of Sum|z| (13 959 -> 12 350), and coherence went 0.881 ->
+      0.995 against a DEROTATE_MIN_COHERENCE of 0.30, so THE DECISION WAS NEVER IN QUESTION AT EITHER
+      READING. The removed ramp moved 4e-4 rad/sample. THE SUBSET FRACTION IS A PROPERTY OF ITS COUNT, NOT
+      OF ANYTHING COMPUTED FROM IT - the same class of error as T-480's premise.
+      IT VERIFIED THE REFIT IS DETERMINISTIC FIRST: re-running fit-densities on an UNMODIFIED tree
+      reproduces the checked-in files BYTE FOR BYTE, so the whole density diff is attributable to the
+      feature. That is what makes "no move" a measurement rather than an absence.
+      THE T-240 DEFECT IS INDEPENDENT, and the test is mechanical: the phase is unwrapped CUMULATIVELY
+      FROM SAMPLE 0, so the noise's random walk through every off gap is already inside the value at each
+      on sample BEFORE any subset is taken. Selecting the right samples changes which points of that walk
+      are read, not that it happened - pulse still reads sigma_dp 41-87 rad at 10 dB across six seeds.
+      Both OBSERVATION_STATISTICS exemptions stand, now stating WHICH of the two defects each is exempt
+      for.
+      PROPERTIES PINNED WITH CLOSED FORMS: the subset fraction against d(1-P_miss) + (1-d)P_false, with
+      P_false = exp(-t^2/N) (Rayleigh, exact) and P_miss a Rician tail, EVALUATED AT the true on amplitude
+      so it pins the THRESHOLD rather than just the arithmetic; and both callers bound, because a rule
+      nothing calls is worth nothing - derotate by the ramp it removed, phase_features by its ABSTENTION.
+      Non-vacuity by injection: helper reverted -> both tests fail; both callers reverted with the helper
+      intact -> only the binding test fails; phase_features alone reverted -> only the abstention half.
+      THIS MERGE ALSO LANDED T-431, whose commit 06e4b7d was marked done on the board but had NEVER
+      REACHED MAIN - found because T-447 needed its construction. The third instance (frequency_features,
+      seven IF dimensions) is measured, recorded at the site, and filed as T-488.
+      Gate: full, passed - the first acceptance-ci over these refitted densities.
   - id: T-448
     milestone: M2-hardening
     title: view_pause_keeps_capture fails at 28 threads and once at 8 - a live undiagnosed defect the thread cap now hides
@@ -13918,7 +13953,7 @@ tasks:
   - id: T-487
     milestone: MCANVAS
     title: app-trace's peak-argmax compares a readout and a framebuffer captured at DIFFERENT instants
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     depends_on: []
@@ -13956,6 +13991,42 @@ tasks:
       Filed 2026-09-18 by the coordinator after it blocked T-476's gate. Second flake in this tier to
       block the queue; the first was T-478's live-edge drift, whose first fix was backwards.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "94d7290"
+    result: |
+      DONE - TWO DEFECTS IN ONE MEASUREMENT, both confirmed rather than assumed.
+      (1) TWO INSTANTS. The readout was read with one CDP round trip and the framebuffer with another.
+      Measured over 40 unheld brackets (readout -> screenshot -> readout): 38 OF 40 HAD A DIFFERENT
+      READOUT ON EITHER SIDE. The stated peak wanders ~15 screen columns frame to frame - a real FM
+      signal's instantaneous peak bin moving - so the screenshot is a THIRD instant between two different
+      spectra. IT IS NOT THE SLICE-SOURCE SWITCH THE TICKET HYPOTHESISED: 37 of 40 said `live frame` at
+      both reads. (The source switch is real and landed in the second test - see below.)
+      (2) strip() WAS MEASURING ITS OWN TIE-BREAK. It reduces the strip to one peakCol by taking the
+      topmost pixel and breaking ties LEFTWARD. Over 30 HELD (single-instant) frames the top row was
+      shared by 3-19 columns in clusters up to 14 px apart, and 8 OF 30 HAD A TIED COLUMN MORE THAN 9.6 px
+      FROM THE STATED PEAK - so even one instant compared with itself was a coin flip. T-470's 0.625 dB/px
+      made this worse, exactly as predicted.
+      ONE OBSERVATION: TAP gains hold(). Its listener is registered in the socket constructor, BEFORE
+      net.ts assigns onmessage, so stopImmediatePropagation() withholds delivery to the page while the tap
+      keeps observing the wire. Every frame draws the same slice through UNMODIFIED PRODUCT CODE, and the
+      count of rows withheld is ASSERTED NON-ZERO, so a quiet socket cannot pass as a held view.
+      heldObservation() per attempt: resume -> wait for the state -> hold -> screenshot BRACKETED BY THE
+      READOUT ON BOTH SIDES, requiring them identical AND requiring the captured readout to still be in
+      the state under test. Exhausting retries is a loud failure, never a skip.
+      STRENGTH, STATED PER PART: data path unchanged in form and now from the same frame (stronger);
+      render path now pins THE EXACT STATED COLUMN within one stroke rather than a +/-9.6 px neighbourhood
+      - zero slack over 30 held frames - and is weaker in EXACTLY ONE case, another column drawn at
+      identical height, which THE FRAMEBUFFER CANNOT EXPRESS and the old test resolved by an arbitrary
+      leftmost tie-break. A flat line cannot satisfy it: the strip must span >= 20 rows, measured 48. The
+      extent test's live-frame precondition is now ENFORCED at the capture rather than hoped for.
+      IT FALSIFIED THE OBVIOUS CAUSE of a second flake it hit - 0 of 14 page loads moved the canvas rect -
+      before finding the real one: the slice's source flipped from the live row back to a 1.0 s pyramid
+      cell WITH NO TILE IN HAND between the wait and the screenshot, the state the wait established having
+      lapsed by the capture. Same family, so it goes through the same held observation.
+      ITS FIRST NON-VACUITY FAULT DEMONSTRATED THE WRONG ASSERTION: shifting the READOUT reddened the file
+      via the data-path check above, not the render-path check it had rewritten. It re-aimed at
+      traceQuads's x placement - the line trace.ts itself calls load-bearing.
+      10/10 GREEN UNDER CONTINUOUS cargo build LOAD (17-25 on 28 cores), twice.
+      Gate: ui, test-ui 45/45, e2e 10/10 in 137.3 s.
   - id: T-488
     milestone: M3
     title: frequency_features takes the SAME broken strong-envelope subset, over seven IF dimensions - the third instance
