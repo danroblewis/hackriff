@@ -3,8 +3,9 @@
 Headless Chrome, driving `/surface.html` against a real `hk serve` over a recorded SigMF fixture.
 
 ```sh
-just test-ui-e2e            # the tier (part of the gate's ACCEPTANCE phase for ui/ and full)
-just test-ui-e2e-selftest   # put each known defect back and require the suite to go red
+just test-ui-e2e                    # the tier (part of the gate's ACCEPTANCE phase for ui/ and full)
+just test-ui-e2e-selftest           # put each known defect back and require the suite to go red
+just test-ui-e2e-selftest-timeout   # prove a hung spec is killed and reported red, not left to hang
 cd ui && npm run e2e -- surface-nav      # one file, by name substring
 ```
 
@@ -59,7 +60,7 @@ Two of those deserve a note:
 | `png.mjs` | Minimal PNG decoder + `census()`, the colour histogram the pixel assertions use. |
 | `harness.mjs` | `Browser`/`Page`: navigation, console and exception capture, network recording with concurrency watches, gestures (drag, wheel **with real modifier bits**, click, double-click), screenshots, named waits. |
 | `backend.mjs` | Starts `hk serve` over the fixture; `assertRealCsp`; `tileCost`. |
-| `run.mjs` | One backend, shared; one node process per `*.e2e.mjs`; prints the runtime of each. |
+| `run.mjs` | One backend, shared; one node process per `*.e2e.mjs`; prints the runtime of each. Every spec runs under a per-file deadline, `HK_E2E_SPEC_TIMEOUT_MS` (default 300000 ms — well above the ~95 s the slowest file takes today): on expiry the spec is killed **whole-tree** — its node process, its Chrome, and any extra `hk serve` it started — and reported FAILED, never a pass (T-473). |
 | `surface-load.e2e.mjs` | **T-450's guard**, on `/surface.html`. |
 | `app-surface.e2e.mjs` | **T-445's guard**, on **`/` — the page the user actually opens.** The cutover put this renderer on the app's critical path and deleted the waterfall it replaces, so "the app comes up" stopped being a property of an additive preview. Different bundle (`--splitting`), different entry, different mount: passing `surface-load` says nothing about it. Also asserts the retired slots are absent, the rest of Explore is present, and that a drag moves the view while reaching no device route. |
 | `surface-nav.e2e.mjs` | **T-454's guard** — the in-flight cap and the AIMD contract. Plus **T-456's**: the four navigation gestures, and the modifier the browser actually delivered. |
@@ -68,6 +69,7 @@ Two of those deserve a note:
 | `surface-region.e2e.mjs` | **T-458's guard**, on `/`: shift+drag marks out a region. Reads the `shiftKey` flag *on the `pointerdown` the canvas received* before concluding anything from the view, asserts the viewport does **not** move under a stroke, and re-states T-340's control over the new gesture. Its non-vacuity is recorded in the file header: `selftest.mjs` cannot hold these faults, because it builds only the `/surface.html` bundle and this file (like `app-surface`) drives the app. |
 | `canvas-journey.e2e.mjs` | **T-481: the whole user journey, in one flow, through the MOCK SDR** (`--device mock:…`, its own backend on its own port) — pan/zoom, retune, a tile off screen and back, then the backend killed underneath it. The standing guard for T-495/T-497/T-499. Its own findings are below. |
 | `selftest.mjs` | Reintroduces each defect in a scratch copy of `ui/src` and requires the suite to go red. |
+| `selftest-timeout.mjs` | T-473's own non-vacuity check: drives the real `run.mjs` against `selftest-fixtures/hang.e2e.mjs` (a spec that launches a Chrome and a backend, then hangs forever) via `HK_E2E_EXTRA_SPECS`, and requires the hang to be killed, reported red by name, and to leave no process behind — checked with `pgrep`, not assumed. |
 
 ## Dependencies: none new
 
