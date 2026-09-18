@@ -91,6 +91,23 @@
 //! - **Concurrency** is bounded by [`TILE_MAX_IN_FLIGHT`] ([`TileSlot`]). Over the cap the answer
 //!   is `503` naming the cap, not a queue that grows until ingest starves.
 //!
+//! # The coverage plane is a table of distinct planes, run-length encoded (T-467)
+//!
+//! `coverage` here is **not** `/api/coverage`'s per-cell form, and that is the single largest cost
+//! ever measured on this route. The per-cell form serialises
+//! `{"state":…,"duty":…,"observed_s":…,"last_s":…,"spans":…,"center_hz":…,"sample_rate_hz":…}` —
+//! about 146 B — for each of 65 536 cells, and this route carried **two** such planes, `any` and
+//! `devices[0]`, byte-identical on a one-device server. Measured against the demo backend that was
+//! 99 % of a 19.34 MB tile body, to deliver the one field `ui/src/surface/tile.ts` reads.
+//!
+//! [`crate::coverage::TileOverlay`] serves each **distinct** plane once, as a run-length encoding
+//! of per-cell state codes over an alphabet served beside it. Measured in-process on the same
+//! 256 × 256 grid: 19 818 236 B → 2 906 B. The three states are untouched — `unobserved` is still
+//! its own code, `unknown` (T-423) still its own, and no cell on the plane carries a measurement
+//! key of any kind, so there is nothing on it a client could read as a level of zero. The per-cell
+//! sampling detail is a **hover** question about one cell and `/api/coverage` still answers it;
+//! `/api/timeline`'s overlay is unchanged.
+//!
 //! # What a tile never carries
 //!
 //! Emitters (§5.3). Identity gating is per-caller and a tile is not; a sealed tile is immutable and
@@ -840,27 +857,13 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     let max_live = crate::http::max_live_span_hz(state);
     let source = tier(&key, &r, max_live);
     let window = key.window();
-    let mut coverage =
-        crate::coverage::overlay_json(state, key.region.freq, window, key.cells, key.cells);
-    if let Some(obj) = coverage.as_object_mut() {
-        let present = obj
-            .get("devices")
-            .and_then(Value::as_array)
-            .is_some_and(|a| a.iter().any(|d| d["device"] == json!(key.device)));
-        obj.insert(
-            "selected".into(),
-            json!({
-                "device": key.device,
-                "named": key.named_device(),
-                // A named device with no plane here is a front end that recorded nothing over this
-                // tile — which is a coverage answer, not a missing one, and saying which it is
-                // keeps "we have no record" from being read as "it never looked".
-                "present": !key.named_device() || present,
-                "rule": "grey a cell of this tile if and only if the selected plane's state is \
-                    \"unobserved\". `any` is the union; a named device is that front end alone.",
-            }),
-        );
-    }
+    // T-467: the compact plane-table form. The per-cell form this route used to serve was 99 % of a
+    // live tile's 19.34 MB body, duplicated between `any` and `devices[0]`, for a `state` field the
+    // renderer reads and nothing else. `TileOverlay` computes each distinct plane once and serves
+    // it once.
+    let overlay =
+        crate::coverage::TileOverlay::collect(state, key.region.freq, window, key.cells, key.cells);
+    let coverage = overlay.to_json(&key.device, key.named_device());
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
     Ok(json!({
         "key": key_json(&key),

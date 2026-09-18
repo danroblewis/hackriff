@@ -8,6 +8,13 @@
 // milestone exists to end. So the measurement stays a float and the state stays a byte, and the
 // only writer of the state plane is [[decodeTile]].
 //
+// **The coverage plane arrives run-length encoded, out of a table of distinct planes** (T-467).
+// It used to arrive as one JSON object per cell carrying six sampling fields this client never
+// read — 99 % of a 19.34 MB tile body, and duplicated, because `any` and `devices[0]` were the same
+// plane on a one-device server. The states themselves are unchanged and still three: `unobserved`,
+// `observed` and `unknown` are separate codes in an alphabet the answer serves beside the runs, and
+// a plane that does not decode exactly throws rather than resolving to any of them.
+//
 // **A response we cannot read is not a coverage answer.** A malformed or truncated tile throws
 // rather than decoding to `unobserved`: the place then stays *pending*, which is true, instead of
 // claiming the radio never looked. The same reasoning as `BiasTee::Unknown` is not `Off`.
@@ -75,9 +82,15 @@ export interface TileResponse {
   };
   coverage?: {
     grid?: { nt: number; nf: number };
-    any?: { cells: { state: string }[] };
-    devices?: { device: string; cells: { state: string }[] }[];
-    selected?: { device: string; named: boolean; present: boolean };
+    /** Code -> state name, served with the planes (T-467). A code is never read against an
+     * alphabet the answer did not state. */
+    states?: string[];
+    /** Every **distinct** plane, once. `any` and each device name the one that is theirs, so a
+     * one-device server no longer pays for two copies of the same plane. */
+    planes?: { runs: number[]; cells: number; uniform?: string | null }[];
+    any?: { plane: number };
+    devices?: { device: string; plane: number }[];
+    selected?: { device: string; named: boolean; present: boolean; plane?: number | null };
   };
   resolution: {
     source: string;
@@ -199,8 +212,47 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
 }
 
 /**
+ * Expands one run-length-encoded plane into a state name per cell (T-467).
+ *
+ * The wire carries `runs` as a flat `[code, count, code, count, …]` and `states` as the alphabet
+ * those codes index. **Both come from the same answer**, so a code is never resolved against an
+ * alphabet this client assumed — and anything that does not add up (an odd run list, a code outside
+ * the alphabet, a total that is not the plane's cell count) throws rather than being patched to a
+ * state. A plane we cannot read is not a coverage answer: the place stays *pending*, never grey,
+ * and never `observed`.
+ */
+function expandPlane(addr: TileAddr, states: string[], runs: number[], cells: number): string[] {
+  if (!Array.isArray(runs) || runs.length % 2 !== 0) {
+    throw new TileDecodeError(`tile ${keyOf(addr)}: coverage runs are not [code, count] pairs`);
+  }
+  const out = new Array<string>(cells);
+  let at = 0;
+  for (let r = 0; r < runs.length; r += 2) {
+    const code = runs[r], n = runs[r + 1];
+    const name = states[code];
+    if (typeof name !== "string") {
+      throw new TileDecodeError(`tile ${keyOf(addr)}: coverage run code ${code} is not in the served alphabet`);
+    }
+    if (!Number.isInteger(n) || n < 0 || at + n > cells) {
+      throw new TileDecodeError(`tile ${keyOf(addr)}: coverage run length ${n} overruns ${cells} cells`);
+    }
+    out.fill(name, at, at + n);
+    at += n;
+  }
+  if (at !== cells) {
+    throw new TileDecodeError(`tile ${keyOf(addr)}: coverage runs cover ${at} cells, expected ${cells}`);
+  }
+  return out;
+}
+
+/**
  * A reader for the selected device's coverage state at a tile-grid index, resampling nearest when
  * the coverage plane is not cell-for-cell aligned with the tile (`coverage.grid.aligned`).
+ *
+ * The selection rule is the route's own and is applied here rather than taken from
+ * `selected.plane`, because it is the one place the client must be sure of: a **named** device gets
+ * that front end's own plane and *never* the union, or a merged plane would wear one radio's
+ * identity (T-259/T-305).
  *
  * A **named** device with no plane in the answer is `unobserved` for that device — `selected.present
  * = false` is a coverage answer (that front end recorded nothing here), which the route says in so
@@ -211,22 +263,27 @@ function coverageCells(addr: TileAddr, resp: TileResponse): (i: number) => strin
   const c = resp.coverage;
   if (!c) throw new TileDecodeError(`tile ${keyOf(addr)}: no coverage plane, so no grey authority`);
   const named = addr.device !== "any";
-  const plane = named ? c.devices?.find((d) => d.device === addr.device)?.cells : c.any?.cells;
-  if (!plane) {
+  const index = named ? c.devices?.find((d) => d.device === addr.device)?.plane : c.any?.plane;
+  const encoded = typeof index === "number" ? c.planes?.[index] : undefined;
+  if (!encoded) {
     if (named && c.selected?.present === false) return () => "unobserved";
     throw new TileDecodeError(`tile ${keyOf(addr)}: coverage has no plane for device ${addr.device}`);
   }
-  const cnf = c.grid?.nf ?? nf, cnt = c.grid?.nt ?? nt;
-  if (plane.length !== cnf * cnt) {
-    throw new TileDecodeError(`tile ${keyOf(addr)}: coverage plane has ${plane.length} cells, expected ${cnf * cnt}`);
+  if (!Array.isArray(c.states) || c.states.length === 0) {
+    throw new TileDecodeError(`tile ${keyOf(addr)}: coverage carries no state alphabet`);
   }
-  if (cnf === nf && cnt === nt) return (i) => plane[i]?.state ?? "unobserved";
+  const cnf = c.grid?.nf ?? nf, cnt = c.grid?.nt ?? nt;
+  if (encoded.cells !== cnf * cnt) {
+    throw new TileDecodeError(`tile ${keyOf(addr)}: coverage plane has ${encoded.cells} cells, expected ${cnf * cnt}`);
+  }
+  const plane = expandPlane(addr, c.states, encoded.runs, encoded.cells);
+  if (cnf === nf && cnt === nt) return (i) => plane[i];
   // Nearest-cell resample. Only ever a downscale or an exact upscale of the same extent, so it
   // moves no boundary: both grids cover this tile and nothing else.
   return (i) => {
     const t = Math.min(cnt - 1, Math.floor((Math.floor(i / nf) * cnt) / nt));
     const f = Math.min(cnf - 1, Math.floor(((i % nf) * cnf) / nf));
-    return plane[t * cnf + f]?.state ?? "unobserved";
+    return plane[t * cnf + f];
   };
 }
 

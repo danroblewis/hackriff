@@ -6581,6 +6581,76 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         json!(true),
         "{fine}"
     );
+    // **T-467.** The plane is a run-length-encoded table of DISTINCT planes, not one JSON object
+    // per cell: 99 % of a 19.34 MB tile body was this block, duplicated between `any` and
+    // `devices[0]`, to carry the one field a renderer reads.
+    assert_eq!(
+        fine["coverage"]["encoding"],
+        json!("plane-table-rle"),
+        "{fine}"
+    );
+    // THREE states, in the answer's own alphabet: a code is never read against one the client
+    // assumed, and `unknown` (T-423) is never spelled as `unobserved`.
+    assert_eq!(
+        fine["coverage"]["states"],
+        json!(["unobserved", "observed", "unknown"]),
+        "{fine}"
+    );
+    let planes = fine["coverage"]["planes"].as_array().unwrap();
+    assert!(!planes.is_empty(), "{fine}");
+    // Every plane decodes exactly: the runs are [code, count] pairs, every code is in the served
+    // alphabet, and the counts sum to the plane's own cell count — which is the tile's grid.
+    for p in planes {
+        let runs: Vec<u64> = p["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_u64().unwrap())
+            .collect();
+        assert_eq!(runs.len() % 2, 0, "{p}");
+        let mut total = 0u64;
+        let mut counts = [0u64; 3];
+        for pair in runs.chunks(2) {
+            assert!(pair[0] < 3, "code outside the served alphabet: {p}");
+            counts[pair[0] as usize] += pair[1];
+            total += pair[1];
+        }
+        assert_eq!(total, json!(N * N).as_u64().unwrap(), "{p}");
+        assert_eq!(p["cells"], json!(N * N), "{p}");
+        // The counts beside the runs are derived from the runs, so they cannot disagree with them.
+        assert_eq!(p["observed_cells"], json!(counts[1]), "{p}");
+        assert_eq!(p["unobserved_cells"], json!(counts[0]), "{p}");
+        assert_eq!(p["unknown_cells"], json!(counts[2]), "{p}");
+        // And no cell on this plane carries a measurement key of any kind — there is nothing here
+        // that could be read as a level of zero. The measurement plane is `grid`, separately.
+        for k in [
+            "duty",
+            "observed_s",
+            "last_s",
+            "center_hz",
+            "sample_rate_hz",
+            "shade",
+        ] {
+            assert!(p.get(k).is_none(), "plane carries {k}: {p}");
+        }
+    }
+    // An identical plane is carried ONCE: on this single-device server the union and the device's
+    // plane are the same answer, so they are the same index rather than two copies.
+    let n_planes = planes.len();
+    let distinct: std::collections::BTreeSet<String> =
+        planes.iter().map(|p| p["runs"].to_string()).collect();
+    assert_eq!(distinct.len(), n_planes, "a plane is repeated: {fine}");
+    // The selection the answer states is an index into that table, and `any` is the union.
+    assert_eq!(fine["coverage"]["any"]["plane"], json!(0), "{fine}");
+    assert_eq!(fine["coverage"]["selected"]["plane"], json!(0), "{fine}");
+    // The whole tile body is now dominated by the measurement grid, not by the coverage plane —
+    // the inversion this ticket bought, asserted rather than assumed.
+    let cov_bytes = serde_json::to_string(&fine["coverage"]).unwrap().len();
+    let grid_bytes = serde_json::to_string(&fine["grid"]).unwrap().len();
+    assert!(
+        cov_bytes < grid_bytes,
+        "coverage {cov_bytes} B still outweighs the measurement grid {grid_bytes} B: {fine}"
+    );
     // De-welding costs the percentiles (T-434): unknown on the wire, never approximated.
     assert!(
         fine["grid"]["percentiles"]
