@@ -14628,7 +14628,8 @@ tasks:
   - id: T-494
     milestone: MLIVE
     title: affordable_levels admits nodes materialize refuses, so the ladder cannot deepen past 4 x 4
-    status: in-progress
+    status: done
+    commit: "dbed8242"
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15280,6 +15281,138 @@ tasks:
       that may change what this test should expect).
     notes: |
       Filed 2026-09-18 by the coordinator so an intermittent red is recorded, not waved through.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-510
+    milestone: MSDR
+    title: Multi-source capture composition - one Pipeline spawning N source/ring/capture-thread sets into the shared per-device stores
+    status: in-progress
+    priority: high
+    parallel_group: SDR
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      MSDR TRACK A (user, 2026-09-18). A second SDR is connected and verified receiving live RF: a
+      NooElec NESDR Nano 3 (RTL2832U + R820T, serial 7673444264; 25 MHz-1.75 GHz, ~2.4 Msps, 8-bit),
+      beside the HackRF, on a separate USB controller. CLAUDE.md already requires the source layer,
+      scheduler and inventory to be N-source-capable; this is the ticket that makes the PIPELINE so.
+      GROUNDWORK, DO NOT REDO: generic device interface (T-048), the single-device audit (T-259),
+      device_id provenance throughout (T-302/T-304/T-283/T-325/T-332), /api/navigation windows[]
+      already a list (T-340), coverage already per-device (hk-store coverage.rs Device::Id/Unknown/Any),
+      and the mock SDR can stand in as device 2. The gap is the COMPOSITION SEAM: opening and wiring N
+      sources into the serving layer. hk-core/src/source/mod.rs:482-511 names every single-device
+      consumer; hk-api/src/navigation.rs:173-196 documents the exact change.
+      SCOPE: one Pipeline spawns N {source, ring, capture-thread} into the already-per-device stores
+      (shared history, coverage, floor). Files: hk-pipeline/src/run.rs (Pipeline::start, Shared,
+      workers), capture.rs, iqbuffer.rs (a ring per device). THE ONLY GENUINELY HARD TICKET in the
+      slice: per-arriving-row cost on the capture thread is paid whether or not anyone looks, so
+      MEASURE it for N=1 and N=2 and do not regrow residency (the T-453 constraint).
+      N=1 MUST BE BEHAVIOURALLY IDENTICAL to today - the whole existing suite is the guard for that.
+      Device 2 is the MOCK SDR here; no hardware. Reviewed by Opus before merge (core_interface).
+      DoD: two mock sources run concurrently in one Pipeline, each with its own ring and device_id,
+      writing the shared stores with correct per-device provenance; N=1 unchanged; measured
+      per-row cost at N=1 vs N=2 recorded.
+    notes: |
+      Filed 2026-09-18 from /tmp/claude-501/multi-sdr-brief.md (planning log B0.690). Paced to ONE
+      builder slot: the user is near the weekly budget cap and retune/live fixes keep priority.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-511
+    milestone: MSDR
+    title: The serving layer holds N live controls, and device-control routes take a device selector
+    status: todo
+    priority: normal
+    parallel_group: SDR
+    core_interface: true
+    model: opus
+    depends_on: [T-510]
+    use_cases: [AWARE-011]
+    acceptance: |
+      ApiState.live_control: Option<...> becomes a collection keyed by device_id, with one DeviceGate
+      per device (one capture at a time PER DEVICE, settle gap, device_id recorded). The
+      device-control routes (retune, rate, gains, bias-tee) take a device selector; with exactly one
+      device the selector may be omitted and behaviour is unchanged. navigation.windows_json needs no
+      change - it is already a list. docs/api.md and api_contract.rs are updated TOGETHER (T-079).
+      A pan or wheel still never reaches a device route (T-340's spy assertions stay green).
+    notes: |
+      Filed 2026-09-18, MSDR track (B0.690).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-512
+    milestone: MSDR
+    title: hk serve / hk run / hackriffd accept a repeatable --device
+    status: todo
+    priority: normal
+    parallel_group: SDR
+    model: sonnet
+    depends_on: [T-510, T-511]
+    use_cases: [AWARE-011]
+    acceptance: |
+      `hk serve --device X --device Y` (repeatable), and the same for `hk run` and hackriffd. One
+      --device keeps today's behaviour exactly. Each device's settings (centre, rate, gains) are
+      addressable per device on the command line; an unknown or duplicated device is a clear error,
+      not a silent drop.
+    notes: |
+      Filed 2026-09-18, MSDR track (B0.690). Well-specified CLI plumbing over T-510/T-511.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-513
+    milestone: MSDR
+    title: Two-device mock e2e - both windows, both coverages, shared air merged, device physics kept apart
+    status: todo
+    priority: normal
+    parallel_group: SDR
+    model: sonnet
+    depends_on: [T-510, T-511]
+    use_cases: [AWARE-011]
+    acceptance: |
+      Two MockSdrDriver instances on two bands, through the device interface (CLAUDE.md's e2e rule).
+      Assert: both appear in /api/navigation windows[]; both in /api/coverage devices[] and /api/tiles;
+      an emitter seen by both (shared air) merges into one inventory entry carrying both devices'
+      provenance, while device-local physics (spurs, DC, overload, gain state) stays per-device and
+      never crosses. NO HARDWARE.
+    notes: |
+      Filed 2026-09-18, MSDR track (B0.690).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-514
+    milestone: MSDR
+    title: RTL-SDR source - a native librtlsdr driver behind an rtlsdr feature, for the NooElec Nano 3
+    status: todo
+    priority: normal
+    parallel_group: SDR
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      A native librtlsdr FFI source behind an `rtlsdr` cargo feature, mirroring the `hackrf` feature:
+      tune, rate, gain (29 steps 0-49.6 dB on the R820T), timestamps and overruns through the generic
+      Device/SourceControl trait, passing the existing device conformance suite. Addresses the device
+      BY SERIAL (7673444264), never by index. SoapySDR is NOT needed; librtlsdr and rtl_test are
+      installed. Model the RTL's real capabilities explicitly (25 MHz-1.75 GHz, ~2.4 Msps, 8-bit, no
+      bias-tee assumption) so the UI never implies what it cannot do.
+      OP NOTE: the Nano 3's R820T takes ~10 s to lock on this Mac - any harness allows ~10 s before
+      expecting samples, and that is not a failure.
+      HIL: against the real Nano 3. RECEIVE ONLY. One process per device; the HackRF stays with the
+      user's demo on :8899 and must not be opened.
+    notes: |
+      Filed 2026-09-18, MSDR track (B0.690). Only ticket in the slice that needs hardware; it is
+      present and verified (100.3 MHz FM capture, std 10.66 - live signal, not a dead input).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-515
+    milestone: MLIVE
+    title: The coverage-only tile shortcut answers 200 above the declared readable ceiling, where docs/api.md says 400
+    status: todo
+    priority: low
+    parallel_group: PIPE
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-507. A tile whose plane is uniform (all unobserved) takes the coverage-only fast path
+      and returns 200 even at a level above the route's declared max_level, where docs/api.md says the
+      route answers 400. Decide which is right - the ceiling is a claim about what can be READ, and a
+      uniform-unobserved answer reads nothing - and make the doc and the route agree, with a contract
+      assertion. T-507 moved the ceiling test's walk to the tuned band to avoid depending on this.
+    notes: |
+      Filed 2026-09-18 from T-507's report; T-494's area, which has now merged.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
