@@ -11326,7 +11326,7 @@ tasks:
   - id: T-442
     milestone: MCANVAS
     title: The pane model - split, independent pan/zoom, per-pane follow-mode and per-pane pause
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     core_interface: true
@@ -11359,6 +11359,41 @@ tasks:
       COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
       harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
       with uncommitted work.
+    commit: 75c7ebe
+    result: |
+      DONE. A PANE'S TIME WINDOW IS ITS PAUSE STATE, as a union whose two arms carry DIFFERENT
+      DATA: { live: true, spanNs } has NO CENTRE because a following pane borrows the edge,
+      re-derived every frame; { live: false, centerNs, spanNs } is frozen on an absolute instant.
+      So "scrubbed but not paused" and "paused with a stale centre beside a live window" are
+      states THE TYPE CANNOT SPELL. That is the right answer to T-347's finding that a run-wide
+      boolean cannot represent N viewers: the fix is not a better flag, it is NO FLAG. A test
+      reads a paused pane's keys and greps the source for `paused:` - there is none.
+      freezeAt() is a COORDINATE CHANGE, NOT A MODE CHANGE: it writes down the window already
+      showing, so the frame you pause on is deepEqual to the one before, and freezing an
+      already-frozen window is a no-op rather than a jump to the edge. panTime freezes first,
+      because an edge-pinned pane carrying an offset IS the third state; dragging forward clamps
+      and stays frozen, so re-following is explicit and never a gesture ending near the edge -
+      T-407's lesson on the other axis.
+      ISOLATION PROVED ON VALUES, three ways: (1) two panes over twelve frames with the edge
+      advancing unconditionally - A pauses at frame 4 and is poked repeatedly, B's box top is
+      strictly advancing AND equal to the edge every frame, and B's entire state is deepEqual to
+      the instant A paused; (2) THE REQUESTS THE CLIENT BUILDS (T-367's rule) - 40 frames through
+      the real Surface, the paused pane addressing exactly ONE set of tile rows while the live
+      pane crosses several; (3) a spy fetch over every pane operation sees an EMPTY CALL LIST -
+      pausing is, on the wire, NOTHING, which is what makes it unable to reach another pane,
+      another browser, or the radio.
+      Also asserted: zooming one pane three levels leaves another's untouched; split hands back
+      two panes on the IDENTICAL box (one surface, two places to look from); the last pane cannot
+      be closed; 100 MHz and 2.45 GHz render in ONE frame through ONE context at two levels.
+      THE STATED LEVEL IS THE DRAWN LEVEL: paneStatuses joins pane state to the PaneReport the
+      renderer ACTUALLY DREW WITH, so it cannot drift into a second calculation that disagrees
+      with the pixels. levelDivergenceNote() is §8.5a's sentence and returns null when every pane
+      agrees, because then there is nothing to explain.
+      CAVEAT THE AGENT VOLUNTEERED: nothing mounts it yet, because nothing mounts the surface yet.
+      The statement is produced and asserted; T-443's chrome is where it renders.
+      Seams left rather than built: rects()/list() for T-443, read PER FRAME with deliberately no
+      change event, because re-laying-out on one is T-388's box-jump.
+
   - id: T-443
     milestone: MCANVAS
     title: The zoomable minimap - another viewport, with pane rectangles and per-SDR live segments
@@ -11427,7 +11462,7 @@ tasks:
   - id: T-445
     milestone: MCANVAS
     title: The cutover - retire both edge scrubbers and the separate history view
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CANVAS-FE
     core_interface: true
@@ -11552,7 +11587,7 @@ tasks:
   - id: T-447
     milestone: M3
     title: phase_features and derotate take their strong-envelope subset over the same broken mean rule T-431 just fixed
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: M3A
     deps: [T-431]
