@@ -988,6 +988,7 @@ requires `class SurfacePreview` to have exactly one definer.
    it the client-side **max-hold** and the **manual dB range**. This is not a zoom level of the
    surface: the surface draws *folded cells over time*, and a trace is *this frame across
    frequency*. It is the one retired thing that is genuinely a different picture.
+   **RULED AND BUILT — see §8.5c (T-457).**
 2. **Drag-to-select a region**, and **T-193's draggable Confirmed-band edges**. On this surface a
    drag pans (T-456), so a selection gesture needs a modifier or a mode nobody has designed.
    Selections are still created from the capture band's time drag and are still *drawn* here as
@@ -1000,6 +1001,79 @@ requires `class SurfacePreview` to have exactly one definer.
 thing `/api/tiles` was built on (§8.5a F2), `/api/floor` answers SPACE-050 — and `docs/api.md` now
 says so at each. **A UI cutover is not evidence that a server route has no other caller**, so
 retiring them is a separate, backend-classed decision this ticket deliberately did not take.
+
+### 8.5c The spectrum trace, restored and time-addressable (T-457, 2026-09-17)
+
+The user ruled on finding 1 — *"these are real feature gaps the cutover dropped, and restoring them
+IS finishing MCANVAS"* — and then widened it. The trace is **not** pinned to *now*:
+
+> It is time-addressable: live playback shows the top-most most-recent sample, but when exploring the
+> past it shows the FFT at the viewport's current time position. It spans the whole viewport width,
+> not one tile — one long continuous plot, rendering only the section shown and only where data
+> exists. And it is per viewport: each split pane gets its own trace at its own time position.
+
+**Where it lives.** A strip is carved off the **top of each pane's rectangle** in
+`SurfaceView.frame()` (`tracePx`), and the quads go through the existing `overlay.ts` pass — the
+program with no sampler and no ramp, so the trace still cannot tint a measurement. Carved, never
+painted over: an overlay covering the newest rows would falsify "the top of the pane is the newest
+row", which every mark on this surface is placed through. The arithmetic is `ui/src/surface/trace.ts`
+and it is pure; the mount composes it in `ui/src/app/centre/surface.ts`.
+
+**What it shares, which is the axes and only the axes.** x goes through the renderer's own `toClip`
+against the pane's own box, so a peak on the trace sits above the column it paints. y goes through
+`Surface.lo`/`hi` — the one *measured* display range the ramp is relative to — so the trace's height
+and the waterfall's colour are two readings of one scale.
+
+**The slice, and its source.** The trace's time position is `box.t1Ns`, the newest instant *that
+viewport* is showing. The slice comes from whichever source can answer finest at that instant:
+
+- the **live spectrum row**, when its own capture time falls inside the pane's topmost time cell.
+  This is the one quantity on the screen no tile can supply — a cell is a fold over at least one row.
+  `ui/src/app/centre/live-edge.ts` kept the stream and threw the rows away (T-445); it now keeps the
+  newest one, in a one-row holder, never in the store;
+- otherwise **the pyramid**, read as the one row of cells covering that instant. That row is a
+  max-hold over the cell's duration, and the readout says so — *"(1.0 s cell)"* — rather than passing
+  a fold off as an instant.
+
+**Max-hold: no new tier, and no accumulator — the premise of the question was wrong.** The ticket
+asked whether max-hold belongs in the ladder "as a max-reduction tier beside the mean one". **There
+is no mean tier.** The ladder's only reduction already *is* max-hold, stated by the server in
+`MAX_HOLD_RULE` and served verbatim beside every grid; a level-0 cell is already the maximum of the
+STFT frames under it (`hk_dsp::Spectrum::max_hold` → `FrameInput::peak`). So the tier exists, is
+on-demand in exactly §5.2's corrected sense, and **T-457 changed no backend code at all**. Building a
+second max tier would have put write work back on the capture path that T-453 spent a whole ticket
+removing, to duplicate a reduction already in the ladder.
+
+The client-side reduction is licensed by the statistic itself: **a max of max-holds is a max-hold**,
+idempotent and associative, so reducing a pane's resident tiles gives the number the server would
+return for one tile spanning the box. `ui/test/surface-trace.test.ts` asserts that directly, with an
+averaging control so the assertion is not vacuous. This is therefore not the client "re-reducing a
+measurement" in the sense `overview_semantics_json` warns about — that warning is about inventing a
+statistic the server did not state.
+
+Time-addressability sharpens it rather than weakening it: *max over what window* now has a viewport
+answer, and a per-pane accumulator would have to be discarded on every pan, zoom and split, while the
+pyramid simply answers about the box it is asked about.
+
+**The manual dB range does not come back.** Two reasons, in order. First the evidence: `Waterfall
+.setScale(auto, lo, hi)` existed at the cutover commit and **had no caller** — a repo-wide search
+finds the definition and nothing else — so T-445 retired an unreachable control, not a feature in
+use. "The old UI had it" is false. Second the principle: the range is *measured* (the tiles' own
+`range_db`, which §4 already insists a client shade against rather than decide for itself), and a
+hand-set pair of numbers is a user overriding a measurement. The honest control is to **state** the
+range, which the trace readout does, so a surprising picture is diagnosable instead of paintable-over.
+
+**Gaps, and one distinction the first draft got wrong.** A column nothing answered for draws nothing:
+*unobserved is not quiet*, and a line across a gap claims a measurement nobody took. But **"not
+loaded" is not "never observed"** either — the same distinction `cellrule.ts` keeps between PENDING
+and the one grey. The pixels are the same (absence claims nothing), so the *readout* carries it,
+off the `PaneReport` the renderer just produced: *"no tile in hand for this span yet (4 pending)"*
+versus *"nothing observed across this span"*.
+
+**Nothing here depends on when a node is sealed.** The trace asks `TileCache` for whatever is
+resident and treats an absent tile as not-in-hand. If tiles begin arriving at the live edge
+incrementally, the slice there simply gets finer; the live row is preferred at the edge only because
+it is finer than any cell, and that stays true however the cell was produced.
 
 ### 8.5a What the spike proved, and the three places §8 and §6 were wrong (T-437, 2026-09-17)
 

@@ -46,7 +46,13 @@ import { SurfacePreview, isBackpressure, probeSurface } from "../../surface/prev
 import {
   acceptPaneRetune, offerAcceptable, offerLabel, paneRetuneOffer, type PaneRetuneOffer,
 } from "../../surface/retune";
-import type { PaneView } from "../../surface/surface";
+import type { PaneRect, PaneReport, PaneView } from "../../surface/surface";
+import {
+  HOLD_INK, SLICE_INK, TRACE_COLUMNS, liveFrameFits, maxHoldColumns, peakOf, sampleFrame, sliceColumns,
+  sliceWindow, traceQuads,
+} from "../../surface/trace";
+import type { OverlayQuad } from "../../surface/minimap";
+import { liveRow } from "./live-edge";
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
 import { openSelectionMenu, openSignalMenu } from "../menu";
@@ -60,6 +66,8 @@ const MINIMAP_PX = 110;
 /** A pane frozen within this of the edge still counts as showing the growing edge, for the retune
  * offer's "not showing the live edge" refusal (T-444). One frame at 60 Hz, generously. */
 const EDGE_GRACE_NS = 0.25 * S_TO_NS;
+/** Height of the spectrum-trace strip above each pane, device px (T-457). */
+const TRACE_PX = 96;
 
 function mount(el: HTMLElement, ctx: AppContext) {
   const { store, client } = ctx;
@@ -70,19 +78,26 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
   const offerEl = h("div", { class: "sf-offer", hidden: true });
+  const traceEl = h("div", { class: "sf-trace", role: "status" });
   const liveBtn = h("button", { class: "mini sf-live", type: "button" }, "Live");
-  const actions = h("div", { class: "sf-actions" }, liveBtn,
+  const traceBtn = h("button", {
+    class: "mini sf-tracebtn on", type: "button", "aria-pressed": "true",
+    title: "The spectrum trace above each viewport: the slice across frequency at that viewport's own time position, and the max-hold over its whole window. Both are drawn on the surface's one measured dB range.",
+  }, "Trace");
+  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn,
     h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved.", onclick: () => preview?.split("columns") }, "Split ⇔"),
     h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => preview?.closeActive() }, "Close"),
     h("button", { class: "mini", type: "button", title: "Zoom the active viewport out to the device-available spectrum over the whole record horizon.", onclick: () => preview?.fitToSurface() }, "Whole surface"),
     offerEl);
-  el.replaceChildren(h("div", { class: "sf-bar" }, actions, hoverEl), stage, chrome, note);
+  el.replaceChildren(h("div", { class: "sf-bar" }, actions, hoverEl), stage, traceEl, chrome, note);
 
   let preview: SurfacePreview | null = null;
   let windows: ActiveWindow[] = [];
   let detach: (() => void) | null = null;
 
   const say = (text: string) => { note.textContent = text; note.hidden = !text; };
+  /** Set-if-changed, so a per-frame readout does not rewrite the DOM sixty times a second. */
+  const setText = (e: HTMLElement, text: string) => { if (e.textContent !== text) e.textContent = text; };
 
   // ---- the live edge, on the capture clock (T-379). Never `Date.now()`. ----
   // `live.edgeTS` is the newest spectrum row's own time (`live-edge.ts`); the capture window's end
@@ -106,6 +121,99 @@ function mount(el: HTMLElement, ctx: AppContext) {
       ...selectionMarkBoxes(s.selections.list, selId, pane.box),
     ];
   };
+
+  // ---- the spectrum trace (T-457, docs/16 §8.5b finding 1) ----
+  //
+  // **Why it exists as a strip and not as a zoom level.** The cutover's own reason for dropping it is
+  // the reason it is back in this shape: the surface draws folded cells *over time*, and a trace is
+  // one spectrum *across frequency*. Zooming in gives finer cells, never a single row — so the trace
+  // gets a rectangle of its own, carved off the top of **each pane** by `SurfaceView.frame`.
+  //
+  // **It is time-addressable, and the time is the pane's** (user, 2026-09-17). The slice is taken at
+  // `box.t1Ns`, the newest instant *this viewport* is showing: the live edge when the pane follows
+  // it, last hour when the pane has been scrubbed to last hour. A split therefore gives two traces at
+  // two different instants, because it gives two viewports at two different instants — and none of
+  // that needs a clock here, only the pane's own box, which is the rule every other time-varying
+  // thing on this surface already obeys.
+  //
+  // **What it shares, and what it must not.** It shares the two axes: x through the pane's own
+  // `toClip`, y through `Surface.lo`/`hi`, the one *measured* display range the ramp is relative to.
+  // It shares no renderer state: the quads go to `overlay.ts`, which has no sampler and no ramp.
+  //
+  // **Why there is no manual dB range.** The old waterfall carried `setScale(auto, lo, hi)` and
+  // **nothing ever called it** — a repo-wide search at the cutover commit finds the definition and no
+  // caller, so the cutover retired an unreachable control rather than a feature in use. And the range
+  // it would have overridden is measured: the tiles report their own `range_db` and the surface
+  // tracks it. Letting a hand-set pair of numbers stand in for that is a user overriding a
+  // measurement, which is the move this product declines by default. The honest control is to *say*
+  // the range, which the readout below does, so a surprising picture is diagnosable instead of
+  // paintable-over.
+  let traceOn = true;
+  const fmtDb = (db: number) => `${db.toFixed(1)} dB`;
+  const fmtDur = (s: number) => (s < 1 ? `${(s * 1000).toFixed(0)} ms` : s < 90 ? `${s.toFixed(1)} s` : `${(s / 60).toFixed(1)} min`);
+  const traceFor = (pane: PaneView, _edgeNs: number, report: PaneReport, strip: PaneRect): OverlayQuad[] => {
+    const p = preview;
+    if (!p) return [];
+    const s = p.view.surface;
+    const dev = pane.device ?? "any";
+    const n = Math.max(16, Math.min(TRACE_COLUMNS, Math.floor(strip.w)));
+    const out: OverlayQuad[] = [];
+
+    // The max-hold, over this viewport's WHOLE window, from the tiles it just drew at the level it
+    // drew them. Not an accumulator: the pyramid's cells ARE max-holds (hk-api's `MAX_HOLD_RULE`),
+    // so panning to an hour ago shows that hour's peak instead of restarting from nothing.
+    const hold = maxHoldColumns(s.lat, s.cache, pane.box, report.levelF, report.levelT, dev, n);
+    out.push(...traceQuads(hold, pane.box, strip, s.lo, s.hi, HOLD_INK, "trace-hold", pane.id));
+
+    // The slice, at this viewport's own time position. The live row is preferred only where it is
+    // genuinely finer — inside the cell the slice is asking about — and the pyramid answers
+    // everywhere else, which is what makes a scrubbed pane show the spectrum of *then*.
+    const tAtNs = pane.box.t1Ns;
+    const win = sliceWindow(s.lat, report.levelT, tAtNs);
+    const fr = liveRow.get();
+    const live = liveFrameFits(fr, win);
+    const slice = live && fr
+      ? sampleFrame(fr, pane.box, n)
+      : sliceColumns(s.lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);
+    out.push(...traceQuads(slice, pane.box, strip, s.lo, s.hi, SLICE_INK, "trace-slice", pane.id));
+
+    // The readout, for the pane gestures apply to. Written here rather than on the poll for the same
+    // reason the quads are: it describes the frame that was just drawn. It names the SOURCE, because
+    // "a live frame" and "a 1.0 s cell" are different claims about the same picture and the coarser
+    // one must not be passed off as an instant.
+    if (pane.id === p.activePane) {
+      const slicePk = peakOf(slice, pane.box);
+      const holdPk = peakOf(hold, pane.box);
+      const spanS = (pane.box.t1Ns - pane.box.t0Ns) / S_TO_NS;
+      const src = live ? "live frame" : `${fmtDur((win.t1Ns - win.t0Ns) / S_TO_NS)} cell`;
+      // **A gap is not evidence of quiet, and "not loaded" is not "never observed."** The trace draws
+      // nothing in either case, which is the safe direction — absence claims nothing. But the
+      // sentence beside it must not turn a memory-and-latency fact into a statement about the radio,
+      // which is exactly the distinction `cellrule.ts` keeps between PENDING and the one grey. The
+      // `PaneReport` the renderer just produced is what knows which it is.
+      const empty = report.tiles === 0
+        ? `no tile in hand for this span yet (${report.pending} pending, ${report.fallbacks} coarse stand-in${report.fallbacks === 1 ? "" : "s"}) — not loaded is not unobserved`
+        : "nothing observed across this span";
+      setText(traceEl, [
+        slicePk
+          ? `slice ${at(live && fr ? fr.tNs : tAtNs)} (${src}) · peak ${fmtDb(slicePk.db)} at ${fmtHz(slicePk.hz)}`
+          : `slice ${at(tAtNs)} (${src}) — ${empty}`,
+        holdPk
+          ? `max-hold over ${fmtDur(spanS)} · peak ${fmtDb(holdPk.db)} at ${fmtHz(holdPk.hz)}`
+          : `max-hold over ${fmtDur(spanS)} — ${empty}`,
+        `scale ${fmtDb(s.lo)} … ${fmtDb(s.hi)}, measured from the served tiles and shared with the ramp`,
+      ].join(" · "));
+    }
+    return out;
+  };
+  traceBtn.addEventListener("click", () => {
+    traceOn = !traceOn;
+    if (preview) preview.view.tracePx = traceOn ? TRACE_PX : 0;
+    traceBtn.classList.toggle("on", traceOn);
+    traceBtn.setAttribute("aria-pressed", String(traceOn));
+    traceEl.hidden = !traceOn;
+    if (!traceOn) traceEl.textContent = "";
+  });
 
   // ---- mirror the active viewport into the app's one window (CLAUDE.md's whole-UI window rule) ----
   // The inventory lists, the focus panel and the decode captures all scope themselves through
@@ -203,6 +311,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         edge: () => edgeNs() || probe.origin.edgeNs,
         windows: () => windows,
         marks: (pane, edge) => markQuads(boxesFor(pane), edge, pane.box, pane.rect),
+        trace: traceFor, tracePx: TRACE_PX,
       });
     } catch (e) {
       say(`WebGL2 is unavailable in this browser: ${e instanceof Error ? e.message : String(e)}`);

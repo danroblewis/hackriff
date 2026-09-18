@@ -49,3 +49,13 @@
    sampled, and where this view opened. A nearly-grey first screen with this line is a finding; the
    same screen without it is a bug report. */
 .sf-note { border-top: 1px solid var(--line); background: var(--panel); padding: 4px 12px; font-size: 11px; color: var(--muted); }
+
+/* T-457: what the spectrum trace above each viewport is currently saying — the newest frame's peak,
+   the max-hold's peak over the viewport's own window, and the measured dB range both are drawn on.
+   Stated rather than settable: the range comes from the tiles' own `range_db`, and a hand-set one
+   would be a user overriding a measurement (docs/16 §8.5b finding 1). */
+.sf-trace {
+  border-top: 1px solid var(--line); background: var(--panel);
+  font: 10.5px var(--mono); color: var(--muted); padding: 4px 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}

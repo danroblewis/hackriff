@@ -76,7 +76,7 @@ export class Browser {
 
 /** One page target, with its console, its exceptions and its network recorded from before load. */
 export class Page {
-  static async open(conn, url, { width = 1440, height = 900 } = {}) {
+  static async open(conn, url, { width = 1440, height = 900, initScript = null } = {}) {
     // No width/height here: `Target.createTarget` only accepts them for a new *window*, and the
     // viewport is set by `Emulation.setDeviceMetricsOverride` below anyway.
     const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
@@ -117,6 +117,17 @@ export class Page {
           blocked: e.blockedURI, source: e.sourceFile, line: e.lineNumber, sample: e.sample,
         }));`,
     }, sessionId);
+    // **A test's own instrumentation, installed before the page's scripts** (T-457).
+    //
+    // What it is for: asserting a rendering against **the bytes the server actually delivered**,
+    // without putting a hook in product code. A trace that renders is not a trace showing the
+    // current frame — the only way to tell the difference is to observe the delivered frame
+    // independently and compare, and the socket is where it is observable. Injected here for the
+    // same reason the CSP listener is: it must run before the app opens its own sockets.
+    //
+    // It may only ever *observe*. A script that changed what the page does would make this tier a
+    // test of a page nobody ships.
+    if (initScript) await conn.send("Page.addScriptToEvaluateOnNewDocument", { source: initScript }, sessionId);
     await conn.send("Emulation.setDeviceMetricsOverride",
       { width, height, deviceScaleFactor: 1, mobile: false }, sessionId);
     if (url) await p.goto(url);

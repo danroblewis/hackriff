@@ -41,7 +41,7 @@ import type { OverlayQuad } from "./minimap";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache } from "./tilecache";
-import type { PaneView, TilePlanes } from "./surface";
+import type { PaneRect, PaneReport, PaneView, TilePlanes } from "./surface";
 import { SurfaceView, type SurfaceFrame } from "./view";
 
 /** Cells per tile edge the preview renders at — the route's own default, and the size the cache
@@ -317,6 +317,17 @@ export interface PreviewOptions {
    * nothing drawn here can tint a measurement.
    */
   marks?: ((pane: PaneView, edgeNs: number) => readonly OverlayQuad[]) | null;
+  /**
+   * **The instantaneous spectrum trace** (T-457): quads for the strip carved off the top of each
+   * pane. Like `marks`, a function called per frame — but handed the `PaneReport` the data pass just
+   * produced as well, so the reduction behind it is at the level the picture beneath it was drawn at.
+   *
+   * The historical preview passes none. A trace of *this frame* needs a stream, and this host is
+   * deliberately the one that reads no live edge.
+   */
+  trace?: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly OverlayQuad[]) | null;
+  /** Height of that strip, device px. 0 draws no trace and gives the space back to the pane. */
+  tracePx?: number;
 }
 
 /**
@@ -357,6 +368,8 @@ export class SurfacePreview {
       freq: probe.opening.freq,
       spanNs: probe.opening.spanNs,
       marks: opts.marks ?? null,
+      trace: opts.trace ?? null,
+      tracePx: opts.tracePx ?? 0,
     });
     // **Freeze everything at open, unless an edge was reported in.** A following viewport borrows
     // the growing edge; without one there is nothing to borrow, so nothing follows (T-450's
