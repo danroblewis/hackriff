@@ -720,6 +720,133 @@ front ends widen *coverage* and never split the *view*; under this design the su
 surface and the panes are viewports onto it, so the invariant survives in a stronger form: there is
 exactly one thing being looked at, and panes are where you look from.
 
+### 8.4a How the pane model expresses pause, follow and level (T-442, 2026-09-17)
+
+Built in `ui/src/surface/panes.ts`, over T-440's renderer. Four decisions worth recording, because
+each one is a place the obvious implementation reintroduces a defect the repo has already paid for.
+
+**A pane's pause IS its time window — there is no flag.** T-347 retired `/api/control/pause` because
+a run-wide boolean cannot represent N viewers; a per-pane boolean beside a per-pane window is the
+same defect scoped smaller, because the two can disagree. So `TimeWindow` is a discriminated union
+whose arms **carry different data**: a following pane has *no centre of its own* (it borrows the
+growing edge, re-derived every frame), and a frozen one has one. "Scrubbed but not paused" — the
+third state T-347 refused — is therefore not a state the type can spell. Freezing is a **coordinate
+change, not a mode change**: it writes down the window the pane was already showing, so the frame
+you pause on is identical to the frame before it, and pausing an already-scrubbed pane is a no-op
+rather than a jump to the live edge.
+
+**Pause is unable to reach anything.** Every pane operation — pan, zoom, pause, resume, split, close
+— is arithmetic over this client's own view state, so *on the wire, pausing is nothing*. That is
+what makes one pane unable to affect another pane, another browser, or the radio, and it is asserted
+the way T-340 asserts its own control: a spy `fetch` sees an **empty call list** after the whole
+gesture vocabulary has been exercised. Capture, the ring and detection are never consulted; the live
+edge is *reported in* to `views(edgeNs)`, never controlled from here.
+
+**Panning in time freezes first, and never silently re-follows.** A pane pinned to the edge that
+also carries an offset from it is exactly the third state; so a scrub converts the anchor. Dragging
+forward clamps at the edge and *stays frozen* — re-entering follow is an explicit act, not a
+consequence of a gesture ending near the edge (the T-407 lesson, one axis over).
+
+**The level is stated per pane** (§8.5a's correction). `paneStatuses()` joins pane state to the
+`PaneReport` the renderer actually drew with, so the stated level is the drawn level rather than a
+second calculation that could disagree with the pixels, and `levelDivergenceNote()` is the sentence
+shown when panes differ: *a coarser cell is the maximum over more cells, so the same energy
+legitimately reads differently — same ramp, same scale, stated level.* Stating it is the fix; hiding
+it is what invites the bug report.
+
+**T-380's invariant, operationalised:** `split` hands back two panes on the **identical** box, and
+they diverge only when the user moves one; the last pane cannot be closed, because with no viewport
+there is nowhere to look *from* and the surface does not stop existing because the window did. A
+pane's `device` selects **whose coverage plane decides its grey** (`any` = the union) — a coverage
+selector, not a second subject.
+
+### 8.4b The minimap as a viewport, and what that cost (T-443, 2026-09-17)
+
+Built in `ui/src/surface/{minimap,overlay,chrome,view}.ts`. **"Another viewport" survived contact**:
+the minimap is a one-pane `PaneModel` whose `PaneView` is appended to the panes' and handed to the
+*same* `Surface.render` call, so zoom, pan, the zoom floor, clamping, the shared LRU, the ramp, the
+display range and the grey rule are all the pane path unchanged. Nothing about it is special-cased,
+and it has **no fetch path of its own** — `TileCache` is the only thing that requests a tile, for
+every viewport alike. It also goes into the *same* `paneStatuses()` list, so §8.5a's stated level
+covers the map without a second readout.
+
+**One thing did need fixing, and it was the cache's cancellation predicate.** `setViewports` matched
+tiles by *extent only*, which was sound while every viewport was a pane at a comparable zoom. A
+viewport the size of the surface breaks it: every fine-level tile for a pane the user had left still
+intersected the map, so **viewport-change cancellation silently stopped cancelling anything** — the
+in-flight cap would have become a queue the user waits out, at 11.4 ms a tile. A viewport is now a
+box **and** its levels, and a tile is wanted when some viewport draws at its level or one step
+coarser (the parent pin). That is a strictly better predicate than the one it replaces.
+
+**Two rules keep the overlay pass from tinting a measurement**, which is not a hypothetical: the
+T-437 spike's own first minimap comparison failed because a translucent pane-viewport wash had been
+drawn over the sample point, and it added a `setOverlays(false)` flag to work around it — a flag
+someone must remember. Here (1) the overlays are a **separate program in a separate pass run after
+the data pass**, with no sampler, no ramp and no cell-state uniform, so it cannot express a
+measurement colour or a grey; and (2) every overlay quad is a **stroke** — four edges of a rectangle,
+or a bar at the live edge — never a wash over a region's interior. The data draws are asserted
+byte-identical with overlays on and off, so the honesty comparison needs no flag at all.
+
+**A lit segment is placed in time, not pinned to the top.** "Where each SDR is currently live" is
+true *now*, so the bar is laid out at the live edge through the same time mapping as everything
+else; a minimap scrubbed into the past therefore lights nothing, which is the honest picture. The
+segments read `GET /api/navigation`'s `windows` through the **same function** the frequency
+navigator uses (`activeWindows`, asserted to be the same object, so there is no second reader to
+disagree), and the device each names is the same identity a pane's tiles are keyed by — one coverage
+plane, not two client-side notions of "which radio".
+### 8.4c Retune-on-pan: the gesture, and why it cannot fire from a drag (T-444, 2026-09-17)
+
+Built in `ui/src/surface/retune.ts`. §8.4's third bullet — *panning a pane to an un-tuned frequency
+offers or triggers a retune* — resolves to **offers**, and the choice is forced rather than
+preferred: T-340's control drags ±1.0 of the whole 6 GHz surface through a spy client and asserts an
+**empty call list**, and T-442 re-asserted the same shape over the entire pane vocabulary. A pane's
+pan is a pan. So the retune is a **discrete, explicit act on a separate control** — T-343's
+`edgeOffer` and T-392's region-select-on-release are the precedents this repo has already argued
+through — and the whole of the gesture design is that *the commit is not a gesture*.
+
+**T-407's lesson, taken one surface over.** T-407 found two ways a finger could retune the radio,
+both latent until T-392 removed a confirmation step: the drag threshold was the mouse's 6 px, so a
+fat-fingered tap was a drag; and travel was measured as `clientX + clientY`, so a stroke *across* a
+bar counted as travel *along* it. The shape of both is **a continuous pointer stream misread as a
+committing act**, and neither was introduced by the ticket that exposed them. A better threshold is
+not the answer to that. What is: `acceptPaneRetune` **re-derives the offer from the pane's state at
+the instant of the commit and refuses (`"moved"`) if the planned `(centre, span)` has changed**. A
+pan therefore *invalidates* a pending offer instead of silently re-aiming it — the radio goes where
+the button said, or it goes nowhere — and a finger still dragging the pane cannot command a
+frequency the control was never labelled with. (A pan too small to move the snapped configuration is
+not a moved target; refusing that would protect nothing and make the control unusable.)
+
+**Nothing is re-derived.** The capture configuration is `retunePlan`'s: T-341's `snapCenter` for the
+achievable-centre grid, `smallestCoveringSpan` for the narrowest window that still covers the pane,
+and T-418's derived off-DC placement (`span/4`, the midpoint of the usable half-band, maximally far
+from the LO spike at DC and the anti-alias roll-off at Nyquist), bounded by the pane staying inside
+the window and by the snap's own half-step, **without ever widening the window to buy the dodge**.
+The module decides *whether* to offer; it does not decide *where*, and a source assertion keeps it
+that way.
+
+**Three ways there is nothing to offer, each a statement rather than an omission:** a live window
+already contains the pane (coverage is containment, not overlap, and a pane pinned to one front end
+is not covered by another's window); the pane is **not showing the growing edge**, since a retune
+changes only what is captured from now on and offering would imply the past could be re-observed;
+and no grid was reported, because not knowing what the front end can do is not evidence that it can
+do this.
+
+**At the band edge the offer is disabled, not clamped** — T-409's rule, and the reason `retunePlan`
+tests `containsCenter` rather than `snapCenter`, which would walk an out-of-band request *inward*
+and call every out-of-range centre achievable. A pane past the top of the tunable range gets a
+stated refusal (`center_out_of_range`) and a control that does nothing when pressed; a pane wider
+than one capture window is survey overview (`span_too_wide`) and says so. A clamped retune that went
+somewhere other than the label is the control that lies, and it is the one thing this must not do.
+
+**The one client-side addition the spike asked for (§5.2):** after a retune the front end **took**,
+the growing edge's tiles are invalidated. They were computed *on request* from the tuning that has
+just ended, so a cached one is an observation claim about a tuning that no longer exists — which
+makes this the grey-honesty rule, not a freshness nicety. Two details: **coarser levels go too**, or
+the upscaled-ancestor fallback keeps drawing the old tuning underneath the new one; and an
+**in-flight** fetch is marked stale rather than merely aborted, because it lands *after* the retune
+and the cache would otherwise accept it into the empty slot it just made. `applyDeviceAction` now
+returns whether the front end took the action, because "only after a real retune" cannot be read off
+a toast.
 ### 8.5 What this removes
 
 The two bespoke edge-scrubber widgets collapse into canvas pan/zoom plus the minimap. The

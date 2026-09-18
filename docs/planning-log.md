@@ -4913,6 +4913,118 @@ completes it — so T-434 landed before its gate finished, under a message about
 amended, main verified separately (445/445, 332/332, zero FAIL lines across 2230 more). Cost time, not
 correctness.
 
+### B0.683 — a missing pair of parentheses, and a gate that was answering the wrong question (2026-09-17)
+
+**T-446** (`ecffd6a`) is the sharpest root cause of the day, and it is one operator:
+
+```rust
+if !continues && last_end.as_unix_nanos() > 0
+    || shared.counters.history.frames_ingested.load(...) > 0
+```
+
+Rust groups that as `(!continues && A) || B`, so **`!continues` guarded only the first disjunct** —
+and `B` is a **run-wide** counter shared by every segment, so once *any* segment had folded one frame
+it was true for ever and **every re-plumb sealed anyway**. `seal_through` advances a **monotonic**
+watermark, here by an hour of capture time, and it never retreats. That is why retuning *back*
+recovered nothing. The guard was introduced in exactly this shape by T-050, and **its own comment
+states the intent correctly**; the precedence defeated it.
+
+**The trap it recorded is worth more than the fix.** Its first test draft asked *"has anything for this
+centre landed yet"* — patient in **wall clock**, unbounded in **capture time**. The defect is bounded
+in capture time, and a scripted radio outruns an hour of stream time in ~88 s of wall clock, so **the
+broken build passed two of those assertions.** Only the `frames_late` counter caught it. That is the
+capture-clock family in a genuinely new place: not a *feature* measuring the observation, but **a test
+whose patience was measured in the wrong clock.**
+
+**T-438** (`f1981be`) avoided the spike's F2 by **removing the surface** rather than patching it: there
+is no caller-supplied per-axis cell budget on the tile route at all — **the address is the budget**. It
+also found that **T-426's walk direction inverts here**: `/api/timeline` prefers *coarsest adequate*
+and walks finer, while a tile must prefer *finest affordable* and walk coarser, because eviction hits
+the finest first. §7 step 5 does not say which, and getting it backwards would have re-imported F2.
+Measured tile production at **11.4 ms per 256×256 tile**, so the spike's "hypothetical 10 ms
+server-side" was nearly exact.
+
+**T-436** (`dfe9284`) turned out to have **no trade-off**: capping the suite at 8 threads is **faster
+*and* correct** — 234 s against 280 s, with one failure at 28. And it is structural, not luck: the
+serial group is one-at-a-time at any setting, so **its duration is the run's critical path** (96 % of
+the 8-thread run, 100 % of the 28-thread one), and parallelism outside it has nothing left to overlap
+with — it can only steal CPU from the tests that *are* the path. It also found that **T-257 measured
+the same discontinuity months ago** while investigating a `pipe(2)` race, not looking for a thread
+count. And it **flagged the defect its own cap hides** (`view_pause_keeps_capture`, 28 → 4/4 failures,
+8 → 1/4), which is now T-448.
+
+**T-424** (`6df409c`) reframed the always-full gate: *it is not "ignore some files", it is **classify
+the right diff**.* During `git merge --no-ff --no-commit` git itself builds the index as the merge
+result versus HEAD, and `git commit` commits the index — **the index is the change being certified**.
+The counterexample did not survive contact: classifying untracked paths as `full` never protected
+against a stray fixture, because **the suites read the working tree**, so fail-closed on untracked buys
+**cost, not safety**, for that subject. Guarded by requiring `MERGE_HEAD` (a blanket `--staged` would
+not be), with every unclassified path **printed with the class it would have had**. **First payoff the
+same hour:** T-440's merge classified `ui` instead of drawing a 25-minute full gate.
+
+**T-440** (`55fb808`) built the renderer core and found that **the spike cleared panes to grey — that
+one line was F3.** Production clears to `PENDING`; not-resident is a different *type* (`Residency`,
+never a `CellState`); and a test counts the grey literal in the shader source the renderer actually
+handed to `shaderSource`: **exactly one**. It also caught the spike's queue being **FIFO where §5.5
+requires LIFO**, and its ramp being *"an approximation of `CMAP_STOPS`"* — which would have quietly
+reintroduced the two colormaps T-397 existed to merge. **Three defects a throwaway prototype carried
+into the design, caught by the production pass** — the argument both for running the spike and for not
+shipping it.
+
+**The shape of this batch:** two of the five were *correct code with a wrong question underneath* — a
+guard whose comment was right and whose precedence was not, and a gate classifying the wrong diff. The
+other three were measurements overturning assumptions nobody had tested.
+
+### B0.684 — two states the type cannot spell, and a mark that must not promise arrival (2026-09-17)
+
+**T-442** (`75c7ebe`) answered T-347's finding structurally rather than carefully. T-347 established
+that **a run-wide boolean cannot represent N viewers**; T-442's answer is that **the fix is not a better
+flag, it is no flag**:
+
+```ts
+| { live: true;  spanNs }              // pinned to the edge — NO centre of its own
+| { live: false; centerNs; spanNs };   // frozen on an absolute capture instant
+```
+
+A following pane has **no centre** because it borrows the edge, re-derived every frame. So *"scrubbed
+but not paused"* and *"paused with a stale centre beside a live window"* are states **the type cannot
+express**. `freezeAt()` is a **coordinate change, not a mode change** — it writes down the window
+already showing, so the frame you pause on is `deepEqual` to the frame before it.
+
+Isolation was proved three ways, and the third settles it: a spy `fetch` over every pane operation sees
+an **empty call list**. **Pausing is, on the wire, nothing** — which is exactly what makes it unable to
+reach another pane, another browser, or the radio.
+
+**T-441** (`445fbef`) named the fifth state — *observed-but-not-yet-measured* — and its reasoning is the
+part to keep. The mark is **sparse dots**, and the rule is **the mark must not promise arrival**:
+T-446's defect wrote exactly this cell (coverage `observed`, `frames_late` climbing, nothing ever
+written) for **an hour of capture time**, and a "loading" spinner **would have made that invisible**. It
+also rejected the alternative discriminator — *is this cell near the live edge?* — as a guess about the
+future, which is precisely what this state must not assert. The discriminator it used is already on the
+wire and needs no clock: coverage `observed`, `max_db` null, **`frames == 0`**.
+
+It proved the tiers **in a frame** rather than on flags, replaying recorded GL ops — including the bytes
+actually uploaded to the samplers — through the CPU half of the table the shader is generated from, and
+asserting on **pixel histograms**. Three tiers give three pairwise-different pictures of identical
+measurements, **yet the ramp never moves**, because a tier inks only the pixels it draws on.
+
+**The merge gate caught a real integration defect between them**, which is what it exists for: T-442
+landed while T-441 was in flight, its fixtures predate `measured`, and `sourceCellPx` threw. **The
+agent's diagnosis beat mine.** I framed it as a missing field; the real bug is that `sourceCellPx` runs
+inside `drawRegion`, so the throw propagated out of `render` and **blanked every pane**, not the one
+tile — worth fixing whichever field is absent.
+
+**And it argued against my suggested fix, correctly.** I proposed drawing no survey lattice when
+`measured` is absent. It pointed out that **a survey-overview tile with no mark is pixel-identical to a
+live-iq tile**, so suppressing the tier mark is not the weaker claim — it *erases* the tier rather than
+being imprecise about the pitch, which is a different and louder falsehood. It fell back to the tile's
+own served grid instead: the rule `decodeTile` already applies, in one more place, rather than a second
+policy.
+
+**The pattern across both:** the strongest fixes this week have made bad states **unrepresentable**
+rather than guarded — no pause flag to desynchronise, one grey literal in the shader, a mark that cannot
+imply a future. That is the same move as `Coverage::Unobserved` not being spellable as quiet.
+
 ## Open for the user (current)
 
 Kept current by the coordinator; the planning-phase list near the top of this file is the 2026-09-13

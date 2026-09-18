@@ -85,3 +85,33 @@ def test_only_blocked_tasks_carry_a_blocker(records) -> None:
     """
     stale = [(i, f.get("status")) for i, f in records if f.get("blocked_on") and f.get("status") != "blocked"]
     assert not stale, f"blocked_on left behind after unblocking: {stale}"
+
+
+def test_a_commit_field_is_never_silently_a_number(records) -> None:
+    """A short SHA of all digits is a YAML *number*, and a leading zero makes it octal.
+
+    `commit: 0567143` parses as octal 192099 — the SHA is intact in the file and wrong in every
+    tool that reads it through a YAML loader. `commit: 5684346` is luckier: it becomes an int
+    whose digits happen to round-trip, so it reads correctly until someone compares types. Five
+    entries were affected before this test existed, and the leading-zero one had genuinely lost
+    its value.
+
+    This is the board's own instance of the rule the codebase keeps rediscovering: a field that is
+    *usually* a string is not a string, and nothing says so at the point of use. The fix is to
+    quote it; the guard is to refuse the unquoted form.
+
+    Deliberately a *textual* check, like the rest of this file: it reads the raw line, because the
+    whole point is that the loader has already destroyed the evidence by the time it has a value.
+    """
+    unquoted = [
+        (i, f["commit"])
+        for i, f in records
+        if f.get("commit")
+        and f["commit"][0].isdigit()
+        and f["commit"].strip('"').isdigit()
+        and not f["commit"].startswith('"')
+    ]
+    assert not unquoted, (
+        f"commit SHAs that YAML will read as numbers: {unquoted}. Quote them — an all-digit short "
+        "SHA becomes an int, and a leading zero becomes octal (0567143 -> 192099)."
+    )
