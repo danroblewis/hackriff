@@ -6537,8 +6537,8 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     );
     assert_eq!(
         fine["resolution"]["answered"]["levels"],
-        json!(64),
-        "the view lattice is 8 x 8 nodes, not a 5-rung ladder: {fine}"
+        json!(16),
+        "the view lattice is 4 x 4 nodes, not a 5-rung ladder: {fine}"
     );
     for axis in ["frequency", "time"] {
         assert_eq!(

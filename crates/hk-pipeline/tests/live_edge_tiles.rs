@@ -451,13 +451,17 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     // epoch of frequency, not to the span's own lower edge).
     let bw = f_cell * f64::from(VIEW_F_CELLS_PER_BLOCK);
     let blocks = ((F_LO + SPAN_HZ) / bw).ceil() - (F_LO / bw).floor();
-    let bound = VIEW_LEVELS as f64 * blocks * per_tile as f64;
+    // One tile row per TIME level, plus one: inside `seal_lag` a node's outgoing tile is still open
+    // while the incoming one has been created, so the instantaneous peak is a level higher than the
+    // steady set. Measured, not assumed — the peak at 4 x 4 is exactly this.
+    let bound = (VIEW_LEVELS + 1) as f64 * blocks * per_tile as f64;
     let mb = |b: f64| b / (1 << 20) as f64;
     let per_mhz = |b: f64| mb(b) / (SPAN_HZ / 1e6);
     eprintln!(
         "T-439 view-lattice floor ({:.2} kHz x 1 s, {nf}x{} cells/block, {} nodes), {:.1} MHz \
          tuned:\n  measured peak {peak_tiles} tiles, {:.1} MB resident, {:.0} KB/tile, \
-         {:.2} MB/MHz\n  bound (one tile row per TIME level, all {} of them): {:.1} MB, \
+         {:.2} MB/MHz\n  bound (a tile row per TIME level, all {} of them, plus a seal-lag \
+         overlap): {:.1} MB, \
          {:.2} MB/MHz -> {:.0} MB at a {:.0} MHz live edge",
         f_cell / 1e3,
         VIEW_T_CELLS_PER_BLOCK,
@@ -497,9 +501,9 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
         "residency exceeded one tile row per time level: {peak_bytes} > {bound:.0}"
     );
     assert!(
-        peak_bytes as f64 >= 4.0 * blocks * per_tile as f64,
-        "the four finest time levels should be resident together at the peak, got {peak_tiles} \
-         tiles ({peak_bytes} B)"
+        peak_bytes as f64 >= VIEW_LEVELS as f64 * blocks * per_tile as f64,
+        "every time level should be resident together at the peak, got {peak_tiles} tiles \
+         ({peak_bytes} B)"
     );
     // The order that matters: single MB per MHz, so a 20 MHz live edge is tens of MB — not the
     // hundreds the naive per-NODE estimate gives, and not the tens of KB that would mean nothing

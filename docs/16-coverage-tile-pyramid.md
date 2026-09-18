@@ -534,6 +534,52 @@ Pricing a pyramid as bytes-per-cell × cells understates it by half as much agai
 pure time fold; the two arms of the lattice came out within 2 % of each other. There is no axis to
 materialise preferentially and none to leave to read-time folding on cost grounds.
 
+### 6.4a What it costs to **write** — measured (T-439)
+
+§6.4 priced the lattice **on disk** and found 4× its finest node, which §5.2 had already accepted
+sight-unseen. **The same 4× applies to tile write *operations* per second of capture, and that is
+the number a running pipeline pays.** Nobody had costed it, and it is the more expensive of the two.
+
+The arithmetic is §6.4's finding 1 read in the time domain. A **welded ladder's** coarser levels are
+vastly coarser in *time* — scheme 1 steps ×60, ×15, ×4, ×24 — so they seal almost no tiles and the
+whole ladder totals ≈1.02× its level 0. A **de-welded ×2 lattice** has one tile series per time
+level and one per frequency level, so it totals ≈2 × 2 = **4× a ladder's tile writes**, by
+construction. Tile writes scale with *stream duration*, so a long or time-compressed run pays it
+continuously, not once.
+
+**Measured** (M0 acceptance, `cargo test -p hk-e2e --test acceptance_m0`, one box, back to back):
+
+| lattice | suite wall | user CPU | peak RSS |
+|---|---|---|---|
+| off | 31.7 / 32.9 s | 333 s | 6.28 GB |
+| 8 × 8 (64 nodes) | 112.7–162.8 s | 331–339 s | 6.42 GB |
+| 4 × 4 (16 nodes), shipped | **52.1 s** | 384 s | 6.26 GB |
+
+**5.1× the wall clock for identical user CPU and unchanged RSS** is what made this diagnosable: not
+compute, not memory — the runs were *waiting*. Three probes isolated it. One test **alone** costs
+10.5 s against 10.0 s, so there is no per-run cost worth the name. **Opening** a 64-level pyramid
+without ever writing it costs nothing (31.4 s). Only the **node count** moved it, at roughly
+**1.5 s of suite wall per node**. It is invisible on the product, which runs one pipeline, and
+amplified by the harness, which runs 28 on one volume and replays time-compressed 48-hour scenes.
+
+Two consequences, both landed:
+
+- **The shipped view lattice is 4 × 4** (`hk_pipeline::history::VIEW_LEVELS`): frequency
+  6.25 kHz → 50 kHz, time 1 s → 8 s. That is the range a live edge is looked at over, and the reach
+  given up is the reach T-438 independently found **unbackable at the coarse end** — a
+  3.28 GHz × 48-day tile needs 32 768 frequency cells at scheme 1's coarsest with no finer level
+  affordable. Surrendering reach nothing can serve is the cheapest kind of surrender. An address
+  past the coarsest node still answers, folded out of it and saying so per axis.
+- **Eager folding at every seal is a deviation from §5.2**, whose heading already reads
+  *"precomputed at seal time, on demand at the live edge"*. Filed as **T-453**.
+
+Two further write-side defects were found and fixed with it, neither of them this cost:
+`Pyramid::ingest` seals, encodes, compresses and writes **inline**, so folding on the history
+reader — which holds a capture gate cursor — stopped the ring at every tile boundary (now a
+`ViewWriter` thread); and a run-end seal *an hour* past the last frame forces every node's current
+tile shut however little of it was observed, measured at **273 files and 1288 ms to persist 0.1 MB**
+against a ladder's 9 files and 67 ms (now sealed through the last frame, 70 ms).
+
 ### 6.5 Which horizon binds, at which `(level_f, level_t)`
 
 Derived from the measured per-cell cost the way T-406 derived both of the observation log's bounds

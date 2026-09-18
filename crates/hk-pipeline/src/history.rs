@@ -194,30 +194,54 @@ pub const VIEW_T_CELLS_PER_BLOCK: u32 = 64;
 /// Widening the blocking recovered only about a quarter of the regression, and neither did moving
 /// the writes to their own thread (102 s) nor sealing through the last frame (112.7 s). Varying the
 /// **node count** did: a 4 × 4 lattice ran the same suite in 62.6 s against 8 × 8's 112.7 s and the
-/// control's 32.9 s, i.e. roughly **1.5 s of suite wall per lattice node**.
+/// control's 32.9 s, i.e. roughly **1.5 s of suite wall per lattice node**. That measurement is why
+/// [`VIEW_LEVELS`] is 4 and why T-453 exists; shipped, 4 × 4 with both write fixes runs it in
+/// **52.1 s**.
 ///
 /// That is not a defect, it is the **de-welding's running cost, and nobody had costed it**. T-434
 /// measured a lattice at about 4× its finest level *on disk* and accepted that; the same 4× applies
 /// to **tile write operations per second of capture**, and that is the part a running pipeline
 /// pays. A welded ladder's coarser levels are vastly coarser in *time* — scheme 1 steps ×60, ×15,
 /// ×4, ×24 — so they write almost nothing and the total is ~1.02× level 0. A de-welded ×2 lattice
-/// has eight time levels each writing its own tile series, giving 2× on the time axis and 2× on the
-/// frequency axis: **~4× scheme 1's tile writes, by construction**.
+/// has one tile series per time level, giving ~2× on the time axis and ~2× on the frequency axis:
+/// **~4× scheme 1's tile writes, by construction**, and the eager fold at every seal is itself a
+/// deviation from `docs/16` §5.2, which decided *precomputed at seal time, on demand at the live
+/// edge* (T-453).
 ///
 /// **It is invisible on the product and amplified only by the harness.** One acceptance run costs
 /// 10.5 s against 10.0 s with the lattice off — within noise — because a device runs *one*
 /// pipeline. The suite runs 28 concurrently on one volume, several of them replaying
 /// **time-compressed 48 h scenes**, so tile writes scale with stream duration and 28 pipelines'
-/// worth contend for one disk. Opening the 64-level pyramid without writing it costs nothing
-/// (31.4 s), which is what isolates the cost to the writes.
+/// worth contend for one disk. Opening the pyramid without writing it costs nothing (31.4 s at
+/// 64 levels), which is what isolates the cost to the writes.
 pub const VIEW_F_CELLS_PER_BLOCK: u32 = 1024;
 
-/// Frequency and time levels of the view lattice. 8 × 8 = 64 nodes, which is exactly
-/// [`hk_store::history::MAX_LEVELS`]: frequency reaches ×128 the floor and time reaches 128 s
-/// cells (8192 s tiles), which is the range a *live edge* is looked at over. Wider or older than
-/// that folds out of the coarsest node and says so per axis (`resolution.fold`), rather than
-/// pretending to a resolution nothing measured.
-pub const VIEW_LEVELS: usize = 8;
+/// Frequency and time levels of the view lattice: **4 × 4 = 16 nodes**, so frequency runs
+/// 6.25 kHz → 50 kHz (tiles 6.4 → 51.2 MHz) and time 1 s → 8 s (tiles 64 → 512 s). That is the
+/// range a **live edge** is actually looked at over, and a live edge is what this scheme exists
+/// for.
+///
+/// # Why not 8 × 8, which [`hk_store::history::MAX_LEVELS`] would allow
+///
+/// Because the reach it buys is not real, and it is not free.
+///
+/// **Not real:** T-438 found `docs/16` §6.2's V0 unbackable at the **coarse** end as well as the
+/// fine one — a 3.28 GHz × 48-day tile needs 32 768 frequency cells at scheme 1's coarsest and no
+/// finer level is affordable inside `/api/tiles`'s work budget. The nodes beyond this ladder
+/// address a surface nothing can serve; an address past the coarsest node still answers, folded out
+/// of it and saying so per axis in `resolution.fold`, which is the honest form of the same picture.
+///
+/// **Not free:** measured at ~**1.5 s of M0-acceptance wall per node** (see
+/// [`VIEW_F_CELLS_PER_BLOCK`] for the isolation). With both write fixes below, 4 × 4 runs that
+/// suite in **52.1 s** against 8 × 8's 112.7 s and the lattice-off control's 32.9 s — 8 × 8 would
+/// cost about 80 s per merge, on a gate that runs every merge this milestone, for reach nothing
+/// can back.
+///
+/// **This is a configuration, not a contract.** The alternative of ×4 steps per axis reaches the
+/// same node count by changing [`hk_store::ViewLattice`]'s own shape for every future consumer;
+/// that is a contract change, and the right time to consider it is after T-453 has made the coarse
+/// nodes lazy and the real access pattern has been measured.
+pub const VIEW_LEVELS: usize = 4;
 
 /// The view lattice this run opens: `f_cell_hz` × 1 s at node (0, 0), doubling independently on
 /// each axis (`docs/16` §8.2).
