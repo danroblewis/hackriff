@@ -13200,7 +13200,7 @@ tasks:
   - id: T-466
     milestone: M2-hardening
     title: ui/e2e/selftest.mjs cannot hold app-page faults, so per-guard attribution is meaningless for two specs
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: UI
     depends_on: []
