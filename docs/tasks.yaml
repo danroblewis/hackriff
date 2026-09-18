@@ -12518,7 +12518,7 @@ tasks:
   - id: T-458
     milestone: MCANVAS
     title: Drag-to-select and T-193's draggable Confirmed-band edges have no gesture - drag now pans
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-445, T-456]
@@ -12543,6 +12543,32 @@ tasks:
     notes: |
       Filed by the coordinator at T-445's merge (19d9bed).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "2ffef31"
+    result: |
+      DONE. T-193's OVERRIDE WAS LIVE AND HONOURED WITH NO WAY TO SET IT - the door was the broken half,
+      not the state. The ruling is KEEP, and it rests on finding EVERY READER first: marks.ts draws
+      user_band IN PLACE OF the measured extent; /api/inventory serves it on every row; inventory.rs
+      audits set and clear; migration 0006 stores it and carries it through merges; api_contract.rs and
+      inventory_lifecycle_api.rs cover it. CLEAR was wired. Only SET was orphaned - setUserBand had no
+      call site outside its own unit test, and "Adjust band" toasted an instruction to drag edge handles
+      THE CUTOVER HAD RETIRED. Retiring the state would have deleted a contract-tested, audited, working
+      feature because its way in was missing.
+      THE GESTURE IS SHIFT + DRAG, and its MEANING lives in preview.ts as dragIntent BESIDE wheelAxes - so
+      input.ts still reads no modifier bit and T-412's source guard passes unchanged, NOW COVERING THE
+      POINTER AS WELL AS THE WHEEL. Rejections reasoned, not asserted: CTRL because on macOS ctrl+click IS
+      the secondary click, so the stroke silently becomes "open the menu" - the same invisible failure
+      T-456 rejected ctrl+wheel for; ALT because it already means the time axis on the wheel; RIGHT-DRAG
+      because that button is this surface's only route to Promote/Delete/Adjust band.
+      READ FROM THE EVENT RATHER THAN INFERRED FROM THE VIEW: pointerdown.shiftKey true, shift present on
+      every move, 0 contextmenu, 0 dragstart; readout unchanged (no pan); one region committed. NINE FAULT
+      INJECTIONS, each required to go red.
+      T-340's control passes VERBATIM AND UNEDITED - its files are not in the diff - and was restated on
+      the wire: six drags including region strokes reached ZERO device calls, with two selection POSTs
+      proving the check non-vacuous.
+      TWO FINDINGS IT REFUSED TO SMUGGLE INTO ITS OWN FIX: the sidebar count is window-scoped, so its
+      first browser test read a PAN as a deleted selection (fixed by counting POSTs on the wire); and
+      ui/e2e/selftest.mjs cannot hold app-page faults - filed as T-466.
+      Gate: ui, test-ui 41/41, e2e 5/5 in 49.4 s.
   - id: T-459
     milestone: MCANVAS
     title: Axis ticks with labels - each viewport states its window as a readout, and a readout is not a ruler
@@ -12570,7 +12596,7 @@ tasks:
   - id: T-467
     milestone: MLIVE
     title: 99 percent of a live tile's 19.34 MB body is the coverage plane, and it is sent TWICE
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -12648,7 +12674,7 @@ tasks:
   - id: T-461
     milestone: MLIVE
     title: An empty tile costs 134 ms and 2.56 MB to build - 86 percent of an observed one - and must short-circuit
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     depends_on: []
@@ -12896,7 +12922,7 @@ tasks:
   - id: T-470
     milestone: MCANVAS
     title: Colours shift on zoom because the dB range auto-scales to the VISIBLE tiles - the same measurement must be the same colour
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CANVAS-FE
     core_interface: true
@@ -13107,6 +13133,120 @@ tasks:
       failed the gate because the trace strip made every drag over a pane inert. Do not start until
       T-457 lands, and build on its `trace.ts` rather than beside it.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-476
+    milestone: MCANVAS
+    title: Retune is offered only sporadically - make it a PERSISTENT per-pane control, because it raises resolution INSIDE the window too
+    status: in-progress
+    priority: normal
+    parallel_group: CANVAS-FE
+    depends_on: []
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      USER FEEDBACK: they love retune-to-fill-viewport - it is high-resolution sampling of a zoomed
+      region - but IT APPEARS ONLY SPORADICALLY. `ui/src/surface/retune.ts` offers it only when the
+      pane's viewport is NOT FULLY CONTAINED in the tuned window (the T-343/T-444 pan-offer model).
+      THE INSIGHT THAT CHANGES THE MODEL, and it is the user's: RETUNE IS VALUABLE EVEN INSIDE THE
+      TUNED WINDOW. The offer model assumed retune is for REACHING frequencies you cannot see -
+      true, and why the frequency navigator commands the radio - but retuning to a ZOOMED viewport
+      that already sits inside the tuned span RAISES THE RESOLUTION THERE: the same instantaneous
+      bandwidth spent on a narrower span is finer cells. Containment is therefore the wrong trigger.
+      A pane zoomed deep inside the current window is exactly where a user most wants this, and today
+      it is exactly where the control disappears.
+      MAKE IT A PERSISTENT PER-PANE CONTROL, ALWAYS VISIBLE, that retunes to the current viewport -
+      centre and span SNAPPED TO AN ACHIEVABLE CONFIGURATION, as T-418 already does.
+      KEEP THE STATED-AND-DISABLED BEHAVIOUR when the span exceeds one live window: that case is
+      survey-history overview rather than live IQ, and the control must SAY SO rather than vanish.
+      "Nothing said is never permissive" - a missing control teaches the user nothing, which is the
+      complaint that produced this ticket. A disabled control with a reason is the honest form.
+      DO NOT DISTURB WHAT T-444 AND T-407 ESTABLISHED. The retune must still RE-DERIVE ITS TARGET AT
+      THE INSTANT OF COMMIT, so a pan between press and commit cannot fire a stale target - T-444's
+      whole point. And it stays a DISCRETE PRESS, never a threshold on a pointer stream: T-407 found
+      two ways a finger could retune the radio. T-340's control - no pan and no wheel reaches a
+      device route - must pass VERBATIM and unedited.
+      Device rules unchanged: one capture at a time, settle gap, provenance and device_id recorded.
+      MULTI-SDR PER-SDR PICK IS EXPLICITLY LATER, NOT NOW - one device, one control. Note where it
+      would go rather than building it.
+      DoD: the control is present on every pane at all times; it retunes to the viewport when
+      achievable, INCLUDING when the viewport is fully inside the tuned window; it is stated and
+      disabled with a reason when the span exceeds one live window; the target re-derives at commit;
+      T-340 passes verbatim; and it is confirmed in a real browser via the T-455 harness.
+    notes: |
+      Filed 2026-09-18 from user feedback. The sporadic behaviour is not a bug in retune.ts - it is
+      the offer model working as designed, with a premise the user has now corrected.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-477
+    milestone: M2-hardening
+    title: The board does not self-clean - `just reconcile` answers which in-progress tickets git says are merged, stalled or empty
+    status: done
+    priority: normal
+    parallel_group: CI
+    depends_on: []
+    use_cases: []
+    commit: "PENDING"
+    acceptance: |
+      USER PROCESS DIRECTIVE 2026-09-18: the orphaned-in-progress problem recurs and SHOULD NOT NEED
+      THE SUPERVISOR TO CATCH IT. `in-progress` is a CLAIM ABOUT THE WORLD and nothing in the normal
+      flow re-checks it, so it goes stale two ways that look identical from the board and completely
+      different from git: a branch LANDS and the board is never flipped (T-300, T-364, T-426 and
+      T-458 all did this), or an AGENT IS LOST and its branch sits with work on it, or with none.
+      Because it is a pure function of git plus the board, it belongs in a RUNNER rather than in a
+      coordinator's memory - the same reason T-396 moved the which-suites decision into `just gate`.
+    notes: |
+      DONE. `py/hkpy/reconcile.py` + `just reconcile`, stdlib only like hkpy.gate. Per in-progress
+      ticket it prints MERGED / AHEAD n / NO WORK / NO BRANCH plus staleness, then names what to do.
+      THE DISCRIMINATOR IS THE MERGE COMMIT, NOT ANCESTRY, and the tool caught its own first draft
+      getting this wrong: `git merge-base --is-ancestor <branch> main` is TRUE for a branch freshly
+      cut from main, so the first run reported THREE LIVE WORKTREES as MERGED. It now asks the
+      question directly - does main carry a merge commit naming this branch's tip as a parent, which
+      is what `git merge --no-ff` writes and what a fresh branch never has. A tool whose job is to
+      catch a false claim on the board must not make one itself, and the test named
+      `test_a_fresh_branch_is_not_merged` pins it.
+      It parses the board TEXTUALLY rather than with PyYAML, deliberately: it must answer when the
+      board has a merge conflict in it, which is exactly when a coordinator most wants to know what
+      is in flight.
+      STALENESS IS A HINT, NOT A VERDICT - an agent reading rather than writing is legitimately
+      quiet - so the tool prints evidence and refuses to draw the conclusion itself.
+      KNOWN LIMITATION, worth stating rather than hiding: a ticket deliberately built on ANOTHER
+      ticket's branch reads as NO BRANCH (T-461 on task-t467 at the time of writing). That is
+      correct about git and misleading about the world; the fix would be a `branch:` field on the
+      board, which is not worth it yet.
+      The standing discipline is recorded in CLAUDE.md Coordination: run it at the START of every
+      tick, before launching anything.
+  - id: T-478
+    milestone: M2-hardening
+    title: surface-region's readout assertions compared a string containing the pane's LIVE-EDGE DRIFT
+    status: done
+    priority: high
+    parallel_group: UI
+    depends_on: []
+    use_cases: []
+    commit: "PENDING"
+    acceptance: |
+      FOUND BY THE COORDINATOR 2026-09-18 when T-451's gate failed on `surface-region.e2e.mjs` -
+      A PURE RUST TEST-FILE CHANGE CANNOT BREAK A UI E2E SPEC, which is what made it obvious the
+      spec, not the diff, was at fault.
+      The spec compared the chrome READOUT string before and after a gesture. A FOLLOWING pane's
+      `where` line ends in its offset from the live edge - `LIVE`, or `-281 ms` once the render loop
+      falls behind capture that is still arriving. THAT OFFSET DRIFTS WITH WALL-CLOCK LAG AND NO
+      GESTURE TOUCHES IT. Measured on main under three concurrent builders: `-0 ms` became `-281 ms`
+      with the frequency, the span and the level all BYTE-IDENTICAL.
+      BOTH DIRECTIONS WERE WRONG, and the silent one is worse: an `equal` assertion ("it must not
+      have panned") goes RED under load, while a `notEqual` assertion ("a plain drag must pan") can
+      go GREEN ON DRIFT ALONE, passing without any pan at all.
+      THE FAMILY: T-383 - a test may not bound a quantity whose natural range it has not measured -
+      and the repo's recurring capture-clock-versus-wall-clock defect (T-448 compared them at ~27x
+      real time).
+    notes: |
+      DONE, and it NARROWS what is compared without weakening it. READOUT is now a projection: while
+      a pane is FOLLOWING the live-edge offset is dropped, because a following pane sits at the edge
+      BY DEFINITION and its time position carries nothing a pan could change - a pan in time STOPS it
+      following, which the projection reports separately via data-following. While a pane is NOT
+      following the offset is a fixed property of the view and is KEPT, because there it is exactly
+      what a time pan moves. Everything a pan alters - centre, span, level, and whether the pane
+      still follows - is still compared exactly.
+      Verified: surface-region 4/4 in 3.6 s.
+      This is why T-473 (the e2e tier has no per-spec timeout) matters: this tier now gates every
+      merge, so a load-sensitive assertion in it blocks the whole queue.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
