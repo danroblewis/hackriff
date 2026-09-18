@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use hk_model::{TileKey, Timestamp};
+use hk_model::{FreqRange, TileKey, TimeRange, Timestamp};
 
 use super::StoreError;
 use super::codec;
@@ -26,6 +26,11 @@ pub struct PyramidStats {
     pub frames_rejected: u64,
     /// Sealed tiles written.
     pub tiles_written: u64,
+    /// T-453: coarse tiles built **on demand** by [`Pyramid::materialize`] rather than at a seal.
+    /// Counts both the ones persisted (their time block had fully elapsed) and the transient
+    /// live-edge ones, which is the point of the counter: it is the work the read path pays in
+    /// exchange for the work capture no longer does.
+    pub tiles_materialized: u64,
     /// Open level-0 tiles checkpointed.
     pub checkpoints_written: u64,
     /// Bytes written (sealed tiles and checkpoints).
@@ -123,6 +128,12 @@ pub struct Pyramid {
     pub(super) root: PathBuf,
     /// Open tiles per level, keyed `(f_block, t_block)`.
     pub(super) open: Vec<HashMap<(i64, i64), Box<Tile>>>,
+    /// T-453: coarse tiles built on demand whose time block has **not** elapsed — the live edge,
+    /// which `docs/16` §5.2 says is computed on request precisely because it cannot be
+    /// precomputed. Keyed `(level, f_block, t_block)`, never written, and dropped the moment the
+    /// data they were folded from can have changed (see [`Pyramid::invalidate_derived`]), so a
+    /// growing edge can never be served from a stale summary.
+    pub(super) derived: HashMap<(usize, i64, i64), Box<Tile>>,
     /// Sealed tiles on disk per level, keyed `(t_block, f_block)` → bytes.
     pub(super) sealed: Vec<BTreeMap<(i64, i64), u64>>,
     /// Level-0 checkpoint files of open tiles, `(f_block, t_block)` → bytes.
@@ -179,6 +190,15 @@ pub(super) struct Ages {
 
 /// File of the per-source front-end state (T-126), under the scheme root.
 const SOURCE_STATE_FILE: &str = "front_end.state";
+
+/// Producer tiles one [`Pyramid::materialize`] call may fold, over the whole recursion.
+///
+/// The shipped 4 × 4 view lattice's *coarsest* node needs 127 (64 level-0 tiles and the 63
+/// intermediates on the canonical path), and the intermediates are sealed on the way so the next
+/// address pays a fraction of it. The cap is what stops an address into a scheme with a deep ladder
+/// turning one tile request into an unbounded read; it is an error rather than a silent partial,
+/// because a partial fold is a tile that says *unobserved* about data the store holds.
+const MAX_MATERIALIZE_TILES: usize = 1024;
 
 fn dur_ns(d: std::time::Duration) -> i64 {
     i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)
@@ -249,6 +269,7 @@ impl Pyramid {
         let bins = usize::from(config.histogram.bins);
         let mut p = Self {
             open: (0..n).map(|_| HashMap::new()).collect(),
+            derived: HashMap::new(),
             sealed: (0..n).map(|_| BTreeMap::new()).collect(),
             checkpoints: HashMap::new(),
             disk_bytes: 0,
@@ -544,6 +565,9 @@ impl Pyramid {
             i = j;
         }
         self.stats.frames_folded += 1;
+        // T-453: this frame has just changed level 0, so any live-edge summary folded from it is
+        // stale. Cheap when nothing is cached, which is every ingest of a run nobody is watching.
+        self.invalidate_derived();
         let end = frame.t.as_unix_nanos().saturating_add(frame.duration_ns);
         self.latest_ns = self.latest_ns.max(end);
         let due = self
@@ -597,6 +621,7 @@ impl Pyramid {
     }
 
     fn seal_through_ns(&mut self, w: i64) -> Result<(), StoreError> {
+        self.invalidate_derived();
         self.watermark_ns = self.watermark_ns.max(w);
         let w = self.watermark_ns;
         let margin = self.cfg.occupancy_margin_db;
@@ -621,7 +646,12 @@ impl Pyramid {
                     self.update_floor(&tile);
                 }
                 let written = self.write_tile(level, &tile, true);
-                if written.is_ok() {
+                // T-453, `docs/16` §5.2: eager only for a ladder. A lattice's coarse nodes are
+                // built by `materialize` when a read asks for them, so capture writes one tile
+                // series instead of ~4 (§6.4a) — and on a narrow capture, instead of ~7.5, because
+                // a frequency-coarser node's tile seals on the same watermark as its producer's
+                // however few frequency blocks the capture spans.
+                if written.is_ok() && !self.cfg.coarse_on_demand {
                     self.fold_into_consumers(level, &tile);
                 }
                 self.pool[level].push(tile);
@@ -704,6 +734,286 @@ impl Pyramid {
             );
         }
         self.consumers = ups;
+    }
+
+    /// Drops every transient live-edge summary. Called wherever the data a derived tile was folded
+    /// from can have changed — a fold into level 0, or a seal that adds a sealed child — so the
+    /// cache can never outlive its inputs by so much as one frame.
+    fn invalidate_derived(&mut self) {
+        if !self.derived.is_empty() {
+            for ((level, ..), tile) in std::mem::take(&mut self.derived) {
+                self.pool[level].push(tile);
+            }
+        }
+    }
+
+    /// The producer tiles of `(level, fb, tb)`: `(f_blocks, t_blocks)` of `level`'s producer.
+    ///
+    /// The exact inverse of [`Geometry::fold_target`], and it must stay that way — it is the one
+    /// place a lazy build decides *what to fold*, where the eager path was told by the child which
+    /// parent to fold into. `f_factor` child frequency blocks (a parent cell's children lie in one
+    /// child tile, which `geometry()` enforces) × `nt / parent_cells_per_tile` child time blocks
+    /// (1 when the node coarsens frequency alone, which is the whole point of the de-welding).
+    fn child_blocks(
+        &self,
+        from: usize,
+        level: usize,
+        fb: i64,
+        tb: i64,
+    ) -> (std::ops::Range<i64>, std::ops::Range<i64>) {
+        let u = &self.geom.levels[level];
+        let f = i64::from(u.f_factor);
+        let k = self.geom.parent_cells_per_tile(from, level).max(1);
+        let per_parent_tile = (u.nt as i64).div_euclid(k).max(1);
+        (
+            fb * f..(fb + 1) * f,
+            tb * per_parent_tile..(tb + 1) * per_parent_tile,
+        )
+    }
+
+    /// Folds every existing producer tile of `(level, fb, tb)` into a fresh tile, or `None` when no
+    /// producer tile holds anything (an address over unobserved time–frequency, which must stay
+    /// unobserved rather than becoming an empty *measured* tile).
+    ///
+    /// A producer still **open** at the live edge contributes what it holds, which is everything
+    /// except the occupancy of its own in-progress time column — that is decided by
+    /// [`Tile::close_column`] when the column ends, and a direct level-0 read stands in for it with
+    /// `column_preview`. So a live-edge summary can lag level 0's occupancy by up to one of the
+    /// producer's time cells. It never disagrees with it: max-hold, counts and linear power are
+    /// accumulated as each value lands.
+    fn fold_children(
+        &mut self,
+        from: usize,
+        level: usize,
+        fb: i64,
+        tb: i64,
+    ) -> Result<Option<Box<Tile>>, StoreError> {
+        let key = TileKey {
+            scheme: self.cfg.scheme,
+            level: level as u8,
+            f_block: fb,
+            t_block: tb,
+        };
+        let (f_range, t_range) = self.child_blocks(from, level, fb, tb);
+        let (f_factor, t_factor) = (
+            self.geom.levels[level].f_factor,
+            self.geom.levels[level].t_factor,
+        );
+        let hist_cfg = self.cfg.histogram;
+        let pct = self.pct();
+        let mut group_hist = std::mem::take(&mut self.group_hist);
+        let mut parent: Option<Box<Tile>> = None;
+        let mut result = Ok(());
+        'outer: for cfb in f_range {
+            for ctb in t_range.clone() {
+                // The producer tile, wherever it lives: still open at the live edge, already
+                // derived for a coarser read, or sealed on disk.
+                let owned;
+                let child: Option<&Tile> = if let Some(t) = self.open[from].get(&(cfb, ctb)) {
+                    Some(t)
+                } else if let Some(t) = self.derived.get(&(from, cfb, ctb)) {
+                    Some(t)
+                } else {
+                    match self.read_sealed(from, cfb, ctb) {
+                        Ok(t) => {
+                            owned = t;
+                            owned.as_ref()
+                        }
+                        Err(e) => {
+                            result = Err(e);
+                            break 'outer;
+                        }
+                    }
+                };
+                let Some(child) = child else { continue };
+                let p = parent.get_or_insert_with(|| {
+                    let g = &self.geom.levels[level];
+                    match self.pool[level].pop() {
+                        Some(mut t) => {
+                            t.reset(key, g);
+                            t
+                        }
+                        None => {
+                            Box::new(Tile::new(key, self.geom.nf, g, usize::from(hist_cfg.bins)))
+                        }
+                    }
+                });
+                p.fold_child(child, f_factor, t_factor, &hist_cfg, pct, &mut group_hist);
+            }
+        }
+        self.group_hist = group_hist;
+        result?;
+        Ok(parent)
+    }
+
+    /// Ensures the tile `(level, fb, tb)` exists, building it from its producers if it does not.
+    ///
+    /// A tile whose time block has fully elapsed is **written sealed** — precomputed from then on,
+    /// which is `docs/16` §5.2's "precomputed at seal time" applied to the levels a reader actually
+    /// asks for. One at the **live edge** cannot be sealed (more frames are still due inside it), so
+    /// it is folded into [`Pyramid::derived`] and thrown away the moment anything under it changes.
+    ///
+    /// Returns whether the tile now exists. `false` means the region holds nothing, which is a real
+    /// answer and not a failure.
+    fn materialize_tile(
+        &mut self,
+        level: usize,
+        fb: i64,
+        tb: i64,
+        budget: &mut usize,
+    ) -> Result<bool, StoreError> {
+        if self.sealed[level].contains_key(&(tb, fb))
+            || self.open[level].contains_key(&(fb, tb))
+            || self.derived.contains_key(&(level, fb, tb))
+        {
+            return Ok(true);
+        }
+        let Some(from) = self.geom.levels[level].from else {
+            return Ok(false); // a level nothing produces: level 0 is capture's own product
+        };
+        if *budget == 0 {
+            return Err(StoreError::BadQuery(format!(
+                "building level {level} here needs more than {MAX_MATERIALIZE_TILES} tiles of \
+                 folding; ask for a finer level, or a smaller region"
+            )));
+        }
+        *budget -= 1;
+        let (f_range, t_range) = self.child_blocks(from, level, fb, tb);
+        for cfb in f_range {
+            for ctb in t_range.clone() {
+                self.materialize_tile(from, cfb, ctb, budget)?;
+            }
+        }
+        let Some(parent) = self.fold_children(from, level, fb, tb)? else {
+            return Ok(false);
+        };
+        self.stats.tiles_materialized += 1;
+        if self.geom.block_end_ns(level, tb) <= self.watermark_ns {
+            let written = self.write_tile(level, &parent, true);
+            self.pool[level].push(parent);
+            written?;
+        } else {
+            self.derived.insert((level, fb, tb), parent);
+        }
+        Ok(true)
+    }
+
+    /// **Builds the coarse tiles a read at `level` over `(freq, time)` needs** (`docs/16` §5.2,
+    /// T-453). A no-op unless [`PyramidConfig::coarse_on_demand`] is set, and a no-op for a level
+    /// nothing produces.
+    ///
+    /// # Why this does not simply move the contention it removes
+    ///
+    /// The eager fold ran on **every seal, for every node, for the whole run**: its cost is
+    /// O(capture duration × nodes), it is paid by the thread that gates the ring, and — this is the
+    /// part that made it 5.1× on the harness — it is paid whether or not anyone ever looks. This
+    /// runs O(tiles actually viewed), on a reader, **once**: the result is sealed to disk, so the
+    /// second viewer of the same address pays nothing, and a node nobody opens costs nothing
+    /// forever. Only the live edge is rebuilt per read, and only the live edge *can* be, which is
+    /// exactly §5.2's split.
+    ///
+    /// The lock is the same mutex the read already takes, and callers already chunk their reads
+    /// (`/api/tiles` re-acquires per whole output row), so the hold this adds is bounded the same
+    /// way the read's is — by the region asked for, not by the run's length.
+    pub fn materialize(
+        &mut self,
+        level: usize,
+        freq: FreqRange,
+        time: TimeRange,
+    ) -> Result<usize, StoreError> {
+        if !self.cfg.coarse_on_demand || level >= self.geom.n_levels() {
+            return Ok(0);
+        }
+        if !(freq.lo_hz.is_finite() && freq.hi_hz >= freq.lo_hz) {
+            return Err(StoreError::BadQuery("frequency range".into()));
+        }
+        if time.end < time.start {
+            return Err(StoreError::BadQuery("time range".into()));
+        }
+        let g = self.geom.levels[level];
+        let nf = self.geom.nf as i64;
+        let c_lo = (freq.lo_hz / g.f_cell_hz).floor() as i64;
+        let c_hi = ((freq.hi_hz / g.f_cell_hz).ceil() as i64 - 1).max(c_lo);
+        let (fb_lo, fb_hi) = (c_lo.div_euclid(nf), c_hi.div_euclid(nf));
+        let block = g.t_block_ns();
+        let t0 = time.start.as_unix_nanos();
+        let tb_lo = t0.div_euclid(block);
+        let tb_hi = time
+            .end
+            .as_unix_nanos()
+            .saturating_sub(1)
+            .max(t0)
+            .div_euclid(block);
+        // The addresses asked for, before any folding: bounded here as well as inside the
+        // recursion, so a wide region is refused rather than walked a tile at a time.
+        let asked = (fb_hi - fb_lo + 1).saturating_mul(tb_hi - tb_lo + 1);
+        if asked > MAX_MATERIALIZE_TILES as i64 {
+            return Err(StoreError::BadQuery(format!(
+                "{asked} tiles of level {level} cover this region, over the {MAX_MATERIALIZE_TILES} \
+                 one request may build; ask for a coarser level, or a smaller region"
+            )));
+        }
+        let mut budget = MAX_MATERIALIZE_TILES;
+        let mut built = 0;
+        for fb in fb_lo..=fb_hi {
+            for tb in tb_lo..=tb_hi {
+                if self.materialize_tile(level, fb, tb, &mut budget)? {
+                    built += 1;
+                }
+            }
+        }
+        Ok(built)
+    }
+
+    /// The budget pass's step: builds the missing summary of the **oldest** sealed tile that no
+    /// coarser level covers, finest level first — the order the budget evicts in, so the tile that
+    /// gets a summary is the one about to need it.
+    fn promote_oldest(&mut self) -> bool {
+        let top = self.geom.top();
+        for level in 0..top {
+            let Some(&(tb, fb)) = self.sealed[level]
+                .keys()
+                .find(|&&(tb, fb)| !self.covered(level, fb, tb))
+            else {
+                continue;
+            };
+            if self.promote_for_retention(level, fb, tb) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// One retention step for a lazy lattice: the summary a tile about to be evicted would
+    /// otherwise not have. Returns whether a coarser tile actually became sealed, so the caller's
+    /// loop terminates on `false` rather than spinning.
+    ///
+    /// **Retention is the one place laziness cannot be honest on its own**: dropping the fine
+    /// tiles of a level whose coarse summary was never built would lose the measurement outright,
+    /// which is the opposite of what the byte budget is for. So the summary is produced *here*,
+    /// for exactly the tile that is about to go, and nowhere else.
+    fn promote_for_retention(&mut self, level: usize, fb: i64, tb: i64) -> bool {
+        if !self.cfg.coarse_on_demand {
+            return false;
+        }
+        let ups: Vec<usize> = self.geom.consumers(level).to_vec();
+        let mut any = false;
+        for up in ups {
+            let (pfb, ptb) = self.geom.fold_target(level, up, fb, tb);
+            if self.sealed[up].contains_key(&(ptb, pfb)) {
+                continue;
+            }
+            // A consumer tile whose own block has not ended cannot be sealed, and the fine tile
+            // under it must therefore be kept. That is the correct answer, not a failure.
+            if self.geom.block_end_ns(up, ptb) > self.watermark_ns {
+                continue;
+            }
+            let mut budget = MAX_MATERIALIZE_TILES;
+            if matches!(self.materialize_tile(up, pfb, ptb, &mut budget), Ok(true)) {
+                any = true;
+            }
+        }
+        any && self.covered(level, fb, tb)
     }
 
     fn write_tile(&mut self, level: usize, tile: &Tile, sealed: bool) -> Result<(), StoreError> {
@@ -982,7 +1292,7 @@ impl Pyramid {
                 if !self.sealed[level].contains_key(&(tb, fb)) {
                     continue;
                 }
-                if !self.covered(level, fb, tb) {
+                if !self.covered(level, fb, tb) && !self.promote_for_retention(level, fb, tb) {
                     // Re-check once the last consumer still missing this tile has sealed past it.
                     let at = self
                         .geom
@@ -1026,8 +1336,15 @@ impl Pyramid {
             };
             let mut victims = Vec::new();
             let mut visits = 0;
-            for &(tb, fb) in &self.unprotected[level] {
-                if excess == 0 || (level < top && !self.covered(level, fb, tb)) {
+            let keys: Vec<(i64, i64)> = self.unprotected[level].iter().copied().collect();
+            for (tb, fb) in keys {
+                if excess == 0 {
+                    break;
+                }
+                if level < top
+                    && !self.covered(level, fb, tb)
+                    && !self.promote_for_retention(level, fb, tb)
+                {
                     break;
                 }
                 visits += 1;
@@ -1061,6 +1378,10 @@ impl Pyramid {
             self.retention_visits += visits;
             match victim {
                 Some((level, (tb, fb))) => self.evict(level, tb, fb)?,
+                // A lazy lattice has no coarse summary until something asks for one, so the budget
+                // pass builds the one it is about to need. `promote_oldest` returns false as soon
+                // as it cannot make progress, which is what terminates this loop.
+                None if self.cfg.coarse_on_demand && self.promote_oldest() => continue,
                 None => {
                     self.stats.over_budget = true;
                     break;
@@ -1282,7 +1603,14 @@ impl Pyramid {
                 }
             }
         }
+        // T-453: a lazy lattice has nothing to re-fold. A coarse tile of a lazy scheme is only ever
+        // written once its own time block has elapsed, after which no further child can seal into
+        // it (a frame for a sealed level-0 tile is refused as late), so every coarse tile on disk
+        // is already complete and every one that is missing will be built when a read asks.
         for level in 0..=top {
+            if self.cfg.coarse_on_demand {
+                break;
+            }
             let ups: Vec<usize> = self.geom.consumers(level).to_vec();
             if ups.is_empty() {
                 continue;

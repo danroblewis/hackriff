@@ -203,6 +203,40 @@ accepted (140 GB free at the time of the decision). This matches how the history
 so the coarse levels are a seal-time product like every other tier, and only the edge — where data is
 still arriving and cannot be precomputed — is computed on request.
 
+**How it is implemented — and which "seal time" it turned out to be (T-453).** The first
+implementation folded every sealed tile into every consumer as it sealed, so the whole lattice was a
+by-product of capture. That reads the decision as *the producer's* seal time; §6.4a measured what it
+costs, and it costs ~4× a ladder's tile writes per second of capture, paid whether or not anyone
+looks. The implementation now reads it as **the consumer's** seal time: a coarse node is built by the
+read that asks for it, and a node whose own time block has elapsed is **written sealed on the way**,
+so it is precomputed for every reader after the first. Only the live edge — a node whose block has
+not ended, and so cannot be sealed — is folded transiently and dropped when a frame lands under it.
+
+Three consequences, all measured:
+
+- **Capture's cost stops depending on the node count.** It writes node (0, 0) and nothing else, and
+  the resident accumulator floor went from one tile row per *time level* plus a seal-lag overlap
+  (2.28 MB/MHz measured, 3.65 MB/MHz bound) to **one row plus that overlap, 0.91 MB/MHz measured
+  and bounded** — ~18 MB at a 20 MHz live edge, independent of how many nodes the lattice has.
+- **The 4× on disk becomes a cost of looking, not of capturing.** §6.4's measurement still holds for
+  a viewer who opens every node; a run nobody watches leaves nothing but its finest node behind.
+- **Retention is the one place laziness cannot be honest on its own.** Evicting a fine tile whose
+  coarse summary was never built would lose the measurement, so the byte-budget and age passes build
+  the summary of exactly the tile that is about to go, and nowhere else.
+
+The set-up is not free at the coarse end: the shipped 4 × 4 lattice's coarsest node folds 64 level-0
+tiles and 63 intermediates, and the cap on that (1 024 producer tiles per request) is an **error**
+rather than a partial fold, because a partial fold is a tile that reads *unobserved* over data the
+store holds.
+
+**This does not move the contention it removes.** The eager fold ran on every seal, for every node,
+for the whole run, on the thread that gates the ring — O(capture duration × nodes), paid whether or
+not anyone looked. The lazy build is O(tiles actually viewed), on a reader, once, and the reader
+already chunks its lock holds by whole output rows (§5.5 cap 3), so the hold this adds is bounded by
+the region asked for rather than by the run's length. The build and the query share **one** lock
+hold per chunk, deliberately: splitting them would race ingest, which drops the live-edge summary
+the instant a frame lands under it.
+
 ### 5.3 Confirmed-signal highlighting — SETTLED: the client overlays; a tile carries no emitters
 
 **A tile carries measurement and coverage. It never carries emitters.** The client draws highlights
@@ -571,7 +605,14 @@ Two consequences, both landed:
   affordable. Surrendering reach nothing can serve is the cheapest kind of surrender. An address
   past the coarsest node still answers, folded out of it and saying so per axis.
 - **Eager folding at every seal is a deviation from §5.2**, whose heading already reads
-  *"precomputed at seal time, on demand at the live edge"*. Filed as **T-453**.
+  *"precomputed at seal time, on demand at the live edge"*. Filed as **T-453**, and **fixed**: the
+  coarse nodes are now built by the read that asks for them and sealed on the way, so the ≈4× above
+  is what a viewer of every node pays and no longer what every second of capture pays. See §5.2 for
+  what that changed and what it did not. Measured on the same box, comparing each target's own test
+  time so no build is counted: the acceptance gate's ten targets went from **190.6 s to 160.4 s**,
+  and **the M0 slice inside it from 54.1 s to 33.5 s — against the lattice-off control's 32.9 s.**
+  `hk-pipeline`'s own suite went from **262 s to 75 s**, because its live-edge test no longer waits
+  on capture to fold the off-diagonal nodes. **The lattice now costs the gate nothing measurable.**
 
 Two further write-side defects were found and fixed with it, neither of them this cost:
 `Pyramid::ingest` seals, encodes, compresses and writes **inline**, so folding on the history

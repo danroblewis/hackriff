@@ -270,6 +270,44 @@ pub(crate) fn with_tile_history<T>(
     }
 }
 
+/// [`with_tile_history`], with the store **mutable first**, so a read can build the coarse node it
+/// is asking for (`docs/16` §5.2 "on demand at the live edge", T-453) inside the same lock hold
+/// that then reads it.
+///
+/// The build and the read cannot be split into two holds: a live-edge summary is dropped the
+/// instant the frames under it change, so materialising under one lock and querying under the next
+/// would race ingest and serve a tile that reads *unobserved* over data the store holds.
+///
+/// A store reached only through the floor product is immutable here and is scheme 1, whose coarse
+/// levels are a seal-time product; [`hk_store::Pyramid::materialize`] is a no-op for it either way,
+/// so that path simply reads.
+fn with_tile_history_built<T>(
+    state: &ApiState,
+    store: TileStore,
+    level: u8,
+    freq: FreqRange,
+    time: TimeRange,
+    read: impl FnOnce(&hk_store::Pyramid) -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    let shared = match store {
+        TileStore::View => state.view_history.as_ref(),
+        TileStore::Main => state.history.as_ref(),
+    };
+    let Some(shared) = shared else {
+        return with_tile_history(state, store, read);
+    };
+    let mut p = shared
+        .lock()
+        .map_err(|_| ApiError::new(500, "history store poisoned"))?;
+    p.materialize(usize::from(level), freq, time).map_err(|e| {
+        ApiError::new(
+            400,
+            format!("this tile's level cannot be built from the levels below it: {e}"),
+        )
+    })?;
+    read(&p)
+}
+
 /// The lattice a tile address is expressed in.
 ///
 /// Both forms give the same thing — a `(level_f, level_t)` grid of cell sizes — and differ only in
@@ -586,8 +624,11 @@ fn read_level(
             Timestamp::from_unix_nanos(t0 + hi as i64 * key.t_cell_ns),
         );
         // One lock hold per chunk: the history mutex is released between chunks so a tile fan-out
-        // at the live edge never holds it for a whole tile (docs/16 §5.5 cap 3).
-        let part = with_tile_history(state, store, |p| {
+        // at the live edge never holds it for a whole tile (docs/16 §5.5 cap 3). T-453 builds the
+        // coarse node inside that same hold, per chunk, so the chunking that bounds the read bounds
+        // the build too — and so an ingest between chunks re-builds the live edge rather than
+        // leaving half the tile unobserved.
+        let part = with_tile_history_built(state, store, level, key.region.freq, chunk, |p| {
             let h = p
                 .query(&RegionQuery {
                     freq: key.region.freq,

@@ -66,8 +66,19 @@ fn node(level_f: usize, level_t: usize) -> u8 {
 
 /// Observed cells the view pyramid holds at `level` for `center` over the **capture-time** window
 /// `[from_ns, from_ns + WINDOW_NS)`.
+///
+/// **T-453: a coarse node is built when a read asks for it** (`docs/16` §5.2), so this asks — in
+/// the same lock hold as the query, which is what `/api/tiles` does per output-row chunk and for
+/// the same reason: a live-edge summary is dropped the moment a frame lands under it.
 fn observed_at(view: &Arc<Mutex<Pyramid>>, level: u8, center: f64, from_ns: i64) -> usize {
-    let p = view.lock().unwrap();
+    let mut p = view.lock().unwrap();
+    let freq = FreqRange::centered(center, 0.5 * FS);
+    let time = TimeRange::new(
+        Timestamp::from_unix_nanos(from_ns),
+        Timestamp::from_unix_nanos(from_ns + WINDOW_NS),
+    );
+    p.materialize(usize::from(level), freq, time)
+        .expect("the view pyramid built the node");
     let h = p
         .query(&RegionQuery {
             freq: FreqRange::centered(center, 0.5 * FS),
@@ -302,12 +313,18 @@ fn the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture()
 
     // ---- 5. the off-diagonal nodes carry the live edge's own measurements ----
     //
-    // Coarser nodes are fed by folding **sealed** finer tiles, so this waits for a finest tile to
-    // complete in capture time rather than forcing it: the run-end seal goes through the last
-    // frame and no further, deliberately (see `history::view_writer` — the hour of slack scheme 1
-    // uses writes 273 files to persist 0.1 MB on a 64-node lattice). A node (0, 0) tile is
+    // T-453: they carry them **when asked**. `observed_at` materialises before it queries, which is
+    // the whole of the change — capture writes node (0, 0) and no other, and a coarse node is
+    // folded out of it by the reader that wants it. A node whose own time block has elapsed is
+    // sealed on the way, so the second reader of the same address pays nothing; one at the live
+    // edge is folded transiently and thrown away when the next frame lands.
+    //
+    // This still waits for a finest tile to complete in capture time rather than forcing it, so
+    // that the *sealed* path is the one exercised: the run-end seal goes through the last frame and
+    // no further, deliberately (see `history::view_writer` — the hour of slack scheme 1 uses writes
+    // 273 files to persist 0.1 MB on a 64-node lattice). A node (0, 0) tile is
     // `VIEW_T_CELLS_PER_BLOCK` seconds, so one completes on its own shortly after that much stream
-    // time, and the fold into (0, 1) and (1, 0) follows.
+    // time, and (0, 1) and (1, 0) can then be folded out of sealed tiles.
     let tile_ns = VIEW_T_CELLS_PER_BLOCK as i64 * 1_000_000_000;
     let want = 3 * tile_ns;
     let deadline = Instant::now() + LIMIT;
@@ -367,12 +384,22 @@ fn the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture()
 /// an open tile depends on where the watermark sits modulo each node's tile duration, so one
 /// snapshot varies by 2× and is not a bound.
 ///
-/// The measurement found something the arithmetic did not predict. **Only the `level_f = 0` column
-/// is ever resident.** A frequency-coarser node has the *same* time cell as its producer, so the
-/// fold that fills it runs inside the producer's seal — after the watermark has already passed that
-/// tile's end — and it is sealed in the same pass instead of being left open. Residency is
-/// therefore one tile row per **time** level, not per node: an eighth of the obvious estimate, and
-/// the bound the settings doc quotes.
+/// # What T-439 measured, and what T-453 changed
+///
+/// T-439 measured, and did not predict, that **only the `level_f = 0` column is ever resident**: a
+/// frequency-coarser node has the *same* time cell as its producer, so the fold that fills it runs
+/// inside the producer's seal — after the watermark has already passed that tile's end — and it is
+/// sealed in the same pass instead of being left open. Residency was one tile row per **time**
+/// level, not per node: an eighth of the obvious estimate. The peak came out **one row above** that,
+/// because inside `seal_lag` a node's outgoing tile is still open while its successor has been
+/// created.
+///
+/// **T-453 collapses that to one level.** `docs/16` §5.2 decided the coarse nodes are built on
+/// demand, so capture opens an accumulator for node (0, 0) and for nothing else, whichever axis a
+/// node coarsens: the *whole lattice's* floor is now one node's, and it does not move when the
+/// lattice grows. That is the residency half of making the node count a reach decision — the write
+/// half is in [`VIEW_F_CELLS_PER_BLOCK`]. The seal-lag row survives, and is why the bound is two
+/// rows rather than one: it is a property of sealing, not of the lattice.
 #[test]
 fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     use hk_model::PowerUnit;
@@ -415,19 +442,21 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
 
     let resident = |p: &Pyramid| -> (usize, usize, usize) {
         let g = p.geometry();
-        let (mut tiles, mut bytes, mut coarse_f) = (0usize, 0usize, 0usize);
+        let (mut tiles, mut bytes, mut coarse) = (0usize, 0usize, 0usize);
         for level in 0..g.n_levels() {
             let open = p.open_keys(level).len();
             tiles += open;
             bytes += open * (nf * g.levels[level].nt * BYTES_PER_CELL + nf * bins * 4);
-            if level / VIEW_LEVELS > 0 {
-                coarse_f += open;
+            // T-453: ANY node above (0, 0), on either axis. T-439 could only count the frequency
+            // column, because the time column was resident by construction.
+            if level > 0 {
+                coarse += open;
             }
         }
-        (tiles, bytes, coarse_f)
+        (tiles, bytes, coarse)
     };
 
-    let (mut peak_tiles, mut peak_bytes, mut ever_coarse_f) = (0usize, 0usize, 0usize);
+    let (mut peak_tiles, mut peak_bytes, mut ever_coarse) = (0usize, 0usize, 0usize);
     for s in (0..SECS).step_by(STRIDE as usize) {
         p.ingest(&FrameInput::new(
             Timestamp::from_unix_nanos(t0 + s * 1_000_000_000),
@@ -438,8 +467,8 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
             &psd,
         ))
         .unwrap();
-        let (tiles, bytes, coarse_f) = resident(&p);
-        ever_coarse_f = ever_coarse_f.max(coarse_f);
+        let (tiles, bytes, coarse) = resident(&p);
+        ever_coarse = ever_coarse.max(coarse);
         if bytes > peak_bytes {
             peak_bytes = bytes;
             peak_tiles = tiles;
@@ -451,17 +480,21 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     // epoch of frequency, not to the span's own lower edge).
     let bw = f_cell * f64::from(VIEW_F_CELLS_PER_BLOCK);
     let blocks = ((F_LO + SPAN_HZ) / bw).ceil() - (F_LO / bw).floor();
-    // One tile row per TIME level, plus one: inside `seal_lag` a node's outgoing tile is still open
-    // while the incoming one has been created, so the instantaneous peak is a level higher than the
-    // steady set. Measured, not assumed — the peak at 4 x 4 is exactly this.
-    let bound = (VIEW_LEVELS + 1) as f64 * blocks * per_tile as f64;
+    // **T-453: one tile row, plus one.** Capture opens node (0, 0) and nothing else, so the steady
+    // set is one row however many nodes the lattice has; inside `seal_lag` that row's outgoing tile
+    // is still open while its successor has been created, which is the second. T-439 measured
+    // `VIEW_LEVELS + 1` rows here, one per TIME level plus the seal lag — the difference between
+    // the two numbers is exactly the eager fold this ticket removed, and the remaining term is a
+    // property of sealing rather than of the lattice. Measured, not assumed.
+    const RESIDENT_ROWS: f64 = 2.0;
+    let bound = RESIDENT_ROWS * blocks * per_tile as f64;
     let mb = |b: f64| b / (1 << 20) as f64;
     let per_mhz = |b: f64| mb(b) / (SPAN_HZ / 1e6);
     eprintln!(
-        "T-439 view-lattice floor ({:.2} kHz x 1 s, {nf}x{} cells/block, {} nodes), {:.1} MHz \
+        "T-453 view-lattice floor ({:.2} kHz x 1 s, {nf}x{} cells/block, {} nodes), {:.1} MHz \
          tuned:\n  measured peak {peak_tiles} tiles, {:.1} MB resident, {:.0} KB/tile, \
-         {:.2} MB/MHz\n  bound (a tile row per TIME level, all {} of them, plus a seal-lag \
-         overlap): {:.1} MB, \
+         {:.2} MB/MHz\n  bound (node (0, 0)'s tile row, plus a seal-lag overlap; {} nodes, and \
+         the count does not enter): {:.1} MB, \
          {:.2} MB/MHz -> {:.0} MB at a {:.0} MHz live edge",
         f_cell / 1e3,
         VIEW_T_CELLS_PER_BLOCK,
@@ -470,7 +503,7 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
         mb(peak_bytes as f64),
         per_tile as f64 / 1024.0,
         per_mhz(peak_bytes as f64),
-        VIEW_LEVELS,
+        VIEW_LEVELS * VIEW_LEVELS,
         mb(bound),
         per_mhz(bound),
         per_mhz(bound) * LIVE_EDGE_HZ / 1e6,
@@ -487,22 +520,23 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
         (2_500_000..3_500_000).contains(&per_tile),
         "~2.9 MB per tile — scheme 1's own level-0 tile shape, got {per_tile}"
     );
-    // The mechanism, over the WHOLE run rather than at its end: a frequency-coarser node is
-    // written and sealed inside its producer's seal, so it never holds an open accumulator. If this
-    // changes, the bound below is wrong by about 2× and so is the number the settings doc quotes.
+    // The mechanism, over the WHOLE run rather than at its end: no coarse node — on either axis —
+    // ever holds an open accumulator, because capture never folds one. This is the assertion that
+    // makes the floor independent of the node count, so growing the lattice cannot move it.
     assert_eq!(
-        ever_coarse_f, 0,
-        "a level_f > 0 node held an open tile at some point: residency is one tile row per TIME \
-         level, and the sizing bound assumes it"
+        ever_coarse, 0,
+        "a coarse node held an open tile at some point: with docs/16 §5.2's on-demand folding, \
+         capture opens node (0, 0) and nothing else, and the sizing bound assumes it"
     );
     // The peak must sit inside the bound, and near enough to it that the bound is not vacuous.
     assert!(
         peak_bytes as f64 <= bound,
-        "residency exceeded one tile row per time level: {peak_bytes} > {bound:.0}"
+        "residency exceeded node (0, 0)'s tile row plus a seal-lag overlap: {peak_bytes} > \
+         {bound:.0}"
     );
     assert!(
-        peak_bytes as f64 >= VIEW_LEVELS as f64 * blocks * per_tile as f64,
-        "every time level should be resident together at the peak, got {peak_tiles} tiles \
+        peak_bytes as f64 >= blocks * per_tile as f64,
+        "the finest node's row should be resident at the peak, got {peak_tiles} tiles \
          ({peak_bytes} B)"
     );
     // The order that matters: single MB per MHz, so a 20 MHz live edge is tens of MB — not the

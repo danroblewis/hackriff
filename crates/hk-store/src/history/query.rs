@@ -868,6 +868,14 @@ impl Pyramid {
             };
             return Ok(Some(Source::Mem(t, preview)));
         }
+        // T-453: a live-edge coarse summary built on demand by `Pyramid::materialize`. Level 0 is
+        // never derived — it is capture's own product — and a derived tile carries no open column,
+        // so there is no preview to take.
+        if level > 0
+            && let Some(t) = self.derived.get(&(level, fb, tb))
+        {
+            return Ok(Some(Source::Mem(t, None)));
+        }
         Ok(self
             .read_sealed(level, fb, tb)?
             .map(|t| Source::Disk(Box::new(t))))
