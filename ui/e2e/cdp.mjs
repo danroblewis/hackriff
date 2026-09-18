@@ -14,7 +14,7 @@
 // named condition in `harness.mjs` (`waitFor`), which is the honest form anyway — a flaky sleep
 // would be the thing that gets this tier disabled.
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
@@ -61,7 +61,32 @@ export function findChrome() {
   );
 }
 
-export async function launch({ port = 19455, width = 1440, height = 900, headless = true } = {}) {
+/**
+ * Start a headless Chrome and return a CDP endpoint to it.
+ *
+ * THE DEBUGGING PORT IS EPHEMERAL, AND THAT IS LOAD-BEARING (T-473). It used to be the fixed 19455,
+ * which is fine for one run and silently catastrophic for two: the readiness loop below polls
+ * `http://127.0.0.1:<port>/json/version`, and if ANOTHER run's Chrome already owns that port the
+ * fetch SUCCEEDS and hands back **that browser's** WebSocket URL. The second run then drives the
+ * first run's browser — two drivers, one page, each undoing the other. Observed twice as a merge
+ * gate wedged at `about:blank` for 31 minutes with no output, while builder agents ran their own
+ * `just test-ui-e2e` concurrently; killing the browser only made the surviving driver relaunch one.
+ *
+ * It reads as a hang, but it is CROSS-RUN INTERFERENCE, and a retry or a timeout would have hidden
+ * it rather than fixed it. Chrome writes the port it actually bound to `DevToolsActivePort` in its
+ * user-data-dir, and that directory is already a fresh mkdtemp per launch — so asking for port 0 and
+ * reading it back makes concurrent runs independent BY CONSTRUCTION rather than by convention.
+ *
+ * `port` is still accepted for a caller that genuinely wants a fixed endpoint (attaching a debugger
+ * by hand); it is not what the suite uses.
+ *
+ * SCOPE OF THE FIX, stated so the next person does not over-trust it: this makes runs in DIFFERENT
+ * working directories independent, which is the case that matters here — the coordinator gates in
+ * the main checkout while builder agents run in their own worktrees, each with its own `ui/dist` and
+ * its own backend port. Two runs in the SAME directory still share `ui/dist` and will race on the
+ * bundle build; that is a separate defect and is not what wedged the gate.
+ */
+export async function launch({ port = 0, width = 1440, height = 900, headless = true } = {}) {
   const exe = findChrome();
   const profile = mkdtempSync(path.join(tmpdir(), "hk-e2e-chrome-"));
   const args = [
@@ -85,16 +110,35 @@ export async function launch({ port = 19455, width = 1440, height = 900, headles
   let stderr = "";
   proc.stderr.on("data", (d) => { stderr += d; });
 
+  // Wait for THIS browser to publish the port it bound, in ITS OWN profile directory. Polling a
+  // port number instead would answer from whatever Chrome happens to hold it — see the note above.
+  const portFile = path.join(profile, "DevToolsActivePort");
+  let bound = null;
+  for (let i = 0; i < 300; i++) {
+    try {
+      const [line] = readFileSync(portFile, "utf8").split("\n");
+      if (line && Number(line) > 0) { bound = Number(line); break; }
+    } catch { /* not written yet */ }
+    if (proc.exitCode !== null) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  if (!bound) {
+    killTree(proc);
+    throw new Error(
+      `chrome did not publish ${portFile} (exit ${proc.exitCode}): ${stderr.slice(0, 2000)}`,
+    );
+  }
+
   let ws = null;
   for (let i = 0; i < 300; i++) {
     try {
-      const r = await fetch(`http://127.0.0.1:${port}/json/version`);
+      const r = await fetch(`http://127.0.0.1:${bound}/json/version`);
       ws = (await r.json()).webSocketDebuggerUrl;
       break;
     } catch { await new Promise((r) => setTimeout(r, 50)); }
   }
   if (!ws) { killTree(proc); throw new Error(`chrome did not start: ${stderr.slice(0, 2000)}`); }
-  return { proc, exe, port, wsUrl: ws, profile };
+  return { proc, exe, port: bound, wsUrl: ws, profile };
 }
 
 function killTree(proc) {

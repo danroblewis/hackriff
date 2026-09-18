@@ -12568,6 +12568,7 @@ tasks:
       `preview.ts` gains `paneAtPoint`/`clampToRect`, `minimap.ts`'s `OverlayQuad.kind` union gains
       `trace-slice`/`trace-hold` beside T-458's `pending-region`, `harness.mjs` gains an `initScript`
       option. Nothing in T-458's files (`input.ts`, `marks.ts`, `explore/region.ts`).
+    commit: "155b19e"
   - id: T-458
     milestone: MCANVAS
     title: Drag-to-select and T-193's draggable Confirmed-band edges have no gesture - drag now pans
@@ -12684,7 +12685,7 @@ tasks:
   - id: T-460
     milestone: MLIVE
     title: The live edge is frozen in the CLIENT - a resident tile is never refetched, so live advances once every 256 s
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CANVAS-FE
     model: opus
@@ -13235,7 +13236,7 @@ tasks:
     parallel_group: CI
     depends_on: []
     use_cases: []
-    commit: "PENDING"
+    commit: "e82d78c"
     acceptance: |
       USER PROCESS DIRECTIVE 2026-09-18: the orphaned-in-progress problem recurs and SHOULD NOT NEED
       THE SUPERVISOR TO CATCH IT. `in-progress` is a CLAIM ABOUT THE WORLD and nothing in the normal
@@ -13273,7 +13274,7 @@ tasks:
     parallel_group: UI
     depends_on: []
     use_cases: []
-    commit: "PENDING"
+    commit: "cbd6dcd"
     acceptance: |
       FOUND BY THE COORDINATOR 2026-09-18 when T-451's gate failed on `surface-region.e2e.mjs` -
       A PURE RUST TEST-FILE CHANGE CANNOT BREAK A UI E2E SPEC, which is what made it obvious the
@@ -13300,6 +13301,129 @@ tasks:
       Verified: surface-region 4/4 in 3.6 s.
       This is why T-473 (the e2e tier has no per-spec timeout) matters: this tier now gates every
       merge, so a load-sensitive assertion in it blocks the whole queue.
+  - id: T-479
+    milestone: MCANVAS
+    title: A 400 from /api/tiles is retried FOREVER - the cache requeues a failure only 503 is special-cased for
+    status: in-progress
+    priority: high
+    parallel_group: CANVAS-FE
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      URGENT, USER-REPORTED: the console floods. The canvas requests an INVALID tile address (seen:
+      level_f=10 with t_index=218471, an out-of-range pyramid node), the route correctly answers
+      400, and THE CLIENT RETRIES THE 400 FOREVER - tilecache's pump requeues the failed place, and
+      fetchTile special-cases only 503.
+      THIS TICKET STOPS THE FLOOD; T-480 removes the cause. Both are wanted: a client that retries a
+      permanent failure forever is wrong EVEN IF nothing ever asks for a bad address again.
+      THE RULE: a 4xx is TERMINAL. Drop the place, render it as grey/overview, and NEVER requeue it.
+      Only 503 and genuine NETWORK failures are retryable - a 503 is T-454's backpressure, a
+      statement that the server is busy NOW, and that is the only failure that says "ask again". A
+      400 says the request itself is wrong; asking again cannot change it.
+      MAKE THE DISTINCTION STRUCTURAL RATHER THAN A LIST. The defect is that retryability was decided
+      by special-casing ONE status, so everything else fell into the default - and the default was
+      retry. Invert it: retryable is the ENUMERATED case, terminal is the DEFAULT. "Nothing said is
+      never permissive" is this repo's rule and it was violated in the retry direction.
+      SAY WHAT THE USER SEES. A terminal failure must not be silent: grey on this surface means
+      UNOBSERVED, which a failed request is NOT. Distinguish "we asked and the answer was no" from
+      "nothing was ever sampled here" - T-441's AWAITING and cellrule.ts's "not loaded is not
+      unobserved" are the existing vocabulary. Report which you used.
+      DoD: a 400 is fetched at most once per place; the console is quiet; 503 still retries with
+      T-454's AIMD and its peak-at-cap property intact; a failed place is visibly distinct from an
+      unobserved one; and a test that fails if any non-503 status is ever requeued.
+    notes: |
+      Filed 2026-09-18 from user report. tilecache.ts is T-460's file and T-460 is in flight, so this
+      is routed to that agent rather than given a second owner.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-480
+    milestone: MCANVAS
+    title: The surface asks for pyramid nodes that do not exist - tile-address math must clamp to realizable levels and indices
+    status: in-progress
+    priority: high
+    parallel_group: CANVAS-FE
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      URGENT, USER-REPORTED, and the CAUSE of T-479's flood: the canvas computes tile addresses
+      naming NON-EXISTENT pyramid nodes - observed in the wild as level_f=10 with t_index=218471.
+      THIS IS THE DISCRETIZED-NAVIGATION INVARIANT, ALREADY IN CLAUDE.md: "zoom/pan and region-select
+      resolve only to REALIZABLE configurations and SNAP to the nearest one". An address off the
+      lattice is that invariant broken in the client, and it is why the server is being asked a
+      question that has no answer.
+      CLAMP IN THE ADDRESS MATH: never a level outside the pyramid's declared levels, never an index
+      outside a level's extent. The clamp belongs where the address is DERIVED, not at the fetch - a
+      fetch-time guard would hide the bad arithmetic while leaving every other consumer of that
+      arithmetic wrong.
+      LIKELY AN UNCLAMPED ZOOM-OUT, and it ties to T-472 (a plain wheel must lock the aspect ratio:
+      today zooming out past the Y bound keeps scaling X while Y is clamped). If the two share a
+      root, SAY SO and fix the root - but DO NOT silently absorb T-472's DoD; they are separate
+      tickets and T-472 has its own browser evidence to produce.
+      DO NOT RE-WELD THE AXES. Clamping is per-axis against that axis's own extent; the levels stay
+      independent (T-434 de-welded them in the store, T-438 addresses them independently, T-440
+      resolves them per pane).
+      DoD: no address outside the lattice can be produced, asserted over the zoom/pan RANGE rather
+      than at a few sample points - a property, not three examples; the clamp lives in the
+      derivation; the axes remain independently levelled; and a real-browser run over an aggressive
+      zoom-out produces ZERO 4xx from /api/tiles.
+    notes: |
+      Filed 2026-09-18 from user report. T-479 stops the flood; this removes the cause.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-481
+    milestone: MCANVAS
+    title: A full canvas e2e SCENARIO through the mock SDR - pan/zoom, live advance, retune-fills - as the standing regression guard
+    status: todo
+    priority: high
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    depends_on: [T-460, T-476, T-480]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      USER DIRECTIVE 2026-09-18. The browser tier exists but there is no END-TO-END SCENARIO for the
+      canvas: the whole user journey, driven by THE MOCK SDR through the device interface, over
+      sample data shaped for this surface. This is the standing regression guard for the entire
+      live/tile/retune push - all three assertions below are bugs that are in flight RIGHT NOW.
+      BUILD ON WHAT EXISTS, DO NOT RESTART. T-455 gave real headless-Chrome automation for /surface
+      (harness.mjs, cdp.mjs, backend.mjs, run.mjs, selftest.mjs). T-125 gave the mock SDR plus the
+      e2e harness replaying time-compressed occupancy scenes BEHIND THE DEVICE INTERFACE, which is
+      CLAUDE.md's rule: e2e drives through the mock SDR, never files straight into the pipeline.
+      T-117/T-125 already make occupancy scenes.
+      THE THREE ASSERTIONS, IN ONE FLOW:
+      (1) PAN AND ZOOM -> tiles LOAD WHERE DATA EXISTS and read GREY WHERE IT DOES NOT, and the
+      client makes NO INVALID TILE REQUEST. The test must FAIL if the client asks for an
+      out-of-range node - this is the regression guard for T-480, and the observable is ZERO 4xx
+      from /api/tiles over an aggressive pan/zoom, not merely "it looked right".
+      (2) SWITCH TO LIVE -> rows RENDER AND ADVANCE in real time. Must fail if the live edge
+      freezes - the direct guard for T-460, whose defect was a resident tile never being refetched.
+      ASSERT ADVANCEMENT, NOT PRESENCE: a frozen edge still renders rows, which is exactly why the
+      bug survived every existing test.
+      (3) RETUNE A REGION -> the front end actually retunes AND THE VIEW FILLS AT HIGHER RESOLUTION
+      there. Guards T-476. The resolution claim is the load-bearing half: assert the CELL SIZE the
+      pane reports, or the drawn extent, not that a button was pressed.
+      THE MOCK SDR NEEDS SIGNALS IN 2-3 SEPARATED BANDS, VARYING OVER TIME, so panning shows real
+      occupancy in more than one place and a narrower retune demonstrably increases detail. Either
+      STITCH existing fixtures - fixtures/hackrf/ has FM 100.8M/2.4M, urban 98M/20M, ISM 915M/10M,
+      433 ISM - or SYNTHESISE a multi-band occupancy scene. Whichever is cheapest that gives real
+      signals in >=2-3 separated bands over time. Do not commit new fixture binaries: fixtures/ is
+      LFS and .sigmf-data files must stay 134-byte pointers in git.
+      WATCH THE HARNESS TRAPS THIS TIER HAS ALREADY EARNED. T-478: a FOLLOWING pane's chrome readout
+      ends in its offset from the live edge, and that offset DRIFTS WITH WALL-CLOCK LAG with no
+      gesture touching it - never assert on raw readout strings, because an `equal` goes red under
+      load and a `notEqual` can go GREEN ON DRIFT ALONE. T-473: the CDP debugging port was fixed at
+      19455, so a second concurrent run silently drove the FIRST run's browser; it is ephemeral now,
+      but two runs in ONE directory still race on the ui/dist build. T-466: selftest.mjs compiles
+      only the /surface.html bundle, so app-page fault injection has no per-guard attribution until
+      that is fixed - say which tier your non-vacuity evidence comes from.
+      DoD: one scenario spec driving the mock SDR through the device interface; the three assertions
+      above, each shown NON-VACUOUS by injecting the specific defect it names against a green
+      baseline (a frozen edge, an unclamped address, a retune that does not narrow); zero 4xx over
+      the pan/zoom leg; and a runtime that keeps the tier something people will actually run.
+    notes: |
+      Filed 2026-09-18 from /tmp/claude-501/canvas-e2e-brief.md. Sequenced after T-460, T-476 and
+      T-480 because it is their regression guard - a guard written before the fix tends to encode
+      the bug. If any of those three slips, this can still be written against the DEFECT and left
+      failing, but say so explicitly rather than weakening an assertion to make it pass.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
