@@ -333,7 +333,7 @@ fn listed(conn: &Connection, id: EmitterId) -> Result<Option<EmitterId>, RepoErr
 }
 
 /// Everything the rules need about one live row (see [`RowEvidence`]).
-fn evidence(conn: &Connection, id: EmitterId) -> Result<Option<RowEvidence>, RepoError> {
+pub(super) fn evidence(conn: &Connection, id: EmitterId) -> Result<Option<RowEvidence>, RepoError> {
     type Raw = (
         f64,
         f64,

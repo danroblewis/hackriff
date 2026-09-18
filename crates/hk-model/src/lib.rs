@@ -52,6 +52,9 @@ pub mod decode;
 pub mod detection;
 pub mod emitter;
 pub mod frames;
+pub mod harmonic; // T-374 (C40): harmonics of a fundamental nobody can see
+#[cfg(test)]
+mod harmonic_tests;
 pub mod hash;
 pub mod ids;
 pub mod plan;
@@ -97,6 +100,11 @@ pub use emitter::{
 pub use frames::{
     FrameKey, Persistence, PowerUnit, SpectrumFrame, SpectrumTile, SweepFrame, TileKey, TileStats,
 };
+pub use harmonic::{
+    FamilyAssignment, FamilyMember, FamilyRejection, HarmonicFamily, LineFit, MAX_INDEX,
+    MIN_MEMBERS, WidthEvidence, find_harmonic_families, fit_line, judge_family,
+    residual_tolerance_hz, width_evidence,
+};
 pub use hash::{ContentHash, canonical_json};
 pub use ids::{
     AnnotationId, AnomalyId, BitstreamId, BookmarkId, CalibrationStateId, CallRecordId, DecodeId,
@@ -125,10 +133,11 @@ pub use relate::{
 };
 pub use repo::{
     BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind, EmitterUpsert,
-    LIFECYCLE_TEXT_MAX, ProvenanceChain, REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX,
-    RefinedTuning, RepoBatch, RepoError, Repository, SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX,
-    SELECTION_NAME_MAX, SELECTION_NOTES_MAX, SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX,
-    Selection, SelectionLink, SelectionLinkKind, SelectionWatch, TrustTest, TrustVerdict,
+    HarmonicFamilyRow, LIFECYCLE_TEXT_MAX, MAX_FAMILY_CANDIDATES, ProvenanceChain,
+    REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning, RepoBatch, RepoError,
+    Repository, SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX,
+    SELECTION_NOTES_MAX, SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, Selection,
+    SelectionLink, SelectionLinkKind, SelectionWatch, TrustTest, TrustVerdict,
     USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand,
 };
 pub use signature::cluster::{
