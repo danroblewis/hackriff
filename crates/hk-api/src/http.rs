@@ -137,6 +137,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/control/bias_tee"),
     ("POST", "/api/control/baseband_filter"),
     ("POST", "/api/control/display"),
+    // T-452: the in-app survey sweep. GET reports where it is and prices a proposed one without
+    // starting it; POST starts or resumes it; stop is its own path so it can never be mistaken for
+    // start, and is never refused.
+    ("GET", "/api/control/scan"),
+    ("POST", "/api/control/scan"),
+    ("POST", "/api/control/scan/stop"),
     ("POST", "/api/control/record/start"),
     ("POST", "/api/control/record/stop"),
     ("GET", "/api/bookmarks"),
@@ -305,6 +311,13 @@ pub struct ApiState {
     /// Live front-end control (T-042, [`crate::live_control`]); `None` for replays and
     /// scheduler-driven runs (device endpoints then answer 409 `not_live`).
     pub live_control: Option<Arc<dyn crate::live_control::LiveControl>>,
+    /// T-452: the in-app survey sweep over [`Self::live_control`] ([`crate::scan`]). `None` leaves
+    /// `/api/control/scan*` answering 503 — the front end is there but nothing can sweep it.
+    ///
+    /// It is a *driver over the interactive retune path*, not a scheduler: `hk serve` still does
+    /// not drive the scheduler, and every step is the same gated [`crate::DeviceAction::Retune`] a
+    /// user's explicit tune is. See [`crate::scan`] for the decision and the arbitration rule.
+    pub scan: Option<Arc<crate::scan::ScanRunner>>,
     /// Display and recording control of the running pipeline (T-050).
     pub run_control: Option<Arc<dyn RunControl>>,
     /// Bookmark store (T-050), usually the run's database.

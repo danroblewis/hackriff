@@ -1117,6 +1117,12 @@ pub fn serve_api(
             }
             v
         })),
+        // T-452: the in-app survey sweep, over the same front end the five device routes move.
+        // It exists exactly when a live front end does — a replay has nothing to retune — and it
+        // is a driver over the interactive retune path, not the scheduler this run does not drive.
+        scan: live_control
+            .clone()
+            .map(|lc| Arc::new(hk_api::scan::ScanRunner::new(lc))),
         live_control,
         run_control: Some(Arc::new(PipelineRunControl(controller))),
         bookmarks: Some(db),

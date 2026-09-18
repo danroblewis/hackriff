@@ -7978,3 +7978,271 @@ fn nanosecond_and_second_fields_in_one_response_agree_once_their_units_are_appli
     );
     drop(server);
 }
+
+/// T-452: **the in-app survey sweep, and who wins when it and the user both want the radio.**
+///
+/// T-406 built the iterative scan as a dwell policy over the scheduler — and `hk serve`, the mode
+/// the UI talks to, deliberately never drives the scheduler. This asserts the resolution: the
+/// sweep is a driver over the *interactive* retune path, reachable as `/api/control/scan`, and its
+/// arbitration with interactive tuning is one rule with an honest answer on the wire.
+///
+/// Four claims, each asserting a **value** and not a shape (T-315):
+///
+/// 1. **The arithmetic comes before the button.** `GET /api/control/scan` with a proposed range and
+///    dwell prices the pass — steps, pass length, duty — **without starting anything**. A user
+///    about to commit to an 80-minute sweep is told so first.
+/// 2. **Starting commissions retunes and names the radio.** The answer carries
+///    `device.commissions = "retune"` and the front end's own `device_id`: the request performed no
+///    device action, and the log must not read as if it had.
+/// 3. **The user wins, and the sweep says so.** An explicit `POST /api/control/center` while a
+///    sweep is running is **not refused** — it succeeds, the user's centre stands, and the *same
+///    response* carries the `scan.yielded` object their action caused, naming what it took the
+///    radio from and which step the sweep kept its place at.
+/// 4. **A user action that never reached the device un-yields it.** A refused retune took no radio,
+///    so the sweep is still running afterwards — the honesty rule in the other direction.
+#[test]
+fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
+    let (_dir_guard, serving, addr) = start_server();
+    wait_for("a live front end", Duration::from_secs(30), || {
+        get(addr, "/api/control/state").1["tuning"]["center_hz"].as_f64() == Some(FIXTURE_CENTER_HZ)
+    });
+
+    // ---- (0) idle, and `/api/control/state` says so beside the tuning the sweep would move ----
+    let (st, v) = get(addr, "/api/control/scan");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["scan"]["state"], json!("idle"), "{v}");
+    assert_eq!(v["scan"]["available"], json!(true), "{v}");
+    assert_eq!(
+        v["scan"]["plan"],
+        Value::Null,
+        "an idle scan has no plan: {v}"
+    );
+    assert_eq!(v["proposed"], Value::Null, "nothing was proposed: {v}");
+    let (_, state) = get(addr, "/api/control/state");
+    assert_eq!(state["scan"]["state"], json!("idle"), "{state}");
+
+    // ---- (1) the price of a pass, before committing to it ----
+    // 20 MHz at the fixture's 2.4 Msps is a 1.8 MHz usable span: 12 steps (20 / 1.8 = 11.1 -> 12),
+    // and at 12 s a step that is a 144 s pass in which any one band is heard 12 s — a duty of
+    // 1/12. Every one of those is a VALUE, computed by T-406's own pricing, not a shape.
+    let (st, v) = get(
+        addr,
+        "/api/control/scan?f_lo_hz=88000000&f_hi_hz=108000000&dwell_s=12",
+    );
+    assert_eq!(st, 200, "{v}");
+    let p = &v["proposed"];
+    assert_eq!(p["plan"]["steps"], json!(12), "{p}");
+    assert_eq!(p["plan"]["dwell_s"], json!(12.0), "{p}");
+    assert_eq!(p["plan"]["recommended_dwell"], json!(true), "{p}");
+    assert_eq!(
+        p["plan"]["sample_rate_hz"],
+        json!(2.4e6),
+        "tiled at the span in force: {p}"
+    );
+    assert_eq!(p["budget"]["steps"], json!(12), "{p}");
+    assert_eq!(p["budget"]["pass_s"], json!(144.0), "{p}");
+    assert_eq!(p["budget"]["step_span_hz"], json!(1.8e6), "{p}");
+    let duty = p["budget"]["duty"].as_f64().unwrap_or_default();
+    assert!((duty - 1.0 / 12.0).abs() < 1e-9, "duty is dwell/pass: {p}");
+    let statement = p["budget"]["statement"].as_str().unwrap_or_default();
+    assert!(
+        statement.contains("12 steps") && statement.contains("144.0 s pass"),
+        "the statement must carry this plan's own numbers: {statement:?}"
+    );
+    assert!(
+        statement.contains("catches nothing during the other"),
+        "the statement must state the limit in the same breath as the capability: {statement:?}"
+    );
+    // Pricing is not starting.
+    assert_eq!(v["scan"]["state"], json!("idle"), "{v}");
+    assert_eq!(
+        get(addr, "/api/control/state").1["tuning"]["center_hz"].as_f64(),
+        Some(FIXTURE_CENTER_HZ),
+        "pricing a sweep moved the radio"
+    );
+
+    // A dwell outside the 10-30 s the survey is sized for still runs, and says it is unusual
+    // rather than being clamped to one band's taste (T-406).
+    let (st, v) = get(addr, "/api/control/scan?dwell_s=2");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        v["proposed"]["plan"]["recommended_dwell"],
+        json!(false),
+        "{v}"
+    );
+    assert_eq!(v["proposed"]["plan"]["dwell_s"], json!(2.0), "{v}");
+
+    // ---- (2) start: it commissions retunes on a named front end, and performs none itself ----
+    let (st, v) = post(
+        addr,
+        "/api/control/scan",
+        r#"{"f_lo_hz": 88000000, "f_hi_hz": 108000000, "dwell_s": 2}"#,
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["device"]["commissions"], json!("retune"), "{v}");
+    assert!(
+        v["device"]["action"].is_null(),
+        "no device action was performed in the call: {v}"
+    );
+    assert!(
+        v["device"]["id"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("mock:")),
+        "the sweep must name the front end it commits: {v}"
+    );
+    assert_eq!(v["scan"]["state"], json!("running"), "{v}");
+    assert_eq!(v["scan"]["plan"]["steps"], json!(12), "{v}");
+
+    // It steps: the tune moves off the fixture's own centre, through the device path.
+    wait_for(
+        "the sweep to step the tune",
+        Duration::from_secs(30),
+        || {
+            get(addr, "/api/control/scan").1["scan"]["progress"]["steps_done"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        },
+    );
+    let (_, v) = get(addr, "/api/control/scan");
+    let swept = v["scan"]["progress"]["center_hz"]
+        .as_f64()
+        .expect("a stepped centre");
+    assert!(
+        (88e6..=108e6).contains(&swept),
+        "a step must land inside the range asked for: {v}"
+    );
+
+    // **Coverage honesty, which is the whole point of the feature.** T-406's finding was that a
+    // dwell step must write ONE RECORD PER STEP with its true band and interval, because a coarse
+    // record spanning a pass rasterises as "the whole band, the whole time". The sweep gets that
+    // from the plane that already exists — the interactive observer closes one dwell record per
+    // steady tune — so what lights the canvas is the same coverage the rest of the UI reads, with
+    // no second accumulator. Assert the records, and that they are per-step and not one wide one.
+    wait_for(
+        "the sweep to reach a second step",
+        Duration::from_secs(60),
+        || {
+            get(addr, "/api/control/scan").1["scan"]["progress"]["steps_done"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 3
+        },
+    );
+    let mut stepped: Vec<f64> = Vec::new();
+    wait_for("per-step coverage records", Duration::from_secs(60), || {
+        let q = format!(
+            "f_lo=88000000&f_hi=108000000&t0={}&t1={}",
+            unix_now() - 300.0,
+            unix_now()
+        );
+        let (_, v) = get(addr, &format!("/api/observations?{q}"));
+        stepped = v["records"]
+            .as_array()
+            .map(|rs| {
+                rs.iter()
+                    .filter_map(|r| r["window"]["center_hz"].as_f64())
+                    .filter(|c| (88e6..=108e6).contains(c) && (c - FIXTURE_CENTER_HZ).abs() > 1.0)
+                    .collect()
+            })
+            .unwrap_or_default();
+        stepped.len() >= 2
+    });
+    stepped.sort_by(f64::total_cmp);
+    stepped.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+    assert!(
+        stepped.len() >= 2,
+        "the sweep must write one record per step, each with its own centre: {stepped:?}"
+    );
+    let widest = stepped.last().unwrap() - stepped.first().unwrap();
+    assert!(
+        widest > 1.0,
+        "the records all share one centre, so a pass is being recorded as one coarse window \
+         instead of per-step: {stepped:?}"
+    );
+
+    // ---- (3) THE ARBITRATION: the user wins, is not refused, and the sweep says it yielded ----
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let wanted = step * ((FIXTURE_CENTER_HZ / step).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{wanted:?}}}"),
+    );
+    assert_eq!(
+        st, 200,
+        "an explicit user tune is never refused by a sweep: {r}"
+    );
+    assert_eq!(
+        r["scan"]["yielded"]["to"],
+        json!("retune"),
+        "the response that stopped the sweep must say it stopped the sweep: {r}"
+    );
+    let detail = r["scan"]["yielded"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("kept its place"),
+        "a yield is resumable and says so: {detail:?}"
+    );
+    let (_, v) = get(addr, "/api/control/scan");
+    assert_eq!(v["scan"]["state"], json!("yielded"), "{v}");
+    assert_eq!(v["scan"]["yielded"]["to"], json!("retune"), "{v}");
+    assert_eq!(
+        v["scan"]["plan"]["steps"],
+        json!(12),
+        "it kept its plan: {v}"
+    );
+    // And the user's tune stands: nothing takes it back.
+    std::thread::sleep(Duration::from_secs(3));
+    let held = get(addr, "/api/control/state").1["tuning"]["center_hz"].as_f64();
+    assert_eq!(
+        held,
+        Some(wanted),
+        "a yielded sweep must not take the tune back from the user"
+    );
+
+    // ---- (4) resume, then a refused user action un-yields rather than stopping the sweep ----
+    let (st, v) = post(addr, "/api/control/scan", r#"{"resume": true}"#);
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["scan"]["state"], json!("running"), "{v}");
+    assert_eq!(v["scan"]["yielded"], Value::Null, "{v}");
+    // A centre no front end can reach is refused before it reaches the device, so nothing took the
+    // radio — and the sweep is still running.
+    let (st, r) = post(addr, "/api/control/center", r#"{"center_hz": 9.9e12}"#);
+    assert!(st >= 400, "an unreachable centre must be refused: {r}");
+    assert!(r["scan"].is_null(), "a refused action yielded nothing: {r}");
+    assert_eq!(
+        get(addr, "/api/control/scan").1["scan"]["state"],
+        json!("running"),
+        "a user action that never reached the device must not stop the sweep"
+    );
+
+    // ---- stopping surrenders the radio and is never refused ----
+    let (st, v) = post(addr, "/api/control/scan/stop", "{}");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["scan"]["state"], json!("idle"), "{v}");
+    assert_eq!(v["scan"]["plan"], Value::Null, "{v}");
+    let (st, v) = post(addr, "/api/control/scan/stop", "{}");
+    assert_eq!(st, 200, "stopping an idle sweep is not an error: {v}");
+
+    // A second sweep while one runs is two policies fighting for one tune.
+    let (st, _) = post(addr, "/api/control/scan", r#"{"dwell_s": 30}"#);
+    assert_eq!(st, 200);
+    let (st, v) = post(addr, "/api/control/scan", r#"{"dwell_s": 30}"#);
+    assert_eq!(st, 409, "{v}");
+    assert_eq!(v["code"], json!("refused"), "{v}");
+    let (st, v) = post(addr, "/api/control/scan/stop", "{}");
+    assert_eq!(st, 200, "{v}");
+
+    // Half a range is a half-stated request, and is refused rather than guessed at.
+    let (st, v) = post(addr, "/api/control/scan", r#"{"f_lo_hz": 88000000}"#);
+    assert_eq!(st, 400, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("go together"),
+        "{v}"
+    );
+
+    stop_server(serving);
+}

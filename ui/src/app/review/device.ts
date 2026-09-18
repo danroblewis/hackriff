@@ -14,8 +14,9 @@
 import type { ControlClient } from "../../controls/client";
 import { formatFrequency } from "../../controls/freq";
 import {
-  type ControlState, type GainControl, type PanelModel, classLabel, fftSizeOptions,
-  panelModel, recordingText, rowRateOptions, segmentNotice, windowLabel,
+  type ControlState, type GainControl, type PanelModel, type ScanBudget, type ScanPlan,
+  type ScanQuery, classLabel, fftSizeOptions, panelModel, recordingText, rowRateOptions,
+  scanPanelModel, scanPreviewPath, scanQueryFrom, segmentNotice, windowLabel,
 } from "../../controls/model";
 import { fmtBandwidth } from "../../axis";
 import { h } from "../dom";
@@ -28,6 +29,8 @@ export class DeviceTab {
   private model: PanelModel | null = null;
   private pending = false;
   private prevRun: { segment: number; content_class: string } | null = null;
+  /** T-452: the price of the sweep the inputs currently describe, from `GET /api/control/scan?…`. */
+  private proposed: { plan: ScanPlan; budget: ScanBudget } | null = null;
   private poll = 0;
 
   private readonly notice = h("div", { class: "hint" });
@@ -68,9 +71,29 @@ export class DeviceTab {
   private readonly recFields = h("div", { class: "rv-fieldset" },
     h("legend", {}, "Recording"), h("div", {}, this.recLabel, this.recMax, this.recStart, this.recStop), this.recStatus);
 
+  // T-452: the survey sweep. Range and dwell are inputs, not a fixed button, because the pass
+  // length is linear in both — and the commitment line below them is priced by the server before
+  // anything starts, so a user who is about to give the radio away for 80 minutes is told first.
+  private readonly scanLo = h("input", { type: "number", class: "mono", placeholder: "from MHz", onchange: () => void this.priceScan() });
+  private readonly scanHi = h("input", { type: "number", class: "mono", placeholder: "to MHz", onchange: () => void this.priceScan() });
+  private readonly scanDwell = h("input", { type: "number", class: "mono", min: "0.1", value: "15", placeholder: "dwell s", onchange: () => void this.priceScan() });
+  private readonly scanStart = h("button", { class: "mini", type: "button", onclick: () => void this.onScanStart() }, "Start sweep");
+  private readonly scanStop = h("button", { class: "mini", type: "button", onclick: () => void this.call("sweep stop", () => this.client.post("/api/control/scan/stop")) }, "Stop sweep");
+  private readonly scanCommit = h("div", { class: "hint" });
+  private readonly scanStatus = h("div", { class: "hint" });
+  private readonly scanNotes = h("div", { class: "hint" });
+  private readonly scanReason = h("div", { class: "hint" });
+  private readonly scanFields = h("fieldset", { class: "rv-fieldset" },
+    h("legend", {}, "Survey sweep"),
+    h("div", { class: "hint" }, "Steps the tune across a range. Leave the range empty to sweep everything this front end can tune."),
+    h("label", {}, "From ", this.scanLo), h("label", {}, "To ", this.scanHi), h("label", {}, "Dwell ", this.scanDwell),
+    h("div", {}, this.scanStart, this.scanStop),
+    this.scanCommit, this.scanStatus, this.scanNotes);
+
   private readonly root = h("div", { class: "rv-panel" },
     this.notice, this.run, this.spinner,
-    this.deviceFields, this.deviceReason, this.displayFields, this.displayReason, this.recFields, this.msg);
+    this.deviceFields, this.deviceReason, this.scanFields, this.scanReason,
+    this.displayFields, this.displayReason, this.recFields, this.msg);
 
   private gainKey = ""; private rateKey = ""; private filterKey = ""; private limitsKey = "";
 
@@ -81,6 +104,9 @@ export class DeviceTab {
   activate() {
     if (this.poll) return;
     void this.refresh();
+    // T-452: price the default sweep straight away, so the commitment line is there before the
+    // user touches anything rather than appearing only once they have edited a field.
+    void this.priceScan();
     this.poll = window.setInterval(() => { if (document.visibilityState === "visible") void this.refresh(); }, 2000);
   }
 
@@ -143,10 +169,68 @@ export class DeviceTab {
       if (document.activeElement !== this.avg) (this.avg as HTMLInputElement).value = String(d.averaging);
     }
 
+    this.renderScan(s);
+
     const rec = run?.recording;
     (this.recStart as HTMLButtonElement).disabled = !m.record.enabled;
     (this.recStop as HTMLButtonElement).disabled = !m.record.active || !m.display.enabled;
     this.recStatus.textContent = m.record.enabled || m.record.active ? recordingText(rec, rec?.sample_rate_hz ?? sp) : m.record.reason;
+  }
+
+  /**
+   * T-452: the sweep control. Three things must always be visible, because each of them is a
+   * promise the backend makes and the panel would otherwise swallow:
+   *
+   * - **the commitment**, before the button — what a pass of this range at this dwell costs;
+   * - **where the sweep is**, while it runs;
+   * - **why it stopped**, when the user's own tune took the radio from it. A yield is never
+   *   silent, and the control that resumes it sits right there.
+   */
+  private renderScan(s: ControlState) {
+    const m = scanPanelModel(s, this.proposed, this.pending);
+    (this.scanFields as HTMLFieldSetElement).disabled = !m.gate.enabled;
+    this.scanReason.textContent = m.gate.reason;
+    this.scanStart.textContent = m.primary.label;
+    (this.scanStart as HTMLButtonElement).disabled = !m.primary.enabled;
+    (this.scanStop as HTMLButtonElement).disabled = !m.stopEnabled;
+    this.scanCommit.textContent = m.commitment;
+    this.scanCommit.title = m.statement;
+    this.scanStatus.textContent = m.yieldText || m.progressText;
+    this.scanNotes.textContent = m.notes.join(" · ");
+  }
+
+  /** What the range/dwell boxes ask for. The rule that a half-stated range sends neither end lives
+   * in `scanQueryFrom`, where a test can assert the request this panel builds (T-367). */
+  private scanQuery(): ScanQuery {
+    return scanQueryFrom({
+      loMHz: (this.scanLo as HTMLInputElement).value,
+      hiMHz: (this.scanHi as HTMLInputElement).value,
+      dwellS: (this.scanDwell as HTMLInputElement).value,
+    });
+  }
+
+  /** Prices what the inputs currently say, without starting anything. */
+  private async priceScan() {
+    const path = scanPreviewPath(this.scanQuery());
+    try {
+      const body = await this.client.get<{ proposed: { plan: ScanPlan; budget: ScanBudget } | null }>(path);
+      this.proposed = body.proposed;
+      this.scanCommit.classList.remove("bad");
+    } catch (e) {
+      // A range this front end cannot reach is said, not swallowed: the commitment line is the
+      // only place the user finds out before pressing Start.
+      this.proposed = null;
+      this.scanCommit.textContent = errText(e);
+      this.scanCommit.classList.add("bad");
+      return;
+    }
+    if (this.state) this.render();
+  }
+
+  private async onScanStart() {
+    const resume = this.state?.scan?.state === "yielded";
+    const body = resume ? { resume: true } : this.scanQuery();
+    await this.call(resume ? "sweep resume" : "sweep start", () => this.client.post("/api/control/scan", body));
   }
 
   private renderLimits(m: PanelModel) {

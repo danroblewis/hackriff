@@ -910,17 +910,20 @@ Opaque, per-build JSON object of counters (source samples, chain stats, control-
 
 ## Control API (T-050)
 
-Device, display, recording and bookmark endpoints, all behind the bearer token, all audited once authenticated. **Five of them reach the radio and the rest do not** — see [Device actions](#device-actions-t-343). Every mutating body is a JSON object (`Content-Type: application/json`); an unknown field is `400 invalid`. Device endpoints (`center`, `rate`, `gains`, `bias_tee`) act on a *live* source ([`ApiState::live_control`]); on a replayed recording they answer `409 not_live`, while display, recording and bookmarks keep working.
+Device, display, recording and bookmark endpoints, all behind the bearer token, all audited once authenticated. **Five of them reach the radio and the rest do not** — see [Device actions](#device-actions-t-343) — and one more *commissions* retunes without performing any: [the in-app survey sweep](#the-in-app-survey-sweep-and-who-wins-when-it-and-the-user-both-want-the-radio-t-452). Every mutating body is a JSON object (`Content-Type: application/json`); an unknown field is `400 invalid`. Device endpoints (`center`, `rate`, `gains`, `bias_tee`) act on a *live* source ([`ApiState::live_control`]); on a replayed recording they answer `409 not_live`, while display, recording and bookmarks keep working.
 
 | Method | Path | Body | Response | Notable errors |
 |---|---|---|---|---|
-| GET | `/api/control/state` | – | `{live, device, tuning, run, display_limits, transmit: {available: false, reason}, audit, routes}` | – |
+| GET | `/api/control/state` | – | `{live, device, tuning, run, scan, display_limits, transmit: {available: false, reason}, audit, routes}` | – |
 | POST | `/api/control/center` | `{"center_hz"}` | `{tuning, run, device}` **(device action)** | 400 invalid/out_of_range, 409 not_live/conflict/device_busy/finished |
 | POST | `/api/control/rate` | `{"sample_rate_hz"}` | `{tuning, run, device}` **(device action)** | as above |
 | POST | `/api/control/gains` | `{"gains": {"<stage>": <dB>, …}}` | `{tuning, device}` **(device action)** (gains quantised per stage) | 400, 409 not_live/device_busy |
 | POST | `/api/control/bias_tee` | `{"enabled"}` | `{tuning, device}` **(device action)** | 501 unsupported (no bias tee), 409 not_live/device_busy |
 | POST | `/api/control/baseband_filter` (T-067) | `{"bandwidth_hz"}` | `{tuning, device}` **(device action)** (validated against `device.baseband_filter`) | 501 unsupported (no selectable filter), 400 out_of_range, 409 not_live/device_busy |
 | POST | `/api/control/display` | any of `{"fft_size", "averaging", "rows_per_s", "window"}` (T-067; at least one) | `{display}` | 400 invalid |
+| GET | `/api/control/scan[?f_lo_hz&f_hi_hz&dwell_s]` (T-452) | – | `{scan, proposed}` — `proposed` prices the named sweep **without starting it**, `null` when none is named | 400 invalid (a range the device cannot reach), 409 not_live |
+| POST | `/api/control/scan` (T-452) | `{"f_lo_hz"?, "f_hi_hz"?, "dwell_s"?}`, or `{"resume": true}` | `{scan, proposed, device: {commissions, id}}` **(commissions retunes)** | 400 invalid, 409 refused (one already running / nothing to resume), 409 not_live |
+| POST | `/api/control/scan/stop` (T-452) | `{}` (or empty) | `{scan}` — **never refused** | 409 not_live |
 | POST | `/api/control/record/start` | `{"label"?, "max_s"?}` | `{recording}` | 409 refused (a content-forbidding class), conflict (already recording) |
 | POST | `/api/control/record/stop` | `{}` (or empty) | `{recording}` (the stored `Recording`) | – |
 | GET | `/api/bookmarks` | – | `{"bookmarks": [Bookmark, …]}` | – |
@@ -934,6 +937,46 @@ Device, display, recording and bookmark endpoints, all behind the bearer token, 
 `tuning`: `{center_hz, sample_rate_hz, gains: {"<stage>": <dB>, …}, bias_tee, baseband_filter_hz}` (`bias_tee` (T-325) is `"unknown"`, `"off"` or `"on"` — three states, never a bool. `"unknown"` means nothing has reported a state: this server has not set one and the device does not have a bias tee. **It must not be read as off** — a bias tee left on into a passive or DC-shorted port is a hardware hazard, and an active antenna's LNA moves the noise floor, so unknown is not a claim that either is safe. Whether the control exists at all is `device.bias_tee`, not this field. `baseband_filter_hz`: `null` without that capability, or before it's been set explicitly — the device's own default is in force). `display`: `{fft_size, averaging, rows_per_s, window}` (`window`: `"hann"`, `"blackman-harris"` or `"flat-top"`; T-067). `run`: `{live, content_class, content_permitted, center_hz, sample_rate_hz, segment, replumbing, finished, display, recording}` — `segment` increments on every re-plumb (a retune or rate change into a window of another content class). `recording`: `{active, id, label, center_hz, sample_rate_hz, samples, lost_samples, max_s, stored, ended}`.
 
 **`display_limits` (T-067)** reports the bounds `POST /api/control/display` accepts, so the UI stops hard-coding hk-pipeline's `DISPLAY_*` constants: `{fft_size_min, fft_size_max, averaging_max, rows_per_s_min, rows_per_s_max, windows}` — `fft_size` must be a power of two in `[fft_size_min, fft_size_max]`, `averaging` in `[1, averaging_max]`, `rows_per_s` in `[rows_per_s_min, rows_per_s_max]`, `window` one of the `windows` list. `null` when this server has no running pipeline (503-class servers only; both live and replayed runs report it).
+
+### The in-app survey sweep, and who wins when it and the user both want the radio (T-452)
+
+`/api/control/scan` starts, prices and stops T-406's iterative scan **from the running app**, so the coverage map fills — grey turning lit — as the sweep steps, instead of a survey being something you could only ask for at server launch.
+
+**`hk serve` still does not drive the scheduler, and that is the decision, not an oversight.** T-406 built the iterative scan as a dwell policy *over the scheduler*, and `hk serve` deliberately composes its run without one. Turning the scheduler on here would be a second composition path (the scheduler and the interactive observer are chosen when a segment is built, not while it runs), and it is not needed: the interactive run **already writes what a sweep needs**. `hk_pipeline`'s interactive observer closes **one dwell record per steady tune**, with that tune's own window and its own interval — which is exactly T-406's load-bearing requirement of *one record per step with its true band and interval*, the thing that stops a pass rasterising as "the whole band, the whole time". So the sweep is a **driver over the interactive retune path**: every step is the same gated `DeviceAction::Retune` a user's explicit tune is, through the same gate, recorded against the same `device_id`, and its coverage lands in the plane every other surface already reads. There is **no second accumulator and no second device path**. `hk run` / `hackriffd` keep `--survey-dwell`, which is the scheduler-driven form.
+
+**Commissioning is a third classification, not a loophole.** `POST /api/control/scan` moves no front end within the call, so it is *not* one of the five device actions — and it is obviously not a view change either, because it commits this radio to hundreds of retunes over the next hour or two. Its answer and audit entry therefore carry `device: {commissions: "retune", id}`, never `{action, id}`: the log says which radio was committed without ever reading as if the request itself moved it. `/api/control/scan/stop` and the `GET` are plain view-side routes — surrendering the radio must never be refusable.
+
+**The arbitration: the user wins, the sweep yields, and the sweep says so.**
+
+> An explicit user device action always wins. The sweep yields at the step it was on, **keeps its place**, and reports what took the radio. The user resumes it or stops it.
+
+"Explicit user device action" is not a guess — by the rule above, a client may only call the five device routes for an explicit user act, so anything arriving on one *is* the user acting. The sweep is in-process and reaches no route, so it cannot mistake itself for the user. The yield happens **before** the user's action is attempted, so the sweep has already stopped stepping by the time that action reaches the gate.
+
+The alternatives were weighed and rejected: *refusing the user* while a sweep holds the radio would make T-444's retune-on-pan start failing for the ~80 minutes of a 6 GHz pass, on a route that must keep working; *letting the sweep step on and take the tune back* is the silent drop the honesty rule forbids — the user's tune stands for a few seconds and is then undone by something they cannot see (T-409's clamped-nudge lesson, one layer up).
+
+A yield is therefore never silent, and never wrong in either direction:
+
+- the **user's own response** carries the `scan.yielded` object their action caused — the answer to "why did my sweep stop" is in the reply that stopped it;
+- `GET /api/control/scan` and `/api/control/state` both report `state: "yielded"` with the same object;
+- a user action **refused before it reached the device** un-yields the sweep, because nothing took the radio;
+- the **sweep's own step** can lose too: a *transient* refusal (`device_busy`, `conflict`, `timeout`) is retried on the same step a few times, and anything else — or a step that keeps failing — yields with that error and keeps its place. What a step never does is move on, because a skipped step would claim a band was swept when it was not.
+
+**A step is a retune, with a retune's costs.** Each step is one `POST`-equivalent `set_center` and nothing else: the sweep never changes the rate, the gains or the filter, so the pass is tiled at the span in force and every step is a single device action. Where the window's content class is unchanged that is a tune in place; a step across a class boundary re-plumbs the segment exactly as a user's retune across the same boundary does, around the still-open device — capture is not stopped, and the step just starts later, since the dwell is timed from when the retune returns. A range inside one class, which a band survey usually is, never re-plumbs.
+
+**What the control shows before the button.** `GET /api/control/scan?f_lo_hz=…&f_hi_hz=…&dwell_s=…` prices a sweep without starting one, so the arithmetic is in front of the user rather than in the log afterwards. `proposed.budget.statement` is T-406's own sentence with this plan's numbers in it — *"401 steps × 12.0 s = a 4812.0 s pass over 5999.000 MHz (15.000 MHz per step); each band is listened to 12.0 s in every 4812.0 s (duty 0.249 %). A step catches anything on the air during its own dwell; it catches nothing during the other 4800.0 s, and spectrum the pass has not reached is unobserved, never quiet."* A 6 GHz sweep at a 15 s dwell is a commitment of about 80 minutes, and the control says so first.
+
+Shapes:
+
+- `scan`: `{state: "idle"|"running"|"yielded", available, unavailable_reason, plan, budget, progress, yielded}`.
+  - `plan`: `{f_lo_hz, f_hi_hz, dwell_s, recommended_dwell, sample_rate_hz, steps, warnings}` — `recommended_dwell` is whether the dwell is inside the 10–30 s the survey is sized for; a dwell outside it **still runs** (the user asked for a configurable number, not a clamped one) and this is what lets the UI say it is unusual. `sample_rate_hz` is the span **in force**: the pass is tiled at the window the run is actually capturing, and a sweep never changes the user's span or gains — the one device action per step is the retune. `warnings` say what compilation did to the request, clipping above all.
+  - `budget`: `{steps, dwell_s, pass_s, revisit_s, span_hz, step_span_hz, duty, statement}`. `pass_s` **is** the revisit interval, and `duty` = `dwell/pass` — the honest headline of the trade, not a detection probability.
+  - `progress`: `{step, steps, pass, steps_done, center_hz, started_s, step_started_s, next_step_in_s}`, `null` when idle.
+  - `yielded`: `{to, at_s, step, detail}` — `to` is a `DeviceAction` name (`"retune"`, `"rate"`, …) for a user action, or `"step_failed"` when the sweep's own retune was refused. `null` unless yielded.
+- `available` is `false`, with `unavailable_reason`, for a front end that cannot be retuned or states no tunable range — "nothing said" about a range is not a range, so the control is disabled with its reason rather than offering a button that would fail.
+- `proposed` is a `{plan, budget}` pair, `null` when the request named neither a range nor a dwell. `f_lo_hz` and `f_hi_hz` **go together**: either alone is a half-stated range, refused rather than guessed at. Omitting both prices a sweep of everything this front end can tune.
+- `resume: true` takes no range and no dwell — it continues the sweep that yielded, at the step it stopped on. Starting with a range while one is yielded replaces it; starting while one is **running** is `409 refused`, because two sweeps over one front end are two policies fighting for the same tune.
+
+Contract: `crates/hk-cli/tests/api_contract.rs::a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user` drives the whole thing through the mock SDR device — prices a pass, starts it, watches the tune step and **per-step observation records appear with their own centres**, then asserts the user's retune succeeds *and* carries the yield it caused, that the user's tune is not taken back, that a refused user action un-yields, and that stopping is never refused.
 
 ### Pause is client view state — there is no pause route (T-347)
 
