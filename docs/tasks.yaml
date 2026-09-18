@@ -13386,7 +13386,7 @@ tasks:
   - id: T-473
     milestone: M2-hardening
     title: The e2e tier has no per-spec timeout and can hang the gate indefinitely - observed at 31 minutes
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CI
     depends_on: []
@@ -14772,7 +14772,8 @@ tasks:
   - id: T-497
     milestone: MLIVE
     title: A retune tears the live capture down again - the server stays up and the live view never recovers
-    status: in-progress
+    status: done
+    commit: 13222163
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15252,6 +15253,32 @@ tasks:
       re-plumb does not reset oldest_record, so the unknown wall is a separate defect.
       NOT YET CONFIRMED ON THE USER'S HARDWARE: T-497's fix matches the symptom exactly, but no agent
       may touch the demo's HackRF. The user's next retune on the demo is the real test.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-509
+    milestone: M2-hardening
+    title: tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell saw an all-unobserved plane once under a full gate
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      OBSERVED ONCE, 2026-09-18, in the T-497 merge gate (a diff that does not touch hk-api):
+      api_contract.rs:6712 "a plane that is part unknown and part unobserved is not uniform" got
+      uniform "unobserved", 1024/1024 cells, 0 unknown. It FAILED IN 0.167 s where it PASSES in
+      ~0.65 s - a different path, not a slow one. 3/3 green in isolation on the same merged tree;
+      the full gate re-run from scratch was green.
+      HYPOTHESIS, NOT VERDICT: the test depends on the record horizon falling INSIDE the requested
+      tile, and under load the store has either no record yet or one that lands elsewhere - the
+      same unknown_rows/oldest_record machinery as T-507. Measure it under load (with a builder
+      competing) before touching it; do NOT add it to the quarantine list without the
+      isolation-versus-load measurement docs/10 section 3.5 requires.
+      DoD: the failing path reproduced deliberately, and either the test made to construct its
+      horizon deterministically or the product defect it caught fixed (read T-507 first - fixing
+      that may change what this test should expect).
+    notes: |
+      Filed 2026-09-18 by the coordinator so an intermittent red is recorded, not waved through.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
