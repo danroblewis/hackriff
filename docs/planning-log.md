@@ -5347,3 +5347,36 @@ the canvas is delivered, so non-canvas work resumes — **T-400** (the gate rege
 state every agent is configured to avoid), **T-447** (the strong-envelope subset over the same broken
 mean rule T-431 fixed one layer down) and **T-374** (harmonic families — the user's signal-
 relationships item, and the one whose hardest requirement is that it must be able to say **no**).
+
+**T-348 measured the paused view and changed nothing, because the saving it found is real and pause
+cannot reach it.** The ticket's premise was already stale: T-347 removed the run-wide pause outright,
+so there is no pause check in `spectrum.rs` sitting after `cursor.set` to think twice about moving —
+there is no pause check at all, and the invariant it guarded is untouched because nothing was changed.
+
+The prize is bigger than the ticket assumed and smaller than it looks. On `hk serve --replay` at
+2.4 Msps (fft 4096, 25 rows/s), no consumer, three interleaved 60 s steady-state windows of process
+CPU: skipping the spectrum reader's `stft.push` saves ~1.7 of ~11 CPU-seconds per 60 s of wall clock,
+**~13% of pipeline CPU** — about 0.03 of the 0.18 cores the whole pipeline draws. It is **all** the
+FFT: skipping only `Output::row` (the EMA, the dB conversion, the serialize, the publish) moved
+nothing measurable and the sign flipped between pairs, and an attached consumer pulling 407 kB/s cost
+nothing measurable either. The right subject matters here as much as the number — **one-shot
+`hk replay` answers a different question** and would have understated it, because a 0.6–5 s run is
+dominated by one-off costs (DB open, the `hk-survey` receiver-line window, model init) and dilutes
+the view's share to 1.4–7.3%. And one instrument was discarded for the T-454 reason: a
+`CLOCK_THREAD_CPUTIME_ID` probe per reader thread billed `hk-spectrum` 0.052 s of a 2.12 s process
+total, but every probed thread summed to 0.33 s of 7.69 s at 20 Msps — `compute::stft` dispatches to
+a shared CPU pool, so **the counter measured the caller, not the work**.
+
+None of that 13% is reachable by pausing, and the reason is a design decision rather than an
+oversight. Since T-445/T-457 the client keeps **one spectrum socket per session whatever its panes
+do**, because that socket carries three things which are not pixels: the live edge on the capture
+clock (`/api/timeline` polls at 60 s, far too coarse to advance boxes smoothly), the tuned geometry
+`state.live` and the retune gate read, and the newest row for the viewport-wide trace. A frozen pane
+still needs the first two, so `open_consumers()` stays ≥ 1 while any browser is open. The client side
+is meanwhile already correct — T-460's `refreshEdge` fires only for `following` viewports. So the one
+lever on the 13% is **"nothing is subscribed at all"**, which is the headless scheduled-survey case
+(product workflow #2: hours on battery with no browser attached), not the paused-screen case, and it
+is a real-time-path change with four hazards worth writing down rather than discovering — filed as
+**T-489**, reviewed before merge. What is never recoverable either way is the ring read and
+`cursor.set`: reader 3 holds a gate cursor and drains the ring whether or not anyone is looking, or a
+lossless run stalls capture behind it.
