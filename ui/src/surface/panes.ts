@@ -360,13 +360,23 @@ export class PaneModel {
    * **The motion is unthresholded and stays that way (T-456).** The window moves 1:1 with `dNs`
    * from the first pixel; there is no gate here, no minimum travel, and no suppressed first move.
    * What T-486 adds is not a threshold on *this* — it is a threshold on the **derived follow
-   * state**, applied once, at the end of the gesture, by [[settleTime]]. A pan is still a pan.
+   * state**, applied once, at the end of the gesture, by [[settleTime]]. A pan is still a pan, and
+   * the sentence this doc used to end on — "re-entering follow is an explicit act, never a side
+   * effect of a gesture ending near the edge" — moved there rather than going away: the explicit
+   * act is now the *release*, because the user reported twice that requiring a button press after a
+   * drag that plainly ended at the live edge is the defect, not the discipline.
    *
-   * **A scrub of zero is not a scrub.** `Preview.drag` pans both axes on every pointer move, so a
-   * drag straight along frequency arrives here as `panTime(id, 0)`; freezing on it would silently
-   * stop the waterfall following the live edge, which [[follow]]'s contract says may only happen by
-   * an explicit act. It also must not *start* a gesture, or a sideways drag would arrive at
-   * [[settleTime]] claiming to be a time gesture that ended at the edge.
+   * **A scrub of zero is not a scrub (T-484).** `Preview.drag` pans both axes on every pointer
+   * move, so a drag straight along frequency arrives here as `panTime(id, 0)` — and the version
+   * without this guard froze the pane anyway, because `freezeAt` ran before the delta was looked
+   * at. A sideways drag silently stopped the waterfall following the live edge: the user changed
+   * frequency and the pane quietly entered the state *"scrubbed into the past"*, which is the one
+   * thing [[follow]]'s contract says may only happen by an explicit act. It surfaced through T-484:
+   * with the finest tier at the display row rather than at 1 s, a frozen pane drifts visibly behind
+   * the edge within a few hundred milliseconds, and `paneRetuneOffer` began — correctly — answering
+   * `block: "past"` for a viewport whose only gesture had been sideways. T-486 gives the guard a
+   * second job: a zero scrub must not *open a gesture* either, or a sideways drag would reach
+   * [[settleTime]] claiming to be a time gesture that ended at the live edge.
    */
   panTime(id: string, dNs: number): void {
     if (dNs === 0) return;
