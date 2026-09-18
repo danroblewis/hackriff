@@ -13711,7 +13711,7 @@ tasks:
   - id: T-481
     milestone: MCANVAS
     title: A full canvas e2e SCENARIO through the mock SDR - pan/zoom, live advance, retune-fills - as the standing regression guard
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     core_interface: true
