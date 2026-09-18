@@ -63,6 +63,14 @@ gate *args:
 gate-merge *args:
     uv run --locked --project py python -m hkpy.gate --merge {{args}}
 
+# THE SELF-CLEANING BOARD: which in-progress tickets git says are merged, stalled or empty (T-477).
+# `in-progress` is a claim about the world and it goes stale silently - a branch lands and the board
+# is never flipped, or an agent is lost. Both read identically from the board and differently from
+# git. Run it at the START of every tick, before launching anything. --strict exits 1 if anything
+# needs attention.
+reconcile *args:
+    uv run --locked --project py python -m hkpy.reconcile {{args}}
+
 # Build the Rust workspace (CPU path; `gpu` off)
 build:
     cargo build --workspace
