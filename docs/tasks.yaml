@@ -11970,7 +11970,7 @@ tasks:
   - id: T-452
     milestone: MCANVAS
     title: An in-app scan trigger - the iterative-scan ENGINE exists but `hk serve` deliberately never drives the scheduler
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -12032,10 +12032,37 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-cli`,
       `just test-crate hk-core`, `just test-ui`, `just test-one <name>` - then HAND BACK. Never
       `just gate`; the coordinator gates at merge.
+    commit: "88dd4eb"
+    result: |
+      DONE, and THE STANCE WAS KEPT RATHER THAN DELETED. hk serve still does not drive the scheduler;
+      serve.rs:139's comment now says why. The sweep is a DRIVER OVER THE INTERACTIVE RETUNE PATH,
+      issuing the same gated DeviceAction::Retune a user's explicit tune issues.
+      The load-bearing reason: THE COVERAGE RECORD ALREADY HAS THE RIGHT SHAPE WITHOUT THE SCHEDULER.
+      InteractiveObserver closes ONE DWELL RECORD PER STEADY TUNE with that tune's own window and
+      interval - exactly T-406's requirement - and spans_from_records reads a record by its window and
+      interval, NOT BY ITS REASON. So the sweep fills the SAME coverage plane: no second accumulator, no
+      second device path. (Also: the scheduler is chosen when a segment is COMPOSED, so enabling it
+      mid-run is the second composition path T-406 refused to add.)
+      ARBITRATION - THE USER WINS, THE SWEEP YIELDS, AND SAYS SO. The yield happens BEFORE the user's
+      action is attempted, so stepping has stopped by the time it reaches the gate; the sweep keeps its
+      place and resumes. Rejected: refusing the user (breaks T-444's retune-on-pan for ~80 minutes of a
+      6 GHz pass) and taking the tune back at the next step (the silent drop, T-409's lesson one layer
+      up).
+      THE SURFACING IS THE PART TO KEEP: the user's OWN RESPONSE carries the scan.yielded object their
+      action caused, so "why did my sweep stop" is answered in the reply that stopped it. A user action
+      refused BEFORE reaching the device UN-YIELDS the sweep, but only if the standing yield is the one
+      it caused. A step retries a TRANSIENT refusal on the SAME step and never moves on, because a
+      skipped step would claim a band was swept when it was not.
+      The control prices the pass WITHOUT starting it, rendering T-406's statement verbatim: "401 steps
+      x 12 s = 80 min per pass; each band is heard 12 s in every 80 min (duty 0.249%)". A dwell outside
+      10-30 s runs and is REPORTED UNUSUAL, never clamped.
+      INVARIANTS: POST /api/control/scan forced a THIRD classification rather than a looser one -
+      Action::reach() answers Device / Commissions / View - so T-343's "exactly five routes reach the
+      front end" test is unchanged and passes. Each step is one set_center, so no re-plumb.
   - id: T-453
     milestone: MCANVAS
     title: Coarse nodes are built EAGERLY at every seal, which is a deviation from §5.2's decided "on demand at the live edge"
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -12083,6 +12110,29 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-store`,
       `just test-crate hk-pipeline`, and `just acceptance-ci` since it is the thing that regressed
       - then HAND BACK. Never `just gate`; the coordinator gates at merge.
+    commit: "1b1d68b"
+    result: |
+      DONE, and the fix is a READING rather than a redesign. §5.2 says "precomputed at seal time, on
+      demand at the live edge"; the implementation read "seal time" as THE PRODUCER'S seal - every
+      sealed tile folded into every consumer, so the whole lattice was a by-product of capture. It now
+      reads it as THE CONSUMER'S seal, which is what the sentence says.
+      coarse_on_demand makes seal_through_ns skip fold_into_consumers entirely: capture writes node
+      (0,0) and nothing else. Pyramid::materialize builds what a READ needs, recursing through producers
+      (child_blocks is the exact inverse of T-434's fold_target); a tile whose time block has ELAPSED is
+      written sealed on the way, so it is precomputed for every reader after the first.
+      WHY IT DOES NOT MOVE THE CONTENTION, which §5.2's own reasoning warned about: the eager fold was
+      O(capture duration x nodes) ON THE THREAD THAT GATES THE RING, paid whether or not anyone looked.
+      The lazy build is O(tiles actually viewed), on a READER, ONCE, sharing the lock hold the reader
+      already chunks by whole output rows - bounded by the region asked for, not the run's length.
+      MEASURED: M0 acceptance slice 54.07 s -> 33.45 s against T-439's lattice-off control of 32.9 s;
+      acceptance-ci targets 190.6 -> 160.4 s; hk-pipeline 262 -> 75 s with live_edge_tiles 182 -> 3 s;
+      resident floor 2.28 -> 0.91 MB/MHz; user CPU across acceptance-ci 800 -> 454 s.
+      RESIDENCY CHANGED SHAPE, NOT JUST SIZE, and was re-measured rather than assumed: capture now opens
+      one accumulator whichever axis a node coarsens, so the peak is 2 tiles (~18 MB at a 20 MHz live
+      edge). The seal-lag row survives because it is a property of SEALING, not of the lattice.
+      THE LATTICE CAN GROW BACK on cost grounds - neither write cost nor residency scales with node
+      count now, so VIEW_LEVELS is a REACH decision again. It stays at 4 because T-438's other half is
+      unchanged: those nodes address a surface nothing can serve.
   - id: T-454
     milestone: MCANVAS
     title: The surface surfaces the tile backpressure 503 instead of backing off - and TileCache already has a cap and cancellation
@@ -12159,7 +12209,7 @@ tasks:
   - id: T-455
     milestone: MCANVAS
     title: Real headless-browser automation for /surface - the verification tier that would have caught both of the last two defects
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     deps: [T-450]
@@ -12205,6 +12255,41 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`; the
       coordinator gates at merge. Adding a dependency is in scope here - say what it costs.
 
+    commit: "56322c0"
+    result: |
+      DONE - the verification tier this milestone was missing, and IT CAUGHT ITS OWN BOUND BEING TOO
+      WEAK.
+      ui/e2e/ drives headless Chrome against a real hk serve --replay, wired as `just test-ui-e2e` into
+      the gate's ACCEPTANCE phase for the `ui` and `full` classes. Not folded into test-ui (which every
+      .ts edit pays and which needs neither a Rust binary nor a browser) and not opt-in, because a tier
+      nobody must run looks like coverage. ZERO DEPENDENCY COST: a ~120-line CDP driver over node's
+      built-in WebSocket using whatever Chrome the machine has.
+      THE BOUND QUESTION ANSWERED - IT IS DISCOVERY, NOT LEAKAGE, over eleven instrumented runs: peak on
+      the wire is EXACTLY the server's cap and never above (4/4 against 6/4 before T-454); EVERY refusal
+      occurs with the operating cap AT ITS CEILING, never at 2 or 3 where leakage would also show; and
+      after the last viewport change the cap returns to ceiling and holds through ~3700 further requests
+      with ZERO refusals. A leaked slot keeps leaking; a search stops once the share is found. So "zero
+      503s" does forbid the mechanism, T-454's fix is sound, and there was nothing to file.
+      THEN IT CAUGHT ITSELF. Its first replacement bound was a count plus a structural story ("AIMD
+      cannot return to its ceiling more often than the gestures that push it off"). It wrote a fault
+      that DELETES THE HALVING - a client that notices the 503 and does nothing - which never leaves the
+      ceiling, is refused 8-10 times, AND PASSED THAT BOUND. A BOUND REASONED FROM HOW THE CORRECT
+      ALGORITHM BEHAVES DOES NOT CONSTRAIN THE INCORRECT ONE.
+      The bound now conditions permission on the MECHANISM: peak <= the server's declared cap, exact;
+      zero refusals in 8 s of steady state, the window sized to CONTAIN the measured 12-14 s return to
+      ceiling; A REFUSAL MUST BE SEEN TO HALVE THE CLIENT'S OPERATING CAP, read from the status line -
+      the sharp one, since refusals are allowed BECAUSE they are a search, so the permission is void
+      unless the halving is observed; refusals <= viewport changes as a coarse guard; and busyRefusals
+      must EQUAL the wire's 503 count, the inversion of T-454's own lesson.
+      NON-VACUITY PROVED FOR BOTH DEFECTS AGAINST A GREEN BASELINE - five faults, five caught by the
+      guard named for them. It also corrected a claim of its own: it had written that the
+      abandoned-slots fault is what the steady-state assertion catches, and the run disagreed.
+      surface-contention.e2e.mjs opens a SECOND TAB into the first tab's tile storm - T-454's closing
+      note that both halves of its defect are visible only when a second client exists - and declares
+      itself INCONCLUSIVE if the probe was never actually refused, so it cannot bank a green on a race
+      it lost.
+      M8 shares this harness rather than growing a second; the only axis it adds is WHICH BACKEND.
+      Runtime ~32 s for 3/3.
   - id: T-456
     milestone: MCANVAS
     title: Google-Maps navigation on the surface - drag pans, plain wheel zooms BOTH axes, modifiers give one axis
