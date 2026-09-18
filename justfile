@@ -137,7 +137,7 @@ test-one name:
 # so the opposite drift (a new target quietly running in no gate at all, which is what the harness
 # set did locally) cannot recur either. Adding a target means adding it here, deliberately.
 e2e_slice := "acceptance_m0"
-e2e_harness := "concurrent_demod floor_acceptance listen_live mock_device outputs_record refine smoke spectrum_axis stream_external"
+e2e_harness := "canvas_fidelity concurrent_demod floor_acceptance listen_live mock_device outputs_record refine smoke spectrum_axis stream_external"
 e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp"
 
 # M0 slice acceptance suite (T-024, docs/11 §1.1): 7 use cases through the composed pipeline. Missing uv or LFS fixtures fail; only readsb-dependent parts skip. Extra args go to cargo test, e.g. `just acceptance -- --nocapture`

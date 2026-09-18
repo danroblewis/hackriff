@@ -13725,7 +13725,7 @@ tasks:
   - id: T-483
     milestone: MLIVE
     title: PROVE THE GAP - the canvas finest-live tier must reproduce the old waterfall's image for the same window, and today it will not
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     core_interface: true
@@ -13773,6 +13773,31 @@ tasks:
       Filed 2026-09-18 from /tmp/claude-501/canvas-fidelity-brief.md. THE USER'S EXPLICIT PRIORITY is
       this test, ahead of the fix. Expected to fail on arrival; that is the point.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      LANDED 2026-09-18, branch task-t483: tests/e2e/tests/canvas_fidelity.rs. Rust e2e tier, driven
+      through the mock SDR device (open_mock_replay); one run, two readers of the same capture - the
+      spectrum/live stream (Path A, the FFT frames the retired waterfall drew) and the view-lattice
+      pyramid's finest node (Path B, what /api/tiles serves). VALUES, not pixels, so T-470's ramp and
+      display range cannot move any number. No second renderer.
+      MEASURED (fm_100p8M_2p4M_l32g30a1_t1p5_5s): display 1024 bins / 2.400 MHz at 24.9 rows/s =
+      2343.8 Hz x 40.1 ms; canvas finest node 6250 Hz x 1 s => ONE CANVAS CELL STANDS IN FOR
+      2.67 x 24.93 = 66.5 FFT CELLS (171x the finest bin a zoomed client may request). CONTROL, and
+      it passes: both paths put the quiet band's floor at -84.53 dB/Hz, identical - so every dB below
+      is the statistic and the grid, not a calibration difference. Canvas max_db reads that floor at
+      -74.02, +10.5 dB OF MAX-HOLD FLOOR LIFT, costing 4.5 dB of contrast on the 100.000 MHz spur,
+      5.0 dB on the 100.465 MHz emission and 1.6 dB on the station ("washed out", in dB). The 1 s
+      cell keeps 19 % of the 100.465 MHz emission's level variation and 3 % of the station's ("reads
+      nearly straight", as a number). Per-cell reproduction error 15.8 dB in the station band.
+      THE BRIEF'S MECHANISM WAS THE WRONG PLANE, and the correction matters for T-484: the brief
+      named RegridPlan::mean (f_cell/bin_width bins averaged), but /api/tiles serves `max_db` and
+      ui/src/surface/tile.ts is its only consumer. The `mean_db` plane in fact AGREES with the
+      display path to 0.00 dB. The three mechanisms that do act on max_db are (1) the history/view
+      chain's OWN STFT at detection_resolution()'s fft_len = 512 at 2.4 Msps = 4687.5 Hz bins, which
+      is coarser than the display stream before any cell fold - a loss no choice of f_cell can undo;
+      (2) the max-hold statistic over ~10^3 FFT cells (Welch holds on, k ~= 938 segments/row), which
+      lifts the floor while a deterministic peak stays put; (3) VIEW_T_CELL = 1 s against 25 rows/s.
+      STATE: the four proofs are #[ignore]d so one known-red measurement does not block unrelated
+      merges; the control test is not. DELETING THOSE FOUR #[ignore] LINES IS T-484'S DoD. Run them:
+      cargo test -p hk-e2e --test canvas_fidelity -- --ignored --test-threads 1 --nocapture
   - id: T-484
     milestone: MLIVE
     title: The live/tuned tier must render at live-IQ FFT resolution - the pyramid stays coarse only for zoom-out and history
