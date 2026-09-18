@@ -16,6 +16,9 @@
 //! | POST | `/api/control/bias_tee` | `{"enabled"}` | `tuning` (501 without a bias tee) |
 //! | POST | `/api/control/baseband_filter` (T-067) | `{"bandwidth_hz"}` | `tuning` (validated against `device.baseband_filter`; 501 without one) |
 //! | POST | `/api/control/display` | any of `{"fft_size", "averaging", "rows_per_s", "window"}` (T-067) | `display` |
+//! | GET | `/api/control/scan[?f_lo_hz&f_hi_hz&dwell_s]` (T-452) | – | `scan` (state, plan, budget, progress, `yielded`) and, for a proposed range/dwell, `proposed` — **what a sweep would cost, without starting it** |
+//! | POST | `/api/control/scan` (T-452) | `{"f_lo_hz"?, "f_hi_hz"?, "dwell_s"?}` or `{"resume": true}` | `scan`, `proposed`, `device.commissions` |
+//! | POST | `/api/control/scan/stop` (T-452) | `{}` or empty | `scan` (never refused) |
 //! | POST | `/api/control/record/start` | `{"label"?, "max_s"?}` | `recording` (409 `refused` under a class that forbids content) |
 //! | POST | `/api/control/record/stop` | `{}` or empty | `recording` (the stored Recording) |
 //! | GET, POST | `/api/bookmarks` | create: `{"name", "f_center_hz", "kind"?, "bandwidth_hz"?, "note"?}` | list / the created bookmark (201) |
@@ -55,6 +58,23 @@
 //!   front end a retune would move **before** it asks for one;
 //! - device actions serialise on one [`crate::live_control::DeviceGate`]; a contended one answers
 //!   409 `device_busy` naming the holder rather than racing it to the driver.
+//!
+//! # Commissioning is a third answer, not a loophole (T-452)
+//!
+//! `POST /api/control/scan` starts a survey sweep that will retune this front end hundreds of
+//! times. It performs no device action *within the call*, so it is not one of the five — and it is
+//! plainly not a view change either. [`Action::reach`] therefore has three answers, not two:
+//! [`Reach::Device`], [`Reach::Commissions`] and [`Reach::View`]. The commissioning route's answer
+//! and audit entry carry `device: {commissions, id}` rather than `{action, id}`, so the log says
+//! which radio was committed without ever reading as if the request itself moved it. Every step
+//! the sweep then takes *is* a `DeviceAction::Retune` through the same gate, recorded against the
+//! same `device_id`: there is no second device path, and "exactly five routes reach the front end"
+//! is still true.
+//!
+//! **Arbitration** between the sweep and interactive tuning is one rule, applied in [`apply`]: an
+//! explicit user device action wins, the sweep yields at its step and keeps its place, and the
+//! user's own response carries the `scan.yielded` object it caused. A user action refused before
+//! it reaches the device un-yields the sweep, because nothing took the radio. See [`crate::scan`].
 //!
 //! `POST /api/control/center` is not a view control. It re-derives the window's content class and,
 //! when the class or rate changes, stops and re-plumbs the running segment. Holding the view,
@@ -705,6 +725,9 @@ enum Action {
     BiasTee,
     BasebandFilter,
     Display,
+    ScanState,
+    ScanStart,
+    ScanStop,
     RecordStart,
     RecordStop,
     ListBookmarks,
@@ -724,6 +747,9 @@ impl Action {
             Self::BiasTee => "bias_tee",
             Self::BasebandFilter => "baseband_filter",
             Self::Display => "display",
+            Self::ScanState => "scan_state",
+            Self::ScanStart => "scan_start",
+            Self::ScanStop => "scan_stop",
             Self::RecordStart => "record_start",
             Self::RecordStop => "record_stop",
             Self::ListBookmarks => "bookmarks_list",
@@ -737,24 +763,33 @@ impl Action {
     fn mutating(self) -> bool {
         !matches!(
             self,
-            Self::State | Self::ListBookmarks | Self::GetBookmark(_)
+            Self::State | Self::ScanState | Self::ListBookmarks | Self::GetBookmark(_)
         )
     }
 
-    /// **Which routes reach the front end** (T-343). This match is the classification: a route is
-    /// a device action if and only if it names a [`DeviceAction`] here, and the arms are
-    /// exhaustive, so a new route cannot be added without deciding which side of the line it is
-    /// on. Everything on the `None` side only changes what is shown — holding the view, scrubbing
-    /// and zooming never touch the device (T-339) and reach no route at all (T-347), and a retune
-    /// does, which is the whole asymmetry.
-    fn device_action(self) -> Option<DeviceAction> {
+    /// **What this route does to the front end** (T-343, extended by T-452).
+    ///
+    /// T-343 drew one line — reaches the driver, or only changes the view — and it held while
+    /// every route did one or the other. `POST /api/control/scan` does neither: it moves no front
+    /// end within the call, and it is emphatically not a view change, because it commits this
+    /// radio to a programme of retunes that will run for as long as the pass takes. Lumping it
+    /// with `display` would have made "only five routes touch the device" true on a technicality
+    /// and false in effect, so the classification gained a third answer instead of a looser one.
+    fn reach(self) -> Reach {
         match self {
-            Self::Center => Some(DeviceAction::Retune),
-            Self::Rate => Some(DeviceAction::Rate),
-            Self::Gains => Some(DeviceAction::Gains),
-            Self::BiasTee => Some(DeviceAction::BiasTee),
-            Self::BasebandFilter => Some(DeviceAction::BasebandFilter),
-            Self::State
+            Self::Center => Reach::Device(DeviceAction::Retune),
+            Self::Rate => Reach::Device(DeviceAction::Rate),
+            Self::Gains => Reach::Device(DeviceAction::Gains),
+            Self::BiasTee => Reach::Device(DeviceAction::BiasTee),
+            Self::BasebandFilter => Reach::Device(DeviceAction::BasebandFilter),
+            // The sweep's steps are `DeviceAction::Retune` through the one gate, each recorded
+            // against the same `device_id`; this route only decides that they will happen.
+            Self::ScanStart => Reach::Commissions(DeviceAction::Retune),
+            // Stopping surrenders the radio, and reading says where the sweep is. Neither commands
+            // anything, and stopping must never be refusable.
+            Self::ScanStop
+            | Self::ScanState
+            | Self::State
             | Self::Display
             | Self::RecordStart
             | Self::RecordStop
@@ -762,9 +797,38 @@ impl Action {
             | Self::CreateBookmark
             | Self::GetBookmark(_)
             | Self::UpdateBookmark(_)
-            | Self::DeleteBookmark(_) => None,
+            | Self::DeleteBookmark(_) => Reach::View,
         }
     }
+
+    /// **Which routes reach the front end** (T-343): the route performs a [`DeviceAction`] within
+    /// the call. Everything else only changes what is shown — holding the view, scrubbing and
+    /// zooming never touch the device (T-339) and reach no route at all (T-347), and a retune
+    /// does, which is the whole asymmetry.
+    ///
+    /// A route that *commissions* device actions for later ([`Reach::Commissions`]) is **not** one
+    /// of these: no front end moves while the request is in flight, so its answer names no action
+    /// taken. It is still not a view change — see [`Action::reach`].
+    #[cfg(test)]
+    fn device_action(self) -> Option<DeviceAction> {
+        match self.reach() {
+            Reach::Device(a) => Some(a),
+            Reach::Commissions(_) | Reach::View => None,
+        }
+    }
+}
+
+/// What a control route does to the front end ([`Action::reach`], T-343 + T-452).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    /// Performs this [`DeviceAction`] on the front end within the call.
+    Device(DeviceAction),
+    /// Performs none itself, but commits the front end to a programme of this action, taken later
+    /// by a driver in this process — each one through the same gate, recorded against the same
+    /// `device_id`.
+    Commissions(DeviceAction),
+    /// Changes only what is shown or stored.
+    View,
 }
 
 /// The `device` object on a device action's response and audit entry (T-343): which front end the
@@ -799,6 +863,15 @@ fn resolve(method: &str, path: &str) -> Option<Result<Action, Option<&'static st
             "bias_tee" => pick("POST", Action::BiasTee),
             "baseband_filter" => pick("POST", Action::BasebandFilter),
             "display" => pick("POST", Action::Display),
+            // T-452: one path, two methods — GET is "where is the sweep, and what would this one
+            // cost", POST is "start or resume it". Stopping is its own path so it can never be
+            // confused with starting.
+            "scan" => match method {
+                "GET" => Ok(Action::ScanState),
+                "POST" => Ok(Action::ScanStart),
+                _ => Err(Some("GET, POST")),
+            },
+            "scan/stop" => pick("POST", Action::ScanStop),
             "record/start" => pick("POST", Action::RecordStart),
             "record/stop" => pick("POST", Action::RecordStop),
             _ => Err(None),
@@ -898,15 +971,21 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
         Err(allow) => return Some(refuse_route(state, req, allow)),
     };
     // A device action's audit entry says which front end it reached, whether or not it succeeded:
-    // "which device retuned" must survive a refusal as well as a success.
-    let device = action.device_action().map(|d| device_json(state, d));
+    // "which device retuned" must survive a refusal as well as a success. A commissioning route
+    // (T-452) names the device it commits to a programme of retunes, with `commissions` rather
+    // than `action`, so the log never reads as if the request itself moved the radio.
+    let device = match action.reach() {
+        Reach::Device(d) => Some(device_json(state, d)),
+        Reach::Commissions(d) => Some(commissioned_json(state, d)),
+        Reach::View => None,
+    };
     Some(dispatch_device(
         state,
         req,
         action.name(),
         action.mutating(),
         device,
-        |s| read(s, action),
+        |s| read(s, action, req.query),
         |s, body| apply(s, action, body),
     ))
 }
@@ -1255,6 +1334,74 @@ fn caps_json(c: &SourceCapabilities, device_id: Option<&str>) -> Value {
     })
 }
 
+/// The `device` object of a **commissioning** route (T-452): which front end this request commits
+/// to a programme of device actions, and which action those will be.
+///
+/// It says `commissions`, never `action`, because no front end moved while the request was in
+/// flight — the same distinction the type [`Reach`] draws, carried onto the wire and into the
+/// audit log so neither can be read as the other. `id` is `null` when the source reports no
+/// identity, never a placeholder (the T-325 rule).
+fn commissioned_json(state: &ApiState, action: DeviceAction) -> Value {
+    json!({
+        "commissions": action.as_str(),
+        "id": state.live_control.as_deref().and_then(LiveControl::device_id),
+    })
+}
+
+/// The scan runner, or the reason there is none.
+fn scan_runner(state: &ApiState) -> Result<&std::sync::Arc<crate::scan::ScanRunner>, Fail> {
+    if state.live_control.is_none() {
+        return Err(Fail::new(
+            409,
+            "not_live",
+            "the source is a recording: there is no front end to sweep",
+        ));
+    }
+    state.scan.as_ref().ok_or_else(|| {
+        Fail::new(
+            503,
+            "unavailable",
+            "this server was composed without a scan runner",
+        )
+    })
+}
+
+fn scan_fail(e: crate::scan::ScanError) -> Fail {
+    Fail::new(e.status, e.code, e.message)
+}
+
+/// The proposed `(range, dwell)` in a `GET /api/control/scan` query, when one is asked for.
+///
+/// `f_lo_hz`/`f_hi_hz` go together; either alone is a half-stated range, and guessing the other
+/// half would price something the caller did not ask for.
+fn scan_proposal(query: &[(String, String)]) -> Result<Option<crate::scan::ScanRequest>, Fail> {
+    let get = |k: &str| {
+        query
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.parse::<f64>().map_err(|_| k.to_owned()))
+    };
+    let num = |k: &str| -> Result<Option<f64>, Fail> {
+        match get(k) {
+            None => Ok(None),
+            Some(Ok(v)) if v.is_finite() => Ok(Some(v)),
+            Some(_) => Err(Fail::invalid(format!("{k} must be a finite number"))),
+        }
+    };
+    let (lo, hi, dwell_s) = (num("f_lo_hz")?, num("f_hi_hz")?, num("dwell_s")?);
+    let freq = match (lo, hi) {
+        (Some(lo), Some(hi)) => Some(hk_model::FreqRange::new(lo, hi)),
+        (None, None) => None,
+        _ => {
+            return Err(Fail::invalid(
+                "f_lo_hz and f_hi_hz go together; omit both to price a sweep of everything this \
+                 front end can tune",
+            ));
+        }
+    };
+    Ok((freq.is_some() || dwell_s.is_some()).then_some(crate::scan::ScanRequest { freq, dwell_s }))
+}
+
 fn bookmark_json(b: &Bookmark) -> Value {
     let secs = |t: Timestamp| t.as_unix_nanos() as f64 / 1e9;
     json!({
@@ -1277,6 +1424,10 @@ pub(crate) fn state_json(state: &ApiState) -> Value {
         "device": live.map(|l| caps_json(l.capabilities(), l.device_id())),
         "tuning": live.map(|l| tuning_json(&l.tuning())),
         "run": state.run_control.as_deref().map(|r| run_json(&r.state())),
+        // T-452: the survey sweep's state, beside the tuning it moves. The panel that polls this
+        // sees a scan yield to the user's own tune without a second poll, which is what makes the
+        // yield visible rather than merely recorded. `null` when nothing can sweep this source.
+        "scan": state.scan.as_ref().map(|s| s.json()),
         "display_limits": state.run_control.as_deref().map(|r| display_limits_json(&r.display_limits())),
         "transmit": {
             "available": false,
@@ -1287,9 +1438,20 @@ pub(crate) fn state_json(state: &ApiState) -> Value {
     })
 }
 
-fn read(state: &ApiState, action: Action) -> Result<Value, Fail> {
+fn read(state: &ApiState, action: Action, query: &[(String, String)]) -> Result<Value, Fail> {
     match action {
         Action::State => Ok(state_json(state)),
+        // T-452: where the sweep is, and — when the caller names a range or a dwell — what that
+        // sweep would cost, **without starting it**. A 6 GHz pass at a 15 s dwell is ~80 minutes;
+        // the arithmetic belongs in front of the button, not in the log after it.
+        Action::ScanState => {
+            let runner = scan_runner(state)?;
+            let proposed = match scan_proposal(query)? {
+                Some(req) => runner.prepare(&req).map_err(scan_fail)?.json(),
+                None => Value::Null,
+            };
+            Ok(json!({ "scan": runner.json(), "proposed": proposed }))
+        }
         Action::ListBookmarks => {
             let repo = bookmarks(state)?;
             let all = repo.bookmarks().map_err(repo_fail)?;
@@ -1345,7 +1507,52 @@ fn name(v: Option<&str>) -> Result<String, Fail> {
 
 const BOOKMARK_FIELDS: &[&str] = &["kind", "name", "f_center_hz", "bandwidth_hz", "note"];
 
+/// **The arbitration between a survey sweep and interactive tuning** (T-452), in the one place
+/// every mutating control request passes through.
+///
+/// An explicit user device action always wins: a running scan yields *before* the action is
+/// attempted, so it has already stopped stepping by the time the user's call reaches the gate. It
+/// keeps its place and can be resumed; it is never cancelled behind the user's back, and the user
+/// is never refused because a sweep is running (`crate::scan` argues both alternatives down).
+///
+/// Two honesty rules meet here:
+///
+/// - **a yield is never silent**: the user's own response carries the `scan.yielded` object their
+///   action caused, so the answer to "why did my sweep stop" is in the reply that stopped it;
+/// - **a yield to an action that never happened is undone**: if the request is refused before it
+///   reaches the device, nothing took the radio, so [`crate::scan::ScanRunner::unyield`] puts the
+///   sweep back exactly as it was — and only if the yield still standing is the one this request
+///   caused.
 fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<Applied, Fail> {
+    let yielded = match action.reach() {
+        Reach::Device(d) => state
+            .scan
+            .as_ref()
+            .and_then(|s| s.note_user_device_action(d)),
+        Reach::Commissions(_) | Reach::View => None,
+    };
+    let mut result = apply_action(state, action, body);
+    match (&yielded, &mut result) {
+        (Some(y), Ok(a)) => {
+            if let Some(o) = a.body.as_object_mut() {
+                o.insert("scan".into(), json!({ "yielded": y.json() }));
+            }
+        }
+        (Some(y), Err(_)) => {
+            if let Some(s) = state.scan.as_ref() {
+                s.unyield(y);
+            }
+        }
+        (None, _) => {}
+    }
+    result
+}
+
+fn apply_action(
+    state: &ApiState,
+    action: Action,
+    body: &Map<String, Value>,
+) -> Result<Applied, Fail> {
     let run_body = |state: &ApiState| state.run_control.as_deref().map(|r| run_json(&r.state()));
     match action {
         Action::Center | Action::Rate => {
@@ -1379,6 +1586,71 @@ fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<
                 old,
                 new,
             ))
+        }
+        // T-452: start or resume the in-app survey sweep. It commissions retunes; it performs
+        // none here, so the answer names the device it commits and the plan it will walk, and the
+        // first step is taken by the driver.
+        Action::ScanStart => {
+            only(body, &["f_lo_hz", "f_hi_hz", "dwell_s", "resume"])?;
+            let runner = scan_runner(state)?;
+            let old = runner.json();
+            let resume = match body.get("resume") {
+                None => false,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => return Err(Fail::invalid("resume must be true or false")),
+            };
+            let plan = if resume {
+                if body.len() > 1 {
+                    return Err(Fail::invalid(
+                        "resume takes no range and no dwell: it continues the sweep that yielded, \
+                         at the step it stopped on. Start a new one to change either.",
+                    ));
+                }
+                runner.resume().map_err(scan_fail)?;
+                Value::Null
+            } else {
+                let freq = match (body.get("f_lo_hz"), body.get("f_hi_hz")) {
+                    (None, None) => None,
+                    (Some(_), Some(_)) => Some(hk_model::FreqRange::new(
+                        required(body, "f_lo_hz")?,
+                        required(body, "f_hi_hz")?,
+                    )),
+                    _ => {
+                        return Err(Fail::invalid(
+                            "f_lo_hz and f_hi_hz go together; omit both to sweep everything this \
+                             front end can tune",
+                        ));
+                    }
+                };
+                let dwell_s = match body.get("dwell_s") {
+                    None => None,
+                    Some(_) => Some(required(body, "dwell_s")?),
+                };
+                runner
+                    .start(&crate::scan::ScanRequest { freq, dwell_s })
+                    .map_err(scan_fail)?
+                    .json()
+            };
+            let new = runner.json();
+            Ok(ok(
+                json!({
+                    "scan": new.clone(),
+                    "proposed": plan,
+                    "device": commissioned_json(state, DeviceAction::Retune),
+                }),
+                old,
+                new,
+            ))
+        }
+        // Stopping surrenders the radio, so it is never refused and never a device action: a
+        // control that can command the front end must always be surrenderable.
+        Action::ScanStop => {
+            only(body, &[])?;
+            let runner = scan_runner(state)?;
+            let old = runner.json();
+            runner.stop();
+            let new = runner.json();
+            Ok(ok(json!({ "scan": new.clone() }), old, new))
         }
         Action::Gains => {
             only(body, &["gains"])?;
@@ -1520,7 +1792,7 @@ fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<
             let old = bookmark_json(&deleted);
             Ok(ok(json!({ "deleted": old }), old, Value::Null))
         }
-        Action::State | Action::ListBookmarks | Action::GetBookmark(_) => {
+        Action::State | Action::ScanState | Action::ListBookmarks | Action::GetBookmark(_) => {
             Err(Fail::new(500, "failed", "not a control action"))
         }
     }
@@ -1560,6 +1832,9 @@ mod tests {
             ("POST", "/api/control/record/stop"),
             ("GET", "/api/bookmarks"),
             ("POST", "/api/bookmarks"),
+            // T-452: reading where the sweep is, and surrendering the radio, command nothing.
+            ("GET", "/api/control/scan"),
+            ("POST", "/api/control/scan/stop"),
         ] {
             let a = resolve(method, path).unwrap().unwrap();
             assert_eq!(
@@ -1584,6 +1859,39 @@ mod tests {
         reached.sort_unstable();
         reached.dedup();
         assert_eq!(reached, expected);
+    }
+
+    /// T-452: starting a sweep is the third answer, and the classification says so rather than
+    /// letting it pass as harmless.
+    ///
+    /// The route moves no front end within the call — so `only_the_five_device_routes...` above is
+    /// still literally true — but it commits this radio to hundreds of retunes, which is not a view
+    /// change by any reading. Classifying it as `View` would make that test pass on a technicality,
+    /// so this one asserts the middle category exists and that `scan` is in it.
+    #[test]
+    fn starting_a_sweep_commissions_retunes_and_is_not_a_view_change() {
+        let start = resolve("POST", "/api/control/scan").unwrap().unwrap();
+        assert_eq!(start.reach(), Reach::Commissions(DeviceAction::Retune));
+        assert_eq!(start.device_action(), None, "it performs none in the call");
+        // Stopping surrenders the radio and reading only reports; neither commands anything.
+        for (method, path) in [
+            ("POST", "/api/control/scan/stop"),
+            ("GET", "/api/control/scan"),
+        ] {
+            let a = resolve(method, path).unwrap().unwrap();
+            assert_eq!(a.reach(), Reach::View, "{path}");
+        }
+        // And nothing else in the table quietly acquired the middle category.
+        let commissioning: Vec<&str> = ROUTES
+            .iter()
+            .filter(|(m, p)| {
+                resolve(m, p)
+                    .and_then(Result::ok)
+                    .is_some_and(|a| matches!(a.reach(), Reach::Commissions(_)))
+            })
+            .map(|(_, p)| *p)
+            .collect();
+        assert_eq!(commissioning, ["/api/control/scan"]);
     }
 
     #[test]

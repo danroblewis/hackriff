@@ -136,8 +136,19 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
                     live: live.clone(),
                     data_dir: data_dir.clone(),
                     plan: None,
-                    // `hk serve` is interactive tuning: it never drives the scheduler, so an
-                    // iterative scan would have nothing to step it (T-406).
+                    // `hk serve` is interactive tuning: it never drives the scheduler, so a
+                    // `--survey-dwell` plan would have nothing to step it (T-406).
+                    //
+                    // T-452 KEPT THIS, DELIBERATELY, and put the in-app survey sweep somewhere
+                    // else. The scheduler is chosen when a segment is composed, so turning it on
+                    // here would be a second composition path — and the interactive run already
+                    // writes what a sweep needs: `hk_pipeline`'s interactive observer closes one
+                    // dwell record per steady tune, with that tune's own window and interval,
+                    // which is exactly T-406's "one record per step with its true band and
+                    // interval". So the sweep is a driver over the interactive retune path
+                    // (`hk_api::scan`), issuing the same gated `DeviceAction::Retune` a user's
+                    // explicit tune issues, and its coverage lands in the same plane with no
+                    // second accumulator. `hk run`/`hackriffd` keep `--survey-dwell`.
                     survey_dwell_s: None,
                     schedule: false,
                     feeds: None,
