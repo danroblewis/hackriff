@@ -120,8 +120,18 @@ export interface Viewport {
   readonly levelT: number;
 }
 
-/** What the cache can answer. **`pending` is not a cell state** — see ui/src/surface/cellrule.ts. */
-export type Residency<T> = { readonly kind: "resident"; readonly entry: TileEntry<T> } | { readonly kind: "pending" };
+/**
+ * What the cache can answer. **`pending` is not a cell state** — see ui/src/surface/cellrule.ts.
+ *
+ * `failed` marks a place the route answered *no* to permanently (T-479). It is carried on `pending`
+ * rather than as a third kind deliberately: "not loaded" is already structurally distinct from
+ * "never observed" — the renderer clears a place to `PENDING` and only a `coverage` state byte can
+ * produce grey — so a failed place is already visibly not an unobserved one, which is the claim that
+ * matters. The flag says *which* not-loaded it is, for a caller that wants to mark it further.
+ */
+export type Residency<T> =
+  | { readonly kind: "resident"; readonly entry: TileEntry<T> }
+  | { readonly kind: "pending"; readonly failed?: boolean };
 
 export interface TileCacheOptions {
   /**
@@ -192,6 +202,8 @@ export interface TileCacheStats {
   /** Refreshes whose answer actually replaced a resident tile — the number that says rows reached
    * the texture, as against merely having been asked for. */
   edgeRefreshApplied: number;
+  /** Places the route answered *no* to permanently, and that are never asked for again (T-479). */
+  terminalFailures: number;
 }
 
 const MB = 1024 * 1024;
@@ -247,6 +259,19 @@ export class TileCache<T> {
   /** Keys whose in-flight fetch was overtaken by a retune: the data that arrives describes the old
    * tuning, so it is dropped on arrival and asked for again ([[invalidateEdge]]). */
   private stale = new Set<string>();
+  /**
+   * Places the route refused permanently, and why (T-479).
+   *
+   * The user watched the console flood because this did not exist: the canvas asked for an
+   * out-of-range node (`level_f=10`, `t_index=218471` — T-480 owns the address arithmetic), the route
+   * correctly answered **400**, and the client asked again on the very next frame. `acquire` had no
+   * memory of the refusal, so `schedule` re-queued it forever at whatever rate the budget allowed.
+   *
+   * The fix is not another status beside 503. **Retryable is the enumerated case and terminal is the
+   * default** ([[retryable]]), because the defect was that everything unenumerated fell through to
+   * *ask again* — the same shape as `BiasTee::Unknown` not being `Off`, in the retry direction.
+   */
+  private terminal = new Map<string, string>();
   /** Keys being re-fetched **while their copy stays resident and drawn** (T-460). The set is what
    * lets [[insert]] tell a revalidation, which replaces, from a duplicate, which never uploads. */
   private refreshing = new Set<string>();
@@ -274,7 +299,7 @@ export class TileCache<T> {
   readonly stats: TileCacheStats = {
     uploads: 0, hits: 0, misses: 0, evictions: 0, refetchAfterEvict: 0, requests: 0,
     failures: 0, busyRefusals: 0, cancelled: 0, abandoned: 0, overBudgetFrames: 0, distinctKeys: 0,
-    edgeRefreshes: 0, edgeRefreshApplied: 0,
+    edgeRefreshes: 0, edgeRefreshApplied: 0, terminalFailures: 0,
   };
 
   constructor(
@@ -338,9 +363,16 @@ export class TileCache<T> {
       return { kind: "resident", entry: e };
     }
     this.stats.misses++;
+    const why = this.terminal.get(key);
+    if (why !== undefined) return { kind: "pending", failed: true };
     this.schedule(addr);
     return { kind: "pending" };
   }
+
+  /** Why this place will never be drawn, or `null`. `"…"` is the route's own words (T-479). */
+  refusalFor(addr: TileAddr): string | null { return this.terminal.get(keyOf(addr)) ?? null; }
+  /** How many places the route has refused permanently. */
+  get terminalPlaces(): number { return this.terminal.size; }
 
   /** Resident lookup with no scheduling and no pin: how a fallback search asks about ancestors
    * without queueing a fetch for every level it tries. */
@@ -366,6 +398,9 @@ export class TileCache<T> {
   private schedule(addr: TileAddr): void {
     const key = keyOf(addr);
     if (this.map.has(key) || this.inflight.has(key) || this.queued.has(key)) return;
+    // The route has already said this place is not askable. A renderer calls `acquire` for it on
+    // every frame, so without this the refusal is re-issued at frame rate (T-479).
+    if (this.terminal.has(key)) return;
     this.queue.push(addr);
     this.queued.add(key);
     if (this.queue.length > this.maxQueue) {
@@ -560,6 +595,7 @@ export class TileCache<T> {
     this.refreshQueue = [];
     this.refreshQueued.clear();
     this.refreshedAt.clear();
+    this.terminal.clear();
   }
 
   private pump(): void {
@@ -739,6 +775,18 @@ export class TileCache<T> {
     }
     this.observe(startedAt);
     this.stats.failures++;
+    // **Terminal unless asking again could change the answer** (T-479). Nothing is re-queued here
+    // either way — the difference is whether the *next frame* may ask. A renderer calls `acquire` for
+    // every place it draws on every frame, so a place that is not remembered as refused is asked for
+    // again at frame rate, which is exactly what flooded the user's console with 400s.
+    //
+    // It is not grey: `acquire` still answers `pending`, and only a `coverage` state byte can produce
+    // grey (ui/src/surface/cellrule.ts), so a refused place stays structurally distinguishable from
+    // one the radio never looked at.
+    if (!retryable(err)) {
+      this.terminal.set(keyOf(addr), describeFailure(err));
+      this.stats.terminalFailures++;
+    }
     return false;
   }
 
@@ -795,6 +843,40 @@ export class TileCache<T> {
       this.stats.evictions++;
     }
   }
+}
+
+/**
+ * **Is asking again capable of changing the answer?** (T-479.)
+ *
+ * Two cases, and they are the whole enumeration — everything else is terminal by default, which is
+ * the inversion this function exists for. The old rule special-cased `503` and let *every other*
+ * outcome fall through to "ask again", so each unenumerated status was wrong by default; this is the
+ * same principle as `BiasTee::Unknown` not being `Off`, applied in the retry direction.
+ *
+ *  1. **`TileBusyError`** — the route's `503`. T-454's backpressure is a statement about *now*: the
+ *     history lock is held, and the only correct response is to wait and ask again. It is handled by
+ *     the AIMD branch above with its own backoff and never reaches here.
+ *  2. **A failure that carries no HTTP status** — the request never got an answer at all (socket
+ *     closed, server restarting, DNS). The server said nothing, so nothing it said is permanent, and
+ *     blanking the surface for the rest of the session over a momentary disconnect would be the
+ *     opposite defect. This does not re-queue either: the next frame's `acquire` asks again, so the
+ *     retry is paced by the render loop rather than by a tight failure cycle.
+ *
+ * Anything the server *said* — 400, 404, 413, 500 — is terminal. The status is read structurally
+ * rather than by instanceof so this does not couple to which error class the fetch layer happens to
+ * build (`tile.ts` is not this file's to know the internals of).
+ */
+function retryable(err: unknown): boolean {
+  if (err instanceof TileBusyError) return true;
+  const status = (err as { status?: unknown } | null)?.status;
+  return typeof status !== "number";
+}
+
+/** The route's own words for a refusal, for the readout and for a test's failure message. */
+function describeFailure(err: unknown): string {
+  const status = (err as { status?: unknown } | null)?.status;
+  const msg = err instanceof Error ? err.message : String(err);
+  return typeof status === "number" ? `HTTP ${status}: ${msg}` : msg;
 }
 
 const levelDistance = <T>(e: TileEntry<T>) => e.addr.levelF + e.addr.levelT;

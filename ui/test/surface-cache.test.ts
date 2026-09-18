@@ -559,3 +559,90 @@ test("a retune still wins over a refresh in flight", async () => {
   await flush();
   assert.ok(h.waiting.has(keyOf(edgeTile())), "the address is asked for again after the retune");
 });
+
+// ——— T-479: a 4xx is TERMINAL, and "retryable" is the enumerated case ———
+//
+// What the user saw: the console flooding. The canvas asked for an out-of-range node (observed in
+// the wild as `level_f=10` with `t_index=218471` — the address arithmetic is T-480's, not this
+// file's), the route correctly answered **400**, and the client asked again on the very next frame,
+// forever. `failed()` special-cased 503 and let everything else fall through to a default of *ask
+// again*, so every unenumerated status was wrong; a fix that adds `400` beside `503` would leave the
+// next one wrong too. The predicate is therefore inverted: retryable is enumerated, terminal is the
+// default.
+
+/** An error shaped like the one `tile.ts` builds from a non-503 response: it carries a status. */
+const httpError = (status: number, msg = "bad node") =>
+  Object.assign(new Error(msg), { status, code: "bad_request" });
+
+test("a 400 is fetched at most ONCE per place, however many frames ask for it", async () => {
+  const h = harness({ inFlight: 4 });
+  const bad = addr(9, 218471, 10, 0);
+  h.cache.beginFrame();
+  h.cache.acquire(bad);
+  h.cache.endFrame();
+  await flush();
+  await h.fail(bad, httpError(400));
+
+  // Sixty frames — one second of a render loop — all asking for the same refused place.
+  for (let frame = 0; frame < 60; frame++) {
+    h.cache.beginFrame();
+    const res = h.cache.acquire(bad);
+    h.cache.endFrame();
+    await flush();
+    assert.equal(res.kind, "pending", "a refused place must never become a cell state");
+    assert.equal(res.kind === "pending" && res.failed, true,
+      "…and the caller is told WHICH not-loaded it is: asked and refused, not never-sampled");
+  }
+  assert.deepEqual(h.calls, [keyOf(bad)], `the 400 was re-asked ${h.calls.length - 1} more times`);
+  assert.equal(h.cache.stats.terminalFailures, 1);
+  assert.equal(h.cache.terminalPlaces, 1);
+  assert.match(h.cache.refusalFor(bad) ?? "", /HTTP 400/, "the route's own words are kept for the readout");
+});
+
+test("NO non-503 status is ever asked twice — the enumeration, not a list of special cases", async () => {
+  // The guard the ticket asked for, stated over the statuses rather than over the one that bit us.
+  for (const status of [400, 401, 403, 404, 410, 413, 422, 500, 502, 504]) {
+    const h = harness({ inFlight: 4 });
+    const a = addr(status % 7);
+    h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+    await flush();
+    await h.fail(a, httpError(status));
+    for (let frame = 0; frame < 10; frame++) {
+      h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+      await flush();
+    }
+    assert.deepEqual(h.calls, [keyOf(a)], `HTTP ${status} was re-asked: terminal is supposed to be the DEFAULT`);
+  }
+});
+
+test("…and 503 still retries with T-454's AIMD intact: the cap is discovery, not leakage", async () => {
+  // The load-bearing property this change must not disturb. A refusal is not a failure, is not
+  // terminal, halves the cap, backs off, and the place stays wanted.
+  let clock = 0;
+  const h = harness({ inFlight: 4, busyBackoffMs: 50, now: () => clock });
+  h.cache.beginFrame(); h.cache.acquire(addr(0)); h.cache.endFrame();
+  await flush();
+  await h.fail(addr(0), new TileBusyError(4, "too many tile reads in flight (limit 4)"));
+  assert.equal(h.cache.inFlightLimit, 2, "a 503 still halves the cap");
+  assert.equal(h.cache.stats.busyRefusals, 1);
+  assert.equal(h.cache.stats.terminalFailures, 0, "backpressure is a statement about NOW, never terminal");
+  assert.equal(h.cache.terminalPlaces, 0);
+  clock += 100;
+  h.cache.beginFrame(); h.cache.acquire(addr(0)); h.cache.endFrame();
+  await flush();
+  assert.deepEqual(h.calls, [keyOf(addr(0)), keyOf(addr(0))], "the refused place is still wanted");
+  await h.settle(addr(0));
+  assert.equal(h.cache.residentTiles, 1);
+
+  // A transport failure — the server said nothing at all — is not terminal either, and is re-asked
+  // by the next frame rather than by a tight requeue cycle.
+  const net = harness({ inFlight: 4 });
+  net.cache.beginFrame(); net.cache.acquire(addr(3)); net.cache.endFrame();
+  await flush();
+  await net.fail(addr(3), new TypeError("Failed to fetch"));
+  assert.equal(net.cache.stats.terminalFailures, 0, "a disconnect must not blank the place for the session");
+  assert.equal(net.cache.queueDepth, 0, "…and must not spin: nothing is re-queued by the failure itself");
+  net.cache.beginFrame(); net.cache.acquire(addr(3)); net.cache.endFrame();
+  await flush();
+  assert.equal(net.calls.length, 2, "the next frame asks again, paced by the render loop");
+});

@@ -1,4 +1,4 @@
-// **Does the live view add rows for recent samples?** (T-460.)
+// **Does the live view add rows for recent samples?** (T-460, and T-479 beside it.)
 //
 // The user's words: *"the live view still does not add waterfall rows for recent samples."* The
 // backend was measured innocent — the live-edge tile grows, 33 024 → 43 520 observed cells over 40 s,
@@ -104,4 +104,34 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
   assert.ok(tiles.peak <= Number(process.env.HK_E2E_TILE_LIMIT || 4),
     `peak ${tiles.peak} tile requests in flight, above the route's cap — the refresh lane took slots it may not`);
   assert.deepEqual(page.exceptions, [], "uncaught exception while the live view ran");
+});
+
+test("a refused place is asked for ONCE: a 4xx is terminal, and the console stays quiet", async (t) => {
+  // T-479. The user watched the console flood: the canvas asked for an out-of-range node, the route
+  // answered 400, and the client asked again on the very next frame — forever. The address
+  // arithmetic that produces the bad node is T-480's; this is the claim that a permanent refusal is
+  // never re-asked, which is worth holding even once nothing asks for a bad address again.
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page();
+
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitFor("the app's surface to draw",
+    `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200`,
+    { timeoutMs: 60000 });
+  // Long enough that a frame-rate retry would be in the thousands rather than in the ones.
+  await new Promise((r) => setTimeout(r, 15000));
+
+  const refused = page.requests.filter((r) => r.url.includes("/api/tiles") && r.status !== null && r.status >= 400 && r.status !== 503);
+  const per = new Map();
+  for (const r of refused) per.set(r.url, (per.get(r.url) ?? 0) + 1);
+  t.diagnostic(`${refused.length} permanent refusals over ${per.size} distinct place(s)`);
+  for (const [url, n] of per) {
+    assert.equal(n, 1, `${url} was refused ${n} times — asking again cannot change the answer, ` +
+      "so a non-503 status must be terminal (T-479)");
+  }
+  // And the retryable one still is: a 503 is T-454's backpressure, a statement about *now*.
+  const busy = page.requests.filter((r) => r.status === 503).length;
+  t.diagnostic(`${busy} backpressure refusals (503), which stay retryable`);
+  assert.deepEqual(page.exceptions, [], "uncaught exception while the surface ran");
 });
