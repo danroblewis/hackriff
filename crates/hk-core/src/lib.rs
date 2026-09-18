@@ -33,10 +33,11 @@ pub use rt::MemoryLock;
 pub use scheduler::{ScheduleStep, Scheduler, SchedulerConfig};
 pub use source::{
     BasebandFilters, ControlMailbox, Coverage, DeviceInfo, GainStage, Gains, HackRfConfig,
-    HackRfDeviceInfo, HackRfDriver, HackRfSource, HackRfStats, MockClock, MockEnd, MockOptions,
-    MockSdrControl, MockSdrDriver, MockSdrSource, MockStats, NamedGain, OpenRequest, Pacing,
-    PendingControl, Recording, ReplayOptions, SigmfReplaySource, Source, SourceCapabilities,
-    SourceControl, SourceDriver, SourceError, SourceStats, SweepCapability, SweepPlan, TuningStep,
+    HackRfDeviceInfo, HackRfDriver, HackRfSource, HackRfStats, MockClock, MockEnd, MockFault,
+    MockOptions, MockSdrControl, MockSdrDriver, MockSdrSource, MockStats, NamedGain, OpenRequest,
+    Pacing, PendingControl, Recording, ReplayOptions, SigmfReplaySource, Source,
+    SourceCapabilities, SourceControl, SourceDriver, SourceError, SourceStats, SweepCapability,
+    SweepPlan, TuningStep,
 };
 
 #[cfg(test)]

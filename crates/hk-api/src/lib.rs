@@ -71,7 +71,8 @@ pub use tcp::{StreamServer, StreamServerConfig, StreamServerStats};
 pub use auth::{Token, default_token_path};
 pub use bridge::{StreamInfo, StreamRegistry};
 pub use control::{
-    AuditLog, DisplayLimits, DisplayState, DisplayUpdate, RecordingState, RunControl, RunState,
+    AuditLog, CaptureStatus, DisplayLimits, DisplayState, DisplayUpdate, RecordingState,
+    RunControl, RunState,
 };
 pub use datasets::{DatasetControl, DatasetFailure};
 pub use http::{ApiState, ROUTES, Server, ServerConfig};

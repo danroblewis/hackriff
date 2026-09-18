@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use hk_core::source::conformance::{self, ConformanceSpec};
 use hk_core::{
-    BlockHeader, Coverage, Discontinuity, MockEnd, MockOptions, MockSdrDriver, MockSdrSource,
-    OpenRequest, Pacing, ReplayOptions, SigmfReplaySource, Source, SourceDriver,
+    BlockHeader, Coverage, Discontinuity, MockEnd, MockFault, MockOptions, MockSdrDriver,
+    MockSdrSource, OpenRequest, Pacing, ReplayOptions, SigmfReplaySource, Source, SourceDriver,
 };
 use hk_model::sigmf::{Capture, Datatype, SigmfMeta};
 use hk_model::{BiasTee, ClockSource, Provenance, TimestampMethod, Tune};
@@ -946,4 +946,124 @@ fn scene_gaps_jump_stream_time_at_the_window_boundary() {
             wall.elapsed()
         );
     }
+}
+
+/// T-508: the mock can **fail** a retune, the way the HackRF driver does — accepted by `tune`,
+/// refused when the capture thread applies it, surfacing as a read error — and the front end stays
+/// on the tuning it had. Without this every retune guard ran on a radio that always obeys.
+#[test]
+fn an_armed_retune_fault_fails_the_read_that_applies_it_and_the_device_stays_put() {
+    let dir = Scratch::new("fault");
+    let meta = Synth {
+        fs: 4e6,
+        secs: 0.25,
+        ..Synth::new(Datatype::Ci8)
+    }
+    .write(&dir.0, "fault");
+    let driver = MockSdrDriver::new(
+        &meta,
+        MockOptions {
+            fault: Some(MockFault::RetuneApplyFails { count: 1 }),
+            ..opts(16_384)
+        },
+    )
+    .unwrap();
+    let mut src = driver.open_mock(&driver.default_request()).unwrap();
+    let control = src.control();
+    let mut buf = Vec::new();
+    src.read_block_ci8(&mut buf).unwrap().unwrap();
+
+    // Re-sending the tuning in force is not a retune: it applies, faults stay armed.
+    control.tune(100e6).unwrap();
+    src.read_block_ci8(&mut buf).unwrap().unwrap();
+    assert_eq!(src.mock_control().mock_stats().faults, 0);
+
+    // The call is accepted (the HackRF's `tune` only posts), and the read that applies it fails.
+    control.tune(100.5e6).unwrap();
+    let err = src.read_block_ci8(&mut buf).unwrap_err();
+    assert!(
+        matches!(err, hk_core::SourceError::Device { .. }),
+        "a refused retune is a device error on the read: {err:?}"
+    );
+    assert_eq!(src.mock_control().mock_stats().faults, 1);
+    // The stream still works, on the tuning it had.
+    let h = src.read_block_ci8(&mut buf).unwrap().unwrap();
+    assert_eq!(
+        h.center_hz(),
+        100e6,
+        "a refused retune leaves the device where it was"
+    );
+
+    // One fault was armed: the next retune lands.
+    control.tune(100.5e6).unwrap();
+    let h = read_until(&mut src, &mut buf, |h| {
+        h.discontinuity.contains(Discontinuity::RETUNE)
+    });
+    assert_eq!(h.center_hz(), 100.5e6);
+
+    // Armed for ever, every retune fails; disarmed, none does.
+    src.mock_control().arm_retune_faults(u32::MAX);
+    for _ in 0..3 {
+        control.tune(100.2e6).unwrap();
+        assert!(src.read_block_ci8(&mut buf).is_err());
+    }
+    src.mock_control().arm_retune_faults(0);
+    control.tune(100.2e6).unwrap();
+    let h = read_until(&mut src, &mut buf, |h| {
+        h.discontinuity.contains(Discontinuity::RETUNE)
+    });
+    assert_eq!(h.center_hz(), 100.2e6);
+
+    assert_eq!(MockFault::parse(""), Ok(None));
+    assert_eq!(
+        MockFault::parse("retune-apply-fails"),
+        Ok(Some(MockFault::RetuneApplyFails { count: 1 }))
+    );
+    assert_eq!(
+        MockFault::parse("retune-apply-fails:always"),
+        Ok(Some(MockFault::RetuneApplyFails { count: u32::MAX }))
+    );
+    assert_eq!(
+        MockFault::parse("gone-on-retune"),
+        Ok(Some(MockFault::GoneOnRetune))
+    );
+    assert!(MockFault::parse("retune-apply-fails:0").is_err());
+    assert!(MockFault::parse("tune-sometimes").is_err());
+}
+
+/// T-508: `gone-on-retune` — the first retune takes the device away, and nothing brings it back:
+/// the fault a harness uses to produce a run that has genuinely ended.
+#[test]
+fn a_device_gone_on_retune_fails_every_read_after_it() {
+    let dir = Scratch::new("gone");
+    let meta = Synth {
+        fs: 4e6,
+        secs: 0.25,
+        ..Synth::new(Datatype::Ci8)
+    }
+    .write(&dir.0, "gone");
+    let driver = MockSdrDriver::new(
+        &meta,
+        MockOptions {
+            fault: Some(MockFault::GoneOnRetune),
+            ..opts(16_384)
+        },
+    )
+    .unwrap();
+    let mut src = driver.open_mock(&driver.default_request()).unwrap();
+    let control = src.control();
+    let mut buf = Vec::new();
+    control.set_gain("vga", 10.0).unwrap();
+    src.read_block_ci8(&mut buf).unwrap().unwrap();
+    control.tune(100.5e6).unwrap();
+    assert!(src.read_block_ci8(&mut buf).is_err());
+    for _ in 0..3 {
+        // Re-sending the old tuning does not bring it back either.
+        control.tune(100e6).unwrap();
+        assert!(
+            src.read_block_ci8(&mut buf).is_err(),
+            "a gone device stays gone"
+        );
+    }
+    assert_eq!(src.mock_control().mock_stats().faults, 1);
 }
