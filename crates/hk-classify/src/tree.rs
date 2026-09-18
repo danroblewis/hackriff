@@ -42,7 +42,60 @@ pub const OFDM_MIN_CP_CORR: f64 = 0.10;
 pub const OFDM_MIN_FLATNESS: f64 = 0.20;
 
 /// Envelope duty above which a pulse train is ruled out (a pulse train is mostly off).
-pub const PULSED_MAX_DUTY: f64 = 0.60;
+///
+/// # 0.60 → 0.40 (T-431), re-derived on a feature that had stopped measuring duty
+///
+/// The old value was written against the old `duty`, which counted samples over half the record's
+/// **own mean** envelope and so read the SNR rather than the on-fraction. At 10 dB the 5 %-duty
+/// radar train read 0.630–0.680, cleared this gate and was **denied the `pulsed` family for
+/// `continuous_envelope`** — a pulse train ruled out of the pulsed family for being always on.
+/// T-427 measured that and left it, because this is an admissibility gate and moving it moves a
+/// family-level number; it is fixed here at the source ([`crate::features::on_level`]) and the
+/// constant re-derived on the corrected curve, not fitted to the broken one.
+///
+/// # The derivation
+///
+/// The gate has to admit an emission that is **mostly off** and exclude one that is on at least as
+/// often as it is off. The taxonomy brackets it from both sides: the busiest `pulsed` class is
+/// `ppm`, on for a third of its frame, and the nearest classes outside the family are the 50 %-duty
+/// keyed carriers `cw` and `ook`. Measured over 10/15/20/25/30 dB × 12 seeds, as **per-seed
+/// extremes**, not means:
+///
+/// | class | true duty | old `duty` | new `duty` |
+/// |---|---|---|---|
+/// | `pulse` | 0.050 | 0.051–0.677 | 0.050–0.050 |
+/// | `ppm` | 0.333 | 0.390–0.476 | 0.329–0.341 |
+/// | `ook` | 0.5 | 0.488–0.674 | 0.465–0.548 |
+/// | `cw` | 0.5 | 0.487–0.696 | 0.475–0.552 |
+///
+/// 0.40 is the middle of the measured gap 0.341…0.465, and every other class of the 32 sits clear
+/// of it: behind `ppm` on the admitted side come held-out `noise-burst` at 0.275–0.286 and held-out
+/// `coded-pulse` at 0.175–0.176, and behind `cw` on the denied side held-out `dsb-sc` at 0.546 and
+/// held-out `ask3` at 0.596, with the remaining 24 classes all above 0.74.
+///
+/// **1/2 was rejected**, although "mostly off" states it, because a true-1/2 emission does not
+/// read 1/2: the envelope of a keyed carrier in noise spreads, and `cw` and `ook` measure
+/// 0.465–0.552 *across* it. A gate at 0.50 would admit or deny the same class by seed.
+///
+/// # What this changes, and what it does not
+///
+/// `pulse` is admitted at every rung instead of being denied at the gate. `cw` and `ook` are now
+/// denied at every rung where the old constant straddled them — their old reading spanned
+/// 0.487–0.696 across the ladder, so which side of 0.60 a keyed carrier fell was decided by how
+/// loudly it was heard.
+///
+/// Everything else keeps the admission it had: `ppm`, held-out `coded-pulse` and held-out
+/// `noise-burst` stay admitted, and every remaining class stays denied.
+///
+/// **The constant itself moves no acceptance number, and that is stated rather than assumed.**
+/// `just acceptance-m3` was run on the corrected feature at both 0.40 and 0.60 and every figure it
+/// prints is identical (held-out unknown recall 0.9444 / false-known 0.0556, known top-1 0.9325,
+/// top-2 0.9861, every per-family open set to three decimals). All of the movement against the
+/// merge base comes from the feature and the refit, none of it from here. So the value rests on
+/// the derivation above and not on a score — which is the right way round, and the reason the old
+/// one was wrong: 0.60 was a number the suite could not see either, sitting on a feature that had
+/// stopped measuring duty.
+pub const PULSED_MAX_DUTY: f64 = 0.40;
 
 /// Spectral flatness below which a noise-like emission is ruled out.
 pub const NOISE_MIN_FLATNESS: f64 = 0.45;
@@ -423,11 +476,15 @@ pub fn class_guess(
 // dimension does not distinguish a sparse pulse train from a busy one; it distinguishes a
 // high-SNR snippet from a low-SNR one.
 //
-// The same inflation costs `pulse` its **family** at 10 dB, where the measured duty 0.630–0.680
-// clears [`PULSED_MAX_DUTY`] (0.60) and the emission is denied `pulsed` for "continuous_envelope" —
-// a 5 %-duty radar pulse train ruled out of the pulsed family for being always on. That is an
-// admissibility gate, not a class call, so T-427 left it measured and filed rather than changing it
-// under a ticket whose floors forbid moving a family-level number.
+// The same inflation cost `pulse` its **family** at 10 dB, where the measured duty 0.630–0.680
+// cleared [`PULSED_MAX_DUTY`] (then 0.60) and the emission was denied `pulsed` for
+// "continuous_envelope" — a 5 %-duty radar pulse train ruled out of the pulsed family for being
+// always on. That is an admissibility gate, not a class call, so T-427 left it measured and filed
+// rather than changing it under a ticket whose floors forbid moving a family-level number.
+// **T-431 fixed it at the source** rather than re-deriving a constant against a broken feature:
+// [`crate::features::on_level`] references both envelope thresholds to the emission's own on level,
+// so `pulse` now reads 0.050 at every rung from 10 to 30 dB, and the gate was re-derived on the
+// corrected curve (see [`PULSED_MAX_DUTY`]). The table above is what the feature *used* to read.
 //
 // What replaces the table is [`density_classes`], as for `analog`, `fsk` and `psk-qam`. Measured
 // before any change, as the arg-max of the shipped densities over the two `pulsed` classes:
