@@ -6,13 +6,37 @@ import type { CaptureWindow } from "./timeline";
 /**
  * The capture-timeline cursor: following live data, or reviewing a past instant (Unix s).
  *
- * T-340: `spanS` is the time **span** the reviewed view covers, ending at `tS` — what a dragged
- * region on the time navigator zooms the waterfall to. Absent (or null) means *no span was asked
- * for*, and the review render falls back to the rows it holds at their own period; it is never a
- * default duration, because a duration invented here would be the 48 h constant T-338 removed all
- * over again.
+ * `spanS` is the time **span** the view covers, ending at `tS` (T-340). Absent (or null) means *no
+ * span was asked for*, and the reader falls back to its own extent; it is never a default duration,
+ * because a duration invented here would be the 48 h constant T-338 removed all over again.
+ *
+ * T-445: `spanS` is carried on **both** arms. It used to be frozen-only, because the only thing
+ * that could name a span was a dragged region on the retired time navigator, and a following view's
+ * span was implicitly the waterfall's ring height over its row rate. The unified surface's time
+ * axis is zoomable while following (a pane can follow the growing edge over 20 s or over 10
+ * minutes), so a live cursor with no span would leave `viewWindow` computing one window while the
+ * canvas drew another — the two-windows defect the whole-UI window rule names, reintroduced by
+ * omission. Absent (or null) still means *no span was asked for*, never a default duration.
  */
-export type TimeCursor = { live: true } | { live: false; tS: number; spanS?: number | null };
+export type TimeCursor =
+  | { live: true; spanS?: number | null }
+  | { live: false; tS: number; spanS?: number | null };
+
+/**
+ * Cursor equality for `store.select` (a new `{live: true}` object is the same cursor).
+ *
+ * Moved here by T-445 from the retired `centre/review-render.ts`. It is not review-render's
+ * property — it is the cursor's — and leaving it in the module that happened to need it first is
+ * how `explore/index.ts` ended up importing the *history renderer* to compare two time cursors.
+ *
+ * The live arm compares `spanS` too, now that a following view can name one: a pane that zoomed its
+ * time axis while still following has genuinely changed window, and a comparison that called those
+ * two cursors equal would leave every subscriber answering about the old span.
+ */
+export const sameCursor = (a: TimeCursor, b: TimeCursor): boolean =>
+  (a.live
+    ? b.live && (a.spanS ?? null) === (b.spanS ?? null)
+    : !b.live && a.tS === b.tS && (a.spanS ?? null) === (b.spanS ?? null));
 
 export interface CaptureState {
   time: TimeCursor;

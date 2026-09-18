@@ -10,7 +10,6 @@ import type { AnomalyRow } from "../src/alarms";
 import { alarmEmitterId, alarmRowView } from "../src/app/review/alarms";
 import { newBookmarkFromForm } from "../src/app/review/bookmarks";
 import { defaultReportParams } from "../src/app/review/report";
-import { defaultHistoryRegion } from "../src/app/review/history";
 import { bookmarksError, openReview, reviewInitial, setBookmarks, toggleReview } from "../src/app/review/slice";
 import type { AppState } from "../src/app/state";
 
@@ -116,22 +115,10 @@ test("defaultReportParams is null with no region and no live view (nothing to gu
 
 // ---- history tab: default region widens the span by 10 s either side ----
 
-test("defaultHistoryRegion widens a region's span by 10 s and keeps its extent", () => {
-  const r = defaultHistoryRegion({ loHz: 1e6, hiHz: 2e6, t0: 100, t1: 200 }, { view: null }, { live: true }, 9999);
-  assert.deepEqual(r, { fLoHz: 1e6, fHiHz: 2e6, t0: 90, t1: 210 });
-});
-
-test("defaultHistoryRegion falls back to the live view and the last 10 minutes", () => {
-  const r = defaultHistoryRegion(null, { view: { loHz: 5e6, hiHz: 6e6 } }, { live: true }, 1000);
-  assert.deepEqual(r, { fLoHz: 5e6, fHiHz: 6e6, t0: 1000 - 610, t1: 1000 + 10 });
-});
-
-// ---- bookmarks: form → NewBookmark ----
-
-test("newBookmarkFromForm parses MHz/kHz and clips the name", () => {
-  const b = newBookmarkFromForm({ name: "  My   Marker  ", freqMHz: "433.92", bandwidthKHz: "12.5", kind: "bookmark" });
-  assert.deepEqual(b, { kind: "bookmark", name: "My Marker", f_center_hz: 433_920_000, bandwidth_hz: 12_500 });
-});
+// T-445 retired the drawer's "Spectrum grid" tab — the region-over-time waterfall over
+// `GET /api/history`, with its own hand-written colormap LUT (T-397's colormap divergence, in the
+// repo, twice). Its two tests went with it: `defaultHistoryRegion` chose the tab's opening region,
+// and there is no tab to open. The question it answered is the unified surface's whole subject.
 
 test("newBookmarkFromForm names an unnamed marker after its frequency and omits bandwidth when unset", () => {
   const b = newBookmarkFromForm({ name: "", freqMHz: "101.3", bandwidthKHz: "", kind: "marker" });

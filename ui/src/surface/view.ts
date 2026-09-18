@@ -53,6 +53,16 @@ export interface SurfaceViewOptions {
   freq?: FreqWindow;
   spanNs?: number;
   device?: string;
+  /**
+   * Extra stroked marks drawn **inside each pane** — the signal boxes and selections the old
+   * waterfall's DOM overlay layer used to carry (T-445, `./marks.ts`).
+   *
+   * It is a *function called per frame*, not a list set on a poll, and that is the whole point:
+   * T-388's box-jump was a per-poll DOM layout racing a per-frame scroll. Here the caller is handed
+   * the very `PaneView` the data pass was just given, so a box and the energy under it are placed
+   * by the same `toClip` on the same frame and **cannot** use two mappings.
+   */
+  marks?: ((pane: PaneView, edgeNs: number) => readonly OverlayQuad[]) | null;
 }
 
 /** What one frame did — enough to assert on without a framebuffer. */
@@ -81,8 +91,11 @@ export class SurfaceView {
   private readonly chrome: SurfaceChrome | null;
   private readonly overlayStyle: OverlayStyle;
   private readonly canvas: HTMLCanvasElement;
+  /** Per-pane marks, re-derived every frame. See [[SurfaceViewOptions.marks]]. */
+  marks: ((pane: PaneView, edgeNs: number) => readonly OverlayQuad[]) | null;
 
   constructor(opts: SurfaceViewOptions) {
+    this.marks = opts.marks ?? null;
     this.canvas = opts.canvas;
     this.surface = new Surface(opts.canvas, opts.lattice, opts.cache, opts.surface ?? {});
     this.overlay = new OverlayPass(this.surface.gl);
@@ -128,13 +141,27 @@ export class SurfaceView {
 
     // 2. the overlays: geometry re-derived from pane state THIS frame, drawn by a different program
     //    afterwards. Computed even when not drawn, so a caller can place the same marks in the DOM.
-    const quads = mapView && mapRect
+    const mapQuads = mapView && mapRect
       ? [
         ...paneOutlineQuads(this.panes.list(), edgeNs, mapView.box, mapRect, this.overlayStyle),
         ...liveSegmentQuads(windows, edgeNs, mapView.box, mapRect, this.overlayStyle),
       ]
       : [];
-    const overlaysDrawn = this.overlays && mapRect ? this.overlay.draw(mapRect, quads) : 0;
+    // The in-pane marks: signal boxes and selections, derived from the **same** `PaneView` the data
+    // pass was handed, this frame. One mapping, one frame — never a poll's layout over a scroll.
+    const paneQuads: { rect: PaneRect; quads: readonly OverlayQuad[] }[] = [];
+    if (this.marks) {
+      for (const v of paneViews) {
+        const q = this.marks(v, edgeNs);
+        if (q.length) paneQuads.push({ rect: v.rect, quads: q });
+      }
+    }
+    let overlaysDrawn = 0;
+    if (this.overlays) {
+      if (mapRect) overlaysDrawn += this.overlay.draw(mapRect, mapQuads);
+      for (const p of paneQuads) overlaysDrawn += this.overlay.draw(p.rect, p.quads);
+    }
+    const quads = paneQuads.length ? [...mapQuads, ...paneQuads.flatMap((p) => p.quads)] : mapQuads;
 
     // 3. the chrome: the level each viewport resolved to, from the report it was actually drawn
     //    with — the minimap among them, because it is another viewport.

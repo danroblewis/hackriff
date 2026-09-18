@@ -13,8 +13,9 @@ import { ControlClient } from "../controls/client";
 import { h } from "../app/dom";
 import { takeToken } from "../app/net";
 import { fmtShare } from "./bootstrap";
+import { attachSurfaceInput } from "./input";
 import { legendEntries, swatchPixels } from "./legend";
-import { SurfacePreview, isBackpressure, probeSurface, wheelAxes, zoomFactor } from "./preview";
+import { SurfacePreview, isBackpressure, probeSurface } from "./preview";
 
 const SWATCH_W = 54, SWATCH_H = 22;
 
@@ -114,55 +115,11 @@ async function main(): Promise<void> {
     button("Overlays", "Draw the map's pane rectangles. They are strokes, never washes, so they cannot tint a measurement.", () => { preview.view.overlays = !preview.view.overlays; }),
   );
 
-  // ——— pointer: drawing-buffer coordinates, GL convention (origin bottom-left) ———
-  const point = (e: { clientX: number; clientY: number }) => {
-    const r = canvas.getBoundingClientRect();
-    return {
-      x: (e.clientX - r.left) * (canvas.width / Math.max(1, r.width)),
-      y: canvas.height - (e.clientY - r.top) * (canvas.height / Math.max(1, r.height)),
-    };
-  };
-
-  let dragging: { x: number; y: number; map: boolean; pane: string | null } | null = null;
-  canvas.addEventListener("pointerdown", (e) => {
-    const p = point(e);
-    const map = preview.onMap(p);
-    const pane = map ? null : preview.paneAt(p);
-    if (pane) preview.activePane = pane;
-    dragging = { x: e.clientX, y: e.clientY, map, pane };
-    canvas.setPointerCapture(e.pointerId);
-  });
-  canvas.addEventListener("pointermove", (e) => {
-    if (!dragging || !e.buttons) return;
-    const scale = canvas.width / Math.max(1, canvas.getBoundingClientRect().width);
-    // Screen y runs down and the drawing buffer's runs up, so the vertical delta is negated once,
-    // here, and every consumer below is in one convention.
-    const dx = (e.clientX - dragging.x) * scale, dy = -(e.clientY - dragging.y) * scale;
-    dragging.x = e.clientX;
-    dragging.y = e.clientY;
-    if (dragging.map) preview.dragMap(dx, dy);
-    else if (dragging.pane) preview.drag(dragging.pane, dx, dy);
-  });
-  const endDrag = () => { dragging = null; };
-  canvas.addEventListener("pointerup", endDrag);
-  canvas.addEventListener("pointercancel", endDrag);
-
-  canvas.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    const p = point(e);
-    const f = zoomFactor(e.deltaY, e.deltaMode);
-    const axes = wheelAxes(e);
-    if (preview.onMap(p)) { preview.wheelMap(p, f, axes); return; }
-    const pane = preview.paneAt(p);
-    if (pane) { preview.activePane = pane; preview.wheel(pane, p, f, axes); }
-  }, { passive: false });
-
-  // Double-click on the map sends the active pane there. A discrete act rather than a threshold on
-  // a pointer stream — T-407's lesson, kept even though nothing here can reach a radio.
-  canvas.addEventListener("dblclick", (e) => {
-    const p = point(e);
-    if (preview.onMap(p)) preview.goToOnMap(p);
-  });
+  // ——— pointer ———
+  // T-445 moved this to `./input.ts`, because the cutover gives the surface a **second** host (the
+  // app's Explore centre) and a second copy of "what a wheel means" is T-412's wheel-zoom mismatch
+  // waiting to happen. One handler, two mounts.
+  attachSurfaceInput(canvas, preview);
 
   // ——— size, and the loop ———
   const fit = () => {

@@ -1,5 +1,11 @@
-// Review drawer (ADR-0013 §2, §8; T-155): tabs for Alarms, Survey report, History, Scheduler,
-// Device and Bookmarks — the M0b–M2 panels rehomed off the old stacked page. The drawer's own
+// Review drawer (ADR-0013 §2, §8; T-155): tabs for Alarms, Survey report, Scheduler, Device and
+// Bookmarks — the M0b–M2 panels rehomed off the old stacked page.
+//
+// T-445 retired the sixth, "Spectrum grid": a region-over-time waterfall over `GET /api/history`
+// with **its own hand-written colormap LUT** — literally T-397's colormap divergence, a second ramp
+// that stopped at cyan where the main one went on to white. The question it answered ("what did
+// this region look like over this period?") is the unified surface's whole subject: pan there and
+// zoom out. One renderer, one ramp. The drawer's own
 // open/close and the top bar's badge stay T-150's (shell.ts toggles `#review`'s `hidden`); this
 // file only fills that slot's subtree with the tab bar and the six panels.
 import type { AppContext } from "../context";
@@ -8,7 +14,6 @@ import { openReview, type ReviewSlice, type ReviewTab } from "../state";
 import { AlarmsTab } from "./alarms";
 import { BookmarksTab } from "./bookmarks";
 import { DeviceTab } from "./device";
-import { HistoryTab } from "./history";
 import { ReportTab } from "./report";
 import { SchedulerTab } from "./scheduler";
 
@@ -17,9 +22,6 @@ interface Panel { el(): HTMLElement; activate(region: ReviewSlice["region"]): vo
 const TABS: readonly { id: ReviewTab; label: string }[] = [
   { id: "alarms", label: "Alarms" },
   { id: "report", label: "Survey report" },
-  // T-264 took the name "History" for the top-level catalogue surface (ADR-0017 TM-8). This tab is
-  // the region-over-time *spectrum* grid, a different question, so it says so.
-  { id: "history", label: "Spectrum grid" },
   { id: "scheduler", label: "Scheduler" },
   { id: "device", label: "Device" },
   { id: "bookmarks", label: "Bookmarks" },
@@ -31,7 +33,6 @@ export function mountReview(el: HTMLElement, ctx: AppContext) {
   const panels: Record<ReviewTab, Panel> = {
     alarms: new AlarmsTab(client, store),
     report: new ReportTab(client, store, token),
-    history: new HistoryTab(client, store),
     scheduler: new SchedulerTab(client),
     device: new DeviceTab(client),
     bookmarks: new BookmarksTab(client, store),

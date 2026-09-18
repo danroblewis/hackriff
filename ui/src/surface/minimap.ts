@@ -146,7 +146,9 @@ export interface OverlayQuad {
   /** `[x0, y0, x1, y1]`, the renderer's clip convention (`toClip`). */
   readonly clip: readonly [number, number, number, number];
   readonly rgba: readonly [number, number, number, number];
-  readonly kind: "pane-outline" | "live-segment";
+  /** `signal-box` and `selection-box` are T-445's in-pane marks (`./marks.ts`); the other two are
+   * the map's own. All four are strokes, and `overlay.ts` can draw nothing else. */
+  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box";
   /** The pane id, or the device id, this mark is about. */
   readonly id: string;
 }

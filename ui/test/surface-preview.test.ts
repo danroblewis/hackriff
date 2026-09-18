@@ -12,9 +12,14 @@
 //     open and two frames at the same edge are the same box.
 //  3. **No gesture can reach the radio.** Structural, at the source level: the preview names no
 //     device route and imports neither `./retune.ts` nor `../app/centre/view.ts`.
-//  4. **The existing UI is unchanged.** Asserted by walking the app's own import graph from
-//     `src/app/main.ts` and requiring that it never reaches a T-450 file. "Additive" is a claim
-//     about the whole repo; a diff review cannot see it and a convention would drift.
+//  4. **~~The existing UI is unchanged.~~ INVERTED BY T-445.** T-450 was additive, and asserted it
+//     by walking the app's import graph from `src/app/main.ts` and requiring that it never reached
+//     a T-450 file. The cutover is the ticket that was waiting for that preview to be looked at, so
+//     the claim it must now hold up is the opposite one — **the app mounts this same host**, and
+//     there is not a second copy of it under `src/app/`. The assertion was inverted rather than
+//     deleted (T-347's precedent): the guarantee it protected — one host, not two — is the whole
+//     anti-divergence argument, and it needs a guard on the other side of the cutover more than it
+//     needed one before.
 
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
@@ -511,21 +516,25 @@ function importGraph(entry: string): Set<string> {
   return seen;
 }
 
-test("THE ADDITIVE CLAIM: the app cannot reach the preview, and the preview is not on its bundle", () => {
+test("T-445 INVERTS T-450's ADDITIVE CLAIM: the app mounts THIS host, and there is no second copy of it", () => {
   const app = importGraph("src/app/main.ts");
-  assert.ok(app.has("src/app/shell.ts"), "the graph walk found nothing: the assertion below would pass vacuously");
+  assert.ok(app.has("src/app/shell.ts"), "the graph walk found nothing: the assertions below would pass vacuously");
   assert.ok(app.size > 30, `the graph walk found only ${app.size} files; it is not walking the app`);
-  for (const f of T450_FILES) {
-    assert.ok(!app.has(normalize(f)), `${f} is reachable from the app's entry point — this ticket is additive`);
+  // The host, the bootstrap and the shared input handler are all on the app's graph now. Before the
+  // cutover this assertion was `!app.has(...)`, for a preview nothing was allowed to reach.
+  for (const f of ["src/surface/preview.ts", "src/surface/bootstrap.ts", "src/surface/input.ts",
+    "src/surface/view.ts", "src/surface/panes.ts", "src/surface/minimap.ts", "src/surface/marks.ts"]) {
+    assert.ok(app.has(normalize(f)), `${f} is NOT reachable from the app — the cutover mounted something else`);
   }
-  // The preview has its own entry, its own page and its own bundle: the app's build line is
-  // untouched and its output cannot change because of anything here.
+  // The page entry stays the preview page's own: two pages, one host. If the app had grown its own
+  // copy of `SurfacePreview` this is where it would show, because the class would have two definers.
+  const definers = ["src/surface/preview.ts", "src/app/centre/surface.ts", "src/surface/preview-main.ts"]
+    .filter((f) => /class SurfacePreview/.test(SRC(f)));
+  assert.deepEqual(definers, ["src/surface/preview.ts"], "the mounted host has exactly one definition");
   const pkg = JSON.parse(SRC("package.json")) as { scripts: Record<string, string> };
   assert.match(pkg.scripts["build:surface"], /preview-main\.ts.*--outfile=dist\/surface\.js/s);
-  assert.ok(!pkg.scripts.build.includes("preview-main"),
-    "the preview must not join the app's --splitting entry list: shared chunks would change app.js");
-  assert.ok(existsSync("src/surface/preview.html"));
-  assert.ok(!SRC("src/app/index.html").includes("surface.js"), "the app's page must not load the preview's bundle");
+  assert.ok(existsSync("src/surface/preview.html"), "the preview page still exists beside the app");
+  assert.ok(!SRC("src/app/index.html").includes("surface.js"), "…and the app still loads its own bundle, not the page's");
 });
 
 test("the preview reaches the renderer it was built to mount, rather than a copy of it", () => {

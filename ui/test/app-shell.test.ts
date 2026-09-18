@@ -20,10 +20,11 @@ const html = readFileSync("src/app/index.html", "utf8");
 const entryCss = readFileSync("src/app/app.css", "utf8");
 const cssImports = [...entryCss.matchAll(/@import "\.\/([^"]+)";/g)].map((m) => m[1]);
 const css = cssImports.map((f) => readFileSync(`src/app/${f}`, "utf8")).join("\n");
-// T-340 adds "timenav"/"freqnav": one edge navigator parallel to each waterfall axis.
-// T-409 adds "nudge": the tuning-nudge buttons in the top bar, beside the Go to control they sit
+// T-445's cutover replaced four centre slots — "live" (the waterfall), "axis" (the frequency tick
+// strip) and the two edge navigators "timenav"/"freqnav" — with ONE: "surface".
+// T-409's "nudge" stays: the tuning-nudge buttons in the top bar, beside the Go to control they sit
 // next to and the Centre readout they change.
-const SLOTS = ["inventory", "selections", "live", "axis", "timenav", "freqnav", "nudge", "capture", "focus", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue"];
+const SLOTS = ["inventory", "selections", "surface", "nudge", "capture", "focus", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue"];
 const replayState = JSON.parse(readFileSync("test/control_state_replay.json", "utf8")) as ControlState;
 
 test("backoff doubles from 250 ms and caps at 10 s", () => {

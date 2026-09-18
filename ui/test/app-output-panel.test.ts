@@ -10,8 +10,8 @@ import {
   rdsFieldText, rdsIdentity, rdsViewModel, scopePoints, trimRds, ScopeBuffer,
   type DecodeRow, type PanelSource, type PipelineLite,
 } from "../src/app/explore/output-panel";
-import { viewWindow, windowKey } from "../src/app/explore/inventory";
-import { WATERFALL_ROWS } from "../src/waterfall";
+import { FALLBACK_ROWS, viewWindow, windowKey } from "../src/app/explore/inventory";
+
 
 function audioOutput(over: Partial<OutputEntry> = {}): OutputEntry {
   return {
@@ -256,14 +256,14 @@ test("THE PROPERTY: the decode request carries the window the waterfall shows, o
   const q = new URLSearchParams(live.slice(live.indexOf("?") + 1));
   assert.ok(live.startsWith("/api/inventory/em-fm/decode?"));
   assert.equal(Number(q.get("t1")), CAPTURE_EDGE_S, "the window ends at the live edge");
-  assert.equal(Number(q.get("t0")), CAPTURE_EDGE_S - WATERFALL_ROWS / 25, "one waterfall span back");
+  assert.equal(Number(q.get("t0")), CAPTURE_EDGE_S - FALLBACK_ROWS / 25, "one waterfall span back");
 
   // Scrubbed back: the reviewed instant over the same span — the waterfall's own window, not a
   // second one kept by this panel.
   const back = decodePath("em-fm", viewWindow(winState({ time: { live: false, tS: CAPTURE_EDGE_S - 3600 } })))!;
   const bq = new URLSearchParams(back.slice(back.indexOf("?") + 1));
   assert.equal(Number(bq.get("t1")), CAPTURE_EDGE_S - 3600);
-  assert.equal(Number(bq.get("t0")), CAPTURE_EDGE_S - 3600 - WATERFALL_ROWS / 25);
+  assert.equal(Number(bq.get("t0")), CAPTURE_EDGE_S - 3600 - FALLBACK_ROWS / 25);
 
   // A span dragged on the time navigator is the window here too.
   const dragged = decodePath("em-fm", viewWindow(winState({ time: { live: false, tS: 500, spanS: 600 } })))!;
@@ -303,7 +303,7 @@ test("THE GENUINELY-EMPTY CONTROL: an empty window asks about its coverage, for 
   assert.equal(paths.length, 2, "the coverage question is asked only when the window came back empty");
   const cov = new URLSearchParams(paths[1].slice(paths[1].indexOf("?") + 1));
   assert.equal(Number(cov.get("t1")), CAPTURE_EDGE_S, "about exactly this panel's window, not another");
-  assert.equal(Number(cov.get("t0")), CAPTURE_EDGE_S - WATERFALL_ROWS / 25);
+  assert.equal(Number(cov.get("t0")), CAPTURE_EDGE_S - FALLBACK_ROWS / 25);
   assert.equal(cov.get("f_lo"), String(99.6e6));
 });
 

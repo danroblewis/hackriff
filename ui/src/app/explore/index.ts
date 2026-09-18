@@ -1,8 +1,7 @@
 // Explore sidebar (inventory, selections) and focus panel mounts (ADR-0013 §8, T-151). Renders
 // only what the API served; explanations are always shown as ranked suggestions, never as truth
 // (CLAUDE.md "Product vision" §4).
-import { toast } from "../state";
-import { sameCursor } from "../centre/review-render";
+import { sameCursor, toast } from "../state";
 // T-386: the sidebar filters selections against the *same* frequency view the centre pane places
 // its boxes in — one definition, so a header-less session cannot list one set and draw another.
 import { centreView, centreViewKey } from "../centre/view";

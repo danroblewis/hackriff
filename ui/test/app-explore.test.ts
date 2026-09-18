@@ -16,11 +16,11 @@ import {
   clearUserBand, CLUSTER_CHIP_TITLE, clusterChip, confirmedFilters, DEFAULT_ROW_RATE_HZ, emptyListText, liveEdgeS,
   loadInventoryRows, nextInventorySort, recurrenceDots, renderedInventory, rowChips, rowSeenText,
   setUserBand, sortInventoryRows, viewFilters, viewWindow, WAITING_FOR_WINDOW, waterfallSpanS,
-  type Classification, type Row,
+  type Classification, type Row, FALLBACK_ROWS,
 } from "../src/app/explore/inventory";
-import { bracketLayout, presenceBoxes } from "../src/app/centre/overlays";
+import { signalMarkBoxes } from "../src/surface/marks";
 import * as ax from "../src/axis";
-import { WATERFALL_ROWS } from "../src/waterfall";
+
 import {
   foundInside, listenAllTargets, recordSelectionClip, selectionsEmptyText, selectionsInWindow,
   type Selection,
@@ -377,12 +377,12 @@ function windowCtx(
 
 test("waterfallSpanS: the ring height over the row rate, header rate first, then the device, then the default", () => {
   const base = winState();
-  assert.equal(waterfallSpanS(base), WATERFALL_ROWS / DEFAULT_ROW_RATE_HZ, "≈ 20.5 s at 25 rows/s");
-  assert.equal(waterfallSpanS(winState({ rowRateHz: 64 })), WATERFALL_ROWS / 64);
-  assert.equal(waterfallSpanS(winState({ rowsPerS: 10 })), WATERFALL_ROWS / 10, "the device rate when no header has arrived");
+  assert.equal(waterfallSpanS(base), FALLBACK_ROWS / DEFAULT_ROW_RATE_HZ, "≈ 20.5 s at 25 rows/s");
+  assert.equal(waterfallSpanS(winState({ rowRateHz: 64 })), FALLBACK_ROWS / 64);
+  assert.equal(waterfallSpanS(winState({ rowsPerS: 10 })), FALLBACK_ROWS / 10, "the device rate when no header has arrived");
   assert.equal(
     waterfallSpanS(winState({ rowRateHz: 64, rowsPerS: 10 })),
-    WATERFALL_ROWS / 64,
+    FALLBACK_ROWS / 64,
     "the stream header wins over the device poll",
   );
 });
@@ -416,13 +416,13 @@ test("liveEdgeS: the stream's own row time, then the capture window, then UNKNOW
 
 test("THE PROPERTY: the Candidate window is the window the waterfall shows, on the capture clock", () => {
   const live = winState({ rowRateHz: 25, edgeTS: CAPTURE_EDGE_S });
-  assert.deepEqual(viewWindow(live), { t0: CAPTURE_EDGE_S - WATERFALL_ROWS / 25, t1: CAPTURE_EDGE_S });
+  assert.deepEqual(viewWindow(live), { t0: CAPTURE_EDGE_S - FALLBACK_ROWS / 25, t1: CAPTURE_EDGE_S });
 
   // Scrubbed back: the reviewed instant, over the *same* span the waterfall renders — not a
   // separate review constant. `REVIEW_WINDOW_S = 3600` was a second window: the list answered about
   // an hour while every other surface answered about the 20 s under it.
   const reviewing = winState({ rowRateHz: 25, edgeTS: CAPTURE_EDGE_S, time: { live: false, tS: 500 } });
-  assert.deepEqual(viewWindow(reviewing), { t0: 500 - WATERFALL_ROWS / 25, t1: 500 }, "the reviewed instant, not now");
+  assert.deepEqual(viewWindow(reviewing), { t0: 500 - FALLBACK_ROWS / 25, t1: 500 }, "the reviewed instant, not now");
 
   // A span dragged on the time navigator is the window, on this surface too (T-340).
   const dragged = winState({ rowRateHz: 25, time: { live: false, tS: 500, spanS: 600 } });
@@ -448,7 +448,7 @@ test("LIVE: the Candidate query carries the waterfall window; the Confirmed quer
 
   const cand = paramsFor("candidate");
   assert.equal(Number(cand.get("t1")), CAPTURE_EDGE_S, "the candidate window ends at the live edge");
-  assert.equal(Number(cand.get("t0")), CAPTURE_EDGE_S - WATERFALL_ROWS / 25, "and starts one waterfall span back");
+  assert.equal(Number(cand.get("t0")), CAPTURE_EDGE_S - FALLBACK_ROWS / 25, "and starts one waterfall span back");
   assert.equal(cand.get("f_lo"), String(99.6e6), "the frequency span is sent on both lists");
 
   const conf = paramsFor("confirmed");
@@ -517,20 +517,28 @@ test("THE STRUCTURAL RULE (T-389): list count = box count + noExtent + focused, 
   for (const focusedId of [null, "k1", "c1", "c3"]) {
     const r = renderedInventory(rows, focusedId);
     const listed = r.listed.candidate.length + r.listed.confirmed.length;
-    const boxes = presenceBoxes(r.boxed, T389_G, focusedId);
+    const boxes = signalMarkBoxes(r.boxed, focusedId);
+    // T-445 INVERTED THIS, rather than deleting it. The identity used to carry a third term for the
+    // focused row, which substituted a full-height DOM band for its presence box. On the canvas the
+    // focused row draws the same mark, heavier — so the identity is the stronger two-term one, and
+    // this assertion now fails if that substitution is ever reintroduced.
     assert.equal(
-      listed, boxes.length + r.noExtent.length + (r.focused ? 1 : 0),
-      `focus=${focusedId}: every listed row draws a box, carries no extent, or is the focused row`,
+      listed, boxes.length + r.noExtent.length,
+      `focus=${focusedId}: every listed row draws a box or carries no extent — no exceptions`,
     );
+    if (r.focused?.presence?.last_interval) {
+      const f = boxes.find((b) => b.id === r.focused!.id);
+      assert.ok(f, "the focused row draws a box too");
+      assert.equal(f!.rgba[3], 1, "…and it is the opaque one: heavier, not different");
+    }
     // Not merely equal in count: `boxed` is a SUBSET of what the list shows, so the waterfall can
     // never draw a box for something the list does not name. This is the direction the user saw
     // broken — several boxes beside a heading that said "1".
     const names = new Set([...r.listed.candidate, ...r.listed.confirmed].map((x) => x.id));
     for (const b of boxes) assert.ok(names.has(b.id), `box ${b.id} is one of the listed rows`);
     assert.ok(!names.has("gone"), "a deleted row is on neither surface");
-    // And the brackets, the third view of the same rows, name exactly the listed set too.
-    const bk = bracketLayout([...r.listed.candidate, ...r.listed.confirmed], T389_V, 1440, focusedId);
-    assert.deepEqual(bk.map((x) => x.id).sort(), [...names].sort(), "one bracket per listed row");
+    // And there is no longer a third view of the same rows to keep in step: the brackets were the
+    // spectrum pane's own frequency marks, drawn by a renderer that no longer exists.
   }
 });
 
@@ -545,7 +553,7 @@ test("T-389: a row with no measured extent is DISCLOSED as one, never dropped an
   assert.deepEqual(r.listed.confirmed.map((x) => x.id), ["quiet"], "still listed — §2.2's safety valve");
   assert.deepEqual(r.boxed, []);
   assert.deepEqual(r.noExtent.map((x) => x.id), ["quiet"]);
-  assert.deepEqual(presenceBoxes(r.boxed, T389_G, null), [], "and no box is fabricated for it");
+  assert.deepEqual(signalMarkBoxes(r.boxed, null), [], "and no box is fabricated for it");
 });
 
 test("T-389: an UNSELECTED confirmed row is drawn — it used to have no marker in the spectrum pane at all", () => {
@@ -560,16 +568,13 @@ test("T-389: an UNSELECTED confirmed row is drawn — it used to have no marker 
     makeRow({ id: "k", state: "confirmed", f_lo_hz: 100_400_000, f_hi_hz: 100_600_000, presence: iv(60, 120) }),
     makeRow({ id: "c", state: "candidate", f_lo_hz: 99_400_000, f_hi_hz: 99_600_000, presence: iv(110, 120) }),
   ] as Row[];
-  const bk = bracketLayout(rows, T389_V, 1440, null);
-  assert.deepEqual(bk.map((x) => [x.id, x.state, x.active]), [["k", "confirmed", false], ["c", "candidate", false]]);
-  // And the confirmed presence box is the heavier of the two, not the lighter: a solid 2 px border
-  // where a candidate has a 1 px dashed one, because two thin lines read as nothing where dashes
-  // read as a box.
-  const boxes = presenceBoxes(rows, T389_G, null);
+  // T-445: the bracket layer is gone with the spectrum pane, and the property it existed for is
+  // now the box's own — an UNSELECTED confirmed row draws a mark, and the confirmed mark is the
+  // heavier of the two, because a confirmed emitter is the stronger claim (T-389's ordering).
+  const boxes = signalMarkBoxes(rows, null);
+  assert.deepEqual(boxes.map((b) => b.id), ["k", "c"], "both are drawn with nothing focused");
   const conf = boxes.find((b) => b.id === "k")!, cand = boxes.find((b) => b.id === "c")!;
-  assert.ok(conf.style.borderPx > cand.style.borderPx, "confirmed is drawn heavier than candidate");
-  assert.ok(conf.style.fill[3] > cand.style.fill[3]);
-  assert.equal(conf.style.dashPx, 0);
+  assert.ok(conf.rgba[3] > cand.rgba[3], "confirmed is drawn heavier than candidate");
 });
 
 test("T-389: no live edge known yet sends no `at` at all — a made-up 'now' is worse than none", async () => {
@@ -611,7 +616,7 @@ test("reviewing: the Candidate window follows the scrubbed instant; Confirmed st
   await loadInventoryRows(ctx, () => {});
   const cand = paramsFor("candidate");
   assert.equal(Number(cand.get("t1")), CAPTURE_EDGE_S - 9614);
-  assert.equal(Number(cand.get("t0")), CAPTURE_EDGE_S - 9614 - WATERFALL_ROWS / 25, "the waterfall's own span, not a review constant");
+  assert.equal(Number(cand.get("t0")), CAPTURE_EDGE_S - 9614 - FALLBACK_ROWS / 25, "the waterfall's own span, not a review constant");
   assert.equal(paramsFor("confirmed").get("t0"), null, "a quiet confirmed station does not vanish while reviewing either");
 });
 
@@ -889,16 +894,23 @@ test("T-386: no view known filters nothing on frequency, rather than everything"
   assert.deepEqual(selectionsInWindow([a, b], null, WINDOW).listed.map((s) => s.id), ["a", "b"]);
 });
 
-test("T-386/T-389: the sidebar list and the centre's selection boxes derive from ONE filtered collection", () => {
-  // Two parallel filters that happen to agree are not an invariant — T-389's rule, applied to the
-  // surface T-389 did not touch. `live-spectrum.ts` must take `selectionsInWindow`'s own `listed`,
-  // not `s.selections.list`, for both the full-height boxes and the timed ones in the render pass.
-  const src = readFileSync("src/app/centre/live-spectrum.ts", "utf8");
-  assert.match(src, /const sels = selectionsInWindow\(/, "the centre view derives the same split");
-  assert.match(src, /selectionBoxes\(sels\.listed,/, "the untimed boxes come from the split");
-  assert.match(src, /selectionTimeBoxes\(sels\.listed,/, "and so do the timed ones");
-  assert.ok(!/selectionBoxes\(s\.selections\.list/.test(src), "never the unfiltered list");
-  assert.ok(!/selectionTimeBoxes\(s\.selections\.list/.test(src), "never the unfiltered list");
+test("T-386/T-389: the sidebar list and the surface's marks come from ONE collection, filtered ONCE", () => {
+  // The original form of this test held `live-spectrum.ts` to `selectionsInWindow`'s `listed` for
+  // both its full-height boxes and its timed ones, because two parallel filters that happen to
+  // agree are not an invariant. T-445 made the second filter unnecessary rather than correct: the
+  // surface hands `s.selections.list` and `s.inventory.rows` straight to `marks.ts`, and the only
+  // thing that decides whether a mark is on screen is `markQuads` clipping it to the pane's OWN
+  // box — the same box the tiles were drawn in, on the same frame. A mark cannot be drawn where
+  // the pane is not looking, so there is nothing left for a window filter to disagree with.
+  const src = readFileSync("src/app/centre/surface.ts", "utf8");
+  assert.match(src, /signalMarkBoxes\(Object\.values\(s\.inventory\.rows\)/, "the marks come from the store's rows");
+  assert.match(src, /selectionMarkBoxes\(s\.selections\.list/, "and from the store's selections");
+  assert.match(src, /markQuads\(boxesFor\(pane\), edge, pane\.box, pane\.rect\)/,
+    "placed in the pane's own box and rect — the renderer's mapping, not a second one");
+  // And the sidebar's window is the pane's window: `mirror()` is the ONE writer of `live.view`
+  // here, so the list and the canvas cannot be scoped to two different things.
+  const writers = [...src.matchAll(/live: \{ \.\.\.s\.live, view:/g)].length;
+  assert.equal(writers, 1, "exactly one place publishes the viewport as the app's view window");
 
   const idx = readFileSync("src/app/explore/index.ts", "utf8");
   // The whole window, both axes: a split asked for with `null, null` would satisfy the shape and
@@ -906,14 +918,11 @@ test("T-386/T-389: the sidebar list and the centre's selection boxes derive from
   assert.match(
     idx,
     /selectionsInWindow\(sortSelections\(s\.selections\.list\), centreView\(s\), viewWindow\(s\)\)/,
-    "the sidebar renders the same split, over this view and this window",
+    "the sidebar renders the split, over this view and this window",
   );
   assert.match(idx, /list\.replaceChildren\(\.\.\.\(split\.listed\.length/, "and renders `listed`, not the raw list");
   // And it re-reads when either axis of the window moves, not only when the selections do (T-384).
   assert.match(idx, /windowKey\(s\)\}\|\$\{centreViewKey\(s\)\}/);
-  // The centre view asks the same question of the same two axes: `v` there IS `centreView(s)`.
-  assert.match(src, /selectionsInWindow\(s\.selections\.list, v, viewWindow\(s\)\)/);
-  assert.match(src, /const s = store\.get\(\), v = centreView\(s\)/);
 });
 
 test("T-386 CLOCK GUARD: no clock of the browser's own reaches the Explore sidebar modules", () => {

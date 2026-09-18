@@ -12,9 +12,9 @@ import {
   selectedByteRange, servedAddressText, unplaceableFrames, windowFrames,
   type RingFrame, type StreamsResponse,
 } from "../src/app/decode/inspector";
-import { emptyListText, viewWindow, windowKey } from "../src/app/explore/inventory";
+import { FALLBACK_ROWS, emptyListText, viewWindow, windowKey } from "../src/app/explore/inventory";
 import { decodeEmptyText } from "../src/app/explore/output-panel";
-import { WATERFALL_ROWS } from "../src/waterfall";
+
 
 // ---- fixture: a small RDS-shaped frame record + layer tree, shaped exactly as
 // docs/stream-contract.md §14.2's example (bytes 0x16 0x94 0x0A 0x00). ----
@@ -199,7 +199,7 @@ test("byte click -> field select lands on the same field a field click would hig
  * behind T-379 is what makes a `Date.now()` window select nothing while the capture window holds
  * five frames. */
 const CAP_EDGE_S = 1_789_297_847;
-const SPAN_S = WATERFALL_ROWS / 25;
+const SPAN_S = FALLBACK_ROWS / 25;
 
 function winState(over: {
   view?: { loHz: number; hiHz: number } | null; rowRateHz?: number | null; edgeTS?: number | null;
