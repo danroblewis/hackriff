@@ -108,3 +108,46 @@ def test_age_is_human_and_monotone():
     assert rec._age(30).endswith("s")
     assert rec._age(600).endswith("m")
     assert rec._age(7200).endswith("h")
+
+
+def test_a_merged_and_cleaned_up_ticket_reads_as_landed_not_no_branch(monkeypatch):
+    """The phantom-in-progress bug, pinned.
+
+    Removing a worktree after a merge is the documented reclaim step, so a FINISHED ticket ends up
+    looking exactly like one that NEVER STARTED — both have no branch. Reporting that as "NO WORK"
+    is how T-460, T-472, T-476 and T-479 all sat `in-progress` on the board after landing.
+    """
+    calls = {"named": ""}
+
+    def fake_git(*args):
+        if args[0] == "rev-parse":
+            return ""  # no branch
+        if args[0] == "log" and "--grep" in args:
+            return calls["named"]
+        return ""
+
+    monkeypatch.setattr(rec, "_git", fake_git)
+    t = rec.Ticket("T-460", "in-progress", "x")
+
+    assert rec.inspect(t, 0.0).state == "NO BRANCH"
+
+    calls["named"] = "184586b3 Merge T-460 + T-479: the live edge was frozen in the client"
+    f = rec.inspect(t, 0.0)
+    assert f.state == "LANDED"
+    assert f.needs_attention, "a landed ticket still marked in-progress must be surfaced"
+
+
+def test_the_grep_uses_a_plain_id_because_gits_ere_has_no_word_boundary(monkeypatch):
+    """`--grep '\\bT-460\\b'` matches NOTHING in git's ERE and exits 0, so every landed ticket read
+    as never-started — the bug this branch exists to fix, reintroduced inside the fix."""
+    seen = {}
+
+    def fake_git(*args):
+        if args[0] == "log" and "--grep" in args:
+            seen["pattern"] = args[args.index("--grep") + 1]
+        return "" if args[0] == "rev-parse" else ""
+
+    monkeypatch.setattr(rec, "_git", fake_git)
+    rec.inspect(rec.Ticket("T-460", "in-progress", "x"), 0.0)
+    assert seen["pattern"] == "T-460", "the grep pattern must be the bare id"
+    assert "\\b" not in seen["pattern"]

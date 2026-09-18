@@ -58,6 +58,25 @@ const PANE_WHY = `${PANE_ROW} .hk-surface-why`;
 
 /** Every device route. A press on a replay must reach none of them, and neither may a gesture. */
 const DEVICE = /\/api\/control\/(center|rate|gains|bias_tee|baseband_filter)$/;
+
+/**
+ * **The zoom gesture this file uses: SHIFT-held, a frequency-only zoom. T-472 is why.**
+ *
+ * Everything this file zooms for is a claim about **frequency** — "deep inside the tuned window"
+ * (test 2), "the viewport is now inside the window in force" (test 5). A plain wheel is the *uniform*
+ * gesture, and since T-472 it stops as soon as **either** axis reaches a bound, so the aspect ratio
+ * cannot drift out from under a gesture that promised to scale both equally. On a young record the
+ * time axis is pinned before the first wheel, and a plain wheel then correctly moves **neither**
+ * axis — which turned test 5's premise into a no-op outright ("the viewport never got inside the
+ * tuned window") and left test 2 green off a single step while its comment still claimed three
+ * orders of magnitude.
+ *
+ * Shift is untouched by the lock and is the instrument these claims actually want. The claims are
+ * unchanged; only the gesture is. (Where a *plain* wheel is the subject — test 4's "no gesture
+ * reaches a device route" — it stays, alongside the modified ones, because there the point is the
+ * vocabulary rather than the travel.)
+ */
+const ZOOM = { shift: true };
 const deviceCalls = (page) =>
   page.requests.filter((r) => DEVICE.test(new URL(r.url).pathname)).map((r) => `${r.method} ${new URL(r.url).pathname}`);
 
@@ -155,7 +174,13 @@ test("2. THE TICKET: zooming DEEP INSIDE the tuned window keeps the control — 
   // Zoom in hard about the middle of the pane. A negative deltaY is zoom IN (`zoomFactor` is
   // `exp(px * 0.0015)`), and eight of them is ~3 orders of magnitude — comfortably inside whatever
   // the tuned window is, which is the condition that used to erase the control.
-  for (let i = 0; i < 8; i++) await page.wheel(at, -400);
+  //
+  // **SHIFT-held, and T-472 is why** (see [[ZOOM]]). "Deep inside the tuned window" is a claim about
+  // FREQUENCY, and shift is the gesture that makes it one: a plain wheel is the uniform zoom, which
+  // since T-472 stops as soon as *either* axis reaches a bound, so on a young record — where the
+  // time axis is pinned before the first wheel — it would travel a step or two and stop, leaving
+  // this test's premise ("~3 orders of magnitude") quietly false while it still went green.
+  for (let i = 0; i < 8; i++) await page.wheel(at, -400, ZOOM);
   await page.frames(4);
 
   const after = await rows(page);
@@ -174,7 +199,7 @@ test("2. THE TICKET: zooming DEEP INSIDE the tuned window keeps the control — 
   // Asserting it here would be an assertion about the fixture, not about the control.
 
   // …and zooming back out keeps it too: the control is not a state you can fall out of.
-  for (let i = 0; i < 10; i++) await page.wheel(at, 400);
+  for (let i = 0; i < 10; i++) await page.wheel(at, 400, ZOOM);
   await page.frames(4);
   const out = panes(await rows(page))[0];
   assert.equal(out.hasButton, true, "the control vanished on the way back out");
@@ -218,12 +243,22 @@ test("4. THE CONTROL (T-340/T-407): no gesture presses it, and a press on a repl
   const at = await centre(page);
   assert.deepEqual(deviceCalls(page), [], "the app commanded the front end just by opening");
 
-  // Drags the width of the pane, wheels at every scale — the whole pointer vocabulary, over a canvas
-  // that now has a permanently armed control sitting beside it. A gesture must still be a gesture.
+  // Drags the width of the pane, wheels at every scale and in **every modifier T-456 defines** — the
+  // whole pointer vocabulary, over a canvas that now has a permanently armed control sitting beside
+  // it. A gesture must still be a gesture.
+  //
+  // The bare wheels stay (here the subject is the wheel *path*, not how far it travels), but they
+  // are no longer the whole vocabulary: since T-472 a plain wheel can legitimately be a no-op at a
+  // bound, and a vocabulary made only of those would be a negative claim over gestures that did
+  // nothing. Shift and alt each move one axis whatever the other is doing, so they always travel.
   for (const dx of [-0.4, 0.4, -0.05, 0.05]) {
     await page.drag({ x: at.x, y: at.y }, { x: at.x + at.rect.w * dx, y: at.y + 40 }, 10);
   }
   for (const d of [-600, 600, -60, 60]) await page.wheel(at, d);
+  for (const d of [-600, 600]) {
+    await page.wheel(at, d, { shift: true });
+    await page.wheel(at, d, { alt: true });
+  }
   await page.frames(4);
   assert.deepEqual(deviceCalls(page), [], "a pan or a wheel reached a device route");
 
@@ -322,24 +357,43 @@ test("5. THE TICKET, enabled: a viewport INSIDE the tuned window retunes to wher
   // overview, and no single retune covers it". Wheel in until the viewport is both takeable and
   // inside the window in force, recording how the control read on the way, so the transition is
   // evidence rather than a precondition.
+  //
+  // The wheel is SHIFT-held ([[ZOOM]]): getting *inside a frequency window* is a frequency claim,
+  // and a plain wheel is the uniform zoom, which T-472 stops as soon as either axis reaches a bound.
+  // On this mock-SDR backend the time axis is pinned from the first frame, so a plain wheel moved
+  // neither axis and this loop ran its twenty iterations without the viewport ever narrowing.
   const at = await centre(page);
   const w0 = await tunedWindow(backend);
   const inside = (v) => v.loHz >= w0.loHz && v.hiHz <= w0.hiHz;
+  const MHz = (hz) => (hz / 1e6).toFixed(3);
+  const span = (v) => `${MHz(v.loHz)}-${MHz(v.hiHz)} MHz`;
   const seen = [];
   let row = await pane0(), view = viewportOf(row.where);
   for (let i = 0; i < 20 && !(row.disabled === false && inside(view)); i++) {
     seen.push(`${row.where} -> ${row.why}`);
-    await page.wheel(at, -400);
+    await page.wheel(at, -400, ZOOM);
     await page.frames(3);
     row = await pane0();
     view = viewportOf(row.where);
   }
+  // Both failures below name the window that was WANTED **and the one that was reached**, plus
+  // whether the viewport narrowed at all across the run. A failure that prints only the target says
+  // nothing about whether the gesture was refused, was too small, or overshot — and three merges
+  // this session were slowed by exactly that.
+  const first = viewportOf(seen.length ? seen[0].split(" -> ")[0] : row.where);
+  const got = `wanted ${span(w0)}, viewport is ${span(view)} (opened at ${span(first)}, ` +
+    `${seen.length} wheel step(s))`;
+  // Printed on every run, not only on failure: "zooming is what makes it achievable" is this test's
+  // premise, and a run that arrived inside the window with ZERO wheel steps would satisfy every
+  // assertion below while demonstrating nothing about the zoom.
+  t.diagnostic(`into the tuned window: ${got}`);
   // The precondition the ticket is about, ESTABLISHED rather than assumed: the viewport is now fully
   // inside the window in force, which under T-444 is exactly when the control was hidden.
   assert.ok(inside(view),
-    `the viewport never got inside the tuned window ${w0.loHz}-${w0.hiHz}:\n  ${seen.join("\n  ")}`);
+    `the viewport never got inside the tuned window — ${got}:\n  ${seen.join("\n  ")}`);
   assert.equal(row.disabled, false,
-    `the control is not takeable on a live viewport inside the tuned window — this is T-476 itself:\n  ${seen.join("\n  ")}`);
+    `the control is not takeable on a live viewport inside the tuned window — this is T-476 itself. ` +
+    `${got}:\n  ${seen.join("\n  ")}`);
   // The wide opening view legitimately said "survey overview"; what matters is that it did not STAY
   // that way and did not vanish on the way in either.
   for (const line of seen) assert.match(line, / -> .{20,}/, `a viewport on the way in said nothing: ${line}`);

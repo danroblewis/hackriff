@@ -53,7 +53,7 @@ const MINIMAP_PX = 120;
 const INSET = 8;
 /**
  * One wheel step, and it zooms **OUT** (`zoomFactor` is `exp(delta * 0.0015)`, so a positive delta
- * is a factor > 1). ~2.46× per step, which is over a level on both ladders.
+ * is a factor > 1). ~2.46× per step, which is over a level on the frequency ladder.
  *
  * Measured, not chosen by taste: with the page opened on observed coverage the panes sit at the
  * lattice's **finest** levels, so zooming *in* magnifies the same cells and `level_f`/`level_t`
@@ -63,6 +63,24 @@ const INSET = 8;
  * pyramid level, fetches a different set of tiles, and evicts from the LRU the other pane shares.
  */
 const ZOOM_OUT = 600;
+
+/**
+ * **Every wheel below is SHIFT-held — a frequency-only zoom — and T-472 is why.**
+ *
+ * A plain wheel is the *uniform* gesture, and since T-472 it stops when **either** axis reaches a
+ * bound, so that the aspect ratio cannot drift out from under a gesture that promised to scale both
+ * equally. This page opens on observed coverage, and on a young record that window's time span is
+ * already the whole retained record — so the time axis is at its ceiling before the first wheel, and
+ * a plain wheel outward correctly moves **neither** axis. This file's own premise check caught that
+ * the moment the lock landed ("zoom 1 moved no viewport at all").
+ *
+ * The claim here is about **colour under a change of pyramid level**, and it needs one viewport to
+ * change level while the other stays put. Shift is exactly the instrument for that: it zooms
+ * frequency alone, is untouched by the lock, and moves `level_f` — which is what `levelsOf` reads.
+ * The time axis never needed to move for anything this file asserts; the plain wheel was simply the
+ * convenient one when it was written. The claim is unchanged; only the gesture is.
+ */
+const ZOOM_MODS = { shift: true };
 
 /** The RGB bytes of a rectangle, as one buffer, for an exact comparison. */
 function pixels(img, rect) {
@@ -255,7 +273,7 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
   let prev = base, repainted = 0;
   for (const [i, delta] of [ZOOM_OUT, ZOOM_OUT, ZOOM_OUT, -ZOOM_OUT, -ZOOM_OUT, -ZOOM_OUT].entries()) {
     const step = i + 1;
-    await page.wheel(at, delta);
+    await page.wheel(at, delta, ZOOM_MODS);
     await page.frames(4);
     await waitResident(page);
     const s = await settle(page, all);
@@ -415,7 +433,7 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
   // measured in the product — but a gate on it would fire on the recording rather than on the code.
   let worstHeld = 0;
   for (const delta of [ZOOM_OUT, ZOOM_OUT, ZOOM_OUT, -ZOOM_OUT, -ZOOM_OUT, -ZOOM_OUT]) {
-    await page.wheel(at, delta);
+    await page.wheel(at, delta, ZOOM_MODS);
     await page.frames(4);
     await waitResident(page);
     const s = await settle(page, all, { timeoutMs: 25000 });

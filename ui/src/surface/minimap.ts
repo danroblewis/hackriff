@@ -115,6 +115,9 @@ export class Minimap {
   setFreq(centerHz: number, spanHz: number): void { this.model.setFreq(this.id, centerHz, spanHz); }
   panTime(dNs: number): void { this.model.panTime(this.id, dNs); }
   zoomTime(factor: number, anchor = 1): void { this.model.zoomTime(this.id, factor, anchor); }
+  /** The plain wheel's aspect-locked zoom (T-472). The map is a viewport, so it gets the viewport's
+   * gesture — not a second, squarer-or-not opinion about what a plain wheel does. */
+  zoomBoth(factor: number, anchorF = 0.5, anchorT = 1): void { this.model.zoomBoth(this.id, factor, anchorF, anchorT); }
   /** Follow the growing edge, or freeze — the minimap's pause is its time window, like a pane's. */
   setFollowing(on: boolean): void { this.model.setFollowing(this.id, on); }
   get following(): boolean { return this.model.isFollowing(this.id); }

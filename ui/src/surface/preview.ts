@@ -665,8 +665,21 @@ export class SurfacePreview {
    * The two axes are still moved by **two separate calls with two separate anchors**, and each
    * clamps and resolves its level on its own: a uniform gesture is one factor applied twice, never
    * one level applied to two axes. That is the distinction T-434's de-welding rests on, and it is
-   * why `factor` may zoom frequency while time sits clamped at the record's floor — a legitimate
-   * outcome the chrome states rather than hides.
+   * why one plain wheel leaves the pane at two different levels — a legitimate outcome the chrome
+   * states rather than hides.
+   *
+   * **T-472: the uniform branch takes the aspect lock, and it takes it here.** The earlier reading
+   * of the sentence above — "`factor` may zoom frequency while time sits clamped" — was the bug the
+   * user reported: past the end of the record the time axis pins, the frequency axis keeps widening,
+   * and the *aspect ratio* of a gesture that promised uniformity walks away, jumping the view and
+   * forcing a shift-scroll to recover. So when both axes are named, `PaneModel.zoomBoth` reduces the
+   * factor to the one both can honour and applies that — stopping both together at either axis's
+   * bound. Only the single-axis branches below, which the user asked for with **shift** (frequency)
+   * or **alt** (time), may change the ratio.
+   *
+   * It lives on this side of the split — in `preview.ts`, over `PaneModel`, rather than in
+   * `input.ts` — for T-456's reason: the surface has two hosts, and a handler that decided when to
+   * stop a zoom would be a second opinion about what a wheel does.
    */
   wheel(id: string, p: GlPoint, factor: number, axes: { freq: boolean; time: boolean }): void {
     const r = this.rectOf(id);
@@ -675,15 +688,20 @@ export class SurfacePreview {
     // `zoomTime`'s anchor is 0 = oldest (bottom of the pane) and 1 = newest, which is already the
     // GL y direction — so no flip here either.
     const ty = clamp01((p.y - r.y) / Math.max(1, r.h));
+    if (axes.freq && axes.time) { this.view.panes.zoomBoth(id, factor, fx, ty); return; }
     if (axes.freq) this.view.panes.zoomFreq(id, factor, fx);
     if (axes.time) this.view.panes.zoomTime(id, factor, ty);
   }
 
+  /** The same gesture on the map, which is a viewport and therefore gets the same lock. */
   wheelMap(p: GlPoint, factor: number, axes: { freq: boolean; time: boolean }): void {
     const r = this.lastFrame?.mapRect;
     if (!r) return;
-    if (axes.freq) this.view.minimap.zoomFreq(factor, clamp01((p.x - r.x) / Math.max(1, r.w)));
-    if (axes.time) this.view.minimap.zoomTime(factor, clamp01((p.y - r.y) / Math.max(1, r.h)));
+    const fx = clamp01((p.x - r.x) / Math.max(1, r.w));
+    const ty = clamp01((p.y - r.y) / Math.max(1, r.h));
+    if (axes.freq && axes.time) { this.view.minimap.zoomBoth(factor, fx, ty); return; }
+    if (axes.freq) this.view.minimap.zoomFreq(factor, fx);
+    if (axes.time) this.view.minimap.zoomTime(factor, ty);
   }
 
   /** Send the active pane to a point on the map, keeping its spans. A view move, not a retune. */
