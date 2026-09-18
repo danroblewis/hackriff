@@ -5290,3 +5290,60 @@ renderer's shader on 114,973 of 115,200 pixels for **a module that could not loa
 T-455 exists so the cutover is not made at the moment the replacement is least verifiable. The brief
 says plainly that a capability with **no home on the canvas** is a finding to report, not a thing to
 drop quietly.
+
+### B0.688 — MCANVAS lands, and three capabilities are reported rather than dropped (2026-09-17)
+
+The unified full-spectrum canvas is complete: **17 of 17**. The cutover (T-445, `19d9bed`) retired
+**3,900 lines across five client surfaces**, four of which drew spectrum. The Explore centre now
+mounts **the same `SurfacePreview` host the `/surface` page mounts**, with the live edge *reported
+in* rather than owned — absent that supplier the host is T-450's historical preview, unchanged. The
+live-versus-history split is gone rather than relocated into the client.
+
+**The exit criterion was cashed, not assumed.** Each of the five scrubber defects was shown
+**unreachable** by naming the thing that no longer exists — T-420's sliver needed a row ring drawn at
+full height regardless of what was served; T-388's box-jump needed a second layout on a second
+cadence, and the marks are now computed inside `SurfaceView.frame()` from that frame's own `PaneView`
+through the data pass's own `toClip`, *asserted against `toClip` itself rather than a copy of its
+arithmetic*, with a test that advances the edge with **no poll of any kind**; T-412's mismatch needed
+a second wheel handler, and there is one file, shared by both hosts, forbidden from reading a delta
+or a modifier bit itself. **Every one of the five was two implementations of the same idea drifting
+apart**, and that is the property the cutover removes.
+
+T-450's *additive* assertion — "the app cannot reach the preview" — was **inverted rather than
+deleted**, T-347's precedent used five times over: it now requires the app to reach exactly that host
+and requires `class SurfacePreview` to have exactly one definer.
+
+**Three capabilities have no home on the canvas**, reported as findings and filed as **T-457**
+(the instantaneous spectrum trace, with max-hold and the manual dB range), **T-458** (drag-to-select
+and T-193's draggable Confirmed-band edges) and **T-459** (axis ticks with labels). None is built
+until the user rules. T-458 carries the one part that cannot wait on taste: **T-193's user-band
+override now has no setter at all**, and stored state that a reader still honours with no way to set
+it is worse than no feature. A note for T-457: max-hold is an accumulator over frames, which is the
+shape the pyramid already owns — it may belong as a max-reduction tier in the tile ladder rather than
+a client buffer that dies with the view.
+
+`GET /api/history` and `/api/floor` lost their only web client and **both stay** — the first is
+`hk report`'s engine and what `/api/tiles` was built on, the second answers SPACE-050. **A UI cutover
+is not evidence a server route has no other caller**, and `docs/api.md` now says so at each.
+
+**T-456** put the Y axis on **ALT**, and the reason is one no browser test can check: macOS
+Accessibility zoom defaults to ^Control and consumes ctrl+scroll **in the window server**, so no
+`wheel` is dispatched, there is nothing to `preventDefault`, and no in-browser harness can distinguish
+that from the user not scrolling. *A binding whose failure mode is invisible to its own guard is the
+wrong binding.* It also found a defect no synthesised test could see: **macOS delivers a shift-held
+wheel as a horizontal scroll**, travel in `deltaX` with `deltaY` at zero, so the frequency axis was
+inert on a real Mac while every unit test passed.
+
+**T-449** was a test bug twice over. A `LiveExtent`'s silence during steady keying is not the key-off
+— `t_last_end` does not advance while a burst is in flight — so the quantity being bounded was
+`KEY_PERIOD_S`, which T-410 had set to **1.0** against a `MIN_IDLE_GAP_S` of **exactly 1.0**. The
+whole margin was detector lag. And a correct REVOKE read as a second opening, because `Seen::open` is
+true for one. It was honest about its limits: the 1-in-5 did not reproduce on today's `main`, so the
+**trace** is what proves the mechanism, plausibly because T-453 changed the writer contention that
+sets the tick phase.
+
+**The freeze lifts with the milestone.** The all-in directive pointed every builder at the canvas;
+the canvas is delivered, so non-canvas work resumes — **T-400** (the gate regenerating incremental
+state every agent is configured to avoid), **T-447** (the strong-envelope subset over the same broken
+mean rule T-431 fixed one layer down) and **T-374** (harmonic families — the user's signal-
+relationships item, and the one whose hardest requirement is that it must be able to say **no**).

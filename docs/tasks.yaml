@@ -7565,7 +7565,7 @@ tasks:
   - id: T-374
     title: Nothing can say "these emitters are harmonics of one fundamental nobody can see"
     milestone: M3
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: M3B
     core_interface: true
@@ -8537,7 +8537,7 @@ tasks:
   - id: T-400
     title: just gate regenerates incremental state that every agent is configured to avoid
     milestone: M2-hardening
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CI
     deps: [T-396]
@@ -11766,7 +11766,7 @@ tasks:
   - id: T-447
     milestone: M3
     title: phase_features and derotate take their strong-envelope subset over the same broken mean rule T-431 just fixed
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: M3A
     deps: [T-431]
