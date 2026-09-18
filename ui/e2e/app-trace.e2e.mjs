@@ -825,11 +825,18 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
     "nothing is drawn behind the line");
 
   // **The non-vacuity, and it is the point of doing this in pixels at all.** Grey ink existing proves
-  // something was drawn; it does not prove the shadows are OTHER ROWS rather than four copies of the
-  // current one under the same line. So: in how many columns does the topmost grey sit clear of the
-  // current trace's own stroke AND of its bloom, which is grey too and hugs the line?
+  // something was drawn; it does not prove the shadows are OTHER ROWS rather than a halo around this
+  // one. The current slice has a grey bloom of its own, and the bloom's top edge sits a FIXED offset
+  // above the line in every column — `(GLOW_PX - SLICE_PX) / 2`. Earlier rows do not: each is its own
+  // spectrum, so the offset varies with how much the band moved between rows.
+  //
+  // So the claim is about the SHAPE OF THE OFFSET DISTRIBUTION, not a count above a threshold. A
+  // count is the wrong instrument here and the first version of this check proved it: consecutive
+  // 80 ms rows of a steady FM band genuinely are similar, so "how many columns moved more than N px"
+  // measured the weather rather than the feature, and read 27, 25 and 7 on three identical runs. A
+  // halo has ONE offset; four earlier rows cannot.
   const x0 = Math.round(rect.x), y0 = Math.round(rect.y);
-  let apart = 0, both = 0;
+  const offsets = [];
   for (let x = 0; x < s.w; x++) {
     if (s.cols[x] < 0) continue;
     let topGrey = -1;
@@ -838,14 +845,25 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
       const r = obs.img.data[d], g = obs.img.data[d + 1], b = obs.img.data[d + 2];
       if (isGreyInk(r, g, b)) topGrey = y;
     }
-    if (topGrey < 0) continue;
-    both++;
-    if (Math.abs(topGrey - s.cols[x]) > GLOW_PX) apart++;
+    if (topGrey >= 0) offsets.push(s.cols[x] - topGrey);
   }
-  t.diagnostic(`${apart}/${both} columns carry a shadow more than ${GLOW_PX} px clear of the current line`);
-  assert.ok(apart >= 10,
-    `only ${apart} of ${both} columns have a shadow clear of the current trace's stroke and bloom. ` +
-    "Glow that only ever sits on the current line is a halo, not the earlier rows.");
+  assert.ok(offsets.length > 50, `only ${offsets.length} columns carry any grey to measure`);
+  const hist = new Map();
+  for (const o of offsets) hist.set(o, (hist.get(o) ?? 0) + 1);
+  const mode = [...hist.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  const away = offsets.filter((o) => Math.abs(o - mode) >= 2).length;
+  const distinct = hist.size;
+  const spread = away / offsets.length;
+  t.diagnostic(`topmost-grey offset above the line: mode ${mode} px (the bloom's own edge), ` +
+    `${distinct} distinct values, max ${Math.max(...offsets)}, ` +
+    `${(spread * 100).toFixed(1)}% of columns ≥ 2 px off the mode`);
+  assert.ok(distinct >= 4 && spread >= 0.1,
+    `the topmost grey sits ${distinct} distinct offsets above the line (${(spread * 100).toFixed(1)}% ` +
+    `of columns more than 2 px off the modal ${mode} px). A glow that is the same distance above the ` +
+    "current line in every column is a halo on this row, not the rows before it.");
+  assert.ok(Math.max(...offsets) >= mode + 6,
+    `the furthest any shadow gets above the line is ${Math.max(...offsets)} px, against a modal ` +
+    `${mode} px — no earlier row is anywhere but on top of this one`);
   await page.eval("window.__hkTap.resume()");
   assert.deepEqual(page.exceptions, [], "uncaught exception while measuring the afterglow");
 });
