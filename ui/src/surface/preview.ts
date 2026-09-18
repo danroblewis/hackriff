@@ -37,6 +37,7 @@ import {
   type CoverageCensus, type CoverageSlice, type NavigationSlice, type OpeningWindow, type SurfaceOrigin,
 } from "./bootstrap";
 import { tileUrl, type Box, type Lattice, type TileAddr } from "./lattice";
+import type { RowActionFor } from "./chrome";
 import type { OverlayQuad } from "./minimap";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
@@ -412,6 +413,16 @@ export interface PreviewOptions {
   fetchFn: TileFetch;
   /** Where `SurfaceChrome` mounts its per-viewport level readout. Null in a headless test. */
   chrome?: HTMLElement | null;
+  /**
+   * A per-viewport control on each pane's chrome row, and its press (T-476).
+   *
+   * Forwarded, never produced here: these are strings and a callback, so this host stays unable to
+   * reach a device route and `./retune.ts` stays out of the preview's import graph — which
+   * `ui/test/surface-preview.test.ts` asserts, and which is the whole reason the slot is typed as
+   * `RowAction` rather than as an offer.
+   */
+  chromeAction?: RowActionFor | null;
+  onChromeAction?: ((paneId: string) => void) | null;
   minimapPx?: number;
   /**
    * **The growing edge, reported in (T-445).** Omit it and the surface is historical: the edge is
@@ -493,6 +504,8 @@ export class SurfacePreview {
         fetchTile(a, opts.token, opts.fetchFn, signal)),
       minimapPx: opts.minimapPx ?? 120,
       chrome: opts.chrome ?? null,
+      chromeAction: opts.chromeAction ?? null,
+      onChromeAction: opts.onChromeAction ?? null,
       freq: probe.opening.freq,
       spanNs: probe.opening.spanNs,
       marks: opts.marks ?? null,
