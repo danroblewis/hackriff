@@ -45,9 +45,35 @@ import { Browser } from "./harness.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 
-/** The per-viewport chrome readout the page draws: moving the view changes it, and nothing else does. */
-const READOUT = `[...document.querySelectorAll('.hk-surface-viewport')].map((v) =>
-  (v.querySelector('.hk-surface-where')?.textContent ?? '') + '|' + (v.querySelector('.hk-surface-level')?.textContent ?? '')).join(';')`;
+/**
+ * The per-viewport chrome readout the page draws: moving the view changes it, and nothing else does.
+ *
+ * WITH ONE EXCEPTION, WHICH IS WHY THIS IS A PROJECTION AND NOT THE RAW TEXT. A *following* pane's
+ * `where` line ends in its offset from the live edge — `LIVE`, or `−281 ms` when the render loop has
+ * fallen behind the capture that is still arriving. That offset drifts with WALL-CLOCK LAG and no
+ * gesture touches it, so comparing the raw string makes every assertion here load-sensitive: an
+ * `equal` ("it must not have panned") goes red under builder load, and — worse, because it is
+ * silent — a `notEqual` ("a plain drag must pan") can go GREEN on drift alone, without any pan.
+ * Measured on main at three concurrent builders: `−0 ms` became `−281 ms` with the frequency, the
+ * span and the level all byte-identical.
+ *
+ * So while a pane is FOLLOWING, the offset is dropped: a following pane sits at the live edge by
+ * definition, so its time position carries nothing a pan could change — a pan in time STOPS it
+ * following, which `following` itself reports. While a pane is NOT following the offset is a fixed
+ * property of the view and is kept, because there it is exactly what a time pan moves.
+ *
+ * This narrows what is compared; it does not weaken it. Everything a pan alters — centre, span,
+ * level, and whether the pane still follows — is still compared exactly.
+ */
+const READOUT = `JSON.stringify([...document.querySelectorAll('.hk-surface-viewport')].map((v) => {
+  const following = v.getAttribute('data-following') === 'true';
+  const where = v.querySelector('.hk-surface-where')?.textContent ?? '';
+  return {
+    where: following ? where.split('\\u00b7')[0].trim() : where,
+    level: v.querySelector('.hk-surface-level')?.textContent ?? '',
+    following,
+  };
+}))`;
 
 /** Every pointer-ish event the CANVAS ITSELF received, in order, with the flags the browser set. */
 const PROBE = `(() => {
