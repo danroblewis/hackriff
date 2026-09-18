@@ -6007,7 +6007,7 @@ tasks:
     milestone: M2-hardening
     title: The /api/baselines chain field is documented but not contract-tested, so docs and contract can
       drift
-    status: todo
+    status: deferred
     priority: low
     deps:
     - T-303
@@ -6021,6 +6021,13 @@ tasks:
       assertions in api_contract.rs have the same hole - a field that can be renamed or dropped without
       a test failing is documentation, not a contract. Report any others found rather than fixing them all
       here
+    notes: |
+      SUPERSEDED BY T-502 (2026-09-18): batched with the other hk-api
+      field-consistency fixes into one ticket, one agent session and one gate. The merge
+      queue, not builder capacity, is the bottleneck - four separate merges of four
+      one-line contract fixes cost four full gates and four chances of composition churn.
+      Deferred rather than cancelled: the work is wanted, it just travels with T-502.
+
   - id: T-316
     milestone: M2-hardening
     title: On real air the pipeline fires 866 detections and 5 candidate emitters into a band measured flat
@@ -6955,7 +6962,7 @@ tasks:
     milestone: M2-hardening
     title: /api/status carries no server timestamp, and scheduler leases carry a duration with no start
       or expiry
-    status: todo
+    status: deferred
     priority: low
     deps:
     - T-337
@@ -6968,6 +6975,13 @@ tasks:
       time, which is exactly the inference the shared-time-axis invariant forbids. Add a server timestamp
       to status; give leases an absolute start and expiry rather than a bare duration. Update docs/api.md
       and api_contract.rs together per T-079, asserting values
+    notes: |
+      SUPERSEDED BY T-502 (2026-09-18): batched with the other hk-api
+      field-consistency fixes into one ticket, one agent session and one gate. The merge
+      queue, not builder capacity, is the bottleneck - four separate merges of four
+      one-line contract fixes cost four full gates and four chances of composition churn.
+      Deferred rather than cancelled: the work is wanted, it just travels with T-502.
+
   - id: T-352
     milestone: M2-hardening
     title: 'lint-py is not reproducible off the lockfile: ruff resolves only because an incidental system
@@ -7041,7 +7055,7 @@ tasks:
     milestone: M2-hardening
     title: 'Frequency fields are inconsistently suffixed: FreqRange says lo_hz but several envelopes answer
       bare f_lo'
-    status: todo
+    status: deferred
     priority: low
     deps:
     - T-349
@@ -7054,6 +7068,13 @@ tasks:
       already being paid in the detector's exemption list. Suffix them with serde aliases the way T-349
       did, and remove the exemptions so the detector covers frequencies too. Update docs/api.md and api_contract.rs
       together per T-079, asserting values
+    notes: |
+      SUPERSEDED BY T-502 (2026-09-18): batched with the other hk-api
+      field-consistency fixes into one ticket, one agent session and one gate. The merge
+      queue, not builder capacity, is the bottleneck - four separate merges of four
+      one-line contract fixes cost four full gates and four chances of composition churn.
+      Deferred rather than cancelled: the work is wanted, it just travels with T-502.
+
   - id: T-356
     milestone: M2-hardening
     title: 'Cross-process device exclusion is unverified: two hk serve runs against one HackRF have never
@@ -7486,7 +7507,7 @@ tasks:
     milestone: M2-hardening
     title: /api/selections/{id}/watch serves nanoseconds under a bare t, and the unit sweep cannot reach
       it
-    status: todo
+    status: deferred
     priority: normal
     deps:
     - T-354
@@ -7504,6 +7525,13 @@ tasks:
       selection-scoped routes by creating a selection first, exactly as it already does for an emitter.
       A detector that cannot reach a route is not evidence about that route, and this is now the second
       field it missed for that reason rather than for a listing error'
+    notes: |
+      SUPERSEDED BY T-502 (2026-09-18): batched with the other hk-api
+      field-consistency fixes into one ticket, one agent session and one gate. The merge
+      queue, not builder capacity, is the bottleneck - four separate merges of four
+      one-line contract fixes cost four full gates and four chances of composition churn.
+      Deferred rather than cancelled: the work is wanted, it just travels with T-502.
+
   - id: T-371
     title: A baselines/slots row does not name its bias-tee cohort
     milestone: M4
@@ -12785,7 +12813,7 @@ tasks:
   - id: T-459
     milestone: MCANVAS
     title: Axis ticks with labels - each viewport states its window as a readout, and a readout is not a ruler
-    status: todo
+    status: deferred
     priority: low
     parallel_group: CANVAS-FE
     depends_on: [T-445]
@@ -12803,6 +12831,9 @@ tasks:
       Honesty applies: a tick interval finer than the cell size drawn would imply resolution the
       hardware did not capture, which docs/16's honesty tiers forbid.
     notes: |
+      SUPERSEDED BY T-503 (2026-09-18): batched with the other visible UI-polish
+      tickets into one ticket, one agent session and one gate. Deferred rather than
+      cancelled - the work is wanted, it travels with T-503.
       Filed by the coordinator at T-445's merge (19d9bed). Low priority - the chrome line already
       answers "where am I", and the missing capability is "what is THAT".
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
@@ -14629,7 +14660,7 @@ tasks:
   - id: T-496
     milestone: MCANVAS
     title: Capture width is changeable but not discoverable - it is a side effect of zoom-then-retune
-    status: todo
+    status: deferred
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-476]
@@ -14665,6 +14696,9 @@ tasks:
       than hidden; T-340 passes verbatim; and one target-derivation path, demonstrated rather than
       asserted.
     notes: |
+      SUPERSEDED BY T-503 (2026-09-18): batched with the other visible UI-polish
+      tickets into one ticket, one agent session and one gate. Deferred rather than
+      cancelled - the work is wanted, it travels with T-503.
       Filed 2026-09-18 from user feedback. Depends on T-476, whose persistent per-pane retune control
       is the natural home for this and whose refusal wording should be reused.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
@@ -14732,7 +14766,7 @@ tasks:
   - id: T-498
     milestone: MCANVAS
     title: The retune label states only the CENTRE, not the SPAN it will capture
-    status: todo
+    status: deferred
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-476]
@@ -14760,6 +14794,9 @@ tasks:
       to equal what the retune actually commits; the disabled wordings are unchanged; and T-476's
       existing e2e assertions still pass, with the label check updated rather than loosened.
     notes: |
+      SUPERSEDED BY T-503 (2026-09-18): batched with the other visible UI-polish
+      tickets into one ticket, one agent session and one gate. Deferred rather than
+      cancelled - the work is wanted, it travels with T-503.
       Filed 2026-09-18 from user feedback. Small, and lives in the chrome label plus its test - but
       the "snapped, not requested" requirement is what makes it worth writing down rather than doing
       casually.
@@ -14912,6 +14949,138 @@ tasks:
       T-486 also found that T-484's "a real scrub, however small, still pauses" was never testing
       that: panTime(-1) at T0 ~ 1.7e18 ns is below a double's 256 ns ulp, so the centre never moved.
       256 ns is the real floor under every threshold in that file.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-502
+    milestone: M2-hardening
+    title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      A DELIBERATE BATCH (user directive 2026-09-18). The bottleneck is the MERGE QUEUE - a serial
+      gate plus composition churn - not builder capacity. Four separate merges of four small
+      same-crate contract fixes cost four full gates and four chances for main to move underneath
+      them. They are same-area, low-risk, and touch the same files, so they travel together.
+      THE FOUR, each keeping its own DoD - read each ticket's own acceptance, they are not restated
+      here:
+      - T-315: The /api/baselines chain field is documented but not contract-tested, so docs and contract can
+      - T-351: /api/status carries no server timestamp, and scheduler leases carry a duration with no start
+      - T-355: 'Frequency fields are inconsistently suffixed: FreqRange says lo_hz but several envelopes answer
+      - T-370: /api/selections/{id}/watch serves nanoseconds under a bare t, and the unit sweep cannot reach
+      WHAT MAKES THIS BATCHABLE, and the test for anything batched later: same crate (hk-api), same
+      kind of change (what a route says about its own fields), none `core_interface`, none on the
+      real-time path, and no two of them fight over the same function. If any of that turns out to be
+      false once you are in the code - if one of them needs a schema change, or reaches into
+      hk-pipeline, or contradicts another - STOP AND SAY SO rather than forcing the batch. A batch
+      that hides a hard problem inside three easy ones is worse than four merges.
+      COMMIT PER TICKET ON THE BRANCH. Four commits, one merge, one gate. The board records four
+      results, so each stays independently readable afterwards.
+      docs/api.md AND ITS CONTRACT TEST MOVE TOGETHER for every one of them (T-079) - these are all
+      statements a route makes about itself, so the contract test IS the deliverable, not a
+      formality.
+      THE FAMILY THESE BELONG TO, worth reading before starting: T-350 found an inventory row's
+      snr_db and peak_dbfs were a Detection's numbers with its TimeRange stripped at the API
+      boundary. The recurring shape is a field that means one thing inside and another on the wire.
+      Look for that in each of the four rather than doing the literal rename.
+    notes: |
+      Filed 2026-09-18 under the user's batching directive: cluster related, low-risk, same-area
+      todos into one ticket, one agent session and one gate; route well-specified, test-covered,
+      non-core-interface work to Sonnet.
+      T-315, T-351, T-355 and T-370 are marked `deferred` and point here.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-api`,
+      `just test-one api_contract` - then HAND BACK. Never `just gate`; the coordinator gates once.
+  - id: T-503
+    milestone: MCANVAS
+    title: UI-polish batch - axis ticks, capture-width discoverability, the retune label's span
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: sonnet
+    depends_on: [T-481]
+    use_cases: [AWARE-011]
+    acceptance: |
+      A DELIBERATE BATCH (user directive 2026-09-18) of VISIBLE, LOW-RISK, INDEPENDENT UI polish.
+      Each keeps its own DoD - read each ticket's own acceptance, they are not restated here:
+      - T-459: Axis ticks with labels - each viewport states its window as a readout, and a readout is not a ruler
+      - T-496: Capture width is changeable but not discoverable - it is a side effect of zoom-then-retune
+      - T-498: The retune label states only the CENTRE, not the SPAN it will capture
+      WHAT MAKES THESE BATCHABLE, and the test for anything batched later: each is a LABEL OR A
+      READOUT, none changes the render pipeline, none touches tile production, the stream, or the
+      follow/pause state, and no two fight over the same function. If any turns out to reach into
+      those - if the axis ticks need the pane's level derivation changed, or the width control needs
+      a second target-derivation path - STOP AND SAY SO rather than forcing the batch. A batch that
+      hides a hard problem inside two easy ones is worse than three merges.
+      WHAT THIS BATCH MUST NEVER ABSORB, stated because the cost is now measured: the render,
+      pipeline and stream bugs stay SEPARATE and individually gated - T-495 (a live tile panned off
+      and back serves a stale cache), T-497 (a retune tears the live capture down), T-499 (purple
+      tiles and a re-render loop on stream loss), T-501 (the fidelity redo), T-462 and T-468. T-484
+      is why: it passed every unit suite, canvas_fidelity 5/5 AND a full gate, and still left the
+      user's demo with no tiles at all. That class of change needs its own gate and its own blame.
+      GATED BY T-481'S CANVAS JOURNEY. Every UI batch runs through `canvas-journey.e2e.mjs` before
+      merge from now on - it is the tier that would have caught T-484, and its assertion 1 (the
+      pane's grey share against /api/coverage's own share, at the level the pane states it drew at)
+      is the specific check that was missing.
+      COMMIT PER TICKET ON THE BRANCH. Three commits, one merge, one gate; the board records three
+      results so each stays independently readable.
+      THE ONE REQUIREMENT WORTH REPEATING FROM T-498, because it is the easy thing to get wrong: the
+      span in the retune label must be the SNAPPED, achievable one - the width the front end will
+      really capture - not the one asked for. T-409's precedent: the actual move is named, and the
+      difference from the advertised fraction is NOT absorbed.
+    notes: |
+      Filed 2026-09-18 under the user's UI-batching directive. T-459, T-496 and T-498 are `deferred`
+      and point here.
+      Depends on T-481 because the canvas journey is the gate this batch must pass, and it has to be
+      on main first.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-ui`, `just test-ui-e2e` - then
+      HAND BACK. Never `just gate`; the coordinator gates once, at merge.
+  - id: T-504
+    milestone: M2-hardening
+    title: Quarantine the load-sensitive tests agents keep re-running, so nobody characterises them twice
+    status: todo
+    priority: high
+    parallel_group: CI
+    model: sonnet
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      AGENT-EFFICIENCY DIRECTIVE (user, 2026-09-18). Profiling recent agents found 40-55
+      build/test cycles and 40-150 edits each, with the edit-build-test loop dominating - and a
+      measurable share of it is agents RE-RUNNING AND RE-CHARACTERISING THE SAME FLAKY TESTS. At
+      least five agents this session independently measured the same failures, each spending runs to
+      conclude "pre-existing, not mine". That work is real and it is duplicated.
+      THE KNOWN SET, with what has already been established so nobody re-derives it:
+      - hk-plugins::host plugin_crash_restarts_and_capture_never_blocks and
+        finish_delivers_queued_input_to_a_slow_starting_plugin_then_waits_for_its_exit. FAIL at
+        25.2 s and 28.1 s under a full gate with a builder competing; PASS IN ISOLATION AT 0.29 s
+        AND 2.70 s. Mechanism already documented in .config/nextest.toml from T-257: a macOS
+        pipe(2)/FD_CLOEXEC race BETWEEN CONCURRENTLY SPAWNING TEST PROCESSES, scaling with spawn
+        concurrency and nothing else - ZERO in 25 hk-plugins runs at 6 threads, and the workspace cap
+        is 8. Owned by T-493.
+      - Anything else the quarantine list acquires must arrive WITH its measurement, not as a
+        suspicion.
+      WHAT QUARANTINE MEANS HERE, AND WHAT IT MUST NOT MEAN. This repo's own rule (T-436) is that a
+      cap or a skip makes a defect RARER OR INVISIBLE, NOT FIXED, and T-383's is that a test may not
+      bound a quantity whose natural range it has not measured. So a quarantine that silently drops
+      the test is forbidden. The established pattern is T-483's #[ignore] and T-481's skip: THE
+      MARKER CARRIES ITS OWN REASON, ITS MEASUREMENT, AND THE TICKET WHOSE DoD IS REMOVING IT. Copy
+      that. A reader hitting the marker must learn in one line why it is there and what unfixes it.
+      THE POINT IS TO STOP THE DUPLICATED WORK, not to stop caring: an agent that hits a quarantined
+      test should be able to read the marker, know it is not theirs, and move on in seconds instead
+      of spending six runs proving it.
+      ALSO WANTED, and cheap: a single place an agent can read the current quarantine list - the
+      briefs can then point at it rather than restating five findings each time.
+      DoD: the known set is quarantined with self-explaining markers naming their tickets; the full
+      gate no longer fails on them; each quarantined test is still runnable deliberately by one
+      documented command; and nothing is quarantined without a measurement in its marker.
+    notes: |
+      Filed 2026-09-18 under the user's agent-efficiency directive. HIGH because the cost is paid by
+      every agent and every gate until it lands.
+      DO NOT quarantine app-trace or surface-region: both were real defects and are FIXED (T-487's
+      two-instant capture and its own tie-break; T-478's live-edge drift, whose first fix was
+      backwards). Quarantining a fixed test would hide a regression.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

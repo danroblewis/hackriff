@@ -111,6 +111,23 @@ export const __selftestMark = __selftestPredicate(1);
     },
   },
   {
+    // T-486 exactly as the user reported it, twice, and the smallest edit that is it: take the
+    // commit point out of the pointer-up handler. Every threshold in `panes.ts` survives — the dead
+    // zone, the hysteresis, the one-way door, and all their unit tests — and none of it is ever
+    // consulted, because nothing ends a gesture. `panTime` freezes on the first pixel and the pane
+    // stays frozen, which is the pre-T-486 behaviour verbatim. A policy nothing invokes, again.
+    name: "t486-no-commit-on-release",
+    expect: "surface-nav.e2e.mjs",
+    what: "T-486: the follow/pause transition has no dead zone, so a 1 px time-pan drops the pane " +
+      "out of live and a drag released at the live edge stays paused a few rows short of it.",
+    file: "surface/input.ts",
+    patch: (src) => {
+      const from = "    settle(d);\n";
+      if (!src.includes(from)) throw new Error("selftest: anchor not found in input.ts: settle(d)");
+      return src.replace(from, "    // injected by ui/e2e/selftest.mjs — a release commits nothing\n");
+    },
+  },
+  {
     // The bootstrap half, found by this tier before T-454 landed: `probeSurface` makes one
     // `/api/tiles` call to learn the lattice, and treating its `503` as fatal meant one busy tab
     // could stop a second one from opening at all. Removing the retry restores that.
