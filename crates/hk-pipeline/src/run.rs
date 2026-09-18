@@ -50,7 +50,7 @@ use hk_model::{
     CalibrationState, CalibrationStateId, ContentClass, InventoryQuery, ProvenanceId, Repository,
     Survey, SurveyId, SurveyState, SurveySummary, Timestamp,
 };
-use hk_store::{FloorProduct, FloorProductConfig};
+use hk_store::{FloorProduct, FloorProductConfig, Pyramid};
 use num_complex::{Complex, Complex32};
 use serde::Serialize;
 use serde_json::Value;
@@ -672,6 +672,13 @@ struct Common {
     /// the run, not the segment: a re-plumb landing back on the same device, tune and gain is the
     /// same receiver, and re-measuring it would pay twice for an unchanged answer.
     receiver: Arc<crate::survey::ReceiverSurvey>,
+    /// T-439: the **view-scheme** pyramid (`docs/16` §6.2/§8.2), opened beside the floor product's
+    /// scheme-1 pair and written by every segment's history reader. It is the surface the unified
+    /// canvas addresses with independent `(level_f, level_t)`, and its finest node is the *live
+    /// edge* — there is no second write path, only this one, which is the whole point of §8.
+    /// `None` when `PipelineSettings::view_history` is off or the store could not open (never a
+    /// reason to fail a run: the tile route then folds out of scheme 1 as it did before T-439).
+    view: Option<Arc<Mutex<Pyramid>>>,
     /// T-322: the run's C36 L1 dwell service. Like the survey it lives for the run, not the
     /// segment: the constellation overhead and the quiet in-band reference are properties of the
     /// site and the receiver, not of a re-plumb.
@@ -859,7 +866,25 @@ impl Pipeline {
             &cfg,
             db_path.clone(),
         ));
+        // T-439: the de-welded view lattice, in its own scheme root beside `calibrated/` and
+        // `uncalibrated/`. Its own `Mutex`, deliberately: `/api/history` and `/api/floor` hold the
+        // floor product for a whole query, and the growing edge must not be behind that lock.
+        let view = cfg
+            .settings
+            .view_history
+            .then(|| {
+                let dir = cfg.data_dir.join("history").join("view");
+                Pyramid::open(
+                    &dir,
+                    crate::history::view_config(cfg.settings.view_f_cell_hz),
+                )
+                .map(|p| Arc::new(Mutex::new(p)))
+                .map_err(|e| eprintln!("view-scheme history disabled: {e}"))
+                .ok()
+            })
+            .flatten();
         let common = Common {
+            view,
             iq_buffer,
             receiver: Arc::default(),
             // T-322: the C36 L1 dwell service, configured from the plan's `extra.gnss`.
@@ -1090,14 +1115,15 @@ fn start_segment(
         )?);
     }
     {
-        let (s, p, a) = (
+        let (s, p, a, v) = (
             Arc::clone(&shared),
             Arc::clone(&common.product),
             common.attention.clone(),
+            common.view.clone(),
         );
         workers.push(spawn(
             "hk-history",
-            Box::new(move || crate::history::run(s, p, a)),
+            Box::new(move || crate::history::run(s, p, a, v)),
         )?);
     }
     if common.iq_buffer.active() {
@@ -1835,6 +1861,12 @@ impl PipelineHandle {
     /// The floor product (history), shared with `/api/history` and `/api/floor`.
     pub fn floor_product(&self) -> Arc<Mutex<FloorProduct>> {
         Arc::clone(&self.sup.common.product)
+    }
+
+    /// T-439: the view-scheme pyramid, shared with `/api/tiles?scheme=view`. `None` when the run
+    /// did not open one.
+    pub fn view_history(&self) -> Option<Arc<Mutex<Pyramid>>> {
+        self.sup.common.view.clone()
     }
 
     /// The occupancy engine, series and learned channel plan (T-118).

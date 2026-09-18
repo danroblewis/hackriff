@@ -1103,6 +1103,8 @@ pub fn serve_api(
     let state = ApiState {
         streams: registry.clone(),
         history: None,
+        // T-439: the de-welded view lattice, whose finest node is the growing edge.
+        view_history: handle.view_history(),
         floor: Some(handle.floor_product()),
         inventory: Some(Arc::clone(&db)),
         status: Some(Arc::new(move || {

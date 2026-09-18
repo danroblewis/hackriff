@@ -810,8 +810,8 @@ One route serves every viewport — the panes, the zoomable minimap and the live
                 "rule": "record-derived: …" },
   "resolution": {
     "source": "spectrum-history", "live": false, "statement": "…",
-    "answered": { "level": 2, "levels": 5, "f_cell_hz": 25000.0, "t_cell_s": 900.0,
-                  "exact_node": false },
+    "answered": { "level": 2, "levels": 64, "f_cell_hz": 25000.0, "t_cell_s": 900.0,
+                  "exact_node": false, "store": "view-lattice" },
     "candidates": [2, 3, 4], "tried": [2],
     "fold": { "frequency": { "source_cell": 25000.0, "tile_cell": 50000.0, "source_cells": 512,
                              "served": 256, "direction": "folded", "replicated": false },
@@ -831,8 +831,9 @@ One route serves every viewport — the panes, the zoomable minimap and the live
 
 [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §8.3 named four parts — `(level_f, level_t, f_block, t_block)`. §6.3 already required a fifth, and **retrofitting a key is the expensive kind of change**, so both extra parts are here from the start.
 
-- **`scheme` is the lattice the address is expressed in**, and it is what makes *"no such node"* an answerable question rather than a theoretical one.
+- **`scheme` is the lattice the address is expressed in — and, since T-439, which store answers it.** It is what makes *"no such node"* an answerable question rather than a theoretical one. The two halves cannot come apart: expressing an address in the view lattice while reading scheme 1's ladder is the gap T-438 left, where the off-diagonal nodes had nothing behind them. `resolution.answered.store` names the pyramid that answered — `view-lattice` or `spectrum-history`.
   - `scheme=view` (default) is the de-welded view lattice. Node `(0, 0)` is the open pyramid's **own level-0 cell** and each axis doubles **independently**, so every `(level_f, level_t)` inside the axes is a node. Frequency runs up to a tile wide enough to put 1 MHz–6 GHz in two tiles; time up to a tile a month tall (§6.2's V7 corner, kept).
+  - **A run opens a view-scheme pyramid and the live chain writes its finest node** (T-439, `PipelineSettings.view_history`), so `scheme=view` addresses a real 8 × 8 lattice — `(level_f 0, level_t 3)` is a node with tiles in it, not a fold out of a ladder's diagonal. On a server with no view pyramid open, `scheme=view` still resolves against the spectrum-history pyramid exactly as it did before, and `answered.store` says so.
   - `scheme=<n>` addresses a store scheme's own levels, read off the geometry by T-434's `Geometry::f_axis`/`t_axis`. **A welded ladder is the *diagonal* of its own lattice**, so `(level_f 0, level_t 3)` on scheme 1 has no node and is a `404` that says so — never a silent snap to a level whose time cell is a day.
   - `axes.store_node` is the store level whose cells are *exactly* this tile's, or `null` when the tile sits off the ladder's diagonal and is therefore folded rather than read whole.
 - **`device` is whose coverage decides this tile's grey.** Coverage is device-local (T-259/T-305, §6.3), so it belongs in the key and never in a cell. `any` is the union and keeps `device_named: false`, so a merged plane can never wear one radio's identity; `coverage.selected` echoes the choice, and `present: false` says a named front end contributed no record over this tile — a coverage answer, not a missing one.
@@ -863,7 +864,8 @@ T-437 measured rendering at p95 2.2 ms for 48 panes and tile **production** at ~
 
 - **No emitters** (§5.3). Identity gating is per-caller and a tile is not; a sealed tile is immutable and an emitter set never is. The highlight layer is [`/api/tiles/events`](#get-apitilesevents--the-coarse-zoom-event-aggregate-t-438-docs16-53) below.
 - **No percentiles.** De-welding costs them (T-434): a tile keeps one histogram per frequency cell over the whole tile, which is the parent cell's histogram *only* when a child tile is exactly one parent time cell — the weld. `grid.percentiles` says `unknown` rather than approximating a distribution; the noise floor stays a scheme-1 question, asked through [`/api/history`](#get-apihistory--region-over-time-grid-t-017-aware-042).
-- **Never `live-iq`.** This route reads the pyramid, exactly as `/api/history` and `/api/timeline` do. T-439 adds the growing edge; claiming live here first would be the stronger claim with no evidence.
+- **Never `live-iq`, and T-439 does not change that.** T-439 makes the view lattice's finest node the growing edge — *"live" is a viewport, not a mode* ([docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §8.1) — but a tile is still a **pyramid** read served at a level's cell size, and `live-iq` means *live IQ from the front end at the resolution shown*. A 6.25 kHz × 1 s cell is not that, however recently it was written; the ring is where a client goes for live-IQ resolution.
+- **No cell for the newest moment.** At a growing edge the newest cells are routinely **observed but not yet measured**: `coverage` says the front end was tuned there and sampling, and `grid` has nothing for them yet, because the fold is behind capture by at least one history frame. That is the normal state of a live edge, not an error — and it is **neither grey nor `"unknown"`**: grey is *nothing ever looked*, `"unknown"` (T-423) is *we no longer know whether we looked*, and this is *we are looking right now*. Three states, three marks (T-441).
 
 ### `GET /api/tiles/events` — the coarse-zoom event aggregate (T-438, [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §5.3)
 

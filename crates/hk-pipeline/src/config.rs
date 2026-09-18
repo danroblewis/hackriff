@@ -106,6 +106,35 @@ pub struct PipelineSettings {
     /// [`hk_store::observation::DEFAULT_MAX_BYTES`] (2 GiB). On a continuously *sweeping*
     /// installation this is the bound that actually binds, not the age.
     pub observation_max_mb: Option<f64>,
+    /// T-439: open the **view-scheme** pyramid (`docs/16` §6.2/§8.2) alongside scheme 1 and write
+    /// the live edge into it (`true`).
+    ///
+    /// Scheme 1 is a welded ladder, so only its diagonal exists: `(fine frequency, coarse time)`
+    /// is not a node it has, and the unified surface's whole premise is that the two axes move
+    /// independently. The view scheme is the de-welded lattice that makes those addresses real,
+    /// and the live chain is what fills its finest node — *"live" is the finest-level growing edge
+    /// where hardware is currently tuned*, not a separate mode. Turning this off leaves
+    /// `/api/tiles?scheme=view` folding out of scheme 1's ladder exactly as it did before T-439.
+    pub view_history: bool,
+    /// T-439: the **frequency** cell of the view lattice's node (0, 0), Hz (6250, scheme 1's own
+    /// level-0 cell).
+    ///
+    /// The time cell is fixed at 1 s and is **not** configurable: T-437's finding F1 is that
+    /// `docs/16` §6.2's 128 s floor puts the entire 120 s IQ retention inside one time cell, which
+    /// re-welds the axis the lattice exists to de-weld. The frequency floor is the knob, because
+    /// it is the one that costs memory.
+    ///
+    /// **Measured** (`tests/live_edge_tiles.rs`, at this default): a peak of **2.28 MB of resident
+    /// accumulator per MHz of tuned span**, against a bound of **3.65 MB/MHz** — one tile row per
+    /// *time* level — so a 20 MHz live edge is **~46 MB measured, 73 MB worst case**, and the
+    /// finest tile stays open for **64 s** against `docs/16` §6.2's 9.1 h. The cost is linear in
+    /// the span and inversely linear in this setting, so a 25 kHz floor divides all of it by four.
+    ///
+    /// Turning the lattice **off** is not a way to save memory — it is the switch for the *write*
+    /// cost, which is the one that showed up: a de-welded ×2 lattice writes ~4× a welded ladder's
+    /// tiles per second of capture, measured at ~1.5 s of M0-acceptance wall per node. See
+    /// [`crate::history::VIEW_F_CELLS_PER_BLOCK`].
+    pub view_f_cell_hz: f64,
     /// On-demand listening limits (T-066).
     pub listen: ListenSettings,
     /// Compute providers (T-056, ADR-0007): `{"provider": "auto|cpu|cpu-mt|accelerate|gpu",
@@ -177,6 +206,8 @@ impl Default for PipelineSettings {
             verify_pois: true,
             observation_retention_days: None,
             observation_max_mb: None,
+            view_history: true,
+            view_f_cell_hz: 6250.0,
             listen: ListenSettings::default(),
             compute: hk_dsp::compute::ComputeOptions::default(),
         }
