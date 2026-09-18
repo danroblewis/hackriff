@@ -321,6 +321,31 @@ test("the generated shader is the only implementation: one grey, one tier rule, 
   assert.ok(FALLBACK_MARK.pattern !== (CELL_MARKS[CELL.UNKNOWN] as { pattern: string }).pattern, "the stand-in and the fourth state must not share a hatch");
 });
 
+test("a tile with NO `measured` renders — a renderer may not have an input that blanks every pane", async () => {
+  // Caught on the merge with T-442, whose pane fixtures predate `measured`. `sourceCellPx` ran
+  // inside `drawRegion`, so an unguarded dereference there did not spoil one tile: it threw out of
+  // `render` and took **every pane on the screen** with it. The guard is the same default
+  // `decodeTile` applies with no `fold` block — the served grid, i.e. "no replication reported".
+  const rect: Rect = { x: 0, y: 0, w: W, h: H };
+  const box = { f0Hz: 0, f1Hz: TILE_HZ, t0Ns: 0, t1Ns: TILE_NS };
+  const bare = (a: TileAddr): TileData => {
+    const { measured: _drop, ...rest } = tile(a, { tier: "survey-overview", nf: 4, nt: 4 });
+    return rest as TileData;
+  };
+  const { fb, reports } = await frameOf(bare, [{ id: "bare", rect, box }]);
+  assert.ok(reports[0].tiles > 0, "the frame must actually have drawn the tile, not merely survived");
+  assert.ok(fb.histogram(rect).size > 1, "…and drawn something, not one flat colour");
+
+  // The fallback is the served grid, so the pitch is the tile's own cells — never invented, and
+  // never a pitch coarser than anything the tile reported.
+  assert.deepEqual(sourceCellPx({ nf: 8, nt: 4 }, 1, 1, 640, 320), sourceCellPx({ nf: 8, nt: 4, measured: { nf: 8, nt: 4 } }, 1, 1, 640, 320));
+  // Every degenerate shape a hand-built fixture can reach answers a number, not an exception.
+  for (const d of [{ nf: 0, nt: 0 }, { nf: NaN, nt: 2 }, { nf: 2, nt: 2, measured: { nf: 0, nt: -1 } }]) {
+    const [x, y] = sourceCellPx(d as { nf: number; nt: number }, 1, 1, 100, 100);
+    assert.ok(Number.isFinite(x) && Number.isFinite(y) && x >= 2 && y >= 2, `sourceCellPx(${JSON.stringify(d)}) = ${x},${y}`);
+  }
+});
+
 test("sourceCellPx: a stand-in shows the pitch of the part on screen, and never sub-pixel mush", () => {
   const data = { nf: 256, nt: 256, measured: { nf: 8, nt: 4 } };
   // A whole tile across 640 × 320 device px: 8 measured columns, 4 measured rows.

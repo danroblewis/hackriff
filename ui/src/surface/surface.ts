@@ -383,15 +383,29 @@ export class Surface {
  * resolve is not a statement. The floor can only make the drawn cells look *finer* than they are on
  * an axis where they are already finer than two pixels — never coarser, which is the direction that
  * would be a claim.
+ *
+ * **Total, by construction.** A tile whose `measured` is missing or nonsensical falls back to the
+ * tile's own served grid, which is the *same* default [[decodeTile]] applies when the answer carries
+ * no `fold` block — one rule in one more place, not a second policy. So the drawn pitch is always
+ * what the tile itself says, and there is no input for which this throws. That last part is not
+ * politeness: `drawRegion` runs inside the frame loop, so a throw here does not spoil one tile, it
+ * blanks **every pane on the screen**. A renderer may not have an input that turns the whole surface
+ * off.
  */
 export function sourceCellPx(
-  data: { readonly nf: number; readonly nt: number; readonly measured: { readonly nf: number; readonly nt: number } },
+  data: { readonly nf: number; readonly nt: number; readonly measured?: { readonly nf: number; readonly nt: number } },
   du: number, dv: number, wPx: number, hPx: number,
 ): [number, number] {
-  const cells = (measured: number, total: number, d: number) => Math.max(1e-6, measured * (total > 0 ? Math.abs(d) : 1));
+  // `measured ?? served` is "no replication was reported", which is exactly what `measured` equal to
+  // the served grid means everywhere else in this client.
+  const axis = (measured: number | undefined, total: number, d: number, px: number) => {
+    const served = Number.isFinite(total) && total > 0 ? total : 1;
+    const m = Number.isFinite(measured) && (measured as number) > 0 ? Math.min(measured as number, served) : served;
+    return Math.max(2, Math.abs(px) / Math.max(1e-6, m * Math.abs(Number.isFinite(d) ? d : 1)));
+  };
   return [
-    Math.max(2, Math.abs(wPx) / cells(data.measured.nf, data.nf, du)),
-    Math.max(2, Math.abs(hPx) / cells(data.measured.nt, data.nt, dv)),
+    axis(data.measured?.nf, data.nf, du, wPx),
+    axis(data.measured?.nt, data.nt, dv, hPx),
   ];
 }
 

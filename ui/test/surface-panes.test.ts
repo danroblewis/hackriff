@@ -46,6 +46,9 @@ function data(a: TileAddr): TileData {
     value: new Float32Array([-90, -80, -70, -60]),
     state: new Uint8Array([CELL.OBSERVED, CELL.OBSERVED, CELL.OBSERVED, CELL.OBSERVED]),
     tier: "spectrum-history", answeredLevel: 1, fold: { frequency: "exact", time: "exact" },
+    // An `exact` fold on both axes measured every cell it served (T-441). `decodeTile` always fills
+    // this in; a fixture that stands in for it has to say what the decoder would have said.
+    measured: { nf: 2, nt: 2 },
     rangeDb: { lo: -100, hi: -60 }, bytes: 192 * 1024, serverInFlightLimit: null,
   };
 }
