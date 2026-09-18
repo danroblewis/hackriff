@@ -14367,7 +14367,7 @@ tasks:
   - id: T-492
     milestone: M2-hardening
     title: "`just test` runs the hk-plugins host tests without building the plugin binaries they spawn"
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CI
     depends_on: []
@@ -14391,6 +14391,28 @@ tasks:
     notes: |
       Filed by the coordinator 2026-09-18.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "bd22734"
+    result: |
+      DONE - AND THE MECHANISM THE COORDINATOR CLAIMED WAS NEVER PROVED. The fix is the line `acceptance`
+      already runs, added to test-rust: 0.04 s on a warm target, a no-op when the bins are current.
+      `test-ui-e2e` already carried the same guard for `hk`, so this is the existing pattern applied to
+      the recipe that was missing it.
+      THE NON-REPRO IS THE IMPORTANT PART. The coordinator saw dummy_round_trip_into_repository fail in a
+      gate, built the plugin binaries, saw it pass, and ATTRIBUTED THE RECOVERY TO THE BUILD - WITH NO
+      CONTROL, since load also dropped between those runs. At -p hk-plugins scope the failure could not be
+      reproduced at all: deleting the top-level binaries, and even purging their fingerprint and deps cache
+      entries, makes CARGO SELF-HEAL by relinking from cached artefacts in under a second. The one isolated
+      failure came straight after a ~100 s full recompile at 1500 % CPU and looked like load-induced
+      timing flakiness with real PIDs spawned and killed - T-493's subject.
+      So T-493's spawn race is the LIKELIER explanation of the original observation, and this fix stands on
+      different grounds than those it was filed on: it removes an IMPLICIT RELIANCE rather than repairing a
+      mechanism anyone has pinned. Recorded here rather than left asserting a cause nobody demonstrated.
+      SIBLING FOUND, NOT FIXED: crates/hk-cli/tests/ctrl_c.rs uses CARGO_BIN_EXE_hk and
+      CARGO_BIN_EXE_hackriffd, and nothing in the `test` path pre-builds them - the same shape in a
+      different package. RULED OUT as siblings: fixture and synthetic-data consumers (they self-generate or
+      fail loudly rather than silently depending on another recipe having run), ui_dist (always None in
+      tests), and external tools (readsb, multimon-ng, uv - presence-checked already).
+      Gate: full, passed - and hk-plugins::host did not fail in it.
   - id: T-493
     milestone: M2-hardening
     title: The hk-plugins spawn race is capped at 8 threads where T-257 measured zero only at 6
@@ -14400,6 +14422,12 @@ tasks:
     depends_on: []
     use_cases: []
     acceptance: |
+      CORRECTION 2026-09-18, AFTER T-492: the coordinator originally split this run's failures into
+      "a missing artefact" (T-492) and "a load race" (this). T-492 then showed the missing-artefact
+      mechanism CANNOT be reproduced - Cargo self-heals by relinking from cached deps in under a
+      second - so THIS TICKET IS NOW THE LIKELIER EXPLANATION OF BOTH failures, and T-492's fix
+      stands on the separate ground of removing an implicit reliance. Treat the load race as the
+      primary suspect for anything in hk-plugins::host that fails under a gate and passes alone.
       OBSERVED BY THE COORDINATOR 2026-09-18: hk-plugins::host
       plugin_crash_restarts_and_capture_never_blocks and
       finish_delivers_queued_input_to_a_slow_starting_plugin_then_waits_for_its_exit FAILED at
