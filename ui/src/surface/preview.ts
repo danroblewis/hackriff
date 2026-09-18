@@ -181,11 +181,100 @@ export function zoomFactor(deltaY: number, deltaMode = 0): number {
   return Math.min(4, Math.max(0.25, Math.exp(px * 0.0015)));
 }
 
-/** Which axes a wheel gesture zooms. Stated as data so the page can print the same table it obeys. */
-export function wheelAxes(e: { shiftKey?: boolean; altKey?: boolean }): { freq: boolean; time: boolean } {
-  if (e.altKey) return { freq: true, time: true };
-  if (e.shiftKey) return { freq: true, time: false };
-  return { freq: false, time: true };
+/**
+ * The scroll this wheel event actually carried, as one number.
+ *
+ * **Why `deltaX` is read at all, and only under shift.** macOS — and Chrome and Safari generally —
+ * deliver a *shift-held* wheel as a HORIZONTAL scroll: the scroll arrives in `deltaX` and `deltaY`
+ * is 0. Reading `deltaY` alone therefore makes shift+wheel, the frequency axis, do nothing at all on
+ * the machine this runs on, and **no CDP-synthesised event would ever show it**, because the swap
+ * happens in the platform's input layer rather than in the page. So the shift case takes whichever
+ * axis carried the scroll.
+ *
+ * It is the **dominant** axis, never the sum. T-407's defect was travel measured as
+ * `clientX + clientY`, which let a stroke *across* a bar count as travel *along* it; adding the two
+ * deltas here would be the same mistake, and would make a diagonal trackpad flick zoom twice as far
+ * as either of its components asked for. Without shift, `deltaX` is left alone entirely: a two-
+ * finger horizontal swipe is a scroll, not a zoom, and on a canvas whose drag already pans it would
+ * be startling for one to change the view's scale.
+ */
+export function wheelDelta(e: { deltaX?: number; deltaY?: number; shiftKey?: boolean }): number {
+  const y = e.deltaY ?? 0, x = e.deltaX ?? 0;
+  return e.shiftKey === true && Math.abs(x) > Math.abs(y) ? x : y;
+}
+
+/**
+ * Which axes a wheel gesture zooms. Stated as data so the page can print the same table it obeys.
+ *
+ * **T-456 — Google-Maps navigation, with the axes still independently reachable:**
+ *
+ * | gesture | axes |
+ * |---|---|
+ * | drag | pans **both** (see [[SurfacePreview.drag]]) |
+ * | plain wheel | zooms **both**, uniformly, about the cursor |
+ * | **shift** + wheel | frequency (X) only |
+ * | **alt / option** + wheel | time (Y) only |
+ *
+ * **Why ALT/OPTION for the time axis and not CTRL.** The brief allowed either and asked for the
+ * reason; there are three, and the first is not testable from inside a browser at all:
+ *
+ *  1. **macOS takes ctrl+scroll before any browser sees it.** System Settings → Accessibility →
+ *     Zoom → *"Use scroll gesture with modifier keys to zoom"* defaults to **^Control**, and when it
+ *     is on the OS consumes the event: no `wheel` is dispatched, so there is nothing to
+ *     `preventDefault` and no in-browser test can observe the difference between "the user did not
+ *     scroll" and "the OS ate it". A binding whose failure mode is invisible to its own guard is the
+ *     wrong binding.
+ *  2. **ctrl+wheel is also how a trackpad PINCH arrives.** Chrome and Safari synthesise a pinch as a
+ *     wheel event with `ctrlKey` set. Binding time to ctrl would make a pinch — the most Google-Maps
+ *     gesture there is — zoom one axis. Leaving ctrl unbound drops a pinch into the uniform branch
+ *     below, which zooms both axes about the cursor: exactly what a pinch should do.
+ *  3. **Alt/Option carries no OS or browser default on a wheel**, so the `preventDefault` in
+ *     `preview-main.ts` is a complete answer for it, where for ctrl it is only a partial one.
+ *
+ * Ctrl and meta are therefore *deliberately* not read here. They are still `preventDefault`ed at the
+ * canvas, so a ctrl+wheel or cmd+wheel over the surface zooms the surface rather than the page.
+ *
+ * **This does not re-weld the axes.** Uniform zoom is a *gesture* that applies one factor to two
+ * independent windows; each axis is still clamped on its own and still resolves its own pyramid
+ * level (T-434/T-438/T-440). After a plain wheel the two may legitimately sit at different levels —
+ * which is what `levelDivergenceNote` exists to say.
+ */
+export function wheelAxes(
+  e: { shiftKey?: boolean; altKey?: boolean; ctrlKey?: boolean; metaKey?: boolean },
+): { freq: boolean; time: boolean } {
+  const freqOnly = e.shiftKey === true, timeOnly = e.altKey === true;
+  // Both modifiers held is not a third gesture: it names both axes, which is the uniform one.
+  if (freqOnly !== timeOnly) return { freq: freqOnly, time: timeOnly };
+  return { freq: true, time: true };
+}
+
+/** The part of a `WheelEvent` a zoom gesture reads. A structural type, so this file stays testable
+ * without a DOM and a host can pass the real event straight in. */
+export interface WheelLike {
+  readonly deltaX?: number;
+  readonly deltaY?: number;
+  readonly deltaMode?: number;
+  readonly shiftKey?: boolean;
+  readonly altKey?: boolean;
+  readonly ctrlKey?: boolean;
+  readonly metaKey?: boolean;
+}
+
+/**
+ * **The whole of a wheel gesture, decided in one place: which axes, and by how much.**
+ *
+ * The surface has more than one host — the preview page, and the app's Explore centre after the
+ * cutover — and *two hosts each doing their own wheel arithmetic is T-412's wheel-zoom mismatch by
+ * construction*. So a host's listener does exactly three things: `preventDefault`, convert the
+ * pointer to drawing-buffer coordinates, and call this. Nothing host-side may read `deltaY`,
+ * `shiftKey` or `altKey` itself — `ui/test/surface-preview.test.ts` asserts that against the source
+ * of every file in this directory that registers a `wheel` listener, because the failure mode of
+ * getting it wrong is silent: `zoomFactor(e.deltaY, …)` compiles, runs, and makes shift+wheel inert
+ * on macOS, where a shift-held wheel arrives in `deltaX`.
+ */
+export function wheelZoom(e: WheelLike): { factor: number; axes: { freq: boolean; time: boolean }; delta: number } {
+  const delta = wheelDelta(e);
+  return { delta, factor: zoomFactor(delta, e.deltaMode ?? 0), axes: wheelAxes(e) };
 }
 
 export interface PreviewOptions {
@@ -327,10 +416,14 @@ export class SurfacePreview {
   }
 
   /**
-   * Wheel over a pane, anchored so the cell under the pointer stays put.
+   * Wheel over a pane, **anchored so the cell under the pointer stays put** — on whichever axes
+   * `wheelAxes` named, which after T-456 is both of them for a plain wheel.
    *
-   * The two axes zoom **independently** — that is the whole point of T-434's de-welding, and a
-   * wheel that always moved both would hide it. `wheelAxes` names which.
+   * The two axes are still moved by **two separate calls with two separate anchors**, and each
+   * clamps and resolves its level on its own: a uniform gesture is one factor applied twice, never
+   * one level applied to two axes. That is the distinction T-434's de-welding rests on, and it is
+   * why `factor` may zoom frequency while time sits clamped at the record's floor — a legitimate
+   * outcome the chrome states rather than hides.
    */
   wheel(id: string, p: GlPoint, factor: number, axes: { freq: boolean; time: boolean }): void {
     const r = this.rectOf(id);
