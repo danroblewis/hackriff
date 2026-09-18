@@ -1,6 +1,5 @@
-//! T-483/T-484 — **the canvas's finest live tier must reproduce the FFT spectrum frames for the
-//! same window.** T-483 wrote this file as a PROOF that it did not, and T-484 made it pass; it is
-//! now the standing regression guard, and every number below is measured on each run.
+//! T-483 — **the canvas's finest live tier must reproduce the FFT spectrum frames for the same
+//! window, and today it does not.** This file is a PROOF, and it is expected to fail.
 //!
 //! The user reports that the canvas shows *less detail* than the waterfall T-445 retired: the
 //! narrowband emission near 100.465 MHz "reads nearly straight" and the 101.3 MHz station is
@@ -37,9 +36,7 @@
 //! **`value`/mean** plane — and `/api/tiles` serves **`max_db`** (`tiles.rs::grid_json`), which
 //! `ui/src/surface/tile.ts` is the sole consumer of. So the mean-over-bins fold is not the plane the
 //! canvas draws, and a proof resting on it would be measuring an adjacent question. The three
-//! mechanisms that *do* act on `max_db`, each measured below rather than assumed. They are written
-//! in the present tense because T-483 found them so; T-484 removed all three, and the
-//! "Consequence" note after them says which change removed which:
+//! mechanisms that *do* act on `max_db`, each measured below rather than assumed:
 //!
 //! 1. **The frames folded into the pyramid are not the display's.** The history/view chain runs its
 //!    own STFT at `detection_resolution()`'s `fft_len` (`hk-pipeline/src/history.rs::run`), which at
@@ -54,29 +51,14 @@
 //!    max of `N` exponential noise samples sits ~`10·log10(ln N + γ)` above their mean, so the
 //!    canvas's **floor rises** while a deterministic peak does not — contrast collapses. That is
 //!    "washed out", in dB.
-//! 3. **One canvas row is one second.** `VIEW_T_CELL` was 1 s against the display stream's 25 rows/s,
+//! 3. **One canvas row is one second.** `VIEW_T_CELL` is 1 s against the display stream's 25 rows/s,
 //!    so a second of level variation becomes a single number — and a max, which keeps the crests
 //!    and discards the troughs. That is "reads nearly straight", and it is measured here as the
 //!    fraction of the display path's time variation the canvas retains.
 //!
-//! **Consequence for T-484 (the fix):** widening or narrowing `f_cell` alone cannot close this. The
-//! frames reaching the pyramid are 512-bin, 10 rows/s, max-held. The live tier reaching FFT
-//! resolution means changing what is folded, not only the grid it folds onto — and that is what
-//! T-484 did, in three parts, one per mechanism above:
-//!
-//! 1. **A different source.** The view lattice's finest node is fed the *display* frames
-//!    (`hk-pipeline/src/spectrum.rs` pushes them; `crate::history`'s own STFT still feeds scheme 1,
-//!    with T-397's max-hold intact for `/api/timeline`, `/api/coverage` and `/api/floor`).
-//! 2. **No statistic on top of the measurement.** The display plan carries no per-segment Welch
-//!    holds (`hk-pipeline/src/class.rs::row_plan`), so the cell's `peak` is the number the row
-//!    published. At a 1:1 tier a cell *is* a measurement: its max, its mean and what the waterfall
-//!    drew are one number, and every coarser node maxes over those.
-//! 3. **A grid that is the measurements' own.** Node (0, 0)'s cell is
-//!    `fs / spectrum_fft_len × the display row period` (`hk-pipeline/src/history.rs::view_geometry`).
-//!
-//! A sub-row burst is still averaged across its row, exactly as the retired waterfall averaged it —
-//! that is the *"same experience"* half of the user's request, and it is deliberate (see
-//! `row_plan`'s note).
+//! **Consequence for T-484 (the fix, which is NOT this ticket):** widening or narrowing `f_cell`
+//! alone cannot close this. The frames reaching the pyramid are 512-bin, 10 rows/s, max-held. The
+//! live tier reaching FFT resolution means changing what is folded, not only the grid it folds onto.
 //!
 //! # The fixture's checkable structure
 //!
@@ -90,42 +72,30 @@
 //! | WFM broadcast | 101.3 MHz | wideband — its *density* is resolution-invariant, so its contrast loss isolates the floor lift |
 //! | quiet band | 100.50–100.70 MHz | no emission: the noise reference both paths are scored against |
 //!
-//! # How to run it
+//! # How to run it, and why four tests are `#[ignore]`d
 //!
 //! ```text
-//! cargo test -p hk-e2e --test canvas_fidelity -- --test-threads 1 --nocapture
+//! cargo test -p hk-e2e --test canvas_fidelity -- --ignored --test-threads 1 --nocapture
 //! ```
 //!
-//! Nothing here is `#[ignore]`d. T-483 shipped the four proofs `#[ignore]`d so that one
-//! deliberately-red measurement did not block every unrelated merge while the fix was built, and
-//! **deleting those four lines was T-484's definition of done**. The fifth,
-//! [`the_two_paths_agree_on_the_noise_floor_so_the_comparison_is_sound`], was never ignored and must
-//! keep passing: every dB the other four report is a subtraction between the two paths and is
-//! meaningless if they ever stop agreeing on scale.
+//! The four proofs are `#[ignore]`d **only** so one deliberately-red measurement does not block
+//! every unrelated merge while the fix is built; they are expected to fail and the numbers above
+//! are what they print. **Deleting those four `#[ignore]` lines is T-484's definition of done** —
+//! after which this file is the standing regression guard that the canvas's native zoom still
+//! shows what the FFT frames hold.
 //!
-//! # The two measurements, on the same fixture and the same box
+//! The fifth test, [`the_two_paths_agree_on_the_noise_floor_so_the_comparison_is_sound`], is **not**
+//! ignored: it passes today and must keep passing, because every dB the other four report is a
+//! subtraction between the two paths and is meaningless if they ever stop agreeing on scale.
 //!
-//! **T-483, 2026-09-18 (red).** The display path serves 1024 bins over 2.400 MHz at 24.9 rows/s
-//! (2343.8 Hz × 40.1 ms); the canvas's finest node was 6250 Hz × 1 s, so **one canvas cell stood in
-//! for 2.67 × 24.93 = 66.5 FFT cells**. Control: both paths put the quiet band's floor at
-//! −84.53 dB/Hz — identical. Canvas `max_db` put it at −74.02, **+10.5 dB of max-hold floor lift**,
-//! costing 4.5 dB of contrast on the 100.000 MHz spur, 5.0 dB on the 100.465 MHz emission and 1.6 dB
-//! on the station; the one-second cell kept **19 %** of that emission's level variation and **3 %**
-//! of the station's; and the per-cell reproduction error was **10.6 dB** in the quiet band and
-//! **15.9 dB** at the station.
-//!
-//! **T-484, 2026-09-18 (green).** The canvas's finest node is **2343.8 Hz × 40.1 ms** — the display
-//! path's own bin and row — so **one canvas cell stands in for 1.00 × 1.00 = 1.0 FFT cells**. The
-//! floor lift is **+0.1 dB**; contrast lost is **0.1 dB** on all three probes; **98 %** and **100 %**
-//! of the level variation is retained, over the same 74 rows the display path drew; and the per-cell
-//! reproduction error is **0.0 dB** in both bands, over 6278 and 5694 cells rather than 128 and 120.
-//!
-//! The three measurement details this file changed between those runs are each documented at their
-//! site, and each was re-run against the pre-fix tree to show it cannot turn a red into a green:
-//! the row period is medianed in `f64` (an `f32` reported 40 106 667 ns as 40 106 668 and then lost
-//! ~2 ns more to `* 1e-9`), a cell is matched to every display value it stands in for rather than
-//! only to cells holding two or more, and a row is located by the middle of the samples it averaged
-//! — `Pyramid::ingest`'s own rule, and the only well-defined one once a cell is one row wide.
+//! Measured 2026-09-18 on `fm_100p8M_2p4M_l32g30a1_t1p5_5s`: the display path serves 1024 bins over
+//! 2.400 MHz at 24.9 rows/s (2343.8 Hz × 40.1 ms); the canvas's finest node is 6250 Hz × 1 s, so
+//! **one canvas cell stands in for 2.67 × 24.93 = 66.5 FFT cells** (and 171× the finest bin a
+//! zoomed client may request). Control: both paths put the quiet band's floor at −84.53 dB/Hz —
+//! identical. Canvas `max_db` puts it at −74.02, **+10.5 dB of max-hold floor lift**, which costs
+//! 4.5 dB of contrast on the 100.000 MHz spur, 5.0 dB on the 100.465 MHz emission and 1.6 dB on the
+//! station; and the one-second cell keeps **19 %** of the 100.465 MHz emission's level variation and
+//! **3 %** of the station's.
 
 #[path = "acceptance/common.rs"]
 mod common;
@@ -455,20 +425,12 @@ fn build() -> Option<Fidelity> {
     let fft = header.fft_size.expect("the header declares fft_size") as f64;
     let span = header.bandwidth_hz.expect("the header declares a span");
     let bin_hz = span / fft;
-    // **In f64, and that is not a loosening — it is the difference between measuring the row period
-    // and measuring `f32`.** A 40.106 667 ms gap is 40 106 667 ns, and `40_106_667i64 as f32` is
-    // 40 106 668: past 2²⁴ an `f32` integer snaps to a multiple of 4, and the `* 1e-9` adds another
-    // ~2 ns of relative error. So the old spelling reported the display row period 3–5 ns LOW,
-    // which is invisible against the 25× gap this file was written to prove (1 s cells against
-    // 40 ms rows) and decisive against a tier that matches the rows exactly. Nothing else changes:
-    // the same gaps, the same median, the same comparison.
-    let mut gaps: Vec<f64> = rows
+    let mut gaps: Vec<f32> = rows
         .windows(2)
-        .map(|w| (w[1].t_ns - w[0].t_ns) as f64 * 1e-9)
+        .map(|w| (w[1].t_ns - w[0].t_ns) as f32 * 1e-9)
         .collect();
     gaps.retain(|g| *g > 0.0);
-    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let row_s = gaps[gaps.len() / 2];
+    let row_s = f64::from(median(gaps));
 
     // The window: the middle of the recording, so neither path is scored on a partial edge row.
     let t_lo = rows.first().unwrap().t_ns + (EDGE_S * 1e9) as i64;
@@ -544,6 +506,10 @@ fn run() -> Option<&'static Fidelity> {
 /// This fails today, and the failure message is the measurement: bins per cell, rows per cell, and
 /// the product — how many FFT cells the canvas replaces with one number.
 #[test]
+#[ignore = "T-483 PROVES THE GAP AND IS EXPECTED TO FAIL. It is `#[ignore]`d only so one \
+            known-red proof does not block every other merge; deleting this line is T-484's \
+            definition of done. Run it: cargo test -p hk-e2e --test canvas_fidelity -- --ignored \
+            --nocapture"]
 fn the_finest_live_tier_is_no_coarser_than_the_display_ffts_it_folds() {
     let Some(f) = run() else { return };
     let (bins, rows, fold) = f.fold();
@@ -600,6 +566,10 @@ fn the_finest_live_tier_is_no_coarser_than_the_display_ffts_it_folds() {
 /// This is a property of **dB values from two backend readers of one capture**. No colormap, no
 /// display range, no pixels — T-470 can change both without moving this number.
 #[test]
+#[ignore = "T-483 PROVES THE GAP AND IS EXPECTED TO FAIL. It is `#[ignore]`d only so one \
+            known-red proof does not block every other merge; deleting this line is T-484's \
+            definition of done. Run it: cargo test -p hk-e2e --test canvas_fidelity -- --ignored \
+            --nocapture"]
 fn the_finest_live_tier_reproduces_the_display_ffts_values() {
     let Some(f) = run() else { return };
     let tol_db = 1.0f32;
@@ -636,23 +606,7 @@ fn the_finest_live_tier_reproduces_the_display_ffts_values() {
                 let inside: Vec<f32> = f
                     .rows
                     .iter()
-                    // **A row is in the cell that holds the MIDDLE of the samples it averaged** —
-                    // `Pyramid::ingest`'s own rule (`tc = (t + duration/2).div_euclid(t_cell)`),
-                    // and the only rule that is well defined once a cell is one row wide. A record
-                    // timestamps its FIRST sample, so a row covers `[t, t + row_s)` and, at an
-                    // arbitrary phase against an epoch-aligned cell grid, straddles two cells; the
-                    // store gives it to the one it lies mostly in, and scoring it against the one
-                    // its first sample happens to fall in measures that bookkeeping, not fidelity.
-                    // It was invisible while cells were 1 s (a row's midpoint changes cell only
-                    // within 20 ms of a boundary — 2 % of rows, and the pre-fix medians below are
-                    // unchanged by this line, re-measured: 10.5 dB quiet, 15.8 dB station); at a
-                    // one-row cell the same half-row offset moves EVERY row, which is why the
-                    // station band — 2.50 dB of level change per row — read 1.4 dB against a 0.0 dB
-                    // spread inside each cell.
-                    .filter(|r| {
-                        let mid = r.t_ns + (0.5 * f.row_s * 1e9) as i64;
-                        mid >= t0 && mid < t1
-                    })
+                    .filter(|r| r.t_ns >= t0 && r.t_ns < t1)
                     .flat_map(|r| {
                         r.psd_db
                             .iter()
@@ -665,18 +619,7 @@ fn the_finest_live_tier_reproduces_the_display_ffts_values() {
                     })
                     .filter(|v| v.is_finite())
                     .collect();
-                // **Match a cell to every display value it stands in for, including when that is
-                // one.** The old guard was `< 2`, on the assumption — true when this file was
-                // written, and the very thing T-484 removes — that a canvas cell always folds many
-                // measurements. It cannot make a failing comparison pass: at 66.5 display cells per
-                // canvas cell it never fired, so the numbers T-483 published are unchanged by this
-                // line (re-measured on the pre-fix tree: 10.5 dB quiet, 15.8 dB station, identical).
-                // What it does is stop *discarding* the cells that would prove the fix: a 1:1 tier
-                // has exactly one display value per cell, `spreads` came back empty, and the test
-                // aborted with "no canvas cell could be matched" rather than reporting 0.0 dB.
-                // Relaxing it only ever ADDS cells to `errors`, so the assertion below is scored on
-                // strictly more evidence, at the same 1 dB tolerance, over the same two bands.
-                if inside.is_empty() {
+                if inside.len() < 2 {
                     continue;
                 }
                 let mx = max_of(&inside);
@@ -759,6 +702,10 @@ fn the_two_paths_agree_on_the_noise_floor_so_the_comparison_is_sound() {
 /// The number reported is a property of **one emission's SNR against the same recording's own
 /// noise, measured twice** — once through each path. It is not a difference between two images.
 #[test]
+#[ignore = "T-483 PROVES THE GAP AND IS EXPECTED TO FAIL. It is `#[ignore]`d only so one \
+            known-red proof does not block every other merge; deleting this line is T-484's \
+            definition of done. Run it: cargo test -p hk-e2e --test canvas_fidelity -- --ignored \
+            --nocapture"]
 fn max_hold_folding_washes_out_the_narrow_spur_and_the_station() {
     let Some(f) = run() else { return };
     let tol_db = 2.0f32;
@@ -823,6 +770,10 @@ fn max_hold_folding_washes_out_the_narrow_spur_and_the_station() {
 /// its second, so it keeps the crests and discards the troughs; the variation that survives is what
 /// the waterfall can still draw.
 #[test]
+#[ignore = "T-483 PROVES THE GAP AND IS EXPECTED TO FAIL. It is `#[ignore]`d only so one \
+            known-red proof does not block every other merge; deleting this line is T-484's \
+            definition of done. Run it: cargo test -p hk-e2e --test canvas_fidelity -- --ignored \
+            --nocapture"]
 fn one_second_cells_flatten_the_wave_the_display_path_still_shows() {
     let Some(f) = run() else { return };
 

@@ -13919,7 +13919,7 @@ tasks:
   - id: T-484
     milestone: MLIVE
     title: The live/tuned tier must render at live-IQ FFT resolution - the pyramid stays coarse only for zoom-out and history
-    status: done
+    status: reverted
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -14813,7 +14813,7 @@ tasks:
   - id: T-500
     milestone: MLIVE
     title: "surface-colour's settle check cannot settle now the live tier advances 25x faster - main is RED"
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     depends_on: []
@@ -14856,6 +14856,62 @@ tasks:
     notes: |
       Filed by the coordinator 2026-09-18. HIGH because main is red and no merge can gate until it is
       green.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-501
+    milestone: MLIVE
+    title: REDO T-484 - the FFT-resolution fidelity fix, gated by the canvas e2e that would have caught its tile breakage
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-481]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      T-484 WAS REVERTED ON MAIN (87ca0b74) BECAUSE IT BROKE TILE RENDERING ON THE USER'S DEMO - no
+      tiles, a flashing trace, no max line. THE FIDELITY WORK IS NOT DROPPED: the user wants it back.
+      This ticket redoes it, with the breakage fixed and the whole thing gated by the canvas e2e.
+      THE DIFF IS PRESERVED: branch `task-t484` still points at de758d17. START FROM IT. Do not
+      rewrite from scratch - its measurements are sound and its reasoning is recorded; what is
+      missing is why the tile map went dark.
+      WHAT T-484 ACHIEVED AND MUST ACHIEVE AGAIN, measured: 66.5 -> 1.0 FFT cells per canvas cell;
+      floor lift +10.5 -> +0.1 dB; contrast lost 4.5/5.0/1.6 -> 0.1 dB; wave variation retained
+      19 %/3 % -> 98 %/100 %; per-cell reproduction error 10.6/15.9 -> 0.0/0.0 dB. Its DoD was
+      deleting T-483's four #[ignore] lines, and canvas_fidelity 5/5 with the control still passing.
+      HOW IT DID IT: spectrum.rs pushes the DISPLAY frames into the view lattice's writer queue;
+      class.rs::row_plan turns per-segment Welch holds off; history.rs::view_geometry sizes node
+      (0,0) to that plan's own bin and row. Scheme 1 is untouched.
+      THE THING TO FIND FIRST, AND IT IS THE WHOLE TICKET: WHY DOES THE TILE MAP GO DARK? Every unit
+      suite passed, canvas_fidelity passed 5/5, and the full gate passed - and the demo rendered
+      nothing. So the defect is in a place none of those look. Candidates, to measure rather than
+      pick: node (0,0)'s geometry no longer matching what the client addresses (T-482's declared
+      ceiling is computed from the pyramid's geometry, and T-494 already records that
+      affordable_levels and materialize disagree at depth); the writer queue saturating at ~25 rows/s
+      where it carried 10; tiles being produced at a level nothing requests; or the coverage plane
+      reading unobserved because cells now exist that no frame filled.
+      THE GATE THIS TIME IS T-481's CANVAS JOURNEY, which is exactly the tier that was missing.
+      Its assertion 1 - tiles load where data exists, grey only where the server says unobserved,
+      measured as a pane grey share against /api/coverage's own share at the level the pane states it
+      drew at - is the one that would have caught this. It must pass with the fidelity fix in.
+      DO NOT SHIP ON A GREEN UNIT SUITE AGAIN. The lesson is recorded in the revert commit: the unit
+      tier cannot see whether the surface renders, and this is the third time this milestone has been
+      told so (T-450's module that could not load, T-476's four tests that would have been green over
+      a shipped defect, and now this).
+      DoD: T-483's four #[ignore] lines deleted and canvas_fidelity 5/5 with the control passing; the
+      fidelity numbers above reproduced; T-481's canvas journey green, assertion 1 included; a real
+      browser showing a drawn canvas with a plausible colour distribution (the revert's baseline is
+      625 distinct colours, dominant 19.0 %, mean luma 56.6 - a flat or near-empty canvas is the
+      defect); and a stated explanation of what went dark and why nothing caught it.
+    notes: |
+      Filed 2026-09-18 after reverting T-484 (merge 5fe4f2d, revert 87ca0b74) at the user's
+      direction. The branch task-t484 is preserved at de758d17 as the starting point.
+      T-484 also carried a REAL defect fix worth keeping: panTime(id, 0) ran freezeAt before checking
+      the delta, so a purely horizontal drag silently unfollowed the pane. That went out with the
+      revert and should come back with this - it is independent of the tile pipeline and could be
+      split out and landed on its own first if that is cheaper.
+      T-486 also found that T-484's "a real scrub, however small, still pauses" was never testing
+      that: panTime(-1) at T0 ~ 1.7e18 ns is below a double's 256 ns ulp, so the centre never moved.
+      256 ns is the real floor under every threshold in that file.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

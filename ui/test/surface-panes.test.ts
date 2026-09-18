@@ -94,35 +94,6 @@ test("there is no third state: a scrubbed pane is a paused pane, and following c
   assert.deepEqual(Object.keys(m.get(p.id)!.time).sort(), ["live", "spanNs"], "resuming must DROP the centre, not keep a stale one beside `live`");
 });
 
-test("a sideways drag does not pause the waterfall: a scrub of ZERO leaves a following pane following", () => {
-  // **T-484.** `Preview.drag` pans BOTH axes on every pointer move, so a drag straight along
-  // frequency reaches the model as `panFreq(dx)` followed by `panTime(0)` — and `panTime` froze the
-  // pane before it looked at the delta. The user changed frequency and the pane silently entered
-  // "scrubbed into the past", which `follow`'s own contract says may only happen by an explicit act.
-  //
-  // It is asserted through the pane's OWN state rather than through a retune control, because the
-  // property is about pausing: the control was only the messenger (`paneRetuneOffer` began
-  // answering `block: "past"` for a viewport whose only gesture had been sideways, and it was right
-  // to). A pane that is following has no centre to store, so `isFollowing` is the whole claim.
-  const m = model();
-  const [p] = m.list();
-  const before = boxOf(m.get(p.id)!, T0);
-  m.panFreq(p.id, 2e6);
-  m.panTime(p.id, 0);
-  assert.equal(m.isFollowing(p.id), true, "a drag along frequency must not stop the pane following the live edge");
-  assert.deepEqual(Object.keys(m.get(p.id)!.time).sort(), ["live", "spanNs"], "and it must not have acquired a centre");
-  // The time axis really is untouched: same window at the same edge, and it still grows with it.
-  assert.deepEqual(boxOf(m.get(p.id)!, T0).t1Ns, before.t1Ns);
-  assert.equal(boxOf(m.get(p.id)!, T0 + 30 * S).t1Ns, T0 + 30 * S, "and it still follows");
-  // The mutation: one nanosecond IS a scrub, and still freezes. The guard is zero, not "small".
-  m.panTime(p.id, -1);
-  assert.equal(m.isFollowing(p.id), false, "a real scrub, however small, still pauses");
-  // And a zero pan on an already-frozen pane changes nothing either.
-  const frozen = boxOf(m.get(p.id)!, T0);
-  m.panTime(p.id, 0);
-  assert.deepEqual(boxOf(m.get(p.id)!, T0), frozen, "a zero pan must not move a frozen pane");
-});
-
 test("pausing is a COORDINATE CHANGE, not a mode change: the frame you pause on is the frame before it", () => {
   const m = model();
   const [p] = m.list();

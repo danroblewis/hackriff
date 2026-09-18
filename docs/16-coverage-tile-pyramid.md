@@ -224,11 +224,10 @@ Three consequences, all measured:
   coarse summary was never built would lose the measurement, so the byte-budget and age passes build
   the summary of exactly the tile that is about to go, and nowhere else.
 
-The set-up is not free at the coarse end: a 4 × 4 lattice's coarsest node folds 64 level-0 tiles and
-63 intermediates, and the cap on that (1 024 producer
-tiles per request) is an **error** rather than a partial fold, because a partial fold is a tile that
-reads *unobserved* over data the store holds. That cap is what `hk_api::tiles::affordable_levels`
-and T-482's declared ceiling keep a client on the right side of.
+The set-up is not free at the coarse end: the shipped 4 × 4 lattice's coarsest node folds 64 level-0
+tiles and 63 intermediates, and the cap on that (1 024 producer tiles per request) is an **error**
+rather than a partial fold, because a partial fold is a tile that reads *unobserved* over data the
+store holds.
 
 **This does not move the contention it removes.** The eager fold ran on every seal, for every node,
 for the whole run, on the thread that gates the ring — O(capture duration × nodes), paid whether or
@@ -605,44 +604,6 @@ Two consequences, both landed:
   3.28 GHz × 48-day tile needs 32 768 frequency cells at scheme 1's coarsest with no finer level
   affordable. Surrendering reach nothing can serve is the cheapest kind of surrender. An address
   past the coarsest node still answers, folded out of it and saying so per axis.
-
-  **T-484 moved the floor under it and the depth could not follow — yet.** Node (0, 0) is now the
-  display STFT's own bin and row (`fs / spectrum_fft_len` × the display row period; 2343.75 Hz ×
-  40.1 ms at 2.4 Msps), 2.67× finer in frequency and **25× finer in time**. A viewport's demanded
-  level is `ceil(log2(nsPerPx / t_cell₀))` and so moves with the floor, while what the route can
-  serve is bounded by `level_f + level_t` — an **index** bound, blind to cell size. The finer time
-  cell therefore spends ~4.6 levels of reach, and since T-482 the client *clamps* to the declared
-  ceiling rather than being refused, so the cost is **fan-out, not a `400`**: more tiles, at a
-  coarser level than the viewport asked for. Measured on a 1600 × 800 pane, tiles per viewport at
-  the declared ceiling:
-
-  | `f × t` | ceiling | tuned 2.4 MHz × 20 s | band 20 MHz × 10 min | device 6 GHz × 10 min |
-  |---|---|---|---|---|
-  | T-439's floor, 4 × 4 | (9, 1) | 2 | 21 | 24 |
-  | **T-484's floor, 4 × 4 (shipped)** | **(9, 1)** | **8** | **150** | **600** |
-  | T-484's floor, 5 × 4 | (9, 2) | 8 | 75 | 300 |
-  | T-484's floor, 4 × 6 | (7, 4) | 8 | **20** | 316 |
-  | T-484's floor, 4 × 9 | (0, 0) | 8 | 2006 | 590 000 |
-
-  4 × 6 is the shape the measurement points at — it returns the band sweep to the coarse floor's own
-  number — and it is **not shipped because it does not work yet**: every depth whose ceiling has
-  `max_t ≥ 2` makes T-482's declared ceiling false at its own corner, refusing with *"building level
-  2 here needs more than 1024 tiles of folding"*. Level 2 is node (0, 2), which `affordable_levels`
-  admits (cheap to **read**) and `materialize` refuses (expensive to **build**); `servable` does not
-  close that gap, and the shipped 4 × 4 never exposed it because its ceiling is `(9, 1)`. Measured:
-  4 × 4 passes the contract test; 4 × 5, 5 × 4, 3 × 6 and 4 × 6 all fail it the same way. So the
-  depth stays put, the fan-out above is the stated price of the fidelity fix, and the repair is a
-  separate ticket in two parts — make buildability part of the affordability predicate, then take
-  the depth to 4 × 6. Guard:
-  `hk-pipeline/tests/live_edge_tiles.rs::the_lattices_depth_keeps_the_canvass_zoom_out_affordable`.
-
-  Two things that are **no longer reasons** to leave the depth at 4: the ≈1.5 s of suite wall per
-  node measured above predates T-453, and with the coarse nodes built on demand neither residency
-  nor per-second write cost scales with node count. And reach is **not monotone in depth** — the
-  ceiling is an area constraint, and a node too deep to fold inside `MAX_MATERIALIZE_TILES` poisons
-  the candidate list for every address: at 7 × 7 the ceiling collapses to `(0, 0)` and a 20 MHz view
-  costs 2006 tiles. Any change here is grid-searched, not reasoned.
-
 - **Eager folding at every seal is a deviation from §5.2**, whose heading already reads
   *"precomputed at seal time, on demand at the live edge"*. Filed as **T-453**, and **fixed**: the
   coarse nodes are now built by the read that asks for them and sealed on the way, so the ≈4× above
@@ -670,21 +631,6 @@ one front end dwelling continuously on a 20 MHz window, the HackRF's practical l
 |---|---|---|---|
 | Scheme 1 (welded ladder) | 6.25 kHz × 1 s | **771 MB** | **11 days** |
 | View lattice (§6.2) | 100 kHz × 128 s | **1.26 MB** | **6 842 days** |
-
-**T-484 inverts this table's conclusion for the view lattice, and that is a deliberate purchase.**
-The finest node is now one published display row per cell — `fft_len × rows_per_s` cells per second,
-**25 532/s at the shipped plan and independent of the tuned span**, against `span / f_cell` before
-(384/s at 2.4 MHz, 3200/s at 20 MHz). Measured through a real pyramid on noisy, structured frames
-(`the_finer_floor_costs_what_the_cell_rate_says_it_costs`): **92.8 kB/s against 3.8 kB/s** at
-2.4 MHz — cells ×66.5, bytes ×24.3, or **334 MB/h against 13.7 MB/h**; at a 20 MHz edge the old
-floor's rate scales with the span and the new one does not, so the ratio falls to about ×3. So the
-8 GiB budget binds the **finest** node after roughly a day rather than never, and the retention loop
-promotes each tile's coarse summary before evicting it (`promote_for_retention`). That is the
-honesty tiers made real by retention rather than asserted: live-IQ-resolution detail for about the
-last day, spectrum-history for far longer, survey overview beyond that. Residency moves the other
-way — `f_cell = fs / fft_len` makes the tuned span exactly **one** level-0 frequency block at any
-rate, so the resident accumulator is **5.8 MB / 0.29 MB/MHz at a 20 MHz edge** against T-453's 18 MB
-/ 0.91 MB/MHz.
 
 **The finding: the view lattice is so cheap that its byte budget stops being the binding horizon, and
 the observation log's 180-day age binds instead — at every `(level_f, level_t)`.** §5.4 argued the
