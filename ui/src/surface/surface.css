@@ -31,6 +31,34 @@
 .hk-surface-level { color: #8fd0b4; }
 .hk-surface-counts { margin-left: auto; opacity: 0.75; }
 
+/* T-476: the persistent per-pane control, and the sentence that says what it would do or why it
+   cannot be pressed. It is ALWAYS on the row — a disabled button with a reason, never a gap where a
+   control used to be, because a missing control teaches the user nothing. The sentence takes its own
+   line (`flex-basis: 100%`) so a long reason is readable rather than crushed against the counts. */
+.hk-surface-action {
+  font: inherit;
+  padding: 1px 8px;
+  margin-left: 8px;
+  color: var(--hk-text, #dde3ec);
+  background: transparent;
+  border: 1px solid #6b7488;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.hk-surface-action:not(:disabled) { color: #fad340; border-color: #fad340; }
+.hk-surface-action:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.hk-surface-why {
+  flex-basis: 100%;
+  opacity: 0.8;
+  font: 10.5px/1.45 system-ui, sans-serif;
+}
+
+/* A row's control and sentence are hidden by `el.hidden`; these are flex children, so the UA's
+   `display: none` must not be outranked by anything above. */
+.hk-surface-viewport [hidden] { display: none !important; }
+
 .hk-surface-level-note {
   margin: 4px 0 0;
   padding: 4px 6px;

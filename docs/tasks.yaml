@@ -13009,7 +13009,7 @@ tasks:
   - id: T-470
     milestone: MCANVAS
     title: Colours shift on zoom because the dB range auto-scales to the VISIBLE tiles - the same measurement must be the same colour
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     core_interface: true
@@ -13048,6 +13048,38 @@ tasks:
       Filed 2026-09-17 from /tmp/claude-501/surface-polish-brief.md item 1. Post-live-view priority
       per the user, but it is a reported BUG on shipped behaviour, so it leads the polish set.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "03d9d1e"
+    result: |
+      DONE. THE ANCHOR IS /api/coverage's shade.range_db - an answer probeSurface ALREADY fetches at open,
+      over the observed region, in the tiles' own dBFS, whose documented normalisation IS the shader's
+      (v-uLo)/(uHi-uLo). cmap.ts already named that field as where 0 and 1 come from; NOTHING READ IT.
+      Zero new requests, no new route name.
+      ONLY THE TOP IS ADOPTED, and the reason is the result: the fold is max-hold, so the two ends are
+      DIFFERENT KINDS OF NUMBER. `hi` is a maximum of maxima and is exact at ANY resolution; `lo` is a
+      MINIMUM OF MAXIMA, which folding can only RAISE. Adopting both clipped 14 dB to black - the coverage
+      grid says -72 dBFS where level-0 cells reach -86 - and collapsed the trace from 586 drawn columns to
+      44, every one pinned to the strip floor. THE BROWSER TIER CAUGHT IT. So lo = hi - 60 dB, a STATED
+      span, with the legend saying which half is which.
+      /api/floor WAS REJECTED ON INSPECTION, against the coordinator's own suggestion: it answers dBm per
+      Hz, not the tiles' per-cell dBFS, and converting needs an FFT bin bandwidth the tile does not report
+      - a unit mismatch plus client-side signal arithmetic the thin-client rule forbids.
+      PIXEL EVIDENCE: split the surface, zoom ONE viewport through four pyramid level configurations; the
+      other - box, level and residency pinned from the page's own readout at every step - stays
+      BYTE-IDENTICAL, 0 of 316 478 px, six times, and again after the round trip. It also caught its own
+      first gesture being wrong: zooming IN moved no level, and its premise check said so.
+      IT REJECTED THE OBVIOUS CONTROL AFTER MEASURING IT: "zoom with auto-contrast on" fired 3 runs in 4,
+      because auto-contrast tracks the union over BOTH panes. "A control that fires 3 times in 4 is a
+      flake." The mode-switch control repaints 72.8 % of the very pixels that stayed byte-identical.
+      THEN THE CONTROL ITSELF WAS FOUND TO COMPARE THE WRONG PAIR - it bracketed the six zoom gestures as
+      well as the toggle, so it asserted round-trip reversibility too, which T-480's clamp makes untrue in
+      general (a step that clamps on the way out does not un-clamp on the way back). Now bracketed across
+      the press and across press-plus-settle, naming the viewport, the field and both values. "And nothing
+      else" is untouched; only the ZOOMED pane's reversibility was dropped, which no assertion here was
+      about.
+      CARRIES THE HARNESS FIX THREE AGENTS HIT INDEPENDENTLY: startBackend waited for ANYTHING to answer
+      on its port, so with several worktrees running it drove ANOTHER WORKTREE'S BUNDLE. It now steps to
+      the next free port.
+      Gate: ui, test-ui 44/44, e2e 9/9 in 126.3 s.
   - id: T-471
     milestone: MCANVAS
     title: Prefetch a bounded ring of tiles around the viewport, at lower priority, cancelled on move
@@ -13623,6 +13655,27 @@ tasks:
       justified with measured storage, residency and write cost against T-453's figures; the honesty
       tier a cell came from is still distinguishable; and zoomed-out/history behaviour is unchanged,
       shown rather than asserted.
+      T-483'S MEASUREMENT CORRECTS THIS TICKET'S PREMISE - READ IT BEFORE DESIGNING. The brief named
+      RegridPlan::mean (f_cell / bin_width bins averaged). That fold is real but it produces the
+      VALUE/MEAN plane, and /api/tiles::grid_json serves max_db - which ui/src/surface/tile.ts is the
+      only consumer of. THE MEAN PLANE AGREES WITH THE DISPLAY PATH TO 0.00 dB. What actually acts on
+      max_db is three things, and the first one rules out half of option (b):
+      (1) THE FRAMES FOLDED IN ARE NOT THE DISPLAY'S. hk-pipeline/src/history.rs::run runs its OWN
+      STFT at detection_resolution()'s fft_len = 512, which at 2.4 Msps is 4687.5 Hz bins - ALREADY
+      COARSER THAN THE DISPLAY STREAM BEFORE ANY CELL FOLD. NO CHOICE OF f_cell CAN UNDO THIS.
+      (2) max_db is a MAX-HOLD over ~10^3 FFT cells (Welch holds on, k ~ 938 segments per row, then
+      max over bins and rows), so the floor rises by ~10*log10(ln N + gamma) while a deterministic
+      peak does not - measured as a +10.5 dB lift of the quiet-band floor.
+      (3) VIEW_T_CELL = 1 s against ~25 rows/s.
+      SO THE FIX MUST CHANGE WHAT IS FOLDED, NOT ONLY THE GRID IT IS FOLDED ONTO.
+      MEASURED GAP to reproduce as closed: one canvas cell stands in for 2.67 x 24.93 = 66.5 FFT
+      cells; quiet-band floor -84.53 -> -74.02 dB/Hz; contrast at 100.465 MHz 12.7 -> 7.7 dB; level
+      variation kept 19 % at 100.465 and 3 % at the station; per-cell reproduction error 15.8 dB
+      median in band. The CONTROL that makes these measurements rather than differences: both paths
+      put the quiet-band floor at -84.53 dB/Hz IDENTICALLY (display FFT vs the pyramid's mean_db), so
+      the gap is the statistic and the grid, not a calibration difference.
+      T-483'S FOUR PROOFS ARE #[ignore]d so one deliberately-red measurement does not block unrelated
+      merges. DELETING THOSE FOUR #[ignore] LINES IS THIS TICKET'S DoD.
     notes: |
       Filed 2026-09-18 from /tmp/claude-501/canvas-fidelity-brief.md. Sequenced after T-483 because
       the user asked for the proof first, and because a fix whose test was written afterwards tends
@@ -13739,6 +13792,47 @@ tasks:
       the live edge, and that offset DRIFTS with wall-clock lag. Since this ticket is precisely about
       small offsets from the live edge, do not assert follow/pause state from the readout string -
       read `data-following`, which is what the T-478 projection already does.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-487
+    milestone: MCANVAS
+    title: app-trace's peak-argmax compares a readout and a framebuffer captured at DIFFERENT instants
+    status: todo
+    priority: high
+    parallel_group: UI
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      BLOCKING THE MERGE QUEUE. `app-trace.e2e.mjs`'s "the trace is the spectrum at the viewport's
+      time position, and its numbers are the socket's own" fails intermittently:
+        the trace's highest point is at column 528, but it SAYS its peak is at 101.3709 MHz,
+        which is column 549.3 of 820. The readout and the pixels are describing different things.
+      MEASURED PRE-EXISTING BY TWO INDEPENDENT AGENTS, which is why it is not attributable to any
+      branch: T-460 built a dist from MAIN'S OWN ui/src and ran both under identical load - main 4/6,
+      its branch 5/6. T-472 saw it red once under heavy contention and green in every uncontended
+      run. It has now failed a gate for T-476, a ticket that touches neither the trace nor the ramp.
+      THE ASSERTION IS A GOOD ONE AND MUST NOT BE DELETED. "The readout and the pixels describe the
+      same thing" is exactly the claim this milestone exists to keep - it is the T-397 axis/colormap
+      divergence family, stated for the trace. The defect is in HOW it is measured, not in what it
+      claims.
+      THE LIKELY MECHANISM, to confirm rather than assume: the readout is read with one evaluation
+      and the framebuffer with another, so they are TWO INSTANTS. Between them the slice's source can
+      change - T-457's slice prefers the live spectrum row when its capture time falls inside the
+      pane's topmost cell and otherwise falls back to the pyramid's row - and a tile arriving or the
+      edge advancing switches which one answered. A 21-column disagreement is far larger than the
+      +/-9.6 column tolerance T-457 measured, so this is a different slice, not a noisy argmax.
+      FIX BY MAKING THEM ONE OBSERVATION, not by widening the tolerance. Capture the readout and the
+      pixels from the SAME frame - one evaluation that reads both, or a paused/frozen edge for the
+      duration of the check - so the comparison is of one instant with itself. If the two genuinely
+      cannot be captured together, then say so and assert the weaker claim honestly rather than the
+      stronger claim unreliably.
+      NOTE T-470'S OBSERVATION when it lands: a 60 dB strip is 0.625 dB/px against ~0.4 before, so
+      the peak-argmax becomes slightly LESS discriminating. That makes this fix more urgent, not less.
+      DoD: readout and pixels are compared from one observation; the assertion's strength is unchanged
+      or stated to have changed and why; and it survives 10 consecutive runs under builder load,
+      because "green in isolation" is what it already does.
+    notes: |
+      Filed 2026-09-18 by the coordinator after it blocked T-476's gate. Second flake in this tier to
+      block the queue; the first was T-478's live-edge drift, whose first fix was backwards.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

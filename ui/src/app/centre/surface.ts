@@ -35,9 +35,9 @@
 //
 // Nothing about signals. It converts pointer events into viewport arithmetic, mirrors the viewport
 // into `state.live.view`/`state.time` so the inventory lists stay scoped to what is on screen
-// (CLAUDE.md's whole-UI window rule), and renders the retune offer T-444 computes. The only device
-// route it can reach is through `acceptPaneRetune` → `applyDeviceAction`, T-343's one gate, on an
-// explicit button press.
+// (CLAUDE.md's whole-UI window rule), and renders the retune control T-444 computes — persistent
+// and per-pane since T-476. The only device route it can reach is through `acceptPaneRetune` →
+// `applyDeviceAction`, T-343's one gate, on an explicit button press.
 import { activeWindows, type ActiveWindow } from "../../navigators";
 import type { NavigationGrid } from "../../navigation";
 import { attachSurfaceInput, type GlPoint } from "../../surface/input";
@@ -45,6 +45,8 @@ import {
   markAt, markQuads, normalizeRegion, pendingMarkBox, pointOn, selectionMarkBoxes, signalMarkBoxes,
   type MarkBox, type MarkRegion,
 } from "../../surface/marks";
+import type { RowAction } from "../../surface/chrome";
+import { rangeLabel } from "../../surface/legend";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
 import {
   acceptPaneRetune, offerAcceptable, offerLabel, paneRetuneOffer, type PaneRetuneOffer,
@@ -68,7 +70,7 @@ const S_TO_NS = 1e9;
 /** The map strip along the bottom of the canvas, device px. */
 const MINIMAP_PX = 110;
 /** A pane frozen within this of the edge still counts as showing the growing edge, for the retune
- * offer's "not showing the live edge" refusal (T-444). One frame at 60 Hz, generously. */
+ * control's `"past"` block (T-444/T-476). One frame at 60 Hz, generously. */
 const EDGE_GRACE_NS = 0.25 * S_TO_NS;
 /** Height of the spectrum-trace strip above each pane, device px (T-457). */
 const TRACE_PX = 96;
@@ -81,19 +83,23 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
-  const offerEl = h("div", { class: "sf-offer", hidden: true });
   const traceEl = h("div", { class: "sf-trace", role: "status" });
   const liveBtn = h("button", { class: "mini sf-live", type: "button" }, "Live");
   const traceBtn = h("button", {
     class: "mini sf-tracebtn on", type: "button", "aria-pressed": "true",
     title: "The spectrum trace above each viewport: the slice across frequency at that viewport's own time position, and the max-hold over its whole window. Both are drawn on the surface's one measured dB range.",
   }, "Trace");
-  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn,
+  // T-470: the display range is anchored by default, so the same measured dB is the same colour at
+  // every zoom — and so is the trace's y axis, which reads the same range. This is the opt-in escape
+  // hatch for digging into weak signals, and the label beside it states the range and which way
+  // round it is — a fixed scale is honest only if it is quoted.
+  const contrastBtn = h("button", { class: "mini sf-contrast", type: "button" }, "Auto-contrast: off");
+  const rangeEl = h("span", { class: "sf-range", role: "status" });
+  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn,
     h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved.", onclick: () => preview?.split("columns") }, "Split ⇔"),
     h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => preview?.closeActive() }, "Close"),
-    h("button", { class: "mini", type: "button", title: "Zoom the active viewport out to the device-available spectrum over the whole record horizon.", onclick: () => preview?.fitToSurface() }, "Whole surface"),
-    offerEl);
-  el.replaceChildren(h("div", { class: "sf-bar" }, actions, hoverEl), stage, traceEl, chrome, note);
+    h("button", { class: "mini", type: "button", title: "Zoom the active viewport out to the device-available spectrum over the whole record horizon.", onclick: () => preview?.fitToSurface() }, "Whole surface"));
+  el.replaceChildren(h("div", { class: "sf-bar" }, actions, rangeEl, hoverEl), stage, traceEl, chrome, note);
 
   let preview: SurfacePreview | null = null;
   let windows: ActiveWindow[] = [];
@@ -151,14 +157,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // `toClip`, y through `Surface.lo`/`hi`, the one *measured* display range the ramp is relative to.
   // It shares no renderer state: the quads go to `overlay.ts`, which has no sampler and no ramp.
   //
-  // **Why there is no manual dB range.** The old waterfall carried `setScale(auto, lo, hi)` and
-  // **nothing ever called it** — a repo-wide search at the cutover commit finds the definition and no
-  // caller, so the cutover retired an unreachable control rather than a feature in use. And the range
-  // it would have overridden is measured: the tiles report their own `range_db` and the surface
-  // tracks it. Letting a hand-set pair of numbers stand in for that is a user overriding a
-  // measurement, which is the move this product declines by default. The honest control is to *say*
-  // the range, which the readout below does, so a surprising picture is diagnosable instead of
-  // paintable-over.
+  // **Why there is still no manual dB range, and what T-470 changed.** The old waterfall carried
+  // `setScale(auto, lo, hi)` and **nothing ever called it** — a repo-wide search at the cutover
+  // commit finds the definition and no caller — so the cutover retired an unreachable control rather
+  // than a feature in use. A hand-set pair of numbers standing in for a measured range is a user
+  // overriding a measurement, and that is still declined.
+  //
+  // What T-470 corrected is *which* measurement. The range was tracked from the tiles **currently on
+  // screen**, so navigating re-coloured measurements that had not changed ("colours animate and
+  // shift when I zoom"). It is now a stated span below a peak measured once over the region, so the
+  // same dB is the same colour at every zoom — and so is this trace's y axis, which reads that same
+  // pair. `Auto-contrast` is the opt-in way back to tracking, and it is a *contrast* control rather
+  // than a hand-set scale: it still colours from a measurement, just from the visible one. The honest
+  // part is unchanged — the range is **said**, by the readout below and by the label in the bar, so a
+  // surprising picture is diagnosable instead of paintable-over.
   let traceOn = true;
   const fmtDb = (db: number) => `${db.toFixed(1)} dB`;
   const fmtDur = (s: number) => (s < 1 ? `${(s * 1000).toFixed(0)} ms` : s < 90 ? `${s.toFixed(1)} s` : `${(s / 60).toFixed(1)} min`);
@@ -212,7 +224,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
         holdPk
           ? `max-hold over ${fmtDur(spanS)} · peak ${fmtDb(holdPk.db)} at ${fmtHz(holdPk.hz)}`
           : `max-hold over ${fmtDur(spanS)} — ${empty}`,
-        `scale ${fmtDb(s.lo)} … ${fmtDb(s.hi)}, measured from the served tiles and shared with the ramp`,
+        // T-470: one scale for the trace's y axis and the ramp, and it says which of the two ways it
+        // was decided. It used to read "measured from the served tiles" — true of the viewport-
+        // tracking range, and exactly what stopped being true when the scale stopped following the
+        // viewport. `app-trace.e2e.mjs` asserts this sentence, and was updated with it.
+        `scale ${fmtDb(s.lo)} … ${fmtDb(s.hi)}, ${s.range.mode === "anchored"
+          ? "measured over the region and anchored there"
+          : "measured from the tiles on screen (auto-contrast)"}, shared with the ramp`,
       ].join(" · "));
     }
     return out;
@@ -247,19 +265,46 @@ function mount(el: HTMLElement, ctx: AppContext) {
     else store.set(reviewAt(pane.time.centerNs / S_TO_NS + spanS / 2, spanS));
   }
 
-  // ---- the retune offer (T-444). A pan produces an offer; only this button moves the radio. ----
-  let offer: PaneRetuneOffer | null = null;
+  // ---- the retune control (T-444, made persistent and per-pane by T-476) ----
+  //
+  // It used to be one control in the toolbar, shown only when `paneRetuneOffer` produced an offer —
+  // which it did only for a viewport NOT contained in a tuned window. The user's report was that the
+  // thing they wanted most appeared only sporadically, and the reason is that the containment
+  // trigger hid it exactly where it is worth the most: a pane zoomed deep INSIDE the tuned window,
+  // where a narrower capture is a finer look at what is already on screen.
+  //
+  // So it is now a slot on **every pane's chrome row**, asked for on every frame. Two consequences
+  // worth stating, because both are load-bearing:
+  //
+  //  - **Per frame, not per poll.** The sentence names the viewport's current window, and a label
+  //    produced on the 1 s poll while the window moves per frame names somewhere the pane is not.
+  //  - **The offer that was PAINTED is the one that is pressed.** `lastPainted` records what each
+  //    row's label was derived from, so `acceptPaneRetune`'s re-derivation at commit is comparing
+  //    the destination the user read against the viewport as it is *now* — which is T-444's guard
+  //    doing its job rather than comparing an offer to itself. Deriving fresh at press instead would
+  //    close that window by making the guard vacuous, and would let a press land on a frequency the
+  //    button had never displayed.
   const offerNow = (paneId: string): PaneRetuneOffer | null => {
     const p = preview;
     const pane = p?.view.panes.get(paneId);
     if (!p || !pane) return null;
     return paneRetuneOffer(pane, windows, store.get().navGrid.grid?.frequency ?? null, p.edgeNs, EDGE_GRACE_NS);
   };
-  const acceptBtn = h("button", { class: "mini", type: "button" }, "Retune");
-  const offerText = h("span", {});
-  offerEl.replaceChildren(offerText, acceptBtn);
-  acceptBtn.addEventListener("click", () => {
-    const p = preview, o = offer;
+  /** What each row's label was last derived from — the target the user actually consented to. */
+  const lastPainted = new Map<string, PaneRetuneOffer>();
+
+  const chromeAction = (paneId: string): RowAction | null => {
+    const o = offerNow(paneId);
+    if (!o) {
+      lastPainted.delete(paneId);
+      return null;
+    }
+    lastPainted.set(paneId, o);
+    return { label: "Retune", why: offerLabel(o), enabled: offerAcceptable(o) };
+  };
+
+  const pressRetune = (paneId: string): void => {
+    const p = preview, o = lastPainted.get(paneId);
     if (!p || !o) return;
     void acceptPaneRetune(ctx, {
       offerNow,
@@ -269,16 +314,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     }, o).then((r) => {
       if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
     });
-  });
-
-  function renderOffer(): void {
-    const p = preview;
-    offer = p ? offerNow(p.activePane) : null;
-    offerEl.hidden = !offer;
-    if (!offer) return;
-    offerText.textContent = offerLabel(offer);
-    acceptBtn.disabled = !offerAcceptable(offer);
-  }
+  };
 
   // ---- pointer: hover readout, click to focus, right-click for the menu ----
   //
@@ -346,6 +382,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
       preview = new SurfacePreview({
         canvas, probe, token: ctx.token, fetchFn: (u, i) => fetch(u, i),
         chrome, minimapPx: MINIMAP_PX,
+        // The persistent per-pane retune control (T-476). Strings and a press: `preview.ts` and
+        // `view.ts` carry them through without ever naming a tuning, which is what keeps
+        // `retune.ts` out of the `/surface.html` preview's import graph.
+        chromeAction, onChromeAction: pressRetune,
         edge: () => edgeNs() || probe.origin.edgeNs,
         windows: () => windows,
         marks: (pane, edge) => markQuads(boxesFor(pane), edge, pane.box, pane.rect),
@@ -358,7 +398,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     say(probe.note);
 
     detach = attachSurfaceInput(canvas, preview, {
-      onView: () => { mirror(); renderOffer(); },
+      onView: () => { mirror(); },
       onHover: (p) => {
         if (!p) { hoverEl.textContent = ""; return; }
         const hit = hitAt(p.x, p.y);
@@ -402,9 +442,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     window.addEventListener("resize", fit);
     preview.start();
 
-    // Once a second, not per frame: the offer depends on the reported windows and the grid, both of
-    // which arrive on a poll. The *boxes* are per frame; this is chrome.
-    startPoll(async () => { mirror(); renderOffer(); }, 1000);
+    // Once a second: the app's one (time, frequency) window has to track the active viewport so the
+    // inventory lists stay scoped to it. The retune control is NOT on this cadence any more — it is
+    // re-derived per frame through `chromeAction`, because its sentence names the window the pane is
+    // showing *now* (T-476).
+    startPoll(async () => { mirror(); }, 1000);
 
     // ---- Go to / bookmarks: a frequency request moves the viewport (T-152's `nav.gotoHz`) ----
     store.select((s) => s.nav.gotoHz, (hz) => {
@@ -414,7 +456,6 @@ function mount(el: HTMLElement, ctx: AppContext) {
       if (!pane) return;
       p.view.panes.setFreq(p.activePane, hz, pane.freq.spanHz);
       mirror();
-      renderOffer();
     });
 
     liveBtn.addEventListener("click", () => {
@@ -441,6 +482,29 @@ function mount(el: HTMLElement, ctx: AppContext) {
     };
     renderLive();
     store.select((s) => s.time.live, renderLive);
+
+    // ---- the colour scale (T-470). A view control; it reaches no route and no device. ----
+    const renderRange = () => {
+      const p = preview;
+      if (!p) return;
+      const r = p.range;
+      rangeEl.textContent = rangeLabel(r);
+      contrastBtn.textContent = r.mode === "anchored" ? "Auto-contrast: off" : "Auto-contrast: on";
+      contrastBtn.classList.toggle("on", r.mode === "auto");
+      contrastBtn.setAttribute("aria-pressed", r.mode === "auto" ? "true" : "false");
+      contrastBtn.title = r.mode === "anchored"
+        ? "The display range is anchored to the region, so the same measured dB is the same colour at every zoom — at the cost of clipping outside it. Press to track what is on screen instead."
+        : "The display range tracks the tiles currently on screen: nothing clips, but the same signal changes colour as you navigate. Press to go back to the anchored range.";
+    };
+    contrastBtn.addEventListener("click", () => {
+      preview?.setAutoScale(preview.range.mode === "anchored");
+      renderRange();
+    });
+    renderRange();
+    // Auto-contrast moves the range every frame, so the statement follows it rather than only the
+    // press: a label quoting a range the surface no longer draws with is worse than no label. At the
+    // chrome cadence, not the frame's — it is a sentence, and the anchored mode never changes it.
+    startPoll(async () => renderRange(), 1000);
   })();
 
   // The one poll that fills the navigation slice: the achievable-centre grid the retune offer plans

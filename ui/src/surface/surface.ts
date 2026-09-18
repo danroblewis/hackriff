@@ -14,6 +14,23 @@
 // the navigator strips grew a second ramp that stopped at cyan. One renderer must not undo that, so
 // this shader imports the ramp rather than writing one out.
 //
+// One scale, and it is **not the viewport's** (T-470). The ramp needs a `(lo, hi)` to be a colour at
+// all, and until T-470 this file computed that pair, every frame, from the `range_db` of the tiles
+// that happened to be *on screen*. Zooming changes which tiles those are, so it changed the range,
+// so **the same measured dB re-coloured** — the user's report was "colours animate and shift when I
+// zoom", and the reading behind it ("it is normalised to the visible time/region") was exactly
+// right. The default is now **anchored**: one `(lo, hi)` measured once over the region by the
+// backend (`GET /api/coverage`'s `shade.range_db`, whose `normalisation` is this shader's
+// arithmetic in so many words) and held. Same measurement, same colour, at every zoom — the
+// slippy-map property, on the colour axis.
+//
+// Auto-scale survives as an **opt-in** ([[Surface.setAutoScale]]): tracking the visible tiles is a
+// genuinely useful contrast control for digging into weak signals, and the trade a fixed range makes
+// — it **can** clip a strong signal or wash out a weak one — is real. It is stated in the legend
+// rather than hidden, which is what keeps a consistent picture an honest one. What it may not be is
+// the default, because a default that re-colours on navigation makes colour unreadable as a
+// quantity.
+//
 // One grey. Every cell colour goes through `CELL_RULE_GLSL`, generated from `CELL_MARKS`, and the
 // grey appears in exactly one branch of it: the cell whose *coverage state* says `unobserved`. A
 // tile that is merely **not resident** is drawn by a different branch entirely — an upscaled
@@ -68,6 +85,57 @@ export interface PaneReport {
 }
 
 const KIND_TILE = 0, KIND_FLAT = 1;
+
+/** How the one display range was decided. `anchored` is the default and is zoom-invariant. */
+export type RangeMode = "anchored" | "auto";
+
+/** The display range, and **where it came from** — a range with no provenance is a number a user
+ * cannot check. Every surface that states the scale states this whole record. */
+export interface DisplayRange {
+  readonly lo: number;
+  readonly hi: number;
+  readonly mode: RangeMode;
+  /** One clause naming the measurement (or the fallback) this range is. */
+  readonly source: string;
+}
+
+/**
+ * The range used when **nothing measured one**.
+ *
+ * It is reached only when no backend answer carried a `range_db` at all, which is very nearly the
+ * same condition as *nothing here was ever observed* — and a surface with no observed cell has
+ * nothing on the ramp to mis-colour. So this constant is a stated fallback for an empty screen, not
+ * a guess competing with a measurement, and [[DisplayRange.source]] says which of the two is in
+ * force. The span is 60 dB, the working dynamic range of an 8-bit front end.
+ */
+export const FALLBACK_RANGE = { lo: -100, hi: -40 } as const;
+export const FALLBACK_RANGE_SOURCE =
+  "no measured range was reported: this client's stated 60 dB fallback, not a measurement";
+
+/**
+ * **The anchored display range's span, in dB.** The top is measured; this is how far below it the
+ * ramp reaches.
+ *
+ * Why the bottom is stated rather than measured, when the backend reports a `range_db` with both
+ * ends. The fold is **max-hold**, so the two ends are not the same kind of number:
+ *
+ * - `range_db.hi` is a maximum of maxima, and folding further never lowers a maximum. The coarse
+ *   answer therefore equals the fine one **exactly**, at any resolution, over the same region. It is
+ *   a measurement this client can adopt as-is.
+ * - `range_db.lo` is the *minimum of the cells' maxima*, and folding coarser can only **raise** it.
+ *   It is an upper bound on the floor, not the floor — and the gap is large: over this project's FM
+ *   fixture the 128 × 32 coverage grid reports −72 dBFS where the level-0 cells the waterfall draws
+ *   reach −86. Anchoring the bottom there clips 14 dB of real measurement to black, which was
+ *   measured on the spectrum trace: **586 of 820 drawn columns collapsed to 44**, every one of them
+ *   pinned to the floor of the strip. A scale that hides a third of the dynamic range is not a
+ *   trade-off, it is a broken picture.
+ *
+ * So the top is the measurement and the span is a **stated** 60 dB — the working dynamic range of an
+ * 8-bit front end, and the "fixed dynamic span" T-470 asked for. Nothing above the range exists by
+ * construction, and 60 dB below a region's own peak reaches past any noise floor this front end can
+ * show, so in practice the anchored ramp clips neither end while still being a fixed scale.
+ */
+export const ANCHOR_SPAN_DB = 60;
 
 const VS = `#version 300 es
 precision highp float;
@@ -185,10 +253,16 @@ export class Surface {
   readonly gl: GL;
   readonly cache: TileCache<TilePlanes>;
   /** The one display range every pane's colour is relative to. */
-  lo = -120;
-  hi = -60;
-  /** Track the observed range the tiles themselves report. One range for every pane, always. */
-  autoScale = true;
+  lo: number = FALLBACK_RANGE.lo;
+  hi: number = FALLBACK_RANGE.hi;
+  /**
+   * **Opt-in** (T-470). On, the range tracks the `range_db` of the tiles currently on screen, so the
+   * same measured dB changes colour as the viewport changes — useful as a manual contrast control,
+   * wrong as a default. Off (the default) the range is whatever [[setScale]] anchored it to.
+   */
+  autoScale = false;
+  /** Where [[lo]]/[[hi]] came from, so every surface that states the range can state its provenance. */
+  rangeSource: string = FALLBACK_RANGE_SOURCE;
   drawCalls = 0;
   frames = 0;
   lastFrame: PaneReport[] = [];
@@ -227,9 +301,40 @@ export class Surface {
   setLattice(lat: Lattice): void { this.lattice = lat; }
   get lat(): Lattice { return this.lattice; }
 
-  /** A fixed display range for every pane (turns [[autoScale]] off). */
-  setScale(lo: number, hi: number): void {
-    if (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) { this.lo = lo; this.hi = hi; this.autoScale = false; }
+  /**
+   * **Anchor** the display range: one `(lo, hi)` for every pane, held whatever the viewport does
+   * (and so it turns [[autoScale]] off).
+   *
+   * `source` is not decoration. A fixed range can clip or wash out, and the only thing that makes
+   * that honest rather than merely consistent is a legend that can say *which measurement this
+   * scale is* — so the provenance travels with the numbers instead of being reconstructed by
+   * whoever draws the key.
+   */
+  setScale(lo: number, hi: number, source = "set by the host"): void {
+    if (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) {
+      this.lo = lo;
+      this.hi = hi;
+      this.autoScale = false;
+      this.rangeSource = source;
+    }
+  }
+
+  /**
+   * Turn the opt-in contrast tracker on or off.
+   *
+   * Turning it **off** leaves the range exactly where tracking left it — it freezes the picture the
+   * user was looking at rather than jumping back to the anchor, which is what a contrast control
+   * should do. `setScale` is how a caller returns to a stated anchor.
+   */
+  setAutoScale(on: boolean): void {
+    this.autoScale = on;
+    if (on) this.rangeSource = "auto-contrast: the range of the tiles currently on screen";
+    else this.rangeSource = `held at ${this.lo.toFixed(1)}…${this.hi.toFixed(1)} dBFS, where auto-contrast left it`;
+  }
+
+  /** The one display range, with its provenance. What a legend states, in either mode. */
+  get range(): DisplayRange {
+    return { lo: this.lo, hi: this.hi, mode: this.autoScale ? "auto" : "anchored", source: this.rangeSource };
   }
 
   /**
@@ -282,8 +387,14 @@ export class Surface {
         const res = this.cache.acquire(a);
         if (res.kind === "resident") {
           this.drawRegion(pane, extentOf(this.lattice, a), res.entry, "tile", r);
-          const rg = res.entry.data.rangeDb;
-          if (rg) { lo = Math.min(lo, rg.lo); hi = Math.max(hi, rg.hi); }
+          // **The one read of a tile's own range, and it is inside the opt-in branch** (T-470). What
+          // is on screen decides the scale only when the user has asked for that; otherwise the
+          // scale is anchored and this loop cannot touch it. `ui/test/surface-range.test.ts` asserts
+          // that on this source, because the defect is re-introducible in one line.
+          if (this.autoScale) {
+            const rg = res.entry.data.rangeDb;
+            if (rg) { lo = Math.min(lo, rg.lo); hi = Math.max(hi, rg.hi); }
+          }
           tiles++;
           continue;
         }
@@ -306,7 +417,9 @@ export class Surface {
     gl.disable(gl.SCISSOR_TEST);
     if (this.autoScale && lo < hi) {
       // One range for every pane, moved gently: two panes showing the same energy must not read as
-      // two strengths on one screen (T-397's honesty problem, one layer up).
+      // two strengths on one screen (T-397's honesty problem, one layer up). This is the **opt-in**
+      // contrast control since T-470 — as a default it is the defect, because the "energy" whose
+      // colour it holds steady across panes is not held steady across *zooms*.
       this.lo += 0.15 * (lo - 8 - this.lo);
       this.hi += 0.15 * (hi + 3 - this.hi);
     }

@@ -25,6 +25,30 @@ const FORBIDDEN = new Set([8788, 8789, 8899, 8900]);
 
 export const DEFAULT_FIXTURE = "fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta";
 
+/**
+ * The first port from `first` that nothing is already answering on, skipping the reserved ones.
+ *
+ * "Answering" is the same question the readiness loop asks — an HTTP response to `/surface.html` —
+ * because that is exactly what the readiness loop would mistake for its own server. A refused
+ * connection is the answer we want; anything else means the port is taken.
+ */
+async function freePort(first, tries = 24) {
+  for (let p = first; p < first + tries; p++) {
+    if (FORBIDDEN.has(p)) continue;
+    try {
+      await fetch(`http://127.0.0.1:${p}/surface.html`, { signal: AbortSignal.timeout(1500) });
+    } catch {
+      return p; // nothing listening (or nothing that speaks HTTP): ours to take
+    }
+    if (p === first) {
+      console.error(`e2e: port ${p} is already serving — another e2e run is using it; stepping past it ` +
+        "rather than testing that run's bundle");
+    }
+  }
+  throw new Error(`no free port in ${first}..${first + tries - 1}: every one is already serving. ` +
+    "Another e2e run (or several) is in flight; wait for it, or set HK_E2E_PORT.");
+}
+
 function hkBinary() {
   if (process.env.HK_BIN) {
     if (!existsSync(process.env.HK_BIN)) throw new Error(`HK_BIN=${process.env.HK_BIN} does not exist`);
@@ -49,6 +73,13 @@ function hkBinary() {
 export async function startBackend({
   port = Number(process.env.HK_E2E_PORT ?? 8791),
   fixture = process.env.HK_E2E_FIXTURE ?? DEFAULT_FIXTURE,
+  // T-476, additive and off by default: drive the **mock SDR device** over the same fixture
+  // (`--device mock:…`) instead of a plain `--replay`. A replay reports no frequency grid and is not
+  // live, so every device-facing control on the page is correctly stated-and-disabled — which proves
+  // the disabled half and nothing about the enabled one. The mock reports a HackRF-class grid, an
+  // active capture window, and takes a retune, so a browser can drive the whole act without any real
+  // hardware (CLAUDE.md: e2e goes THROUGH the device interface; receive only; never the real radio).
+  mockDevice = false,
   // HK_E2E_UI_DIST is how `selftest.mjs` points the product's own server at a DELIBERATELY BROKEN
   // build, to prove this suite can still tell the difference.
   uiDist = process.env.HK_E2E_UI_DIST ?? path.join(UI_DIR, "dist"),
@@ -60,12 +91,23 @@ export async function startBackend({
   if (!existsSync(path.join(uiDist, "surface.html"))) {
     throw new Error(`${uiDist}/surface.html is missing — run \`npm run build\` in ui/ first`);
   }
+  // **Never adopt somebody else's server** (T-470). The readiness loop below waits for *anything* to
+  // answer `/surface.html` on this port, and a second worktree running its own e2e on the default
+  // port answers it — so the suite drives **that worktree's bundle**, reports on code the run never
+  // built, and goes green or red about the wrong thing. Measured the expensive way: three runs of a
+  // new guard failed against a page with none of the code under test, because another agent's
+  // `hk serve` held 8791. The repo runs up to four agents at once, so this is the normal case, not a
+  // corner. Stepping to the next free port is what the caller wanted anyway — the port is internal,
+  // callers use the returned `origin` — and it fails closed if none is free.
+  port = await freePort(port);
   const bin = hkBinary();
   const dataDir = mkdtempSync(path.join(tmpdir(), "hk-e2e-data-"));
+  const source = mockDevice
+    ? ["--device", `mock:${path.join(REPO, fixture)}`]
+    : ["--replay", path.join(REPO, fixture), "--loop"];
   const proc = spawn(bin, [
     "serve",
-    "--replay", path.join(REPO, fixture),
-    "--loop",
+    ...source,
     "--bind", `127.0.0.1:${port}`,
     "--data-dir", dataDir,
     "--ui-dist", uiDist,
