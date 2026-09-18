@@ -1,0 +1,216 @@
+// One tile, fetched from `GET /api/tiles` and decoded into the two planes the renderer samples
+// (T-440, docs/api.md "GET /api/tiles").
+//
+// **Two planes, because the wire has two planes.** The route serves a measurement grid
+// (`grid.max_db`) and a coverage grid (`coverage`), and its own rule is *"grey a cell of this tile
+// if and only if the selected plane's state is `unobserved`"*. Packing both into one number would
+// mean a state could be spelled as a value and a value as a state — the family of defect this
+// milestone exists to end. So the measurement stays a float and the state stays a byte, and the
+// only writer of the state plane is [[decodeTile]].
+//
+// **A response we cannot read is not a coverage answer.** A malformed or truncated tile throws
+// rather than decoding to `unobserved`: the place then stays *pending*, which is true, instead of
+// claiming the radio never looked. The same reasoning as `BiasTee::Unknown` is not `Off`.
+
+import { buildRequest, errorFrom } from "../controls/client";
+import { CELL } from "./cellrule";
+import { keyOf, tileUrl, type Lattice, type TileAddr } from "./lattice";
+
+/** Bytes one decoded cell occupies on the GPU: R16F measurement + R8 state. */
+export const BYTES_PER_CELL = 3;
+
+/** The honesty tier the route says answered. T-441 owns how the three are drawn. */
+export type Tier = "live-iq" | "spectrum-history" | "survey-overview";
+
+/** Per-axis fold direction, straight off `resolution.fold.<axis>.direction`. */
+export type FoldDirection = "exact" | "folded" | "replicated";
+
+/** A decoded tile: the two planes, plus what the route said about how it answered. */
+export interface TileData {
+  readonly addr: TileAddr;
+  readonly key: string;
+  readonly nf: number;
+  readonly nt: number;
+  /** Row-major `[t * nf + f]`, earliest row first, lowest frequency first — the route's own order.
+   * `NaN` wherever the state plane does not say `OBSERVED`; never a sentinel that could be read as
+   * a level. */
+  readonly value: Float32Array;
+  /** Row-major, same order. One of [[CELL]]'s codes. */
+  readonly state: Uint8Array;
+  readonly tier: Tier;
+  /** The pyramid level that actually answered (`resolution.answered.level`), for the per-pane
+   * "stated level" §8.5a requires instead of pretending two viewports agree. */
+  readonly answeredLevel: number;
+  readonly fold: { readonly frequency: FoldDirection; readonly time: FoldDirection };
+  /** Observed range of this tile's own measurements, or null — never used as a colour scale here
+   * (that is one shared range across every pane), only reported. */
+  readonly rangeDb: { readonly lo: number; readonly hi: number } | null;
+  /** What this tile costs the resident budget. */
+  readonly bytes: number;
+  /** `cost.in_flight_limit`: the server's cap, so the client can adopt it rather than guess. */
+  readonly serverInFlightLimit: number | null;
+}
+
+/** The shape this client reads. Structural, and only the fields it actually uses. */
+export interface TileResponse {
+  key: { device: string; scheme: string | number; level_f: number; level_t: number; f_index: number; t_index: number; cells: number };
+  extent: { nt: number; nf: number };
+  axes: { frequency: { levels: number; cell_hz: number }; time: { levels: number; cell_s: number } };
+  grid: { nt: number; nf: number; max_db: (number | null)[]; range_db?: { lo: number; hi: number } | null };
+  coverage?: {
+    grid?: { nt: number; nf: number };
+    any?: { cells: { state: string }[] };
+    devices?: { device: string; cells: { state: string }[] }[];
+    selected?: { device: string; named: boolean; present: boolean };
+  };
+  resolution: {
+    source: string;
+    answered?: { level: number };
+    fold?: { frequency?: { direction: string }; time?: { direction: string } };
+  };
+  cost?: { in_flight_limit?: number };
+}
+
+const TIERS: readonly string[] = ["live-iq", "spectrum-history", "survey-overview"];
+const DIRECTIONS: readonly string[] = ["exact", "folded", "replicated"];
+
+/** Thrown when the response is not a tile. The caller leaves the place *pending*, never grey. */
+export class TileDecodeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TileDecodeError";
+  }
+}
+
+/**
+ * The route's ingest backpressure (`503`, naming its own cap), as a **first-class answer rather
+ * than an error**: tile production takes the history lock, so the refusal means *ask again, fewer
+ * at a time*, and the cap it names is the number to obey.
+ */
+export class TileBusyError extends Error {
+  constructor(readonly limit: number | null, message: string) {
+    super(message);
+    this.name = "TileBusyError";
+  }
+}
+
+/** The cap a `503` names ("too many tile reads in flight (limit 4)"), or null if it named none. */
+export function capFromRefusal(message: string): number | null {
+  const m = /limit\s+(\d+)/.exec(message);
+  const n = m ? Number(m[1]) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Decodes one response into the two planes.
+ *
+ * The state plane is built from `coverage` — the route's own grey authority — and the measurement
+ * only decides between `OBSERVED` and `NO_LEVEL` *within* an observed cell. That ordering matters:
+ * a `null` in `max_db` means the pyramid kept no level here, which is a different statement from
+ * "nothing looked", and collapsing the two is exactly the lie §4 forbids.
+ */
+export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
+  const nf = resp.extent?.nf ?? resp.grid?.nf, nt = resp.extent?.nt ?? resp.grid?.nt;
+  if (!(nf > 0) || !(nt > 0)) throw new TileDecodeError(`tile ${keyOf(addr)}: no grid dimensions`);
+  const n = nf * nt;
+  const db = resp.grid?.max_db;
+  if (!Array.isArray(db) || db.length !== n) {
+    throw new TileDecodeError(`tile ${keyOf(addr)}: grid.max_db has ${db?.length ?? "no"} cells, expected ${n}`);
+  }
+  const cov = coverageCells(addr, resp);
+  const value = new Float32Array(n);
+  const state = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const s = cov(i);
+    if (s === "unobserved") { state[i] = CELL.UNOBSERVED; value[i] = NaN; continue; }
+    if (s === "unknown") { state[i] = CELL.UNKNOWN; value[i] = NaN; continue; }
+    const v = db[i];
+    if (typeof v === "number" && Number.isFinite(v)) { state[i] = CELL.OBSERVED; value[i] = v; }
+    else { state[i] = CELL.NO_LEVEL; value[i] = NaN; }
+  }
+  const src = String(resp.resolution?.source ?? "");
+  if (!TIERS.includes(src)) throw new TileDecodeError(`tile ${keyOf(addr)}: unknown honesty tier ${src || "(none)"}`);
+  const dir = (d: unknown): FoldDirection => (DIRECTIONS.includes(String(d)) ? (String(d) as FoldDirection) : "exact");
+  return {
+    addr,
+    key: keyOf(addr),
+    nf,
+    nt,
+    value,
+    state,
+    tier: src as Tier,
+    answeredLevel: Number(resp.resolution?.answered?.level ?? -1),
+    fold: { frequency: dir(resp.resolution?.fold?.frequency?.direction), time: dir(resp.resolution?.fold?.time?.direction) },
+    rangeDb: resp.grid?.range_db ?? null,
+    bytes: n * BYTES_PER_CELL,
+    serverInFlightLimit: typeof resp.cost?.in_flight_limit === "number" ? resp.cost.in_flight_limit : null,
+  };
+}
+
+/**
+ * A reader for the selected device's coverage state at a tile-grid index, resampling nearest when
+ * the coverage plane is not cell-for-cell aligned with the tile (`coverage.grid.aligned`).
+ *
+ * A **named** device with no plane in the answer is `unobserved` for that device — `selected.present
+ * = false` is a coverage answer (that front end recorded nothing here), which the route says in so
+ * many words. A *missing or malformed* coverage block is not, and throws.
+ */
+function coverageCells(addr: TileAddr, resp: TileResponse): (i: number) => string {
+  const nf = resp.extent?.nf ?? resp.grid.nf, nt = resp.extent?.nt ?? resp.grid.nt;
+  const c = resp.coverage;
+  if (!c) throw new TileDecodeError(`tile ${keyOf(addr)}: no coverage plane, so no grey authority`);
+  const named = addr.device !== "any";
+  const plane = named ? c.devices?.find((d) => d.device === addr.device)?.cells : c.any?.cells;
+  if (!plane) {
+    if (named && c.selected?.present === false) return () => "unobserved";
+    throw new TileDecodeError(`tile ${keyOf(addr)}: coverage has no plane for device ${addr.device}`);
+  }
+  const cnf = c.grid?.nf ?? nf, cnt = c.grid?.nt ?? nt;
+  if (plane.length !== cnf * cnt) {
+    throw new TileDecodeError(`tile ${keyOf(addr)}: coverage plane has ${plane.length} cells, expected ${cnf * cnt}`);
+  }
+  if (cnf === nf && cnt === nt) return (i) => plane[i]?.state ?? "unobserved";
+  // Nearest-cell resample. Only ever a downscale or an exact upscale of the same extent, so it
+  // moves no boundary: both grids cover this tile and nothing else.
+  return (i) => {
+    const t = Math.min(cnt - 1, Math.floor((Math.floor(i / nf) * cnt) / nt));
+    const f = Math.min(cnf - 1, Math.floor(((i % nf) * cnf) / nf));
+    return plane[t * cnf + f]?.state ?? "unobserved";
+  };
+}
+
+/** How the cache asks for a tile. `signal` lets a viewport change abandon one in flight. */
+export type TileFetch = (url: string, init: RequestInit) => Promise<{ ok: boolean; status: number; statusText: string; json(): Promise<unknown> }>;
+
+/**
+ * Fetches and decodes one tile. `503` becomes [[TileBusyError]] carrying the cap the server named;
+ * anything else non-2xx becomes the API's own `ControlError`.
+ */
+export async function fetchTile(addr: TileAddr, token: string, fetchFn: TileFetch, signal?: AbortSignal): Promise<TileData> {
+  const req = buildRequest("GET", tileUrl(addr), token);
+  const r = await fetchFn(req.url, { ...req.init, signal });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const e = errorFrom(r.status, body, r.statusText);
+    if (r.status === 503) throw new TileBusyError(capFromRefusal(e.message), e.message);
+    throw e;
+  }
+  return decodeTile(addr, body as TileResponse);
+}
+
+/** The lattice bootstrap: one cheap tile (`cells=8`) whose `axes` state the ladder both axes run on. */
+export function probeAddr(device = "any", scheme = "view"): TileAddr {
+  return { device, scheme, levelF: 0, levelT: 0, fIndex: 0, tIndex: 0, cells: 8 };
+}
+
+/** The lattice, read off a probe response. See [[latticeFrom]] for why the client never picks it. */
+export function latticeOf(resp: TileResponse, cells: number): Lattice {
+  return {
+    scheme: String(resp.key.scheme),
+    cells,
+    f0Hz: resp.axes.frequency.cell_hz / 2 ** resp.key.level_f,
+    t0Ns: (resp.axes.time.cell_s * 1e9) / 2 ** resp.key.level_t,
+    levelsF: resp.axes.frequency.levels,
+    levelsT: resp.axes.time.levels,
+  };
+}

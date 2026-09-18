@@ -1,0 +1,192 @@
+// T-440: the shared tile LRU — the reason the surface is ONE WebGL2 context.
+//
+// The load-bearing assertion is the first one: a tile wanted by eight panes is fetched once and
+// uploaded once. T-437 measured that on real WebGL2 (95 distinct keys -> 95 uploads, 18.68 MB
+// shared against 149.44 MB per-pane); this is the same claim as a property of the code, so it
+// cannot quietly stop being true.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { CELL } from "../src/surface/cellrule";
+import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
+import { TileCache, parseKey, type TileCacheOptions } from "../src/surface/tilecache";
+import { TileBusyError, type TileData } from "../src/surface/tile";
+
+const LAT: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 20, levelsT: 15 };
+const BYTES = 192 * 1024; // one 256^2 tile: R16F measurement + R8 state
+
+const addr = (fIndex: number, tIndex = 0, levelF = 0, levelT = 0): TileAddr =>
+  ({ device: "any", scheme: "view", levelF, levelT, fIndex, tIndex, cells: 256 });
+
+function data(a: TileAddr, bytes = BYTES): TileData {
+  return {
+    addr: a, key: keyOf(a), nf: 2, nt: 2,
+    value: new Float32Array([-90, NaN, -70, NaN]),
+    state: new Uint8Array([CELL.OBSERVED, CELL.UNOBSERVED, CELL.OBSERVED, CELL.UNKNOWN]),
+    tier: "spectrum-history", answeredLevel: 1, fold: { frequency: "exact", time: "exact" },
+    rangeDb: { lo: -100, hi: -60 }, bytes, serverInFlightLimit: null,
+  };
+}
+
+const flush = () => new Promise((r) => setImmediate(r));
+
+function harness(opts: TileCacheOptions = {}) {
+  const calls: string[] = [];
+  const waiting = new Map<string, { resolve: (d: TileData) => void; reject: (e: unknown) => void }>();
+  let uploads = 0, destroys = 0;
+  const cache = new TileCache<{ id: number }>(
+    { upload: () => ({ id: uploads++ }), destroy: () => { destroys++; } },
+    (a) => new Promise<TileData>((resolve, reject) => { calls.push(keyOf(a)); waiting.set(keyOf(a), { resolve, reject }); }),
+    { now: () => 0, ...opts },
+  );
+  return {
+    cache, calls, waiting,
+    uploads: () => uploads,
+    destroys: () => destroys,
+    async settle(a: TileAddr, bytes = BYTES) {
+      waiting.get(keyOf(a))!.resolve(data(a, bytes));
+      waiting.delete(keyOf(a));
+      await flush();
+    },
+    async fail(a: TileAddr, e: unknown) {
+      waiting.get(keyOf(a))!.reject(e);
+      waiting.delete(keyOf(a));
+      await flush();
+    },
+  };
+}
+
+test("a tile wanted by eight panes is fetched ONCE and uploaded ONCE", async () => {
+  const h = harness({ inFlight: 8 });
+  const a = addr(1);
+  h.cache.beginFrame();
+  for (let pane = 0; pane < 8; pane++) assert.equal(h.cache.acquire(a).kind, "pending");
+  h.cache.endFrame();
+  await flush();
+  assert.deepEqual(h.calls, [keyOf(a)]);
+  await h.settle(a);
+  assert.equal(h.uploads(), 1);
+  h.cache.beginFrame();
+  for (let pane = 0; pane < 8; pane++) assert.equal(h.cache.acquire(a).kind, "resident");
+  assert.equal(h.cache.stats.hits, 8);
+  assert.equal(h.uploads(), 1, "a second upload means the panes are not sharing one cache");
+});
+
+test("the budget is BYTES, because `cells` makes tiles non-uniform", async () => {
+  const h = harness({ budgetBytes: 3 * BYTES, inFlight: 8 });
+  // A small tile costs a small part of the budget; a count would treat it as a whole one.
+  h.cache.beginFrame();
+  for (let i = 0; i < 4; i++) h.cache.acquire(addr(i));
+  h.cache.endFrame();
+  await flush();
+  for (let i = 0; i < 4; i++) await h.settle(addr(i), BYTES / 16);
+  assert.equal(h.cache.residentTiles, 4, "four eighth-sized tiles fit a three-tile budget");
+  assert.equal(h.cache.residentBytes, 4 * (BYTES / 16));
+  assert.equal(h.cache.stats.evictions, 0);
+});
+
+test("eviction is LRU over the budget, and never touches what this frame is drawing", async () => {
+  const h = harness({ budgetBytes: 2 * BYTES, inFlight: 8 });
+  for (let i = 0; i < 3; i++) {
+    h.cache.beginFrame();
+    h.cache.acquire(addr(i));
+    h.cache.endFrame();
+    await flush();
+    await h.settle(addr(i));
+  }
+  assert.equal(h.cache.residentBytes <= 2 * BYTES, true);
+  assert.equal(h.cache.stats.evictions, 1);
+  assert.equal(h.destroys(), 1, "an evicted tile must free its textures, or the budget is fiction");
+  // The oldest went; the two most recent are still there.
+  h.cache.beginFrame();
+  assert.equal(h.cache.acquire(addr(0)).kind, "pending");
+  assert.equal(h.cache.acquire(addr(2)).kind, "resident");
+});
+
+test("pins win over the budget: a starved frame keeps drawing rather than dropping what is on screen", async () => {
+  const h = harness({ budgetBytes: BYTES, inFlight: 8 });
+  h.cache.beginFrame();
+  for (let i = 0; i < 3; i++) h.cache.acquire(addr(i));
+  h.cache.endFrame();
+  await flush();
+  for (let i = 0; i < 3; i++) await h.settle(addr(i));
+  // All three were acquired on the current frame, so all three are pinned.
+  h.cache.beginFrame();
+  for (let i = 0; i < 3; i++) assert.equal(h.cache.acquire(addr(i)).kind, "resident");
+  h.cache.endFrame();
+  assert.equal(h.cache.residentTiles, 3);
+  assert.ok(h.cache.stats.overBudgetFrames > 0, "being over budget on pins alone must be COUNTED, not silently obeyed");
+});
+
+test("the queue is LIFO: the last tile wanted is the first fetched", async () => {
+  const h = harness({ inFlight: 1 });
+  h.cache.beginFrame();
+  h.cache.acquire(addr(1));
+  h.cache.acquire(addr(2));
+  h.cache.acquire(addr(3));
+  h.cache.endFrame();
+  await flush();
+  assert.deepEqual(h.calls, [keyOf(addr(3))], "FIFO here is what makes a fast pan deliver tiles for where the user WAS");
+  await h.settle(addr(3));
+  assert.deepEqual(h.calls, [keyOf(addr(3)), keyOf(addr(2))]);
+});
+
+test("a viewport change cancels the tiles it left, and only those", async () => {
+  const h = harness({ inFlight: 1 });
+  h.cache.beginFrame();
+  for (let i = 0; i < 4; i++) h.cache.acquire(addr(i));
+  h.cache.endFrame();
+  await flush();
+  const tileHz = 6250 * 256;
+  h.cache.setViewports(LAT, [{ f0Hz: 0, f1Hz: tileHz, t0Ns: 0, t1Ns: 1e9 * 256 }]);
+  assert.equal(h.cache.queueDepth, 1, "only tile 0 intersects the new viewport");
+  assert.ok(h.cache.stats.cancelled >= 2);
+});
+
+test("the route's 503 is an ANSWER: adopt the cap it names, back off, keep wanting the tile", async () => {
+  let clock = 0;
+  const h = harness({ inFlight: 4, busyBackoffMs: 50, now: () => clock });
+  h.cache.beginFrame();
+  h.cache.acquire(addr(1));
+  h.cache.endFrame();
+  await flush();
+  await h.fail(addr(1), new TileBusyError(2, "too many tile reads in flight (limit 2)"));
+  assert.equal(h.cache.inFlightLimit, 2, "the server owns this cap: it is ingest backpressure, not a browser connection limit");
+  assert.equal(h.cache.stats.busyRefusals, 1);
+  assert.equal(h.cache.stats.failures, 0, "a refusal naming its cap is not a failure");
+  assert.equal(h.cache.queueDepth, 1, "the tile is still wanted");
+  // Backoff holds the queue, then it runs again.
+  h.cache.beginFrame(); h.cache.endFrame();
+  assert.equal(h.calls.length, 1);
+  clock = 100;
+  h.cache.beginFrame(); h.cache.endFrame();
+  assert.equal(h.calls.length, 2);
+});
+
+test("a real failure is counted and does not wedge the queue", async () => {
+  const h = harness({ inFlight: 1 });
+  h.cache.beginFrame();
+  h.cache.acquire(addr(1));
+  h.cache.acquire(addr(2));
+  h.cache.endFrame();
+  await flush();
+  await h.fail(addr(2), new Error("boom"));
+  assert.equal(h.cache.stats.failures, 1);
+  assert.deepEqual(h.calls, [keyOf(addr(2)), keyOf(addr(1))]);
+});
+
+test("the residency answer is never a cell state", async () => {
+  const h = harness();
+  h.cache.beginFrame();
+  const r = h.cache.acquire(addr(9));
+  assert.equal(r.kind, "pending");
+  // `pending` is not in CELL, and CELL's codes are not residencies. The type system says so; this
+  // says it again where a future edit would have to notice.
+  assert.ok(!Object.values(CELL).some((v) => String(v) === r.kind));
+});
+
+test("keys round-trip, so an in-flight request can be tested against a viewport", () => {
+  const a = addr(7, 3, 2, 5);
+  assert.deepEqual(parseKey(keyOf(a)), a);
+  assert.equal(parseKey("nonsense"), null);
+});
