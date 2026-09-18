@@ -11810,7 +11810,7 @@ tasks:
   - id: T-450
     milestone: MCANVAS
     title: A preview route that MOUNTS the surface over recorded history - see the canvas before anything is retired
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     deps: [T-438, T-440, T-441, T-442, T-443]
@@ -11857,6 +11857,43 @@ tasks:
       `just gate`; the coordinator gates at merge. Never end your turn waiting on a background
       command, including one the harness backgrounded for you.
       NOTHING REACHES MAIN WITHOUT THE USER'S APPROVAL on this one - commit to task-t450 only.
+    commit: "dc1e386"
+    result: |
+      DONE, and MOUNTING IT FOUND A DEFECT THAT MADE EVERY PREVIOUS GREEN SUITE BESIDE THE POINT.
+      THE RENDERER COULD NOT LOAD IN A BROWSER AT ALL. cellrule.ts compiled its four pattern
+      predicates with `new Function` AT MODULE SCOPE; hk serve sends default-src 'self' with no
+      unsafe-eval, so it threw DURING MODULE EVALUATION - and surface.ts imports it, so the whole
+      bundle died. Invisible because nothing in ui/src imported the module and node's test runner
+      has no CSP. T-441 had proved the generated shader against a CPU rule on 114973 of 115200
+      pixels: entirely correct, about a module that COULD NEVER RUN WHERE THE PRODUCT RUNS.
+      Fixed by writing the predicates in TypeScript and moving the eval INTO surface-tiers.test.ts,
+      which compiles every PATTERNS string and asserts agreement over a dense pixel/pitch grid - so
+      T-441's anti-drift guarantee is now ASSERTED rather than assumed, and it runs where the
+      product runs.
+      THE ROUTE: /surface.html, its own esbuild invocation and entry, sharing the tab's hk-token.
+      Verified end to end against a real backend on port 8791 - never 8789/8899/8900.
+      WHAT A USER SEES: the FM capture renders 99.6-102.0 MHz, carrier in orange, flat grey either
+      side (genuinely unobserved), purple hatch below (past the record horizon). T-443's divergence
+      note live: pane1 6 kHz x 1.0 s (level 0/0) against map1 6.40 MHz x 1.0 s (level 10/0). Wheel
+      zoom moved the pane to level 1/0 and left the time level alone.
+      THE EMPTY-SCREEN ANSWER, measurement-only with no band-plan lookup: open on the bounding box
+      of OBSERVED cells with a 20% margin; then a REFINEMENT PASS, because the mount measured the
+      coarse answer - 128 cells over 6.5 GHz is 51.2 MHz per cell, so the first box came back
+      51.2-102.4 MHz, 20x too wide, and asking again over it returns the real 99.6-102.0 MHz. And
+      SAY THE NUMBER BEFORE THE PICTURE: "0.8% of this surface was ever sampled (32 of 4096
+      coverage cells)".
+      THREE FINDINGS FOR T-445: tile WIRE cost is ~50x the RESIDENT cost (a level-0 256^2 tile is
+      9.5 MB of JSON and 0.41 s, the map's level-10 tile 5.2 s, against TileCache's 192 KB decoded
+      assumption) and with in_flight_limit 4 the map's coarse tiles STARVE the panes - 26 resident
+      against 17268 cancelled in 75 s; coverage.horizon.oldest_record_s ROLLS FORWARD (~218 s over
+      five minutes), so a view pinned at open watches its own window turn to `unknown` hatch, and
+      T-445 needs a bounds-refresh policy that is NOT the live edge; and on a replay
+      /api/navigation reports frequency: null, so the extent falls back to the lattice's own axis -
+      which the page LABELS in orange rather than passing off as a reported bound.
+      ADDITIVE, ASSERTED: a test walks the import graph from src/app/main.ts and requires it never
+      reaches a T-450 file, and dist/app.js built from this branch is BYTE-IDENTICAL to main's.
+      Scope held - panes frozen at open, edgeNs resolved once and never advanced, liveSegmentQuads
+      empty with the page saying why, retune.ts not imported and no device route named.
   - id: T-451
     milestone: M2-hardening
     title: decoded_capture's segments_roll test fails 2 in 10 AT THE CAPPED THREAD COUNT, and it is already in heavy-serial
@@ -11954,6 +11991,57 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-cli`,
       `just test-crate hk-core`, `just test-ui`, `just test-one <name>` - then HAND BACK. Never
       `just gate`; the coordinator gates at merge.
+  - id: T-453
+    milestone: MCANVAS
+    title: Coarse nodes are built EAGERLY at every seal, which is a deviation from §5.2's decided "on demand at the live edge"
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    deps: [T-439]
+    use_cases: [AWARE-011, AWARE-042]
+    found_by: 'T-439 (2026-09-17), measuring why the view lattice cost 5.1x wall clock on the acceptance suite'
+    acceptance: |
+      §5.2's heading is "Downsample timing - DECIDED: precomputed at seal time, on demand at the
+      live edge", settled by the user and relayed through T-408. THE CURRENT BEHAVIOUR IS A
+      DEVIATION FROM THAT DECISION, not an optimisation opportunity: every seal eagerly builds
+      every coarse node. This ticket implements what §5.2 already says.
+      WHAT T-439 MEASURED, and it is why this is worth doing properly. The view lattice cost the
+      acceptance suite 162.8 s against a control's 32.9 s - 5.1x WALL FOR IDENTICAL USER CPU
+      (333 s vs 331 s) AND UNCHANGED RSS. The runs were WAITING, not computing. Three probes
+      isolated it: one test alone costs 10.5 s against 10.0 s, so there is no per-run cost;
+      opening the 64-level pyramid and never writing it is free at 31.4 s; and only NODE COUNT
+      moved it - 4x4 at 62.6 s against 8x8's 112.7 s, about 1.5 s of suite wall per node.
+      THE GENERALISABLE FINDING, which belongs in docs/16: T-434 measured a lattice at ~4x its
+      finest level ON DISK and accepted that. THE SAME 4x APPLIES TO TILE WRITES PER SECOND OF
+      CAPTURE - the part a running pipeline pays, which nobody had costed. A welded ladder's
+      coarse levels step x60, x15, x4, x24 and write almost nothing; a de-welded x2 lattice has
+      eight time levels each writing its own series. Invisible on the product (one pipeline),
+      amplified by the harness (28 pipelines on one volume, several replaying time-compressed 48 h
+      scenes).
+      T-439 shipped the 4x4 lattice as the measured interim, which surrenders reach the coarse end
+      could not back anyway - T-438 found the same independently from the other direction, that
+      §6.2's V0 is unbackable at the COARSE end because a 3.28 GHz x 48-day tile needs 32768
+      frequency cells at scheme 1's coarsest and no finer level is affordable. Two agents, two
+      routes, one conclusion.
+      DoD: coarse nodes are built ON DEMAND at the live edge and precomputed at seal time for the
+      levels that are actually sealed, per §5.2. Measure the acceptance-suite cost before and
+      after, and the residency, at whatever lattice size the milestone then wants - the point of
+      this ticket is that it should make the lattice size a REACH decision again rather than a
+      gate-time one.
+      DO NOT regress T-439's two fixes: tile I/O stays off the thread that gates capture (a
+      ViewWriter thread owns the folding; the history reader does a clone and a push), and the
+      run-end seal goes through the last frame rather than an hour of slack - that gesture cost
+      273 files and 1288 ms to persist 0.1 MB on a 64-node lattice, against scheme 1's 9 files and
+      67 ms.
+    notes: |
+      §5.2's own reasoning is worth re-reading before designing: it concentrates the on-demand
+      work at the live edge, where ingest is running and the lock is contended, which is exactly
+      the tension this ticket has to resolve rather than move.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-store`,
+      `just test-crate hk-pipeline`, and `just acceptance-ci` since it is the thing that regressed
+      - then HAND BACK. Never `just gate`; the coordinator gates at merge.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
