@@ -12650,7 +12650,7 @@ tasks:
   - id: T-467
     milestone: MLIVE
     title: 99 percent of a live tile's 19.34 MB body is the coverage plane, and it is sent TWICE
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -12682,6 +12682,22 @@ tasks:
       Filed 2026-09-17 from /tmp/claude-501/live-tiles-assessment.md. THE ASSESSMENT'S TOP
       RECOMMENDATION together with T-461: "T-A + T-B are the cheap 80 percent."
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "99fea67"
+    result: |
+      DONE. A TABLE OF DISTINCT PLANES, each run-length encoded over a served alphabet: coverage.planes[]
+      holds each distinct plane once as flat runs, coverage.states is the code->name alphabet, and
+      any.plane / devices[].plane are INDICES into that table. devices[] was NOT dropped - a device whose
+      coverage equals the union costs ONE INDEX, so the duplication is gone BY CONSTRUCTION rather than by
+      a one-device special case. Cost when devices genuinely differ is linear in DISTINCT planes, not
+      devices x cells; tested with two front ends on disjoint bands, each reading its own.
+      MEASURED: observed 256^2 body 18 421 100 -> 1 120 616 B (16.4x); the coverage part 17 303 374 ->
+      2 891 B (5 985x); route build_ms 707.4 -> 14.1 ms. Plus an in-process side-by-side on one grid:
+      19 818 236 B vs 2 906 B (6 820x).
+      THE HONESTY BOUNDARY HELD IN A STRONGER FORM THAN THE RULE REQUIRES: three codes, never two, and a
+      test asserts STATE-FOR-STATE that this encoding and the per-cell form classify EVERY cell
+      identically, including that an observed cell is never relabelled past the horizon. NO CELL ON THE
+      PLANE CARRIES A MEASUREMENT KEY AT ALL - there is no field anywhere to read as zero. Malformed
+      planes throw client-side, so the place stays pending rather than rendering as data.
   - id: T-460
     milestone: MLIVE
     title: The live edge is frozen in the CLIENT - a resident tile is never refetched, so live advances once every 256 s
@@ -12728,7 +12744,7 @@ tasks:
   - id: T-461
     milestone: MLIVE
     title: An empty tile costs 134 ms and 2.56 MB to build - 86 percent of an observed one - and must short-circuit
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     depends_on: []
@@ -12755,6 +12771,23 @@ tasks:
       Filed 2026-09-17 from /tmp/claude-501/live-tiles-brief.md item 3; costs measured in
       /tmp/claude-501/live-tiles-assessment.md. With T-467 this is the assessment's "cheap 80 percent".
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "99fea67"
+    result: |
+      DONE. Coverage is computed FIRST; when uniform_state(device) is "unobserved" the route returns
+      without any RegionQuery. uniform_state inspects THE VERY Vec<u8> that to_json serialises - one
+      value, two uses, not a second opinion about what was observed.
+      MEASURED: empty 256^2 body 2 561 726 -> 7 568 B (338x); route build_ms 92.1 -> 2.93 ms (31x);
+      source_cells 65 536 -> 0; chunks 1 -> 0. THE BODY IS A CONSTANT: 7 549 B at 64^2 against 7 563 B at
+      256^2 - sixteen times the cells for fourteen more bytes.
+      IT CORRECTED THE ASSESSMENT: "sub-millisecond" was extrapolated from a cells=8 request; at 256^2 the
+      residual ~3 ms is the coverage RASTERISATION itself, which is the answer rather than overhead, and
+      is the floor without a second opinion.
+      NON-VACUITY THAT FAILS CLOSED: a uniformly-UNKNOWN plane over a band where the pyramid demonstrably
+      holds data (the test asserts observed_cells > 0 there), so had the short-circuit fired, measured
+      spectrum would have been served as nothing; and a MIXED plane that is not contrived - a server
+      seconds old has its record horizon INSIDE the current tile, which is what the first tile of every
+      server's life looks like. resolution.short_circuit is on BOTH paths, so applied:false names its
+      reason.
   - id: T-468
     milestone: MLIVE
     title: A row-push route - and it must subscribe to an ADDRESS RANGE, not to "the live stream"
@@ -13048,7 +13081,7 @@ tasks:
   - id: T-472
     milestone: MCANVAS
     title: A plain wheel must LOCK the aspect ratio - when either axis hits its bound, BOTH stop
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: []
@@ -13338,7 +13371,7 @@ tasks:
   - id: T-480
     milestone: MCANVAS
     title: The surface asks for pyramid nodes that do not exist - tile-address math must clamp to realizable levels and indices
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     depends_on: []
@@ -13368,6 +13401,30 @@ tasks:
     notes: |
       Filed 2026-09-18 from user report. T-479 stops the flood; this removes the cause.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "b9191b0"
+    result: |
+      DONE, AND IT DISPROVED ITS OWN TICKET'S PREMISE. level_f=10, t_index=218471 - the address from the
+      user's console flood - IS INSIDE THE DECLARED LATTICE. /api/tiles declares axes.frequency.levels=12
+      and axes.time.levels=15, then 400s a large part of that grid: every level_f >= 10, and roughly
+      level_f + level_t > 10. Two distinct server refusals reproduced against a real hk serve. The root:
+      the VIEW address lattice is 12 x 15 while the STORE behind it is VIEW_LEVELS = 4 deep, so the coarse
+      corner is NAMED BUT UNBACKABLE. THE SERVABLE SET IS AN AREA CONSTRAINT (tile Hz x tile s), NOT a
+      per-axis level bound - verified by moving `cells`: level 10 fails at 256 and SUCCEEDS at 128, and
+      level 9 at 256 is the same extent and succeeds. SO THE CLIENT WAS OBEYING THE ONLY BOUND ANYONE
+      STATES, AND THAT BOUND IS WRONG. Filed as T-482.
+      THE CLAMP SHIPS ANYWAY, IN THE DERIVATION: tilesFor clamps LEVELS - covering surface.ts's pinned
+      parent row at levelF + 1, exactly the consumer a fetch-time guard would have hidden - and bounds
+      indices per axis. An index past the end is DROPPED, never clamped: a level is a resolution, an index
+      is a place. latticeOf was a SECOND COPY of latticeFrom and now delegates; that copy is why one
+      reader could learn a ceiling and the other could not.
+      THE PROPERTY IS QUANTIFIED, NOT SAMPLED: 6 pane sizes x 25 frequency zooms x 25 time zooms x 9 pans,
+      through the derivation the renderer uses, checking EVERY address produced - 17 075 of 14 449 619
+      off-lattice before, 0 of 14 513 258 after. inLattice() is written from the declared axes, not from
+      the clamp, so it cannot certify itself.
+      BROWSER, STATED AS A CONDITIONAL RATHER THAN OVERCLAIMED: as shipped, aggressive zoom-out makes 117
+      requests of which 107 are refused; TOLD THE CEILING, the same gesture makes 12 with ZERO 4xx.
+      T-472 IS NOT A SHARED ROOT: the minimap sits at level 10/0 ON FIRST PAINT with no gesture at all, so
+      the flood is not gesture-driven and aspect drift only aggravates it. T-472's DoD was not absorbed.
   - id: T-481
     milestone: MCANVAS
     title: A full canvas e2e SCENARIO through the mock SDR - pan/zoom, live advance, retune-fills - as the standing regression guard
@@ -13376,7 +13433,7 @@ tasks:
     parallel_group: UI
     core_interface: true
     model: opus
-    depends_on: [T-460, T-476, T-480]
+    depends_on: [T-460, T-476, T-480, T-483]
     use_cases: [AWARE-011, AWARE-042]
     acceptance: |
       USER DIRECTIVE 2026-09-18. The browser tier exists but there is no END-TO-END SCENARIO for the
@@ -13475,6 +13532,101 @@ tasks:
       with no gesture at all - so the flood is not gesture-driven and T-472's aspect drift only
       aggravates it. Until this ticket lands, T-479's terminal-4xx handling is what keeps the console
       quiet.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-483
+    milestone: MLIVE
+    title: PROVE THE GAP - the canvas finest-live tier must reproduce the old waterfall's image for the same window, and today it will not
+    status: todo
+    priority: high
+    parallel_group: UI
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      USER PRIORITY 2026-09-18. The user reports the canvas shows LESS DETAIL than the previous
+      waterfall: the wavey FM signal at 100.45 MHz reads nearly straight, and 101.3 MHz is washed
+      out. THIS TICKET IS THE PROOF, NOT THE FIX - and IT IS EXPECTED TO FAIL WHEN WRITTEN.
+      ROOT CAUSE, CONFIRMED IN THE BRIEF: the canvas renders the tile pyramid, and per
+      crates/hk-store/src/history/frame.rs:132-133 a level-0 cell AVERAGES f_cell / bin_width FFT
+      BINS when f_cell > bin_width. With the default level-0 f_cell (~6.25 kHz) far wider than the
+      live FFT bin (hundreds of Hz over a 2.4 MHz span), EACH CANVAS CELL SMOOTHS ~10+ BINS. The old
+      waterfall rendered live spectrum frames at FULL FFT BIN RESOLUTION. It is not the span and not
+      the sample rate - it is TILE-AVERAGING VERSUS DIRECT FFT.
+      NOTE WHICH INVARIANT THIS BREAKS, because it is the opposite of the usual worry. The honesty
+      rules exist to stop the UI IMPLYING detail the hardware did not capture. Here the canvas is
+      WITHHOLDING detail the hardware DID capture, and CLAUDE.md already forbids that: "whenever data
+      exists for that window it must be shown" - "we have it but didn't render it" is a bug. So this
+      is not a new requirement; it is an existing one, violated.
+      THE TEST: drive IDENTICAL IQ - an existing FM-with-RDS fixture - through both paths for the
+      same (time x frequency) window, and assert they MATCH. The two paths are the FFT spectrum
+      frames at display resolution, and the canvas/tile path at its live/finest tier.
+      COMPARE VALUES, NOT ONLY PIXELS, AND SAY WHICH. The strongest form is that the finest live tier
+      REPRODUCES THE FFT BINS - same numbers - because a pixel comparison also folds in the colormap
+      and the display range (which T-470 has just changed) and would drift for reasons that have
+      nothing to do with fidelity. A pixel comparison within a small tolerance is acceptable as a
+      second, weaker check; if you do both, say what each is a property OF.
+      QUANTIFY THE GAP RATHER THAN MERELY FAILING: how many bins per cell, and what the smoothing
+      does to a known structure in the fixture (the 100.45 MHz wave, the 101.3 MHz detail, the 19 kHz
+      pilot and the 57 kHz RDS subcarrier are all things whose presence or absence is checkable). A
+      failing test that says "differs" is worth far less than one that says "the canvas cell is the
+      mean of 10.24 bins and the 19 kHz pilot is attenuated by N dB".
+      NOTE THE ONE-RENDERER RULE BEFORE PROPOSING ANYTHING: T-445 retired the old waterfall
+      precisely because every one of T-420, T-388, T-397 and T-412 was TWO IMPLEMENTATIONS OF THE
+      SAME IDEA DRIFTING APART. The old render path no longer exists in the client, so the
+      comparison is against the FFT FRAMES THEMSELVES, not against a resurrected second renderer.
+      Do not reintroduce one to make the test easy.
+      DoD: the test exists, runs on a fixture, and FAILS with a quantified gap; the comparison is
+      against FFT values with its own stated premise; it is folded into the canvas e2e/acceptance
+      work (T-481) rather than living alone; and it becomes the standing regression guard that
+      native-zoom canvas == old waterfall once T-484 lands.
+    notes: |
+      Filed 2026-09-18 from /tmp/claude-501/canvas-fidelity-brief.md. THE USER'S EXPLICIT PRIORITY is
+      this test, ahead of the fix. Expected to fail on arrival; that is the point.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-484
+    milestone: MLIVE
+    title: The live/tuned tier must render at live-IQ FFT resolution - the pyramid stays coarse only for zoom-out and history
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-483]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      THE FIX for the gap T-483 proves. The user's words: "same experience, with the new zoom/pan".
+      At native/live zoom on the tuned region, THE CANVAS MUST EQUAL THE OLD WATERFALL. The pyramid
+      stays coarse for zoomed-out, history and panning - that is honest survey overview and the
+      honesty tiers already say so - but the finest LIVE-IQ tier must deliver the old detail.
+      TWO CANDIDATE APPROACHES, AND THE TICKET IS TO PICK ONE ON MEASUREMENT, not taste:
+      (a) the live-IQ tier renders the actual SPECTRUM FRAMES (full FFT) for the tuned window, with
+      the pyramid used only for coarser tiers; or
+      (b) the finest pyramid level's f_cell EQUALS THE FFT BIN WIDTH for the live window, so level-0
+      is exact FFT and averages nothing - at a storage and bandwidth cost.
+      ASSESS BOTH AGAINST hk-store AND THE LIVE-TILE PATH (T-439/T-460) AND SAY WHICH IS CHEAPER FOR
+      THE SAME RESULT. Real numbers: (b) multiplies level-0 cell count by f_cell / bin_width (~10x)
+      and therefore multiplies residency and write cost, which is exactly the budget T-453 spent a
+      ticket reclaiming (262 s -> 75 s, 2.28 -> 0.91 MB/MHz) - so quantify it rather than assuming.
+      (a) is cheaper in storage but risks the defect family this milestone closed.
+      THE TRAP IN (a), STATED PLAINLY: "the live tier renders spectrum frames" must mean ONE RENDERER
+      FED A DIFFERENT SOURCE, not a second render path. T-445 retired the old waterfall because every
+      one of T-420, T-388, T-397 and T-412 was two implementations of one idea drifting apart, and
+      T-460 was told the same rule about live rows. If (a) is chosen, the frames must enter the same
+      pane, the same toClip, the same ramp, the same honesty tiers - and the design must say how a
+      reader can tell which source a cell came from, because the honesty tiers require exactly that
+      distinction.
+      T-467 IS RELEVANT TO THE COST: a tile body is now ~1.1 MB rather than 19.34 MB, and an
+      unobserved tile 7.5 kB, so the bandwidth argument against a finer level-0 is much weaker than
+      it was a day ago. Re-derive it; do not inherit the old number.
+      DoD: T-483's test passes with the comparison unchanged and unweakened; the chosen approach is
+      justified with measured storage, residency and write cost against T-453's figures; the honesty
+      tier a cell came from is still distinguishable; and zoomed-out/history behaviour is unchanged,
+      shown rather than asserted.
+    notes: |
+      Filed 2026-09-18 from /tmp/claude-501/canvas-fidelity-brief.md. Sequenced after T-483 because
+      the user asked for the proof first, and because a fix whose test was written afterwards tends
+      to be tested against itself.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
