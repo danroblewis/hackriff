@@ -141,6 +141,35 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
     .sort((a, b) => b[1] - a[1])
     .map(([k, n]) => `${k} x${n} @${med(msByLevel.get(k) ?? []).toFixed?.(0) ?? "?"}ms`).join("   ")}`);
 
+  // **The longest the live pane went without a fresh answer for an address it had already.** T-491:
+  // whether the `t+8 s` sample is a real render is decided by whether it lands inside such a hole,
+  // and the two causes look identical in pixels — a lane whose clock was set by a neighbour's
+  // history-lock hold, and a lane that is simply expensive. The gap is what says a hole existed; the
+  // latency column above says why. (Measured: 2.6 s mean before this ticket, 1.7 s after.)
+  const again = new Map();
+  let worst = 0, worstAt = 0;
+  for (const r of asked) {
+    const prev = again.get(r.url);
+    if (prev !== undefined && r.startedMs - prev > worst) { worst = r.startedMs - prev; worstAt = prev; }
+    again.set(r.url, r.endedMs ?? r.startedMs);
+  }
+  const t0 = Math.min(...asked.map((r) => r.startedMs));
+  t.diagnostic(`longest gap between successive answers for one address: ${worst} ms, starting ` +
+    `${((worstAt - t0) / 1000).toFixed(1)} s into the run`);
+
+  // **The FIRST sample is asserted on its own** (T-491). The `4 of 5` tolerance below is deliberate
+  // — one screenshot may catch a frame mid-scroll — but it is also exactly wide enough to hide a
+  // dead OPENING, and that is the failure it hid: the flat sample was `t+8 s` in every one of the
+  // runs that failed, never a later one, and the first seconds of a session are when a user is
+  // looking. A tolerance that happens to cover the one sample whose failure has its own mechanism is
+  // not a tolerance, it is a blind spot.
+  assert.ok(samples[0].ok,
+    `the newest rows of a following pane were a FLAT fill 8 s after the surface first drew ` +
+    `(${samples[0].c.distinct} distinct, dominant ${(samples[0].c.dominantShare * 100).toFixed(0)} %). ` +
+    "The later samples say whether the live edge recovers; this one says whether it ever started. " +
+    "T-491: look at the gap and the per-level latencies above — a live lane whose cadence was set " +
+    "from one answer the minimap's initial fill had slowed is what this guard exists to catch.");
+
   const drawn = samples.filter((s) => s.ok).length;
   assert.ok(drawn >= 4,
     `the newest rows of a following pane were a real render in only ${drawn} of 5 samples over 20 s ` +

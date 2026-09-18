@@ -788,3 +788,89 @@ test("…and the lanes take TURNS, so a WIDE coarse viewport cannot queue ahead 
     `the live edge revalidated ${narrow.fine} times beside one coarse tile and ${wide.fine} times ` +
     "beside eight — another viewport's queue depth must not set the live edge's cadence");
 });
+
+// ——— T-491: ONE contended completion must not buy the live edge seconds of silence ———
+//
+// T-490 left a named residual: in 3 of 13 browser runs the live-edge e2e's `t+8 s` sample was FLAT,
+// always the FIRST sample. Its stated mechanism was that the minimap's ~19-miss initial fill holds
+// `pumpRefresh`'s `inflight < limit` false. **Measured in a browser, that is not what happens** —
+// instrumenting every `pumpRefresh` outcome over 16 runs, the "no slot" bail fired only while the
+// refresh lanes were EMPTY (the live tile was not yet resident, so there was nothing to revalidate);
+// not once did a queued revalidation fail for want of a slot. The slots are indeed full for the
+// first ~2.5 s, and that window closes six seconds before the failing sample.
+//
+// What the initial fill actually does is **inflate the one sample the lane's clock is set from.**
+// The route serialises tile reads on the history mutex, so the live lane's wall time is production
+// plus whatever a neighbour's hold added: the same `0/0` address answered in 844 ms during the fill
+// and in 80 ms after it, and `(REFRESH_DUTY - 1) x 844 ms` then bought 2.5 s of silence for an 80 ms
+// tile. This is T-490's own finding surviving as a *sample* rather than as a mean.
+//
+// The control is the same run with that one answer served promptly. The claim is that the lane's
+// cadence is the same either way — a neighbour's cost must not become the live edge's clock.
+
+/**
+ * Run the live loop, answering every fetch at once **except one**: the fetch issued at or after
+ * `slowAfterMs` is held for `slowMs` of simulated time. Returns when that one landed, the gap to
+ * the next completion, and how many completions there were.
+ */
+async function liveOneSlow(h: ReturnType<typeof harness>, clock: { t: number }, ms: number,
+  slowAfterMs: number, slowMs: number) {
+  const issuedAt = new Map<string, number>();
+  let slowTag: string | null = null, slowDone = 0, slowSpent = 0, gapAfter = -1, n = 0;
+  for (let step = 0; step < ms / 100; step++) {
+    clock.t += 100;
+    h.cache.beginFrame();
+    h.cache.acquire(edgeTile());
+    h.cache.setViewports(LAT, [edgeView()]);
+    h.cache.endFrame();
+    h.cache.refreshEdge(LAT, EDGE_NS, [edgeView()]);
+    await flush();
+    for (const [key, w] of [...h.waiting]) {
+      if (!issuedAt.has(key)) issuedAt.set(key, clock.t);
+      const started = issuedAt.get(key)!;
+      const tag = `${key}@${started}`;
+      if (slowTag === null && started >= slowAfterMs) slowTag = tag;
+      if (tag === slowTag && clock.t - started < slowMs) continue;
+      if (tag === slowTag && !slowDone) { slowDone = clock.t; slowSpent = clock.t - started; }
+      else if (slowDone && gapAfter < 0) gapAfter = clock.t - slowDone;
+      issuedAt.delete(key);
+      w.resolve(data(parseKey(key)!));
+      h.waiting.delete(key);
+      n++;
+      await flush();
+    }
+  }
+  return { slowDone, slowSpent, gapAfter, n };
+}
+
+test("ONE contended answer does not set the live lane's clock — the cadence survives it", async () => {
+  const SLOW_MS = 800, AT = 3000, RUN = 9000;
+  const c1 = { t: 0 };
+  const clean = await liveOneSlow(harness({ inFlight: 4, now: () => c1.t, serverMsGuess: 20 }), c1, RUN, AT, 0);
+  const c2 = { t: 0 };
+  const contended = await liveOneSlow(harness({ inFlight: 4, now: () => c2.t, serverMsGuess: 20 }), c2, RUN, AT, SLOW_MS);
+
+  // **Non-vacuity, both halves.** The lane has to have been running — a lane that never refreshed
+  // has a gap of -1 and would sail through the claim — and the contended answer has to have actually
+  // been contended, or the two runs are the same run twice. This is the check T-490's own depth
+  // guard failed to make: it counted the ordinary queue's misses alongside revalidations and stayed
+  // green with the lanes collapsed.
+  assert.ok(clean.n >= 5 && contended.n >= 5,
+    `only ${clean.n} / ${contended.n} completions — there is no cadence here to measure`);
+  assert.ok(contended.slowSpent >= SLOW_MS,
+    `the "slow" answer took ${contended.slowSpent} ms, not ${SLOW_MS} — the control and the subject are the same run`);
+  assert.ok(clean.gapAfter >= 0 && contended.gapAfter >= 0,
+    `no completion followed the marked one (clean ${clean.gapAfter}, contended ${contended.gapAfter})`);
+
+  // **The claim.** The gap to the next revalidation is a property of what this lane costs, not of
+  // how long a neighbour held the lock during one of its answers. Charged from that single sample it
+  // is (REFRESH_DUTY - 1) x 800 = 2400 ms; charged from the lane's own recent minimum it is the
+  // clean run's gap, within one 100 ms step of the loop.
+  assert.ok(contended.gapAfter <= clean.gapAfter + 300,
+    `after ONE ${contended.slowSpent} ms answer the live edge waited ${contended.gapAfter} ms for its ` +
+    `next revalidation against ${clean.gapAfter} ms with the same answer served promptly — a ` +
+    "neighbour's history-lock hold must not become the live edge's clock (T-491)");
+  // And the bound it must not have traded away: a lane that is GENUINELY expensive still gets rarer
+  // on its own. That is the run above ("a fixed share of MEASURED capacity"), where every answer
+  // costs 600 ms, so the minimum over the window IS 600 ms and the duty cap still binds.
+});

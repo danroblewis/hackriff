@@ -74,9 +74,13 @@
 //     capacity.** A refresh is revalidation of something already on screen, so it must never be the
 //     reason a tile the user is waiting for is not being fetched: it is issued at the *end* of
 //     [[pump]], after the ordinary queue has had first refusal on every slot in the budget, and at
-//     most once per [[REFRESH_DUTY]] × **the cost of the previous revalidation, measured on the
-//     request itself** — so the lane can never take more than 1/[[REFRESH_DUTY]] of what a live-edge
-//     tile has just been observed to cost. If tiles get slower the refresh gets rarer on its own; if
+//     most once per [[REFRESH_DUTY]] × **what that lane costs, measured on its own requests**
+//     ([[TileCache.refreshCostOf]]) — so the lane can never take more than 1/[[REFRESH_DUTY]] of
+//     what a live-edge tile has been observed to cost. It is the **minimum of the lane's recent
+//     completions** rather than the last one, because a completion's wall time is production *plus*
+//     whatever a neighbour's history-lock hold added, and one contended sample charges the live edge
+//     for the minimap's tile (T-491, measured: the same address 844 ms during the minimap's initial
+//     fill and 80 ms after it). If tiles get slower the refresh gets rarer on its own; if
 //     they get cheaper (T-467 measured 18.4 MB → 1.12 MB, `build_ms` 707 → 14) it speeds up, with no
 //     constant to retune. One revalidation is in flight at a time, so this bounds the whole lane.
 //
@@ -340,6 +344,12 @@ export class TileCache<T> {
   /** The next instant each lane may issue, and the next one the resident set may be walked. Per
    * lane, because a share of measured cost is only a fair share if it is that lane's own cost. */
   private refreshNextIssue = new Map<string, number>();
+  /**
+   * The last few completions of each lane, newest last — what [[refreshCostOf]] takes its minimum
+   * over (T-491). Kept per lane for the same reason [[refreshNextIssue]] is, and kept as a *window*
+   * rather than as one sample for the reason spelled out there.
+   */
+  private refreshCosts = new Map<string, number[]>();
   private nextEdgeScan = 0;
   private clock = 0;
   private frame = 0;
@@ -657,6 +667,7 @@ export class TileCache<T> {
     this.refreshing.clear();
     this.refreshLanes.clear();
     this.refreshNextIssue.clear();
+    this.refreshCosts.clear();
     this.refreshingLane = null;
     this.refreshQueued.clear();
     this.refreshedAt.clear();
@@ -751,6 +762,60 @@ export class TileCache<T> {
     return null;
   }
 
+  /**
+   * **What one revalidation in this lane costs the route: the MINIMUM of its recent completions,
+   * not the last one** (T-491).
+   *
+   * The duty limit is `REFRESH_DUTY x` this number, so this is the only input to how often the live
+   * edge is re-asked, and getting it from a single sample is what made the opening seconds of a
+   * session a lottery. A completion's wall time is **production plus however long another tenant
+   * held the history lock**, and the route serialises tile reads on that lock — so a sample taken
+   * while a neighbour is reading is a measurement of the neighbour.
+   *
+   * Measured in a browser, same address, same server, one run:
+   *
+   * ```
+   * 4628  9/0  miss     1303 ms   \
+   * 4707  9/0  miss     1369 ms    |  the minimap's INITIAL FILL, 15-19 ordinary misses
+   * 5380  9/0  miss      673 ms    |  at 2 097 152 source cells and 37 lock holds each
+   * 5434  0/0  REFRESH   844 ms   <-  the live lane's sample, taken inside that
+   * 5465  9/0  miss      837 ms   /
+   * ...
+   * 8477  0/0  REFRESH   133 ms   \
+   * 8958  0/0  REFRESH    80 ms    |  the SAME address once the fill is done
+   * 9282  0/0  REFRESH    81 ms   /
+   * ```
+   *
+   * The lane's work did not change; the 8x is the minimap. `(REFRESH_DUTY - 1) x 844 ms` then
+   * bought **2.5 s of silence** for a tile that costs 80 ms, and the e2e's first sample — taken at
+   * `firstFill + 8 s` — landed inside that hole in **2 of 10 runs**. This is T-490's own finding
+   * surviving as a *sample* rather than as a mean: *"a mean that folds in the minimap's coarse read
+   * charges the live edge for a tile it is not"*, and one contended sample charges it just as
+   * wrongly. (It is not a wire effect: the route's own `cost.build_ms` was **807 ms** against the
+   * client's 844 ms, so the time was spent inside `build`, waiting on the history mutex.)
+   *
+   * The minimum over a window is the standard estimator of uncontended service time, and the
+   * **window is the route's own in-flight cap** rather than a tuned number: that is how many readers
+   * the route admits at once, so it is the most tenants that can be in this lane's way, and if any
+   * of the last `ceiling` completions ran with a gap in that traffic, the estimate is the lane's
+   * real cost. When the cap is 1 the window is 1 — correctly, because a route that admits one reader
+   * has no contention to reject.
+   *
+   * **The duty bound is not weakened, it is aimed.** It still says "at most `1/REFRESH_DUTY` of what
+   * this lane costs the route", and a lane that is *genuinely* expensive still gets rarer on its own,
+   * because a sustained slowdown fills the window and raises the minimum within `ceiling`
+   * completions. What it no longer does is charge the live edge for someone else's tile.
+   */
+  private refreshCostOf(lane: string, spent: number): number {
+    const hist = this.refreshCosts.get(lane) ?? [];
+    hist.push(spent);
+    while (hist.length > Math.max(1, this.ceiling)) hist.shift();
+    this.refreshCosts.set(lane, hist);
+    let est = Infinity;
+    for (const v of hist) est = Math.min(est, v);
+    return est;
+  }
+
   /** Start one request for `addr`, on the budget. The single place a fetch begins — an ordinary
    * miss and a live-edge revalidation differ only in what [[insert]] does with the answer. */
   private issue(addr: TileAddr, owner: number): void {
@@ -764,7 +829,10 @@ export class TileCache<T> {
     const done = (requeue: boolean) => {
       this.inflight.delete(key);
       if (this.refreshing.delete(key)) {
-        // **The lane's cadence is a share of the LANE'S OWN cost, measured on this very request.**
+        // **The lane's cadence is a share of the LANE'S OWN cost** — measured on its own requests
+        // ([[refreshCostOf]]), which since T-491 is the minimum of its last few rather than the last
+        // one alone, because one sample taken while a neighbour holds the history lock measures the
+        // neighbour.
         //
         // It was `REFRESH_DUTY x serverMs`, and a browser run showed why that is the wrong number:
         // `serverMs` folds in every completion, including the minimap's coarse read, which T-450
@@ -772,7 +840,7 @@ export class TileCache<T> {
         // set the live edge's refresh interval to 24 s and the newest quarter-minute of a 17 s
         // window went unasked-for. A fine live-edge tile is not that tile and must not be charged
         // for it. Waiting (REFRESH_DUTY - 1) further service times after it lands makes the lane's
-        // duty cycle exactly 1/REFRESH_DUTY of what it was just observed to cost, whatever that is.
+        // duty cycle 1/REFRESH_DUTY of what this lane has been observed to cost, whatever that is.
         const spent = Math.max(MIN_RESIDUAL_MS, this.now() - started);
         // …and charged to the lane that spent it (T-490). One `refreshNextIssue` for every
         // following viewport is the same mistake as one `serverMs` for every tile, one level up:
@@ -782,7 +850,7 @@ export class TileCache<T> {
         // became servable.
         const lane = this.refreshingLane ?? laneOf(addr);
         this.refreshingLane = null;
-        this.refreshNextIssue.set(lane, this.now() + (REFRESH_DUTY - 1) * spent);
+        this.refreshNextIssue.set(lane, this.now() + (REFRESH_DUTY - 1) * this.refreshCostOf(lane, spent));
       }
       if (requeue) this.schedule(addr);
       this.pump();
