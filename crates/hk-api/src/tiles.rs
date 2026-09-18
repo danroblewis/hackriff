@@ -739,16 +739,133 @@ fn tier(key: &TileKey, r: &TileRead, max_live_span_hz: Option<f64>) -> DetailSou
     if replicated {
         return DetailSource::SurveyOverview;
     }
-    // Never `live-iq`, and **T-439 does not change that**. T-439 makes the finest node of the view
-    // lattice the growing edge — "live" is a viewport, not a mode (docs/16 §8.1) — but a tile is
-    // still a *pyramid* read, served at a level's cell size, and `DetailSource::LiveIq` means
-    // exactly "live IQ from the front end at the resolution shown". A 6.25 kHz × 1 s cell is not
-    // that, however recently it was written. Claiming otherwise would trade §4's honesty rule for
-    // a word, and the ring is where a client goes for live-IQ resolution.
+    base_tier(key, max_live_span_hz)
+}
+
+/// The tier before any replication claim: what a tile of this **width** is, whatever answered it.
+///
+/// Never `live-iq`, and **T-439 does not change that**. T-439 makes the finest node of the view
+/// lattice the growing edge — "live" is a viewport, not a mode (docs/16 §8.1) — but a tile is still
+/// a *pyramid* read, served at a level's cell size, and `DetailSource::LiveIq` means exactly "live
+/// IQ from the front end at the resolution shown". A 6.25 kHz × 1 s cell is not that, however
+/// recently it was written. Claiming otherwise would trade §4's honesty rule for a word, and the
+/// ring is where a client goes for live-IQ resolution.
+fn base_tier(key: &TileKey, max_live_span_hz: Option<f64>) -> DetailSource {
     match crate::navigation::live_window_verdict(key.region.freq.width_hz(), max_live_span_hz) {
         DetailSource::LiveIq => DetailSource::SpectrumHistory,
         other => other,
     }
+}
+
+/// Whether the coverage map answered this tile on its own, and — when it did not — **why not**
+/// (T-461).
+///
+/// Served on *both* paths, so "did the short-circuit fire?" is a question the wire answers rather
+/// than one a test has to infer from a timing. `applied` is true **if and only if**
+/// `selected_plane_uniform` is `"unobserved"`: a mixed plane, or a uniformly `"observed"` or
+/// `"unknown"` one, takes the full read.
+fn short_circuit_json(uniform: Option<&'static str>) -> Value {
+    json!({
+        "applied": uniform == Some("unobserved"),
+        "selected_plane_uniform": uniform,
+        "rule": "if and only if the SELECTED coverage plane — the one `coverage.selected.plane` \
+            names, which is the same plane this answer serves and the same one the renderer greys \
+            from — is \"unobserved\" for EVERY cell of this tile's extent, the tile is answered \
+            from it: no pyramid query, no level walk, no grid enumeration, and `grid` states its \
+            one cell instead of enumerating cells x cells of it. It FAILS CLOSED in every other \
+            case: one observed cell, or one \"unknown\" cell (T-423 — we no longer know whether we \
+            looked, which is not \"nothing looked\"), and the full read runs. The coverage plane is \
+            read at this tile's own cells or coarser, and a coarser cell is unobserved only when no \
+            tune span touches it at all, so uniform-unobserved coarser implies uniform-unobserved \
+            finer — the predicate cannot be weakened by the grid it was evaluated on.",
+    })
+}
+
+/// The answer for a tile whose selected coverage plane is `unobserved` end to end (T-461).
+///
+/// **Measured:** the read this replaces cost 92 ms of the route's own `cost.build_ms` and 2.56 MB
+/// on the wire to say *nothing here*, with `source_cells: 65 536` — the full grid walked because
+/// the cost is `O(cells²)` and essentially independent of whether any data exists. And the empty
+/// case is the **common** case: T-437 measured the default full-device view at 99.4 % grey before
+/// history accumulates, settling to 55.2 %.
+///
+/// It is not a second answer, it is a cheaper spelling of the same one. The client's own rule is
+/// *"a cell the coverage plane calls unobserved stays unobserved even with a level beside it"*
+/// (`ui/src/surface/tile.ts`), so the measurement the full read would have produced is discarded by
+/// the renderer cell for cell — which is why this is observationally equivalent and not merely
+/// faster.
+fn unobserved_tile_json(
+    key: &TileKey,
+    store: TileStore,
+    coverage: Value,
+    max_live: Option<f64>,
+    elapsed_ms: f64,
+    slot: &TileSlot,
+) -> Value {
+    let source = base_tier(key, max_live);
+    json!({
+        "key": key_json(key),
+        "extent": {
+            "f_lo_hz": key.region.freq.lo_hz,
+            "f_hi_hz": key.region.freq.hi_hz,
+            "f_cell_hz": key.f_cell_hz,
+            "t0_s": key.region.t0_ns as f64 / 1e9,
+            "t1_s": key.region.t1_ns as f64 / 1e9,
+            "t_cell_s": key.t_cell_ns as f64 / 1e9,
+            "nt": key.cells,
+            "nf": key.cells,
+        },
+        "axes": axes_json(key),
+        "grid": unobserved_grid_json(key),
+        "coverage": coverage,
+        "resolution": {
+            "source": source.as_str(),
+            "live": source.is_live(),
+            "statement": source.statement(),
+            // NOTHING answered, because nothing was asked. `null` rather than a level, because
+            // naming a level here would claim a read that did not happen — the same direction as
+            // `tried: []`, which says the walk did not occur rather than that it found nothing.
+            "answered": Value::Null,
+            "candidates": Value::Array(Vec::new()),
+            "tried": Value::Array(Vec::new()),
+            "store": match store {
+                TileStore::View => "view-lattice",
+                TileStore::Main => "spectrum-history",
+            },
+            "fold": {
+                // No source cells were read, so there is no fold and in particular no REPLICATION:
+                // a replicated axis is the only direction that makes a claim, and nothing here
+                // claims anything.
+                "frequency": axis_fold(key.f_cell_hz, key.f_cell_hz, 0, key.cells),
+                "time": axis_fold(key.t_cell_ns as f64, key.t_cell_ns as f64, 0, key.cells),
+                "rule": "no level was folded onto this tile because none was consulted: the \
+                    coverage map answered it (see `short_circuit`). `source_cells: 0` is the \
+                    honest count of what was read.",
+            },
+            "budget": {
+                "max_source_cells_per_lock": TILE_MAX_SOURCE_CELLS,
+                "max_source_cells_per_tile": TILE_MAX_TOTAL_SOURCE_CELLS,
+                "statement": "these bound WORK, never resolution — and no work was done here: the \
+                    coverage map decides grey, and it greyed the whole tile.",
+            },
+            "short_circuit": short_circuit_json(Some("unobserved")),
+            "grey_rule": "grey is decided by `coverage`, never by this block: a level that holds \
+                nothing here is a level, and a cell nothing ever sampled is grey. Not-loaded is a \
+                third thing and is the client's to draw (docs/16 §5.5).",
+        },
+        "cost": {
+            "build_ms": (elapsed_ms * 1000.0).round() / 1000.0,
+            // Zero, and that is the whole ticket: the read this replaces walked 65 536 source cells
+            // to produce 65 536 nulls over spectrum no record says was ever sampled.
+            "source_cells": 0,
+            "chunks": 0,
+            "in_flight": slot.in_flight(),
+            "in_flight_limit": TILE_MAX_IN_FLIGHT,
+            "statement": "this tile was answered from the coverage map alone (T-461): no history \
+                lock was taken, so `chunks` is 0 and this request contributed no ingest \
+                backpressure at all.",
+        },
+    })
 }
 
 fn axis_fold(source_cell: f64, tile_cell: f64, source_cells: usize, served: usize) -> Value {
@@ -769,8 +886,74 @@ fn axis_fold(source_cell: f64, tile_cell: f64, source_cells: usize, served: usiz
     })
 }
 
+/// A measurement value on the wire: a finite number, or `null`. **`null` is *not observed*, never
+/// quiet** (C26) — there is no zero here for anything to read as a level.
+fn num(x: f32) -> Value {
+    if x.is_finite() { json!(x) } else { Value::Null }
+}
+
+/// The one cell every cell of a uniform grid is, stated once instead of enumerated (T-461).
+///
+/// Written through the same [`num`] the per-cell arrays use, from a real [`OverviewCell`], so the
+/// short form cannot say something the long form would not have said about the same cell.
+fn uniform_cell_json(c: &hk_store::OverviewCell) -> Value {
+    json!({
+        "max_db": num(c.max_db),
+        "occupancy_max": num(c.occupancy_max),
+        "coverage": c.coverage,
+        "frames": c.frames,
+        "observed": c.observed(),
+        "rule": "every cell of this grid holds exactly this, so the per-cell arrays are omitted \
+            (T-461). `max_db: null` is the ABSENCE of a level, never a level of zero — and grey is \
+            not decided here in any case: `coverage` decides it, cell by cell, and this grid says \
+            only that the pyramid holds nothing for any of them.",
+    })
+}
+
+/// The grid of a tile the **coverage map** answered: `cells × cells` of nothing (T-461).
+///
+/// Every field is what [`read_level`] would have produced for the same address had it run — an
+/// [`Overview`] of [`OverviewCell::UNOBSERVED`], `observed_cells` zero, no `range_db`, and the unit
+/// `read_level` falls back to when no level answered. `an_unobserved_tile_read_produces_exactly_the_constants_the_short_circuit_serves`
+/// asserts that equality against a real store read, so this is a *cheaper spelling* of the full
+/// path's answer and not a second answer.
+fn unobserved_grid_json(key: &TileKey) -> Value {
+    let o = Overview {
+        unit: hk_model::PowerUnit::Dbfs,
+        nt: key.cells,
+        nf: key.cells,
+        t0_ns: key.region.t0_ns,
+        t_cell_ns: key.t_cell_ns as f64,
+        f_lo_hz: key.region.freq.lo_hz,
+        f_cell_hz: key.f_cell_hz,
+        cells: Vec::new(),
+        observed_cells: 0,
+        src_nt: 0,
+        src_nf: 0,
+        range_db: None,
+    };
+    json!({
+        "nt": o.nt,
+        "nf": o.nf,
+        "t0_s": o.t0_ns as f64 / 1e9,
+        "t_cell_s": o.t_cell_ns / 1e9,
+        "f_lo_hz": o.f_lo_hz,
+        "f_cell_hz": o.f_cell_hz,
+        // The four per-cell arrays are ABSENT, not empty: an empty array would read as a grid of
+        // no cells, which is a different claim from a grid of cells that hold nothing.
+        "uniform": uniform_cell_json(&hk_store::OverviewCell::UNOBSERVED),
+        "cells": o.nt * o.nf,
+        "observed_cells": 0,
+        "range_db": Value::Null,
+        "unit": o.unit,
+        "percentiles": "unknown: a de-welded fold cannot split a tile's per-frequency histogram \
+            across parent time cells, so no percentile is carried (T-434). The noise-floor \
+            distribution stays a scheme-1 question, asked through /api/history.",
+        "semantics": crate::query::overview_semantics_json(&o),
+    })
+}
+
 fn grid_json(o: &Overview) -> Value {
-    let num = |x: f32| -> Value { if x.is_finite() { json!(x) } else { Value::Null } };
     json!({
         "nt": o.nt,
         "nf": o.nf,
@@ -852,18 +1035,29 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     let store = tile_store(state, q);
     let key = with_tile_history(state, store, |p| parse_key(p.geometry(), q))?;
     let started = std::time::Instant::now();
-    let r = tile_read(state, store, &key)?;
-    let levels = with_tile_history(state, store, |p| Ok(p.geometry().n_levels()))?;
     let max_live = crate::http::max_live_span_hz(state);
-    let source = tier(&key, &r, max_live);
     let window = key.window();
     // T-467: the compact plane-table form. The per-cell form this route used to serve was 99 % of a
     // live tile's 19.34 MB body, duplicated between `any` and `devices[0]`, for a `state` field the
     // renderer reads and nothing else. `TileOverlay` computes each distinct plane once and serves
     // it once.
+    //
+    // T-461: and it is computed **first**, because it is what decides grey. When the selected plane
+    // is `unobserved` over the tile's whole extent, the answer is already complete and the pyramid
+    // read below is 65 536 source cells spent to confirm it.
     let overlay =
         crate::coverage::TileOverlay::collect(state, key.region.freq, window, key.cells, key.cells);
+    let uniform = overlay.uniform_state(&key.device);
     let coverage = overlay.to_json(&key.device, key.named_device());
+    if uniform == Some("unobserved") {
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
+        return Ok(unobserved_tile_json(
+            &key, store, coverage, max_live, elapsed_ms, &slot,
+        ));
+    }
+    let r = tile_read(state, store, &key)?;
+    let levels = with_tile_history(state, store, |p| Ok(p.geometry().n_levels()))?;
+    let source = tier(&key, &r, max_live);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
     Ok(json!({
         "key": key_json(&key),
@@ -928,6 +1122,9 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
                     tighter frequency budget cost 34x of time resolution and greyed a third of the \
                     window) cannot be expressed here.",
             },
+            // T-461: served on the full path too, so "did the coverage map answer this?" is a
+            // question the wire answers and `applied: false` names the reason it did not.
+            "short_circuit": short_circuit_json(uniform),
             "grey_rule": "grey is decided by `coverage`, never by this block: a level that holds \
                 nothing here is a level, and a cell nothing ever sampled is grey. Not-loaded is a \
                 third thing and is the client's to draw (docs/16 §5.5).",
@@ -1519,6 +1716,338 @@ mod tests {
         eprintln!(
             "T-438 chunking: level {}, {} source cells in {} lock hold(s)",
             r.level, r.source_cells, r.chunks
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- T-461: the coverage short-circuit ---------------------------------------------------
+
+    /// One dwell over `lo..hi` for `[t0, t1)`, by a named front end — the record that makes a band
+    /// *observed* and, just as importantly, fixes the **record horizon**: a tile wholly before it
+    /// is `"unknown"`, not `"unobserved"`, and must not short-circuit.
+    fn dwell(
+        lo: f64,
+        hi: f64,
+        t0_ns: i64,
+        t1_ns: i64,
+    ) -> hk_model::attention::observation::ObservationRecord {
+        use hk_model::attention::baseline::SiteKey;
+        use hk_model::attention::observation::{
+            DwellRecord, ObservationRecord, ObservedWindow, Reason, Tier,
+        };
+        let w = TimeRange::new(
+            Timestamp::from_unix_nanos(t0_ns),
+            Timestamp::from_unix_nanos(t1_ns),
+        );
+        ObservationRecord::Dwell(DwellRecord {
+            schema: hk_model::attention::ATTENTION_SCHEMA_VERSION,
+            survey_id: None,
+            seq: 1,
+            plan_version: 1,
+            site: SiteKey::Unassigned,
+            device_id: Some("mock:0".into()),
+            reason: Reason::RegionDwell { hop: 0 },
+            tier: Tier::ScheduledPlan,
+            window: ObservedWindow {
+                center_hz: (lo + hi) / 2.0,
+                sample_rate_hz: hi - lo,
+                usable: FreqRange::new(lo, hi),
+                dc_excluded: None,
+                rbw_hz: 1e3,
+            },
+            rf_path: 0,
+            planned: w,
+            observed: w,
+            preempted: false,
+            dropped_samples: 0,
+            overload: false,
+            provenance_ref: None,
+        })
+    }
+
+    /// [`state_with_history`] plus an observation log holding one dwell over the fixture's own band
+    /// and window, offset in time by `record_offset_s`.
+    ///
+    /// The offset is the whole point of the fixture: at `0` the record covers the tile, so the
+    /// fixture's band is `observed` and every other band is `unobserved`. Pushed an hour into the
+    /// future, the record horizon moves past the tile and *every* cell becomes `"unknown"` — which
+    /// is the fail-closed case, and it is a case this fixture can actually produce rather than one
+    /// argued for.
+    fn state_with_records(
+        dir: &std::path::Path,
+        secs: i64,
+        record_offset_s: i64,
+    ) -> (ApiState, i64, f64) {
+        let (mut state, t0, f_lo) = state_with_history(dir, secs);
+        let f_hi = f_lo + 6250.0 * N as f64;
+        let store = hk_store::observation::ObservationStore::open(
+            hk_store::observation::ObservationLogConfig::new(dir.join("observations")),
+        )
+        .unwrap();
+        let off = record_offset_s * 1_000_000_000;
+        store.append(&dwell(
+            f_lo,
+            f_hi,
+            t0 + off,
+            t0 + off + secs * 1_000_000_000,
+        ));
+        store.flush();
+        state.observations = Some(store);
+        (state, t0, f_lo)
+    }
+
+    fn tile_params(f_index: i64, t_index: i64) -> Vec<(String, String)> {
+        params(&[
+            ("level_f", "0"),
+            ("level_t", "0"),
+            ("f_index", &f_index.to_string()),
+            ("t_index", &t_index.to_string()),
+            ("cells", &N.to_string()),
+        ])
+    }
+
+    /// **The ticket.** A tile whose selected coverage plane is `unobserved` end to end is answered
+    /// from that plane: no pyramid query, no level walk, no grid enumeration, and a body that
+    /// states its one cell instead of enumerating `cells × cells` of it.
+    ///
+    /// Measured before this change on the same fixture shape at 256 × 256: **92 ms** of the route's
+    /// own `cost.build_ms` and **2 561 726 B** on the wire, with `source_cells: 65 536` — the whole
+    /// grid walked to say *nothing here*. (`crates/hk-api/tests/tile_cost.rs` is that measurement,
+    /// committed so it can be re-run rather than quoted.)
+    #[test]
+    fn an_unobserved_tile_is_answered_from_the_coverage_map_and_no_level_is_consulted() {
+        let dir = temp_dir("short-circuit");
+        let (state, _, _) = state_with_records(&dir, N as i64, 0);
+        // 100 tiles up the frequency axis: inside the record horizon, and no record covers it.
+        let v = tiles_json(&state, &tile_params(F_INDEX + 100, T_INDEX)).unwrap();
+
+        assert_eq!(
+            v["resolution"]["short_circuit"]["applied"],
+            json!(true),
+            "{v}"
+        );
+        assert_eq!(
+            v["resolution"]["short_circuit"]["selected_plane_uniform"],
+            json!("unobserved"),
+            "{v}"
+        );
+        // Nothing was read, and the answer says so rather than reporting a level that did not run.
+        assert_eq!(v["cost"]["source_cells"], json!(0), "{v}");
+        assert_eq!(
+            v["cost"]["chunks"],
+            json!(0),
+            "no history lock was taken: {v}"
+        );
+        assert_eq!(v["resolution"]["answered"], Value::Null, "{v}");
+        assert_eq!(v["resolution"]["tried"], json!([]), "{v}");
+        assert_eq!(v["resolution"]["candidates"], json!([]), "{v}");
+
+        // **The answer is "unobserved", which is not "quiet" and not "zero".** The grid states one
+        // cell, and that cell has NO level — `null`, never a number, and `observed: false`.
+        let g = &v["grid"];
+        assert_eq!(g["uniform"]["max_db"], Value::Null, "{g}");
+        assert_eq!(g["uniform"]["occupancy_max"], Value::Null, "{g}");
+        assert_eq!(g["uniform"]["frames"], json!(0), "{g}");
+        assert_eq!(g["uniform"]["observed"], json!(false), "{g}");
+        assert_eq!(g["observed_cells"], json!(0), "{g}");
+        assert_eq!(g["range_db"], Value::Null, "no scale from nothing: {g}");
+        assert_eq!(
+            g["cells"],
+            json!(N * N),
+            "the grid is still the tile's own: {g}"
+        );
+        // The per-cell arrays are ABSENT, not empty and not full of zeroes — an empty array would
+        // read as a grid of no cells, and a zero would read as a level.
+        for k in ["max_db", "occupancy_max", "coverage", "frames"] {
+            assert!(g.get(k).is_none(), "grid still enumerates {k}: {g}");
+        }
+
+        // And the plane the client greys from says the same thing, in its own vocabulary.
+        assert_eq!(
+            v["coverage"]["planes"][v["coverage"]["selected"]["plane"].as_u64().unwrap() as usize]
+                ["uniform"],
+            json!("unobserved"),
+            "{v}"
+        );
+
+        // The body is a constant, not a function of `cells`: the same address at 256 × 256 is the
+        // same size to within the axis numbers.
+        let small = serde_json::to_string(&v).unwrap().len();
+        let big = serde_json::to_string(
+            &tiles_json(&state, &{
+                let mut p = tile_params(
+                    (F_INDEX + 100) * N as i64 / TILE_CELLS as i64,
+                    T_INDEX * N as i64 / TILE_CELLS as i64,
+                );
+                p.retain(|(k, _)| k != "cells");
+                p.push(("cells".into(), TILE_CELLS.to_string()));
+                p
+            })
+            .unwrap(),
+        )
+        .unwrap()
+        .len();
+        eprintln!(
+            "T-461 short-circuit body: {small} B at {N}x{N}, {big} B at {TILE_CELLS}x{TILE_CELLS}"
+        );
+        assert!(
+            big < small * 2,
+            "a 16x larger tile must not cost 16x the body: {small} B vs {big} B"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **It fails closed, and the closing is load-bearing.**
+    ///
+    /// Two cases the short-circuit must refuse, and for the second one the refusal is what keeps a
+    /// measurement the store holds from being served as nothing:
+    ///
+    /// 1. an **observed** plane — the ordinary tile, which takes the full read;
+    /// 2. an **`"unknown"`** plane (T-423: a row wholly before the record horizon, where no
+    ///    surviving record can say either way). `unknown` is not `unobserved`, and here the pyramid
+    ///    demonstrably **holds data** for exactly those cells. Had the short-circuit fired on
+    ///    `unknown`, this tile would have been served as an empty grid over a measured band — which
+    ///    is precisely the defect the ticket named as worse than being slow.
+    #[test]
+    fn the_short_circuit_refuses_an_observed_plane_and_refuses_unknown_over_data_the_store_holds() {
+        // 1. Observed: the full read runs and the tile carries its measurements.
+        let dir = temp_dir("closed-observed");
+        let (state, _, _) = state_with_records(&dir, N as i64, 0);
+        let v = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        assert_eq!(
+            v["resolution"]["short_circuit"]["applied"],
+            json!(false),
+            "{v}"
+        );
+        assert_eq!(
+            v["resolution"]["short_circuit"]["selected_plane_uniform"],
+            json!("observed"),
+            "{v}"
+        );
+        assert!(v["cost"]["source_cells"].as_u64().unwrap() > 0, "{v}");
+        assert!(v["grid"]["observed_cells"].as_u64().unwrap() > 0, "{v}");
+        assert!(
+            v["grid"]["max_db"].is_array(),
+            "the full path enumerates: {v}"
+        );
+        assert!(v["grid"].get("uniform").is_none(), "{v}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 2. Unknown, over a band the pyramid holds frames for. The record horizon is an hour after
+        //    the tile, so no surviving record can say whether we looked — and the measurement is
+        //    still there to be served.
+        let dir = temp_dir("closed-unknown");
+        let (state, _, _) = state_with_records(&dir, N as i64, 3600);
+        let v = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        assert_eq!(
+            v["resolution"]["short_circuit"]["selected_plane_uniform"],
+            json!("unknown"),
+            "the fixture must actually produce a uniformly UNKNOWN plane: {}",
+            v["coverage"]
+        );
+        assert_eq!(
+            v["resolution"]["short_circuit"]["applied"],
+            json!(false),
+            "`unknown` is not `unobserved`, and short-circuiting on it would grey measured \
+             spectrum: {v}"
+        );
+        // The load-bearing half: there really is data here, so the refusal saved something.
+        assert!(
+            v["grid"]["observed_cells"].as_u64().unwrap() > 0,
+            "the mutation control is vacuous unless the store holds data here: {}",
+            v["grid"]["observed_cells"]
+        );
+        assert!(v["grid"]["max_db"].is_array(), "{v}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The equivalence.** The constants [`unobserved_grid_json`] serves are exactly what a real
+    /// store read produces for the same address — so the short-circuit is a cheaper *spelling* of
+    /// the full path's answer, not a second answer about the same tile.
+    #[test]
+    fn an_unobserved_tile_read_produces_exactly_the_constants_the_short_circuit_serves() {
+        let dir = temp_dir("equivalent");
+        let (state, _, _) = state_with_history(&dir, N as i64);
+        let g = crate::http::with_history(&state, |p| Ok(p.geometry().clone())).unwrap();
+        let key = parse_key(&g, &tile_params(F_INDEX + 100, T_INDEX)).unwrap();
+        let r = tile_read(&state, TileStore::Main, &key).unwrap();
+        // What the full read actually produced over never-sampled spectrum.
+        assert_eq!(r.grid.observed_cells, 0);
+        assert_eq!(r.grid.range_db, None);
+        assert_eq!(r.grid.unit, hk_model::PowerUnit::Dbfs);
+        assert!(
+            r.grid.cells.iter().all(|c| {
+                c.sources == 0 && c.frames == 0 && c.coverage == 0.0 && !c.max_db.is_finite()
+            }),
+            "the full read must be uniformly UNOBSERVED for this comparison to mean anything"
+        );
+        // …and the short form says the same, field for field.
+        let short = unobserved_grid_json(&key);
+        assert_eq!(short["unit"], grid_json(&r.grid)["unit"]);
+        assert_eq!(short["cells"], grid_json(&r.grid)["cells"]);
+        assert_eq!(
+            short["observed_cells"],
+            grid_json(&r.grid)["observed_cells"]
+        );
+        assert_eq!(short["range_db"], grid_json(&r.grid)["range_db"]);
+        assert_eq!(short["semantics"], grid_json(&r.grid)["semantics"]);
+        assert_eq!(short["uniform"], uniform_cell_json(&r.grid.cells[0]));
+        // The mutation: had the uniform cell been written as zeroes rather than as absences, it
+        // would differ — which is what makes the equality above an assertion and not a tautology.
+        let zeroed = hk_store::OverviewCell {
+            max_db: 0.0,
+            occupancy_max: 0.0,
+            ..hk_store::OverviewCell::UNOBSERVED
+        };
+        assert_ne!(
+            short["uniform"],
+            uniform_cell_json(&zeroed),
+            "a level of zero and the absence of a level must not serialise the same"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The cost, measured through the route, before and after, in one run.**
+    ///
+    /// The short-circuit's floor is the coverage rasterisation itself — which is the point: it
+    /// reads the same plane the renderer greys from, so that work is the answer rather than
+    /// overhead. What disappears is the `O(cells²)` pyramid walk on top of it.
+    #[test]
+    fn the_short_circuit_is_measured_against_the_read_it_replaces() {
+        let dir = temp_dir("sc-cost");
+        let (state, _, _) = state_with_records(&dir, TILE_CELLS as i64, 0);
+        let g = crate::http::with_history(&state, |p| Ok(p.geometry().clone())).unwrap();
+        let n = 8;
+        let time = |f_index: i64| -> f64 {
+            let q = tile_params(f_index, T_INDEX);
+            let _ = tiles_json(&state, &q).unwrap();
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(tiles_json(&state, &q).unwrap());
+            }
+            started.elapsed().as_secs_f64() * 1e3 / n as f64
+        };
+        // The same address, read the long way, so the comparison is against this machine and this
+        // fixture rather than against a number from another run.
+        let key = parse_key(&g, &tile_params(F_INDEX + 100, T_INDEX)).unwrap();
+        let started = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(
+                tile_read(&state, TileStore::Main, &key)
+                    .unwrap()
+                    .source_cells,
+            );
+        }
+        let full_read_ms = started.elapsed().as_secs_f64() * 1e3 / n as f64;
+        let short_ms = time(F_INDEX + 100);
+        let observed_ms = time(F_INDEX);
+        eprintln!(
+            "T-461 at {N}x{N}: pyramid read alone over never-sampled spectrum {full_read_ms:.2} ms; \
+             whole short-circuited answer {short_ms:.2} ms; whole observed answer {observed_ms:.2} ms"
+        );
+        assert!(
+            short_ms < observed_ms,
+            "the short-circuited answer must be cheaper than the full one: {short_ms:.2} vs {observed_ms:.2} ms"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

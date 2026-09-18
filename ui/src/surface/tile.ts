@@ -75,10 +75,14 @@ export interface TileResponse {
   extent: { nt: number; nf: number };
   axes: { frequency: { levels: number; cell_hz: number }; time: { levels: number; cell_s: number } };
   grid: {
-    nt: number; nf: number; max_db: (number | null)[]; range_db?: { lo: number; hi: number } | null;
+    nt: number; nf: number; max_db?: (number | null)[]; range_db?: { lo: number; hi: number } | null;
     /** Per-cell folded frame count. The evidence that separates [[CELL.AWAITING]] from
      * [[CELL.NO_LEVEL]] — see [[decodeTile]]. */
     frames?: (number | null)[];
+    /** T-461: the one cell **every** cell of this grid is, served instead of the per-cell arrays
+     * when the coverage map answered the tile on its own. `max_db: null` is the absence of a
+     * level, never a level. */
+    uniform?: { max_db: number | null; frames?: number | null };
   };
   coverage?: {
     grid?: { nt: number; nf: number };
@@ -163,22 +167,35 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
   if (!(nf > 0) || !(nt > 0)) throw new TileDecodeError(`tile ${keyOf(addr)}: no grid dimensions`);
   const n = nf * nt;
   const db = resp.grid?.max_db;
-  if (!Array.isArray(db) || db.length !== n) {
-    throw new TileDecodeError(`tile ${keyOf(addr)}: grid.max_db has ${db?.length ?? "no"} cells, expected ${n}`);
+  const frames = resp.grid?.frames;
+  const uni = resp.grid?.uniform;
+  // **Two spellings of one grid** (T-461). Per-cell arrays, or — when the coverage map answered the
+  // tile on its own and every cell holds the same nothing — the one cell they would all have held.
+  // Neither is a default for the other: a grid that is neither an array of the right length nor a
+  // stated uniform cell is unreadable, and unreadable is not an answer.
+  let levelAt: (i: number) => number | null | undefined;
+  let framesAt: (i: number) => number | null | undefined;
+  if (Array.isArray(db) && db.length === n) {
+    const counted = Array.isArray(frames) && frames.length === n ? frames : null;
+    levelAt = (i) => db[i];
+    framesAt = counted ? (i) => counted[i] : () => undefined;
+  } else if (uni && typeof uni === "object" && "max_db" in uni) {
+    levelAt = () => uni.max_db;
+    framesAt = () => uni.frames;
+  } else {
+    throw new TileDecodeError(`tile ${keyOf(addr)}: grid.max_db has ${db?.length ?? "no"} cells and no grid.uniform, expected ${n}`);
   }
   const cov = coverageCells(addr, resp);
-  const frames = resp.grid?.frames;
-  const counted = Array.isArray(frames) && frames.length === n ? frames : null;
   const value = new Float32Array(n);
   const state = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
     const s = cov(i);
     if (s === "unobserved") { state[i] = CELL.UNOBSERVED; value[i] = NaN; continue; }
     if (s === "unknown") { state[i] = CELL.UNKNOWN; value[i] = NaN; continue; }
-    const v = db[i];
+    const v = levelAt(i);
     if (typeof v === "number" && Number.isFinite(v)) { state[i] = CELL.OBSERVED; value[i] = v; continue; }
     value[i] = NaN;
-    state[i] = counted && counted[i] === 0 ? CELL.AWAITING : CELL.NO_LEVEL;
+    state[i] = framesAt(i) === 0 ? CELL.AWAITING : CELL.NO_LEVEL;
   }
   const src = String(resp.resolution?.source ?? "");
   if (!TIERS.includes(src)) throw new TileDecodeError(`tile ${keyOf(addr)}: unknown honesty tier ${src || "(none)"}`);

@@ -109,7 +109,7 @@ fn dwell(
 /// A server holding: a pyramid with one carrier over the observed tile's band for the whole tile
 /// window, and an observation log saying that band — and only that band — was tuned.
 fn fixture(dir: &std::path::Path) -> ApiState {
-    let mut p = hk_store::Pyramid::open(&dir.join("history"), PyramidConfig::default()).unwrap();
+    let mut p = hk_store::Pyramid::open(dir.join("history"), PyramidConfig::default()).unwrap();
     let g = p.geometry().clone();
     let t_cell = g.levels[0].t_cell_ns;
     let f_cell = g.levels[0].f_cell_hz;

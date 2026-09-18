@@ -300,3 +300,33 @@ test("fetchTile turns the route's backpressure into an answer, and everything el
     /no such node/,
   );
 });
+
+test("T-461: a tile the coverage map answered states its one cell, and it reads as unobserved — not as zeroes", () => {
+  // The short-circuited answer: no per-cell arrays at all, one stated cell, and a coverage plane
+  // that is uniformly `unobserved`. The renderer must get grey, and must get NO number.
+  const t = decodeTile(ADDR, resp({
+    grid: { nt: 2, nf: 2, uniform: { max_db: null, frames: 0 }, range_db: null },
+    coverage: coverage(["unobserved", "unobserved", "unobserved", "unobserved"]),
+  }));
+  assert.deepEqual([...t.state], [CELL.UNOBSERVED, CELL.UNOBSERVED, CELL.UNOBSERVED, CELL.UNOBSERVED]);
+  assert.ok([...t.value].every(Number.isNaN), "an unobserved tile must carry no number anything could colour");
+  assert.equal(t.rangeDb, null, "no scale from nothing");
+
+  // **The trap, made into a test.** If the same body arrived with `max_db: 0` — a level of zero
+  // rather than the absence of one — the decoder would colour it, because the coverage plane is the
+  // only thing standing between the two. So the states stay grey ONLY because coverage says so, and
+  // the stated cell contributes nothing: swap coverage to observed and the same uniform grid reads
+  // as "we looked and nothing has been folded here yet", never as a measurement.
+  const awaiting = decodeTile(ADDR, resp({
+    grid: { nt: 2, nf: 2, uniform: { max_db: null, frames: 0 } },
+    coverage: coverage(["observed", "observed", "observed", "observed"]),
+  }));
+  assert.deepEqual([...awaiting.state], [CELL.AWAITING, CELL.AWAITING, CELL.AWAITING, CELL.AWAITING]);
+  assert.ok([...awaiting.value].every(Number.isNaN));
+  assert.notDeepEqual([...awaiting.state], [...t.state], "observed-and-empty is not unobserved");
+
+  // And a grid that is neither an array of the right length nor a stated uniform cell is
+  // unreadable — it does not fall back to either spelling.
+  assert.throws(() => decodeTile(ADDR, resp({ grid: { nt: 2, nf: 2 } })), TileDecodeError);
+  assert.throws(() => decodeTile(ADDR, resp({ grid: { nt: 2, nf: 2, uniform: undefined, max_db: [-90] } })), TileDecodeError);
+});

@@ -6501,6 +6501,24 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     // Tile (0, 0, 0, 0) is 0 Hz in 1970: genuinely unobserved, and that is a coverage answer.
     assert_eq!(probe["grid"]["observed_cells"], json!(0), "{probe}");
     assert_eq!(probe["grid"]["range_db"], Value::Null, "{probe}");
+    // **T-461, the fail-closed half, on a real server.** 1970 is before this server's record
+    // horizon, so no surviving record can say whether it looked — the plane is uniformly
+    // `"unknown"`, which is NOT `"unobserved"`, and the tile takes the full read.
+    assert_eq!(
+        probe["resolution"]["short_circuit"]["selected_plane_uniform"],
+        json!("unknown"),
+        "{probe}"
+    );
+    assert_eq!(
+        probe["resolution"]["short_circuit"]["applied"],
+        json!(false),
+        "`unknown` must never short-circuit: the pyramid may hold measurements there: {probe}"
+    );
+    assert!(probe["grid"]["max_db"].is_array(), "{probe}");
+    assert!(
+        probe["cost"]["source_cells"].as_u64().unwrap() > 0,
+        "{probe}"
+    );
 
     let f_index = (STATION_HZ / (f_cell * N as f64)).floor() as u64;
     let t_index_of = |lt: u32| (unix_now() / (t_cell * (1u64 << lt) as f64 * N as f64)) as u64;
@@ -6660,6 +6678,126 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     );
     assert!(fine["grid"]["p_low_db"].is_null(), "{fine}");
     let observed_fine = fine["grid"]["observed_cells"].as_u64().unwrap();
+    // The observed tile is the other half of T-461's fail-closed rule: its plane is observed, so
+    // the full read runs and the per-cell arrays are there.
+    assert_eq!(
+        fine["resolution"]["short_circuit"]["applied"],
+        json!(false),
+        "{fine}"
+    );
+    assert!(fine["grid"]["max_db"].is_array(), "{fine}");
+    assert!(fine["grid"].get("uniform").is_none(), "{fine}");
+
+    // ---- T-461: the short-circuit, and the two ways it fails closed ----
+    //
+    // 2 000 tiles up the frequency axis: a band this server has never tuned to, on either axis of
+    // evidence. What decides the two cases below is *time*.
+    let far = f_index + 2_000;
+
+    // **Fails closed on a MIXED plane.** This server started moments ago, so its record horizon
+    // (`coverage.horizon.oldest_record_s`) falls INSIDE the current 32 s tile: the rows before it
+    // are `"unknown"` (no surviving record can say whether we looked) and the rows after it are
+    // `"unobserved"`. Mixed is not uniform, so the full read runs — and this is not a contrived
+    // case, it is what the first tile of every server's life looks like.
+    let (st, mixed) = get(addr, &tile(0, 0, far, t_index_of(0)));
+    assert_eq!(st, 200, "{mixed}");
+    assert_eq!(
+        mixed["resolution"]["short_circuit"]["selected_plane_uniform"],
+        Value::Null,
+        "a plane that is part unknown and part unobserved is not uniform: {}",
+        mixed["coverage"]["planes"]
+    );
+    assert_eq!(
+        mixed["resolution"]["short_circuit"]["applied"],
+        json!(false),
+        "{mixed}"
+    );
+    assert!(mixed["grid"]["max_db"].is_array(), "{mixed}");
+    assert!(
+        mixed["coverage"]["horizon"]["unknown_rows"]
+            .as_u64()
+            .is_some_and(|n| n > 0),
+        "the fixture must actually straddle the horizon: {}",
+        mixed["coverage"]["horizon"]
+    );
+
+    // **Fires on a uniformly unobserved plane.** One time tile on: wholly after the record
+    // horizon, and still a band nothing ever tuned to. Every cell `"unobserved"`, so the coverage
+    // map answers the tile on its own.
+    let (st, empty) = get(addr, &tile(0, 0, far, t_index_of(0) + 1));
+    assert_eq!(st, 200, "{empty}");
+    assert_eq!(
+        empty["resolution"]["short_circuit"]["selected_plane_uniform"],
+        json!("unobserved"),
+        "{empty}"
+    );
+    assert_eq!(
+        empty["resolution"]["short_circuit"]["applied"],
+        json!(true),
+        "{empty}"
+    );
+    // Nothing was read, and the answer says so rather than naming a level that never ran.
+    assert_eq!(empty["cost"]["source_cells"], json!(0), "{empty}");
+    assert_eq!(empty["cost"]["chunks"], json!(0), "{empty}");
+    assert_eq!(empty["resolution"]["answered"], Value::Null, "{empty}");
+    assert_eq!(empty["resolution"]["tried"], json!([]), "{empty}");
+    // **The answer is UNOBSERVED, not quiet and not zero.** One stated cell with no level, the
+    // per-cell arrays absent rather than empty or zeroed, and the grid still the tile's own.
+    assert_eq!(empty["grid"]["uniform"]["max_db"], Value::Null, "{empty}");
+    assert_eq!(empty["grid"]["uniform"]["frames"], json!(0), "{empty}");
+    assert_eq!(
+        empty["grid"]["uniform"]["observed"],
+        json!(false),
+        "{empty}"
+    );
+    assert_eq!(empty["grid"]["observed_cells"], json!(0), "{empty}");
+    assert_eq!(empty["grid"]["range_db"], Value::Null, "{empty}");
+    assert_eq!(empty["grid"]["cells"], json!(N * N), "{empty}");
+    for k in ["max_db", "occupancy_max", "coverage", "frames"] {
+        assert!(
+            empty["grid"].get(k).is_none(),
+            "grid enumerates {k}: {empty}"
+        );
+    }
+    // …and the plane the client greys from agrees, in its own vocabulary.
+    let sel = empty["coverage"]["selected"]["plane"].as_u64().unwrap() as usize;
+    assert_eq!(
+        empty["coverage"]["planes"][sel]["uniform"],
+        json!("unobserved"),
+        "{empty}"
+    );
+    // The body is a CONSTANT, not a function of the tile's cell count: sixty-four times the cells
+    // is the same answer, to within the axis numbers.
+    let small = serde_json::to_string(&empty).unwrap().len();
+    let (_, empty_big) = get(
+        addr,
+        &format!(
+            "/api/tiles?level_f=0&level_t=0&f_index={}&t_index={}&cells=256",
+            far * N / 256,
+            t_index_of(0) / 8 + 1
+        ),
+    );
+    assert_eq!(
+        empty_big["resolution"]["short_circuit"]["applied"],
+        json!(true),
+        "{empty_big}"
+    );
+    assert_eq!(empty_big["grid"]["cells"], json!(256 * 256), "{empty_big}");
+    let big = serde_json::to_string(&empty_big).unwrap().len();
+    assert!(
+        big < small * 2,
+        "an unobserved tile's body must not scale with cells: {small} B at {N}x{N}, {big} B at 256x256"
+    );
+    // Against the full read beside it, the saving is the whole ticket — measured on the `grid`
+    // member, which is the part that scales with cells (the rest of a tile answer is fixed prose
+    // and axis numbers, and at 32 x 32 that prose is most of both bodies).
+    let empty_grid = serde_json::to_string(&empty_big["grid"]).unwrap().len();
+    let observed_grid = serde_json::to_string(&fine["grid"]).unwrap().len();
+    assert!(
+        empty_grid < observed_grid,
+        "a 256 x 256 unobserved grid ({empty_grid} B) must be smaller than a {N} x {N} OBSERVED \
+         one ({observed_grid} B) — sixty-four times the cells, stated once"
+    );
 
     // ---- the de-welding, on the wire: one axis's level moves only its own axis's cell ----
     let (st, coarse_f) = get(addr, &tile(2, 0, f_index / 4, t_index_of(0)));
