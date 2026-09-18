@@ -13200,7 +13200,8 @@ tasks:
   - id: T-466
     milestone: M2-hardening
     title: ui/e2e/selftest.mjs cannot hold app-page faults, so per-guard attribution is meaningless for two specs
-    status: in-progress
+    status: done
+    commit: "b7070787"
     priority: normal
     parallel_group: UI
     depends_on: []
@@ -15224,7 +15225,8 @@ tasks:
   - id: T-508
     milestone: MLIVE
     title: A failed re-plumb ends the run for good while hk serve stays up saying finished - the other road to "retune never recovers"
-    status: in-progress
+    status: done
+    commit: "51bc8aae"
     priority: high
     parallel_group: PIPE
     core_interface: true
