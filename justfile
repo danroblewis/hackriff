@@ -101,6 +101,11 @@ test-rust:
     #!/usr/bin/env bash
     set -euo pipefail
     export HK_E2E_REQUIRE_SYNTH=1
+    # T-492: hk-plugins::host spawns these via CARGO_BIN_EXE_*, resolved at the *test binary's*
+    # compile time. `--workspace` does not reliably rebuild them if hk-plugins' own fingerprint
+    # is otherwise fresh — the same one line `acceptance` (below) already runs before its
+    # hk-e2e tests, for the same reason. A no-op relink on a warm target (measured: ~0.05s).
+    cargo build -p hk-plugins --bins
     if command -v cargo-nextest >/dev/null 2>&1; then
         cargo nextest run --workspace --exclude hk-e2e
     else
