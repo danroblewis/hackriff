@@ -363,51 +363,35 @@ test("capture.css: the timeline is fluid (no fixed wide pixel width) and scrubba
 
 // ---- T-391: the edge navigators are as thick as the Capture panel, and stay that way when it folds ----
 
-test("T-391 property: the freqnav row and the timenav column both equal the Capture panel's own row", () => {
-  const css = readFileSync("src/app/base.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-  const rowsOf = (rule: string) => rule.match(/grid-template-rows:\s*([^;]+);/)![1].trim().split(/\s+/);
-  const colsOf = (rule: string) => rule.match(/grid-template-columns:\s*([^;]+);/)![1].trim().split(/\s+/);
-
-  // .centre's rows are [wfrow, axis, freqnav, capture] — asserted as the actual values, not merely
-  // "greater than 12px": the freqnav row and the Capture row are the same 92px.
-  const centreRows = rowsOf(css.match(/\.centre\s*\{[^}]*\}/)![0]);
-  assert.deepEqual(centreRows, ["minmax(0,1fr)", "26px", "92px", "92px"], "wfrow / axis / freqnav / capture");
-  assert.equal(centreRows[2], centreRows[3], "freqnav is exactly as thick as the Capture panel");
-
-  // .wfrow's columns are [timenav, specwf] — the timenav column is the same 92px too.
-  const wfrowCols = colsOf(css.match(/\.wfrow\s*\{[^}]*\}/)![0]);
-  assert.deepEqual(wfrowCols, ["92px", "minmax(0,1fr)"], "timenav / specwf");
-  assert.equal(wfrowCols[0], centreRows[3], "timenav is exactly as wide as the Capture panel is tall");
-});
-
-test("T-391 control: collapsing the Capture panel changes only Capture's own row, never freqnav's or timenav's", () => {
+test("T-391, after T-445: collapsing the Capture panel changes only Capture's own row", () => {
+  // The original property was that the two edge navigators were each exactly as thick as the
+  // Capture panel — they had been measured and served into 12 px and 30 px tracks, too thin to
+  // read — and its control was that collapsing Capture could not resize either of them. T-445
+  // retired both navigators, so the sizing half is gone; the CONTROL is kept and re-pointed,
+  // because the thing it protects is still here: `.cap-collapsed` must rewrite the Capture row and
+  // nothing else, or folding one panel silently resizes the surface above it.
   const css = readFileSync("src/app/base.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   const rowsOf = (rule: string) => rule.match(/grid-template-rows:\s*([^;]+);/)![1].trim().split(/\s+/);
   const expandedRows = rowsOf(css.match(/\.centre\s*\{[^}]*\}/)![0]);
   const collapsedRows = rowsOf(css.match(/\.centre\.cap-collapsed\s*\{[^}]*\}/)![0]);
-
-  // The decision: navigator thickness follows the Capture panel's *expanded* size and is fixed
-  // there — it does not track the panel's live collapsed state. So collapsing rewrites only the
-  // last (Capture) row; the third (freqnav) row is identical in both rules.
-  assert.deepEqual(collapsedRows, ["minmax(0,1fr)", "26px", "92px", "34px"]);
-  assert.equal(collapsedRows[2], expandedRows[2], "freqnav's row is untouched by Capture collapsing");
-  assert.notEqual(collapsedRows[3], expandedRows[3], "Capture's own row is what actually shrinks");
-
-  // No rule ever makes the collapse touch .wfrow (the timenav column) at all.
-  assert.doesNotMatch(css, /\.wfrow\.cap-collapsed|\.timenav\.cap-collapsed|\.freqnav\.cap-collapsed/);
-
+  assert.equal(expandedRows.length, 2, "the centre column is [surface, capture]");
+  assert.deepEqual(collapsedRows.length, expandedRows.length);
+  assert.equal(collapsedRows[0], expandedRows[0], "the surface's row is untouched by Capture collapsing");
+  assert.notEqual(collapsedRows[1], expandedRows[1], "Capture's own row is what actually shrinks");
+  // And the surface's row is the flexible one, so the canvas takes the height that is left.
+  assert.equal(expandedRows[0], "minmax(0,1fr)");
   // Holds at the one-screen breakpoint too, not only at the default width.
   const narrow = css.slice(css.indexOf("@media (max-width: 900px)"), css.indexOf("@media (prefers-reduced-motion"));
   const narrowExpanded = rowsOf(narrow.match(/\.centre\s*\{[^}]*\}/)![0]);
   const narrowCollapsed = rowsOf(narrow.match(/\.centre\.cap-collapsed\s*\{[^}]*\}/)![0]);
-  assert.deepEqual(narrowExpanded.slice(2), ["92px", "92px"], "freqnav and Capture stay 92px at 900px too");
-  assert.deepEqual(narrowCollapsed.slice(2), ["92px", "34px"], "same decoupling holds at 900px");
+  assert.equal(narrowCollapsed[0], narrowExpanded[0], "same decoupling holds at 900px");
+  assert.notEqual(narrowCollapsed[1], narrowExpanded[1]);
   // The rest of the one-screen layout (single column, no horizontal scroll) is unchanged by this
   // task — still one column, and .centre's own overflow rules are untouched.
   assert.match(narrow, /\.main,\s*\.wb\s*\{\s*grid-template-columns:\s*minmax\(0,1fr\);\s*\}/);
 });
 
-test("T-391: the Capture panel header is a disclosure toggle, wired through the persisted shell pref, and never resizes the navigators itself", () => {
+test("T-391: the Capture panel header is a disclosure toggle, wired through the persisted shell pref", () => {
   const src = readFileSync("src/app/capture/index.ts", "utf8");
   assert.match(src, /setCaptureCollapsed/, "the toggle reads/writes the persisted captureCollapsed pref");
   assert.match(src, /band\.hidden\s*=\s*collapsed/, "collapsing hides the overview band");

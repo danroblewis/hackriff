@@ -1,136 +1,51 @@
-/* centre area styles (ADR-0013 §5, §8). Owner: T-152. Every rule is scoped under the centre slots
-   (.specwf = live, .axis). Tokens only; the waterfall canvas keeps its fixed data colormap (always
-   dark), so the lines drawn over it (crosshair, DC hatching) are fixed light/dark overlays. */
-.specwf [hidden] { display: none !important; }
-.specwf { cursor: crosshair; user-select: none; -webkit-user-select: none; touch-action: none; }
-.specwf.reviewing { box-shadow: inset 0 2px 0 var(--amber); }
+/* Centre area styles (ADR-0013 §5, §8). Owner: T-152; rebuilt by T-445's cutover.
+ *
+ * What was here: ~136 lines placing DOM overlays — brackets, full-height Confirmed bands, selection
+ * boxes, a hover crosshair and tip, a drag draft, a review badge — on top of the live waterfall
+ * canvas. Every one of them was a second layout of something the canvas was already drawing, laid
+ * out on a poll while the canvas scrolled per frame, which is T-388.
+ *
+ * They are now stroked quads inside the render pass (`ui/src/surface/marks.ts`), so what is left
+ * here is chrome around the canvas: a bar, a hover readout, the retune offer, the level statement
+ * and the orientation note. None of it overlaps the picture. */
+.surface [hidden] { display: none !important; }
 
-.specwf .c-spec { position: absolute; left: 0; right: 0; top: 0; height: 35%; pointer-events: none; }
-.specwf .c-brackets { position: absolute; inset: 0; pointer-events: none; }
-.specwf .bk { position: absolute; top: 24px; height: 14px; box-sizing: border-box; border-top: 2px solid; border-left: 1px solid; border-right: 1px solid; pointer-events: auto; cursor: pointer; }
-.specwf .bk span { position: absolute; top: -17px; left: 50%; transform: translateX(-50%); font: 500 10.5px var(--mono); white-space: nowrap; padding: 0 4px; border-radius: 3px; background: var(--ground); }
-.specwf .bk.confirmed { border-color: var(--teal); color: var(--teal); }
-.specwf .bk.candidate { border-color: var(--lav); color: var(--lav); border-style: dashed; }
-.specwf .bk.active { border-color: var(--amber); color: var(--amber); border-style: solid; z-index: 2; }
-.specwf .bk.narrow span { display: none; }
-.specwf .bk.active span, .specwf .bk:hover span { display: block; }
+.sf-bar {
+  display: flex; align-items: center; gap: 10px; padding: 0 12px;
+  border-bottom: 1px solid var(--line); background: var(--panel);
+  font: 11px var(--mono); color: var(--muted); min-width: 0;
+}
+.sf-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sf-hover { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.specwf .c-bands { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
-.specwf .c-band { position: absolute; top: 0; bottom: 0; box-sizing: border-box; border-left: 2px solid var(--yellow); border-right: 2px solid var(--yellow); background: var(--yellow-soft); }
-.specwf .c-band.active { border-left-width: 3px; border-right-width: 3px; box-shadow: inset 0 0 0 1px var(--yellow); }
-.specwf .c-band-tick { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed color-mix(in srgb, var(--yellow) 55%, transparent); opacity: 0.8; }
-
-/* T-261 (ADR-0017 TM-4) / T-362: the time-extent presence boxes and the timed selection boxes are
-   no longer DOM. They are drawn in the waterfall's own WebGL render pass (ui/src/waterfall.ts
-   `drawBoxes`, ui/src/timebox.ts), from the same ring head and the same per-row capture times as
-   the rows, every animation frame — so they cannot sit still while the rows scroll under them and
-   then jump when the data poll catches up. Their colours are the same --teal / --lav / --amber
-   tokens, written as RGB in ui/src/app/centre/overlays.ts, since the canvas keeps its own always-
-   dark colormap. What stays here is only what has no time axis: the focused row's full-height
-   .c-band above, and .c-sel for a frequency-only selection below. */
-
-.specwf .c-wf { position: absolute; left: 0; right: 0; top: 35%; bottom: 0; pointer-events: none; overflow: hidden; }
-.specwf .c-colhi { position: absolute; top: 0; bottom: 0; background: var(--amber-soft); border-left: 1px solid var(--amber); border-right: 1px solid var(--amber); }
-.specwf .c-dc { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ground) 0%, transparent) 0 4px, color-mix(in srgb, var(--ground) 60%, transparent) 4px 6px); }
-.specwf .c-dc.assumed { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ground) 0%, transparent) 0 6px, color-mix(in srgb, var(--ground) 45%, transparent) 6px 8px); }
-.specwf .c-dc span { position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%); font: 10px var(--mono); color: var(--muted); background: var(--ground); padding: 1px 4px; border-radius: 3px; white-space: nowrap; }
-.specwf .c-sel { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--amber); border-right: 1px dashed var(--amber); opacity: 0.6; pointer-events: auto; }
-.specwf .c-sel.active { background: var(--amber-soft); opacity: 1; }
-.specwf .c-sel.pending { border-style: dotted; }
-.specwf .c-drag { position: absolute; box-sizing: border-box; border: 1px dashed var(--amber); background: var(--amber-soft); pointer-events: none; }
-.specwf .c-drag span { position: absolute; top: 4px; left: 4px; font: 10.5px var(--mono); color: var(--text); background: var(--panel); padding: 1px 5px; border-radius: 3px; white-space: nowrap; }
-
-.specwf .c-cross { position: absolute; top: 0; bottom: 0; width: 1px; background: color-mix(in srgb, var(--text) 45%, transparent); pointer-events: none; }
-.specwf .c-tip { position: absolute; top: 46px; max-width: calc(100% - 16px); overflow: hidden; text-overflow: ellipsis; font: 11px var(--mono); color: var(--text); background: var(--panel); border: 1px solid var(--line); padding: 3px 7px; border-radius: 4px; pointer-events: none; white-space: nowrap; z-index: 4; }
-.specwf .c-hint { position: absolute; right: 10px; bottom: 28px; font-size: 11px; color: var(--muted); background: var(--panel); opacity: 0.9; padding: 3px 8px; border-radius: 4px; pointer-events: none; }
-.specwf .c-addmode { position: absolute; left: 8px; top: 8px; z-index: 5; font: 600 10.5px var(--ui); letter-spacing: 0.03em; color: var(--muted); background: var(--panel); border: 1px solid var(--line); padding: 3px 9px; border-radius: 12px; cursor: pointer; pointer-events: auto; touch-action: manipulation; }
-.specwf .c-addmode.on { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 55%, transparent); background: color-mix(in srgb, var(--amber) 14%, transparent); }
-.specwf .c-time { position: absolute; right: 8px; bottom: 8px; font: 10px var(--mono); color: var(--muted); background: var(--ground); padding: 0 4px; border-radius: 3px; pointer-events: none; }
-.specwf .c-review { position: absolute; left: 10px; top: calc(35% + 8px); max-width: calc(100% - 20px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--amber); background: var(--panel); border: 1px solid var(--amber); padding: 2px 8px; border-radius: 4px; pointer-events: none; }
-.specwf .c-perf { position: absolute; left: 8px; bottom: 8px; font: 10px var(--mono); color: var(--muted); background: var(--ground); padding: 0 4px; border-radius: 3px; pointer-events: none; }
-
-.axis { touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
-.axis.dragging { cursor: grabbing; }
-.axis .c-tick { position: absolute; top: 0; height: 100%; }
-.axis .c-tick::before { content: ""; position: absolute; top: 0; left: 0; width: 1px; height: 5px; background: var(--dim); }
-.axis .c-tick span { position: absolute; top: 7px; transform: translateX(-50%); white-space: nowrap; }
-
-/* T-343: a pan past the band edge offers a retune. It is the one control on this strip that moves
-   the radio rather than the view, so it is styled as an action, not as a readout: amber like the
-   other "this changes something" affordances, never the dim tick colour. */
-.axis .c-retune-offer { position: absolute; top: 3px; z-index: 6; font: 600 10.5px var(--ui); letter-spacing: 0.03em; color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, var(--panel)); border: 1px solid var(--amber); padding: 2px 9px; border-radius: 12px; cursor: pointer; touch-action: manipulation; white-space: nowrap; }
-.axis .c-retune-offer[data-side="lo"] { left: 8px; }
-.axis .c-retune-offer[data-side="hi"] { right: 30px; }
-.axis .c-retune-dismiss { position: absolute; top: 3px; right: 8px; z-index: 6; font: 600 10.5px var(--ui); color: var(--muted); background: var(--panel); border: 1px solid var(--line); padding: 2px 6px; border-radius: 12px; cursor: pointer; touch-action: manipulation; }
-
-@media (max-width: 900px) {
-  .specwf .c-hint { display: none; }
+.sf-stage { position: relative; min-height: 0; min-width: 0; overflow: hidden; background: var(--ground); }
+.sf-canvas {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+  /* The surface owns its own pan and zoom, so the browser must not also scroll or pinch it. */
+  touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none;
 }
 
-/* T-340: the two edge navigators. Scoped under .freqnav / .timenav, the slots they mount into.
-   Both are view controls — the one thing here that moves the radio is the retune offer button,
-   styled as an action (amber) exactly like the axis strip's, never as a readout. */
-.freqnav { touch-action: none; user-select: none; -webkit-user-select: none; }
-/* T-391: the track fills the bar's own (now 92px, base.css) height instead of a fixed 12px sliver
-   pinned near the top — the T-368 survey strip it draws was measured but had nowhere to be seen. */
-.freqnav .fn-track { position: absolute; left: 10px; right: 10px; top: 8px; bottom: 20px; border: 1px solid var(--line); border-radius: 3px; background: color-mix(in srgb, var(--text) 5%, transparent); cursor: crosshair; }
-.freqnav .fn-track.dragging { cursor: grabbing; }
-.freqnav .fn-dim-layer { position: absolute; inset: 0; pointer-events: none; }
-/* T-405: the coverage shading that replaced the `.fn-view` box. One span per GAP between the
-   reported active capture windows (docs/api.md `windows`), darkened; the windows themselves are
-   left untouched, so the region at full strength IS the tuned window and no separate rectangle
-   claims to be it. The wash is neutral, not a hue — a coloured overlay would compete with the
-   waterfall ramp under it. */
-.freqnav .fn-dim { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--ground) 62%, transparent); }
-.freqnav .fn-draft { position: absolute; top: -2px; bottom: -2px; box-sizing: border-box; border: 1px dashed var(--amber); background: var(--amber-soft); pointer-events: none; }
-.freqnav .fn-offer { position: absolute; bottom: 14px; z-index: 6; font: 600 10.5px var(--ui); letter-spacing: 0.03em; color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, var(--panel)); border: 1px solid var(--amber); padding: 2px 9px; border-radius: 12px; cursor: pointer; touch-action: manipulation; white-space: nowrap; }
-.freqnav .fn-label { position: absolute; left: 52px; right: 10px; bottom: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* T-393 (1): a static name for the axis each bar controls. The two bars look alike and do different
-   things — the left one is time, the bottom one is frequency — and the user asked each to say so. */
-.freqnav .fn-axis-label { position: absolute; left: 10px; bottom: 1px; font-weight: 700; letter-spacing: 0.1em; color: var(--dim); }
-/* T-393 (3): the hover/drag readout. Only on hover or drag (`hidden` is toggled in JS), following
-   the cursor along this bar's own axis, and never a pointer target of its own. */
-.freqnav .fn-readout { position: absolute; top: 2px; z-index: 7; transform: translateX(-50%); max-width: 96%; font: 10px var(--mono); color: var(--text); background: color-mix(in srgb, var(--ground) 88%, transparent); border: 1px solid var(--line); border-radius: 3px; padding: 1px 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+/* T-442/T-347: a viewport following the growing edge, versus one frozen on a past window. Pausing
+   is a view change and reaches nothing — the button says which state this viewport is in, never
+   what the radio is doing. */
+.sf-live.on { color: var(--teal); border-color: var(--teal); }
 
-.timenav { touch-action: none; user-select: none; -webkit-user-select: none; }
-/* T-393/T-395: the bar now carries its axis label at the top and the LIVE control at the foot, so
-   the track is inset to leave room for both rather than filling the bar edge to edge. */
-.timenav .tn-track { position: absolute; inset: 15px 6px 21px; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; cursor: crosshair; }
-.timenav .tn-track.dragging { cursor: grabbing; }
-.timenav .tn-track.reviewing { box-shadow: inset 0 0 0 1px var(--amber); }
-.timenav .tn-axis-label { position: absolute; top: 2px; left: 7px; font: 700 9.5px var(--ui); letter-spacing: 0.1em; color: var(--dim); }
-.timenav .tn-readout { position: absolute; left: 2px; right: 2px; z-index: 7; transform: translateY(-50%); font: 10px var(--mono); color: var(--text); background: color-mix(in srgb, var(--ground) 88%, transparent); border: 1px solid var(--line); border-radius: 3px; padding: 1px 3px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
-/* T-395: LIVE, moved off the Capture band. Styled as the pill it replaced — coral while following,
-   amber while the view is held in the past — because it is the same control in a better place. */
-.timenav .tn-live { position: absolute; left: 6px; right: 6px; bottom: 2px; font: 600 9.5px var(--ui); letter-spacing: 0.08em; color: var(--amber); border: 1px solid color-mix(in srgb, var(--amber) 50%, transparent); background: color-mix(in srgb, var(--amber) 12%, transparent); padding: 1px 4px; border-radius: 4px; cursor: pointer; touch-action: manipulation; }
-.timenav .tn-live.following { color: var(--coral); border-color: color-mix(in srgb, var(--coral) 50%, transparent); background: color-mix(in srgb, var(--coral) 12%, transparent); }
-/* Upscaled, never smoothed: repeating a measured cell across pixels is the honest direction. */
-.timenav .tn-overview { position: absolute; inset: 0; width: 100%; height: 100%; display: block; image-rendering: pixelated; }
-.timenav .tn-view { position: absolute; left: -1px; right: -1px; box-sizing: border-box; border: 1px solid var(--amber); background: var(--amber-soft); cursor: grab; }
-.timenav .tn-draft { position: absolute; left: -1px; right: -1px; box-sizing: border-box; border: 1px dashed var(--amber); background: var(--amber-soft); pointer-events: none; }
+/* T-444: the retune offer. A pan produces it; only this button moves the front end, and a disabled
+   one is a STATED refusal (band edge, span too wide) rather than a clamped smaller move. */
+.sf-offer { display: flex; align-items: center; gap: 8px; color: var(--amber); min-width: 0; }
+.sf-offer > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 42ch; }
+.sf-offer button[disabled] { opacity: 0.5; cursor: not-allowed; }
 
-/* T-368/T-397: the frequency navigator's survey strip — now a mini-waterfall (time down, frequency
-   across), sized one cell per pixel so nothing is stretched. Upscaled, never smoothed, for the same
-   reason as the time bar's overview: repeating a served cell across pixels shows what was measured,
-   while interpolating between them invents a value. Grey cells in it are never-observed spectrum. */
-.freqnav .fn-survey { position: absolute; inset: 0; width: 100%; height: 100%; display: block; image-rendering: pixelated; border-radius: 2px; }
-
-/* T-407: the two bars on touch. *"The left + bottom scrubber bars are hard to use on touch —
-   everything else is fine on mobile."*
-
-   The `touch-action: none` on `.freqnav` / `.timenav` above is the "no accidental page scroll" half,
-   and it is deliberately **scoped to the two bars**: a blanket rule on `body` would make the whole
-   page unscrollable on a phone, which is the trap in this ticket. Everything outside these two
-   slots keeps the browser's own scrolling; the controls inside them opt back in with
-   `touch-action: manipulation` so a tap on LIVE or the retune offer is still a fast tap.
-
-   The rest is hit-target size, and only where the pointer is coarse — a mouse loses nothing. The
-   marker's *grab* area is widened in JS (`grabTolerancePx`), not here, so the drawn marker is
-   unchanged; this gives it a floor so there is something to see under the finger, and grows the two
-   buttons, which at 9.5px/1px padding are about 14px tall — under any thumb. */
-@media (pointer: coarse) {
-  .timenav .tn-view { min-height: 20px; }
-  .timenav .tn-track { inset: 15px 6px 30px; }
-  .timenav .tn-live { padding: 6px 4px; }
-  .freqnav .fn-offer { padding: 7px 12px; }
+/* docs/16 §8.5a: the anti-divergence guarantee is "same ramp, same scale, STATED level" — two
+   viewports at different (level_f, level_t) legitimately differ, and the map, being device-wide, is
+   nearly always one of them. Stating it is the fix; hiding it is what invites the bug report. */
+.sf-chrome {
+  border-top: 1px solid var(--line); background: var(--panel);
+  font: 10.5px var(--mono); color: var(--muted); padding: 4px 12px;
+  max-height: 84px; overflow-y: auto;
 }
+
+/* The orientation sentence (T-450's `orientationNote`): what fraction of the surface was ever
+   sampled, and where this view opened. A nearly-grey first screen with this line is a finding; the
+   same screen without it is a bug report. */
+.sf-note { border-top: 1px solid var(--line); background: var(--panel); padding: 4px 12px; font-size: 11px; color: var(--muted); }

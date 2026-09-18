@@ -4,7 +4,6 @@
 // `explanations`, `refined` — that the old page's `Row` never needed.
 import { deleteEntry, inventoryQuery, promoteEntry, rowListenTarget, type ActionResult, type Filters, type InventoryClient, type Recurrence as BaseRecurrence, type Row as BaseRow, type UserBand } from "../../inventory";
 import { surveyCells, type CoverageResponse } from "../../navigators";
-import { WATERFALL_ROWS } from "../../waterfall";
 import type { AppContext } from "../context";
 import { apiErrorText } from "./format";
 import { setInventoryRows, setInventoryWindow } from "./slice";
@@ -129,12 +128,21 @@ export function liveEdgeS(state: WindowState): number | null {
   return state.live.edgeTS ?? state.captureWindow?.t1S ?? null;
 }
 
-/** Seconds of time the waterfall is showing: its ring height over the row rate (≈ 20.5 s at the
- * default 25 rows/s). Pure arithmetic over already-known UI view state — which rows *qualify* in
- * that window is the backend's predicate, never this client's (§1 thin-client rule). */
+/**
+ * The span a view falls back to when **no viewport has named one** — 512 rows at the stream's own
+ * row rate (≈ 20.5 s at the default 25 rows/s).
+ *
+ * T-445: this used to be the live waterfall's ring height over its row rate, and it was the *only*
+ * definition of "how much time is on screen". The unified surface names its own span on both arms
+ * of the cursor (`capture/slice.ts`), so this is now a fallback for the moment before the first
+ * viewport has reported, not a second opinion about the window. It stays pinned to the row rate
+ * rather than becoming a constant, because that is what it means: the period of the data.
+ */
+export const FALLBACK_ROWS = 512;
+
 export function waterfallSpanS(state: WindowState): number {
   const rate = state.live.rowRateHz ?? state.device.rowsPerS ?? DEFAULT_ROW_RATE_HZ;
-  return WATERFALL_ROWS / Math.max(1e-3, rate);
+  return FALLBACK_ROWS / Math.max(1e-3, rate);
 }
 
 /** The UI's one time window: `[t0, t1]` on the capture clock. */
@@ -275,23 +283,27 @@ export async function loadInventoryRows(ctx: AppContext, onMore: (tab: Inventory
 // permitted difference between them, and it is named and countable rather than inferred from a
 // missing rectangle. The arithmetic that holds by construction, and that the test asserts:
 //
-//     listed.candidate.length + listed.confirmed.length
-//       === boxed.length + noExtent.length + (focused row in the collection ? 1 : 0)
+//     listed.candidate.length + listed.confirmed.length === boxed.length + noExtent.length
 //
-// The focused row is the third term because it keeps its full-height bracket/band instead of a
-// presence box (T-193/T-261, ADR-0017 TM-4) — a deliberate substitution, not a dropped row.
+// T-445 REMOVED THE THIRD TERM. It used to be `+ (focused row ? 1 : 0)`, because the focused row
+// substituted a full-height DOM bracket/band for its presence box (T-193/T-261, ADR-0017 TM-4).
+// That substitution was a second renderer for one row, and it is exactly what the cutover retires:
+// on the canvas every listed row with a measured extent draws the SAME kind of mark, and the
+// focused one is drawn heavier rather than drawn differently. One fewer special case, and an
+// identity with one fewer term to get wrong.
 
 /** The rows of the current window, split once for every surface that renders them (T-389). */
 export interface RenderedInventory {
   /** What the Explore lists render and count, by tab. */
   listed: { candidate: Row[]; confirmed: Row[] };
-  /** The rows that draw a presence box on the waterfall — a strict subset of `listed`. */
+  /** The rows that draw a signal box on the surface — a strict subset of `listed`, and since
+   * T-445 it includes the focused one (it is drawn heavier, not drawn by something else). */
   boxed: Row[];
   /** Listed rows carrying no `presence.last_interval`, so there is no measured extent to draw.
    * Never a fabricated box; the disagreement is disclosed instead (docs/api.md `presence`). */
   noExtent: Row[];
-  /** The focused row, when it is one of the listed rows: it draws its own full-height overlay
-   * rather than a presence box, so it is in `listed` and never in `boxed`. */
+  /** The focused row, when it is one of the listed rows. It is in `boxed` too (T-445): the sidebar
+   * still needs to know which row is focused, but the surface no longer draws it differently. */
   focused: Row | null;
 }
 
@@ -311,7 +323,7 @@ export function renderedInventory(
   for (const r of all) {
     if (r.state !== "candidate" && r.state !== "confirmed") continue;
     out.listed[r.state].push(r);
-    if (r.id === focusedId) { out.focused = r; continue; }
+    if (r.id === focusedId) out.focused = r;
     if (r.presence?.last_interval) out.boxed.push(r);
     else out.noExtent.push(r);
   }

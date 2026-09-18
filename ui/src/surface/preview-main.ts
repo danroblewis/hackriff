@@ -13,8 +13,9 @@ import { ControlClient } from "../controls/client";
 import { h } from "../app/dom";
 import { takeToken } from "../app/net";
 import { fmtShare } from "./bootstrap";
+import { attachSurfaceInput } from "./input";
 import { legendEntries, swatchPixels } from "./legend";
-import { SurfacePreview, isBackpressure, probeSurface, wheelZoom } from "./preview";
+import { SurfacePreview, isBackpressure, probeSurface } from "./preview";
 
 const SWATCH_W = 54, SWATCH_H = 22;
 
@@ -114,73 +115,14 @@ async function main(): Promise<void> {
     button("Overlays", "Draw the map's pane rectangles. They are strokes, never washes, so they cannot tint a measurement.", () => { preview.view.overlays = !preview.view.overlays; }),
   );
 
-  // ——— pointer: drawing-buffer coordinates, GL convention (origin bottom-left) ———
-  const point = (e: { clientX: number; clientY: number }) => {
-    const r = canvas.getBoundingClientRect();
-    return {
-      x: (e.clientX - r.left) * (canvas.width / Math.max(1, r.width)),
-      y: canvas.height - (e.clientY - r.top) * (canvas.height / Math.max(1, r.height)),
-    };
-  };
-
-  // **Drag pans, on both axes at once (T-456)** — and it has no threshold and no combined travel
-  // measure, which is T-407's lesson kept rather than re-learned: that defect was a 6 px threshold
-  // that turned a tap into a drag, plus travel measured as `clientX + clientY` so a stroke *across*
-  // a bar counted as travel *along* it. Here each move applies its own `dx` and `dy` to its own
-  // axis, a zero-pixel move moves the view by zero, and nothing accumulates toward a decision.
-  let dragging: { x: number; y: number; map: boolean; pane: string | null } | null = null;
-  canvas.addEventListener("pointerdown", (e) => {
-    const p = point(e);
-    const map = preview.onMap(p);
-    const pane = map ? null : preview.paneAt(p);
-    if (pane) preview.activePane = pane;
-    dragging = { x: e.clientX, y: e.clientY, map, pane };
-    canvas.setPointerCapture(e.pointerId);
-  });
-  canvas.addEventListener("pointermove", (e) => {
-    if (!dragging || !e.buttons) return;
-    const scale = canvas.width / Math.max(1, canvas.getBoundingClientRect().width);
-    // Screen y runs down and the drawing buffer's runs up, so the vertical delta is negated once,
-    // here, and every consumer below is in one convention.
-    const dx = (e.clientX - dragging.x) * scale, dy = -(e.clientY - dragging.y) * scale;
-    dragging.x = e.clientX;
-    dragging.y = e.clientY;
-    if (dragging.map) preview.dragMap(dx, dy);
-    else if (dragging.pane) preview.drag(dragging.pane, dx, dy);
-  });
-  const endDrag = () => { dragging = null; };
-  canvas.addEventListener("pointerup", endDrag);
-  canvas.addEventListener("pointercancel", endDrag);
-
-  // **Every wheel over the canvas is the surface's, whatever is held down (T-456).**
+  // ——— pointer ———
   //
-  // The listener is `{ passive: false }` precisely so this `preventDefault` binds, and it is
-  // unconditional: ctrl+wheel is the browser's page-zoom shortcut and cmd+wheel is Safari's, so a
-  // conditional one would let a user who reached for ctrl zoom the *document* on top of the surface.
-  // What it cannot do is reach past the browser — macOS's own ctrl+scroll zoom (Accessibility →
-  // Zoom) consumes the event before any `wheel` is dispatched, which is why `wheelAxes` puts the
-  // time axis on ALT and leaves ctrl to fall through to the uniform gesture (where a trackpad pinch,
-  // which Chrome and Safari deliver as ctrl+wheel, also belongs).
-  //
-  // **What the gesture MEANS is not decided here.** `wheelZoom` reads the modifier bits and the
-  // deltas; this host only forwards the event and places the result. The surface has a second host
-  // after the cutover, and two hosts each doing their own wheel arithmetic is T-412's wheel-zoom
-  // mismatch rebuilt — so the arithmetic lives in `preview.ts` and the listener stays this thin.
-  canvas.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    const p = point(e);
-    const { factor, axes } = wheelZoom(e);
-    if (preview.onMap(p)) { preview.wheelMap(p, factor, axes); return; }
-    const pane = preview.paneAt(p);
-    if (pane) { preview.activePane = pane; preview.wheel(pane, p, factor, axes); }
-  }, { passive: false });
-
-  // Double-click on the map sends the active pane there. A discrete act rather than a threshold on
-  // a pointer stream — T-407's lesson, kept even though nothing here can reach a radio.
-  canvas.addEventListener("dblclick", (e) => {
-    const p = point(e);
-    if (preview.onMap(p)) preview.goToOnMap(p);
-  });
+  // **T-445 moved the handlers to `./input.ts`, and T-456's semantics went with them.** The cutover
+  // gives this surface a *second* host — the app's Explore centre — and two hosts each doing their
+  // own wheel and drag arithmetic is T-412's wheel-zoom mismatch rebuilt. So the listeners are
+  // registered in one file, the meaning of a wheel is `preview.ts`'s `wheelZoom`, and this page and
+  // the app cannot disagree about either.
+  attachSurfaceInput(canvas, preview);
 
   // ——— size, and the loop ———
   const fit = () => {

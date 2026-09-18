@@ -37,9 +37,11 @@ import {
   type CoverageCensus, type CoverageSlice, type NavigationSlice, type OpeningWindow, type SurfaceOrigin,
 } from "./bootstrap";
 import { tileUrl, type Box, type Lattice, type TileAddr } from "./lattice";
+import type { OverlayQuad } from "./minimap";
+import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache } from "./tilecache";
-import type { TilePlanes } from "./surface";
+import type { PaneView, TilePlanes } from "./surface";
 import { SurfaceView, type SurfaceFrame } from "./view";
 
 /** Cells per tile edge the preview renders at — the route's own default, and the size the cache
@@ -285,6 +287,36 @@ export interface PreviewOptions {
   /** Where `SurfaceChrome` mounts its per-viewport level readout. Null in a headless test. */
   chrome?: HTMLElement | null;
   minimapPx?: number;
+  /**
+   * **The growing edge, reported in (T-445).** Omit it and the surface is historical: the edge is
+   * the one `probeSurface` resolved, it never advances, and every viewport opens frozen — which is
+   * exactly T-450's preview and stays its behaviour unchanged.
+   *
+   * Supply it and the same host becomes the *live* view: the first pane opens **following**, and
+   * `frame()` asks this function where capture has got to. It is still *reported in* and never
+   * controlled from here — T-442's rule, unchanged: capture, the ring and detection are never
+   * consulted by a gesture, and a pane's pause is still only its own time window.
+   *
+   * There is deliberately no second host class for "the live one". The live-versus-history split
+   * is the seam docs/16 §8.5 retires; two hosts would be that seam moved into the client.
+   */
+  edge?: (() => number) | null;
+  /**
+   * The currently-active capture windows to light on the map, re-read every frame (T-445). The
+   * preview passes none, because it does not read the live edge and a segment placed from a fixed
+   * historical instant would be a live claim with no live evidence.
+   */
+  windows?: (() => readonly ActiveWindow[]) | null;
+  /**
+   * Extra stroked marks to draw **inside each pane**, re-derived on every frame from the state they
+   * describe — signal boxes and selections (T-445, `./marks.ts`).
+   *
+   * Per frame, not per poll: a per-poll layout against a per-frame scroll is T-388's box-jump, and
+   * the whole reason the boxes move here is that the mapping they are placed through is the *same*
+   * `toClip` the tiles are placed through. Strokes only: `overlay.ts` has no sampler and no ramp, so
+   * nothing drawn here can tint a measurement.
+   */
+  marks?: ((pane: PaneView, edgeNs: number) => readonly OverlayQuad[]) | null;
 }
 
 /**
@@ -302,11 +334,18 @@ export class SurfacePreview {
   private readonly canvas: HTMLCanvasElement;
   private raf = 0;
   private disposed = false;
+  private readonly edgeFn: (() => number) | null;
+  private readonly windowsFn: (() => readonly ActiveWindow[]) | null;
+  /** The newest edge seen. A live edge must never go backwards under the boxes placed on it. */
+  private edgeSeen: number;
 
   constructor(opts: PreviewOptions) {
     const { probe } = opts;
     this.canvas = opts.canvas;
     this.probe = probe;
+    this.edgeFn = opts.edge ?? null;
+    this.windowsFn = opts.windows ?? null;
+    this.edgeSeen = probe.origin.edgeNs;
     this.view = new SurfaceView({
       canvas: opts.canvas,
       lattice: probe.lattice,
@@ -317,14 +356,19 @@ export class SurfacePreview {
       chrome: opts.chrome ?? null,
       freq: probe.opening.freq,
       spanNs: probe.opening.spanNs,
+      marks: opts.marks ?? null,
     });
-    // **Freeze everything at open.** A following viewport borrows the growing edge, and this preview
-    // has no growing edge to borrow — so nothing here follows one. `pause` is a coordinate change
-    // (T-347/T-442), so this costs no frame and no jump.
+    // **Freeze everything at open, unless an edge was reported in.** A following viewport borrows
+    // the growing edge; without one there is nothing to borrow, so nothing follows (T-450's
+    // historical preview). `pause` is a coordinate change (T-347/T-442), so this costs no frame and
+    // no jump. With a live edge the first pane stays following and the map follows too — "live" is
+    // then just the finest growing edge of this same surface (docs/16 §8.1), not a second mode.
     this.activePane = this.view.panes.list()[0].id;
-    this.view.panes.pause(this.activePane, probe.origin.edgeNs);
-    this.view.panes.goTo(this.activePane, probe.opening.centerNs);
-    this.view.minimap.setFollowing(false);
+    if (!this.edgeFn) {
+      this.view.panes.pause(this.activePane, probe.origin.edgeNs);
+      this.view.panes.goTo(this.activePane, probe.opening.centerNs);
+    }
+    this.view.minimap.setFollowing(!!this.edgeFn);
     // The map opens on the whole surface — it is the thing that says where the opened pane sits in
     // a mostly-grey world, which is half the answer to the empty-screen problem.
     this.view.minimap.setFreq(
@@ -333,13 +377,27 @@ export class SurfacePreview {
     );
   }
 
-  /** The fixed newest instant this preview draws. It never advances: see the module comment. */
-  get edgeNs(): number { return this.probe.origin.edgeNs; }
+  /**
+   * The newest instant this surface draws.
+   *
+   * Without an `edge` supplier it is the one `probeSurface` resolved and it never advances (the
+   * historical preview). With one it is whatever capture has reported, clamped monotone: a
+   * re-plumbed stream's first rows can repeat, and an edge that went backwards would drag every
+   * following pane and every box on it backwards with it.
+   */
+  get edgeNs(): number {
+    if (!this.edgeFn) return this.probe.origin.edgeNs;
+    const v = this.edgeFn();
+    if (Number.isFinite(v) && v > this.edgeSeen) this.edgeSeen = v;
+    return this.edgeSeen;
+  }
   get bounds(): Box { return this.probe.origin.bounds; }
 
-  /** Draw one frame. The active-capture list is deliberately empty — no live edge is read here. */
+  /** Draw one frame. With no `windows` supplier the list is empty — the preview reads no live edge,
+   * and a lit segment placed from a fixed historical instant would be a live claim with no live
+   * evidence. */
   frame(): SurfaceFrame {
-    this.lastFrame = this.view.frame(this.edgeNs, []);
+    this.lastFrame = this.view.frame(this.edgeNs, this.windowsFn?.() ?? []);
     return this.lastFrame;
   }
 

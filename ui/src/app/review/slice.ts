@@ -4,7 +4,8 @@
 import type { Bookmark } from "../../controls/bookmarks";
 import type { AppState } from "../state";
 
-export type ReviewTab = "alarms" | "report" | "history" | "scheduler" | "device" | "bookmarks";
+// T-445 removed "history" (the region-over-time spectrum grid): the unified surface is that view.
+export type ReviewTab = "alarms" | "report" | "scheduler" | "device" | "bookmarks";
 export interface ReviewSlice {
   open: boolean; tab: ReviewTab;
   /** Region the drawer was opened on (e.g. a selection's History action); null = the live view. */
