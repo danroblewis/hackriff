@@ -117,7 +117,9 @@ export function gotoDecision(g: ax.Geometry | null, v: ax.View | null, hz: numbe
  * `RetuneOffer` for the user to accept, never a `DeviceAction`. (`"nudge"` is T-409's button press —
  * a discrete, explicit action like the offer button, not the continuation of anything.
  * `"pane-offer"` is T-444's, on the unified surface: panning a pane to un-tuned spectrum *offers*,
- * and taking the offer is the discrete act — same shape, one surface over.)
+ * and taking the offer is the discrete act — same shape, one surface over. `"pane-width"` is
+ * T-496's: an explicit capture-WIDTH preset, pressed directly rather than discovered by zooming
+ * then retuning — the pane's own centre is kept and only `spanHz` is asked for.)
  */
 export type DeviceAction = {
   kind: "retune";
@@ -134,7 +136,7 @@ export type DeviceAction = {
   spanHz?: number | null;
   /** The view to restore once the new header arrives, when the request implies one. */
   want: ax.View | null;
-  source: "goto" | "bookmark" | "edge-offer" | "navigator" | "nudge" | "pane-offer";
+  source: "goto" | "bookmark" | "edge-offer" | "navigator" | "nudge" | "pane-offer" | "pane-width";
 };
 
 /** A retune of the live device to `centerHz`, from the explicit user request `source`. */

@@ -45,11 +45,12 @@ import {
   markAt, markQuads, normalizeRegion, pendingMarkBox, pointOn, selectionMarkBoxes, signalMarkBoxes,
   type MarkBox, type MarkRegion,
 } from "../../surface/marks";
-import type { RowAction } from "../../surface/chrome";
+import type { RowAction, WidthAction } from "../../surface/chrome";
 import { rangeLabel } from "../../surface/legend";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
 import {
-  acceptPaneRetune, offerAcceptable, offerLabel, paneRetuneOffer, type PaneRetuneOffer,
+  acceptPaneRetune, acceptPaneWidth, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
+  widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
 } from "../../surface/retune";
 import type { PaneRect, PaneReport, PaneView } from "../../surface/surface";
 import {
@@ -74,6 +75,11 @@ const MINIMAP_PX = 110;
 const EDGE_GRACE_NS = 0.25 * S_TO_NS;
 /** Height of the spectrum-trace strip above each pane, device px (T-457). */
 const TRACE_PX = 96;
+/** The capture-width presets offered directly (T-496) — round numbers a HackRF-class front end
+ * commonly captures at. A host decision, not an RF fact: `retune.ts` re-derives none of its own
+ * (`ui/test/surface-retune.test.ts` asserts that), so which spans to offer as buttons lives here,
+ * beside "Retune"'s own label text. An unachievable one is still offered, stated and disabled. */
+const WIDTH_PRESETS_HZ: readonly number[] = [500e3, 2e6, 5e6, 10e6, 20e6];
 
 function mount(el: HTMLElement, ctx: AppContext) {
   const { store, client } = ctx;
@@ -316,6 +322,58 @@ function mount(el: HTMLElement, ctx: AppContext) {
     });
   };
 
+  // ---- the capture-width presets (T-496) ----
+  //
+  // The width IS changeable today (zoom, then press Retune above), but only as a side effect of two
+  // gestures — nothing on screen says so. This is a second, explicit way to ask for a width without
+  // zooming first: a fixed list of round spans, each planned through `paneWidthOffer`, which reaches
+  // `smallestCoveringSpan` through the SAME `retunePlan` the control above calls. Zoom-then-retune is
+  // untouched — this adds a way to say the width, it does not replace the one that already works.
+  //
+  // Same painted-offer discipline as the retune control: each preset's offer is re-derived every
+  // frame and recorded by (pane, span), so a press re-derives from the state that was ACTUALLY
+  // painted and refuses if it moved (T-407) — comparing a fresh offer to itself would prove nothing.
+  //
+  // `chrome.ts` must not learn what a span is (it stays as ignorant of tuning as `RowAction` already
+  // keeps it — `ui/test/surface-retune.test.ts` greps its source for "spanHz" and fails if it is
+  // there), so each preset crosses into `WidthAction` as an opaque `key` — `String(spanHz)` — and is
+  // parsed back only here, on this side of the boundary.
+  const paintedKey = (paneId: string, spanHz: number) => `${paneId}:${spanHz}`;
+  const lastPaintedWidth = new Map<string, PaneWidthOffer>();
+
+  const widthOfferNow = (paneId: string, spanHz: number): PaneWidthOffer | null => {
+    const p = preview;
+    const pane = p?.view.panes.get(paneId);
+    if (!p || !pane) return null;
+    return paneWidthOffer(pane, spanHz, store.get().navGrid.grid?.frequency ?? null, p.edgeNs, EDGE_GRACE_NS);
+  };
+
+  const widthLabel = (hz: number) => hz < 1e6 ? `${Math.round(hz / 1e3)} kHz` : `${(hz / 1e6).toFixed(hz % 1e6 === 0 ? 0 : 1)} MHz`;
+
+  const widthActions = (paneId: string): WidthAction[] =>
+    WIDTH_PRESETS_HZ.map((spanHz): WidthAction => {
+      const o = widthOfferNow(paneId, spanHz);
+      const key = String(spanHz);
+      lastPaintedWidth.delete(paintedKey(paneId, spanHz));
+      if (!o) return { label: widthLabel(spanHz), why: "No viewport to plan against.", enabled: false, key };
+      lastPaintedWidth.set(paintedKey(paneId, spanHz), o);
+      return { label: widthLabel(spanHz), why: widthOfferLabel(o), enabled: widthOfferAcceptable(o), key };
+    });
+
+  const pressWidth = (paneId: string, key: string): void => {
+    const spanHz = Number(key);
+    const p = preview, o = lastPaintedWidth.get(paintedKey(paneId, spanHz));
+    if (!p || !o) return;
+    void acceptPaneWidth(ctx, {
+      offerNow: widthOfferNow,
+      // T-437 §5.2, same as the retune control: the growing edge's tiles described the tuning that
+      // has just ended.
+      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+    }, o).then((r) => {
+      if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
+    });
+  };
+
   // ---- pointer: hover readout, click to focus, right-click for the menu ----
   //
   // **One hit test, `preview.paneAt`, so hover and gesture cannot disagree about where a pointer is.**
@@ -386,6 +444,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // `view.ts` carry them through without ever naming a tuning, which is what keeps
         // `retune.ts` out of the `/surface.html` preview's import graph.
         chromeAction, onChromeAction: pressRetune,
+        widthActions, onWidthAction: pressWidth,
         edge: () => edgeNs() || probe.origin.edgeNs,
         windows: () => windows,
         marks: (pane, edge) => markQuads(boxesFor(pane), edge, pane.box, pane.rect),

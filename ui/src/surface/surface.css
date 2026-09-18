@@ -49,6 +49,29 @@
 .hk-surface-action:not(:disabled) { color: #fad340; border-color: #fad340; }
 .hk-surface-action:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* T-496: the capture-width presets, a second explicit way to ask for a width (zoom-then-retune is
+   unchanged). Small buttons in a row, styled like `.hk-surface-action` but quieter — this is a
+   discoverable option beside the primary retune control, not a replacement for it. */
+.hk-surface-widths {
+  display: flex;
+  gap: 4px;
+  margin-left: 8px;
+}
+
+.hk-surface-width {
+  font: inherit;
+  font-size: 10px;
+  padding: 1px 6px;
+  color: var(--hk-text-dim, #9aa3b2);
+  background: transparent;
+  border: 1px solid #6b7488;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.hk-surface-width:not(:disabled):hover { color: #fad340; border-color: #fad340; }
+.hk-surface-width:disabled { opacity: 0.4; cursor: not-allowed; }
+
 .hk-surface-why {
   flex-basis: 100%;
   opacity: 0.8;

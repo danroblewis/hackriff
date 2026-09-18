@@ -31,15 +31,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { retunePlan, type FrequencyGrid } from "../src/navigation";
+import { retunePlan, type FrequencyGrid, type RetunePlan } from "../src/navigation";
 import type { ActiveWindow } from "../src/navigators";
 import { CELL } from "../src/surface/cellrule";
 import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { readoutOf } from "../src/surface/chrome";
 import { PaneModel, type PaneState, type PaneStatus } from "../src/surface/panes";
 import {
-  acceptPaneRetune, coveringWindow, offerAcceptable, offerLabel, paneRetuneAction, paneRetuneOffer,
-  type PaneRetuneOffer, type PaneRetuneSite,
+  acceptPaneRetune, acceptPaneWidth, coveringWindow, offerAcceptable, offerLabel, paneRetuneAction,
+  paneRetuneOffer, paneWidthAction, paneWidthOffer, widthOfferAcceptable, widthOfferLabel,
+  type PaneRetuneOffer, type PaneRetuneSite, type PaneWidthOffer, type PaneWidthSite,
 } from "../src/surface/retune";
 import { TileCache } from "../src/surface/tilecache";
 import type { TileData } from "../src/surface/tile";
@@ -603,4 +604,132 @@ test("the invalidation happens ONLY after the front end took the retune", async 
   const out = await acceptPaneRetune(ctx, site, site.offerNow(p)!);
   assert.equal(out.ok && out.invalidated, 7);
   assert.equal(site.invalidations, 1, "invalidated once, after the retune, and not before it");
+});
+
+// ---------------------------------------------------------------------------
+// 4. T-496: an explicit capture-width control
+// ---------------------------------------------------------------------------
+//
+// The width control is a second way to ASK for what zoom-then-retune already achieves, so its
+// claims mirror T-444/T-476's own: always offered (stated and disabled, never hidden), one
+// target-derivation path (through `retunePlan`, never a second copy of the arithmetic), the SNAPPED
+// span said alongside the asked one when they differ, and the same T-407 guard against a pane that
+// moved between paint and press.
+
+function widthSiteOver(m: PaneModel, edgeNs = T0): PaneWidthSite & { invalidations: number } {
+  const site = {
+    invalidations: 0,
+    offerNow: (id: string, spanHz: number) => {
+      const p = m.get(id);
+      return p ? paneWidthOffer(p, spanHz, GRID, edgeNs) : null;
+    },
+    invalidateEdge: () => { site.invalidations++; return 7; },
+  };
+  return site;
+}
+
+test("T-496: paneWidthOffer re-derives no arithmetic of its own — it calls retunePlan, over a region built from the pane's OWN centre", () => {
+  const m = model(); // opens at centerHz: 100.8e6
+  const p = m.list()[0].id;
+  const pane = m.get(p)!;
+  for (const askedSpanHz of [500e3, 2e6, 10e6]) {
+    const got = paneWidthOffer(pane, askedSpanHz, GRID, T0).plan;
+    const want = retunePlan(GRID, pane.freq.centerHz - askedSpanHz / 2, pane.freq.centerHz + askedSpanHz / 2);
+    assert.deepEqual(got, want, `askedSpanHz=${askedSpanHz}: paneWidthOffer must not diverge from retunePlan`);
+  }
+});
+
+test("T-496: an achievable preset states just the one span it will capture", () => {
+  const m = model();
+  const o = paneWidthOffer(m.get(m.list()[0].id)!, 2e6, GRID, T0); // GRID's own span floor
+  assert.ok(o.plan.ok);
+  // Not exactly 2e6: `retunePlan`'s off-DC placement (T-418) can widen the covering span past the
+  // bare floor by a fraction of a tuning step, which is real and correct — this asserts "close
+  // enough to round to the same label", not a number this test would have to re-derive by hand.
+  assert.ok(o.plan.ok && Math.abs(o.plan.spanHz - 2e6) < 1e3, `expected ~2 MHz, got ${o.plan.ok && o.plan.spanHz}`);
+  assert.equal(widthOfferAcceptable(o), true);
+  assert.match(widthOfferLabel(o), /^Capture 2\.000 MHz here$/);
+});
+
+test("T-496: widthOfferLabel states the SNAPPED span, and both numbers only when they differ", () => {
+  // A pure check of the formatting rule itself, over a synthetic plan — independent of retunePlan's
+  // own off-DC arithmetic, which the two tests above already exercise for real.
+  const plan = (spanHz: number): RetunePlan => ({
+    ok: true, centerHz: 100.8e6, spanHz, snappedCenter: true, source: "live-iq", dcOffsetHz: 0, clearsDc: true,
+  });
+  const base = { paneId: "p", device: "any", block: null as const };
+  assert.equal(
+    widthOfferLabel({ ...base, askedSpanHz: 2e6, plan: plan(2e6) }),
+    "Capture 2.000 MHz here",
+  );
+  assert.equal(
+    widthOfferLabel({ ...base, askedSpanHz: 500e3, plan: plan(2e6) }),
+    "Asked for 0.500 MHz; the narrowest achievable capture is 2.000 MHz",
+  );
+});
+
+test("T-496: a preset narrower than the front end can go SAYS BOTH numbers — asked and snapped — never just one", () => {
+  const m = model();
+  const o = paneWidthOffer(m.get(m.list()[0].id)!, 500e3, GRID, T0); // below GRID.spans_hz.min = 2e6
+  assert.ok(o.plan.ok);
+  assert.equal(o.plan.ok && o.plan.spanHz, 2e6, "floors to the narrowest achievable span");
+  assert.equal(widthOfferAcceptable(o), true, "still takeable — it just does not deliver 500 kHz");
+  assert.match(widthOfferLabel(o), /^Asked for 0\.500 MHz; the narrowest achievable capture is 2\.000 MHz$/);
+});
+
+test("T-496: a preset wider than one live window is stated and disabled, never hidden", () => {
+  const m = model();
+  const o = paneWidthOffer(m.get(m.list()[0].id)!, 25e6, GRID, T0); // > GRID.max_live_span_hz = 20e6
+  assert.equal(o.plan.ok, false);
+  assert.equal(widthOfferAcceptable(o), false);
+  assert.equal(paneWidthAction(o), null, "a disabled preset must not become a device action");
+  assert.match(widthOfferLabel(o), /survey overview/);
+});
+
+test("T-496: a pane frozen behind the growing edge is stated and disabled, exactly as the retune control is", () => {
+  const m = model();
+  const p = m.list()[0].id;
+  m.panTime(p, -60 * S);
+  const o = paneWidthOffer(m.get(p)!, 2e6, GRID, T0);
+  assert.equal(o.block, "past");
+  assert.equal(widthOfferAcceptable(o), false);
+  assert.match(widthOfferLabel(o), /frozen behind the growing edge/);
+});
+
+test("T-496: taking a preset reaches the device exactly once, named pane-width, at the SAME centre a plain retune would pick", () => {
+  const m = model();
+  const p = m.list()[0].id;
+  m.panFreq(p, 300e6); // an arbitrary pane position — the width control does not care where it is
+  const site = widthSiteOver(m);
+  const offer = site.offerNow(p, 2e6)!;
+  const { ctx, calls } = deviceSpyCtx(); // dev.sampleRateHz = 2_400_000, so the 2 MHz preset re-posts the rate
+  return acceptPaneWidth(ctx, site, offer).then((out) => {
+    assert.equal(out.ok, true);
+    assert.equal(out.ok && out.action.source, "pane-width", "tellable apart from a plain retune in the audit trail");
+    assert.deepEqual(calls.map((c) => c.path), ["/api/control/rate", "/api/control/center"]);
+    // The posted rate is `Math.round(plan.spanHz)`, not a re-derivation of it — asserted against the
+    // offer's own plan rather than a literal 2_000_000, since T-418's off-DC placement can widen the
+    // achievable span past the bare 2 MHz floor by a fraction of a tuning step (see the label tests).
+    assert.ok(offer.plan.ok);
+    assert.deepEqual(calls[0].body, { sample_rate_hz: offer.plan.ok ? Math.round(offer.plan.spanHz) : NaN });
+    // T-498, applied to this control too: the toast names the span it actually committed.
+    const wideMhz = offer.plan.ok ? (offer.plan.spanHz / 1e6).toFixed(3) : "?";
+    assert.match(
+      ctx.store.get().toast.text,
+      new RegExp(`Retuning hackrf:0000000000000000fake0000000000ab to [\\d.]+ MHz, ${wideMhz.replace(".", "\\.")} MHz wide`),
+    );
+    assert.equal(out.ok && out.invalidated, 7, "the growing edge is invalidated after a successful width change too");
+  });
+});
+
+test("T-496/T-407: a pane that moved between paint and press refuses, and reaches nothing", async () => {
+  const m = model();
+  const p = m.list()[0].id;
+  const site = widthSiteOver(m);
+  const offer = site.offerNow(p, 2e6)!;
+  m.panFreq(p, 250e6); // the pane moves after the offer was painted, before the press
+  const { ctx, calls } = deviceSpyCtx();
+  const out = await acceptPaneWidth(ctx, site, offer);
+  assert.deepEqual(out, { ok: false, reason: "moved" });
+  assert.deepEqual(calls, [], "a stale offer must reach nothing");
 });

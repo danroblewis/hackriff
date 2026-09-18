@@ -24,7 +24,7 @@
 // radio; a pan is a pan (retune is T-444).
 
 import type { ActiveWindow } from "../navigators";
-import { SurfaceChrome, readoutOf, type Readout, type RowActionFor } from "./chrome";
+import { SurfaceChrome, readoutOf, type Readout, type RowActionFor, type WidthActionsFor } from "./chrome";
 import type { Box, Lattice } from "./lattice";
 import {
   Minimap, liveSegmentQuads, paneOutlineQuads,
@@ -57,6 +57,11 @@ export interface SurfaceViewOptions {
   chromeAction?: RowActionFor | null;
   /** The press. A discrete click on that row's button; nothing here reads a pointer stream. */
   onChromeAction?: ((paneId: string) => void) | null;
+  /** Capture-width presets (T-496), re-asked every frame for the same reason `chromeAction` is. */
+  widthActions?: WidthActionsFor | null;
+  /** The press, naming which preset (its opaque `key`). A discrete click; nothing here reads a
+   * pointer stream. */
+  onWidthAction?: ((paneId: string, key: string) => void) | null;
   /** Draw the overlay pass. A user preference — **not** what keeps the data pass untinted. */
   overlays?: boolean;
   overlayStyle?: OverlayStyle;
@@ -127,6 +132,8 @@ export class SurfaceView {
   private readonly chrome: SurfaceChrome | null;
   /** Per-viewport control, re-asked every frame (T-476). Null when the host offers none. */
   private readonly chromeAction: RowActionFor | null;
+  /** Per-viewport width presets, re-asked every frame (T-496). Null when the host offers none. */
+  private readonly widthActions: WidthActionsFor | null;
   private readonly overlayStyle: OverlayStyle;
   private readonly canvas: HTMLCanvasElement;
   /** Per-pane marks, re-derived every frame. See [[SurfaceViewOptions.marks]]. */
@@ -151,7 +158,10 @@ export class SurfaceView {
     this.overlays = opts.overlays ?? true;
     this.overlayStyle = opts.overlayStyle ?? {};
     this.chromeAction = opts.chromeAction ?? null;
-    this.chrome = opts.chrome ? new SurfaceChrome(opts.chrome, opts.onChromeAction ?? null) : null;
+    this.widthActions = opts.widthActions ?? null;
+    this.chrome = opts.chrome
+      ? new SurfaceChrome(opts.chrome, opts.onChromeAction ?? null, opts.onWidthAction ?? null)
+      : null;
   }
 
   /** The surface's extent moved: a retention window that has rolled, or a new front end's range. */
@@ -251,7 +261,9 @@ export class SurfaceView {
       const box = boxById.get(id), s = statusById.get(id);
       return box && s ? rulerLabel(box.f0Hz, box.f1Hz, box.t0Ns, box.t1Ns, s.cellHz, s.cellS, edgeNs) : null;
     };
-    const readout = readoutOf(statuses, mapView ? this.minimap.id : null, this.chromeAction, rulerFor);
+    const readout = readoutOf(
+      statuses, mapView ? this.minimap.id : null, this.chromeAction, rulerFor, this.widthActions,
+    );
     this.chrome?.update(readout);
 
     return {
