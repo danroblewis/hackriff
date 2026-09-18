@@ -553,7 +553,9 @@ fn dims(geom: &Geometry, l: usize, r: &Region) -> (f64, f64) {
     ((t1 - t0).max(1) as f64, nf)
 }
 
-/// The store levels that may back this tile, **finest first**.
+/// The levels whose **read** over this tile fits the work budget — **one half of the question**,
+/// and never an answer on its own. [`affordable_levels`] is the whole answer; this is private for
+/// exactly that reason.
 ///
 /// Ordered by **cell area**, explicitly, because T-434 proved index order is a coarseness order
 /// only for a ladder: in a lattice node (1, 0) outranks (0, 3) in index while being finer in time.
@@ -561,12 +563,12 @@ fn dims(geom: &Geometry, l: usize, r: &Region) -> (f64, f64) {
 /// than another on both axes its area is no larger — so ordering by it never puts a coarser level
 /// before a finer one.
 ///
-/// Affordability is a **work** bound, never a resolution budget: a level qualifies when its whole
-/// grid over the tile fits [`TILE_MAX_TOTAL_SOURCE_CELLS`] and one chunk of it fits
+/// The bound is a **work** bound, never a resolution budget: a level qualifies when its whole grid
+/// over the tile fits [`TILE_MAX_TOTAL_SOURCE_CELLS`] and one chunk of it fits
 /// [`TILE_MAX_SOURCE_CELLS`]. Because the preference is *finest*, the bound can only ever push the
 /// answer toward a level at least as coarse as the finest one that fits — and that is stated as
 /// replication, never hidden as grey.
-pub fn affordable_levels(geom: &Geometry, key: &TileKey) -> Vec<usize> {
+fn read_affordable_levels(geom: &Geometry, key: &TileKey) -> Vec<usize> {
     let mut out: Vec<usize> = (0..geom.n_levels())
         .filter(|&l| {
             let (nt, nf) = dims(geom, l, &key.region);
@@ -581,6 +583,78 @@ pub fn affordable_levels(geom: &Geometry, key: &TileKey) -> Vec<usize> {
         let area = |l: usize| geom.levels[l].f_cell_hz * geom.levels[l].t_cell_ns as f64;
         area(a).total_cmp(&area(b)).then(a.cmp(&b))
     });
+    out
+}
+
+/// Whether the **fold** this read would provoke at `level` fits `hk-store`'s materialize budget,
+/// charged on an **empty** store — the worst store a read can meet, since a tile that already
+/// exists costs no budget ([`hk_store::Pyramid::materialize_cost_bound`]).
+///
+/// The window is [`chunk_rows`]'s, not the tile's: the read is chunked into whole output rows and
+/// `materialize` is called **per chunk** ([`with_tile_history_built`]), so the chunk is what the
+/// budget is actually asked for. The last chunk can only be shorter, and the bound is monotone in
+/// the window, so charging a full chunk is conservative for every chunk of the read.
+fn fold_affordable(p: &hk_store::Pyramid, key: &TileKey, level: usize) -> bool {
+    let window = chunk_rows(p.geometry(), key, level) as i64 * key.t_cell_ns;
+    // Two things bound the blocks one chunk can touch, and a chunk fits the budget if EITHER does
+    // (the true count is at most the smaller one):
+    //
+    // - its own start grid: `read_level` starts chunk k at `t0 + k * window`, and `t0` is a whole
+    //   number of tile spans from the epoch, so every start is a multiple of gcd(window, span);
+    // - the tile it lies inside: a chunk never leaves its tile, so it cannot touch a block the
+    //   whole tile does not. The tile starts on its own span, and at `(9, 1)` on the shipped
+    //   store that span is one 512 s block. The window grid alone says a 30 s chunk may straddle
+    //   two blocks. The tile says there is only one to straddle.
+    //
+    // The last chunk is shorter, starts on the same grid and lies in the same tile. The bound is
+    // monotone in the window, so that chunk is covered too.
+    let span = key.t_cell_ns.saturating_mul(key.cells as i64);
+    let freq = key.region.freq;
+    p.materialize_cost_bound(level, freq, window, gcd_ns(window, span))
+        .or_else(|| p.materialize_cost_bound(level, freq, span, span))
+        .is_some()
+}
+
+/// Greatest common divisor of two durations; `0` only when both are `0`.
+fn gcd_ns(mut a: i64, mut b: i64) -> i64 {
+    while b != 0 {
+        (a, b) = (b, a.rem_euclid(b));
+    }
+    a.abs()
+}
+
+/// The store levels that may back this tile, **finest first** — affordable to **read** *and*
+/// affordable to **build**.
+///
+/// # Why both halves are one predicate (T-494)
+///
+/// They were two, and they disagreed. This function used to answer only the read half, and
+/// `tile_read` then walked its answer straight into `hk-store`'s `materialize`, which refuses a
+/// fold past [`hk_store::history::MAX_MATERIALIZE_TILES`]. A level can be cheap to read and
+/// impossible to build — a coarse node's grid over a tile is small *because* the node is coarse,
+/// and the same coarseness is what makes folding it from nothing expensive — so the two predicates
+/// contradicted each other on a large part of every lattice, measured: on the shipped 4 × 4 store
+/// every address with `level_t >= 5` listed the frequency-coarsest column as a candidate and none
+/// of that column could be folded.
+///
+/// [`servable`] papered over it the only way a per-address `bool` can: by demanding **every**
+/// candidate be buildable, so one unbuildable level poisoned the address even though `tile_read`
+/// would only ever reach it after everything finer held nothing. That is what capped the ladder —
+/// on a 6 × 6 store the ceiling fell to `(7, 2)` and on 8 × 8 to `(0, 0)`, because a deeper store
+/// has *more* coarse nodes to be poisoned by.
+///
+/// **The fix is not to loosen `materialize`.** Its refusal is real: the fold it declines genuinely
+/// costs more than 1024 tiles. The fix is that a level nobody can build is not a candidate, so the
+/// walk never offers it and `servable` reduces to *"is any level left?"*. Skipping it can only
+/// serve more than refusing the whole address did, because the walk continues to the coarser levels
+/// that follow it.
+///
+/// The answer does **not** depend on what the store holds — `materialize_cost_bound` is taken on an
+/// empty store — so this stays a pure function of geometry and config, which is what lets
+/// [`readable_ceiling`] quote it in a contract.
+pub fn affordable_levels(p: &hk_store::Pyramid, key: &TileKey) -> Vec<usize> {
+    let mut out = read_affordable_levels(p.geometry(), key);
+    out.retain(|&l| fold_affordable(p, key, l));
     out
 }
 
@@ -601,28 +675,18 @@ fn chunk_rows(geom: &Geometry, key: &TileKey, level: usize) -> usize {
 
 /// Can [`tile_read`] answer this address **at all**, on the worst store it could meet?
 ///
-/// Both of the route's two refusals, asked before either is provoked:
+/// Both of the route's two refusals, asked before either is provoked — and asked as **one**
+/// question, because [`affordable_levels`] now carries both (T-494): a level survives it only if
+/// its read fits the work budget *and* its fold fits `hk-store`'s materialize budget on an empty
+/// store. So servability is exactly *"is any level left?"*.
 ///
-/// 1. [`affordable_levels`] is empty — no store level's grid over this tile fits the work budget.
-/// 2. A candidate level cannot be **folded** inside `hk-store`'s materialize budget
-///    ([`hk_store::Pyramid::materialize_cost_bound`]).
-///
-/// **Every candidate must pass (2), not merely the finest.** `tile_read` walks the candidates in
+/// **This is the whole candidate list, not merely the finest.** `tile_read` walks the candidates in
 /// order and stops at the first that *holds something*, so on a store where the fine levels are
-/// empty — which is every store, over any band it has not tuned — the walk reaches the coarse ones,
-/// and a refusal there is a refusal of the address. Requiring all of them is what makes this a
-/// bound rather than a typical case.
+/// empty — which is every store, over any band it has not tuned — the walk reaches the coarse ones.
+/// Every level it can reach has to be answerable, and it is, because every level it can reach is in
+/// this list.
 pub fn servable(p: &hk_store::Pyramid, key: &TileKey) -> bool {
-    let geom = p.geometry();
-    let candidates = affordable_levels(geom, key);
-    if candidates.is_empty() {
-        return false;
-    }
-    candidates.iter().all(|&l| {
-        let window = chunk_rows(geom, key, l) as i64 * key.t_cell_ns;
-        p.materialize_cost_bound(l, key.region.freq, window)
-            .is_some()
-    })
+    !affordable_levels(p, key).is_empty()
 }
 
 /// The address at `(level_f, level_t)` on this lattice, at index `(0, 0)`.
@@ -860,13 +924,36 @@ fn read_level(
 
 /// Reads one tile: the finest affordable level, walking **coarser** only when a level holds nothing.
 pub fn tile_read(state: &ApiState, store: TileStore, key: &TileKey) -> Result<TileRead, ApiError> {
-    let candidates = with_tile_history(state, store, |p| Ok(affordable_levels(p.geometry(), key)))?;
+    let (candidates, read_only) = with_tile_history(state, store, |p| {
+        let read = read_affordable_levels(p.geometry(), key);
+        let both: Vec<usize> = read
+            .iter()
+            .copied()
+            .filter(|&l| fold_affordable(p, key, l))
+            .collect();
+        Ok((both, read))
+    })?;
     if candidates.is_empty() {
+        // Which half emptied it is the difference between "this tile is too wide for the history's
+        // coarsest cell" and "the levels that would fit cannot be folded from nothing", and a
+        // caller can act on one and not the other. Saying "no level fits" for both would be the
+        // same conflation T-494 removed from the predicate.
         return Err(ApiError::new(
             400,
-            "no store level can back this tile inside the work budget: the spectrum history's \
-             coarsest cells are still too fine for a tile this wide. This is the view lattice's \
-             own scheme being absent, not an unobserved region.",
+            if read_only.is_empty() {
+                "no store level can back this tile inside the work budget: the spectrum history's \
+                 coarsest cells are still too fine for a tile this wide. This is the view \
+                 lattice's own scheme being absent, not an unobserved region."
+                    .to_string()
+            } else {
+                format!(
+                    "no store level can back this tile: {} level(s) are cheap enough to READ over \
+                     this extent, and none of them can be FOLDED inside the store's materialize \
+                     budget from nothing. Ask for a finer level, or a smaller region — \
+                     `axes.{{frequency,time}}.max_level` states how far up this route can be read.",
+                    read_only.len()
+                )
+            },
         ));
     }
     let listed: Vec<u8> = candidates.iter().map(|&l| l as u8).collect();
@@ -1585,7 +1672,7 @@ mod tests {
             ]),
         )
         .unwrap();
-        let got = affordable_levels(&lattice_geom, &key);
+        let got = read_affordable_levels(&lattice_geom, &key);
         let area =
             |l: usize| lattice_geom.levels[l].f_cell_hz * lattice_geom.levels[l].t_cell_ns as f64;
         for w in got.windows(2) {
@@ -1614,7 +1701,7 @@ mod tests {
             ]),
         )
         .unwrap();
-        let got = affordable_levels(&g, &key);
+        let got = read_affordable_levels(&g, &key);
         assert!(!got.is_empty());
         // Level 0 (6.25 kHz x 1 s) over that extent is 128 x 65 536 source cells and must be out.
         let (nt, nf) = dims(&g, 0, &key.region);
