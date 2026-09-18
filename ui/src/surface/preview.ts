@@ -37,7 +37,7 @@ import {
   type CoverageCensus, type CoverageSlice, type NavigationSlice, type OpeningWindow, type SurfaceOrigin,
 } from "./bootstrap";
 import { tileUrl, type Box, type Lattice, type TileAddr } from "./lattice";
-import type { RowActionFor } from "./chrome";
+import type { RowActionFor, WidthActionsFor } from "./chrome";
 import type { OverlayQuad } from "./minimap";
 import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
@@ -424,6 +424,10 @@ export interface PreviewOptions {
    */
   chromeAction?: RowActionFor | null;
   onChromeAction?: ((paneId: string) => void) | null;
+  /** Capture-width presets on each pane's row, and their press (T-496). Forwarded the same way
+   * `chromeAction` is — see that field's note; the same import-graph rule applies. */
+  widthActions?: WidthActionsFor | null;
+  onWidthAction?: ((paneId: string, key: string) => void) | null;
   minimapPx?: number;
   /**
    * **The growing edge, reported in (T-445).** Omit it and the surface is historical: the edge is
@@ -507,6 +511,8 @@ export class SurfacePreview {
       chrome: opts.chrome ?? null,
       chromeAction: opts.chromeAction ?? null,
       onChromeAction: opts.onChromeAction ?? null,
+      widthActions: opts.widthActions ?? null,
+      onWidthAction: opts.onWidthAction ?? null,
       freq: probe.opening.freq,
       spanNs: probe.opening.spanNs,
       marks: opts.marks ?? null,

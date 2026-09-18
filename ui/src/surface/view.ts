@@ -24,7 +24,7 @@
 // radio; a pan is a pan (retune is T-444).
 
 import type { ActiveWindow } from "../navigators";
-import { SurfaceChrome, readoutOf, type Readout, type RowActionFor } from "./chrome";
+import { SurfaceChrome, readoutOf, type Readout, type RowActionFor, type WidthActionsFor } from "./chrome";
 import type { Box, Lattice } from "./lattice";
 import {
   Minimap, liveSegmentQuads, paneOutlineQuads,
@@ -36,6 +36,7 @@ import type { TracePath } from "./trace";
 import { PaneModel, levelDivergenceNote, paneStatuses, type FreqWindow, type PaneStatus } from "./panes";
 import { Surface, type PaneRect, type PaneReport, type PaneView, type SurfaceOptions, type TilePlanes } from "./surface";
 import type { TileCache, TileTextures } from "./tilecache";
+import { rulerLabel } from "./ticks";
 
 export interface SurfaceViewOptions {
   canvas: HTMLCanvasElement;
@@ -58,6 +59,11 @@ export interface SurfaceViewOptions {
   chromeAction?: RowActionFor | null;
   /** The press. A discrete click on that row's button; nothing here reads a pointer stream. */
   onChromeAction?: ((paneId: string) => void) | null;
+  /** Capture-width presets (T-496), re-asked every frame for the same reason `chromeAction` is. */
+  widthActions?: WidthActionsFor | null;
+  /** The press, naming which preset (its opaque `key`). A discrete click; nothing here reads a
+   * pointer stream. */
+  onWidthAction?: ((paneId: string, key: string) => void) | null;
   /** Draw the overlay pass. A user preference — **not** what keeps the data pass untinted. */
   overlays?: boolean;
   overlayStyle?: OverlayStyle;
@@ -135,6 +141,8 @@ export class SurfaceView {
   private readonly chrome: SurfaceChrome | null;
   /** Per-viewport control, re-asked every frame (T-476). Null when the host offers none. */
   private readonly chromeAction: RowActionFor | null;
+  /** Per-viewport width presets, re-asked every frame (T-496). Null when the host offers none. */
+  private readonly widthActions: WidthActionsFor | null;
   private readonly overlayStyle: OverlayStyle;
   private readonly canvas: HTMLCanvasElement;
   /** Per-pane marks, re-derived every frame. See [[SurfaceViewOptions.marks]]. */
@@ -160,7 +168,10 @@ export class SurfaceView {
     this.overlays = opts.overlays ?? true;
     this.overlayStyle = opts.overlayStyle ?? {};
     this.chromeAction = opts.chromeAction ?? null;
-    this.chrome = opts.chrome ? new SurfaceChrome(opts.chrome, opts.onChromeAction ?? null) : null;
+    this.widthActions = opts.widthActions ?? null;
+    this.chrome = opts.chrome
+      ? new SurfaceChrome(opts.chrome, opts.onChromeAction ?? null, opts.onWidthAction ?? null)
+      : null;
   }
 
   /** The surface's extent moved: a retention window that has rolled, or a new front end's range. */
@@ -251,7 +262,18 @@ export class SurfaceView {
     const states = mapView ? [...this.panes.list(), this.minimap.state()] : this.panes.list();
     const statuses = paneStatuses(states, reports, this.surface.lat, edgeNs, rects, (id) =>
       id === this.minimap.id ? this.minimap.following : this.panes.isFollowing(id));
-    const readout = readoutOf(statuses, mapView ? this.minimap.id : null, this.chromeAction);
+    // T-459: the ruler line, from the SAME box `views` was just drawn from and the SAME
+    // `(cellHz, cellS)` `statuses` just reported — never a second read of the pane's window, which
+    // is the drift family §8.5a closed.
+    const boxById = new Map(views.map((v) => [v.id, v.box]));
+    const statusById = new Map(statuses.map((s) => [s.id, s]));
+    const rulerFor = (id: string): string | null => {
+      const box = boxById.get(id), s = statusById.get(id);
+      return box && s ? rulerLabel(box.f0Hz, box.f1Hz, box.t0Ns, box.t1Ns, s.cellHz, s.cellS, edgeNs) : null;
+    };
+    const readout = readoutOf(
+      statuses, mapView ? this.minimap.id : null, this.chromeAction, rulerFor, this.widthActions,
+    );
     this.chrome?.update(readout);
 
     return {

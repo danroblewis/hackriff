@@ -360,3 +360,133 @@ function sameTarget(a: PaneRetuneOffer, b: PaneRetuneOffer | null): boolean {
   if (!a.plan.ok || !b.plan.ok) return false;
   return a.plan.centerHz === b.plan.centerHz && a.plan.spanHz === b.plan.spanHz;
 }
+
+// ---------------------------------------------------------------------------
+// T-496: an explicit, discoverable capture-width control
+// ---------------------------------------------------------------------------
+//
+// The capture WIDTH is changeable today — zoom the frequency axis to the span you want, then press
+// Retune, and `smallestCoveringSpan` sets it — but that is an IMPLICIT SIDE EFFECT of two other
+// gestures, discoverable only by trying them. This adds a way to SAY the width directly, without
+// zooming first. Zoom-then-retune is unchanged and stays reachable: T-476 made it valuable exactly
+// because retuning to a viewport already inside the tuned window sharpens it, and this is a second
+// way to ask for that, not a replacement.
+//
+// **A preset list, not a free-text span.** Every other control on this row is a discrete press —
+// T-407's lesson generalises here: a numeric field invites a value typed mid-gesture, with no
+// natural moment to call "committed" the way a click has. What "changeable but not discoverable" is
+// missing is a small set of round numbers to press, not arbitrary precision a user would rarely
+// need over the zoom-then-retune path that already gives it. The presets are widths a HackRF-class
+// front end commonly captures at; an unachievable one is still offered, stated and disabled
+// (T-409's rule — nothing said is never permissive), never hidden from the list.
+//
+// **One target-derivation path.** [[paneWidthOffer]] builds a region from the pane's OWN centre and
+// the asked-for span and hands it to [[retunePlan]] — the exact function [[paneRetuneOffer]] calls
+// — so `smallestCoveringSpan` is reached through one door, not two that could disagree. The centre
+// is kept rather than re-derived, because this control is about WIDTH: a pane already zoomed
+// narrower than the tuned window keeps looking at the same place, only more sharply.
+//
+// **WHICH spans are offered is deliberately not decided here.** This module re-derives no RF fact
+// of its own (`ui/test/surface-retune.test.ts` greps for exactly that — no tuning step, no crystal,
+// no hardcoded span), so the preset LIST — round numbers a host chooses to expose as buttons — lives
+// with the host (`app/centre/surface.ts`'s `WIDTH_PRESETS_HZ`), which already owns "Retune"'s label
+// text for the same reason. What lives here is only "given a span, what would planning it achieve",
+// which is exactly as true of a host-picked preset as of any other Hz value.
+
+/** One preset width, planned against a pane's CURRENT centre. */
+export interface PaneWidthOffer {
+  readonly paneId: string;
+  readonly device: string;
+  /** The span this offer was asked for — a host-chosen preset, not necessarily what the plan
+   * achieves; see [[widthOfferLabel]] for when the two differ and how that is said. */
+  readonly askedSpanHz: number;
+  readonly plan: RetunePlan;
+  readonly block: PaneRetuneBlock | null;
+}
+
+/**
+ * The offer for one width preset on one pane — always produced, on the same "stated and disabled,
+ * never hidden" rule [[paneRetuneOffer]] already lives by.
+ */
+export function paneWidthOffer(
+  pane: PaneState, askedSpanHz: number, grid: FrequencyGrid | null, edgeNs: number, edgeGraceNs = 0,
+): PaneWidthOffer {
+  const box = boxOf(pane, edgeNs);
+  const centerHz = (box.f0Hz + box.f1Hz) / 2;
+  const half = askedSpanHz / 2;
+  const plan = retunePlan(grid, centerHz - half, centerHz + half);
+  const t = timeExtentOf(pane.time, edgeNs);
+  return {
+    paneId: pane.id, device: pane.device, askedSpanHz, plan,
+    block: t.t1Ns + edgeGraceNs >= edgeNs ? null : "past",
+  };
+}
+
+export const widthOfferAcceptable = (o: PaneWidthOffer | null): boolean => !!o && o.plan.ok && o.block === null;
+
+/**
+ * The sentence beside one width button. **Says the span it will ask for AND the one it will
+ * actually get, when they differ** (T-498's rule, applied here too): `askedSpanHz` is the preset
+ * pressed, `plan.spanHz` is the SNAPPED, achievable one `retunePlan` computed — the width the front
+ * end will really capture. A preset that happens to be achievable as-is says one number; one that
+ * does not says both, so a press never delivers a width the label never mentioned.
+ */
+export function widthOfferLabel(o: PaneWidthOffer): string {
+  if (o.block) {
+    return o.plan.ok ? BLOCK_TEXT[o.block] : `${BLOCK_TEXT[o.block]} ${planRefusalText(o.plan.reason)}`;
+  }
+  if (!o.plan.ok) return planRefusalText(o.plan.reason);
+  const asked = (o.askedSpanHz / 1e6).toFixed(3), got = (o.plan.spanHz / 1e6).toFixed(3);
+  // Compared as PRINTED, not as raw floats: T-418's off-DC placement can widen the achievable span
+  // past the ask by a fraction of a tuning step, and a difference invisible at the precision this
+  // label prints is not a difference this label has anything honest left to say about — saying so
+  // anyway would print "asked for 2.000 MHz; achievable 2.000 MHz", which states nothing a reader
+  // could act on and reads as a bug. A REAL difference still always shows at this precision.
+  return asked === got
+    ? `Capture ${got} MHz here`
+    : `Asked for ${asked} MHz; the narrowest achievable capture is ${got} MHz`;
+}
+
+/** The typed device action an accepted width offer becomes, or `null` for one that cannot be taken.
+ * `source: "pane-width"` names the explicit request in the audit trail, distinct from `"pane-offer"`
+ * so the two controls stay tellable apart after the fact. */
+export function paneWidthAction(o: PaneWidthOffer | null): DeviceAction | null {
+  if (!o || !widthOfferAcceptable(o) || !o.plan.ok) return null;
+  return retuneAction(o.plan.centerHz, "pane-width", null, o.plan.spanHz);
+}
+
+/** What [[acceptPaneWidth]] needs from the surface around it — the width-offer analogue of
+ * [[PaneRetuneSite]]. `askedSpanHz` is threaded through so the re-derivation at commit asks about
+ * the SAME preset that was pressed, not merely "this pane's current offer". */
+export interface PaneWidthSite {
+  offerNow(paneId: string, askedSpanHz: number): PaneWidthOffer | null;
+  invalidateEdge(): number;
+}
+
+export type PaneWidthOutcome = PaneRetuneOutcome;
+
+/**
+ * Take a width offer — the width-preset analogue of [[acceptPaneRetune]], guarded the same way:
+ * re-derive from live pane state at the instant of the press and refuse if it moved (T-407),
+ * before the one gate ([[applyDeviceAction]]) and the growing-edge invalidation (T-437 §5.2).
+ */
+export async function acceptPaneWidth(
+  ctx: AppContext, site: PaneWidthSite, offer: PaneWidthOffer,
+): Promise<PaneWidthOutcome> {
+  const action = paneWidthAction(offer);
+  if (!action) return { ok: false, reason: "not_acceptable" };
+  const now = site.offerNow(offer.paneId, offer.askedSpanHz);
+  if (!sameWidthTarget(offer, now)) return { ok: false, reason: "moved" };
+  const ok = await applyDeviceAction(ctx, action);
+  if (!ok) return { ok: false, reason: "refused" };
+  return { ok: true, action, invalidated: site.invalidateEdge() };
+}
+
+/** Do two width offers name the same capture configuration for the same pane and the same asked
+ * span? See [[sameTarget]] — the same rationale, `askedSpanHz` standing in for the region. */
+function sameWidthTarget(a: PaneWidthOffer, b: PaneWidthOffer | null): boolean {
+  if (!b || b.paneId !== a.paneId || b.device !== a.device || b.askedSpanHz !== a.askedSpanHz) return false;
+  if (b.block !== a.block) return false;
+  if (!a.plan.ok || !b.plan.ok) return false;
+  return a.plan.centerHz === b.plan.centerHz && a.plan.spanHz === b.plan.spanHz;
+}

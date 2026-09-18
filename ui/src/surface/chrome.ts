@@ -50,6 +50,30 @@ export interface RowAction {
 /** Supplies a viewport's control, or `null` for a viewport that has none (e.g. the map). */
 export type RowActionFor = (id: string) => RowAction | null;
 
+/**
+ * One preset on a viewport's row (T-496) — a second, discoverable, explicit way to ask for
+ * something a host offers as a short list, alongside its own primary control. Same
+ * strings-and-a-bit shape as [[RowAction]]; `key` is opaque here — a host-chosen identifier so a
+ * press can be routed back to the offer it was drawn from — and this file never reads what it
+ * means, the same way it never learns what "Retune" means.
+ */
+export interface WidthAction extends RowAction {
+  readonly key: string;
+}
+
+/** Supplies a viewport's width presets, in a fixed order — `[]` for a viewport that has none (e.g.
+ * the map, or a host that offers no width control at all). */
+export type WidthActionsFor = (id: string) => readonly WidthAction[];
+
+/**
+ * Supplies a viewport's ruler line (T-459) — the intermediate frequency/time marks between the
+ * window's stated edges, or `null` when there is nothing to mark. Anonymous the same way
+ * [[RowActionFor]] is: this file does not compute a tick, it only shows the sentence it is handed.
+ * `./ticks.ts` derives the sentence from the pane's own box and the `(cellHz, cellS)` the chrome
+ * already reports — the caller supplies both, never this file.
+ */
+export type RulerFor = (id: string) => string | null;
+
 /** One viewport's line of chrome. Strings only: every number was formatted by `paneStatuses`. */
 export interface ReadoutRow {
   readonly id: string;
@@ -66,6 +90,11 @@ export interface ReadoutRow {
   readonly differsFrom: readonly string[];
   /** This viewport's own control, or `null` when it has none (T-476). */
   readonly action: RowAction | null;
+  /** Intermediate frequency/time marks between the stated edges (T-459), or `null` when the window
+   * is too narrow relative to its own cell to offer one — a readout with nothing to add, not a bug. */
+  readonly ruler: string | null;
+  /** Capture-width presets (T-496), `[]` when this viewport has none. */
+  readonly widths: readonly WidthAction[];
 }
 
 export interface Readout {
@@ -85,6 +114,8 @@ export function readoutOf(
   statuses: readonly PaneStatus[],
   minimapId: string | null = null,
   actionFor: RowActionFor | null = null,
+  rulerFor: RulerFor | null = null,
+  widthsFor: WidthActionsFor | null = null,
 ): Readout {
   const rows = statuses.map((s): ReadoutRow => {
     const viewport = s.id === minimapId ? "minimap" : "pane";
@@ -100,6 +131,11 @@ export function readoutOf(
       // where the panes are — so a control that acts on "this viewport's window" has no meaning on
       // it. Asked per row rather than filtered afterwards, so a host may still refuse one itself.
       action: viewport === "minimap" ? null : actionFor?.(s.id) ?? null,
+      // The ruler applies to every viewport alike, minimap included: it is another window, and
+      // §8.5a's whole point is that a window is a window whether or not you look *through* it.
+      ruler: rulerFor?.(s.id) ?? null,
+      // Width presets are a device action too, so the map gets none — same reasoning as `action`.
+      widths: viewport === "minimap" ? [] : widthsFor?.(s.id) ?? [],
     };
   });
   return { rows, note: levelDivergenceNote(statuses) };
@@ -121,9 +157,14 @@ export class SurfaceChrome {
    * `onAction` is the press. It is an **ordinary click listener on a button**, never a threshold on
    * a pointer stream — T-407 found two ways a finger could retune a radio, both of them a continuous
    * gesture being read as a committing act, and a persistent control is only safe because pressing
-   * it is a discrete event that no drag can synthesise.
+   * it is a discrete event that no drag can synthesise. `onWidth` is the same shape for T-496's
+   * width presets, with which preset named alongside the viewport.
    */
-  constructor(private readonly root: HTMLElement, private readonly onAction: ((id: string) => void) | null = null) {
+  constructor(
+    private readonly root: HTMLElement,
+    private readonly onAction: ((id: string) => void) | null = null,
+    private readonly onWidth: ((id: string, key: string) => void) | null = null,
+  ) {
     this.list = h("div", { class: "hk-surface-viewports" });
     this.note = h("p", { class: "hk-surface-level-note", hidden: true });
     this.root.append(this.list, this.note);
@@ -141,6 +182,10 @@ export class SurfaceChrome {
       set(entry.cells[1], row.headline);
       set(entry.cells[2], row.level);
       set(entry.cells[3], row.counts);
+      // T-459: intermediate marks between the two edges `headline` already states. Its own line
+      // (`flex-basis: 100%`, like `why`), hidden rather than emptied when there is nothing to mark.
+      entry.ruler.hidden = row.ruler === null;
+      if (row.ruler !== null) set(entry.ruler, row.ruler);
       // The control is created once with the row and only ever *updated*: a button rebuilt each
       // frame is a button that cannot be pressed, because the element under the finger between
       // pointerdown and pointerup would be a different one.
@@ -154,6 +199,31 @@ export class SurfaceChrome {
         entry.action.disabled = !a.enabled;
         entry.action.setAttribute("aria-disabled", a.enabled ? "false" : "true");
       }
+      // T-496: the width presets. Buttons persist and are only ever updated in place (same reason
+      // as `action`, above), so the array is grown/shrunk to match rather than rebuilt; each
+      // button's `key` is captured in a per-button record its own click listener reads fresh,
+      // never a value closed over at mint time — the list can change WHICH preset a given button
+      // position represents (a host re-ordering, or a different host on a different mount) without
+      // the listener naming a stale one.
+      const ws = row.widths;
+      while (entry.widthBtns.length < ws.length) {
+        const rec: WidthBtn = { el: h("button", { class: "hk-surface-width", type: "button" }) as HTMLButtonElement, key: "" };
+        rec.el.addEventListener("click", () => { if (!rec.el.disabled) this.onWidth?.(row.id, rec.key); });
+        entry.widthBtns.push(rec);
+        entry.widthGroup.append(rec.el);
+      }
+      while (entry.widthBtns.length > ws.length) {
+        entry.widthBtns.pop()!.el.remove();
+      }
+      entry.widthGroup.hidden = ws.length === 0;
+      ws.forEach((w, i) => {
+        const rec = entry.widthBtns[i];
+        rec.key = w.key;
+        set(rec.el, w.label);
+        rec.el.title = w.why;
+        rec.el.disabled = !w.enabled;
+        rec.el.setAttribute("aria-disabled", w.enabled ? "false" : "true");
+      });
     }
     for (const [id, entry] of this.rows) {
       if (seen.has(id)) continue;
@@ -180,15 +250,24 @@ export class SurfaceChrome {
     ];
     const why = h("span", { class: "hk-surface-why", hidden: true });
     const action = h("button", { class: "hk-surface-action", type: "button", hidden: true }) as HTMLButtonElement;
+    const ruler = h("span", { class: "hk-surface-ruler", hidden: true });
+    const widthGroup = h("div", { class: "hk-surface-widths", hidden: true });
     // The id is captured, not read off the DOM: rows are kept by id and this listener outlives every
     // update, so the press names the viewport the row was minted for and nothing else.
     action.addEventListener("click", () => { if (!action.disabled) this.onAction?.(id); });
-    const root = h("div", { class: "hk-surface-viewport" }, ...cells, action, why);
-    const entry: Row = { root, cells, why, action };
+    const root = h("div", { class: "hk-surface-viewport" }, ...cells, action, why, widthGroup, ruler);
+    const entry: Row = { root, cells, why, action, ruler, widthGroup, widthBtns: [] };
     this.rows.set(id, entry);
     this.list.append(root);
     return entry;
   }
+}
+
+interface WidthBtn {
+  readonly el: HTMLButtonElement;
+  /** Which preset this button currently represents — set fresh every `update()`, read fresh by the
+   * click listener, never captured at mint time (see the T-496 comment in `update()`). */
+  key: string;
 }
 
 interface Row {
@@ -196,6 +275,9 @@ interface Row {
   readonly cells: HTMLElement[];
   readonly why: HTMLElement;
   readonly action: HTMLButtonElement;
+  readonly ruler: HTMLElement;
+  readonly widthGroup: HTMLElement;
+  readonly widthBtns: WidthBtn[];
 }
 
 const set = (el: HTMLElement, text: string) => { if (el.textContent !== text) el.textContent = text; };

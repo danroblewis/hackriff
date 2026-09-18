@@ -117,7 +117,9 @@ export function gotoDecision(g: ax.Geometry | null, v: ax.View | null, hz: numbe
  * `RetuneOffer` for the user to accept, never a `DeviceAction`. (`"nudge"` is T-409's button press —
  * a discrete, explicit action like the offer button, not the continuation of anything.
  * `"pane-offer"` is T-444's, on the unified surface: panning a pane to un-tuned spectrum *offers*,
- * and taking the offer is the discrete act — same shape, one surface over.)
+ * and taking the offer is the discrete act — same shape, one surface over. `"pane-width"` is
+ * T-496's: an explicit capture-WIDTH preset, pressed directly rather than discovered by zooming
+ * then retuning — the pane's own centre is kept and only `spanHz` is asked for.)
  */
 export type DeviceAction = {
   kind: "retune";
@@ -134,7 +136,7 @@ export type DeviceAction = {
   spanHz?: number | null;
   /** The view to restore once the new header arrives, when the request implies one. */
   want: ax.View | null;
-  source: "goto" | "bookmark" | "edge-offer" | "navigator" | "nudge" | "pane-offer";
+  source: "goto" | "bookmark" | "edge-offer" | "navigator" | "nudge" | "pane-offer" | "pane-width";
 };
 
 /** A retune of the live device to `centerHz`, from the explicit user request `source`. */
@@ -208,7 +210,12 @@ export async function applyDeviceAction(ctx: AppContext, action: DeviceAction): 
     }
     await ctx.client.post("/api/control/center", { center_hz: centerHz });
     const on = store.get().device.deviceId;
-    store.set(toast(`Retuning ${on ? `${on} ` : ""}to ${(centerHz / 1e6).toFixed(4)} MHz`));
+    // T-498: name the span too, when this action carries one (a nudge does not — it never touches
+    // the span, so there is nothing here to claim). `spanHz` is already what was actually asked for
+    // above — the SNAPPED, achievable width the plan computed — never a re-derivation, so this
+    // cannot say a different number from the one the request just posted.
+    const wide = spanHz !== null && Number.isFinite(spanHz) && spanHz > 0 ? `, ${(spanHz / 1e6).toFixed(3)} MHz wide` : "";
+    store.set(toast(`Retuning ${on ? `${on} ` : ""}to ${(centerHz / 1e6).toFixed(4)} MHz${wide}`));
     return true;
   } catch (e) {
     store.set((s) => ({ live: { ...s.live, pendingView: null } }));
