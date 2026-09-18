@@ -14173,7 +14173,7 @@ tasks:
   - id: T-488
     milestone: M3
     title: frequency_features takes the SAME broken strong-envelope subset, over seven IF dimensions - the third instance
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: M3A
     depends_on: [T-447]
@@ -14205,6 +14205,40 @@ tasks:
       shared helper (and T-431, which T-447 also carries - T-431 was marked done but its commit
       06e4b7d never reached main).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "f1e812f"
+    result: |
+      DONE - AND THE "FREQUENCY EXCURSION" OF A RADAR TRAIN WAS THE PHASE OF PURE NOISE. T-447's
+      construction was reusable VERBATIM; the product fix is three lines.
+      THE WEIGHTING WAS MEASURED, NOT INFERRED FROM T-447, AND IT IS THE WHOLE DIFFERENCE. derotate
+      accumulates sum += w[1]*w[0].conj(), so each pair enters WEIGHTED BY ITS OWN MAGNITUDE - which is
+      why T-447's 90 %-noise subset carried 11 % of Sum|z| and nothing moved. Every one of the seven IF
+      dimensions is an UNWEIGHTED function of the same fi vector, so a noise pair enters with weight 1:
+      THE COUNT IS THE STATISTIC, and the defect was total.
+        pulse sigma_af at 10 dB read 1.7181 rad/sample against pi/sqrt(3) = 1.8138 - the sd of a variate
+        uniform on (-pi, pi], to within 5 % OF THE CLOSED FORM FOR PURE NOISE.
+      After: 0.1001 / 0.0565 / 0.0324 / 0.0190 / 0.0120 over 10-30 dB, falling 1.77 / 1.74 / 1.71 / 1.58
+      per rung against the noise-limited law's 10^(5/20) = 1.778 - THE CORRECT LAW, since a rectangular
+      train has no excursion of its own. pulse's if_bimodality went from 0.498/0.472/0.211/0.161/0.412 -
+      no monotonicity at all - to 0.327/0.329/0.332/0.329/0.338.
+      DETERMINISM VERIFIED FIRST on the unmodified tree: fit-densities reproduced both density files BYTE
+      FOR BYTE, which is what makes the post-fix diff attributable. DENSITY ATTRIBUTION IS ITS OWN
+      CONTROL: of 598 above-gate dimensions the 146 IF dimensions moved and THE OTHER 452 MOVED BY EXACTLY
+      0.0000 SIGMA, including every cumulant - independently confirming derotate never reads fi.
+      IT REFUSED TO CLAIM THE IMPROVEMENT: unknown recall moved 0.9444 -> 0.9621 = 2.1 draw sd, but
+      ADR-0016 7.2 fixes +/-0.02 as the threshold for a signal, so it is recorded as NO REGRESSION rather
+      than a win, and settling it needs the gate's draw at SEVERAL SEED BASES. All five floors met.
+      sigma_af's SNR_ORDER_EXCEPTIONS ENTRY SURVIVES, and the reason is the result: the fix removes
+      off-gap noise from every KEYED class (cw 0.206 -> 0.148, pulse 1.718 -> 0.100, ppm 0.321 -> 0.094)
+      and leaves the am-vs-cw inversion standing because AM IS CONTINUOUS - no off gaps to exclude, and
+      what limits it is phase noise in the troughs of its own envelope. SELECTING THE RIGHT SAMPLES CANNOT
+      REPAIR A FEATURE WHOSE READING, ON A CLASS WITH NO EXCURSION OF ITS OWN, IS THE NOISE. Two
+      independent defects in one dimension, the same shape as T-447's sigma_ap/sigma_dp finding.
+      Properties pinned with closed forms (the PAIR subset fraction, evaluated at the true on amplitude so
+      it pins the threshold) plus the CALLER bound including the whole function's abstention. Non-vacuity
+      includes the T-455 form: a fault that DOES use the on level but requires only the first sample of
+      each pair to be on still fails (0.551641 vs 0.072305), so the bound constrains the incorrect
+      algorithm and not only the correct one.
+      FEATURES_VERSION 8 -> 9. Gate: full, passed.
   - id: T-490
     milestone: MLIVE
     title: One global refresh lane priced by the LAST revalidation starves a cheap live pane behind an expensive coarse one
