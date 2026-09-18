@@ -12488,7 +12488,7 @@ tasks:
   - id: T-457
     milestone: MCANVAS
     title: The instantaneous spectrum trace has no home on the canvas - a trace is one frame ACROSS frequency, not a zoom level
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-445]
@@ -12507,14 +12507,67 @@ tasks:
       hand-set range is a user overriding a measurement, which this product does deliberately
       rarely.
       USER RULING 2026-09-17: BUILD IT. "These are real feature gaps the cutover dropped, and
-      restoring them IS finishing MCANVAS." Scheduled ahead of the non-MCANVAS backlog. The trace
-      returns; the open question is only WHERE max-hold lives, and the ticket answers that with
-      evidence rather than by reflex.
+      restoring them IS finishing MCANVAS." Scheduled ahead of the non-MCANVAS backlog.
+      DO NOT BUILD UNTIL THE USER RULES on whether the trace returns at all. Recording it as a
+      ticket is what keeps the report from becoming a silent deletion.
+
+      USER RULED (2026-09-17): build it, and bigger than filed. The trace is TIME-ADDRESSABLE - live
+      playback shows the newest sample, but exploring the past shows the FFT at the VIEWPORT's
+      current time position, not `now`. It spans the WHOLE VIEWPORT WIDTH, not one tile: one
+      continuous plot, rendering only the section shown and only where data exists. And it is PER
+      VIEWPORT - each split pane gets its own trace at its own time position.
+
+      DONE. `ui/src/surface/trace.ts` (pure), a strip carved off the TOP of each pane's rectangle by
+      `SurfaceView.frame` (`tracePx`), quads through the existing `overlay.ts` pass (no sampler, no
+      ramp). Two series: SLICE at `box.t1Ns` - the live row when its capture time falls in that
+      pane's topmost time cell, else the pyramid's row of cells at that instant, with the readout
+      naming the source and the cell duration - and MAX-HOLD over the pane's whole window.
+      MAX-HOLD DECISION: no new ladder tier and no accumulator, because the question's premise was
+      wrong - there is NO MEAN TIER. The ladder's only reduction already is max-hold (hk-api's
+      `MAX_HOLD_RULE`; a level-0 cell is `Spectrum::max_hold`), so the tier exists, is on-demand in
+      T-453's corrected sense, and this ticket changed NO backend code. The client-side reduction is
+      licensed by the statistic: a max of max-holds is a max-hold, asserted directly (fine tiles vs a
+      coarse node built as their max) with an averaging control so it is not vacuous.
+      dB-RANGE DECISION: the manual range does not return. Evidence first - `Waterfall.setScale` had
+      NO CALLER at the cutover commit, so T-445 retired an unreachable control, not a feature in use;
+      then principle - the range is measured (`range_db`) and a hand-set one overrides a measurement.
+      The honest control is to STATE it, which the readout does.
+      Gaps draw nothing (unobserved is not quiet), and the readout distinguishes "no tile in hand
+      yet (N pending)" from "nothing observed" - not loaded is not unobserved.
+      Nothing depends on when a node is sealed, for the incremental-tile work.
+      docs/16 gains 8.5c; ui/CONTROLS.md updated.
+      Tests: ui/test/surface-trace.test.ts (23), and ui/e2e/app-trace.e2e.mjs - a real browser with a
+      WebSocket TAP installed before the page's scripts, decoding the stream contract itself, so the
+      trace's CONTENT is compared with the bytes the socket delivered rather than "it drew".
     notes: |
       Filed by the coordinator at T-445's merge (19d9bed). The ticket exists so the capability has
       an owner whichever way the ruling goes.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-ui`, `just test-ui-e2e` - then
       HAND BACK. Never `just gate`; the coordinator gates at merge.
+      MERGE FIX (sent back by the coordinator): merged with T-458 on main, the trace strip swallowed
+      EVERY drag that began in it - not just the new region stroke. Carving the strip off the top of
+      the pane's rectangle left `paneAt()` walking only the drawn rects, so a pointer down in the
+      strip resolved to no pane and `input.ts` dropped the gesture; the diagnosis was in the two
+      failures that had nothing to do with regions (plain and alt drags, T-456's settled bindings,
+      had stopped panning too). THE RULE, now stated in ui/CONTROLS.md: the strip is a READOUT, NOT A
+      CONTROL - it passes every pointer event through to its pane, clamped into that pane's own
+      rectangle so it reads as a point on the pane's TOP EDGE (same frequency, the instant the strip
+      is a spectrum of). The alternative was rejected twice: a vertical drag on a dB axis obviously
+      means "set the range by hand", the control this ticket declined, and a second gesture
+      vocabulary on one canvas is T-412 waiting to happen. Implemented as `paneAtPoint()` +
+      `clampToRect()` in `preview.ts`; `surface-region.e2e.mjs` was NOT edited.
+      REGRESSION GUARD, written to need neither ticket: `paneAtPoint` is a pure function of a frame,
+      and the asserted property over a grid of points is "turning the trace ON may not shrink the set
+      of points a gesture can start from". It names no gesture, holds for any future decoration
+      carved out of a pane, and fails on the broken code with 2380 lost points (verified by reverting
+      the fix). Plus a browser test: a drag STARTING IN THE STRIP pans, and reaches no device route.
+
+      Verified after merging main: `just test-ui` 42/42 files; `npm run e2e` 6/6 files, 14/14 tests -
+      app-trace 4/4, and surface-region's three previously-failing tests green without touching that
+      file. Additive only in shared files: `view.ts`/`preview.ts` gain `trace`/`tracePx` options and
+      `preview.ts` gains `paneAtPoint`/`clampToRect`, `minimap.ts`'s `OverlayQuad.kind` union gains
+      `trace-slice`/`trace-hold` beside T-458's `pending-region`, `harness.mjs` gains an `initScript`
+      option. Nothing in T-458's files (`input.ts`, `marks.ts`, `explore/region.ts`).
   - id: T-458
     milestone: MCANVAS
     title: Drag-to-select and T-193's draggable Confirmed-band edges have no gesture - drag now pans
