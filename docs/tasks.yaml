@@ -11810,7 +11810,7 @@ tasks:
   - id: T-449
     milestone: M2-hardening
     title: presence_push's opens-once test fails 1 in 5 IN ISOLATION - not load, and a different test from the one T-383 cleared
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     deps: [T-383]
@@ -11843,6 +11843,45 @@ tasks:
     notes: |
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-pipeline`,
       `just test-one <name>` - then HAND BACK. Never `just gate`; the coordinator gates at merge.
+    commit: "0aca934"
+    result: |
+      DONE, and IT IS A TEST BUG - TWO OF THEM. crates/hk-pipeline/src/presence.rs is UNCHANGED; the
+      product is correct at every step.
+      WHAT THE TEST ACTUALLY BOUNDS, which is the measurement T-383 demands: a LiveExtent's silence is
+      now - t_last_end, and t_last_end is the end of the last burst WHOSE DETECTION HAS REACHED THE
+      TRACKER - it does not advance while a burst is in flight. So the silence a presence tick reads
+      during steady keying IS NOT THE KEY-OFF; it is the gap between consecutive burst COMPLETIONS, i.e.
+      KEY_PERIOD_S. T-410 set KEY_PERIOD_S = 1.0 believing the judged quantity was the 0.5 s key-off, and
+      MIN_IDLE_GAP_S IS EXACTLY 1.0. THE TEST'S ENTIRE MARGIN WAS THE DETECTOR'S BURST-LANDING LAG.
+      Traced: a tick read obs_sil = 1.0163 s with the tone plainly still keying -> END published
+      mid-keying -> the next tick CORRECTLY REVOKEd it.
+      SECOND DEFECT, INDEPENDENT OF THE FIRST: opens were counted by the wire's `open` flag. A REVOKE sets
+      it - the interval IS open again - but draws NO NEW BOX, same row, same t_start_s. So a correct
+      revocation read as a second opening. Openings now count BY KIND (START/REOPEN) with a separate
+      revokes == 0 guard naming the real defect.
+      WHY IT WAS RANDOM: the presence tick grid is wall-clock dependent - the writer coalesces batches in
+      detect.rs::Writer::run - so ticks are skipped and the grid's phase shifts. Traced tick count varies
+      14-18 OVER THE SAME RECORDING ON THE SAME MACHINE. The danger window is ~31 ms out of a ~502 ms tick
+      period, ~7 opportunities per run, which is the 1-in-5.
+      CHANGES: fixture KEY_ON_S 0.25 / KEY_PERIOD_S 0.75 (key-off still 0.5 s), max keying silence 0.781 s
+      against the 1.0 s floor and IDENTICAL IN ALL 8 TRACED RUNS because it is a period plus a lag, not a
+      sample of the machine. MAX_KEYING_SILENCE_S carries a const assert that FAILS TO COMPILE if the
+      period is put back on the threshold. MAX_LAG_S 1.0 -> 0.1 s and STOP_SLACK_S both RE-POINTED from
+      STOPS_AT_S to last_burst_end_s(), the instant the tone was last on the air (STOPS_AT_S is 0.25 s
+      later). Measured END lag 2 ms every run. EVERY ASSERTION IS STRICTLY STRONGER; NONE WEAKENED.
+      HONEST ABOUT ITS LIMITS: the 1-in-5 DID NOT REPRODUCE on today's main - 64/64 green before the fix -
+      so the TRACE is what proves the mechanism and its window, and the agent said so rather than chasing
+      a reproduction. Plausible cause: T-453 cut hk-pipeline 262 s -> 75 s, changing exactly the
+      writer-thread contention that sets the tick phase. The latent defect is unaffected by that.
+      NON-VACUITY, five faults against a green baseline, each caught by its named guard: F1 per-tick bump
+      -> opens == 1 (7 vs 1); F2 spurious REVOKE with no END -> revokes == 0 (opens AND ends both still 1,
+      so ONLY that guard sees it); F3 idle floor below the keying silence -> ends.len() <= 1, reproducing
+      the original flake's exact START/END/REVOKE/END shape; F4 END names the decision instant ->
+      STOP_SLACK_S; F5 END = now - idle_gap -> MAX_LAG_S, and F5 sits INSIDE STOP_SLACK_S so nothing else
+      catches it. F5 is T-455's check applied to its own replacement: an implementation that LOOKS right
+      and is caught only because the bound is tight and measured rather than reasoned.
+      RATES at --test-threads 1: before 44/44 isolated and 20/20 loaded; after 20/20 and 20/20.
+      Gate: full, passed - 2234 tests, acceptance-ci green, e2e 3/3.
   - id: T-450
     milestone: MCANVAS
     title: A preview route that MOUNTS the surface over recorded history - see the canvas before anything is retired
