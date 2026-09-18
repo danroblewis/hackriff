@@ -34,6 +34,7 @@ import { OverlayPass } from "./overlay";
 import { PaneModel, levelDivergenceNote, paneStatuses, type FreqWindow, type PaneStatus } from "./panes";
 import { Surface, type PaneRect, type PaneReport, type PaneView, type SurfaceOptions, type TilePlanes } from "./surface";
 import type { TileCache, TileTextures } from "./tilecache";
+import { rulerLabel } from "./ticks";
 
 export interface SurfaceViewOptions {
   canvas: HTMLCanvasElement;
@@ -241,7 +242,16 @@ export class SurfaceView {
     const states = mapView ? [...this.panes.list(), this.minimap.state()] : this.panes.list();
     const statuses = paneStatuses(states, reports, this.surface.lat, edgeNs, rects, (id) =>
       id === this.minimap.id ? this.minimap.following : this.panes.isFollowing(id));
-    const readout = readoutOf(statuses, mapView ? this.minimap.id : null, this.chromeAction);
+    // T-459: the ruler line, from the SAME box `views` was just drawn from and the SAME
+    // `(cellHz, cellS)` `statuses` just reported — never a second read of the pane's window, which
+    // is the drift family §8.5a closed.
+    const boxById = new Map(views.map((v) => [v.id, v.box]));
+    const statusById = new Map(statuses.map((s) => [s.id, s]));
+    const rulerFor = (id: string): string | null => {
+      const box = boxById.get(id), s = statusById.get(id);
+      return box && s ? rulerLabel(box.f0Hz, box.f1Hz, box.t0Ns, box.t1Ns, s.cellHz, s.cellS, edgeNs) : null;
+    };
+    const readout = readoutOf(statuses, mapView ? this.minimap.id : null, this.chromeAction, rulerFor);
     this.chrome?.update(readout);
 
     return {

@@ -55,6 +55,14 @@
   font: 10.5px/1.45 system-ui, sans-serif;
 }
 
+/* T-459: the ruler line — intermediate marks between the two edges `headline` already states.
+   Its own line, like `.hk-surface-why`, and styled as a fact rather than an action or a warning. */
+.hk-surface-ruler {
+  flex-basis: 100%;
+  opacity: 0.65;
+  font: 10.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 /* A row's control and sentence are hidden by `el.hidden`; these are flex children, so the UA's
    `display: none` must not be outranked by anything above. */
 .hk-surface-viewport [hidden] { display: none !important; }

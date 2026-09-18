@@ -50,6 +50,15 @@ export interface RowAction {
 /** Supplies a viewport's control, or `null` for a viewport that has none (e.g. the map). */
 export type RowActionFor = (id: string) => RowAction | null;
 
+/**
+ * Supplies a viewport's ruler line (T-459) — the intermediate frequency/time marks between the
+ * window's stated edges, or `null` when there is nothing to mark. Anonymous the same way
+ * [[RowActionFor]] is: this file does not compute a tick, it only shows the sentence it is handed.
+ * `./ticks.ts` derives the sentence from the pane's own box and the `(cellHz, cellS)` the chrome
+ * already reports — the caller supplies both, never this file.
+ */
+export type RulerFor = (id: string) => string | null;
+
 /** One viewport's line of chrome. Strings only: every number was formatted by `paneStatuses`. */
 export interface ReadoutRow {
   readonly id: string;
@@ -66,6 +75,9 @@ export interface ReadoutRow {
   readonly differsFrom: readonly string[];
   /** This viewport's own control, or `null` when it has none (T-476). */
   readonly action: RowAction | null;
+  /** Intermediate frequency/time marks between the stated edges (T-459), or `null` when the window
+   * is too narrow relative to its own cell to offer one — a readout with nothing to add, not a bug. */
+  readonly ruler: string | null;
 }
 
 export interface Readout {
@@ -85,6 +97,7 @@ export function readoutOf(
   statuses: readonly PaneStatus[],
   minimapId: string | null = null,
   actionFor: RowActionFor | null = null,
+  rulerFor: RulerFor | null = null,
 ): Readout {
   const rows = statuses.map((s): ReadoutRow => {
     const viewport = s.id === minimapId ? "minimap" : "pane";
@@ -100,6 +113,9 @@ export function readoutOf(
       // where the panes are — so a control that acts on "this viewport's window" has no meaning on
       // it. Asked per row rather than filtered afterwards, so a host may still refuse one itself.
       action: viewport === "minimap" ? null : actionFor?.(s.id) ?? null,
+      // The ruler applies to every viewport alike, minimap included: it is another window, and
+      // §8.5a's whole point is that a window is a window whether or not you look *through* it.
+      ruler: rulerFor?.(s.id) ?? null,
     };
   });
   return { rows, note: levelDivergenceNote(statuses) };
@@ -141,6 +157,10 @@ export class SurfaceChrome {
       set(entry.cells[1], row.headline);
       set(entry.cells[2], row.level);
       set(entry.cells[3], row.counts);
+      // T-459: intermediate marks between the two edges `headline` already states. Its own line
+      // (`flex-basis: 100%`, like `why`), hidden rather than emptied when there is nothing to mark.
+      entry.ruler.hidden = row.ruler === null;
+      if (row.ruler !== null) set(entry.ruler, row.ruler);
       // The control is created once with the row and only ever *updated*: a button rebuilt each
       // frame is a button that cannot be pressed, because the element under the finger between
       // pointerdown and pointerup would be a different one.
@@ -180,11 +200,12 @@ export class SurfaceChrome {
     ];
     const why = h("span", { class: "hk-surface-why", hidden: true });
     const action = h("button", { class: "hk-surface-action", type: "button", hidden: true }) as HTMLButtonElement;
+    const ruler = h("span", { class: "hk-surface-ruler", hidden: true });
     // The id is captured, not read off the DOM: rows are kept by id and this listener outlives every
     // update, so the press names the viewport the row was minted for and nothing else.
     action.addEventListener("click", () => { if (!action.disabled) this.onAction?.(id); });
-    const root = h("div", { class: "hk-surface-viewport" }, ...cells, action, why);
-    const entry: Row = { root, cells, why, action };
+    const root = h("div", { class: "hk-surface-viewport" }, ...cells, action, why, ruler);
+    const entry: Row = { root, cells, why, action, ruler };
     this.rows.set(id, entry);
     this.list.append(root);
     return entry;
@@ -196,6 +217,7 @@ interface Row {
   readonly cells: HTMLElement[];
   readonly why: HTMLElement;
   readonly action: HTMLButtonElement;
+  readonly ruler: HTMLElement;
 }
 
 const set = (el: HTMLElement, text: string) => { if (el.textContent !== text) el.textContent = text; };
