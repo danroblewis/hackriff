@@ -12293,7 +12293,7 @@ tasks:
   - id: T-456
     milestone: MCANVAS
     title: Google-Maps navigation on the surface - drag pans, plain wheel zooms BOTH axes, modifiers give one axis
-    status: in-progress
+    status: done
     priority: medium
     parallel_group: CANVAS-FE
     deps: [T-454, T-455]
@@ -12330,6 +12330,42 @@ tasks:
       and its own acceptance depends on a real browser to confirm the modifiers - so the test tier
       is a prerequisite rather than a nicety.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "a49ac9c"
+    result: |
+      DONE, and THE Y AXIS WENT TO ALT FOR A REASON NO BROWSER TEST CAN CHECK. Drag pans both axes; a
+      plain wheel zooms BOTH, centred on the cursor; SHIFT = frequency; ALT = time. CTRL IS DELIBERATELY
+      UNBOUND and falls into the uniform branch.
+      WHY NOT CTRL, first reason decisive: macOS Accessibility "use scroll gesture with modifier keys to
+      zoom" defaults to ^Control, and when on THE WINDOW SERVER CONSUMES THE EVENT - no `wheel` is
+      dispatched, there is nothing to preventDefault, and NO IN-BROWSER HARNESS CAN DISTINGUISH THAT FROM
+      THE USER NOT SCROLLING. A binding whose failure mode is invisible to its own guard is the wrong
+      binding. Second: ctrl+wheel is ALSO how a trackpad pinch arrives (Chrome/Safari synthesise it), so
+      binding time to ctrl would make the most Google-Maps gesture there is zoom one axis; unbound, a
+      pinch lands in the uniform branch, which is right. Third: alt carries no OS or browser wheel
+      default, so preventDefault is a COMPLETE answer for it.
+      EVIDENCE, read from the modifier that ARRIVED rather than from the view having moved: a passive
+      window probe reports the bits. In headless Chrome ctrl IS delivered and page zoom IS suppressed
+      (devicePixelRatio 1 -> 1, visualViewport.scale 1 -> 1). THE AGENT REFUSED TO CLAIM THAT SETTLES IT -
+      a CDP event enters at the RENDERER and says nothing about the window server - and wrote that caveat
+      into the test, the README and the source. The binding is alt anyway.
+      A LATENT DEFECT CDP COULD NEVER HAVE SHOWN, found on the way: macOS delivers a SHIFT-HELD WHEEL AS A
+      HORIZONTAL SCROLL - travel in deltaX, deltaY 0. The old code read deltaY only, so SHIFT+WHEEL (the
+      frequency axis) WAS INERT ON A REAL MAC while every synthesised test passed. wheelDelta now takes
+      the DOMINANT axis under shift, never the sum - the sum was T-407's clientX + clientY one layer over.
+      THE SEMANTICS LIVE IN preview.ts's new wheelZoom(), NOT IN A HANDLER, so the second host the cutover
+      adds cannot disagree with the first - that disagreement was T-412. A source guard scans EVERY file
+      under src/surface/ that registers a wheel listener and requires it to call wheelZoom, read no delta
+      or modifier bit itself, register { passive: false } and preventDefault; T-445's input.ts inherits
+      the check automatically.
+      AXES STAYED INDEPENDENTLY LEVELLED: uniform zoom is ONE factor applied to TWO windows by TWO calls
+      with TWO anchors, each clamping and resolving its own level. Measured in the browser at level 9/0
+      after a plain wheel, and the test asserts levelF != levelT - a gesture that collapsed the pyramid
+      would make them equal.
+      T-340's control passes VERBATIM AND UNEDITED: the diff over app-nudge, navigators, surface-retune,
+      surface-panes and their sources is empty. Non-vacuity measured both ways: restoring the old binding
+      goes red on "a drag must pan the FREQUENCY axis"; binding time to ctrl goes red on "alt + wheel
+      moved the FREQUENCY axis".
+      Gate: ui class - test-ui 39/39, test-ui-e2e 3/3 in 50.9 s.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
