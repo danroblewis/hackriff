@@ -7384,7 +7384,14 @@ fn observation_log_routes_answer_as_documented() {
     assert!(is_array(&v["records"]) && is_array(&v["geometries"]), "{v}");
     assert!(v["next_cursor"].is_null());
     assert_eq!(v["truncated"], false);
-    assert_eq!(v["f_lo"], 100_000_000.0);
+    // T-355: the echoed box is `f_lo_hz`/`f_hi_hz`, matching every other envelope-level frequency
+    // field on this API (inventory rows, tiles, `/api/analysis/strongest`, …) instead of the bare
+    // `f_lo`/`f_hi` this route used to answer with alone. Asserted by VALUE, not shape, so the
+    // field cannot be renamed or dropped again without this test failing (T-315's point applied
+    // here too).
+    assert_eq!(v["f_lo_hz"], 100_000_000.0, "{v}");
+    assert_eq!(v["f_hi_hz"], 101_000_000.0, "{v}");
+    assert!(v.get("f_lo").is_none() && v.get("f_hi").is_none(), "{v}");
     for key in [
         "offered",
         "dropped",
@@ -7403,6 +7410,10 @@ fn observation_log_routes_answer_as_documented() {
         &format!("/api/observations/coverage?{q}&channel_hz=250000&tau_s=0.01,0.1&min_gap_s=1"),
     );
     assert_eq!(status, 200, "{v}");
+    // T-355: same rename as `/api/observations` above, same route family.
+    assert_eq!(v["f_lo_hz"], 100_000_000.0, "{v}");
+    assert_eq!(v["f_hi_hz"], 101_000_000.0, "{v}");
+    assert!(v.get("f_lo").is_none() && v.get("f_hi").is_none(), "{v}");
     let totals = &v["totals"];
     assert_eq!(totals["n_visits"], 0);
     assert_eq!(totals["n_visits_activity_independent"], 0);

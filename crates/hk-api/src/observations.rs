@@ -120,8 +120,8 @@ fn records(store: &ObservationStore, req: &CtlRequest<'_>) -> Result<Value, Fail
         limit: (limit as usize).min(MAX_RECORD_LIMIT),
     });
     Ok(json!({
-        "f_lo": freq.lo_hz,
-        "f_hi": freq.hi_hz,
+        "f_lo_hz": freq.lo_hz,
+        "f_hi_hz": freq.hi_hz,
         "t0": secs(span.start),
         "t1": secs(span.end),
         "records": page.records,
@@ -198,8 +198,8 @@ fn coverage(store: &ObservationStore, req: &CtlRequest<'_>) -> Result<Value, Fai
         json!(store.totals(&channels, span))
     };
     Ok(json!({
-        "f_lo": freq.lo_hz,
-        "f_hi": freq.hi_hz,
+        "f_lo_hz": freq.lo_hz,
+        "f_hi_hz": freq.hi_hz,
         "t0": secs(span.start),
         "t1": secs(span.end),
         "totals": totals,

@@ -1610,7 +1610,7 @@ Where and when the radio actually observed, and why: one `DwellRecord` per non-s
 
 ```json
 {
-  "f_lo": 100000000.0, "f_hi": 102000000.0, "t0": 1789300800.0, "t1": 1789300860.0,
+  "f_lo_hz": 100000000.0, "f_hi_hz": 102000000.0, "t0": 1789300800.0, "t1": 1789300860.0,
   "records": [
     { "record": "sweep", "schema": 1, "survey_id": "…", "plan_version": 1, "site": { "kind": "unassigned" },
       "geometry": 1234567890123, "span": { "start_ns": 1789300800000000000, "end_ns": 1789300860000000000 },
@@ -1635,12 +1635,13 @@ Where and when the radio actually observed, and why: one `DwellRecord` per non-s
 - `tier`: `interactive`, `pinned-lease`, `scheduled-plan`, `bandit` or `background-sweep` (sweep records are `background-sweep`). A sweep record matches when any visited hop's `usable` overlaps the box; `geometries` holds every geometry the page's sweep records reference.
 - `limit` defaults to 1000, at most 10000; `next_cursor` (a record offset) is set when more records match.
 - Times inside records (`span`, `planned`, `observed`, and `totals.span`) are hk-model `TimeRange`s, so each is `{start_ns, end_ns}` — integer Unix **nanoseconds**, named per the units convention. The top-level `t0`/`t1` and `gaps` are seconds.
+- **`f_lo_hz`/`f_hi_hz`** (T-355; previously bare `f_lo`/`f_hi`, which the units convention above already required for the `_ns`/`_s` time family but had not been applied to frequency): the requested box, echoed in Hz. Matches `FreqRange`'s own field names (`lo_hz`/`hi_hz`), prefixed the way every other envelope-level frequency field on this API already is (`f_lo_hz`/`f_hi_hz` on inventory rows, tiles, `/api/analysis/strongest`, …), so a field can no longer be renamed or dropped without a contract test failing.
 
 `GET /api/observations/coverage` → `200`:
 
 ```json
 {
-  "f_lo": 100990000.0, "f_hi": 101010000.0, "t0": 1789300800.0, "t1": 1789300860.0,
+  "f_lo_hz": 100990000.0, "f_hi_hz": 101010000.0, "t0": 1789300800.0, "t1": 1789300860.0,
   "totals": { "freq": { "lo_hz": 100990000.0, "hi_hz": 101010000.0 }, "span": { "start_ns": 1789300800000000000, "end_ns": 1789300860000000000 },
               "n_visits": 58, "n_visits_activity_independent": 58,
               "observed_s": { "interactive": 0.0, "pinned_lease": 0.0, "scheduled_plan": 0.0, "bandit": 0.0, "background_sweep": 2.9 },
