@@ -195,8 +195,13 @@ test("the route's 503 is an ANSWER: adopt the cap it names, back off, keep wanti
   assert.equal(h.calls.length, 2);
 });
 
-test("a real failure is counted and does not wedge the queue", async () => {
-  const h = harness({ inFlight: 1 });
+test("a real failure is counted and does not wedge the queue — it PACES it (T-499)", async () => {
+  // **This test changed with T-499, and the change is the ticket.** It used to assert that the very
+  // next pump issues the next queued tile, which is the same policy that asked a SIGKILLed server 56
+  // times in five seconds and 55 in the next. The property it was written for — *the failure does not
+  // wedge the queue* — is asserted here still, and more sharply: the queue drains, on a clock.
+  let clock = 0;
+  const h = harness({ inFlight: 1, now: () => clock });
   h.cache.beginFrame();
   h.cache.acquire(addr(1));
   h.cache.acquire(addr(2));
@@ -204,7 +209,17 @@ test("a real failure is counted and does not wedge the queue", async () => {
   await flush();
   await h.fail(addr(2), new Error("boom"));
   assert.equal(h.cache.stats.failures, 1);
-  assert.deepEqual(h.calls, [keyOf(addr(2)), keyOf(addr(1))]);
+  assert.equal(h.cache.stats.silentFailures, 1, "an error with no status is the server saying nothing");
+  assert.deepEqual(h.calls, [keyOf(addr(2))],
+    "the gate holds: the failure itself must not hand the next tile straight back to the wire");
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  assert.deepEqual(h.calls, [keyOf(addr(2))], "…nor does the next frame, while the backoff is armed");
+  clock += 600; // past the first rung of the ladder
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  assert.deepEqual(h.calls, [keyOf(addr(2)), keyOf(addr(1))],
+    "and once it opens the queue drains — a backoff is not a wedge");
 });
 
 test("the residency answer is never a cell state", async () => {
@@ -634,9 +649,12 @@ test("…and 503 still retries with T-454's AIMD intact: the cap is discovery, n
   await h.settle(addr(0));
   assert.equal(h.cache.residentTiles, 1);
 
-  // A transport failure — the server said nothing at all — is not terminal either, and is re-asked
-  // by the next frame rather than by a tight requeue cycle.
-  const net = harness({ inFlight: 4 });
+  // A transport failure — the server said nothing at all — is not terminal either, and is asked
+  // again **after the silence backoff** rather than on the next frame (T-499). "Paced by the render
+  // loop" is what this line used to say, and a render loop is 60 Hz: that pacing is the loop the
+  // user reported, so the clock that paces it now is this cache's own.
+  let netClock = 0;
+  const net = harness({ inFlight: 4, now: () => netClock });
   net.cache.beginFrame(); net.cache.acquire(addr(3)); net.cache.endFrame();
   await flush();
   await net.fail(addr(3), new TypeError("Failed to fetch"));
@@ -644,7 +662,85 @@ test("…and 503 still retries with T-454's AIMD intact: the cap is discovery, n
   assert.equal(net.cache.queueDepth, 0, "…and must not spin: nothing is re-queued by the failure itself");
   net.cache.beginFrame(); net.cache.acquire(addr(3)); net.cache.endFrame();
   await flush();
-  assert.equal(net.calls.length, 2, "the next frame asks again, paced by the render loop");
+  assert.equal(net.calls.length, 1, "the next frame does NOT ask again — that was the loop");
+  netClock += 600;
+  net.cache.beginFrame(); net.cache.acquire(addr(3)); net.cache.endFrame();
+  await flush();
+  assert.equal(net.calls.length, 2, "…and once the backoff opens it does: a silence is not terminal");
+});
+
+// ——— T-499: a dead server is asked at a DECAYING rate, and one answer clears the ladder ———
+//
+// What the user saw: "on stream loss some tiles render purple and keep re-rendering left to right in
+// a loop", and a page refresh clearing it. The re-render is this: `acquire` runs for every place on
+// every frame, T-479 left *the server said nothing* as the one retryable outcome, and nothing said
+// when. Measured in a browser with `hk serve` SIGKILLed under a live page (`ui/e2e/canvas-journey`
+// test 4, which is the same claim on the wire): **56 failed requests in the first 5 s and 55 in the
+// second** — flat. The e2e is the demonstration; this is the property.
+
+test("a dead server is asked at a DECAYING rate, not at frame rate", async () => {
+  let clock = 0;
+  const h = harness({ inFlight: 4, now: () => clock });
+  const places = [addr(1), addr(2), addr(3), addr(4), addr(5), addr(6)];
+  // Ten seconds of a 60 Hz render loop over a viewport of six places, with nothing answering.
+  const perWindow = [0, 0];
+  for (let frame = 0; frame < 600; frame++) {
+    const before = h.calls.length;
+    h.cache.beginFrame();
+    for (const a of places) h.cache.acquire(a);
+    h.cache.endFrame();
+    await flush();
+    for (const [key, w] of [...h.waiting]) { w.reject(new TypeError("Failed to fetch")); h.waiting.delete(key); }
+    await flush();
+    perWindow[clock < 5000 ? 0 : 1] += h.calls.length - before;
+    clock += 1000 / 60;
+  }
+  assert.ok(perWindow[0] < 60,
+    `${perWindow[0]} requests in the first 5 s: a ladder that starts at 500 ms cannot spend that many`);
+  assert.ok(perWindow[1] <= perWindow[0] * 0.5 + 4,
+    `the client is still hammering a dead server: ${perWindow[0]} requests in the first 5 s and ` +
+    `${perWindow[1]} in the second. The second window is where a ladder shows and a loop does not.`);
+  assert.equal(h.cache.silent, true, "…and it says so, rather than only behaving differently");
+});
+
+test("…and ONE answer clears the ladder: a server that comes back is served at once", async () => {
+  let clock = 0;
+  const h = harness({ inFlight: 4, now: () => clock });
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  await h.fail(addr(1), new TypeError("Failed to fetch"));
+  for (let i = 0; i < 4; i++) {
+    clock += 60_000;
+    h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+    await flush();
+    if (i < 3) await h.fail(addr(1), new TypeError("Failed to fetch"));
+  }
+  // The fifth request is the one the server answers.
+  await h.settle(addr(1));
+  assert.equal(h.cache.silent, false, "an answer is proof the route is there; the gate must fall at once");
+  const before = h.calls.length;
+  h.cache.beginFrame(); h.cache.acquire(addr(2)); h.cache.acquire(addr(3)); h.cache.endFrame();
+  await flush();
+  assert.equal(h.calls.length, before + 2,
+    "recovery must be immediate and at the full cap — a client that stays throttled after the server " +
+    "is back needs a page reload, which is the defect one step on");
+});
+
+test("a place with no usable answer is told apart from one that is merely not loaded", async () => {
+  let clock = 0;
+  const h = harness({ inFlight: 4, now: () => clock });
+  h.cache.beginFrame();
+  assert.equal(h.cache.acquire(addr(1)).failed, undefined, "before anything fails, a miss is just a miss");
+  h.cache.endFrame();
+  await flush();
+  await h.fail(addr(1), new TypeError("Failed to fetch"));
+  h.cache.beginFrame();
+  const res = h.cache.acquire(addr(7));
+  h.cache.endFrame();
+  assert.equal(res.kind, "pending", "…and it is still never a cell state, so it can never be grey");
+  assert.equal(res.kind === "pending" && res.failed, true,
+    "a place this client cannot get an answer for must not be drawn as 'loading': that is a progress " +
+    "bar that never finishes, the same defect as AWAITING promising arrival (T-441)");
 });
 
 test("an unreadable 200 is an ANSWER: a decode failure is terminal too", async () => {

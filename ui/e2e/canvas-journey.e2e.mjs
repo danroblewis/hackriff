@@ -1095,27 +1095,34 @@ test("3. a live tile panned off-screen and back shows no grey gap: its coverage 
 //       surface renders from an unconditional rAF loop, so draw calls run at frame rate whether or
 //       not anything changed and could never settle. A re-render loop spends uploads and requests.
 /**
- * **DELIBERATELY RED, AND `skip`ped ONLY SO ONE KNOWN BUG DOES NOT BLOCK EVERY OTHER MERGE.**
+ * **T-499, and it is green now. It was `skip`ped and red, and both halves are worth keeping.**
  *
- * This assertion FAILS on `main` today, reproducibly, and that is the point: it is the guard for
- * **T-499**, the re-render loop on stream loss. Measured over six runs after SIGKILLing the backend:
- * **182 failed requests in the first 5 s and 181 in the next** (range 172–183 then 170–181) — flat,
- * no decay, which is a retry loop rather than a client winding down.
+ * THE LOOP. This assertion failed on `main`, reproducibly: after SIGKILLing the backend, **56 failed
+ * requests in the first 5 s and 55 in the second** on this rig (the ticket carries 182/181 from the
+ * one it was filed on) — flat, no decay, which is a retry loop rather than a client winding down.
+ * The cause was one outcome with nothing to pace it: T-479 made everything the server *said*
+ * terminal, leaving *the server said nothing* as the only retryable case, and `acquire` runs for
+ * every place on every frame. `tilecache.ts`'s silence backoff (`OFFLINE_BACKOFF_MS`) is the fix and
+ * `ui/test/surface-cache.test.ts` holds the property; this is the demonstration, on a real socket.
  *
- * The colour half of the same claim PASSES: **0 magenta before and after**, 0 texture uploads,
- * 0.00 % pane repaint. So the two halves are asserted separately, exactly as T-499 demands — the
- * purple did not reproduce by killing the backend, and saying so is worth more than forcing it.
- *
- * **Removing this `skip` is T-499's definition of done.** Run it deliberately with:
- *   cd ui && node e2e/run.mjs canvas-journey
- * (the runner honours `skip` for the gate but the failure is visible in the output either way).
+ * THE COLOUR. The magenta half passed here before the fix too — **0 magenta before and after** — and
+ * that is not the guard being weak, it is the ticket's premise being wrong, which was worth finding.
+ * A killed server never answers, so nothing new reaches the ramp at all. What DOES produce the
+ * user's purple was measured separately, by restarting `hk serve` under a live page with a fresh
+ * data dir: **54.3 % of the pane at rgb(112,77,133) at +3 s, 20.4 % at +8 s, 9.3 % at +15 s, 0 at
+ * +25 s**. That ink is `CELL_MARKS[CELL.UNKNOWN]`, decoded from a well-formed 200 — `hk-api`'s
+ * `unknown_rows` serves EVERY row as `"unknown"` while no record survives anywhere, so a server that
+ * has just lost its history paints the whole window in the fourth state until it re-accumulates.
+ * Nothing malformed, no NaN, and the ramp never sees it: `cellMark` returns the hatch before `x` is
+ * read. The count below still stands as a guard — if a value ever does reach the ramp and land in
+ * that corner of the cube, this is where it shows.
  *
  * Draw calls are the WRONG counter here and the file says so where it counts them: the surface
  * renders from an unconditional rAF loop (~2.5 M draws per run) and could never "settle". The
  * subject is **failed requests on the wire**, which is a property of the client's retry policy and
  * of nothing else.
  */
-test("4. a killed backend degrades to grey with no purple and no re-render thrash", { skip: "T-499: the re-render loop on stream loss is real and unfixed — 182 failed requests in 5 s, flat, no decay. Deleting this skip is T-499's DoD." }, async (t) => {
+test("4. a killed backend degrades to grey with no purple and no re-render thrash", async (t) => {
   const { page, backend } = await journey();
   await goLive(page);
   const g = await paneGeometry(page);
