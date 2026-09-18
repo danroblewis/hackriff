@@ -20,10 +20,13 @@
 //     the peak of a row the socket actually delivered — same dB, same frequency. `sampleFrame`
 //     max-pools, so the peak column's value **is** the row's global maximum; an equality, not a
 //     bound.
-//  2. **The render path.** The composited pixels agree with that statement: the highest point of the
-//     drawn trace sits in the screen column the stated peak frequency maps to, through the window
-//     the pane itself says it is showing. This is the half a correct readout over a broken renderer
-//     would fail.
+//  2. **The render path.** The composited pixels agree with that statement: the highest ink in the
+//     drawn trace is in the screen column the stated peak frequency maps to, through the window the
+//     pane itself says it is showing. This is the half a correct readout over a broken renderer would
+//     fail. **It is asserted of ONE frame** — the readout and the framebuffer are captured with the
+//     stream held and the reading bracketed on both sides of the screenshot (T-487), because a
+//     readout and a screenshot a round trip apart are two different spectra, and "do two successive
+//     frames agree" is not the question this claim is about.
 //  3. **Absence, and that the absence is not vacuous.** The viewport is wider than the tuned band,
 //     so one frame of one strip contains both cases. The drawn columns must start and end at the
 //     band's edges — the edges being taken from the **header the socket delivered**, not from
@@ -49,48 +52,81 @@ const TRACE_PX = 96;
 const TRACE_COLUMNS = 256;
 
 /**
- * The tap. Observes only: it forwards nothing, changes nothing, and answers no question the page
- * asks. `class ... extends WebSocket` rather than a wrapping function, so `new`, the prototype chain
- * and every property the app sets (`binaryType`, `onmessage`) behave exactly as they would.
+ * The tap. Observes the wire, and — only when a check asks it to — **holds** the page's view of it.
+ *
+ * `class ... extends WebSocket` rather than a wrapping function, so `new`, the prototype chain and
+ * every property the app sets (`binaryType`, `onmessage`) behave exactly as they would.
+ *
+ * ## The hold, and why a test needs one (T-487)
+ *
+ * The default is pure observation: it forwards nothing, changes nothing, and answers no question the
+ * page asks. `hold()` is the one exception, and it exists because two of the claims below are about
+ * **one frame** — what the readout says and what the pixels show — while a CDP client can only read
+ * the DOM and the framebuffer in separate round trips. Measured on this fixture: over 40 unheld
+ * brackets the readout changed between the two reads **38 times**, its stated peak wandering across
+ * ~15 screen columns from frame to frame as an FM signal's instantaneous peak bin moves. A readout
+ * and a screenshot taken a round trip apart are therefore two different spectra, and comparing them
+ * is the adjacent-question mistake: it asks whether two *successive* frames agree, not whether one
+ * frame's readout describes its own pixels.
+ *
+ * So the hold stops delivery to the page's own `onmessage` — the tap's listener is registered in the
+ * constructor, before `ui/src/app/net.ts` assigns one, so `stopImmediatePropagation` is enough and no
+ * property surgery is needed. The app's live row, and with it the pane's live edge, then stand still,
+ * and every subsequent frame draws the same slice from the same delivered row through exactly the
+ * product code under test. Nothing about the render path changes; only the arrival of the *next*
+ * frame is deferred, which is a state a stalled network reaches anyway.
+ *
+ * The tap keeps recording while held, and counts what it withheld, so "rows kept arriving and the
+ * picture did not move" is a measured claim rather than an assumption — and so a hold that silently
+ * did nothing (because the socket had gone quiet on its own) is distinguishable from one that worked.
  */
 const TAP = `(() => {
   const Base = WebSocket;
-  const tap = { headers: 0, rows: 0, geom: null, recent: [] };
+  const tap = { headers: 0, rows: 0, geom: null, recent: [], held: false, withheld: 0 };
+  tap.hold = () => { tap.held = true; tap.withheld = 0; };
+  tap.resume = () => { tap.held = false; };
   window.__hkTap = tap;
+  const observe = (e) => {
+    if (typeof e.data === "string") {
+      try {
+        const h = JSON.parse(e.data);
+        if (h && h.kind === "spectrum" && h.bandwidth_hz > 0 && h.fft_size >= 1) {
+          tap.headers++;
+          tap.geom = { centerHz: h.center_hz, bandwidthHz: h.bandwidth_hz, bins: h.fft_size };
+          tap.recent.length = 0; // a retune: the old band's rows are not this band's
+        }
+      } catch (_) {}
+      return;
+    }
+    const buf = e.data;
+    if (!(buf instanceof ArrayBuffer) || buf.byteLength < 36 || !tap.geom) return;
+    const dv = new DataView(buf);
+    if (dv.getUint8(0) !== 1) return;            // REC_DATA
+    if (dv.getUint8(1) & 1) return;              // FLAG_GATED: no samples in this record
+    const n = (buf.byteLength - 32) >> 2;
+    if (n < 2) return;
+    const row = new Float32Array(buf, 32, n);
+    let best = -Infinity, at = -1;
+    for (let i = 0; i < n; i++) { const v = row[i]; if (Number.isFinite(v) && v > best) { best = v; at = i; } }
+    if (at < 0) return;
+    const f0 = tap.geom.centerHz - tap.geom.bandwidthHz / 2;
+    const binHz = tap.geom.bandwidthHz / n;
+    tap.rows++;
+    tap.recent.push({
+      tS: Number(dv.getBigInt64(16, true) / 1000n) / 1e6,
+      bins: n, peakDb: best, peakHz: f0 + (at + 0.5) * binHz,
+    });
+    if (tap.recent.length > 400) tap.recent.splice(0, tap.recent.length - 400);
+  };
   class TapSocket extends Base {
     constructor(...a) {
       super(...a);
+      // Registered HERE, in the constructor, so it runs before the handler \`net.ts\` assigns later —
+      // which is what lets the hold below withhold delivery without touching the socket or the app.
       this.addEventListener("message", (e) => {
-        if (typeof e.data === "string") {
-          try {
-            const h = JSON.parse(e.data);
-            if (h && h.kind === "spectrum" && h.bandwidth_hz > 0 && h.fft_size >= 1) {
-              tap.headers++;
-              tap.geom = { centerHz: h.center_hz, bandwidthHz: h.bandwidth_hz, bins: h.fft_size };
-              tap.recent.length = 0; // a retune: the old band's rows are not this band's
-            }
-          } catch (_) {}
-          return;
+        try { observe(e); } finally {
+          if (tap.held) { tap.withheld++; e.stopImmediatePropagation(); }
         }
-        const buf = e.data;
-        if (!(buf instanceof ArrayBuffer) || buf.byteLength < 36 || !tap.geom) return;
-        const dv = new DataView(buf);
-        if (dv.getUint8(0) !== 1) return;            // REC_DATA
-        if (dv.getUint8(1) & 1) return;              // FLAG_GATED: no samples in this record
-        const n = (buf.byteLength - 32) >> 2;
-        if (n < 2) return;
-        const row = new Float32Array(buf, 32, n);
-        let best = -Infinity, at = -1;
-        for (let i = 0; i < n; i++) { const v = row[i]; if (Number.isFinite(v) && v > best) { best = v; at = i; } }
-        if (at < 0) return;
-        const f0 = tap.geom.centerHz - tap.geom.bandwidthHz / 2;
-        const binHz = tap.geom.bandwidthHz / n;
-        tap.rows++;
-        tap.recent.push({
-          tS: Number(dv.getBigInt64(16, true) / 1000n) / 1e6,
-          bins: n, peakDb: best, peakHz: f0 + (at + 0.5) * binHz,
-        });
-        if (tap.recent.length > 400) tap.recent.splice(0, tap.recent.length - 400);
       });
     }
   }
@@ -104,6 +140,7 @@ const SNAPSHOT = `(() => {
     trace: document.querySelector('.sf-trace')?.textContent ?? "",
     headline: row ? row.children[1].textContent : "",
     tap: { headers: window.__hkTap.headers, rows: window.__hkTap.rows, geom: window.__hkTap.geom,
+           held: window.__hkTap.held, withheld: window.__hkTap.withheld,
            recent: window.__hkTap.recent.slice(-400) },
   });
 })()`;
@@ -143,9 +180,88 @@ function strip(img, rect) {
       if (b > r) { slicePx++; if (cols[x] < 0) cols[x] = y; } else if (r > b) holdPx++;
     }
   }
-  let peakCol = -1, peakY = Infinity;
-  for (let x = 0; x < w; x++) if (cols[x] >= 0 && cols[x] < peakY) { peakY = cols[x]; peakCol = x; }
-  return { w, cols, slicePx, holdPx, peakCol, peakY, drawn: cols.filter((v) => v >= 0).length };
+  let peakCol = -1, peakY = Infinity, lowY = -1;
+  for (let x = 0; x < w; x++) {
+    if (cols[x] < 0) continue;
+    if (cols[x] < peakY) { peakY = cols[x]; peakCol = x; }
+    if (cols[x] > lowY) lowY = cols[x];
+  }
+  return { w, cols, slicePx, holdPx, peakCol, peakY, lowY, drawn: cols.filter((v) => v >= 0).length };
+}
+
+/**
+ * The topmost drawn pixel row **within one pooled trace column**, `-1` if that column drew nothing.
+ *
+ * Why a span and not `cols[Math.round(centrePx)]`: the readout states a *frequency*, and the
+ * frequency it states is the centre of a pooled column (`peakOf`: `f0 + (at + 0.5) * colHz`). One
+ * such column is `w / TRACE_COLUMNS` screen pixels wide — 3.2 px at this viewport — so the honest
+ * question the pixels can answer is "what is drawn in that column", not "what is drawn in the single
+ * pixel its centre happens to round to", which lands in the *next* column whenever the centre falls
+ * on a half-pixel.
+ */
+function topWithin(cols, centrePx, widthPx) {
+  const a = Math.max(0, Math.floor(centrePx - widthPx / 2));
+  const b = Math.min(cols.length - 1, Math.ceil(centrePx + widthPx / 2));
+  let top = -1;
+  for (let x = a; x <= b; x++) if (cols[x] >= 0 && (top < 0 || cols[x] < top)) top = cols[x];
+  return { top, a, b };
+}
+
+/**
+ * **The state both frame-accurate checks below are about**, in the two forms they need it: an
+ * in-page expression to wait on, and a predicate over a readout already read back.
+ *
+ * One definition, because the two must agree. A wait that establishes one state and an assertion
+ * that accepts another is the whole defect this file was rewritten for.
+ */
+const LIVE_FRAME_EXPR =
+  `/slice [\\d:]+Z \\(live frame\\) · peak/.test(document.querySelector('.sf-trace')?.textContent ?? "")`;
+const isLiveFrame = (snap) => /slice [\d:]+Z \(live frame\) · peak/.test(snap.trace);
+
+/**
+ * **One observation: the readout and the composited pixels of the SAME frame, in a KNOWN state**
+ * (T-487).
+ *
+ * A CDP client reads the DOM with one round trip and the framebuffer with another, so the naive
+ * sequence `waitFor(state); shot(); eval()` proves nothing about one frame. Two ways it comes apart
+ * were measured on this fixture, and this one function closes both:
+ *
+ *  - **The picture moves between the reads.** Over 40 unheld brackets the readout changed 38 times,
+ *    its stated peak wandering ~15 screen columns as the FM signal's instantaneous peak bin moves.
+ *    So the stream is **held** (see `TAP`) and the screenshot is **bracketed** by the readout on both
+ *    sides, which must come back identical.
+ *  - **The state the wait established has lapsed by the screenshot.** Measured over 14 fresh page
+ *    loads: once, the slice's source had flipped from the live row to a pyramid cell with no tile in
+ *    hand, so the strip was empty and the check read it as "the trace drew nothing". So the state is
+ *    **re-established and then re-verified on the observed readout** rather than assumed to persist.
+ *
+ * Each attempt therefore resumes the stream, waits for the state, holds, and observes; an attempt
+ * that fails either test is retried from the top rather than accepted. Exhausting them is a failure,
+ * never a skip: it would mean the page cannot be held in the state the claims are about.
+ */
+async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, timeoutMs = 60000 }) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    await page.eval("window.__hkTap.resume()");
+    await page.waitFor(what, expr, { timeoutMs });
+    await page.eval("window.__hkTap.hold()");
+    await page.frames(4);
+    const before = JSON.parse(await page.eval(SNAPSHOT));
+    const img = await page.shot(shotPath);
+    const after = JSON.parse(await page.eval(SNAPSHOT));
+    const still = before.trace === after.trace && before.headline === after.headline;
+    if (still && accept(before)) {
+      return { snap: before, img, withheld: after.tap.withheld,
+        rowsDuring: after.tap.rows - before.tap.rows, tries: i + 1 };
+    }
+    last = { still, accepted: accept(before), before: before.trace, after: after.trace, held: after.tap.held };
+    await page.frames(2);
+  }
+  throw new Error(
+    `the page would not hold still in the state under test across ${tries} attempts, so the readout ` +
+    "and the pixels cannot be compared as one frame.\n" +
+    `  waiting for: ${what}\n  held: ${last?.held}; readout unchanged across the capture: ${last?.still}; ` +
+    `state still held at the capture: ${last?.accepted}\n  before: ${last?.before}\n  after:  ${last?.after}`);
 }
 
 test("the trace is the spectrum at the viewport's time position, and its numbers are the socket's own", async (t) => {
@@ -169,16 +285,24 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
 
   // ---- (1) the data path, on a frame the socket delivered ----
   //
-  // Wait for the source the readout NAMES to be the live frame. The pane's time position is its own
+  // The source the readout NAMES has to be the live frame. The pane's time position is its own
   // window's top, and only there is the delivered row finer than a cell — so this is the state in
   // which the two things being compared are the same thing. Everywhere else the slice legitimately
   // comes from the pyramid, and comparing it to a stream row would be the adjacent-question mistake.
-  await page.waitFor("the trace to state a live-frame slice",
-    `/slice [\\d:]+Z \\(live frame\\) · peak/.test(document.querySelector('.sf-trace')?.textContent ?? "")`,
-    { timeoutMs: 60000 });
-  const snap = JSON.parse(await page.eval(SNAPSHOT));
+  //
+  // **Everything from here to the end of the render check describes a single frame** (T-487): the
+  // app's live row is held, so the words and the picture are two readings of the same spectrum
+  // rather than of two successive ones. Capture itself never stops — `withheld` below counts the
+  // rows that arrived on the wire while the picture stood still, which is what makes this a held
+  // *view* rather than a quiet socket.
+  const obs = await heldObservation(page, path.join(ART, "app-trace-strip.png"), {
+    what: "the trace to state a live-frame slice", expr: LIVE_FRAME_EXPR, accept: isLiveFrame,
+  });
+  const snap = obs.snap;
   t.diagnostic(`trace readout: ${snap.trace}`);
   t.diagnostic(`tap: ${snap.tap.headers} headers, ${snap.tap.rows} rows, ${snap.tap.recent.length} retained`);
+  t.diagnostic(`one observation on attempt ${obs.tries}: ${obs.rowsDuring} rows arrived on the wire ` +
+    `during the bracket (${obs.withheld} withheld from the page since the hold) and the readout did not move`);
   assert.ok(snap.tap.recent.length > 0, "the tap retained no row to compare against");
 
   const slice = statedSlice(snap.trace);
@@ -214,8 +338,8 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
     /scale -?[\d.]+ dB … -?[\d.]+ dB, (measured over the region and anchored there|measured from the tiles on screen \(auto-contrast\))/,
     "the trace must say which measured range it is drawn against, and how that range was decided");
 
-  // ---- (2) the render path: the pixels agree with the statement ----
-  const s = strip(await page.shot(path.join(ART, "app-trace-strip.png")), rect);
+  // ---- (2) the render path: the pixels agree with the statement, IN THE SAME FRAME ----
+  const s = strip(obs.img, rect);
   assert.ok(s.slicePx > 20, `the slice series drew ${s.slicePx} pixels in the strip — that is not a trace`);
   // The max-hold's pixels are DIAGNOSTIC, not asserted. Whether it draws depends on a tile being
   // resident for this pane's window, which is a claim about when the pyramid materialises a node —
@@ -223,16 +347,52 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
   // arithmetic is pinned in `ui/test/surface-trace.test.ts`, where the residency is the fixture.
   t.diagnostic(`strip ink: ${s.slicePx} slice px, ${s.holdPx} max-hold px`);
 
+  // **The claim: the highest ink in the strip is in the very column the readout names.**
+  //
+  // Stated that way round, rather than as "the argmax column is within N px of the stated one",
+  // deliberately (T-487). `strip` reduces a whole trace to one `peakCol` by taking the topmost pixel
+  // and breaking ties leftward — and a real spectrum's peak is a *plateau*, not a spike: one pooled
+  // column is 3.2 px wide here, and measured over 30 held frames the top pixel row was shared by
+  // between 3 and 19 columns, in clusters up to 14 px apart. So `peakCol` is an arbitrary pick from a
+  // set the framebuffer cannot order, and 8 of those 30 frames had a tied column more than 9.6 px
+  // from the stated peak: the old form was sitting on the edge of a coin-flip about which member of
+  // the plateau won, which is a property of the tie-break rather than of the trace.
+  //
+  // Asking whether the STATED column is at the top removes that arbitrariness without softening
+  // anything. It is the more exact claim in the direction that matters — the stated column itself,
+  // not a ±9.6 px neighbourhood of it — and the only divergence it forgives is one the pixels do not
+  // express: another column drawn at the identical height. Measured over the same 30 held frames it
+  // held with **zero** slack, top-row equal to top-row, every time.
   const expected = ((slice.hz - win.f0Hz) / win.spanHz) * s.w;
-  // Tolerance: a drawn sample is a whole pooled column wide, and the live row advances between the
-  // snapshot and the screenshot. Three columns of the trace's own grid.
-  const tolPx = Math.max(6, (3 * s.w) / TRACE_COLUMNS);
+  const colPx = s.w / TRACE_COLUMNS;
+  // A stroke is `thickPx` device px tall (`traceQuads`), so the top of one column may sit a stroke
+  // below another's and still be the same drawn value. That, and nothing else, is the slack.
+  const strokePx = 2;
+  const { top: topStated, a: loPx, b: hiPx } = topWithin(s.cols, expected, colPx);
   t.diagnostic(`highest drawn sample at column ${s.peakCol} (row ${s.peakY} of ${TRACE_PX}); ` +
-    `the stated peak maps to column ${expected.toFixed(1)} ± ${tolPx.toFixed(1)}`);
-  assert.ok(Math.abs(s.peakCol - expected) <= tolPx,
-    `the trace's highest point is at column ${s.peakCol}, but it SAYS its peak is at ` +
-    `${(slice.hz / 1e6).toFixed(4)} MHz, which is column ${expected.toFixed(1)} of ${s.w}. ` +
+    `the stated peak ${(slice.hz / 1e6).toFixed(4)} MHz is pooled column ${expected.toFixed(1)} ` +
+    `(px ${loPx}..${hiPx}), drawn at row ${topStated}`);
+  assert.ok(topStated >= 0 && topStated <= s.peakY + strokePx,
+    `the trace's highest ink is at column ${s.peakCol}, row ${s.peakY}, but the column it SAYS its ` +
+    `peak is in — ${(slice.hz / 1e6).toFixed(4)} MHz, px ${loPx}..${hiPx} of ${s.w} — is drawn at ` +
+    `row ${topStated < 0 ? "nothing at all" : topStated}. ` +
     "The readout and the pixels are describing different things.");
+  // The control that keeps the assertion above from being satisfiable by a flat line: a horizontal
+  // trace has every column at the top, so "the stated column is at the top" would say nothing. The
+  // strip must have real vertical structure for the claim to be about a peak at all.
+  t.diagnostic(`the drawn trace spans rows ${s.peakY}..${s.lowY} of ${TRACE_PX}`);
+  assert.ok(s.lowY - s.peakY >= 20,
+    `the drawn trace spans only rows ${s.peakY}..${s.lowY} of ${TRACE_PX} — with no vertical ` +
+    "structure, 'the stated column is at the top' is true of every column and proves nothing");
+
+  // **Capture never stopped while the view was held**, which is what makes this a held *view* and
+  // not a quiet socket — and what keeps "the readout did not move" from being satisfied trivially.
+  assert.ok(obs.snap.tap.held, "the hold was not in force for the observation");
+  assert.ok(obs.withheld > 0,
+    `the socket delivered nothing to withhold while the view was held (${obs.withheld} rows), so the ` +
+    "hold proves nothing: the picture may have been still because there was no data, not because it " +
+    "was being held");
+  await page.eval("window.__hkTap.resume()");
   assert.deepEqual(page.exceptions, [], "uncaught exception while tracing");
 });
 
@@ -246,6 +406,14 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   // Nothing about tile residency enters this: the slice at the growing edge comes from the delivered
   // row, whose extent is exactly `center_hz ± bandwidth_hz/2`. Outside it there is no current frame
   // at all, and "no current frame" must read as nothing rather than as quiet.
+  //
+  // **"In one frame" is now enforced rather than hoped for** (T-487). The live-frame state this test
+  // needs is not one that persists just because a wait once saw it: measured over 14 fresh page
+  // loads, one of them had the slice's source flip back to a pyramid cell — with no tile in hand —
+  // between the wait and the screenshot, and the strip was empty. Read against the stale precondition
+  // that reports as "the trace drew nothing", which is a true statement about a frame this test is
+  // not about. So the observation goes through `heldObservation`, which re-establishes the state,
+  // holds the stream and re-verifies the state on the readout it actually captured.
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
@@ -254,13 +422,11 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   const { rect } = await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
   // A live-frame slice, so the boundary under test is the tuned band and not a tile edge.
-  await page.waitFor("the trace to state a live-frame slice",
-    `/slice [\\d:]+Z \\(live frame\\) · peak/.test(document.querySelector('.sf-trace')?.textContent ?? "")`,
-    { timeoutMs: 60000 });
-  await page.frames(3);
-
-  const img = await page.shot(path.join(ART, "app-trace-extent.png"));
-  const snap = JSON.parse(await page.eval(SNAPSHOT));
+  const obs = await heldObservation(page, path.join(ART, "app-trace-extent.png"), {
+    what: "the trace to state a live-frame slice", expr: LIVE_FRAME_EXPR, accept: isLiveFrame,
+  });
+  const img = obs.img;
+  const snap = obs.snap;
   const s = strip(img, rect);
   const win = windowOf(snap.headline);
   const geom = snap.tap.geom;
@@ -274,10 +440,14 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
     `tuned band ${(band.f0Hz / 1e6).toFixed(3)}–${(band.f1Hz / 1e6).toFixed(3)} MHz = columns ` +
     `${expLo.toFixed(1)}–${expHi.toFixed(1)}`);
   t.diagnostic(`drawn: ${s.drawn}/${s.w} columns, from ${drawnAt[0]} to ${drawnAt[drawnAt.length - 1]}`);
+  t.diagnostic(`one observation on attempt ${obs.tries}: ${obs.rowsDuring} rows arrived on the wire ` +
+    `during the bracket (${obs.withheld} withheld from the page since the hold)`);
 
   // PRESENT: the drawn columns start and end at the band's edges. A trace that quietly covered only
   // one tile's worth, or that stopped at the pane's centre, fails here.
-  assert.ok(s.drawn > 0, "nothing is drawn at all — the absence below would prove nothing");
+  assert.ok(s.drawn > 0,
+    "nothing is drawn at all — the absence below would prove nothing. The readout for this very " +
+    `frame says the slice came from the live frame, so there was a row to draw: ${snap.trace}`);
   // One pooled column plus a stroke's width of slack at each end.
   const tol = Math.max(8, (2 * s.w) / TRACE_COLUMNS);
   assert.ok(Math.abs(drawnAt[0] - Math.max(0, expLo)) <= tol,
@@ -298,6 +468,7 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   assert.ok(outside.length > s.w * 0.05,
     `only ${outside.length} of ${s.w} columns are outside the band — this frame has no control region`);
 
+  await page.eval("window.__hkTap.resume()");
   assert.deepEqual(page.exceptions, [], "uncaught exception while measuring the trace's extent");
 });
 
