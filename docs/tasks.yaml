@@ -12047,6 +12047,139 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-store`,
       `just test-crate hk-pipeline`, and `just acceptance-ci` since it is the thing that regressed
       - then HAND BACK. Never `just gate`; the coordinator gates at merge.
+  - id: T-454
+    milestone: MCANVAS
+    title: The surface surfaces the tile backpressure 503 instead of backing off - and TileCache already has a cap and cancellation
+    status: in-progress
+    priority: high
+    parallel_group: CANVAS-FE
+    deps: [T-450]
+    use_cases: [AWARE-011]
+    found_by: 'the user, 2026-09-17, exercising the live /surface preview'
+    acceptance: |
+      USER REPORT from the live preview. The renderer throws:
+        "too many tile reads in flight (limit 4): tile production takes the history lock, so the
+         cap is ingest backpressure, not a queue - cancel tiles whose viewport you have left and
+         retry the ones you still want."
+      THE ERROR MESSAGE PRESCRIBES THE FIX, which is the useful part - T-438 wrote it that way on
+      purpose. What the user must see instead is nothing: cap concurrent /api/tiles at <= 4,
+      CANCEL in-flight requests whose viewport has been panned or zoomed away from, and BACK OFF
+      AND RETRY on the refusal rather than surfacing it.
+      START BY FINDING OUT WHY IT FIRES AT ALL, because the obvious answer is already implemented
+      and that is the interesting part. tilecache.ts HAS `limit = opts.inFlight ?? 4`, an
+      AbortController per request, and §5.5's viewport-change cancellation at line ~245; T-440
+      reported the 503 handled as a first-class answer (lower the cap, back off, re-queue, counted
+      as busyRefusals not failures); T-443 already fixed one cancellation defect here, where
+      setViewports matched BY EXTENT ONLY so a surface-sized viewport meant nothing was ever
+      cancelled; and T-450 measured 26 tiles resident against 17268 CANCELLED in 75 s, so
+      cancellation is demonstrably running.
+      LEAD HYPOTHESIS, to verify not assume: the quoted text is T-438's SERVER-side 503, so the
+      client's own cap is not the binding one. A client cap of 4 counts ITS OWN outstanding
+      requests; the route's TILE_MAX_IN_FLIGHT is a server-wide budget against a single history
+      lock. Two panes plus a 6 GHz minimap, or two browser tabs, can each be under 4 and together
+      over it. If that is it, the fix is to treat the 503 as the authority (adopt its named cap
+      downward, back off, re-queue) rather than to trust a local count - and T-450 measured why
+      this bites hardest at the coarse end: the map's level-10 tile takes 5.2 s and 9.5 MB of
+      JSON, so a handful of slow coarse reads can hold the budget while the panes starve.
+      DoD: panning and zooming hard never shows the user a backpressure error; concurrent
+      /api/tiles stays <= the cap in force; tiles whose viewport was left are cancelled and only
+      still-visible tiles retried; and the refusal path is asserted, not hoped for.
+    notes: |
+      T-450's measurement is the context that makes this urgent rather than cosmetic: with
+      in_flight_limit 4, the map's slow coarse tiles STARVE the panes - 26 resident against 17268
+      cancelled in 75 s. Fairness between viewports may matter as much as the cap itself.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-ui` - then HAND BACK. Never
+      `just gate`; the coordinator gates at merge.
+
+  - id: T-455
+    milestone: MCANVAS
+    title: Real headless-browser automation for /surface - the verification tier that would have caught both of the last two defects
+    status: in-progress
+    priority: high
+    parallel_group: CANVAS-FE
+    deps: [T-450]
+    use_cases: [AWARE-011, AWARE-042]
+    found_by: 'the user, 2026-09-17 - "we need some sort of UI automation tests to make sure this works"'
+    acceptance: |
+      USER REQUEST, and the evidence for it is two defects in two days that every existing suite
+      passed:
+        T-450: THE RENDERER COULD NOT LOAD IN A BROWSER AT ALL. cellrule.ts compiled its pattern
+          predicates with `new Function` at module scope; hk serve sends default-src 'self' with
+          no unsafe-eval, so it threw DURING MODULE EVALUATION. Invisible because nothing in
+          ui/src imported it and node's test runner has no CSP - while T-441 had proved that same
+          module's shader against a CPU rule on 114973 of 115200 pixels. A correct proof about
+          code that could never run where the product runs.
+        T-454: the tile backpressure 503 reaching the user, in a client that has a cap, an
+          AbortController per request and measured cancellation.
+      Neither is reachable by a pixel-rasterizer test or a node unit test. ADD REAL HEADLESS-
+      BROWSER AUTOMATION (Playwright or Puppeteer + headless Chromium) that:
+        LOADS /surface against a live or mock backend and asserts IT ACTUALLY RENDERS - no
+          load-time throw, which is precisely T-450's defect;
+        PANS AND ZOOMS and asserts the tile cap is not exceeded and no backpressure error appears
+          - T-454's defect;
+        becomes the ACCEPTANCE BACKBONE for MCANVAS UI, run for ui/ changes (extend `just gate`'s
+          ui class, or add `test-ui-e2e` - decide and say which).
+      PRECEDENT AND PLUMBING THAT ALREADY EXISTS: T-450 drove headless Chrome end to end against a
+      real backend using cached playwright-core (`hk serve --replay ... --bind 127.0.0.1:8791
+      --ui-dist <worktree>/ui/dist`), and T-441 ran a one-off real-WebGL2 check via the T-437
+      spike's CDP driver, matching the CPU rule on 114973 of 115200 pixels. Neither was committed.
+      This ticket is making that repeatable. docs/11's M8 field check also names Playwright as a
+      new dependency - check whether these should share one harness rather than growing two.
+      WHAT TO BE CAREFUL OF: a browser test that only asserts "did not throw" is close to
+      vacuous. Assert what is DRAWN or what is REQUESTED, the way the unit tier already does -
+      T-441 asserts on pixel histograms, T-442 on the requests the client builds, T-443 on every
+      submitted quad's size. Carry that standard up, do not drop it because the harness is
+      heavier. And measure the runtime: if it is slow enough that people skip it, it will be
+      skipped.
+      NEVER bind 8789/8899/8900 - the user's demo holds the real HackRF on 8899 - and never issue
+      a real retune. T-450 used 8791.
+      DoD: a committed, repeatable browser suite; both known defects reproduced by it when
+      reintroduced (non-vacuity, the way this repo checks every guard); wired into the gate for
+      ui/ changes with its runtime stated.
+    notes: |
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`; the
+      coordinator gates at merge. Adding a dependency is in scope here - say what it costs.
+
+  - id: T-456
+    milestone: MCANVAS
+    title: Google-Maps navigation on the surface - drag pans, plain wheel zooms BOTH axes, modifiers give one axis
+    status: todo
+    priority: medium
+    parallel_group: CANVAS-FE
+    deps: [T-454, T-455]
+    use_cases: [AWARE-011]
+    found_by: 'the user, 2026-09-17, exercising the live /surface preview'
+    acceptance: |
+      USER REQUEST. Today plain wheel zooms Y (time) and shift+wheel zooms X (frequency). The user
+      wants it to feel like Google Maps while KEEPING independent axis control:
+        DRAG = PAN, both axes.
+        PLAIN WHEEL = UNIFORM ZOOM, both axes together, CENTRED ON THE CURSOR.
+        SHIFT + wheel = frequency (X) only.
+        CTRL + wheel = time (Y) only.
+      THE CAVEAT IS THE WHOLE RISK, and the user named it: ctrl+wheel is captured by macOS and by
+      browsers for page/OS zoom. preventDefault where possible; IF CTRL PROVES UNRELIABLE in
+      Chrome or Safari, USE ALT/OPTION for the Y axis instead and say which you chose and why.
+      "Confirm the chosen modifiers actually work in a real browser" is the user's instruction and
+      is why this DEPENDS ON T-455 - a unit test cannot tell you whether the OS ate the event.
+      DO NOT RE-WELD THE AXES. Uniform zoom is a GESTURE that moves both axes together; the
+      surface's levels stay independent (T-434 de-welded them in the store, T-438 addresses them
+      independently, T-440 resolves them per pane). A uniform gesture must not collapse into one
+      level, and after a plain-wheel zoom the two axes may legitimately sit at different levels -
+      which T-443's levelDivergenceNote already explains to the user.
+      WATCH T-407'S LESSON, since this changes the gesture layer: it found two ways a finger could
+      retune the radio, both latent until a confirmation step was removed - a 6 px drag threshold
+      making a tap a drag, and travel measured as clientX + clientY so a stroke ACROSS a bar
+      counted as travel ALONG it. T-444 then made the retune re-derive at the instant of commit so
+      a pan invalidates a pending offer. Changing drag semantics must not disturb either: T-340's
+      control (no pan and no wheel reaches a device route) has to pass verbatim.
+      DoD: the four gestures behave as specified, verified IN A REAL BROWSER via T-455; the
+      modifier choice for the Y axis is stated with its reason; T-340's control passes verbatim;
+      and the axes remain independently levelled.
+    notes: |
+      Sequenced after T-454 and T-455 deliberately. The user marked it medium and not blocking,
+      and its own acceptance depends on a real browser to confirm the modifiers - so the test tier
+      is a prerequisite rather than a nicety.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
