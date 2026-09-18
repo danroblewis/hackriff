@@ -330,9 +330,43 @@ function tileAnswer(a: TileAddr, lat: Lattice = LAT) {
     extent: { nf: a.cells, nt: a.cells },
     axes: { frequency: { levels: lat.levelsF, cell_hz: lat.f0Hz * 2 ** a.levelF }, time: { levels: lat.levelsT, cell_s: (lat.t0Ns * 2 ** a.levelT) / 1e9 } },
     grid: { nf: a.cells, nt: a.cells, max_db: Array<number>(n).fill(-90), range_db: { lo: -100, hi: -60 } },
-    coverage: { any: { cells: Array.from({ length: n }, () => ({ state: "observed" })) } },
+    // **T-467's wire shape**: a table of distinct run-length-encoded planes, with `any.plane` an
+    // INDEX into it. Every cell of this fixture is observed, so that is one run. Spelled out here
+    // rather than borrowed from `surface-tile.test.ts` because this file's subject is the host, not
+    // the decoder — but it has to track the route, and when it did not (this fixture still emitted
+    // the pre-T-467 `any.cells`) every tile in this harness failed to DECODE, which is what the
+    // premise assertions below now catch instead of letting it be read as a refresh defect.
+    coverage: {
+      grid: { nf: a.cells, nt: a.cells },
+      states: ["unobserved", "observed", "unknown"],
+      planes: [{ runs: [1, n], cells: n, uniform: "observed" }],
+      any: { plane: 0 },
+      devices: [],
+      selected: { device: "any", named: false, present: true },
+    },
     resolution: { source: "spectrum-history", answered: { level: a.levelF } },
   };
+}
+
+/**
+ * **The premise both live-edge guards rest on: the harness's tiles actually arrived.**
+ *
+ * Stated as its own assertion because of how these two tests failed on the T-467 merge. The fixture
+ * above still emitted the old coverage shape, so every fetch threw `TileDecodeError`, no tile ever
+ * became resident, and `acquire` re-scheduled each address on every frame — 157 re-asks in 700 ms.
+ * The control read that as *"the historical preview is refreshing"* and the live one as *"asking is
+ * not arriving"*: two confident, precise, **wrong** diagnoses, because neither test said what its
+ * number was a property OF. A repeat count is only evidence about the refresh lane once the
+ * ordinary path is known to be working.
+ */
+function assertTilesArrived(preview: SurfacePreview): void {
+  const cache = preview.view.surface.cache;
+  assert.equal(cache.stats.failures, 0,
+    `${cache.stats.failures} tile fetches failed: the fixture no longer decodes, so nothing below is ` +
+    "about the live edge. Check this file's `tileAnswer` against `ui/src/surface/tile.ts`.");
+  assert.ok(cache.residentTiles > 0, "no tile is resident, so there is nothing for a refresh to replace");
+  const drew = preview.lastFrame!.reports.reduce((n, r) => n + r.tiles, 0);
+  assert.ok(drew > 0, "the renderer drew no resident tile this frame");
 }
 
 test("every viewport is FROZEN at open: this preview has no live edge to follow", () => {
@@ -409,6 +443,7 @@ test("a FOLLOWING pane re-asks for the live-edge tile: the rows recorded since a
   assert.equal(preview.view.panes.isFollowing(preview.activePane), true,
     "a reported edge opens the first pane following — otherwise this tests nothing");
   await run(preview, 700);
+  assertTilesArrived(preview);
 
   const cache = preview.view.surface.cache;
   const again = repeats(asked);
@@ -435,8 +470,10 @@ test("…and the CONTROL: T-450's historical preview refreshes NOTHING", async (
   const { preview, asked } = liveHarness({ live: false });
   assert.equal(preview.view.panes.isFollowing(preview.activePane), false);
   await run(preview, 700);
+  assertTilesArrived(preview);
+  assert.equal(preview.view.surface.cache.stats.edgeRefreshes, 0,
+    "the historical preview issued a refresh, and nothing there is following a growing edge");
   assert.equal(repeats(asked).size, 0, "the historical preview re-asked for a tile whose data cannot change");
-  assert.equal(preview.view.surface.cache.stats.edgeRefreshes, 0);
 });
 
 test("no live-edge mark is drawn: the active-capture list is never even read here", () => {
