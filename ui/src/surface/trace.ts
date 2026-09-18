@@ -182,8 +182,17 @@ export const SHADOW_ALPHA: readonly number[] = [0.34, 0.23, 0.15, 0.09];
 export const MONO_LO = 0.2;
 export const MONO_HI = 0.6;
 
-/** Stroke width, device px: the current slice, its glow, an afterglow row, the max-hold. */
-export const SLICE_PX = 2.2;
+/**
+ * Stroke width, device px: the current slice, its glow, an afterglow row, the max-hold.
+ *
+ * The slice is **3 px and not less**, and that is a measurement rather than a taste. `tracepass.ts`
+ * feathers coverage over the outermost device pixel of a stroke, so a line 2 px across has almost no
+ * fully-covered core and every pixel of it is a few percent blended with the backdrop — which showed
+ * up as the trace's colour sitting 9–12/255 away from the identical cell below it, on a claim that is
+ * supposed to be an equality. At 3 px there is a full pixel of core carrying the vertex colour
+ * unblended, and `ui/e2e/app-trace.e2e.mjs` reads it back off the framebuffer.
+ */
+export const SLICE_PX = 3;
 export const GLOW_PX = 7;
 export const SHADOW_PX = 1.6;
 export const HOLD_PX = 1.4;
