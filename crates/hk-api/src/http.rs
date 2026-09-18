@@ -1028,10 +1028,25 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         // tile is immutable), so the coarse-zoom highlight layer is a count per cell, computed on
         // demand on the same address.
         "/api/tiles/events" => crate::tiles::tile_events_json(state, &req.query),
+        // T-351: `t` is the server's own wall clock at the instant this response was built — added
+        // here, not inside the pipeline's opaque counter object, since every consumer of
+        // `StatusFn` already answers without one and a caller needs it to tell a fresh read from a
+        // cached one, or to measure its own clock skew against this device. Bare name, Unix
+        // seconds, per the units convention; wall clock (`Timestamp::now`), not the run's sample
+        // clock, because skew-against-the-device is exactly what a sample clock cannot answer.
         "/api/status" => state
             .status
             .as_ref()
-            .map(|f| f())
+            .map(|f| {
+                let mut v = f();
+                if let Some(o) = v.as_object_mut() {
+                    o.insert(
+                        "t".into(),
+                        json!(Timestamp::now().as_unix_nanos() as f64 / 1e9),
+                    );
+                }
+                v
+            })
             .ok_or_else(|| ApiError::new(404, "no pipeline status")),
         // T-218: reference data (the taxonomy and its thresholds), so the thin client never keeps
         // its own copy of the family tree or the gates. No server state is involved.

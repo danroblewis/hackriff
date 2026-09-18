@@ -775,9 +775,17 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     );
 
     // /api/status: pipeline counters, never content.
+    let before = unix_now();
     let (st, v) = get(addr, "/api/status");
+    let after = unix_now();
     assert_eq!(st, 200, "{v}");
     assert!(is_object(&v), "{v}");
+    // T-351: `t` is the server's own wall clock at the instant this response was built, bare-named
+    // Unix seconds — asserted by VALUE against the test's own clock, bracketing the request, not
+    // merely that the field is present (T-315's point: a shape check would not catch a stale or
+    // frozen clock).
+    let t = v["t"].as_f64().expect("t (server clock, s): {v}");
+    assert!((before - 1.0..=after + 1.0).contains(&t), "t={t}: {v}");
     // T-132: the baseline memory bound (docs/api.md `attention`).
     for field in [
         "memory_bytes",
