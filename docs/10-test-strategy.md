@@ -127,6 +127,24 @@ T-257 was filed on the belief that `hk-plugins::bin/hk-plugin-readsb tests::spaw
 
 **Verdict: a runner-side artifact, not a test bug and not a product defect.** Don't read a `LEAK` line as a leaked child, and don't silence it with a leak policy in `.config/nextest.toml` — that would hide the genuine orphaned-child case this project has actually been bitten by, which is exactly the class of pin T-228 was filed to remove. If a `LEAK` line ever does coincide with a real stray, `pgrep -fl <child>` straight after the run is the discriminator. And **if `just test` exits 1 on an all-passing Rust summary, the failure is in one of the other three steps the recipe chains** (`test-doc`, `test-py`, `test-ui` — `test-ui` runs `npm ci`, so it needs the network); `just` names the failing recipe on its last line. Re-measured on main at `1346085`, all four steps exit 0.
 
+### 3.5 Quarantined load-sensitive tests (T-504) — read this before re-diagnosing a failure here
+
+At least five agents in one session independently spent runs re-measuring the same two failures and each concluding "pre-existing, not mine". This section is the one place to check first, so a sixth agent doesn't have to.
+
+**The known set:**
+
+- `crates/hk-plugins/tests/host.rs`: `plugin_crash_restarts_and_capture_never_blocks` and `finish_delivers_queued_input_to_a_slow_starting_plugin_then_waits_for_its_exit`, both `#[ignore]`d with the measurement and the owning ticket inline.
+
+**What's wrong with them, already measured — don't re-measure it:** they FAIL at 25.2s and 28.1s under a full gate with a builder agent competing, and PASS IN ISOLATION at 0.29s and 2.70s. The mechanism is §3.4's macOS `pipe(2)`/`FD_CLOEXEC` race between concurrently *spawning* test processes (T-257): it scales with spawn concurrency and nothing else — zero failures in 25 `hk-plugins` runs at 6 threads, and the workspace default (`.config/nextest.toml`) is 8. **Owned by T-493**, not by whatever task an agent was actually sent to do.
+
+**What quarantine does and does not mean here (T-436, T-383).** A cap or a skip makes a defect rarer or invisible, not fixed, and a test must not bound a quantity whose natural range it hasn't measured. So these two are `#[ignore]`d, not deleted, not loosened, and not moved into `heavy-serial` (that's T-493's subject, and serializing them papers over the race rather than fixing it). Each stays runnable deliberately, by the exact command in its own `#[ignore = "..."]` message — e.g.:
+
+```
+cargo test -p hk-plugins --test host -- --ignored --exact plugin_crash_restarts_and_capture_never_blocks
+```
+
+**If you hit one of these two names failing (or missing) in a full-gate run: it is not your bug, move on.** If you find a *different* load-sensitive failure, it is not automatically part of this set — add it here only with its own isolation-vs-load measurement, the same way these two were established; a suspicion is not evidence. And don't quarantine a test that turned out to be a real, fixed defect (e.g. `tests/e2e/tests/app-trace.e2e.mjs`, `surface-region.e2e.mjs`) — quarantining a fixed test would hide a regression instead of hiding a runner artifact.
+
 ## 4. From a use-case ID to tests
 
 A use-case ID becomes one or more test cases that assert on the **data-model objects** it should produce. Every T3/T4 case loads its fixture into the mock device, lets the system survey and detect blind, and then asserts against the hidden truth list. Worked pattern (matching the [docs/07 §5](07-data-model.md) examples):
