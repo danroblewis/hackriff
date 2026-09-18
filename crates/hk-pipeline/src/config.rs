@@ -134,7 +134,16 @@ pub struct PipelineSettings {
     /// cost, which is the one that showed up: a de-welded ×2 lattice writes ~4× a welded ladder's
     /// tiles per second of capture, measured at ~1.5 s of M0-acceptance wall per node. See
     /// [`crate::history::VIEW_F_CELLS_PER_BLOCK`].
-    pub view_f_cell_hz: f64,
+    /// **T-484 made this an override rather than the floor itself.** `None` — the default — derives
+    /// node (0, 0) from the display plan ([`crate::history::view_geometry`]): `f_cell = fs /
+    /// spectrum_fft_len`, so the canvas's finest tier is the display stream's own bin. Setting it
+    /// pins the frequency cell and the fold stops being 1:1, which is honest but coarser: a
+    /// 6250 Hz cell over 2343.75 Hz bins is the 2.67-bins-per-cell collapse T-483 measured.
+    ///
+    /// The **time** cell is derived the same way (the display row period) and has no override:
+    /// T-437's finding F1 plus T-483's measurement — a 1 s cell against 25 rows/s kept 3 % of the
+    /// station's level variation — leave no value worth pinning.
+    pub view_f_cell_hz: Option<f64>,
     /// On-demand listening limits (T-066).
     pub listen: ListenSettings,
     /// Compute providers (T-056, ADR-0007): `{"provider": "auto|cpu|cpu-mt|accelerate|gpu",
@@ -207,7 +216,7 @@ impl Default for PipelineSettings {
             observation_retention_days: None,
             observation_max_mb: None,
             view_history: true,
-            view_f_cell_hz: 6250.0,
+            view_f_cell_hz: None,
             listen: ListenSettings::default(),
             compute: hk_dsp::compute::ComputeOptions::default(),
         }
