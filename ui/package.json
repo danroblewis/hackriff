@@ -5,7 +5,8 @@
   "description": "hackriff web UI: MUI one-screen exploratory app (T-149...T-156, ADR-0013), WebGL2 waterfall over the stream bridge, region-over-time history. Served at / (and aliased at /app.html).",
   "license": "UNLICENSED",
   "scripts": {
-    "build": "esbuild src/app/main.ts --bundle --minify --sourcemap --splitting --format=esm --target=es2020 --outdir=dist --entry-names=app --chunk-names=chunks/[name]-[hash] && esbuild src/app/app.css --bundle --minify --outfile=dist/app.css && esbuild src/audio-worklet.ts --bundle --minify --target=es2020 --outfile=dist/audio-worklet.js && cp src/app/index.html dist/index.html && cp src/app/index.html dist/app.html",
+    "build": "esbuild src/app/main.ts --bundle --minify --sourcemap --splitting --format=esm --target=es2020 --outdir=dist --entry-names=app --chunk-names=chunks/[name]-[hash] && esbuild src/app/app.css --bundle --minify --outfile=dist/app.css && esbuild src/audio-worklet.ts --bundle --minify --target=es2020 --outfile=dist/audio-worklet.js && cp src/app/index.html dist/index.html && cp src/app/index.html dist/app.html && npm run build:surface",
+    "build:surface": "esbuild src/surface/preview-main.ts --bundle --minify --sourcemap --format=esm --target=es2020 --outfile=dist/surface.js && esbuild src/surface/preview.css --bundle --minify --outfile=dist/surface.css && cp src/surface/preview.html dist/surface.html",
     "typecheck": "tsc --noEmit",
     "test": "node test/run.mjs"
   },

@@ -1,0 +1,97 @@
+/* The preview page's own styling (T-450). Self-contained: it imports the surface chrome the
+   renderer already ships and adds nothing the app uses, so the app's stylesheet is untouched.
+
+   Dark, because the surface is: every cell mark in ui/src/surface/cellrule.ts is a dark ground, and
+   a light page around them would make the grey read as the lightest thing on screen when it is the
+   one claim that must read as absence. */
+
+@import "./surface.css";
+
+:root {
+  --sp-bg: #0a0b0e;
+  --sp-panel: #11131a;
+  --sp-line: #232733;
+  --hk-text: #dde3ec;
+  --hk-text-dim: #9aa3b2;
+  color-scheme: dark;
+}
+
+.sp-body {
+  margin: 0;
+  background: var(--sp-bg);
+  color: var(--hk-text);
+  font: 13px/1.5 system-ui, -apple-system, Segoe UI, sans-serif;
+}
+
+.sp { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 16px; }
+
+.sp-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sp-brand { font-weight: 700; letter-spacing: 0.02em; }
+.sp-brand span { color: #fad340; }
+.sp-brand em { font: 400 11px/1 ui-monospace, Menlo, monospace; color: var(--hk-text-dim); font-style: normal; }
+
+/* The badge is a statement of scope, not a warning: this view is historical by construction. */
+.sp-badge {
+  padding: 2px 8px;
+  border: 1px solid #3a4152;
+  border-radius: 999px;
+  font: 11px/1.6 ui-monospace, Menlo, monospace;
+  color: #8fd0b4;
+}
+.sp-edge { font: 11px/1.6 ui-monospace, Menlo, monospace; color: var(--hk-text-dim); }
+
+.sp-actions { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+.sp-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--sp-line);
+  border-radius: 4px;
+  background: var(--sp-panel);
+  color: var(--hk-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sp-btn:hover { border-color: #4a5266; }
+
+.sp-note {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 3px solid #fad340;
+  background: var(--sp-panel);
+  color: var(--hk-text);
+  max-width: 120ch;
+}
+
+.sp-stage { position: relative; height: min(66vh, 720px); background: #05060a; border: 1px solid var(--sp-line); }
+.sp-stage canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+.sp-stage canvas:active { cursor: grabbing; }
+
+.sp-fail { padding: 24px; color: var(--hk-text-dim); }
+.sp-fail b { display: block; color: var(--hk-text); margin-bottom: 6px; }
+
+.sp-help { font-size: 12px; color: var(--hk-text-dim); }
+.sp-help b { color: var(--hk-text); font-weight: 600; }
+
+.sp-chrome { padding: 4px 0; border-top: 1px solid var(--sp-line); border-bottom: 1px solid var(--sp-line); }
+
+.sp-cols { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.sp-legend { flex: 1 1 380px; display: flex; flex-direction: column; gap: 4px; }
+.sp-about { flex: 1 1 380px; }
+.sp-about h2 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--hk-text-dim); }
+
+.sp-legend-row { display: flex; gap: 10px; align-items: flex-start; }
+.sp-swatch { flex: none; image-rendering: pixelated; border: 1px solid #2b303c; }
+.sp-legend-text { display: flex; flex-direction: column; font-size: 12px; }
+.sp-legend-text b { font-weight: 600; }
+.sp-legend-text span { color: var(--hk-text-dim); }
+
+.sp-prov { margin: 0; padding-left: 18px; font-size: 12px; color: var(--hk-text-dim); }
+.sp-prov li { margin-bottom: 3px; word-break: break-word; }
+/* A route that failed and what was used instead — never the same colour as a reported bound. */
+.sp-degraded { color: #e0a06a; }
+
+.sp-status { font: 11px/1.6 ui-monospace, Menlo, monospace; color: var(--hk-text-dim); }
+.sp-foot { font-size: 12px; color: var(--hk-text-dim); max-width: 80ch; }
+
+/* The three coverage states, counted and never summed: a census, not a verdict. */
+.sp-census { margin: 0; font: 11px/1.6 ui-monospace, Menlo, monospace; color: var(--hk-text-dim); }

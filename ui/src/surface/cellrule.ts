@@ -101,14 +101,30 @@ type PatternFn = (px: Vec2, p: Vec2, fract: (v: number) => number) => boolean;
 
 const fract = (v: number) => v - Math.floor(v);
 
-// The GLSL expression, compiled once, as the CPU-side rule. `new Function` rather than a
-// transcription: a transcription is a second implementation and would be free to drift.
-const COMPILED: Readonly<Record<PatternName, PatternFn>> = Object.fromEntries(
-  (Object.keys(PATTERNS) as PatternName[]).map((k) => [
-    k,
-    new Function("px", "p", "fract", `return (${PATTERNS[k]});`) as PatternFn,
-  ]),
-) as Record<PatternName, PatternFn>;
+/**
+ * The same predicates as [[PATTERNS]], in TypeScript.
+ *
+ * **Why these are written out rather than `new Function`-ed from the GLSL string** (T-450). The
+ * original compiled the expression at module scope, which is the nicer shape — one implementation,
+ * no possibility of drift — and it works everywhere except the one place this code has to run.
+ * `hk serve` sends `Content-Security-Policy: default-src 'self'` with no `unsafe-eval`, so the
+ * `new Function` call throws **while the module is being evaluated**, and since `surface.ts` imports
+ * this file that took the *entire renderer* down in the browser. Nothing caught it before T-450
+ * because the app never imported this module and node's test runner has no CSP: the first page to
+ * mount the surface was also the first to find out.
+ *
+ * The anti-drift guarantee is kept, and made stronger, by moving the `new Function` into the test
+ * instead of deleting it: `ui/test/surface-tiers.test.ts` compiles every string in [[PATTERNS]] and
+ * asserts it agrees with the entry below over a dense grid of pixels and pitches. So a transcription
+ * that drifts fails a test, rather than being prevented by a construct the product's own CSP
+ * forbids — an *asserted* equivalence in place of an assumed one.
+ */
+const COMPILED: Readonly<Record<PatternName, PatternFn>> = {
+  hatchDown: (px, p, fr) => fr((px.x + px.y) / p.x) < 0.35,
+  hatchUp: (px, p, fr) => fr((px.y - px.x) / p.x) < 0.5,
+  dots: (px, p, fr) => fr(px.x / p.x) < 0.34 && fr(px.y / p.y) < 0.34,
+  grid: (px, p, fr) => fr(px.x / p.x) < 0.10 || fr(px.y / p.y) < 0.10,
+};
 
 /** Is this pixel on the pattern? The same expression the shader runs, evaluated on the CPU. */
 export function patternHit(name: PatternName, px: Vec2, p: Vec2): boolean {
