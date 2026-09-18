@@ -302,8 +302,13 @@ test("taking the offer retunes through T-343's gate: the covering rate, then the
   assert.ok(offer.plan.ok);
   assert.equal(posted, offer.plan.ok ? offer.plan.centerHz : NaN);
   assert.ok(Math.abs(posted / STEP - Math.round(posted / STEP)) < 1e-6, `${posted} is off the synthesiser grid`);
-  // The radio it moved is named from the backend's own state, not claimed by the client.
-  assert.match(ctx.store.get().toast.text, /Retuning hackrf:0000000000000000fake0000000000ab to/);
+  // The radio it moved is named from the backend's own state, not claimed by the client. T-498: the
+  // toast also names the span the retune actually committed — 2.000 MHz, the narrowest covering
+  // window asserted above (`calls[0].body`), not merely "a retune happened" with the width silent.
+  assert.match(
+    ctx.store.get().toast.text,
+    /Retuning hackrf:0000000000000000fake0000000000ab to [\d.]+ MHz, 2\.000 MHz wide/,
+  );
 });
 
 test("the rate is not re-posted when the window in force is already the right width", async () => {

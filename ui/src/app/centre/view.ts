@@ -208,7 +208,12 @@ export async function applyDeviceAction(ctx: AppContext, action: DeviceAction): 
     }
     await ctx.client.post("/api/control/center", { center_hz: centerHz });
     const on = store.get().device.deviceId;
-    store.set(toast(`Retuning ${on ? `${on} ` : ""}to ${(centerHz / 1e6).toFixed(4)} MHz`));
+    // T-498: name the span too, when this action carries one (a nudge does not — it never touches
+    // the span, so there is nothing here to claim). `spanHz` is already what was actually asked for
+    // above — the SNAPPED, achievable width the plan computed — never a re-derivation, so this
+    // cannot say a different number from the one the request just posted.
+    const wide = spanHz !== null && Number.isFinite(spanHz) && spanHz > 0 ? `, ${(spanHz / 1e6).toFixed(3)} MHz wide` : "";
+    store.set(toast(`Retuning ${on ? `${on} ` : ""}to ${(centerHz / 1e6).toFixed(4)} MHz${wide}`));
     return true;
   } catch (e) {
     store.set((s) => ({ live: { ...s.live, pendingView: null } }));
