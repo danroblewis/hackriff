@@ -14330,7 +14330,7 @@ tasks:
   - id: T-491
     milestone: MLIVE
     title: The minimap's INITIAL FILL holds the refresh lane's precondition false for ~10 s - a weaker form of the same trap
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-490]
@@ -14364,6 +14364,44 @@ tasks:
       Filed 2026-09-18 from T-490's report. Second-order: the live edge advances correctly from ~10 s
       onward; this is the opening window only.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "3c9654a"
+    result: |
+      DONE - AND THE TICKET'S PREMISE IS MEASURABLY FALSE, which is the finding. Instrumenting every
+      pumpRefresh outcome at 10 Hz across 16 browser runs under load: the "no free slot" bail fired
+      171-227 times per run and EVERY ONE HAD refreshDepth == 0 - the live tile was not yet resident, so
+      there was nothing to revalidate. The counter for "a revalidation was queued and lost its slot to
+      visible work" was ZERO in every run. The slots ARE full for 2.4-2.9 s exactly as reported; that
+      window BLOCKS NOTHING and closes ~6 s before the failing sample. The cheap angle was already done
+      too: Surface.render acquires per tile per frame and draws PENDING for a miss, so the minimap never
+      waits for its 19 tiles and there is no first-draw barrier to shorten.
+      WHAT ACTUALLY HAPPENS: the route serialises tile reads on the history mutex, so a completion's wall
+      time is production PLUS a neighbour's hold. Same 0/0 address in one run - a REFRESH measured 844 ms
+      taken INSIDE the minimap's fill, against 80 ms for the same address after it.
+      (REFRESH_DUTY-1) x 844 ms BOUGHT 2.5 s OF SILENCE FOR AN 80 ms TILE, and the t+8 s sample landed in
+      that hole. Not a wire effect: the route's own cost.build_ms was 807 ms against the client's 844 ms,
+      settled with a probe that was added and then removed.
+      This is T-490's finding surviving as a SAMPLE rather than as a mean.
+      FIX: the cadence is REFRESH_DUTY x the MINIMUM of the lane's last `ceiling` completions, not the last
+      one alone. The window is the route's own in-flight cap - that is how many tenants can be in the
+      lane's way at once - and at a cap of 1 it is 1, correctly. The bound keeps its form and still
+      self-widens: a SUSTAINED slowdown fills the window and raises the minimum.
+      NONE OF T-460's FIVE PROPERTIES MOVED; property 5 in particular is untouched. Only the MEASUREMENT
+      inside the duty clause changed.
+      NO VISIBLE FETCH STARVED, measured 16 runs before / 13 after: ordinary-miss count identical (23.0),
+      median wire time identical (876 ms), p90 better (1263 -> 1172 ms), opening fill finishing at the same
+      instant (5510 -> 5491 ms), coarse lane unmoved (4132 -> 4153 ms). Worst live-lane gap before 11 s
+      fell 2642 -> 1710 ms mean.
+      FIRST SAMPLE DRAWN 21/21 UNDER LOAD against a 10/16 baseline. The e2e now asserts the first sample ON
+      ITS OWN - the 4-of-5 tolerance was exactly wide enough to hide a dead opening, which is the failure
+      it hid.
+      Non-vacuity: a new unit test runs the live loop twice, identical but for one 800 ms held answer, and
+      asserts the gap to the next revalidation is the same either way - red at 2400 ms against the
+      control's 1200 ms with the fix reverted. It carries its own two premise checks, because T-490's
+      depth guard stayed green while measuring the adjacent thing.
+      OBSERVATION, NOT FIXED: the minimap's own live edge (9/0) goes up to ~14.7 s between answers FOR A
+      GIVEN ADDRESS, because ~19 coarse addresses share one lane and take turns. Unchanged by this ticket
+      and pre-dating it, but a 6 GHz overview strip refreshing one address every 15 s may be worth a look.
+      Gate: ui, test-ui 45/45, e2e green.
   - id: T-492
     milestone: M2-hardening
     title: "`just test` runs the hk-plugins host tests without building the plugin binaries they spawn"
