@@ -291,6 +291,8 @@ function probeFor(opening = { freq: { centerHz: 100.8e6, spanHz: 2.4e6 }, center
     },
     census: { observed: 4, unobserved: 4092, unknown: 0, total: 4096, box: null },
     opening,
+    // T-470: the anchored display range, resolved once at open and never from a viewport.
+    range: { lo: -95, hi: -45, source: "test" },
     note: "test",
     requests: [],
     degraded: [],

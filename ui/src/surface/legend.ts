@@ -12,6 +12,7 @@
 // legend changes with it, because there is nothing here to keep in step.
 
 import { CELL, PENDING, TIER, cellPixel, type Rgb, type Vec2 } from "./cellrule";
+import type { DisplayRange } from "./surface";
 
 /** One row of the key: a name, what it claims, and how to paint a pixel of its swatch. */
 export interface LegendEntry {
@@ -46,7 +47,8 @@ export function legendEntries(): readonly LegendEntry[] {
     {
       key: "observed",
       label: "Observed",
-      note: "A measurement, coloured from one display range shared by every viewport.",
+      note: "A measurement, coloured from one display range shared by every viewport — and, since T-470, "
+        + "by every zoom: the range is anchored to the region, not to what happens to be on screen.",
       pixel: cell(CELL.OBSERVED),
     },
     {
@@ -92,6 +94,47 @@ export function legendEntries(): readonly LegendEntry[] {
       pixel: () => PENDING,
     },
   ];
+}
+
+/**
+ * **The scale row** (T-470): the ramp, the two dB it runs between, and which of the two ways it was
+ * decided.
+ *
+ * The key already said what every *mark* claims. It said nothing about what a *colour* claims, which
+ * was survivable only while the scale was a moving target nobody could have quoted anyway. Anchoring
+ * it makes the number quotable, and a quotable scale that is not quoted is the worse of the two
+ * failures: a picture that looks authoritative and is unreadable as a quantity.
+ *
+ * Both modes state the trade they make, in their own words, because they make opposite ones:
+ *
+ * - **anchored** — the same dB is the same colour at every zoom, *and* anything outside the range
+ *   clips or washes out. That is the cost of the property the user chose, and it is said out loud
+ *   rather than discovered.
+ * - **auto-contrast** — nothing clips, *and* the colour of a measurement depends on what else is on
+ *   screen, so the same signal changes colour as you navigate.
+ *
+ * The swatch is the ramp itself, rasterised through [[cellPixel]] like every other row — so the key's
+ * scale bar cannot drift from the shader's ramp any more than its greys can.
+ */
+export function rangeEntry(range: DisplayRange): LegendEntry {
+  const span = (range.hi - range.lo).toFixed(0);
+  const note = range.mode === "anchored"
+    ? `Anchored: ${range.source}. The same measured dB is the same colour at every zoom — and anything `
+      + `below ${range.lo.toFixed(1)} dBFS or above ${range.hi.toFixed(1)} dBFS is clipped to an end of the ramp.`
+    : `Auto-contrast: ${range.source}. Nothing clips, but the colour of a measurement depends on what else is `
+      + "on screen, so the same signal changes colour as you zoom or pan.";
+  return {
+    key: "range",
+    label: `Display range · ${range.lo.toFixed(1)} … ${range.hi.toFixed(1)} dBFS (${span} dB)`,
+    note,
+    pixel: cell(CELL.OBSERVED),
+  };
+}
+
+/** One line a status bar can carry where there is no room for the key. Same facts, fewer words. */
+export function rangeLabel(range: DisplayRange): string {
+  return `display range ${range.lo.toFixed(1)}…${range.hi.toFixed(1)} dBFS · `
+    + (range.mode === "anchored" ? "anchored (same colour at every zoom; outside it clips)" : "auto-contrast (re-scales to what is on screen)");
 }
 
 /** Rasterise one swatch into an `ImageData`-shaped RGBA buffer, gamma-free like the renderer. */

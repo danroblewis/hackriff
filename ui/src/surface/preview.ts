@@ -33,7 +33,7 @@
 
 import { ControlError } from "../controls/client";
 import {
-  coverageUrl, observedExtent, openingWindow, orientationNote, surfaceBounds,
+  coverageUrl, observedExtent, openingWindow, orientationNote, shadeRange, surfaceBounds,
   type CoverageCensus, type CoverageSlice, type NavigationSlice, type OpeningWindow, type SurfaceOrigin,
 } from "./bootstrap";
 import { tileUrl, type Box, type Lattice, type TileAddr } from "./lattice";
@@ -41,7 +41,10 @@ import type { OverlayQuad } from "./minimap";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache, type Viewport } from "./tilecache";
-import type { PaneRect, PaneReport, PaneView, TilePlanes } from "./surface";
+import {
+  FALLBACK_RANGE, FALLBACK_RANGE_SOURCE,
+  type DisplayRange, type PaneRect, type PaneReport, type PaneView, type TilePlanes,
+} from "./surface";
 import { SurfaceView, type SurfaceFrame } from "./view";
 
 /** Cells per tile edge the preview renders at — the route's own default, and the size the cache
@@ -87,6 +90,12 @@ export interface SurfaceProbe {
   readonly origin: SurfaceOrigin;
   readonly census: CoverageCensus;
   readonly opening: OpeningWindow;
+  /**
+   * **The anchored display range** (T-470): one `(lo, hi)` in the tiles' own dBFS, measured by the
+   * backend over the region, resolved **once** here and never from the viewport. It is what makes
+   * the same measurement the same colour at every zoom.
+   */
+  readonly range: { readonly lo: number; readonly hi: number; readonly source: string };
   /** The sentence that makes a 99.4 %-grey first screen a finding instead of a bug report. */
   readonly note: string;
   /** Paths requested, in order. Surfaced so the page can show them and a test can assert them. */
@@ -139,6 +148,7 @@ export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureO
   const origin = surfaceBounds(nav, probe.coverage?.horizon?.oldest_record_s ?? null, lattice, nowS);
 
   let cov: CoverageSlice | null = null;
+  let fine: CoverageSlice | null = null;
   try {
     cov = (await ask(coverageUrl(origin.bounds, ORIENT_CELLS, ORIENT_ROWS))) as CoverageSlice;
   } catch (e) {
@@ -155,7 +165,8 @@ export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureO
   let refined = census;
   if (census.box) {
     try {
-      refined = observedExtent((await ask(coverageUrl(census.box, ORIENT_CELLS, ORIENT_ROWS))) as CoverageSlice);
+      fine = (await ask(coverageUrl(census.box, ORIENT_CELLS, ORIENT_ROWS))) as CoverageSlice;
+      refined = observedExtent(fine);
     } catch (e) {
       degraded.push(`the coverage refinement pass failed (${describe(e)}): the view opens on the coarse observed box, which may be much wider than what was actually sampled.`);
       refined = census;
@@ -167,7 +178,33 @@ export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureO
   // The note's share is the SURFACE-wide census: it is a statement about the whole surface, and
   // quoting the refined pass's share (measured inside coverage, so near 100 %) would invert it.
   const opening = openingWindow(origin.bounds, refined.box);
-  return { lattice, origin, census, opening, note: orientationNote(census, opening), requests, degraded };
+  // **The colour scale, decided here and only here** (T-470). Preferred from the refinement pass,
+  // because that answer was measured over the observed region rather than over 6.5 GHz of mostly
+  // grey; the coarse pass stands in when there was no refinement to make. Both are already in hand,
+  // so the anchor costs nothing, and neither depends on where any viewport later goes.
+  const range = shadeRange(fine, "the observed region")
+    ?? shadeRange(cov, "the whole surface")
+    ?? { ...FALLBACK_RANGE, source: FALLBACK_RANGE_SOURCE };
+  return { lattice, origin, census, opening, range, note: orientationNote(census, opening), requests, degraded };
+}
+
+/**
+ * The anchor a host will actually use, validated (T-470).
+ *
+ * The probe states one, but this runs in the constructor of the thing that draws **every pane**, and
+ * a range that arrives non-finite or inverted would not produce a bad picture — it would produce
+ * `NaN` out of the shader's divide and blank the screen. So a nonsensical range is replaced by the
+ * stated fallback, which is the same direction as `sourceCellPx`'s totality: a renderer may not have
+ * an input that turns the whole surface off.
+ */
+export function anchorOf(
+  range: { lo?: number; hi?: number; source?: string } | null | undefined,
+): { lo: number; hi: number; source: string } {
+  const lo = range?.lo, hi = range?.hi;
+  if (typeof lo === "number" && typeof hi === "number" && Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) {
+    return { lo, hi, source: range?.source ?? FALLBACK_RANGE_SOURCE };
+  }
+  return { ...FALLBACK_RANGE, source: FALLBACK_RANGE_SOURCE };
 }
 
 const describe = (e: unknown): string =>
@@ -438,6 +475,8 @@ export class SurfacePreview {
   private readonly windowsFn: (() => readonly ActiveWindow[]) | null;
   /** The newest edge seen. A live edge must never go backwards under the boxes placed on it. */
   private edgeSeen: number;
+  /** The anchored range this host returns to, validated once. See [[anchorOf]]. */
+  private readonly anchor: { lo: number; hi: number; source: string };
 
   constructor(opts: PreviewOptions) {
     const { probe } = opts;
@@ -460,6 +499,11 @@ export class SurfacePreview {
       trace: opts.trace ?? null,
       tracePx: opts.tracePx ?? 0,
     });
+    // **Anchor the colour scale before the first frame** (T-470). `Surface` opens anchored to its
+    // own stated fallback, so this is the one place a *measured* scale replaces it — once, from the
+    // probe, never from a viewport. Nothing below this line, and nothing in `frame()`, moves it.
+    this.anchor = anchorOf(probe.range);
+    this.view.surface.setScale(this.anchor.lo, this.anchor.hi, this.anchor.source);
     // **Freeze everything at open, unless an edge was reported in.** A following viewport borrows
     // the growing edge; without one there is nothing to borrow, so nothing follows (T-450's
     // historical preview). `pause` is a coordinate change (T-347/T-442), so this costs no frame and
@@ -652,6 +696,26 @@ export class SurfacePreview {
     const o = this.probe.opening;
     this.setWindow(this.activePane, o.freq.centerHz, o.freq.spanHz, o.centerNs, o.spanNs);
   }
+
+  // ——— the colour scale ———
+
+  /**
+   * Turn the opt-in contrast tracker on, or go back to the anchor the probe measured (T-470).
+   *
+   * Returns the range now in force, so a caller can state it without asking twice. It is a *view*
+   * control in the strictest sense — it changes nothing the backend sent and nothing about where
+   * any pane is looking — but it is the one control that can make two zooms disagree about a
+   * colour, which is why it is a deliberate press rather than a side effect of navigating.
+   */
+  setAutoScale(on: boolean): DisplayRange {
+    const s = this.view.surface;
+    if (on) s.setAutoScale(true);
+    else s.setScale(this.anchor.lo, this.anchor.hi, this.anchor.source);
+    return s.range;
+  }
+
+  /** The display range every pane is coloured by, with its provenance. What a legend states. */
+  get range(): DisplayRange { return this.view.surface.range; }
 
   /** Zoom the active pane out to the whole surface. */
   fitToSurface(): void {

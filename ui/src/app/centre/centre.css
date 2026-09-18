@@ -16,6 +16,9 @@
   font: 11px var(--mono); color: var(--muted); min-width: 0;
 }
 .sf-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* T-470: the colour scale, stated. It sits next to the actions rather than at the far end because a
+   fixed range that clips is only honest if the range is read, not hunted for. */
+.sf-range { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .sf-hover { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .sf-stage { position: relative; min-height: 0; min-width: 0; overflow: hidden; background: var(--ground); }

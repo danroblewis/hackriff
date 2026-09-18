@@ -205,8 +205,14 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
   // today's answer to it.)
   assert.match(snap.trace, /max-hold over [\d.]+ (ms|s|min) (·|—)/,
     "the max-hold series is missing from the readout");
-  assert.match(snap.trace, /scale -?[\d.]+ dB … -?[\d.]+ dB, measured from the served tiles/,
-    "the trace must say which measured range it is drawn against");
+  // T-470 changed *which* measurement this is, so the wording it asserts changed with it. It used to
+  // read "measured from the served tiles", which described a range tracked from whatever was on
+  // screen — the defect. The claim the assertion is actually making is unchanged and is the one that
+  // matters: the trace states the range it is drawn against, **and says how that range was decided**,
+  // so a surprising picture is diagnosable rather than mysterious.
+  assert.match(snap.trace,
+    /scale -?[\d.]+ dB … -?[\d.]+ dB, (measured over the region and anchored there|measured from the tiles on screen \(auto-contrast\))/,
+    "the trace must say which measured range it is drawn against, and how that range was decided");
 
   // ---- (2) the render path: the pixels agree with the statement ----
   const s = strip(await page.shot(path.join(ART, "app-trace-strip.png")), rect);

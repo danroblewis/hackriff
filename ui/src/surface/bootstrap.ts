@@ -29,6 +29,7 @@
 import { spectrumExtent, type Range } from "../navigators";
 import type { CenterGrid } from "../navigation";
 import type { Box, Lattice } from "./lattice";
+import { ANCHOR_SPAN_DB } from "./surface";
 import type { FreqWindow } from "./panes";
 
 /** The slice of `GET /api/navigation` this file reads. Optional throughout: a replay reports no
@@ -51,6 +52,12 @@ export interface CoverageSlice {
     t0_s?: number; t_cell_s?: number;
   } | null;
   any?: { cells?: readonly { state?: string }[] | null } | null;
+  /**
+   * The route's own display scale for this region (T-470): `range_db`, with a `normalisation` that
+   * reads *"0 at `range_db.lo`, 1 at `range_db.hi`, linear in dB and clamped"* — which is the
+   * surface shader's `(v - uLo) / (uHi - uLo)`, stated on the wire.
+   */
+  shade?: { range_db?: { lo?: number; hi?: number } | null } | null;
 }
 
 const S_TO_NS = 1e9;
@@ -194,6 +201,45 @@ export function observedExtent(cov: CoverageSlice | null | undefined): CoverageC
     }
     : null;
   return { observed, unobserved, unknown, total: cells.length, box };
+}
+
+/**
+ * **The colour scale's anchor** (T-470): the display range the backend measured over a region,
+ * adopted as-is.
+ *
+ * This is the whole of the fix for *"colours animate and shift when I zoom"*. The renderer needs a
+ * `(lo, hi)` to turn a dB into a colour, and it used to compute one every frame from the tiles that
+ * happened to be on screen — so navigating re-coloured measurements that had not changed. The
+ * replacement has to be a range that is **not a function of the viewport**, and `GET /api/coverage`
+ * already answers exactly that for a region, in the tiles' own unit, in an answer this client
+ * **already fetches at open**: `shade.range_db`, whose `shade.normalisation` is the shader's
+ * arithmetic written out. So the anchor costs no request, invents no number, and is measured once
+ * over the region rather than continuously over the window.
+ *
+ * **Only the top is adopted; the span is stated** — see [[ANCHOR_SPAN_DB]] for why, and for the
+ * measurement that forced it. In one line: the fold is max-hold, so `range_db.hi` is exactly the
+ * region's maximum at any resolution, while `range_db.lo` is a *minimum of maxima* that folding can
+ * only raise, so it is an upper bound on the floor and anchoring there clips real measurement to
+ * black. `lo` is still read, because a reported range is how this client knows the answer carried a
+ * measurement at all.
+ *
+ * `null` when no range was reported — which is very nearly the same condition as *nothing here was
+ * ever observed*, since the range is the observed minimum and maximum. The caller states its own
+ * fallback rather than being handed one that looks like a measurement.
+ */
+export function shadeRange(
+  cov: CoverageSlice | null | undefined,
+  where: string,
+): { readonly lo: number; readonly hi: number; readonly source: string } | null {
+  const r = cov?.shade?.range_db;
+  const lo = r?.lo, hi = r?.hi;
+  if (!finite(lo) || !finite(hi) || !(hi > lo)) return null;
+  return {
+    lo: hi - ANCHOR_SPAN_DB,
+    hi,
+    source: `${ANCHOR_SPAN_DB} dB below the peak measured once over ${where} `
+      + "(GET /api/coverage shade.range_db.hi, which max-hold makes exact at any resolution)",
+  };
 }
 
 /** A pane's opening window: a frequency centre/span and an absolute time centre/span. */
