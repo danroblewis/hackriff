@@ -15133,10 +15133,94 @@ tasks:
       is a gap in the harness, not only in this pipeline, and it generalises: several e2e
       assertions here are implicitly scoped to a young server.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-506
+    milestone: MCANVAS
+    title: Remove the Capture panel - but first move the IQ horizon, the retention bound and the capture clock onto the canvas
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER DIRECTIVE 2026-09-18: remove the collapsible Capture panel at the bottom (ui/src/app/capture/,
+      the data-slot=capture row of the centre grid, captureCollapsed in shell-slice.ts, .cap-collapsed in
+      base.css). The unified canvas (Y = time) already shows the capture, so the band is redundant AS A
+      VIEW. DO NOT JUST DELETE IT: it is the only home of three things, two of them standing invariants.
+      INVESTIGATED BEFORE FILING (read-only survey, file:line in the coordinator's log):
+      (a) THE IQ-AVAILABILITY BOUNDARY IS NOT ON THE CANVAS. The ring window reaches the UI only as
+      window.buffered on /api/timeline, consumed only in app/capture (timeline.ts bufferedSpan:284,
+      iqBackingAt:296, scrubDataNote:308 - the only place the UI ever says "past the IQ ring - no IQ
+      detail"). Zero hits in ui/src/surface or ui/src/app/centre. cellrule.ts's live-iq TIER is a
+      per-tile resolution claim decided from tile WIDTH (tiles.rs base_tier), not a time boundary.
+      (b) THE RETENTION BOUND IS NOT ON THE CANVAS - and the canvas actively violates T-338:
+      bootstrap.ts surfaceBounds() sizes the time axis from coverage.horizon.oldest_record_s (the
+      spectrum-history horizon), which is exactly what CLAUDE.md says must NOT size it. navigators.ts
+      timeExtent() implements T-338 correctly but has NO IMPORTER in ui/src - only its test keeps it
+      alive, asserting the invariant against dead code.
+      (c) THE CAPTURE CLOCK. capture/index.ts is the ONLY writer of state.captureWindow, which is the
+      non-stream fallback for liveEdgeS in explore/inventory.ts and centre/surface.ts and the History
+      catalogue's default period. Delete the poll and the T-379 Date.now() bug comes back by omission.
+      (d) "Record IQ" (capture/index.ts:314-330, the GAP-1 export-from-buffer interim) is a FUNCTION
+      with no other home.
+      GET /api/timeline STAYS: it has a live contract test (api_contract.rs
+      the_timeline_spans_the_capture_window_and_draws_it and two coverage cross-checks), a spike
+      harness caller, and is a documented public route. A UI cutover is not proof a route is unused.
+      ORDER: (1) draw the IQ horizon and the retention bound on the canvas time axis, from the ring
+      window /api/timeline reports, and resize the canvas's time extent to the retention window
+      (wire timeExtent() or replace it; point navigators.test.ts's T-340 guard at the live code);
+      (2) re-home the captureWindow poll and Record IQ; (3) move the invariant tests in
+      app-capture.test.ts (the band is the ring's retention; bufferedSpan never resizes the band;
+      iqBackingAt's three answers; scrubDataNote; no default span; T-386 clock guard) to the canvas;
+      (4) only then delete app/capture's view, its CSS, the grid row and the pref, and update
+      surface-cutover.test.ts:77 and app-surface.e2e.mjs:50, which currently FORBID the removal;
+      (5) rewrite CLAUDE.md's T-338 capture-band invariant to fold its role into the canvas.
+      DoD: panel gone; the canvas shows where raw IQ ends and where retention ends, measured in a
+      browser; the time axis is sized from retention not the history horizon; liveEdgeS never falls to
+      a browser clock; /api/timeline and its contract test untouched; CLAUDE.md updated. Ask before
+      committing CLAUDE.md.
+    notes: |
+      Filed 2026-09-18 from the user's directive plus a read-only survey done before filing, per the
+      directive's own instruction to check the invariants and the route's callers first. Finding (b)
+      is a live invariant violation independent of the removal - the canvas has been sized from the
+      wrong horizon since the cutover, and the only guard for it tests an unwired helper.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-507
+    milestone: MLIVE
+    title: A server that has lost its history answers every tile all-unknown - a wall of purple the user sees
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      FOUND BY T-499, MEASURED. The purple the user reported is not a client colour bug: it is
+      CELL_MARKS[CELL.UNKNOWN] (the T-423 hatch) decoded from a well-formed 200 whose coverage plane
+      said every cell was "unknown". Source: crates/hk-api/src/coverage.rs::unknown_rows returns g.nt
+      - EVERY row - whenever oldest_record is None ("with no surviving record anywhere, every row is
+      beyond the horizon"). Restarting hk serve under a live page with a fresh data dir: 54.3 % of the
+      pane purple at +3 s, 20.4 % at +8 s, 9.3 % at +15 s, 0 at +25 s. SIGKILL produces zero purple -
+      a dead server answers nothing.
+      THE QUESTION: rows the coverage map records as SAMPLED since the restart are not beyond any
+      horizon, and rows it has no record of are unobserved, not unknown. "Unknown whether we looked"
+      should be the narrow case it was defined as (T-441), not the default for a young store. Decide
+      what the plane should say when there is no surviving record and live frames are arriving, and
+      assert it at the route.
+      CHECK AGAINST T-497 FIRST: if a retune resets the record state, this is part of the user's
+      "retune kills the live view", and T-497's agent was asked to check. Read its report before
+      starting.
+    notes: |
+      Filed 2026-09-18 from T-499's report. T-499 fixed the CLIENT half (a refused/failed fetch now
+      draws its own REFUSED_MARK, never grey or the unknown hatch, with backoff on the transport) and
+      deliberately left this server half alone as out of its lane.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
-    status: in-progress
+    status: done
+    commit: 33bed846
     priority: normal
     parallel_group: PIPE
     model: sonnet
@@ -15178,7 +15262,8 @@ tasks:
   - id: T-503
     milestone: MCANVAS
     title: UI-polish batch - axis ticks, capture-width discoverability, the retune label's span
-    status: in-progress
+    status: done
+    commit: 71a4a341
     priority: normal
     parallel_group: CANVAS-FE
     model: sonnet
