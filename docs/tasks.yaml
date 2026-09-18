@@ -14672,7 +14672,8 @@ tasks:
   - id: T-495
     milestone: MLIVE
     title: A live tile panned off-screen and back serves a STALE cache - its middle is gray and never fills
-    status: in-progress
+    status: done
+    commit: 5cd816fa
     priority: high
     parallel_group: CANVAS-FE
     core_interface: true
@@ -14870,7 +14871,8 @@ tasks:
   - id: T-499
     milestone: MLIVE
     title: On stream loss some tiles render PURPLE and re-render left-to-right in a loop
-    status: in-progress
+    status: done
+    commit: 61cf1838
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: []
@@ -15136,7 +15138,7 @@ tasks:
   - id: T-506
     milestone: MCANVAS
     title: Remove the Capture panel - but first move the IQ horizon, the retention bound and the capture clock onto the canvas
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CANVAS-FE
     model: opus
@@ -15215,6 +15217,41 @@ tasks:
       Filed 2026-09-18 from T-499's report. T-499 fixed the CLIENT half (a refused/failed fetch now
       draws its own REFUSED_MARK, never grey or the unknown hatch, with backoff on the transport) and
       deliberately left this server half alone as out of its lane.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-508
+    milestone: MLIVE
+    title: A failed re-plumb ends the run for good while hk serve stays up saying finished - the other road to "retune never recovers"
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-497]
+    use_cases: [AWARE-011]
+    acceptance: |
+      FOUND BY T-497, NOT FIXED BY IT. T-497 fixed one road into the user's "retune kills the live
+      view and it never recovers": WindowGuard waited FOR EVER for a window the radio never reached.
+      The other road is still open: supervise() ends the run PERMANENTLY if the re-plumb itself
+      fails - the source not handed back, the 5 s unwrap_shared timeout, or start_segment failing.
+      hk serve stays up, answers, reports finished: true, and NO CLIENT SHOWS IT.
+      TWO PARTS: (1) a failed re-plumb must recover capture (retry on the last good config, or on
+      the device's actual state) rather than end the run; (2) a run that has genuinely ended must be
+      VISIBLE - the surface must say capture stopped rather than showing a frozen edge that looks
+      live. A silent frozen edge is the symptom the user reported three times.
+      AND THE HARNESS GAP T-497 NAMED: every retune guard is green because the mock SDR always lands
+      exactly where it was told. Give the mock a failed-tune / failed-replumb FAULT so a browser-tier
+      retune test can go red - T-497 deliberately added no canvas-journey case because on today's
+      mock it would be a third green guard over this defect.
+      DoD: the fault exists in the mock; a canvas-journey retune case that is RED on main with the
+      fault and green with the fix; supervise() no longer ends the run on a recoverable re-plumb
+      failure; an ended run is visible in the UI.
+    notes: |
+      Filed 2026-09-18 from T-497's report. T-497 also established the green guards run on the wrong
+      SUBJECT, not the wrong path: socket survives, rows resume, 90-98 % of the pane's newest strip
+      changes over 8 s even on a 15-minute-old server - on the mock. And it checked T-507: a
+      re-plumb does not reset oldest_record, so the unknown wall is a separate defect.
+      NOT YET CONFIRMED ON THE USER'S HARDWARE: T-497's fix matches the symptom exactly, but no agent
+      may touch the demo's HackRF. The user's next retune on the demo is the real test.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
