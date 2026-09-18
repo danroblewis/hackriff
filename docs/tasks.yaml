@@ -14627,7 +14627,7 @@ tasks:
     milestone: MLIVE
     title: affordable_levels admits nodes materialize refuses, so the ladder cannot deepen past 4 x 4
     status: todo
-    priority: normal
+    priority: high
     parallel_group: PIPE
     core_interface: true
     model: opus
@@ -14993,7 +14993,7 @@ tasks:
     parallel_group: PIPE
     core_interface: true
     model: opus
-    depends_on: [T-481]
+    depends_on: [T-481, T-494, T-505]
     use_cases: [AWARE-011, AWARE-042]
     acceptance: |
       T-484 WAS REVERTED ON MAIN (87ca0b74) BECAUSE IT BROKE TILE RENDERING ON THE USER'S DEMO - no
@@ -15040,6 +15040,97 @@ tasks:
       T-486 also found that T-484's "a real scrub, however small, still pauses" was never testing
       that: panTime(-1) at T0 ~ 1.7e18 ns is below a double's 256 ns ulp, so the centre never moved.
       256 ns is the real floor under every threshold in that file.
+      ANSWERED 2026-09-18, AND THE ANSWER RE-SCOPES THIS TICKET. The mechanism is found and
+      MEASURED; the redo was deliberately NOT attempted, because it cannot work as specified.
+      WHY THE TILE MAP WENT DARK: axes.{frequency,time}.max_level bounds level_f and level_t,
+      NEVER CELL SIZE. T-484's floor is 8 doublings finer (585.9375 Hz x 40.106667 ms against
+      6250 Hz x 1 s), so the coarsest ADDRESSABLE tile shrank by the same 8 doublings -
+      819.2 MHz x 512 s -> 76.8 MHz x 20.5 s, 133x of tile area - and tilesFor has no budget.
+      Tiles per viewport, probed through the client's own latticeFrom/levelsFor/tilesFor on two
+      builds of the same fixture (pinParents doubles these again): pane 2.4 MHz x 20 s 4 -> 15;
+      pane 2.4 MHz x 30 min 8 -> 445; minimap 6 GHz x 100 s 16 -> 474; minimap 6 GHz x 30 min
+      32 -> 7031. Thousands of requests queued behind the route's four-slot in-flight cap under a
+      96 MB LRU, and nothing arrived.
+      WHY NO SUITE CAUGHT IT - INCLUDING T-481's CANVAS JOURNEY, so the gate this ticket named
+      would NOT have saved it: the surface opens on the OBSERVED EXTENT, so a server alive for
+      seconds opens on a seconds-wide window and asks for a handful of tiles. Every suite runs
+      against exactly such a server. The demo had been capturing twenty minutes. THE DEFECT IS A
+      FUNCTION OF ELAPSED CAPTURE TIME, WHICH NO SUITE VARIES.
+      AND NO DEPTH RECOVERS IT. readable_ceiling swept over f_levels x t_levels in 2..=10 at both
+      floors is IDENTICAL index-for-index on every depth (4x4 -> (9,1) for both), because servable
+      is about ratios and blind to absolute size. Best level_f + level_t anywhere is 11; matching
+      the old absolute reach at T-484's floor needs 19; past f_levels + t_levels >= 13 the ceiling
+      collapses to (0,0) - T-494's buildability gap. cells cancels, because the bound is on tile
+      SPAN. One lattice cannot be the display stream's own bin and row at its floor AND
+      device-wide over the record horizon at its ceiling.
+      SO THE APPROACH MUST CHANGE, and that is T-505: a coarse tier for wide-and-long viewports
+      (scheme 1, or a second coarse view lattice) while the fine tier answers the tuned window -
+      the honesty tiers made real in the tile SOURCE, not just the label - and/or a minimap that
+      asks /api/coverage first and requests tiles only where something was observed. RAISING THE
+      CEILING (T-494) IS A PREREQUISITE EITHER WAY, which is why this now depends on it.
+      TWO SIDE FINDINGS. (1) The demo's stage.sh wipes its data dir on every restart, so the
+      SchemeMismatch-on-reopen hypothesis is DEAD for the demo - but it stays a live hazard for
+      any persistent data dir if the view geometry ever changes. (2) 7cfa2134 had already
+      attributed the demo's "no tiles, flashing trace, no max line" to the auto-contrast flip and
+      claimed reverting four ui/ files restored rendering; the T-484 revert seven minutes later
+      has NO RECORDED SECOND OBSERVATION behind it. The tile explosion is real and independently
+      fatal regardless, but the attribution chain is worth knowing.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-505
+    milestone: MLIVE
+    title: One lattice cannot be both the display stream's own bin and device-wide over the horizon - give wide-and-long viewports a coarse tier
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-494]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      FILED FROM T-501's MEASUREMENT, NOT FROM A HYPOTHESIS. T-501 set out to redo T-484 and
+      instead proved the redo cannot work as specified, so this is the ticket that makes it
+      possible. Read T-501's notes first - the numbers are there and they are not re-derivable
+      cheaply.
+      THE CONSTRAINT, MEASURED: axes.{frequency,time}.max_level bounds level_f and level_t, never
+      CELL SIZE. So a finer floor shrinks the coarsest ADDRESSABLE tile by the same number of
+      doublings. T-484's 8-doubling-finer floor turned a 819.2 MHz x 512 s coarsest tile into
+      76.8 MHz x 20.5 s - 133x of tile area - and a 6 GHz x 30 min minimap viewport went from 32
+      tiles to 7031, behind a four-slot in-flight cap. Nothing arrived, and the map went dark.
+      AND DEPTH DOES NOT HELP: readable_ceiling is identical index-for-index across
+      f_levels x t_levels in 2..=10 at both floors, because servable reasons about RATIOS and is
+      blind to absolute size. Best level_f + level_t anywhere in that sweep is 11; the old
+      absolute reach at T-484's floor needs 19; past 13 the ceiling collapses to (0,0). `cells`
+      cancels, because the bound is on tile SPAN.
+      SO THE HONESTY TIERS MUST BECOME REAL IN THE TILE SOURCE, NOT JUST THE LABEL. CLAUDE.md
+      already requires the view to distinguish live-IQ-backed detail from survey/spectrum-history
+      overview; today that distinction is a label over ONE lattice that is asked to be both. Two
+      candidate shapes, and the ticket is to choose between them ON MEASUREMENT:
+      (1) A SECOND, COARSE VIEW LATTICE (or scheme 1 pressed into that role) answering
+      wide-and-long viewports, while the fine tier answers the tuned window. The client picks by
+      viewport span, and the pane says which tier it drew from.
+      (2) A COVERAGE-FIRST MINIMAP: ask /api/coverage first and request tiles only where
+      something was observed. On a device-wide viewport most of 1 MHz - 6 GHz has never been
+      sampled, so this is a large constant factor - but it is a factor, not a bound, and it does
+      not by itself fix a 30-minute tuned-window viewport.
+      THESE ARE NOT EXCLUSIVE and (2) is cheaper; measure whether (2) alone is sufficient before
+      building (1).
+      DoD: a stated tile budget per viewport that holds AT A THIRTY-MINUTE HORIZON, not just on a
+      freshly-started server; the budget asserted by ui/test/surface-lattice.test.ts (landed with
+      T-501's finding) with the new tier's numbers pinned; the pane reporting which tier it drew
+      from; and T-501 able to reland the fidelity floor with the minimap counts staying inside
+      the budget.
+    notes: |
+      Filed 2026-09-18 from T-501's report, which declined to re-apply T-484 and measured why
+      instead - the right outcome, and the reason this ticket exists rather than a second revert.
+      THE TESTING LESSON THIS CARRIES, and it is bigger than this ticket: T-484 passed every unit
+      suite, canvas_fidelity 5/5 and a FULL GATE, and the canvas e2e written afterwards to catch
+      it WOULD NOT HAVE CAUGHT IT EITHER. The surface opens on the observed extent, so a server
+      alive for seconds opens on a seconds-wide window; every suite runs against exactly such a
+      server, and the demo had been capturing twenty minutes. THE DEFECT IS A FUNCTION OF ELAPSED
+      CAPTURE TIME, WHICH NO SUITE VARIES. Any test for this class must age the server - or fake
+      the observed extent - or it is testing a different system from the one the user runs. That
+      is a gap in the harness, not only in this pipeline, and it generalises: several e2e
+      assertions here are implicitly scoped to a young server.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
@@ -15130,7 +15221,8 @@ tasks:
   - id: T-504
     milestone: M2-hardening
     title: Quarantine the load-sensitive tests agents keep re-running, so nobody characterises them twice
-    status: in-progress
+    status: done
+    commit: 5f765c29
     priority: high
     parallel_group: CI
     model: sonnet
