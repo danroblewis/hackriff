@@ -11146,7 +11146,7 @@ tasks:
   - id: T-439
     milestone: MCANVAS
     title: Live-edge tiles - "live" is the finest level growing where hardware is tuned, not a separate mode
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CANVAS-BE
     core_interface: true
@@ -11178,6 +11178,30 @@ tasks:
       COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
       harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
       with uncommitted work.
+    commit: "070c20d"
+    result: |
+      DONE, shipped (b) per the coordinator's ruling. VIEW_LEVELS 8 -> 4: frequency 6.25 kHz -> 50 kHz,
+      time 1 s -> 8 s. acceptance_m0 48/48 AT 52.1 s against the lattice-off control's 32.9 s and 8x8's
+      112.7 s, peak RSS 6.26 GB vs the control's 6.28 - so the gate pays ~19 s, not ~80 s.
+      THE REGRESSION WAS NOT DECODE AT ALL: tutorial_rds.rs:373 is a POST /api/pipelines STATUS
+      assertion and listen.rs:236 is a listener that should have been REFUSED being admitted. All four
+      wait in WALL CLOCK for stream time on a live unpaced looping run.
+      THE MEASUREMENT THAT MADE IT DIAGNOSABLE: 5.1x wall for IDENTICAL user CPU (333 s vs 331 s) and
+      UNCHANGED RSS. The runs were WAITING, not computing. Three probes turned it into arithmetic: one
+      test alone 10.5 s vs 10.0 s (no per-run cost); an opened-but-never-written 64-level pyramid at
+      31.4 s (free); only NODE COUNT moving it, ~1.5 s of suite wall per node.
+      TWO DEFECTS FIXED: tile I/O was on the thread that gates capture - ViewIngest only TRIED the lock,
+      which stopped a /api/tiles READER parking the history reader but missed the WRITER, since
+      Pyramid::ingest seals, encodes, compresses and writes inline; a ViewWriter thread now owns the
+      folding. And an hour of run-end seal slack wrote 273 FILES / 1288 ms TO PERSIST 0.1 MB on a
+      64-node lattice against scheme 1's 9 files / 67 ms.
+      FOUND BY AN ASSERTION FAILING RATHER THAN BY PREDICTION: at 4x4 the measured peak is ONE TILE ROW
+      MORE than the number of time levels, because inside seal_lag a node's outgoing tile is still open
+      while its successor has been created. At 8x8 it never showed. The bound says levels + 1 and why.
+      docs/16 §6.4a records the generalisable finding, beside §6.4's on-disk pricing because it is the
+      same finding in the time domain: §6.4 priced the lattice at 4x its finest node ON DISK and §5.2
+      accepted that sight-unseen; THE SAME 4x APPLIES TO TILE WRITES PER SECOND OF CAPTURE - what a
+      running pipeline pays, which nobody had costed.
   - id: T-440
     milestone: MCANVAS
     title: The renderer core - one canvas, one WebGL2 context, N scissored panes, shared tile-texture LRU
@@ -11550,7 +11574,7 @@ tasks:
     parallel_group: CANVAS-FE
     core_interface: true
     model: opus
-    deps: [T-439, T-441, T-442, T-443, T-444]
+    deps: [T-439, T-441, T-442, T-443, T-444, T-455]
     use_cases: [AWARE-011, AWARE-042]
     found_by: 'MCANVAS decomposition (user directive, 2026-09-17)'
     acceptance: |
@@ -11575,6 +11599,18 @@ tasks:
       a home on the canvas or is explicitly reported as dropped with the user's sign-off needed;
       docs/api.md, docs/14 and ui/CONTROLS.md updated; the UI suite green.
     notes: |
+      T-455 ADDED TO DEPS 2026-09-17 by the coordinator, and the user may overrule it.
+      THIS TICKET RETIRES WORKING SURFACES. T-450 then proved that the replacement COULD NOT LOAD
+      IN A BROWSER AT ALL - `new Function` at module scope against hk serve's CSP - while T-441
+      had proved that same module's shader on 114973 of 115200 pixels. A correct proof about code
+      that could never run where the product runs. T-454 then found three more mechanisms that
+      were present, tested and counting the wrong side of the wire.
+      So the evidence is now explicit: THE UNIT TIER CANNOT SEE WHETHER THIS SURFACE WORKS, and
+      T-455 is building the tier that can. Retiring the scrubbers before that exists would remove
+      the fallback at exactly the moment the replacement is least verifiable. The ticket's own
+      acceptance already says DO THIS LAST AND ONLY ON EVIDENCE.
+      T-454's closing note is the specific gap: both halves of its defect are visible only when a
+      SECOND CLIENT exists - two tabs, or a reload mid-drag. No unit test reaches that.
       DEPENDENCY ADDED 2026-09-17, caught before launch: T-439 (live-edge tiles) was missing from
       the deps and belongs there. This ticket retires the LIVE waterfall as well as the scrubbers -
       §8.5's "the live-vs-history split disappears" - and T-439 is what makes "live is the finest
@@ -11934,7 +11970,7 @@ tasks:
   - id: T-452
     milestone: MCANVAS
     title: An in-app scan trigger - the iterative-scan ENGINE exists but `hk serve` deliberately never drives the scheduler
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -11999,7 +12035,7 @@ tasks:
   - id: T-453
     milestone: MCANVAS
     title: Coarse nodes are built EAGERLY at every seal, which is a deviation from §5.2's decided "on demand at the live edge"
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -12050,7 +12086,7 @@ tasks:
   - id: T-454
     milestone: MCANVAS
     title: The surface surfaces the tile backpressure 503 instead of backing off - and TileCache already has a cap and cancellation
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     deps: [T-450]
@@ -12091,6 +12127,35 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-ui` - then HAND BACK. Never
       `just gate`; the coordinator gates at merge.
 
+    commit: "517b603"
+    result: |
+      FIXED, and the diagnosis is the value: ALL THREE MECHANISMS WERE PRESENT AND RUNNING - a cap of 4,
+      an AbortController per request, §5.5's viewport-change cancellation. EVERY ONE OF THEM COUNTED THE
+      CLIENT WHILE MAKING A CLAIM ABOUT THE SERVER.
+      1. AN ABORT DOES NOT GIVE THE ROUTE ITS SLOT BACK. hk-api serves on blocking std::net threads;
+         tiles_json is synchronous - takes a TileSlot, takes the history lock, discovers a closed socket
+         only when it WRITES. So abort() reaches the browser and nothing else while the server keeps
+         producing for 11.4 ms to 5.2 s. The cache freed its own slot and pump() immediately issued a
+         replacement, so a drag issued and abandoned a request EVERY FRAME against slots the server still
+         held. T-450's 17268 cancellations in 75 s IS NOT EVIDENCE CANCELLATION WORKED - it is the
+         measurement of that pump.
+      2. "ADOPT THE CAP IT NAMES" WAS LITERALLY Math.min(4, 4) - TILE_MAX_IN_FLIGHT is a constant 4 and
+         the cache default is 4, so T-440's adoption path could never lower anything. And it is a
+         SERVER-WIDE budget shared with every pane, every other tab and the bootstrap probe.
+      3. probeSurface is the ONE tile fetch outside TileCache (the cells=8 lattice probe) - no cap, no
+         backoff, no retry - so a 503 there became a fatal banner quoting the route's prose. Reloading
+         mid-drag reproduces it: the previous page's abandoned reads still hold all four slots.
+      FIX: abandoned requests are charged to the budget until they are EXPECTED to have finished, the
+      expectation an EWMA measured from completions (11 ms..6 s, never below T-438's measured 12 ms), so
+      the issue rate becomes "as fast as the route is OBSERVED to serve" rather than "as fast as we can
+      draw". The 503 sets a CEILING and halves the operating cap (AIMD), recovering one slot per 8
+      successes. nextAddr() shares issue between viewports so one 5.2 s map tile cannot hold the budget.
+      Seven tests asserting WHAT THE CLIENT REQUESTS (T-442's style), each verified red by reverting the
+      mechanisms one at a time.
+      NOTE FOR T-455, and it is the important one: the unit tier could hold all of this, but ONLY
+      BECAUSE THE MECHANISM COULD BE NAMED FIRST. What no suite could have caught - and these still
+      cannot - is the INTERACTION: two tabs, or a reload mid-drag, against one real hk-api. Both halves
+      are visible only when a SECOND CLIENT exists.
   - id: T-455
     milestone: MCANVAS
     title: Real headless-browser automation for /surface - the verification tier that would have caught both of the last two defects
