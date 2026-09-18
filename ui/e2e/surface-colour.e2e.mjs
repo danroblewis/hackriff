@@ -131,30 +131,40 @@ function diff(a, b, rect) {
  *
  * ## The subjects are the two PANES, and the minimap is deliberately not one of them (T-500)
  *
- * This used to settle over the whole canvas, and after T-484 took the finest time level from a 1 s
- * cell to the display row rate (~25 rows/s) it began failing here — "zoom 1 never settled: 1320 of
- * 839 916 px, worst channel sum 24". **Measured before changing anything**, over 40 screenshots
- * 250 ms apart with the page in exactly the state the first assertion sees:
+ * This used to settle over the whole canvas, which failed as "zoom 1 never settled: 1320 of 839 916
+ * px, worst channel sum 24" while T-484 had the finest time level at the display row rate (~25
+ * rows/s) instead of a 1 s cell. T-484 is reverted at the time of writing and T-501 will bring it
+ * back, so the condition is not hypothetical and the measurement below was taken **against T-484's
+ * own branch** (`de758d17`), at exactly the point that failed — immediately after zoom 1 — over 60
+ * screenshots 250 ms apart:
  *
  * ```
- * LEFT  pane (held):   39/39 consecutive pairs agreed, 0 px changed
- * RIGHT pane (zoomed): 39/39 consecutive pairs agreed, 0 px changed
- * MINIMAP:             11/39 agreed; every changed pixel inside y 610..729 — the 120 px map strip
+ * LEFT  pane (held):   59/59 consecutive pairs agreed · 0 px · worst channel sum 0
+ * RIGHT pane (zoomed): 59/59 consecutive pairs agreed · 0 px · worst channel sum 0
+ * MINIMAP:             19/59 agreed · mean 899 px · WORST CHANNEL SUM 24 · all of it in y 610..729
+ * WHOLE CANVAS:        19/59 agreed · mean 899 px · worst channel sum 24 · all of it in y 610..729
  * ```
  *
- * So **nothing was re-colouring**: both panes were byte-identical for ten seconds, and the residual
- * was entirely in the map. The residency readout over the same 40 samples names the cause — 29
- * distinct states, the map walking `0 tiles · 126 coarse stand-ins · 3 pending` →
- * `10 tiles · 118 coarse stand-ins · 1 pending`, resolving roughly one stand-in per 250 ms with the
- * in-flight cap at 4. Each swap repaints a tile-wide column over the map's full height. T-484 is
- * why it no longer converges inside the budget: at 40 ms cells the map's level has ~25× the tile
- * addresses it had at 1 s cells, so ~128 stand-ins take ~30 s to resolve — and the panes' own
- * fetches evict from the LRU they share, restarting it after every gesture.
+ * The whole canvas and the map strip are the *same numbers*, down to the reported failure's own
+ * `worst 24`: **every** residual pixel on the canvas was in the map. Nothing was re-colouring — both
+ * panes were byte-identical for fifteen seconds — and no pane was advancing either, because
+ * `preview-main.ts` passes no `edgeFn`, so `Surface` freezes every viewport at open and sets
+ * `minimap.setFollowing(false)`. There is no live edge in this page at all.
  *
- * That is **residency, not colour**, and this file already knew the map never reaches residency:
- * `waitResident` below exempts it in so many words ("it is 6 GHz wide and always has stand-ins").
- * Asking the whole canvas to stop changing was therefore asking for a state the file itself
- * documents as unreachable — a property of the instrument, not of the product.
+ * The cause is **residency**. The readout over the same samples walks 29 distinct states, the map
+ * going `0 tiles · 126 coarse stand-ins · 3 pending` → `43 tiles · 85 coarse stand-ins · 1 pending`,
+ * resolving roughly one stand-in per 250 ms against an in-flight cap of 4, each swap repainting a
+ * tile-wide column over the map's full height. At 40 ms cells the map's level has ~25× the addresses
+ * it has at 1 s cells, so ~128 stand-ins take ~30 s — and a zoom evicts from the LRU the panes share,
+ * restarting it. Two consecutive frames then agree on the whole canvas only ~32 % of the time, which
+ * is why this was a rare red rather than a permanent one: the 20 s budget is ~80 polls, so the
+ * timeout is the tail of a coin-flip process, and it gets likelier with load, with an older record
+ * and with every eviction.
+ *
+ * And this file already knew the map never reaches residency: `waitResident` below exempts it in so
+ * many words ("it is 6 GHz wide and always has stand-ins"). Asking the whole canvas to stop changing
+ * was asking for a state the file itself documents as unreachable — a property of the instrument,
+ * not of the product.
  *
  * **The instrument changed, and the claim did not.** Every assertion in this file reads `left` or
  * `right`; not one reads the map. Settling on exactly those two rects is the precondition the
@@ -162,6 +172,14 @@ function diff(a, b, rect) {
  * weaker — it is the same zero over the same pixels, no longer conditioned on a third viewport
  * that is still loading. No tolerance was widened: T-470's claim below is still `held.pixels === 0`
  * over all 316 478 px of the held pane, and the round trip is still byte-identity.
+ *
+ * **What this does NOT buy, so that T-501 does not read it as more than it is.** The subjects here
+ * are two *frozen* panes, so "two consecutive frames agree" is a reachable state for them. It would
+ * not be for a pane that follows a fast live edge: a following pane repaints every row period, and
+ * a frame-diff settle over one is unreachable by construction, not marginal. If a later change gives
+ * this page an `edgeFn`, the panes stop being valid subjects for this instrument and the comparison
+ * needs a different shape — freezing the subject pane for the duration of the comparison, or the
+ * frame-averaged reading T-481's canvas journey adopted for exactly this reason.
  *
  * It **reports** rather than throws when it cannot settle: a surface that never stops changing is a
  * finding the assertions below should get to describe, not a harness timeout with no evidence — and
