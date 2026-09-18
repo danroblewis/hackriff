@@ -152,7 +152,18 @@ use num_complex::{Complex32, Complex64};
 /// moving it moves σ_ap, σ_dp and, through the de-rotation decision, every cumulant. For a 5 %-duty
 /// train that subset held **0.662 of the record at 10 dB instead of 0.050**, so those features were
 /// computed over samples that were 93 % noise. Both density files are refitted against it.
-pub const FEATURES_VERSION: u32 = 8;
+///
+/// **9 (T-488):** [`frequency_features`] takes the same subset against the same on level, closing
+/// the **third and last** site of the rule T-431 opened — seven dimensions at once (`sigma_af`,
+/// `if_std_norm`, `if_bimodality`, `if_modality`, `if_slope_r2`, `if_local_bimodality`,
+/// `if_local_modality`, all of them statistics of one `fi` vector). Unlike T-447's two sites this
+/// one moves: every dimension here is an **unweighted** statistic of the selected pairs, where
+/// `derotate` sums phasors and weights each pair by its magnitude, so the subset's *count* — the
+/// thing that was wrong — is exactly what they average over. A 5 %-duty `pulse` read `sigma_af`
+/// 1.718 rad/sample at 10 dB against π/√3 = 1.814, the sd of a variate uniform on (−π, π]; it now
+/// reads 0.100 and follows the 1/√ρ law down the ladder. Both density files are refitted against
+/// it.
+pub const FEATURES_VERSION: u32 = 9;
 
 /// Bins guarded either side of the carrier when measuring `symmetry`: the **main-lobe half-width
 /// of the analysis window**, which [`spectral_features`] configures as [`WindowKind::Hann`].
@@ -759,17 +770,19 @@ fn on_level(a: &[f64], mean_a: f64) -> f64 {
 
 /// The envelope a sample must clear to be **on**: half the emission's own [`on_level`].
 ///
-/// # This is the Azzouz–Nandi "strong envelope" subset, and until T-447 it was the wrong samples
+/// # This is the Azzouz–Nandi "strong envelope" subset, and until T-447/T-488 it was the wrong samples
 ///
 /// Azzouz–Nandi's σ_ap and σ_dp are defined over the samples whose envelope is up — "the
 /// non-weak intervals" — because the phase of a sample that carries no signal is the phase of
 /// noise, which is uniform on [−π, π] and tells you nothing about the modulation. [`derotate`]
 /// takes the same subset for the same reason: it averages per-sample phase *steps*, and a step
-/// between two noise samples is a draw from a distribution with no mean direction.
+/// between two noise samples is a draw from a distribution with no mean direction. So does
+/// [`frequency_features`] (T-488), whose whole instantaneous-frequency vector is those steps.
 ///
-/// The subset therefore has to be "where the emission is on", and until T-447 both sites asked for
-/// it with `a > 0.5 · mean(a)` — **the identical rule T-431 had just removed from `duty` and
-/// `low_fraction` one layer down**. For an emission that is mostly off, `mean(a)` is set by the
+/// The subset therefore has to be "where the emission is on", and until T-447 (and T-488 for the
+/// third site) all three asked for it with `a > 0.5 · mean(a)` — **the identical rule T-431 had
+/// just removed from `duty` and `low_fraction` one layer down**. For an emission that is mostly
+/// off, `mean(a)` is set by the
 /// *off* time, the threshold collapses towards the noise floor, and the "strong envelope" subset
 /// fills up with exactly the noise samples it exists to exclude. Measured here on the dev grid,
 /// 6 seeds per cell, as the fraction of the record the subset holds:
@@ -792,6 +805,15 @@ fn on_level(a: &[f64], mean_a: f64) -> f64 {
 /// that same subset, so noise pairs inflate the denominator without contributing to the numerator,
 /// and the de-rotation decision — which every cumulant depends on, see [`CUMULANT_BLOCK`] — was
 /// being made on a diluted statistic.
+///
+/// **Which consumer the dilution actually reached is not the same question as how big the subset
+/// was, and the two sites answer it differently.** T-447 measured the phase pair and `derotate`
+/// and found no movement at all in the gate figures, because `derotate` weights each pair by its
+/// own magnitude (the noise 90 % of the subset carried 11 % of Σ|z|) and σ_ap/σ_dp are dominated
+/// by T-240's walk regardless of which samples are read. [`frequency_features`] (T-488) is the
+/// site where the count *is* the statistic: every one of its seven dimensions is an unweighted
+/// function of the selected pairs, so a subset that is 93 % noise makes them 93 % statistics of
+/// the noise, and `pulse`'s σ_af read π/√3 — the sd of a uniform phase — at 10 dB.
 ///
 /// **Two independent defects live in σ_ap and σ_dp, and this is only the second of them.** The
 /// first is T-240's: the unwrapped phase residual random-walks with the *record*, so both are
@@ -945,26 +967,43 @@ fn phase_features(f: &mut Features, x: &[Complex64]) {
 /// Instantaneous-frequency shape: bimodality, mode count, linear-ramp fit and spread.
 fn frequency_features(f: &mut Features, x: &[Complex64], input: &FeatureInput<'_>) {
     let a: Vec<f64> = x.iter().map(|s| s.norm()).collect();
-    let mean_a = a.iter().sum::<f64>() / a.len() as f64;
-    // rad/sample; only where the envelope is up, so OOK gaps do not fill the histogram with the
-    // noise's phase walk.
+    // rad/sample, over adjacent pairs that are **both on** ([`strong_envelope_threshold`]), so the
+    // gaps of a keyed or pulsed emission do not fill the histogram with the noise's phase walk.
     //
-    // **THE THIRD INSTANCE OF T-431's RULE, MEASURED AND LEFT, EXACTLY AS T-431 LEFT THIS ONE.**
-    // `0.5 * mean_a` here is the same broken selector [`strong_envelope_threshold`] replaced in
-    // `derotate` and `phase_features`: for a 5 %-duty train this filter keeps 0.662 of the record at
-    // 10 dB instead of 0.050, so the instantaneous-frequency histogram every dimension below is
-    // built from is mostly the noise's phase walk — which is the one thing the comment above says
-    // it excludes. It is left here on the same reasoning T-431 left the phase pair: it is a
-    // different and wider blast radius (seven dimensions — `sigma_af`, `if_std_norm`,
-    // `if_bimodality`, `if_modality`, `if_slope_r2`, `if_local_bimodality`, `if_local_modality` —
-    // against this ticket's two plus the cumulants), `sigma_af` is one of the five surviving
-    // `SNR_ORDER_EXCEPTIONS` and so is a live claim about an SNR-ordering inversion that this would
-    // move, and it deserves its own before/after rather than being folded into one that already
-    // moves the family numbers. Filed rather than smuggled in.
+    // **The third and last site of T-431's rule, closed by T-488.** Until then this asked for the
+    // subset with `0.5 × mean(a)` — the selector T-431 removed from `duty`/`low_fraction` and T-447
+    // from `derotate`/`phase_features` — which for an emission that is mostly off is referenced to
+    // the *off* time, so the threshold collapses towards the noise floor and the histogram fills
+    // with exactly the samples the line above says it excludes. Unlike `derotate`, which sums
+    // *phasors* and so weights each pair by its own magnitude (T-447's null result), every
+    // dimension here is an **unweighted** statistic of `fi` — a standard deviation, two histogram
+    // shapes, a mode count, a ramp fit — so a noise pair counts exactly as much as a signal pair
+    // and the count *is* the defect. Measured on the dev grid, 24 seeds, `sigma_af` mean:
+    //
+    // | class | 10 dB | 15 dB | 20 dB | 25 dB | 30 dB |
+    // |---|---|---|---|---|---|
+    // | `pulse`, `0.5 × mean(a)` | 1.7181 | 1.6736 | 1.0789 | 0.7702 | 0.0201 |
+    // | `pulse`, on level | 0.1001 | 0.0565 | 0.0324 | 0.0190 | 0.0120 |
+    // | `ppm`, `0.5 × mean(a)` | 0.3206 | 0.1472 | 0.0465 | 0.0230 | 0.0127 |
+    // | `ppm`, on level | 0.0935 | 0.0558 | 0.0303 | 0.0170 | 0.0098 |
+    //
+    // **1.7181 rad/sample against π/√3 = 1.8138**, the standard deviation of a variate uniform on
+    // (−π, π] — a 5 %-duty radar train's "instantaneous frequency" at 10 dB was the phase of pure
+    // noise to within 5 % of the closed form, on a dimension named as a frequency excursion. The
+    // corrected column is the *right* law instead: a rectangular pulse train has no frequency
+    // excursion of its own, so σ_af should be the phase-difference noise `√(1/ρ)` alone, which
+    // halves every 6 dB — and 0.1001 / 0.0565 / 0.0324 / 0.0190 / 0.0120 falls by 1.77, 1.74, 1.71,
+    // 1.58 per 5 dB rung against the law's 10^(5/20) = 1.778.
+    //
+    // The same collapse ran through the histogram dimensions: `pulse`'s `if_bimodality` went
+    // 0.498 / 0.472 / 0.211 / 0.161 / 0.412 across the ladder — a shape statistic with no
+    // monotonicity at all, because at 10 dB it was describing the noise's distribution and by
+    // 30 dB the emission's — and now reads 0.327 / 0.329 / 0.332 / 0.329 / 0.338.
+    let on = strong_envelope_threshold(&a);
     let fi: Vec<f64> = x
         .windows(2)
         .enumerate()
-        .filter(|(i, w)| a[*i] > 0.5 * mean_a && a[i + 1] > 0.5 * mean_a && w[0].norm() > 0.0)
+        .filter(|(i, w)| a[*i] > on && a[i + 1] > on && w[0].norm() > 0.0)
         .map(|(_, w)| (w[1] * w[0].conj()).arg())
         .collect();
     if fi.len() < MIN_SAMPLES / 2 {
@@ -2483,6 +2522,197 @@ mod tests {
         );
         assert!(
             f.reasons.iter().any(|r| r == "no_strong_envelope"),
+            "and it must say why: {:?}",
+            f.reasons
+        );
+    }
+
+    /// The **pairs** `frequency_features` measures over are the emission's own on time (T-488).
+    ///
+    /// # What this is a property of, said before it is asserted
+    ///
+    /// It is a property of the **pair subset**, and — unlike T-447's — the thing downstream is an
+    /// unweighted function of exactly that subset, which is why this site moved when the other two
+    /// did not. `sigma_af` is a standard deviation of the selected steps, `if_bimodality` and
+    /// `if_local_bimodality` are shape statistics of their histogram, `if_modality` and
+    /// `if_local_modality` count its modes, `if_std_norm` rescales the first and `if_slope_r2` fits
+    /// a line through them. A noise pair therefore enters every one of the seven with weight 1,
+    /// where in [`derotate`] it entered weighted by its own (small) magnitude. So the count is the
+    /// statistic here, and pinning the count is pinning what changed.
+    ///
+    /// # The closed form
+    ///
+    /// The train is on (amplitude 1) for `on` of every `period` samples in circular Gaussian noise
+    /// of power `N`, so a threshold `t` keeps a single sample with probability
+    ///
+    /// ```text
+    /// 1 − P_miss  if on,     P_miss  = Φ(−(1 − t)/√(N/2))   (the Rician tail, Gaussian in-phase)
+    /// P_false     if off,    P_false = exp(−t²/N)           (Rayleigh, exact)
+    /// ```
+    ///
+    /// The noise is i.i.d. per sample, so the two samples of a pair are independent **given** the
+    /// on/off pattern, and of the `period` adjacent pairs in a cycle `on − 1` are on–on,
+    /// `period − on − 1` are off–off and 2 straddle an edge:
+    ///
+    /// ```text
+    /// kept = [ (on − 1)(1 − P_miss)² + (period − on − 1)P_false² + 2(1 − P_miss)P_false ] / period
+    /// ```
+    ///
+    /// and the property is that this holds **at `t = 0.5`** — half the emission's *true* on
+    /// amplitude, which is what pins the threshold rather than merely the arithmetic — and not at
+    /// whatever threshold the record's own statistics produce.
+    ///
+    /// The tolerance is the spread of the proportion, not a number widened until it passed.
+    /// Overlapping pairs are correlated, so the naive binomial sd is not enough: for indicators
+    /// with `|Cov(Zᵢ, Zᵢ₊₁)| ≤ Var(Z)` and zero covariance beyond lag 1, `Var(mean Z) ≤
+    /// 3·p(1 − p)/n`, and the bound below is 4 of those plus the 0.005 that covers the `P_miss`
+    /// approximation (worth at most 0.013 at the 10 dB, `d = 0.5` cell and under 4 × 10⁻⁵
+    /// elsewhere — the same term T-447 measured).
+    ///
+    /// # What it does not pin
+    ///
+    /// The same caveat as T-447's: it pins the **subset**, not the **0.5**. On a rectangular train
+    /// every threshold strictly between the noise and the on level selects the same pairs, so
+    /// `0.3 × on_level` would pass this too — whereas `0.5 × mean(a)` is not the on time at all,
+    /// which is the distinction being held.
+    #[test]
+    fn the_instantaneous_frequency_pairs_are_the_emission_s_on_time() {
+        let n = 16_384;
+        for (on, period) in [(10usize, 200usize), (50, 200), (64, 128)] {
+            let d = on as f64 / period as f64;
+            for snr_db in [10.0f64, 15.0, 20.0, 25.0, 30.0] {
+                let noise_power = d * 10f64.powf(-snr_db / 10.0);
+                let x = train(n, on, period, noise_power, 0.0, 0x744_8000 ^ snr_db as u64);
+                let a: Vec<f64> = x
+                    .iter()
+                    .map(|s| f64::from(s.re).hypot(f64::from(s.im)))
+                    .collect();
+
+                let predict = |t: f64| {
+                    let p_false = (-(t * t) / noise_power).exp();
+                    let keep_on = 1.0 - gaussian_tail((1.0 - t) / (noise_power / 2.0).sqrt());
+                    ((on as f64 - 1.0) * keep_on * keep_on
+                        + (period as f64 - on as f64 - 1.0) * p_false * p_false
+                        + 2.0 * keep_on * p_false)
+                        / period as f64
+                };
+                let pair_frac = |t: f64| {
+                    a.windows(2).filter(|w| w[0] > t && w[1] > t).count() as f64
+                        / (a.len() - 1) as f64
+                };
+
+                let predicted = predict(0.5);
+                let measured = pair_frac(strong_envelope_threshold(&a));
+                let tol = 4.0 * (3.0 * predicted * (1.0 - predicted) / n as f64).sqrt() + 0.005;
+                assert!(
+                    (measured - predicted).abs() <= tol,
+                    "the instantaneous-frequency pairs hold {measured:.4} of the record against a \
+                     predicted {predicted:.4} for a true duty {d:.3} at {snr_db} dB (tolerance \
+                     {tol:.4})"
+                );
+
+                // NON-VACUITY, asserted rather than claimed, at the cell where the two rules are
+                // furthest apart: a tolerance loose enough to accept the pre-T-488 rule would make
+                // the assertion above worthless, so the test fails if it ever becomes that loose.
+                if (d - 0.05).abs() < 1e-9 && snr_db == 10.0 {
+                    let mean_a = a.iter().sum::<f64>() / a.len() as f64;
+                    let broken = pair_frac(0.5 * mean_a);
+                    assert!(
+                        (broken - predicted).abs() > 10.0 * tol,
+                        "the pre-T-488 rule must fail this assertion, and it reads {broken:.4} \
+                         against a predicted {predicted:.4} (tolerance {tol:.4})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// …and `frequency_features` is the one that takes it (T-488).
+    ///
+    /// The test above pins the *rule*; T-447's lesson is that a rule nothing calls is worth
+    /// nothing, and reverting the caller to `0.5 × mean(a)` would leave it green. Both halves here
+    /// separate the two subsets by an observable:
+    ///
+    /// - **`sigma_af`** recomputed over each subset. The shipped value must equal the on-level
+    ///   answer *and* differ from the mean-envelope one, so neither half can be satisfied by
+    ///   accident. (The equality is exact to float error because `derotate` removes a *constant*
+    ///   ramp, which shifts every instantaneous-frequency sample by the same amount and so leaves
+    ///   their standard deviation alone; the subset itself is scale-invariant, since the threshold
+    ///   scales with the record.)
+    /// - **the whole function's abstention.** A 5 %-duty train 2 048 samples long offers ~92 on–on
+    ///   pairs, under the `MIN_SAMPLES / 2` floor, so the honest answer is `no_instantaneous_
+    ///   frequency` and **all seven** dimensions absent. Under the old rule the same record
+    ///   produced a subset fifteen times larger and every one of them was reported, from the
+    ///   noise's phase walk. "Too few looks at the emission" and "plenty of looks at the noise" are
+    ///   different statements, and this is where they separate.
+    #[test]
+    fn frequency_features_takes_that_subset_and_not_the_record_s_mean() {
+        let x32 = train(16_384, 10, 200, 0.05 * 0.1, 0.002, 0x744_8DE0);
+        let power = x32.iter().map(|s| f64::from(s.norm_sqr())).sum::<f64>() / x32.len() as f64;
+        let unit: Vec<Complex64> = x32
+            .iter()
+            .map(|s| Complex64::new(f64::from(s.re), f64::from(s.im)) / power.sqrt())
+            .collect();
+        let a: Vec<f64> = unit.iter().map(|s| s.norm()).collect();
+        let mean_a = a.iter().sum::<f64>() / a.len() as f64;
+
+        let sigma_over = |t: f64| {
+            let fi: Vec<f64> = unit
+                .windows(2)
+                .enumerate()
+                .filter(|(i, _)| a[*i] > t && a[i + 1] > t)
+                .map(|(_, w)| (w[1] * w[0].conj()).arg())
+                .collect();
+            std_dev(&fi)
+        };
+        let on_sigma = sigma_over(strong_envelope_threshold(&a));
+        let mean_sigma = sigma_over(0.5 * mean_a);
+        // The two subsets must actually disagree, or the assertion below proves nothing.
+        assert!(
+            (on_sigma - mean_sigma).abs() > 0.5,
+            "the two subsets give the same sigma_af ({on_sigma:.6} vs {mean_sigma:.6}), so this \
+             test cannot tell them apart"
+        );
+        let f = features(&FeatureInput {
+            samples: &x32,
+            sample_rate_hz: 1e6,
+            obw_hz: None,
+            snr_db: Some(10.0),
+            symbols: None,
+        });
+        let shipped = f.get("sigma_af").expect("sigma_af");
+        assert!(
+            (shipped - on_sigma).abs() < 1e-6,
+            "frequency_features reported sigma_af {shipped:.6}; the on-level subset gives \
+             {on_sigma:.6} and the record-mean subset {mean_sigma:.6}"
+        );
+
+        // Too few ON pairs: all seven dimensions abstain rather than reporting the noise's walk.
+        let short = train(2_048, 10, 200, 0.05 * 0.1, 0.0, 0x744_8ABE);
+        let f = features(&FeatureInput {
+            samples: &short,
+            sample_rate_hz: 1e6,
+            obw_hz: Some(50e3),
+            snr_db: Some(10.0),
+            symbols: None,
+        });
+        for name in [
+            "sigma_af",
+            "if_std_norm",
+            "if_bimodality",
+            "if_modality",
+            "if_slope_r2",
+            "if_local_bimodality",
+            "if_local_modality",
+        ] {
+            assert!(
+                f.get(name).is_none(),
+                "~92 on-on pairs is under the MIN_SAMPLES/2 floor, so {name} must abstain; got {:?}",
+                f.get(name)
+            );
+        }
+        assert!(
+            f.reasons.iter().any(|r| r == "no_instantaneous_frequency"),
             "and it must say why: {:?}",
             f.reasons
         );

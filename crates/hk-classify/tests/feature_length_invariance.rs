@@ -1180,12 +1180,20 @@ const SNR_ORDER_EXCEPTIONS: &[OrderException] = &[
               is near-uniform on (-pi, pi], so a measured sigma_af is sqrt(emission^2 + c/rho) - a \
               clean 1/sqrt(rho) law on a feature NAMED as a frequency excursion. `am` has \
               essentially no excursion of its own (0.004 rad/sample at 30 dB) so it is ENTIRELY \
-              noise-limited and slides 1.067 -> 0.004, a 250-fold move; `cw`'s keying transitions \
-              floor it at 0.019 so it slides only 11-fold, 0.206 / 0.078 / 0.047 / 0.030 / 0.019, \
-              reproducing T-249's measured 0.170-0.207 at 10 dB and 0.038-0.050 at 20. The two \
-              cross between 10 and 20 dB: the carrier with NO frequency excursion reads the LARGER \
-              excursion at 10 dB. T-249's `cw` conjunct `sigma_af < 0.02` was written against the \
-              30 dB end and could not fire below ~28 dB, which is this entry stated as a constant.",
+              noise-limited and slides 1.030 -> 0.004, a 264-fold move; `cw` slides 8-fold, 0.148 \
+              / 0.071 / 0.044 / 0.029 / 0.018. The two cross between 10 and 20 dB: the carrier \
+              with NO frequency excursion reads the LARGER excursion at 10 dB. T-249's `cw` \
+              conjunct `sigma_af < 0.02` was written against the 30 dB end and could not fire \
+              below ~28 dB, which is this entry stated as a constant. \
+              T-488 SURVIVED BY THIS ENTRY, AND THAT IS THE MEASUREMENT, NOT AN ASSUMPTION. T-488 \
+              took the instantaneous frequency over the emission's own ON LEVEL instead of 0.5 x \
+              mean(a), which removed the off-gap noise from every keyed class - `cw` 0.206 -> \
+              0.148 at 10 dB, `pulse` 1.718 -> 0.100, `ppm` 0.321 -> 0.094 - and left THIS pair \
+              inverting, because `am` is CONTINUOUS: it has no off gaps to exclude, its subset \
+              barely moves (1.067 -> 1.030 at 10 dB), and what limits it is the phase noise in the \
+              troughs of its own envelope. Selecting the right samples cannot repair a feature \
+              whose reading, on a class with no excursion of its own, IS the noise. Two \
+              independent defects, one fixed, and this is the other.",
     },
     OrderException {
         feature: "carrier_line_db",
