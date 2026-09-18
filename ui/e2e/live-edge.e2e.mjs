@@ -30,8 +30,26 @@ import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
-/** The minimap strip along the bottom of the same canvas (`MINIMAP_PX` in app/centre/surface.ts). */
+// The canvas is one drawing buffer with three tenants, and this test measures the middle one. Both
+// numbers are `app/centre/surface.ts`'s own, in device px; the arithmetic below is `view.ts`'s.
+/** The minimap strip along the BOTTOM of the canvas (`MINIMAP_PX`). */
 const MINIMAP_PX = 110;
+/** The spectrum-trace strip carved off the TOP of each pane (`TRACE_PX`, T-457). */
+const TRACE_PX = 96;
+
+/**
+ * The rectangle a pane draws its MEASUREMENT into, in page coordinates.
+ *
+ * Not the canvas: the trace strip is taken out of the pane's rectangle rather than painted over it
+ * (T-457), so the pane's data starts below it. Getting this wrong would be the T-457 composition
+ * failure again — a decoration changing the geometry another ticket's assertions were measured in —
+ * except here it would make the test *pass* on the trace's own colours, which is worse than red.
+ */
+function paneRectOf(rect, dpr) {
+  const paneH = rect.h * dpr - MINIMAP_PX;
+  const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
+  return { x: rect.x, w: rect.w, y: rect.y + traceH / dpr, h: (paneH - traceH) / dpr };
+}
 
 /**
  * The band of the pane this test is about: the **newest rows**, minus the very edge.
@@ -69,11 +87,12 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
   const { rect, ms } = await page.waitForCanvas(".sf-canvas", isRender, { timeoutMs: 90000 });
   t.diagnostic(`first fill after ${ms} ms; canvas ${rect.w}x${rect.h}`);
   const dpr = await page.eval("window.devicePixelRatio || 1");
-  const paneH = rect.h - MINIMAP_PX / dpr;
+  const pane = paneRectOf(rect, dpr);
   const strip = {
-    x: Math.round(rect.x), w: Math.round(rect.w),
-    y: Math.round(rect.y + paneH * FRESH_FROM), h: Math.round(paneH * (FRESH_TO - FRESH_FROM)),
+    x: Math.round(pane.x), w: Math.round(pane.w),
+    y: Math.round(pane.y + pane.h * FRESH_FROM), h: Math.round(pane.h * (FRESH_TO - FRESH_FROM)),
   };
+  t.diagnostic(`pane data rect ${JSON.stringify(pane)}; fresh strip ${JSON.stringify(strip)}`);
   assert.ok(strip.h > 8, `the fresh strip is ${strip.h} px; the window is too small to measure`);
 
   // Five samples over twenty further seconds of capture. Under the defect the newest rows scroll off
