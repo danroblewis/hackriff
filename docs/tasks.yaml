@@ -14173,7 +14173,7 @@ tasks:
   - id: T-488
     milestone: M3
     title: frequency_features takes the SAME broken strong-envelope subset, over seven IF dimensions - the third instance
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: M3A
     depends_on: [T-447]
@@ -14205,6 +14205,40 @@ tasks:
       shared helper (and T-431, which T-447 also carries - T-431 was marked done but its commit
       06e4b7d never reached main).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "f1e812f"
+    result: |
+      DONE - AND THE "FREQUENCY EXCURSION" OF A RADAR TRAIN WAS THE PHASE OF PURE NOISE. T-447's
+      construction was reusable VERBATIM; the product fix is three lines.
+      THE WEIGHTING WAS MEASURED, NOT INFERRED FROM T-447, AND IT IS THE WHOLE DIFFERENCE. derotate
+      accumulates sum += w[1]*w[0].conj(), so each pair enters WEIGHTED BY ITS OWN MAGNITUDE - which is
+      why T-447's 90 %-noise subset carried 11 % of Sum|z| and nothing moved. Every one of the seven IF
+      dimensions is an UNWEIGHTED function of the same fi vector, so a noise pair enters with weight 1:
+      THE COUNT IS THE STATISTIC, and the defect was total.
+        pulse sigma_af at 10 dB read 1.7181 rad/sample against pi/sqrt(3) = 1.8138 - the sd of a variate
+        uniform on (-pi, pi], to within 5 % OF THE CLOSED FORM FOR PURE NOISE.
+      After: 0.1001 / 0.0565 / 0.0324 / 0.0190 / 0.0120 over 10-30 dB, falling 1.77 / 1.74 / 1.71 / 1.58
+      per rung against the noise-limited law's 10^(5/20) = 1.778 - THE CORRECT LAW, since a rectangular
+      train has no excursion of its own. pulse's if_bimodality went from 0.498/0.472/0.211/0.161/0.412 -
+      no monotonicity at all - to 0.327/0.329/0.332/0.329/0.338.
+      DETERMINISM VERIFIED FIRST on the unmodified tree: fit-densities reproduced both density files BYTE
+      FOR BYTE, which is what makes the post-fix diff attributable. DENSITY ATTRIBUTION IS ITS OWN
+      CONTROL: of 598 above-gate dimensions the 146 IF dimensions moved and THE OTHER 452 MOVED BY EXACTLY
+      0.0000 SIGMA, including every cumulant - independently confirming derotate never reads fi.
+      IT REFUSED TO CLAIM THE IMPROVEMENT: unknown recall moved 0.9444 -> 0.9621 = 2.1 draw sd, but
+      ADR-0016 7.2 fixes +/-0.02 as the threshold for a signal, so it is recorded as NO REGRESSION rather
+      than a win, and settling it needs the gate's draw at SEVERAL SEED BASES. All five floors met.
+      sigma_af's SNR_ORDER_EXCEPTIONS ENTRY SURVIVES, and the reason is the result: the fix removes
+      off-gap noise from every KEYED class (cw 0.206 -> 0.148, pulse 1.718 -> 0.100, ppm 0.321 -> 0.094)
+      and leaves the am-vs-cw inversion standing because AM IS CONTINUOUS - no off gaps to exclude, and
+      what limits it is phase noise in the troughs of its own envelope. SELECTING THE RIGHT SAMPLES CANNOT
+      REPAIR A FEATURE WHOSE READING, ON A CLASS WITH NO EXCURSION OF ITS OWN, IS THE NOISE. Two
+      independent defects in one dimension, the same shape as T-447's sigma_ap/sigma_dp finding.
+      Properties pinned with closed forms (the PAIR subset fraction, evaluated at the true on amplitude so
+      it pins the threshold) plus the CALLER bound including the whole function's abstention. Non-vacuity
+      includes the T-455 form: a fault that DOES use the on level but requires only the first sample of
+      each pair to be on still fails (0.551641 vs 0.072305), so the bound constrains the incorrect
+      algorithm and not only the correct one.
+      FEATURES_VERSION 8 -> 9. Gate: full, passed.
   - id: T-490
     milestone: MLIVE
     title: One global refresh lane priced by the LAST revalidation starves a cheap live pane behind an expensive coarse one
@@ -14296,7 +14330,7 @@ tasks:
   - id: T-491
     milestone: MLIVE
     title: The minimap's INITIAL FILL holds the refresh lane's precondition false for ~10 s - a weaker form of the same trap
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-490]
@@ -14329,6 +14363,70 @@ tasks:
     notes: |
       Filed 2026-09-18 from T-490's report. Second-order: the live edge advances correctly from ~10 s
       onward; this is the opening window only.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-492
+    milestone: M2-hardening
+    title: "`just test` runs the hk-plugins host tests without building the plugin binaries they spawn"
+    status: in-progress
+    priority: normal
+    parallel_group: CI
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY THE COORDINATOR 2026-09-18 during T-488's merge gate, and BRIEFLY MISATTRIBUTED TO
+      T-488 - which touches only hk-classify.
+      `just acceptance` runs `cargo build -p hk-plugins --bins`. `just test` DOES NOT, and
+      hk-plugins::host SPAWNS those binaries. So those tests pass ONLY IF an acceptance run happened
+      first in the same target dir - which it almost always has, which is exactly why this has been
+      invisible. On a clean target, a fresh checkout, or a reordered CI job they fail with an error
+      pointing at the plugin host rather than at the missing artefact.
+      Observed exactly that: dummy_round_trip_into_repository failed in the gate and passed
+      immediately once the binaries were built.
+      THE FIX IS ONE LINE in test-rust, but it belongs in a ticket rather than a silent edit: the
+      justfile is in the FULL gate class precisely so the gate cannot quietly certify a change to
+      itself.
+      CHECK FOR SIBLINGS: any other recipe whose tests consume an artefact a DIFFERENT recipe builds
+      has the same latent ordering dependency. That is the general defect; the plugin binaries are
+      one instance.
+    notes: |
+      Filed by the coordinator 2026-09-18.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-493
+    milestone: M2-hardening
+    title: The hk-plugins spawn race is capped at 8 threads where T-257 measured zero only at 6
+    status: todo
+    priority: normal
+    parallel_group: CI
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      OBSERVED BY THE COORDINATOR 2026-09-18: hk-plugins::host
+      plugin_crash_restarts_and_capture_never_blocks and
+      finish_delivers_queued_input_to_a_slow_starting_plugin_then_waits_for_its_exit FAILED at
+      25.2 s and 28.1 s in a full gate run with a builder agent competing, and PASS IN ISOLATION AT
+      0.29 s AND 2.70 s. A re-run without that load passed. Three data points, one direction.
+      THE MECHANISM IS ALREADY DOCUMENTED in .config/nextest.toml from T-257 (docs/10 3.4): nextest
+      LEAK lines here are a macOS pipe(2)/FD_CLOEXEC race BETWEEN CONCURRENTLY SPAWNING TEST
+      PROCESSES, scaling with spawn concurrency and nothing else - "6 of 10 runs leaked at the
+      default 28; 6 of 12 at 16; ZERO in a full 1754-test workspace run at 8, and ZERO IN 25
+      hk-plugins RUNS AT 6."
+      SO THE MEASUREMENT SAYS 6 AND THE CAP SAYS 8. T-436 set 8 for the workspace, and the file is
+      explicit that 8 is "still not zero... BETTER, NOT SUFFICIENT". hk-plugins is not in
+      heavy-serial either. This is that sentence coming true for a process-spawning family, under a
+      load the original measurement never covered.
+      DO NOT REACH FOR heavy-serial BY REFLEX. The file's own argument is that serialising a group
+      LENGTHENS the run by taking CPU from the one-at-a-time tests that ARE the critical path - the
+      same 266 serial tests cost 224 s at 8 and 279 s at 28 - and T-436 is explicit that a cap makes
+      a defect RARER RATHER THAN FIXING IT. T-383's rule applies: a test may not bound a quantity
+      whose natural range it has not measured. MEASURE WHAT THESE TWO TESTS WAIT FOR, at 6 and at 8,
+      with and without a concurrent builder, before choosing between a per-package thread cap, a
+      serial group, and a fix to the waits themselves.
+      DoD: the natural range of whatever these tests bound is measured and reported; the remedy is
+      justified against that measurement rather than by analogy; and if the answer is a cap, it says
+      out loud that it is a cap and what remains unfixed.
+    notes: |
+      Filed by the coordinator 2026-09-18 from a first-hand gate failure. Related: T-492, the same
+      run's other plugin failure - a genuinely missing artefact rather than a race.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

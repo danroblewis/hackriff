@@ -5380,3 +5380,91 @@ is a real-time-path change with four hazards worth writing down rather than disc
 **T-489**, reviewed before merge. What is never recoverable either way is the ring read and
 `cursor.set`: reader 3 holds a gate cursor and drains the ring whether or not anyone is looking, or a
 lossless run stalls capture behind it.
+
+### B0.689 — the product was usually right; what kept failing was the evidence (2026-09-18)
+
+A long stretch of live-view, tile and classification work. Nineteen tickets landed. The pattern
+underneath almost all of them is worth stating once, because it is not the pattern anyone expected:
+**the product was usually right, and the measurement was usually wrong.** Five separate tickets
+arrived to fix a defect and found the defect was in the thing measuring it.
+
+**The user's live view was frozen, and the cause was one grep.** `TileCache.acquire()` returned a
+resident tile unconditionally, and `invalidateEdge()` had **exactly one call site** — `acceptPaneRetune`.
+No timer, no poll, no age rule: a live-edge tile was fetched once and frozen until the pane scrolled
+to a new address, **once every 256 seconds** at `level_t = 0`. The cells drew correctly as `AWAITING`,
+so the honesty machinery worked perfectly — *the request simply never happened* (T-460).
+
+The first fix still did not advance, and the reason generalises: the minimap held three permanently
+refused places re-asked at frame rate, so a refresh gate of "only into a completely idle cache" never
+opened. **A precondition something unrelated can hold false forever is not a safety property**
+(T-479). Then `TileDecodeError` carried no HTTP status, so `retryable()` read it as *the server said
+nothing* and retried 157 times in 700 ms — the enumeration asked *"is there a status?"* when the
+question is **"did the server answer?"** A 200 whose body does not decode is an answer.
+
+**Four tickets disproved their own premises**, each by measuring rather than reasoning:
+
+- **T-480** was asked to clamp addresses outside the lattice. It found `level_f = 10` **is inside the
+  declared lattice** — `/api/tiles` declares 12 × 15 and refuses a large part of it, because the view
+  address lattice is 12 × 15 while the store is `VIEW_LEVELS = 4` deep. *The client was obeying the
+  only bound anyone states, and that bound was wrong.*
+- **T-482** was told to fix that root if affordable. It measured 4×4, 6×6 and 8×8 stores and found
+  deepening makes it **worse** — the coarse corners stay unbackable at every depth and the cost of
+  failing rises 100×. The ceiling is the honest statement, and what a per-axis box loses (the true
+  bound is an anti-diagonal) is written on the wire rather than hidden.
+- **T-483** was handed a mechanism — `RegridPlan::mean` averaging `f_cell / bin_width` bins. That
+  plane **agrees with the display path to 0.00 dB**. The canvas draws `max_db`, and the real cost is
+  that `history.rs` runs its *own* STFT at `fft_len = 512` — already coarser **before any cell fold**,
+  so no choice of `f_cell` can close it.
+- **T-374** built the negative control its acceptance demanded, and **it rejected the first design**:
+  a residual tolerance of 10 % of the narrowest member's width declared **555 of 1000** unrelated FM
+  populations to be harmonic families. After: 0.0000.
+
+**The sharpest single measurement** came from T-488. `pulse`'s `sigma_af` at 10 dB read **1.7181
+rad/sample against π/√3 = 1.8138** — the standard deviation of a variate uniform on (−π, π].
+*The "frequency excursion" of a radar train was the phase of pure noise, to within 5 % of the closed
+form for pure noise.* It got there by **measuring the weighting rather than inheriting T-447's
+conclusion**: `derotate` sums phasors, so noise enters weighted by its own magnitude and T-447's
+90 %-noise subset moved nothing; the seven IF dimensions are unweighted, so **the count is the
+statistic** and the defect was total. Its density attribution is its own control — 146 IF dimensions
+moved and **the other 452 by exactly 0.0000 σ**.
+
+**The tests themselves were the recurring bottleneck.** Five defects, all in the evidence:
+
+- a *following* pane's readout carries its offset from the live edge, and **the first fix dropped that
+  drift in the state where it is small and kept it where it grows without bound** — a paused pane's
+  offset grows as the edge runs away from it. That error blocked three merges (T-478).
+- `app-trace` compared a readout and a framebuffer **captured at two instants** — 38 of 40 brackets
+  had a different readout on either side — *and* its argmax was reading **its own leftward tie-break**,
+  with 8 of 30 held frames tied beyond the tolerance (T-487).
+- the CDP debugging port was **fixed at 19455**, so a second concurrent run's readiness probe
+  succeeded against the *first* run's Chrome and returned its WebSocket URL: two drivers, one page.
+  It read as a 31-minute hang; a timeout would have hidden it (T-473).
+- `startBackend` waited for *anything* answering on its port and drove **another worktree's bundle**
+  (found independently by three agents).
+- T-490's own depth guard counted the **ordinary queue's initial misses** alongside revalidations, so
+  it stayed green when the lanes were collapsed — *a sound proof of the adjacent question.*
+
+**And one test passed for a reason unrelated to what it asserted.** `main`'s live-edge test was green
+**because the minimap was broken**: its address was a permanent 400, asked once by T-479's terminal
+rule, so the refresh lane and all four in-flight slots belonged to the live pane. T-482's ceiling made
+it servable, the minimap came alive at 246 ms and 37 history-lock holds, and it starved the live pane
+both ways at once — latency 69 → 183 ms *and* count 68 → 14. Fixed by **one lane per level**, the cost
+class, round-robin, each charged its own service time (T-490).
+
+**Numbers that landed.** Tile body **18.4 MB → 1.12 MB** with the coverage plane **17.3 MB → 2,891 B**,
+because it was serialised twice and the client reads one field of it; an empty tile **2.56 MB / 92 ms
+→ 7.5 kB / 2.9 ms**, and its body is now a constant — 7,549 B at 64² against 7,563 B at 256² (T-467,
+T-461). The console flood: **117 requests with 107 refused → 9 with zero 4xx** (T-482).
+
+**A null result worth as much as a fix.** T-348 measured the paused view's cost properly — ~13 % of
+pipeline CPU is the spectrum reader's FFT — and found **pause cannot reach any of it**, because the
+ticket's premise was stale: T-347 had already removed the run-wide pause outright. It also rejected
+two instruments for answering an adjacent question, including a per-thread CPU probe that billed
+`hk-spectrum` 0.052 s of a 2.12 s total because `compute::stft` dispatches to a shared pool — *the
+counter measured the caller, not the work.*
+
+**Process.** `just reconcile` now exists because the phantom in-progress ticket kept recurring, and it
+caught three false claims about its own subject before it was trusted — reachability standing in for
+merged-ness, branch state standing in for agent activity, and a `\b` word boundary that git's ERE
+silently ignores. The board is a claim about the world and it goes stale in exactly the direction
+nobody checks.
