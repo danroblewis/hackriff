@@ -18,7 +18,7 @@
 // Screen y runs down and the drawing buffer's runs up, so the vertical delta is negated exactly
 // once, here, and every consumer below is in one convention.
 
-import { type SurfacePreview, wheelZoom } from "./preview";
+import { dragIntent, type SurfacePreview, wheelZoom } from "./preview";
 
 /** A point in drawing-buffer coordinates, GL convention (origin bottom-left). */
 export interface GlPoint { x: number; y: number }
@@ -38,7 +38,19 @@ export interface SurfaceInputOptions {
   onHover?: (p: GlPoint | null, e: PointerEvent) => void;
   /** Called for a context-menu request (right-click) at a point. */
   onContext?: (p: GlPoint, e: MouseEvent) => void;
+  /** A region stroke in progress, every move, for the host to draw as a pending box; `null` when
+   * the stroke ended or was abandoned. It is *not* a commit — see [[SurfaceInputOptions.onRegion]]. */
+  onRegionDrag?: (r: SurfaceRegion | null) => void;
+  /** A region stroke that **committed**: shift was held at the press, the pointer travelled far
+   * enough not to be a tap, and the rectangle is non-degenerate. */
+  onRegion?: (r: SurfaceRegion) => void;
 }
+
+/** A rectangle strokes out on one pane, as its two corners in drawing-buffer coordinates. The
+ * corners are in the order they were made (`a` is the press) and are **not** normalised here:
+ * `normalizeRegion` in `./marks` is the one place that orders them, so the box that is drawn and
+ * the region that is committed cannot be ordered by two different rules. */
+export interface SurfaceRegion { pane: string; a: GlPoint; b: GlPoint }
 
 /**
  * Travel, in CSS px, past which a pointer stream that has already panned is **not also a click**.
@@ -52,6 +64,11 @@ export interface SurfaceInputOptions {
  *
  * It is a **distance** (`Math.hypot`), never `dx + dy`: T-407's second defect was travel summed
  * across axes, so a stroke *across* one counted as travel *along* it.
+ *
+ * T-458 gives it a **second, opposite** job: a *region* stroke commits only once travel has passed
+ * it. The two uses are consistent — below the threshold a pointer stream is a **tap**, and a tap
+ * focuses a row and marks out nothing — and the pan is still unthresholded, because a pan that
+ * moves the view by the distance travelled cannot turn a tap into anything.
  */
 export const DRAG_PX = 6;
 
@@ -74,15 +91,35 @@ export function attachSurfaceInput(
   };
   const moved = () => opts.onView?.();
 
-  let dragging: { x: number; y: number; map: boolean; pane: string | null; travel: number } | null = null;
+  let dragging:
+    | { x: number; y: number; x0: number; y0: number; map: boolean; pane: string | null; travel: number; region: SurfaceRegion | null }
+    | null = null;
 
+  const endRegion = () => { if (dragging?.region) opts.onRegionDrag?.(null); };
+
+  // **What the press means is decided ONCE, at the press, and it is decided by `dragIntent`.**
+  //
+  // Which modifier and why is `preview.ts`'s call, not this file's — the same split as `wheelZoom`,
+  // and for the same reason: one place says what a modifier means, whichever event carries it. The
+  // source guards in `surface-preview.test.ts` and `surface-cutover.test.ts` forbid a modifier bit
+  // being read here at all.
+  //
+  // Latched, and never re-read per move: a modifier sampled on `pointermove` would let a stroke
+  // change meaning halfway through — release shift mid-drag and the region you were marking out
+  // becomes a pan of the very view you were marking it out on. T-407's family of defect is exactly
+  // a pointer stream whose meaning is settled by something other than how it began.
+  //
+  // Nothing here moves a viewport, so a region stroke is not a pan: T-444's offer is neither
+  // invalidated nor created by one, which is correct — the viewport did not move.
   const onDown = (e: PointerEvent) => {
     if (e.button !== 0) return;
     const p = point(e);
     const map = preview.onMap(p);
     const pane = map ? null : preview.paneAt(p);
     if (pane) preview.activePane = pane;
-    dragging = { x: e.clientX, y: e.clientY, map, pane, travel: 0 };
+    const region = dragIntent(e) === "region" && pane && opts.onRegion ? { pane, a: p, b: p } : null;
+    dragging = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, map, pane, travel: 0, region };
+    if (region) opts.onRegionDrag?.(region);
     canvas.setPointerCapture(e.pointerId);
   };
 
@@ -93,6 +130,11 @@ export function attachSurfaceInput(
     dragging.travel += Math.hypot(e.clientX - dragging.x, e.clientY - dragging.y);
     dragging.x = e.clientX;
     dragging.y = e.clientY;
+    if (dragging.region) {
+      dragging.region = { ...dragging.region, b: point(e) };
+      opts.onRegionDrag?.(dragging.region);
+      return; // a region stroke is not a pan: the view must not move under the rectangle
+    }
     if (dragging.map) preview.dragMap(dx, dy);
     else if (dragging.pane) preview.drag(dragging.pane, dx, dy);
     moved();
@@ -101,9 +143,24 @@ export function attachSurfaceInput(
   const onUp = (e: PointerEvent) => {
     const d = dragging;
     dragging = null;
-    if (d && d.travel < DRAG_PX && !d.map) opts.onClick?.(point(e), e);
+    if (!d) return;
+    if (d.region) {
+      opts.onRegionDrag?.(null);
+      // A TAP IS NEVER A REGION, and the test is on the rectangle the user actually ended up with.
+      //
+      // The gate is the **net** press-to-release displacement, as a `Math.hypot` distance — not the
+      // accumulated path length `d.travel`, which a stroke that wandered out and came back can pass
+      // while enclosing nothing, and emphatically not `dx + dy`, which was T-407's second defect.
+      // Plus a non-degenerate extent on **both** axes, since a rectangle flat in either one is a
+      // line: neither condition implies the other, so both are asked.
+      const r: SurfaceRegion = { ...d.region, b: point(e) };
+      const far = Math.hypot(e.clientX - d.x0, e.clientY - d.y0) >= DRAG_PX;
+      if (far && r.a.x !== r.b.x && r.a.y !== r.b.y) opts.onRegion?.(r);
+      return;
+    }
+    if (d.travel < DRAG_PX && !d.map) opts.onClick?.(point(e), e);
   };
-  const onCancel = () => { dragging = null; };
+  const onCancel = () => { endRegion(); dragging = null; };
   const onLeave = (e: PointerEvent) => { if (!dragging) opts.onHover?.(null, e); };
 
   // **Every wheel over the canvas is the surface's, whatever is held down (T-456).**

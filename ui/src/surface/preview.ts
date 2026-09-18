@@ -279,6 +279,47 @@ export function wheelZoom(e: WheelLike): { factor: number; axes: { freq: boolean
   return { delta, factor: zoomFactor(delta, e.deltaMode ?? 0), axes: wheelAxes(e) };
 }
 
+/** The part of a `PointerEvent` a drag gesture reads. */
+export interface PointerLike {
+  readonly shiftKey?: boolean;
+  readonly altKey?: boolean;
+  readonly ctrlKey?: boolean;
+  readonly metaKey?: boolean;
+}
+
+/**
+ * **What a press means: pan the view, or mark out a region** (T-458).
+ *
+ * It lives here, beside [[wheelAxes]], for the same reason and under the same rule: a host's
+ * listener may not read a modifier bit itself, so there is exactly one file that says what a
+ * modifier means, whichever event carries it. The source guards in
+ * `ui/test/surface-preview.test.ts` and `ui/test/surface-cutover.test.ts` enforce that on
+ * `input.ts` by name, and they pass unedited because of this function.
+ *
+ * **Shift, and the three that were rejected.**
+ * - *Ctrl* is the same invisible failure T-456 rejected ctrl+wheel for, in its pointer form: on
+ *   macOS ctrl+click **is** the secondary click, so the browser sends `contextmenu` and
+ *   `button === 2` and the stroke silently becomes "open the menu".
+ * - *Alt* is Chrome's copy-drag modifier and is grabbed by common Linux window managers to move the
+ *   window — again, a gesture the page never learns it did not receive.
+ * - *Right-drag* would have to fight the context menu, which is this surface's only route to
+ *   Promote / Delete / Adjust band / Reset band.
+ * - A *mode toggle* is a state a user can be in without noticing; the surface already has one such
+ *   (Live/Paused) and a second would compound it. (A mode is still right for naming *which* signal
+ *   a band override applies to, where the target has to be said out loud anyway — that is
+ *   `explore.bandEdit`, and it selects the stroke's destination rather than arming the stroke.)
+ *
+ * **Why shift does not collide with T-456's `shift + wheel = frequency`.** A wheel and a captured
+ * pointer drag are disjoint event streams — no event can be claimed by both bindings, and a user
+ * cannot be mid-gesture in both — and the two readings are one idea rather than two: shift confines
+ * the gesture to a *region of frequency* instead of sliding the whole view. Alt would have been the
+ * real collision, since `alt + wheel` means "time only" and an alt-drag meaning "select" has no such
+ * story.
+ */
+export function dragIntent(e: PointerLike): "pan" | "region" {
+  return e.shiftKey === true ? "region" : "pan";
+}
+
 export interface PreviewOptions {
   canvas: HTMLCanvasElement;
   probe: SurfaceProbe;

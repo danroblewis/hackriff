@@ -34,7 +34,11 @@ export function selectionStoreFor(ctx: AppContext): SelectionStore {
   shared = store;
   store.subscribe((list) => ctx.store.set(setSelections(list, syncText(store.sync(), list.length))));
   void store.load();
-  setInterval(() => void store.flush(), 15_000);
+  // `unref` where it exists (node), a no-op where it does not (every browser, where `setInterval`
+  // returns a number). T-458: without it this one timer keeps a node process alive for ever, so any
+  // unit test that reaches this function hangs instead of failing — which is how a *test* stops
+  // being able to see a fault in the code that calls it. The browser behaviour is unchanged.
+  (setInterval(() => void store.flush(), 15_000) as unknown as { unref?: () => void }).unref?.();
   return store;
 }
 

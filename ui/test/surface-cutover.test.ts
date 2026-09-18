@@ -160,8 +160,20 @@ test("T-412: there is ONE wheel/drag handler, and every mount of the surface goe
   // `deltaY === 0`, so a host that read `deltaY` itself would make the frequency axis inert on a
   // real Mac while every synthesised test passed. `surface-preview.test.ts` holds the same guard
   // over every wheel registrar under src/surface/; this is its half of the cutover's claim.
+  //
+  // T-458 widened the *first* of these from an exact import line to "imports the interpreters, and
+  // implements none of them", because the rule was never about which names appear: it is that the
+  // meaning of a modifier is decided in `preview.ts` whatever event carries it. The drag gained a
+  // meaning of its own (shift = mark out a region), and `dragIntent` is where that lives — so the
+  // modifier-bit ban below, which is the half with the teeth, holds **unchanged** and now covers
+  // the pointer as well as the wheel.
   const input = readFileSync("src/surface/input.ts", "utf8");
-  assert.match(input, /import \{ type SurfacePreview, wheelZoom \} from ".\/preview"/);
+  const imported = /import \{([^}]*)\} from "\.\/preview"/.exec(input);
+  assert.ok(imported, "input.ts must take the gesture's meaning from ./preview");
+  for (const name of ["wheelZoom", "dragIntent"]) {
+    assert.match(imported[1], new RegExp(`\\b${name}\\b`),
+      `input.ts must import ${name} rather than deciding that gesture itself`);
+  }
   assert.ok(!/Math\.exp\(/.test(input), "the factor is not recomputed here");
   const code = bare("src/surface/input.ts");
   for (const bit of ["deltaY", "deltaX", "deltaMode", "shiftKey", "altKey", "ctrlKey", "metaKey"]) {
