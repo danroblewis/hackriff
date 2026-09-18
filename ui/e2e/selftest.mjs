@@ -127,6 +127,37 @@ export const __selftestMark = __selftestPredicate(1);
     },
   },
   {
+    // The T-397 axis-divergence family, stated for the trace: the numbers are right and the picture
+    // is placed wrong, so the readout and the pixels describe different things. Injected at exactly
+    // the line `trace.ts` says is load-bearing — *"a trace placed by arithmetic of its own would
+    // drift from the column it describes the moment either side changed, and nobody would see it
+    // until it mattered"* — by adding an offset to the frequency each column is placed at.
+    //
+    // As a fraction of the pane's own span, not a fixed number of hertz, so the fault is the same
+    // number of screen columns whatever viewport the page opens on: 5 % of the width, against a
+    // tolerance of one pooled column plus a stroke.
+    //
+    // **Aimed at the render-path assertion on purpose** (T-487). The obvious alternative — shifting
+    // the frequency the READOUT states — also turns the file red, but it is caught by the *data
+    // path* check above it, which compares the stated peak against the delivered row. That would be
+    // a demonstration of the wrong assertion. Moving the picture leaves the readout truthful about
+    // the socket, so the first thing to fail is the check that the pixels agree with it.
+    name: "t487-trace-drawn-in-the-wrong-column",
+    expect: "app-trace.e2e.mjs",
+    what: "T-397/T-487: the trace's columns are placed 5 % of the viewport away from the frequency " +
+      "they carry, so the readout is right about the frame and the picture beneath it is of " +
+      "somewhere else — a divergence every arithmetic test of the trace still passes.",
+    file: "surface/trace.ts",
+    patch: (src) => {
+      const from = "      { f0Hz: box.f0Hz + c * colHz, f1Hz: box.f0Hz + (c + 1) * colHz, t0Ns: box.t0Ns, t1Ns: box.t1Ns },";
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in surface/trace.ts: ${from}`);
+      return src.replace(from,
+        "      // injected by ui/e2e/selftest.mjs — place each column 5 % of the span from its own frequency\n" +
+        "      { f0Hz: box.f0Hz + c * colHz + span * 0.05, f1Hz: box.f0Hz + (c + 1) * colHz + span * 0.05," +
+        " t0Ns: box.t0Ns, t1Ns: box.t1Ns },");
+    },
+  },
+  {
     // T-479, restored as the inverted predicate rather than as a removed line: `retryable` goes back
     // to "everything the server said is worth asking again", which is exactly the default the real
     // defect had.
