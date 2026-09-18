@@ -51,6 +51,34 @@ export const ORIENT_CELLS = 128, ORIENT_ROWS = 32;
 /** How the bootstrap asks. One function so a test can record exactly what was requested. */
 export type Getter = (path: string) => Promise<unknown>;
 
+/**
+ * How the bootstrap handles the route's ingest backpressure.
+ *
+ * **The probe is the one tile fetch that does not go through `TileCache`**, and that is how T-454's
+ * defect reached the user as a page-fatal banner quoting the route's `503` verbatim. The cache had
+ * the cap, the cancellation and the backoff; this path had none of them, because it is one cheap
+ * `cells=8` tile asked once at open — and a refusal is precisely what a *shared* budget serves to a
+ * new arrival. Reloading the page mid-drag was enough: `hk-api` keeps a [`TileSlot`] until its read
+ * finishes, so the previous page's abandoned reads were still holding all four.
+ *
+ * A refusal is not a failure here either. It is answered the same way the cache answers it — wait,
+ * ask again — and only an exhausted retry is something the user should ever be told about.
+ */
+export interface BackpressureOptions {
+  /** Attempts after the first, per request. */
+  retries?: number;
+  /** First wait, ms; doubles per attempt. */
+  backoffMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const REFUSAL_STATUS = 503;
+
+/** Is this the route saying "too many at once" rather than something being wrong? */
+export function isBackpressure(e: unknown): boolean {
+  return e instanceof ControlError && e.status === REFUSAL_STATUS;
+}
+
 /** Everything the preview needs before its first frame, and where each part came from. */
 export interface SurfaceProbe {
   readonly lattice: Lattice;
@@ -72,12 +100,25 @@ export interface SurfaceProbe {
  * would be addressing a pyramid that does not exist. The other two degrade *and say so* — an
  * invented bound must never be indistinguishable from a reported one.
  */
-export async function probeSurface(get: Getter, nowS?: number): Promise<SurfaceProbe> {
+export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureOptions = {}): Promise<SurfaceProbe> {
   const requests: string[] = [];
   const degraded: string[] = [];
+  const retries = bp.retries ?? 5;
+  const backoffMs = bp.backoffMs ?? 150;
+  const sleep = bp.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  // Every request here retries a `503`, not only the tile probe: the refusal means the history lock
+  // is busy, and asking again is the whole of the right response. Each attempt is pushed to
+  // `requests`, so what the client actually asked for is visible to the page and to a test.
   const ask = async (path: string): Promise<unknown> => {
-    requests.push(path);
-    return get(path);
+    for (let attempt = 0; ; attempt++) {
+      requests.push(path);
+      try {
+        return await get(path);
+      } catch (e) {
+        if (attempt >= retries || !isBackpressure(e)) throw e;
+        await sleep(backoffMs * 2 ** attempt);
+      }
+    }
   };
 
   const probePath = tileUrl(probeAddr());

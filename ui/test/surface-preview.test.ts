@@ -27,7 +27,8 @@ import {
 import { GREY } from "../src/surface/cellrule";
 import { legendEntries, swatchPixels } from "../src/surface/legend";
 import type { Lattice, TileAddr } from "../src/surface/lattice";
-import { ORIENT_CELLS, ORIENT_ROWS, SurfacePreview, probeSurface, wheelAxes, zoomFactor, type SurfaceProbe } from "../src/surface/preview";
+import { ControlError } from "../src/controls/client";
+import { ORIENT_CELLS, ORIENT_ROWS, SurfacePreview, isBackpressure, probeSurface, wheelAxes, zoomFactor, type SurfaceProbe } from "../src/surface/preview";
 import { stubGl } from "./surface-glstub";
 
 const S = 1e9;
@@ -194,6 +195,70 @@ test("a route that fails degrades visibly: the fallback is recorded, never silen
 
 test("without a tile answer there is no lattice, and the preview refuses rather than guessing one", async () => {
   await assert.rejects(() => probeSurface(async () => { throw new Error("no history"); }), /no history/);
+});
+
+// ——— T-454: the probe is the one tile fetch outside TileCache, and it is what reached the user ———
+
+const REFUSAL = "too many tile reads in flight (limit 4): tile production takes the history lock, " +
+  "so the cap is ingest backpressure, not a queue — cancel tiles whose viewport you have left and " +
+  "retry the ones you still want";
+const refused = () => new ControlError(503, "http_503", REFUSAL);
+
+test("the route's backpressure is answered by ASKING AGAIN, never by a banner quoting it", async () => {
+  // This is the defect the user hit: `probeSurface` is the one tile request that does not go
+  // through `TileCache`, so it had neither the cap, the cancellation nor the backoff — and a
+  // *shared* budget is exactly what refuses a new arrival. Reloading the page mid-drag was enough,
+  // because the previous page's abandoned reads still held all four of the route's slots.
+  let refusals = 2;
+  const asked: string[] = [];
+  const slept: number[] = [];
+  const p = await probeSurface(
+    async (path) => {
+      asked.push(path);
+      if (path.startsWith("/api/tiles")) {
+        if (refusals-- > 0) throw refused();
+        return tileProbeResponse();
+      }
+      if (path === "/api/navigation") return { frequency: { ranges_hz: [[1e6, 6e9]], center_step_hz: 28.6 }, time: { latest_s: T1 } };
+      return coverage(ORIENT_CELLS, ORIENT_ROWS, { f0: 10, f1: 20, t0: 28, t1: 31 });
+    },
+    undefined,
+    { backoffMs: 4, sleep: async (ms) => { slept.push(ms); } },
+  );
+  const probePath = "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8";
+  assert.deepEqual(asked.slice(0, 3), [probePath, probePath, probePath],
+    "the request the client builds on a refusal is the SAME request, again");
+  assert.deepEqual(slept, [4, 8], "and it waits longer each time rather than re-asking on one cadence");
+  assert.deepEqual(p.degraded, [], "a refusal that was answered is not a degradation");
+  assert.equal(p.lattice.cells, 256, "and the surface opens exactly as if it had never been refused");
+  assert.deepEqual(p.requests.slice(0, 3), [probePath, probePath, probePath],
+    "every attempt is on the record: the page shows what it actually asked for");
+});
+
+test("only backpressure is retried — a real error is still an error, and at once", async () => {
+  let n = 0;
+  await assert.rejects(
+    () => probeSurface(async () => { n++; throw new ControlError(404, "not_found", "no such node"); },
+      undefined, { sleep: async () => {} }),
+    /no such node/,
+  );
+  assert.equal(n, 1, "retrying a 404 would only make a broken surface slower to say so");
+});
+
+test("an unrelenting refusal is bounded, and is reported AS backpressure", async () => {
+  let n = 0;
+  await assert.rejects(
+    () => probeSurface(async () => { n++; throw refused(); }, undefined, { retries: 3, sleep: async () => {} }),
+    (e: unknown) => {
+      // The page branches on this, and says "the route is busy" instead of quoting the route at the
+      // user. `preview-main.ts` is the only consumer, and this is the predicate it uses.
+      assert.ok(isBackpressure(e), "a 503 must stay recognisable as backpressure after the retries");
+      return true;
+    },
+  );
+  assert.equal(n, 4, "bounded: one attempt plus the retries, never an unbounded loop against a busy lock");
+  assert.equal(isBackpressure(new ControlError(500, "internal", "boom")), false);
+  assert.equal(isBackpressure(new Error("boom")), false);
 });
 
 // ——— 3. the mounted surface ———
