@@ -72,7 +72,9 @@ struct Marks {
     ring: u64,
     /// Samples the capture thread wrote: the SDR being read.
     captured: u64,
-    /// Detection rows written to the repository: detection still running.
+    /// Detection rows written to the repository: detection still running. **The one mark here
+    /// the flow gate does not pin to the capture clock** — it lives on the far side of the detect
+    /// writer's channel, so it advances in wall clock (see [`wait_phase`], T-448).
     detections_written: u64,
     /// Detection records produced.
     detections: u64,
@@ -93,39 +95,65 @@ fn marks(handle: &PipelineHandle, c: &Counters) -> Marks {
     }
 }
 
-/// Waits until **both** the capture counter and the ring head have advanced `n` past `from`.
+/// Waits until **every quantity the phase goes on to assert** has moved past `from`: capture and
+/// the ring by `n` samples, and detection by at least one record produced and one row stored.
+/// `Err` names the one that did not.
 ///
-/// T-433. A phase must close on the counters it is asserted on. These two used to be asserted
-/// against a phase the SOURCE's `emitted` counter closed, and the three move in lockstep only up
-/// to the block in flight between them: `writer.push` advances the ring, then `add(&c.samples, n)`
-/// advances capture, and `emitted` ran ahead of both. `wait_emitted` also overshoots its target to
-/// the next whole block, so the phase really spans 153 x 16 384 = 2 506 752 emitted samples against
-/// a 2 500 000 bound — **6 752 samples of headroom, less than half a block**. One block in flight
-/// at the closing mark and the answer is 2 506 752 - 16 384 = 2 490 368: the figure T-406 and
-/// T-436 reported independently, to the sample, which is why it was bit-identical on two trees and
-/// not the "load flake" it was filed as. Load makes the in-flight block likelier; it does not make
-/// the bound sound.
+/// **T-433. A phase must close on the counters it is asserted on.** Capture and the ring used to
+/// be asserted against a phase the SOURCE's `emitted` counter closed, and the three move in
+/// lockstep only up to the block in flight between them: `writer.push` advances the ring, then
+/// `add(&c.samples, n)` advances capture, and `emitted` ran ahead of both. `wait_emitted` also
+/// overshoots its target to the next whole block, so the phase really spanned
+/// 153 x 16 384 = 2 506 752 emitted samples against a 2 500 000 bound — **6 752 samples of
+/// headroom, less than half a block**. One block in flight at the closing mark and the answer is
+/// 2 506 752 - 16 384 = 2 490 368: the figure T-406 and T-436 reported independently, to the
+/// sample, which is why it was bit-identical on two trees and not the "load flake" it was filed
+/// as. Load makes the in-flight block likelier; it does not make the bound sound.
 ///
-/// Closing the phase on these counters removes the mismatch instead of widening the bound: the
-/// claim — capture and the ring kept advancing while the view was held — is now carried by this
-/// wait's deadline, which a view control that reached the device would blow.
-fn wait_advanced(
+/// **T-448, the same rule reaching one counter further.** `detections_written` was left outside
+/// this wait and asserted `> 0` over a window this wait closes in *captured samples*, and it is
+/// the **one asserted counter the lossless gate does not pin to the capture clock**. Every other
+/// one is pinned: the spectrum and detect readers hold `GateCursor`s, so `hk_pipeline::gate` stops
+/// the capture thread once a block would run more than half a ring (here 125 000 samples) past
+/// the slowest of them — a 2 500 000-sample phase therefore *forces* ~120 spectrum rows and the
+/// detection records that go with them. `detections_written` is on the far side of the detect
+/// writer's channel, which no cursor and no gate reaches: it advances when that thread is
+/// scheduled and gets the repository lock, i.e. in **wall clock**, while the phase closes in
+/// capture time that an unpaced replay runs at roughly 27x real time. A 2 500 000-sample phase is
+/// ~5 s of capture and ~0.2 s of wall clock, so the writer missing its slot costs the whole
+/// phase's writes and the next phase gets them: T-436's A/B recorded exactly that, `playing` with
+/// `detections_written: 0` against `detections: 6`, and `held` with 8 — the two phases' rows,
+/// stored in one pass, in the second phase's window.
+///
+/// So the phase now waits for detection too. The claim is unchanged and none of it moves into this
+/// wait's tolerance: capture, the ring and detection all had to advance for the phase to close at
+/// all, and a view control that stopped any of them blows the 120 s deadline with a message naming
+/// which one — instead of being scored against a counter whose clock the phase never controlled.
+fn wait_phase(
     handle: &PipelineHandle,
     c: &Counters,
     from: Marks,
     n: u64,
     limit: Duration,
-) -> bool {
+) -> Result<(), String> {
     let deadline = std::time::Instant::now() + limit;
     loop {
-        let now = marks(handle, c);
-        if now.captured.saturating_sub(from.captured) >= n
-            && now.ring.saturating_sub(from.ring) >= n
-        {
-            return true;
-        }
+        let d = delta(from, marks(handle, c));
+        let stalled = if d.captured < n {
+            "the capture thread"
+        } else if d.ring < n {
+            "the ring"
+        } else if d.detections == 0 {
+            "detection (no record produced)"
+        } else if d.detections_written == 0 {
+            "detection's writer (no row stored)"
+        } else {
+            return Ok(());
+        };
         if std::time::Instant::now() > deadline {
-            return false;
+            return Err(format!(
+                "{stalled} stopped advancing: {d:?} over a phase of {n} samples, after {limit:?}"
+            ));
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -187,10 +215,9 @@ fn holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection() {
 
     // ---- phase A: playing (the live control) ----
     let a0 = marks(&handle, &counters);
-    assert!(
-        wait_advanced(&handle, &counters, a0, PHASE_SAMPLES, LIMIT),
-        "the source stalled while playing"
-    );
+    if let Err(why) = wait_phase(&handle, &counters, a0, PHASE_SAMPLES, LIMIT) {
+        panic!("the run stalled while playing: {why}");
+    }
     let a = delta(a0, marks(&handle, &counters));
     eprintln!("playing: {a:?}");
 
@@ -216,11 +243,12 @@ fn holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection() {
 
     // ---- phase B: the view held, the display moved ----
     let b0 = marks(&handle, &counters);
-    assert!(
-        wait_advanced(&handle, &counters, b0, PHASE_SAMPLES, LIMIT),
-        "capture or the ring stopped advancing while the view was held: a view control reached \
-         the device"
-    );
+    if let Err(why) = wait_phase(&handle, &counters, b0, PHASE_SAMPLES, LIMIT) {
+        panic!(
+            "the run stalled while the view was held, so a view control reached past the view: \
+             {why}"
+        );
+    }
     let b = delta(b0, marks(&handle, &counters));
     eprintln!("held:    {b:?}");
 
@@ -236,12 +264,12 @@ fn holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection() {
     );
 
     // The property: the ring, the capture thread and detection all carried on while the view was
-    // held, by margins comparable to the phase-A control. Both counters are now the phase's own
-    // closing condition (`wait_advanced`), so these restate what the wait established rather than
+    // held, by margins comparable to the phase-A control. All four counters are now the phase's own
+    // closing condition (`wait_phase`), so these restate what the wait established rather than
     // racing it: a view control that reached the device stops capture, and the wait's deadline —
     // 120 s against 5 s of samples — is what fails, not a comparison one in-flight block decides
-    // (T-433). The same two lines are asserted for the playing control, so neither phase can pass
-    // on a run where nothing was happening.
+    // (T-433) or one the detect writer's scheduling decides (T-448). The same lines are asserted
+    // for the playing control, so neither phase can pass on a run where nothing was happening.
     assert!(
         a.captured >= PHASE_SAMPLES && a.ring >= PHASE_SAMPLES,
         "{a:?}"
@@ -308,4 +336,18 @@ fn holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection() {
     eprintln!("{}", summary.to_text());
     assert!(!fired, "the run had to be stopped by the watchdog");
     assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+
+    // **T-448.** The detect writer keeps its own cadence — it is the one counter above that the
+    // flow gate does not pin to the capture clock, which is why a phase may not score it — but
+    // nothing may be *lost* to it. Every detection the run produced is a row in the repository by
+    // the time the run closes. That is the guarantee the per-phase counter was being read as, and
+    // this is the seam where it actually holds: `detections_stored` is a `SELECT count(*)`, not a
+    // counter, so it also checks the rows are really there.
+    let produced = counters.detect.detections.load(Ordering::Relaxed);
+    assert_eq!(
+        summary.detections_stored, produced,
+        "the run produced {produced} detections and stored {}: the writer dropped work rather \
+         than deferring it",
+        summary.detections_stored
+    );
 }
