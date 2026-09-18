@@ -77,6 +77,10 @@ export class DeviceTab {
   private readonly scanLo = h("input", { type: "number", class: "mono", placeholder: "from MHz", onchange: () => void this.priceScan() });
   private readonly scanHi = h("input", { type: "number", class: "mono", placeholder: "to MHz", onchange: () => void this.priceScan() });
   private readonly scanDwell = h("input", { type: "number", class: "mono", min: "0.1", value: "15", placeholder: "dwell s", onchange: () => void this.priceScan() });
+  // T-517: the step width. Coarse advances by about a whole usable window (the server picks the
+  // rate that keeps the bins the same width); the commitment line reprices so coarse visibly = fast.
+  private readonly scanStep = h("select", { onchange: () => void this.priceScan() },
+    option("fine", "fine"), option("coarse", "coarse"));
   private readonly scanStart = h("button", { class: "mini", type: "button", onclick: () => void this.onScanStart() }, "Start sweep");
   private readonly scanStop = h("button", { class: "mini", type: "button", onclick: () => void this.call("sweep stop", () => this.client.post("/api/control/scan/stop")) }, "Stop sweep");
   private readonly scanCommit = h("div", { class: "hint" });
@@ -87,6 +91,7 @@ export class DeviceTab {
     h("legend", {}, "Survey sweep"),
     h("div", { class: "hint" }, "Steps the tune across a range. Leave the range empty to sweep everything this front end can tune."),
     h("label", {}, "From ", this.scanLo), h("label", {}, "To ", this.scanHi), h("label", {}, "Dwell ", this.scanDwell),
+    h("label", { title: "Coarse steps by a whole window: ~10x fewer steps at the same frequency resolution" }, "Step ", this.scanStep),
     h("div", {}, this.scanStart, this.scanStop),
     this.scanCommit, this.scanStatus, this.scanNotes);
 
@@ -206,6 +211,7 @@ export class DeviceTab {
       loMHz: (this.scanLo as HTMLInputElement).value,
       hiMHz: (this.scanHi as HTMLInputElement).value,
       dwellS: (this.scanDwell as HTMLInputElement).value,
+      step: (this.scanStep as HTMLSelectElement).value,
     });
   }
 
