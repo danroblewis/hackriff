@@ -815,10 +815,19 @@ One route serves every viewport — the panes, the zoomable minimap and the live
             "cells": 65536, "observed_cells": 4096, "range_db": { "lo": -138.2, "hi": -91.0 },
             "unit": "dbfs", "percentiles": "unknown: a de-welded fold cannot split …",
             "semantics": { "…": "…" } },
-  "coverage": { "grid": {"…": "…"}, "devices": ["…"], "any": {"…": "…"}, "horizon": {"…": "…"},
-                "sources": ["…"],
-                "selected": { "device": "any", "named": false, "present": true, "rule": "…" },
-                "rule": "record-derived: …" },
+  "coverage": { "encoding": "plane-table-rle",
+                "grid": { "nt": 256, "nf": 256, "t0_s": …, "t_cell_s": 32.0, "f_lo_hz": …,
+                          "f_cell_hz": 50000.0, "aligned": true, "order": "row-major: …" },
+                "states": ["unobserved", "observed", "unknown"],
+                "planes": [ { "runs": [0, 12288, 1, 53248], "cells": 65536, "uniform": null,
+                              "observed_cells": 53248, "unobserved_cells": 12288,
+                              "unknown_cells": 0, "observed_fraction": 0.8125 } ],
+                "any": { "device": "any", "named": false, "plane": 0 },
+                "devices": [ { "device": "hackrf:0000…925f", "named": true, "plane": 0 } ],
+                "selected": { "device": "any", "named": false, "present": true, "plane": 0,
+                              "rule": "…" },
+                "horizon": {"…": "…"}, "sources": ["…"],
+                "rule": "record-derived: …", "encoding_rule": "…", "per_cell_metadata": "…" },
   "resolution": {
     "source": "spectrum-history", "live": false, "statement": "…",
     "answered": { "level": 2, "levels": 64, "f_cell_hz": 25000.0, "t_cell_s": 900.0,
@@ -849,6 +858,19 @@ One route serves every viewport — the panes, the zoomable minimap and the live
   - `axes.store_node` is the store level whose cells are *exactly* this tile's, or `null` when the tile sits off the ladder's diagonal and is therefore folded rather than read whole.
 - **`device` is whose coverage decides this tile's grey.** Coverage is device-local (T-259/T-305, §6.3), so it belongs in the key and never in a cell. `any` is the union and keeps `device_named: false`, so a merged plane can never wear one radio's identity; `coverage.selected` echoes the choice, and `present: false` says a named front end contributed no record over this tile — a coverage answer, not a missing one.
 
+#### The coverage plane: a table of **distinct** planes, run-length encoded (T-467)
+
+`coverage` on this route is **not** `/api/coverage`'s per-cell form. It was, and measured against the demo backend that cost **99 % of a 19.34 MB tile body**: each of 65 536 cells serialised `{"state":…,"duty":…,"observed_s":…,"last_s":…,"spans":…,"center_hz":…,"sample_rate_hz":…}` at ~146 B, **twice** — once as `coverage.any` and once as `coverage.devices[0]`, byte-identical on a one-device server — to carry the one field a renderer reads. Measured in-process on the same 256 × 256 grid: **19 818 236 B → 2 906 B, a factor of 6 820**; end to end the tile body went **18.42 MB → 1.12 MB**.
+
+- **`states` is the alphabet, served with the planes.** A code is never resolved against an alphabet the answer did not state. There are **three** and they never collapse into two: `unobserved` (nothing ever looked — grey, and *only* this is grey), `observed`, and `unknown` (T-423: we no longer know whether we looked — not grey, not a level).
+- **`planes[i].runs` is a flat `[code, count, code, count, …]`** over the cells in `grid.order`. The counts sum to `planes[i].cells`; each code indexes `states`. A coverage plane is the rasterisation of tuned **spans**, so it changes state only where a band begins or ends — a handful of runs a row, not an entry a cell.
+- **`planes[i].uniform`** is the one state the whole plane is in, or `null`. Derived from the same runs, never asserted beside them.
+- **A plane appears once.** `any.plane` and each `devices[].plane` are indices into `planes`, so two front ends whose coverage genuinely differs cost two entries and a front end whose coverage *is* the union costs an index. The duplication this ticket was filed about is gone by construction, not by a special case for one-device servers. When devices genuinely differ the cost is one RLE plane per distinct plane — a few KB each, linear in *distinct* planes rather than in devices × cells.
+- **`selected.plane`** is the index the route's own selection rule picks: `any` → the union; a named device → **that front end's plane and never the union**. `present: false` with `plane: null` is a named device this answer holds no plane for, which is `unobserved` *for that device* — a coverage answer, not a missing one.
+- **No cell on this plane carries a measurement key of any kind**, so there is nothing here a client can read as a level of zero. That is *stronger* than the per-cell form's rule that an unobserved cell carries no measurement keys, not weaker: here no cell does. The measurement plane is `grid`, and it is separate on purpose.
+- **The per-cell sampling metadata moved, it did not vanish.** `duty`, `observed_s`, `last_s`, `spans`, `center_hz` and `sample_rate_hz` are a question about *one* cell — hover — and [`GET /api/coverage`](#get-apicoverage--the-coverage-map-grey-means-genuinely-unobserved-t-368) answers it per cell over any `f_lo`/`f_hi`/`t0`/`t1`/`cells`/`rows`, in the same three-state vocabulary. `/api/timeline`'s overlay is unchanged and still serves the per-cell form.
+- **A plane that does not decode exactly is not a coverage answer.** An odd run list, a code outside the alphabet, a run that overruns, a total that is not `cells`, or a missing `states`: the client throws and the place stays *pending*, never grey and never observed (`ui/src/surface/tile.ts`).
+
 **The view lattice's floor is the store's, not §6.2's.** §6.2 put node (0, 0) at 100 kHz × **128 s** against a 120 s IQ retention, which puts the entire live view inside one time cell and pins `level_t` at 0 for every realistic pane — the de-welding buying nothing on the axis it exists for (T-437 finding **F1**). Anchoring at the open pyramid's level-0 cell is that fix.
 
 #### The budget is a fold target, never a level selector (T-437 finding F2)
@@ -877,6 +899,33 @@ T-437 measured rendering at p95 2.2 ms for 48 panes and tile **production** at ~
 - **No percentiles.** De-welding costs them (T-434): a tile keeps one histogram per frequency cell over the whole tile, which is the parent cell's histogram *only* when a child tile is exactly one parent time cell — the weld. `grid.percentiles` says `unknown` rather than approximating a distribution; the noise floor stays a scheme-1 question, asked through [`/api/history`](#get-apihistory--region-over-time-grid-t-017-aware-042).
 - **Never `live-iq`, and T-439 does not change that.** T-439 makes the view lattice's finest node the growing edge — *"live" is a viewport, not a mode* ([docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §8.1) — but a tile is still a **pyramid** read served at a level's cell size, and `live-iq` means *live IQ from the front end at the resolution shown*. A 6.25 kHz × 1 s cell is not that, however recently it was written; the ring is where a client goes for live-IQ resolution.
 - **No cell for the newest moment.** At a growing edge the newest cells are routinely **observed but not yet measured**: `coverage` says the front end was tuned there and sampling, and `grid` has nothing for them yet, because the fold is behind capture by at least one history frame. That is the normal state of a live edge, not an error — and it is **neither grey nor `"unknown"`**: grey is *nothing ever looked*, `"unknown"` (T-423) is *we no longer know whether we looked*, and this is *we are looking right now*. Three states, three marks (T-441).
+
+#### An unobserved tile is answered from the coverage map (T-461)
+
+A tile's default is **no data**, and a tile over spectrum no record says was ever sampled ran the identical `O(cells²)` production path as an observed one. Measured: **92 ms** of `cost.build_ms` and **2 561 726 B** on the wire to say *nothing here*, with `source_cells: 65 536` — the whole grid walked. And that is the **common** case, not an edge one: T-437 measured the default full-device view at **99.4 % grey** before history accumulates, settling to 55.2 %. The view that opens first pays the most.
+
+So when the **selected** coverage plane — the one `coverage.selected.plane` names, which is the same plane this answer serves and the same one the renderer greys from — is `unobserved` for every cell of the tile's extent, the route answers from it:
+
+```jsonc
+"grid": { "nt": 256, "nf": 256, "t0_s": …, "t_cell_s": …, "f_lo_hz": …, "f_cell_hz": …,
+          "uniform": { "max_db": null, "occupancy_max": null, "coverage": 0.0, "frames": 0,
+                       "observed": false, "rule": "…" },
+          "cells": 65536, "observed_cells": 0, "range_db": null, "unit": "dbfs",
+          "percentiles": "…", "semantics": {"…": "…"} },
+"resolution": { "answered": null, "candidates": [], "tried": [],
+                "short_circuit": { "applied": true, "selected_plane_uniform": "unobserved",
+                                   "rule": "…" }, "…": "…" },
+"cost": { "build_ms": 3.1, "source_cells": 0, "chunks": 0, "…": "…" }
+```
+
+- **`grid.uniform` replaces the four per-cell arrays, which are then *absent*** — not empty, because an empty array reads as a grid of *no cells*, which is a different claim from a grid of cells that hold nothing. `max_db: null` is the **absence of a level, never a level of zero**, and `observed: false` says so in a second way. `nt`, `nf` and `cells` are unchanged, so the grid is still the tile's own `cells × cells`.
+- **It answers "unobserved", which is neither "quiet" nor "zero".** Grey is still decided by `coverage` and by nothing else; this grid says only that the pyramid holds nothing for any cell.
+- **It fails closed.** `short_circuit.applied` is true **if and only if** `short_circuit.selected_plane_uniform` is `"unobserved"`. A partially observed tile takes the full read; a uniformly **`"unknown"`** tile (T-423 — a row wholly before the record horizon, where no surviving record can say either way) takes the full read, because `unknown` is not `unobserved` and the pyramid may well hold measurements there. `short_circuit` is served on **both** paths, so `applied: false` names the reason.
+- **The predicate cannot be weakened by the grid it was evaluated on.** The coverage plane is rasterised at this tile's own cells or coarser (the per-grid cap in `hk_store::coverage::grid_over`), and a coarser cell is `unobserved` only when *no* tune span touches it at all — so uniform-unobserved at a coarser grid implies uniform-unobserved at a finer one.
+- **It is a cheaper spelling of the full path's answer, not a second answer.** The constants in `uniform` are exactly what a real store read produces over never-sampled spectrum (asserted against one in `hk-api`'s tests), and the client's own rule is that *a cell the coverage plane calls unobserved stays unobserved even with a level beside it* — so the measurement the full read would have produced is discarded by the renderer cell for cell either way.
+- **`cost.chunks: 0`** is literal: no history lock was taken, so a screen full of grey tiles contributes no ingest backpressure at all.
+
+Measured on the same fixture, before and after (`crates/hk-api/tests/tile_cost.rs`, a test-profile binary; `body_bytes` is the uncompressed bytes the HTTP layer would write): **2 561 726 B → 7 568 B** (338×), `cost.build_ms` **92.1 ms → 3.1 ms** (29×), `source_cells` **65 536 → 0**. The body is a *constant*: 7 549 B at 64 × 64 and 7 563 B at 256 × 256 — sixteen times the cells for fourteen more bytes. The remaining ~3 ms is the coverage rasterisation itself, which is the answer rather than overhead: reading the same plane the renderer greys from is the point.
 
 ### `GET /api/tiles/events` — the coarse-zoom event aggregate (T-438, [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §5.3)
 

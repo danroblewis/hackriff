@@ -399,6 +399,33 @@ fn oldest_record(state: &ApiState) -> Option<Timestamp> {
     .map(Timestamp::from_unix_nanos)
 }
 
+/// The wire vocabulary of a coverage cell's state, **indexed by its code** (T-467).
+///
+/// This is the alphabet [`TileOverlay`]'s compact planes are written in, and it is served beside
+/// every one of them so a code can never be read against an alphabet the answer did not state. The
+/// order is fixed by [`state_code`], and [`cell_json`] — the per-cell form `/api/coverage` and
+/// `/api/timeline` still serve — is asserted against it cell-state for cell-state, so the two
+/// encodings cannot drift into disagreeing about what a cell is.
+pub(crate) const COVERAGE_STATES: [&str; 3] = ["unobserved", "observed", "unknown"];
+/// Nothing ever looked. Grey, and **only** this is grey.
+const UNOBSERVED: u8 = 0;
+/// The radio was here.
+const OBSERVED: u8 = 1;
+/// We no longer know whether we looked (T-423). Not grey, not a level, not `unobserved`.
+const UNKNOWN: u8 = 2;
+
+/// One cell's state as a code into [`COVERAGE_STATES`] — the same three-way decision
+/// [`cell_json`] makes, and written next to it so it stays the same decision.
+fn state_code(c: &Coverage, beyond_horizon: bool) -> u8 {
+    match c.sampled() {
+        // Only `unobserved` can become `unknown`. An observed cell stays observed past the
+        // horizon: the measurement is the proof.
+        None if beyond_horizon => UNKNOWN,
+        None => UNOBSERVED,
+        Some(_) => OBSERVED,
+    }
+}
+
 /// One cell's JSON.
 ///
 /// An unobserved cell carries **no measurement keys**, so there is nothing a client can read as a
@@ -738,6 +765,267 @@ pub(crate) fn overlay_json(
     })
 }
 
+// ---- the compact form `/api/tiles` serves (T-467) -------------------------------------------
+
+/// Run-length encodes a cell-state plane as a flat `[code, count, code, count, …]`.
+///
+/// A coverage plane is the output of rasterising **spans**, so along a row it changes state only
+/// where a tuned band begins or ends: a handful of runs a row, not one entry a cell. That is why
+/// the per-cell form was 146 B/cell for information that is nearly constant.
+fn rle(codes: &[u8]) -> Vec<u64> {
+    let mut runs: Vec<u64> = Vec::with_capacity(8);
+    for &c in codes {
+        let n = runs.len();
+        if n >= 2 && runs[n - 2] == u64::from(c) {
+            runs[n - 1] += 1;
+        } else {
+            runs.push(u64::from(c));
+            runs.push(1);
+        }
+    }
+    runs
+}
+
+/// One distinct coverage plane's JSON: the runs, the counts, and the uniform fast path.
+///
+/// **Every number here is derived from the same `codes` slice the runs are**, so the counts cannot
+/// disagree with the plane they describe — the failure mode of serving a summary beside a body.
+fn plane_json(codes: &[u8]) -> Value {
+    let mut counts = [0usize; COVERAGE_STATES.len()];
+    for &c in codes {
+        counts[usize::from(c)] += 1;
+    }
+    let observed = counts[usize::from(OBSERVED)];
+    let uniform = codes
+        .first()
+        .filter(|&&c| counts[usize::from(c)] == codes.len())
+        .map(|&c| COVERAGE_STATES[usize::from(c)]);
+    json!({
+        "runs": rle(codes),
+        "cells": codes.len(),
+        // The whole plane in one word when it has one, so a caller need not expand the runs to
+        // learn it — and `null` when it has not. Derived from the runs, never asserted beside them.
+        "uniform": uniform,
+        "observed_cells": observed,
+        "unobserved_cells": counts[usize::from(UNOBSERVED)],
+        "unknown_cells": counts[usize::from(UNKNOWN)],
+        "observed_fraction": if codes.is_empty() { 0.0 } else { observed as f64 / codes.len() as f64 },
+    })
+}
+
+/// Which plane answers for the selected device, by the route's own selection rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Selected {
+    /// This plane index in [`TileOverlay::planes`] decides the tile's grey.
+    Plane(usize),
+    /// A **named** front end with no plane in this answer: it recorded nothing over this tile.
+    /// That is a coverage answer — unobserved for that device — not a missing one.
+    AbsentDevice,
+}
+
+/// `/api/tiles`'s coverage overlay: computed **once**, asked once for the short-circuit, and
+/// serialised once — compactly (T-467, T-461).
+///
+/// # Why this is not [`overlay_json`]
+///
+/// [`overlay_json`] serves one JSON object per cell — `{"state":"observed","duty":…,"last_s":…,
+/// "center_hz":…,"sample_rate_hz":…,"spans":…,"observed_s":…}`, about 146 B. On a 256 × 256 tile
+/// that is 9.5 MB **per plane**, and the answer carried two of them: `any` and, on a one-device
+/// server, a `devices[0]` holding the identical bytes. Measured on the demo backend, that was 99 %
+/// of a 19.34 MB tile body, of which the client reads one field — `state`.
+///
+/// So this form carries the **state and nothing else**, run-length encoded, and carries each
+/// *distinct* plane exactly once with `any` and each device naming the plane that is theirs. The
+/// per-cell sampling metadata is still served, per cell, by `/api/coverage` — which is the right
+/// place for it: it is a hover question about one cell, not a property of every cell of every tile.
+///
+/// # The honesty boundary, under compression
+///
+/// Three codes, never two. `unobserved` is a code of its own, `unknown` is a code of its own, and
+/// neither carries any measurement key — there is no field on this wire a client could read as a
+/// zero level, which is *stronger* than the per-cell form's absence of keys, not weaker. The
+/// alphabet is served with the planes ([`COVERAGE_STATES`]) so a code is never read against an
+/// alphabet the answer did not state, and `hk-api`'s own tests assert code-for-code that this form
+/// and [`cell_json`] classify every cell identically.
+pub(crate) struct TileOverlay {
+    evidence: Evidence,
+    any: CoverageGrid,
+    devices: Vec<CoverageGrid>,
+    /// The **distinct** planes, in first-seen order. An identical plane is never repeated: that is
+    /// the duplicate `any`/`devices[0]` this ticket was filed about, removed by construction rather
+    /// than by a special case for one-device servers.
+    planes: Vec<Vec<u8>>,
+    /// `any`'s plane.
+    any_plane: usize,
+    /// Each device's plane, parallel to `devices`.
+    device_planes: Vec<usize>,
+    nt_asked: usize,
+    nf_asked: usize,
+}
+
+impl TileOverlay {
+    /// Reads both tune histories over `freq × window` and rasterises the union and every device's
+    /// plane onto an `nt × nf` grid.
+    pub(crate) fn collect(
+        state: &ApiState,
+        freq: FreqRange,
+        window: TimeRange,
+        nt: usize,
+        nf: usize,
+    ) -> Self {
+        let evidence = Evidence::collect(state, freq, window);
+        let any = hk_store::coverage::union_grid_over(&evidence.spans, freq, window, nt, nf);
+        let devices =
+            hk_store::coverage::by_device_over(&evidence.spans, freq, window, any.nt, any.nf);
+        let mut planes: Vec<Vec<u8>> = Vec::new();
+        let mut intern = |codes: Vec<u8>| -> usize {
+            match planes.iter().position(|p| *p == codes) {
+                Some(i) => i,
+                None => {
+                    planes.push(codes);
+                    planes.len() - 1
+                }
+            }
+        };
+        let any_plane = intern(state_codes(&any, evidence.unknown_rows(&any)));
+        let device_planes: Vec<usize> = devices
+            .iter()
+            .map(|g| intern(state_codes(g, evidence.unknown_rows(g))))
+            .collect();
+        Self {
+            evidence,
+            any,
+            devices,
+            planes,
+            any_plane,
+            device_planes,
+            nt_asked: nt,
+            nf_asked: nf,
+        }
+    }
+
+    /// The plane that decides this tile's grey, by the same rule the response states and the
+    /// renderer follows: a **named** device is that front end's own plane and never the union
+    /// (T-259/T-305), `any` is the union.
+    pub(crate) fn selected(&self, device: &str) -> Selected {
+        if device == "any" {
+            return Selected::Plane(self.any_plane);
+        }
+        match self
+            .devices
+            .iter()
+            .position(|g| g.device.as_str() == device)
+        {
+            Some(i) => Selected::Plane(self.device_planes[i]),
+            None => Selected::AbsentDevice,
+        }
+    }
+
+    /// The one state every cell of the selected plane is in, or `None` when the plane is mixed.
+    ///
+    /// **This is the same `Vec<u8>` [`Self::to_json`] serialises**, not a second computation over
+    /// the same spans — which is the point: a short-circuit that consulted its own opinion of what
+    /// was observed would be exactly the drift this milestone spent weeks closing.
+    ///
+    /// A named device with no plane here is uniformly `unobserved` *for that device*, which is what
+    /// the answer already tells the client (`selected.present = false`) and what the client already
+    /// draws.
+    pub(crate) fn uniform_state(&self, device: &str) -> Option<&'static str> {
+        let codes = match self.selected(device) {
+            Selected::AbsentDevice => return Some(COVERAGE_STATES[usize::from(UNOBSERVED)]),
+            Selected::Plane(i) => &self.planes[i],
+        };
+        let first = *codes.first()?;
+        codes
+            .iter()
+            .all(|&c| c == first)
+            .then(|| COVERAGE_STATES[usize::from(first)])
+    }
+
+    /// The compact `coverage` block.
+    pub(crate) fn to_json(&self, device: &str, named: bool) -> Value {
+        let g = &self.any;
+        let selected = self.selected(device);
+        let plane_of = |s: Selected| match s {
+            Selected::Plane(i) => json!(i),
+            Selected::AbsentDevice => Value::Null,
+        };
+        json!({
+            // Named so a client can refuse an encoding it does not know rather than guess at one.
+            "encoding": "plane-table-rle",
+            "grid": {
+                "nt": g.nt,
+                "nf": g.nf,
+                "t0_s": g.window.start.as_unix_nanos() as f64 * 1e-9,
+                "t_cell_s": g.t_cell_ns as f64 * 1e-9,
+                "f_lo_hz": g.f_lo_hz,
+                "f_cell_hz": g.f_cell_hz,
+                // Whether this plane lines up cell-for-cell with `grid` above.
+                "aligned": g.nt == self.nt_asked && g.nf == self.nf_asked,
+                "order": "row-major: cells[t * nf + f], earliest row first, low frequency first — \
+                    the same layout as `grid`",
+            },
+            // Code -> state name. Served WITH the planes, so a code is never read against an
+            // alphabet the answer did not state.
+            "states": COVERAGE_STATES,
+            // Every DISTINCT plane, once. `any` and each device name the one that is theirs, so a
+            // device whose coverage happens to equal the union costs an index rather than a copy.
+            "planes": self.planes.iter().map(|c| plane_json(c)).collect::<Vec<_>>(),
+            "any": { "device": "any", "named": false, "plane": self.any_plane },
+            "devices": self
+                .devices
+                .iter()
+                .zip(&self.device_planes)
+                .map(|(g, &p)| json!({
+                    "device": g.device.as_str(),
+                    "named": g.device.is_named(),
+                    "plane": p,
+                }))
+                .collect::<Vec<_>>(),
+            "selected": {
+                "device": device,
+                "named": named,
+                // A named device with no plane here is a front end that recorded nothing over this
+                // tile — a coverage answer, not a missing one, and saying which it is keeps "we
+                // have no record" from being read as "it never looked".
+                "present": selected != Selected::AbsentDevice,
+                "plane": plane_of(selected),
+                "rule": "grey a cell of this tile if and only if the selected plane's state is \
+                    \"unobserved\". `any` is the union; a named device is that front end alone, and \
+                    never the union.",
+            },
+            "horizon": self.evidence.horizon_json(&self.any),
+            "sources": self.evidence.sources_json(),
+            "rule": "record-derived: whether the front end was TUNED to this cell, from the IQ ring \
+                journal and the observation log. `grid.coverage` is a different measurement — the \
+                fraction for which the spectrum-history pyramid still holds frames — and is 0 both \
+                where nothing looked and where the budget evicted what it saw. Grey is decided \
+                here: grey a cell if and only if its state is \"unobserved\".",
+            "encoding_rule": "`planes[i].runs` is a flat [code, count, code, count, …] run-length \
+                encoding of that plane's cells in `grid.order`; the counts sum to `planes[i].cells` \
+                and each code indexes `states`. THREE states, never two: \"unobserved\" (nothing \
+                looked) and \"unknown\" (we no longer know whether we looked, T-423) are separate \
+                codes and neither is \"observed\". No cell on this plane carries a measurement key \
+                of any kind, so there is nothing here a client can read as a level of zero — the \
+                measurement plane is `grid`, and it is separate on purpose.",
+            "per_cell_metadata": "the per-cell sampling detail (`duty`, `observed_s`, `last_s`, \
+                `spans`, `center_hz`, `sample_rate_hz`) is NOT carried here (T-467): at ~146 B a \
+                cell it was 99 % of a tile's body to serve a field no renderer reads. It is a \
+                question about ONE cell, and `GET /api/coverage?f_lo&f_hi&t0&t1&cells&rows` answers \
+                it per cell, in the same three-state vocabulary.",
+        })
+    }
+}
+
+/// One grid's per-cell state codes, row-major, in exactly [`grid_json`]'s cell order.
+fn state_codes(g: &CoverageGrid, unknown_rows: usize) -> Vec<u8> {
+    g.cells
+        .iter()
+        .enumerate()
+        .map(|(i, c)| state_code(c, g.nf > 0 && i / g.nf < unknown_rows))
+        .collect()
+}
+
 /// The window: the caller's `t0`/`t1` when both are given, else the capture window this server
 /// holds. An answer with no window at all is refused rather than defaulted to a plausible span.
 fn window_of(state: &ApiState, q: &Params) -> Result<(TimeRange, &'static str), ApiError> {
@@ -1022,6 +1310,245 @@ mod tests {
         assert_ne!(
             honest.cells, m.cells,
             "so the honest assertion is doing work"
+        );
+    }
+
+    // ---- T-467: the compact plane table `/api/tiles` serves --------------------------------
+
+    /// Expands a served plane back to state names, the way `ui/src/surface/tile.ts` does — so the
+    /// assertions below are about what a client actually reads, not about the runs.
+    fn expand(v: &Value) -> Vec<String> {
+        let states: Vec<String> = v["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        let runs: Vec<u64> = v["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_u64().unwrap())
+            .collect();
+        assert_eq!(runs.len() % 2, 0, "runs must be [code, count] pairs: {v}");
+        let mut out = Vec::new();
+        for pair in runs.chunks(2) {
+            for _ in 0..pair[1] {
+                out.push(states[pair[0] as usize].clone());
+            }
+        }
+        assert_eq!(
+            out.len(),
+            v["cells"].as_u64().unwrap() as usize,
+            "runs must cover exactly `cells`: {v}"
+        );
+        out
+    }
+
+    /// Pulls one plane out of a whole coverage block, with the alphabet attached.
+    fn plane(cov: &Value, i: usize) -> Vec<String> {
+        let mut p = cov["planes"][i].clone();
+        p["states"] = cov["states"].clone();
+        expand(&p)
+    }
+
+    /// **The drift guard between the two encodings.** `/api/coverage` and `/api/timeline` still
+    /// serve [`cell_json`]'s per-cell form; `/api/tiles` serves [`state_code`]'s compact one. They
+    /// are two spellings of one decision, and the moment they disagree about which of the three
+    /// states a cell is, the compression has cost exactly what it was forbidden to cost.
+    #[test]
+    fn the_compact_code_and_the_per_cell_form_classify_every_cell_identically() {
+        let observed =
+            hk_store::coverage::Coverage::of(2, 30_000_000_000, 60_000_000_000, t(1030), 1e8, 2e6);
+        for (c, beyond) in [
+            (&Coverage::Unobserved, false),
+            (&Coverage::Unobserved, true),
+            (&observed, false),
+            // An observed cell is NEVER relabelled past the horizon: the measurement is the proof.
+            (&observed, true),
+        ] {
+            let per_cell = cell_json(c, None, beyond);
+            let code = state_code(c, beyond);
+            assert_eq!(
+                per_cell["state"],
+                json!(COVERAGE_STATES[usize::from(code)]),
+                "the two encodings disagree for beyond_horizon={beyond}: {per_cell}"
+            );
+        }
+        // And the alphabet really does have three entries, all distinct: a two-state alphabet is
+        // the collapse this whole surface exists to refuse.
+        assert_eq!(COVERAGE_STATES.len(), 3);
+        assert_eq!(COVERAGE_STATES[usize::from(UNOBSERVED)], "unobserved");
+        assert_eq!(COVERAGE_STATES[usize::from(OBSERVED)], "observed");
+        assert_eq!(COVERAGE_STATES[usize::from(UNKNOWN)], "unknown");
+    }
+
+    /// The runs are lossless, and a run boundary is exactly a state change — never a merge.
+    #[test]
+    fn the_run_length_encoding_is_lossless_and_never_merges_two_states() {
+        for codes in [
+            vec![],
+            vec![UNOBSERVED; 5],
+            vec![OBSERVED, OBSERVED, UNOBSERVED, UNKNOWN, UNKNOWN, OBSERVED],
+            // The pathological shape: every cell a different state from its neighbour.
+            (0..30).map(|i| (i % 3) as u8).collect(),
+        ] {
+            let v = {
+                let mut p = plane_json(&codes);
+                p["states"] = json!(COVERAGE_STATES);
+                p
+            };
+            let back: Vec<u8> = expand(&v)
+                .iter()
+                .map(|s| COVERAGE_STATES.iter().position(|x| x == s).unwrap() as u8)
+                .collect();
+            assert_eq!(back, codes, "{v}");
+            // The counts are derived from the same slice the runs are, so they cannot disagree.
+            let n = |c: u8| codes.iter().filter(|&&x| x == c).count();
+            assert_eq!(v["observed_cells"], json!(n(OBSERVED)), "{v}");
+            assert_eq!(v["unobserved_cells"], json!(n(UNOBSERVED)), "{v}");
+            assert_eq!(v["unknown_cells"], json!(n(UNKNOWN)), "{v}");
+            // `uniform` is a statement about the runs, not a claim beside them.
+            let uniform = codes.first().filter(|&&c| n(c) == codes.len());
+            assert_eq!(
+                v["uniform"],
+                uniform.map_or(Value::Null, |&c| json!(COVERAGE_STATES[usize::from(c)])),
+                "{v}"
+            );
+        }
+    }
+
+    /// **The multi-SDR case the plane table exists for**, and the duplication it removes.
+    ///
+    /// Two front ends on disjoint bands are two genuinely different planes and the union is a
+    /// third: three entries, each device reading its own, and a named device never reading the
+    /// union. One front end whose coverage *is* the union costs **one** entry — which is the
+    /// `coverage.any` / `coverage.devices[0]` duplication T-467 was filed about, gone by
+    /// construction rather than by a special case.
+    #[test]
+    fn devices_that_differ_get_their_own_plane_and_an_identical_plane_is_never_repeated() {
+        let dir = TempDir::new("planes-two");
+        let store = store_of(
+            &dir,
+            &[
+                dwell_over(Some(RUNNING), 100e6, 110e6),
+                dwell_over(Some(OTHER), 190e6, 200e6),
+            ],
+        );
+        let state = ApiState {
+            observations: Some(store),
+            ..ApiState::default()
+        };
+        let o = TileOverlay::collect(&state, band(), observation_window(), 2, 10);
+        let v = o.to_json(RUNNING, true);
+        assert_eq!(
+            v["planes"].as_array().unwrap().len(),
+            3,
+            "union + two disjoint devices are three distinct planes: {v}"
+        );
+        let idx = |d: &str| -> usize {
+            v["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["device"] == json!(d))
+                .unwrap_or_else(|| panic!("no plane for {d}: {v}"))["plane"]
+                .as_u64()
+                .unwrap() as usize
+        };
+        let (a, b) = (plane(&v, idx(RUNNING)), plane(&v, idx(OTHER)));
+        let union = plane(&v, v["any"]["plane"].as_u64().unwrap() as usize);
+        // The property, read off the decoded planes: each radio is observed where it looked and
+        // unobserved where the *other* one did.
+        assert_eq!(
+            (&a[0], &a[9]),
+            (&"observed".to_string(), &"unobserved".to_string()),
+            "{a:?}"
+        );
+        assert_eq!(
+            (&b[0], &b[9]),
+            (&"unobserved".to_string(), &"observed".to_string()),
+            "{b:?}"
+        );
+        assert_ne!(a, b, "two radios on disjoint bands must not share a plane");
+        assert_ne!(
+            a, union,
+            "a named device must never be served the union's plane"
+        );
+        assert_ne!(b, union);
+        assert_eq!(
+            (&union[0], &union[9]),
+            (&"observed".to_string(), &"observed".to_string())
+        );
+        // The selection the response states is the one a client applies.
+        assert_eq!(v["selected"]["plane"], json!(idx(RUNNING)), "{v}");
+        assert_eq!(v["selected"]["present"], json!(true), "{v}");
+        // A named device this answer holds no plane for is a coverage answer, not a missing one.
+        let absent = o.to_json("mock:never-ran", true);
+        assert_eq!(absent["selected"]["present"], json!(false), "{absent}");
+        assert_eq!(absent["selected"]["plane"], Value::Null, "{absent}");
+
+        // ---- and now the one-device server, which is what the duplication was measured on ----
+        let dir1 = TempDir::new("planes-one");
+        let store1 = store_of(&dir1, &[dwell_over(Some(RUNNING), 100e6, 110e6)]);
+        let state1 = ApiState {
+            observations: Some(store1),
+            ..ApiState::default()
+        };
+        let o1 = TileOverlay::collect(&state1, band(), observation_window(), 2, 10);
+        let v1 = o1.to_json("any", false);
+        assert_eq!(
+            v1["planes"].as_array().unwrap().len(),
+            1,
+            "the union and the only device are the same plane, so it is carried ONCE: {v1}"
+        );
+        assert_eq!(v1["any"]["plane"], v1["devices"][0]["plane"], "{v1}");
+        assert_eq!(
+            plane(&v1, 0),
+            plane(&v1, v1["devices"][0]["plane"].as_u64().unwrap() as usize),
+            "sharing an index must not change what either reads"
+        );
+    }
+
+    /// **The size, measured — both encodings, on the same grid, in the same process.**
+    ///
+    /// The demo backend measured a 256 × 256 tile's coverage at 17.3 MB across two identical
+    /// planes. Here the same grid is serialised both ways and the ratio is asserted, so a
+    /// regression that quietly restores the per-cell form fails rather than merely costing.
+    #[test]
+    fn the_compact_plane_is_orders_of_magnitude_smaller_than_the_per_cell_form_it_replaces() {
+        let dir = TempDir::new("size");
+        let store = store_of(&dir, &[dwell_over(Some(RUNNING), 100e6, 200e6)]);
+        let state = ApiState {
+            observations: Some(store),
+            ..ApiState::default()
+        };
+        const CELLS: usize = 256;
+        let o = TileOverlay::collect(&state, band(), observation_window(), CELLS, CELLS);
+        let compact = serde_json::to_string(&o.to_json("any", false))
+            .unwrap()
+            .len();
+        // What the same information cost before: `grid_json`'s per-cell objects, twice, because
+        // `any` and the single device's plane were byte-identical.
+        let per_cell = serde_json::to_string(&grid_json(&o.any, None, 0))
+            .unwrap()
+            .len();
+        let before = per_cell * 2;
+        eprintln!(
+            "T-467 coverage plane, {CELLS}x{CELLS} cells: per-cell x2 = {before} B, compact = {compact} B ({:.0}x)",
+            before as f64 / compact as f64
+        );
+        assert!(
+            o.any.observed_cells() == CELLS * CELLS,
+            "the fixture must fill the plane, or the comparison is about a cheaper grid"
+        );
+        assert!(
+            compact < 8_192,
+            "the compact plane must stay a few KB, not scale with cells: {compact} B"
+        );
+        assert!(
+            before / compact > 100,
+            "per-cell {before} B vs compact {compact} B is not the order this ticket is about"
         );
     }
 
