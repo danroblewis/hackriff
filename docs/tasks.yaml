@@ -7565,7 +7565,7 @@ tasks:
   - id: T-374
     title: Nothing can say "these emitters are harmonics of one fundamental nobody can see"
     milestone: M3
-    status: in-progress
+    status: todo
     priority: normal
     parallel_group: M3B
     core_interface: true
@@ -8537,7 +8537,7 @@ tasks:
   - id: T-400
     title: just gate regenerates incremental state that every agent is configured to avoid
     milestone: M2-hardening
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CI
     deps: [T-396]
@@ -8557,6 +8557,32 @@ tasks:
       which-suites rule there. Do not set it globally in the justfile without checking
       whether any recipe WANTS incremental - a developer building locally may.
       Control: a gate run leaves target/debug/incremental no larger than it found it.
+    commit: "9e87da5"
+    result: |
+      DONE. The flags live in the GATE'S RUNNER, not in each brief - GATE_BUILD_ENV in py/hkpy/gate.py,
+      merged onto a copy of os.environ by a pure suite_env(), applied at the single place main() launches
+      a chosen suite. The rule is in the runner exactly as T-396 moved the which-suites rule there.
+      THE JUSTFILE IS UNTOUCHED, so a developer's own `just build` / `just test` keeps whatever
+      incremental behaviour they want - which is the ticket's own caveat honoured rather than restated.
+      WHY EACH FLAG BELONGS THERE: CARGO_INCREMENTAL=0 is the trigger; CARGO_PROFILE_DEV_DEBUG=
+      line-tables-only matches what every worktree builds with, so the coordinator's target does not
+      diverge in profile fingerprint from what worktrees build against (the same failure one layer up);
+      CARGO_BUILD_JOBS=6 because CLAUDE.md counts the coordinator's check as one of T-144's four slots.
+      DELIBERATELY NOT SET: nextest --test-threads, already pinned in .config/nextest.toml by T-436 for
+      every nextest call including the gate's - a second copy of a rule already in the runner is a copy
+      that can drift.
+      NO du OR df NUMBER IS CLAIMED, and that is the disciplined part. The ticket's caveat is preserved
+      verbatim in the new module docstring: du reports what a directory would cost ALONE, and on this
+      clone-shared repo that is close to meaningless; only df counts, and the real reclaim is removing a
+      worktree after merge. The honest claim is AVOIDED WORK and AVOIDED DIVERGENCE from the seeded clone.
+      SUITE SELECTION PROVEN UNCHANGED: decision.commands() is untouched and the env rides only on
+      subprocess.run's env= kwarg; verified by --dry-run across py-only, docs-only, ui-only, crates-full
+      and the real worktree diff. Note the classifier correctly forced FULL on this very change, since
+      py/hkpy/gate.py is hard-classified full - the gate must not be able to certify its own weakening.
+      Tests: GATE_BUILD_ENV locked to exactly three flags; suite_env() pure, additive, and overriding a
+      conflicting caller value; an in-process main() round-trip asserting the suites launched are
+      identical to classify(...).commands() while every launched call carries the T-144 env.
+      Gate: full, passed - and the gate now announces its own build env in the transcript.
   - id: T-401
     title: No acceptance test asserts latency, so the suite is blind to a whole class of defect
     milestone: M3
@@ -11766,7 +11792,7 @@ tasks:
   - id: T-447
     milestone: M3
     title: phase_features and derotate take their strong-envelope subset over the same broken mean rule T-431 just fixed
-    status: in-progress
+    status: todo
     priority: normal
     parallel_group: M3A
     deps: [T-431]
@@ -12462,7 +12488,7 @@ tasks:
   - id: T-457
     milestone: MCANVAS
     title: The instantaneous spectrum trace has no home on the canvas - a trace is one frame ACROSS frequency, not a zoom level
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-445]
@@ -12480,8 +12506,10 @@ tasks:
       the view. The manual dB range is a honesty question: the surface's ramp is measured, and a
       hand-set range is a user overriding a measurement, which this product does deliberately
       rarely.
-      DO NOT BUILD UNTIL THE USER RULES on whether the trace returns at all. Recording it as a
-      ticket is what keeps the report from becoming a silent deletion.
+      USER RULING 2026-09-17: BUILD IT. "These are real feature gaps the cutover dropped, and
+      restoring them IS finishing MCANVAS." Scheduled ahead of the non-MCANVAS backlog. The trace
+      returns; the open question is only WHERE max-hold lives, and the ticket answers that with
+      evidence rather than by reflex.
     notes: |
       Filed by the coordinator at T-445's merge (19d9bed). The ticket exists so the capability has
       an owner whichever way the ruling goes.
@@ -12490,7 +12518,7 @@ tasks:
   - id: T-458
     milestone: MCANVAS
     title: Drag-to-select and T-193's draggable Confirmed-band edges have no gesture - drag now pans
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-445, T-456]
@@ -12505,8 +12533,9 @@ tasks:
       dead state, and dead state that a reader still honours is worse than no feature - decide
       whether T-193's override is kept (and given an input) or retired (and its state removed with
       the reader). Report which, with evidence about who reads it.
-      THE GESTURE IS A DESIGN CALL FOR THE USER: a modifier-held drag, a mode toggle, or a
-      right-drag. Whatever is chosen must not disturb what T-456 and T-444 established - T-340's
+      USER RULING 2026-09-17: BUILD IT - region-select must not regress. The gesture choice is
+      delegated: pick one of a modifier-held drag, a mode toggle, or a right-drag, STATE WHICH AND
+      WHY, and confirm it in a real browser via T-455. Whatever is chosen must not disturb what T-456 and T-444 established - T-340's
       control (no pan and no wheel reaches a device route) passes VERBATIM, and a pan still
       invalidates a pending retune offer at the instant of commit. T-407's lesson applies directly,
       since this adds a second meaning to a pointer stream: measure travel as a DISTANCE, never as
@@ -12537,6 +12566,498 @@ tasks:
     notes: |
       Filed by the coordinator at T-445's merge (19d9bed). Low priority - the chrome line already
       answers "where am I", and the missing capability is "what is THAT".
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-467
+    milestone: MLIVE
+    title: 99 percent of a live tile's 19.34 MB body is the coverage plane, and it is sent TWICE
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      THE BIGGEST NUMBER IS NOT ON THE USER'S LIST, and the coordinator's assessment found it while
+      confirming the others. MEASURED against a live backend: a live tile's body is 19.34 MB, of
+      which about 99 percent is the COVERAGE PLANE at ~146 B/cell - and it is serialised TWICE, as
+      `coverage.any` and `coverage.devices[0]`, which are IDENTICAL on a one-device server. The
+      client reads `.state` and nothing else (`ui/src/surface/tile.ts`).
+      Fixing only this: 19.3 MB -> ~1.9 MB per tile, parse 48 ms -> ~5 ms. It is the cheapest large
+      win available and it makes every other live-view change affordable - at 19 MB a tile, ANY
+      refresh strategy spends the whole `TILE_MAX_IN_FLIGHT = 4` budget to deliver 0.4 percent useful
+      payload, which is why "poll harder" is not a fix for T-460.
+      DO NOT SIMPLY DROP `devices[]`. It exists for the multi-SDR case the product is committed to
+      (provenance records which device saw a detection), and a one-device server is not the general
+      case. The honest fix is a representation that does not pay per cell for a plane the client
+      reads one field of, and that does not repeat a plane identical to another - say which you chose
+      and what it costs when devices genuinely differ.
+      HONESTY RULE, UNCHANGED: whatever encoding is chosen, `Coverage::Unobserved` must not become
+      indistinguishable from observed-and-quiet. Compression that loses that distinction is not a
+      win, it is the defect this whole surface exists to avoid.
+      DoD: measured before/after body size and parse time on the same tile; the multi-device case
+      still served correctly and tested with devices that DIFFER; docs/api.md and its contract test
+      updated together (T-079).
+    notes: |
+      Filed 2026-09-17 from /tmp/claude-501/live-tiles-assessment.md. THE ASSESSMENT'S TOP
+      RECOMMENDATION together with T-461: "T-A + T-B are the cheap 80 percent."
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-460
+    milestone: MLIVE
+    title: The live edge is frozen in the CLIENT - a resident tile is never refetched, so live advances once every 256 s
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      USER DIRECTIVE 2026-09-17, now a CLAUDE.md invariant: the live view renders like a classic SDR
+      waterfall, rows appended in real time, NEVER gated on batch tile generation.
+      ROOT CAUSE CONFIRMED, AND IT IS NOT THE TILE LAYER. The coordinator's assessment measured the
+      backend against a live device: the live-edge tile GROWS CORRECTLY - 33 024 -> 38 144 -> 43 520
+      observed cells over 40 s, newest row 128 -> 148 -> 169 - and it BUILDS FROM PARTIAL DATA in
+      ~145 ms and never waits. Both of the user's candidate causes are therefore ruled out at the
+      backend.
+      THE FAULT IS IN THE CLIENT, and it is one grep: `TileCache.acquire()` returns a resident tile
+      UNCONDITIONALLY, and `invalidateEdge()` - the only path that can drop one - has EXACTLY ONE
+      CALL SITE in ui/src, `acceptPaneRetune`. There is no timer, no poll, no age rule. A live-edge
+      tile is fetched ONCE and frozen until the pane scrolls into a new address, which at level_t = 0
+      is ONCE EVERY 256 SECONDS. The cells are correctly drawn as T-441's AWAITING, so the honesty
+      machinery is working perfectly - THE REQUEST SIMPLY NEVER HAPPENS.
+      Compounding it: T-445's `live-edge.ts` says in its own header that it opens the spectrum socket
+      and "throws every row away". THE REAL-TIME ROWS ARE ALREADY IN THE CLIENT and are discarded
+      because regridding them was backend work.
+      THIS TICKET IS THE INTERIM FIX: make the live edge refresh. DO NOT FIX IT BY POLLING HARDER
+      UNTIL T-467 LANDS - at 19 MB per tile a 1 Hz poll spends the entire in-flight budget to deliver
+      0.4 percent useful payload. Sequence behind T-467 or make the refresh cheap by construction.
+      THE DURABLE FIX IS T-468's row-push route; this one restores the guarantee now.
+      ONE SOURCE OF ROWS. Do not grow a second path that produces "live rows" separately from tile
+      data - every one of T-420, T-388, T-397 and T-412 was two implementations of one idea drifting
+      apart, and T-445 just spent a milestone making that impossible.
+      DoD: rows appear at the live edge as they are recorded, demonstrated IN A REAL BROWSER via the
+      T-455 harness (a unit test cannot see this - T-450 is the standing proof); a test that fails if
+      a live-edge tile is ever served from cache indefinitely; and no second row path.
+    notes: |
+      Filed 2026-09-17 from /tmp/claude-501/live-tiles-brief.md item 2; root cause confirmed by
+      /tmp/claude-501/live-tiles-assessment.md. USER SEQUENCED THE LIVE VIEW FIRST.
+      The supervisor's read - that incremental tiles (T-462) underpin this - WAS TESTED AND IS NOT
+      BORNE OUT: the backend already builds from partial data. Recording that because it is a good
+      example of a hypothesis worth testing rather than assuming.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-461
+    milestone: MLIVE
+    title: An empty tile costs 134 ms and 2.56 MB to build - 86 percent of an observed one - and must short-circuit
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER DIRECTIVE 2026-09-17, now a CLAUDE.md invariant: a tile's default is "no data", and a
+      viewport tile with no data must answer immediately from the coverage map instead of running the
+      generation path.
+      MEASURED: an empty 256-squared tile costs 134 ms to build and 2.56 MB on the wire, against
+      157 ms for an OBSERVED one - 86 percent of the cost for none of the content - with
+      `source_cells: 65 536`. The cost is O(cells squared) and ESSENTIALLY INDEPENDENT OF WHETHER ANY
+      DATA EXISTS. A coverage short-circuit takes it sub-millisecond, about 150x.
+      THE EMPTY CASE IS THE COMMON CASE, not an edge case: T-437 measured the default full-device
+      view at 99.4 percent grey before history accumulates, settling to 55.2 percent. The view that
+      opens first is the one paying most.
+      THE HONESTY RULE IS THE TRAP: the short-circuit must answer "UNOBSERVED", which is not "quiet"
+      and not "zero" - `Coverage::Unobserved` is not `Off`. An empty answer that renders as data would
+      be far worse than a slow one. Read the SAME coverage record the surface greys from; a second
+      opinion about what was observed is the drift family this milestone just closed.
+      DoD: before/after timings with the method stated and what each number is a property of; the
+      short-circuit reads the same coverage record the renderer does; and a test that fails if an
+      unobserved region is ever served as data.
+    notes: |
+      Filed 2026-09-17 from /tmp/claude-501/live-tiles-brief.md item 3; costs measured in
+      /tmp/claude-501/live-tiles-assessment.md. With T-467 this is the assessment's "cheap 80 percent".
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-468
+    milestone: MLIVE
+    title: A row-push route - and it must subscribe to an ADDRESS RANGE, not to "the live stream"
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-467, T-460]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      THE DURABLE FIX FOR THE LIVE EDGE, where T-460 is the interim one. Rows are already in the
+      client and thrown away (`live-edge.ts`); tiles are already built correctly at the backend. What
+      is missing is a route that PUSHES rows as they are recorded, so the client neither polls nor
+      waits.
+      THE WORDING IS THE WHOLE TICKET, AND IT IS A COST PAID NOW TO AVOID A SECOND MECHANISM LATER.
+      The subscription MUST be to AN ADDRESS RANGE, never to "the live stream". Historical playback
+      (T-463) advances a second, VIRTUAL position forward through already-sealed history at the
+      user's chosen rate - a reader walking forward, not a producer appending. A route that means
+      "the live stream" cannot serve it, so playback would grow its own mechanism, and THAT IS
+      EXACTLY HOW T-420, T-388, T-397 AND T-412 HAPPENED: two implementations of one idea drifting
+      apart.
+      The assessment found the store is already on the right side of this: tile addressing is
+      ABSOLUTE AND EDGE-FREE, and `materialize_tile` already treats "live edge" as a derived
+      predicate (`block_end_ns > watermark_ns`) rather than a mode. THE SINGLE-EDGE ASSUMPTION LIVES
+      IN THE CLIENT - `SurfacePreview.edgeNs` is one monotone-clamped scalar and `atEdge()` takes one
+      edge - and `PaneState.time` is most of the way to fixing it. Keep accumulators keyed by tile
+      address and the property holds.
+      CORE INTERFACE AND REAL-TIME PATH: docs/api.md and its contract test move together (T-079);
+      goes to Opus and is reviewed before merge.
+      DoD: rows pushed by address range; one client edge per pane rather than one per client,
+      demonstrated; the route serves a sealed-history range as readily as the growing one; and a test
+      that fails if the subscription is expressible only as "now".
+    notes: |
+      Filed 2026-09-17 from /tmp/claude-501/live-tiles-assessment.md, which calls this "the one to
+      design properly".
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-462
+    milestone: MLIVE
+    title: Make the level_f=0 time column incrementally maintained - the 15 coarse nodes, not the whole lattice
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-468]
+    use_cases: [AWARE-011]
+    acceptance: |
+      THE USER'S ITEM 4, SCOPED BY MEASUREMENT. The assessment found the scope is much smaller than it
+      looked: LEVEL 0 IS ALREADY INCREMENTALLY MAINTAINED. Item 4 is only about the 15 coarse nodes.
+      THE T-453 TENSION DISSOLVES, AND THE REASON MATTERS: T-453's regression was FILE WRITES under
+      28-way harness concurrency - 5.1x wall for IDENTICAL CPU and RSS, so the runs were WAITING, not
+      computing - NOT fold arithmetic. Per-row incremental folding of the whole lattice is about 4.5x
+      today's level-0 arithmetic, which is ~0.7 percent of one core, on the `hk-view` ViewWriter
+      thread THAT ALREADY CANNOT REACH THE RING. It costs nothing in compute and ZERO EXTRA WRITES if
+      coarse tiles stay written-on-demand. So the objection to item 4 was never the arithmetic.
+      WHERE IT DOES COST IS RESIDENCY: 2 open accumulators become 32, about 18 MB -> 145 MB at a
+      20 MHz edge. THEREFORE BUILD ONLY THE level_f = 0 TIME COLUMN - nodes (0,1) through (0,3) - at
+      about +18 MB. That is literally what the user described: a TIME-AXIS proposal, "commit a
+      downsampled row every N raw rows".
+      THE PAYOFF IS SPECIFIC: `invalidate_derived()` fires inside `Pyramid::ingest`, so EVERY FRAME
+      DESTROYS EVERY LIVE-EDGE COARSE SUMMARY, and a zoomed-out live pane re-folds its subtree on
+      every read - measured at 289 ms for node (0,3) and 323 ms for (3,3).
+      RE-MEASURE BEFORE SHIPPING, because the assessment says so itself: the 6 700 frames/s ingest
+      figure is the repo's own recorded T-017 bench result and was NOT re-run, and THE RESIDENCY
+      FIGURES ARE ARITHMETIC, NOT MEASUREMENT. Treat both as hypotheses to confirm. Report T-453's
+      figures re-measured on the same slice, back to back (T-419's method).
+      DO NOT put coarse tile WRITES back on the capture path, and do not make the whole lattice
+      incremental - the assessment recommends against both.
+    notes: |
+      Filed 2026-09-17 from /tmp/claude-501/live-tiles-brief.md item 4, scoped by
+      /tmp/claude-501/live-tiles-assessment.md. Sequenced after T-468 because the row-push route is
+      what the live view actually needs, and this is an optimisation behind it.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-469
+    milestone: MPLAY
+    title: No GET /api/recordings - nothing enumerates the persisted IQ that extends the audio horizon
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      FOUND BY THE ASSESSMENT while answering the playback IQ-horizon question, and it must be
+      WRITTEN BEFORE PLAYBACK rather than discovered during it.
+      `/api/iqbuffer` already answers the ring's extent exactly - `t0`, `t1`, `span_s`,
+      `retention_s`, `segments[]` with per-segment tuning and gains, and `gaps[]` - and
+      `coverage.rs:99` already keeps IQ availability DISTINCT from the observation plane, which is
+      precisely the distinction T-464 depends on. That half is free.
+      THE GAP: persisted IQ RECORDINGS also extend the audio horizon, and NOTHING ENUMERATES THEM.
+      `/api/captures` serves DECODED captures, which is a different thing. So the "where can I hear
+      audio" question is currently answerable only for the ring, and any playhead built now would
+      silently under-report the horizon over recordings.
+      DoD: a route enumerating persisted IQ recordings with their time extents and tuning, documented
+      in docs/api.md with its contract test in the same change (T-079); and the IQ-available extent
+      computable as ring PLUS recordings rather than ring alone.
+    notes: |
+      Filed 2026-09-17 from /tmp/claude-501/live-tiles-assessment.md. T-464 depends on this.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-463
+    milestone: MPLAY
+    title: Historical playback - play from a chosen past time, and "now" moves forward over recorded history
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-462]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      USER DIRECTIVE 2026-09-17, SECONDARY to the live-view and tile work and explicitly sequenced
+      after it. Now a CLAUDE.md invariant.
+      THE FEATURE: play back from a chosen past time, with play and pause, advancing "now" forward
+      through recorded history AS IF IT WERE LIVE. Reuses SigmfReplaySource, ring-window-extract and
+      T-384 - this is assembly of things that exist, not new machinery, and if it starts to look like
+      new machinery say so.
+      THE SPLIT, WHICH IS THE PART THAT MAKES IT CHEAP: SIGNAL ANALYSIS IS NEVER RE-RUN. Detections
+      and history are IMMUTABLE RECORDS and replay exactly as they were recorded - this is the
+      existing model, not a concession. DEMOD AND DECODE ARE RE-RUN, because they are functions of
+      RAW IQ. A playback that re-detected would produce a second, disagreeing analysis of the same
+      air, which is the drift family this repo keeps closing.
+      Playback should go through the DEVICE INTERFACE like everything else (the e2e rule: tests never
+      feed files straight into the pipeline), which SigmfReplaySource already satisfies.
+      PER-SPLIT PLAYHEAD IS EXPLICITLY DEFERRED by the user - one playhead for now. Do not build the
+      per-pane version speculatively; note where it would go.
+      DoD: play from a chosen time with play/pause; analysis records replayed unchanged and shown to
+      be unchanged; demod/decode re-running from raw IQ; one playhead; and the IQ-horizon behaviour
+      from T-464 respected rather than discovered.
+    notes: |
+      Filed 2026-09-17 from the user's playback directive. Depends on T-462 because playback is the
+      second advancing read position that ticket has to admit; if T-462 lands the N-position property
+      cleanly, this becomes much smaller.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-464
+    milestone: MPLAY
+    title: The raw-IQ horizon is its own visible boundary - beyond it playback is waterfall-only, with no audio
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    depends_on: [T-463, T-469]
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER CONSTRAINT 2026-09-17, now a CLAUDE.md invariant. Demod needs RAW IQ, and raw IQ exists
+      only in the IQ ring (about 30 minutes) and in recordings. Spectrum history runs far longer. So
+      PLAYBACK HAS TWO HORIZONS, NOT ONE: beyond the IQ horizon, playback shows the waterfall only,
+      with NO AUDIO.
+      THE WHOLE POINT OF THIS TICKET IS THAT THE BOUNDARY IS VISIBLE AND PREDICTABLE, never something
+      the user discovers when the sound stops. A playhead that silently goes mute is the same defect
+      as a view that implies resolution the hardware never captured - the exploration-first honesty
+      principle, applied to time.
+      THE TRAP, AND IT IS THE SPECIFIC ONE THIS REPO FALLS INTO: this is a DIFFERENT QUESTION from the
+      one the coverage map answers. Today's coverage map says "was this observed", over the long
+      horizon. This asks "IS RAW IQ STILL AVAILABLE HERE", over a much shorter one. Conflating them
+      makes the product promise audio it cannot deliver. Answer it from whatever actually knows the
+      ring's extent and the recordings' extents - and if something in hk-store already answers it,
+      reuse that rather than computing a second opinion.
+      NOTE THE HORIZON MOVES: the ring is a ring, so a position that had audio ten minutes ago may not
+      now. The boundary is not a constant and must not be cached as one. A recording, by contrast, is
+      immutable once written - so the two sources have different lifetimes and the display must be
+      correct for both.
+      DoD: the IQ-available extent is served and drawn on the timeline as a distinct, honest boundary;
+      it updates as the ring rolls; audio is offered exactly where it can be delivered and refused
+      with a stated reason where it cannot; and a test that fails if the boundary is derived from
+      spectrum coverage instead of IQ availability.
+    notes: |
+      Filed 2026-09-17 from the user's playback directive.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-465
+    milestone: M2-hardening
+    title: drain-timeout discards the recorder's queued records without counting them, so the books do not balance
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-451 while fixing decoded_capture's segments_roll assertion, and correctly NOT
+      smuggled into a test fix - this is the core real-time path.
+      At stream end, a recorder still draining after the publisher's 5 s drain_timeout is closed and
+      ITS QUEUE IS DISCARDED. dropped_records stays 0 while thousands of frames vanish. It is not
+      SILENT - the capture's end_reason says it was cut short, and that reaches the API through
+      CaptureInfo - but the counted-drop books balance only on the ring path, where a frame offered to
+      a full ring is dropped AND counted.
+      T-451's replacement assertion is sound either way, because it requires the counted-drop
+      accounting ONLY when the capture claims it ended cleanly. So this is not blocking; it is the
+      difference between "we know we lost some" and "we know how many".
+      The fix lives in hk-stream's publisher drain watchdog, which would have to count what it throws
+      away. CORE REAL-TIME PATH: goes to Opus, reviewed before merge, and the counting must not itself
+      cost anything on the hot path.
+    notes: |
+      Filed by the coordinator 2026-09-17 from T-451's report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-466
+    milestone: M2-hardening
+    title: ui/e2e/selftest.mjs cannot hold app-page faults, so per-guard attribution is meaningless for two specs
+    status: todo
+    priority: normal
+    parallel_group: UI
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-458. selftest.mjs's build() compiles only the /surface.html bundle, so any fault
+      injected for an APP-page spec fails every app spec rather than the one it names - which makes
+      per-guard attribution meaningless for `surface-region` AND for the pre-existing `app-surface`.
+      WHY THIS MATTERS MORE THAN IT LOOKS: selftest.mjs is the thing that proves the e2e guards are
+      NON-VACUOUS. T-455 built it precisely so a green browser suite could be trusted, and its whole
+      value is that a named fault reddens the guard NAMED FOR IT. A selftest that reddens everything
+      proves only that the page broke, which is the weakest possible claim and exactly the "correct
+      about the wrong thing" family this milestone kept hitting.
+      The fix is to build the app bundle there too. T-458 recorded it in the file header and did not
+      do it, correctly, as it is T-455's scope.
+      DoD: an app-page fault reddens only the guard it names; both app specs get real attribution; and
+      the existing surface-page attribution is unchanged.
+    notes: |
+      Filed by the coordinator 2026-09-17 from T-458's report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-470
+    milestone: MCANVAS
+    title: Colours shift on zoom because the dB range auto-scales to the VISIBLE tiles - the same measurement must be the same colour
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER-REPORTED BUG: "colours animate and shift when I zoom". ROOT CAUSE CONFIRMED IN THE BRIEF:
+      `/api/tiles` returns `range_db = (lo_db, hi_db)` computed PER REQUEST from the requested tiles
+      (crates/hk-api/src/tiles.rs:655/671, `lo_db.min(c.max_db)` and friends) and the client's
+      `autoScale` adopts it (ui/src/surface/surface.ts:230,285). Zooming changes the visible tile set,
+      which changes the range, so THE SAME MEASURED dB RE-COLOURS. The user's reading is correct: it
+      is normalised to the visible time/region.
+      THE FIX: make the dB-to-colour mapping ZOOM-INVARIANT BY DEFAULT, Google-Maps style - the same
+      measurement is the same colour at every zoom. Anchor uLo/uHi to a STABLE REFERENCE rather than
+      the viewport: the noise floor plus a fixed dynamic span (~60 dB) is the obvious candidate, and
+      note that `/api/floor` already exists and kept its non-UI callers through T-445's cutover, so
+      the anchor may be free. A range computed ONCE over the region is the other candidate. What it
+      must NOT be is per-viewport.
+      A FIXED-RANGE MODE ALREADY EXISTS (`autoScale` off), so this is largely DEFAULTING TO IT with a
+      sensible anchor rather than building a mechanism.
+      KEEP AUTO-SCALE AS AN OPT-IN manual contrast toggle - it is genuinely useful for digging into
+      weak signals - and KEEP THE LEGEND STATING THE RANGE whichever mode is active. STATE THE
+      TRADE-OFF HONESTLY IN THE UI: a fixed range CAN clip strong signals or wash out weak ones; the
+      user has chosen cross-zoom consistency as the default and that is the ruling, but the legend is
+      what keeps it honest rather than merely consistent.
+      WATCH THE HONESTY BOUNDARY: whatever the mapping, an UNOBSERVED cell must stay distinguishable
+      from an observed one at the bottom of the range. `Coverage::Unobserved` is not the darkest
+      colour - it is not a colour on this ramp at all. A stable anchor must not quietly turn a weak
+      measurement into the same pixel as no measurement.
+      DoD: the same measured dB renders as the same colour across at least three zoom levels,
+      demonstrated IN A REAL BROWSER via the T-455 harness by reading pixels, not by asserting the
+      uniform was set; auto-scale still reachable and still correct; legend accurate in both modes;
+      and a test that fails if the default mapping is ever made viewport-dependent again.
+    notes: |
+      Filed 2026-09-17 from /tmp/claude-501/surface-polish-brief.md item 1. Post-live-view priority
+      per the user, but it is a reported BUG on shipped behaviour, so it leads the polish set.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-471
+    milestone: MCANVAS
+    title: Prefetch a bounded ring of tiles around the viewport, at lower priority, cancelled on move
+    status: todo
+    priority: low
+    parallel_group: CANVAS-FE
+    depends_on: [T-467]
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER REQUEST, smoothness. Prefetch a ring of tiles JUST OUTSIDE the current viewport - and
+      optionally the adjacent zoom level's covering tiles - into the LRU (ui/src/surface/tilecache.ts)
+      so pan and zoom do not wait on fetches. Default radius: a one-tile ring plus the current level
+      +/- 1; tune later.
+      THE CAP IS NOT NEGOTIABLE AND THE HISTORY EXPLAINS WHY. T-454 capped /api/tiles at 4 in flight
+      because TILE PRODUCTION TAKES THE HISTORY LOCK - the cap is INGEST BACKPRESSURE, not a queue.
+      So prefetch must: run at STRICTLY LOWER PRIORITY than visible tiles, never displace a visible
+      fetch, and CANCEL on viewport movement through the same AbortController path T-454 built. A
+      prefetch that delays a visible tile has made the product worse, not smoother.
+      BOUND IT BY MEMORY, tunable, and say what the bound is in terms of the LRU's own accounting
+      rather than a tile count, since tile bodies vary. NOTE THE ORDERING: T-467 cuts a live tile from
+      19.34 MB to about 1.9 MB, which changes what a "reasonable" prefetch budget even means - hence
+      the dependency. Prefetching 19 MB bodies would be actively harmful.
+      Multiple SDRs will fill more of the plane later; today there is headroom.
+      DoD: prefetch demonstrably fills the ring; a visible-tile fetch is never delayed by a prefetch,
+      shown by measurement rather than by construction; viewport movement cancels outstanding
+      prefetches; the memory bound holds under a pan storm; and T-454's peak-at-cap property still
+      holds exactly, since that is the guard that proves the cap is respected.
+    notes: |
+      Filed 2026-09-17 from /tmp/claude-501/surface-polish-brief.md item 2. Low priority, explicitly.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-472
+    milestone: MCANVAS
+    title: A plain wheel must LOCK the aspect ratio - when either axis hits its bound, BOTH stop
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER-REPORTED BUG on T-456's uniform zoom. Zooming out past the Y-axis limit keeps scaling X
+      while Y is clamped, so THE ASPECT RATIO DRIFTS AND THE VIEW JUMPS, and the user has to
+      shift-scroll to recover EVERY TIME.
+      THE FIX, in the T-456 wheel path (ui/src/surface/input.ts and the `wheelZoom` semantics in
+      preview.ts): under a PLAIN wheel, when EITHER axis reaches its zoom or pan bound, CLAMP BOTH
+      AXES TOGETHER - stop the uniform zoom - so the aspect ratio is preserved at all times. Only
+      SHIFT (frequency/X) and ALT (time/Y) may ever change the aspect ratio. That is the whole rule.
+      DO NOT RE-WELD THE AXES, and this is the distinction that matters: locking the aspect ratio is a
+      constraint on THE GESTURE, not on the pyramid. The two axes stay INDEPENDENTLY LEVELLED (T-434
+      de-welded them in the store, T-438 addresses them independently, T-440 resolves them per pane),
+      and after a plain-wheel zoom they may still legitimately sit at different levels - which
+      T-443's levelDivergenceNote already explains to the user. A fix that collapses the levels to
+      keep the pixels square would undo a milestone.
+      THE SEMANTICS BELONG IN preview.ts's wheelZoom, NOT IN THE HANDLER: T-456 put them there so the
+      second host the cutover added cannot disagree with the first, and a source guard requires every
+      wheel listener under src/surface/ to call wheelZoom and read no delta or modifier bit itself.
+      Keep that guard passing unchanged.
+      DoD: at either bound a plain wheel moves neither axis, demonstrated IN A REAL BROWSER via the
+      T-455 harness by reading the resulting windows; shift and alt still change one axis each; the
+      axes remain independently levelled; T-456's source guards pass unchanged; and a test that fails
+      if a plain wheel ever moves one axis alone.
+    notes: |
+      Filed 2026-09-17 from /tmp/claude-501/surface-polish-brief.md item 3.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-473
+    milestone: M2-hardening
+    title: The e2e tier has no per-spec timeout and can hang the gate indefinitely - observed at 31 minutes
+    status: todo
+    priority: high
+    parallel_group: CI
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      OBSERVED BY THE COORDINATOR 2026-09-17 during T-400's merge gate. `node e2e/run.mjs` sat for
+      THIRTY-ONE MINUTES with zero log output and Chrome parked at `about:blank`, against a normal
+      whole-suite runtime of about 50 s. The gate cannot distinguish that from slow progress, so it
+      waited too. A SIGTERM to the browser caused the harness to SPAWN ANOTHER ONE, which suggests a
+      retry path rather than a clean failure - confirm that before fixing it.
+      WHY THIS IS HIGH AND NOT COSMETIC: `just test-ui-e2e` runs in the gate's acceptance phase for
+      the `ui` and `full` classes, and CI's two jobs call the same gate. A hang here hangs CI with no
+      diagnostic, and the tier was added by T-455 precisely to make the browser path TRUSTWORTHY. A
+      verification tier that can hang silently is not trustworthy, whatever it asserts when it runs.
+      WHAT IT NEEDS: a per-spec deadline that FAILS with a named spec and a reason rather than
+      hanging; a bounded retry (or none) on browser launch, with the retry visible in the log; and the
+      harness to say what it is waiting for while it waits, so the next hang is diagnosable from the
+      log alone rather than from `ps`.
+      Load context, since it may or may not be causal: the machine was at load ~8.5 with a builder
+      agent compiling. Say whether load is a factor rather than assuming it - an intermittent that
+      only appears under load is still a defect, and T-436's thread cap is the precedent for capping
+      false reds WITHOUT calling the underlying test correct.
+    notes: |
+      Filed by the coordinator 2026-09-17 from a first-hand observation during T-400's gate.
+      Related: T-466 (selftest.mjs cannot hold app-page faults) is the other hole in the same tier.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-474
+    milestone: M2-hardening
+    title: A --loop replay makes capture time go BACKWARDS while the client's edge clamps monotone
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-457 while building the spectrum trace, and flagged rather than worked around.
+      `hk serve --replay ... --loop` wraps, so CAPTURE TIME GOES BACKWARDS at the wrap. The client's
+      `SurfacePreview.edgeNs` clamps MONOTONE, so after the first wrap a following pane's edge sits UP
+      TO 5 SECONDS AHEAD of the newest row that actually exists.
+      Harmless today - the pyramid still answers the trace's slice - but it is a real inconsistency in
+      the live-edge clock, and the live-edge clock is about to carry much more weight (T-460, T-468,
+      and playback in T-463, which deliberately advances a second position over history).
+      DECIDE WHICH SIDE IS WRONG, and say why rather than patching the symptom. Either a looping
+      replay should present MONOTONE capture time (a new epoch per lap, so the device contract keeps
+      its promise) or the client must stop assuming the edge only moves forward. THE FIRST IS
+      PROBABLY RIGHT - "capture time is monotone" is the kind of promise the device interface should
+      keep so that no consumer has to defend against it - but it is a device-contract change, so it
+      needs stating rather than assuming.
+      NOTE THE FAMILY: capture clock versus wall clock has bitten this repo three times (T-448
+      compared them at ~27x real time). This is the same family one layer over: capture clock versus
+      ITSELF, across a loop boundary.
+      DoD: the decision stated with its reasoning; whichever side changes, a test that fails if a
+      looped replay ever presents a backwards edge to a consumer that assumes monotonicity.
+    notes: |
+      Filed by the coordinator 2026-09-17 from T-457's report. Affects only --loop replays, which are
+      a test/e2e convenience rather than a product mode - hence normal, not high.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
