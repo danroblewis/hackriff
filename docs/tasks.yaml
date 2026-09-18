@@ -6843,7 +6843,7 @@ tasks:
   - id: T-348
     milestone: M2-hardening
     title: A paused view costs the same CPU as a playing one, which matters on battery
-    status: todo
+    status: in-progress
     priority: low
     deps:
     - T-339
@@ -10640,7 +10640,7 @@ tasks:
       naming the stale one.
       So this ticket is not "fix a gate constant" - it is fix the estimator at both of its
       thresholds, and the gate follows.
-    commit: 06e4b7d
+    commit: "b85071d"  # was 06e4b7d, which never reached main until T-447 carried it
     result: |
       FIXED THE ESTIMATOR, not the constant - which is what the ticket preferred and what the evidence
       supported.
@@ -11792,7 +11792,7 @@ tasks:
   - id: T-447
     milestone: M3
     title: phase_features and derotate take their strong-envelope subset over the same broken mean rule T-431 just fixed
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: M3A
     deps: [T-431]
@@ -11826,6 +11826,41 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-classify`,
       `just test-crate hk-estimate`, `just test-one <name>` - then HAND BACK. Never `just gate`; the
       coordinator gates once at merge.
+    commit: "b85071d"
+    result: |
+      DONE - THE PREMISE REPRODUCES EXACTLY AND THE PREDICTED BLAST RADIUS DOES NOT, which is the result.
+      T-431's construction was reusable VERBATIM: a four-line strong_envelope_threshold(a) =
+      0.5 * on_level(a, mean(a)) called from derotate and phase_features. features@7 -> 8, both density
+      files refitted.
+      GATE FIGURES MOVED BY 0.0000: unknown recall / false-known 0.9444 / 0.0556 unchanged; known top-1 /
+      top-2, wrong-label overall / worst bin, all 40 per-family-per-bin rows and 11 abstention rows every
+      one identical. Largest density move across 598 dimensions: 0.05 sigma. The only movement is in the
+      HARNESS DRAW (ADR 7.2's second reading, NOT the gate): 0.934 -> 0.937, and psk-qam open set
+      0.819 -> 0.833 = ONE SNIPPET of 396. NOTHING EXCEEDS THE 0.0084 DRAW SD.
+      THE MECHANISM: DEROTATE SUMS PHASORS, so each pair is weighted by its own magnitude - the 90 % of
+      the subset that was noise carried 11 % of Sum|z| (13 959 -> 12 350), and coherence went 0.881 ->
+      0.995 against a DEROTATE_MIN_COHERENCE of 0.30, so THE DECISION WAS NEVER IN QUESTION AT EITHER
+      READING. The removed ramp moved 4e-4 rad/sample. THE SUBSET FRACTION IS A PROPERTY OF ITS COUNT, NOT
+      OF ANYTHING COMPUTED FROM IT - the same class of error as T-480's premise.
+      IT VERIFIED THE REFIT IS DETERMINISTIC FIRST: re-running fit-densities on an UNMODIFIED tree
+      reproduces the checked-in files BYTE FOR BYTE, so the whole density diff is attributable to the
+      feature. That is what makes "no move" a measurement rather than an absence.
+      THE T-240 DEFECT IS INDEPENDENT, and the test is mechanical: the phase is unwrapped CUMULATIVELY
+      FROM SAMPLE 0, so the noise's random walk through every off gap is already inside the value at each
+      on sample BEFORE any subset is taken. Selecting the right samples changes which points of that walk
+      are read, not that it happened - pulse still reads sigma_dp 41-87 rad at 10 dB across six seeds.
+      Both OBSERVATION_STATISTICS exemptions stand, now stating WHICH of the two defects each is exempt
+      for.
+      PROPERTIES PINNED WITH CLOSED FORMS: the subset fraction against d(1-P_miss) + (1-d)P_false, with
+      P_false = exp(-t^2/N) (Rayleigh, exact) and P_miss a Rician tail, EVALUATED AT the true on amplitude
+      so it pins the THRESHOLD rather than just the arithmetic; and both callers bound, because a rule
+      nothing calls is worth nothing - derotate by the ramp it removed, phase_features by its ABSTENTION.
+      Non-vacuity by injection: helper reverted -> both tests fail; both callers reverted with the helper
+      intact -> only the binding test fails; phase_features alone reverted -> only the abstention half.
+      THIS MERGE ALSO LANDED T-431, whose commit 06e4b7d was marked done on the board but had NEVER
+      REACHED MAIN - found because T-447 needed its construction. The third instance (frequency_features,
+      seven IF dimensions) is measured, recorded at the site, and filed as T-488.
+      Gate: full, passed - the first acceptance-ci over these refitted densities.
   - id: T-448
     milestone: M2-hardening
     title: view_pause_keeps_capture fails at 28 threads and once at 8 - a live undiagnosed defect the thread cap now hides
