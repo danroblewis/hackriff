@@ -7565,7 +7565,7 @@ tasks:
   - id: T-374
     title: Nothing can say "these emitters are harmonics of one fundamental nobody can see"
     milestone: M3
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: M3B
     core_interface: true
