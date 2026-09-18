@@ -23,6 +23,22 @@
 //! `paused` flag, which meant one browser's Pause froze every other browser's waterfall. Pause is
 //! the client's own time window now ([`crate::config::DisplaySettings`] says why), so the rows go
 //! out for as long as the run does and a held view simply stops advancing over them.
+//!
+//! **And pausing is not where the battery goes (T-348).** Measured on `hk serve --replay` at
+//! 2.4 Msps (fft 4096, 25 rows/s), steady state, no consumer, three interleaved 60 s windows of
+//! process CPU: skipping this reader's `stft.push` entirely saves ~1.7 of ~11 CPU-seconds per 60 s
+//! of wall clock, ~13% of the pipeline's CPU (~0.03 of ~0.18 cores). Essentially all of it is the
+//! FFT — skipping only `Output::row` (the EMA, the dB conversion, the serialize, the publish)
+//! saves nothing measurable at 25 rows/s, and neither does an attached consumer, which was drawing
+//! 407 kB/s for free. **None of that 13% is reachable by pausing,** for two deliberate reasons:
+//! there is no run-wide pause left to check (above), and the client keeps one socket per session
+//! whatever its panes do, because T-445/T-457 put the live-edge capture clock, the tuned geometry
+//! and the newest trace row on it — a frozen pane still needs the first two, so `open_consumers()`
+//! stays ≥ 1 while any browser is open. The only lever on that 13% is therefore "nothing is
+//! subscribed at all", which is the headless scheduled-survey case rather than the paused-screen
+//! one; T-489 carries it with the hazards it has to handle. What can never be saved either way is
+//! the ring read and the `cursor.set` below: reader 3 holds a gate cursor, so it drains the ring
+//! whether or not anyone is looking, or a lossless run stalls capture behind it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};

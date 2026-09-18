@@ -6843,7 +6843,7 @@ tasks:
   - id: T-348
     milestone: M2-hardening
     title: A paused view costs the same CPU as a playing one, which matters on battery
-    status: in-progress
+    status: done
     priority: low
     deps:
     - T-339
@@ -6857,6 +6857,57 @@ tasks:
       as mattering. Measure the actual saving available before changing anything: if the STFT must run regardless
       to keep the ring drained and the gate cursor advancing, the honest answer may be that there is nothing
       to save, and that is a fine result to record'
+    notes: 'MEASURED, NO CHANGE TO THE PIPELINE - the saving is real but pause cannot reach it. (1) The
+      premise is stale: T-347 removed the run-wide pause entirely, so there is no pause check in spectrum.rs
+      to move, and cursor.set ordering is untouched because nothing was changed. (2) Size of the prize,
+      subject = total process CPU (user+sys) of `hk serve --replay` at 2.4 Msps / fft 4096 / 25 rows/s,
+      no consumer, three interleaved 60 s steady-state windows after a 15 s warm-up: baseline 11.44/9.88/11.70
+      CPU-s per 60 s wall, with the spectrum reader''s stft.push skipped 9.03/9.83/9.03 - delta ~1.7 CPU-s
+      per 60 s, ~13% of pipeline CPU (~0.03 of ~0.18 cores). Five of six samples separate cleanly; the
+      baseline itself varies +-9% with other agents on the box. (3) It is ALL the FFT: skipping only Output::row
+      (EMA, dB, serialize, publish) moved nothing measurable and the sign flipped between pairs (8.52/6.82
+      base vs 8.01/7.44), and an attached consumer drawing 407 kB/s cost nothing measurable either (30 s
+      interleaved: no client 5.51/6.46, client 5.62/6.26). (4) DO NOT use one-shot `hk replay` for this
+      question - a 0.6-5 s run is dominated by one-off costs (DB open, the hk-survey receiver-line window,
+      model init) and dilutes the view''s share to 1.4-7.3% across three fixtures. (5) Discarded instrument:
+      a CLOCK_THREAD_CPUTIME_ID probe per reader thread billed hk-spectrum only 0.052-0.059 s of a 2.12 s
+      process total, but the probed threads summed to 0.33 s of 7.69 s at 20 Msps because compute::stft
+      dispatches to a shared CPU worker pool - the counter measured the caller, not the work (T-454 shape).
+      (6) Why pause cannot reach the 13%: the client keeps ONE spectrum socket per session whatever its
+      panes do, because T-445/T-457 put the live-edge capture clock, the tuned geometry and the newest trace
+      row on it, and a frozen pane still needs the first two - so open_consumers() stays >=1 while any browser
+      is open. The client side is already gated correctly (surface/preview.ts:589-591 refreshes the live
+      edge only for `following` viewports, T-460). The only lever on the 13% is "nothing subscribed at all",
+      i.e. the headless scheduled-survey case, filed as T-489. Finding recorded in the spectrum.rs module
+      header.'
+    commit: "19aec9b"
+  - id: T-489
+    milestone: M2-hardening
+    title: An unwatched spectrum stream still pays for its FFT, which is 13% of pipeline CPU on a headless
+      survey run
+    status: todo
+    priority: low
+    deps:
+    - T-348
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    acceptance: 'T-348 measured it: the always-on spectrum reader''s STFT is ~13% of pipeline CPU (~0.03
+      of ~0.18 cores at 2.4 Msps, steady state), and it runs whether or not anything is subscribed. Pausing
+      cannot reclaim it (the client holds a socket per session regardless - see T-348), but a headless run
+      can: product workflow #2 is "run configurable scans on a schedule", which on battery means hours with
+      no browser attached. PublisherHandle::open_consumers() already exists, so the gate is cheap to express
+      - the care is all in the hazards. (a) Reader 3 must STILL read the ring and call cursor.set(chunk.end_sample())
+      every iteration; only stft.push is skipped, or a lossless run stalls capture behind its gate cursor.
+      (b) The publisher must still be OFFERED while idle or nothing can ever subscribe: Output::reoffer is
+      what registers the handle with the hk-api bridge, so gating the offer is circular. (c) StftProcessor
+      retains a partial buffer, so resuming after a skipped gap would stitch stale samples into a frame carrying
+      a wrong timestamp - flush when going idle, and REBUILD (not flush) when resuming, resetting avg_rows.
+      (d) /spectrum/rows would read 0 on a headless `hk replay`, changing the run summary; 11 test files set
+      a stream_sink and are unaffected, but anything asserting rows without one (e.g. signal_062_pipeline.rs:148)
+      is not. Definition of done: the measured saving reproduced on a headless run, the gate cursor still
+      advancing with zero consumers (assert it), and rows resuming within one read timeout of a subscriber
+      attaching. Real-time path: review before merge.'
   - id: T-349
     milestone: M2-hardening
     title: Timestamp is serde-transparent over i64, so the same response can carry nanoseconds and seconds
@@ -14099,7 +14150,7 @@ tasks:
   - id: T-488
     milestone: M3
     title: frequency_features takes the SAME broken strong-envelope subset, over seven IF dimensions - the third instance
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: M3A
     depends_on: [T-447]
