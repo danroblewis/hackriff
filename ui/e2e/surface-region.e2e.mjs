@@ -46,34 +46,34 @@ import { Browser } from "./harness.mjs";
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 
 /**
- * The per-viewport chrome readout the page draws: moving the view changes it, and nothing else does.
+ * The per-viewport chrome readout the page draws, projected to the part a GESTURE can move.
  *
- * WITH ONE EXCEPTION, WHICH IS WHY THIS IS A PROJECTION AND NOT THE RAW TEXT. A *following* pane's
- * `where` line ends in its offset from the live edge — `LIVE`, or `−281 ms` when the render loop has
- * fallen behind the capture that is still arriving. That offset drifts with WALL-CLOCK LAG and no
- * gesture touches it, so comparing the raw string makes every assertion here load-sensitive: an
- * `equal` ("it must not have panned") goes red under builder load, and — worse, because it is
- * silent — a `notEqual` ("a plain drag must pan") can go GREEN on drift alone, without any pan.
- * Measured on main at three concurrent builders: `−0 ms` became `−281 ms` with the frequency, the
- * span and the level all byte-identical.
+ * WHY A PROJECTION. The `where` line ends in the pane's offset from the LIVE EDGE — `LIVE`, or
+ * `−281 ms`. That offset is `edge − t1`, and **`edge` is not view state**: it advances as capture
+ * arrives, with no gesture touching it. Comparing the raw string therefore makes every assertion
+ * here load-sensitive — an `equal` ("it must not have panned") goes red, and, worse because it is
+ * silent, a `notEqual` ("a plain drag must pan") can go GREEN on drift alone, with no pan at all.
  *
- * So while a pane is FOLLOWING, the offset is dropped: a following pane sits at the live edge by
- * definition, so its time position carries nothing a pan could change — a pan in time STOPS it
- * following, which `following` itself reports. While a pane is NOT following the offset is a fixed
- * property of the view and is kept, because there it is exactly what a time pan moves.
+ * T-478 FIRST DROPPED THE OFFSET ONLY WHILE FOLLOWING, AND THAT WAS EXACTLY BACKWARDS. The reasoning
+ * was that a paused pane's offset is "a fixed property of the view". It is not. A FOLLOWING pane
+ * tracks the edge, so its offset stays near zero and only jitters; a PAUSED pane holds a fixed
+ * capture time while the edge runs away from it, so its offset GROWS WITHOUT BOUND — which is
+ * precisely the failure that survived the first fix and blocked three merges:
  *
- * This narrows what is compared; it does not weaken it. Everything a pan alters — centre, span,
- * level, and whether the pane still follows — is still compared exactly.
+ *     actual   "99.787 MHz ± 1.68 MHz · −281 ms" … "following": false
+ *     expected "99.787 MHz ± 1.68 MHz · −0 ms"   … "following": false
+ *
+ * Same centre, same span, same level, same follow state, and the view had not moved.
+ *
+ * So the offset is dropped in BOTH states. What a pan actually changes is the WINDOW — centre and
+ * span — and whether the pane still follows; both are compared exactly, and a pan in time that
+ * leaves the edge also flips `following`, which is compared. Nothing a gesture can do is excluded.
  */
-const READOUT = `JSON.stringify([...document.querySelectorAll('.hk-surface-viewport')].map((v) => {
-  const following = v.getAttribute('data-following') === 'true';
-  const where = v.querySelector('.hk-surface-where')?.textContent ?? '';
-  return {
-    where: following ? where.split('\\u00b7')[0].trim() : where,
-    level: v.querySelector('.hk-surface-level')?.textContent ?? '',
-    following,
-  };
-}))`;
+const READOUT = `JSON.stringify([...document.querySelectorAll('.hk-surface-viewport')].map((v) => ({
+  where: (v.querySelector('.hk-surface-where')?.textContent ?? '').split('\u00b7')[0].trim(),
+  level: v.querySelector('.hk-surface-level')?.textContent ?? '',
+  following: v.getAttribute('data-following') === 'true',
+})))`;
 
 /** Every pointer-ish event the CANVAS ITSELF received, in order, with the flags the browser set. */
 const PROBE = `(() => {
