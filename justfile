@@ -58,6 +58,8 @@ gate *args:
 #     index is not known to be a merge result, so it forces the FULL gate.
 #   - every uncommitted path it did not classify is PRINTED with the class it would have had.
 #     No ignore list, nothing silent: `fixtures/` STAGED in a merge is still full.
+#
+# THE COORDINATOR'S per-merge gate: classify the MERGE INDEX, not the working tree (T-424).
 gate-merge *args:
     uv run --locked --project py python -m hkpy.gate --merge {{args}}
 

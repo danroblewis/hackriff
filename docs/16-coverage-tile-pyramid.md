@@ -720,6 +720,46 @@ front ends widen *coverage* and never split the *view*; under this design the su
 surface and the panes are viewports onto it, so the invariant survives in a stronger form: there is
 exactly one thing being looked at, and panes are where you look from.
 
+### 8.4a How the pane model expresses pause, follow and level (T-442, 2026-09-17)
+
+Built in `ui/src/surface/panes.ts`, over T-440's renderer. Four decisions worth recording, because
+each one is a place the obvious implementation reintroduces a defect the repo has already paid for.
+
+**A pane's pause IS its time window — there is no flag.** T-347 retired `/api/control/pause` because
+a run-wide boolean cannot represent N viewers; a per-pane boolean beside a per-pane window is the
+same defect scoped smaller, because the two can disagree. So `TimeWindow` is a discriminated union
+whose arms **carry different data**: a following pane has *no centre of its own* (it borrows the
+growing edge, re-derived every frame), and a frozen one has one. "Scrubbed but not paused" — the
+third state T-347 refused — is therefore not a state the type can spell. Freezing is a **coordinate
+change, not a mode change**: it writes down the window the pane was already showing, so the frame
+you pause on is identical to the frame before it, and pausing an already-scrubbed pane is a no-op
+rather than a jump to the live edge.
+
+**Pause is unable to reach anything.** Every pane operation — pan, zoom, pause, resume, split, close
+— is arithmetic over this client's own view state, so *on the wire, pausing is nothing*. That is
+what makes one pane unable to affect another pane, another browser, or the radio, and it is asserted
+the way T-340 asserts its own control: a spy `fetch` sees an **empty call list** after the whole
+gesture vocabulary has been exercised. Capture, the ring and detection are never consulted; the live
+edge is *reported in* to `views(edgeNs)`, never controlled from here.
+
+**Panning in time freezes first, and never silently re-follows.** A pane pinned to the edge that
+also carries an offset from it is exactly the third state; so a scrub converts the anchor. Dragging
+forward clamps at the edge and *stays frozen* — re-entering follow is an explicit act, not a
+consequence of a gesture ending near the edge (the T-407 lesson, one axis over).
+
+**The level is stated per pane** (§8.5a's correction). `paneStatuses()` joins pane state to the
+`PaneReport` the renderer actually drew with, so the stated level is the drawn level rather than a
+second calculation that could disagree with the pixels, and `levelDivergenceNote()` is the sentence
+shown when panes differ: *a coarser cell is the maximum over more cells, so the same energy
+legitimately reads differently — same ramp, same scale, stated level.* Stating it is the fix; hiding
+it is what invites the bug report.
+
+**T-380's invariant, operationalised:** `split` hands back two panes on the **identical** box, and
+they diverge only when the user moves one; the last pane cannot be closed, because with no viewport
+there is nowhere to look *from* and the surface does not stop existing because the window did. A
+pane's `device` selects **whose coverage plane decides its grey** (`any` = the union) — a coverage
+selector, not a second subject.
+
 ### 8.5 What this removes
 
 The two bespoke edge-scrubber widgets collapse into canvas pan/zoom plus the minimap. The
