@@ -334,3 +334,86 @@ def test_the_decision_is_always_printed_before_anything_runs():
     assert "ui/src/app/main.ts" in text
     assert "just test-ui" in text
     assert "merge base with main" in text
+
+
+# --------------------------------------------------------------- T-400 build env (in-process)
+#
+# `just gate` shelled out to the suites without CARGO_INCREMENTAL=0 (and the rest of T-144's
+# build flags), so the coordinator's own per-merge check regenerated target/debug/incremental
+# every run — precisely the state every agent brief is configured to avoid. The fix moves those
+# flags into the gate's own subprocess environment, never into the justfile globally (a
+# developer running `just test`/`just lint`/`just build` by hand may still want incremental).
+#
+# These tests must not duplicate the suite-selection tests above: they assert only that the
+# CHOSEN commands are unchanged and that each one is launched with the T-144 env layered on top
+# of whatever the caller already had — never that the flags change which suites run.
+
+
+def test_gate_build_env_is_exactly_t144s_three_flags():
+    from hkpy.gate import GATE_BUILD_ENV
+
+    # Locks the fix to T-144's own flags, not a superset copied by reflex and not a subset
+    # quietly dropped. nextest's thread cap is deliberately absent — T-436 already pins it in
+    # .config/nextest.toml for every nextest invocation, gate included, so repeating it here
+    # would be a second, driftable copy of a rule that already lives in the runner.
+    assert GATE_BUILD_ENV == {
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+        "CARGO_BUILD_JOBS": "6",
+    }
+
+
+def test_suite_env_adds_the_flags_without_touching_anything_else():
+    from hkpy.gate import suite_env
+
+    base = {"PATH": "/usr/bin", "HOME": "/home/x"}
+    env = suite_env(base)
+    assert env["PATH"] == "/usr/bin"
+    assert env["HOME"] == "/home/x"
+    assert env["CARGO_INCREMENTAL"] == "0"
+    assert env["CARGO_PROFILE_DEV_DEBUG"] == "line-tables-only"
+    assert env["CARGO_BUILD_JOBS"] == "6"
+    # Pure: the caller's mapping is never mutated.
+    assert base == {"PATH": "/usr/bin", "HOME": "/home/x"}
+
+
+def test_suite_env_overrides_a_conflicting_value_from_the_caller():
+    from hkpy.gate import suite_env
+
+    # If something upstream already exported CARGO_INCREMENTAL=1, the gate's own suites still
+    # get 0 — that is the entire point of the ticket, so the gate's flags must win.
+    assert suite_env({"CARGO_INCREMENTAL": "1"})["CARGO_INCREMENTAL"] == "0"
+
+
+def test_main_runs_the_same_suites_with_the_build_env_layered_on(monkeypatch, tmp_path):
+    # Full round-trip through `main()`, but with subprocess.run faked out so this stays a
+    # targeted, in-process test rather than an actual build. Asserts two independent things
+    # that the fix must hold at once: the SUITES CHOSEN are exactly what classify() says (the
+    # flags must not change that), and every one of them is launched with T-144's env plus
+    # whatever the caller's environment already had.
+    from hkpy import gate as gate_mod
+
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    class FakeCompleted:
+        returncode = 0
+
+    def fake_run(cmd, cwd=None, env=None, check=False):
+        calls.append((cmd, env))
+        return FakeCompleted()
+
+    monkeypatch.setattr(gate_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(gate_mod.shutil, "which", lambda name: "/usr/bin/just")
+    monkeypatch.setenv("SOME_UNRELATED_VAR", "kept")
+
+    rc = gate_mod.main(["--files", "py/hkpy/synth.py", "--root", str(tmp_path)])
+
+    assert rc == 0
+    assert [" ".join(cmd) for cmd, _ in calls] == [
+        " ".join(c) for c in classify(["py/hkpy/synth.py"]).commands()
+    ]
+    for _, env in calls:
+        assert env["CARGO_INCREMENTAL"] == "0"
+        assert env["CARGO_PROFILE_DEV_DEBUG"] == "line-tables-only"
+        assert env["CARGO_BUILD_JOBS"] == "6"
+        assert env["SOME_UNRELATED_VAR"] == "kept"
