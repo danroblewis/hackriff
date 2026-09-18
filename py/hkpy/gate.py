@@ -27,6 +27,34 @@ The decision is always printed before anything runs. A silent classifier is a wo
 of the judgement it replaces: an agent or a human has to be able to see the choice and
 challenge it, which means seeing the deciding files, not just the verdict.
 
+**Two subjects, two sources (T-424).** The default source — merge base with `main` *plus*
+everything uncommitted, untracked included — answers *"what is in my tree that isn't on
+main?"*. That is the right question for an **agent** checking its own work: an untracked
+`newdir/thing.rs` it has not `git add`ed yet is still going to be committed, so it is part
+of the change and must be classified. The **coordinator's per-merge gate asks a different
+question** — *"what will this merge put on main?"* — and `--merge` answers exactly that by
+classifying the **index during an in-progress merge**, which git itself built as the merge
+result versus HEAD. Untracked files are, by construction, not in that index and cannot reach
+main through that merge; the permanently-untracked `tools/` and diagnostic captures in the
+coordinator's checkout were degrading every merge gate to full for files that can never be
+part of any merge.
+
+That narrowing is guarded, not assumed:
+
+* `--merge` **requires an in-progress merge** (`MERGE_HEAD`, or `SQUASH_MSG` for a squash).
+  Without one there is no guarantee the index is a merge result, so it **forces the full
+  gate** rather than classifying whatever happens to be staged. Fail-closed, as everywhere.
+* Every uncommitted path it did *not* classify is **printed**, with the class it would have
+  had. Nothing is ignored silently; there is no ignore list, and `fixtures/` staged in a
+  merge is still full.
+
+The counterexample worth stating: an untracked fixture *can* change what a suite sees when
+that suite runs. Classifying untracked paths as FULL never protected against that — the
+suites read the working tree, so a stray file changes their result at whatever class was
+chosen. Fail-closed on untracked paths buys **cost, not safety**, for the merge subject. It
+buys real safety for the agent subject, where untracked means not-yet-added-but-will-land,
+which is why the default keeps it.
+
 Stdlib only, so it can run as `python3 py/hkpy/gate.py` as well as `just gate`.
 """
 
@@ -293,6 +321,33 @@ def worktree_changes(root: str) -> list[str] | None:
     return paths
 
 
+def merge_state(root: str) -> str | None:
+    """Name the in-progress merge, or `None` if there isn't one.
+
+    `git merge --no-ff --no-commit` leaves `MERGE_HEAD`; `git merge --squash` leaves
+    `SQUASH_MSG` and no `MERGE_HEAD`. Either one means **git** built the index from a merge,
+    which is the whole precondition `--merge` rests on: the index is then the merge result
+    versus HEAD, not an arbitrary pile of `git add`s.
+    """
+    if _git_ok(["rev-parse", "-q", "--verify", "MERGE_HEAD"], root) is not None:
+        return "MERGE_HEAD"
+    path = _git_ok(["rev-parse", "--git-path", "SQUASH_MSG"], root)
+    if path and os.path.exists(os.path.join(root, path.strip())):
+        return "SQUASH_MSG"
+    return None
+
+
+#: What `--merge` classifies, said out loud in the printed decision.
+MERGE_SUBJECT = "merge index vs HEAD — exactly what this merge puts on main"
+
+#: The misuse guard. `--merge` outside a merge cannot justify its own narrowing, so it
+#: fails closed to the full gate rather than classifying whatever happens to be staged.
+NOT_A_MERGE = (
+    "--merge outside an in-progress merge: nothing guarantees the index is a merge result, "
+    "so the narrowing is unjustified and the full gate runs"
+)
+
+
 @dataclass(frozen=True)
 class Source:
     """Where the changed-file list came from, for printing."""
@@ -300,12 +355,38 @@ class Source:
     description: str
     paths: list[str] | None
     forced: str | None = None
+    #: Uncommitted paths deliberately left out of the classified set (`--merge` only).
+    #: Printed with the class they would have had, so the narrowing is visible, never silent.
+    outside: tuple[str, ...] = ()
+
+
+def merge_source(
+    staged: list[str] | None, uncommitted: list[str] | None, state: str | None
+) -> Source:
+    """Build the `--merge` Source from three already-gathered git facts. Pure.
+
+    `staged` is `git diff --cached` (the merge result vs HEAD), `uncommitted` is the whole
+    working-tree change set including untracked, `state` names the in-progress merge.
+
+    The narrowing happens here and nowhere else, so it is one testable function: classify
+    `staged`, and carry everything in `uncommitted` that is not in it as `outside` — printed,
+    never classified, never silently dropped.
+    """
+    if state is None:
+        return Source("merge index", None, forced=NOT_A_MERGE)
+    if staged is None or uncommitted is None:
+        return Source(
+            "merge index", None, forced="cannot read the index or the working tree"
+        )
+    inside = {normalize(p) for p in staged if normalize(p)}
+    outside = tuple(sorted({normalize(p) for p in uncommitted if normalize(p)} - inside))
+    return Source(f"{MERGE_SUBJECT} [{state}]", list(staged), outside=outside)
 
 
 def resolve_source(args, root: str) -> Source:
     """Pick the diff to classify, and say so.
 
-    Explicit wins: `--files`, `--staged`, `--base`, `--worktree`. Otherwise:
+    Explicit wins: `--merge`, `--files`, `--staged`, `--base`, `--worktree`. Otherwise:
 
     * In GitHub Actions on a pull request, the PR base (`origin/$GITHUB_BASE_REF`).
     * In GitHub Actions on a push, **the full gate**. There is no base to compare against
@@ -314,6 +395,11 @@ def resolve_source(args, root: str) -> Source:
     * Locally, the merge base with `main` **plus** everything uncommitted — which on `main`
       itself degenerates to just the uncommitted set, exactly as it should.
     """
+    if args.merge:
+        return merge_source(
+            staged_changes(root), worktree_changes(root), merge_state(root)
+        )
+
     if args.files is not None:
         return Source("explicit --files", list(args.files))
 
@@ -398,6 +484,21 @@ def render(decision: Decision, source: Source, phase: str) -> list[str]:
         if len(deciding) > _MAX_PRINTED:
             out.append(f"gate:   ... and {len(deciding) - _MAX_PRINTED} more")
 
+    if source.outside:
+        out.append(
+            f"gate: outside  = {len(source.outside)} uncommitted path(s) NOT in this merge, "
+            "listed with the class they would have had:"
+        )
+        for path in source.outside[:_MAX_PRINTED]:
+            klass, reason = classify_path(path)
+            out.append(f"gate:   {path}  [would be {klass}] {reason}")
+        if len(source.outside) > _MAX_PRINTED:
+            out.append(f"gate:   ... and {len(source.outside) - _MAX_PRINTED} more")
+        out.append(
+            "gate:            none of these can reach main through this merge. They CAN "
+            "change what a suite that does run sees, so judge the run, not the class."
+        )
+
     commands = decision.commands(phase)
     phase_note = "" if phase == PHASE_ALL else f" (phase: {phase})"
     if decision.is_empty:
@@ -425,6 +526,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     src = parser.add_argument_group("what to classify (default: merge base with main + uncommitted)")
+    src.add_argument(
+        "--merge",
+        action="store_true",
+        help=(
+            "the coordinator's per-merge gate: classify the index of an in-progress merge "
+            "(what this merge puts on main). Requires a merge in progress, or it runs full."
+        ),
+    )
     src.add_argument("--base", metavar="REF", help="diff against the merge base with REF")
     src.add_argument("--staged", action="store_true", help="classify the staged set only")
     src.add_argument(

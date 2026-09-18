@@ -249,17 +249,87 @@ satisfy a word in a table would be the wrong trade.
 
 **Where the decision comes from.** By default: the merge base with `main` (not `main` itself - a moved
 main makes unrelated files look changed) plus everything uncommitted, including untracked files.
-`--base REF`, `--staged`, `--worktree` and `--files a b c` override it; `--dry-run` prints the decision
-and runs nothing. In GitHub Actions, a pull request uses `origin/$GITHUB_BASE_REF`; a **push** has no
+`--merge` (see below), `--base REF`, `--staged`, `--worktree` and `--files a b c` override it;
+`--dry-run` prints the decision and runs nothing. In GitHub Actions, a pull request uses `origin/$GITHUB_BASE_REF`; a **push** has no
 base worth trusting and runs the full gate, so `main` - the branch everything else is measured against
 - is always verified whole. Renames and deletions count as touching the path (both sides of a rename).
 An empty diff is a printed no-op, not an accidental full run.
 
-In practice, **run it in the task worktree before merging**, where the default source is exactly the
-branch's own diff. Untracked files count as changes on purpose - a new `newdir/thing.rs` nobody has
-`git add`ed is still a change, and leaving it out is the one way this could fail open - so a stray
-scratch file (or the untracked `tools/` in the main checkout) forces the full gate. That is visible
-rather than mysterious: it is printed as a deciding file, and `--base REF` or `--files …` overrides it.
+In practice, **an agent runs `just gate` in its task worktree**, where the default source is exactly
+the branch's own diff. Untracked files count as changes on purpose - a new `newdir/thing.rs` nobody
+has `git add`ed is still a change, and leaving it out is the one way this could fail open - so a stray
+scratch file forces the full gate. That is visible rather than mysterious: it is printed as a deciding
+file, and `--base REF` or `--files …` overrides it.
+
+#### Which source the coordinator's per-merge gate uses: `just gate-merge` (T-424, decided 2026-09-17)
+
+**The decided rule.** There are two subjects, so there are two sources, and each command answers one
+question:
+
+| who | command | question it answers | source |
+|---|---|---|---|
+| an **agent**, checking its own work in a task worktree | `just gate` | *what is in my tree that isn't on main?* | merge base with `main` **+ everything uncommitted, untracked included** |
+| the **coordinator**, at merge, from inside `git merge --no-ff --no-commit` | **`just gate-merge`** | *what will this merge put on `main`?* | **the merge index vs HEAD** (`git diff --cached`) |
+| CI | `just gate --phase …` | unchanged | PR: merge base with `origin/$GITHUB_BASE_REF`; push: the full gate |
+
+**Why the coordinator needed a different source.** The main checkout permanently holds untracked files
+that can never be committed: `tools/` (the user's HackRF experiments, excluded by CLAUDE.md) and
+diagnostic SigMF captures under `fixtures/`. Both are unclassified-or-`fixtures/`, both therefore force
+the full gate, and both are *always there* - so the diff-aware gate degraded to **always-full in the
+one tree it was built to help**. Measured while merging T-415: a single-file ADR text edit was charged
+`lint + test + acceptance-ci` (~7 min) instead of `docs` (nothing). T-409, ui-only, would have been
+charged the same instead of ~10 s.
+
+**The weakening argument, stated rather than assumed.** `--merge` classifies a **strict subset** of the
+paths the default classifies, and `classify()` is monotone - any `full` path forces `full` - so a
+smaller input set can only ever produce a **cheaper or equal** gate. It is a narrowing, and T-396's own
+rule is that the gate must not certify its own weakening. Three things make this one sound:
+
+1. **It is not "ignore some files"; it is "classify the right diff."** The gate's guarantee is about
+   what lands on `main`. During `git merge --no-ff --no-commit`, **git itself** builds the index as the
+   merge result versus HEAD, and `git commit` commits the index. So the index *is* the change being
+   certified. Untracked files are not in it and cannot reach `main` through that merge. For this
+   subject the default source is the one that is wrong: it classifies *what is in my tree*, which is a
+   different question. The default stays right for an agent, where untracked means
+   **not-yet-`git add`ed but about to be committed** - there, untracked genuinely is part of the change.
+2. **The one real counterexample does not survive contact.** An untracked fixture *can* change what a
+   suite sees, because the suites read the **working tree**. But classifying untracked paths as `full`
+   never protected against that: the stray file changes the suite's result whenever that suite runs, at
+   whatever class was chosen. Fail-closed on untracked paths therefore buys **cost, not safety**, for
+   the merge subject - it makes a contaminated run expensive, not clean. Working-tree contamination is
+   a property of *where the suites run*, not of *how the diff is classified*, and the honest mitigations
+   are a clean checkout and CI, not a more expensive classification. (The narrow sub-case - an untracked
+   fixture that would break acceptance, on a `docs`-only merge that skips acceptance - is not a hole
+   either: a `docs`-only merge skips acceptance **by design**, under any source.)
+3. **The narrowing is guarded, and the guards are the part that is tested.**
+   - **It requires an in-progress merge.** `--merge` checks `MERGE_HEAD` (or `SQUASH_MSG`, for
+     `git merge --squash`). Without one, nothing guarantees the index is a merge result, so it **forces
+     the full gate** rather than classifying whatever happens to be staged. A blanket `--staged` would
+     not have this property, which is why the recipe is `--merge` and not `--staged`.
+   - **Nothing is silent.** Every uncommitted path it did *not* classify is **printed**, with the class
+     it would have had (`tools/fm_rx.py [would be full] unclassified path — the gate fails closed`).
+   - **There is no ignore list, and no path is exempt.** `fixtures/` staged into a merge is still
+     `full`; so is `tools/` if it is ever actually committed. The only thing that changed is *which set
+     is classified* - which was the explicit constraint on this ticket, because a classifier with a
+     silent ignore list is precisely the shape of self-weakening the fail-closed rule exists to prevent.
+
+**What misuse would let through, and how it shows.** Running `just gate-merge` when the index is
+deliberately partial (staged half a change, no merge in progress) is caught by guard 3 and runs full.
+Running it inside a real merge while the tree holds an unstaged edit to something the suites read - say
+a modified-but-unstaged `.config/nextest.toml` - classifies without it, so a suite that the default
+would have run may not. That path is printed in the `outside` list every time, and the residual risk is
+**delayed discovery of a problem that exists only in the coordinator's tree**, never a change reaching
+`main` unverified. Periodic `just lint` + `just test` + `just acceptance-ci` by hand remains the
+backstop, as it already was.
+
+**Not done here, on purpose: proving a path inert.** A related complaint has a different shape - T-437
+merged spike artifacts (JS/JSON/PNG/markdown under `spikes/`, which the workspace `exclude`s, with no
+`.rs` and no Cargo files) and the gate said `full` because `spikes/` is unclassified. That was resolved
+by a **human proof recorded in the merge commit**, not by an exemption, and that is the right handling:
+an escalation that is argued and visible in git history is categorically different from a list the
+classifier consults silently. Generalising it ("can this path be *proved* inert?") would need the
+classifier to model what each suite reads, and would itself become a weakening surface. If it recurs it
+earns its own ticket.
 
 **It always prints its decision before running anything**, including the deciding files: a silent
 classifier is a worse version of the judgement it replaces, because nobody can see or challenge the
@@ -274,7 +344,8 @@ periodic/milestone check.
 
 The classifier is a pure function in `py/hkpy/gate.py`; `py/tests/test_gate.py` asserts the *chosen
 suites* for each class, the fail-closed case (`newdir/x.rs` -> full), the three `fixtures/` /
-`justfile` / `.github/` cases, and mixtures (`ui/` + `crates/` -> full).
+`justfile` / `.github/` cases, mixtures (`ui/` + `crates/` -> full), and - for `gate-merge` - that it
+classifies the index, prints what it narrowed away, exempts no path, and forces full outside a merge.
 
 **The gap this leaves - and the full gate left it too.** Contract tests assert that the *server* serves
 a route correctly; nothing asserts that the *client* asks for the right thing. T-367 found the time

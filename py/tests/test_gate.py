@@ -11,6 +11,8 @@ invented path nobody has classified is full.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from hkpy.gate import (
@@ -22,6 +24,8 @@ from hkpy.gate import (
     Decision,
     classify,
     classify_path,
+    forced_full,
+    merge_source,
     render,
     Source,
 )
@@ -181,6 +185,94 @@ def test_one_unclassified_file_drags_a_ui_change_to_full():
     assert d.label == FULL
     # Only the file that forced it is reported as deciding — the point of printing them.
     assert [p for p, _, _ in d.deciding()] == ["newdir/x.rs"]
+
+
+# ------------------------------------------------- the coordinator's merge gate (T-424)
+#
+# `--merge` is a NARROWING — it classifies fewer paths than the default, and the classifier
+# is monotone (any FULL path forces FULL), so a smaller input set can only ever be cheaper
+# or equal. T-396's rule is that the gate must not certify its own weakening, so the
+# narrowing is tested from both ends: that it does narrow (untracked `tools/` no longer
+# forces full), and that every guard which keeps it honest holds.
+
+
+def _merge(staged, uncommitted, state="MERGE_HEAD"):
+    """The Source `just gate-merge` would build from these git facts."""
+    return merge_source(staged, uncommitted, state)
+
+
+def test_merge_gate_classifies_the_index_not_the_working_tree():
+    # The measured T-424 case: a docs-only merge in a tree that permanently holds untracked
+    # `tools/` and an untracked diagnostic capture under `fixtures/`.
+    src = _merge(
+        ["docs/adr/0009-thing.md"],
+        [
+            "docs/adr/0009-thing.md",
+            "tools/fm_rx.py",
+            "fixtures/hackrf/capture-2026-09-16-101p3-diag/iq.sigmf-meta",
+        ],
+    )
+    assert src.forced is None
+    d = classify(src.paths)
+    assert d.label == DOCS
+    assert d.commands() == []
+
+
+def test_merge_gate_prints_every_path_it_did_not_classify():
+    # Silence is the failure mode that would make this a hidden ignore list. The paths it
+    # narrowed away are printed WITH the class they would have had, so the choice is
+    # visible and answerable — the same rule as printing the deciding files.
+    src = _merge(["docs/a.md"], ["docs/a.md", "tools/fm_rx.py", "fixtures/x.sigmf-meta"])
+    assert src.outside == ("fixtures/x.sigmf-meta", "tools/fm_rx.py")
+    text = "\n".join(render(classify(src.paths), src, "all"))
+    assert "tools/fm_rx.py" in text and "would be full" in text
+    assert "fixtures/x.sigmf-meta" in text
+    assert "NOT in this merge" in text
+
+
+def test_merge_gate_without_a_merge_in_progress_fails_closed_to_full():
+    # The misuse guard. Outside a merge nothing makes the index a merge result, so the
+    # narrowing is unjustified — and an unjustified narrowing runs the expensive gate.
+    src = merge_source(["docs/a.md"], ["docs/a.md"], None)
+    assert src.paths is None
+    assert "outside an in-progress merge" in (src.forced or "")
+    d = forced_full(src.forced)
+    assert [" ".join(c) for c in d.commands()] == [
+        "just lint",
+        "just test",
+        "just acceptance-ci",
+    ]
+
+
+def test_merge_gate_is_not_an_ignore_list_for_fixtures_or_tools():
+    # Nothing is exempt by PATH; the only thing that changes is WHICH SET is classified.
+    # A fixture staged into the merge is still full, exactly as under the default source.
+    src = _merge(["fixtures/x.sigmf-meta", "docs/a.md"], ["fixtures/x.sigmf-meta", "docs/a.md"])
+    assert classify(src.paths).label == FULL
+    # And so is a `tools/` file, if it is ever actually committed.
+    assert classify(_merge(["tools/fm_rx.py"], ["tools/fm_rx.py"]).paths).label == FULL
+
+
+def test_merge_gate_reports_an_unreadable_index_as_forced_full():
+    assert "cannot read" in (merge_source(None, [], "MERGE_HEAD").forced or "")
+    assert "cannot read" in (merge_source([], None, "MERGE_HEAD").forced or "")
+
+
+def test_merge_gate_names_the_merge_state_it_relied_on():
+    text = "\n".join(render(classify(["docs/a.md"]), _merge(["docs/a.md"], []), "all"))
+    assert "MERGE_HEAD" in text
+    assert "puts on main" in text
+    squash = _merge(["docs/a.md"], [], state="SQUASH_MSG")
+    assert "SQUASH_MSG" in squash.description
+
+
+def test_the_justfile_exposes_gate_merge_and_it_passes_the_flag():
+    # The recipe is the interface the coordinator actually types; if it drifts from the
+    # classifier the written rule in docs/10 stops describing what runs.
+    justfile = Path(__file__).resolve().parents[2] / "justfile"
+    text = justfile.read_text()
+    assert "\ngate-merge *args:" in text
+    assert "hkpy.gate --merge" in text
 
 
 # ---------------------------------------------------------------------- empty + shape
