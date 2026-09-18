@@ -11713,7 +11713,7 @@ tasks:
   - id: T-448
     milestone: M2-hardening
     title: view_pause_keeps_capture fails at 28 threads and once at 8 - a live undiagnosed defect the thread cap now hides
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     deps: [T-436, T-430]
@@ -11741,6 +11741,36 @@ tasks:
     notes: |
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-pipeline`,
       `just test-one <name>` - then HAND BACK. Never `just gate`; the coordinator gates at merge.
+    commit: "f377bbb"
+    result: |
+      FIXED. THE ASSERTION, identified without guessing: T-436's own A/B log survived in the
+      scratchpad and records detections_written: 0 while playing, every other counter nominal.
+      Line 261 and its phase-B sibling at 265. NOT T-430's mechanism - capture and ring read
+      2605056 and 2539520, well past 2500000.
+      THE CAUSE IS A CLOCK BOUNDARY, not a budget. Phases close in CAPTURED SAMPLES, and the
+      lossless flow gate pins every other asserted counter to that clock: the readers hold
+      GateCursors, so the capture thread stops once a block would run more than half a ring past
+      the slowest. A 2500000-sample phase therefore FORCES ~120 rows and their detections - they
+      cannot be zero. But `detections_written` is THE ONE ASSERTED COUNTER ON THE FAR SIDE OF THE
+      DETECT WRITER'S CHANNEL, which no cursor and no gate reaches: it advances when that thread
+      is scheduled and gets the repository lock, in WALL CLOCK, while the phase closes in capture
+      time an unpaced replay runs at ~27x real time. 5 s of capture is ~0.2 s of wall clock, so
+      ONE MISSED WRITER SLOT COSTS THE WHOLE PHASE.
+      RANGE, measured in captured samples and quantised by BATCH not block: idle median 0.50 M /
+      max 1.02 M (0.41 of a phase); 28 concurrent 0.50 M / 1.68 M (0.67); with fsync load 0.51 M /
+      3.9 M (1.56, 7 of 72 probes over 1.0). THE WALL-CLOCK GAP GROWS WITH CPU LOAD (11 ms ->
+      167 ms) WHILE THE CAPTURE-SAMPLE GAP DOES NOT - everything slows together. Only DISK latency
+      moves it, which is why 400 sequential, 96 concurrent and 300-under-load runs stayed green
+      and only an fsync hammer found it. The floor is 0.
+      FIX: T-433's rule one counter further. wait_advanced -> wait_phase will not close a phase
+      until capture AND the ring moved n samples AND detection produced a record AND stored a row,
+      naming whichever stalled. Nothing weakened - all six assertions stand - and one GAINED: at
+      run end every detection produced is a row in the repository, via SELECT count(*), which is
+      the guarantee the per-phase counter was being misread as.
+      RATES, old and new binaries side by side under identical fsync load: 28 processes 37/168
+      (22%) -> 0/168; 8 processes 3/80 (3.8%) -> 0/80. All 33 panics with surviving output were
+      line 261 or 265. The ~6x drop from 28 to 8 is exactly the sampling-rate effect T-436
+      documented - and why its cap made this harder to find, as T-436 predicted.
   - id: T-449
     milestone: M2-hardening
     title: presence_push's opens-once test fails 1 in 5 IN ISOLATION - not load, and a different test from the one T-383 cleared
@@ -11827,6 +11857,43 @@ tasks:
       `just gate`; the coordinator gates at merge. Never end your turn waiting on a background
       command, including one the harness backgrounded for you.
       NOTHING REACHES MAIN WITHOUT THE USER'S APPROVAL on this one - commit to task-t450 only.
+  - id: T-451
+    milestone: M2-hardening
+    title: decoded_capture's segments_roll test fails 2 in 10 AT THE CAPPED THREAD COUNT, and it is already in heavy-serial
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    deps: [T-448, T-436]
+    found_by: 'T-448 (2026-09-17), in the 20 crate runs it made while measuring its own fix'
+    acceptance: |
+      hk-pipeline::decoded_capture::segments_roll_and_the_oldest_are_evicted_within_the_quota,
+      decoded_capture.rs:542 - `assertion left == right failed ... right: Some(9787)`. Measured by
+      T-448 while verifying its own fix: 2 of 10 runs AT 8 THREADS and 2-3 of 10 at 28, with
+      a_pipeline_is_recorded_automatically... (line 379) firing once.
+      TWO THINGS MAKE IT ITS OWN TICKET rather than another instance: it is ALREADY IN
+      heavy-serial, so membership is not the lever (T-383 established max-threads = 1 serialises
+      the group against ITSELF and does nothing about the ~27 tests outside it); and it FAILS AT
+      THE CAPPED THREAD COUNT, so T-436's cap does not hide it either.
+      HISTORY TO READ FIRST: T-344 closed this file with NO CHANGE because its premise was stale -
+      0 failures in 10 runs at load 46-69, waits of LIMIT = 90 s against a measured 0.57-0.82 s, a
+      150x margin. That was right about what it measured. THIS IS A DIFFERENT ASSERTION in the
+      same file - an eviction quota, not a wait - and Some(9787) is a value comparison rather than
+      a timeout.
+      APPLY THE RULES THIS FAMILY EARNED: T-383 - a test may not bound a quantity whose natural
+      range it has not measured. T-430 - three sibling bounds moved in WHOLE 16384-SAMPLE CAPTURE
+      BLOCKS, so check whether 9787 is quantised. T-448 - check WHICH CLOCK, since it just showed
+      a counter on the far side of a channel advances in WALL clock while the phase closes in
+      CAPTURE time at ~27x real time, and that only DISK latency moved its range while CPU load
+      did not.
+      DoD: the measured range of whatever 9787 is, the cause, the fix, and before/after rates over
+      at least 10 runs at BOTH 8 and 28 threads. No retry, no bound raised to a number that passes
+      today, nothing weakened.
+    notes: |
+      T-448's fsync-hammer method is the one to reuse: it found a range CPU load could not move,
+      because the quantity was bounded by disk rather than by scheduling.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      FILTERSET TRAP worth knowing: `-E 'test(<file name>)'` matches NOTHING and exits non-zero,
+      which reads as a failure. Use `binary(<file>)` for a whole file.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
