@@ -11350,45 +11350,6 @@ tasks:
       IT ARGUED AGAINST MY SUGGESTED FIX AND WAS RIGHT: drawing no survey lattice would make a
       survey-overview tile PIXEL-IDENTICAL to a live-iq tile, erasing the tier rather than being
       imprecise about the pitch. It fell back to the tile's own served grid instead.
-    commit: 445fbef
-    result: |
-      DONE. THE FIFTH STATE (observed-but-not-yet-measured) is SPARSE DOTS ON A COLD DARK-BLUE
-      GROUND - CELL.AWAITING. The discriminator is already on the wire and needs no clock and no
-      prediction: coverage says observed, grid.max_db is null, and grid.frames is ZERO. frames > 0
-      with no level stays NO_LEVEL. A tile with no per-cell frame counts decodes to NO_LEVEL, the
-      claim that says least; the specific state is granted only on POSITIVE EVIDENCE - the
-      BiasTee::Unknown direction.
-      WHY DOTS AND NOT A SPINNER: THE MARK MUST NOT PROMISE ARRIVAL. T-446's defect wrote exactly
-      this cell - coverage observed, frames_late climbing, nothing ever written - for an hour of
-      capture time, and a "loading" mark would have made that INVISIBLE. "We looked and hold
-      nothing" paints the whole dead band and is actionable. The alternative discriminator (is
-      this cell near the live edge?) was rejected as a guess about the future, which is what this
-      state must not assert.
-      TIERS PROVED IN A FRAME: surface-raster replays recorded ops - clears, viewports, per-draw
-      uniforms and THE BYTES ACTUALLY UPLOADED TO THE SAMPLERS - through the CPU half of the table
-      the shader is generated from, asserting on pixel histograms. Three tiers, three
-      pairwise-different pictures of identical measurements; YET THE RAMP NEVER MOVES, because a
-      tier inks only the pixels it draws on. Grey iff unobserved as a pixel fraction.
-      Mutation-checked (collapsing two tier marks reddens 3 tests, drawing the fourth state grey
-      reddens 5), plus a one-off real-WebGL2 run matching the CPU rule on 114973/115200 pixels,
-      every difference a one-pixel pattern edge - closing the gap that the stub never compiles
-      GLSL.
-      CELL_MARKS needed BOTH a fifth row and a third mark kind, `pattern`, because T-413's named
-      drawing for `unknown` is a HATCH and T-440 had it flat. Patterns are GLSL boolean expression
-      STRINGS in one table; the shader is generated from them and the CPU rule new Function-
-      compiles the same string, so a pattern cannot become two implementations. CELL_MARKS.length
-      is asserted equal to the state count, so a state with no mark cannot fall through to grey.
-      THE INTEGRATION DEFECT THE MERGE GATE CAUGHT: T-442 landed mid-flight and its fixtures
-      predate `measured`, so sourceCellPx threw. THE REAL BUG WAS NOT A MISSING FIELD - it runs
-      inside drawRegion, so the throw propagated out of render and BLANKED EVERY PANE. Pinned by a
-      test that deletes `measured` and asserts the frame drew.
-      IT ARGUED AGAINST MY SUGGESTED FIX AND WAS RIGHT: drawing no survey lattice would trade one
-      §8.3 violation for a worse one, since A SURVEY-OVERVIEW TILE WITH NO MARK IS PIXEL-IDENTICAL
-      TO A LIVE-IQ TILE. Suppressing the tier mark erases the tier rather than being imprecise
-      about the pitch. It fell back to the tile's own served grid - what decodeTile already writes
-      when a response carries no fold block.
-      `measured` stays required and no wire contract changed; T-442's fixture was fixed at source.
-
   - id: T-442
     milestone: MCANVAS
     title: The pane model - split, independent pan/zoom, per-pane follow-mode and per-pane pause
@@ -11463,7 +11424,7 @@ tasks:
   - id: T-443
     milestone: MCANVAS
     title: The zoomable minimap - another viewport, with pane rectangles and per-SDR live segments
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     deps: [T-440, T-442]
@@ -11488,6 +11449,35 @@ tasks:
       COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
       harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
       with uncommitted work.
+    commit: 0ab2e76
+    result: |
+      DONE, and THE MINIMAP WAS FINE - the defect was in the shared cache. "Another viewport"
+      survived contact with exactly one exception: TileCache::setViewports matched queued and
+      in-flight tiles BY EXTENT ONLY, sound while every viewport was a pane at a comparable zoom.
+      A VIEWPORT THE SIZE OF THE SURFACE BREAKS IT, because every fine-level tile for a pane the
+      user had already left still intersects a 6 GHz map - so VIEWPORT-CHANGE CANCELLATION
+      SILENTLY STOPPED CANCELLING ANYTHING, turning the in-flight cap into a queue the user waits
+      out at 11.4 ms/tile. A Viewport is now a box AND its levels; both directions asserted.
+      The new surface did not BREAK the cache, it made an existing assumption FALSE.
+      THE OVERLAY PASS IS SEPARABLE BY CONSTRUCTION, not by a flag: a DIFFERENT GL PROGRAM IN A
+      DIFFERENT PASS run after Surface::render() returns (Surface never calls it), whose shader
+      has no sampler, no cmap and no cell-state uniform - structurally incapable of a measurement
+      colour or a grey, asserted by grepping the compiled sources; and EVERY OVERLAY QUAD IS A
+      STROKE, NEVER A WASH, with a test failing any quad covering more than 4 px in BOTH
+      dimensions. That is the defect the spike committed inside its own proof. Payoff: data draws
+      are byte-identical with overlays on and off, so no setOverlays(false) escape hatch.
+      paneStatuses mounted via SurfaceChrome (pure readoutOf() + thin DOM binder), updated every
+      frame from the PaneReport[] the renderer just returned. THE MINIMAP IS IN THE SAME STATUS
+      LIST AS THE PANES, so levelDivergenceNote() fires with the map named in it - §8.5a's case,
+      since a 6 GHz map is essentially never at a pane's level.
+      No other special-casing: the minimap is a one-pane PaneModel appended to the panes' view
+      list for ONE render() call - one context, one LRU, one ramp, one grey rule.
+      TWO JUDGEMENT CALLS FLAGGED: a lit segment sits at the live edge IN TIME rather than pinned
+      to the top of the strip, because "currently live" is true NOW - a minimap scrubbed into the
+      past lights nothing, and the alternative is the fixed-screen-coordinate overlay the
+      time-axis invariant forbids. And segments read activeWindows() re-exported from
+      navigators.ts, asserted to be the SAME FUNCTION OBJECT - no second reader of `windows`.
+
   - id: T-444
     milestone: MCANVAS
     title: Retune-on-pan - panning a pane to un-tuned spectrum offers or triggers a retune
