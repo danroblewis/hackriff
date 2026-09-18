@@ -1156,19 +1156,49 @@ That derivation is the whole difference between a feature that survives a scrub 
 works live. The naive version is a client-side ring of whatever frames the page received, which shows
 the last few seconds of *wall clock* behind a viewport parked in the past — the same defect as a
 trace pinned to now, one layer down. `ui/e2e/app-trace.e2e.mjs` demonstrates it **while scrubbed**: a
-viewport held 3 s behind the live edge states `afterglow 4 × 80 ms` at its own past instant, and the
-achromatic ink is drawn clear of the current line in 27 of 293 columns — shadows that are other rows,
-not a halo on this one.
+viewport parked on a pyramid cell behind the live edge states `afterglow 4 × 1.0 s` at its own past
+instant, with achromatic ink drawn across the trace.
+
+**Where "four EARLIER rows, not four copies of this one" is asserted, and why not in pixels.** Two
+pixel forms of that claim were written and both measured the wrong thing: a count of columns whose
+shadow sits clear of the line read 27, 25 and 7 on three identical runs, and the offset distribution
+that replaced it survived one tree and died in the next — when T-484 was reverted a row went back to
+being a 1 s max-hold rather than a 40 ms one, rows got smoother still, and the spread collapsed from
+21–30 px to 7.
+
+The second failure is the informative one, because it is not an instrument problem. **A shadow that
+coincides with the current line is hidden by construction**: it is a `SHADOW_PX` stroke drawn *under*
+a wider, fully opaque core. So the visible separation between the glow and the line is a fact about
+how much the band moved in that window, and any pixel threshold over it is a fixture-liveliness meter
+wearing a feature's name. The claim is therefore asserted where it is deterministic —
+`ui/test/surface-trace.test.ts` drives `persistenceSlices` over four rows at four known dB and
+asserts the **values**: at the edge the glow is the three rows before the newest, scrubbed one cell
+back it is the two before *that*, no shadow repeats the current row, and no two shadows are the same
+row. The browser tier asserts what only it can: that the whole chain runs on a viewport genuinely
+behind the live edge, and that the ink is drawn. It still measures the separation and prints it as a
+diagnostic, because a tree where it collapses to zero is worth seeing in the log.
 
 **What the browser tier measures.** On a viewport whose slice comes from the pyramid, the slice *is*
 the row of cells at the top of the pane (`sliceColumns` is `maxHoldColumns` over a one-cell window),
 so the trace and the waterfall are two renderings of the same cells and the colours must be **equal**,
-not similar. Measured: **265/293 = 90 %** of drawn trace columns carry a colour the cells below them
-also carry, against a **0 %** negative control matching each column against one a third of a viewport
-away. (Against the live row the comparison would be the adjacent-question mistake — one frame against
-a max-hold over a whole cell.) That measurement is also why `SLICE_PX` is 3 and not 2: the pass
-feathers coverage over the outermost device pixel, so a 2 px line has almost no fully-covered core and
-every pixel of it sits 9–12/255 off the identical cell below.
+not similar. Measured over three runs: **530/586, 530/586, 527/586 ≈ 90 %** of drawn trace columns
+carry a colour the cells below them also carry, against a **9–12 %** negative control matching each
+column against one a third of a viewport away. (Against the live row the comparison would be the
+adjacent-question mistake — one frame against a max-hold over a whole cell.) That measurement is also
+why `SLICE_PX` is 3 and not 2: the pass feathers coverage over the outermost device pixel, so a 2 px
+line has almost no fully-covered core and every pixel of it sits 9–12/255 off the identical cell
+below.
+
+**Parking a viewport in the past is done by RE-ESTABLISHING, never by waiting.** Pressing Live once
+and waiting looks right and is not: a viewport freezes on the instant it was following, which is the
+cell the pipeline is still writing, and if the pyramid never ends up with an observed cell there the
+frozen window sits over a hole for ever — every extra second only widens the gap to the live edge
+without changing the cell being asked about. Measured: a 90 s wait ended with the viewport 86 s in
+the past reading *"nothing observed across this span"*, while the identical predicate in the next
+test was satisfied in 3 s, the difference being luck about which second each happened to freeze on.
+`scrubOntoCell` returns to the growing edge, waits for a live frame that has a peak, freezes there
+and gives the pyramid a bounded moment; a failed attempt freezes somewhere else. It is T-487's
+"re-establish and re-verify" one level out, and it took the file from 104 s to 26 s.
 
 ### 8.5a What the spike proved, and the three places §8 and §6 were wrong (T-437, 2026-09-17)
 
