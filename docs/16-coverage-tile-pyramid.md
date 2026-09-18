@@ -760,6 +760,41 @@ there is nowhere to look *from* and the surface does not stop existing because t
 pane's `device` selects **whose coverage plane decides its grey** (`any` = the union) — a coverage
 selector, not a second subject.
 
+### 8.4b The minimap as a viewport, and what that cost (T-443, 2026-09-17)
+
+Built in `ui/src/surface/{minimap,overlay,chrome,view}.ts`. **"Another viewport" survived contact**:
+the minimap is a one-pane `PaneModel` whose `PaneView` is appended to the panes' and handed to the
+*same* `Surface.render` call, so zoom, pan, the zoom floor, clamping, the shared LRU, the ramp, the
+display range and the grey rule are all the pane path unchanged. Nothing about it is special-cased,
+and it has **no fetch path of its own** — `TileCache` is the only thing that requests a tile, for
+every viewport alike. It also goes into the *same* `paneStatuses()` list, so §8.5a's stated level
+covers the map without a second readout.
+
+**One thing did need fixing, and it was the cache's cancellation predicate.** `setViewports` matched
+tiles by *extent only*, which was sound while every viewport was a pane at a comparable zoom. A
+viewport the size of the surface breaks it: every fine-level tile for a pane the user had left still
+intersected the map, so **viewport-change cancellation silently stopped cancelling anything** — the
+in-flight cap would have become a queue the user waits out, at 11.4 ms a tile. A viewport is now a
+box **and** its levels, and a tile is wanted when some viewport draws at its level or one step
+coarser (the parent pin). That is a strictly better predicate than the one it replaces.
+
+**Two rules keep the overlay pass from tinting a measurement**, which is not a hypothetical: the
+T-437 spike's own first minimap comparison failed because a translucent pane-viewport wash had been
+drawn over the sample point, and it added a `setOverlays(false)` flag to work around it — a flag
+someone must remember. Here (1) the overlays are a **separate program in a separate pass run after
+the data pass**, with no sampler, no ramp and no cell-state uniform, so it cannot express a
+measurement colour or a grey; and (2) every overlay quad is a **stroke** — four edges of a rectangle,
+or a bar at the live edge — never a wash over a region's interior. The data draws are asserted
+byte-identical with overlays on and off, so the honesty comparison needs no flag at all.
+
+**A lit segment is placed in time, not pinned to the top.** "Where each SDR is currently live" is
+true *now*, so the bar is laid out at the live edge through the same time mapping as everything
+else; a minimap scrubbed into the past therefore lights nothing, which is the honest picture. The
+segments read `GET /api/navigation`'s `windows` through the **same function** the frequency
+navigator uses (`activeWindows`, asserted to be the same object, so there is no second reader to
+disagree), and the device each names is the same identity a pane's tiles are keyed by — one coverage
+plane, not two client-side notions of "which radio".
+
 ### 8.5 What this removes
 
 The two bespoke edge-scrubber widgets collapse into canvas pan/zoom plus the minimap. The

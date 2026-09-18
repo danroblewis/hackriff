@@ -1,0 +1,40 @@
+/* The unified surface's chrome (T-443): the per-viewport level readout that ui/src/surface/chrome.ts
+   mounts. Styling only — every string in it was formatted by `paneStatuses()`.
+
+   docs/16 §8.5a: two viewports at different pyramid levels legitimately differ, so each one states
+   the level it drew at and the note explains the difference. It is a statement of fact, not a
+   warning, and it is styled as one. */
+
+.hk-surface-viewports {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.hk-surface-viewport {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 10px;
+  align-items: baseline;
+  padding: 2px 6px;
+  border-left: 2px solid transparent;
+  color: var(--hk-text-dim, #9aa3b2);
+}
+
+/* The map is another viewport, marked rather than moved somewhere else. */
+.hk-surface-viewport[data-viewport="minimap"] { border-left-color: #6b7488; }
+/* Amber matches PANE_MARK, the rectangle this row's pane draws on the map. */
+.hk-surface-viewport[data-following="true"] { border-left-color: #fad340; }
+
+.hk-surface-id { color: var(--hk-text, #dde3ec); font-weight: 600; }
+.hk-surface-level { color: #8fd0b4; }
+.hk-surface-counts { margin-left: auto; opacity: 0.75; }
+
+.hk-surface-level-note {
+  margin: 4px 0 0;
+  padding: 4px 6px;
+  font: 11px/1.45 system-ui, sans-serif;
+  color: var(--hk-text-dim, #9aa3b2);
+  border-left: 2px solid #6b7488;
+}
