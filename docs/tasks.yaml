@@ -11939,7 +11939,7 @@ tasks:
     parallel_group: PIPE
     core_interface: true
     model: opus
-    deps: [T-406, T-450]
+    deps: [T-406, T-450, T-439]
     use_cases: [AWARE-042, AWARE-011]
     found_by: 'the user, 2026-09-17 - wants to start a survey sweep from the app, not only at server launch'
     acceptance: |
@@ -11980,6 +11980,11 @@ tasks:
       asserted; docs/api.md and crates/hk-cli/tests/api_contract.rs move together (T-079),
       asserting the field's VALUE not the response shape (T-315).
     notes: |
+      T-439 ADDED TO DEPS 2026-09-17 to encode the user's sequencing verbatim: "do NOT jump ahead
+      of the preview route (T-450) or T-439". T-450 is done; T-439 is not, so this waits. The
+      dependency is real as well as instructed - a scan that fills coverage is far easier to judge
+      once the live edge writes tiles, since otherwise the sweep populates history the canvas can
+      only show as recorded rather than filling.
       SEQUENCING, from the user: do NOT jump ahead of T-450 (the preview route) or T-439 (live-edge
       tiles). This is slotted into MCANVAS behind them - the scan is much more compelling once
       there is a surface to watch it fill, and T-450 is what makes that visible.
