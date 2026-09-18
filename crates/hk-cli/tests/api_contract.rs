@@ -7235,6 +7235,28 @@ fn the_tile_routes_declared_readable_ceiling_is_true_and_is_stated_for_the_route
             "({lf},{lt}) is servable, so the ceiling is leaving reach unused: {body}"
         );
     }
+    // **T-515 (folded into T-507): the same over a band nothing ever sampled.** 1970 at index 0
+    // is uniformly `"unobserved"`, which the coverage map can answer without reading (T-461) — and
+    // that shortcut must not answer where the read would refuse, or servability would depend on
+    // what the radio sampled rather than on the geometry the ceiling declares. Inside the box it
+    // is served by the shortcut; one past it, refused, exactly as over the tuned band.
+    let origin = |lf: u64, lt: u64| {
+        format!("/api/tiles?level_f={lf}&level_t={lt}&f_index=0&t_index=0&cells=256")
+    };
+    let (st, inside) = get(addr, &origin(max_f, max_t));
+    assert_eq!(st, 200, "{inside}");
+    assert_eq!(
+        inside["resolution"]["short_circuit"]["applied"],
+        json!(true),
+        "{inside}"
+    );
+    for (lf, lt) in [(max_f + 1, max_t), (max_f, max_t + 1)] {
+        let (st, body) = get(addr, &origin(lf, lt));
+        assert_eq!(
+            st, 400,
+            "({lf},{lt}) over an unobserved band answered past the declared ceiling: {body}"
+        );
+    }
 
     // **One pair, whatever the probe cost.** A client fetches its lattice with a deliberately cheap
     // `cells = 8` tile and renders at 256, so the ceiling it caches must not depend on the size of
