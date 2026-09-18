@@ -5025,6 +5025,61 @@ policy.
 rather than guarded — no pause flag to desynchronise, one grey literal in the shader, a mark that cannot
 imply a future. That is the same move as `Coverage::Unobserved` not being spellable as quiet.
 
+### B0.685 — the minimap was fine, and three bookkeeping defects of my own (2026-09-17)
+
+**T-443** (`0ab2e76`) shipped the minimap, and **the defect it found was in the shared cache**.
+`TileCache.setViewports` matched queued and in-flight tiles **by extent only** — sound while every
+viewport was a pane at a comparable zoom. **A viewport the size of the surface breaks it**, because
+every fine-level tile for a pane the user has left still intersects a 6 GHz map, so
+**viewport-change cancellation silently stopped cancelling anything**. At 11.4 ms/tile that turns the
+in-flight cap into a queue the user waits out. **The new surface did not break the cache; it made an
+existing assumption false.**
+
+Its overlay separation is by construction rather than by a flag, which matters given what it guards:
+a **different GL program in a different pass** whose shader has *no sampler, no cmap, no cell-state
+uniform* — structurally incapable of a measurement colour — and **every overlay quad is a stroke,
+never a wash**, with a test failing any quad covering more than 4 px in both dimensions. That is
+exactly the defect **the spike committed inside its own proof**, when a translucent wash landed over
+its sample point.
+
+**T-444** (`fecce8c`) resolved §8.4's *"offers or triggers"* to **offers**, and the choice was forced
+rather than preferred: T-340's control already asserts an **empty call list** for a ±1.0 drag of the
+whole 6 GHz surface. A pane's pan is a pan. The part worth keeping is how it took **T-407's lesson
+structurally instead of as a better threshold** — both of T-407's failures were *a continuous pointer
+stream misread as a committing act*, so rather than tune the gesture, `acceptPaneRetune` **re-derives
+the offer at the instant of the commit** and refuses if the plan changed. **The radio goes where the
+button said, or nowhere.**
+
+### Three bookkeeping defects, all mine, all silent, all found by checking rather than noticing
+
+**1. A lost-update race.** A backgrounded board edit I had *already redone by hand* completed much
+later, holding `tasks.yaml` from before my next edit, and wrote its stale copy back — reverting T-443
+to in-progress and leaving T-441 with two `commit:`/`result:` pairs, which YAML accepts silently by
+keeping the last key. **The error was treating a timed-out command as failed when it was merely
+slow**; a command moved to the background has not been cancelled.
+
+**2. `commit: 0567143` is YAML 1.1 octal.** T-310's SHA was reading as the integer **192099** in every
+tool that loads the board. Four entries were affected; the other three were luckier, because an
+all-digit short SHA becomes an int whose digits round-trip. Only the leading-zero one had genuinely
+lost its value — and **my own merge commit `5684346` was one of the four**. Now quoted, with a
+**textual** guard (the loader has already destroyed the evidence by the time it has a value),
+mutation-checked.
+
+**3. An unanchored search in my status-flip helper.** `s.index('\n    status: todo\n', i)` from a
+ticket's start runs **past the end of its block** if that ticket is not `todo`, and flips **the next
+ticket instead**. T-445 and T-447 were both marked in-progress with no worktree and no agent — each
+exactly one ticket downstream of one I had flipped. Now bounded to the ticket's own block.
+
+**And a real dependency gap**, caught only because I checked whether T-445 could start rather than
+trusting the graph I had written: **T-439 was missing from its deps**. T-445 retires the *live*
+waterfall as well as the scrubbers, and T-439 is what makes *"live is the finest growing edge"* true —
+so launching the cutover early would have left the product **with no live view at all**.
+
+**The through-line is uncomfortable and worth stating:** every one of these is the same shape as the
+defects the agents keep finding in the product — **an operation correct under an assumption nobody
+restated**. The cache assumed comparable zooms; my helper assumed the named ticket's state; my redo
+assumed a timed-out command was dead. None of them announced itself.
+
 ## Open for the user (current)
 
 Kept current by the coordinator; the planning-phase list near the top of this file is the 2026-09-13
