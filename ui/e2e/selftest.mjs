@@ -126,6 +126,38 @@ export const __selftestMark = __selftestPredicate(1);
       return src.replace(from, "const retries = 0; // injected by ui/e2e/selftest.mjs — give up on the first 503");
     },
   },
+  {
+    // T-460 as the user reported it. The refresh POLICY stays in `tilecache.ts` and every unit test
+    // of it still passes — only the CALL is removed. That is the defect's real shape: a policy
+    // nothing invokes, which is T-450 one layer up, and it is why the fault is injected here rather
+    // than inside the cache.
+    name: "t460-frozen-live-edge",
+    expect: "live-edge.e2e.mjs",
+    what: "T-460: nothing tells the cache the live edge moved, so a resident live-edge tile is " +
+      "served from cache until the pane scrolls into a new address — once every 256 s at level_t 0. " +
+      "The rows are recorded and served; the client never asks for them.",
+    file: "surface/preview.ts",
+    patch: (src) => {
+      const from = "if (this.edgeFn) this.refreshLiveEdge(this.lastFrame);";
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in preview.ts: ${from}`);
+      return src.replace(from, "// injected by ui/e2e/selftest.mjs — never refresh the live edge");
+    },
+  },
+  {
+    // T-479, restored as the inverted predicate rather than as a removed line: `retryable` goes back
+    // to "everything the server said is worth asking again", which is exactly the default the real
+    // defect had.
+    name: "t479-retry-a-4xx-forever",
+    expect: "live-edge.e2e.mjs",
+    what: "T-479: a non-503 refusal is not terminal, so a place the route answered 400 for is " +
+      "re-asked on every frame, forever — the console flood the user watched.",
+    file: "surface/tilecache.ts",
+    patch: (src) => {
+      const from = "  return typeof status !== \"number\";";
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in tilecache.ts: ${from}`);
+      return src.replace(from, "  return true; // injected by ui/e2e/selftest.mjs — everything is retryable");
+    },
+  },
 ];
 
 function build(fault) {
@@ -155,6 +187,19 @@ function build(fault) {
   run([path.join(root, "src/surface/preview.css"), "--bundle", "--minify",
     `--outfile=${path.join(dist, "surface.css")}`]);
   cpSync(path.join(root, "src/surface/preview.html"), path.join(dist, "surface.html"));
+  // **And the app**, because `/` is a different bundle from `/surface.html` — a different esbuild
+  // line, with `--splitting`, mounting inside the shell beside a store and a stream socket. Before
+  // T-460 this dist held only the preview page, so `hk serve --ui-dist` answered 404 for `/` and
+  // every app-tier guard failed for the wrong reason: a fault could be reported as caught when what
+  // was caught was the missing page. The two subjects are different, which is the whole point of
+  // `app-surface.e2e.mjs` existing beside `surface-load.e2e.mjs`.
+  run([path.join(root, "src/app/main.ts"), "--bundle", "--minify", "--splitting", "--format=esm",
+    "--target=es2020", `--outdir=${dist}`, "--entry-names=app", "--chunk-names=chunks/[name]-[hash]"]);
+  run([path.join(root, "src/app/app.css"), "--bundle", "--minify", `--outfile=${path.join(dist, "app.css")}`]);
+  run([path.join(root, "src/audio-worklet.ts"), "--bundle", "--minify", "--target=es2020",
+    `--outfile=${path.join(dist, "audio-worklet.js")}`]);
+  cpSync(path.join(root, "src/app/index.html"), path.join(dist, "index.html"));
+  cpSync(path.join(root, "src/app/index.html"), path.join(dist, "app.html"));
   return dist;
 }
 

@@ -45,7 +45,48 @@ export interface Lattice {
   readonly levelsF: number;
   /** Number of time levels (`axes.time.levels`). */
   readonly levelsT: number;
+  /**
+   * The coarsest frequency level this server will answer, when the route states one
+   * (`axes.frequency.max_level`). Absent, the ceiling is `levelsF - 1` — the declared axis.
+   *
+   * It is a **separate number from `levelsF`** because the two answer different questions: how many
+   * levels the address lattice *names*, and how far up it can actually be *read*. On a server whose
+   * store ladder is shallower than the address lattice those differ, and the client must obey the
+   * smaller one or it addresses a node that is named and cannot be built (T-480).
+   */
+  readonly maxLevelF?: number;
+  /** The same on the time axis. Deliberately separate: the axes are levelled independently. */
+  readonly maxLevelT?: number;
+  /** The addressable frequency extent, Hz. Defaults to [[ADDRESSABLE_HZ]]. */
+  readonly maxFHz?: number;
+  /** The addressable time extent, ns from the epoch. Defaults to [[ADDRESSABLE_NS]]. */
+  readonly maxTNs?: number;
 }
+
+/**
+ * The route's own addressable spectrum: `f_index` is refused once a tile's high edge passes this
+ * (`hk-api/src/tiles.rs`, *"f_index is outside the addressable spectrum (0 .. 1 THz)"*).
+ */
+export const ADDRESSABLE_HZ = 1e12;
+/**
+ * The route's own addressable time, ns since the epoch: `t_index` is refused once a tile's end
+ * passes `i64::MAX / 2` (*"t_index is outside the addressable time range"*).
+ */
+export const ADDRESSABLE_NS = 4_611_686_018_427_387_904;
+
+/** The coarsest frequency level that may be addressed — the declared axis, or the stated ceiling. */
+export const levelCapF = (lat: Lattice): number =>
+  Math.max(0, Math.min(lat.levelsF - 1, lat.maxLevelF ?? lat.levelsF - 1));
+/** The same on the time axis, against its own ladder. */
+export const levelCapT = (lat: Lattice): number =>
+  Math.max(0, Math.min(lat.levelsT - 1, lat.maxLevelT ?? lat.levelsT - 1));
+
+/** The highest `f_index` whose tile still lies inside the addressable spectrum, at `level`. */
+export const maxFIndex = (lat: Lattice, level: number): number =>
+  Math.max(0, Math.floor((lat.maxFHz ?? ADDRESSABLE_HZ) / fTileHz(lat, level)) - 1);
+/** The highest `t_index` whose tile still lies inside the addressable time range, at `level`. */
+export const maxTIndex = (lat: Lattice, level: number): number =>
+  Math.max(0, Math.floor((lat.maxTNs ?? ADDRESSABLE_NS) / tTileNs(lat, level)) - 1);
 
 export const fCellHz = (lat: Lattice, level: number): number => lat.f0Hz * 2 ** level;
 export const tCellNs = (lat: Lattice, level: number): number => lat.t0Ns * 2 ** level;
@@ -71,17 +112,31 @@ export interface Box {
  * requested one would be asking the surface to lie about which ladder it is on.
  */
 export function levelForHzPerPx(lat: Lattice, hzPerPx: number): number {
-  return clampLevel(Math.ceil(Math.log2(Math.max(hzPerPx, Number.MIN_VALUE) / lat.f0Hz)), lat.levelsF);
+  return clampLevel(levelDemandF(lat, hzPerPx), levelCapF(lat));
 }
 
 /** The same on the time axis, against its own ladder. Deliberately a separate function (§8.2). */
 export function levelForNsPerPx(lat: Lattice, nsPerPx: number): number {
-  return clampLevel(Math.ceil(Math.log2(Math.max(nsPerPx, Number.MIN_VALUE) / lat.t0Ns)), lat.levelsT);
+  return clampLevel(levelDemandT(lat, nsPerPx), levelCapT(lat));
 }
 
-function clampLevel(l: number, levels: number): number {
+/**
+ * The level a viewport **asks for**, before the lattice's ceiling is applied — the honest statement
+ * of "how far out this zoom wants to go", and the thing a chrome readout would name when a view is
+ * zoomed past what the surface can be read at.
+ *
+ * Exported because it is also how the address tests prove they are not vacuous: a clamp that is
+ * never reached proves nothing, so the sweep asserts these demands genuinely exceed the cap.
+ */
+export const levelDemandF = (lat: Lattice, hzPerPx: number): number =>
+  Math.ceil(Math.log2(Math.max(hzPerPx, Number.MIN_VALUE) / lat.f0Hz));
+/** The same on the time axis. */
+export const levelDemandT = (lat: Lattice, nsPerPx: number): number =>
+  Math.ceil(Math.log2(Math.max(nsPerPx, Number.MIN_VALUE) / lat.t0Ns));
+
+function clampLevel(l: number, cap: number): number {
   if (!Number.isFinite(l)) return 0;
-  return Math.max(0, Math.min(Math.max(0, levels - 1), Math.ceil(l)));
+  return Math.max(0, Math.min(Math.max(0, cap), Math.ceil(l)));
 }
 
 /** Per-axis levels for a pane of `wPx × hPx` showing `box`. The two axes are resolved separately. */
@@ -90,6 +145,52 @@ export function levelsFor(lat: Lattice, box: Box, wPx: number, hPx: number): { l
     levelF: levelForHzPerPx(lat, (box.f1Hz - box.f0Hz) / Math.max(1, wPx)),
     levelT: levelForNsPerPx(lat, (box.t1Ns - box.t0Ns) / Math.max(1, hPx)),
   };
+}
+
+/**
+ * **Is this address a node of `lat`?** The whole of T-480's definition of done, as a pure predicate
+ * over an address and the lattice it claims to be in — so a test can quantify over the zoom/pan
+ * range and ask *"can any address outside the lattice be produced?"* rather than checking three
+ * examples.
+ *
+ * Written from the lattice's declared axes, **not** from the clamp: if it were derived from
+ * [[clampAddr]] it would only prove the clamp agrees with itself.
+ */
+export function inLattice(lat: Lattice, a: TileAddr): boolean {
+  const int = (v: number) => Number.isSafeInteger(v);
+  return (
+    a.scheme === lat.scheme && a.cells === lat.cells &&
+    int(a.levelF) && a.levelF >= 0 && a.levelF <= levelCapF(lat) &&
+    int(a.levelT) && a.levelT >= 0 && a.levelT <= levelCapT(lat) &&
+    int(a.fIndex) && a.fIndex >= 0 && a.fIndex <= maxFIndex(lat, a.levelF) &&
+    int(a.tIndex) && a.tIndex >= 0 && a.tIndex <= maxTIndex(lat, a.levelT)
+  );
+}
+
+/**
+ * The nearest node of `lat` to `a` — **per axis, against that axis's own extent**.
+ *
+ * This is CLAUDE.md's discretized-navigation rule applied to addressing: *"zoom/pan and region
+ * select resolve only to realizable configurations and snap to the nearest one"*. An address off
+ * the lattice is that invariant broken in the client, and it is why the route ends up being asked a
+ * question that has no answer (T-480; seen in the wild as `level_f=10, t_index=218471`).
+ *
+ * Nothing here couples the axes: the frequency level is clamped against the frequency ceiling and
+ * the time level against the time ceiling, and clamping one never moves the other. T-434 de-welded
+ * them in the store, T-438 on the wire and T-440 per pane; a clamp that tied them would put the
+ * weld back one layer up.
+ *
+ * **Clamping the LEVEL is a snap to a realizable node; clamping an INDEX is not** — a different
+ * index is a different place, so an index past the end of its axis is only ever *dropped* by
+ * [[tilesFor]]. This function exists for the single-address paths ([[ancestor]]) where the caller
+ * already knows which place it means.
+ */
+export function clampAddr(lat: Lattice, a: TileAddr): TileAddr {
+  const levelF = clampLevel(a.levelF, levelCapF(lat));
+  const levelT = clampLevel(a.levelT, levelCapT(lat));
+  const fIndex = Math.max(0, Math.min(maxFIndex(lat, levelF), Math.floor(a.fIndex) || 0));
+  const tIndex = Math.max(0, Math.min(maxTIndex(lat, levelT), Math.floor(a.tIndex) || 0));
+  return { ...a, scheme: lat.scheme, cells: lat.cells, levelF, levelT, fIndex, tIndex };
 }
 
 /** The absolute extent of one tile. Its origin is 0 Hz and the Unix epoch, exactly as the route's. */
@@ -108,14 +209,20 @@ export function extentOf(lat: Lattice, a: TileAddr): Box {
  * this backwards is not a nuance at 11.4 ms a tile: it is the difference between a screen that
  * fills from the middle out and one that fills from a corner nobody is looking at.
  *
- * Indices below zero are dropped rather than clamped — the route refuses a negative index, and
- * clamping would silently address a different tile.
+ * Indices outside their axis are dropped rather than clamped — the route refuses a negative index,
+ * and clamping would silently address a different tile. **The LEVELS are clamped** (T-480): a level
+ * is a resolution, so the nearest realizable one is the same place seen at a resolution that
+ * exists, and this is the derivation, so a caller that computes `levelF + 1` for a parent row
+ * cannot leave the lattice by doing so.
  */
 export function tilesFor(lat: Lattice, box: Box, levelF: number, levelT: number, device = "any"): TileAddr[] {
+  levelF = clampLevel(levelF, levelCapF(lat));
+  levelT = clampLevel(levelT, levelCapT(lat));
   const fw = fTileHz(lat, levelF), tw = tTileNs(lat, levelT);
   if (!(fw > 0) || !(tw > 0) || !(box.f1Hz > box.f0Hz) || !(box.t1Ns > box.t0Ns)) return [];
-  const f0 = Math.max(0, Math.floor(box.f0Hz / fw)), f1 = Math.floor((box.f1Hz - 1e-9) / fw);
-  const t0 = Math.max(0, Math.floor(box.t0Ns / tw)), t1 = Math.floor((box.t1Ns - 1) / tw);
+  const fMax = maxFIndex(lat, levelF), tMax = maxTIndex(lat, levelT);
+  const f0 = Math.max(0, Math.floor(box.f0Hz / fw)), f1 = Math.min(fMax, Math.floor((box.f1Hz - 1e-9) / fw));
+  const t0 = Math.max(0, Math.floor(box.t0Ns / tw)), t1 = Math.min(tMax, Math.floor((box.t1Ns - 1) / tw));
   const out: TileAddr[] = [];
   const fMid = (f0 + f1) / 2;
   const cols: number[] = [];
@@ -133,14 +240,21 @@ export function tilesFor(lat: Lattice, box: Box, levelF: number, levelT: number,
  *
  * This is what makes "not loaded" drawable without grey (docs/16 §5.5's most important sentence):
  * while a finer tile is missing the view draws a resident ancestor upscaled and says so.
+ *
+ * `df`/`dt` are **requests**, clamped per axis against that axis's own ceiling, and the index is
+ * halved by the step actually taken — so a fallback always names a node that exists and always
+ * still contains `a` (T-480). Asking to coarsen past the top of one axis leaves the other alone.
  */
-export function ancestor(a: TileAddr, df: number, dt: number): TileAddr {
+export function ancestor(lat: Lattice, a: TileAddr, df: number, dt: number): TileAddr {
+  const base = clampAddr(lat, a);
+  const ef = Math.max(0, Math.min(Math.floor(df) || 0, levelCapF(lat) - base.levelF));
+  const et = Math.max(0, Math.min(Math.floor(dt) || 0, levelCapT(lat) - base.levelT));
   return {
-    ...a,
-    levelF: a.levelF + df,
-    levelT: a.levelT + dt,
-    fIndex: Math.floor(a.fIndex / 2 ** df),
-    tIndex: Math.floor(a.tIndex / 2 ** dt),
+    ...base,
+    levelF: base.levelF + ef,
+    levelT: base.levelT + et,
+    fIndex: Math.floor(base.fIndex / 2 ** ef),
+    tIndex: Math.floor(base.tIndex / 2 ** et),
   };
 }
 
@@ -154,8 +268,11 @@ export function ancestorsOf(lat: Lattice, a: TileAddr, maxSteps = 4): TileAddr[]
   for (let df = 0; df <= maxSteps; df++) {
     for (let dt = 0; dt <= maxSteps; dt++) {
       if (df === 0 && dt === 0) continue;
-      if (a.levelF + df >= lat.levelsF || a.levelT + dt >= lat.levelsT) continue;
-      out.push({ addr: ancestor(a, df, dt), d: df + dt });
+      // The CEILING, not the declared axis length: on a server whose store ladder is shallower than
+      // the address lattice those differ, and a fallback that stepped past the ceiling would be a
+      // second address the route cannot answer, asked while standing in for the first (T-480).
+      if (a.levelF + df > levelCapF(lat) || a.levelT + dt > levelCapT(lat)) continue;
+      out.push({ addr: ancestor(lat, a, df, dt), d: df + dt });
     }
   }
   out.sort((x, y) => x.d - y.d);
@@ -189,17 +306,29 @@ export function intersects(lat: Lattice, a: TileAddr, box: Box): boolean {
 /**
  * The lattice a tile response describes. The response states the cell size **at the level it was
  * asked for**, so level 0 is that cell halved `level` times — the client never picks the floor.
+ *
+ * `max_level` is read per axis when the route states one, and left undefined when it does not, so
+ * an invented ceiling is never indistinguishable from a reported one (the rule `surfaceBounds`
+ * already follows for the surface's extent).
  */
 export function latticeFrom(resp: {
-  key: { scheme: string; level_f: number; level_t: number; cells: number };
-  axes: { frequency: { levels: number; cell_hz: number }; time: { levels: number; cell_s: number } };
-}): Lattice {
+  key: { scheme: string | number; level_f: number; level_t: number; cells: number };
+  axes: {
+    frequency: { levels: number; cell_hz: number; max_level?: number };
+    time: { levels: number; cell_s: number; max_level?: number };
+  };
+}, cells = resp.key.cells): Lattice {
   return {
     scheme: String(resp.key.scheme),
-    cells: resp.key.cells,
+    cells,
     f0Hz: resp.axes.frequency.cell_hz / 2 ** resp.key.level_f,
     t0Ns: (resp.axes.time.cell_s * 1e9) / 2 ** resp.key.level_t,
     levelsF: resp.axes.frequency.levels,
     levelsT: resp.axes.time.levels,
+    ...(statedLevel(resp.axes.frequency.max_level) !== null ? { maxLevelF: statedLevel(resp.axes.frequency.max_level)! } : {}),
+    ...(statedLevel(resp.axes.time.max_level) !== null ? { maxLevelT: statedLevel(resp.axes.time.max_level)! } : {}),
   };
 }
+
+const statedLevel = (v: unknown): number | null =>
+  typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;

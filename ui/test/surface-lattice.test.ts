@@ -78,9 +78,9 @@ test("tilesFor covers the box, drops negative indices, and orders centre-outward
 
 test("an ancestor halves the index on each axis it coarsens, and only on that axis", () => {
   const a = { device: "any", scheme: "view", levelF: 2, levelT: 3, fIndex: 7, tIndex: 9, cells: 256 };
-  assert.deepEqual(ancestor(a, 1, 0), { ...a, levelF: 3, fIndex: 3 });
-  assert.deepEqual(ancestor(a, 0, 2), { ...a, levelT: 5, tIndex: 2 });
-  const parent = ancestor(a, 1, 1);
+  assert.deepEqual(ancestor(LAT, a, 1, 0), { ...a, levelF: 3, fIndex: 3 });
+  assert.deepEqual(ancestor(LAT, a, 0, 2), { ...a, levelT: 5, tIndex: 2 });
+  const parent = ancestor(LAT, a, 1, 1);
   const pe = extentOf(LAT, parent), ae = extentOf(LAT, a);
   assert.ok(pe.f0Hz <= ae.f0Hz && pe.f1Hz >= ae.f1Hz && pe.t0Ns <= ae.t0Ns && pe.t1Ns >= ae.t1Ns,
     "a fallback must CONTAIN the tile it stands in for, or it is showing a different place");
