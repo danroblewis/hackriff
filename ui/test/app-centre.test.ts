@@ -23,6 +23,7 @@ import type { AppContext } from "../src/app/context";
 import { createStore } from "../src/app/store";
 import { initialState } from "../src/app/state";
 import { centreInitial } from "../src/app/centre/slice";
+import { captureBanner } from "../src/app/centre/capture-state";
 import { applyDeviceAction, centreView, centreViewKey, geometryOfLive, gotoDecision, mayRetune, nextView, NOT_LIVE_TEXT, retuneAction, retuneErrorText, viewHooks } from "../src/app/centre/view";
 
 const G: ax.Geometry = { centerHz: 100_000_000, bandwidthHz: 2_400_000, bins: 1024 };
@@ -166,4 +167,24 @@ test("T-386 THE CONTROL: with neither a header nor a device the view stays UNKNO
     centreView({ live: { view: { loHz: 101e6, hiHz: 101.5e6 } }, device: { centerHz: 101.3e6, sampleRateHz: 2e6 } }),
     { loHz: 101e6, hiHz: 101.5e6 },
   );
+});
+
+// ---- T-508: capture state is stated on the surface, from what the backend reports ----
+
+test("the surface states capture recovering or ended, and says nothing while it runs", () => {
+  const base = { loaded: true, live: true, capture: "running" as const, captureNote: null };
+  assert.equal(captureBanner(base), null, "running: nothing to say");
+  assert.equal(captureBanner({ ...base, loaded: false, capture: "ended" }), null, "not loaded: no claim either way");
+  assert.equal(captureBanner({ ...base, capture: null }), null);
+  const r = captureBanner({ ...base, capture: "recovering", captureNote: "mock-sdr: retune failed" });
+  assert.equal(r?.state, "recovering");
+  assert.match(r!.text, /Capture interrupted/);
+  assert.match(r!.text, /not advancing/);
+  assert.match(r!.text, /Cause: mock-sdr: retune failed$/, "the backend's own cause, verbatim");
+  const e = captureBanner({ ...base, capture: "ended", captureNote: null });
+  assert.equal(e?.state, "ended");
+  assert.match(e!.text, /^Capture stopped/);
+  assert.match(e!.text, /not a live edge/, "an ended run never reads as live");
+  assert.doesNotMatch(e!.text, /Cause/, "no cause invented when the backend gave none");
+  assert.match(captureBanner({ ...base, live: false, capture: "ended" })!.text, /^The recording has ended/);
 });

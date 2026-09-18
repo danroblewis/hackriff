@@ -719,6 +719,12 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         .unwrap_or_else(|| panic!("the live source must report its device_id: {v}"));
     assert!(device_id.starts_with("mock:"), "{v}");
     assert!(is_object(&v["run"]), "{v}");
+    // T-508: whether the front end is delivering is STATED, never left to be inferred from
+    // `finished` (which could not tell a device failure from a recording's end, nor a run
+    // restarting capture from one that is running).
+    assert_eq!(v["run"]["capture"], json!("running"), "{v}");
+    assert_eq!(v["run"]["capture_note"], Value::Null, "{v}");
+    assert_eq!(v["run"]["finished"], json!(false), "{v}");
     assert_eq!(v["transmit"]["available"], json!(false));
     assert!(is_array(&v["routes"]), "{v}");
     assert!(

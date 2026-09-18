@@ -29,6 +29,12 @@
 //                     that no `unknown` coverage — the one legitimately purple mark on this surface
 //                     — is in the window), and **counted** texture uploads and failed requests
 //                     settling across successive windows. Not "it looked still".
+//   5. REFUSED RETUNE — (T-508) the same press against a mock whose device REFUSES the retune once:
+//                     the backend's run state (not finished, capture running) and rows at the new
+//                     centre after the recovery. Its own backend, with a fault.
+//   6. DEVICE GONE  — (T-508) a mock whose device goes away mid-retune: the backend reports the run
+//                     ended, and the SURFACE states "Capture stopped" with the cause, having stated
+//                     it was recovering first. Its own backend, with a fault.
 //
 // ——— WHY THE MOCK SDR, AND WHICH SCENE ———
 //
@@ -172,10 +178,11 @@ after(async () => {
   j?.backend?.stop();
 });
 
-async function open() {
+async function open({ port = 8801, mockFault = null } = {}) {
   // Its own port, not the tier's default: this backend is KILLED by test 4, and the shared one is
-  // every other file's.
-  const backend = await startBackend({ port: 8801, mockDevice: true });
+  // every other file's. Tests 5 and 6 bring up their own on other ports, each with a device FAULT
+  // (T-508), so a fault can never reach the journey's backend.
+  const backend = await startBackend({ port, mockDevice: true, mockFault });
   let browser = null;
   try {
     const covered = await waitForCoverage(backend, 90000);
@@ -814,24 +821,13 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     assert.deepEqual(page.exceptions, [], "uncaught exception during the pan/zoom leg");
   });
 
-// ===========================================================================
-// 2. RETUNE: the stream survives it, and rows keep arriving AT THE NEW CENTRE
-// ===========================================================================
-//
-// **T-497.** A property of **rows on the websocket, joined to the header in force when they arrived,
-// joined to the wall-clock instant of the commit** — three facts that only exist together on the
-// wire, which is why the tap records all three per row.
-//
-// The two adjacent questions this must not answer instead, both named in the ticket:
-//   - "is the socket open?" — passes with a silent stream;
-//   - "are there rows?" — passes on rows from BEFORE the retune.
-// So the assertion is over rows whose arrival instant is after the commit AND whose geometry is the
-// new centre. Neither half alone is the claim.
-//
-// The pixel half is beside it, because a row delivered is not a row drawn (T-460's lesson exactly):
-// the pane's freshest strip must be a real render after the retune, not a flat fill.
-test("2. a retune keeps the stream alive, and live rows keep arriving at the NEW centre", async (t) => {
-  const { page, backend } = await journey();
+/**
+ * Put the active pane somewhere a retune really moves the front end, and read the destination the
+ * enabled control names. Test 2's positioning, shared with T-508's fault tests (5 and 6) so all three
+ * press the same control the same way. Returns the window before the press, the named destination,
+ * and the point the gestures were made at.
+ */
+async function planRetune(page, backend, t) {
   const w0 = await tunedWindow(backend);
 
   // The control plans for the viewport, so put the viewport somewhere else inside the recorded band
@@ -877,6 +873,28 @@ test("2. a retune keeps the stream alive, and live rows keep arriving at the NEW
   assert.ok(Math.abs(wantCenterHz - w0.centerHz) > 1e4,
     `the retune would not move the front end (${MHz(wantCenterHz)} vs ${MHz(w0.centerHz)} MHz), so ` +
     "there is no re-plumb here to survive");
+  return { w0, wantCenterHz, wantSpanHz, at };
+}
+
+// ===========================================================================
+// 2. RETUNE: the stream survives it, and rows keep arriving AT THE NEW CENTRE
+// ===========================================================================
+//
+// **T-497.** A property of **rows on the websocket, joined to the header in force when they arrived,
+// joined to the wall-clock instant of the commit** — three facts that only exist together on the
+// wire, which is why the tap records all three per row.
+//
+// The two adjacent questions this must not answer instead, both named in the ticket:
+//   - "is the socket open?" — passes with a silent stream;
+//   - "are there rows?" — passes on rows from BEFORE the retune.
+// So the assertion is over rows whose arrival instant is after the commit AND whose geometry is the
+// new centre. Neither half alone is the claim.
+//
+// The pixel half is beside it, because a row delivered is not a row drawn (T-460's lesson exactly):
+// the pane's freshest strip must be a real render after the retune, not a flat fill.
+test("2. a retune keeps the stream alive, and live rows keep arriving at the NEW centre", async (t) => {
+  const { page, backend } = await journey();
+  const { w0, wantCenterHz, wantSpanHz, at } = await planRetune(page, backend, t);
 
   // The commit instant, read from THE PAGE's clock so it is the same clock the tap stamps rows with.
   const tCommit = await page.eval("Date.now()");
@@ -1276,5 +1294,148 @@ test("4. a killed backend degrades to grey with no purple and no re-render thras
   if (page.exceptions.length) {
     t.diagnostic(`${page.exceptions.length} uncaught exception(s) after the kill: ` +
       page.exceptions.slice(0, 3).map((e) => e.text.slice(0, 160)).join(" | "));
+  }
+});
+
+// ===========================================================================
+// 5. A RETUNE THE DEVICE REFUSES: capture comes back, it does not quietly end
+// ===========================================================================
+//
+// **T-508.** Test 2 was green over the user's "retune kills the live view; it never recovers"
+// (reported three times) because the mock SDR always landed exactly where it was told. This one runs
+// the same press against a mock with a FAULT: `retune-apply-fails:1` refuses the first retune the
+// way a HackRF does — the control call is accepted, and the capture thread's read that applies it
+// fails (`hackrf.rs` applies controls at a block boundary on the capture thread), leaving the front
+// end where it was.
+//
+// A property of **the backend's own run state and of rows on the wire after the press**: the run is
+// not finished, capture reports `running`, the front end reaches the destination the control named
+// (the refusal was transient, so the retry lands), and live rows keep arriving at the new centre.
+//
+// ——— RED WITHOUT THE FIX, MEASURED (2026-09-18) ———
+// Against an `hk` built from `main` plus only the mock fault (`main`'s UI too, via HK_BIN and
+// HK_E2E_UI_DIST), this fails 5.6 s in on `run.finished`: "the run ENDED after a retune the device
+// refused once … true !== false". The press was answered OK, the device refused the change on the
+// new segment's first read, and the supervisor took the capture thread's error for the end of the
+// run. **Note what did NOT catch it:** `/api/navigation` went on reporting the destination, so the
+// "front end reaches the destination" check — test 2's check — passed on the dead run. That is why
+// the run-state assertion comes first.
+test("5. a retune the device refuses restarts capture: rows resume and the run does not end", async (t) => {
+  const { page, browser, backend } = await open({ port: 8803, mockFault: "retune-apply-fails:1" });
+  try {
+    assert.match(backend.log(), /mock SDR: fault armed from HK_MOCK_FAULT/,
+      "the harness asked for a device fault and the server did not arm one, so this would be test 2 again");
+    const { w0, wantCenterHz } = await planRetune(page, backend, t);
+
+    // Press, and read where the FRONT END is — as test 2 does, including its re-press: a press can
+    // legitimately land inside a re-plumb (or, here, a recovery) and come back busy.
+    let w1 = w0;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await page.click(`document.querySelector('${PANE_ACTION}')`);
+      await page.frames(4);
+      for (let i = 0; i < 24; i++) {
+        w1 = await tunedWindow(backend);
+        if (Math.abs(w1.centerHz - wantCenterHz) < 100) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (Math.abs(w1.centerHz - wantCenterHz) < 100) break;
+      t.diagnostic(`press ${attempt + 1}: front end at ${MHz(w1.centerHz)} MHz; toast: ${await page.$text("#toast")}`);
+    }
+    const st = (await get(backend, "/api/control/state")).run;
+    const stats = (await get(backend, "/api/status")).control?.stats ?? {};
+    t.diagnostic(`after the presses: run finished=${st.finished} capture=${st.capture} segment=${st.segment}; ` +
+      `capture_failures=${stats.capture_failures} capture_recoveries=${stats.capture_recoveries}`);
+    assert.equal(st.finished, false,
+      "the run ENDED after a retune the device refused once, while hk serve kept answering. This is T-508: " +
+      "a recoverable failure must restart capture, not end the run.");
+    assert.ok(Math.abs(w1.centerHz - wantCenterHz) < 100,
+      `the front end is at ${MHz(w1.centerHz)} MHz and the control said ${MHz(wantCenterHz)} MHz ` +
+      `(toast: ${await page.$text("#toast")}; run ${JSON.stringify({ finished: st.finished, capture: st.capture })})`);
+    // The premise, stated after the fact so it can be read on a green run too: the fault DID fire.
+    assert.ok(stats.capture_failures >= 1,
+      `the device never refused anything (capture_failures ${stats.capture_failures}), so this passed without the fault it is about`);
+
+    const tSettled = await page.eval("Date.now()");
+    await new Promise((r) => setTimeout(r, 10000));
+    const after = JSON.parse(await page.eval(
+      `JSON.stringify(window.__hkWs.rows.filter((r) => r.atMs > ${tSettled}).map((r) => r.centerHz))`));
+    const atNew = after.filter((c) => Math.abs(c - w1.centerHz) < 1000).length;
+    t.diagnostic(`in the 10 s after the front end got there: ${after.length} rows, ${atNew} at the new centre`);
+    assert.ok(atNew >= 20,
+      `only ${atNew} rows arrived at the new centre in the 10 s after a refused-then-recovered retune ` +
+      `(${after.length} in total): capture did not really come back`);
+    const run = (await get(backend, "/api/control/state")).run;
+    assert.equal(run.capture, "running", `capture is not running after it recovered: ${JSON.stringify(run)}`);
+    assert.equal(await page.eval("document.querySelector('.sf-capture')?.hidden ?? null"), true,
+      "the surface still states a capture failure after capture came back — a banner that outlives " +
+      "the fault is the same dishonesty as one that never appears");
+    assert.deepEqual(page.exceptions, [], "uncaught exception during the refused retune");
+  } finally {
+    browser.close();
+    backend.stop();
+  }
+});
+
+// ===========================================================================
+// 6. A FRONT END THAT IS GONE: the run ends, and THE SURFACE SAYS SO
+// ===========================================================================
+//
+// **T-508's second half.** Some failures cannot be recovered — `gone-on-retune` takes the mock's
+// device away mid-retune and every read after it fails, like a HackRF unplugged or wedged on a USB
+// stall. Then the run must end, and the silent frozen edge the user kept seeing is the defect: the
+// surface has to SAY capture stopped.
+//
+// A property of **the canvas's own statement, joined to the backend's**: `/api/control/state`
+// reports the run ended (the premise), and the surface — over the picture, not in a nine-character
+// label in the top bar — states "Capture stopped" with the backend's cause, having first stated that
+// it was trying to recover.
+//
+// ——— RED WITHOUT THE FIX, MEASURED (2026-09-18) ———
+// Against `main` plus only the mock fault: the premise holds (`finished: true`) and the claim fails
+// — "the run has ENDED (finished: true) and the surface does not say so: null": no `.sf-capture`
+// exists, no state was ever stated (`[]`), and the only trace of it was the top bar's "run
+// finished" label.
+test("6. a front end that is gone ends the run, and the surface says capture stopped", async (t) => {
+  const { page, browser, backend } = await open({ port: 8805, mockFault: "gone-on-retune" });
+  try {
+    assert.match(backend.log(), /mock SDR: fault armed from HK_MOCK_FAULT/,
+      "the harness asked for a device fault and the server did not arm one");
+    await planRetune(page, backend, t);
+    const banner = `(() => { const e = document.querySelector('.sf-capture');
+      return e ? { hidden: e.hidden, state: e.dataset.state ?? null, text: e.textContent } : null; })()`;
+    assert.equal((await page.eval(banner))?.hidden ?? true, true,
+      "the surface already states a capture failure before anything failed");
+
+    await page.click(`document.querySelector('${PANE_ACTION}')`);
+    const seen = new Set();
+    let run = null, b = null;
+    const deadline = Date.now() + 45000;
+    while (Date.now() < deadline) {
+      run = (await get(backend, "/api/control/state")).run;
+      b = await page.eval(banner);
+      if (b && !b.hidden) seen.add(b.state);
+      if (run.finished && b?.state === "ended" && !b.hidden) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    t.diagnostic(`backend: finished=${run?.finished} capture=${run?.capture} note=${JSON.stringify(run?.capture_note)}`);
+    t.diagnostic(`surface: states seen ${JSON.stringify([...seen])}; last ${JSON.stringify(b)}`);
+    await page.shot(path.join(ART, "canvas-journey-capture-stopped.png"));
+
+    // The premise: the run really did end. Without it the claim below is about nothing.
+    assert.equal(run?.finished, true, `the run did not end with its device gone: ${JSON.stringify(run)}`);
+    // THE CLAIM.
+    assert.ok(b && !b.hidden && b.state === "ended",
+      `the run has ENDED (finished: true) and the surface does not say so: ${JSON.stringify(b)}. ` +
+      "This is T-508: a frozen edge that looks live is exactly what the user kept seeing.");
+    assert.match(b.text, /^Capture stopped/, `the surface's statement: ${JSON.stringify(b.text)}`);
+    assert.match(b.text, /device has gone|went away/, "the statement carries the backend's own cause");
+    assert.equal(run.capture, "ended");
+    assert.ok(seen.has("recovering"),
+      `the surface went straight to "stopped" without ever stating it was restarting capture: ${JSON.stringify([...seen])}`);
+    assert.equal(await page.$text("#device-label"), "capture stopped", "the top bar agrees with the surface");
+    assert.deepEqual(page.exceptions, [], "uncaught exception while capture ended");
+  } finally {
+    browser.close();
+    backend.stop();
   }
 });
