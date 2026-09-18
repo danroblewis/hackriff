@@ -424,6 +424,17 @@ test("the afterglow is the rows just before the PANE'S instant — and it MOVES 
   assert.deepEqual(live.map((g) => g.cols[0]), [-70, -80, -90]);
   assert.deepEqual(live.map((g) => g.age), [1, 2, 3]);
   assert.deepEqual(live.map((g) => g.tAtNs / S), [15, 10, 5], "each shadow states the instant its cell ends");
+  // **"Four EARLIER rows, not four copies of this one"**, stated as the equality it is. This is the
+  // half `ui/e2e/app-trace.e2e.mjs` deliberately does NOT assert from pixels: a shadow that coincides
+  // with the current line is drawn under a wider opaque core and is invisible by construction, so how
+  // far the glow separates on screen is a fact about how much the band moved, not about where the
+  // rows came from. Two pixel thresholds over that were written and both measured the fixture's
+  // liveliness instead (27/25/7 columns on identical runs; then a spread that collapsed when a 40 ms
+  // row became a 1 s one). Here it is deterministic.
+  const sliceNow = sliceColumns(LAT, rowTile() as never, ROW_BOX, 0, 0, "any", 4, 20 * S);
+  assert.equal(sliceNow[0], -60, "the slice is the newest row");
+  assert.ok(!live.some((g) => g.cols[0] === sliceNow[0]), "a shadow is repeating the current row");
+  assert.equal(new Set(live.map((g) => g.cols[0])).size, live.length, "two shadows are the same row");
 
   // **Scrubbed back one cell — this is the whole claim.** The glow is now the rows before THAT
   // instant, and the newest row (−60) is nowhere in it: it is in the pane's future. A buffer of
