@@ -141,21 +141,22 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
     .sort((a, b) => b[1] - a[1])
     .map(([k, n]) => `${k} x${n} @${med(msByLevel.get(k) ?? []).toFixed?.(0) ?? "?"}ms`).join("   ")}`);
 
-  // **The longest the live pane went without a fresh answer for an address it had already.** T-491:
-  // whether the `t+8 s` sample is a real render is decided by whether it lands inside such a hole,
-  // and the two causes look identical in pixels — a lane whose clock was set by a neighbour's
-  // history-lock hold, and a lane that is simply expensive. The gap is what says a hole existed; the
-  // latency column above says why. (Measured: 2.6 s mean before this ticket, 1.7 s after.)
-  const again = new Map();
-  let worst = 0, worstAt = 0;
+  // **The longest any address went between successive answers, PER LEVEL.** T-491: whether the
+  // `t+8 s` sample is a real render is decided by whether it lands inside such a hole, and the two
+  // causes look identical in pixels — a lane whose clock was set by a neighbour's history-lock hold,
+  // and a lane that is simply expensive. Per level, because an all-levels maximum is dominated by
+  // the minimap's tiles, which are asked once during its opening fill and are not the subject; the
+  // live pane's own level is the row to read. (Measured on the pane's level: 2.6 s mean before this
+  // ticket, 1.7 s after.)
+  const again = new Map(), gapByLevel = new Map();
   for (const r of asked) {
+    const k = `${new URL(r.url).searchParams.get("level_f")}/${new URL(r.url).searchParams.get("level_t")}`;
     const prev = again.get(r.url);
-    if (prev !== undefined && r.startedMs - prev > worst) { worst = r.startedMs - prev; worstAt = prev; }
+    if (prev !== undefined) gapByLevel.set(k, Math.max(gapByLevel.get(k) ?? 0, r.startedMs - prev));
     again.set(r.url, r.endedMs ?? r.startedMs);
   }
-  const t0 = Math.min(...asked.map((r) => r.startedMs));
-  t.diagnostic(`longest gap between successive answers for one address: ${worst} ms, starting ` +
-    `${((worstAt - t0) / 1000).toFixed(1)} s into the run`);
+  t.diagnostic(`longest gap between successive answers for ONE address, by level: ${[...gapByLevel]
+    .sort((a, b) => b[1] - a[1]).map(([k, g]) => `${k} ${g}ms`).join("   ") || "no address was asked twice"}`);
 
   // **The FIRST sample is asserted on its own** (T-491). The `4 of 5` tolerance below is deliberate
   // — one screenshot may catch a frame mid-scroll — but it is also exactly wide enough to hide a
