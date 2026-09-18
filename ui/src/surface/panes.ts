@@ -318,8 +318,23 @@ export class PaneModel {
    * carries an offset from it is precisely the third state T-347 refused to have. Dragging forward
    * clamps at the edge and stays frozen: re-entering follow is an explicit act ([[follow]]), never
    * a side effect of a gesture ending near the edge.
+   *
+   * **A scrub of zero is not a scrub (T-484).** `Preview.drag` pans both axes on every pointer
+   * move, so a drag straight along frequency arrives here as `panTime(id, 0)` — and the version
+   * without this guard froze the pane anyway, because `freezeAt` ran before the delta was looked
+   * at. A sideways drag silently stopped the waterfall following the live edge: the user changed
+   * frequency and the pane quietly entered the state *"scrubbed into the past"*, which is the one
+   * thing `follow`'s doc above says may only happen by an explicit act. Nothing else about the rule
+   * moves — a one-pixel scrub still freezes, and a frozen pane is unaffected either way, since
+   * `freezeAt` is a no-op on it and `centerNs + 0` is `centerNs`.
+   *
+   * It surfaced through T-484 rather than as its own report: with the finest tier at the display
+   * row rather than at 1 s, a frozen pane drifts visibly behind the edge within a few hundred
+   * milliseconds, and `paneRetuneOffer` began — correctly — answering `block: "past"` for a
+   * viewport whose only gesture had been sideways.
    */
   panTime(id: string, dNs: number): void {
+    if (dNs === 0) return;
     this.update(id, (p) => {
       const t = freezeAt(p.time, this.edgeNs);
       return { ...p, time: { live: false, centerNs: t.centerNs + dNs, spanNs: t.spanNs } };
