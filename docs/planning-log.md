@@ -5233,3 +5233,60 @@ sampled"*), because the honest first screen is nearly empty.
 (T-403 found the duty-cycle lag); the retune-keeps-the-stream-alive bug is fixed (T-417); the timeline
 sliver, the pixelated navigator and the narrow-selection resolution are all landed (T-420, T-397/T-411,
 T-418).
+
+### B0.687 — the tier that can see, and the last three readings before the cutover (2026-09-17)
+
+Three MCANVAS tickets landed together, and each turned out to be a **reading of an existing sentence**
+rather than a new mechanism. Recording them because the pattern is now consistent enough to expect.
+
+**T-452 — the sweep drives the interactive retune path, and `schedule: false` stands.** The obvious
+shape for an in-app scan trigger was to let `hk serve` drive the scheduler. It does not, and the
+comment at `serve.rs:139` now says why. The load-bearing reason is that **the coverage record already
+has the right shape without the scheduler**: `InteractiveObserver` closes one dwell record per steady
+tune, with that tune's own window and interval, and `spans_from_records` reads a record *by its window
+and interval, not by its reason*. So a sweep issuing the same gated `DeviceAction::Retune` a user's
+explicit tune issues fills the **same** coverage plane — no second accumulator, no second device path.
+Arbitration went the only honest way: **the user wins, the sweep yields, and the sweep says so** — the
+`scan.yielded` object rides in the user's *own* response, so "why did my sweep stop" is answered in the
+reply that stopped it. A step retries a transient refusal on the *same* step rather than moving on,
+because a skipped step would claim a band was swept when it was not.
+
+**T-453 — "seal time" meant the CONSUMER's seal.** docs/16 §5.2 says coarse nodes are "precomputed at
+seal time, on demand at the live edge". The implementation read *seal* as the **producer's**, so every
+sealed tile folded into every consumer and the whole lattice was a by-product of capture, paid on the
+thread that gates the ring whether or not anyone ever looked. Read as the **consumer's** seal — which
+is what the sentence says — capture writes node (0,0) and a *read* materialises what it needs.
+Measured: `hk-pipeline` 262 s → 75 s, `live_edge_tiles` 182 s → 3 s, acceptance-ci 190.6 → 160.4 s,
+resident floor 2.28 → 0.91 MB/MHz. The residency changed **shape**, not just size, and was re-measured
+rather than assumed. A consequence worth keeping: `VIEW_LEVELS` is a **reach** decision again, because
+neither write cost nor residency scales with node count any more.
+
+**T-455 — the tier that can see this surface, and it caught its own replacement bound.** `ui/e2e/`
+drives headless Chrome over CDP against a real `hk serve --replay`, wired into the gate's acceptance
+phase for `ui` and `full` — not opt-in, because a tier nobody must run looks like coverage. It answered
+the open question from T-454 as **discovery, not leakage**: peak on the wire is exactly the server's
+cap and never above, every refusal occurs with the operating cap at its ceiling, and after the last
+gesture the cap holds through ~3,700 requests with zero refusals. A leaked slot keeps leaking; a search
+stops once the share is found.
+
+Then it caught **itself**. Its first replacement bound was a count plus a structural story — *AIMD
+cannot return to its ceiling more often than the gestures that push it off*. It wrote a fault that
+deletes the halving, a client that notices the 503 and does nothing, which never leaves the ceiling, is
+refused 8–10 times, **and passed that bound**. The general form, and the one to carry forward:
+
+> **A bound reasoned from how the CORRECT algorithm behaves does not constrain the INCORRECT one.**
+
+The bound now conditions permission on the **mechanism**: a refusal must be *seen* to halve the client's
+operating cap, read from the status line. Five faults, five caught by the guard named for them.
+
+**Where this leaves the milestone.** MCANVAS is 14 of 17. The remaining three launched together:
+**T-445** (the cutover), **T-456** (Google-Maps navigation), and — as gate-health that the cutover's own
+merges pay for — **T-449** and **T-451**, two `hk-pipeline` flakes that are each *a different assertion
+in a file a previous ticket correctly cleared on a different assertion*.
+
+**T-445 is the one to watch, and its own acceptance says why:** *do this last and only on evidence.* It
+retires working surfaces, and T-450 is the standing proof of how that can go wrong — T-441 verified the
+renderer's shader on 114,973 of 115,200 pixels for **a module that could not load in a browser at all**.
+T-455 exists so the cutover is not made at the moment the replacement is least verifiable. The brief
+says plainly that a capability with **no home on the canvas** is a finding to report, not a thing to
+drop quietly.
