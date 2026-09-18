@@ -7578,9 +7578,21 @@ fn attention_sites_baselines_candidates_and_weights_answer_as_documented() {
     assert!(is_array(&v["baselines"]) && v["slot"].is_u64(), "{v}");
     // T-333: every listed baseline discloses the bias-tee cohort its levels belong to, always as
     // one of the three states — never omitted, so "unknown" reads as a cohort, not as a gap.
+    // T-315: and the receive-chain cohort (T-303/T-314) it belongs to, the same tagged `ChainKey`
+    // shape `/api/baselines/slots` asserts below — never absent, never a bare id. Before this, the
+    // key was documented (docs/api.md) but only the response SHAPE was contract-tested
+    // (`is_array(v["baselines"])`), so the field could be renamed or dropped without a test
+    // failing: documentation, not a contract. (This server is a fresh site with no baselines, so
+    // this loop is vacuous, exactly as the slots one below; the non-vacuous assertion against a
+    // real fold is `hk_pipeline::attention::tests::*` where `AttentionService::in_memory` folds
+    // under `ChainKey::Unknown`.)
     for b in v["baselines"].as_array().into_iter().flatten() {
         assert!(
             matches!(b["bias_tee"].as_str(), Some("unknown" | "off" | "on")),
+            "{b}"
+        );
+        assert!(
+            matches!(b["chain"]["kind"].as_str(), Some("unknown" | "device")),
             "{b}"
         );
     }
