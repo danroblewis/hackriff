@@ -11569,7 +11569,7 @@ tasks:
   - id: T-445
     milestone: MCANVAS
     title: The cutover - retire both edge scrubbers and the separate history view
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     core_interface: true
@@ -11625,6 +11625,59 @@ tasks:
       with uncommitted work.
       T-348 (a paused view costs full CPU) and any other genuine backend bug behind the old widgets
       stay open on their own merits - they are correctness, not scrubber polish.
+      DONE 2026-09-17. Retired (3 900 lines): ui/src/app/centre/{navigators,live-spectrum,overlays,
+      review-render,axis-view}.ts, ui/src/app/review/history.ts, ui/src/{waterfall,timebox}.ts, and
+      the Review drawer's "Spectrum grid" tab. The Explore centre is one data-slot="surface"
+      mounting THE SAME SurfacePreview host the /surface page mounts, with the live edge reported in
+      (PreviewOptions.edge). Two hosts, one implementation - and T-450's additive assertion ("the
+      app cannot reach the preview") was INVERTED rather than deleted, so it now requires the app to
+      reach exactly it and requires `class SurfacePreview` to have exactly one definer.
+      The five defects, shown unreachable rather than absent (ui/test/surface-cutover.test.ts +
+      ui/test/surface-marks.test.ts, and docs/16 §8.5b): T-420 needs a row ring and there is none
+      (a pane names a box, the drawn extent IS the asked-for extent at 20 s / 10 min / 24 h);
+      T-388 needs a second layout on a second cadence, and the marks are computed INSIDE
+      SurfaceView.frame() from that frame's own PaneView - the test advances the edge with NO POLL
+      and the box follows, control: an unchanged edge gives byte-identical quads; T-397/T-411 need a
+      view-side budget beside a server-side level, and the pane resolves its own level while the
+      chrome states the level it was DRAWN with; T-397's colormap needs a second ramp, and a
+      repo-wide scan says exactly one module defines one while the overlay program has no sampler
+      and no ramp at all (data draws asserted byte-identical with marks on and off); T-412 needs a
+      second wheel handler, and ui/src/surface/input.ts is the only one, shared by both hosts, and
+      may not read a delta or a modifier bit itself (T-456's wheelZoom is the whole interpretation).
+      TESTS RE-POINTED, NOT DELETED (T-347's precedent, used five times): ui/test/timebox.test.ts ->
+      ui/test/surface-marks.test.ts (T-362/T-410/T-420 against markQuads and the real render pass);
+      T-386/T-389's "one filtered collection" -> the surface's marks, and renderedInventory's
+      identity LOST ITS THIRD TERM because the focused row no longer substitutes a different mark;
+      T-391's "collapsing Capture resizes nothing else" kept, sizing half dropped with the bars;
+      T-450's additive claim inverted; navigators.test.ts trimmed to the 15 tests that exercise the
+      SURVIVING pure ui/src/navigators.ts (activeWindows, spectrumExtent, surveyCells, stripCells,
+      defaultViewport) - the widget-shaped ones went with the widget.
+      NEW BROWSER GUARD: ui/e2e/app-surface.e2e.mjs drives `/` - the page the user actually opens,
+      a different bundle and a different mount from /surface.html - and asserts CSP-clean load, the
+      retired slots absent and the rest of Explore present, 580 distinct colours on the canvas, a
+      200 OK tile fetch, and that neither loading nor a drag reaches a device route. 4/4 e2e files
+      pass in 47 s.
+      THREE CAPABILITIES HAVE NO HOME ON THE CANVAS - REPORTED, NOT DROPPED, AND THE USER DECIDES:
+        1. the INSTANTANEOUS SPECTRUM TRACE (the live FFT plot above the old waterfall), and with it
+           the client-side MAX-HOLD and the MANUAL dB RANGE. This is not a zoom level of the
+           surface: the surface draws folded cells over time, a trace is this frame across
+           frequency. It is the one retired thing that is genuinely a different picture.
+        2. DRAG-TO-SELECT a region (POST /api/selections from the waterfall) and T-193's DRAGGABLE
+           CONFIRMED-BAND EDGES. A drag on this surface pans (T-456), so a selection gesture needs a
+           modifier or a mode nobody has designed. Selections are still created from the capture
+           band's time drag and are still DRAWN here as stroked boxes; the user-band override has no
+           setter at all.
+        3. FREQUENCY/TIME AXIS TICKS WITH LABELS. The .axis strip is gone; each viewport states its
+           window and level in the chrome line, which is a readout, not a ruler.
+      AND A FACT RATHER THAN A DECISION: GET /api/history and GET /api/floor lost their only web
+      client. Both STAY - /api/history is `hk report`'s engine and the thing /api/tiles was built on
+      (§8.5a F2), /api/floor answers SPACE-050 - and docs/api.md now says so at each. A UI cutover
+      is not evidence that a server route has no other caller, so retiring them is a separate,
+      backend-classed decision this ticket deliberately did not take.
+      Docs updated: docs/16 §8.5b (new), docs/14 (the T-340 section marked RETIRED with its
+      invariants' new homes tabulated at the end), docs/api.md (both routes), ui/CONTROLS.md
+      (the retired-widget rows re-pointed + a "what the cutover removed" table; T-456's navigation
+      section untouched). Verified: `just test-ui` 40/40, `just test-ui-e2e` 4/4, tsc clean.
   - id: T-446
     milestone: MCANVAS
     title: After a retune the spectrum-history pyramid stops recording, permanently - the ring advances and coverage says observed, but nothing is written

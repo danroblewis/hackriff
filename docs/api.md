@@ -83,6 +83,13 @@ Never returns content, only stream *metadata*: every offered stream's header fie
 
 ### `GET /api/history` — region-over-time grid (T-017, AWARE-042)
 
+> **No web client reads this route as of T-445.** The cutover (docs/16 §8.5) retired the two
+> surfaces that did — the live waterfall's review render and the Review drawer's "Spectrum grid"
+> tab — for the unified surface, which reads `GET /api/tiles`. The route stays: it is
+> `hk report`'s region-over-time engine, it is contract-tested, and its `t0`/`t1` semantics are
+> what T-438 built `/api/tiles` on (docs/16 §8.5a F2). **Retiring it is a backend decision this
+> ticket did not take** — a UI cutover is not evidence that a server route has no other caller.
+
 A `nt × nf` grid (row-major, time then frequency) of the finest pyramid level whose cell count fits `max_cells`, over `[f_lo, f_hi) × [t0, t1)`. Unobserved cells are `null` — *not observed* is not *quiet* (C26).
 
 ```jsonc
@@ -165,6 +172,10 @@ T-133 additions (all additive; tile format 3, formats 1 and 2 still read):
 A region too large for the cell budget even at the coarsest level is `400`.
 
 ### `GET /api/floor` — calibrated floor vs time (T-021, SPACE-050)
+
+> **No web client reads this route as of T-445**, for the same reason as `/api/history` above: its
+> one reader was the Review drawer's retired "Spectrum grid" tab. It remains the calibrated-floor
+> answer for reports and for SPACE-050, and remains contract-tested.
 
 Same region parameters as `/api/history`, `max_steps` in place of `max_cells`.
 

@@ -60,7 +60,8 @@ Two of those deserve a note:
 | `harness.mjs` | `Browser`/`Page`: navigation, console and exception capture, network recording with concurrency watches, gestures (drag, wheel **with real modifier bits**, click, double-click), screenshots, named waits. |
 | `backend.mjs` | Starts `hk serve` over the fixture; `assertRealCsp`; `tileCost`. |
 | `run.mjs` | One backend, shared; one node process per `*.e2e.mjs`; prints the runtime of each. |
-| `surface-load.e2e.mjs` | **T-450's guard.** |
+| `surface-load.e2e.mjs` | **T-450's guard**, on `/surface.html`. |
+| `app-surface.e2e.mjs` | **T-445's guard**, on **`/` — the page the user actually opens.** The cutover put this renderer on the app's critical path and deleted the waterfall it replaces, so "the app comes up" stopped being a property of an additive preview. Different bundle (`--splitting`), different entry, different mount: passing `surface-load` says nothing about it. Also asserts the retired slots are absent, the rest of Explore is present, and that a drag moves the view while reaching no device route. |
 | `surface-nav.e2e.mjs` | **T-454's guard** — the in-flight cap and the AIMD contract. Plus **T-456's**: the four navigation gestures, and the modifier the browser actually delivered. |
 | `surface-contention.e2e.mjs` | **T-454's bootstrap half**: a second tab must be able to open while the first saturates the route. |
 | `selftest.mjs` | Reintroduces each defect in a scratch copy of `ui/src` and requires the suite to go red. |
@@ -97,6 +98,7 @@ Measured on the dev Mac, warm (`hk` already built, `npm ci` a no-op):
 | `hk serve` up + surface history ready + cap read | ~2 s |
 | `surface-contention.e2e.mjs` | ~7 s |
 | `surface-load.e2e.mjs` | ~2.5 s |
+| `app-surface.e2e.mjs` | ~3.5 s |
 | `surface-nav.e2e.mjs` | ~22 s (8 s of it the deliberate steady-state window) |
 | **`npm run e2e` total** | **~32 s** |
 | `npm run e2e:selftest` (baseline + 5 faults) | ~4 min |

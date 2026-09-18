@@ -947,6 +947,60 @@ apart.
 navigator widgets. Genuine backend bugs behind them stay (T-347 pause-is-global, T-348 paused-view
 CPU) — those are not scrubber polish, they are correctness.
 
+### 8.5b The cutover, done — and the three capabilities that have no home (T-445, 2026-09-17)
+
+**Retired:** `ui/src/app/centre/{navigators,live-spectrum,overlays,review-render,axis-view}.ts`,
+`ui/src/app/review/history.ts`, `ui/src/{waterfall,timebox}.ts` — 3 900 lines, four of which drew
+spectrum. The Explore centre is now one `data-slot="surface"` mounting **the same `SurfacePreview`
+host** the `/surface` page mounts, with a live edge reported in.
+
+**"The live-versus-history split disappears" is now structural rather than aspirational.** There is
+one host class, one wheel handler, one ramp, one grey, one `toClip`, and `PreviewOptions.edge`
+decides only *whether the edge advances* — absent it the host is T-450's historical preview
+unchanged. Two hosts, one implementation: T-450's additive assertion ("the app cannot reach the
+preview") was **inverted** rather than deleted, and now requires the app to reach exactly it and
+requires `class SurfacePreview` to have exactly one definer.
+
+**Each defect, and why it is unreachable rather than absent** (`ui/test/surface-cutover.test.ts`,
+`ui/test/surface-marks.test.ts`):
+
+- **T-420 sliver-of-data** needed a row ring drawn at full height regardless of what was served.
+  There is no ring: a pane names a box and the tiles intersecting it are drawn, so the drawn extent
+  *is* the asked-for extent at 20 s, 10 min and 24 h.
+- **T-388 box-jump** needed a second layout on a second cadence. `SurfaceView.frame()` computes the
+  marks from the `PaneView` the data pass was just handed; the test advances the edge with **no
+  poll of any kind** and the box follows, and its control is an unchanged edge producing
+  byte-identical quads.
+- **T-397/T-411 fill and resolution** needed a view-side budget beside a server-side level choice.
+  The pane resolves its own `(level_f, level_t)` and the chrome states the level it was **drawn**
+  with, off the `PaneReport`.
+- **T-397 colormap divergence** needed a second ramp. A repo-wide scan asserts exactly one module
+  defines one, and the overlay program has no sampler and no ramp at all — it can express a flat
+  colour and nothing else, so a box can never tint a measurement (asserted byte-identical with
+  marks on and off).
+- **T-412 wheel-zoom mismatch** needed a second wheel handler. `ui/src/surface/input.ts` is the only
+  one, both hosts use it, and it may not read a delta or a modifier bit itself — T-456's `wheelZoom`
+  is the whole interpretation.
+
+**THREE CAPABILITIES HAVE NO HOME, and the user has to decide about each.** Reported, not dropped:
+
+1. **The instantaneous spectrum trace** — the live FFT plot that sat above the waterfall — and with
+   it the client-side **max-hold** and the **manual dB range**. This is not a zoom level of the
+   surface: the surface draws *folded cells over time*, and a trace is *this frame across
+   frequency*. It is the one retired thing that is genuinely a different picture.
+2. **Drag-to-select a region**, and **T-193's draggable Confirmed-band edges**. On this surface a
+   drag pans (T-456), so a selection gesture needs a modifier or a mode nobody has designed.
+   Selections are still created from the capture band's time drag and are still *drawn* here as
+   stroked boxes; the user-band override has no setter at all.
+3. **Axis ticks with labels.** Each viewport states its window and its level in the chrome line,
+   which is a readout, not a ruler.
+
+**And two backend routes lost their only web client**, which is a fact rather than a decision:
+`GET /api/history` and `GET /api/floor`. Both stay — `/api/history` is `hk report`'s engine and the
+thing `/api/tiles` was built on (§8.5a F2), `/api/floor` answers SPACE-050 — and `docs/api.md` now
+says so at each. **A UI cutover is not evidence that a server route has no other caller**, so
+retiring them is a separate, backend-classed decision this ticket deliberately did not take.
+
 ### 8.5a What the spike proved, and the three places §8 and §6 were wrong (T-437, 2026-09-17)
 
 **Verdict: YES for the renderer, NO for the system as it stands** — and two of the blockers are

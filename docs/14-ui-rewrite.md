@@ -181,7 +181,17 @@ A retune re-derives the window's content class and, when the class or sample rat
 
 **The frequency navigator is T-340**, below; `DeviceAction`'s `source: "navigator"` is the variant it uses.
 
-### Each waterfall axis has an edge navigator (T-340)
+### Each waterfall axis has an edge navigator (T-340) — **RETIRED by T-445**
+
+> **This section is history.** The two bar widgets it specifies were retired by T-445's cutover
+> (docs/16 §8.5) into the unified surface's own pan and zoom plus its map strip, together with the
+> live waterfall, the frequency-axis strip and the Review drawer's region-over-time grid. The
+> *invariants* below did not go with the widgets — they are the same invariants, now held by one
+> renderer — and where each one lives is recorded in **[Where the navigators' invariants went
+> (T-445)](#where-the-navigators-invariants-went-t-445)** at the end of this document. The gesture
+> table is superseded by `ui/CONTROLS.md`'s "Navigating the surface" (T-456). It is kept unedited
+> because the *reasoning* — especially the three things the bars were not allowed to do — is the
+> reasoning the surface inherited, and the argument is worth more than the widget was.
 
 The user's **fifth** time/waterfall invariant: *time runs down the waterfall and frequency across it, so the **time navigator is a vertical bar on the side** (an overview of the retained capture window) and the **frequency navigator is a horizontal bar along the bottom** (spanning the whole surveyed / device-available spectrum, setting the centre). Each navigator pans and zooms its own axis; a dragged region on either zooms the main view to it. The frequency navigator shows every currently-active capture window as a lit segment — the natural home for multiple SDRs and for survey/sweep coverage.*
 
@@ -458,3 +468,42 @@ Nothing is ever deleted from the record to make the live list correct — that i
 ADR-0017 §6 rules that **Listen stays live-edge** ([ADR-0011 §8.5](adr/0011-decoder-workbench-contracts.md)) and that "decode only the newly-arrived part" governs **bounded-region** analysis, not live audio.
 
 For the UI this means: a region job and a listener on the same signal are **two pipelines in the dock**, not one. A gap in RDS text beside live audio is correct behaviour (the sibling decode output inherits the audio reader's policy), not a bug to chase — relevant to the RDS readout panel.
+
+### Where the navigators' invariants went (T-445)
+
+The cutover retired five client surfaces: the live waterfall (`ui/src/waterfall.ts` and its
+`live-spectrum.ts` mount), its per-poll DOM overlay layer (`overlays.ts`), the second render path
+that swapped that same pane to `GET /api/history` while the time cursor was back (`review-render.ts`),
+the frequency-axis strip (`axis-view.ts`), the two edge navigators (`navigators.ts`), and the Review
+drawer's "Spectrum grid" tab (`review/history.ts`). Four of them drew spectrum, each with its own
+mapping from data to pixels; §8.5's claim is that **every defect in the family was two
+implementations of the same idea drifting apart**, and the cutover is where that claim is cashed.
+
+**Each retired invariant, and the one renderer that now holds it:**
+
+| Invariant (and where it was argued) | Where it lives now |
+|---|---|
+| **One shared time axis** (T-337): everything time-varying is laid out through one mapping and moves together | `surface/surface.ts`'s `toClip`, used by the tile draws, the pane rectangles, the lit segments and the signal boxes alike. `ui/test/surface-marks.test.ts` asserts a box's extent *against `toClip` itself*, not against a copy of its arithmetic |
+| **Boxes are drawn in the render pass, not on a poll** (T-362/T-388) | `SurfaceView.frame()` calls `marks(pane, edgeNs)` with the very `PaneView` the data pass was handed, every frame. There is no change event and no cache between the state and the pixels |
+| **The box runs to the live edge until an END is detected** (T-410) | `MarkBox.t1Ns === null` means open; `markQuads` draws it to the reported edge and marks that edge differently from a measured end |
+| **The selected span fills the view; zooming re-scales rather than truncates** (T-420) | A pane names a box and the tiles intersecting it are drawn. There is no row ring to under-fill |
+| **Span-matched resolution, and the view says what it is showing** (T-334/T-341) | `levelsFor` per axis per pane, and the level *stated* in the chrome is read back off the `PaneReport` the renderer drew with (docs/16 §8.5a) |
+| **Grey means genuinely unobserved** (T-368) | `cellrule.ts`'s one grey, in the one shader. The overlay program has no sampler and no ramp, so nothing drawn over the data can express a measurement colour or a grey |
+| **The bars may not move the radio from a continuous gesture** (T-340/T-343/T-392/T-407) | Unchanged, and asserted on a new surface: a pan is a pan (T-442's spy-client control over the whole pane vocabulary), the retune is a discrete press, and `acceptPaneRetune` re-derives its target at the instant of the commit and refuses if the viewport moved (T-444) |
+| **Extent from the capture window, not the history horizon** (T-338) | The capture band still reads `GET /api/timeline`; the surface's own bounds come from `GET /api/navigation` and the tile lattice, and its record horizon from `/api/tiles`' `coverage.horizon` |
+| **Lit segment per reported active window, never one derived from `frequency.current`** (T-340) | `activeWindows`, the *same function*, re-exported by `surface/minimap.ts` and asserted to be the same object |
+| **Pause freezes the view, not the capture** (T-347) | Per viewport, and stronger: a pane's pause **is** its time window (T-442), so the two cannot disagree |
+| **One filtered collection behind the list and the boxes** (T-386/T-389) | The surface hands the store's rows and selections to `marks.ts`, and the only thing deciding what is on screen is the pane's own box. The focused row no longer substitutes a different mark, so the identity lost its third term |
+
+**Three capabilities have no home on the canvas.** They are recorded here rather than dropped
+quietly, and they need the user's decision:
+
+1. **The instantaneous spectrum trace**, with the client-side **max-hold** and the **manual dB
+   range**. The surface draws folded cells over time; a trace of the current frame is a different
+   picture, not a zoom level of this one.
+2. **Drag-to-select a region** on the spectrum, and **T-193's draggable Confirmed-band edges**. A
+   drag on the surface pans (T-456), so a selection gesture needs a modifier or a mode that is not
+   designed. Selections are still created from the capture band's time drag and are *drawn* on the
+   surface; the band override is not settable anywhere.
+3. **Axis ticks with labels.** The `.axis` strip is gone; each viewport states its window and level
+   in the chrome line, which is a readout rather than a ruler.

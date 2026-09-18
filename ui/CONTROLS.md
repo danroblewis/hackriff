@@ -6,15 +6,15 @@ Standard control sets of [SDR++](https://github.com/AlexandreRouma/SDRPlusPlus),
 |---|---|---|
 | Centre frequency (digit-scroll / entry, all three) | `POST /api/control/center` | Entry with units (`101.3M`, `433.92 MHz`, `+25k`); a retune into another content class re-plumbs (≤ 30 s, spinner) |
 | Tuning step, shift ◀ ▶ (SDR++ snap interval) | client → `center` | Fixed steps snap to their grid; ½-span/span steps walk a band |
-| Scroll-zoom, drag the spectrum (SDR++ FFT, SDRangel spectrum) | client (`axis.ts`) | Display zoom is client-side; panning past the band offers an explicit retune |
+| Scroll-zoom, drag the spectrum (SDR++ FFT, SDRangel spectrum) | client (`surface/input.ts` → `surface/panes.ts`) | Display zoom is client-side, on the unified surface; see **Navigating the surface** below. Panning a viewport onto un-tuned spectrum *offers* an explicit retune (T-444) and never performs one |
 | Sample rate / span (all; SDRangel adds decimation) | `POST /api/control/rate` | Choices from `device.sample_rates_hz`; decimation stays inside the pipeline |
 | Gains LNA/VGA/amp (HackRF source in all three) | `POST /api/control/gains` | Named stages from `device.gain_stages`; generic names for other devices |
 | Bias tee (SDR++, SDRangel HackRF source) | `POST /api/control/bias_tee` | Confirm with a DC-on-antenna warning |
 | FFT size, averaging, refresh/waterfall rate (all) | `POST /api/control/display` | Limits hard-coded from hk-pipeline (not in the state body) |
-| Waterfall min/max, auto-level (SDR++, SigDigger) | client (`waterfall.ts`) | Auto (floor/peak tracking) or manual dB |
-| Peak / max hold (SDRangel, SigDigger) | client | Max-hold trace over the spectrum; resets on retune |
+| Waterfall min/max, auto-level (SDR++, SigDigger) | client (`surface/surface.ts`) | The display range tracks what the served tiles actually hold (`range_db`), shared by every viewport so two panes cannot shade the same energy differently. **T-445 dropped the manual dB entry** with the retired waterfall — see the findings note below |
+| Peak / max hold (SDRangel, SigDigger) | backend (the tile fold) | Max-hold is what a coarser cell *is* (T-342): a level-n cell is the maximum over the level-0 cells under it, folded server-side. **T-445 dropped the client-side max-hold trace** with the spectrum plot — see the findings note below |
 | Bookmarks / frequency manager, markers (SDR++, SDRangel, SigDigger) | `/api/bookmarks` | Add from a click or a selection; jump zooms, or retunes on request |
-| Freeze / pause (SDRangel spectrum, SigDigger) | client (the time navigator's LIVE/PAUSED control) | T-347: holding the view is the client's own time cursor — the same state a scrub leaves — so it is per-viewer and reaches no route. The run-wide `/api/control/pause` is gone: it froze every connected browser's waterfall at once |
+| Freeze / pause (SDRangel spectrum, SigDigger) | client (the surface's Live/Paused button, per viewport) | T-347: holding the view is the client's own time cursor — the same state a scrub leaves — so it is per-viewer and reaches no route. The run-wide `/api/control/pause` is gone: it froze every connected browser's waterfall at once. T-442 made it per **viewport**: a pane's pause *is* its time window, so freezing is a coordinate change and not a mode, and "scrubbed but not paused" is not a state the type can spell |
 | Record baseband (SDR++ recorder, SDRangel file sink) | `POST /api/control/record/start`, `stop` | Refused under content-forbidding classes (409 `refused`) |
 
 ## Navigating the surface (T-456)
@@ -45,6 +45,34 @@ unbound puts a pinch in the uniform branch, where it belongs. Every wheel over t
 **Shift+wheel reads `deltaX`.** A shift-held wheel is delivered as a *horizontal* scroll on macOS,
 so the frequency axis takes whichever delta actually carried the scroll — the dominant one, never
 the sum (T-407's `clientX + clientY`).
+
+## What T-445's cutover removed, and where each thing went
+
+The two bespoke edge scrubbers (the left time navigator and the bottom frequency navigator) and the
+separate region-over-time history view are retired into the one surface (docs/16 §8.5). The controls
+they carried did not disappear with them:
+
+| Retired control | Where it is now |
+|---|---|
+| Time navigator: scrub, zoom the time span, LIVE/PAUSED | The surface's own time axis (drag, Alt+wheel) and the per-viewport **Live/Paused** button |
+| Time navigator: compressed history of the selected band | The surface itself — history *is* the surface, at whatever level the viewport resolves to |
+| Frequency navigator: set centre and span across the device range | Pan and zoom the viewport, or the **map strip** along the canvas's bottom (double-click sends the active viewport there) |
+| Frequency navigator: lit segment per active capture window | The map's per-SDR live segments, read through the same `activeWindows` (T-443) |
+| Frequency navigator: region-select → retune | The **Retune** offer beside the viewport (T-444). It is an offer and a separate press, and it refuses (`"moved"`) if the viewport moved after the label was drawn |
+| Review drawer → "Spectrum grid" (region over time) | The surface. That tab drew `GET /api/history` with a second, hand-written colormap — T-397's divergence, in the repo twice |
+| The live waterfall's frequency axis strip | **No home yet** — see below |
+
+**Three things have no home on the canvas, and they need a decision rather than a quiet deletion:**
+
+1. **The instantaneous spectrum trace** (the live FFT plot above the old waterfall), and with it the
+   client-side **max-hold** and the **manual dB range entry**. The surface draws folded cells over
+   time; a live trace of the current frame is a different picture, not a zoom level of this one.
+2. **Drag-to-select a region** (`POST /api/selections` from the waterfall) and the **Confirmed
+   band's draggable edges** (T-193's user-band override). On this surface a drag pans (T-456), so a
+   selection gesture needs a modifier or a mode that is not yet designed. Selections can still be
+   made from the **capture band's** time drag, and are drawn on the surface as stroked boxes.
+3. **Frequency and time axis ticks with labels.** The old `.axis` strip is gone; the surface states
+   each viewport's window and level in its chrome line, which is a readout rather than a ruler.
 
 **Skipped, and why:**
 - **Transmit** (SDRangel TX device sets, replay-to-TX): receive only; the API has no TX route (C37 gated).
