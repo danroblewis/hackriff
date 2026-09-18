@@ -651,6 +651,21 @@ export class SurfacePreview {
     this.view.panes.panTime(id, -(dy / Math.max(1, r.h)) * (box.t1Ns - box.t0Ns));
   }
 
+  /**
+   * **The drag ended — commit the follow/pause decision** (T-486).
+   *
+   * Motion is per pointer move ([[drag]]); *deciding* whether the pane is paused is per gesture, and
+   * this is where the gesture ends. Both halves of the reported bug live here: a 1 px twitch during
+   * a frequency drag comes to rest inside the dead zone and stays live, and a drag back toward the
+   * top released a few rows short — rows that appended *during* the drag — snaps to the edge instead
+   * of resting nearly-following. The edge is read **now**, not at the last move, which is what makes
+   * the second half work.
+   */
+  endDrag(id: string): void { this.view.panes.settleTime(id, this.edgeNs); }
+
+  /** The same for the map, which is one pane's worth of the same model. */
+  endDragMap(): void { this.view.minimap.settleTime(this.edgeNs); }
+
   /** The same for the map, which is one pane's worth of the same model. */
   dragMap(dx: number, dy: number): void {
     const r = this.lastFrame?.mapRect, box = this.lastFrame?.mapBox;

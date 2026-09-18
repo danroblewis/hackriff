@@ -66,6 +66,7 @@ Two of those deserve a note:
 | `surface-contention.e2e.mjs` | **T-454's bootstrap half**: a second tab must be able to open while the first saturates the route. |
 | `surface-colour.e2e.mjs` | **T-470's guard**, on `/surface.html`: the same measured dB is the same colour at every zoom. Splits the surface, zooms **one** viewport through six states across four pyramid levels, and requires the other — same box, same level, same tiles, all checked from the page's own readout — to stay **byte-identical**. Its control is a mode switch, not a fault injection: see below. |
 | `surface-region.e2e.mjs` | **T-458's guard**, on `/`: shift+drag marks out a region. Reads the `shiftKey` flag *on the `pointerdown` the canvas received* before concluding anything from the view, asserts the viewport does **not** move under a stroke, and re-states T-340's control over the new gesture. Its non-vacuity is recorded in the file header: `selftest.mjs` cannot hold these faults, because it builds only the `/surface.html` bundle and this file (like `app-surface`) drives the app. |
+| `canvas-journey.e2e.mjs` | **T-481: the whole user journey, in one flow, through the MOCK SDR** (`--device mock:…`, its own backend on its own port) — pan/zoom, retune, a tile off screen and back, then the backend killed underneath it. The standing guard for T-495/T-497/T-499. Its own findings are below. |
 | `selftest.mjs` | Reintroduces each defect in a scratch copy of `ui/src` and requires the suite to go red. |
 
 ## Dependencies: none new
@@ -104,6 +105,7 @@ Measured on the dev Mac, warm (`hk` already built, `npm ci` a no-op):
 | `surface-region.e2e.mjs` | ~3.5 s (one browser and one app page shared by the file) |
 | `surface-colour.e2e.mjs` | ~26 s (twelve settle-and-screenshot cycles; it compares whole panes) |
 | `surface-nav.e2e.mjs` | ~22 s (8 s of it the deliberate steady-state window) |
+| `canvas-journey.e2e.mjs` | ~100 s (its own mock-SDR backend; ~40 s of it is dwell — a tile must really be off screen while rows really arrive, and a killed server must really be given two windows to settle in) |
 | **`npm run e2e` total** | **~60 s** |
 | `npm run e2e:selftest` (baseline + 5 faults) | ~4 min |
 
@@ -217,3 +219,63 @@ Recorded here rather than silently worked around, because they are the tier doin
    product puts the time axis on **alt/option** for the reason the harness cannot test. Reading the
    modifier that arrived — rather than only that the view zoomed — is the whole point of the probe
    listener there.
+
+## The canvas journey's own findings (T-481)
+
+Recorded here rather than worked around, because they are the tier doing its job. Every number below
+was measured against `main` at the time of writing, on `--device mock:fixtures/hackrf/2026-09-13/fm_100p8M_2p4M…`.
+
+1. **The client hammers a dead server for as long as the page is open.** With `hk serve` SIGKILLed
+   under a live page: **183 failed requests in the first 5 s and 179 in the next**, flat, over
+   repeated runs (172–183 then 170–179). No decay, no ceiling. This is **T-499's second half** — the
+   render/retry loop — and it is the one assertion in this file that is red on `main` today. The
+   *first* half did not reproduce: **0 magenta pixels** before the kill and 0 after, with texture
+   uploads at 0 and 0.00 % of the pane repainting between the two windows. So on this backend the
+   loop is on the wire, not on the screen. The two halves are asserted separately for exactly this
+   reason.
+2. **The live edge draws THE grey over rows the server holds.** Over a viewport the server reports
+   **100 % observed**, fully resident (`0 coarse stand-ins · 0 pending`), the grey share of the
+   newest 40 % of the pane is **17–31 %**, pulsing frame to frame (measured single frames: 0.0, 3.6,
+   7.4, 9.4, 12.3, 18.7, 53.7 %). The profile by vertical tenth puts every grey pixel in the newest
+   tenths and none below them — `100% 53% 35% 0% 0% 0% 0% 0% 0% 0%` in one run, `15% 0% 0% …` in
+   another. Grey is the one colour that may only mean *the radio never looked*, and these rows were
+   recorded and are served. It is **reported and not asserted**: the amplitude varies by a factor of
+   fifty between runs, so a threshold over it would be a coin toss rather than a guard. Every grey
+   claim in the file is therefore made **below** that zone (`LIVE_EDGE_ZONE`), where the same
+   measurement reads 0.0 % in every run.
+3. **Below the live edge, grey tracks the coverage map almost exactly.** Zoomed out to 9x the tuned
+   window: the pane draws **88–90 %** THE grey where the server reports **88.8 %** unobserved. That
+   agreement only appears once two things are controlled, and both were found the hard way:
+   - **Ask the server at the level the PANE drew at.** A coarse cell is observed if anything in it
+     was (docs/16 §8.5a), so the same band compared at 256 server cells against a pane drawing 8
+     gave 0.0 % and then 44.1 % on consecutive runs for the same 88.8 %. The pane states its level;
+     the route states the lattice; the query is built from both.
+   - **Exclude `unknown` from the denominator.** On a young backend everything before
+     `horizon.oldest_record_s` is `unknown` — 1383 of 3688 cells over a window the server had only
+     partly lived through — and `unknown` is neither grey nor a level (T-423). Counting it either way
+     makes the comparison meaningless. Rows finer than a level-0 cell manufacture it too: the same
+     20 s asked as 64 rows returns 1536 `unknown` and as 8 rows returns none.
+4. **T-495 and T-497 did not reproduce through the mock SDR.** Stated plainly rather than papered
+   over, and the assertions are left in their honest form:
+   - **Retune (T-497):** after a press on the persistent per-pane control, the front end moved
+     100.800 → 100.707 MHz with a rate change (2.400 → 2.000 MHz) in between — a real re-plumb — and
+     **242–244 spectrum rows arrived at the NEW centre in the following 10 s, 0 at the old**, with
+     0 socket closes and 0 errors, on every run. If T-497 is real, its cause is not in this path on
+     this backend.
+   - **Off screen and back (T-495):** with a freshly-live tile (the one the retune created), 13 s
+     off screen during which the server recorded 256/256 cells observed, and 12 s after the return
+     for those rows to scroll out of the live-edge zone — **0.00 % grey before and 0.00 % after**.
+   Both assertions are written to fail if the property breaks, and both are worth keeping for that.
+5. **Two harness traps, paid for.** `location.href` to the same document with only a changed `#hash`
+   is a same-document navigation: no reload, no `load` event, and `goto` reports `timeout` for a page
+   that is working perfectly — so `reopen` carries a unique query. And the surface opens on bounds
+   padded well outside the observed region (98.6–120.8 MHz for a capture at 99.6–102.0 MHz), so a
+   wheel about the canvas centre converges on 109.7 MHz and never reaches the tuned window however
+   many notches it gets. Navigation here therefore pans as well as zooms, with **Hz-per-drag-pixel
+   measured on the page** rather than re-derived from `view.ts`.
+6. **Instruments are checked against a known negative.** Test 2's claim is "≥ 20 rows at the new
+   centre in 10 s"; test 4 reads the same counter with the server killed and requires **0**, having
+   first confirmed it was non-zero moments earlier — so the passing number in test 2 is one that has
+   been seen to fail. The magenta predicate is likewise checked against the surface's own `unknown`
+   ink (rgb 112, 77, 133 — the one legitimately magenta mark) and against a ramp colour, in the file
+   that defines it.

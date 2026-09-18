@@ -114,6 +114,11 @@ export class Minimap {
   zoomFreq(factor: number, anchor = 0.5): void { this.model.zoomFreq(this.id, factor, anchor); }
   setFreq(centerHz: number, spanHz: number): void { this.model.setFreq(this.id, centerHz, spanHz); }
   panTime(dNs: number): void { this.model.panTime(this.id, dNs); }
+  /** End a time gesture on the map and commit its follow/pause decision (T-486). The map is a
+   * viewport, so it gets the viewport's dead zone — one answer about what a released drag means. */
+  settleTime(atNs?: number): void { this.model.settleTime(this.id, atNs); }
+  /** The map's own pixel height, so its dead zone is in ITS pixels rather than a pane's. */
+  setViewport(wPx: number, hPx: number): void { this.model.setViewport(wPx, hPx); }
   zoomTime(factor: number, anchor = 1): void { this.model.zoomTime(this.id, factor, anchor); }
   /** The plain wheel's aspect-locked zoom (T-472). The map is a viewport, so it gets the viewport's
    * gesture — not a second, squarer-or-not opinion about what a plain wheel does. */

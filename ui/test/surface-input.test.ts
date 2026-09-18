@@ -46,6 +46,10 @@ function harness(opts: Parameters<typeof attachSurfaceInput>[2] = {}) {
     removeEventListener: (t: string) => listeners.delete(t),
   };
   const calls: Call[] = [];
+  // T-486's commit point, kept in a list of its OWN rather than in `calls`. Ending a gesture is not
+  // another pan — it moves nothing — and folding it into the motion list would make every existing
+  // assertion about *what the view was asked to do* read as though a release moved the viewport.
+  const settles: string[] = [];
   const preview = {
     activePane: "p0",
     onMap: (p: { y: number }) => p.y < 50, // the map strip, in GL coords (origin bottom-left)
@@ -55,12 +59,14 @@ function harness(opts: Parameters<typeof attachSurfaceInput>[2] = {}) {
     wheel: () => calls.push({ fn: "wheel", args: [] }),
     wheelMap: () => calls.push({ fn: "wheelMap", args: [] }),
     goToOnMap: () => calls.push({ fn: "goToOnMap", args: [] }),
+    endDrag: (id: string) => settles.push(id),
+    endDragMap: () => settles.push("map"),
   };
   const dispose = attachSurfaceInput(
     canvas as unknown as HTMLCanvasElement, preview as unknown as SurfacePreview, opts,
   );
   const fire = (type: string, e: Record<string, unknown>) => listeners.get(type)?.(e);
-  return { calls, fire, dispose, preview };
+  return { calls, settles, fire, dispose, preview };
 }
 
 /** A press–move(s)–release, with the modifiers named once at the press unless `shiftDuring` says

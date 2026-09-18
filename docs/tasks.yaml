@@ -6007,7 +6007,7 @@ tasks:
     milestone: M2-hardening
     title: The /api/baselines chain field is documented but not contract-tested, so docs and contract can
       drift
-    status: todo
+    status: deferred
     priority: low
     deps:
     - T-303
@@ -6021,6 +6021,13 @@ tasks:
       assertions in api_contract.rs have the same hole - a field that can be renamed or dropped without
       a test failing is documentation, not a contract. Report any others found rather than fixing them all
       here
+    notes: |
+      SUPERSEDED BY T-502 (2026-09-18): batched with the other hk-api
+      field-consistency fixes into one ticket, one agent session and one gate. The merge
+      queue, not builder capacity, is the bottleneck - four separate merges of four
+      one-line contract fixes cost four full gates and four chances of composition churn.
+      Deferred rather than cancelled: the work is wanted, it just travels with T-502.
+
   - id: T-316
     milestone: M2-hardening
     title: On real air the pipeline fires 866 detections and 5 candidate emitters into a band measured flat
@@ -6955,7 +6962,7 @@ tasks:
     milestone: M2-hardening
     title: /api/status carries no server timestamp, and scheduler leases carry a duration with no start
       or expiry
-    status: todo
+    status: deferred
     priority: low
     deps:
     - T-337
@@ -6968,6 +6975,13 @@ tasks:
       time, which is exactly the inference the shared-time-axis invariant forbids. Add a server timestamp
       to status; give leases an absolute start and expiry rather than a bare duration. Update docs/api.md
       and api_contract.rs together per T-079, asserting values
+    notes: |
+      SUPERSEDED BY T-502 (2026-09-18): batched with the other hk-api
+      field-consistency fixes into one ticket, one agent session and one gate. The merge
+      queue, not builder capacity, is the bottleneck - four separate merges of four
+      one-line contract fixes cost four full gates and four chances of composition churn.
+      Deferred rather than cancelled: the work is wanted, it just travels with T-502.
+
   - id: T-352
     milestone: M2-hardening
     title: 'lint-py is not reproducible off the lockfile: ruff resolves only because an incidental system
@@ -7041,7 +7055,7 @@ tasks:
     milestone: M2-hardening
     title: 'Frequency fields are inconsistently suffixed: FreqRange says lo_hz but several envelopes answer
       bare f_lo'
-    status: todo
+    status: deferred
     priority: low
     deps:
     - T-349
@@ -7054,6 +7068,13 @@ tasks:
       already being paid in the detector's exemption list. Suffix them with serde aliases the way T-349
       did, and remove the exemptions so the detector covers frequencies too. Update docs/api.md and api_contract.rs
       together per T-079, asserting values
+    notes: |
+      SUPERSEDED BY T-502 (2026-09-18): batched with the other hk-api
+      field-consistency fixes into one ticket, one agent session and one gate. The merge
+      queue, not builder capacity, is the bottleneck - four separate merges of four
+      one-line contract fixes cost four full gates and four chances of composition churn.
+      Deferred rather than cancelled: the work is wanted, it just travels with T-502.
+
   - id: T-356
     milestone: M2-hardening
     title: 'Cross-process device exclusion is unverified: two hk serve runs against one HackRF have never
@@ -7486,7 +7507,7 @@ tasks:
     milestone: M2-hardening
     title: /api/selections/{id}/watch serves nanoseconds under a bare t, and the unit sweep cannot reach
       it
-    status: todo
+    status: deferred
     priority: normal
     deps:
     - T-354
@@ -7504,6 +7525,13 @@ tasks:
       selection-scoped routes by creating a selection first, exactly as it already does for an emitter.
       A detector that cannot reach a route is not evidence about that route, and this is now the second
       field it missed for that reason rather than for a listing error'
+    notes: |
+      SUPERSEDED BY T-502 (2026-09-18): batched with the other hk-api
+      field-consistency fixes into one ticket, one agent session and one gate. The merge
+      queue, not builder capacity, is the bottleneck - four separate merges of four
+      one-line contract fixes cost four full gates and four chances of composition churn.
+      Deferred rather than cancelled: the work is wanted, it just travels with T-502.
+
   - id: T-371
     title: A baselines/slots row does not name its bias-tee cohort
     milestone: M4
@@ -12785,7 +12813,7 @@ tasks:
   - id: T-459
     milestone: MCANVAS
     title: Axis ticks with labels - each viewport states its window as a readout, and a readout is not a ruler
-    status: todo
+    status: deferred
     priority: low
     parallel_group: CANVAS-FE
     depends_on: [T-445]
@@ -12803,6 +12831,9 @@ tasks:
       Honesty applies: a tick interval finer than the cell size drawn would imply resolution the
       hardware did not capture, which docs/16's honesty tiers forbid.
     notes: |
+      SUPERSEDED BY T-503 (2026-09-18): batched with the other visible UI-polish
+      tickets into one ticket, one agent session and one gate. Deferred rather than
+      cancelled - the work is wanted, it travels with T-503.
       Filed by the coordinator at T-445's merge (19d9bed). Low priority - the chrome line already
       answers "where am I", and the missing capability is "what is THAT".
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
@@ -13711,7 +13742,7 @@ tasks:
   - id: T-481
     milestone: MCANVAS
     title: A full canvas e2e SCENARIO through the mock SDR - pan/zoom, live advance, retune-fills - as the standing regression guard
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     core_interface: true
@@ -13764,6 +13795,40 @@ tasks:
       the bug. If any of those three slips, this can still be written against the DEFECT and left
       failing, but say so explicitly rather than weakening an assertion to make it pass.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "49422d0"
+    result: |
+      DONE - THE TIER THE LAST SIX USER-REPORTED BUGS GOT PAST. Four assertions in one flow through the
+      MOCK SDR, each stating what its evidence is a property OF.
+      (1) PAN/ZOOM - the /api/tiles statuses ON THE WIRE plus the pane's grey share against
+      /api/coverage's OWN unobserved share, asked at the level the pane states it drew at. PASSES: 0
+      refused of 4-41 gesture requests; grey 88-90 % where the server says 88.8 %, 0.0 % where it says
+      100 % observed.
+      (2) RETUNE - rows on the socket joined to their ARRIVAL INSTANT and the header geometry in force
+      when they arrived, three facts that only exist together on the wire. PASSES: 100.800 -> 100.707 MHz
+      with a 2.400 -> 2.000 rate change in between (a real re-plumb), 242-244 rows at the NEW centre in the
+      next 10 s, 0 at the old, 0 closes, 0 errors.
+      (3) LIVE TILE OFF AND BACK - the pane's grey share for the IDENTICAL stated viewport before and
+      after, with the server asked separately whether it gained coverage in between, so the "before" is
+      the control and no absolute threshold is needed. PASSES: 0.00 % both times over a 13 s absence.
+      (4) STREAM LOSS - SKIPPED DELIBERATELY, and removing the skip is T-499's DoD. The thrash half FAILS
+      hard and identically: 182 failed requests in the first 5 s after SIGKILL and 181 in the next, FLAT,
+      NO DECAY. The COLOUR half passes - 0 magenta before and after, 0 uploads, 0.00 % repaint - so the
+      two are asserted separately as T-499 requires, and THE PURPLE DID NOT REPRODUCE by killing the
+      backend.
+      DRAW CALLS ARE THE WRONG COUNTER and the file says so: the surface renders from an unconditional rAF
+      loop (~2.5 M draws a run) and could never settle. The subject is failed requests on the wire.
+      T-495 AND T-497 DID NOT REPRODUCE through this backend, and neither assertion was weakened to force
+      red - so if those bugs are real their cause is not in the path this exercises.
+      ALSO RECOVERED HERE, split out of the preserved task-t484 branch: panTime(id, 0) ran freezeAt BEFORE
+      looking at the delta, so a purely sideways drag silently stopped the pane following the live edge.
+      That fix went out with the T-484 revert and was blocking assertions 2 and 3; independent of the tile
+      pipeline, so it came back now rather than waiting for T-501.
+      FINDINGS RECORDED RATHER THAN ASSERTED (ui/e2e/README.md): the live edge draws THE grey over rows
+      the server holds - the newest 40 % of a fully-resident 100 %-observed pane reads 17-31 %, single
+      frames 0.0 to 53.7 % - so every grey claim is made below that zone; and a coverage comparison must
+      match the pane's level and exclude `unknown`, since the same band gave 0.0 % then 44.1 % purely from
+      which level was resident.
+      Gate: ui, test-ui 45/45, e2e 11/11 in 242.6 s.
   - id: T-482
     milestone: MLIVE
     title: /api/tiles declares a 12 x 15 lattice and 400s a large part of it - the route must say how far it can actually be READ
@@ -13919,7 +13984,7 @@ tasks:
   - id: T-484
     milestone: MLIVE
     title: The live/tuned tier must render at live-IQ FFT resolution - the pyramid stays coarse only for zoom-out and history
-    status: done
+    status: reverted
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -14073,7 +14138,7 @@ tasks:
   - id: T-486
     milestone: MCANVAS
     title: Follow-live has no dead zone - a 1 px time-pan drops out of live, and a release near the top re-pauses
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-472]
@@ -14126,6 +14191,37 @@ tasks:
       small offsets from the live edge, do not assert follow/pause state from the readout string -
       read `data-following`, which is what the T-478 projection already does.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "5162a06"
+    result: |
+      DONE - A THRESHOLD ON THE STATE, COMMITTED ONCE PER GESTURE, WITH THE PAN UNTOUCHED. panTime still
+      freezes and offsets 1:1 from the first pixel, asserted directly. The new piece is a COMMIT POINT,
+      PaneModel.settleTime, called from input.ts's onUp AND onCancel, reading the window against the live
+      edge AS OF NOW rather than as of the last pointer move - which is what makes the "rows appended
+      during the drag" half work. isFollowing became the single derived answer and paneStatuses takes it
+      as a predicate, so the chrome's data-following and T-460's refresh set cannot be two derivations of
+      one fact.
+      PIXELS, NOT ROWS, with the cost at both extremes stated: a hand cannot hold a pointer to the pixel,
+      and the question is "am I still at the top of the waterfall" - about the picture, which a pixel
+      answers at every zoom. A row threshold is a claim about data, and T-484 had just moved the finest
+      tier from a 1 s cell to the display row, so "a few rows" would have silently changed meaning by ~25x.
+      ON A DAY-WIDE VIEWPORT 10 px IS ~18 MINUTES, so a pane cannot be parked within minutes of live there
+      - ASSERTED, not hidden. A model never given a viewport gets zone 0: fail closed.
+      HYSTERESIS 10 px OUT, 6 px BACK, PLUS A ONE-WAY DOOR - re-entry also requires the stroke to have come
+      back from further out. That direction test was A BUG THE TESTS CAUGHT: pausing is a coordinate
+      change, so a pane paused while live sits at lag ZERO, inside the snap zone by construction, and
+      without it the first small scrub after an explicit Pause was yanked straight back to live.
+      NO FLAPPING, DEMONSTRATED WITH THE EDGE ADVANCING, twice: 400 rows with settleTime called on EVERY
+      row - the most flap-prone caller there is - ZERO transitions; and jittering +/-6 px across the
+      boundary within one stroke while the edge advances, isFollowing monotone with EXACTLY ONE transition.
+      THE CONTROL IN THE SAME TEST computes what a thresholds-only rule would have said over the identical
+      positions and asserts IT FLAPS, so the one-way door is shown load-bearing rather than asserted to be.
+      T-460's refresh budget: widening isFollowing widens the refresh set, but the PEAK is unchanged and
+      was already reached at open since every viewport opens following. Asserted as an invariant over the
+      whole gesture vocabulary.
+      Non-vacuity includes a selftest fault that removes the commit from onUp, leaving every threshold and
+      every unit test intact and simply never consulted. T-456's unthresholded pan unchanged; T-340
+      verbatim.
+      Gate: ui, test-ui 45/45, e2e 11/11.
   - id: T-487
     milestone: MCANVAS
     title: app-trace's peak-argmax compares a readout and a framebuffer captured at DIFFERENT instants
@@ -14629,7 +14725,7 @@ tasks:
   - id: T-496
     milestone: MCANVAS
     title: Capture width is changeable but not discoverable - it is a side effect of zoom-then-retune
-    status: todo
+    status: deferred
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-476]
@@ -14665,6 +14761,9 @@ tasks:
       than hidden; T-340 passes verbatim; and one target-derivation path, demonstrated rather than
       asserted.
     notes: |
+      SUPERSEDED BY T-503 (2026-09-18): batched with the other visible UI-polish
+      tickets into one ticket, one agent session and one gate. Deferred rather than
+      cancelled - the work is wanted, it travels with T-503.
       Filed 2026-09-18 from user feedback. Depends on T-476, whose persistent per-pane retune control
       is the natural home for this and whose refusal wording should be reused.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
@@ -14732,7 +14831,7 @@ tasks:
   - id: T-498
     milestone: MCANVAS
     title: The retune label states only the CENTRE, not the SPAN it will capture
-    status: todo
+    status: deferred
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-476]
@@ -14760,6 +14859,9 @@ tasks:
       to equal what the retune actually commits; the disabled wordings are unchanged; and T-476's
       existing e2e assertions still pass, with the label check updated rather than loosened.
     notes: |
+      SUPERSEDED BY T-503 (2026-09-18): batched with the other visible UI-polish
+      tickets into one ticket, one agent session and one gate. Deferred rather than
+      cancelled - the work is wanted, it travels with T-503.
       Filed 2026-09-18 from user feedback. Small, and lives in the chrome label plus its test - but
       the "snapped, not requested" requirement is what makes it worth writing down rather than doing
       casually.
@@ -14809,6 +14911,267 @@ tasks:
       will prevent, and a renderer that only behaves when the server behaves is not robust.
       T-487's harness can kill and restart the backend under a live page, which is the instrument for
       the DoD's "demonstrated rather than simulated".
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-500
+    milestone: MLIVE
+    title: "surface-colour's settle check cannot settle now the live tier advances 25x faster - main is RED"
+    status: done
+    priority: high
+    parallel_group: UI
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      MAIN IS RED AND THIS BLOCKS EVERY MERGE. `surface-colour.e2e.mjs` fails at "zoom 1 never
+      settled": 1320 px of 839 916 still changing between two consecutive frames, share 0.0016,
+      worst channel delta 24.
+      THE MASKING IS THE INTERESTING PART, AND IT IS THE COORDINATOR'S ERROR TO RECORD. Two changes
+      landed close together:
+        (1) T-484 took the finest live tier from a 1 s time cell to the DISPLAY ROW RATE (~25 rows/s).
+        (2) The coordinator flipped auto-contrast to the default (user request) in commit 86fc150c.
+      (2) made the test fail EARLY, at an opening-mode assertion, so it never reached the settle
+      check - which HID (1). Fixing the mode (the host now sets it explicitly in preview.ts, because
+      `setScale` turns autoScale off by contract and was overriding the class default) moved the
+      failure to where it always was. T-484's own gate passed for the same reason: the earlier
+      assertion was already failing the file.
+      THE LIKELY MECHANISM, TO CONFIRM RATHER THAN ASSUME: `settle()` screenshots until TWO
+      CONSECUTIVE FRAMES AGREE over a rect. At a 1 s time cell a following pane redrew its newest row
+      once a second, so two frames agreed routinely between rows. At ~25 rows/s a following pane is
+      repainting continuously, so "two consecutive frames agree" may now be unreachable for any rect
+      containing a live pane - which would make this a property of the INSTRUMENT, not of the
+      product. 1320 px is 0.16 % of the canvas, consistent with one advancing row rather than a
+      re-colour.
+      MEASURE BEFORE CHANGING: is the residual change confined to the FOLLOWING pane's newest rows,
+      or spread across the held pane? Those have opposite conclusions - the first says the settle
+      check needs a rect that excludes the live edge (or a pane that is paused for the comparison),
+      the second says something really is re-colouring and T-470's claim is in trouble.
+      DO NOT WIDEN THE TOLERANCE. T-470's claim is byte-identity - 0 of 316 478 px across four
+      pyramid levels - and a "settled enough" threshold would retire the strongest measurement in the
+      file. If the instrument cannot express the claim any more, change the instrument: pause the
+      held pane, or compare a rect that contains no live edge, and say which and why.
+      NOTE FOR WHOEVER TAKES IT: T-475 and T-486 both independently reported this file failing on
+      main and both correctly left it alone as not theirs. T-486 additionally found that T-484's "a
+      real scrub, however small, still pauses" was never testing that - panTime(-1) at T0 ~ 1.7e18 ns
+      is below a double's 256 ns ulp, so the centre did not change at all. 256 ns is the real floor
+      under every threshold in that file.
+      DoD: main green; the residual-change measurement stated with its subject; T-470's byte-identity
+      claim asserted at full strength, through whatever instrument can now express it.
+    notes: |
+      Filed by the coordinator 2026-09-18. HIGH because main is red and no merge can gate until it is
+      green.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "8488289"
+    result: |
+      DONE - AND IT WAS NEITHER OF THE TWO OPTIONS THE TICKET OFFERED. Measured at exactly the failing
+      point on T-484's own branch, 60 screenshots 250 ms apart: LEFT pane (held) 59/59 pairs agreed, 0 px;
+      RIGHT pane (zoomed) 59/59, 0 px; MINIMAP 19/59, mean 899 px, worst 24, all in y 610..729; WHOLE
+      CANVAS THE SAME NUMBERS AS THE MINIMAP, down to the reported failure's own worst 24.
+      So NOTHING WAS RE-COLOURING - T-470's claim was never in trouble - AND it was not the following
+      pane's newest rows either: preview-main.ts passes no edgeFn, so Surface freezes every viewport at
+      open and calls setFollowing(false) on the map. THERE IS NO LIVE EDGE IN THAT PAGE AT ALL, which also
+      kills the coordinator's "25 rows/s repaints continuously" hypothesis.
+      THE CAUSE IS RESIDENCY: the map walks 126 coarse stand-ins down to 85, about one swap per 250 ms
+      against an in-flight cap of 4, each repainting a tile-wide column over the map's full height. At
+      40 ms cells that level has ~25x the addresses it has at 1 s, so ~128 stand-ins take ~30 s and a zoom
+      evicts from the shared LRU and restarts it. Two whole-canvas frames then agree about 32 % of the
+      time - which is why this was a RARE red rather than a permanent one.
+      THE FIX IS THE INSTRUMENT, AND THE FILE'S OWN WORDS ARE THE ARGUMENT: waitResident already documents
+      the map as never resident - "the map excepted - it is 6 GHz wide and always has stand-ins" - so
+      asking the whole canvas to stop changing was asking for a state the file itself calls unreachable.
+      settle() now takes NAMED SUBJECTS and waits on the two panes, the only rects anything asserts over.
+      For those it is STRONGER: the same zero over the same pixels, no longer conditioned on a third
+      viewport still loading. Failures name which subject did not settle.
+      T-470's byte-identity untouched and at full strength: held.pixels === 0 over all 316 478 px at every
+      one of six zooms across four pyramid levels, the grey-count equality, and the round trip closing at 0.
+      RECORDED FOR T-501: two-frames-agree is reachable for FROZEN panes and would NOT be for one
+      following a fast live edge - unreachable by construction rather than marginal.
+      10 consecutive green runs under load (loadavg 12 to 33 on 28 cores).
+  - id: T-501
+    milestone: MLIVE
+    title: REDO T-484 - the FFT-resolution fidelity fix, gated by the canvas e2e that would have caught its tile breakage
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-481]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      T-484 WAS REVERTED ON MAIN (87ca0b74) BECAUSE IT BROKE TILE RENDERING ON THE USER'S DEMO - no
+      tiles, a flashing trace, no max line. THE FIDELITY WORK IS NOT DROPPED: the user wants it back.
+      This ticket redoes it, with the breakage fixed and the whole thing gated by the canvas e2e.
+      THE DIFF IS PRESERVED: branch `task-t484` still points at de758d17. START FROM IT. Do not
+      rewrite from scratch - its measurements are sound and its reasoning is recorded; what is
+      missing is why the tile map went dark.
+      WHAT T-484 ACHIEVED AND MUST ACHIEVE AGAIN, measured: 66.5 -> 1.0 FFT cells per canvas cell;
+      floor lift +10.5 -> +0.1 dB; contrast lost 4.5/5.0/1.6 -> 0.1 dB; wave variation retained
+      19 %/3 % -> 98 %/100 %; per-cell reproduction error 10.6/15.9 -> 0.0/0.0 dB. Its DoD was
+      deleting T-483's four #[ignore] lines, and canvas_fidelity 5/5 with the control still passing.
+      HOW IT DID IT: spectrum.rs pushes the DISPLAY frames into the view lattice's writer queue;
+      class.rs::row_plan turns per-segment Welch holds off; history.rs::view_geometry sizes node
+      (0,0) to that plan's own bin and row. Scheme 1 is untouched.
+      THE THING TO FIND FIRST, AND IT IS THE WHOLE TICKET: WHY DOES THE TILE MAP GO DARK? Every unit
+      suite passed, canvas_fidelity passed 5/5, and the full gate passed - and the demo rendered
+      nothing. So the defect is in a place none of those look. Candidates, to measure rather than
+      pick: node (0,0)'s geometry no longer matching what the client addresses (T-482's declared
+      ceiling is computed from the pyramid's geometry, and T-494 already records that
+      affordable_levels and materialize disagree at depth); the writer queue saturating at ~25 rows/s
+      where it carried 10; tiles being produced at a level nothing requests; or the coverage plane
+      reading unobserved because cells now exist that no frame filled.
+      THE GATE THIS TIME IS T-481's CANVAS JOURNEY, which is exactly the tier that was missing.
+      Its assertion 1 - tiles load where data exists, grey only where the server says unobserved,
+      measured as a pane grey share against /api/coverage's own share at the level the pane states it
+      drew at - is the one that would have caught this. It must pass with the fidelity fix in.
+      DO NOT SHIP ON A GREEN UNIT SUITE AGAIN. The lesson is recorded in the revert commit: the unit
+      tier cannot see whether the surface renders, and this is the third time this milestone has been
+      told so (T-450's module that could not load, T-476's four tests that would have been green over
+      a shipped defect, and now this).
+      DoD: T-483's four #[ignore] lines deleted and canvas_fidelity 5/5 with the control passing; the
+      fidelity numbers above reproduced; T-481's canvas journey green, assertion 1 included; a real
+      browser showing a drawn canvas with a plausible colour distribution (the revert's baseline is
+      625 distinct colours, dominant 19.0 %, mean luma 56.6 - a flat or near-empty canvas is the
+      defect); and a stated explanation of what went dark and why nothing caught it.
+    notes: |
+      Filed 2026-09-18 after reverting T-484 (merge 5fe4f2d, revert 87ca0b74) at the user's
+      direction. The branch task-t484 is preserved at de758d17 as the starting point.
+      T-484 also carried a REAL defect fix worth keeping: panTime(id, 0) ran freezeAt before checking
+      the delta, so a purely horizontal drag silently unfollowed the pane. That went out with the
+      revert and should come back with this - it is independent of the tile pipeline and could be
+      split out and landed on its own first if that is cheaper.
+      T-486 also found that T-484's "a real scrub, however small, still pauses" was never testing
+      that: panTime(-1) at T0 ~ 1.7e18 ns is below a double's 256 ns ulp, so the centre never moved.
+      256 ns is the real floor under every threshold in that file.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-502
+    milestone: M2-hardening
+    title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      A DELIBERATE BATCH (user directive 2026-09-18). The bottleneck is the MERGE QUEUE - a serial
+      gate plus composition churn - not builder capacity. Four separate merges of four small
+      same-crate contract fixes cost four full gates and four chances for main to move underneath
+      them. They are same-area, low-risk, and touch the same files, so they travel together.
+      THE FOUR, each keeping its own DoD - read each ticket's own acceptance, they are not restated
+      here:
+      - T-315: The /api/baselines chain field is documented but not contract-tested, so docs and contract can
+      - T-351: /api/status carries no server timestamp, and scheduler leases carry a duration with no start
+      - T-355: 'Frequency fields are inconsistently suffixed: FreqRange says lo_hz but several envelopes answer
+      - T-370: /api/selections/{id}/watch serves nanoseconds under a bare t, and the unit sweep cannot reach
+      WHAT MAKES THIS BATCHABLE, and the test for anything batched later: same crate (hk-api), same
+      kind of change (what a route says about its own fields), none `core_interface`, none on the
+      real-time path, and no two of them fight over the same function. If any of that turns out to be
+      false once you are in the code - if one of them needs a schema change, or reaches into
+      hk-pipeline, or contradicts another - STOP AND SAY SO rather than forcing the batch. A batch
+      that hides a hard problem inside three easy ones is worse than four merges.
+      COMMIT PER TICKET ON THE BRANCH. Four commits, one merge, one gate. The board records four
+      results, so each stays independently readable afterwards.
+      docs/api.md AND ITS CONTRACT TEST MOVE TOGETHER for every one of them (T-079) - these are all
+      statements a route makes about itself, so the contract test IS the deliverable, not a
+      formality.
+      THE FAMILY THESE BELONG TO, worth reading before starting: T-350 found an inventory row's
+      snr_db and peak_dbfs were a Detection's numbers with its TimeRange stripped at the API
+      boundary. The recurring shape is a field that means one thing inside and another on the wire.
+      Look for that in each of the four rather than doing the literal rename.
+    notes: |
+      Filed 2026-09-18 under the user's batching directive: cluster related, low-risk, same-area
+      todos into one ticket, one agent session and one gate; route well-specified, test-covered,
+      non-core-interface work to Sonnet.
+      T-315, T-351, T-355 and T-370 are marked `deferred` and point here.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-api`,
+      `just test-one api_contract` - then HAND BACK. Never `just gate`; the coordinator gates once.
+  - id: T-503
+    milestone: MCANVAS
+    title: UI-polish batch - axis ticks, capture-width discoverability, the retune label's span
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: sonnet
+    depends_on: [T-481]
+    use_cases: [AWARE-011]
+    acceptance: |
+      A DELIBERATE BATCH (user directive 2026-09-18) of VISIBLE, LOW-RISK, INDEPENDENT UI polish.
+      Each keeps its own DoD - read each ticket's own acceptance, they are not restated here:
+      - T-459: Axis ticks with labels - each viewport states its window as a readout, and a readout is not a ruler
+      - T-496: Capture width is changeable but not discoverable - it is a side effect of zoom-then-retune
+      - T-498: The retune label states only the CENTRE, not the SPAN it will capture
+      WHAT MAKES THESE BATCHABLE, and the test for anything batched later: each is a LABEL OR A
+      READOUT, none changes the render pipeline, none touches tile production, the stream, or the
+      follow/pause state, and no two fight over the same function. If any turns out to reach into
+      those - if the axis ticks need the pane's level derivation changed, or the width control needs
+      a second target-derivation path - STOP AND SAY SO rather than forcing the batch. A batch that
+      hides a hard problem inside two easy ones is worse than three merges.
+      WHAT THIS BATCH MUST NEVER ABSORB, stated because the cost is now measured: the render,
+      pipeline and stream bugs stay SEPARATE and individually gated - T-495 (a live tile panned off
+      and back serves a stale cache), T-497 (a retune tears the live capture down), T-499 (purple
+      tiles and a re-render loop on stream loss), T-501 (the fidelity redo), T-462 and T-468. T-484
+      is why: it passed every unit suite, canvas_fidelity 5/5 AND a full gate, and still left the
+      user's demo with no tiles at all. That class of change needs its own gate and its own blame.
+      GATED BY T-481'S CANVAS JOURNEY. Every UI batch runs through `canvas-journey.e2e.mjs` before
+      merge from now on - it is the tier that would have caught T-484, and its assertion 1 (the
+      pane's grey share against /api/coverage's own share, at the level the pane states it drew at)
+      is the specific check that was missing.
+      COMMIT PER TICKET ON THE BRANCH. Three commits, one merge, one gate; the board records three
+      results so each stays independently readable.
+      THE ONE REQUIREMENT WORTH REPEATING FROM T-498, because it is the easy thing to get wrong: the
+      span in the retune label must be the SNAPPED, achievable one - the width the front end will
+      really capture - not the one asked for. T-409's precedent: the actual move is named, and the
+      difference from the advertised fraction is NOT absorbed.
+    notes: |
+      Filed 2026-09-18 under the user's UI-batching directive. T-459, T-496 and T-498 are `deferred`
+      and point here.
+      Depends on T-481 because the canvas journey is the gate this batch must pass, and it has to be
+      on main first.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-ui`, `just test-ui-e2e` - then
+      HAND BACK. Never `just gate`; the coordinator gates once, at merge.
+  - id: T-504
+    milestone: M2-hardening
+    title: Quarantine the load-sensitive tests agents keep re-running, so nobody characterises them twice
+    status: todo
+    priority: high
+    parallel_group: CI
+    model: sonnet
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      AGENT-EFFICIENCY DIRECTIVE (user, 2026-09-18). Profiling recent agents found 40-55
+      build/test cycles and 40-150 edits each, with the edit-build-test loop dominating - and a
+      measurable share of it is agents RE-RUNNING AND RE-CHARACTERISING THE SAME FLAKY TESTS. At
+      least five agents this session independently measured the same failures, each spending runs to
+      conclude "pre-existing, not mine". That work is real and it is duplicated.
+      THE KNOWN SET, with what has already been established so nobody re-derives it:
+      - hk-plugins::host plugin_crash_restarts_and_capture_never_blocks and
+        finish_delivers_queued_input_to_a_slow_starting_plugin_then_waits_for_its_exit. FAIL at
+        25.2 s and 28.1 s under a full gate with a builder competing; PASS IN ISOLATION AT 0.29 s
+        AND 2.70 s. Mechanism already documented in .config/nextest.toml from T-257: a macOS
+        pipe(2)/FD_CLOEXEC race BETWEEN CONCURRENTLY SPAWNING TEST PROCESSES, scaling with spawn
+        concurrency and nothing else - ZERO in 25 hk-plugins runs at 6 threads, and the workspace cap
+        is 8. Owned by T-493.
+      - Anything else the quarantine list acquires must arrive WITH its measurement, not as a
+        suspicion.
+      WHAT QUARANTINE MEANS HERE, AND WHAT IT MUST NOT MEAN. This repo's own rule (T-436) is that a
+      cap or a skip makes a defect RARER OR INVISIBLE, NOT FIXED, and T-383's is that a test may not
+      bound a quantity whose natural range it has not measured. So a quarantine that silently drops
+      the test is forbidden. The established pattern is T-483's #[ignore] and T-481's skip: THE
+      MARKER CARRIES ITS OWN REASON, ITS MEASUREMENT, AND THE TICKET WHOSE DoD IS REMOVING IT. Copy
+      that. A reader hitting the marker must learn in one line why it is there and what unfixes it.
+      THE POINT IS TO STOP THE DUPLICATED WORK, not to stop caring: an agent that hits a quarantined
+      test should be able to read the marker, know it is not theirs, and move on in seconds instead
+      of spending six runs proving it.
+      ALSO WANTED, and cheap: a single place an agent can read the current quarantine list - the
+      briefs can then point at it rather than restating five findings each time.
+      DoD: the known set is quarantined with self-explaining markers naming their tickets; the full
+      gate no longer fails on them; each quarantined test is still runnable deliberately by one
+      documented command; and nothing is quarantined without a measurement in its marker.
+    notes: |
+      Filed 2026-09-18 under the user's agent-efficiency directive. HIGH because the cost is paid by
+      every agent and every gate until it lands.
+      DO NOT quarantine app-trace or surface-region: both were real defects and are FIXED (T-487's
+      two-instant capture and its own tie-break; T-478's live-edge drift, whose first fix was
+      backwards). Quarantining a fixed test would hide a regression.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

@@ -184,6 +184,10 @@ export class SurfaceView {
     const mapH = Math.max(0, Math.min(Math.floor(this.minimapPx), Math.floor(hPx / 2)));
     const paneH = Math.max(1, hPx - mapH);
     this.panes.setViewport(w, paneH);
+    // The map is laid out in the same pixels, and it needs them for the same reason the panes do:
+    // T-486's dead zone is a number of *device pixels*, so a viewport that does not know its own
+    // height has no pixel to measure in (and, per `PaneModel.zoneNs`, no dead zone at all).
+    this.minimap.setViewport(w, mapH);
     // T-457's strip, taken off the **top** of each pane's rectangle rather than painted over it.
     // Capped at a third of the pane area for the same reason the map is capped at half: the thing
     // you are looking at must not become the thing beside it. Per pane, so a split shows one trace
@@ -245,7 +249,8 @@ export class SurfaceView {
     //    with — the minimap among them, because it is another viewport.
     const rects = new Map(views.map((v) => [v.id, v.rect]));
     const states = mapView ? [...this.panes.list(), this.minimap.state()] : this.panes.list();
-    const statuses = paneStatuses(states, reports, this.surface.lat, edgeNs, rects);
+    const statuses = paneStatuses(states, reports, this.surface.lat, edgeNs, rects, (id) =>
+      id === this.minimap.id ? this.minimap.following : this.panes.isFollowing(id));
     const readout = readoutOf(statuses, mapView ? this.minimap.id : null, this.chromeAction);
     this.chrome?.update(readout);
 

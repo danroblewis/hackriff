@@ -256,23 +256,11 @@ export class Surface {
   lo: number = FALLBACK_RANGE.lo;
   hi: number = FALLBACK_RANGE.hi;
   /**
-   * **On by default (user, 2026-09-18), having been opt-in since T-470.** On, the range tracks the
-   * `range_db` of the tiles currently on screen, so the same measured dB changes colour as the
-   * viewport changes. Off, the range is whatever [[setScale]] anchored it to and a given dB is one
-   * colour at every zoom.
-   *
-   * T-470 made this opt-in *because* of that trade: it measured a fixed anchor holding the untouched
-   * half of a split byte-identical across four pyramid levels, 0 of 316 478 px, while auto-contrast
-   * tracks the union over both panes and re-colours a viewport nobody moved. **The user has since
-   * reversed that ruling and accepts the trade** — contrast on the data in front of them is worth
-   * more to them than colour stability across a zoom. The toggle is unchanged, so the stable mapping
-   * is one click away, and the legend still states which mode is in force and what it costs.
-   *
-   * The guard in `ui/test/surface-range.test.ts` was INVERTED rather than deleted (T-347's
-   * precedent): the stable-colour property is still asserted, now through the anchored mode a host
-   * selects rather than through the default.
+   * **Opt-in** (T-470). On, the range tracks the `range_db` of the tiles currently on screen, so the
+   * same measured dB changes colour as the viewport changes — useful as a manual contrast control,
+   * wrong as a default. Off (the default) the range is whatever [[setScale]] anchored it to.
    */
-  autoScale = true;
+  autoScale = false;
   /** Where [[lo]]/[[hi]] came from, so every surface that states the range can state its provenance. */
   rangeSource: string = FALLBACK_RANGE_SOURCE;
   drawCalls = 0;

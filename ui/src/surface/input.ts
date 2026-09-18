@@ -140,10 +140,26 @@ export function attachSurfaceInput(
     moved();
   };
 
+  // **The gesture ended, so the pane's follow/pause decision is committed now** (T-486).
+  //
+  // A pan moves the view on every pointer move; whether the pane ends up *paused* is decided once,
+  // here, from where the viewport came to rest against the live edge. It is called for a cancel as
+  // well as an up, because a stroke the browser takes away still ended — leaving a pane frozen one
+  // pixel off live because the pointer was captured elsewhere is the reported bug with a different
+  // cause. A region stroke never panned, so there is nothing to commit for one.
+  const settle = (d: { map: boolean; pane: string | null; region: SurfaceRegion | null }) => {
+    if (d.region) return;
+    if (d.map) preview.endDragMap();
+    else if (d.pane) preview.endDrag(d.pane);
+    else return;
+    moved();
+  };
+
   const onUp = (e: PointerEvent) => {
     const d = dragging;
     dragging = null;
     if (!d) return;
+    settle(d);
     if (d.region) {
       opts.onRegionDrag?.(null);
       // A TAP IS NEVER A REGION, and the test is on the rectangle the user actually ended up with.
@@ -160,7 +176,7 @@ export function attachSurfaceInput(
     }
     if (d.travel < DRAG_PX && !d.map) opts.onClick?.(point(e), e);
   };
-  const onCancel = () => { endRegion(); dragging = null; };
+  const onCancel = () => { endRegion(); if (dragging) settle(dragging); dragging = null; };
   const onLeave = (e: PointerEvent) => { if (!dragging) opts.onHover?.(null, e); };
 
   // **Every wheel over the canvas is the surface's, whatever is held down (T-456).**
