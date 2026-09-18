@@ -374,7 +374,13 @@ fn a_pipeline_is_recorded_automatically_and_scrubs_reparses_and_replays_like_liv
         .unwrap();
     wait("live frames", LIMIT, || live.frames().len() >= 40);
 
-    // Recorded with no request, while recording.
+    // Recorded with no request, while recording. The recorder is a separate consumer on its own
+    // writer thread: it opens the capture when it decodes the stream header, which is not ordered
+    // against what the live consumer above has read. Wait for the capture to exist, then assert
+    // there is exactly one (a second would mean the segment rolled).
+    wait("the recorder's capture", LIMIT, || {
+        !run.captures_of(&id).is_empty()
+    });
     let caps = run.captures_of(&id);
     assert_eq!(caps.len(), 1, "{caps:?}");
     let cap = caps[0].clone();
@@ -534,12 +540,65 @@ fn segments_roll_and_the_oldest_are_evicted_within_the_quota() {
         !segs.contains(&0),
         "the oldest segment was evicted: {segs:?}"
     );
-    // The survivors are the newest segments, contiguous, ending with the last frame produced.
+    // The survivors are the newest segments and contiguous.
     let (lo, hi) = (*segs.iter().min().unwrap(), *segs.iter().max().unwrap());
     assert_eq!((hi - lo + 1) as usize, segs.len(), "{segs:?}");
+    // The window ends at the live edge: every survivor but the highest-numbered ended by ROLLING
+    // into its successor, and the highest-numbered is the one the stream itself ended on — the
+    // segment that was live when recording stopped. So eviction took the oldest, never the newest
+    // and never a hole out of the middle. `end_reason` says that directly and, unlike any count
+    // of frames, it does not race the recorder.
     let newest = caps.iter().find(|c| c.segment == hi).unwrap();
+    for c in caps.iter().filter(|c| c.segment != hi) {
+        assert_eq!(c.end_reason.as_deref(), Some("rolled"), "{c:?}");
+    }
+    assert!(
+        matches!(
+            newest.end_reason.as_deref(),
+            Some("finished" | "drain-timeout")
+        ),
+        "the newest survivor is the segment the stream ended on: {caps:?}"
+    );
+    // ...and nothing is lost from its tail silently. "The newest segment ends with the last frame
+    // the pipeline produced" is NOT a property of this store, and asserting it was T-451's flake:
+    // `produced` counts frames offered to the publisher, and the recorder sits behind that on its
+    // own thread as an egress consumer that must never block the pipeline, so it can end short two
+    // ways. Its bounded ring (`CaptureQuota::queue_bytes`, floored at `MIN_QUEUE_BYTES` = 2 MiB +
+    // 64 KiB ~= 5 800 of these ~374-byte records) DROPS AND COUNTS a frame offered while it is
+    // full; and when the stream finishes, a recorder still draining after the publisher's 5 s
+    // drain grace is closed, its queue discarded and the capture flagged `drain-timeout`. What the
+    // store does guarantee is that neither loss is silent: the gap is counted, or the capture says
+    // it was cut short. On the clean path (`finished`) the inequality below is the old equality,
+    // exactly, because a tail drop's marker lands in this same newest segment — drops are marked
+    // on the next enqueue and, at the end, on drain while the ring is empty, and the writer only
+    // ever opens a segment to store a frame, so no segment can open after the last stored frame.
+    //
+    // MEASURED (T-451). 6 `cargo nextest run -p hk-pipeline` runs at 8 threads: produced 769-991
+    // frames, all stored, gap 0, dropped 0 — 6x inside the ring and draining well inside the
+    // grace. Injecting latency into the recorder's own file writes walks it through all three
+    // regimes, and `produced` with it, because nothing the test controls bounds `produced`: it is
+    // (wall time for the recorder to write 8 segments) x (unpaced producer rate), so it stretches
+    // with disk latency while the producer, which never waits for the recorder, does not.
+    //   3-5 ms  produced  3 939- 6 003  gap 0                dropped 0            finished
+    //   7-10 ms produced  7 969-11 393  gap   333-   751     dropped 1 146-1 763  finished
+    //   12+ ms  produced 12 745-42 019  gap 6 656-39 775     dropped 0            drain-timeout
+    // The run T-448 caught, at 9 788 produced, sits squarely in the middle row — the ring-overrun
+    // regime this assertion covers with its counted drops. The old `== produced - 1` fails in both
+    // of the lower two rows, reproducibly: 10 ms gave `left: Some(10203) right: Some(10778)`,
+    // the same shape as the reported `right: Some(9787)`.
     let last = read_all(&run.store, &newest.id, newest.frames - 1);
-    assert_eq!(last[0].metadata.frame, Some(produced - 1));
+    let last_frame = last[0].metadata.frame.expect("a frame record");
+    assert!(
+        last_frame < produced,
+        "stored frame {last_frame} of {produced} produced: {caps:?}"
+    );
+    let gap = produced - 1 - last_frame;
+    assert!(
+        newest.end_reason.as_deref() != Some("finished") || gap <= newest.dropped_records,
+        "{gap} frames produced after the last stored one (frame {last_frame} of {produced}), the \
+         capture says it ended cleanly, and the newest segment counts only {} dropped: {caps:?}",
+        newest.dropped_records
+    );
     run.finish();
 }
 
