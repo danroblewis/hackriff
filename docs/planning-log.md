@@ -5080,6 +5080,63 @@ defects the agents keep finding in the product — **an operation correct under 
 restated**. The cache assumed comparable zooms; my helper assumed the named ticket's state; my redo
 assumed a timed-out command was dead. None of them announced itself.
 
+### B0.686 — two proofs that were correct about the wrong thing (2026-09-17)
+
+The user asked to **see** the canvas before anything was retired. That decision paid for itself twice
+in one afternoon, and both payments have the same shape.
+
+**T-450** (`dc1e386`) mounted the renderer and found it **could not load in a browser at all**.
+`cellrule.ts` compiled its pattern predicates with `new Function` at module scope; `hk serve` sends
+`default-src 'self'` with no `unsafe-eval`, so it threw **during module evaluation**, and `surface.ts`
+imports it — the whole bundle died. Invisible because **nothing in `ui/src` imported the module** and
+node's test runner has no CSP.
+
+And T-441 had proved that same module's shader against a CPU rule on **114 973 of 115 200 pixels**,
+every difference a one-pixel pattern edge. **A rigorous, correct proof about code that could never run
+where the product runs.** The eval now lives inside the test, so the anti-drift guarantee is asserted
+where the product runs.
+
+**T-454** (`517b603`) is the same lesson in a different register. The tile backpressure error reached
+the user through a client that **already had** a cap of 4, an `AbortController` per request, and §5.5's
+viewport-change cancellation. All three were running. The defect:
+
+> **Every one of them counted the client while making a claim about the server.**
+
+An abort does not give the route its slot back — `tiles_json` is synchronous on a blocking thread and
+discovers the closed socket only when it **writes**, so the server keeps producing for 11.4 ms to
+5.2 s while the cache frees its own slot and immediately issues a replacement. **T-450's "17 268
+cancelled in 75 s" was never evidence that cancellation worked — it was the measurement of that pump.**
+"Adopt the cap it names" was literally `Math.min(4, 4)`. And `probeSurface` was the one fetch outside
+the cache, with no cap at all.
+
+Its closing note is the one that matters for the milestone: **the unit tier could hold all of this, but
+only because the mechanism could be named first.** Both halves are visible only when a **second client**
+exists — two tabs, or a reload mid-drag.
+
+**T-439** (`070c20d`) came back from a four-failure acceptance regression that **was not decode at
+all** — a `POST /api/pipelines` status assertion and a listener admitted where it should have been
+refused, both waiting in **wall clock** for stream time. The diagnostic: **5.1× wall at identical user
+CPU and unchanged RSS.** The runs were waiting, not computing. Three probes made it arithmetic — no
+per-run cost, an unwritten pyramid free, only **node count** moving it at ~1.5 s per node. Shipped at
+4×4: acceptance **48/48 at 52.1 s**. `docs/16` §6.4a now records the general finding: **§6.4 priced the
+lattice at 4× on disk and §5.2 accepted that sight-unseen; the same 4× applies to tile writes per
+second of capture** — what a running pipeline pays, which nobody had costed.
+
+**T-448** (`f377bbb`) found the last of the "load flakes" was a clock boundary: `detections_written` is
+**the one asserted counter on the far side of the detect writer's channel**, which no `GateCursor`
+reaches. Every other counter is pinned to capture time by the lossless gate and literally cannot be
+zero; that one advances in **wall clock** while the phase closes in capture time at ~27× real time.
+**22 % → 0 %** at 28 threads. And its range measurement is the transferable part: the capture-sample
+gap **does not** grow with CPU load, because everything slows together — **only disk latency moved it**,
+which is why hundreds of runs stayed green and an fsync hammer found it in one.
+
+**What this batch changes about how to read a green suite here.** Three separate proofs this week were
+methodologically sound and answered a question adjacent to the one that mattered: a shader verified
+against a CPU rule for a module that could not load; a cancellation counter measuring a pump rather
+than a cancellation; a flow gate guaranteeing every counter except the one asserted. **T-455 is being
+built for exactly this gap**, and the cutover (T-445) now waits on it — retiring the fallback before
+the tier that can verify the replacement exists is the one sequencing not worth guessing at.
+
 ## Open for the user (current)
 
 Kept current by the coordinator; the planning-phase list near the top of this file is the 2026-09-13
