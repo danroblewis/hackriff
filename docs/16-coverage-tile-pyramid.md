@@ -1075,6 +1075,29 @@ resident and treats an absent tile as not-in-hand. If tiles begin arriving at th
 incrementally, the slice there simply gets finer; the live row is preferred at the edge only because
 it is finer than any cell, and that stays true however the cell was produced.
 
+**The strip is a readout, not a control — and saying so was the fix.** T-457 and T-458 were each
+green alone and failed on merge: carving the strip off the top of the pane's rectangle left
+`paneAt()` walking only the *drawn* rects, so a pointer down in the strip resolved to no pane and
+`input.ts` dropped the gesture. Three of `surface-region.e2e.mjs`'s four tests went red — and the
+diagnosis was in the two that had nothing to do with regions, because a **plain** drag and an **alt**
+drag are T-456's settled bindings and they had stopped panning too. The strip was not a control and
+not transparent; it was a hole.
+
+The rule now, stated in `ui/CONTROLS.md` rather than left to be inferred: **the strip passes every
+pointer event through to the pane it describes**, and the point is clamped into that pane's own
+rectangle, so it reads as a point on the pane's **top edge** — the same frequency, at the instant the
+strip is a spectrum of. The alternative was rejected twice over: the obvious meaning for a vertical
+drag on a dB axis is *set the display range by hand*, which is the control this ticket deliberately
+did not restore, and a second gesture vocabulary on one canvas is T-412 waiting to happen.
+
+**The class, and the guard.** This is the milestone's recurring shape — two correct pieces disagreeing
+about one shared quantity — with a new twist: *one ticket changed the geometry another ticket's
+gestures are measured in*, so neither branch's own suite could see it. The regression test is
+therefore written to need **neither** ticket: `paneAtPoint()` is a pure function of a frame, and the
+property asserted over a grid of points is *"turning the trace on may not shrink the set of points a
+gesture can start from."* It names no gesture, it holds for any future decoration carved out of a
+pane, and on the broken code it fails with 2 380 lost points.
+
 ### 8.5a What the spike proved, and the three places §8 and §6 were wrong (T-437, 2026-09-17)
 
 **Verdict: YES for the renderer, NO for the system as it stands** — and two of the blockers are

@@ -40,9 +40,12 @@
 // explicit button press.
 import { activeWindows, type ActiveWindow } from "../../navigators";
 import type { NavigationGrid } from "../../navigation";
-import { attachSurfaceInput } from "../../surface/input";
-import { markAt, markQuads, pointOn, selectionMarkBoxes, signalMarkBoxes, type MarkBox } from "../../surface/marks";
-import { SurfacePreview, isBackpressure, probeSurface } from "../../surface/preview";
+import { attachSurfaceInput, type GlPoint } from "../../surface/input";
+import {
+  markAt, markQuads, normalizeRegion, pendingMarkBox, pointOn, selectionMarkBoxes, signalMarkBoxes,
+  type MarkBox, type MarkRegion,
+} from "../../surface/marks";
+import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
 import {
   acceptPaneRetune, offerAcceptable, offerLabel, paneRetuneOffer, type PaneRetuneOffer,
 } from "../../surface/retune";
@@ -57,6 +60,7 @@ import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
 import { openSelectionMenu, openSignalMenu } from "../menu";
 import { startPoll } from "../net";
+import { commitRegion } from "../explore/region";
 import { focusSelection, focusSignal } from "../explore/slice";
 import { reviewAt, setNavigation, toast } from "../state";
 
@@ -94,6 +98,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
   let preview: SurfacePreview | null = null;
   let windows: ActiveWindow[] = [];
   let detach: (() => void) | null = null;
+  /** The region stroke in progress (T-458), in surface coordinates, or `null`. Read inside the
+   * frame callback like the marks are, never mirrored into the store: it is pointer state for the
+   * duration of one gesture, and the store is where things that outlive a gesture live. */
+  let pending: { pane: string; region: MarkRegion } | null = null;
 
   const say = (text: string) => { note.textContent = text; note.hidden = !text; };
   /** Set-if-changed, so a per-frame readout does not rewrite the DOM sixty times a second. */
@@ -119,6 +127,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     return [
       ...signalMarkBoxes(Object.values(s.inventory.rows), focusId),
       ...selectionMarkBoxes(s.selections.list, selId, pane.box),
+      // The rubber band goes through the same pass on the same frame as everything else it is being
+      // drawn over, and only on the pane it is being stroked on (T-458).
+      ...pendingMarkBox(pending && pending.pane === pane.id ? pending.region : null),
     ];
   };
 
@@ -270,14 +281,18 @@ function mount(el: HTMLElement, ctx: AppContext) {
   }
 
   // ---- pointer: hover readout, click to focus, right-click for the menu ----
-  const paneUnder = (x: number, y: number) => {
-    const f = preview?.lastFrame;
-    if (!f) return null;
-    for (const v of f.views) {
-      if (v.id === preview?.view.minimap.id) continue;
-      if (x >= v.rect.x && x < v.rect.x + v.rect.w && y >= v.rect.y && y < v.rect.y + v.rect.h) return v;
-    }
-    return null;
+  //
+  // **One hit test, `preview.paneAt`, so hover and gesture cannot disagree about where a pointer is.**
+  // This used to walk `lastFrame.views` itself — a second copy of the same arithmetic, which is how
+  // T-457's trace strip became a hole that `input.ts` dropped gestures into while this file happily
+  // read out a hover a few pixels away. The strip belongs to its pane (`paneAtPoint`), and the point
+  // is clamped into the pane's own rectangle, so a hover over the strip reads the pane's **top edge**:
+  // the same frequency, at the instant the strip is a spectrum of.
+  const paneUnder = (x: number, y: number): { view: PaneView; at: { x: number; y: number } } | null => {
+    const p = preview;
+    const id = p?.paneAt({ x, y }) ?? null;
+    const view = id ? p!.lastFrame?.views.find((v) => v.id === id) ?? null : null;
+    return view ? { view, at: clampToRect(view.rect, { x, y }) } : null;
   };
   const fmtHz = (hz: number) => `${(hz / 1e6).toFixed(hz < 1e9 ? 4 : 6)} MHz`;
   // The CAPTURE clock's own instant, rendered as UTC (the `hms` idiom the retired live view used).
@@ -287,11 +302,34 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const at = (ns: number) => `${new Date(ns / 1e6).toISOString().slice(11, 19)}Z`;
 
   function hitAt(x: number, y: number): { pane: PaneView; mark: MarkBox | null; fHz: number; tNs: number } | null {
-    const v = paneUnder(x, y);
-    if (!v) return null;
-    const { fHz, tNs } = pointOn(v.box, v.rect, x, y);
+    const hit = paneUnder(x, y);
+    if (!hit) return null;
+    const { view: v, at } = hit;
+    const { fHz, tNs } = pointOn(v.box, v.rect, at.x, at.y);
     return { pane: v, fHz, tNs, mark: markAt(boxesFor(v), preview!.edgeNs, fHz, tNs) };
   }
+
+  // ---- shift+drag marks out a region (T-458) ----
+  //
+  // Two destinations, one gesture, and which one is not inferred: `explore.bandEdit` is armed by the
+  // context menu's "Adjust band" and names a Confirmed row explicitly. Unarmed, a stroke is a new
+  // selection. Nothing here reaches a device route — a region is `POST /api/selections` or
+  // `PUT /api/inventory/{id}/band`, and neither is a tuning.
+  const paneById = (id: string): PaneView | null =>
+    preview?.lastFrame?.views.find((v) => v.id === id) ?? null;
+
+  /** A stroke's two corners as a region of this pane's own window. The release corner is clamped to
+   * the pane: `pointOn` extrapolates outside the rectangle, and a selection running past the edge of
+   * the viewport would claim frequencies and times the user could not see to choose. */
+  const regionOf = (r: { pane: string; a: GlPoint; b: GlPoint }): MarkRegion | null => {
+    const v = paneById(r.pane);
+    if (!v) return null;
+    const clamp = (p: GlPoint) => pointOn(v.box, v.rect,
+      Math.min(Math.max(p.x, v.rect.x), v.rect.x + v.rect.w),
+      Math.min(Math.max(p.y, v.rect.y), v.rect.y + v.rect.h));
+    return normalizeRegion(clamp(r.a), clamp(r.b));
+  };
+
 
   // ---- boot ----
   void (async () => {
@@ -330,6 +368,15 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const hit = hitAt(p.x, p.y);
         if (!hit?.mark) return;
         store.set(hit.mark.kind === "signal-box" ? focusSignal(hit.mark.id) : focusSelection(hit.mark.id));
+      },
+      onRegionDrag: (r) => {
+        const region = r ? regionOf(r) : null;
+        pending = r && region ? { pane: r.pane, region } : null;
+      },
+      onRegion: (r) => {
+        pending = null;
+        const region = regionOf(r);
+        if (region) commitRegion(ctx, region, fmtHz);
       },
       onContext: (p, e) => {
         const hit = hitAt(p.x, p.y);

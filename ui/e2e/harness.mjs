@@ -14,6 +14,12 @@ import { census, decodePng } from "./png.mjs";
 
 export { census };
 
+/** CDP's modifier bitmask, from names: **Alt 1, Ctrl 2, Meta 4, Shift 8**. One definition, used by
+ * both `wheel` and `drag`, so the two gestures cannot disagree about what "shift" is. */
+export function modifierBits({ alt = false, ctrl = false, meta = false, shift = false } = {}) {
+  return (alt ? 1 : 0) | (ctrl ? 2 : 0) | (meta ? 4 : 0) | (shift ? 8 : 0);
+}
+
 /**
  * Reload `/surface.html` until it reports observed coverage, and return what it said.
  *
@@ -268,9 +274,17 @@ export class Page {
 
   // ——— gestures. Real input events, so the page's own listeners run. ———
 
-  async mouse(type, x, y, { button = "left", buttons = 0, clickCount = 0, deltaX = 0, deltaY = 0 } = {}) {
+  /**
+   * One raw mouse event.
+   *
+   * `modifiers` is CDP's bitmask — **Alt 1, Ctrl 2, Meta 4, Shift 8** — and the browser turns it
+   * back into `altKey`/`ctrlKey`/`metaKey`/`shiftKey` on the event the page receives, so a test that
+   * cares about a modifier is testing flags the *browser* set rather than ones it wrote itself.
+   * `modifierBits` below builds it from names.
+   */
+  async mouse(type, x, y, { button = "left", buttons = 0, clickCount = 0, deltaX = 0, deltaY = 0, modifiers = 0 } = {}) {
     await this.conn.send("Input.dispatchMouseEvent",
-      { type, x, y, button, buttons, clickCount, deltaX, deltaY, pointerType: "mouse" }, this.sessionId);
+      { type, x, y, button, buttons, clickCount, deltaX, deltaY, modifiers, pointerType: "mouse" }, this.sessionId);
   }
 
   /**
@@ -287,16 +301,21 @@ export class Page {
     return at;
   }
 
-  /** A press–move–release drag, in `steps` intermediate moves. */
-  async drag(from, to, steps = 8) {
-    await this.mouse("mousePressed", from.x, from.y, { buttons: 1, clickCount: 1 });
+  /**
+   * A press–move–release drag, in `steps` intermediate moves, with the modifiers held for **the
+   * whole stream** — press, every move and the release — which is what a hand does and what a
+   * latched gesture has to be driven with to be tested honestly (T-458).
+   */
+  async drag(from, to, steps = 8, mods = {}) {
+    const modifiers = modifierBits(mods);
+    await this.mouse("mousePressed", from.x, from.y, { buttons: 1, clickCount: 1, modifiers });
     for (let i = 1; i <= steps; i++) {
       await this.mouse("mouseMoved",
         from.x + ((to.x - from.x) * i) / steps,
-        from.y + ((to.y - from.y) * i) / steps, { buttons: 1 });
+        from.y + ((to.y - from.y) * i) / steps, { buttons: 1, modifiers });
       await new Promise((r) => setTimeout(r, 12));
     }
-    await this.mouse("mouseReleased", to.x, to.y, { buttons: 0, clickCount: 1 });
+    await this.mouse("mouseReleased", to.x, to.y, { buttons: 0, clickCount: 1, modifiers });
   }
 
   /** A double-click at a point, which the page treats as a discrete "go there". */
@@ -321,7 +340,7 @@ export class Page {
    * this, rather than letting a green run imply more than it measured.
    */
   async wheel(at, deltaY, { shift = false, alt = false, ctrl = false, meta = false, deltaX = 0 } = {}) {
-    const modifiers = (alt ? 1 : 0) | (ctrl ? 2 : 0) | (meta ? 4 : 0) | (shift ? 8 : 0);
+    const modifiers = modifierBits({ shift, alt, ctrl, meta });
     await this.conn.send("Input.dispatchMouseEvent", {
       type: "mouseWheel", x: at.x, y: at.y, deltaX, deltaY,
       modifiers, pointerType: "mouse",

@@ -10,7 +10,7 @@ import { apiErrorText } from "../explore/format";
 import { decodeActionLabel, emitterStreamAddress, recordEmitterClip } from "../explore/focus";
 import { clearUserBand, deleteEntry, loadInventoryRows, promoteEntry, type Row } from "../explore/inventory";
 import { listenAllTargets, recordSelectionClip, selectionStoreFor, type Selection } from "../explore/selections";
-import { focusSignal, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal } from "../explore/slice";
+import { focusSignal, patchInventoryRow, removeInventoryRowLocal, restoreInventoryRowLocal, setBandEdit } from "../explore/slice";
 import { setMode, toast } from "../state";
 import type { MenuItem } from "./model";
 
@@ -106,13 +106,21 @@ export function signalMenuItems(ctx: AppContext, r: Row): MenuItem[] {
       });
     },
   });
+  // T-458: this ARMS the next region stroke rather than describing a gesture. The hint it used to
+  // give — "drag the yellow box's left/right edges on the live view" — named edge handles that the
+  // cutover retired and a drag that T-456 gave to panning, so it instructed the user to perform the
+  // one thing that had become impossible. A menu item that only toasts is how T-193's override came
+  // to have a reader and no setter.
   items.push({
-    id: "adjust-band", label: "Adjust band", hint: r.state === "confirmed" ? "drag the yellow box's edges" : "promote it first",
+    id: "adjust-band", label: "Adjust band", hint: r.state === "confirmed" ? "then shift-drag the new band" : "promote it first",
     onSelect: () => {
       ctx.store.set(focusSignal(r.id));
-      ctx.store.set(toast(r.state === "confirmed"
-        ? "Adjust band: focused — drag the yellow box's left/right edges on the live view."
-        : "Adjust band: promote this signal to confirmed to drag its box edges."));
+      if (r.state !== "confirmed") {
+        ctx.store.set(toast("Adjust band: promote this signal to confirmed before setting its band."));
+        return;
+      }
+      ctx.store.set(setBandEdit(r.id));
+      ctx.store.set(toast(`Adjust band: shift-drag the new band for ${r.id.slice(0, 8)} on the surface. Anything else cancels.`));
     },
   });
   if (r.user_band) {

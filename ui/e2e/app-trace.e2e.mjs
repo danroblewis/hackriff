@@ -295,6 +295,42 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   assert.deepEqual(page.exceptions, [], "uncaught exception while measuring the trace's extent");
 });
 
+test("a drag that STARTS IN THE TRACE STRIP pans the pane — the strip is a readout, not a hole", async (t) => {
+  // The T-457 × T-458 merge break, in the tier that would have caught it end to end. The strip is
+  // carved off the top of the pane's rectangle; before the fix, `paneAt` walked only the drawn pane
+  // rects, so a pointer down in the strip resolved to no pane and `input.ts` dropped the gesture —
+  // not just T-458's region stroke, but plain and alt drags, which T-456 had settled.
+  //
+  // The rule now: the strip belongs to its pane for every pointer purpose. `ui/test/surface-trace
+  // .test.ts` asserts that as a property of a frame; this asserts the whole chain — a real pointer
+  // stream, through `input.ts`, into the view — which is the part a pure function cannot speak for.
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page(undefined, { initScript: TAP });
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitFor("the trace to draw",
+    `/slice [\\d:]+Z/.test(document.querySelector('.sf-trace')?.textContent ?? "")`, { timeoutMs: 90000 });
+  const rect = await page.$rect(".sf-canvas");
+
+  // Inside the strip: the top `TRACE_PX` device px of the canvas, at dpr 1.
+  const y = rect.y + TRACE_PX / 2;
+  assert.ok(TRACE_PX / 2 < rect.h, "the canvas is shorter than the strip — this test is not aimed at it");
+  const before = (await page.$text(".sf-chrome")) ?? "";
+  await page.drag({ x: rect.x + rect.w * 0.65, y }, { x: rect.x + rect.w * 0.3, y });
+  await page.waitFor("the per-viewport readout to change after a drag begun in the strip",
+    `(document.querySelector('.sf-chrome')?.textContent ?? "") !== ${JSON.stringify(before)}`,
+    { timeoutMs: 15000 });
+  const after = (await page.$text(".sf-chrome")) ?? "";
+  t.diagnostic(`chrome before: ${before.slice(0, 80)}`);
+  t.diagnostic(`chrome after:  ${after.slice(0, 80)}`);
+
+  // T-340's control, unchanged: a pan is a pan. A gesture that began over the trace must be no more
+  // able to reach the radio than one that began over the waterfall.
+  const control = page.requests.filter((r) => /\/api\/control\/(center|rate|gains|bias_tee|baseband_filter)/.test(r.url));
+  assert.deepEqual(control.map((r) => r.url), [], "a drag begun in the trace strip reached the front end");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while dragging from the strip");
+});
+
 test("a viewport scrubbed into the past traces THAT instant, from the pyramid, and says so", async (t) => {
   // "Pause freezes the view, not the capture": rows keep arriving, so the naive trace keeps drawing
   // the newest one. On a window from a minute ago that line is a spectrum of NOW over a picture of

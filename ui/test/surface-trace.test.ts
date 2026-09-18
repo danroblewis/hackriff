@@ -31,6 +31,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { CELL } from "../src/surface/cellrule";
 import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
+import { clampToRect, paneAtPoint } from "../src/surface/preview";
+import { pointOn } from "../src/surface/marks";
 import { Surface, toClip, type PaneRect } from "../src/surface/surface";
 import { TileCache } from "../src/surface/tilecache";
 import type { TileData } from "../src/surface/tile";
@@ -506,6 +508,80 @@ test("EACH split pane gets its own trace, at its OWN time position", () => {
     assert.equal(s.strip.y, pane.rect.y + pane.rect.h, "each strip sits above its own pane");
   }
   assert.equal(f.traces.length, 2);
+  view.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// The strip is a READOUT, not a control: it must not swallow a gesture
+// ---------------------------------------------------------------------------
+
+/**
+ * **The regression test for the T-457 × T-458 merge break, written to need neither ticket.**
+ *
+ * Both branches were green alone. T-457 carved a strip off the top of each pane's rectangle;
+ * `SurfacePreview.paneAt` walked the *drawn* pane rects; so every pointer that came down in the
+ * strip resolved to no pane and `input.ts` dropped the gesture. T-458's region stroke committed
+ * nothing — but so did a **plain** drag and an **alt** drag, which are T-456's settled bindings and
+ * have nothing to do with regions. One ticket changed the geometry another ticket's gestures are
+ * measured in.
+ *
+ * The property below is stated in terms of neither gesture, which is the point: **turning the trace
+ * on may not shrink the set of points a gesture can start from.** Any decoration carved out of a
+ * pane in future has to satisfy it too, and it fails on the broken code without knowing that region
+ * strokes, alt-drags or T-458 exist at all.
+ */
+function grid(w: number, h: number, step = 7): { x: number; y: number }[] {
+  const pts: { x: number; y: number }[] = [];
+  for (let y = 1; y < h; y += step) for (let x = 1; x < w; x += step) pts.push({ x, y });
+  return pts;
+}
+
+test("turning the trace ON may not make any point unreachable — the strip is not a hole", () => {
+  const W = 1200, H = 600;
+  const frameOf = (tracePx: number) => {
+    const { view } = viewWith(tracePx, tracePx > 0 ? () => [] : null);
+    const f = view.frame(T0, []);
+    const mapId = view.minimap.id;
+    const resolved = new Map(grid(W, H).map((p) => [`${p.x},${p.y}`, paneAtPoint(f, mapId, p)]));
+    view.dispose();
+    return { f, mapId, resolved };
+  };
+  const off = frameOf(0), on = frameOf(96);
+
+  const lost: string[] = [];
+  for (const [k, id] of off.resolved) if (id !== null && on.resolved.get(k) === null) lost.push(k);
+  assert.deepEqual(lost, [],
+    `${lost.length} points could start a gesture without the trace and cannot with it ` +
+    `(first: ${lost[0]}). A decoration carved out of a pane must pass pointers through to it.`);
+
+  // And the strip specifically resolves to ITS OWN pane, not merely to some pane: on a split, a
+  // strip that answered with its neighbour's id would pan the wrong viewport.
+  const trace = on.f.traces[0];
+  assert.ok(trace, "no trace strip in the frame");
+  for (const p of [
+    { x: trace.rect.x + 1, y: trace.rect.y + 1 },
+    { x: trace.rect.x + trace.rect.w - 2, y: trace.rect.y + trace.rect.h - 1 },
+    { x: trace.rect.x + trace.rect.w / 2, y: trace.rect.y + trace.rect.h / 2 },
+  ]) {
+    assert.equal(paneAtPoint(on.f, on.mapId, p), trace.id, `a point in the strip at ${JSON.stringify(p)}`);
+  }
+});
+
+test("a point in the strip clamps to the pane's TOP EDGE — the instant the strip is a spectrum of", () => {
+  const { view } = viewWith(96, () => []);
+  const f = view.frame(T0, []);
+  const pane = f.views.find((v) => v.id !== view.minimap.id)!;
+  const strip = f.traces[0];
+  // Halfway up the strip, three-quarters across.
+  const raw = { x: strip.rect.x + strip.rect.w * 0.75, y: strip.rect.y + strip.rect.h / 2 };
+  const at = clampToRect(pane.rect, raw);
+  assert.equal(at.x, raw.x, "frequency is unchanged: the strip shares the pane's x axis exactly");
+  assert.equal(at.y, pane.rect.y + pane.rect.h, "…and the time is the pane's newest instant");
+  const on = pointOn(pane.box, pane.rect, at.x, at.y);
+  near(on.tNs, pane.box.t1Ns, 1);
+  // The same frequency the unclamped point would have read, so a hover over the strip names the
+  // column under the cursor rather than an offset one.
+  near(on.fHz, pointOn(pane.box, pane.rect, raw.x, pane.rect.y).fHz, 1e-6);
   view.dispose();
 });
 

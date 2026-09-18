@@ -55,6 +55,14 @@ chosen. Fail-closed on untracked paths buys **cost, not safety**, for the merge 
 buys real safety for the agent subject, where untracked means not-yet-added-but-will-land,
 which is why the default keeps it.
 
+**The suites this file launches build with T-144's flags (T-400).** Every agent brief sets
+`CARGO_INCREMENTAL=0` (and the rest of T-144) so worktree targets stay close to the APFS clone
+they were seeded from, but `main()` used to shell out to `just lint`/`just test`/etc. without
+them, so the coordinator's own gate regenerated `target/debug/incremental` on every run — state
+every agent is configured to avoid. `GATE_BUILD_ENV`/`suite_env()` fix that at the one place
+this file spawns a suite, not in the justfile: a developer's own `just test` still gets whatever
+incremental behaviour they want.
+
 Stdlib only, so it can run as `python3 py/hkpy/gate.py` as well as `just gate`.
 """
 
@@ -137,6 +145,54 @@ _COMMAND_ORDER = (
     ("just", "acceptance-ci"),
     ("just", "test-ui-e2e"),
 )
+
+#: T-400: the T-144 build flags, applied only to the suite subprocesses the gate itself
+#: launches — never written into the justfile globally, because a developer running `just
+#: build`/`just test`/`just lint` by hand may want incremental compilation. This is what "the
+#: rule lives in the runner" means here, exactly as T-396 moved the which-suites rule into
+#: this file instead of each agent's judgement.
+#:
+#: Every T-144 flag is included, each for its own reason — not copied by reflex:
+#:
+#:   CARGO_INCREMENTAL=0                        the ticket's own trigger. Without it, every
+#:                                               `just gate` regenerates target/debug/incremental
+#:                                               in the coordinator's OWN checkout — 3.6 GB in one
+#:                                               session — diverging it from the clean state every
+#:                                               future worktree clones via `cp -c -R -p`.
+#:   CARGO_PROFILE_DEV_DEBUG=line-tables-only    every worktree already builds with this (T-144).
+#:                                               If the gate's own suites built full debug info
+#:                                               instead, the coordinator's target/ would carry a
+#:                                               different profile fingerprint than what worktrees
+#:                                               build against, which is its own source of
+#:                                               unwanted rebuild divergence — the same failure
+#:                                               mode this ticket exists to close, one layer up.
+#:   CARGO_BUILD_JOBS=6                          CLAUDE.md's Coordination section counts "the
+#:                                               coordinator's full check" as one of the "at most
+#:                                               4 Rust-building agents" T-144 caps at 6 jobs each
+#:                                               (4 x 6 ~= 28 cores). Left unbounded, a `just gate`
+#:                                               run would oversubscribe on top of up to three
+#:                                               concurrently building worktrees exactly as an
+#:                                               agent that skipped the cap would.
+#:
+#: Deliberately NOT here: nextest's `--test-threads` — T-436 already pins that in
+#: `.config/nextest.toml` for every nextest invocation, gate included, so repeating it here would
+#: be a second, driftable copy of a rule that already lives in the runner.
+GATE_BUILD_ENV: dict[str, str] = {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
+    "CARGO_BUILD_JOBS": "6",
+}
+
+
+def suite_env(base: dict[str, str]) -> dict[str, str]:
+    """`base` (normally `os.environ`) with `GATE_BUILD_ENV` applied on top.
+
+    A pure function of its input so it's testable without touching the real environment or
+    spawning anything: it must add exactly the T-144 flags and change nothing else, in
+    particular never removing or overriding an unrelated variable the caller already set.
+    """
+    return {**base, **GATE_BUILD_ENV}
+
 
 _GATE_SELF = "the gate itself — it must not be able to weaken itself"
 
@@ -593,9 +649,20 @@ def main(argv: list[str] | None = None) -> int:
         print("gate: `just` is not on PATH — cannot run the suites.", file=sys.stderr)
         return 1
 
+    # T-400: the suites the gate itself launches get T-144's build flags (env only — this
+    # changes nothing about *which* commands run or what they assert, only how cargo builds
+    # while they run). Printed so the override is visible, not a silent side effect.
+    env = suite_env(dict(os.environ))
+    print(
+        "gate: build env = "
+        + " ".join(f"{k}={v}" for k, v in GATE_BUILD_ENV.items())
+        + " (T-400, this process only)",
+        flush=True,
+    )
+
     for cmd in commands:
         print(f"gate: running {' '.join(cmd)}", flush=True)
-        rc = subprocess.run(cmd, cwd=root, check=False).returncode
+        rc = subprocess.run(cmd, cwd=root, env=env, check=False).returncode
         if rc != 0:
             print(f"gate: FAILED {' '.join(cmd)} (exit {rc})", file=sys.stderr)
             return rc
