@@ -11777,6 +11777,56 @@ tasks:
     notes: |
       TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate hk-pipeline`,
       `just test-one <name>` - then HAND BACK. Never `just gate`; the coordinator gates at merge.
+  - id: T-450
+    milestone: MCANVAS
+    title: A preview route that MOUNTS the surface over recorded history - see the canvas before anything is retired
+    status: in-progress
+    priority: high
+    parallel_group: CANVAS-FE
+    deps: [T-438, T-440, T-441, T-442, T-443]
+    use_cases: [AWARE-011, AWARE-042]
+    found_by: 'the user, 2026-09-17 - wants to SEE the canvas before the cutover'
+    acceptance: |
+      USER DIRECTIVE. The surface renderer is BUILT AND UNMOUNTED: ui/src/surface/ holds twelve
+      production files (surface, tilecache, panes, minimap, overlay, chrome, view, cellrule, tile,
+      lattice, retune + css) and NOTHING IN ui/src IMPORTS ANY OF IT. T-442 said so plainly -
+      "nothing mounts it yet, because nothing mounts the surface yet" - and left rects()/list() as
+      the seam. This ticket is that host.
+      Add a PREVIEW ROUTE (e.g. /surface) that mounts the existing renderer against the LIVE
+      GET /api/tiles (T-438) and renders the coverage pyramid over RECORDED HISTORY, with pan,
+      zoom and the minimap. The point is that the user can LOOK AT IT before anything is retired.
+      HARD SCOPE, from the user:
+        MUST NOT depend on T-439 (live-edge tiles) or T-445 (the cutover). A HISTORICAL PANNABLE
+          VIEW ONLY. Do not wire the live edge, do not follow the growing edge, do not touch the
+          old UI. If a pane would need live data, show it honestly as unobserved/awaiting rather
+          than reaching for it.
+        LEAVE THE OLD UI UNTOUCHED - no route removed, no panel changed, no shared state
+          repurposed. This is additive. The existing app must behave exactly as it does today.
+      WHAT YOU ARE MOUNTING, and do not rebuild any of it: T-440's renderer core (one canvas, one
+      WebGL2 context, N scissored panes, the shared tile LRU keyed by (device, scheme, level_f,
+      level_t, f_block, t_block)); T-441's CELL_MARKS and generated shader, where GREY HAS EXACTLY
+      ONE EXPRESSION and five cell states are distinct; T-442's pane model, where a pane's time
+      window IS its pause state and a following pane has no centre; T-443's minimap-as-viewport
+      with the overlay pass separable by construction, plus SurfaceChrome and paneStatuses.
+      T-444's retune-on-pan exists but is a DEVICE ACTION - leave it inert or unmounted in a
+      preview; if you do surface it, it must stay behind T-343's gate and T-340's control (no pan
+      and no wheel reaches a device route), and never point at the user's live HackRF.
+      DoD: navigating to the route shows the pyramid over recorded history; pan and zoom work on
+      both axes at independent levels; the minimap shows pane rectangles; the per-pane level is
+      stated (T-443 mounted paneStatuses and levelDivergenceNote for exactly this); grey means
+      genuinely unobserved and the honesty tiers are visible; and the existing UI is unchanged,
+      asserted rather than assumed.
+      EXPECT A NEARLY EMPTY FIRST SCREEN and do not treat it as a bug: T-437 measured 99.4% grey
+      before history accumulates, settling to 55.2%. That is §8 working - the shape of what is NOT
+      grey is the survey - but it means orientation matters. Say what you did about it; T-445 has
+      to solve this properly and your finding feeds it.
+    notes: |
+      The user described the renderer as being "in ui/test surface-*.ts". The TESTS are there; the
+      CODE is in ui/src/surface/. Do not hunt.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-ui` - then HAND BACK. Never
+      `just gate`; the coordinator gates at merge. Never end your turn waiting on a background
+      command, including one the harness backgrounded for you.
+      NOTHING REACHES MAIN WITHOUT THE USER'S APPROVAL on this one - commit to task-t450 only.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
