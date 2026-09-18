@@ -144,9 +144,19 @@ def _merged_via_commit(branch: str) -> bool:
     tip = _git("rev-parse", branch)
     if not tip:
         return False
-    # Only merges need checking, and only their parent lists.
+    # Only merges need checking, and only their parent lists — MINUS THE FIRST PARENT.
+    #
+    # A merge commit's first parent is main's own previous tip; the second and later parents are the
+    # branches that were merged IN. Checking every parent makes any branch cut from a commit that
+    # later became a merge's first parent look merged — which is every fresh worktree the moment the
+    # next merge lands. Observed: task-t480, cut from 44b6d4c, read as MERGED as soon as T-457's
+    # merge named 44b6d4c as its mainline parent.
+    #
+    # This is the THIRD false claim this tool has made about its own subject, and they share a shape:
+    # each time, a cheaper question (reachability, branch-has-commits, any-parent) stood in for the
+    # real one (was this branch merged in). The real question is only ever about the SECOND parent.
     for line in _git("log", "main", "--merges", "--format=%P").splitlines():
-        if tip in line.split():
+        if tip in line.split()[1:]:
             return True
     return False
 
