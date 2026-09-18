@@ -9,8 +9,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CELL } from "../src/surface/cellrule";
 import { keyOf, tileUrl, type Lattice, type TileAddr } from "../src/surface/lattice";
-import { RECOVER_AFTER, TileCache, parseKey, type TileCacheOptions, type Viewport } from "../src/surface/tilecache";
-import { TileBusyError, type TileData } from "../src/surface/tile";
+import { RECOVER_AFTER, REFRESH_DUTY, TileCache, parseKey, type TileCacheOptions, type Viewport } from "../src/surface/tilecache";
+import { TileBusyError, TileDecodeError, type TileData } from "../src/surface/tile";
 
 const LAT: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 20, levelsT: 15 };
 const BYTES = 192 * 1024; // one 256^2 tile: R16F measurement + R8 state
@@ -357,4 +357,312 @@ test("keys round-trip, so an in-flight request can be tested against a viewport"
   const a = addr(7, 3, 2, 5);
   assert.deepEqual(parseKey(keyOf(a)), a);
   assert.equal(parseKey("nonsense"), null);
+});
+
+// ——— T-460: the live edge was frozen HERE, and this is the guard that would have seen it ———
+//
+// The defect was one line: `acquire` answers a resident tile unconditionally, and the only path that
+// could drop one was the retune. So a live-edge tile was fetched ONCE and frozen until the pane
+// scrolled into a new address — at `level_t = 0`, once every 256 seconds — while the backend served
+// the rows the whole time. The user's words: *"the live view still does not add waterfall rows for
+// recent samples."*
+//
+// **What these assert is a property of the CACHE, not of the screen.** The pixels are
+// `ui/e2e/live-edge.e2e.mjs`'s subject, deliberately: a tile being re-fetched is not a row appearing,
+// and this file cannot tell the difference. What it can pin down is the policy — that a live-edge
+// tile is never served from cache indefinitely, that the re-ask is bounded by the period the data
+// can change in, and that it can never take a slot from something the user is waiting for.
+
+/** A live-edge tile: its extent straddles `EDGE_NS`, so `atEdge` holds. */
+const EDGE_NS = 200e9;
+const edgeTile = (fIndex = 0, levelT = 0) => addr(fIndex, 0, 0, levelT);
+const edgeView = (levelT = 0): Viewport =>
+  ({ box: { f0Hz: 0, f1Hz: TILE_HZ, t0Ns: EDGE_NS - 100e9, t1Ns: EDGE_NS }, levelF: 0, levelT });
+
+/**
+ * Run `ms` of simulated time in 100 ms steps, drawing a frame each step and answering every fetch
+ * at once. `refresh` is what separates the guard from its own control: with it, the policy runs;
+ * without it, this is exactly the loop that produced the defect.
+ */
+async function live(h: ReturnType<typeof harness>, clock: { t: number }, ms: number,
+  { refresh = true, levelT = 0, tiles = [0] }: { refresh?: boolean; levelT?: number; tiles?: number[] } = {}) {
+  let everPending = 0;
+  for (let step = 0; step < ms / 100; step++) {
+    clock.t += 100;
+    h.cache.beginFrame();
+    for (const f of tiles) if (h.cache.acquire(edgeTile(f, levelT)).kind === "pending") everPending++;
+    h.cache.setViewports(LAT, [edgeView(levelT)]);
+    h.cache.endFrame();
+    if (refresh) h.cache.refreshEdge(LAT, EDGE_NS, [edgeView(levelT)]);
+    await flush();
+    for (const [key, w] of [...h.waiting]) {
+      w.resolve(data(parseKey(key)!));
+      h.waiting.delete(key);
+      await flush();
+    }
+  }
+  return { everPending };
+}
+
+test("a live-edge tile is NEVER served from cache indefinitely", async () => {
+  const clock = { t: 0 };
+  const h = harness({ inFlight: 4, now: () => clock.t, serverMsGuess: 20 });
+  const a = edgeTile();
+  // Ten simulated seconds of a following pane on the growing edge.
+  const { everPending } = await live(h, clock, 10_000);
+
+  const asked = h.calls.filter((k) => k === keyOf(a)).length;
+  assert.ok(asked > 1,
+    `the live-edge tile was fetched ${asked} time(s) in 10 s — this is T-460: the rows were recorded ` +
+    "and served, and the client never asked for them again");
+  assert.ok(h.cache.stats.edgeRefreshApplied > 0,
+    "asking is not enough: the answer has to REPLACE the resident tile, or nothing new is drawn");
+  assert.equal(h.cache.stats.edgeRefreshes, asked - 1, "every re-ask is accounted for as a refresh");
+
+  // And it never flashes: the stale copy stays resident and drawn for the whole revalidation, so a
+  // following pane never goes back to `pending` for a tile it already had.
+  assert.equal(everPending, 1, "the edge tile went pending again — a refresh must not drop what is drawn");
+  assert.equal(h.cache.residentTiles, 1);
+  // One texture in hand, not a leak per refresh.
+  assert.equal(h.uploads() - h.destroys(), 1, "each refresh must destroy the texture it replaces");
+});
+
+test("…and the CONTROL: without the policy, the very same loop asks exactly once (the defect)", async () => {
+  // Non-vacuity. The loop above draws frames, moves the clock, pumps the queue and reports
+  // viewports — everything except the one call this ticket adds. If the guard above could pass
+  // without `refreshEdge`, it would be measuring the harness.
+  const clock = { t: 0 };
+  const h = harness({ inFlight: 4, now: () => clock.t, serverMsGuess: 20 });
+  await live(h, clock, 10_000, { refresh: false });
+  assert.deepEqual(h.calls, [keyOf(edgeTile())],
+    "one fetch in ten seconds: that is the frozen live edge, reproduced");
+
+  // The same is true for a pane that is FROZEN rather than following, and that is not a bug: a
+  // frozen pane is a view over data that cannot change, so refreshing for it is pure cost.
+  const frozen = harness({ inFlight: 4, now: () => clock.t, serverMsGuess: 20 });
+  for (let step = 0; step < 100; step++) {
+    clock.t += 100;
+    frozen.cache.beginFrame();
+    frozen.cache.acquire(edgeTile());
+    frozen.cache.endFrame();
+    frozen.cache.refreshEdge(LAT, EDGE_NS, []); // no viewport is following
+    await flush();
+    for (const [key, w] of [...frozen.waiting]) { w.resolve(data(parseKey(key)!)); frozen.waiting.delete(key); await flush(); }
+  }
+  assert.deepEqual(frozen.calls, [keyOf(edgeTile())], "a frozen viewport refreshes nothing");
+});
+
+test("the refresh is bounded by the period the data can change in, per level", async () => {
+  // A tile's newest row is one cell tall, so a re-ask inside `tCellNs(level_t)` cannot return a row
+  // the copy in hand does not already have. That makes the cadence a function of the ZOOM, with no
+  // policy number to tune — which is what keeps this from being the poll the ticket forbids.
+  const fine = { t: 0 };
+  const hFine = harness({ inFlight: 4, now: () => fine.t, serverMsGuess: 20 });
+  await live(hFine, fine, 10_000);                     // level_t 0: a 1 s cell
+  const nFine = hFine.cache.stats.edgeRefreshes;
+  assert.ok(nFine >= 8 && nFine <= 10, `level 0 refreshed ${nFine} times in 10 s; expected ~one per 1 s cell`);
+
+  const coarse = { t: 0 };
+  const hCoarse = harness({ inFlight: 4, now: () => coarse.t, serverMsGuess: 20 });
+  await live(hCoarse, coarse, 10_000, { levelT: 5 });  // a 32 s cell
+  assert.equal(hCoarse.cache.stats.edgeRefreshes, 0,
+    "a 32 s cell re-asked inside 10 s would spend a 19 MB tile to learn nothing");
+});
+
+test("the refresh can never take a slot from a tile the user is waiting for", async () => {
+  const clock = { t: 0 };
+  const h = harness({ inFlight: 4, now: () => clock.t, serverMsGuess: 20 });
+  // One edge tile resident and long overdue a refresh…
+  h.cache.beginFrame();
+  h.cache.acquire(edgeTile(0));
+  h.cache.endFrame();
+  await flush();
+  await h.settle(edgeTile(0));
+  clock.t += 5_000;
+
+  // …and now four MISSES appear: a pan, a split, a zoom. The refresh is revalidation of something
+  // already on screen, so it may not be the reason any of these is not being fetched.
+  h.cache.beginFrame();
+  h.cache.acquire(edgeTile(0));
+  for (let i = 1; i <= 4; i++) h.cache.acquire(addr(i));
+  h.cache.setViewports(LAT, [{ box: { f0Hz: 0, f1Hz: 5 * TILE_HZ, t0Ns: EDGE_NS - 100e9, t1Ns: EDGE_NS }, levelF: 0, levelT: 0 }]);
+  h.cache.endFrame();
+  h.cache.refreshEdge(LAT, EDGE_NS, [edgeView()]);
+  await flush();
+
+  assert.equal(h.cache.stats.edgeRefreshes, 0, "a refresh was issued while four misses were outstanding");
+  assert.ok(h.cache.inFlightCount <= 4, `in flight ${h.cache.inFlightCount} > the route's cap`);
+  assert.deepEqual(h.calls.slice(1).sort(), [1, 2, 3, 4].map((i) => keyOf(addr(i))).sort(),
+    "the four visible misses are what went out");
+  assert.ok(h.cache.refreshDepth > 0, "the refresh is not dropped — it waits for the cache to be idle");
+
+  // Once they land the cache is idle again, and the refresh goes out then.
+  for (let i = 1; i <= 4; i++) await h.settle(addr(i));
+  assert.equal(h.cache.stats.edgeRefreshes, 1, "and it is not forgotten either");
+});
+
+test("the refresh lane can never exceed a fixed share of MEASURED capacity", async () => {
+  // The duty limit, and why it is a share of the measured service time rather than a frequency: at
+  // ~19 MB a live tile, a fixed 1 Hz would spend the whole in-flight budget. Here every answer costs
+  // 600 ms of the clock, the cache measures that, and the refresh rate is a quotient of it — so a
+  // route that gets slower makes the refresh rarer with nothing retuned.
+  const clock = { t: 0 };
+  const SERVER_MS = 600;
+  const h = harness({ inFlight: 4, now: () => clock.t, serverMsGuess: SERVER_MS });
+  const wide: Viewport = { box: { f0Hz: 0, f1Hz: 3 * TILE_HZ, t0Ns: EDGE_NS - 100e9, t1Ns: EDGE_NS }, levelF: 0, levelT: 0 };
+  for (let step = 0; step < 200; step++) {
+    clock.t += 100;
+    h.cache.beginFrame();
+    for (const f of [0, 1, 2]) h.cache.acquire(edgeTile(f));
+    h.cache.setViewports(LAT, [wide]);
+    h.cache.endFrame();
+    h.cache.refreshEdge(LAT, EDGE_NS, [wide]);
+    await flush();
+    for (const [key, w] of [...h.waiting]) {
+      clock.t += SERVER_MS;
+      w.resolve(data(parseKey(key)!));
+      h.waiting.delete(key);
+      await flush();
+    }
+  }
+  const n = h.cache.stats.edgeRefreshes;
+  assert.ok(n >= 2, `only ${n} refresh(es) in ${clock.t} ms — nothing to measure, the bound would be vacuous`);
+  // At least the per-answer cost: a batch settled back-to-back on the same fake clock charges the
+  // later ones for the earlier ones' wait, which is honest — the route really was busy that long.
+  assert.ok(h.cache.serverEstimateMs >= SERVER_MS,
+    `the estimate never learned the ${SERVER_MS} ms cost: ${h.cache.serverEstimateMs}`);
+  // The whole guarantee, stated as a rate so it does not depend on when the test looked: at most one
+  // refresh per REFRESH_DUTY service times over the whole run (+1 for the one issued at t = 0).
+  const cap = clock.t / (REFRESH_DUTY * SERVER_MS) + 1;
+  assert.ok(n <= cap,
+    `${n} refreshes in ${clock.t} ms is above one per ${REFRESH_DUTY} x ${SERVER_MS} ms (cap ${cap.toFixed(1)})`);
+  // Three edge tiles, all continuously due, and the lane still never ran more than one at a time.
+  assert.ok(h.cache.stats.edgeRefreshApplied >= 2, "the refreshes landed rather than being cancelled");
+});
+
+test("a retune still wins over a refresh in flight", async () => {
+  // `invalidateEdge` marks an in-flight key stale, and the data that then arrives describes a tuning
+  // that no longer exists. A refresh must not be the one path that smuggles it back in: the tile is
+  // dropped, the answer is discarded, and the address is asked for again.
+  const clock = { t: 0 };
+  const h = harness({ inFlight: 4, now: () => clock.t, serverMsGuess: 20 });
+  await live(h, clock, 1_500);
+  clock.t += 2_000;
+  h.cache.refreshEdge(LAT, EDGE_NS, [edgeView()]);
+  await flush();
+  assert.equal(h.cache.inFlightCount, 1, "a refresh should be in flight to be overtaken");
+
+  assert.equal(h.cache.invalidateEdge(LAT, EDGE_NS), 1, "the retune drops the resident edge tile");
+  const uploads = h.uploads();
+  await h.settle(edgeTile());
+  assert.equal(h.uploads(), uploads, "the old tuning's tile was uploaded by the refresh path");
+  await flush();
+  assert.ok(h.waiting.has(keyOf(edgeTile())), "the address is asked for again after the retune");
+});
+
+// ——— T-479: a 4xx is TERMINAL, and "retryable" is the enumerated case ———
+//
+// What the user saw: the console flooding. The canvas asked for an out-of-range node (observed in
+// the wild as `level_f=10` with `t_index=218471` — the address arithmetic is T-480's, not this
+// file's), the route correctly answered **400**, and the client asked again on the very next frame,
+// forever. `failed()` special-cased 503 and let everything else fall through to a default of *ask
+// again*, so every unenumerated status was wrong; a fix that adds `400` beside `503` would leave the
+// next one wrong too. The predicate is therefore inverted: retryable is enumerated, terminal is the
+// default.
+
+/** An error shaped like the one `tile.ts` builds from a non-503 response: it carries a status. */
+const httpError = (status: number, msg = "bad node") =>
+  Object.assign(new Error(msg), { status, code: "bad_request" });
+
+test("a 400 is fetched at most ONCE per place, however many frames ask for it", async () => {
+  const h = harness({ inFlight: 4 });
+  const bad = addr(9, 218471, 10, 0);
+  h.cache.beginFrame();
+  h.cache.acquire(bad);
+  h.cache.endFrame();
+  await flush();
+  await h.fail(bad, httpError(400));
+
+  // Sixty frames — one second of a render loop — all asking for the same refused place.
+  for (let frame = 0; frame < 60; frame++) {
+    h.cache.beginFrame();
+    const res = h.cache.acquire(bad);
+    h.cache.endFrame();
+    await flush();
+    assert.equal(res.kind, "pending", "a refused place must never become a cell state");
+    assert.equal(res.kind === "pending" && res.failed, true,
+      "…and the caller is told WHICH not-loaded it is: asked and refused, not never-sampled");
+  }
+  assert.deepEqual(h.calls, [keyOf(bad)], `the 400 was re-asked ${h.calls.length - 1} more times`);
+  assert.equal(h.cache.stats.terminalFailures, 1);
+  assert.equal(h.cache.terminalPlaces, 1);
+  assert.match(h.cache.refusalFor(bad) ?? "", /HTTP 400/, "the route's own words are kept for the readout");
+});
+
+test("NO non-503 status is ever asked twice — the enumeration, not a list of special cases", async () => {
+  // The guard the ticket asked for, stated over the statuses rather than over the one that bit us.
+  for (const status of [400, 401, 403, 404, 410, 413, 422, 500, 502, 504]) {
+    const h = harness({ inFlight: 4 });
+    const a = addr(status % 7);
+    h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+    await flush();
+    await h.fail(a, httpError(status));
+    for (let frame = 0; frame < 10; frame++) {
+      h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+      await flush();
+    }
+    assert.deepEqual(h.calls, [keyOf(a)], `HTTP ${status} was re-asked: terminal is supposed to be the DEFAULT`);
+  }
+});
+
+test("…and 503 still retries with T-454's AIMD intact: the cap is discovery, not leakage", async () => {
+  // The load-bearing property this change must not disturb. A refusal is not a failure, is not
+  // terminal, halves the cap, backs off, and the place stays wanted.
+  let clock = 0;
+  const h = harness({ inFlight: 4, busyBackoffMs: 50, now: () => clock });
+  h.cache.beginFrame(); h.cache.acquire(addr(0)); h.cache.endFrame();
+  await flush();
+  await h.fail(addr(0), new TileBusyError(4, "too many tile reads in flight (limit 4)"));
+  assert.equal(h.cache.inFlightLimit, 2, "a 503 still halves the cap");
+  assert.equal(h.cache.stats.busyRefusals, 1);
+  assert.equal(h.cache.stats.terminalFailures, 0, "backpressure is a statement about NOW, never terminal");
+  assert.equal(h.cache.terminalPlaces, 0);
+  clock += 100;
+  h.cache.beginFrame(); h.cache.acquire(addr(0)); h.cache.endFrame();
+  await flush();
+  assert.deepEqual(h.calls, [keyOf(addr(0)), keyOf(addr(0))], "the refused place is still wanted");
+  await h.settle(addr(0));
+  assert.equal(h.cache.residentTiles, 1);
+
+  // A transport failure — the server said nothing at all — is not terminal either, and is re-asked
+  // by the next frame rather than by a tight requeue cycle.
+  const net = harness({ inFlight: 4 });
+  net.cache.beginFrame(); net.cache.acquire(addr(3)); net.cache.endFrame();
+  await flush();
+  await net.fail(addr(3), new TypeError("Failed to fetch"));
+  assert.equal(net.cache.stats.terminalFailures, 0, "a disconnect must not blank the place for the session");
+  assert.equal(net.cache.queueDepth, 0, "…and must not spin: nothing is re-queued by the failure itself");
+  net.cache.beginFrame(); net.cache.acquire(addr(3)); net.cache.endFrame();
+  await flush();
+  assert.equal(net.calls.length, 2, "the next frame asks again, paced by the render loop");
+});
+
+test("an unreadable 200 is an ANSWER: a decode failure is terminal too", async () => {
+  // Found by merging T-467, not by argument. Its new coverage encoding made a stale fixture's `200`
+  // responses undecodable; `TileDecodeError` carries no HTTP status, so the rule above read it as
+  // "the server said nothing" and the place was re-asked on every frame — 157 times in 700 ms. The
+  // server had said plenty. A body this client cannot read is an answer, and asking again gets the
+  // same bytes back.
+  const h = harness({ inFlight: 4 });
+  const a = addr(2);
+  h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+  await flush();
+  await h.fail(a, new TileDecodeError("tile …: coverage has no plane for device any"));
+  for (let frame = 0; frame < 60; frame++) {
+    h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+    await flush();
+  }
+  assert.deepEqual(h.calls, [keyOf(a)], `an undecodable response was re-asked ${h.calls.length} times`);
+  assert.equal(h.cache.stats.terminalFailures, 1);
+  assert.match(h.cache.refusalFor(a) ?? "", /coverage has no plane/, "the decoder's own words survive");
 });

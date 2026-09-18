@@ -116,13 +116,42 @@ async function zoomOutHard(t, browser, { initScript = null, caps = null } = {}) 
   t.diagnostic(`level readout: "${before}" -> "${after}"`);
 
   const tiles = page.requests.slice(firstIdx).filter((r) => r.url.includes("/api/tiles"));
-  // Non-vacuity, twice over: the gestures must have put addresses on the wire, and they must have
-  // reached the COARSE end of the frequency axis — which is where the reported defect lives. A run
-  // that stopped short of the ceiling would pass every assertion below and prove nothing.
+  const everyTile = page.requests.filter((r) => r.url.includes("/api/tiles"));
+  // Non-vacuity, twice over: the gestures must have moved the view (asserted above, from the
+  // chrome) and put addresses on the wire, and the page's addressing must have reached the COARSE
+  // end of the frequency axis — which is where the reported defect lives. A run that stopped short
+  // of the ceiling would pass every assertion below and prove nothing.
   assert.ok(tiles.length >= 4, `the zoom-out must have produced tile requests (got ${tiles.length})`);
-  const coarsest = Math.max(...tiles.map((r) => addrOf(r.url).levelF));
-  assert.equal(coarsest, capF, "the zoom-out must actually reach the top of the frequency axis");
-  t.diagnostic(`${tiles.length} tile requests, coarsest level_f = ${coarsest}`);
+
+  // **Why the ceiling is measured over the page's whole life and not over the gesture alone**
+  // (T-460/T-479). `capF` is only ever reached by the parent PIN — one level above what any
+  // viewport draws — and on this backend that node is refused **400**, permanently (T-482: the
+  // route declares a lattice it cannot serve). A client that asks a permanently-refused address
+  // once and never again therefore reaches `capF` at load and never inside the gesture window.
+  // Measured on the same backend, same gestures, same two distinct level-11 addresses:
+  //
+  //   before T-479's terminal-failure rule : 19 requests for those 2 addresses (9 at load, 14 in
+  //                                          the gesture), answered 400 — and 503, because the
+  //                                          retries were stealing the route's shared in-flight
+  //                                          budget from tiles someone was waiting for.
+  //   after                                : 2 requests, each address asked exactly once, 400.
+  //
+  // So the gesture-scoped form of this premise was satisfied by the RETRY STORM rather than by the
+  // addressing, and it would go red for anyone who fixed that storm. Counting distinct addressing
+  // over the page's whole life asks the question the premise is actually about — *did the client's
+  // addressing reach the ceiling* — and, unlike the old form, cannot be satisfied by repetition.
+  const coarsest = Math.max(...everyTile.map((r) => addrOf(r.url).levelF));
+  assert.equal(coarsest, capF, "the page's addressing must actually reach the top of the frequency axis");
+
+  // **And no third check over the gesture's own wire traffic.** The obvious one — "the gesture
+  // asked for the coarsest level it says it drew" — is cache-sensitive in exactly the way the old
+  // premise was: a coarse tile resident since load is drawn every frame and requested never, so it
+  // passes or fails on how warm the server was, which is how it behaved when tried (green alone,
+  // red in the full suite). "The gestures moved the view" is asserted above, from the chrome, and
+  // that is the cache-independent form of the same claim.
+  const gestureCoarsest = Math.max(...tiles.map((r) => addrOf(r.url).levelF));
+  t.diagnostic(`${tiles.length} gesture tile requests (coarsest level_f ${gestureCoarsest}); ` +
+    `${everyTile.length} over the page's life, coarsest level_f = ${coarsest}`);
   return { tiles, lat, capF, capT };
 }
 

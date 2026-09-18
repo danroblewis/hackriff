@@ -13628,6 +13628,62 @@ tasks:
       the user asked for the proof first, and because a fix whose test was written afterwards tends
       to be tested against itself.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-485
+    milestone: MCANVAS
+    title: A SHADOW tier - echo an earlier scan into unobserved cells, render-time only, never stored and never detected on
+    status: todo
+    priority: low
+    parallel_group: CANVAS-FE
+    depends_on: [T-483, T-484]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      USER IDEA 2026-09-18, FILED AS A FUTURE ITEM AND EXPLICITLY NOT PRIORITISED. Do not start it
+      ahead of T-460, T-483/T-484 or the canvas e2e.
+      THE IDEA: fill missing / grey cells with a SHADOW - a repeat of prior-date scan data for that
+      frequency region, drawn darker or more transparent as a DISTINCT tier, an "echo from an earlier
+      scan". A full-spectrum view then shows context everywhere while real data is sampled at will.
+      It covers two different gaps and both are wanted: cells NEVER OBSERVED at all, and TEMPORAL
+      GAPS within a frequency that has been scanned - for the latter, repeat the last real rows until
+      real data arrives.
+      THE CRITICAL HONESTY RULE, IN THE USER'S OWN TERMS AND NOT NEGOTIABLE: RENDER-TIME OVERLAY
+      ONLY. Never stored as coverage. Never stored as data. Never fed to detection. THE COVERAGE MAP
+      STAYS HONESTLY UNOBSERVED, so grey = unobserved is preserved underneath.
+      WHY THAT RULE IS THE WHOLE TICKET, AND WHY THIS IS THE MOST DANGEROUS THING ON THE BOARD: this
+      product's central promise is that the screen distinguishes what was measured from what was not.
+      A shadow tier deliberately paints something that looks like data where there is none. Every
+      existing guard in this area exists because that line was crossed accidentally -
+      Coverage::Unobserved is not Off, "not loaded is not unobserved" (cellrule.ts), T-441's AWAITING,
+      the T-461 short-circuit that must answer unobserved rather than zero. This ticket crosses the
+      line ON PURPOSE, which is defensible only if the crossing is VISIBLE, LOCAL TO THE RENDERER,
+      and IMPOSSIBLE TO PERSIST.
+      SO THE DESIGN MUST MAKE IT UNPERSISTABLE BY CONSTRUCTION, not by discipline. State how a
+      shadow cell cannot reach: the tile store, the coverage plane, /api/tiles' response, any
+      detection input, any export or report. A comment saying "do not store this" is not a mechanism.
+      The strongest available shape is that the shadow never enters the data pass at all - overlay.ts
+      has no sampler and no ramp, which is precisely why a trace cannot tint a measurement (T-457);
+      a shadow that needs the ramp needs a different answer, and that answer needs stating.
+      IT MUST BE VISUALLY UNMISTAKABLE, and "darker or transparent" is a starting point rather than a
+      specification. The honesty tiers (live-iq / spectrum-history / survey-overview) already exist
+      and are already visually distinct; a shadow is a FOURTH tier and must be as distinguishable
+      from survey-overview as survey-overview is from live-iq. It must also be distinguishable from
+      GREY: a shadow says "this is what was here before", grey says "nothing was ever sampled here",
+      and confusing those is the failure mode.
+      IT MUST SAY WHEN. An echo from an hour ago and an echo from a month ago are different claims.
+      The chrome already states each viewport's window, level and honesty tier; the shadow's AGE
+      belongs there too.
+      DEFAULT OFF IS THE SAFE STARTING POSITION - decide and justify. A user who has not asked for
+      echoes should not be shown them, and the first screen of a fresh install is 99.4 % grey
+      (T-437), which is exactly where a shadow tier would be most tempting and most misleading.
+      DoD: shadows render for never-observed cells and for temporal gaps; a test proves a shadow cell
+      cannot reach the store, the coverage plane, the route or detection - by construction, not by
+      inspection; the tier is visually distinct from all three honest tiers AND from grey; its age is
+      stated; and the coverage map is byte-identical with shadows on and off.
+    notes: |
+      Filed 2026-09-18 from a user idea, LOW priority and explicitly not to be prioritised. The queue
+      stays T-460, then T-483/T-484 (fidelity), then the canvas e2e (T-481).
+      Depends on T-483/T-484 because the fidelity work decides what the finest live tier actually
+      renders, and a shadow tier drawn against the wrong finest tier would have to be redone.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
