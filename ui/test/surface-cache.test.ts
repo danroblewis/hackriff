@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { CELL } from "../src/surface/cellrule";
 import { keyOf, tileUrl, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { RECOVER_AFTER, REFRESH_DUTY, TileCache, parseKey, type TileCacheOptions, type Viewport } from "../src/surface/tilecache";
-import { TileBusyError, type TileData } from "../src/surface/tile";
+import { TileBusyError, TileDecodeError, type TileData } from "../src/surface/tile";
 
 const LAT: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 20, levelsT: 15 };
 const BYTES = 192 * 1024; // one 256^2 tile: R16F measurement + R8 state
@@ -645,4 +645,24 @@ test("…and 503 still retries with T-454's AIMD intact: the cap is discovery, n
   net.cache.beginFrame(); net.cache.acquire(addr(3)); net.cache.endFrame();
   await flush();
   assert.equal(net.calls.length, 2, "the next frame asks again, paced by the render loop");
+});
+
+test("an unreadable 200 is an ANSWER: a decode failure is terminal too", async () => {
+  // Found by merging T-467, not by argument. Its new coverage encoding made a stale fixture's `200`
+  // responses undecodable; `TileDecodeError` carries no HTTP status, so the rule above read it as
+  // "the server said nothing" and the place was re-asked on every frame — 157 times in 700 ms. The
+  // server had said plenty. A body this client cannot read is an answer, and asking again gets the
+  // same bytes back.
+  const h = harness({ inFlight: 4 });
+  const a = addr(2);
+  h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+  await flush();
+  await h.fail(a, new TileDecodeError("tile …: coverage has no plane for device any"));
+  for (let frame = 0; frame < 60; frame++) {
+    h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+    await flush();
+  }
+  assert.deepEqual(h.calls, [keyOf(a)], `an undecodable response was re-asked ${h.calls.length} times`);
+  assert.equal(h.cache.stats.terminalFailures, 1);
+  assert.match(h.cache.refusalFor(a) ?? "", /coverage has no plane/, "the decoder's own words survive");
 });

@@ -92,7 +92,7 @@
 // flash grey. T-468's row-push route is the durable fix; this restores the guarantee now.
 
 import { extentOf, intersects, keyOf, tCellNs, type Box, type Lattice, type TileAddr } from "./lattice";
-import { TileBusyError, type TileData } from "./tile";
+import { TileBusyError, TileDecodeError, type TileData } from "./tile";
 
 /** The GPU side, kept behind an interface so the cache is testable without a GL context. */
 export interface TileTextures<T> {
@@ -848,26 +848,35 @@ export class TileCache<T> {
 /**
  * **Is asking again capable of changing the answer?** (T-479.)
  *
- * Two cases, and they are the whole enumeration — everything else is terminal by default, which is
- * the inversion this function exists for. The old rule special-cased `503` and let *every other*
- * outcome fall through to "ask again", so each unenumerated status was wrong by default; this is the
- * same principle as `BiasTee::Unknown` not being `Off`, applied in the retry direction.
+ * **The question is: did the server answer?** If it answered anything at all, asking again cannot
+ * change it. If we never got an answer, it can. That is the whole enumeration, and everything
+ * outside it is terminal by default — the inversion this function exists for. The pre-T-479 rule
+ * special-cased `503` and let every other outcome fall through to "ask again", so each unenumerated
+ * outcome was wrong by default: `BiasTee::Unknown` is not `Off`, in the retry direction.
  *
- *  1. **`TileBusyError`** — the route's `503`. T-454's backpressure is a statement about *now*: the
- *     history lock is held, and the only correct response is to wait and ask again. It is handled by
- *     the AIMD branch above with its own backoff and never reaches here.
- *  2. **A failure that carries no HTTP status** — the request never got an answer at all (socket
- *     closed, server restarting, DNS). The server said nothing, so nothing it said is permanent, and
- *     blanking the surface for the rest of the session over a momentary disconnect would be the
- *     opposite defect. This does not re-queue either: the next frame's `acquire` asks again, so the
- *     retry is paced by the render loop rather than by a tight failure cycle.
+ *  1. **`TileBusyError`** — the route's `503` — is the one answer that *is* about now. T-454's
+ *     backpressure says the history lock is held; waiting and asking again is the whole of the right
+ *     response. It is handled by the AIMD branch above with its own backoff and never reaches here.
+ *  2. **A failure that carries no answer at all** — socket closed, server restarting, DNS. The
+ *     server said nothing, so nothing it said is permanent, and blanking a place for the rest of the
+ *     session over a momentary disconnect would be the opposite defect. It is not re-queued either:
+ *     the next frame's `acquire` asks, so the retry is paced by the render loop.
  *
- * Anything the server *said* — 400, 404, 413, 500 — is terminal. The status is read structurally
- * rather than by instanceof so this does not couple to which error class the fetch layer happens to
- * build (`tile.ts` is not this file's to know the internals of).
+ * Everything the server *said* is terminal — a status (400, 404, 413, 500), **and a body this client
+ * could not read**. The second half was missing, and merging T-467 proved why it matters rather than
+ * arguing it: the new coverage encoding made a stale fixture's `200` responses undecodable, and
+ * because a `TileDecodeError` carries no HTTP status it fell into case 2 and was re-asked at frame
+ * rate — **157 times in 700 ms**, the very storm T-479 exists to stop, wearing different clothes.
+ * A 200 whose body does not decode is an answer; it is just not a readable one, and asking again
+ * gets the same bytes back.
+ *
+ * The status is read structurally rather than by `instanceof` so this does not couple to which error
+ * class the fetch layer builds for an HTTP failure; `TileDecodeError` is named because it is the
+ * exported way `tile.ts` says "the server answered and I could not read it", which no status carries.
  */
 function retryable(err: unknown): boolean {
   if (err instanceof TileBusyError) return true;
+  if (err instanceof TileDecodeError) return false;
   const status = (err as { status?: unknown } | null)?.status;
   return typeof status !== "number";
 }
