@@ -21,7 +21,7 @@
 //!   one.
 //!
 //! The geometries are parameterised because the ceiling is a claim about *whatever store is open*,
-//! not about one constant: T-439's shipped view lattice is one case, and a shallower and a
+//! not about one constant: the shipped view lattice is one case, and a shallower and a
 //! narrower-floor lattice are the others.
 
 use std::sync::{Arc, Mutex};
@@ -54,14 +54,8 @@ impl Drop for TempDir {
 /// `level_f = 10` refused at `cells = 256` and served at `cells = 128`.
 const CELLS: usize = 256;
 
-/// A view-lattice pyramid config, rebuilt here because hk-api cannot depend on hk-pipeline.
-///
-/// These are **fixtures, not the shipped shape**, and deliberately so: the ceiling is a property of
-/// a geometry, and pinning it to whatever `hk_pipeline::history::view_config` currently produces
-/// would make this test restate that constant rather than check the predicate against the read.
-/// T-484 moved the shipped floor to the display plan's own bin and row and the depth to 7 x 7, and
-/// none of the numbers below moved with it — which is the point. `view(6250.0, 4, 4)` was the
-/// shipped shape from T-439 to T-484 and is kept as the case whose answer, (9, 1), is written down.
+/// A view-lattice pyramid config. The shipped one is `view(6250.0, 4, 4)`
+/// (`hk_pipeline::history::view_config`), rebuilt here because hk-api cannot depend on hk-pipeline.
 fn view(f_cell_hz: f64, f_levels: usize, t_levels: usize) -> PyramidConfig {
     PyramidConfig {
         f_cells_per_block: 1024,
@@ -81,13 +75,10 @@ fn view(f_cell_hz: f64, f_levels: usize, t_levels: usize) -> PyramidConfig {
     }
 }
 
-/// The geometries under test; T-439's shipped floor first, as the case with a written-down answer.
+/// The geometries under test: the shipped one first.
 fn cases() -> Vec<(&'static str, PyramidConfig)> {
     vec![
-        (
-            "T-439's shipped floor, 6.25 kHz x 1 s, 4 x 4",
-            view(6250.0, 4, 4),
-        ),
+        ("shipped 6.25 kHz x 1 s, 4 x 4", view(6250.0, 4, 4)),
         ("shallower 6.25 kHz x 1 s, 2 x 2", view(6250.0, 2, 2)),
         ("coarser floor 25 kHz x 1 s, 4 x 4", view(25_000.0, 4, 4)),
     ]
@@ -187,12 +178,11 @@ fn the_ceiling_is_maximal_for_this_geometry() {
     let dir = TempDir::new("maximal");
     let (state, geom) = server(&dir.0, view(6250.0, 4, 4));
     let (max_f, max_t) = ceiling_of(&state, &geom);
-    // This fixture's answer, stated so a change to the predicate or to either bound is visible
-    // here. It is T-439's floor, not T-484's shipped one (see `view`).
+    // The shipped geometry's answer, stated so a change to either constant is visible here.
     assert_eq!(
         (max_f, max_t),
         (9, 1),
-        "a 12 x 15 lattice over a 4 x 4 store reads to (9, 1)"
+        "the shipped 12 x 15 lattice over a 4 x 4 store reads to (9, 1)"
     );
     for (lf, lt) in [(max_f + 1, max_t), (max_f, max_t + 1)] {
         assert!(

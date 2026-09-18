@@ -330,23 +330,6 @@ pub fn row_plan(
 ) -> RowPlan {
     let mut welch = WelchConfig::new(fft_len);
     welch.spectral_kurtosis = false;
-    // **OFF, deliberately — and T-484 is why it now matters beyond the CPU it saves.**
-    //
-    // Nothing ever read `max_hold` from this plan: `Output::row` publishes `spec.psd`, so the two
-    // extra O(bins) passes per segment were pure cost. T-484 makes these frames the view lattice's
-    // finest node as well, where the cell is **one bin of one published row** — and there
-    // `FrameInput::from_dsp` would hand the per-segment max-hold to the store as the cell's `peak`,
-    // so `/api/tiles`'s `max_db` would be a statistic **no row ever showed**: T-483 measured that
-    // as +8.2 dB of floor lift on the quiet band, on top of the +2.3 dB the cell fold added.
-    //
-    // At a 1:1 tier a cell IS a measurement, so its max, its mean and the number the waterfall drew
-    // are the same number, and every coarser node maxes over those. The statistic T-397 protects —
-    // a max-hold that keeps a sub-frame burst — is scheme 1's, fed from `crate::history`'s own
-    // frames with `holds = true`, and is untouched: `/api/timeline`, `/api/coverage` and
-    // `/api/floor` still fold it. The trade is explicit: a burst shorter than one display row is
-    // averaged across that row here, exactly as the waterfall T-445 retired averaged it, which is
-    // the *"same experience"* the user asked for.
-    welch.holds = false;
     welch.window = window;
     let hop = welch.hop() as f64;
     let gated = !class.permits_content();

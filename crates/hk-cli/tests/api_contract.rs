@@ -6483,30 +6483,12 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     };
 
     // The address is resolved against the open pyramid's own geometry, so the cell sizes come back
-    // from the server rather than being assumed here.
-    //
-    // **T-484: the floor is not a constant any more.** The view lattice's node (0, 0) is the display
-    // plan's own bin and row (`fs / spectrum_fft_len` x the display row period,
-    // `hk_pipeline::history::view_geometry`), so it moves with the run's sample rate; the 6250 Hz x
-    // 1 s that used to be asserted here was T-439's fixed floor. Pinning a number would restate that
-    // function in a second place, which is what this file exists to avoid. What the assertions below
-    // need is only that the floor is real and that the route reports one cell, not two.
+    // from the server rather than being assumed here. Scheme 1's floor is 6.25 kHz x 1 s.
     let (st, probe) = get(addr, &tile(0, 0, 0, 0));
     assert_eq!(st, 200, "{probe}");
     let f_cell = probe["extent"]["f_cell_hz"].as_f64().unwrap();
     let t_cell = probe["extent"]["t_cell_s"].as_f64().unwrap();
-    assert!(
-        f_cell.is_finite() && f_cell > 0.0 && t_cell.is_finite() && t_cell > 0.0,
-        "{probe}"
-    );
-    assert_eq!(
-        (
-            probe["axes"]["frequency"]["cell_hz"].as_f64().unwrap(),
-            probe["axes"]["time"]["cell_s"].as_f64().unwrap()
-        ),
-        (f_cell, t_cell),
-        "`extent` and `axes` must name the same node (0, 0): {probe}"
-    );
+    assert_eq!((f_cell, t_cell), (6250.0, 1.0), "{probe}");
     assert_eq!(probe["key"]["scheme"], json!("view"), "{probe}");
     assert_eq!(probe["key"]["device"], json!("any"), "{probe}");
     // `any` is the union and can never wear one radio's identity (T-259/T-305, docs/16 §6.3).
@@ -6897,19 +6879,12 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         v["error"].as_str().is_some_and(|s| s.contains("diagonal")),
         "the refusal must say WHY: {v}"
     );
-    // On the diagonal the same scheme answers — **addressed in SCHEME 1's own cells**, which since
-    // T-484 are no longer the view lattice's. Scheme 1's floor is still its fixed 6.25 kHz x 1 s;
-    // the view lattice's is now the display plan's own bin and row, so an index computed from one
-    // lands somewhere else in the other, and for time it lands outside the addressable range
-    // entirely. `scheme` names one store, and so does an index expressed in its cells.
-    let s1_f = 6250.0;
-    let s1_t = 1.0;
+    // On the diagonal the same scheme answers.
     let (st, v) = get(
         addr,
         &format!(
-            "/api/tiles?scheme=1&level_f=0&level_t=0&f_index={}&t_index={}&cells={N}",
-            (STATION_HZ / (s1_f * N as f64)).floor() as u64,
-            (unix_now() / (s1_t * N as f64)) as u64,
+            "/api/tiles?scheme=1&level_f=0&level_t=0&f_index={f_index}&t_index={}&cells={N}",
+            t_index_of(0)
         ),
     );
     assert_eq!(st, 200, "{v}");
