@@ -32,7 +32,9 @@
 //
 // Presentation-and-view-state only, per ADR-0013 §1: the boxes are in the surface's own absolute
 // coordinates (Hz, capture-time ns), every bound comes from the backend, and no signal fact is
-// computed. Retune-on-pan is **T-444** — a pan here is a pan, and commands nothing.
+// computed. Retune-on-pan is **T-444** (`./retune.ts`) — a pan here is a pan, and commands nothing:
+// that module reads pane state and produces an *offer*, and only an explicit act on that offer
+// reaches the front end, through T-343's one gate.
 
 import { fmtBandwidth } from "../app/explore/format";
 import type { Box, Lattice } from "./lattice";

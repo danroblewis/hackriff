@@ -21,7 +21,7 @@
 //     queue so a fast pan serves where the user now is, cancellation for viewports they have left,
 //     an in-flight cap matching the server's own, and one request per key however many panes want it.
 
-import { intersects, keyOf, type Box, type Lattice, type TileAddr } from "./lattice";
+import { extentOf, intersects, keyOf, tCellNs, type Box, type Lattice, type TileAddr } from "./lattice";
 import { TileBusyError, type TileData } from "./tile";
 
 /** The GPU side, kept behind an interface so the cache is testable without a GL context. */
@@ -115,6 +115,9 @@ export class TileCache<T> {
   private inflight = new Map<string, AbortController | null>();
   private evicted = new Set<string>();
   private everRequested = new Set<string>();
+  /** Keys whose in-flight fetch was overtaken by a retune: the data that arrives describes the old
+   * tuning, so it is dropped on arrival and asked for again ([[invalidateEdge]]). */
+  private stale = new Set<string>();
   private clock = 0;
   private frame = 0;
   private bytes = 0;
@@ -243,6 +246,52 @@ export class TileCache<T> {
     }
   }
 
+  /**
+   * Drop every resident tile that **reaches the growing edge**, and discard any already in flight
+   * for it. Returns how many resident tiles were dropped.
+   *
+   * Called after a retune (T-444; T-437 §5.2's one client-side ask, which the spike measured at 32
+   * tiles). The edge tiles are computed *on request* from whatever the front end was tuned to at
+   * that moment, so after the tuning changes a cached one is an observation claim about a tuning
+   * that no longer exists. That makes this a **grey-honesty** measure, not a freshness nicety: the
+   * surface's load-bearing claim is that grey means the radio never looked there, and its mirror
+   * claim is that a coloured cell means it did — of *this* band, at *this* time.
+   *
+   * Two details that are not obvious:
+   *
+   *  - **Coarser levels go too, not only the finest.** A level-3 tile covering the edge is rewritten
+   *    by the same new frames; keeping it because it is not "the finest" would leave the fallback
+   *    path (§5.5's upscaled ancestor) drawing the old tuning underneath the new one.
+   *  - **In-flight requests are marked stale, not merely aborted.** A fetch issued before the retune
+   *    lands after it, and `insert` would happily accept it into an empty slot. So the key is marked
+   *    and the arriving data is dropped and re-requested instead.
+   *
+   * Tiles addressed on another lattice are left alone: their scheme is part of the key, so they
+   * cannot be confused with this one's, and this call knows nothing about their geometry.
+   */
+  invalidateEdge(lat: Lattice, edgeNs: number, box?: Box): number {
+    if (!Number.isFinite(edgeNs)) return 0;
+    let n = 0;
+    for (const e of [...this.map.values()]) {
+      if (this.atEdge(lat, e.addr, edgeNs, box) && this.invalidate(e.addr)) n++;
+    }
+    for (const key of this.inflight.keys()) {
+      const a = parseKey(key);
+      if (a && this.atEdge(lat, a, edgeNs, box)) this.stale.add(key);
+    }
+    return n;
+  }
+
+  /** Does this tile hold the growing edge — i.e. is its newest cell still being written? */
+  private atEdge(lat: Lattice, a: TileAddr, edgeNs: number, box?: Box): boolean {
+    if (a.scheme !== lat.scheme) return false;
+    const ext = extentOf(lat, a);
+    // One cell of slack: the cell the edge is *in* is partly written, and so is the one before it
+    // when a frame straddles the boundary.
+    if (ext.t1Ns < edgeNs - tCellNs(lat, a.levelT)) return false;
+    return !box || (ext.f1Hz > box.f0Hz && ext.f0Hz < box.f1Hz);
+  }
+
   /** Drop one tile so the growing edge can rewrite it (T-439's live tiles are not immutable). */
   invalidate(addr: TileAddr): boolean {
     const key = keyOf(addr);
@@ -262,6 +311,7 @@ export class TileCache<T> {
     this.inflight.clear();
     this.queue = [];
     this.queued.clear();
+    this.stale.clear();
   }
 
   private pump(): void {
@@ -283,8 +333,12 @@ export class TileCache<T> {
       };
       void this.source(addr, ctrl?.signal).then(
         (data) => {
-          try { this.insert(addr, data); } catch { this.stats.failures++; }
-          done(false);
+          // A tile the retune overtook is requeued, not kept: `insert` says which happened, and the
+          // requeue has to run in `done`, after the key leaves the in-flight map, or `schedule`
+          // would see this very request still outstanding and silently drop the retry.
+          let requeue = false;
+          try { requeue = !this.insert(addr, data); } catch { this.stats.failures++; }
+          done(requeue);
         },
         (err) => done(this.failed(addr, err, ctrl?.signal.aborted ?? false)),
       );
@@ -308,9 +362,11 @@ export class TileCache<T> {
     return false;
   }
 
-  private insert(addr: TileAddr, data: TileData): void {
+  /** Take a fetched tile. **False means "ask again"**: the tuning changed while it was in flight. */
+  private insert(addr: TileAddr, data: TileData): boolean {
     const key = keyOf(addr);
-    if (this.map.has(key)) return; // never upload the same tile twice
+    if (this.stale.delete(key)) return false;
+    if (this.map.has(key)) return true; // never upload the same tile twice
     if (data.serverInFlightLimit && data.serverInFlightLimit > 0) this.limit = Math.min(this.limit, data.serverInFlightLimit);
     const tex = this.tex.upload(data);
     this.stats.uploads++;
@@ -319,6 +375,7 @@ export class TileCache<T> {
     this.map.set(key, { key, addr, data, tex, lastUsed: ++this.clock, pinnedFrame: this.frame });
     this.bytes += data.bytes;
     this.evict();
+    return true;
   }
 
   /**

@@ -794,7 +794,59 @@ segments read `GET /api/navigation`'s `windows` through the **same function** th
 navigator uses (`activeWindows`, asserted to be the same object, so there is no second reader to
 disagree), and the device each names is the same identity a pane's tiles are keyed by — one coverage
 plane, not two client-side notions of "which radio".
+### 8.4c Retune-on-pan: the gesture, and why it cannot fire from a drag (T-444, 2026-09-17)
 
+Built in `ui/src/surface/retune.ts`. §8.4's third bullet — *panning a pane to an un-tuned frequency
+offers or triggers a retune* — resolves to **offers**, and the choice is forced rather than
+preferred: T-340's control drags ±1.0 of the whole 6 GHz surface through a spy client and asserts an
+**empty call list**, and T-442 re-asserted the same shape over the entire pane vocabulary. A pane's
+pan is a pan. So the retune is a **discrete, explicit act on a separate control** — T-343's
+`edgeOffer` and T-392's region-select-on-release are the precedents this repo has already argued
+through — and the whole of the gesture design is that *the commit is not a gesture*.
+
+**T-407's lesson, taken one surface over.** T-407 found two ways a finger could retune the radio,
+both latent until T-392 removed a confirmation step: the drag threshold was the mouse's 6 px, so a
+fat-fingered tap was a drag; and travel was measured as `clientX + clientY`, so a stroke *across* a
+bar counted as travel *along* it. The shape of both is **a continuous pointer stream misread as a
+committing act**, and neither was introduced by the ticket that exposed them. A better threshold is
+not the answer to that. What is: `acceptPaneRetune` **re-derives the offer from the pane's state at
+the instant of the commit and refuses (`"moved"`) if the planned `(centre, span)` has changed**. A
+pan therefore *invalidates* a pending offer instead of silently re-aiming it — the radio goes where
+the button said, or it goes nowhere — and a finger still dragging the pane cannot command a
+frequency the control was never labelled with. (A pan too small to move the snapped configuration is
+not a moved target; refusing that would protect nothing and make the control unusable.)
+
+**Nothing is re-derived.** The capture configuration is `retunePlan`'s: T-341's `snapCenter` for the
+achievable-centre grid, `smallestCoveringSpan` for the narrowest window that still covers the pane,
+and T-418's derived off-DC placement (`span/4`, the midpoint of the usable half-band, maximally far
+from the LO spike at DC and the anti-alias roll-off at Nyquist), bounded by the pane staying inside
+the window and by the snap's own half-step, **without ever widening the window to buy the dodge**.
+The module decides *whether* to offer; it does not decide *where*, and a source assertion keeps it
+that way.
+
+**Three ways there is nothing to offer, each a statement rather than an omission:** a live window
+already contains the pane (coverage is containment, not overlap, and a pane pinned to one front end
+is not covered by another's window); the pane is **not showing the growing edge**, since a retune
+changes only what is captured from now on and offering would imply the past could be re-observed;
+and no grid was reported, because not knowing what the front end can do is not evidence that it can
+do this.
+
+**At the band edge the offer is disabled, not clamped** — T-409's rule, and the reason `retunePlan`
+tests `containsCenter` rather than `snapCenter`, which would walk an out-of-band request *inward*
+and call every out-of-range centre achievable. A pane past the top of the tunable range gets a
+stated refusal (`center_out_of_range`) and a control that does nothing when pressed; a pane wider
+than one capture window is survey overview (`span_too_wide`) and says so. A clamped retune that went
+somewhere other than the label is the control that lies, and it is the one thing this must not do.
+
+**The one client-side addition the spike asked for (§5.2):** after a retune the front end **took**,
+the growing edge's tiles are invalidated. They were computed *on request* from the tuning that has
+just ended, so a cached one is an observation claim about a tuning that no longer exists — which
+makes this the grey-honesty rule, not a freshness nicety. Two details: **coarser levels go too**, or
+the upscaled-ancestor fallback keeps drawing the old tuning underneath the new one; and an
+**in-flight** fetch is marked stale rather than merely aborted, because it lands *after* the retune
+and the cache would otherwise accept it into the empty slot it just made. `applyDeviceAction` now
+returns whether the front end took the action, because "only after a real retune" cannot be read off
+a toast.
 ### 8.5 What this removes
 
 The two bespoke edge-scrubber widgets collapse into canvas pan/zoom plus the minimap. The

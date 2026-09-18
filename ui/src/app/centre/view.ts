@@ -115,7 +115,9 @@ export function gotoDecision(g: ax.Geometry | null, v: ax.View | null, hz: numbe
  * `source` names the explicit user request it came from, so the toast (and any future log) can say
  * what moved the radio. There is deliberately no variant for a gesture: a pan produces a
  * `RetuneOffer` for the user to accept, never a `DeviceAction`. (`"nudge"` is T-409's button press —
- * a discrete, explicit action like the offer button, not the continuation of anything.)
+ * a discrete, explicit action like the offer button, not the continuation of anything.
+ * `"pane-offer"` is T-444's, on the unified surface: panning a pane to un-tuned spectrum *offers*,
+ * and taking the offer is the discrete act — same shape, one surface over.)
  */
 export type DeviceAction = {
   kind: "retune";
@@ -132,7 +134,7 @@ export type DeviceAction = {
   spanHz?: number | null;
   /** The view to restore once the new header arrives, when the request implies one. */
   want: ax.View | null;
-  source: "goto" | "bookmark" | "edge-offer" | "navigator" | "nudge";
+  source: "goto" | "bookmark" | "edge-offer" | "navigator" | "nudge" | "pane-offer";
 };
 
 /** A retune of the live device to `centerHz`, from the explicit user request `source`. */
@@ -177,11 +179,17 @@ export const retuneLabel = (centerHz: number) => `Retune to ${(centerHz / 1e6).t
  * capture, is recorded in the server's audit log against the device's `device_id`, and is refused
  * with `device_busy` when something else holds the device. Callers must pass a `DeviceAction` built
  * from an explicit user request; nothing here makes one from a gesture.
+ *
+ * **Returns whether the front end took it** (T-444). Every existing caller ignores the answer and
+ * is unaffected, but a caller that must do something *only after a real retune* — invalidating the
+ * growing edge's tiles, which describe the tuning that has just ended — cannot read that off a
+ * toast. `false` is a refusal that has already been reported to the user here: not live, the device
+ * busy, or the route rejecting the configuration.
  */
-export async function applyDeviceAction(ctx: AppContext, action: DeviceAction): Promise<void> {
+export async function applyDeviceAction(ctx: AppContext, action: DeviceAction): Promise<boolean> {
   const { store } = ctx;
   const dev = store.get().device;
-  if (!mayRetune(dev)) { store.set(toast(NOT_LIVE_TEXT)); return; }
+  if (!mayRetune(dev)) { store.set(toast(NOT_LIVE_TEXT)); return false; }
   // T-341: a retune goes to an **achievable** centre. `Math.round` picks a whole hertz, which the
   // route requires, but a whole hertz is not a state the front end has: a HackRF's synthesiser
   // moves in ~28.6 Hz steps, so 28 of every 29 rounded values land it somewhere other than the
@@ -201,9 +209,11 @@ export async function applyDeviceAction(ctx: AppContext, action: DeviceAction): 
     await ctx.client.post("/api/control/center", { center_hz: centerHz });
     const on = store.get().device.deviceId;
     store.set(toast(`Retuning ${on ? `${on} ` : ""}to ${(centerHz / 1e6).toFixed(4)} MHz`));
+    return true;
   } catch (e) {
     store.set((s) => ({ live: { ...s.live, pendingView: null } }));
     store.set(toast(retuneErrorText(e)));
+    return false;
   }
 }
 
