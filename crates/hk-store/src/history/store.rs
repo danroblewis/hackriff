@@ -198,7 +198,10 @@ const SOURCE_STATE_FILE: &str = "front_end.state";
 /// address pays a fraction of it. The cap is what stops an address into a scheme with a deep ladder
 /// turning one tile request into an unbounded read; it is an error rather than a silent partial,
 /// because a partial fold is a tile that says *unobserved* about data the store holds.
-const MAX_MATERIALIZE_TILES: usize = 1024;
+///
+/// **Public since T-482**, because a route that declares how far up it can be read has to be able
+/// to ask this question *before* it answers — see [`Pyramid::materialize_cost_bound`].
+pub const MAX_MATERIALIZE_TILES: usize = 1024;
 
 fn dur_ns(d: std::time::Duration) -> i64 {
     i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)
@@ -963,6 +966,80 @@ impl Pyramid {
             }
         }
         Ok(built)
+    }
+
+    /// Budget units one tile of `level` costs to fold **from nothing**: itself, plus every
+    /// intermediate tile under it. Level-0 tiles are free, because [`Self::materialize_tile`]
+    /// returns before the budget check for a level nothing produces.
+    ///
+    /// The subtree is uniform — every tile of a level has the same producer shape — so this is a
+    /// product down the canonical path rather than a walk over the tiles themselves, which is the
+    /// only reason it can be asked about a node whose subtree is astronomically large.
+    fn fold_cost(&self, level: usize) -> u128 {
+        let (mut cost, mut per_tile, mut l) = (0u128, 1u128, level);
+        // The producer index is strictly smaller by construction, so this terminates; the bound is
+        // belt-and-braces against a hand-written config.
+        for _ in 0..self.geom.n_levels() {
+            let Some(from) = self.geom.levels[l].from else {
+                break;
+            };
+            cost = cost.saturating_add(per_tile);
+            if cost > MAX_MATERIALIZE_TILES as u128 {
+                return cost; // already hopeless; the rest would only overflow
+            }
+            let k = self.geom.parent_cells_per_tile(from, l).max(1);
+            let per_parent = (self.geom.levels[l].nt as i64).div_euclid(k).max(1);
+            per_tile = per_tile
+                .saturating_mul(u128::from(self.geom.levels[l].f_factor) * per_parent as u128);
+            l = from;
+        }
+        cost
+    }
+
+    /// The **worst case, over every time alignment**, of what [`Self::materialize`] would cost for
+    /// `level` over `freq` and a window of `window_ns`, on a store holding **nothing** — `Some`
+    /// budget units when that fits [`MAX_MATERIALIZE_TILES`], `None` when the call would refuse.
+    ///
+    /// # What this is a property of, and why each half is the shape it is
+    ///
+    /// It answers *would a read of this address be refused for want of folding?* without folding
+    /// anything, which is what lets `/api/tiles` declare a readable ceiling instead of discovering
+    /// it one 400 at a time (T-482).
+    ///
+    /// - **A store holding nothing is the worst case, not a special case.** A tile that already
+    ///   exists costs no budget ([`Self::materialize_tile`] returns before the decrement), so every
+    ///   byte of capture can only make a real call *cheaper* than this. A bound taken on an empty
+    ///   store therefore stays true as the store fills, which is the whole point of quoting it in a
+    ///   contract.
+    /// - **Frequency is exact and time is a bound**, because that is how the caller uses them: a
+    ///   tile read passes its whole frequency extent and *chunks* time into whole output rows, so
+    ///   the time window's offset is not known here while the frequency range is. `window_ns` is
+    ///   therefore charged the most blocks any half-open window of that length can touch,
+    ///   `floor(window / block) + 1`.
+    pub fn materialize_cost_bound(
+        &self,
+        level: usize,
+        freq: FreqRange,
+        window_ns: i64,
+    ) -> Option<usize> {
+        if !self.cfg.coarse_on_demand || level >= self.geom.n_levels() {
+            return Some(0);
+        }
+        if !(freq.lo_hz.is_finite() && freq.hi_hz >= freq.lo_hz) || window_ns < 0 {
+            return None; // `materialize` refuses these outright
+        }
+        let g = self.geom.levels[level];
+        let nf = self.geom.nf as i64;
+        let c_lo = (freq.lo_hz / g.f_cell_hz).floor() as i64;
+        let c_hi = ((freq.hi_hz / g.f_cell_hz).ceil() as i64 - 1).max(c_lo);
+        let fb = c_hi.div_euclid(nf) - c_lo.div_euclid(nf) + 1;
+        let tb = window_ns.div_euclid(g.t_block_ns().max(1)) + 1;
+        let asked = u128::from(fb.max(1) as u64).saturating_mul(tb.max(1) as u64 as u128);
+        if asked > MAX_MATERIALIZE_TILES as u128 {
+            return None;
+        }
+        let total = asked.saturating_mul(self.fold_cost(level));
+        (total <= MAX_MATERIALIZE_TILES as u128).then_some(total as usize)
     }
 
     /// The budget pass's step: builds the missing summary of the **oldest** sealed tile that no

@@ -161,7 +161,7 @@ pub use query::{
     Resolution, burst_histogram,
 };
 pub use shape::NoiseShapeEstimator;
-pub use store::{IngestOutcome, Pyramid, PyramidStats};
+pub use store::{IngestOutcome, MAX_MATERIALIZE_TILES, Pyramid, PyramidStats};
 pub use tile::{
     FrontEndState, MAX_GAIN_STATES, MAX_ORIGINS, MAX_PROVENANCE_STEPS, Origin, OriginField,
     OriginFilter, OriginMatch, ProvenanceStep, ProvenanceSummary, SHAPE_TOLERANCE,

@@ -14,15 +14,18 @@
 //   1. **Is the address a node of the lattice the page was told about?** Parsed from the request's
 //      own query, compared against the `axes` the server serves. That is T-480's subject and it is
 //      asserted at zero, for the product exactly as it ships.
-//   2. **Did the route refuse an address that WAS on that lattice?** Reported with the server's own
-//      message, because it is a different fault with a different owner: `GET /api/tiles` names a
-//      12 x 15 grid of view nodes and the store behind it can only back part of that grid, so a
-//      declared node can still be unservable. **A client cannot clamp to a bound nobody states.**
+//   2. **Did the route refuse an address that WAS on that lattice?** Asserted at zero **since
+//      T-482**, and this is the half that changed. It used to be only *reported*, with the server's
+//      own message, because it was a different fault with a different owner: `GET /api/tiles` named
+//      a 12 x 15 grid of view nodes while the store behind it could back only part of that grid, so
+//      a declared node could still be unservable, and **a client cannot clamp to a bound nobody
+//      states.** T-482 states the bound — `axes.{frequency,time}.max_level`, the box the route can
+//      actually be read over — so the client can obey it and the refusals are now a defect this
+//      file does own.
 //
-// Reporting (2) rather than asserting it is the honest shape: asserting zero 4xx outright would
-// fail this file for a defect it does not own, and folding (2) into (1) would be exactly the "sound
-// proof of the adjacent question" this repo keeps catching. The second test then closes the loop by
-// **stating the missing bound** and showing the client needs nothing else — see its own header.
+// The two are still asserted separately, because they still fail for different reasons: (1) is the
+// client leaving the lattice, (2) is the route refusing inside it. Folding them together would be
+// exactly the "sound proof of the adjacent question" this repo keeps catching.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Browser } from "./harness.mjs";
@@ -180,72 +183,61 @@ test("an aggressive zoom-out never addresses a node outside the lattice the page
   assert.deepEqual(off.slice(0, 5), [],
     `${off.length}/${run.tiles.length} requests named a node outside the declared lattice`);
 
-  // The residual, in the server's own words. Not asserted — see this file's header for why.
+  // **And no request inside that lattice was refused** (T-482). Before the route declared its
+  // readable ceiling this was a diagnostic rather than an assertion, because the flood was the
+  // route's fault and not the client's: 117 requests, 107 of them 400. The ceiling is what lets the
+  // client ask only answerable questions, and this is where that is measured **with no shim** — the
+  // page gets the real server's real declaration and nothing else.
   const refused = run.tiles.filter((r) => r.status >= 400 && r.status < 500);
   if (refused.length) {
     const first = refused[0];
     const body = await (await ask(new URL(first.url).pathname + new URL(first.url).search)).json().catch(() => ({}));
-    t.diagnostic(`RESIDUAL: ${refused.length}/${run.tiles.length} ON-LATTICE requests were refused ${first.status}`);
     t.diagnostic(`  first refused address: ${JSON.stringify(addrOf(first.url))}`);
     t.diagnostic(`  the route's own reason: ${body.error ?? "(no body)"}`);
-  } else {
-    t.diagnostic(`0/${run.tiles.length} tile requests were refused`);
   }
+  assert.deepEqual(refused.map((r) => `${r.status} ${JSON.stringify(addrOf(r.url))}`).slice(0, 5), [],
+    `${refused.length}/${run.tiles.length} ON-LATTICE tile requests were refused`);
+  t.diagnostic(`0/${run.tiles.length} gesture tile requests refused across the whole zoom-out`);
 });
 
-test("told the ceiling it cannot infer, the same zoom-out produces ZERO 4xx", async (t) => {
+test("the route DECLARES the ceiling, and every address inside it answers", async (t) => {
   // ——— WHAT THIS TEST IS A PROPERTY OF ———
   //
-  // It is **conditional, and the condition is stated in the test rather than assumed**: *given* the
-  // route declares how far up each axis it can be read, the client's address math needs nothing
-  // else to stop asking unanswerable questions. It is not evidence that the shipped server is
-  // fixed — the test above measures that, and reports the residual.
+  // It is a property of **the served declaration against the served answers**, with no browser and
+  // no shim in it. Until T-482 this test installed the missing `max_level` itself, as a fetch shim
+  // over the tile probe, and was explicitly *conditional*: "given the route declares how far up it
+  // can be read, the client needs nothing else". The route declares it now, so the conditional half
+  // is gone and what is left is the part a client depends on — that the declaration is **true**.
   //
-  // The premise is installed the smallest way there is: one field per axis added to the tile
-  // probe's `axes`, which is where `latticeFrom` already looks for it (`max_level`). Nothing else
-  // about the page, the gestures or the assertions changes, so what the two tests differ by is
-  // exactly one number per axis.
-  //
-  // The numbers are MEASURED, not chosen: they are the coarsest level each axis answers `200` at
-  // with the other axis at 0, probed from this backend below, so they describe this server rather
-  // than a number that happened to make the test pass.
-  const at = async (lf, lt) => (await ask(`/api/tiles?level_f=${lf}&level_t=${lt}&f_index=0&t_index=0`)).status;
+  // The ceiling is a BOX (`level_f <= max_f` AND `level_t <= max_t`), so the box is what is walked.
+  // The servable set itself is an **area** constraint and larger than any box — `(5, 5)` is
+  // servable on the shipped geometry and is outside `(9, 1)` — which is why the walk is of the
+  // declaration rather than of the grid: over-claiming is the defect, under-claiming is the cost.
   const probe = await (await ask("/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8")).json();
-  let capF = 0, capT = 0;
-  for (let l = probe.axes.frequency.levels - 1; l >= 0; l--) if (await at(l, 0) === 200) { capF = l; break; }
-  for (let l = probe.axes.time.levels - 1; l >= 0; l--) if (await at(0, l) === 200) { capT = l; break; }
-  t.diagnostic(`measured servable ceiling on THIS backend: level_f 0..${capF}, level_t 0..${capT} `
-    + `(the route DECLARES 0..${probe.axes.frequency.levels - 1} and 0..${probe.axes.time.levels - 1})`);
-  assert.ok(capF < probe.axes.frequency.levels - 1 || capT < probe.axes.time.levels - 1,
-    "if the route could serve every level it declares there would be nothing here to state, and the "
-    + "test above would already be at zero — this premise must be doing work");
+  const { frequency, time } = probe.axes;
+  assert.equal(typeof frequency.max_level, "number", "the route must state a frequency ceiling");
+  assert.equal(typeof time.max_level, "number", "the route must state a time ceiling");
+  assert.ok(frequency.max_level < frequency.levels - 1 || time.max_level < time.levels - 1,
+    "if the route could serve every level it declares there would be nothing here to state, and "
+    + "the test above would already have been at zero — this declaration must be doing work");
+  t.diagnostic(`declared: level_f 0..${frequency.max_level}, level_t 0..${time.max_level} `
+    + `(the lattice NAMES 0..${frequency.levels - 1} and 0..${time.levels - 1})`);
 
-  // The premise, as a fetch shim over the tile probe only: `axes.*.max_level`, which is a field the
-  // client already reads and the route does not yet send.
-  const initScript = `(() => {
-    const real = window.fetch;
-    window.fetch = async (input, init) => {
-      const r = await real(input, init);
-      const url = typeof input === "string" ? input : input.url;
-      if (!url.includes("/api/tiles") || !r.ok) return r;
-      const body = await r.clone().json().catch(() => null);
-      if (!body || !body.axes) return r;
-      body.axes.frequency.max_level = ${capF};
-      body.axes.time.max_level = ${capT};
-      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
-    };
-  })();`;
-
-  const browser = await Browser.open();
-  t.after(() => browser.close());
-  const run = await zoomOutHard(t, browser, { initScript, caps: { capF, capT } });
-
-  // The addresses respect the STATED ceiling, which is strictly tighter than the declared axis —
-  // so this is not the previous test restated.
-  assert.deepEqual(offLattice(run).slice(0, 5), []);
-  const refused = run.tiles.filter((r) => r.status >= 400 && r.status < 500)
-    .map((r) => `${r.status} ${JSON.stringify(addrOf(r.url))}`);
+  const refused = [];
+  for (let lf = 0; lf <= frequency.max_level; lf++) {
+    for (let lt = 0; lt <= time.max_level; lt++) {
+      const r = await ask(`/api/tiles?level_f=${lf}&level_t=${lt}&f_index=0&t_index=0`);
+      if (r.status !== 200) refused.push(`(${lf},${lt}) -> ${r.status} ${(await r.json().catch(() => ({}))).error ?? ""}`);
+    }
+  }
   assert.deepEqual(refused.slice(0, 5), [],
-    `${refused.length}/${run.tiles.length} tile requests were refused`);
-  t.diagnostic(`0/${run.tiles.length} tile requests refused across the whole zoom-out`);
+    `${refused.length} addresses INSIDE the declared ceiling were refused — a ceiling that still `
+    + "refuses is the same defect one notch down");
+  t.diagnostic(`${(frequency.max_level + 1) * (time.max_level + 1)} addresses walked, 0 refused`);
+
+  // Tight, not merely safe: one level past the box on either axis is genuinely refused.
+  for (const [lf, lt] of [[frequency.max_level + 1, time.max_level], [frequency.max_level, time.max_level + 1]]) {
+    const r = await ask(`/api/tiles?level_f=${lf}&level_t=${lt}&f_index=0&t_index=0`);
+    assert.ok(r.status >= 400, `(${lf},${lt}) answered ${r.status}, so the ceiling is leaving reach unused`);
+  }
 });

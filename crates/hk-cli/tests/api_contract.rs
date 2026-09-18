@@ -6953,6 +6953,121 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     stop_server(serving);
 }
 
+/// T-482: **`axes.*.max_level` is a ceiling that is TRUE**, on the wire, against a real server.
+///
+/// # What this test is a property of
+///
+/// It is a property of the **served answers**, not of the computation behind them: it walks the box
+/// the route declares, address by address, over HTTP, and asserts none of them is refused. That is
+/// the distinction this ticket exists for — the route used to declare `levels` and then `400` a
+/// large part of the grid it had declared, so a declaration checked only against itself is exactly
+/// the evidence that was already there.
+///
+/// It also asserts what a per-axis pair **cannot** say. The binding bound is the tile's *area*, so
+/// it is an anti-diagonal in `(level_f, level_t)`, and the wire shows it in the one way an area
+/// constraint can be told from a per-axis one: the same address that is refused at `cells = 256` is
+/// **served** at `cells = 32`. The declared pair itself does **not** move with `cells` — it is
+/// stated for this route's own 256-cell unit, because a client bootstraps its lattice from a cheap
+/// `cells = 8` probe and renders at 256, so a per-answer ceiling would be cached against tiles 32×
+/// wider on each axis (measured: a probe read back `(11, 9)` and 69 addresses inside that box were
+/// refused at 256).
+#[test]
+fn the_tile_routes_declared_readable_ceiling_is_true_and_is_stated_for_the_routes_tile_unit() {
+    let (_dir_guard, serving, addr) = start_server();
+    let probe = |cells: u64| {
+        let (st, v) = get(
+            addr,
+            &format!("/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells={cells}"),
+        );
+        assert_eq!(st, 200, "{v}");
+        v
+    };
+
+    let v = probe(256);
+    let levels_f = v["axes"]["frequency"]["levels"].as_u64().unwrap();
+    let levels_t = v["axes"]["time"]["levels"].as_u64().unwrap();
+    let max_f = v["axes"]["frequency"]["max_level"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("axes.frequency.max_level must be stated: {v}"));
+    let max_t = v["axes"]["time"]["max_level"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("axes.time.max_level must be stated: {v}"));
+    // The two numbers answer different questions, and on the shipped geometry they DIFFER — a
+    // 12 x 15 view lattice over a 4 x 4 store. If they were equal there would be nothing to state.
+    assert!(max_f < levels_f && max_t < levels_t, "{v}");
+    assert!(
+        v["axes"]["readable"]
+            .as_str()
+            .is_some_and(|s| s.contains("BOX")),
+        "the wire must say what kind of bound this is: {v}"
+    );
+
+    // **The walk.** Every address inside the declared box, at the tile size the box was declared
+    // for. A ceiling that still refuses is the same defect one notch down.
+    let mut refused = Vec::new();
+    for lf in 0..=max_f {
+        for lt in 0..=max_t {
+            let (st, body) = get(
+                addr,
+                &format!("/api/tiles?level_f={lf}&level_t={lt}&f_index=0&t_index=0&cells=256"),
+            );
+            if st != 200 {
+                refused.push(format!("({lf},{lt}) -> {st} {}", body["error"]));
+            }
+        }
+    }
+    assert!(
+        refused.is_empty(),
+        "the declared ceiling ({max_f}, {max_t}) is a LIE: {refused:?}"
+    );
+
+    // And it is not conservative for the sake of it: one level past it, on either axis, refuses.
+    for (lf, lt) in [(max_f + 1, max_t), (max_f, max_t + 1)] {
+        let (st, body) = get(
+            addr,
+            &format!("/api/tiles?level_f={lf}&level_t={lt}&f_index=0&t_index=0&cells=256"),
+        );
+        assert_eq!(
+            st, 400,
+            "({lf},{lt}) is servable, so the ceiling is leaving reach unused: {body}"
+        );
+    }
+
+    // **One pair, whatever the probe cost.** A client fetches its lattice with a deliberately cheap
+    // `cells = 8` tile and renders at 256, so the ceiling it caches must not depend on the size of
+    // the probe that fetched it.
+    for cells in [8u64, 32, 256] {
+        let v = probe(cells);
+        assert_eq!(
+            (
+                v["axes"]["frequency"]["max_level"].as_u64().unwrap(),
+                v["axes"]["time"]["max_level"].as_u64().unwrap()
+            ),
+            (max_f, max_t),
+            "the ceiling is a property of the SURFACE, not of this answer's cells={cells}: {v}"
+        );
+    }
+
+    // **The area constraint, on the wire.** The bound itself does move with tile size, even though
+    // the declared pair does not: the same address refused at 256 is served at 32. That is the
+    // reach a cacheable pair gives up, and it is what a per-axis bound could never express.
+    let past = format!(
+        "/api/tiles?level_f={}&level_t={max_t}&f_index=0&t_index=0",
+        max_f + 1
+    );
+    let (st_big, big) = get(addr, &format!("{past}&cells=256"));
+    let (st_small, small) = get(addr, &format!("{past}&cells=32"));
+    assert_eq!(st_big, 400, "{big}");
+    assert_eq!(
+        st_small,
+        200,
+        "level_f {} must be servable at cells=32 — the bound is on AREA: {small}",
+        max_f + 1
+    );
+
+    stop_server(serving);
+}
+
 #[test]
 fn every_route_in_the_route_table_is_documented() {
     let doc_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md");
