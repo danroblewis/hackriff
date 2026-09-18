@@ -772,3 +772,77 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
   assert.equal(await page.$count(".sp-fail"), 0, `a failure card appeared: ${await page.$text(".sp-fail")}`);
   assert.deepEqual(page.exceptions, [], "uncaught exception during the bound run");
 });
+
+// ---------------------------------------------------------------------------
+// T-486: the snap-to-live dead zone, in a real browser with a real advancing edge
+// ---------------------------------------------------------------------------
+//
+// The user reported this twice, and both halves are gestures rather than arithmetic, so the unit
+// tier cannot be the last word on them: a 1 px time-pan dropped the pane out of live, and a drag
+// back toward the top — released as a new row appended under the cursor — re-paused.
+//
+// **It asserts `data-following`, never the readout string.** T-478: a following pane's chrome ends
+// in its offset from the live edge, and that offset drifts with wall-clock lag, so a readout is a
+// measurement of the lag rather than a statement of the state. This ticket is precisely about small
+// offsets from the edge, which is the worst possible thing to read a small-offset-tolerant state
+// from. `data-following` is what the chrome sets from the pane model's own answer.
+//
+// **Non-vacuity is built in as step 2**: the same page, same pointer, a bigger drag, and the
+// attribute must go to `false`. A guard that could not observe the pane leaving live would pass
+// step 1 no matter what the client did.
+test("T-486: a 1 px time-pan keeps the pane LIVE; a real drag pauses it; a drag back to the edge returns it", async (t) => {
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page();
+  // **The APP page, not `/surface.html`.** The standalone preview reports no live edge, so
+  // `SurfacePreview` correctly freezes every viewport at open (T-450's historical preview) — there
+  // would be no follow state to hold, and this test would pass by describing a page it is not about.
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitFor("the app's surface to draw",
+    `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200`,
+    { timeoutMs: 60000 });
+  await page.waitFor("the chrome to report a viewport",
+    `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]').length > 0`, { timeoutMs: 30000 });
+
+  const FOLLOWING = `[...document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]')]` +
+    `.map((v) => v.getAttribute('data-following'))`;
+  const follow = async () => JSON.parse(await page.eval(`JSON.stringify(${FOLLOWING})`));
+
+  // The premise, asserted rather than assumed: there IS a pane following a live edge to fall out of.
+  const start = await follow();
+  assert.deepEqual(start, ["true"],
+    `no pane is following the live edge, so there is nothing for a dead zone to hold: ${JSON.stringify(start)}`);
+
+  const rect = await page.$rect(".sf-canvas");
+  const mid = { x: rect.x + rect.w / 2, y: rect.y + rect.h * 0.35 };
+
+  // **Make room on the time axis first, and say why.** A following pane opens on the whole observed
+  // extent, so `PaneModel.normalise` clamps its centre and a backward pan is a no-op — the pane
+  // would stay live for a reason that has nothing to do with a dead zone, and step 2's control
+  // would be vacuous. Alt+wheel zooms time alone (T-456) and a zoom is not a pause, so this leaves
+  // the pane following with the whole record behind it to scrub into.
+  for (let i = 0; i < 3; i++) await page.wheel(mid, -240, { alt: true });
+  await page.frames(6);
+  assert.deepEqual(await follow(), ["true"], "zooming the time axis must not pause the pane: a zoom is not a pause");
+
+  const step = async (what, dy, steps) => {
+    await page.drag(mid, { x: mid.x, y: mid.y + dy }, steps);
+    await page.frames(6);
+    const now = await follow();
+    t.diagnostic(`${what} (${dy} px): data-following = ${JSON.stringify(now)}`);
+    return now;
+  };
+
+  // 1. THE REPORTED DEFECT. One pixel, straight up the time axis — a twitch, not a scrub.
+  assert.deepEqual(await step("a 1 px time-pan", -1, 1), ["true"],
+    "a 1 px time-pan dropped the pane out of live: this is the dead zone the user asked for, twice");
+
+  // 2. THE CONTROL, and the other half of the rule: dragged well beyond the zone it commits to pause.
+  assert.deepEqual(await step("a 160 px scrub", -160, 12), ["false"],
+    "a real scrub did not pause the pane — so step 1 proves nothing, because the attribute never moves");
+
+  // 3. AND BACK. A drag hard toward the edge clamps against it, and the release is a return to live
+  //    rather than a pause a few rows short of it — with rows appending under the cursor throughout.
+  assert.deepEqual(await step("a drag back to the live edge", 420, 14), ["true"],
+    "a drag released at the live edge left the pane frozen — the second half of the report");
+});

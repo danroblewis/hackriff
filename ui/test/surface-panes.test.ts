@@ -269,9 +269,21 @@ test("a pan is a pan: panning past the surface's extent clamps, and panning time
   const f = m.get(p.id)!.freq;
   assert.ok(f.centerHz + f.spanHz / 2 <= BOUNDS.f1Hz + 1e-6, "a pane wandered off the device's range");
   m.pause(p.id, T0);
+  m.panTime(p.id, -600 * S);   // scrub well back, so the drag below is really a drag TOWARD the edge
+  m.settleTime(p.id, T0);
   m.panTime(p.id, 10_000 * S); // drag hard toward the edge
-  assert.equal(m.isFollowing(p.id), false, "ending a drag near the live edge must not silently re-enter follow-mode");
+  assert.equal(m.isFollowing(p.id), false, "the pan itself does not re-enter follow: the decision belongs to the release");
   assert.ok(boxOf(m.get(p.id)!, T0).t1Ns <= T0 + 1e-6);
+  // **T-486 revises the second half of this sentence, and only that half.** It used to read
+  // "…and panning time forward does not re-enter follow", full stop, on the reasoning that
+  // re-entering follow must be an explicit act rather than a side effect of a gesture ending near
+  // the edge. The user reported the consequence twice: a drag released AT the edge left the pane
+  // frozen one pixel short of live, and a 1 px twitch cost you live outright. So the explicit act
+  // is now the *release* — `settleTime`, called once per stroke — and a stroke that clamped hard
+  // against the edge ends live. The pan above still commits nothing; the release does.
+  m.settleTime(p.id, T0);
+  assert.equal(m.isFollowing(p.id), true, "a drag RELEASED at the live edge is a return to live, not a pause one pixel short of it");
+  assert.equal(boxOf(m.get(p.id)!, T0).t1Ns, T0, "and it pins EXACTLY to the edge");
 });
 
 // ——— 3. state the level per pane (docs/16 §8.5a) ———
@@ -322,4 +334,291 @@ test("a pane carries WHOSE coverage decides its grey, and it reaches the rendere
   assert.equal(m.get(a)!.device, "any", "the union of every front end is the default: extra SDRs widen coverage");
   m.setDevice(a, "hackrf-0");
   assert.equal(m.views(T0)[0].device, "hackrf-0");
+});
+
+// ——— 4. T-486: the snap-to-live dead zone at the live edge ———
+//
+// **The user reported this twice.** A 1 px time-pan dropped the pane out of live, so a twitch while
+// dragging along *frequency* cost you the live edge; and a drag back toward the top, released as new
+// rows appended under the cursor, landed a few pixels short and re-paused. The two are one defect:
+// the follow/pause transition had no dead zone, so "at the live edge" was a measure-zero condition
+// that no hand and no advancing clock could hit.
+//
+// **What gains a threshold is the DERIVED STATE, not the pan** — the distinction is the ticket.
+// T-456's unthresholded drag is unchanged and asserted unchanged below: the view moves 1:1 with the
+// pointer from the first pixel. The threshold is on where the viewport *comes to rest* against the
+// live edge, it reads no pointer, and it commands no device — which is why T-407 (a gate on a
+// pointer stream, and travel summed across axes) is not the precedent. Its one rule that does carry
+// is honoured trivially: the only distance measured here is along one axis, time.
+//
+// **The unit is DEVICE PIXELS, not rows.** See `settleTime`'s doc for the argument and the cost at
+// the zoomed-out extreme; the tests below fix the behaviour at both ends of the zoom.
+
+/** One device pixel of this pane, in ns — the unit the dead zone is actually in. */
+const pxNs = (m: PaneModel, id: string) => m.get(id)!.time.spanNs / m.rects().get(id)!.h;
+/** How far a pane's newest row sits behind `edge`, in its own pixels. */
+const lagPx = (m: PaneModel, id: string, edge: number) => (edge - boxOf(m.get(id)!, edge).t1Ns) / pxNs(m, id);
+
+test("T-486 half one: a 1 px time-pan leaves the pane FOLLOWING, and the release pins it EXACTLY to the edge", () => {
+  const m = model();
+  const [p] = m.list();
+  const px = pxNs(m, p.id);
+
+  // T-456, unchanged and asserted first: the window moves by exactly one pixel's worth on the first
+  // pixel. Nothing is suppressed, held back or gated — the view tracks the pointer the whole way.
+  m.panTime(p.id, -px);
+  assert.equal(boxOf(m.get(p.id)!, T0).t1Ns, T0 - px, "T-456: the pan is unthresholded — the view moves 1:1 from the FIRST pixel");
+  // ...and the pane has nonetheless not dropped out of live, because nothing has decided to pause.
+  assert.equal(m.isFollowing(p.id), true, "a 1 px twitch must not cost the user the live edge");
+
+  m.settleTime(p.id, T0);
+  assert.equal(m.isFollowing(p.id), true);
+  assert.deepEqual(Object.keys(m.get(p.id)!.time).sort(), ["live", "spanNs"], "it is REALLY following: no centre left beside `live`");
+  assert.equal(boxOf(m.get(p.id)!, T0).t1Ns, T0, "pinned EXACTLY to the edge — a pane resting a pixel short is the bug, not a near-miss of the fix");
+  assert.equal(boxOf(m.get(p.id)!, T0 + 30 * S).t1Ns, T0 + 30 * S, "and it grows with the edge again");
+
+  // **Non-vacuity.** The same gesture on a model with no dead zone — which is exactly the code
+  // before this ticket — reproduces the report. If the assertions above were true of anything, this
+  // one would pass too.
+  const flat = model({ holdPx: 0, snapPx: 0 });
+  const [q] = flat.list();
+  flat.panTime(q.id, -pxNs(flat, q.id));
+  flat.settleTime(q.id, T0);
+  assert.equal(flat.isFollowing(q.id), false, "control: with no dead zone a 1 px pan still drops the pane out of live — the reported bug");
+});
+
+test("T-486 half two: released near the top while rows APPEND under the cursor, the pane returns to live", () => {
+  const m = model();
+  const [p] = m.list();
+  const px = pxNs(m, p.id);
+
+  // Park it forty pixels into the past — a deliberate scrub, committed.
+  m.pause(p.id, T0);
+  m.panTime(p.id, -40 * px);
+  m.settleTime(p.id, T0);
+  assert.equal(m.isFollowing(p.id), false, "forty pixels back is a pause, and stays one");
+
+  // Now drag back to what WAS the top. The user's hand lands on the edge they can see; by the time
+  // they let go, four more rows have been recorded and the edge has moved out from under them.
+  m.panTime(p.id, 40 * px);
+  m.settleTime(p.id, T0 + 4 * px);
+  assert.equal(m.isFollowing(p.id), true, "the rows that appended DURING the drag must not be what re-pauses the pane");
+  assert.equal(boxOf(m.get(p.id)!, T0 + 4 * px).t1Ns, T0 + 4 * px, "and it pins to the edge as it is NOW, not as it was at the last pointer move");
+
+  // The boundary is real and stated, not infinite: a release that lands well outside the snap-back
+  // zone is a pause, however plausibly it was meant.
+  const n = model();
+  const [r] = n.list();
+  const rpx = pxNs(n, r.id);
+  n.pause(r.id, T0);
+  n.panTime(r.id, -40 * rpx);
+  n.settleTime(r.id, T0);
+  n.panTime(r.id, 40 * rpx);
+  n.settleTime(r.id, T0 + 12 * rpx);
+  assert.equal(n.isFollowing(r.id), false, "twelve pixels behind is beyond the snap-back zone — the zone has an edge and this is it");
+});
+
+test("T-486: a drag BEYOND the zone commits to pause, and the pause is where the pointer left it", () => {
+  const m = model();
+  const [p] = m.list();
+  const px = pxNs(m, p.id);
+  m.panTime(p.id, -30 * px);
+  assert.equal(m.isFollowing(p.id), false, "past the hold zone the stroke has left follow — before the release, not after it");
+  m.settleTime(p.id, T0);
+  assert.equal(m.isFollowing(p.id), false);
+  assert.equal(boxOf(m.get(p.id)!, T0).t1Ns, T0 - 30 * px, "and the window is exactly where the pointer put it: the dead zone did not move it");
+  // Capture is untouched throughout — the pane is frozen, the edge keeps advancing, and the frozen
+  // window does not move with it.
+  assert.equal(boxOf(m.get(p.id)!, T0 + 60 * S).t1Ns, T0 - 30 * px, "pause freezes the VIEW, not the capture");
+});
+
+test("T-486 hysteresis: the SAME release position, opposite states, decided by where the stroke came from", () => {
+  const at8 = (from: "live" | "parked" | "returning", opts: Partial<ConstructorParameters<typeof PaneModel>[0]> = {}) => {
+    const m = model(opts);
+    const [p] = m.list();
+    const px = pxNs(m, p.id);
+    if (from === "live") m.panTime(p.id, -8 * px);                       // a twitch, never out of the zone
+    if (from === "parked") {                                              // already scrubbed; nudge toward live
+      m.pause(p.id, T0); m.panTime(p.id, -20 * px); m.settleTime(p.id, T0);
+      m.panTime(p.id, 12 * px);
+    }
+    if (from === "returning") { m.panTime(p.id, -30 * px); m.panTime(p.id, 22 * px); } // out and part-way back
+    const released = lagPx(m, p.id, T0);
+    m.settleTime(p.id, T0);
+    return { released, following: m.isFollowing(p.id) };
+  };
+
+  const live = at8("live"), parked = at8("parked"), returning = at8("returning");
+  // All three release at the same place. This is the premise the rest of the test is a claim about,
+  // so it is asserted rather than assumed.
+  for (const [name, r] of [["live", live], ["parked", parked], ["returning", returning]] as const) {
+    // To a thousandth of a pixel. Exact equality is not available and is not the claim: at capture-
+    // time magnitudes (T0 ≈ 1.7e18 ns) a double's ulp is 256 ns, so three different routes to the
+    // same instant land within a few ulps of each other rather than on it.
+    assert.ok(Math.abs(r.released - 8) < 1e-3, `${name} should release 8 px behind the edge, got ${r.released}`);
+  }
+  assert.equal(live.following, true, "a stroke that never left the hold zone was never a pause");
+  assert.equal(parked.following, false, "a pane already parked is not yanked back to live by a fine adjustment");
+  assert.equal(returning.following, false, "and leaving the hold zone is a ONE-WAY DOOR within a stroke: coming part-way back does not undo it");
+
+  // **Non-vacuity: the asymmetry is load-bearing.** Make the two thresholds equal and two of the
+  // three answers flip — the band between them is the only thing distinguishing these cases.
+  const sym = { holdPx: 10, snapPx: 10 };
+  assert.equal(at8("live", sym).following, true);
+  assert.equal(at8("parked", sym).following, true, "control: with a symmetric threshold the parked pane IS yanked to live");
+  assert.equal(at8("returning", sym).following, true, "control: and so is the one that came part-way back");
+});
+
+test("T-486: NOTHING FLAPS with the live edge advancing — neither state can be left without a gesture", () => {
+  // The claim is about the follow state under an ADVANCING edge, so the edge advances throughout.
+  // It is asserted from the pane model, never from a chrome readout, whose offset from the edge
+  // drifts with wall-clock lag (T-478) and would be a property of the lag rather than of the state.
+  const m = model();
+  const a = m.list()[0].id;
+  const b = m.split(a, "columns")!;
+  const px = pxNs(m, a);
+
+  // One pane following, one parked just OUTSIDE the snap-back zone — the worst place to sit.
+  m.pause(b, T0);
+  m.panTime(b, -7 * px);
+  m.settleTime(b, T0);
+  assert.equal(m.isFollowing(a), true);
+  assert.equal(m.isFollowing(b), false);
+
+  // Now run capture forward for four hundred rows, settling on EVERY one of them — a host that
+  // committed per frame rather than per gesture, which is the most flap-prone caller there is.
+  let flips = 0;
+  let prev = [m.isFollowing(a), m.isFollowing(b)];
+  for (let i = 1; i <= 400; i++) {
+    const edge = T0 + i * px;
+    m.views(edge);
+    m.settleTime(a, edge);
+    m.settleTime(b, edge);
+    const now = [m.isFollowing(a), m.isFollowing(b)];
+    if (now[0] !== prev[0] || now[1] !== prev[1]) flips++;
+    prev = now;
+  }
+  assert.equal(flips, 0, "an advancing edge changed a follow state: a pane's state must only be moved by a gesture");
+  assert.equal(m.isFollowing(a), true, "the following pane is PINNED — its lag is identically zero, so capture cannot carry it out of the zone");
+  assert.equal(m.isFollowing(b), false, "and an advancing edge moves a frozen pane AWAY from the snap zone, never toward it");
+  assert.ok(lagPx(m, b, m.lastEdgeNs) > 400, "which is the reason: the frozen pane is now four hundred pixels back");
+
+  // And within a single stroke that jitters across the boundary while the edge advances: the state
+  // is MONOTONE — it falls once, at most, and only the release can raise it.
+  const j = model();
+  const [q] = j.list();
+  const jpx = pxNs(j, q.id);
+  const seen: boolean[] = [j.isFollowing(q.id)];
+  const naive: boolean[] = [true]; // what a thresholds-only rule, with no one-way door, would say
+  for (let i = 0; i < 40; i++) {
+    const edge = T0 + i * jpx;
+    j.views(edge);
+    j.panTime(q.id, (i % 2 ? -1 : 1) * 6 * jpx); // a hand hovering right at the boundary
+    seen.push(j.isFollowing(q.id));
+    naive.push(lagPx(j, q.id, edge) <= 10);
+  }
+  const transitions = (xs: readonly boolean[]) => xs.filter((v, i) => i > 0 && v !== xs[i - 1]).length;
+  assert.equal(transitions(seen), 1, `follow state flapped within one stroke: ${seen.map((v) => (v ? "1" : "0")).join("")}`);
+  assert.ok(seen.indexOf(false) > 0 && !seen.slice(seen.indexOf(false)).includes(true), "once a stroke has left follow it stays left until the release");
+  // The control: the same stroke, judged by the threshold alone, oscillates — which is what the
+  // one-way door exists to prevent, and the reason this test is not vacuous.
+  assert.ok(transitions(naive) > 1, `control: a thresholds-only rule must flap here, or this test proves nothing: ${naive.map((v) => (v ? "1" : "0")).join("")}`);
+});
+
+test("T-486: a tap, and a frequency-only drag, commit NOTHING — a release is only a decision if a time gesture was in flight", () => {
+  const m = model();
+  const [p] = m.list();
+  // A frozen pane, and a pointer-up that panned no time: `input.ts` settles on every release, so
+  // this is the path a plain click takes. It must not snap a scrubbed pane to live.
+  m.pause(p.id, T0);
+  m.panTime(p.id, -3 * pxNs(m, p.id));
+  m.settleTime(p.id, T0);
+  const parked = m.get(p.id)!;
+  m.settleTime(p.id, T0);
+  m.settleTime(p.id, T0 + 5 * S);
+  assert.equal(m.isFollowing(p.id), false, "a tap on a paused pane is not a request to go live");
+  assert.deepEqual(m.get(p.id)!.time, parked.time, "and it moved nothing");
+
+  // T-484's case: `Preview.drag` pans both axes on every move, so a sideways drag arrives as
+  // `panFreq(dx)` then `panTime(0)`. That starts no time gesture, so the release decides nothing —
+  // and a following pane stays following for the ordinary reason, not by passing through the zone.
+  const n = model();
+  const [q] = n.list();
+  n.panFreq(q.id, 2e6);
+  n.panTime(q.id, 0);
+  n.settleTime(q.id, T0);
+  assert.equal(n.isFollowing(q.id), true);
+  assert.deepEqual(Object.keys(n.get(q.id)!.time).sort(), ["live", "spanNs"], "a sideways drag must not even give the pane a centre");
+});
+
+test("T-486 × T-460: a pane that READS as following is a pane whose newest row is at the live edge", () => {
+  // T-460's live-edge refresh runs only for a FOLLOWING viewport, which is one of the three things
+  // that make it cheap by construction. Widening what counts as following therefore widens what is
+  // refreshed — so the budget's guard has to be that "following" never means "far from the edge".
+  // That is the invariant asserted here, over the whole gesture vocabulary.
+  const m = model();
+  const a = m.list()[0].id;
+  const b = m.split(a, "columns")!;
+  const px = () => pxNs(m, a);
+  const viewports = 2;
+
+  const check = (where: string) => {
+    let live = 0;
+    for (const p of m.list()) {
+      if (!m.isFollowing(p.id)) continue;
+      live++;
+      assert.ok(lagPx(m, p.id, m.lastEdgeNs) <= 10 + 1e-9,
+        `${where}: pane ${p.id} reads as following but its newest row is ${lagPx(m, p.id, m.lastEdgeNs).toFixed(1)} px behind the edge`);
+    }
+    assert.ok(live <= viewports, `${where}: more viewports in the refresh set than exist`);
+    return live;
+  };
+
+  assert.equal(check("at open"), viewports, "every viewport opens following — so T-486 cannot RAISE the peak refresh set, which was already at its bound");
+  m.panTime(a, -px()); check("mid twitch");
+  m.settleTime(a, T0); check("after the twitch");
+  m.panTime(a, -300 * px()); check("mid scrub");
+  assert.equal(m.isFollowing(a), false, "a real scrub leaves the refresh set immediately, not at the release");
+  m.settleTime(a, T0); assert.equal(check("after the scrub"), viewports - 1, "a committed pause is a view over data that cannot change, and T-460 must not pay for it");
+  m.follow(a); assert.equal(check("after Play"), viewports);
+});
+
+test("T-486: the zone is DEVICE PIXELS, so it scales with the zoom rather than with the data", () => {
+  // The choice, stated as behaviour. A pixel is a gesture affordance and stays constant to the hand;
+  // a row is a claim about data and — after T-484 took the finest tier from a 1 s cell to the display
+  // row — changed meaning by ~25× without anything about the hand changing. The test is that the
+  // SAME gesture, in pixels, does the same thing at two zooms three decades apart in span.
+  for (const spanNs of [2 * S, 2000 * S]) {
+    const m = model({ spanNs });
+    const [p] = m.list();
+    const px = pxNs(m, p.id);
+    m.panTime(p.id, -8 * px);
+    m.settleTime(p.id, T0);
+    assert.equal(m.isFollowing(p.id), true, `an 8 px twitch at a ${spanNs / S} s span must hold live`);
+
+    const n = model({ spanNs });
+    const [q] = n.list();
+    n.panTime(q.id, -40 * pxNs(n, q.id));
+    n.settleTime(q.id, T0);
+    assert.equal(n.isFollowing(q.id), false, `a 40 px drag at a ${spanNs / S} s span must be a pause`);
+  }
+  // The stated cost at the zoomed-out extreme: ten pixels of a very wide window is a long time, so a
+  // pane cannot be parked within that much of live there. It is the right trade because at that
+  // scale the two windows ARE the same picture — ten pixels of it.
+  const wide = model({ spanNs: 86_400 * S });
+  const [w] = wide.list();
+  assert.ok(pxNs(wide, w.id) * 10 > 900 * S, "on a day-wide viewport the ten-pixel zone really is minutes — stated, not hidden");
+});
+
+test("T-486: a model that was never given a viewport has NO dead zone — fail closed, not on a guess", () => {
+  // The zone is in pixels, so without a pixel height there is no threshold to be in. Answering
+  // anything else would snap panes to live on a guess; the pre-T-486 behaviour is the safe default.
+  const m = model({ width: 0, height: 0 });
+  const [p] = m.list();
+  // A millisecond: far below any pixel at this model's ~25 ms/px, and far ABOVE the 256 ns ulp of a
+  // double at capture-time magnitudes (T0 ≈ 1.7e18 ns), which is the real floor on every threshold
+  // in this file — a 1 ns scrub of an absolute capture instant does not change the number at all.
+  m.panTime(p.id, -1e6);
+  m.settleTime(p.id, T0);
+  assert.equal(m.isFollowing(p.id), false, "with no viewport, any scrub at all is a scrub");
 });

@@ -88,6 +88,15 @@ export interface PaneModelOptions {
   minSpanNs?: number;
   /** Backdrop showing between panes, device px. */
   gapPx?: number;
+  /**
+   * **The snap-to-live dead zone at the live edge, in DEVICE PIXELS of the pane (T-486).**
+   *
+   * `holdPx` is how far a *following* pane may be dragged and still be held in follow; `snapPx` is
+   * how near a *frozen* pane must end up to snap back to it. `snapPx < holdPx` is the hysteresis —
+   * see [[PaneModel.settleTime]] for why the two differ and what the band between them is for.
+   */
+  holdPx?: number;
+  snapPx?: number;
   width?: number;
   height?: number;
   /** The first pane's window. Defaults to the whole surface. */
@@ -148,6 +157,34 @@ export class PaneModel {
   private hPx: number;
   private nextId = 1;
   private readonly prefix: string;
+  /** T-486's dead zone, device px. See [[settleTime]]. */
+  private readonly holdPx: number;
+  private readonly snapPx: number;
+  /**
+   * **The in-flight time gesture per pane** — opened on its first move, read once at
+   * [[settleTime]], then dropped.
+   *
+   * This is *gesture* state, not view state, and the distinction is what keeps T-347 intact: it
+   * holds no coordinate, so it cannot describe a window that disagrees with [[TimeWindow]]'s tag.
+   * The pane's window is still the whole of its pause; there is still no `paused` field.
+   *
+   * `left` is **the hysteresis, as a one-way door rather than as a second constant**. A stroke that
+   * began live holds follow until it is dragged beyond `holdPx`, and once it has been, it has left —
+   * for the rest of that stroke, whatever the pointer does next. Without the latch the two
+   * thresholds would be read against a moving lag and the pane would flicker in and out of live
+   * while a hand hovered at the boundary, which is precisely the oscillation the brief warned about.
+   * With it, `isFollowing` is **monotone within a stroke**: it can fall once and never rise again
+   * before the release, and the release is the only place it can rise.
+   *
+   * `maxLagNs` is **the direction test, and it is what keeps the zone from eating an explicit
+   * Pause.** Pausing is a coordinate change, so a pane paused while live sits at lag *zero* — inside
+   * the snap-back zone by construction. Without this, the user's next small scrub would be pulled
+   * straight back to live and the pane could not be nudged off the edge at all. The snap-back exists
+   * to catch *"I was heading back to live and fell short"*, so it asks that the stroke actually came
+   * back from somewhere: the release must be nearer the edge than the furthest the stroke reached.
+   * A stroke that only ever moved **away** from live is never a request to return to it.
+   */
+  private readonly gesture = new Map<string, { readonly live: boolean; left: boolean; maxLagNs: number }>();
   /** The newest live edge [[views]] has been shown, in capture ns. The model never asks for it;
    * capture is always-on and the caller reports where it has got to. */
   private edgeNs: number;
@@ -159,6 +196,8 @@ export class PaneModel {
     this.minSpanHz = opts.minSpanHz ?? (opts.lattice ? opts.lattice.f0Hz * cells : (opts.bounds.f1Hz - opts.bounds.f0Hz) / 2 ** 20);
     this.minSpanNs = opts.minSpanNs ?? (opts.lattice ? opts.lattice.t0Ns * cells : (opts.bounds.t1Ns - opts.bounds.t0Ns) / 2 ** 12);
     this.gapPx = opts.gapPx ?? 4;
+    this.holdPx = Math.max(0, opts.holdPx ?? 10);
+    this.snapPx = Math.max(0, Math.min(opts.snapPx ?? 6, this.holdPx));
     this.wPx = opts.width ?? 0;
     this.hPx = opts.height ?? 0;
     this.edgeNs = opts.bounds.t1Ns;
@@ -209,6 +248,7 @@ export class PaneModel {
     if (!this.panes.has(id) || this.panes.size === 1) return false;
     this.root = drop(this.root, id)!;
     this.panes.delete(id);
+    this.gesture.delete(id);
     return true;
   }
 
@@ -315,15 +355,122 @@ export class PaneModel {
 
   /**
    * Scrub. **A pan in time freezes the pane first**, because a pane pinned to the edge that also
-   * carries an offset from it is precisely the third state T-347 refused to have. Dragging forward
-   * clamps at the edge and stays frozen: re-entering follow is an explicit act ([[follow]]), never
-   * a side effect of a gesture ending near the edge.
+   * carries an offset from it is precisely the third state T-347 refused to have.
+   *
+   * **The motion is unthresholded and stays that way (T-456).** The window moves 1:1 with `dNs`
+   * from the first pixel; there is no gate here, no minimum travel, and no suppressed first move.
+   * What T-486 adds is not a threshold on *this* — it is a threshold on the **derived follow
+   * state**, applied once, at the end of the gesture, by [[settleTime]]. A pan is still a pan.
+   *
+   * **A scrub of zero is not a scrub.** `Preview.drag` pans both axes on every pointer move, so a
+   * drag straight along frequency arrives here as `panTime(id, 0)`; freezing on it would silently
+   * stop the waterfall following the live edge, which [[follow]]'s contract says may only happen by
+   * an explicit act. It also must not *start* a gesture, or a sideways drag would arrive at
+   * [[settleTime]] claiming to be a time gesture that ended at the edge.
    */
   panTime(id: string, dNs: number): void {
-    this.update(id, (p) => {
-      const t = freezeAt(p.time, this.edgeNs);
-      return { ...p, time: { live: false, centerNs: t.centerNs + dNs, spanNs: t.spanNs } };
+    if (dNs === 0) return;
+    const p = this.panes.get(id);
+    if (!p) return;
+    let g = this.gesture.get(id);
+    if (!g) this.gesture.set(id, (g = { live: p.time.live, left: !p.time.live, maxLagNs: this.lagBehindEdge(p.time) }));
+    this.update(id, (q) => {
+      const t = freezeAt(q.time, this.edgeNs);
+      return { ...q, time: { live: false, centerNs: t.centerNs + dNs, spanNs: t.spanNs } };
     });
+    const q = this.panes.get(id)!;
+    const lag = this.lagBehindEdge(q.time);
+    g.maxLagNs = Math.max(g.maxLagNs, lag);
+    // The one-way door: the instant this stroke carries the viewport past the hold zone it has left
+    // follow, and nothing later in the same stroke puts it back. See [[gesture]].
+    if (!g.left && lag > this.zoneNs(id, q.time.spanNs, this.holdPx)) g.left = true;
+  }
+
+  /**
+   * **End a time gesture and commit the follow/pause decision — T-486's snap-to-live dead zone.**
+   *
+   * The reported bug was two halves of one missing thing. A 1 px time-pan dropped the pane out of
+   * live, so a twitch during a *frequency* drag cost you the live edge; and a drag back toward the
+   * top, released as a new row appended under the cursor, landed a few pixels short and re-paused —
+   * the pane came to rest *nearly* following, which is the state that produces the first half again
+   * on the next twitch. A pane that is almost live is the defect, not a near-miss of the fix.
+   *
+   * So the gesture's **end** asks one question: where did the viewport come to rest, relative to the
+   * live edge? Within the zone the pane follows and is **pinned exactly to the edge** — `followAgain`
+   * drops the centre, so `box.t1Ns === edgeNs` by construction rather than by arithmetic that could
+   * leave it a pixel short. Beyond it the pause is committed.
+   *
+   * **The threshold is on the state, not on the pan.** Nothing above suppressed a pixel of motion:
+   * the view tracked the pointer the whole way, and this reads no pointer at all — only the window
+   * it left behind, measured against the edge. That is why T-407 is not the precedent here (its
+   * defect was a gate on a *pointer stream*, and travel summed across axes); the one rule of T-407's
+   * that does apply — measure a distance, never a sum of axes — is honoured trivially, because the
+   * only distance measured is along one axis, time.
+   *
+   * **Pixels, not rows, and the choice matters.** The zone is `holdPx`/`snapPx` **device pixels of
+   * this pane**, converted to ns through the pane's own time scale (`spanNs / rectHeightPx`). It
+   * exists because a hand cannot hold a pointer to the pixel and because the user's question is
+   * *"am I still at the top of the waterfall?"* — a question about the picture, which a pixel
+   * answers at every zoom and a row does not. A row threshold is a claim about data: after T-484 the
+   * finest tier is the display row rather than a 1 s cell, so "a few rows" silently changed meaning
+   * by ~25×, and five levels out ten rows is minutes of capture. The cost of the pixel rule is at
+   * the zoomed-out extreme: on a day-wide viewport ten pixels is minutes, so a pane cannot be parked
+   * within minutes of live there — which is correct, because at that scale minutes *is* ten pixels
+   * and the two windows are the same picture. At the zoomed-in extreme the zone shrinks with the
+   * span and stays exactly as wide as the hand's tremor, which is the whole point.
+   *
+   * **Hysteresis, and why it is not symmetric.** Leaving follow takes more than `holdPx`; re-entering
+   * it takes less than `snapPx`. Between them is a band that **keeps whatever the pane had**, so a
+   * pane the user parked just off live is not yanked back by a fine adjustment, while a pane the user
+   * meant to keep live survives a twitch. Which threshold applies is decided by [[gesture]] — the
+   * state the stroke *began* in, and whether it has already been out — not by the lag at the instant
+   * of asking, which is what would oscillate. Note what cannot flap at all: a following pane is
+   * **pinned**, so its lag is
+   * identically zero and no amount of capture can carry it out of the zone; and an advancing edge
+   * moves a *frozen* pane monotonically **away** from `snapPx`, never toward it. Neither state can
+   * be left without a gesture, and a gesture commits once.
+   *
+   * Capture, the ring and detection are untouched, as everywhere else in this file.
+   */
+  settleTime(id: string, atNs = this.edgeNs): void {
+    // Like [[pause]]'s argument, `atNs` is a report of where capture has got to, so it advances the
+    // known edge: the rows that appended *during* the drag are exactly the ones the second half of
+    // the bug is about, and measuring the lag against a stale edge would re-create it.
+    this.edgeNs = Math.max(this.edgeNs, atNs);
+    const g = this.gesture.get(id);
+    this.gesture.delete(id);
+    if (!g) return; // no time gesture was in flight; there is nothing to commit
+    const p = this.panes.get(id);
+    if (!p || p.time.live) return;
+    // Never left the hold zone → it was never a pause, and it pins. Left it (or began frozen) → it
+    // is a pause unless the release both lands inside the tighter snap-back zone AND came back from
+    // further out: a stroke that only moved away from live is not a request to return to it.
+    if (g.left) {
+      const lag = this.lagBehindEdge(p.time);
+      if (lag > this.zoneNs(id, p.time.spanNs, this.snapPx) || lag >= g.maxLagNs) return;
+    }
+    this.update(id, (q) => ({ ...q, time: followAgain(q.time) }));
+  }
+
+  /** How far this window's newest row sits behind the live edge, ns. Zero for a following pane,
+   * which has no offset to have — that is what the live arm means. */
+  private lagBehindEdge(t: TimeWindow): number {
+    if (t.live) return 0;
+    return Math.max(0, this.edgeNs - (t.centerNs + t.spanNs / 2));
+  }
+
+  /**
+   * `px` device pixels of pane `id`, in ns at its current time scale.
+   *
+   * **Zero when the viewport is unknown**, which is the fail-closed direction: without a pixel
+   * height there is no pixel to be a threshold in, and answering anything else would snap panes to
+   * live on a guess. A model that has never been given a viewport therefore keeps the pre-T-486
+   * behaviour exactly.
+   */
+  private zoneNs(id: string, spanNs: number, px: number): number {
+    const h = this.rects().get(id)?.h ?? 0;
+    if (!(h > 1) || !(spanNs > 0)) return 0;
+    return (px / h) * spanNs;
   }
 
   /**
@@ -351,21 +498,47 @@ export class PaneModel {
     // advances the known edge. Without that, pausing between frames would clamp the pane back to
     // the previous frame's edge and the pause would visibly jump — the one thing it must not do.
     this.edgeNs = Math.max(this.edgeNs, atNs);
+    this.gesture.delete(id); // an explicit act ends any gesture's claim on the decision
     this.update(id, (p) => ({ ...p, time: freezeAt(p.time, atNs) }));
   }
 
   /** **Play this pane** — re-pin it to the growing edge. */
   follow(id: string): void {
+    this.gesture.delete(id);
     this.update(id, (p) => ({ ...p, time: followAgain(p.time) }));
   }
 
   /** The play/pause toggle, as one control over one state (T-347's shape, per pane). */
   setFollowing(id: string, on: boolean): void { if (on) this.follow(id); else this.pause(id); }
-  isFollowing(id: string): boolean { return this.panes.get(id)?.time.live ?? false; }
+
+  /**
+   * **Is this pane following the live edge?** The *committed* state — which, mid-gesture, is not
+   * the same as the window's tag.
+   *
+   * A time gesture has to freeze the window to carry the offset the pointer is asking for (see
+   * [[panTime]]), but freezing the window is not the same event as **deciding to pause**: T-486's
+   * whole point is that the decision belongs to where the viewport comes to rest, and until
+   * [[settleTime]] runs it has not been made. So a stroke that began live and has not yet been
+   * dragged beyond `holdPx` still reads as following, which is what makes a 1 px time-pan leave the
+   * pane in live rather than blinking it out and back.
+   *
+   * This is a **pure function of the window, the edge and the gesture's origin** — not a stored flag
+   * beside the window that could disagree with it, and there is still no `paused` field anywhere in
+   * this file. It is the one answer to the question: `data-following`, the play/pause control and
+   * T-460's refresh set all read it here rather than each deriving it again (T-397).
+   */
+  isFollowing(id: string): boolean {
+    const p = this.panes.get(id);
+    if (!p) return false;
+    if (p.time.live) return true;
+    const g = this.gesture.get(id);
+    return !!g && !g.left;
+  }
 
   /** Jump a pane to an absolute capture time (the timeline scrubber's landing). Freezes it, since
    * an absolute centre and following the edge are different windows. */
   goTo(id: string, centerNs: number): void {
+    this.gesture.delete(id);
     this.update(id, (p) => ({ ...p, time: { live: false, centerNs, spanNs: p.time.spanNs } }));
   }
 
@@ -535,6 +708,12 @@ export function paneStatuses(
   lat: Lattice,
   edgeNs: number,
   rects?: ReadonlyMap<string, PaneRect>,
+  /** Whether a viewport is following, **asked of the model that owns the answer**. Mid-gesture that
+   * is not the same as the window's tag (T-486, [[PaneModel.isFollowing]]), and the chrome must not
+   * be a second derivation of it — the pane's border and the refresh set have to agree, or one of
+   * them is lying about the same pane in the same frame. Defaults to the tag for callers with only
+   * states in hand. */
+  isFollowing?: (id: string) => boolean,
 ): PaneStatus[] {
   const byId = new Map(reports.map((r) => [r.id, r]));
   const out: PaneStatus[] = [];
@@ -545,17 +724,18 @@ export function paneStatuses(
     const differsFrom = reports.filter((o) => o.id !== p.id && `${o.levelF}/${o.levelT}` !== mine).map((o) => o.id);
     const cellHz = cellHzAt(lat, r.levelF), cellS = cellSAt(lat, r.levelT);
     const t = timeExtentOf(p.time, edgeNs);
+    const live = isFollowing ? isFollowing(p.id) : p.time.live;
     out.push({
       id: p.id,
       rect: rects?.get(p.id) ?? null,
-      following: p.time.live,
+      following: live,
       device: p.device,
       levelF: r.levelF,
       levelT: r.levelT,
       cellHz,
       cellS,
       levelLabel: `${fmtBandwidth(cellHz)} × ${fmtSpan(cellS)} cells (level ${r.levelF}/${r.levelT})`,
-      timeLabel: p.time.live ? "LIVE" : `−${fmtSpan((edgeNs - t.t1Ns) / 1e9)}`,
+      timeLabel: live ? "LIVE" : `−${fmtSpan((edgeNs - t.t1Ns) / 1e9)}`,
       freqLabel: `${(p.freq.centerHz / 1e6).toFixed(3)} MHz ± ${fmtBandwidth(p.freq.spanHz / 2)}`,
       tiles: r.tiles,
       fallbacks: r.fallbacks,
