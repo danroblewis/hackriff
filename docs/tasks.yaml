@@ -11425,7 +11425,7 @@ tasks:
   - id: T-443
     milestone: MCANVAS
     title: The zoomable minimap - another viewport, with pane rectangles and per-SDR live segments
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     deps: [T-440, T-442]
@@ -11450,6 +11450,37 @@ tasks:
       COORDINATOR runs the full gate once, at merge. A full gate takes 7-25 minutes here and the
       harness backgrounds it at its 600 s cap, so an agent that waits on one ends its turn stalled
       with uncommitted work.
+    commit: 0ab2e76
+    result: |
+      DONE, and THE MINIMAP WAS FINE - the defect was in the shared cache. "Another viewport"
+      survived contact with exactly one exception: TileCache::setViewports matched queued and
+      in-flight tiles BY EXTENT ONLY, which was sound while every viewport was a pane at a
+      comparable zoom. A VIEWPORT THE SIZE OF THE SURFACE BREAKS IT, because every fine-level tile
+      for a pane the user had already left still intersects a 6 GHz map - so VIEWPORT-CHANGE
+      CANCELLATION SILENTLY STOPPED CANCELLING ANYTHING, turning the in-flight cap into a queue
+      the user waits out at 11.4 ms/tile. A Viewport is now a box AND its levels, and a tile is
+      wanted when some viewport draws at its level or one step coarser (the parent pin). Strictly
+      better than the predicate it replaced; both directions asserted.
+      THE OVERLAY PASS IS SEPARABLE BY CONSTRUCTION, not by a flag: a DIFFERENT GL PROGRAM IN A
+      DIFFERENT PASS run after Surface::render() returns (Surface never calls it), whose shader
+      has no sampler, no cmap and no cell-state uniform - structurally incapable of producing a
+      measurement colour or a grey, asserted by grepping the compiled sources; and EVERY OVERLAY
+      QUAD IS A STROKE, NEVER A WASH, with a test failing any quad covering more than 4 px in BOTH
+      dimensions. That is the defect the spike hit inside itself. Payoff: data draws are
+      byte-identical with overlays on and off, so the pixel comparison needs no setOverlays(false).
+      paneStatuses mounted via SurfaceChrome (pure readoutOf() view model + thin DOM binder),
+      updated every frame from the PaneReport[] the renderer just returned. THE MINIMAP IS IN THE
+      SAME STATUS LIST AS THE PANES, so levelDivergenceNote() fires with the map named in it -
+      §8.5a's case, since a 6 GHz map is essentially never at a pane's level.
+      No other special-casing: the minimap is a one-pane PaneModel appended to the panes' view
+      list for ONE render() call - one context, one LRU (a tile wanted by pane and map at one
+      level is asserted fetched once), one ramp, one grey rule.
+      TWO JUDGEMENT CALLS FLAGGED: a lit segment sits at the live edge IN TIME rather than pinned
+      to the top of the strip, because "currently live" is true NOW - so a minimap scrubbed into
+      the past lights nothing, and the alternative is the fixed-screen-coordinate overlay the
+      time-axis invariant forbids. And segments read activeWindows() re-exported from
+      navigators.ts, asserted to be the SAME FUNCTION OBJECT - no second reader of `windows`.
+
   - id: T-444
     milestone: MCANVAS
     title: Retune-on-pan - panning a pane to un-tuned spectrum offers or triggers a retune
