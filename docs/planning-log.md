@@ -5176,6 +5176,27 @@ tidiness. Last swept **2026-09-17** (after the MCANVAS decomposition).
   no floor was moved**. Your standing rule (floors do not move to accommodate a capability) rules out the
   one option that actually fixes genuine short bursts, which is the heart of the call.
 
+**How to open the surface preview (T-450, live now):**
+
+```
+cd ui && npm run build          # build:surface runs as part of it
+hk serve --replay fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta \
+         --bind 127.0.0.1:8791 --ui-dist ui/dist
+```
+Then **`http://127.0.0.1:8791/surface.html#token=<token>`**. It shares the tab's `hk-token` with the
+app, so opening `/` first and then navigating also works. **Use a port that is not 8789/8899/8900** —
+your demo holds the real HackRF on 8899.
+
+It is **additive**: `dist/app.js` built with it is byte-identical to without, a test walks the import
+graph from `src/app/main.ts` and requires it never reaches a preview file, and the preview is a
+separate esbuild invocation so it cannot join the app's chunk set. **Nothing in the existing UI
+changed.**
+
+What it shows is **recorded history only** — panes are frozen at open and the live edge is resolved
+once and never advanced, deliberately, so it could ship without waiting for T-439. It opens on the
+bounding box of *observed* cells and states the census in words (*"0.8 % of this surface was ever
+sampled"*), because the honest first screen is nearly empty.
+
 **Visible behaviour changes agents flagged for your eye (not blocking; say if you want them different):**
 
 - **A scrubbed view now reads `❚❚ PAUSED`** (T-347, T-442). Under the new model scrubbing *is* pausing —
