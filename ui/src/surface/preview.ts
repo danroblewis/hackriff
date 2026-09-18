@@ -40,7 +40,7 @@ import { tileUrl, type Box, type Lattice, type TileAddr } from "./lattice";
 import type { OverlayQuad } from "./minimap";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
-import { TileCache } from "./tilecache";
+import { TileCache, type Viewport } from "./tilecache";
 import type { PaneView, TilePlanes } from "./surface";
 import { SurfaceView, type SurfaceFrame } from "./view";
 
@@ -439,7 +439,38 @@ export class SurfacePreview {
    * evidence. */
   frame(): SurfaceFrame {
     this.lastFrame = this.view.frame(this.edgeNs, this.windowsFn?.() ?? []);
+    if (this.edgeFn) this.refreshLiveEdge(this.lastFrame);
     return this.lastFrame;
+  }
+
+  /**
+   * **Tell the cache the edge moved, so live actually advances** (T-460).
+   *
+   * Before this, `TileCache.acquire` answered a resident tile unconditionally and the only path that
+   * could drop one was the retune, so a following pane redrew the *same* tile for the 256 s it took
+   * to scroll into a new address: the newest rows were recorded, served and never asked for. The
+   * request is made here rather than inside `SurfaceView` because this is the only object that knows
+   * **which viewports are following** — a frozen pane is a view over data that cannot change, and
+   * refreshing for it would be cost with nothing to show for it.
+   *
+   * It is guarded on `edgeFn`, so T-450's historical preview — which reports no edge and freezes
+   * every viewport at open — issues no refresh at all and keeps its behaviour exactly.
+   *
+   * The levels come off the `PaneReport`s the renderer *just drew with*, never a second calculation
+   * beside them: refreshing a level the pane is not showing would be the T-397 shape of defect (two
+   * derivations of one number) applied to the fetch path.
+   */
+  private refreshLiveEdge(f: SurfaceFrame): void {
+    const following: Viewport[] = [];
+    for (const r of f.reports) {
+      const v = f.views.find((x) => x.id === r.id);
+      if (!v) continue;
+      const live = r.id === this.view.minimap.id
+        ? this.view.minimap.following
+        : this.view.panes.isFollowing(r.id);
+      if (live) following.push({ box: v.box, levelF: r.levelF, levelT: r.levelT });
+    }
+    if (following.length) this.view.surface.cache.refreshEdge(this.view.surface.lat, f.edgeNs, following);
   }
 
   /** Match the drawing buffer to the element's CSS box at the device's pixel ratio. */

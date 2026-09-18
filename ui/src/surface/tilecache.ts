@@ -45,6 +45,51 @@
 //     with the server's number kept as the *ceiling* it actually is.
 //  3. **The coarse viewport could starve the fine ones.** One 5.2 s map tile holding a slot is a
 //     quarter of the budget for five seconds. Issue is now shared between viewports ([[nextAddr]]).
+//
+// ## T-460: the live edge was frozen HERE, and what it costs to unfreeze it
+//
+// The user's report was *"the live view still does not add waterfall rows for recent samples"*, and
+// the backend was measured innocent: the live-edge tile grows (33 024 → 43 520 observed cells over
+// 40 s, newest row 128 → 169) and builds from partial data in ~145 ms without waiting. The fault was
+// one line of this file. [[acquire]] answers a resident tile **unconditionally**, and the only path
+// that could ever drop one — [[invalidateEdge]] — had a single call site in `ui/src`, the retune. No
+// timer, no age rule: **a live-edge tile was fetched once and frozen until the pane scrolled into a
+// new address, which at `level_t = 0` is once every 256 seconds.** The cells beyond it were drawn
+// correctly as T-441's `AWAITING`, so the honesty machinery was working perfectly — the request
+// simply never happened.
+//
+// [[refreshEdge]] is the fix, and the interesting part is not that it re-asks but what stops it
+// becoming a poll. A live tile's body is ~19 MB, so a naive 1 Hz refresh would spend the whole
+// in-flight budget to deliver a percent of new payload. Three constraints make it cheap **by
+// construction** rather than by a tuned constant:
+//
+//  1. **Only the live-edge address, only for a viewport that is FOLLOWING, only at the level it is
+//     actually drawn at.** A frozen pane is a view over data that cannot change, and a parent-pin
+//     tile is not on screen. The caller passes the following viewports; nothing else is eligible.
+//  2. **Never more often than the data can change.** A tile's newest row is one cell tall, so a
+//     re-ask inside `tCellNs(level_t)` cannot return a row the copy in hand does not already have.
+//     That makes the cadence a *function of the zoom*: 1 s at level 0, 32 s five levels out, with no
+//     policy number to tune.
+//  3. **Only into a slot the ordinary queue did not take, and never above a fixed share of measured
+//     capacity.** A refresh is revalidation of something already on screen, so it must never be the
+//     reason a tile the user is waiting for is not being fetched: it is issued at the *end* of
+//     [[pump]], after the ordinary queue has had first refusal on every slot in the budget, and at
+//     most once per [[REFRESH_DUTY]] × **the cost of the previous revalidation, measured on the
+//     request itself** — so the lane can never take more than 1/[[REFRESH_DUTY]] of what a live-edge
+//     tile has just been observed to cost. If tiles get slower the refresh gets rarer on its own; if
+//     they get cheaper (T-467 measured 18.4 MB → 1.12 MB, `build_ms` 707 → 14) it speeds up, with no
+//     constant to retune. One revalidation is in flight at a time, so this bounds the whole lane.
+//
+//     **It was "only when the cache is completely idle", and that was measured wrong in a browser.**
+//     With T-479's defect present the minimap held three places that could never arrive — a 400
+//     re-asked at frame rate — so the queue was *never* empty and the refresh lane never ran once in
+//     forty seconds of capture. One stuck place must not be able to freeze the live edge, and a rule
+//     whose precondition can be held false forever by something unrelated is not a rule.
+//
+// **It is one source of rows, not two.** The refresh re-fetches the same address through the same
+// `source`, and the answer replaces the resident tile in place ([[insert]]); nothing here invents a
+// row, and the stale copy stays on screen and drawn until the new one lands, so the refresh cannot
+// flash grey. T-468's row-push route is the durable fix; this restores the guarantee now.
 
 import { extentOf, intersects, keyOf, tCellNs, type Box, type Lattice, type TileAddr } from "./lattice";
 import { TileBusyError, type TileData } from "./tile";
@@ -141,6 +186,12 @@ export interface TileCacheStats {
    * budget can hold, and the honest response is to keep drawing, not to grey anything. */
   overBudgetFrames: number;
   distinctKeys: number;
+  /** Live-edge revalidations issued (T-460). Counted separately from `requests` because they are
+   * the one class of fetch this cache starts for a tile it already holds. */
+  edgeRefreshes: number;
+  /** Refreshes whose answer actually replaced a resident tile — the number that says rows reached
+   * the texture, as against merely having been asked for. */
+  edgeRefreshApplied: number;
 }
 
 const MB = 1024 * 1024;
@@ -155,6 +206,19 @@ export const RECOVER_AFTER = 8;
 const MIN_RESIDUAL_MS = 12;
 /** Bounds on the measured service-time estimate, ms: a fine tile's 11.4 ms and the map's 5.2 s. */
 const MIN_SERVER_MS = 11, MAX_SERVER_MS = 6000;
+/**
+ * The live-edge refresh may issue at most one request per this many **measured** service times
+ * ([[TileCache.serverEstimateMs]]), so revalidation can never take more than a quarter of what the
+ * route has been observed to be able to produce (T-460).
+ *
+ * It is a share of measured capacity rather than a frequency on purpose: a 19 MB live tile that
+ * takes 600 ms to answer makes the refresh 2.4 s apart without anything being retuned, which is the
+ * property that stops this from becoming the poll the ticket forbids.
+ */
+export const REFRESH_DUTY = 4;
+/** How often [[TileCache.refreshEdge]] may walk the resident set, ms. The walk is cheap; doing it
+ * at frame rate would still be 60× more often than the finest tile can change. */
+const EDGE_SCAN_MS = 250;
 
 /** One request the client is waiting on, and what it is being counted against. */
 interface InFlight {
@@ -183,6 +247,18 @@ export class TileCache<T> {
   /** Keys whose in-flight fetch was overtaken by a retune: the data that arrives describes the old
    * tuning, so it is dropped on arrival and asked for again ([[invalidateEdge]]). */
   private stale = new Set<string>();
+  /** Keys being re-fetched **while their copy stays resident and drawn** (T-460). The set is what
+   * lets [[insert]] tell a revalidation, which replaces, from a duplicate, which never uploads. */
+  private refreshing = new Set<string>();
+  /** The live-edge revalidation lane: its own queue, so it can never take a slot from [[queue]]. */
+  private refreshQueue: TileAddr[] = [];
+  private refreshQueued = new Set<string>();
+  /** When each resident tile's data was last taken in, ms. The refresh interval is measured from
+   * this, so a tile is never asked for again inside the period its newest cell spans. */
+  private refreshedAt = new Map<string, number>();
+  /** The next instant a refresh may be issued, and the next one the resident set may be walked. */
+  private refreshNextIssue = 0;
+  private nextEdgeScan = 0;
   private clock = 0;
   private frame = 0;
   private bytes = 0;
@@ -198,6 +274,7 @@ export class TileCache<T> {
   readonly stats: TileCacheStats = {
     uploads: 0, hits: 0, misses: 0, evictions: 0, refetchAfterEvict: 0, requests: 0,
     failures: 0, busyRefusals: 0, cancelled: 0, abandoned: 0, overBudgetFrames: 0, distinctKeys: 0,
+    edgeRefreshes: 0, edgeRefreshApplied: 0,
   };
 
   constructor(
@@ -218,6 +295,8 @@ export class TileCache<T> {
   get inFlightLimit(): number { return this.limit; }
   get inFlightCount(): number { return this.inflight.size; }
   get queueDepth(): number { return this.queue.length; }
+  /** Live-edge revalidations queued but not yet issued (T-460). Its own lane, never [[queue]]. */
+  get refreshDepth(): number { return this.refreshQueue.length; }
   /** What the measurements say one tile costs the route, ms. */
   get serverEstimateMs(): number { return this.serverMs; }
 
@@ -395,6 +474,56 @@ export class TileCache<T> {
     return n;
   }
 
+  /**
+   * **Re-ask for the tiles that hold the growing edge, so live advances** (T-460).
+   *
+   * The counterpart to [[invalidateEdge]], and deliberately *not* it: invalidating drops the tile,
+   * which would blank the newest seconds of a following pane every time the edge moved. This queues
+   * a re-fetch of the same address while the copy in hand stays resident and drawn, and [[insert]]
+   * swaps the texture when the answer lands. Nothing on screen goes backwards, and no second path
+   * produces rows — it is the same address through the same `source`.
+   *
+   * `following` is the viewports that are **pinned to the growing edge**, with the levels they were
+   * actually drawn at this frame. Everything eligible has to be on that list, because:
+   *
+   *  - a **frozen** pane is a view over data that cannot change, so refreshing for it is pure cost;
+   *  - a tile one level coarser is the parent *pin* — prefetched, not drawn — and refreshing what is
+   *    not on screen is the same cost with less excuse.
+   *
+   * The two rate limits are in [[pumpRefresh]] and in the `due` test below, and neither is a tuned
+   * number: one is the period the tile's own newest cell spans, the other a fixed share of the
+   * *measured* service time. Returns how many were queued, for the tests and the stats.
+   */
+  refreshEdge(lat: Lattice, edgeNs: number, following: readonly Viewport[]): number {
+    if (!Number.isFinite(edgeNs) || !following.length) return 0;
+    const t = this.now();
+    if (t < this.nextEdgeScan) return 0;
+    this.nextEdgeScan = t + EDGE_SCAN_MS;
+    let n = 0;
+    for (const e of this.map.values()) {
+      const key = e.key;
+      if (this.refreshing.has(key) || this.refreshQueued.has(key) || this.inflight.has(key)) continue;
+      if (!this.atEdge(lat, e.addr, edgeNs)) continue;
+      if (!following.some((v) => this.drawnBy(lat, v, e.addr))) continue;
+      // The newest cell of a tile is one cell tall, so a re-ask inside that period cannot come back
+      // with a row the copy in hand does not already have. This is the cadence, and it scales itself
+      // with the zoom: 1 s at level 0, 32 s five levels out.
+      if (t < (this.refreshedAt.get(key) ?? 0) + tCellNs(lat, e.addr.levelT) / 1e6) continue;
+      this.refreshQueue.push(e.addr);
+      this.refreshQueued.add(key);
+      n++;
+    }
+    if (n) this.pump();
+    return n;
+  }
+
+  /** Is this tile one that viewport is **drawing**, at exactly its level? Unlike [[wants]] this
+   * excludes the parent pin: a refresh is for what is on screen. */
+  private drawnBy(lat: Lattice, v: Viewport, a: TileAddr): boolean {
+    return a.scheme === lat.scheme && a.levelF === v.levelF && a.levelT === v.levelT &&
+      intersects(lat, a, v.box);
+  }
+
   /** Does this tile hold the growing edge — i.e. is its newest cell still being written? */
   private atEdge(lat: Lattice, a: TileAddr, edgeNs: number, box?: Box): boolean {
     if (a.scheme !== lat.scheme) return false;
@@ -412,6 +541,7 @@ export class TileCache<T> {
     if (!e) return false;
     this.tex.destroy(e.tex);
     this.map.delete(key);
+    this.refreshedAt.delete(key);
     this.bytes -= e.data.bytes;
     return true;
   }
@@ -426,6 +556,10 @@ export class TileCache<T> {
     this.queue = [];
     this.queued.clear();
     this.stale.clear();
+    this.refreshing.clear();
+    this.refreshQueue = [];
+    this.refreshQueued.clear();
+    this.refreshedAt.clear();
   }
 
   private pump(): void {
@@ -434,36 +568,98 @@ export class TileCache<T> {
     // *and* the ones walked away from, which it is still producing. See [[abandonedSlots]].
     while (this.inflight.size + this.abandonedSlots < this.limit && this.queue.length) {
       const next = this.nextAddr();
-      if (!next) return; // every viewport is at its share; the rest of the queue waits
+      if (!next) break; // every viewport is at its share; the rest of the queue waits
       const { addr, owner } = next;
       const key = keyOf(addr);
       this.queued.delete(key);
       if (this.map.has(key) || this.inflight.has(key)) continue;
-      const ctrl = typeof AbortController === "function" ? new AbortController() : null;
-      const started = this.now();
-      this.inflight.set(key, { ctrl, startedAt: started, owner });
-      if (this.evicted.has(key)) this.stats.refetchAfterEvict++;
-      // The request is off the in-flight list BEFORE anything is re-queued, or `schedule` would see
-      // its own request still outstanding and silently drop the retry.
-      const done = (requeue: boolean) => {
-        this.inflight.delete(key);
-        if (requeue) this.schedule(addr);
-        this.pump();
-      };
-      void this.source(addr, ctrl?.signal).then(
-        (data) => {
-          this.observe(started);
-          this.succeeded();
-          // A tile the retune overtook is requeued, not kept: `insert` says which happened, and the
-          // requeue has to run in `done`, after the key leaves the in-flight map, or `schedule`
-          // would see this very request still outstanding and silently drop the retry.
-          let requeue = false;
-          try { requeue = !this.insert(addr, data); } catch { this.stats.failures++; }
-          done(requeue);
-        },
-        (err) => done(this.failed(addr, err, started, ctrl?.signal.aborted ?? false)),
-      );
+      this.issue(addr, owner);
     }
+    this.pumpRefresh();
+  }
+
+  /**
+   * Issue at most one live-edge revalidation (T-460), and only when it can cost nothing anyone is
+   * waiting for.
+   *
+   * **Last refusal, not first.** This runs at the end of [[pump]], so the ordinary queue has already
+   * been offered every slot in the budget; a refresh can only use one the visible work could not.
+   * The route's cap is shared and an abandoned read holds a slot until it finishes ([[abandon]]), so
+   * `abandonedSlots` is charged here exactly as it is there — the free slot has to be free *at the
+   * route*, not merely in this map.
+   *
+   * It is deliberately **not** "only when nothing at all is outstanding". That was the first rule,
+   * and a browser run measured it wrong: T-479's permanently-refused minimap places kept the queue
+   * non-empty for the whole session, and the live edge never refreshed once. A precondition that
+   * something unrelated can hold false forever is not a safety property, it is a deadlock.
+   *
+   * **And the duty limit is what stops it being a poll.** Once per [[REFRESH_DUTY]] × the measured
+   * service time, so the lane can never occupy more than a quarter of observed capacity — and gets
+   * rarer on its own if tiles get more expensive, which is exactly the 19 MB case the ticket forbids
+   * polling into.
+   */
+  private pumpRefresh(): void {
+    if (!this.refreshQueue.length) return;
+    // **At most one revalidation in flight, ever.** It is what makes the duty limit below a bound on
+    // the lane rather than on each of its members, and it is why the cadence can be set from the one
+    // completion rather than from a running estimate.
+    if (this.refreshing.size) return;
+    const t = this.now();
+    if (t < this.busyUntil || t < this.refreshNextIssue) return;
+    if (this.inflight.size + this.abandonedSlots >= this.limit) return;
+    const addr = this.refreshQueue.shift()!;
+    const key = keyOf(addr);
+    this.refreshQueued.delete(key);
+    // Evicted, retuned away, or otherwise no longer in hand while it waited: there is nothing to
+    // revalidate, and the ordinary miss path owns the address now.
+    if (!this.map.has(key)) return;
+    this.refreshing.add(key);
+    this.refreshedAt.set(key, t);
+    this.stats.edgeRefreshes++;
+    this.issue(addr, -1);
+  }
+
+  /** Start one request for `addr`, on the budget. The single place a fetch begins — an ordinary
+   * miss and a live-edge revalidation differ only in what [[insert]] does with the answer. */
+  private issue(addr: TileAddr, owner: number): void {
+    const key = keyOf(addr);
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const started = this.now();
+    this.inflight.set(key, { ctrl, startedAt: started, owner });
+    if (this.evicted.has(key)) this.stats.refetchAfterEvict++;
+    // The request is off the in-flight list BEFORE anything is re-queued, or `schedule` would see
+    // its own request still outstanding and silently drop the retry.
+    const done = (requeue: boolean) => {
+      this.inflight.delete(key);
+      if (this.refreshing.delete(key)) {
+        // **The lane's cadence is a share of the LANE'S OWN cost, measured on this very request.**
+        //
+        // It was `REFRESH_DUTY x serverMs`, and a browser run showed why that is the wrong number:
+        // `serverMs` folds in every completion, including the minimap's coarse read, which T-450
+        // measured at **5.2 s** and which `MAX_SERVER_MS` clamps at 6 s — so one unrelated map tile
+        // set the live edge's refresh interval to 24 s and the newest quarter-minute of a 17 s
+        // window went unasked-for. A fine live-edge tile is not that tile and must not be charged
+        // for it. Waiting (REFRESH_DUTY - 1) further service times after it lands makes the lane's
+        // duty cycle exactly 1/REFRESH_DUTY of what it was just observed to cost, whatever that is.
+        const spent = Math.max(MIN_RESIDUAL_MS, this.now() - started);
+        this.refreshNextIssue = this.now() + (REFRESH_DUTY - 1) * spent;
+      }
+      if (requeue) this.schedule(addr);
+      this.pump();
+    };
+    void this.source(addr, ctrl?.signal).then(
+      (data) => {
+        this.observe(started);
+        this.succeeded();
+        // A tile the retune overtook is requeued, not kept: `insert` says which happened, and the
+        // requeue has to run in `done`, after the key leaves the in-flight map, or `schedule`
+        // would see this very request still outstanding and silently drop the retry.
+        let requeue = false;
+        try { requeue = !this.insert(addr, data); } catch { this.stats.failures++; }
+        done(requeue);
+      },
+      (err) => done(this.failed(addr, err, started, ctrl?.signal.aborted ?? false)),
+    );
   }
 
   /**
@@ -550,7 +746,10 @@ export class TileCache<T> {
   private insert(addr: TileAddr, data: TileData): boolean {
     const key = keyOf(addr);
     if (this.stale.delete(key)) return false;
-    if (this.map.has(key)) return true; // never upload the same tile twice
+    const prev = this.map.get(key);
+    // A **live-edge revalidation replaces** the copy in hand (T-460); anything else that arrives for
+    // a resident key is a duplicate, and the same tile is never uploaded twice.
+    if (prev && !this.refreshing.has(key)) return true;
     // `cost.in_flight_limit` is the same server-wide number the refusal names, so it sets the
     // ceiling — it is not permission to run at it.
     if (data.serverInFlightLimit && data.serverInFlightLimit > 0) {
@@ -559,10 +758,18 @@ export class TileCache<T> {
     }
     const tex = this.tex.upload(data);
     this.stats.uploads++;
+    // The replaced texture is destroyed and its bytes returned: a refresh that leaked one would turn
+    // the growing edge into a memory leak proportional to how long the view is left running.
+    if (prev) {
+      this.tex.destroy(prev.tex);
+      this.bytes -= prev.data.bytes;
+      this.stats.edgeRefreshApplied++;
+    }
     // A tile that has just arrived is pinned for the frame it arrived on: it cost the server 11.4 ms
     // and evicting it before it has been drawn once would spend that twice.
     this.map.set(key, { key, addr, data, tex, lastUsed: ++this.clock, pinnedFrame: this.frame });
     this.bytes += data.bytes;
+    this.refreshedAt.set(key, this.now());
     this.evict();
     return true;
   }
@@ -582,6 +789,7 @@ export class TileCache<T> {
       if (!victim) { this.stats.overBudgetFrames++; return; }
       this.tex.destroy(victim.tex);
       this.map.delete(victim.key);
+      this.refreshedAt.delete(victim.key);
       this.bytes -= victim.data.bytes;
       this.evicted.add(victim.key);
       this.stats.evictions++;

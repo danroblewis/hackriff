@@ -31,9 +31,10 @@ import {
 } from "../src/surface/bootstrap";
 import { GREY } from "../src/surface/cellrule";
 import { legendEntries, swatchPixels } from "../src/surface/legend";
-import type { Lattice, TileAddr } from "../src/surface/lattice";
+import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { ControlError } from "../src/controls/client";
 import { ORIENT_CELLS, ORIENT_ROWS, SurfacePreview, isBackpressure, probeSurface, wheelAxes, wheelDelta, wheelZoom, zoomFactor, type SurfaceProbe } from "../src/surface/preview";
+import { parseKey } from "../src/surface/tilecache";
 import { stubGl } from "./surface-glstub";
 
 const S = 1e9;
@@ -322,12 +323,12 @@ function parseTileUrl(url: string): TileAddr {
   };
 }
 
-function tileAnswer(a: TileAddr) {
+function tileAnswer(a: TileAddr, lat: Lattice = LAT) {
   const n = a.cells * a.cells;
   return {
     key: { device: a.device, scheme: a.scheme, level_f: a.levelF, level_t: a.levelT, f_index: a.fIndex, t_index: a.tIndex, cells: a.cells },
     extent: { nf: a.cells, nt: a.cells },
-    axes: { frequency: { levels: LAT.levelsF, cell_hz: LAT.f0Hz * 2 ** a.levelF }, time: { levels: LAT.levelsT, cell_s: (LAT.t0Ns * 2 ** a.levelT) / 1e9 } },
+    axes: { frequency: { levels: lat.levelsF, cell_hz: lat.f0Hz * 2 ** a.levelF }, time: { levels: lat.levelsT, cell_s: (lat.t0Ns * 2 ** a.levelT) / 1e9 } },
     grid: { nf: a.cells, nt: a.cells, max_db: Array<number>(n).fill(-90), range_db: { lo: -100, hi: -60 } },
     coverage: { any: { cells: Array.from({ length: n }, () => ({ state: "observed" })) } },
     resolution: { source: "spectrum-history", answered: { level: a.levelF } },
@@ -345,6 +346,97 @@ test("every viewport is FROZEN at open: this preview has no live edge to follow"
   const b = preview.frame();
   assert.deepEqual(a.views[0].box, b.views[0].box);
   assert.equal(a.edgeNs, T1 * S);
+});
+
+// ——— T-460: the live edge advances, and the wiring is the subject ———
+//
+// The guard in `surface-cache.test.ts` is about the POLICY; this one is about the CALL. T-460's
+// defect was not that `TileCache` refused to refresh — it had no refresh at all, and the only path
+// that could drop a live-edge tile had one call site, the retune. A policy nothing invokes is
+// exactly the shape of T-450, whose renderer was proved on 114 973 pixels for a module that could
+// not load. So this drives the real `SurfacePreview.frame()` loop and asks whether the address was
+// asked for twice.
+//
+// The edge is deliberately held STILL here. That is not a weaker test, it is the defect itself: the
+// address a following pane resolves changes only when the edge crosses a tile boundary, which at
+// `level_t = 0` is once every 256 seconds, and for all of that time the rows being recorded were
+// served and never requested. A fixed edge reproduces exactly that window. Whether the rows then
+// appear on the screen is `ui/e2e/live-edge.e2e.mjs`'s subject — a tile being re-fetched is not a
+// row being drawn, and this tier cannot tell the two apart.
+
+/** A lattice whose time cells are milliseconds, so the refresh cadence — one cell — is testable in
+ * a test's lifetime rather than in the product's 1 s. Nothing else about it is special. */
+const LIVE_LAT: Lattice = { scheme: "view", cells: 64, f0Hz: 6250, t0Ns: 1e6, levelsF: 20, levelsT: 15 };
+
+function liveHarness({ live = true } = {}) {
+  const g = stubGl(1200, 600);
+  const asked: TileAddr[] = [];
+  const fetchFn = async (url: string) => {
+    const a = parseTileUrl(url);
+    asked.push(a);
+    return { ok: true, status: 200, statusText: "OK", json: async () => tileAnswer(a, LIVE_LAT) };
+  };
+  const probe: SurfaceProbe = {
+    ...probeFor({ freq: { centerHz: 100.8e6, spanHz: 2.4e6 }, centerNs: T1 * S - S, spanNs: 2 * S, onCoverage: true }),
+    lattice: LIVE_LAT,
+  };
+  const preview = new SurfacePreview({
+    canvas: g.canvas, probe, token: "t", fetchFn, chrome: null, minimapPx: 120,
+    // The ONE difference between the two arms: whether a growing edge is reported in at all.
+    edge: live ? () => probe.origin.edgeNs : null,
+  });
+  return { g, preview, asked };
+}
+
+/** Draw frames for `ms` of real time, letting every fetch settle between them. */
+async function run(preview: SurfacePreview, ms: number) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    preview.frame();
+    await flush();
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+const repeats = (asked: TileAddr[]) => {
+  const seen = new Set<string>(), again = new Set<string>();
+  for (const a of asked) { const k = keyOf(a); if (seen.has(k)) again.add(k); seen.add(k); }
+  return again;
+};
+
+test("a FOLLOWING pane re-asks for the live-edge tile: the rows recorded since are fetched", async () => {
+  const { preview, asked } = liveHarness();
+  assert.equal(preview.view.panes.isFollowing(preview.activePane), true,
+    "a reported edge opens the first pane following — otherwise this tests nothing");
+  await run(preview, 700);
+
+  const cache = preview.view.surface.cache;
+  const again = repeats(asked);
+  assert.ok(again.size > 0,
+    "no address was ever asked for twice in 700 ms on a following pane: this is T-460, the frozen live edge");
+  assert.ok(cache.stats.edgeRefreshApplied > 0,
+    `${cache.stats.edgeRefreshes} refresh(es) issued but none replaced a resident tile — asking is not arriving`);
+  // Every repeat is a live-edge tile at the level the pane was DRAWN at, never a parent pin and
+  // never a tile some other viewport wanted.
+  const drawn = preview.lastFrame!.reports.find((r) => r.id === preview.activePane)!;
+  for (const k of again) {
+    const a = parseKey(k)!;
+    assert.equal(a.levelT, drawn.levelT, `refreshed ${k}, which the pane is not drawing`);
+    assert.equal(a.levelF, drawn.levelF, `refreshed ${k}, which the pane is not drawing`);
+  }
+  assert.deepEqual(preview.lastFrame!.reports.map((r) => r.pending), preview.lastFrame!.reports.map(() => 0),
+    "a refresh must never put a pane back to pending: the stale copy stays drawn until the new one lands");
+});
+
+test("…and the CONTROL: T-450's historical preview refreshes NOTHING", async () => {
+  // Non-vacuity for the test above, and the guarantee this ticket owed the preview page: with no
+  // edge reported in, every viewport is frozen, the data under it cannot change, and a refresh
+  // would be cost with nothing to show for it.
+  const { preview, asked } = liveHarness({ live: false });
+  assert.equal(preview.view.panes.isFollowing(preview.activePane), false);
+  await run(preview, 700);
+  assert.equal(repeats(asked).size, 0, "the historical preview re-asked for a tile whose data cannot change");
+  assert.equal(preview.view.surface.cache.stats.edgeRefreshes, 0);
 });
 
 test("no live-edge mark is drawn: the active-capture list is never even read here", () => {
