@@ -269,13 +269,20 @@ const OBSERVATION_STATISTICS: &[(&str, &str)] = &[
          33.0 -> 252.4 over 679/1357/2715/5430 samples of ONE wfm waveform (T-281). T-240 and \
          T-248 each implemented a fixed-window replacement, measured an open-set regression and \
          reverted it; features.rs carries both measurements. Not a bound that can be tightened - \
-         the quantity itself is cumulative.",
+         the quantity itself is cumulative. THIS IS THE FIRST OF TWO DEFECTS IN THIS FEATURE AND \
+         IT IS THE ONE STILL OPEN: T-447 fixed the SECOND, independent one (the strong-envelope \
+         subset it is measured over was selected by 0.5 x the record's own mean, so for a sparse \
+         train it was 93% noise BY COUNT). Fixing which samples are read does not stop the walk \
+         that already happened in the off gaps before they were read, so this exemption stands.",
     ),
     (
         "sigma_dp",
         "the same unwrapped-phase residual as sigma_ap, before the absolute value - and so the \
          same random walk with the observation, growing as sqrt(record length) rather than \
-         settling on a value. Measured 50.9 -> 407.5 over N/8 -> N of one wfm waveform.",
+         settling on a value. Measured 50.9 -> 407.5 over N/8 -> N of one wfm waveform. Carries \
+         the same second defect and the same T-447 fix as sigma_ap, and is exempt here for the \
+         same first one: with the corrected subset a 5%-duty `pulse` still reads 41-87 rad at \
+         10 dB across six seeds, which is the walk and not the subset.",
     ),
     (
         "if_bimodality",
