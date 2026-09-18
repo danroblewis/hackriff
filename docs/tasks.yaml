@@ -13742,7 +13742,7 @@ tasks:
   - id: T-481
     milestone: MCANVAS
     title: A full canvas e2e SCENARIO through the mock SDR - pan/zoom, live advance, retune-fills - as the standing regression guard
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     core_interface: true
@@ -13795,6 +13795,40 @@ tasks:
       the bug. If any of those three slips, this can still be written against the DEFECT and left
       failing, but say so explicitly rather than weakening an assertion to make it pass.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "49422d0"
+    result: |
+      DONE - THE TIER THE LAST SIX USER-REPORTED BUGS GOT PAST. Four assertions in one flow through the
+      MOCK SDR, each stating what its evidence is a property OF.
+      (1) PAN/ZOOM - the /api/tiles statuses ON THE WIRE plus the pane's grey share against
+      /api/coverage's OWN unobserved share, asked at the level the pane states it drew at. PASSES: 0
+      refused of 4-41 gesture requests; grey 88-90 % where the server says 88.8 %, 0.0 % where it says
+      100 % observed.
+      (2) RETUNE - rows on the socket joined to their ARRIVAL INSTANT and the header geometry in force
+      when they arrived, three facts that only exist together on the wire. PASSES: 100.800 -> 100.707 MHz
+      with a 2.400 -> 2.000 rate change in between (a real re-plumb), 242-244 rows at the NEW centre in the
+      next 10 s, 0 at the old, 0 closes, 0 errors.
+      (3) LIVE TILE OFF AND BACK - the pane's grey share for the IDENTICAL stated viewport before and
+      after, with the server asked separately whether it gained coverage in between, so the "before" is
+      the control and no absolute threshold is needed. PASSES: 0.00 % both times over a 13 s absence.
+      (4) STREAM LOSS - SKIPPED DELIBERATELY, and removing the skip is T-499's DoD. The thrash half FAILS
+      hard and identically: 182 failed requests in the first 5 s after SIGKILL and 181 in the next, FLAT,
+      NO DECAY. The COLOUR half passes - 0 magenta before and after, 0 uploads, 0.00 % repaint - so the
+      two are asserted separately as T-499 requires, and THE PURPLE DID NOT REPRODUCE by killing the
+      backend.
+      DRAW CALLS ARE THE WRONG COUNTER and the file says so: the surface renders from an unconditional rAF
+      loop (~2.5 M draws a run) and could never settle. The subject is failed requests on the wire.
+      T-495 AND T-497 DID NOT REPRODUCE through this backend, and neither assertion was weakened to force
+      red - so if those bugs are real their cause is not in the path this exercises.
+      ALSO RECOVERED HERE, split out of the preserved task-t484 branch: panTime(id, 0) ran freezeAt BEFORE
+      looking at the delta, so a purely sideways drag silently stopped the pane following the live edge.
+      That fix went out with the T-484 revert and was blocking assertions 2 and 3; independent of the tile
+      pipeline, so it came back now rather than waiting for T-501.
+      FINDINGS RECORDED RATHER THAN ASSERTED (ui/e2e/README.md): the live edge draws THE grey over rows
+      the server holds - the newest 40 % of a fully-resident 100 %-observed pane reads 17-31 %, single
+      frames 0.0 to 53.7 % - so every grey claim is made below that zone; and a coverage comparison must
+      match the pane's level and exclude `unknown`, since the same band gave 0.0 % then 44.1 % purely from
+      which level was resident.
+      Gate: ui, test-ui 45/45, e2e 11/11 in 242.6 s.
   - id: T-482
     milestone: MLIVE
     title: /api/tiles declares a 12 x 15 lattice and 400s a large part of it - the route must say how far it can actually be READ
@@ -14104,7 +14138,7 @@ tasks:
   - id: T-486
     milestone: MCANVAS
     title: Follow-live has no dead zone - a 1 px time-pan drops out of live, and a release near the top re-pauses
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-472]
@@ -14157,6 +14191,37 @@ tasks:
       small offsets from the live edge, do not assert follow/pause state from the readout string -
       read `data-following`, which is what the T-478 projection already does.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "5162a06"
+    result: |
+      DONE - A THRESHOLD ON THE STATE, COMMITTED ONCE PER GESTURE, WITH THE PAN UNTOUCHED. panTime still
+      freezes and offsets 1:1 from the first pixel, asserted directly. The new piece is a COMMIT POINT,
+      PaneModel.settleTime, called from input.ts's onUp AND onCancel, reading the window against the live
+      edge AS OF NOW rather than as of the last pointer move - which is what makes the "rows appended
+      during the drag" half work. isFollowing became the single derived answer and paneStatuses takes it
+      as a predicate, so the chrome's data-following and T-460's refresh set cannot be two derivations of
+      one fact.
+      PIXELS, NOT ROWS, with the cost at both extremes stated: a hand cannot hold a pointer to the pixel,
+      and the question is "am I still at the top of the waterfall" - about the picture, which a pixel
+      answers at every zoom. A row threshold is a claim about data, and T-484 had just moved the finest
+      tier from a 1 s cell to the display row, so "a few rows" would have silently changed meaning by ~25x.
+      ON A DAY-WIDE VIEWPORT 10 px IS ~18 MINUTES, so a pane cannot be parked within minutes of live there
+      - ASSERTED, not hidden. A model never given a viewport gets zone 0: fail closed.
+      HYSTERESIS 10 px OUT, 6 px BACK, PLUS A ONE-WAY DOOR - re-entry also requires the stroke to have come
+      back from further out. That direction test was A BUG THE TESTS CAUGHT: pausing is a coordinate
+      change, so a pane paused while live sits at lag ZERO, inside the snap zone by construction, and
+      without it the first small scrub after an explicit Pause was yanked straight back to live.
+      NO FLAPPING, DEMONSTRATED WITH THE EDGE ADVANCING, twice: 400 rows with settleTime called on EVERY
+      row - the most flap-prone caller there is - ZERO transitions; and jittering +/-6 px across the
+      boundary within one stroke while the edge advances, isFollowing monotone with EXACTLY ONE transition.
+      THE CONTROL IN THE SAME TEST computes what a thresholds-only rule would have said over the identical
+      positions and asserts IT FLAPS, so the one-way door is shown load-bearing rather than asserted to be.
+      T-460's refresh budget: widening isFollowing widens the refresh set, but the PEAK is unchanged and
+      was already reached at open since every viewport opens following. Asserted as an invariant over the
+      whole gesture vocabulary.
+      Non-vacuity includes a selftest fault that removes the commit from onUp, leaving every threshold and
+      every unit test intact and simply never consulted. T-456's unthresholded pan unchanged; T-340
+      verbatim.
+      Gate: ui, test-ui 45/45, e2e 11/11.
   - id: T-487
     milestone: MCANVAS
     title: app-trace's peak-argmax compares a readout and a framebuffer captured at DIFFERENT instants
@@ -14850,7 +14915,7 @@ tasks:
   - id: T-500
     milestone: MLIVE
     title: "surface-colour's settle check cannot settle now the live tier advances 25x faster - main is RED"
-    status: in-progress
+    status: done
     priority: high
     parallel_group: UI
     depends_on: []
@@ -14894,6 +14959,32 @@ tasks:
       Filed by the coordinator 2026-09-18. HIGH because main is red and no merge can gate until it is
       green.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "8488289"
+    result: |
+      DONE - AND IT WAS NEITHER OF THE TWO OPTIONS THE TICKET OFFERED. Measured at exactly the failing
+      point on T-484's own branch, 60 screenshots 250 ms apart: LEFT pane (held) 59/59 pairs agreed, 0 px;
+      RIGHT pane (zoomed) 59/59, 0 px; MINIMAP 19/59, mean 899 px, worst 24, all in y 610..729; WHOLE
+      CANVAS THE SAME NUMBERS AS THE MINIMAP, down to the reported failure's own worst 24.
+      So NOTHING WAS RE-COLOURING - T-470's claim was never in trouble - AND it was not the following
+      pane's newest rows either: preview-main.ts passes no edgeFn, so Surface freezes every viewport at
+      open and calls setFollowing(false) on the map. THERE IS NO LIVE EDGE IN THAT PAGE AT ALL, which also
+      kills the coordinator's "25 rows/s repaints continuously" hypothesis.
+      THE CAUSE IS RESIDENCY: the map walks 126 coarse stand-ins down to 85, about one swap per 250 ms
+      against an in-flight cap of 4, each repainting a tile-wide column over the map's full height. At
+      40 ms cells that level has ~25x the addresses it has at 1 s, so ~128 stand-ins take ~30 s and a zoom
+      evicts from the shared LRU and restarts it. Two whole-canvas frames then agree about 32 % of the
+      time - which is why this was a RARE red rather than a permanent one.
+      THE FIX IS THE INSTRUMENT, AND THE FILE'S OWN WORDS ARE THE ARGUMENT: waitResident already documents
+      the map as never resident - "the map excepted - it is 6 GHz wide and always has stand-ins" - so
+      asking the whole canvas to stop changing was asking for a state the file itself calls unreachable.
+      settle() now takes NAMED SUBJECTS and waits on the two panes, the only rects anything asserts over.
+      For those it is STRONGER: the same zero over the same pixels, no longer conditioned on a third
+      viewport still loading. Failures name which subject did not settle.
+      T-470's byte-identity untouched and at full strength: held.pixels === 0 over all 316 478 px at every
+      one of six zooms across four pyramid levels, the grey-count equality, and the round trip closing at 0.
+      RECORDED FOR T-501: two-frames-agree is reachable for FROZEN panes and would NOT be for one
+      following a fast live edge - unreachable by construction rather than marginal.
+      10 consecutive green runs under load (loadavg 12 to 33 on 28 cores).
   - id: T-501
     milestone: MLIVE
     title: REDO T-484 - the FFT-resolution fidelity fix, gated by the canvas e2e that would have caught its tile breakage
