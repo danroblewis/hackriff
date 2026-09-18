@@ -13845,7 +13845,7 @@ tasks:
   - id: T-484
     milestone: MLIVE
     title: The live/tuned tier must render at live-IQ FFT resolution - the pyramid stays coarse only for zoom-out and history
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
