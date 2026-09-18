@@ -14813,7 +14813,7 @@ tasks:
   - id: T-500
     milestone: MLIVE
     title: "surface-colour's settle check cannot settle now the live tier advances 25x faster - main is RED"
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: UI
     depends_on: []
