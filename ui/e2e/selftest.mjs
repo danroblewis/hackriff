@@ -51,9 +51,62 @@ export const __selftestMark = __selftestPredicate(1);
       "an AbortController per request and measured cancellation still had.",
     file: "surface/tilecache.ts",
     patch: (src) => {
-      const from = "this.limit = opts.inFlight ?? 4;";
+      const from = "this.ceiling = this.limit = Math.max(1, opts.inFlight ?? 4);";
       if (!src.includes(from)) throw new Error(`selftest: anchor not found in tilecache.ts: ${from}`);
-      return src.replace(from, "this.limit = 64; // injected by ui/e2e/selftest.mjs — ignore the server's cap");
+      return src.replace(from,
+        "this.ceiling = this.limit = 64; // injected by ui/e2e/selftest.mjs — ignore the server's cap");
+    },
+  },
+  {
+    // The other half of T-454: a client that backs off on a refusal but never releases the slots it
+    // walked away from asks the route for slots it is still using. This is the pre-T-454 behaviour,
+    // and the guard catches it at the **cap** assertion (measured: peak 5 against a cap of 4), not
+    // at the steady-state one — which is worth saying plainly, because an earlier draft of this
+    // entry claimed the opposite and the run disagreed.
+    name: "t454-forget-abandoned-slots",
+    expect: "surface-nav.e2e.mjs",
+    what: "T-454, the other half: abandoned requests stop being charged to the budget, so a client " +
+      "that aborts on every viewport change asks the route for slots it is still using. Refusals " +
+      "then continue indefinitely rather than stopping once the controller has converged.",
+    file: "surface/tilecache.ts",
+    patch: (src) => {
+      const from = "return this.abandonedUntil.length;";
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in tilecache.ts: ${from}`);
+      return src.replace(from, "return 0; // injected by ui/e2e/selftest.mjs — forget abandoned slots");
+    },
+  },
+  {
+    // The fault that exercises `surface-nav`'s STEADY-STATE bound specifically, so that assertion
+    // is not one no fault reproduces. The client still counts refusals but never backs off, so it
+    // sits at the ceiling permanently and is refused for as long as it keeps rendering — the
+    // difference between backpressure as a *probe* and backpressure as a *regime*, which is the
+    // whole reason the bound is "none after convergence" rather than "none at all".
+    name: "t454-never-back-off",
+    expect: "surface-nav.e2e.mjs",
+    what: "T-454's controller removed: the client notices the 503 but does not halve its operating " +
+      "cap, so it never finds its share and keeps being refused indefinitely, including long after " +
+      "the user has stopped touching the view.",
+    file: "surface/tilecache.ts",
+    patch: (src) => {
+      const from = "this.limit = Math.max(1, Math.min(Math.floor(this.limit / 2), this.ceiling));";
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in tilecache.ts: ${from}`);
+      return src.replace(from, "/* injected by ui/e2e/selftest.mjs — never back off */");
+    },
+  },
+  {
+    // The bootstrap half, found by this tier before T-454 landed: `probeSurface` makes one
+    // `/api/tiles` call to learn the lattice, and treating its `503` as fatal meant one busy tab
+    // could stop a second one from opening at all. Removing the retry restores that.
+    name: "t454-probe-gives-up-on-503",
+    expect: "surface-contention.e2e.mjs",
+    what: "T-454's bootstrap half: the surface probe stops retrying the tile route's 503, so a " +
+      "second tab opened while the first is demanding tiles shows \"The surface could not be " +
+      "addressed\" instead of waiting the refusal out.",
+    file: "surface/preview.ts",
+    patch: (src) => {
+      const from = "const retries = bp.retries ?? 5;";
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in preview.ts: ${from}`);
+      return src.replace(from, "const retries = 0; // injected by ui/e2e/selftest.mjs — give up on the first 503");
     },
   },
 ];

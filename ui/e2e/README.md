@@ -40,8 +40,7 @@ excuse for a weaker claim. So this tier asserts the same *kinds* of things the u
 Concretely: `surface-load` requires the canvas to hold ≥ 32 distinct colours, no single colour over
 92 % of it, mean luma > 8, and a drawing buffer equal to the CSS box × dpr; `surface-nav` requires
 every gesture to move the page's own per-viewport readout, peak on-the-wire tile concurrency to stay
-inside the server's declared `cost.in_flight_limit`, zero `503`s, zero backpressure reported to the
-user, non-zero cancellation, and the picture to differ from before.
+inside the server's declared `cost.in_flight_limit`, and the backpressure bound derived below.
 
 Two of those deserve a note:
 
@@ -62,7 +61,8 @@ Two of those deserve a note:
 | `backend.mjs` | Starts `hk serve` over the fixture; `assertRealCsp`; `tileCost`. |
 | `run.mjs` | One backend, shared; one node process per `*.e2e.mjs`; prints the runtime of each. |
 | `surface-load.e2e.mjs` | **T-450's guard.** |
-| `surface-nav.e2e.mjs` | **T-454's guard.** |
+| `surface-nav.e2e.mjs` | **T-454's guard** — the in-flight cap and the AIMD contract. |
+| `surface-contention.e2e.mjs` | **T-454's bootstrap half**: a second tab must be able to open while the first saturates the route. |
 | `selftest.mjs` | Reintroduces each defect in a scratch copy of `ui/src` and requires the suite to go red. |
 
 ## Dependencies: none new
@@ -94,11 +94,12 @@ Measured on the dev Mac, warm (`hk` already built, `npm ci` a no-op):
 
 | Step | Time |
 |---|---|
-| `hk serve` up + surface history ready + cap read | ~1–2 s |
-| `surface-load.e2e.mjs` | ~2 s |
-| `surface-nav.e2e.mjs` | ~13–15 s |
-| **`npm run e2e` total** | **~16–19 s** |
-| `npm run e2e:selftest` (baseline + 2 faults) | ~80 s |
+| `hk serve` up + surface history ready + cap read | ~2 s |
+| `surface-contention.e2e.mjs` | ~7 s |
+| `surface-load.e2e.mjs` | ~2.5 s |
+| `surface-nav.e2e.mjs` | ~22 s (8 s of it the deliberate steady-state window) |
+| **`npm run e2e` total** | **~32 s** |
+| `npm run e2e:selftest` (baseline + 5 faults) | ~4 min |
 
 Cold, `just test-ui-e2e` also pays `cargo build -p hk-cli --bin hk` and `npm ci`.
 
@@ -109,25 +110,68 @@ Never binds 8788/8789/8899/8900 — the user's demo holds the real HackRF on 889
 stream server cannot take 8788 either. The backend is a `--replay` of a recording: nothing here can
 tune a radio, and `surface-load` asserts that the page requested no `/api/control/` route at all.
 
-## Findings this tier produced on day one
+## Where the `503` bound came from
+
+Worth reading before touching `surface-nav`'s assertions, because the obvious bound is wrong in both
+directions.
+
+The first version asserted **zero** `503`s. That was right against the client this tier was written
+for (27–48 refusals per run, peak 6 in flight against a cap of 4, every one surfaced). After T-454
+landed it failed on **2 of ~1 850** — and relaxing it to 2 would have been the move this repo
+refuses all week.
+
+So the residual was measured, over eleven runs, to tell two live readings apart. **Discovery:**
+T-454's fix is AIMD, and an AIMD controller finds its share of a *global* budget — shared by the
+page's two viewports, its own abandoned reads, the bootstrap probe and any other tab — by being
+refused. **Leakage:** a client `abort()` that fails to release the server's slot, which is what
+T-454's abandoned-slot accounting addresses and which this tier had flagged as not excluded.
+
+The measurement says discovery:
+
+- peak on the wire is **exactly the cap, never above** (4/4, was 6/4);
+- **every** refusal happens with the operating cap **at its ceiling** — never at 2 or 3, where
+  leakage would also show. Same trace every run: 4 → 2 on the first refusal, +1, +1, back to 4;
+- after the last viewport change the cap returns to the ceiling and **stays** there through ~3 700
+  further requests over 25 s with **zero** refusals. A leak keeps leaking.
+
+The replacement bound was then wrong once more, and the selftest caught it. It was a count with a
+story — "AIMD cannot return to its ceiling more often than the gestures that push it off, so ≤ 1 per
+gesture". A client with the halving **deleted** never leaves the ceiling, is refused 8–10 times
+across the same nine gestures, and passes that bound *and* the steady-state one. A bound reasoned
+from how the correct algorithm behaves does not constrain the incorrect one.
+
+What is asserted now conditions the permission on the mechanism instead of counting it:
+
+1. **peak ≤ the server's declared cap** — exact, no tolerance;
+2. **zero refusals in 8 s of steady state**, with nothing moving the view (the window is sized to
+   contain the measured 12–14 s return to the ceiling, so the client really is running at the cap);
+3. **a refusal must be seen to halve the client's operating cap** — the AIMD contract itself. This
+   is the sharp one: the refusals are permitted *because* they are a search, so the permission is
+   void unless the halving is observed;
+4. refusals ≤ viewport changes — a coarse guard against the pre-fix regime, safe to leave loose
+   because (3) is sharp;
+5. the client's `busyRefusals` must **equal** the wire's `503` count — the inversion of T-454's
+   lesson that every mechanism counted the client while claiming something about the server.
+
+`selftest.mjs` carries a fault for each: `t454-ignore-the-cap` (peak 13), `t454-forget-abandoned-slots`
+(peak 5), `t454-never-back-off` (cap pinned at the ceiling, 10 refusals), and
+`t454-probe-gives-up-on-503`.
+
+## Findings this tier produced
 
 Recorded here rather than silently worked around, because they are the tier doing its job.
 
-1. **`probeSurface` treats the tile route's `503` as fatal.** If `/api/tiles` is at its cap when the
-   page loads, the page shows "The surface could not be addressed" and stops. Two tabs on `/surface`
-   is enough to cause it. The route's `503` is documented backpressure asking the caller to retry —
-   T-454's shape, at page load rather than during a pan. The runner drains before each file so the
-   suite is not order-dependent, but the product still has no retry here.
-2. **The client exceeds the server's cap under navigation.** Measured on the wire, reproducibly:
-   peak **6** in flight against a declared limit of **4**, and 30–48 of ~1 400 tile requests refused
-   `503`, every one of them surfaced to the user in the status line. Six is exactly Chrome's
-   per-origin HTTP/1.1 connection limit, so 6 is a *lower bound* on what the client actually had
-   outstanding. A plausible second mechanism, not excluded by this evidence: a client-side `abort()`
-   does not release the *server's* in-flight slot — the server keeps counting a read whose tile
-   production still holds the history lock — so even a client that obeys its own cap can be refused
-   right after a fast pan. `surface-nav.e2e.mjs` is **red on `main`** until T-454 lands; the
-   selftest reports T-454's fault as INCONCLUSIVE for exactly that reason, and should be re-run
-   once the guard is green.
+1. **`probeSurface` treated the tile route's `503` as fatal** — found here before T-454 landed, when
+   one file's browser left four reads in flight and the next file's page showed "The surface could
+   not be addressed". Two tabs on `/surface` was enough. **Fixed by T-454** (bounded retry, doubling
+   backoff) and now guarded by `surface-contention.e2e.mjs`, which opens a second tab *into* the
+   first tab's whole-surface tile storm: measured 3–6 refusals on the second tab's probe, mounting
+   anyway in 0.4–1.4 s and drawing 516–587 distinct colours. The run reports itself INCONCLUSIVE if
+   the probe was never actually refused.
+2. **The client exceeded the server's cap under navigation** — peak **6** against a limit of **4**,
+   30–48 of ~1 400 requests refused, all surfaced. **Fixed by T-454**: peak is now exactly 4, and
+   the residual is 1–2 discovery refusals, none of them surfaced as a failure. See the section
+   above for how that was established rather than assumed.
 3. **Time zoom is structurally clamped on a seconds-long fixture** (the whole record is already on
    screen at the lattice's finest time level), which is why `surface-nav` exercises the time wheel
    but requires movement only on the frequency axis. Stated in the test rather than hidden.
