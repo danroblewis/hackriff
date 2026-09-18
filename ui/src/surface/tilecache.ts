@@ -228,6 +228,16 @@ const MIN_SERVER_MS = 11, MAX_SERVER_MS = 6000;
  * property that stops this from becoming the poll the ticket forbids.
  */
 export const REFRESH_DUTY = 4;
+/**
+ * The refresh lane a tile belongs to: its **cost class**, which on this route is its level.
+ *
+ * A tile's production cost is a function of the level and of nothing else this client can see —
+ * measured against a real server, `0/0` is 37 ms over 65 536 source cells in one history-lock hold
+ * and `9/0` is 246 ms over 2 097 152 cells in 37 holds. Keying the lane by level therefore separates
+ * exactly the tenants whose costs differ, and puts two panes at the same zoom in one lane, which is
+ * right: they cost the same and should share a turn.
+ */
+const laneOf = (a: TileAddr): string => `${a.levelF}/${a.levelT}`;
 /** How often [[TileCache.refreshEdge]] may walk the resident set, ms. The walk is cheap; doing it
  * at frame rate would still be 60× more often than the finest tile can change. */
 const EDGE_SCAN_MS = 250;
@@ -275,14 +285,61 @@ export class TileCache<T> {
   /** Keys being re-fetched **while their copy stays resident and drawn** (T-460). The set is what
    * lets [[insert]] tell a revalidation, which replaces, from a duplicate, which never uploads. */
   private refreshing = new Set<string>();
-  /** The live-edge revalidation lane: its own queue, so it can never take a slot from [[queue]]. */
-  private refreshQueue: TileAddr[] = [];
+  /**
+   * The live-edge revalidation lanes: their own queues, so they can never take a slot from
+   * [[queue]] — **one lane per cost class**, keyed by the level a tile is drawn at (T-490).
+   *
+   * It was ONE queue and one cadence for every following viewport, and that is the same defect
+   * T-460 fixed one level down. Its `done` handler already explains why `REFRESH_DUTY x serverMs`
+   * was wrong — a mean that folds in the minimap's coarse read charges the live edge for a tile it
+   * is not — and the answer there was to measure the lane's own cost on its own request. But the
+   * *lane* was still a mixture: a minimap is a following viewport too, so its tiles queue here
+   * beside the pane's, and one 725 ms revalidation set a 2.2 s gate on a 183 ms one.
+   *
+   * A tile's cost is a function of its level and nothing else here — measured against a real
+   * server, `level 0/0` is 37 ms over 65 536 source cells in one history-lock hold, `level 9/0` is
+   * **246 ms over 2 097 152 cells in 37 holds** — so the level *is* the cost class, and charging
+   * each class its own observed cost is the same medicine at the right granularity. Panes at the
+   * same zoom share a lane, which is correct: they cost the same.
+   *
+   * # Why nobody saw this, and what to check before trusting a green live-edge test
+   *
+   * `ui/e2e/live-edge.e2e.mjs` passed on `main` **for a reason unrelated to what it asserts.** The
+   * view lattice named a 12 x 15 grid of levels over a 4 x 4 store, so the minimap's address was a
+   * permanent `400`; T-479's terminal rule asked it once and never again, and this lane plus all
+   * four in-flight slots belonged to the live pane. T-482 declares the readable ceiling, the minimap
+   * becomes servable, and a second tenant appears here for the first time. Measured in a browser,
+   * same gestures and same box, with only the server binary differing:
+   *
+   * ```
+   * main   0/0 x68 @69ms    1/1 x3 @513ms   11/0 x2 @153ms   (73 requests, 5/5 samples drawn)
+   * before 9/0 x16 @725ms   0/0 x14 @183ms  9/1 x8 @398ms    (41 requests, 2/5 drawn — FLAT)
+   * after  0/0 x45 @128ms   9/0 x18 @650ms  9/1 x8 @660ms    (74 requests, 5/5 drawn)
+   * ```
+   *
+   * `11/0 x2` is the whole story. **So if the live edge goes quiet, look at what the minimap's
+   * address is answering before concluding anything about this lane** — a viewport that is failing
+   * is also a viewport that is costing nothing, and the two are indistinguishable from here.
+   *
+   * **Fairness is a sixth property, not a replacement for T-460's five.** Only the live-edge
+   * address, only for a FOLLOWING viewport, only at the level it was drawn at, never inside one
+   * `tCellNs(level_t)`, and one revalidation in flight into a slot the ordinary queue could not use
+   * — all five still hold and are still asserted in `ui/test/surface-cache.test.ts`. This adds: each
+   * cost class gets its own turn and its own clock.
+   */
+  private refreshLanes = new Map<string, TileAddr[]>();
   private refreshQueued = new Set<string>();
+  /** Round-robin cursor over [[refreshLanes]], so a cheap lane never waits behind an expensive one
+   * for a slot it is entitled to. */
+  private refreshCursor = 0;
+  /** The lane whose revalidation is in flight, so [[issue]]'s completion charges the right one. */
+  private refreshingLane: string | null = null;
   /** When each resident tile's data was last taken in, ms. The refresh interval is measured from
    * this, so a tile is never asked for again inside the period its newest cell spans. */
   private refreshedAt = new Map<string, number>();
-  /** The next instant a refresh may be issued, and the next one the resident set may be walked. */
-  private refreshNextIssue = 0;
+  /** The next instant each lane may issue, and the next one the resident set may be walked. Per
+   * lane, because a share of measured cost is only a fair share if it is that lane's own cost. */
+  private refreshNextIssue = new Map<string, number>();
   private nextEdgeScan = 0;
   private clock = 0;
   private frame = 0;
@@ -321,7 +378,11 @@ export class TileCache<T> {
   get inFlightCount(): number { return this.inflight.size; }
   get queueDepth(): number { return this.queue.length; }
   /** Live-edge revalidations queued but not yet issued (T-460). Its own lane, never [[queue]]. */
-  get refreshDepth(): number { return this.refreshQueue.length; }
+  get refreshDepth(): number {
+    let n = 0;
+    for (const q of this.refreshLanes.values()) n += q.length;
+    return n;
+  }
   /** What the measurements say one tile costs the route, ms. */
   get serverEstimateMs(): number { return this.serverMs; }
 
@@ -544,7 +605,9 @@ export class TileCache<T> {
       // with a row the copy in hand does not already have. This is the cadence, and it scales itself
       // with the zoom: 1 s at level 0, 32 s five levels out.
       if (t < (this.refreshedAt.get(key) ?? 0) + tCellNs(lat, e.addr.levelT) / 1e6) continue;
-      this.refreshQueue.push(e.addr);
+      const lane = laneOf(e.addr);
+      const q = this.refreshLanes.get(lane);
+      if (q) q.push(e.addr); else this.refreshLanes.set(lane, [e.addr]);
       this.refreshQueued.add(key);
       n++;
     }
@@ -592,7 +655,9 @@ export class TileCache<T> {
     this.queued.clear();
     this.stale.clear();
     this.refreshing.clear();
-    this.refreshQueue = [];
+    this.refreshLanes.clear();
+    this.refreshNextIssue.clear();
+    this.refreshingLane = null;
     this.refreshQueued.clear();
     this.refreshedAt.clear();
     this.terminal.clear();
@@ -635,24 +700,55 @@ export class TileCache<T> {
    * polling into.
    */
   private pumpRefresh(): void {
-    if (!this.refreshQueue.length) return;
     // **At most one revalidation in flight, ever.** It is what makes the duty limit below a bound on
-    // the lane rather than on each of its members, and it is why the cadence can be set from the one
-    // completion rather than from a running estimate.
+    // the lanes rather than on each of their members, and it is why a cadence can be set from the
+    // one completion rather than from a running estimate.
     if (this.refreshing.size) return;
     const t = this.now();
-    if (t < this.busyUntil || t < this.refreshNextIssue) return;
+    if (t < this.busyUntil) return;
     if (this.inflight.size + this.abandonedSlots >= this.limit) return;
-    const addr = this.refreshQueue.shift()!;
+    const picked = this.nextRefresh(t);
+    if (!picked) return;
+    const { lane, addr } = picked;
     const key = keyOf(addr);
     this.refreshQueued.delete(key);
     // Evicted, retuned away, or otherwise no longer in hand while it waited: there is nothing to
     // revalidate, and the ordinary miss path owns the address now.
     if (!this.map.has(key)) return;
     this.refreshing.add(key);
+    this.refreshingLane = lane;
     this.refreshedAt.set(key, t);
     this.stats.edgeRefreshes++;
     this.issue(addr, -1);
+  }
+
+  /**
+   * The next revalidation to issue: **round-robin over the lanes that are due**, so a cheap lane is
+   * never blocked behind an expensive one (T-490).
+   *
+   * Two separate things had to change together and neither works alone. Round-robin alone would
+   * still stall the live edge, because one global `refreshNextIssue` set from a 725 ms minimap read
+   * gates every lane for 2.2 s. A per-lane gate alone would still stall it, because a single FIFO
+   * hands the one in-flight slot to whatever was queued first. Together they give each cost class a
+   * duty cycle of `1/REFRESH_DUTY` of **its own** measured service time.
+   *
+   * The cursor advances per *pick*, not per lane visited, so lanes take turns rather than the
+   * lowest-keyed one being tried first forever.
+   */
+  private nextRefresh(t: number): { lane: string; addr: TileAddr } | null {
+    const lanes = [...this.refreshLanes.keys()].sort();
+    for (let i = 0; i < lanes.length; i++) {
+      const lane = lanes[(this.refreshCursor + i) % lanes.length];
+      const q = this.refreshLanes.get(lane)!;
+      if (!q.length) {
+        this.refreshLanes.delete(lane);
+        continue;
+      }
+      if (t < (this.refreshNextIssue.get(lane) ?? 0)) continue;
+      this.refreshCursor = (this.refreshCursor + i + 1) % lanes.length;
+      return { lane, addr: q.shift()! };
+    }
+    return null;
   }
 
   /** Start one request for `addr`, on the budget. The single place a fetch begins — an ordinary
@@ -678,7 +774,15 @@ export class TileCache<T> {
         // for it. Waiting (REFRESH_DUTY - 1) further service times after it lands makes the lane's
         // duty cycle exactly 1/REFRESH_DUTY of what it was just observed to cost, whatever that is.
         const spent = Math.max(MIN_RESIDUAL_MS, this.now() - started);
-        this.refreshNextIssue = this.now() + (REFRESH_DUTY - 1) * spent;
+        // …and charged to the lane that spent it (T-490). One `refreshNextIssue` for every
+        // following viewport is the same mistake as one `serverMs` for every tile, one level up:
+        // the minimap is a following viewport too, so a 725 ms coarse revalidation gated the live
+        // pane's 183 ms one for 2.2 s and the newest rows went unasked-for. Measured: the pane's
+        // own refresh count fell 68 -> 14 over the same 30 s the moment the minimap's address
+        // became servable.
+        const lane = this.refreshingLane ?? laneOf(addr);
+        this.refreshingLane = null;
+        this.refreshNextIssue.set(lane, this.now() + (REFRESH_DUTY - 1) * spent);
       }
       if (requeue) this.schedule(addr);
       this.pump();

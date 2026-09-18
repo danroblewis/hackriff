@@ -486,16 +486,7 @@ pub fn parse_key(geom: &Geometry, q: &Params) -> Result<TileKey, ApiError> {
     // A welded ladder is the DIAGONAL of its own lattice (T-434): addressing it off-diagonal is a
     // node that does not exist, and the honest answer is to say so rather than serve a level whose
     // time cell is a day when a second was asked for.
-    let store_node = geom
-        .f_axis()
-        .iter()
-        .position(|w| *w == f_cell_hz)
-        .and_then(|lf| {
-            geom.t_axis()
-                .iter()
-                .position(|d| *d == t_cell_ns)
-                .and_then(|lt| geom.level_at(lf, lt))
-        });
+    let store_node = node_of(geom, f_cell_hz, t_cell_ns);
     if lattice.from_store && store_node.is_none() {
         return Err(ApiError::new(
             404,
@@ -543,6 +534,16 @@ pub fn parse_key(geom: &Geometry, q: &Params) -> Result<TileKey, ApiError> {
     })
 }
 
+/// The store level whose cells are **exactly** `(f_cell_hz, t_cell_ns)`, when the scheme has one.
+///
+/// A welded ladder is the DIAGONAL of its own lattice (T-434): addressing it off-diagonal is a node
+/// that does not exist, and `None` here is what says so.
+fn node_of(geom: &Geometry, f_cell_hz: f64, t_cell_ns: i64) -> Option<usize> {
+    let lf = geom.f_axis().iter().position(|w| *w == f_cell_hz)?;
+    let lt = geom.t_axis().iter().position(|d| *d == t_cell_ns)?;
+    geom.level_at(lf, lt)
+}
+
 /// `(nt, nf)` of store level `l`'s own grid over `r`.
 fn dims(geom: &Geometry, l: usize, r: &Region) -> (f64, f64) {
     let g = &geom.levels[l];
@@ -583,6 +584,171 @@ pub fn affordable_levels(geom: &Geometry, key: &TileKey) -> Vec<usize> {
     out
 }
 
+/// Output rows one chunk of a read at `level` covers — **one history lock hold each**.
+///
+/// Shared by the read and by [`servable`] on purpose: the readable ceiling is a claim about what
+/// the read will do, so the two must not be able to disagree about how the read is cut up.
+fn chunk_rows(geom: &Geometry, key: &TileKey, level: usize) -> usize {
+    let g = &geom.levels[level];
+    let (_, nf) = dims(geom, level, &key.region);
+    let rows_per_out = (key.t_cell_ns as f64 / g.t_cell_ns as f64).ceil() + 1.0;
+    let per_out_row = (rows_per_out * nf).max(1.0);
+    let rows = (TILE_MAX_SOURCE_CELLS as f64 / per_out_row)
+        .floor()
+        .max(1.0);
+    (rows as usize).min(key.cells)
+}
+
+/// Can [`tile_read`] answer this address **at all**, on the worst store it could meet?
+///
+/// Both of the route's two refusals, asked before either is provoked:
+///
+/// 1. [`affordable_levels`] is empty — no store level's grid over this tile fits the work budget.
+/// 2. A candidate level cannot be **folded** inside `hk-store`'s materialize budget
+///    ([`hk_store::Pyramid::materialize_cost_bound`]).
+///
+/// **Every candidate must pass (2), not merely the finest.** `tile_read` walks the candidates in
+/// order and stops at the first that *holds something*, so on a store where the fine levels are
+/// empty — which is every store, over any band it has not tuned — the walk reaches the coarse ones,
+/// and a refusal there is a refusal of the address. Requiring all of them is what makes this a
+/// bound rather than a typical case.
+pub fn servable(p: &hk_store::Pyramid, key: &TileKey) -> bool {
+    let geom = p.geometry();
+    let candidates = affordable_levels(geom, key);
+    if candidates.is_empty() {
+        return false;
+    }
+    candidates.iter().all(|&l| {
+        let window = chunk_rows(geom, key, l) as i64 * key.t_cell_ns;
+        p.materialize_cost_bound(l, key.region.freq, window)
+            .is_some()
+    })
+}
+
+/// The address at `(level_f, level_t)` on this lattice, at index `(0, 0)`.
+///
+/// Index is immaterial to servability on this route's own lattices and it is worth saying why
+/// rather than assuming it: a tile's extent is a power-of-two multiple of the store's own cell on
+/// both axes, and so is a store block, so a tile either contains whole blocks or lies inside one
+/// **at every index**. The one offset-dependent quantity — where a read's *time chunks* fall
+/// against the blocks — is not indexed at all; `materialize_cost_bound` charges it the worst
+/// alignment by construction.
+fn probe_key(
+    lattice: &TileLattice,
+    cells: usize,
+    level_f: usize,
+    level_t: usize,
+) -> Option<TileKey> {
+    let (f_cell_hz, t_cell_ns) = lattice.cell_of(level_f, level_t)?;
+    Some(TileKey {
+        device: "any".into(),
+        lattice: lattice.clone(),
+        level_f,
+        level_t,
+        f_index: 0,
+        t_index: 0,
+        cells,
+        f_cell_hz,
+        t_cell_ns,
+        region: Region {
+            freq: FreqRange::new(0.0, f_cell_hz * cells as f64),
+            t0_ns: 0,
+            t1_ns: t_cell_ns.saturating_mul(cells as i64),
+        },
+        store_node: None,
+    })
+}
+
+/// **How far up each axis this route can actually be READ** (T-482).
+///
+/// # The defect this exists for
+///
+/// The view lattice is 12 × 15 on the shipped geometry and the store behind it is 4 × 4, so the
+/// coarse corner is **named but unbackable**: the route declared `levels` and then `400`d a large
+/// part of the grid it had just declared. Measured against a real `hk serve`, an aggressive
+/// zoom-out made 117 tile requests of which 107 were refused — and the client was not misbehaving,
+/// it was obeying the only bound anyone stated. *Nothing said is never permissive*, inverted: the
+/// route promised more than it could deliver, and every client that believed it was punished.
+///
+/// # What the number means, and what a per-axis pair cannot say
+///
+/// `(max_f, max_t)` is a **box**: every address with `level_f <= max_f` and `level_t <= max_t` is
+/// servable. That is the strong reading, and it is the one a client can use, because the client
+/// clamps each axis on its own.
+///
+/// **The servable set is not a box, though, and a box therefore loses some of it.** The binding
+/// constraint at the coarse end is the *work* budget, and work goes as the tile's **area** — a
+/// store level's grid over the tile is `tile_hz / f_cell` by `tile_s / t_cell`, so the budget reads
+/// `level_f + level_t <= k`, an anti-diagonal. A box inscribed in an anti-diagonal cannot reach
+/// both of its far corners: on the shipped geometry `(9, 1)` and `(5, 5)` are both servable and
+/// both maximal, and no single box holds them both. What is lost is the off-corner pairs — a very
+/// wide tile *and* a very tall one, which is exactly the combination whose work bound is the reason
+/// for the ceiling in the first place.
+///
+/// The tie is settled toward **frequency**, and measured rather than argued: covering the canvas's
+/// own widest view (1 MHz–6 GHz by a retention window of tens of minutes) costs 32 tiles at
+/// `(9, 1)`, 30 at `(8, 2)` and `(7, 3)`, and 118 at `(5, 5)` — so the sum is what matters and the
+/// tie-break barely does, and it goes to the axis the defect appeared on: the frequency surface is
+/// 6 GHz wide and always at full extent, while the time surface is a retention window that usually
+/// fits inside one tile whatever the level.
+///
+/// # Readability, not existence
+///
+/// A node a scheme does not *have* — a welded ladder's off-diagonal, which `parse_key` answers with
+/// its own 404 and `axes.store_node` already reports — is skipped here rather than counted against
+/// the ceiling. The two are different claims and conflating them would collapse a ladder's ceiling
+/// to `(0, 0)` while saying nothing new.
+///
+/// # It is stated at [`TILE_CELLS`], NOT at this answer's `cells`
+///
+/// The bound is on tile **area**, so it does move with `cells` — and quoting it *per answer* would
+/// be the adjacent question rather than the one a client asks. `ui/src/surface/tile.ts` bootstraps
+/// its lattice from a deliberately cheap **`cells = 8`** probe and then renders the surface at 256
+/// (`latticeOf(probe, RENDER_CELLS)`), so a ceiling quoted for the probe's own tile size would be
+/// cached against tiles 32× wider on each axis and would be a lie for every one of them — measured
+/// in the browser tier, where a per-answer ceiling read back as `(11, 9)` from the probe while the
+/// page drew at 256 and 69 addresses inside that box were refused.
+///
+/// So the ceiling is a property of the **surface**, not of the probe that fetched it, and 256 is
+/// the canvas's own tile unit (`docs/16` §6.2). It is also the **most conservative** statement over
+/// the whole `cells` range this route accepts, since a bigger tile is strictly harder to back — so
+/// it cannot over-claim for a caller using any smaller tile either. What it costs is reach for such
+/// a caller: at `cells = 32` more levels are genuinely readable than this pair names.
+pub fn readable_ceiling(p: &hk_store::Pyramid, lattice: &TileLattice) -> (usize, usize) {
+    let cells = TILE_CELLS;
+    let geom = p.geometry();
+    let nf = lattice.f_cells_hz.len();
+    let nt = lattice.t_cells_ns.len();
+    // `reach[lt]`: the largest `level_f` with every `(0..=level_f, lt)` servable, or `None` when
+    // even `(0, lt)` is not.
+    let reach = |lt: usize| -> Option<usize> {
+        let mut last = None;
+        for lf in 0..nf {
+            let Some(key) = probe_key(lattice, cells, lf, lt) else {
+                break;
+            };
+            // A node this scheme does not have is not an unreadable node (see above).
+            let exists =
+                !lattice.from_store || node_of(geom, key.f_cell_hz, key.t_cell_ns).is_some();
+            if exists && !servable(p, &key) {
+                break;
+            }
+            last = Some(lf);
+        }
+        last
+    };
+    let (mut best, mut floor_f) = ((0usize, 0usize), usize::MAX);
+    for lt in 0..nt {
+        let Some(r) = reach(lt) else { break };
+        floor_f = floor_f.min(r);
+        // Maximise the coarsest tile's AREA (`2^(max_f + max_t)`), then reach in frequency.
+        if floor_f + lt > best.0 + best.1 || (floor_f + lt == best.0 + best.1 && floor_f > best.0) {
+            best = (floor_f, lt);
+        }
+    }
+    best
+}
+
 /// One tile's measurement plane, and what produced it.
 pub struct TileRead {
     /// The tile's grid, exactly `cells × cells` on the tile's own extent.
@@ -617,13 +783,8 @@ fn read_level(
         with_tile_history(state, store, |p| {
             let g = &p.geometry().levels[level as usize];
             let (_, nf) = dims(p.geometry(), level as usize, &key.region);
-            let rows_per_out = (key.t_cell_ns as f64 / g.t_cell_ns as f64).ceil() + 1.0;
-            let per_out_row = (rows_per_out * nf).max(1.0);
-            let rows = (TILE_MAX_SOURCE_CELLS as f64 / per_out_row)
-                .floor()
-                .max(1.0);
             Ok((
-                (rows as usize).min(cells),
+                chunk_rows(p.geometry(), key, level as usize),
                 nf as usize,
                 g.f_cell_hz,
                 g.t_cell_ns,
@@ -797,6 +958,7 @@ fn short_circuit_json(uniform: Option<&'static str>) -> Value {
 fn unobserved_tile_json(
     key: &TileKey,
     store: TileStore,
+    ceiling: (usize, usize),
     coverage: Value,
     max_live: Option<f64>,
     elapsed_ms: f64,
@@ -815,7 +977,7 @@ fn unobserved_tile_json(
             "nt": key.cells,
             "nf": key.cells,
         },
-        "axes": axes_json(key),
+        "axes": axes_json(key, ceiling),
         "grid": unobserved_grid_json(key),
         "coverage": coverage,
         "resolution": {
@@ -996,18 +1158,42 @@ fn key_json(key: &TileKey) -> Value {
     })
 }
 
-fn axes_json(key: &TileKey) -> Value {
+fn axes_json(key: &TileKey, ceiling: (usize, usize)) -> Value {
     json!({
         "frequency": {
             "levels": key.lattice.f_cells_hz.len(),
+            "max_level": ceiling.0,
             "cell_hz": key.f_cell_hz,
             "tile_hz": key.f_cell_hz * key.cells as f64,
         },
         "time": {
             "levels": key.lattice.t_cells_ns.len(),
+            "max_level": ceiling.1,
             "cell_s": key.t_cell_ns as f64 / 1e9,
             "tile_s": key.t_cell_ns as f64 * key.cells as f64 / 1e9,
         },
+        // T-482. `levels` and `max_level` answer DIFFERENT questions and a client that conflates
+        // them addresses a node that is named and cannot be built: how many levels the address
+        // lattice NAMES, against how far up it can actually be READ. They differ whenever the store
+        // ladder is shallower than the address lattice, which on the shipped geometry is a 12 x 15
+        // lattice over a 4 x 4 store.
+        "readable": "`max_level` is a CEILING ON READING, per axis, and it is a BOX: every address \
+            with level_f <= frequency.max_level AND level_t <= time.max_level can be served. \
+            Beyond it this route answers 400, because the store behind the lattice cannot back the \
+            tile — `levels` names the addresses, `max_level` is the reachable part of them. It is \
+            computed from the open pyramid's own geometry against both of this route's work bounds \
+            (the per-tile source-cell budget in `resolution.budget`, and the store's fold budget), \
+            on the WORST store either could meet, so it does not move as the store fills. \
+            The servable set is an AREA constraint and not a box — work goes as tile_hz x tile_s, \
+            so the real bound is an anti-diagonal in (level_f, level_t) — and a box inscribed in it \
+            cannot reach both far corners. What a box loses is the very-wide-AND-very-tall pairs; \
+            the box stated is the one whose corner tile covers the most area, and the tie among \
+            those goes to frequency. IT IS STATED FOR A 256-CELL TILE, this route's own unit, and \
+            NOT for this answer's `cells`: the bound is on area, so a ceiling quoted per answer \
+            would be a lie the moment a client probed cheaply and drew at full size — which is \
+            exactly what a client does. 256 is also the widest tile this route accepts, so the \
+            pair can never over-claim for a smaller one; a caller using `cells` below 256 can read \
+            further than this says, and gives up that reach for a number it can cache.",
         // The store level whose cells are EXACTLY this tile's, when the scheme has one. `null` on
         // the view lattice is not an error: it says this pair is off a welded ladder's diagonal, so
         // the tile is folded rather than read whole (T-434).
@@ -1033,7 +1219,11 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         return Err(too_many_in_flight());
     };
     let store = tile_store(state, q);
-    let key = with_tile_history(state, store, |p| parse_key(p.geometry(), q))?;
+    let (key, ceiling) = with_tile_history(state, store, |p| {
+        let key = parse_key(p.geometry(), q)?;
+        let ceiling = readable_ceiling(p, &key.lattice);
+        Ok((key, ceiling))
+    })?;
     let started = std::time::Instant::now();
     let max_live = crate::http::max_live_span_hz(state);
     let window = key.window();
@@ -1052,7 +1242,7 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     if uniform == Some("unobserved") {
         let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
         return Ok(unobserved_tile_json(
-            &key, store, coverage, max_live, elapsed_ms, &slot,
+            &key, store, ceiling, coverage, max_live, elapsed_ms, &slot,
         ));
     }
     let r = tile_read(state, store, &key)?;
@@ -1071,7 +1261,7 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
             "nt": key.cells,
             "nf": key.cells,
         },
-        "axes": axes_json(&key),
+        "axes": axes_json(&key, ceiling),
         "grid": grid_json(&r.grid),
         "coverage": coverage,
         "resolution": {
