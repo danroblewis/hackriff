@@ -13798,6 +13798,7 @@ tasks:
       STATE: the four proofs are #[ignore]d so one known-red measurement does not block unrelated
       merges; the control test is not. DELETING THOSE FOUR #[ignore] LINES IS T-484'S DoD. Run them:
       cargo test -p hk-e2e --test canvas_fidelity -- --ignored --test-threads 1 --nocapture
+    commit: "b9214f8"
   - id: T-484
     milestone: MLIVE
     title: The live/tuned tier must render at live-IQ FFT resolution - the pyramid stays coarse only for zoom-out and history
@@ -14086,6 +14087,63 @@ tasks:
       Filed by the coordinator 2026-09-18 from T-447's report. Depends on T-447 because it lands the
       shared helper (and T-431, which T-447 also carries - T-431 was marked done but its commit
       06e4b7d never reached main).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-490
+    milestone: MLIVE
+    title: One global refresh lane priced by the LAST revalidation starves a cheap live pane behind an expensive coarse one
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      UN-MASKED BY T-482, WHICH PROVED IT RATHER THAN GUESSED IT. T-460's live-edge refresh is ONE
+      GLOBAL LANE, at most one revalidation in flight, rate-limited by a share of THE PREVIOUS
+      REVALIDATION'S MEASURED COST, with NO PER-VIEWPORT FAIRNESS. That is fine while every viewport
+      is cheap. It is not fine when one is not.
+      WHY IT WAS INVISIBLE, and this is the part worth keeping: on main the minimap's address is a
+      PERMANENT 400, so T-479's terminal rule asks it once and never again, and the refresh lane plus
+      all four in-flight slots belong to the live pane. THE live-edge TEST PASSES ON MAIN BECAUSE THE
+      MINIMAP IS BROKEN. T-482's ceiling makes that address servable, the minimap comes alive, and
+      the defect appears.
+      MEASURED ON THE WIRE against a real hk serve, per address:
+        0/0  live pane   build 37 ms    65 536 source cells    1 history-lock hold
+        9/0  minimap     build 246 ms  2 097 152 source cells  37 history-lock holds
+        9/1              build 83 ms   1 261 568               18
+      BOTH STARVATION PATHS FIRE AT ONCE: the live pane's own level-0 latency goes 69 -> 183 ms
+      (server contention against the same mutex), AND its refresh count drops 68 -> 14 because the
+      lane is now pricing itself off 246 ms revalidations. Total requests 73 -> 41 - the RATE LIMITER,
+      not the in-flight cap, which stayed at peak 4 in both.
+      THE INVARIANT THIS BREAKS IS EXPLICIT IN CLAUDE.md: "the live view renders like a classic SDR
+      waterfall... live is NEVER gated on batch tile generation." A 246 ms, 2M-source-cell,
+      37-lock-hold coarse tile gating the live edge IS that defect.
+      WHAT THE FIX IS NOT, measured by T-482 and recorded so nobody re-tries them: the ceiling's
+      TIE-BREAK is not the lever - (8,2)/(7,3)/(6,4)/(5,5) are equally maximal, and a lower frequency
+      ceiling makes each minimap tile cheaper while requiring proportionally more of them, for the
+      same total work; and the minimap uses level_t 0 and 1, so the time cap is not binding it.
+      Changing affordable_levels' finest-affordable-first preference is ALSO not the fix - reading
+      32x the tile's own cell count is where the 2M comes from, but that rule is T-426/T-434/T-437-F2's
+      honesty defence and must not be altered to make a test pass.
+      SO THE FIX IS FAIRNESS, and the shape is a design call: per-viewport lanes, or a lane whose
+      budget is per-viewport rather than global, or a cost-aware admission rule that will not let one
+      expensive viewport price a cheap one out. Whatever is chosen, KEEP T-460's PROPERTIES: only the
+      live-edge address, only for a FOLLOWING viewport, only at the level it was drawn at, never more
+      often than one tCellNs, one revalidation in flight, and no visible fetch starved.
+      A SECOND, INDEPENDENT AVENUE worth measuring before choosing: the coarse tile's own cost. 37
+      history-lock holds for one read is the contention half, and it is separable from the lane.
+      DoD: with the minimap live, a following pane keeps drawing rows at its stated cadence -
+      live-edge.e2e.mjs green WITH T-482's ceiling in place, not with the minimap refused; the
+      per-address latency and count reported before and after; and T-460's five properties shown
+      still to hold.
+    notes: |
+      Filed 2026-09-18 from T-482's measurement. T-482 is CORRECT and its ceiling stands; it un-masked
+      a pre-existing defect that was invisible while the minimap was refused.
+      SEQUENCING DECISION (coordinator): this lands WITH T-482 rather than after it. Landing T-482
+      alone means a red live-edge gate for every subsequent merge; holding T-482 keeps the minimap
+      broken, which is the only reason the test is currently green. Neither is acceptable, so the two
+      go together.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
