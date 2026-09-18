@@ -38,6 +38,7 @@ function data(a: TileAddr): TileData {
     value: new Float32Array([-90, NaN, -70, NaN]),
     state: new Uint8Array([CELL.OBSERVED, CELL.UNOBSERVED, CELL.OBSERVED, CELL.UNKNOWN]),
     tier: "spectrum-history", answeredLevel: 1, fold: { frequency: "exact", time: "exact" },
+    measured: { nf: 2, nt: 2 },
     rangeDb: { lo: -100, hi: -60 }, bytes: BYTES, serverInFlightLimit: null,
   };
 }
@@ -80,12 +81,18 @@ test("the grey constant lives in exactly one place in the shader: the coverage-s
 test("the rule in TypeScript and the rule in GLSL are the same rule, because one generates the other", () => {
   assert.deepEqual(markFor(CELL.UNOBSERVED), { kind: "flat", rgb: GREY });
   assert.deepEqual(markFor(CELL.OBSERVED), { kind: "ramp" });
-  assert.notDeepEqual(markFor(CELL.NO_LEVEL), markFor(CELL.UNOBSERVED));
-  assert.notDeepEqual(markFor(CELL.UNKNOWN), markFor(CELL.UNOBSERVED));
-  assert.notDeepEqual(markFor(CELL.UNKNOWN), markFor(CELL.NO_LEVEL));
-  // Three states, three marks (T-413): a fourth state drawn as grey is the collapse this refuses.
-  const flats = CELL_MARKS.filter((m) => m.kind === "flat").map((m) => JSON.stringify(m));
-  assert.equal(new Set(flats).size, flats.length);
+  // FIVE states, five marks (T-413/T-441): any two of them drawn alike is the collapse this
+  // refuses — "looked and it was quiet" spelled as "never looked", in either direction.
+  const marks = CELL_MARKS.map((m) => JSON.stringify(m));
+  assert.equal(new Set(marks).size, CELL_MARKS.length, `two cell states share a mark: ${marks}`);
+  assert.equal(CELL_MARKS.length, Object.keys(CELL).length, "a state with no mark falls through to grey");
+  // …and no mark that is not the unobserved one may use the grey, in ANY of its parts.
+  for (const [s, m] of CELL_MARKS.entries()) {
+    if (s === CELL.UNOBSERVED) continue;
+    for (const c of m.kind === "flat" ? [m.rgb] : m.kind === "pattern" ? [m.rgb, m.ink] : []) {
+      assert.notDeepEqual([...c], [...GREY], `state ${s} draws THE grey`);
+    }
+  }
 });
 
 test("ONE canvas, ONE context — which is what makes the cache shareable at all", () => {

@@ -1,10 +1,12 @@
 // T-440: decoding one `/api/tiles` answer into the two planes, and the route's `503` as an answer
 // rather than an error.
 //
-// The assertions that carry weight are the ones about which of four things a cell is. `null` in
-// `grid.max_db` is "sampled, level not retained"; `state: "unobserved"` is "nothing ever looked";
-// `state: "unknown"` is "the record that would say is gone". Collapsing any pair of those is the
-// defect docs/16 §4 exists to forbid, and T-413 met it from the other side.
+// The assertions that carry weight are the ones about which of **five** things a cell is.
+// `state: "unobserved"` is "nothing ever looked"; `state: "unknown"` is "the record that would say
+// is gone"; and `null` in `grid.max_db` over an observed cell splits in two on `grid.frames`
+// (T-441) — zero frames folded is *nothing has been written here yet*, the normal state of a live
+// edge, while frames folded with no level is *no level is in hand*. Collapsing any pair of those is
+// the defect docs/16 §4 exists to forbid, and T-413 met it from the other side.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -34,7 +36,62 @@ function resp(over: Partial<TileResponse> = {}): TileResponse {
   };
 }
 
-test("four cell states, and none of them collapses into another", () => {
+test("the fifth state: observed, zero frames folded — NOT unknown, NOT grey, NOT 'level not retained'", () => {
+  // The live edge, as T-446 measured it post-fix: the radio is demonstrably tuned here (duty up to
+  // 1.0) and the pyramid has written nothing yet. Cell 0 has a level; cell 1 was folded from two
+  // frames and kept none; cell 2 has had nothing folded into it at all.
+  const t = decodeTile(ADDR, resp({
+    grid: { nt: 2, nf: 2, max_db: [-90, null, null, null], frames: [7, 2, 0, 0] },
+    coverage: {
+      grid: { nt: 2, nf: 2 },
+      any: { cells: [{ state: "observed" }, { state: "observed" }, { state: "observed" }, { state: "unobserved" }] },
+      selected: { device: "any", named: false, present: true },
+    },
+  }));
+  assert.deepEqual([...t.state], [CELL.OBSERVED, CELL.NO_LEVEL, CELL.AWAITING, CELL.UNOBSERVED]);
+  assert.ok(Number.isNaN(t.value[2]), "an awaiting cell must carry no number anything could colour");
+
+  // **Coverage still decides everything above the measurement.** Zero frames over an unobserved or
+  // unknown cell is not the fifth state — the fifth state's whole content is *we know we looked*.
+  const nothingFolded = decodeTile(ADDR, resp({
+    grid: { nt: 2, nf: 2, max_db: [null, null, null, null], frames: [0, 0, 0, 0] },
+    coverage: {
+      grid: { nt: 2, nf: 2 },
+      any: { cells: [{ state: "unobserved" }, { state: "unknown" }, { state: "observed" }, { state: "observed" }] },
+      selected: { device: "any", named: false, present: true },
+    },
+  }));
+  assert.deepEqual([...nothingFolded.state], [CELL.UNOBSERVED, CELL.UNKNOWN, CELL.AWAITING, CELL.AWAITING]);
+});
+
+test("without per-cell frame counts the decoder claims LESS, not more", () => {
+  // No `grid.frames` at all: every observed-and-null cell is NO_LEVEL, never AWAITING. The more
+  // specific state is granted only on positive evidence — `BiasTee::Unknown` is not `Off`.
+  const t = decodeTile(ADDR, resp({ grid: { nt: 2, nf: 2, max_db: [-90, null, null, null] } }));
+  assert.equal(t.state[1], CELL.NO_LEVEL);
+  // …and a frames array of the wrong length is not evidence either.
+  const short = decodeTile(ADDR, resp({ grid: { nt: 2, nf: 2, max_db: [-90, null, null, null], frames: [0, 0] } }));
+  assert.equal(short.state[1], CELL.NO_LEVEL);
+});
+
+test("`measured` is how many cells were really measured, so a replicated axis cannot pass as detail", () => {
+  const t = decodeTile(ADDR, resp({
+    resolution: {
+      source: "survey-overview",
+      answered: { level: 4 },
+      fold: {
+        frequency: { direction: "folded", source_cells: 512, served: 2 },
+        time: { direction: "replicated", source_cells: 1, served: 2 },
+      },
+    },
+  }));
+  assert.deepEqual(t.measured, { nf: 2, nt: 1 }, "a folded axis measured every served cell; a replicated one measured fewer");
+  // Absent fold info: the tile's own grid, because claiming LESS measured detail than we can show
+  // would be its own invention.
+  assert.deepEqual(decodeTile(ADDR, resp()).measured, { nf: 2, nt: 2 });
+});
+
+test("five cell states, and none of them collapses into another", () => {
   const t = decodeTile(ADDR, resp());
   assert.deepEqual([...t.state], [CELL.OBSERVED, CELL.NO_LEVEL, CELL.UNOBSERVED, CELL.UNKNOWN]);
   assert.equal(t.value[0], -90);

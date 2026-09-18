@@ -20,11 +20,19 @@
 // ancestor, said so, or the pending mark — because a memory budget must never be able to claim the
 // radio never looked (T-437 F3).
 //
+// One place for every mark. T-441 extended that generation to the three honesty tiers (§8.3: they
+// "stay visually distinct … so a wide or deep zoom never fakes resolution the hardware did not
+// capture") and to the stand-in hatch, so this file now contains no colour arithmetic of its own at
+// all — only the decision of *which* rule applies to a quad, and the pixel geometry each rule needs.
+// The tier mark qualifies a **measurement** and is applied only to an `OBSERVED` cell; the
+// survey-overview lattice is drawn at `uSrcPx`, the on-screen size of a cell the front end really
+// measured, which is how replication is declared rather than smoothed over.
+//
 // Presentation only. Tile extents, levels and states all come from the backend; this file maps them
 // to pixels and colours.
 
 import { CMAP_GLSL } from "../cmap";
-import { BACKDROP, CELL, CELL_RULE_GLSL, PENDING, type DrawKind } from "./cellrule";
+import { BACKDROP, CELL, CELL_RULE_GLSL, PENDING, tierByte, type DrawKind } from "./cellrule";
 import {
   ancestorsOf, extentOf, keyOf, levelsFor, tilesFor,
   type Box, type Lattice, type TileAddr,
@@ -86,23 +94,25 @@ uniform int   uKind;        // 0 = tile, 1 = flat
 uniform vec3  uFlat;
 uniform float uLo, uHi;     // ONE display range, shared by every pane: "same ramp, same scale"
 uniform float uFallback;    // 1 when this quad is an upscaled coarser ancestor standing in
-uniform vec2  uSizePx;      // the quad's size in device px, so the fallback hatch keeps its weight
-uniform int   uTier;        // 0 live-iq, 1 spectrum-history, 2 survey-overview — T-441 draws these
+uniform vec2  uSizePx;      // the quad's size in device px, so every mark keeps its screen weight
+uniform int   uTier;        // 0 live-iq, 1 spectrum-history, 2 survey-overview (cellrule.ts's TIER)
+uniform vec2  uSrcPx;       // the on-screen size of one cell the front end ACTUALLY measured
 ${CMAP_GLSL}
 ${CELL_RULE_GLSL}
 void main() {
   if (uKind == ${KIND_FLAT}) { frag = vec4(uFlat, 1.0); return; }
+  vec2 px = vQ * uSizePx;
   int s = int(floor(texture(uState, vUv).r * 255.0 + 0.5));
   float v = texture(uValue, vUv).r;
-  vec3 col = cellMark(s, (v - uLo) / max(uHi - uLo, 1e-6));
+  vec3 col = cellMark(s, (v - uLo) / max(uHi - uLo, 1e-6), px);
+  // **The honesty tier qualifies a measurement and nothing else** (docs/16 §8.3). Only an OBSERVED
+  // cell carries a resolution claim to overstate; a tier wash over an unobserved cell would make a
+  // second grey, which is the one thing this shader may not contain.
+  if (s == ${CELL.OBSERVED}) col = tierMark(uTier, col, px, uSrcPx);
   // A stand-in for a tile that has not arrived is MARKED, never passed off as the level it stands
   // in for (docs/16 §5.5: "draws the coarser parent upscaled and says so"). A coarse diagonal hatch
   // at constant screen weight, so it reads at any zoom and cannot be mistaken for structure.
-  if (uFallback > 0.5) {
-    vec2 px = vQ * uSizePx;
-    col = mix(col, vec3(0.5), 0.10);
-    if (fract((px.x + px.y) / 10.0) < 0.35) col *= 0.80;
-  }
+  if (uFallback > 0.5) col = fallbackMark(col, px);
   frag = vec4(col, 1.0);
 }`;
 
@@ -205,7 +215,7 @@ export class Surface {
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(String(gl.getProgramInfoLog(p)));
     this.prog = p;
-    for (const n of ["uRect", "uUv0", "uUv1", "uValue", "uState", "uKind", "uFlat", "uLo", "uHi", "uFallback", "uSizePx", "uTier"]) {
+    for (const n of ["uRect", "uUv0", "uUv1", "uValue", "uState", "uKind", "uFlat", "uLo", "uHi", "uFallback", "uSizePx", "uTier", "uSrcPx"]) {
       this.u[n] = gl.getUniformLocation(p, n);
     }
     this.vao = gl.createVertexArray()!;
@@ -329,11 +339,14 @@ export class Surface {
     gl.uniform1i(this.u.uState, 1);
     gl.uniform1i(this.u.uKind, KIND_TILE);
     gl.uniform1f(this.u.uFallback, kind === "fallback" ? 1 : 0);
-    gl.uniform1i(this.u.uTier, entry.data.tier === "live-iq" ? 0 : entry.data.tier === "spectrum-history" ? 1 : 2);
+    gl.uniform1i(this.u.uTier, tierByte(entry.data.tier));
     gl.uniform4f(this.u.uRect, clip[0], clip[1], clip[2], clip[3]);
     gl.uniform2f(this.u.uUv0, u0, v0);
     gl.uniform2f(this.u.uUv1, u1, v1);
-    gl.uniform2f(this.u.uSizePx, ((clip[2] - clip[0]) / 2) * rect.w, ((clip[3] - clip[1]) / 2) * rect.h);
+    const wPx = ((clip[2] - clip[0]) / 2) * rect.w, hPx = ((clip[3] - clip[1]) / 2) * rect.h;
+    gl.uniform2f(this.u.uSizePx, wPx, hPx);
+    const src = sourceCellPx(entry.data, u1 - u0, v1 - v0, wPx, hPx);
+    gl.uniform2f(this.u.uSrcPx, src[0], src[1]);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     this.drawCalls++;
   }
@@ -344,6 +357,7 @@ export class Surface {
     const clip = toClip(region, pane.box);
     gl.uniform1i(this.u.uKind, KIND_FLAT);
     gl.uniform1f(this.u.uFallback, 0);
+    gl.uniform2f(this.u.uSrcPx, 1, 1);
     gl.uniform3f(this.u.uFlat, rgb[0], rgb[1], rgb[2]);
     gl.uniform4f(this.u.uRect, clip[0], clip[1], clip[2], clip[3]);
     gl.uniform2f(this.u.uSizePx, ((clip[2] - clip[0]) / 2) * rect.w, ((clip[3] - clip[1]) / 2) * rect.h);
@@ -355,6 +369,44 @@ export class Surface {
     this.cache.dispose();
     this.gl.getExtension("WEBGL_lose_context")?.loseContext();
   }
+}
+
+/**
+ * The on-screen size, in device pixels, of **one cell the front end actually measured** — the pitch
+ * the `survey-overview` lattice is drawn at, so a replicated tile shows its real resolution instead
+ * of a smooth upscale of it (docs/16 §4: *never imply resolution the front end did not capture*).
+ *
+ * `du`/`dv` are the fraction of the tile this quad shows, so an ancestor standing in for one of its
+ * children gets the pitch of the part on screen rather than of the whole texture.
+ *
+ * Floored at 2 px: below that a lattice is aliasing rather than information, and a mark nobody can
+ * resolve is not a statement. The floor can only make the drawn cells look *finer* than they are on
+ * an axis where they are already finer than two pixels — never coarser, which is the direction that
+ * would be a claim.
+ *
+ * **Total, by construction.** A tile whose `measured` is missing or nonsensical falls back to the
+ * tile's own served grid, which is the *same* default [[decodeTile]] applies when the answer carries
+ * no `fold` block — one rule in one more place, not a second policy. So the drawn pitch is always
+ * what the tile itself says, and there is no input for which this throws. That last part is not
+ * politeness: `drawRegion` runs inside the frame loop, so a throw here does not spoil one tile, it
+ * blanks **every pane on the screen**. A renderer may not have an input that turns the whole surface
+ * off.
+ */
+export function sourceCellPx(
+  data: { readonly nf: number; readonly nt: number; readonly measured?: { readonly nf: number; readonly nt: number } },
+  du: number, dv: number, wPx: number, hPx: number,
+): [number, number] {
+  // `measured ?? served` is "no replication was reported", which is exactly what `measured` equal to
+  // the served grid means everywhere else in this client.
+  const axis = (measured: number | undefined, total: number, d: number, px: number) => {
+    const served = Number.isFinite(total) && total > 0 ? total : 1;
+    const m = Number.isFinite(measured) && (measured as number) > 0 ? Math.min(measured as number, served) : served;
+    return Math.max(2, Math.abs(px) / Math.max(1e-6, m * Math.abs(Number.isFinite(d) ? d : 1)));
+  };
+  return [
+    axis(data.measured?.nf, data.nf, du, wPx),
+    axis(data.measured?.nt, data.nt, dv, hPx),
+  ];
 }
 
 /**
