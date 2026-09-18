@@ -31,6 +31,8 @@ import {
   type OverlayQuad, type OverlayStyle,
 } from "./minimap";
 import { OverlayPass } from "./overlay";
+import { TracePass } from "./tracepass";
+import type { TracePath } from "./trace";
 import { PaneModel, levelDivergenceNote, paneStatuses, type FreqWindow, type PaneStatus } from "./panes";
 import { Surface, type PaneRect, type PaneReport, type PaneView, type SurfaceOptions, type TilePlanes } from "./surface";
 import type { TileCache, TileTextures } from "./tilecache";
@@ -85,8 +87,13 @@ export interface SurfaceViewOptions {
    * The strip is taken out of the pane's **rectangle**, never painted over it: an overlay covering
    * the newest rows would make "the top of the pane is the newest row" false, which is the one thing
    * every mark on this surface is placed through.
+   *
+   * Since T-475 it returns [[TracePath]]s for `./tracepass.ts` rather than overlay quads, because the
+   * series are coloured **by amplitude from the one ramp** and `overlay.ts`'s program is — and stays
+   * — incapable of a measurement colour. That is a deliberate widening, not a loosening: see the
+   * header of `./tracepass.ts` for the two properties it re-establishes structurally.
    */
-  trace?: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly OverlayQuad[]) | null;
+  trace?: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly TracePath[]) | null;
   /** Height of that strip, device px. 0 (the default) draws no trace and takes no space. */
   tracePx?: number;
 }
@@ -123,6 +130,8 @@ export class SurfaceView {
   overlays: boolean;
   minimapPx: number;
   private readonly overlay: OverlayPass;
+  /** The trace's own program: vertex colour from the one ramp, no sampler. See `./tracepass.ts`. */
+  private readonly tracePass: TracePass;
   private readonly chrome: SurfaceChrome | null;
   /** Per-viewport control, re-asked every frame (T-476). Null when the host offers none. */
   private readonly chromeAction: RowActionFor | null;
@@ -131,7 +140,7 @@ export class SurfaceView {
   /** Per-pane marks, re-derived every frame. See [[SurfaceViewOptions.marks]]. */
   marks: ((pane: PaneView, edgeNs: number) => readonly OverlayQuad[]) | null;
   /** Per-pane spectrum trace, re-derived every frame. See [[SurfaceViewOptions.trace]]. */
-  trace: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly OverlayQuad[]) | null;
+  trace: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly TracePath[]) | null;
   /** Height of the trace strip above each pane, device px. 0 hides it and returns the space. */
   tracePx: number;
 
@@ -142,6 +151,7 @@ export class SurfaceView {
     this.canvas = opts.canvas;
     this.surface = new Surface(opts.canvas, opts.lattice, opts.cache, opts.surface ?? {});
     this.overlay = new OverlayPass(this.surface.gl);
+    this.tracePass = new TracePass(this.surface.gl);
     this.panes = new PaneModel({
       bounds: opts.bounds, lattice: opts.lattice, freq: opts.freq, spanNs: opts.spanNs, device: opts.device,
     });
@@ -209,7 +219,7 @@ export class SurfaceView {
     //     Scissored to that strip, so a trace cannot reach the measurement it is a trace of, and
     //     handed the report the data pass produced so its reduction is at the level that was drawn.
     const traces: TraceRect[] = [];
-    const traceQuads: { rect: PaneRect; quads: readonly OverlayQuad[] }[] = [];
+    const tracePaths: { rect: PaneRect; paths: readonly TracePath[] }[] = [];
     if (this.trace && traceH > 0) {
       const byId = new Map(reports.map((r) => [r.id, r]));
       for (const v of paneViews) {
@@ -218,7 +228,7 @@ export class SurfaceView {
         const rect: PaneRect = { x: v.rect.x, y: v.rect.y + v.rect.h, w: v.rect.w, h: traceH };
         traces.push({ id: v.id, rect, box: v.box });
         const q = this.trace(v, edgeNs, report, rect);
-        if (q.length) traceQuads.push({ rect, quads: q });
+        if (q.length) tracePaths.push({ rect, paths: q });
       }
     }
     let overlaysDrawn = 0;
@@ -228,7 +238,7 @@ export class SurfaceView {
     }
     // The trace is not an overlay preference: it is a series in a rectangle of its own, so it draws
     // whether or not the map's outlines and the in-pane marks are switched off.
-    for (const p of traceQuads) this.overlay.draw(p.rect, p.quads);
+    for (const p of tracePaths) this.tracePass.draw(p.rect, p.paths);
     const quads = paneQuads.length ? [...mapQuads, ...paneQuads.flatMap((p) => p.quads)] : mapQuads;
 
     // 3. the chrome: the level each viewport resolved to, from the report it was actually drawn

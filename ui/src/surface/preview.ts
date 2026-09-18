@@ -39,6 +39,7 @@ import {
 import { tileUrl, type Box, type Lattice, type TileAddr } from "./lattice";
 import type { RowActionFor } from "./chrome";
 import type { OverlayQuad } from "./minimap";
+import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache, type Viewport } from "./tilecache";
@@ -462,7 +463,7 @@ export interface PreviewOptions {
    * The historical preview passes none. A trace of *this frame* needs a stream, and this host is
    * deliberately the one that reads no live edge.
    */
-  trace?: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly OverlayQuad[]) | null;
+  trace?: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly TracePath[]) | null;
   /** Height of that strip, device px. 0 draws no trace and gives the space back to the pane. */
   tracePx?: number;
 }
