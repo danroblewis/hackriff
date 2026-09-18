@@ -49,6 +49,13 @@ function hkBinary() {
 export async function startBackend({
   port = Number(process.env.HK_E2E_PORT ?? 8791),
   fixture = process.env.HK_E2E_FIXTURE ?? DEFAULT_FIXTURE,
+  // T-476, additive and off by default: drive the **mock SDR device** over the same fixture
+  // (`--device mock:…`) instead of a plain `--replay`. A replay reports no frequency grid and is not
+  // live, so every device-facing control on the page is correctly stated-and-disabled — which proves
+  // the disabled half and nothing about the enabled one. The mock reports a HackRF-class grid, an
+  // active capture window, and takes a retune, so a browser can drive the whole act without any real
+  // hardware (CLAUDE.md: e2e goes THROUGH the device interface; receive only; never the real radio).
+  mockDevice = false,
   // HK_E2E_UI_DIST is how `selftest.mjs` points the product's own server at a DELIBERATELY BROKEN
   // build, to prove this suite can still tell the difference.
   uiDist = process.env.HK_E2E_UI_DIST ?? path.join(UI_DIR, "dist"),
@@ -62,10 +69,12 @@ export async function startBackend({
   }
   const bin = hkBinary();
   const dataDir = mkdtempSync(path.join(tmpdir(), "hk-e2e-data-"));
+  const source = mockDevice
+    ? ["--device", `mock:${path.join(REPO, fixture)}`]
+    : ["--replay", path.join(REPO, fixture), "--loop"];
   const proc = spawn(bin, [
     "serve",
-    "--replay", path.join(REPO, fixture),
-    "--loop",
+    ...source,
     "--bind", `127.0.0.1:${port}`,
     "--data-dir", dataDir,
     "--ui-dist", uiDist,

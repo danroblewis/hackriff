@@ -30,11 +30,10 @@
    what the radio is doing. */
 .sf-live.on { color: var(--teal); border-color: var(--teal); }
 
-/* T-444: the retune offer. A pan produces it; only this button moves the front end, and a disabled
-   one is a STATED refusal (band edge, span too wide) rather than a clamped smaller move. */
-.sf-offer { display: flex; align-items: center; gap: 8px; color: var(--amber); min-width: 0; }
-.sf-offer > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 42ch; }
-.sf-offer button[disabled] { opacity: 0.5; cursor: not-allowed; }
+/* T-444's retune offer used to live in this bar, appearing only when a pan left the tuned window.
+   T-476 made it a PERSISTENT PER-PANE control, so it moved to the viewport rows in `.sf-chrome` and
+   is styled by `ui/src/surface/surface.css` (`.hk-surface-action` / `.hk-surface-why`) beside the
+   readout it belongs to. Nothing in this bar is per-viewport, which is why it could not stay here. */
 
 /* docs/16 §8.5a: the anti-divergence guarantee is "same ramp, same scale, STATED level" — two
    viewports at different (level_f, level_t) legitimately differ, and the map, being device-wide, is

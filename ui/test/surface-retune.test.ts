@@ -1,5 +1,13 @@
-// T-444 — retune-on-pan. Panning a pane to un-tuned spectrum **offers** a retune; taking the offer
-// is the one act that moves the radio, and it goes through T-343's single gate.
+// T-444 — retune to the viewport. Taking the offer is the one act that moves the radio, and it goes
+// through T-343's single gate.
+//
+// **T-476 corrected the trigger, on the user's own argument.** T-444 produced an offer only for a
+// viewport *not contained* in a tuned window, on the premise that a retune is for reaching spectrum
+// you cannot see. Retuning to a viewport **inside** the window raises the resolution there, so the
+// control is now persistent and per-pane, and the three conditions that used to erase it are stated
+// and disabled instead. The tests for that are in their own section below; the pair that matter most
+// are **the contained viewport is still retunable** (the ticket) and **a pane frozen between the
+// paint and the press refuses** (the hole a persistent control opens in T-407's guard).
 //
 // Four claims, each with the control that stops a degenerate implementation passing it:
 //
@@ -23,11 +31,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import type { FrequencyGrid } from "../src/navigation";
+import { retunePlan, type FrequencyGrid } from "../src/navigation";
 import type { ActiveWindow } from "../src/navigators";
 import { CELL } from "../src/surface/cellrule";
 import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
-import { PaneModel, type PaneState } from "../src/surface/panes";
+import { readoutOf } from "../src/surface/chrome";
+import { PaneModel, type PaneState, type PaneStatus } from "../src/surface/panes";
 import {
   acceptPaneRetune, coveringWindow, offerAcceptable, offerLabel, paneRetuneAction, paneRetuneOffer,
   type PaneRetuneOffer, type PaneRetuneSite,
@@ -130,14 +139,111 @@ test("T-340's control holds for a pane: pan and wheel across the whole 6 GHz sur
   assert.ok(offers.some((o) => offerAcceptable(o)), "no acceptable offer was produced, so the run proves nothing");
 });
 
-test("a pane already covered by a live window is offered nothing; a pane panned off it is", () => {
+// ---------------------------------------------------------------------------
+// T-476: the control is PERSISTENT, and containment was the wrong trigger
+// ---------------------------------------------------------------------------
+
+test("T-476 THE PROPERTY: a viewport zoomed INSIDE the tuned window is still offered a retune, and it is narrower", () => {
+  // The user's complaint, stated as the case that used to produce nothing. The pane opens at
+  // 100.8 MHz ± 500 kHz, wholly inside the 99.6–102 MHz window in force, and then zooms in further.
+  const m = model();
+  const p = m.list()[0].id;
+  m.zoomFreq(p, 0.2);                      // 200 kHz across, deep inside the 2.4 MHz capture
+  const box = m.get(p)!;
+  assert.ok(coveringWindow(WINDOWS, box.freq.centerHz - box.freq.spanHz / 2, box.freq.centerHz + box.freq.spanHz / 2),
+    "the run needs the pane to be CONTAINED, or it is not testing the case that regressed");
+  const o = offerFor(box);
+  assert.equal(o.covered?.deviceId, GRID.device_id, "the covering window is reported, not used to erase the offer");
+  assert.equal(offerAcceptable(o), true, "a contained viewport must still be retunable — that is the whole ticket");
+  assert.ok(o.plan.ok);
+  if (!o.plan.ok) return;
+  // …and what it buys is real: the planned capture is narrower than the one in force, which is the
+  // resolution argument the user made. 2 Msps is the HackRF's floor and the window is 2.4 MHz.
+  assert.ok(o.plan.spanHz < WINDOWS[0].spanHz, `${o.plan.spanHz} is not narrower than ${WINDOWS[0].spanHz}`);
+  assert.match(offerLabel(o), /narrower than the 2\.400 MHz capture in force/);
+});
+
+test("T-476: what the retune BUYS is stated, and a re-centre is not sold as a sharpening", () => {
+  // A pane as wide as the window it sits in: the plan cannot be narrower, so the label says so
+  // rather than implying finer cells. (Honesty, not politeness — it is the same rule as T-409's
+  // disabled-not-clamped and the grey rule: never claim detail the configuration will not produce.)
+  const m = new PaneModel({
+    bounds: BOUNDS, lattice: LAT, width: 1200, height: 800,
+    freq: { centerHz: 100.8e6, spanHz: 2.4e6 }, spanNs: 20 * S,
+  });
+  const o = offerFor(m.list()[0]);
+  assert.ok(o.covered, "the pane fills the window exactly, so it is contained");
+  assert.ok(o.plan.ok && o.plan.spanHz >= WINDOWS[0].spanHz);
+  assert.match(offerLabel(o), /no narrower than the 2\.400 MHz capture in force, so this re-centres rather than sharpens/);
+});
+
+test("T-476: a pane panned off the tuned window is offered a retune, as it always was", () => {
   const m = model();
   const p = m.list()[0];
   assert.equal(coveringWindow(WINDOWS, 100.3e6, 101.3e6)?.deviceId, GRID.device_id);
-  assert.equal(offerFor(p), null, "the radio is looking here already");
   m.panFreq(p.id, 300e6);
   const o = offerFor(m.get(p.id)!);
-  assert.ok(o && o.plan.ok, "panning to un-tuned spectrum must offer a retune");
+  assert.equal(o.covered, null, "panned off the window, nothing covers it");
+  assert.ok(o.plan.ok, "panning to un-tuned spectrum must offer a retune");
+});
+
+test("T-476: the control has a row on EVERY pane and none on the map, and the chrome stays ignorant of tuning", () => {
+  // Where the persistent control actually lives: a slot on each viewport's chrome row. Asserted on
+  // `readoutOf`, which is the pure half — the DOM half is `ui/e2e/surface-retune.e2e.mjs`, because a
+  // node test has no document and "a control that renders is not a control that is reachable".
+  const st = (id: string): PaneStatus => ({
+    id, rect: null, following: true, device: "any", levelF: 0, levelT: 0, cellHz: 6250, cellS: 1,
+    levelLabel: "6.25 kHz × 1.0 s cells (level 0/0)", timeLabel: "LIVE", freqLabel: "100.800 MHz ± 500 kHz",
+    tiles: 1, fallbacks: 0, pending: 0, differsFrom: [],
+  });
+  const asked: string[] = [];
+  const r = readoutOf([st("pane1"), st("pane2"), st("map")], "map", (id) => {
+    asked.push(id);
+    return { label: "Retune", why: `why ${id}`, enabled: id === "pane1" };
+  });
+  assert.deepEqual(asked, ["pane1", "pane2"], "the map was asked for a control, or a pane was not");
+  assert.deepEqual(r.rows.map((x) => x.action?.why ?? null), ["why pane1", "why pane2", null]);
+  assert.deepEqual(r.rows.map((x) => x.action?.enabled ?? null), [true, false, null],
+    "a disabled control is still ON the row: a missing control teaches the user nothing");
+  // And with no host supplying one, the readout is exactly what it was before T-476.
+  assert.deepEqual(readoutOf([st("pane1")], null).rows.map((x) => x.action), [null]);
+  // The slot is strings and a bit. `chrome.ts` may not know what a retune is, or `retune.ts` — and
+  // with it `applyDeviceAction` — lands in the /surface.html preview's import graph, which
+  // `surface-preview.test.ts` forbids.
+  // Comments explaining why the slot is anonymous are the point, not a dependency.
+  const src = readFileSync("src/surface/chrome.ts", "utf8")
+    .split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+  for (const word of ["retune", "Retune", "centerHz", "spanHz", "/api/"]) {
+    assert.ok(!src.includes(word), `chrome.ts names "${word}": the control's slot must stay anonymous`);
+  }
+});
+
+test("T-476: there is NO pane state that produces no control — every one gets a sentence", () => {
+  // "Nothing said is never permissive." The three conditions that used to erase the control are
+  // enumerated here against `offerLabel`, so a future refusal that forgets to say anything fails.
+  const cases: { what: string; pane: PaneState; grid: FrequencyGrid | null; re: RegExp }[] = [];
+  const paneWith = (freq: { centerHz: number; spanHz: number }, back = 0) => {
+    const m = new PaneModel({ bounds: BOUNDS, lattice: LAT, width: 1200, height: 800, freq, spanNs: 20 * S });
+    const id = m.list()[0].id;
+    if (back) m.panTime(id, -back);
+    return m.get(id)!;
+  };
+  cases.push({ what: "contained in the tuned window", pane: paneWith({ centerHz: 100.8e6, spanHz: 200e3 }), grid: GRID, re: /^Retune to 100\./ });
+  cases.push({ what: "off the tuned window", pane: paneWith({ centerHz: 433.92e6, spanHz: 200e3 }), grid: GRID, re: /^Retune to 433\./ });
+  cases.push({ what: "frozen in the past", pane: paneWith({ centerHz: 433.92e6, spanHz: 200e3 }, 60 * S), grid: GRID, re: /frozen behind the growing edge/ });
+  cases.push({ what: "wider than one live window", pane: paneWith({ centerHz: 3e9, spanHz: 400e6 }), grid: GRID, re: /survey overview/ });
+  cases.push({ what: "no grid reported", pane: paneWith({ centerHz: 433.92e6, spanHz: 200e3 }), grid: null, re: /has not reported a tunable range/ });
+  for (const c of cases) {
+    const o = offerFor(c.pane, T0, WINDOWS, c.grid);
+    assert.ok(o, `${c.what}: no offer at all — the control would vanish`);
+    const label = offerLabel(o);
+    assert.match(label, c.re, `${c.what}: ${label}`);
+    assert.ok(label.length > 20, `${c.what}: the sentence says nothing`);
+  }
+  // The control that stops "every case is disabled" from passing this: two of the five are takeable
+  // and three are stated refusals, so the enumeration is measuring a difference.
+  const takeable = cases.filter((c) => offerAcceptable(offerFor(c.pane, T0, WINDOWS, c.grid)));
+  assert.equal(takeable.length, 2, `expected exactly the two live, in-range panes to be takeable: ${takeable.map((c) => c.what)}`);
 });
 
 test("a pane straddling the tuned window's edge is un-tuned: coverage is containment, not overlap", () => {
@@ -147,20 +253,32 @@ test("a pane straddling the tuned window's edge is un-tuned: coverage is contain
   assert.ok(coveringWindow(WINDOWS, 100.3e6, 101.3e6, GRID.device_id!));
 });
 
-test("a pane frozen in the past is offered nothing: a retune cannot change what was already captured", () => {
+test("a pane frozen in the past is STATED and disabled: a retune cannot change what was already captured", () => {
   const m = model();
   const p = m.list()[0].id;
   m.panFreq(p, 300e6);
-  assert.ok(offerFor(m.get(p)!), "the live pane is offered a retune");
+  assert.equal(offerAcceptable(offerFor(m.get(p)!)), true, "the live pane is offered a retune");
   m.panTime(p, -60 * S);
-  assert.equal(offerFor(m.get(p)!), null, "a pane scrubbed into history has nothing to gain from a retune");
+  const o = offerFor(m.get(p)!);
+  assert.equal(o.block, "past");
+  assert.equal(offerAcceptable(o), false, "a pane scrubbed into history has nothing to gain from a retune");
+  assert.equal(paneRetuneAction(o), null, "…and a blocked control must not become a device action");
+  assert.match(offerLabel(o), /frozen behind the growing edge/);
+  // The block is a fact about the VIEW, not about the front end: the plan itself is fine, and says
+  // so. Folding it into a `RetunePlan` reason would make those reasons mean two kinds of thing.
+  assert.equal(o.plan.ok, true);
 });
 
-test("an unreported grid offers nothing: not knowing the front end's range is not evidence it can reach here", () => {
+test("an unreported grid is stated, not silent: not knowing the front end's range is not evidence it can reach here", () => {
   const m = model();
   const p = m.list()[0].id;
   m.panFreq(p, 300e6);
-  assert.equal(offerFor(m.get(p)!, T0, WINDOWS, null), null);
+  const o = offerFor(m.get(p)!, T0, WINDOWS, null);
+  assert.equal(o.plan.ok, false);
+  if (o.plan.ok) return;
+  assert.equal(o.plan.reason, "no_grid");
+  assert.equal(offerAcceptable(o), false);
+  assert.match(offerLabel(o), /has not reported a tunable range/);
 });
 
 // ---------------------------------------------------------------------------
@@ -310,6 +428,71 @@ test("T-407's failure mode, structurally: a pane that MOVED refuses rather than 
   assert.equal(site.invalidations, 0);
   // The *fresh* offer is takeable: the refusal is about staleness, not about the pane.
   assert.equal((await acceptPaneRetune(ctx, site, site.offerNow(p)!)).ok, true);
+});
+
+test("T-476/T-407: a pane FROZEN between the paint and the press refuses, and reaches nothing", async () => {
+  // The hole the persistent control opens, and the reason `sameTarget` compares `block`. Under
+  // T-444 a pane scrubbed into the past made `offerNow` return `null`, which read as "moved". Now it
+  // returns a well-formed offer whose PLAN is identical — same centre, same span — and only `block`
+  // differs. Compare on the plan alone and a frozen viewport retunes the radio.
+  const m = model();
+  const p = m.list()[0].id;
+  m.panFreq(p, 300e6);
+  const site = siteOver(m);
+  const offer = site.offerNow(p)!;
+  m.panTime(p, -60 * S);                 // pause + scrub, between the label being painted and the press
+  const after = site.offerNow(p)!;
+  assert.ok(offer.plan.ok && after.plan.ok);
+  if (offer.plan.ok && after.plan.ok) {
+    assert.equal(after.plan.centerHz, offer.plan.centerHz, "the run needs the PLANS to agree, or it proves nothing");
+    assert.equal(after.plan.spanHz, offer.plan.spanHz);
+  }
+  assert.equal(after.block, "past");
+  const { ctx, calls } = deviceSpyCtx();
+  assert.deepEqual(await acceptPaneRetune(ctx, site, offer), { ok: false, reason: "moved" });
+  assert.deepEqual(calls, [], "a frozen viewport commanded the radio");
+  assert.equal(site.invalidations, 0);
+});
+
+test("T-476 THE COMMIT: what goes out is the CONTAINED viewport as it stands at the instant of commit", async () => {
+  // The failure mode this repo keeps hitting, applied here: *a control that renders is not a control
+  // that retunes to the viewport it is showing.* So this asserts the bodies actually POSTed, against
+  // the pane's own window read at commit — not against the offer object, which would be comparing
+  // the arithmetic to itself.
+  const m = model();                                    // 100.8 MHz ± 500 kHz, inside the window
+  const p = m.list()[0].id;
+  m.zoomFreq(p, 0.2);                                   // …zoomed to 200 kHz, still inside it
+  const site = siteOver(m);
+  const offer = site.offerNow(p)!;
+  const { ctx, calls } = deviceSpyCtx();
+  const out = await acceptPaneRetune(ctx, site, offer);
+  assert.equal(out.ok, true);
+
+  // Re-derive the target from the PANE, through the planner, with no reference to `offer`.
+  const box = m.get(p)!.freq;
+  const expected = retunePlan(GRID, box.centerHz - box.spanHz / 2, box.centerHz + box.spanHz / 2);
+  assert.ok(expected.ok);
+  if (!expected.ok) return;
+  const posted = Object.fromEntries(calls.map((c) => [c.path, c.body]));
+  assert.deepEqual(posted["/api/control/center"], { center_hz: expected.centerHz });
+  assert.deepEqual(posted["/api/control/rate"], { sample_rate_hz: expected.spanHz });
+  // …and the centre that went out is the OFF-DC placement for this viewport, not the viewport's own
+  // midpoint: the plan is being obeyed, not approximated by something that happens to be nearby.
+  assert.ok(Math.abs((box.centerHz - expected.centerHz) - expected.spanHz / 4) <= STEP / 2 + 1e-6,
+    `${expected.centerHz} is not span/4 below the viewport's ${box.centerHz}`);
+  // The resolution claim, measured: the capture that went out is narrower than the one in force.
+  assert.ok(expected.spanHz < WINDOWS[0].spanHz, "the retune must buy a narrower capture, or the ticket's premise is wrong");
+  // NON-VACUITY: the same run with the pane moved between paint and commit posts NOTHING, so the
+  // agreement above is the guard working rather than the guard being absent.
+  const m2 = model();
+  const q = m2.list()[0].id;
+  m2.zoomFreq(q, 0.2);
+  const site2 = siteOver(m2);
+  const stale = site2.offerNow(q)!;
+  m2.panFreq(q, 500e6);
+  const spy2 = deviceSpyCtx();
+  assert.deepEqual(await acceptPaneRetune(spy2.ctx, site2, stale), { ok: false, reason: "moved" });
+  assert.deepEqual(spy2.calls, []);
 });
 
 test("a pan too small to change the snapped configuration is not a moved target", async () => {
