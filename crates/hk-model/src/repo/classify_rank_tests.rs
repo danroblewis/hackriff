@@ -474,8 +474,11 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
         // T-262: nor the 0012 observation-time index. It is an *index*, not a table — its table
         // `emitter_observation` comes from 0001 and stays — so it needs DROP INDEX, and without it
         // replaying 0012 onto this file fails with "index ... already exists".
+        // T-374: nor the 0014 harmonic-family tables (members first: they reference the family).
         conn.execute_batch(
             "DROP INDEX IF EXISTS idx_emitter_observation_time; \
+             DROP TABLE IF EXISTS harmonic_family_member; \
+             DROP TABLE IF EXISTS harmonic_family; \
              DROP TABLE IF EXISTS emitter_relation; \
              DROP TABLE IF EXISTS signature_match; \
              DROP TABLE IF EXISTS signature; \

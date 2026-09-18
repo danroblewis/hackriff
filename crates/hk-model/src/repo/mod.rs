@@ -69,6 +69,9 @@ mod cluster;
 mod cluster_tests;
 mod clusters; // T-202 C18 clusters of unknown emissions
 mod gating;
+mod harmonic; // T-374 (C40): harmonic families
+#[cfg(test)]
+mod harmonic_tests;
 mod interpret;
 mod inventory;
 mod lifecycle;
@@ -113,6 +116,7 @@ use crate::region::Region;
 use crate::time::Timestamp;
 
 pub use bookmarks::{BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind};
+pub use harmonic::{HarmonicFamilyRow, MAX_FAMILY_CANDIDATES};
 pub use inventory::EmitterUpsert;
 pub use lifecycle::LIFECYCLE_TEXT_MAX;
 pub use refined::{REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning};
@@ -143,6 +147,7 @@ const MIGRATIONS: &[&str] = &[
     // appends after 0013 (T-262), and databases at either version migrate correctly.
     include_str!("migrations/0013_trunking.sql"), // T-266 C23 trunking metadata (no call audio)
     include_str!("migrations/0012_observation_time_index.sql"), // T-262 ADR-0017 TM-5 (index only)
+    include_str!("migrations/0014_harmonic_family.sql"), // T-374 C40 harmonic families
 ];
 
 /// Schema version this build creates and understands.
