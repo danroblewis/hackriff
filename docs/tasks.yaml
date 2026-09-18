@@ -13386,7 +13386,8 @@ tasks:
   - id: T-473
     milestone: M2-hardening
     title: The e2e tier has no per-spec timeout and can hang the gate indefinitely - observed at 31 minutes
-    status: in-progress
+    status: done
+    commit: "e55f627e"
     priority: high
     parallel_group: CI
     depends_on: []
@@ -15191,7 +15192,7 @@ tasks:
   - id: T-507
     milestone: MLIVE
     title: A server that has lost its history answers every tile all-unknown - a wall of purple the user sees
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15222,7 +15223,7 @@ tasks:
   - id: T-508
     milestone: MLIVE
     title: A failed re-plumb ends the run for good while hk serve stays up saying finished - the other road to "retune never recovers"
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
