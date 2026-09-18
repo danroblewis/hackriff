@@ -1200,6 +1200,60 @@ test was satisfied in 3 s, the difference being luck about which second each hap
 and gives the pyramid a bounded moment; a failed attempt freezes somewhere else. It is T-487's
 "re-establish and re-verify" one level out, and it took the file from 104 s to 26 s.
 
+### 8.5e The readable ceiling is an INDEX bound, so the floor and the reach are one budget (T-501, 2026-09-18)
+
+**T-484 is not affordable, and the measurement says so without ambiguity.** It set the view
+lattice's node (0, 0) to the display STFT's own bin and row — 585.9375 Hz x 40.106667 ms at
+2.4 Msps, against the shipped 6250 Hz x 1 s — to make the finest tier reproduce the published rows
+1:1 (T-483's gap). It passed every unit suite, `canvas_fidelity` 5/5 and a full gate, and left the
+user's demo with **no tiles**. This is where the tiles went.
+
+**`axes.{frequency,time}.max_level` bounds `level_f` and `level_t`, not cell size.** Measured with
+`hk_api::tiles::readable_ceiling` over a sweep of `f_levels x t_levels` in `2..=10`, at both floors:
+the declared ceiling is **identical, index for index, on every depth in the sweep** — the shipped
+4 x 4 answers `(9, 1)` for a 6250 Hz x 1 s floor and `(9, 1)` for T-484's, because `servable` is a
+statement about *ratios* (tile span over source cell) and is blind to absolute size. So the
+**coarsest tile the surface can address shrinks by exactly the factor the floor shrank**: from
+819.2 MHz x 512 s to **76.8 MHz x 20.5 s**, a **133x** loss of tile *area*.
+
+**No depth gives it back.** The best `level_f + level_t` anywhere in the sweep is **11** (at 7 x 2
+and 6 x 3), against the **19** that matching the old absolute reach would need; and past
+`f_levels + t_levels >= 13` the ceiling **collapses to `(0, 0)`** — the buildability gap T-484's own
+`VIEW_T_LEVELS` note records, where `affordable_levels` admits a node `materialize` then refuses and
+one bad candidate poisons every address. The whole usable range of the budget is eight doublings
+short of the eight doublings the fidelity floor spends.
+
+**What that does to the client is the dark map.** `tilesFor` has no budget: `Surface.render` walks
+every address a viewport enumerates, every frame, and `TileCache` queues each miss behind the
+route's four-slot in-flight cap under a 96 MB LRU. Measured with the client's own `tilesFor`
+against a live server of each build (`ui/test/surface-lattice.test.ts` pins these):
+
+| viewport | shipped floor | T-484's floor |
+|---|---|---|
+| tuned pane, 2.4 MHz x 20 s | 4 | 15 |
+| tuned pane, 2.4 MHz x 20 min | 6 | 300 |
+| tuned pane, 2.4 MHz x 30 min | 8 | 445 |
+| minimap, 6 GHz x 100 s | 16 | **474** |
+| minimap, 6 GHz x 20 min | 24 | **4 740** |
+| minimap, 6 GHz x 30 min | 32 | **7 031** |
+
+The pins double those again (`pinParents` prefetches the same box one level coarser). **This is why
+nothing caught it:** every suite runs against a server that has existed for seconds, and the surface
+opens on the *observed extent* (`surface/bootstrap.ts`), so a seconds-old server opens on a seconds-
+wide window and enumerates a handful of tiles. The user's demo had been capturing for twenty
+minutes. The tile map was not wrong; it was never delivered.
+
+**The consequence for the design.** One lattice cannot be both the display stream's own bin and row
+at its floor *and* device-wide over the record horizon at its ceiling — the two ends are one budget
+and it is about eight doublings too small. Closing T-483's gap therefore needs a **change of
+approach**, not a tuning: the wide-and-long viewports must be answered from a *coarser tier* (scheme
+1, or a second coarse view lattice) while the fine tier answers the tuned window — the honesty tiers
+made real in the tile **source** rather than only in the label — and/or the minimap must ask
+`/api/coverage` first and request tiles only where something was observed, so its enumeration is
+bounded by *observed* area rather than by viewport area. Raising `readable_ceiling`'s wall is a
+prerequisite either way, and starts with the `affordable_levels`/`materialize` disagreement that
+collapses the ceiling past `f_levels + t_levels = 12`.
+
 ### 8.5a What the spike proved, and the three places §8 and §6 were wrong (T-437, 2026-09-17)
 
 **Verdict: YES for the renderer, NO for the system as it stands** — and two of the blockers are
