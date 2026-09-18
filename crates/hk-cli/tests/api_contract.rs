@@ -6105,13 +6105,15 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
     assert_eq!(v["window"]["span_s"], json!(1.0), "{v}");
     // A window in 1970 saw nothing, whatever the band: the map is time-scoped, not a band property.
     assert_eq!(v["any"]["observed_cells"], json!(0), "{v}");
-    // T-423: and it does not say it was *never looked at* either. 1970 lies before the oldest
-    // record this server still holds, so the honest answer is the fourth state — "we no longer know
-    // whether we looked" — which is a different value from grey and carries no measurement keys.
-    assert_eq!(v["any"]["unknown_cells"], json!(4), "{v}");
-    assert_eq!(v["any"]["unobserved_cells"], json!(0), "{v}");
+    // T-507: and 1970 is before this server recorded anything, with nothing discarded that could
+    // say otherwise — so it is honestly grey, `unobserved`, not the fourth state. (T-423 served
+    // `"unknown"` here: every server's memory was taken to be lost before its first sample, which
+    // painted a fresh server's past purple.)
+    assert_eq!(v["horizon"]["forgotten"], Value::Null, "{v}");
+    assert_eq!(v["any"]["unknown_cells"], json!(0), "{v}");
+    assert_eq!(v["any"]["unobserved_cells"], json!(4), "{v}");
     for c in v["any"]["cells"].as_array().expect("cells") {
-        assert_eq!(*c, json!({ "state": "unknown" }), "{v}");
+        assert_eq!(*c, json!({ "state": "unobserved" }), "{v}");
     }
 
     let (st, _) = call(
@@ -6149,11 +6151,11 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
 ///     later answer cannot hold fewer seconds) plus the shape the bug would break. T-430: the
 ///     live window cannot carry an exact identity, because the radio captures more of it between
 ///     the two round-trips — one 16384-sample block, 6.8267 ms, at a time.
-///  3. **The fourth state is sayable, and it is not grey.** A window before the oldest surviving
-///     record answers `"unknown"` — *we no longer know whether we looked* — never `"unobserved"`,
-///     which claims nothing looked. The **control** is property 1's later rows: inside the horizon
-///     the same absence of coverage reads `"unobserved"`. Two windows, two different values, so
-///     neither is a constant.
+///  3. **A young server has forgotten nothing (T-507).** A window before this server recorded
+///     anything answers `"unobserved"` — nothing looked, and nothing was discarded that could say
+///     otherwise — never `"unknown"`. The fourth state is asserted on a server that has actually
+///     recorded and lost something, in
+///     `unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so`.
 ///  4. **Device stays in the key.** Every per-device grid carries the full `nt × nf` plane and the
 ///     union wears `"any"` with `"named": false` (T-259/T-305).
 ///
@@ -6355,38 +6357,42 @@ fn coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it
         "a window wholly inside capture is sampled throughout: {pcol}"
     );
 
-    // ---- 3. the fourth state, and it is a DIFFERENT value from grey ----
-    // Three hours before the live edge: before the ring's buffer and before the observation log's
-    // oldest surviving hour. No record can say either way, so `unobserved` would be a claim nothing
-    // supports.
+    // ---- 3. a young server has forgotten nothing (T-507) ----
+    // Three hours before the live edge: before this server recorded anything at all. Nothing
+    // looked, and this server knows it — it has discarded nothing — so the answer is the true one,
+    // `unobserved`. Before T-507 it was `"unknown"` for every such row: the purple wall a freshly
+    // started server painted under a live page. The fourth state is asserted where it belongs, on a
+    // server that has actually recorded and lost something:
+    // `unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so`.
     let (ot0, ot1) = (edge - 3.0 * 3600.0 - 600.0, edge - 3.0 * 3600.0);
     let (st, old) = get(
         addr,
         &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells={CELLS}&rows=4&t0={ot0}&t1={ot1}"),
     );
     assert_eq!(st, 200, "{old}");
+    let began = old["horizon"]["recording_began_s"]
+        .as_f64()
+        .expect("a recording server names when it began");
     let oldest = old["horizon"]["oldest_record_s"]
         .as_f64()
         .expect("the horizon names the oldest surviving record");
     assert!(
-        oldest > ot1,
-        "this window is wholly before the oldest record ({oldest}): {old}"
+        began > ot1 && oldest > ot1,
+        "this window is wholly before the server recorded anything: {old}"
     );
-    assert_eq!(old["horizon"]["unknown_rows"], json!(4), "{old}");
+    assert!(
+        began <= buffered_t0 + 1e-6,
+        "recording began no later than the ring's oldest sample: {old}"
+    );
+    assert_eq!(old["horizon"]["forgotten"], Value::Null, "{old}");
+    assert_eq!(old["horizon"]["unknown_rows"], json!(0), "{old}");
     assert_eq!(old["horizon"]["rows"], json!(4), "{old}");
-    assert_eq!(old["any"]["unknown_cells"], json!(4 * CELLS), "{old}");
-    assert_eq!(old["any"]["unobserved_cells"], json!(0), "{old}");
-    assert_eq!(old["any"]["observed_cells"], json!(0), "{old}");
+    assert_eq!(old["any"]["unknown_cells"], json!(0), "{old}");
+    assert_eq!(old["any"]["unobserved_cells"], json!(4 * CELLS), "{old}");
     for c in old["any"]["cells"].as_array().expect("cells") {
-        // No measurement keys, exactly like grey — and a different value from grey.
-        assert_eq!(*c, json!({ "state": "unknown" }), "{old}");
-        assert_ne!(*c, json!({ "state": "unobserved" }), "{old}");
+        assert_eq!(*c, json!({ "state": "unobserved" }), "{old}");
     }
-    // The pair that makes neither a constant: the same absence of coverage, inside the horizon,
-    // came back `unobserved` in property 1 above.
-    assert_ne!(cells[5 * CELLS], old["any"]["cells"][0], "{g} vs {old}");
-    // And the horizon block inside the live window says the opposite, so `unknown_rows` is measured
-    // rather than always-on.
+    // And the horizon block inside the live window says the same.
     assert_eq!(g["horizon"]["unknown_rows"], json!(0), "{g}");
 
     // ---- 4. device stays in the key, with the time axis intact per device ----
@@ -6470,6 +6476,165 @@ fn coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it
     stop_server(serving);
 }
 
+/// **T-507: `"unknown"` is only what a server recorded and lost, and the plane says exactly that.**
+///
+/// A server whose IQ ring keeps two seconds has, a few seconds in, genuinely *lost* the tune
+/// record of its first seconds while its spectrum history still remembers that it was recording
+/// then. That is the fourth state's real case, and the route draws it as a band with a floor:
+///
+/// - rows wholly **before `recording_began_s`** are `"unobserved"` — nothing this server knows of
+///   was recording, and it has discarded nothing that could say otherwise;
+/// - rows **from it until `oldest_record_s`** are `"unknown"` — recorded, record since lost;
+/// - `forgotten` is null: the history still knows when recording began, so the ring's routine
+///   eviction does not make the past unbounded.
+///
+/// And on `/api/tiles` the same band, row for row, derived from the tile's **own** `horizon` — so
+/// the plane cannot be right by accident — with T-461's fail-closed half on a real server: a plane
+/// holding any `"unknown"` never short-circuits. The tile is placed from the route's own
+/// `recording_began_s`, never from wall clock, so unlike the assertion it replaces (T-509) it does
+/// not depend on where a 32 s block boundary falls relative to the request.
+#[test]
+fn unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so() {
+    const CELLS: usize = 4;
+    let (_dir_guard, serving, addr) = start_server_retaining(Some(2.0));
+    let (lo, hi) = (
+        FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
+        FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0,
+    );
+    let (mut began, mut oldest) = (0.0f64, 0.0f64);
+    wait_for(
+        "the ring to discard four seconds of what the server recorded",
+        Duration::from_secs(60),
+        || {
+            let (st, v) = get(addr, &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=1"));
+            let h = &v["horizon"];
+            match (
+                st,
+                h["recording_began_s"].as_f64(),
+                h["oldest_record_s"].as_f64(),
+            ) {
+                (200, Some(b), Some(o)) if o - b >= 4.0 => {
+                    (began, oldest) = (b, o);
+                    true
+                }
+                _ => false,
+            }
+        },
+    );
+
+    // ---- /api/coverage: eight 1 s rows, half a row off `began` so no row edge sits on it ----
+    let (t0, t1) = (began - 4.5, began + 3.5);
+    assert!(
+        t1 <= oldest,
+        "every row after `began` is before the oldest record"
+    );
+    let (st, v) = get(
+        addr,
+        &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells={CELLS}&rows=8&t0={t0}&t1={t1}"),
+    );
+    assert_eq!(st, 200, "{v}");
+    let h = &v["horizon"];
+    assert_eq!(h["forgotten"], Value::Null, "{h}");
+    assert_eq!(h["recording_began_s"].as_f64(), Some(began), "{h}");
+    assert_eq!(h["unknown_from_row"], json!(4), "{h}");
+    assert_eq!(h["unknown_rows"], json!(4), "{h}");
+    let cells = v["any"]["cells"].as_array().expect("cells");
+    assert_eq!(cells.len(), 8 * CELLS, "{v}");
+    for (i, c) in cells.iter().enumerate() {
+        // Rows 0..4 end at or before `began - 0.5`; row 4 straddles `began`; rows 5..8 lie
+        // between it and the ring's floor. The tuned band itself: the ring has discarded it.
+        let want = if i / CELLS < 4 {
+            "unobserved"
+        } else {
+            "unknown"
+        };
+        // No measurement keys either way: neither is a level.
+        assert_eq!(*c, json!({ "state": want }), "cell {i}: {v}");
+    }
+    assert_eq!(v["any"]["unknown_cells"], json!(4 * CELLS), "{v}");
+    assert_eq!(v["any"]["unobserved_cells"], json!(4 * CELLS), "{v}");
+
+    // ---- /api/tiles: the same band, in the block `began` falls in, over a band never tuned ----
+    const N: u64 = 32;
+    let probe = get(
+        addr,
+        &format!("/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells={N}"),
+    )
+    .1;
+    let (f_cell, t_cell) = (
+        probe["extent"]["f_cell_hz"].as_f64().unwrap(),
+        probe["extent"]["t_cell_s"].as_f64().unwrap(),
+    );
+    let far = (STATION_HZ / (f_cell * N as f64)).floor() as u64 + 2_000;
+    let block_s = t_cell * N as f64;
+    let t_index = (began / block_s).floor() as u64;
+    let (st, tile) = get(
+        addr,
+        &format!("/api/tiles?level_f=0&level_t=0&f_index={far}&t_index={t_index}&cells={N}"),
+    );
+    assert_eq!(st, 200, "{tile}");
+    let cov = &tile["coverage"];
+    let th = &cov["horizon"];
+    let tb = th["recording_began_s"].as_f64().expect("began");
+    let to = th["oldest_record_s"].as_f64().expect("oldest");
+    assert_eq!(tb, began, "{th}");
+    // The expected plane, row by row, from the tile's own horizon.
+    let tile_t0 = t_index as f64 * block_s;
+    let want: Vec<&str> = (0..N)
+        .map(|r| {
+            let z = tile_t0 + (r + 1) as f64 * t_cell;
+            if z <= tb || z > to {
+                "unobserved"
+            } else {
+                "unknown"
+            }
+        })
+        .collect();
+    let states: Vec<String> = cov["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_string())
+        .collect();
+    let sel = cov["selected"]["plane"].as_u64().unwrap() as usize;
+    let runs: Vec<u64> = cov["planes"][sel]["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_u64().unwrap())
+        .collect();
+    let got: Vec<String> = runs
+        .chunks(2)
+        .flat_map(|p| std::iter::repeat_n(states[p[0] as usize].clone(), p[1] as usize))
+        .collect();
+    assert_eq!(got.len() as u64, N * N, "{cov}");
+    for (r, w) in want.iter().enumerate() {
+        for f in 0..N as usize {
+            assert_eq!(got[r * N as usize + f], *w, "row {r} cell {f}: {th}");
+        }
+    }
+    let unknown = want.iter().filter(|w| **w == "unknown").count();
+    assert!(
+        unknown > 0,
+        "the row holding `began` is always unknown here: {th}"
+    );
+    assert_eq!(th["unknown_rows"], json!(unknown), "{th}");
+    // T-461, fail-closed, on a real server: any `"unknown"` means the full read.
+    assert_eq!(
+        tile["resolution"]["short_circuit"]["applied"],
+        json!(false),
+        "{tile}"
+    );
+    if unknown < N as usize {
+        assert_eq!(
+            tile["resolution"]["short_circuit"]["selected_plane_uniform"],
+            Value::Null,
+            "a plane that is part unknown and part unobserved is not uniform: {cov}"
+        );
+    }
+    stop_server(serving);
+}
+
 /// T-438: `GET /api/tiles` and `GET /api/tiles/events`, as `docs/api.md` documents them.
 ///
 /// The assertions are on **values**, not shapes (T-315), and the two that matter most are the ones
@@ -6509,22 +6674,25 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     // Tile (0, 0, 0, 0) is 0 Hz in 1970: genuinely unobserved, and that is a coverage answer.
     assert_eq!(probe["grid"]["observed_cells"], json!(0), "{probe}");
     assert_eq!(probe["grid"]["range_db"], Value::Null, "{probe}");
-    // **T-461, the fail-closed half, on a real server.** 1970 is before this server's record
-    // horizon, so no surviving record can say whether it looked — the plane is uniformly
-    // `"unknown"`, which is NOT `"unobserved"`, and the tile takes the full read.
+    // **T-507.** 1970 is before this server recorded anything, and it has discarded nothing, so
+    // the plane is uniformly `"unobserved"` — nothing looked — and the coverage map answers the tile
+    // on its own (T-461). Before T-507 this was `"unknown"`: every server's memory was taken to be
+    // lost before its first sample. T-461's fail-closed half — `unknown` never short-circuits — is
+    // asserted on a server that has actually lost records, in
+    // `unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so`.
     assert_eq!(
         probe["resolution"]["short_circuit"]["selected_plane_uniform"],
-        json!("unknown"),
+        json!("unobserved"),
         "{probe}"
     );
     assert_eq!(
         probe["resolution"]["short_circuit"]["applied"],
-        json!(false),
-        "`unknown` must never short-circuit: the pyramid may hold measurements there: {probe}"
+        json!(true),
+        "{probe}"
     );
-    assert!(probe["grid"]["max_db"].is_array(), "{probe}");
-    assert!(
-        probe["cost"]["source_cells"].as_u64().unwrap() > 0,
+    assert_eq!(
+        probe["coverage"]["horizon"]["unknown_rows"],
+        json!(0),
         "{probe}"
     );
 
@@ -6702,31 +6870,27 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     // evidence. What decides the two cases below is *time*.
     let far = f_index + 2_000;
 
-    // **Fails closed on a MIXED plane.** This server started moments ago, so its record horizon
-    // (`coverage.horizon.oldest_record_s`) falls INSIDE the current 32 s tile: the rows before it
-    // are `"unknown"` (no surviving record can say whether we looked) and the rows after it are
-    // `"unobserved"`. Mixed is not uniform, so the full read runs — and this is not a contrived
-    // case, it is what the first tile of every server's life looks like.
-    let (st, mixed) = get(addr, &tile(0, 0, far, t_index_of(0)));
-    assert_eq!(st, 200, "{mixed}");
+    // **The tile this server started in (T-507, and T-509's flake).** Before T-507 this tile was
+    // asserted MIXED — `"unknown"` before the server's first sample, `"unobserved"` after — which
+    // was the purple wall, and which also depended on the wall-clock 32 s block still containing
+    // the server's start when the request landed: under load the block boundary could pass first,
+    // and the tile came back uniformly `"unobserved"` in 0.167 s (T-509). Now a young server has
+    // forgotten nothing, so the current tile over a band never tuned is `"unobserved"` whenever the
+    // request lands. The mixed plane is built deterministically, from the route's own
+    // `recording_began_s`, in `unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so`.
+    let (st, now_tile) = get(addr, &tile(0, 0, far, t_index_of(0)));
+    assert_eq!(st, 200, "{now_tile}");
     assert_eq!(
-        mixed["resolution"]["short_circuit"]["selected_plane_uniform"],
-        Value::Null,
-        "a plane that is part unknown and part unobserved is not uniform: {}",
-        mixed["coverage"]["planes"]
+        now_tile["resolution"]["short_circuit"]["selected_plane_uniform"],
+        json!("unobserved"),
+        "a server that has lost nothing has no unknown rows: {}",
+        now_tile["coverage"]["horizon"]
     );
     assert_eq!(
-        mixed["resolution"]["short_circuit"]["applied"],
-        json!(false),
-        "{mixed}"
-    );
-    assert!(mixed["grid"]["max_db"].is_array(), "{mixed}");
-    assert!(
-        mixed["coverage"]["horizon"]["unknown_rows"]
-            .as_u64()
-            .is_some_and(|n| n > 0),
-        "the fixture must actually straddle the horizon: {}",
-        mixed["coverage"]["horizon"]
+        now_tile["coverage"]["horizon"]["unknown_rows"],
+        json!(0),
+        "{}",
+        now_tile["coverage"]["horizon"]
     );
 
     // **Fires on a uniformly unobserved plane.** One time tile on: wholly after the record
@@ -6982,6 +7146,38 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
 #[test]
 fn the_tile_routes_declared_readable_ceiling_is_true_and_is_stated_for_the_routes_tile_unit() {
     let (_dir_guard, serving, addr) = start_server();
+    // **Where the walk reads (T-507).** Every address below is placed over the band the mock is
+    // tuned to, at a moment it had captured, so its coverage plane holds an observed cell and the
+    // FULL read runs — which is where the ceiling is enforced. Until T-507 the walk read 1970 at
+    // index 0, which a young server wrongly called `"unknown"` and so also read in full; 1970 is
+    // now honestly `unobserved`, and a uniformly unobserved tile is answered by the coverage map
+    // (T-461) before any level is consulted, at any address.
+    let mut edge = 0.0f64;
+    wait_for(
+        "the ring to buffer capture",
+        Duration::from_secs(60),
+        || {
+            let (st, got) = get(addr, "/api/timeline");
+            let b = &got["window"]["buffered"];
+            match (st, b["t0_s"].as_f64(), b["t1_s"].as_f64()) {
+                (200, Some(a), Some(z)) if z - a > 1.0 => {
+                    edge = z - 0.5;
+                    true
+                }
+                _ => false,
+            }
+        },
+    );
+    // Scheme `view`: 6.25 kHz x 1 s at the floor, each level doubling its own axis's cell.
+    let at = |lf: u64, lt: u64, cells: u64| {
+        let f_tile = 6250.0 * (1u64 << lf) as f64 * cells as f64;
+        let t_tile = (1u64 << lt) as f64 * cells as f64;
+        format!(
+            "/api/tiles?level_f={lf}&level_t={lt}&f_index={}&t_index={}&cells={cells}",
+            (FIXTURE_CENTER_HZ / f_tile).floor() as u64,
+            (edge / t_tile).floor() as u64
+        )
+    };
     let probe = |cells: u64| {
         let (st, v) = get(
             addr,
@@ -7015,9 +7211,11 @@ fn the_tile_routes_declared_readable_ceiling_is_true_and_is_stated_for_the_route
     let mut refused = Vec::new();
     for lf in 0..=max_f {
         for lt in 0..=max_t {
-            let (st, body) = get(
-                addr,
-                &format!("/api/tiles?level_f={lf}&level_t={lt}&f_index=0&t_index=0&cells=256"),
+            let (st, body) = get(addr, &at(lf, lt, 256));
+            assert_ne!(
+                body["resolution"]["short_circuit"]["applied"],
+                json!(true),
+                "({lf},{lt}) must take the full read: {body}"
             );
             if st != 200 {
                 refused.push(format!("({lf},{lt}) -> {st} {}", body["error"]));
@@ -7031,10 +7229,7 @@ fn the_tile_routes_declared_readable_ceiling_is_true_and_is_stated_for_the_route
 
     // And it is not conservative for the sake of it: one level past it, on either axis, refuses.
     for (lf, lt) in [(max_f + 1, max_t), (max_f, max_t + 1)] {
-        let (st, body) = get(
-            addr,
-            &format!("/api/tiles?level_f={lf}&level_t={lt}&f_index=0&t_index=0&cells=256"),
-        );
+        let (st, body) = get(addr, &at(lf, lt, 256));
         assert_eq!(
             st, 400,
             "({lf},{lt}) is servable, so the ceiling is leaving reach unused: {body}"
@@ -7059,12 +7254,8 @@ fn the_tile_routes_declared_readable_ceiling_is_true_and_is_stated_for_the_route
     // **The area constraint, on the wire.** The bound itself does move with tile size, even though
     // the declared pair does not: the same address refused at 256 is served at 32. That is the
     // reach a cacheable pair gives up, and it is what a per-axis bound could never express.
-    let past = format!(
-        "/api/tiles?level_f={}&level_t={max_t}&f_index=0&t_index=0",
-        max_f + 1
-    );
-    let (st_big, big) = get(addr, &format!("{past}&cells=256"));
-    let (st_small, small) = get(addr, &format!("{past}&cells=32"));
+    let (st_big, big) = get(addr, &at(max_f + 1, max_t, 256));
+    let (st_small, small) = get(addr, &at(max_f + 1, max_t, 32));
     assert_eq!(st_big, 400, "{big}");
     assert_eq!(
         st_small,

@@ -569,8 +569,9 @@ The asymmetry is deliberate and it is the route's shape: **the window is the ser
                                 "last_s": 1789300920.0, "center_hz": 100800000.0,
                                 "sample_rate_hz": 2400000.0 }, "…" ] } ],
     "any": { "device": "any", "named": false, "…": "…" },
-    "horizon": { "oldest_record_s": 1789300890.0, "unknown_rows": 72, "rows": 96,
-                 "rule": "a row wholly before `oldest_record_s` … is \"unknown\" …",
+    "horizon": { "oldest_record_s": 1789300890.0, "recording_began_s": 1789300802.5,
+                 "forgotten": null, "unknown_from_row": 2, "unknown_rows": 70, "rows": 96,
+                 "rule": "a row wholly before `oldest_record_s` … is \"unknown\" - UNLESS … wholly before `recording_began_s` …",
                  "state_rule": "\"unknown\" carries no measurement keys, exactly like \"unobserved\" …" },
     "sources": [ { "kind": "iq-ring", "spans": 37, "named_spans": 37, "device_known": true, "available": true },
                  { "kind": "observation-log", "spans": 12, "named_spans": 12, "device_known": true, "available": true } ],
@@ -707,8 +708,10 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
   "any": { "device": "any", "named": false, "observed_cells": 3, "unobserved_cells": 1,
            "unknown_cells": 0, "cells": [ … ] },
   "horizon": { "oldest_record_s": 1789214520.0,  // null when nothing here holds a tune record
-               "unknown_rows": 0, "rows": 1,
-               "rule": "a row wholly before `oldest_record_s` has no surviving record either way, so its unsampled cells are \"unknown\" (we no longer know whether we looked), never \"unobserved\" (nothing looked). …",
+               "recording_began_s": 1789214400.0, // T-507: null when nothing here ever recorded
+               "forgotten": null,                 // or why the past before it is unbounded
+               "unknown_from_row": 0, "unknown_rows": 0, "rows": 1,
+               "rule": "a row wholly before `oldest_record_s` has no surviving tune record, so its unsampled cells are \"unknown\" (we no longer know whether we looked) - UNLESS the row is also wholly before `recording_began_s` and nothing is `forgotten`: before this installation recorded anything, nothing looked, and the cell is \"unobserved\". …",
                "state_rule": "\"unknown\" carries no measurement keys, exactly like \"unobserved\", and must be drawn as neither grey nor a level …" },
   "sources": [
     { "kind": "iq-ring",         "spans": 37, "named_spans": 37, "device_known": true, "available": true },
@@ -760,9 +763,13 @@ The horizons on this server are **deliberately different lengths and they cross*
 
 | Field | Says |
 |---|---|
-| `oldest_record_s` | The earliest instant **any** consulted source still holds a record for — `min` over the IQ ring's buffered start and the observation log's oldest surviving hour. `min`, not `max`: a row is knowable if *at least one* record reaches it. `null` when nothing here holds a record, in which case **every** row is `"unknown"` — a server that has forgotten its tune history cannot say the radio was not there. |
-| `unknown_rows` | How many leading rows lie wholly before it — the rows whose unsampled cells are served as `"unknown"`. |
-| `rows` | The grid's realised row count, so `unknown_rows` can be read against it. |
+| `oldest_record_s` | The earliest instant **any** consulted source still holds a tune record for — `min` over the IQ ring's buffered start and the observation log's oldest surviving hour. `min`, not `max`: a row is knowable if *at least one* record reaches it. `null` when nothing here holds a record. |
+| `recording_began_s` | **When this server's memory of recording begins** (T-507): `min` over the same two reaches and the spectrum history's own record of when it began recording (a fact it persists, so it outlives both a restart and the tiles that proved it). `null` when nothing here has ever recorded. Rows wholly before it are `"unobserved"`: before this installation recorded anything, nothing looked. |
+| `forgotten` | `null`, or why the past before `recording_began_s` is unbounded: a source has **discarded** records that could reach back past it (the observation log deleted a segment by retention; or the IQ ring evicted data on a server with no spectrum history to remember when recording began). Then every row before `oldest_record_s` is `"unknown"`. |
+| `unknown_from_row`, `unknown_rows` | The rows served as `"unknown"` are exactly `[unknown_from_row, unknown_from_row + unknown_rows)` — a contiguous band: wholly before `oldest_record_s`, and not wholly before `recording_began_s` (a row straddling it counts as unknown). |
+| `rows` | The grid's realised row count, so the band can be read against it. |
+
+**`"unknown"` is what a server recorded and lost, never the default for a young one (T-507).** Until T-507 every row before `oldest_record_s` was `"unknown"`, so a freshly started or reset server painted everything before its first sample in the fourth state — the magenta hatch covered 54 % of a live pane 3 s after a restart and faded only as the window slid past the start. A server that has never recorded has forgotten nothing; its true answer about the time before it started is `"unobserved"`. The fourth state is now exactly three cases: rows between `recording_began_s` and `oldest_record_s` (recording happened, its tune record did not survive — e.g. a short IQ ring evicted it before the observation log's once-a-minute interactive record covered it); every row before `oldest_record_s` when `forgotten` is set; and every row on a server with **no tune history at all** (no IQ ring and no observation log), which cannot say whether it looked. What `recording_began_s` cannot see is a store deleted from disk, or a spectrum history written before T-507 that had already evicted its oldest tiles: its oldest surviving block stands in, a lower bound, which can only widen `"unknown"`, never claim `"unobserved"` over a span that was recorded.
 
 Two rules hold and are stated in the response:
 
