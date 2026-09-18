@@ -1622,7 +1622,7 @@ tasks:
     milestone: M1
     title: "M1 Tutorial 2: POCSAG recipe with follow_hops + blind acceptance"
     status: done
-    commit: 4267655
+    commit: "4267655"
     deps: [T-098, T-094, T-093, T-087]
     parallel_group: M1T
     use_cases: [SIGNAL-062]
@@ -1811,7 +1811,7 @@ tasks:
     milestone: M1
     title: "POCSAG tutorial continuation: blind detection merges close-packed simultaneous narrowband channels; un-ignore tutorial_pocsag"
     status: done
-    commit: 4267655
+    commit: "4267655"
     deps: [T-095]
     parallel_group: M1T2
     use_cases: [SIGNAL-062, AWARE-053]
@@ -2262,7 +2262,7 @@ tasks:
     milestone: M2
     title: "Baseline hardening nits: SlotSeries packed()/packed_at() not public without the decay multiplier, assert the fold-equivalence fingerprint (reference-fold count exact, novelty sum 1e-9), debug_assert finite decay factor, share pool membership helper"
     status: done
-    commit: 3828015
+    commit: "3828015"
     deps: [T-137]
     parallel_group: M2B
     use_cases: [AWARE-042]
@@ -5911,7 +5911,7 @@ tasks:
     title: 'cyclic_db is a density dimension in 21 of 21 classes and grows ~10*log10(N): +11 dB from watching
       the same emission 8x longer'
     status: done
-    commit: 0567143
+    commit: "0567143"
     priority: normal
     deps:
     - T-281
@@ -10781,7 +10781,7 @@ tasks:
       the scheme, and both now accumulate into it rather than into private accumulators.
       Gate: crates/ so FULL. Run the affected suite twice (T-403). Floors: ADR-0016 §7.1, and read
       §7.2 first - the held-out figures have a draw sd of 0.008, so a +/-0.02 move is noise.
-    commit: 5684346
+    commit: "5684346"
     result: |
       DONE - de-welded, and the disk measurement overturned two of §6's assumptions.
       level_f and level_t become independent coordinates DERIVED FROM THE GEOMETRY rather than
