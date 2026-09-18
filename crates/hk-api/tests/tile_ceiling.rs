@@ -237,8 +237,16 @@ fn the_ceiling_is_stated_for_the_routes_own_tile_unit_and_not_for_the_probes() {
 /// allowed, but every such cell is reach thrown away, so they are counted and printed).
 #[test]
 fn the_predicate_agrees_with_the_read_over_the_whole_lattice() {
-    let dir = TempDir::new("agree");
-    let (state, geom) = server(&dir.0, view(6250.0, 4, 4));
+    // The shipped store. T-494's disagreement surfaced only past 4 x 4. Its whole-lattice sweep
+    // over 4x5, 5x4, 3x6, 4x6 and 5x5 measured 0 unsound and 0 slack cells, but at ~100 s per deep
+    // store in debug that sweep is a measurement, not a suite member. The deeper stores' ceilings
+    // are walked cell by cell in `deeper_stores_declare_a_deeper_ceiling_that_is_true_and_maximal`.
+    agree_over_the_whole_lattice(4, 4);
+}
+
+fn agree_over_the_whole_lattice(fl: usize, tl: usize) {
+    let dir = TempDir::new(&format!("agree-{fl}x{tl}"));
+    let (state, geom) = server(&dir.0, view(6250.0, fl, tl));
     let lattice = TileLattice::view(&geom);
     let (nf, nt) = (lattice.f_cells_hz.len(), lattice.t_cells_ns.len());
     let mut unsound = Vec::new();
@@ -266,11 +274,65 @@ fn the_predicate_agrees_with_the_read_over_the_whole_lattice() {
         }
         grid.push('\n');
     }
-    eprintln!("predicate vs read over the {nf} x {nt} lattice (rows = level_f):\n{grid}");
+    eprintln!(
+        "{fl} x {tl} store: predicate vs read over the {nf} x {nt} lattice (rows = level_f):\n{grid}"
+    );
     assert!(
         unsound.is_empty(),
-        "`servable` said yes where the read refused, so a ceiling built on it could be a lie: {}",
+        "{fl} x {tl}: `servable` said yes where the read refused, so a ceiling built on it could \
+         be a lie: {}",
         unsound.join(", ")
     );
     eprintln!("conservative at {slack} of {} addresses", nf * nt);
+}
+
+/// **A deeper store now declares a deeper ceiling, and it is still true** (T-494).
+///
+/// Before T-494 every one of these depths refused inside its own declared box. Two predicates
+/// about the same store disagreed: `affordable_levels` offered levels that `materialize` could not
+/// fold. `servable` papered over that by demanding every candidate be foldable, so the ceiling
+/// stopped short at shallow depths and fell to `(0, 0)` at 7 x 7. Now a level nobody can fold is
+/// not a candidate, and the fold bound charges the blocks a chunk really straddles. Each depth
+/// declares the box below, walks it with zero refusals, and is maximal on both axes.
+///
+/// Each gains exactly one level of `level_f + level_t` over 4 x 4's 10. That is the whole of what
+/// depth buys at this floor: work goes as tile area, so no ladder moves the anti-diagonal far.
+#[test]
+fn deeper_stores_declare_a_deeper_ceiling_that_is_true_and_maximal() {
+    // One store deeper in each axis. T-494's sweep measured the rest, each with 0 refused inside
+    // its box: 4x5 -> (7, 4), 3x6 -> (6, 5), 5x5 -> (8, 3), 6x6 -> (9, 2), 7x7 -> (10, 1) and
+    // 8x8 -> (11, 0). All of them used to refuse inside their own box, and 7x7 used to be (0, 0).
+    //
+    // This walks the box's COARSE EDGE (`level_f == max_f` or `level_t == max_t`), which is where
+    // the fold budget binds and where every pre-T-494 refusal sat. It does not walk the interior.
+    // The sweep walked every interior cell of every depth above with 0 refusals, but on an empty
+    // store a fine interior read tries every one of ~20 candidate levels, and the full walk cost
+    // 118 s in debug for two stores. The shipped store's interior is still walked in full by
+    // `walks_the_declared_ceiling_and_finds_no_refusal`.
+    for (fl, tl, want) in [(4, 6, (7, 4)), (5, 4, (8, 3))] {
+        let dir = TempDir::new(&format!("deep-{fl}x{tl}"));
+        let (state, geom) = server(&dir.0, view(6250.0, fl, tl));
+        let (max_f, max_t) = ceiling_of(&state, &geom);
+        assert_eq!((max_f, max_t), want, "{fl} x {tl} store");
+        let mut refused = Vec::new();
+        let edge = (0..=max_f)
+            .map(|lf| (lf, max_t))
+            .chain((0..max_t).map(|lt| (max_f, lt)));
+        for (lf, lt) in edge {
+            if let Err(e) = read_ok(&state, &geom, lf, lt) {
+                refused.push(format!("({lf},{lt}) -> {e}"));
+            }
+        }
+        assert!(
+            refused.is_empty(),
+            "{fl} x {tl}: the declared ceiling ({max_f}, {max_t}) refuses inside itself:\n  {}",
+            refused.join("\n  ")
+        );
+        for (lf, lt) in [(max_f + 1, max_t), (max_f, max_t + 1)] {
+            assert!(
+                read_ok(&state, &geom, lf, lt).is_err(),
+                "{fl} x {tl}: ({lf},{lt}) is servable, so ({max_f}, {max_t}) leaves reach unused"
+            );
+        }
+    }
 }

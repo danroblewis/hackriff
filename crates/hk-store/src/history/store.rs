@@ -1013,14 +1013,36 @@ impl Pyramid {
     ///   contract.
     /// - **Frequency is exact and time is a bound**, because that is how the caller uses them: a
     ///   tile read passes its whole frequency extent and *chunks* time into whole output rows, so
-    ///   the time window's offset is not known here while the frequency range is. `window_ns` is
-    ///   therefore charged the most blocks any half-open window of that length can touch,
-    ///   `floor(window / block) + 1`.
+    ///   the time window's offset is not known here while the frequency range is. What the caller
+    ///   *can* promise is the **grid its windows start on**: every chunk of a `/api/tiles` read
+    ///   starts on a multiple of the tile's own time cell. `start_step_ns` is that grid, and the
+    ///   window is charged the most blocks it can touch from **any** start on it —
+    ///   `floor((window - 1 + block - g) / block) + 1` with `g = gcd(start_step, block)`, which is
+    ///   exact: the worst start is `block - g` past a boundary. A caller that can promise nothing
+    ///   passes `start_step_ns <= 0`, meaning every nanosecond (`g = 1`).
+    ///
+    /// # The block count was `floor(window / block) + 1`, and that is NOT the worst case (T-494)
+    ///
+    /// It is the count for a window that starts **on** a block boundary, which the caller cannot
+    /// promise: a tile is chunked into whole output *rows*, a row can be finer than a block, and
+    /// then chunks after the first start mid-block. Measured on a 4 x 5 store at address `(8, 3)`:
+    /// the read's only candidate was level 19, whose 240 s window over a 1024 s block was charged
+    /// one block for 1016 budget units, under the 1024 cap, and was then refused for real at output
+    /// row 120, where the same window straddles two blocks and costs 2032. So `/api/tiles` could
+    /// declare a ceiling and still 400 inside it. On the shipped 4 x 4 store the error never
+    /// surfaced. That was luck, not soundness: the addresses it hit were already refused for
+    /// another reason.
+    ///
+    /// The start grid is what keeps this from simply over-charging instead. A plain worst case
+    /// over every nanosecond costs the shipped ceiling `(9, 1)`, where every chunk *is*
+    /// block-aligned and the extra block is never touched. Measured, that dropped the ceiling to
+    /// `(8, 2)`.
     pub fn materialize_cost_bound(
         &self,
         level: usize,
         freq: FreqRange,
         window_ns: i64,
+        start_step_ns: i64,
     ) -> Option<usize> {
         if !self.cfg.coarse_on_demand || level >= self.geom.n_levels() {
             return Some(0);
@@ -1033,7 +1055,16 @@ impl Pyramid {
         let c_lo = (freq.lo_hz / g.f_cell_hz).floor() as i64;
         let c_hi = ((freq.hi_hz / g.f_cell_hz).ceil() as i64 - 1).max(c_lo);
         let fb = c_hi.div_euclid(nf) - c_lo.div_euclid(nf) + 1;
-        let tb = window_ns.div_euclid(g.t_block_ns().max(1)) + 1;
+        // Blocks a half-open window of this length touches, maximised over every start on the
+        // caller's grid. The worst start is `block - g` past a boundary (see the doc comment).
+        let block = g.t_block_ns().max(1);
+        let step = if start_step_ns <= 0 { 1 } else { start_step_ns };
+        let g_align = gcd(step, block);
+        let tb = if window_ns <= 0 {
+            1
+        } else {
+            (window_ns - 1 + block - g_align).div_euclid(block) + 1
+        };
         let asked = u128::from(fb.max(1) as u64).saturating_mul(tb.max(1) as u64 as u128);
         if asked > MAX_MATERIALIZE_TILES as u128 {
             return None;
@@ -1733,4 +1764,12 @@ impl Pyramid {
         }
         Ok(())
     }
+}
+
+/// Greatest common divisor of two positive integers.
+fn gcd(mut a: i64, mut b: i64) -> i64 {
+    while b != 0 {
+        (a, b) = (b, a.rem_euclid(b));
+    }
+    a.abs().max(1)
 }

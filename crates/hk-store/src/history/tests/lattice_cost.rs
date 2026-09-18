@@ -380,3 +380,89 @@ fn the_view_lattice_is_so_cheap_that_the_record_horizon_binds_not_the_byte_budge
         "the live edge's share of a fixed budget should fall by about 3×: {cut}"
     );
 }
+
+/// **`materialize_cost_bound` is exactly the worst case of `materialize`, over every start on the
+/// caller's grid** (T-494).
+///
+/// The bound is quoted in `/api/tiles`'s readable ceiling, so it has to be sound. It should also be
+/// tight, because each conservative cell is reach thrown away. Both are checked the same way:
+/// for every level, window and start grid, the bound says `Some` **if and only if** a real
+/// `materialize` succeeds at *every* start on that grid within one block period. An empty store is
+/// the worst store a read can meet (an existing tile costs nothing), and on it a refused or empty
+/// fold caches nothing, so one store serves every probe.
+///
+/// The regression it pins, measured on a 4 x 5 store: node (3, 4), a 240 s window over its 1024 s
+/// block, used to be charged **one** block for 1016 units. At a start 960 s into the block the same
+/// window straddles two blocks, and the real call refuses. So a bound that assumed an aligned start
+/// was not a bound.
+#[test]
+fn the_fold_cost_bound_is_exactly_the_worst_start_on_its_grid() {
+    let dir = TempDir::new("fold-bound");
+    let cfg = PyramidConfig {
+        f_cells_per_block: 1024,
+        ..PyramidConfig::view_lattice(ViewLattice {
+            scheme: 13,
+            f_cell_hz: 6250.0,
+            t_cell: Duration::from_secs(1),
+            cells_per_block: 64,
+            f_levels: 4,
+            t_levels: 5,
+        })
+    };
+    let mut p = Pyramid::open(&dir.0, cfg).unwrap();
+    let geom = p.geometry().clone();
+    // One 256-cell tile at level_f 8 over the 6.25 kHz floor: 409.6 MHz, the measured address.
+    let freq = FreqRange::new(0.0, 409.6e6);
+    let origin = 1_789_298_688 * S; // a whole number of every block here
+    let (mut checked, mut some) = (0usize, 0usize);
+    for level in 1..geom.n_levels() {
+        let block = geom.levels[level].t_block_ns();
+        for window in [16 * S, 240 * S, 1500 * S] {
+            for step in [16 * S, block] {
+                let bound = p.materialize_cost_bound(level, freq, window, step);
+                let every_start_ok = (0..block / step).all(|k| {
+                    let t0 = origin + k * step;
+                    p.materialize(level, freq, TimeRange::new(ts(t0), ts(t0 + window)))
+                        .is_ok()
+                });
+                assert_eq!(
+                    bound.is_some(),
+                    every_start_ok,
+                    "level {level} {:?}, window {} s, start grid {} s: the bound says {bound:?} and \
+                     the real fold {} at every start",
+                    geom.axes_of(level),
+                    window / S,
+                    step / S,
+                    if every_start_ok {
+                        "succeeds"
+                    } else {
+                        "does NOT succeed"
+                    }
+                );
+                checked += 1;
+                some += usize::from(bound.is_some());
+            }
+        }
+    }
+    // Not vacuous in either direction: both answers occur.
+    assert!(some > 0 && some < checked, "{some} of {checked} admitted");
+
+    // The measured regression, stated on its own.
+    let l = geom.level_at(3, 4).unwrap();
+    assert_eq!(
+        p.materialize_cost_bound(l, freq, 240 * S, geom.levels[l].t_block_ns()),
+        Some(1016),
+        "aligned starts only: one block"
+    );
+    assert_eq!(
+        p.materialize_cost_bound(l, freq, 240 * S, 16 * S),
+        None,
+        "a 16 s start grid reaches the straddle"
+    );
+    let t0 = origin + 960 * S;
+    assert!(
+        p.materialize(l, freq, TimeRange::new(ts(t0), ts(t0 + 240 * S)))
+            .is_err(),
+        "and the straddle is refused for real"
+    );
+}
