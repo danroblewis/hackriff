@@ -12701,7 +12701,7 @@ tasks:
   - id: T-460
     milestone: MLIVE
     title: The live edge is frozen in the CLIENT - a resident tile is never refetched, so live advances once every 256 s
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     model: opus
@@ -12741,6 +12741,31 @@ tasks:
       BORNE OUT: the backend already builds from partial data. Recording that because it is a good
       example of a hypothesis worth testing rather than assuming.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "184586b"
+    result: |
+      DONE - LIVE ROWS ARE BACK, demonstrated on PIXELS in the newest strip of a following pane rather
+      than on requests: 5 of 5 samples drawn over 24 s (527-596 distinct colours, dominant 29-37 %). Under
+      the defect that strip measures distinct 2, dominant 100 % - a flat fill.
+      THE ROOT WAS ONE GREP: TileCache.acquire() returned a resident tile UNCONDITIONALLY, and
+      invalidateEdge() had EXACTLY ONE CALL SITE, acceptPaneRetune. No timer, no poll, no age rule - a
+      live-edge tile was fetched once and frozen until the pane scrolled to a new address, ONCE EVERY
+      256 SECONDS at level_t = 0. The cells drew correctly as T-441's AWAITING, so the honesty machinery
+      worked perfectly: THE REQUEST SIMPLY NEVER HAPPENED.
+      CHEAP BY CONSTRUCTION, no tuned constant: only the live-edge address, only for a FOLLOWING viewport,
+      only at the level it was drawn at (off the PaneReport the renderer just drew with); never more often
+      than one tCellNs(level_t), so cadence is a function of the zoom; one revalidation in flight, ever,
+      into a slot the ordinary queue could not use. The answer REPLACES the resident tile in place, so a
+      refresh can never flash grey or return a pane to pending. ONE SOURCE OF ROWS - live-edge.ts still
+      throws its socket rows away and no second path exists.
+      THE FIRST FIX DID NOT WORK, AND WHY IS THE LESSON: the minimap held three permanently-refused places
+      re-asked at frame rate, so a refresh gate of "only into a completely idle cache" NEVER OPENED - A
+      PRECONDITION SOMETHING UNRELATED CAN HOLD FALSE FOREVER IS NOT A SAFETY PROPERTY. It also caught a
+      measurement error of its own: it charged the refresh lane REFRESH_DUTY x serverMs, and serverMs
+      folds in the MINIMAP's coarse read, so one unrelated map tile was setting the live edge's interval
+      to 24 s.
+      T-457's composition bit exactly where predicted: the trace strip is carved OUT of the pane, so the
+      fresh-pixel strip straddled it and would have kept passing on the trace's own colours. Dominant
+      share fell 53-80 % -> 29-37 % once the geometry was corrected.
   - id: T-461
     milestone: MLIVE
     title: An empty tile costs 134 ms and 2.56 MB to build - 86 percent of an observed one - and must short-circuit
@@ -13113,7 +13138,7 @@ tasks:
   - id: T-472
     milestone: MCANVAS
     title: A plain wheel must LOCK the aspect ratio - when either axis hits its bound, BOTH stop
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: []
@@ -13143,6 +13168,31 @@ tasks:
     notes: |
       Filed 2026-09-17 from /tmp/claude-501/surface-polish-brief.md item 3.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "5a9d4b9"
+    result: |
+      DONE. THE ASPECT LOCK IS A CONSTRAINT ON THE GESTURE, NOT ON THE PYRAMID. Under a plain wheel the
+      requested factor is reduced to the one BOTH axes can honour - each axis's realized clamp(span*f)/span,
+      whichever is nearer 1 - BEFORE either is touched, so neither clamp fires and both spans scale by
+      exactly the same number: the ratio is preserved BY CONSTRUCTION, not by a tolerance. A locked factor
+      of exactly 1 returns without calling either axis, so a wheel at the bound is a TRUE no-op rather than
+      a recomputation that happens to land on the same numbers - (c+k)-k is not always c.
+      It lives in preview.ts over PaneModel, with ZERO LINES OF DIFF IN input.ts: the surface has two
+      hosts, and a handler deciding WHEN TO STOP A ZOOM is a second opinion about what a wheel means. A
+      centre clamp is deliberately NOT a stop - it moves a window without changing a span.
+      THE RATIO IS MEASURED, NOT THE CLAMP: spanHz/spanNs before and after every wheel, over 4 surfaces x
+      9 windows x 5 anchors x 27 deltas x 4 repeats = 19 440 WHEELS. Locked: 0 ratio changes, 0
+      one-axis-alone, 0.000 % worst drift. The per-axis code it replaces: 7 705, 5 865, and 300 % worst
+      drift. POPULATIONS ASSERTED NON-ZERO so the zeroes are not a walk that never left the middle - 6 375
+      unclamped, 1 990 shortened by the lock, 10 355 refused.
+      Axes remain independently levelled, three ways: shift and alt still move one axis each FROM the
+      locked state; two split panes 64x apart in aspect stay exactly 64x apart after the same gesture; and
+      T-456's notEqual(levelF, levelT) still passes.
+      It then fixed two OTHER files whose zoom premises its own correctness had turned into no-ops (on a
+      young record the time axis is at its ceiling before the first wheel). Both zoom for a FREQUENCY
+      reason, so both moved to shift+wheel with EVERY ASSERTION UNCHANGED - and shift proved SHARPER:
+      T-470's zoomed pane walks levelF 0->1->3->4->3->1->0, four level configurations against a premise of
+      three, repainting on 6 of 6 steps against a premise of 3. It also found T-476's test 2 was GREEN BUT
+      HOLLOW, and recorded that levelT is 0 for every viewport at every span this fixture can hold.
   - id: T-473
     milestone: M2-hardening
     title: The e2e tier has no per-spec timeout and can hang the gate indefinitely - observed at 31 minutes
@@ -13255,7 +13305,7 @@ tasks:
   - id: T-476
     milestone: MCANVAS
     title: Retune is offered only sporadically - make it a PERSISTENT per-pane control, because it raises resolution INSIDE the window too
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: []
@@ -13293,6 +13343,28 @@ tasks:
       Filed 2026-09-18 from user feedback. The sporadic behaviour is not a bug in retune.ts - it is
       the offer model working as designed, with a premise the user has now corrected.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "a89d736"
+    result: |
+      DONE. CONTAINMENT WAS THE WRONG TRIGGER, and the user's insight is why: retune is valuable EVEN
+      INSIDE the tuned window, because retuning to a ZOOMED viewport RAISES THE RESOLUTION THERE - the
+      same instantaneous bandwidth spent on a narrower span is finer cells. The offer model assumed retune
+      is for REACHING what you cannot see, so the control disappeared exactly where a user most wants it.
+      paneRetuneOffer no longer returns null: it answers for every pane in every state. "Covered by a live
+      window" becomes a FACT THE LABEL USES rather than a refusal; no_grid and span_too_wide pass through
+      as the plan's own refusals; frozen-behind-the-edge becomes block: "past", kept OUT of RetunePlan's
+      reasons DELIBERATELY because that is a fact about the VIEW, not about what the front end can do.
+      offerAcceptable = plan.ok && block === null drives both the button's disabled state and the refusal,
+      so they cannot disagree.
+      sameTarget NOW COMPARES `block`, and that is load-bearing: a pane scrubbed into the past between
+      paint and press has an IDENTICAL PLAN, so without it a frozen viewport would retune - the hole a
+      permanently-armed control opens, and the one T-444's guard would have been vacuous against.
+      THE FINDING WORTH KEEPING: its first four browser tests run against the shared --replay backend,
+      which reports NO FREQUENCY GRID, so every control there is correctly disabled and a press posts
+      nothing - TESTS 1-4 ALONE WOULD HAVE BEEN A GREEN SUITE OVER THE SHIPPED DEFECT. It paid for a
+      second hk serve behind --device mock: to get a real grid, window and retune, and recorded why in the
+      file header. Same class as a shader verified for a module that could not load.
+      T-340 passes verbatim and unedited (app-centre.test.ts empty diff, checked programmatically),
+      restated on the wire at zero device calls across six drags.
   - id: T-477
     milestone: M2-hardening
     title: The board does not self-clean - `just reconcile` answers which in-progress tickets git says are merged, stalled or empty
@@ -13369,7 +13441,7 @@ tasks:
   - id: T-479
     milestone: MCANVAS
     title: A 400 from /api/tiles is retried FOREVER - the cache requeues a failure only 503 is special-cased for
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     depends_on: []
@@ -13400,6 +13472,26 @@ tasks:
       Filed 2026-09-18 from user report. tilecache.ts is T-460's file and T-460 is in flight, so this
       is routed to that agent rather than given a second owner.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: "184586b"
+    result: |
+      DONE. A 400 WAS RETRIED FOREVER. The rule is now that RETRYABLE IS THE ENUMERATED CASE AND TERMINAL
+      IS THE DEFAULT - the inverse of the defect, which decided retryability by special-casing ONE status
+      (503) so everything else fell through to a default of retry. "Nothing said is never permissive",
+      violated in the retry direction.
+      THEN A SECOND DEFECT INSIDE THE FIRST: TileDecodeError carries NO HTTP STATUS, so retryable() read
+      it as "the server said nothing" and retried - 157 TIMES IN 700 ms. THE ENUMERATION WAS KEYED ON THE
+      WRONG QUESTION: it asked "is there a status?"; the question is "DID THE SERVER ANSWER?" - because if
+      it answered anything at all, asking again cannot change it. A 200 whose body does not decode is an
+      answer, just not a readable one. Terminal now.
+      AND IT REFUTED T-480'S PREMISE WITH A MEASUREMENT. surface-address's "the zoom-out must reach level
+      11" was counting THE RETRY STORM, not the addressing it named: both clients address the IDENTICAL
+      TWO nodes at the ceiling, main asking 19 times - with 503s STEALING THE ROUTE'S SHARED IN-FLIGHT
+      BUDGET from tiles someone was waiting for - against this branch's 2. The premise is restated over
+      the page's whole life, so it asks the question it is about and CANNOT BE SATISFIED BY REPETITION.
+      A third check was tried and REMOVED for being cache-sensitive in the same way, with a comment so
+      nobody re-adds it - the agent briefly reintroducing the bug it was fixing, and catching itself.
+      Guards: a 400 is fetched at most ONCE per place (60 frames, one call); NO non-503 status is ever
+      asked twice, over ten statuses; 503 still retries with T-454's AIMD intact.
   - id: T-480
     milestone: MCANVAS
     title: The surface asks for pyramid nodes that do not exist - tile-address math must clamp to realizable levels and indices
