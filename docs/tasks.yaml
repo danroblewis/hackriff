@@ -14810,6 +14810,53 @@ tasks:
       T-487's harness can kill and restart the backend under a live page, which is the instrument for
       the DoD's "demonstrated rather than simulated".
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-500
+    milestone: MLIVE
+    title: "surface-colour's settle check cannot settle now the live tier advances 25x faster - main is RED"
+    status: todo
+    priority: high
+    parallel_group: UI
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      MAIN IS RED AND THIS BLOCKS EVERY MERGE. `surface-colour.e2e.mjs` fails at "zoom 1 never
+      settled": 1320 px of 839 916 still changing between two consecutive frames, share 0.0016,
+      worst channel delta 24.
+      THE MASKING IS THE INTERESTING PART, AND IT IS THE COORDINATOR'S ERROR TO RECORD. Two changes
+      landed close together:
+        (1) T-484 took the finest live tier from a 1 s time cell to the DISPLAY ROW RATE (~25 rows/s).
+        (2) The coordinator flipped auto-contrast to the default (user request) in commit 86fc150c.
+      (2) made the test fail EARLY, at an opening-mode assertion, so it never reached the settle
+      check - which HID (1). Fixing the mode (the host now sets it explicitly in preview.ts, because
+      `setScale` turns autoScale off by contract and was overriding the class default) moved the
+      failure to where it always was. T-484's own gate passed for the same reason: the earlier
+      assertion was already failing the file.
+      THE LIKELY MECHANISM, TO CONFIRM RATHER THAN ASSUME: `settle()` screenshots until TWO
+      CONSECUTIVE FRAMES AGREE over a rect. At a 1 s time cell a following pane redrew its newest row
+      once a second, so two frames agreed routinely between rows. At ~25 rows/s a following pane is
+      repainting continuously, so "two consecutive frames agree" may now be unreachable for any rect
+      containing a live pane - which would make this a property of the INSTRUMENT, not of the
+      product. 1320 px is 0.16 % of the canvas, consistent with one advancing row rather than a
+      re-colour.
+      MEASURE BEFORE CHANGING: is the residual change confined to the FOLLOWING pane's newest rows,
+      or spread across the held pane? Those have opposite conclusions - the first says the settle
+      check needs a rect that excludes the live edge (or a pane that is paused for the comparison),
+      the second says something really is re-colouring and T-470's claim is in trouble.
+      DO NOT WIDEN THE TOLERANCE. T-470's claim is byte-identity - 0 of 316 478 px across four
+      pyramid levels - and a "settled enough" threshold would retire the strongest measurement in the
+      file. If the instrument cannot express the claim any more, change the instrument: pause the
+      held pane, or compare a rect that contains no live edge, and say which and why.
+      NOTE FOR WHOEVER TAKES IT: T-475 and T-486 both independently reported this file failing on
+      main and both correctly left it alone as not theirs. T-486 additionally found that T-484's "a
+      real scrub, however small, still pauses" was never testing that - panTime(-1) at T0 ~ 1.7e18 ns
+      is below a double's 256 ns ulp, so the centre did not change at all. 256 ns is the real floor
+      under every threshold in that file.
+      DoD: main green; the residual-change measurement stated with its subject; T-470's byte-identity
+      claim asserted at full strength, through whatever instrument can now express it.
+    notes: |
+      Filed by the coordinator 2026-09-18. HIGH because main is red and no merge can gate until it is
+      green.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

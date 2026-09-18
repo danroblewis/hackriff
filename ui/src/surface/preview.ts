@@ -51,6 +51,15 @@ import { SurfaceView, type SurfaceFrame } from "./view";
 /** Cells per tile edge the preview renders at — the route's own default, and the size the cache
  * budget in `tilecache.ts` was measured against. */
 export const RENDER_CELLS = 256;
+/**
+ * **Auto-contrast is the opening mode (user, 2026-09-18).** T-470 made it opt-in, having measured a
+ * fixed anchor hold an untouched split-pane byte-identical across four pyramid levels — 0 of 316 478
+ * px — while auto-contrast tracks the union over both panes and re-colours a viewport nobody moved.
+ * The user has since reversed that ruling and accepts the trade: contrast on the data in front of
+ * them is worth more than colour stability across a zoom. The toggle is unchanged, so the stable
+ * mapping is one click away, and the legend states which mode is in force and what it costs.
+ */
+export const AUTO_CONTRAST_BY_DEFAULT = true;
 /** The orientation coverage map's grid. 128 × 32 = 4096 cells, the route's own cap. */
 export const ORIENT_CELLS = 128, ORIENT_ROWS = 32;
 
@@ -512,11 +521,21 @@ export class SurfacePreview {
       trace: opts.trace ?? null,
       tracePx: opts.tracePx ?? 0,
     });
-    // **Anchor the colour scale before the first frame** (T-470). `Surface` opens anchored to its
-    // own stated fallback, so this is the one place a *measured* scale replaces it — once, from the
-    // probe, never from a viewport. Nothing below this line, and nothing in `frame()`, moves it.
+    // **Install the measured anchor before the first frame, then restore the default mode** (T-470,
+    // and the user's 2026-09-18 reversal).
+    //
+    // `setScale` means "anchor and HOLD", and by contract it turns `autoScale` off — so calling it
+    // here would silently override the class default whatever that default is. That is why flipping
+    // `Surface.autoScale` alone left `/surface.html` still opening anchored: THE HOST WAS SETTING
+    // THE MODE, not inheriting it. The default now lives here, at the host, which is where a
+    // product default belongs — `Surface` stays a mechanism with two modes and no opinion.
+    //
+    // The anchor's NUMBERS still matter in auto mode: they are what the range falls back to before
+    // any tile has reported a `range_db`, and their provenance is what the legend states. So the
+    // measured scale is installed exactly as before; only the mode is then put back.
     this.anchor = anchorOf(probe.range);
     this.view.surface.setScale(this.anchor.lo, this.anchor.hi, this.anchor.source);
+    this.view.surface.setAutoScale(AUTO_CONTRAST_BY_DEFAULT);
     // **Freeze everything at open, unless an edge was reported in.** A following viewport borrows
     // the growing edge; without one there is nothing to borrow, so nothing follows (T-450's
     // historical preview). `pause` is a coordinate change (T-347/T-442), so this costs no frame and
