@@ -6961,6 +6961,162 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     stop_server(serving);
 }
 
+/// T-519: the `shadow` block on `GET /api/tiles` — the **last-known / stale** tier (fog-of-war,
+/// `docs/adr/0020`), asserted on values (T-315) against a real server whose radio is retuned away
+/// from the station through the real control route.
+///
+/// - **Swept then departed = shadow.** After the retune, the station's tile carries runs over the
+///   station's columns in the rows the grid no longer measures, and each run's value is a value the
+///   pyramid measured there — for a value this tile holds, exactly the grid's own value in the row
+///   above the run.
+/// - **Observed now = its own value.** No run ever covers a cell the grid measured.
+/// - **Never observed = nothing.** A tile over spectrum the radio never tuned carries no run and the
+///   search reports no column found — grey's meaning is unchanged.
+#[test]
+fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
+    let (_dir_guard, serving, addr) = start_server();
+    const N: u64 = 32;
+    let n = N as usize;
+    let tile = |fi: u64, ti: u64| {
+        format!("/api/tiles?level_f=0&level_t=0&f_index={fi}&t_index={ti}&cells={N}")
+    };
+    let f_index = (STATION_HZ / (6250.0 * N as f64)).floor() as u64;
+    let t_now = || (unix_now() / N as f64) as u64;
+    wait_for(
+        "the station's tile to be observed",
+        Duration::from_secs(60),
+        || {
+            get(addr, &tile(f_index, t_now())).1["grid"]["observed_cells"]
+                .as_u64()
+                .is_some_and(|c| c > 0)
+        },
+    );
+
+    // Never observed: 3 GHz, which this 2.4 MHz front end has never been tuned near.
+    let (st, never) = get(addr, &tile((3.0e9 / (6250.0 * N as f64)) as u64, t_now()));
+    assert_eq!(st, 200, "{never}");
+    assert_eq!(never["shadow"]["encoding"], json!("column-runs"), "{never}");
+    assert_eq!(never["shadow"]["runs"], json!(0), "{}", never["shadow"]);
+    assert_eq!(never["shadow"]["search"]["columns_found"], json!(0));
+    assert_eq!(never["shadow"]["f"], json!([]), "{}", never["shadow"]);
+
+    // Depart: retune 3 MHz up, so 102.6-105.0 MHz is watched and the station at 101.3 MHz is not.
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let moved = step * (((FIXTURE_CENTER_HZ + 3.0e6) / step).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{moved:?}}}"),
+    );
+    assert_eq!(st, 200, "{r}");
+    let retuned_at = unix_now();
+
+    // Wait for a station-tile row after the retune that the grid does not measure and a shadow
+    // covers. (The station's own column carries the carrier.)
+    let station_col = ((STATION_HZ - f_index as f64 * 6250.0 * N as f64) / 6250.0) as usize;
+    let mut v = Value::Null;
+    wait_for(
+        "the departed station to carry a shadow",
+        Duration::from_secs(60),
+        || {
+            v = get(addr, &tile(f_index, t_now())).1;
+            let t0 = v["extent"]["t0_s"].as_f64().unwrap_or(0.0);
+            let sh = &v["shadow"];
+            let (f, row) = (&sh["f"], &sh["row"]);
+            f.as_array().is_some_and(|fs| {
+                fs.iter().enumerate().any(|(i, c)| {
+                    c.as_u64() == Some(station_col as u64)
+                        && t0 + row[i].as_f64().unwrap_or(0.0) > retuned_at
+                })
+            })
+        },
+    );
+    let (sh, grid) = (&v["shadow"], v["grid"]["max_db"].as_array().unwrap());
+    let arr = |k: &str| sh[k].as_array().unwrap().clone();
+    let (f, row, rows, db, t, src) = (
+        arr("f"),
+        arr("row"),
+        arr("rows"),
+        arr("last_db"),
+        arr("last_t_s"),
+        arr("src"),
+    );
+    assert_eq!(sh["runs"].as_u64().unwrap() as usize, f.len(), "{sh}");
+    for a in [&row, &rows, &db, &t, &src] {
+        assert_eq!(a.len(), f.len(), "parallel arrays: {sh}");
+    }
+    let (t0, t_cell) = (
+        v["extent"]["t0_s"].as_f64().unwrap(),
+        v["extent"]["t_cell_s"].as_f64().unwrap(),
+    );
+    let edge = sh["edge_s"]
+        .as_f64()
+        .expect("a server with frames has an edge");
+    let mut covered = vec![false; n * n];
+    for i in 0..f.len() {
+        let (c, r0, k) = (
+            f[i].as_u64().unwrap() as usize,
+            row[i].as_u64().unwrap() as usize,
+            rows[i].as_u64().unwrap() as usize,
+        );
+        let last_db = db[i].as_f64().expect("a run always carries a value");
+        let last_t = t[i].as_f64().unwrap();
+        // Last seen at or before the run's first row: never a value from its future.
+        assert!(
+            last_t <= t0 + r0 as f64 * t_cell + 1e-6,
+            "run {i}: {last_t} after row {r0}"
+        );
+        // Never past the data edge.
+        assert!(
+            t0 + r0 as f64 * t_cell < edge,
+            "run {i} starts at or past the edge {edge}"
+        );
+        let source = &sh["sources"][src[i].as_u64().unwrap() as usize];
+        if source["from"] == "this-tile" {
+            // T-315: the value IS the grid's own, in the last measured row above the run.
+            assert!(r0 > 0, "a this-tile run below row 0: {sh}");
+            assert_eq!(
+                grid[(r0 - 1) * n + c].as_f64(),
+                Some(last_db),
+                "run {i} at ({r0}, {c})"
+            );
+        } else {
+            assert_eq!(source["from"], json!("before-tile"), "{source}");
+            assert!(
+                source["f_cell_hz"].as_f64().is_some_and(|x| x > 0.0),
+                "{source}"
+            );
+        }
+        for r in r0..r0 + k {
+            assert!(!covered[r * n + c], "runs overlap at ({r}, {c})");
+            covered[r * n + c] = true;
+            // A shadow never replaces a measurement.
+            assert!(
+                grid[r * n + c].is_null(),
+                "a shadow over the measured cell ({r}, {c}): {}",
+                grid[r * n + c]
+            );
+        }
+    }
+    assert!(
+        (0..n).any(|r| covered[r * n + station_col]),
+        "the departed station carries a shadow: {sh}"
+    );
+    eprintln!(
+        "T-519 contract: {} runs, sources {}, station rows shadowed {}, search {}",
+        f.len(),
+        sh["sources"],
+        (0..n).filter(|&r| covered[r * n + station_col]).count(),
+        sh["search"]
+    );
+    assert!(
+        sh["rule"]
+            .as_str()
+            .is_some_and(|s| s.contains("GREY IS UNCHANGED"))
+    );
+    stop_server(serving);
+}
+
 /// T-482: **`axes.*.max_level` is a ceiling that is TRUE**, on the wire, against a real server.
 ///
 /// # What this test is a property of

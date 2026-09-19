@@ -829,6 +829,19 @@ One route serves every viewport — the panes, the zoomable minimap and the live
                               "rule": "…" },
                 "horizon": {"…": "…"}, "sources": ["…"],
                 "rule": "record-derived: …", "encoding_rule": "…", "per_cell_metadata": "…" },
+  "shadow": { "encoding": "column-runs", "runs": 2,
+              "f": [17, 18], "row": [0, 0], "rows": [256, 256],
+              "last_db": [-96.5, -101.2], "last_t_s": [1789300620.0, 1789300620.0], "src": [1, 1],
+              "sources": [ { "from": "this-tile", "level": 2, "statement": "…" },
+                           { "from": "before-tile", "store": "spectrum-history", "level": 1,
+                             "f_cell_hz": 12500.0, "t_cell_s": 60.0 } ],
+              "edge_s": 1789309800.5,
+              "search": { "store": "spectrum-history", "before_s": 1789300736.0,
+                          "searched_from_s": 1788912000.0, "columns_found": 2, "unsearched": [],
+                          "stages": [ { "level": 1, "from_s": …, "to_s": …, "source_cells": 3072,
+                                        "found": 2, "skipped": false }, "…" ],
+                          "source_cells": 5120, "chunks": 3, "build_ms": 0.8, "rule": "…" },
+              "rule": "the LAST-KNOWN tier (docs/adr/0020), NOT a measurement of the row it is drawn on. …" },
   "resolution": {
     "source": "spectrum-history", "live": false, "statement": "…",
     "answered": { "level": 2, "levels": 64, "f_cell_hz": 25000.0, "t_cell_s": 900.0,
@@ -883,6 +896,20 @@ One route serves every viewport — the panes, the zoomable minimap and the live
 - **The per-cell sampling metadata moved, it did not vanish.** `duty`, `observed_s`, `last_s`, `spans`, `center_hz` and `sample_rate_hz` are a question about *one* cell — hover — and [`GET /api/coverage`](#get-apicoverage--the-coverage-map-grey-means-genuinely-unobserved-t-368) answers it per cell over any `f_lo`/`f_hi`/`t0`/`t1`/`cells`/`rows`, in the same three-state vocabulary. `/api/timeline`'s overlay is unchanged and still serves the per-cell form.
 - **A plane that does not decode exactly is not a coverage answer.** An odd run list, a code outside the alphabet, a run that overruns, a total that is not `cells`, or a missing `states`: the client throws and the place stays *pending*, never grey and never observed (`ui/src/surface/tile.ts`).
 
+#### `shadow` — the last-known / stale tier, a band's most-recent-known value (T-519, [ADR-0020](adr/0020-last-known-shadow-tier.md))
+
+A band swept and then departed is not grey: it was observed, and the newest thing known about it is a real measurement. `shadow` carries that value down the tile's rows so the client can draw it **dimly** (T-520) — swept then departed = shadow; never swept = grey; re-swept = bright again. It is its own honesty tier, **last-known / stale**: a measurement *of `last_t_s` and earlier*, carried forward, never a measurement of the cell it is drawn on.
+
+- **Grey's meaning is unchanged, and it is still decided by `coverage` alone.** Draw a shadow **only** where the selected coverage plane says `unobserved`; a cell with no run over it stays grey — no retained measurement reaches it. `unknown` (T-423) and *observed-not-yet-measured* keep their own marks.
+- **Runs, per column.** Run `i` covers rows `[row[i], row[i] + rows[i])` of column `f[i]` (the grid's axes, row 0 earliest). `last_db[i]` is the newest max-hold known there at or before those rows, last seen at `last_t_s[i]` (absolute capture time — the age of a row is its own time minus this), resolved at `sources[src[i]]`'s cells. The parallel arrays all have `runs` entries; runs never overlap.
+- **A shadow never replaces a measurement.** No run covers a row where `grid` holds a value. Down each column the carried value starts as the newest one **before the tile** (`sources[].from = "before-tile"`) and is replaced by the tile's own value at every row it measures (`"this-tile"`), so a band seen part-way down the tile and then departed carries the value it was last seen with.
+- **Nothing past the data edge.** Rows at or after `edge_s` (the store's newest frame) carry nothing: a shadow never paints the future.
+- **Where the before-tile value comes from.** A query-time search over the **spectrum-history** pyramid (scheme 1, whose ladder runs seconds → days; a server without one searches the tile's own store at its level 0): newest-first and fine-to-coarse, each stage reading one level over the part of the past the finer stage did not, so the whole retained horizon costs a few hundred rows per column. It stops when every column has a value or nothing older is held. Nothing is maintained for it and capture pays nothing (T-453). `search.stages` lists what was read.
+- **Never carried backward, and what was not searched is said.** A coarse cell straddling the tile's start is used for a column only where this tile's own grid proves it held nothing for that column before the cell ended. A window over budget, or whose coarse cell is not folded yet, is listed in `search.unsearched` — a column with no run is unobserved in `[searched_from_s, before_s)` **outside** those windows, and nothing is claimed about earlier. Frequency resolution coarsens with age because the ladder is welded; `sources[].f_cell_hz` states it, and a coarser source replicates (T-334's direction).
+- **Cost.** One history lock hold per search step, each ≤ `resolution.budget.max_source_cells_per_lock` source cells, and ≤ `max_source_cells_per_tile` for the whole search — the tile read's own two bounds, so it can at most double a tile's work. Over spectrum no tile holds, the search answers from the pyramid's tile index without reading a cell. Measured in `hk-store`'s `last_known_cost_is_bounded_on_a_tuned_and_a_device_wide_viewport`.
+- **Size.** Runs, not a plane: a departed band is one run per column (~4 KB for 64 columns including the search block), a fully measured tile carries none. The shadow is **not device-scoped** — the pyramid is not, and this carries its values.
+- **Served on both paths.** A tile the coverage map answers alone (T-461, below) is exactly where a departed band's shadow lives, so `shadow` is served there too, searched against no grid.
+
 **The view lattice's floor is the store's, not §6.2's.** §6.2 put node (0, 0) at 100 kHz × **128 s** against a 120 s IQ retention, which puts the entire live view inside one time cell and pins `level_t` at 0 for every realistic pane — the de-welding buying nothing on the axis it exists for (T-437 finding **F1**). Anchoring at the open pyramid's level-0 cell is that fix.
 
 #### The budget is a fold target, never a level selector (T-437 finding F2)
@@ -936,7 +963,7 @@ So when the **selected** coverage plane — the one `coverage.selected.plane` na
 - **It fails closed.** `short_circuit.applied` is true **if and only if** `short_circuit.selected_plane_uniform` is `"unobserved"`. A partially observed tile takes the full read; a uniformly **`"unknown"`** tile (T-423 — a row wholly before the record horizon, where no surviving record can say either way) takes the full read, because `unknown` is not `unobserved` and the pyramid may well hold measurements there. `short_circuit` is served on **both** paths, so `applied: false` names the reason.
 - **The predicate cannot be weakened by the grid it was evaluated on.** The coverage plane is rasterised at this tile's own cells or coarser (the per-grid cap in `hk_store::coverage::grid_over`), and a coarser cell is `unobserved` only when *no* tune span touches it at all — so uniform-unobserved at a coarser grid implies uniform-unobserved at a finer one.
 - **It is a cheaper spelling of the full path's answer, not a second answer.** The constants in `uniform` are exactly what a real store read produces over never-sampled spectrum (asserted against one in `hk-api`'s tests), and the client's own rule is that *a cell the coverage plane calls unobserved stays unobserved even with a level beside it* — so the measurement the full read would have produced is discarded by the renderer cell for cell either way.
-- **`cost.chunks: 0`** is literal: no history lock was taken, so a screen full of grey tiles contributes no ingest backpressure at all.
+- **`cost.chunks: 0`** is literal for the grid: no history lock was taken for it. The last-known search behind `shadow` (T-519) is separate and states its own holds in `shadow.search.chunks`; over spectrum no tile holds, it answers from the pyramid's tile index without reading a cell.
 
 Measured on the same fixture, before and after (`crates/hk-api/tests/tile_cost.rs`, a test-profile binary; `body_bytes` is the uncompressed bytes the HTTP layer would write): **2 561 726 B → 7 568 B** (338×), `cost.build_ms` **92.1 ms → 3.1 ms** (29×), `source_cells` **65 536 → 0**. The body is a *constant*: 7 549 B at 64 × 64 and 7 563 B at 256 × 256 — sixteen times the cells for fourteen more bytes. The remaining ~3 ms is the coverage rasterisation itself, which is the answer rather than overhead: reading the same plane the renderer greys from is the point.
 
