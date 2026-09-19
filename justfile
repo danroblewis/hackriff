@@ -402,7 +402,21 @@ run:
         exec "$BIN" serve --hackrf --center-hz 100800000 --rate 2400000 --lna 32 --vga 30 --amp --ui-dist ui/dist --bind 127.0.0.1:8080
     else
         echo ">> No HackRF found. Run 'hackrf_info' to check the USB connection."
-        echo ">> To try the UI without a radio, replay a recording:"
-        echo ">>   $BIN serve --replay fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta --loop --ui-dist ui/dist --bind 127.0.0.1:8080"
+        echo ">> To try the UI without a radio, run:  just demo"
         exit 1
     fi
+
+# Demo / sample mode: run against a bundled recording — NO HackRF and NO libhackrf needed.
+# Great for trying the UI on a machine with no radio. Open the printed .../#token=... URL. Ctrl-C stops it.
+demo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -d ui/node_modules ] || ( cd ui && npm install )
+    ( cd ui && npm run build )
+    cargo build --release -p hk-cli --bin hk
+    FIX=fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta
+    if [ ! -s "$FIX" ] || grep -ql 'git-lfs' "$FIX" 2>/dev/null; then
+        echo ">> Demo recording missing. Pull the Git LFS fixtures once:  git lfs install && git lfs pull"; exit 1
+    fi
+    echo ">> Demo (replay) mode - open the http://127.0.0.1:8080/#token=... URL printed below."
+    exec target/release/hk serve --replay "$FIX" --loop --ui-dist ui/dist --bind 127.0.0.1:8080

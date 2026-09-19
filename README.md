@@ -48,13 +48,15 @@ open http://127.0.0.1:8080/#token=abc123...
 **Open that full URL (including the `#token=...`) in a browser** — that's the app. `Ctrl-C` stops
 the server. The token is generated automatically; the whole URL is what grants access.
 
-**No HackRF handy?** `just run` will tell you how to replay a bundled recording instead, so you can
-see the UI without a radio:
+**No HackRF handy?** Run the demo instead — a bundled recording, so you need **no radio and no
+libhackrf** at all:
 
 ```sh
-target/release/hk serve --replay fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta \
-  --loop --ui-dist ui/dist --bind 127.0.0.1:8080
+just demo
 ```
+
+The demo replays a real FM capture on a loop. The recordings come via Git LFS, so if you cloned
+without it, run `git lfs install && git lfs pull` once first.
 
 ### Tuning the run
 
