@@ -163,23 +163,16 @@ impl Spectrum {
         }
     }
 
-    /// The DC/LO-leakage notch bins for a notch of half-width `half_hz` (T-524): bins
-    /// `N/2 − k ..= N/2 + k` with `k = max(1, ⌈half_hz / (fs/N)⌉)`, clipped so one measured bin
-    /// is left each side as an anchor. At least ±1 bin, because the spike's own window main lobe
-    /// spreads it over the neighbours even when the notch is narrower than a bin. `None` when the
-    /// spectrum is too short to leave an anchor either side or `half_hz` is not positive.
-    pub fn dc_notch_bins(&self, half_hz: f64) -> Option<Range<usize>> {
+    /// The DC/LO-leakage notch bins (T-524): `N/2 − k ..= N/2 + k` for `k = half_bins`, clipped
+    /// so one measured bin is left each side as an anchor. `None` when `half_bins` is 0 or the
+    /// spectrum is too short to leave an anchor either side.
+    pub fn dc_notch_bins(&self, half_bins: usize) -> Option<Range<usize>> {
         let n = self.psd.len();
-        let bin = self.resolution.bin_width_hz;
-        let usable = half_hz > 0.0 && bin > 0.0 && n >= 5;
-        if !usable {
+        if half_bins == 0 || n < 5 {
             return None;
         }
         let c = n / 2;
-        let k = ((half_hz / bin).ceil() as usize)
-            .max(1)
-            .min(c - 1)
-            .min(n - c - 2);
+        let k = half_bins.min(c - 1).min(n - c - 2);
         Some(c - k..c + k + 1)
     }
 
@@ -189,8 +182,8 @@ impl Spectrum {
     /// at every tune centre is not drawn as a signal and the notch is not drawn as missing data.
     /// O(notch width). Returns the replaced range. The cells are synthesized, not measured:
     /// detection must run on a spectrum this was **not** applied to (it keeps its own DC rule).
-    pub fn interpolate_dc_notch(&mut self, half_hz: f64) -> Option<Range<usize>> {
-        let r = self.dc_notch_bins(half_hz)?;
+    pub fn interpolate_dc_notch(&mut self, half_bins: usize) -> Option<Range<usize>> {
+        let r = self.dc_notch_bins(half_bins)?;
         for trace in [&mut self.psd, &mut self.max_hold, &mut self.min_hold] {
             interpolate_log(trace, r.clone());
         }
@@ -348,8 +341,7 @@ mod tests {
         s.max_hold.clone_from(&s.psd);
         s.min_hold.clone_from(&s.psd);
         let before = s.psd.clone();
-        // 2.5 kHz half-width at 1 kHz bins: k = 3.
-        let r = s.interpolate_dc_notch(2_500.0).expect("notch");
+        let r = s.interpolate_dc_notch(3).expect("notch");
         assert_eq!(r, n / 2 - 3..n / 2 + 4);
         let db = |v: f32| 10.0 * v.log10();
         let (a, b) = (db(s.psd[r.start - 1]), db(s.psd[r.end]));
@@ -367,8 +359,7 @@ mod tests {
         // No spike left: the notch peak is at most the higher anchor.
         let peak = r.clone().map(|i| db(s.psd[i])).fold(f32::MIN, f32::max);
         assert!(peak <= a.max(b) + 1e-3);
-        // Narrower than a bin still notches ±1 bin; no notch when disabled.
-        assert_eq!(s.dc_notch_bins(10.0), Some(n / 2 - 1..n / 2 + 2));
-        assert_eq!(s.dc_notch_bins(0.0), None);
+        assert_eq!(s.dc_notch_bins(1), Some(n / 2 - 1..n / 2 + 2));
+        assert_eq!(s.dc_notch_bins(0), None);
     }
 }

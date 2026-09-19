@@ -133,10 +133,10 @@ pub struct StftConfig {
     /// Emit a reset's partial frame (T-139; see the module docs). `None` (the default) discards
     /// it.
     pub partial: Option<PartialFrames>,
-    /// Notch-and-interpolate the DC/LO-leakage cells of every emitted frame, half-width Hz
+    /// Notch-and-interpolate the DC/LO-leakage cells of every emitted frame, half-width in bins
     /// ([`crate::Spectrum::interpolate_dc_notch`], T-524). For display and history STFTs only; a
     /// detection STFT leaves it `None` so interpolated cells never read as measured energy.
-    pub dc_notch_hz: Option<f64>,
+    pub dc_notch_half_bins: Option<usize>,
 }
 
 /// When a reset emits its partial frame instead of discarding it (T-139).
@@ -174,7 +174,7 @@ impl StftConfig {
             persistence: None,
             reset_on: DEFAULT_RESET_ON,
             partial: None,
-            dc_notch_hz: None,
+            dc_notch_half_bins: None,
         }
     }
 
@@ -428,8 +428,8 @@ impl Replay {
         let fs = frame.provenance.tune.sample_rate_hz;
         let fc = frame.provenance.tune.center_hz;
         self.acc.finish_into(fs, fc, &mut frame.spectrum);
-        if let Some(half_hz) = self.config.dc_notch_hz {
-            frame.spectrum.interpolate_dc_notch(half_hz);
+        if let Some(k) = self.config.dc_notch_half_bins {
+            frame.spectrum.interpolate_dc_notch(k);
         }
         frame.seq = self.stats.frames;
         frame.t = SampleTime {

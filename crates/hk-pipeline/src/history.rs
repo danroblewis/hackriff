@@ -550,7 +550,7 @@ pub(crate) fn history_stft_config(fs: f64, fft_len: usize, rows_per_s: f64) -> S
     // T-524: history (the pyramid, the view lattice, the tiles, the trace and every sweep hop) is
     // folded from notch-and-interpolated frames, so a sweep does not stamp the LO spike at each
     // hop's centre. Detection runs its own STFT without this and keeps its DC rule.
-    stft_cfg.dc_notch_hz = Some(crate::observe::DC_NOTCH_HALF_HZ);
+    stft_cfg.dc_notch_half_bins = Some(crate::observe::DC_INTERP_HALF_BINS);
     // T-139: scheduler steps shorter than a row still leave a (reduced-averaging) row.
     stft_cfg.partial = Some(PartialFrames {
         min_segments: k.div_ceil(PARTIAL_MIN_DIVISOR),
@@ -929,7 +929,7 @@ mod tests {
         let peak_over_floor = |notch: bool| -> Vec<f32> {
             let mut cfg = super::history_stft_config(FS, N, 20.0);
             if !notch {
-                cfg.dc_notch_hz = None;
+                cfg.dc_notch_half_bins = None;
             }
             let dir = TempDir::new(if notch { "t524n" } else { "t524r" });
             let mut p = Pyramid::open(&dir.0, PyramidConfig::default()).unwrap();

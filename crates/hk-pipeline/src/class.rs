@@ -345,10 +345,10 @@ pub fn row_plan(
     } else {
         row_rate_hz
     };
-    // T-524: the display rows are notch-and-interpolated across the same DC notch the header
-    // declares (`dc_excluded_hz`), so the LO spike at each tune centre is not drawn as a signal.
+    // T-524: the display rows are notch-and-interpolated across the LO tone's main lobe, inside
+    // the DC notch the header declares (`dc_excluded_hz`), so the LO spike at each tune centre is not drawn as a signal.
     let mut stft = StftConfig::new(welch, k);
-    stft.dc_notch_hz = Some(crate::observe::DC_NOTCH_HALF_HZ);
+    stft.dc_notch_half_bins = Some(crate::observe::DC_INTERP_HALF_BINS);
     RowPlan {
         stft,
         row_rate_hz,
