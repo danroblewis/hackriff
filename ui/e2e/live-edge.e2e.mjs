@@ -198,7 +198,7 @@ test("a refused place is asked for ONCE: a 4xx is terminal, and the console stay
   // Long enough that a frame-rate retry would be in the thousands rather than in the ones.
   await new Promise((r) => setTimeout(r, 15000));
 
-  const refused = page.requests.filter((r) => r.url.includes("/api/tiles") && r.status !== null && r.status >= 400 && r.status !== 503);
+  const refused = page.requests.filter((r) => r.url.includes("/api/tiles") && r.status !== null && r.status >= 400 && ![502, 503, 504].includes(r.status));
   const per = new Map();
   for (const r of refused) per.set(r.url, (per.get(r.url) ?? 0) + 1);
   t.diagnostic(`${refused.length} permanent refusals over ${per.size} distinct place(s)`);
@@ -210,4 +210,81 @@ test("a refused place is asked for ONCE: a 4xx is terminal, and the console stay
   const busy = page.requests.filter((r) => r.status === 503).length;
   t.diagnostic(`${busy} backpressure refusals (503), which stay retryable`);
   assert.deepEqual(page.exceptions, [], "uncaught exception while the surface ran");
+});
+
+test("a proxy's 502s during a zoom burst do not stop the live edge (no resize needed)", async (t) => {
+  // T-523. The user's tunnel answers 502 for a slow `/api/tiles`; after a rapid zoom the live edge
+  // stopped advancing until a window resize. A 502 is not the route's answer — it is the proxy saying
+  // the route said nothing — so it must not make a place terminal. The injection sits in `fetch`,
+  // installed before the page's own scripts, and a flag turns it on for the burst only.
+  const inject = `(() => {
+    const real = window.fetch.bind(window);
+    window.__t523 = { on: false, n: 0, injected: [] };
+    window.fetch = (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (window.__t523.on && url.includes("/api/tiles") && (window.__t523.n++ % 2 === 0)) {
+        window.__t523.injected.push(url);
+        return Promise.resolve(new Response("bad gateway", { status: 502, statusText: "Bad Gateway" }));
+      }
+      return real(input, init);
+    };
+  })();`;
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page(undefined, { initScript: inject });
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitFor("the app's surface to draw",
+    `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200`,
+    { timeoutMs: 60000 });
+  await page.waitFor("the chrome to report a viewport",
+    `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]').length > 0`, { timeoutMs: 30000 });
+  const { rect } = await page.waitForCanvas(".sf-canvas", isRender, { timeoutMs: 90000 });
+  const dpr = await page.eval("window.devicePixelRatio || 1");
+  const pane = paneRectOf(rect, dpr);
+  const at = { x: Math.round(pane.x + pane.w / 2), y: Math.round(pane.y + pane.h / 2) };
+  const strip = {
+    x: Math.round(pane.x), w: Math.round(pane.w),
+    y: Math.round(pane.y + pane.h * FRESH_FROM), h: Math.round(pane.h * (FRESH_TO - FRESH_FROM)),
+  };
+
+  // The burst: every other tile request is a 502 while the frequency axis zooms out and in, ending
+  // at a zoom the page has not drawn before — so the places the proxy failed are the ones on screen.
+  await page.eval("window.__t523.on = true");
+  for (let i = 0; i < 2; i++) { await page.wheel(at, 240, { shift: true }); await page.frames(4); }
+  for (let i = 0; i < 5; i++) { await page.wheel(at, -240, { shift: true }); await page.frames(4); }
+  await new Promise((r) => setTimeout(r, 1500));
+  await page.eval("window.__t523.on = false");
+  const injected = await page.eval("window.__t523.injected.slice()");
+  t.diagnostic(`${injected.length} tile requests answered 502 by the injected proxy`);
+  assert.ok(injected.length > 0, "the burst injected no 502s, so this test asserts nothing");
+  assert.equal(
+    await page.$count('.hk-surface-viewport[data-viewport="pane"][data-following="true"]'), 1,
+    "the pane stopped following during a frequency-only zoom; the test's subject is gone");
+
+  const samples = [];
+  for (let i = 0; i < 5; i++) {
+    await new Promise((r) => setTimeout(r, i === 0 ? 8000 : 4000));
+    const img = await page.shot(i === 4 ? path.join(ART, "live-edge-502.png") : null);
+    const c = census(img, strip);
+    samples.push({ at: 8 + i * 4, c, ok: isRender(c) });
+  }
+  // **The claim is the mechanism, not only pixels**: a following pane with a stale ancestor stretched
+  // over it still censuses as "drawn", so the pixels alone passed on the defect. Every place the proxy
+  // failed on a level the view is still drawing must have been asked again and answered — a place
+  // left terminal by a 502 is a place that never draws, and at the live edge that is the stall.
+  const lane = (u) => { const q = new URL(u, ORIGIN).searchParams; return `${q.get("level_f")}/${q.get("level_t")}`; };
+  const ok = page.requests.filter((r) => r.url.includes("/api/tiles") && r.status === 200);
+  const answered = new Set(ok.map((r) => new URL(r.url, ORIGIN).href));
+  const liveLanes = new Set(ok.slice(-20).map((r) => lane(r.url)));
+  const stranded = injected.filter((u) => liveLanes.has(lane(u)) && !answered.has(new URL(u, ORIGIN).href));
+  t.diagnostic(`${injected.length - stranded.length} of ${injected.length} failed addresses recovered; ` +
+    `lanes still drawn: ${[...liveLanes].join(" ")}`);
+  for (const s of samples) t.diagnostic(`t+${s.at}s newest rows: ${s.c.distinct} distinct, dominant ` +
+    `${(s.c.dominantShare * 100).toFixed(0)} % — ${s.ok ? "drawn" : "FLAT"}`);
+  assert.deepEqual(stranded, [], "a place the PROXY failed (502) was never asked again: it was made terminal, " +
+    "as if the route had refused it, so the view stalls there until a resize re-addresses it (T-523)");
+  const drawn = samples.filter((s) => s.ok).length;
+  assert.ok(drawn >= 4, `after a zoom burst with injected 502s the newest rows were drawn in only ${drawn} of 5 ` +
+    "samples — a proxy's 502 made a place terminal and the live edge stalled until something re-laid it out");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while the live view ran");
 });

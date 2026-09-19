@@ -1268,8 +1268,21 @@ function retryable(err: unknown): boolean {
   if (err instanceof TileBusyError) return true;
   if (err instanceof TileDecodeError) return false;
   const status = (err as { status?: unknown } | null)?.status;
-  return typeof status !== "number";
+  return typeof status !== "number" || GATEWAY_SILENCE.has(status);
 }
+
+/**
+ * **A gateway's word that the route said nothing** (T-523): `502 Bad Gateway` and `504 Gateway
+ * Timeout`. The tile route never emits either (its one 5xx-that-means-now is T-454's 503, handled
+ * above); they come from a proxy in front of it — the user's cloudflared tunnel answers 502 for a
+ * slow `/api/tiles` — and they are case 2 of [[retryable]] carried in a status line, not an answer
+ * about the place. Treating them as terminal was measured in a browser (`ui/e2e/live-edge` test 3):
+ * after a zoom burst with half the tile requests 502'd, 4 of the 10 failed places on the drawn
+ * levels were never asked again, and a live-edge tile refused that way stays undrawn until a
+ * resize re-addresses the view — the user's "stalls until I resize". They take the silence ladder:
+ * backed off on the transport, one probe while armed, cleared by the next answer.
+ */
+const GATEWAY_SILENCE: ReadonlySet<number> = new Set([502, 504]);
 
 /** The route's own words for a refusal, for the readout and for a test's failure message. */
 function describeFailure(err: unknown): string {

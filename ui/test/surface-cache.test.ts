@@ -766,7 +766,7 @@ test("a 400 is fetched at most ONCE per place, however many frames ask for it", 
 
 test("NO non-503 status is ever asked twice — the enumeration, not a list of special cases", async () => {
   // The guard the ticket asked for, stated over the statuses rather than over the one that bit us.
-  for (const status of [400, 401, 403, 404, 410, 413, 422, 500, 502, 504]) {
+  for (const status of [400, 401, 403, 404, 410, 413, 422, 500]) {
     const h = harness({ inFlight: 4 });
     const a = addr(status % 7);
     h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
@@ -817,6 +817,31 @@ test("…and 503 still retries with T-454's AIMD intact: the cap is discovery, n
   net.cache.beginFrame(); net.cache.acquire(addr(3)); net.cache.endFrame();
   await flush();
   assert.equal(net.calls.length, 2, "…and once the backoff opens it does: a silence is not terminal");
+});
+
+test("a PROXY's 502/504 is the route saying nothing: silence ladder, never terminal (T-523)", async () => {
+  // The route never emits either; the user's tunnel does, for a slow tile. Terminal left a live-edge
+  // place undrawn until a resize re-addressed the view.
+  for (const status of [502, 504]) {
+    let clock = 0;
+    const h = harness({ inFlight: 4, now: () => clock });
+    const a = addr(status % 7);
+    h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+    await flush();
+    await h.fail(a, httpError(status));
+    assert.equal(h.cache.terminalPlaces, 0, `HTTP ${status} from a gateway made the place terminal`);
+    assert.equal(h.cache.silent, true, `HTTP ${status} should arm the silence backoff`);
+    h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+    await flush();
+    assert.equal(h.calls.length, 1, "not re-asked at frame rate while the backoff is armed");
+    clock += 600;
+    h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
+    await flush();
+    assert.equal(h.calls.length, 2, `HTTP ${status}: the place is asked again once the backoff opens`);
+    await h.settle(a);
+    assert.equal(h.cache.silent, false, "one answer clears the ladder");
+    assert.equal(h.cache.residentTiles, 1);
+  }
 });
 
 // ——— T-499: a dead server is asked at a DECAYING rate, and one answer clears the ladder ———
