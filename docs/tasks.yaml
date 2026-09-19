@@ -15524,7 +15524,8 @@ tasks:
   - id: T-520
     milestone: MSCAN
     title: "Fog-of-war 2B: the client's SHADOW tier - a dim last-known ramp, unmistakable from live, grey untouched"
-    status: in-progress
+    status: done
+    commit: "2ec2179e"
     priority: high
     parallel_group: CANVAS-FE
     model: opus
@@ -15565,7 +15566,7 @@ tasks:
   - id: T-522
     milestone: MSCAN
     title: A toggle to show or hide the found-signal boxes on the canvas, remembered per viewer
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CANVAS-FE
     model: sonnet
