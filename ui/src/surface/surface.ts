@@ -49,7 +49,7 @@
 // to pixels and colours.
 
 import { CMAP_GLSL } from "../cmap";
-import { BACKDROP, CELL, CELL_RULE_GLSL, PENDING, tierByte, type DrawKind } from "./cellrule";
+import { BACKDROP, CELL, CELL_RULE_GLSL, PENDING, SHADOW_MARK, tierByte, type DrawKind } from "./cellrule";
 import {
   ancestorsOf, extentOf, keyOf, levelsFor, tilesFor,
   type Box, type Lattice, type TileAddr,
@@ -169,6 +169,9 @@ uniform float uFallback;    // 1 when this quad is an upscaled coarser ancestor 
 uniform vec2  uSizePx;      // the quad's size in device px, so every mark keeps its screen weight
 uniform int   uTier;        // 0 live-iq, 1 spectrum-history, 2 survey-overview (cellrule.ts's TIER)
 uniform vec2  uSrcPx;       // the on-screen size of one cell the front end ACTUALLY measured
+uniform float uShadowGain;  // the shadow's brightness multiplier (T-526): client-adjustable, default
+                             // SHADOW_MARK.gain (0.25) from ./shadow-gain.ts; the shadow shape itself
+                             // (scanlines, which ramp) stays whatever CELL_MARKS says
 ${CMAP_GLSL}
 ${CELL_RULE_GLSL}
 void main() {
@@ -180,7 +183,7 @@ void main() {
   vec2 px = vQ * uSizePx;
   int s = int(floor(texture(uState, vUv).r * 255.0 + 0.5));
   float v = texture(uValue, vUv).r;
-  vec3 col = cellMark(s, (v - uLo) / max(uHi - uLo, 1e-6), px);
+  vec3 col = cellMark(s, (v - uLo) / max(uHi - uLo, 1e-6), px, uShadowGain);
   // **The honesty tier qualifies a measurement and nothing else** (docs/16 §8.3). Only an OBSERVED
   // cell carries a resolution claim to overstate; a tier wash over an unobserved cell would make a
   // second grey, which is the one thing this shader may not contain.
@@ -271,6 +274,9 @@ export class Surface {
   autoScale = false;
   /** Where [[lo]]/[[hi]] came from, so every surface that states the range can state its provenance. */
   rangeSource: string = FALLBACK_RANGE_SOURCE;
+  /** The shadow's brightness multiplier (T-526), a per-viewer display preference — set via
+   * [[setShadowGain]], never fetched. Defaults to [[SHADOW_MARK]]'s own gain. */
+  shadowGain: number = SHADOW_MARK.gain;
   drawCalls = 0;
   frames = 0;
   lastFrame: PaneReport[] = [];
@@ -297,7 +303,7 @@ export class Surface {
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(String(gl.getProgramInfoLog(p)));
     this.prog = p;
-    for (const n of ["uRect", "uUv0", "uUv1", "uValue", "uState", "uKind", "uFlat", "uLo", "uHi", "uFallback", "uSizePx", "uTier", "uSrcPx"]) {
+    for (const n of ["uRect", "uUv0", "uUv1", "uValue", "uState", "uKind", "uFlat", "uLo", "uHi", "uFallback", "uSizePx", "uTier", "uSrcPx", "uShadowGain"]) {
       this.u[n] = gl.getUniformLocation(p, n);
     }
     this.vao = gl.createVertexArray()!;
@@ -345,6 +351,10 @@ export class Surface {
     return { lo: this.lo, hi: this.hi, mode: this.autoScale ? "auto" : "anchored", source: this.rangeSource };
   }
 
+  /** Set the shadow's brightness multiplier (clamped by the caller — `./shadow-gain.ts`'s
+   * `clampShadowGain`), a display-only change that needs no refetch: the next `render()` uses it. */
+  setShadowGain(gain: number): void { this.shadowGain = gain; }
+
   /**
    * Draw one frame.
    *
@@ -368,6 +378,7 @@ export class Surface {
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.uniform1f(this.u.uLo, this.lo);
     gl.uniform1f(this.u.uHi, this.hi);
+    gl.uniform1f(this.u.uShadowGain, this.shadowGain);
 
     const reports: PaneReport[] = [];
     // The boxes AND the levels each was drawn at, for the cache's cancellation predicate: a box on

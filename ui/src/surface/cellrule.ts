@@ -371,13 +371,17 @@ export function cellPixel(args: {
   readonly tier: number;
   readonly srcPx: Vec2;
   readonly fallback: boolean;
+  /** The shadow's brightness multiplier, client-adjustable (T-526, `./shadow-gain.ts`). Defaults to
+   * [[SHADOW_MARK]]'s own gain, which is what every caller that does not pass one still gets. */
+  readonly shadowGain?: number;
 }): [number, number, number] {
   const m = markFor(args.state);
   let col: [number, number, number];
   if (m.kind === "ramp") col = cmap(args.x);
   else if (m.kind === "shadow") {
+    const gain = args.shadowGain ?? m.gain;
     if (patternHit(m.pattern, args.px, { x: m.pitchPx, y: m.pitchPx })) col = [...m.ink] as [number, number, number];
-    else { const c = cmap(args.x); col = [c[0] * m.gain, c[1] * m.gain, c[2] * m.gain]; }
+    else { const c = cmap(args.x); col = [c[0] * gain, c[1] * gain, c[2] * gain]; }
   } else if (m.kind === "flat") col = [...m.rgb] as [number, number, number];
   else col = [...(patternHit(m.pattern, args.px, { x: m.pitchPx, y: m.pitchPx }) ? m.ink : m.rgb)] as [number, number, number];
 
@@ -409,7 +413,7 @@ const patFn = (name: PatternName) => `pat_${name}`;
  * [[FALLBACK_MARK]]:
  *
  * ```glsl
- * vec3 cellMark(int s, float x, vec2 px);         // the six states
+ * vec3 cellMark(int s, float x, vec2 px, float gain); // the six states; `gain` is the shadow's only
  * vec3 tierMark(int t, vec3 col, vec2 px, vec2 srcPx);  // the three honesty tiers
  * vec3 fallbackMark(vec3 col, vec2 px);           // the stand-in
  * ```
@@ -425,12 +429,16 @@ export const CELL_RULE_GLSL: string = (() => {
     (k) => `bool ${patFn(k)}(vec2 px, vec2 p) { return ${PATTERNS[k]}; }`,
   );
 
+  // `gain` is a parameter, not a baked-in literal (T-526): the shadow's brightness multiplier is
+  // user-adjustable client-side, so the generated function takes it from the caller (`uShadowGain`
+  // in surface.ts) rather than compiling [[SHADOW_MARK]]'s default into the shader text. Every other
+  // mark ignores the parameter; only the shadow branch reads it, exactly as `cellPixel` does above.
   const cell = CELL_MARKS.map((m, s) => {
     const body =
       m.kind === "ramp"
         ? "cmap(x)"
         : m.kind === "shadow"
-          ? `(${patFn(m.pattern)}(px, ${vec2(m.pitchPx)}) ? ${vec3(m.ink)} : cmap(x) * ${num(m.gain)})`
+          ? `(${patFn(m.pattern)}(px, ${vec2(m.pitchPx)}) ? ${vec3(m.ink)} : cmap(x) * gain)`
           : m.kind === "flat"
           ? vec3(m.rgb)
           : `(${patFn(m.pattern)}(px, ${vec2(m.pitchPx)}) ? ${vec3(m.ink)} : ${vec3(m.rgb)})`;
@@ -450,7 +458,7 @@ export const CELL_RULE_GLSL: string = (() => {
   return `
 ${pats.join("\n")}
 
-vec3 cellMark(int s, float x, vec2 px) {
+vec3 cellMark(int s, float x, vec2 px, float gain) {
 ${cell.join("\n")}
 }
 

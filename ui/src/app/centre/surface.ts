@@ -49,6 +49,7 @@ import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { rangeLabel } from "../../surface/legend";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
+import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import {
   acceptPaneRetune, acceptPaneWidth, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
@@ -555,7 +556,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
     }
     say(probe.note);
 
+    // The shadow's brightness is a per-viewer display preference (T-526): loaded once here, never
+    // fetched, and changed only by the Ctrl+Shift+wheel gesture `input.ts` claims before any zoom.
+    preview.view.surface.setShadowGain(loadShadowGain());
+
     detach = attachSurfaceInput(canvas, preview, {
+      onShadowGain: shadowGainWheelHandler(preview.view.surface),
       onView: () => { mirror(); },
       onHover: (p) => {
         if (!p) { hoverEl.textContent = ""; return; }
