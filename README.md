@@ -55,8 +55,16 @@ libhackrf** at all:
 just demo
 ```
 
-The demo replays a real FM capture on a loop. The recordings come via Git LFS, so if you cloned
-without it, run `git lfs install && git lfs pull` once first.
+The demo replays a real FM capture on a loop, delivered via Git LFS. `git-lfs` is a **separate
+tool** (not built into git) — install it and fetch the recordings once:
+
+```sh
+brew install git-lfs                  # macOS  (Debian/Ubuntu: sudo apt install git-lfs)
+git lfs install                       # sets up the hooks (once per machine)
+git lfs pull                          # downloads the actual recordings
+```
+
+If `just demo` reports the recording is still a "Git LFS pointer," the `git lfs pull` didn't run.
 
 ### Tuning the run
 
