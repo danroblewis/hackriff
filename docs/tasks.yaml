@@ -15587,7 +15587,7 @@ tasks:
   - id: T-523
     milestone: MSCAN
     title: Fog-of-war regressed the live view - the live edge stalls until a resize, and zoom bursts draw 502s
-    status: in-progress
+    status: todo
     priority: high
     parallel_group: CANVAS-FE
     model: opus
@@ -15603,6 +15603,15 @@ tasks:
       regression test RED on main - live edge advances through a zoom burst with injected 502s and
       no resize; shadow-search cost cut and measured; honesty cap test kept meaningful.
     notes: |
+      PAUSED 2026-09-18 by the user (budget: DC notch only). CHECKPOINT task-t523 @ 91a2ee1e.
+      MECHANISM CONFIRMED, AND IT IS NOT THE BACKOFF: tile.ts fetchTile turns a proxy 502/504 into a
+      status error and tilecache.ts retryable() treats ANY status as terminal, so a place the tunnel
+      failed is never re-asked; the live-edge tile stays undrawn until a resize changes the addresses
+      (6 of 10 failed places never re-asked, measured in a browser). WIP: 502/504 go to T-499's
+      silence backoff (the route never emits them itself); unit test + live-edge.e2e test 3 (RED on
+      main). NEXT: run live-edge e2e green; shadow brightness (cellrule.ts:190 gain 0.25, cap test
+      surface-honesty.test.ts:125 FROM=0.3); server-side shadow-search cost on the short-circuit
+      (tiles.rs fold_newest) not yet measured.
       Filed 2026-09-18. The user's #1 with ~3% weekly budget left; if unfinished at the cap, it is
       the FIRST thing resumed after the reset (Sun 02:00). Branch task-t523.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
