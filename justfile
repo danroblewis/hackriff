@@ -415,8 +415,12 @@ demo:
     ( cd ui && npm run build )
     cargo build --release -p hk-cli --bin hk
     FIX=fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta
-    if [ ! -s "$FIX" ] || grep -ql 'git-lfs' "$FIX" 2>/dev/null; then
-        echo ">> Demo recording missing. Pull the Git LFS fixtures once:  git lfs install && git lfs pull"; exit 1
+    DATA="${FIX%.sigmf-meta}.sigmf-data"
+    if [ ! -s "$DATA" ] || head -c 80 "$DATA" 2>/dev/null | grep -ql 'git-lfs'; then
+        echo ">> The demo recording is a Git LFS pointer, not the real data (cloned without LFS)."
+        echo ">> Fetch it once, then re-run 'just demo':"
+        echo ">>   git lfs install && git lfs pull"
+        exit 1
     fi
     echo ">> Demo (replay) mode - open the http://127.0.0.1:8080/#token=... URL printed below."
     exec target/release/hk serve --replay "$FIX" --loop --ui-dist ui/dist --bind 127.0.0.1:8080
