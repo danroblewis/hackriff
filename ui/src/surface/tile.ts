@@ -127,6 +127,16 @@ export interface TileResponse {
     };
   };
   cost?: { in_flight_limit?: number };
+  /**
+   * **The last-known tier** (T-519/T-520, ADR-0020): column runs, each carrying a band's newest
+   * known max-hold down rows the radio was not looking at. Parallel arrays of `runs` entries; run
+   * `i` covers rows `[row[i], row[i] + rows[i])` of column `f[i]`, in the grid's own axes.
+   * Absent (a pre-T-519 server) is no runs. Only what the renderer reads is typed.
+   */
+  shadow?: {
+    encoding: string; runs: number;
+    f: number[]; row: number[]; rows: number[]; last_db: number[]; last_t_s: number[]; src?: number[];
+  } | null;
 }
 
 const TIERS: readonly string[] = ["live-iq", "spectrum-history", "survey-overview"];
@@ -174,6 +184,7 @@ export function capFromRefusal(message: string): number | null {
  * | `observed` | a number | – | `OBSERVED` | a measurement |
  * | `observed` | `null` | `0` | `AWAITING` | we looked; **nothing has been folded here** |
  * | `observed` | `null` | `> 0`, or absent | `NO_LEVEL` | we looked; no level is in hand |
+ * | `unobserved` | – | – | `SHADOW` if a `shadow` run covers it (T-520), else `UNOBSERVED` | last-known, or THE grey |
  *
  * `frames == 0` is the whole discriminator, and it needs neither a clock nor a prediction — which
  * matters, because the alternative ("is this cell near the live edge?") is a guess about the
@@ -208,11 +219,19 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     throw new TileDecodeError(`tile ${keyOf(addr)}: grid.max_db has ${db?.length ?? "no"} cells and no grid.uniform, expected ${n}`);
   }
   const cov = coverageCells(addr, resp);
+  const shade = shadowCells(addr, resp, nf, nt, levelAt);
   const value = new Float32Array(n);
   const state = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
     const s = cov(i);
-    if (s === "unobserved") { state[i] = CELL.UNOBSERVED; value[i] = NaN; continue; }
+    if (s === "unobserved") {
+      // THE grey, unless a real earlier measurement is carried here: then the last-known tier. The
+      // shadow is consulted ONLY on this branch — an observed or unknown cell keeps its own mark
+      // whatever the shadow plane says, because coverage alone decides grey (docs/api.md `shadow`).
+      const sv = shade ? shade[i] : NaN;
+      if (Number.isFinite(sv)) { state[i] = CELL.SHADOW; value[i] = sv; } else { state[i] = CELL.UNOBSERVED; value[i] = NaN; }
+      continue;
+    }
     if (s === "unknown") { state[i] = CELL.UNKNOWN; value[i] = NaN; continue; }
     const v = levelAt(i);
     if (typeof v === "number" && Number.isFinite(v)) { state[i] = CELL.OBSERVED; value[i] = v; continue; }
@@ -251,6 +270,59 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     bytes: n * BYTES_PER_CELL,
     serverInFlightLimit: typeof resp.cost?.in_flight_limit === "number" ? resp.cost.in_flight_limit : null,
   };
+}
+
+/**
+ * Rasterises `shadow`'s column runs into a per-cell last-known level (`NaN` = none), or `null`
+ * when the answer carries no shadow (T-520).
+ *
+ * **The rules**, all from docs/api.md's `shadow` section, and each one checked rather than trusted:
+ *
+ *  - Absent or `null` is *no runs*: every `unobserved` cell stays grey, exactly as before T-519.
+ *  - An encoding this client does not know, arrays that are not all `runs` long, a run outside the
+ *    grid, a non-finite level or time, or **two runs over one cell** throw [[TileDecodeError]].
+ *    An unreadable shadow is not "no shadow": decoding it as absent would paint grey — *no retained
+ *    measurement reaches here* — over cells the server just said one does. The place stays
+ *    *pending*, which is true.
+ *  - **A run over a cell whose grid holds a measurement throws too.** The route guarantees a shadow
+ *    never replaces a measurement; a response that breaks that has confused *which* number is the
+ *    measurement of this cell, and the client does not get to pick one.
+ *  - The caller applies a value **only where coverage says `unobserved`** — see [[decodeTile]].
+ */
+function shadowCells(
+  addr: TileAddr, resp: TileResponse, nf: number, nt: number, levelAt: (i: number) => number | null | undefined,
+): Float32Array | null {
+  const sh = resp.shadow;
+  if (sh === undefined || sh === null) return null;
+  const bad = (why: string) => new TileDecodeError(`tile ${keyOf(addr)}: shadow ${why}`);
+  if (typeof sh !== "object") throw bad("is not an object");
+  if (sh.encoding !== "column-runs") throw bad(`encoding ${String(sh.encoding)} is not column-runs`);
+  const runs = sh.runs;
+  if (!Number.isInteger(runs) || runs < 0) throw bad(`runs ${String(runs)} is not a count`);
+  if (runs === 0) return null;
+  for (const k of ["f", "row", "rows", "last_db", "last_t_s"] as const) {
+    if (!Array.isArray(sh[k]) || sh[k].length !== runs) throw bad(`${k} is not ${runs} entries`);
+  }
+  const out = new Float32Array(nf * nt).fill(NaN);
+  for (let r = 0; r < runs; r++) {
+    const f = sh.f[r], row = sh.row[r], rows = sh.rows[r], db = sh.last_db[r], t = sh.last_t_s[r];
+    if (!Number.isInteger(f) || f < 0 || f >= nf) throw bad(`run ${r} column ${f} is outside ${nf}`);
+    if (!Number.isInteger(row) || !Number.isInteger(rows) || row < 0 || rows < 1 || row + rows > nt) {
+      throw bad(`run ${r} rows [${row}, ${row + rows}) are outside ${nt}`);
+    }
+    // The value AND when it was last true travel together (ADR-0020 §1); a level with no age is not
+    // the last-known tier, it is an unlabelled number.
+    if (typeof db !== "number" || !Number.isFinite(db)) throw bad(`run ${r} last_db is not a level`);
+    if (typeof t !== "number" || !Number.isFinite(t)) throw bad(`run ${r} last_t_s is not a time`);
+    for (let y = row; y < row + rows; y++) {
+      const i = y * nf + f;
+      if (!Number.isNaN(out[i])) throw bad(`runs overlap at column ${f} row ${y}`);
+      const v = levelAt(i);
+      if (typeof v === "number" && Number.isFinite(v)) throw bad(`run ${r} covers a measured cell (column ${f} row ${y})`);
+      out[i] = db;
+    }
+  }
+  return out;
 }
 
 /**

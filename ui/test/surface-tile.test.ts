@@ -343,3 +343,109 @@ test("T-461: a tile the coverage map answered states its one cell, and it reads 
   assert.throws(() => decodeTile(ADDR, resp({ grid: { nt: 2, nf: 2 } })), TileDecodeError);
   assert.throws(() => decodeTile(ADDR, resp({ grid: { nt: 2, nf: 2, uniform: undefined, max_db: [-90] } })), TileDecodeError);
 });
+
+// ——— T-520: the last-known (shadow) tier ———
+//
+// Wire fixtures shaped exactly as docs/api.md's `shadow` block serves them (T-519): column runs as
+// parallel arrays, a `sources` table, `edge_s` and a `search` block — the fields the client does not
+// read are present anyway, so a decoder that tripped on them would fail here and not in a browser.
+
+type Shadow = NonNullable<TileResponse["shadow"]>;
+
+function shadowOf(runs: readonly { f: number; row: number; rows: number; db: number; t?: number; src?: number }[]): Shadow {
+  return {
+    encoding: "column-runs",
+    runs: runs.length,
+    f: runs.map((r) => r.f),
+    row: runs.map((r) => r.row),
+    rows: runs.map((r) => r.rows),
+    last_db: runs.map((r) => r.db),
+    last_t_s: runs.map((r) => r.t ?? 1789300620.0),
+    src: runs.map((r) => r.src ?? 1),
+    // Served, not read — carried so the fixture is the real shape.
+    ...({
+      sources: [
+        { from: "this-tile", level: 2, statement: "this tile's own grid" },
+        { from: "before-tile", store: "spectrum-history", level: 1, f_cell_hz: 12500.0, t_cell_s: 60.0 },
+      ],
+      edge_s: 1789309800.5,
+      search: { store: "spectrum-history", before_s: 1789300736.0, searched_from_s: 1788912000.0, columns_found: 2,
+        unsearched: [], stages: [], source_cells: 5120, chunks: 3, build_ms: 0.8, rule: "…" },
+      rule: "the LAST-KNOWN tier (docs/adr/0020), NOT a measurement of the row it is drawn on.",
+    } as object),
+  } as Shadow;
+}
+
+/** A departed band on a 2×2 grid: column 1 swept earlier, now unobserved; column 0 never swept. */
+const DEPARTED = (): TileResponse => resp({
+  grid: { nt: 2, nf: 2, max_db: [null, null, null, null], frames: [0, 0, 0, 0] },
+  coverage: coverage(["unobserved", "unobserved", "unobserved", "unobserved"]),
+  shadow: shadowOf([{ f: 1, row: 0, rows: 2, db: -96.5 }]),
+});
+
+test("swept then departed = SHADOW carrying the last level; never swept = THE grey, with no number", () => {
+  const t = decodeTile(ADDR, DEPARTED());
+  // Row-major [t * nf + f]: column 1 is cells 1 and 3.
+  assert.deepEqual([...t.state], [CELL.UNOBSERVED, CELL.SHADOW, CELL.UNOBSERVED, CELL.SHADOW]);
+  assert.equal(t.value[1], -96.5);
+  assert.equal(t.value[3], -96.5);
+  assert.ok(Number.isNaN(t.value[0]) && Number.isNaN(t.value[2]), "grey must carry no number anything could colour");
+});
+
+test("the shadow is served on the coverage short-circuit too (T-461's uniform grid), and decodes there", () => {
+  const t = decodeTile(ADDR, resp({
+    grid: { nt: 2, nf: 2, uniform: { max_db: null, frames: 0 }, range_db: null },
+    coverage: coverage(["unobserved", "unobserved", "unobserved", "unobserved"]),
+    shadow: shadowOf([{ f: 0, row: 1, rows: 1, db: -101.2 }]),
+  }));
+  assert.deepEqual([...t.state], [CELL.UNOBSERVED, CELL.UNOBSERVED, CELL.SHADOW, CELL.UNOBSERVED]);
+  assert.equal(t.value[2], Math.fround(-101.2), "the level, at the Float32 the GPU plane holds");
+});
+
+test("coverage alone decides grey: a run never overrides observed, unknown, awaiting or no-level", () => {
+  // The route's rule is that runs cover only unobserved cells; if one ever reaches a cell coverage
+  // calls something else, the coverage state wins and the shadow value is not drawn.
+  const t = decodeTile(ADDR, resp({
+    grid: { nt: 2, nf: 2, max_db: [null, null, null, null], frames: [0, 3, 0, 0] },
+    coverage: coverage(["observed", "observed", "unknown", "unobserved"]),
+    shadow: shadowOf([{ f: 0, row: 0, rows: 2, db: -90 }, { f: 1, row: 0, rows: 2, db: -80 }]),
+  }));
+  assert.deepEqual([...t.state], [CELL.AWAITING, CELL.NO_LEVEL, CELL.UNKNOWN, CELL.SHADOW]);
+  assert.ok(Number.isNaN(t.value[0]) && Number.isNaN(t.value[1]) && Number.isNaN(t.value[2]));
+  assert.equal(t.value[3], -80);
+});
+
+test("no shadow block, a null one, or zero runs: every unobserved cell stays THE grey", () => {
+  for (const shadow of [undefined, null, shadowOf([])]) {
+    const t = decodeTile(ADDR, resp({ ...DEPARTED(), shadow }));
+    assert.deepEqual([...t.state], [CELL.UNOBSERVED, CELL.UNOBSERVED, CELL.UNOBSERVED, CELL.UNOBSERVED], JSON.stringify(shadow));
+  }
+});
+
+test("a shadow never replaces a measurement: a run over a measured cell is a contract break, and throws", () => {
+  // Defensive: T-519 guarantees no run covers a row where `grid` holds a value. A response that does
+  // has confused which number is THIS cell's measurement, and the client does not get to pick.
+  assert.throws(() => decodeTile(ADDR, resp({
+    grid: { nt: 2, nf: 2, max_db: [-70, null, null, null] },
+    coverage: coverage(["unobserved", "unobserved", "unobserved", "unobserved"]),
+    shadow: shadowOf([{ f: 0, row: 0, rows: 2, db: -96 }]),
+  })), /covers a measured cell/);
+});
+
+test("an unreadable shadow is not 'no shadow': the tile stays pending rather than painting grey", () => {
+  const bad = (mut: (s: Shadow) => void) => {
+    const s = shadowOf([{ f: 1, row: 0, rows: 2, db: -96.5 }]);
+    mut(s);
+    return () => decodeTile(ADDR, resp({ ...DEPARTED(), shadow: s }));
+  };
+  assert.throws(bad((s) => { s.encoding = "plane"; }), TileDecodeError);
+  assert.throws(bad((s) => { s.runs = 2; }), TileDecodeError, "arrays shorter than runs");
+  assert.throws(bad((s) => { s.f = [2]; }), TileDecodeError, "column outside the grid");
+  assert.throws(bad((s) => { s.rows = [3]; }), TileDecodeError, "rows past the grid");
+  assert.throws(bad((s) => { s.rows = [0]; }), TileDecodeError, "an empty run");
+  assert.throws(bad((s) => { (s.last_db as unknown[]) = [null]; }), TileDecodeError, "a run with no level");
+  assert.throws(bad((s) => { s.last_t_s = [Number.NaN]; }), TileDecodeError, "a level with no age is not last-known");
+  // Two runs over one cell.
+  assert.throws(() => decodeTile(ADDR, resp({ ...DEPARTED(), shadow: shadowOf([{ f: 1, row: 0, rows: 2, db: -1 }, { f: 1, row: 1, rows: 1, db: -2 }]) })),
+    /overlap/);
+});

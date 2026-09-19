@@ -17,7 +17,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BACKDROP, CELL, CELL_MARKS, CELL_RULE_GLSL, GREY, PENDING, REFUSED_MARK, markFor, type Rgb } from "../src/surface/cellrule";
+import { BACKDROP, CELL, CELL_MARKS, CELL_RULE_GLSL, GREY, PENDING, REFUSED_MARK, SHADOW_MARK, cellPixel, markFor, patternHit, type Rgb } from "../src/surface/cellrule";
 import { cmap } from "../src/cmap";
 import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { Surface, type PaneView } from "../src/surface/surface";
@@ -82,7 +82,7 @@ test("the grey constant lives in exactly one place in the shader: the coverage-s
 test("the rule in TypeScript and the rule in GLSL are the same rule, because one generates the other", () => {
   assert.deepEqual(markFor(CELL.UNOBSERVED), { kind: "flat", rgb: GREY });
   assert.deepEqual(markFor(CELL.OBSERVED), { kind: "ramp" });
-  // FIVE states, five marks (T-413/T-441): any two of them drawn alike is the collapse this
+  // SIX states, six marks (T-413/T-441/T-520): any two of them drawn alike is the collapse this
   // refuses — "looked and it was quiet" spelled as "never looked", in either direction.
   const marks = CELL_MARKS.map((m) => JSON.stringify(m));
   assert.equal(new Set(marks).size, CELL_MARKS.length, `two cell states share a mark: ${marks}`);
@@ -90,9 +90,93 @@ test("the rule in TypeScript and the rule in GLSL are the same rule, because one
   // …and no mark that is not the unobserved one may use the grey, in ANY of its parts.
   for (const [s, m] of CELL_MARKS.entries()) {
     if (s === CELL.UNOBSERVED) continue;
-    for (const c of m.kind === "flat" ? [m.rgb] : m.kind === "pattern" ? [m.rgb, m.ink] : []) {
+    for (const c of m.kind === "flat" ? [m.rgb] : m.kind === "pattern" ? [m.rgb, m.ink] : m.kind === "shadow" ? [m.ink] : []) {
       assert.notDeepEqual([...c], [...GREY], `state ${s} draws THE grey`);
     }
+  }
+});
+
+// ——— T-520: the last-known (shadow) tier ———
+//
+// Swept then departed = shadow; never swept = grey; re-swept = full brightness. The shadow is a real
+// measurement drawn where the radio is NOT looking, so it has two ways to lie and each gets a test:
+// read as grey (the radio never looked — false, it did) or read as live (the radio is looking — false,
+// it left). Defended by a hard brightness ceiling (upper ramp) and a texture no live cell carries
+// (lower ramp, where the ceiling cannot help).
+
+const lum = (c: readonly number[]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+const shadowPx = (x: number, px: { x: number; y: number }) =>
+  cellPixel({ state: CELL.SHADOW, x, px, tier: 0, srcPx: { x: 1, y: 1 }, fallback: false });
+
+test("the shadow is not THE grey — at any level, on any pixel — and grey is still only the unobserved branch", () => {
+  for (let i = 0; i <= 200; i++) {
+    for (let y = 0; y < SHADOW_MARK.pitchPx; y++) {
+      assert.ok(!near(shadowPx(i / 200, { x: 0.5, y: y + 0.5 }), [...GREY]), `shadow at x=${i / 200} row ${y} is THE grey`);
+    }
+  }
+  assert.notDeepEqual([...SHADOW_MARK.ink], [...GREY]);
+  // The generated shader still holds exactly one grey, and the shadow branch is generated from the
+  // table — cmap scaled by the table's gain, not hand-written arithmetic.
+  assert.equal(CELL_RULE_GLSL.split(`vec3(${GREY.join(",")})`).length - 1, 1, "the shadow branch added a second grey");
+  assert.ok(CELL_RULE_GLSL.includes(`cmap(x) * ${SHADOW_MARK.gain}`), "the shadow ground must be the ONE ramp, dimmed");
+  assert.ok(CELL_RULE_GLSL.includes(`pat_${SHADOW_MARK.pattern}(px`), "the shadow texture must be a generated pattern");
+});
+
+test("the shadow's HARD CEILING: no shadow pixel is as bright as the live ramp from a third of the way up", () => {
+  // Every pixel a shadow can produce, at every level.
+  let brightest = 0;
+  for (let i = 0; i <= 400; i++) {
+    for (let y = 0; y < SHADOW_MARK.pitchPx; y++) {
+      const c = shadowPx(i / 400, { x: 0.5, y: y + 0.5 });
+      assert.ok(Math.max(...c) <= SHADOW_MARK.gain + 1e-9, `a shadow channel exceeds the ceiling at x=${i / 400}`);
+      brightest = Math.max(brightest, lum(c));
+    }
+  }
+  assert.ok(brightest <= SHADOW_MARK.gain + 1e-9);
+  // The live ramp clears that ceiling from here up, and stays above it.
+  const FROM = 0.3;
+  for (let i = Math.round(FROM * 400); i <= 400; i++) {
+    assert.ok(lum(cmap(i / 400)) > brightest, `live cmap(${i / 400}) is no brighter than the brightest shadow — a remembered signal could read as live`);
+  }
+  // …and the shadow of a strong signal really is far down from that signal live.
+  assert.ok(lum(shadowPx(1, { x: 0.5, y: 3.5 })) < 0.3 * lum(cmap(1)));
+});
+
+test("the shadow's TEXTURE: where the ceiling cannot help (a remembered noise floor), the scanlines can", () => {
+  // At the bottom of the ramp a live cell and its shadow are both near-black. The scanline ink is on
+  // no position of the ramp, so a ruled row can never be a live level…
+  for (let i = 0; i <= 200; i++) {
+    assert.ok(!near(cmap(i / 200), [...SHADOW_MARK.ink]), `the scanline ink is cmap(${i / 200})`);
+  }
+  // …it is clearly lighter than a dimmed floor, so the rules are visible exactly there…
+  assert.ok(lum(SHADOW_MARK.ink) > 5 * lum(shadowPx(0, { x: 0.5, y: 3.5 })));
+  // …and every pitch-high band of a shadow cell carries a rule, running along time only.
+  for (let y0 = 0; y0 < 40; y0++) {
+    let hits = 0;
+    for (let y = y0; y < y0 + SHADOW_MARK.pitchPx; y++) if (patternHit(SHADOW_MARK.pattern, { x: 3.5, y: y + 0.5 }, { x: SHADOW_MARK.pitchPx, y: SHADOW_MARK.pitchPx })) hits++;
+    assert.ok(hits >= 1 && hits < SHADOW_MARK.pitchPx, `band at ${y0}: ${hits} ruled rows`);
+  }
+  for (let x = 0; x < 40; x++) {
+    assert.equal(patternHit(SHADOW_MARK.pattern, { x: x + 0.5, y: 0.5 }, { x: SHADOW_MARK.pitchPx, y: SHADOW_MARK.pitchPx }), true, "a rule is horizontal: constant along frequency");
+  }
+});
+
+test("the shadow is not the unknown hatch, not the refused X, not pending, not any other mark's shape", () => {
+  const others = CELL_MARKS.filter((_, s) => s !== CELL.SHADOW);
+  for (const m of others) if (m.kind === "pattern") assert.notEqual(m.pattern, SHADOW_MARK.pattern, "the shadow shares a cell mark's shape");
+  assert.notEqual(SHADOW_MARK.pattern, REFUSED_MARK.pattern);
+  assert.notEqual(SHADOW_MARK.pattern, (CELL_MARKS[CELL.UNKNOWN] as { pattern: string }).pattern);
+  for (const c of [REFUSED_MARK.ink, REFUSED_MARK.rgb, PENDING, BACKDROP, (CELL_MARKS[CELL.UNKNOWN] as { ink: Rgb }).ink]) {
+    assert.ok(!near([...SHADOW_MARK.ink], [...c]), `the scanline ink is ${c}`);
+  }
+  // Not magenta, by the e2e's own predicate (magenta is `unknown`'s alone).
+  const [r, g, b] = SHADOW_MARK.ink.map((v) => Math.round(v * 255));
+  assert.ok(!(r > g + 20 && b > g + 20 && (r + b) / 2 > 60));
+  // No honesty-tier wash reaches a shadow: it is not a measurement of this cell, so it has no
+  // resolution to qualify — the same pixel whatever tier the tile was answered at.
+  for (const tier of [0, 1, 2]) {
+    assert.deepEqual(cellPixel({ state: CELL.SHADOW, x: 0.6, px: { x: 1.5, y: 3.5 }, tier, srcPx: { x: 2, y: 2 }, fallback: false }),
+      shadowPx(0.6, { x: 1.5, y: 3.5 }));
   }
 });
 
