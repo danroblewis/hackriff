@@ -15566,7 +15566,8 @@ tasks:
   - id: T-522
     milestone: MSCAN
     title: A toggle to show or hide the found-signal boxes on the canvas, remembered per viewer
-    status: in-progress
+    status: done
+    commit: "472af52a"
     priority: normal
     parallel_group: CANVAS-FE
     model: sonnet
