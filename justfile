@@ -386,3 +386,23 @@ deploy-jetson:
         --exclude .git --exclude .venv/ --exclude node_modules/ \
         ./ "$JETSON_HOST:~/hackriff/"
     ssh "$JETSON_HOST" 'source "$HOME/.cargo/env" 2>/dev/null || true; cd ~/hackriff && cargo build --release --features hk-dsp/gpu'
+
+# Build the web UI + the `hk` binary (with HackRF support) and start the server.
+# Autodetects an attached HackRF; then open the http://127.0.0.1:8080/#token=... URL it prints.
+# No radio? It tells you how to replay a recording instead. Ctrl-C to stop.
+run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -d ui/node_modules ] || ( cd ui && npm install )
+    ( cd ui && npm run build )
+    cargo build --release -p hk-cli --bin hk --features hackrf
+    BIN=target/release/hk
+    if hackrf_info >/dev/null 2>&1; then
+        echo ">> HackRF detected - starting live. Open the http://127.0.0.1:8080/#token=... URL printed below."
+        exec "$BIN" serve --hackrf --center-hz 100800000 --rate 2400000 --lna 32 --vga 30 --amp --ui-dist ui/dist --bind 127.0.0.1:8080
+    else
+        echo ">> No HackRF found. Run 'hackrf_info' to check the USB connection."
+        echo ">> To try the UI without a radio, replay a recording:"
+        echo ">>   $BIN serve --replay fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta --loop --ui-dist ui/dist --bind 127.0.0.1:8080"
+        exit 1
+    fi
