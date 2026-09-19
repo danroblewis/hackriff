@@ -15489,7 +15489,8 @@ tasks:
   - id: T-519
     milestone: MSCAN
     title: "Fog-of-war 2A: a last-known (carry-forward) query and a shadow plane on the tile route"
-    status: in-progress
+    status: done
+    commit: "45c37dbc"
     priority: high
     parallel_group: PIPE
     core_interface: true
