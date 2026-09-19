@@ -276,3 +276,21 @@ test("T-340's control over the WHOLE gesture vocabulary, region stroke included:
   // The control that stops "it never commits" from passing this.
   assert.equal(regions.length, 1, "no region was produced at all, so the run proves nothing");
 });
+
+// ---------------------------------------------------------------------------
+// 5. T-526: Ctrl+Shift+wheel is the shadow-brightness gesture, and it is not a view gesture
+// ---------------------------------------------------------------------------
+
+test("a Ctrl+Shift wheel notch calls onShadowGain and reaches NEITHER wheel nor wheelMap: it never moves the pane's view", () => {
+  const notches: number[] = [];
+  const h = harness({ onShadowGain: (n) => notches.push(n) });
+  h.fire("wheel", { preventDefault: () => {}, clientX: 400, clientY: 300, deltaY: -120, deltaX: 0, deltaMode: 0, ctrlKey: true, shiftKey: true });
+  assert.deepEqual(h.calls, [], "ctrl+shift reached preview.wheel/wheelMap — it must stay a display-only gesture");
+  assert.deepEqual(notches, [1]);
+});
+
+test("without a host-supplied onShadowGain, Ctrl+Shift+wheel falls through to the ordinary zoom", () => {
+  const h = harness({});
+  h.fire("wheel", { preventDefault: () => {}, clientX: 400, clientY: 300, deltaY: -120, deltaX: 0, deltaMode: 0, ctrlKey: true, shiftKey: true });
+  assert.deepEqual(h.calls.map((c) => c.fn), ["wheel"], "with no shadow-gain host, the combo must still do SOMETHING sensible, not silently eat the event");
+});
