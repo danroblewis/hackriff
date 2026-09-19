@@ -15639,6 +15639,32 @@ tasks:
       Filed 2026-09-18; top tier with T-523 under the ~3% budget; if unfinished, resumes first after
       the reset (Sun 02:00).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-525
+    milestone: MSCAN
+    title: A full 1-6000 MHz sweep on the LIVE HackRF crashes hk serve - a failed or edge retune must skip the step, never take the server down
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER-REPORTED 2026-09-19. Scanning the live HackRF 1 MHz-6000 MHz at dwell 1 s crashes the
+      backend (unhealthy; stage.sh restarts it). The SAME scan on the mock (hk serve --device mock:)
+      runs fine, so it is NOT the scan logic or the DC notch: it is the REAL-DEVICE retune path under
+      a ~3334-step cadence. Suspects: a retune to an edge frequency (near 1 MHz or 6000 MHz), or a
+      libhackrf/USB error that panics instead of being handled.
+      FIX: (1) the scan's per-step retune is fault-tolerant - a failed or edge retune yields or skips
+      that step, is logged and counted, and NEVER panics the server; (2) clamp the scan range to the
+      device's achievable tune configurations. FIRST find the actual panic (the crashed serve's log /
+      backtrace, RUST_BACKTRACE=1) - measure, don't assume. Reproduce on the mock with T-508's
+      HK_MOCK_FAULT (extend it with an edge/USB-error fault if needed) so the regression test runs
+      without hardware, RED on main. Relates to T-497/T-508's retune hardening.
+      HARDWARE: only with the user's say-so - the HackRF is the demo's device on :8899.
+    notes: |
+      Filed 2026-09-19; queued for after the weekly reset (Sun 02:00) given budget.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
