@@ -15606,6 +15606,30 @@ tasks:
       Filed 2026-09-18. The user's #1 with ~3% weekly budget left; if unfinished at the cap, it is
       the FIRST thing resumed after the reset (Sun 02:00). Branch task-t523.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-524
+    milestone: MSCAN
+    title: Notch-and-interpolate the LO-leakage spike at every tune centre, in the backend, so a sweep stops stamping a false pattern
+    status: in-progress
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER, 2026-09-18, important for sweeps. Every HackRF tune has an LO-leakage (DC) spike at its
+      centre; a sweep stamps that false spike at each hop's centre - "the repeated pattern that
+      isn't really there". FIX: notch-and-INTERPOLATE - replace the DC-notch cells with a LINEAR
+      gradient between the values just left and just right of the notch. NOT black/grey (that reads
+      as missing data). Applied once in the BACKEND spectrum path, so it appears everywhere at once
+      (live rows, history pyramid, tiles, trace, sweep) - never a per-view client patch. Real-time
+      path: Opus, reviewed. Known notch width, per device.
+      Check existing DC handling first (T-418 off-DC placement, the DC twin, spur masks) and reuse it.
+      Detection must not treat the interpolated cells as measured energy.
+    notes: |
+      Filed 2026-09-18; top tier with T-523 under the ~3% budget; if unfinished, resumes first after
+      the reset (Sun 02:00).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
