@@ -59,6 +59,7 @@ import {
 } from "../../surface/trace";
 import type { OverlayQuad } from "../../surface/minimap";
 import { liveRow } from "./live-edge";
+import { captureBanner } from "./capture-state";
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
 import { openSelectionMenu, openSignalMenu } from "../menu";
@@ -85,7 +86,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const { store, client } = ctx;
 
   const canvas = h("canvas", { class: "sf-canvas", "aria-label": "The spectrum surface: frequency across, time down, with the whole-surface map below" }) as HTMLCanvasElement;
-  const stage = h("div", { class: "sf-stage" }, canvas);
+  // T-508: capture state, stated OVER the picture — a frozen edge that looks live is the defect.
+  const captureEl = h("div", { class: "sf-capture", role: "alert", hidden: true });
+  const stage = h("div", { class: "sf-stage" }, canvas, captureEl);
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
@@ -116,6 +119,18 @@ function mount(el: HTMLElement, ctx: AppContext) {
   let pending: { pane: string; region: MarkRegion } | null = null;
 
   const say = (text: string) => { note.textContent = text; note.hidden = !text; };
+  store.select((s) => s.device, (d) => {
+    const b = captureBanner(d);
+    captureEl.hidden = !b;
+    if (b) {
+      if (captureEl.textContent !== b.text) captureEl.textContent = b.text;
+      captureEl.dataset.state = b.state;
+      stage.dataset.capture = b.state;
+    } else {
+      delete captureEl.dataset.state;
+      delete stage.dataset.capture;
+    }
+  }, { immediate: true });
   /** Set-if-changed, so a per-frame readout does not rewrite the DOM sixty times a second. */
   const setText = (e: HTMLElement, text: string) => { if (e.textContent !== text) e.textContent = text; };
 

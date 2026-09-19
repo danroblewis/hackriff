@@ -1539,10 +1539,11 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         return Err(too_many_in_flight());
     };
     let store = tile_store(state, q);
-    let (key, ceiling) = with_tile_history(state, store, |p| {
+    let (key, ceiling, readable) = with_tile_history(state, store, |p| {
         let key = parse_key(p.geometry(), q)?;
         let ceiling = readable_ceiling(p, &key.lattice);
-        Ok((key, ceiling))
+        let readable = servable(p, &key);
+        Ok((key, ceiling, readable))
     })?;
     let started = std::time::Instant::now();
     let max_live = crate::http::max_live_span_hz(state);
@@ -1559,7 +1560,15 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         crate::coverage::TileOverlay::collect(state, key.region.freq, window, key.cells, key.cells);
     let uniform = overlay.uniform_state(&key.device);
     let coverage = overlay.to_json(&key.device, key.named_device());
-    if uniform == Some("unobserved") {
+    // T-515 (folded into T-507): **the shortcut is a cheaper spelling of the full path, including
+    // its refusals.** An address no store level can back is refused whatever its coverage — the
+    // `tile_read` below answers it with the full path's own 400. Otherwise whether an address is
+    // servable would depend on what the radio happened to sample there: the same address would
+    // answer 200 over an unobserved band and 400 once the band became observed, and the declared
+    // ceiling (`axes.*.max_level`, a pure function of geometry) would stop being the bound a client
+    // can cache. Until T-507 this was hidden by accident: a young server's past was `"unknown"`,
+    // which never short-circuits, so the walk above the ceiling reached the refusal anyway.
+    if uniform == Some("unobserved") && readable {
         // T-519: a tile the coverage map greys end to end is exactly where a departed band's
         // shadow lives, so the last-known search runs here too — against no grid, because the
         // coverage map just said no tune touched this tile.

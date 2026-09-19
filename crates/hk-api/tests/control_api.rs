@@ -144,6 +144,8 @@ impl FakeRun {
             segment: 0,
             replumbing: false,
             finished: false,
+            capture: hk_api::CaptureStatus::Running,
+            capture_note: None,
             display: DisplayState {
                 fft_size: 1024,
                 averaging: 1,

@@ -80,6 +80,11 @@ export async function startBackend({
   // active capture window, and takes a retune, so a browser can drive the whole act without any real
   // hardware (CLAUDE.md: e2e goes THROUGH the device interface; receive only; never the real radio).
   mockDevice = false,
+  // T-508: a **fault** for that mock device (`HK_MOCK_FAULT`, e.g. `retune-apply-fails:1` or
+  // `gone-on-retune`; see `hk_core::MockFault::parse`). Every retune guard in this tier was green
+  // because the mock always landed exactly where it was told; a fault is what lets one go red. It
+  // reaches only `--device mock:…` — a real radio has no such switch — so it needs `mockDevice`.
+  mockFault = null,
   // HK_E2E_UI_DIST is how `selftest.mjs` points the product's own server at a DELIBERATELY BROKEN
   // build, to prove this suite can still tell the difference.
   uiDist = process.env.HK_E2E_UI_DIST ?? path.join(UI_DIR, "dist"),
@@ -99,6 +104,7 @@ export async function startBackend({
   // `hk serve` held 8791. The repo runs up to four agents at once, so this is the normal case, not a
   // corner. Stepping to the next free port is what the caller wanted anyway — the port is internal,
   // callers use the returned `origin` — and it fails closed if none is free.
+  if (mockFault && !mockDevice) throw new Error("a mock fault needs mockDevice: true (a --replay has no device to fail)");
   port = await freePort(port);
   const bin = hkBinary();
   const dataDir = mkdtempSync(path.join(tmpdir(), "hk-e2e-data-"));
@@ -116,7 +122,12 @@ export async function startBackend({
     // HK_STREAM_TCP is pinned away from the default as well: `hk serve` also runs a TCP stream
     // server, whose default is 8788 — the port beside the user's live-HackRF demo. `:0` asks the
     // OS for an ephemeral one, so this tier can never take a port anything else wants.
-    env: { ...process.env, HK_TOKEN: token, HK_STREAM_TCP: "127.0.0.1:0" },
+    env: {
+      ...process.env, HK_TOKEN: token, HK_STREAM_TCP: "127.0.0.1:0",
+      // Always set, so a fault in the caller's own environment can never leak into a run that
+      // did not ask for one ("" parses as no fault).
+      HK_MOCK_FAULT: mockFault ?? "",
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 

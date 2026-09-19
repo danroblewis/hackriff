@@ -336,3 +336,75 @@ fn deeper_stores_declare_a_deeper_ceiling_that_is_true_and_maximal() {
         }
     }
 }
+
+/// **The coverage-only shortcut cannot answer above the ceiling** (T-515, folded into T-507).
+///
+/// A tile whose selected coverage plane is `"unobserved"` end to end is answered from the coverage
+/// map without reading the store (T-461). That shortcut must be a cheaper spelling of the full
+/// path, **including its refusals**: whether an address is servable is a function of geometry, the
+/// thing `axes.*.max_level` declares, never of what the radio happened to sample there. Otherwise
+/// the same address answers `200` over an unobserved band and `400` once the band is observed, and
+/// the ceiling a client caches stops being the bound.
+///
+/// So the whole route (`tiles_json`, not `tile_read`) is walked over the whole lattice on a server
+/// whose coverage is **uniformly unobserved** — an observation log holding no records, so nothing
+/// here is `"unknown"` and every address is a shortcut candidate — and its status must be exactly
+/// the predicate's: `200` where `servable`, `400` where not, and the shortcut must actually have
+/// fired on the served ones (or the walk would be testing the full path again).
+#[test]
+fn the_coverage_shortcut_answers_exactly_where_the_read_would() {
+    let dir = TempDir::new("shortcut");
+    let (mut state, geom) = server(&dir.0, view(6250.0, 4, 4));
+    state.observations = Some(
+        hk_store::observation::ObservationStore::open(
+            hk_store::observation::ObservationLogConfig::new(dir.0.join("observations")),
+        )
+        .unwrap(),
+    );
+    let lattice = TileLattice::view(&geom);
+    let (max_f, max_t) = ceiling_of(&state, &geom);
+    let mut wrong = Vec::new();
+    let mut refused_past_ceiling = 0usize;
+    for lf in 0..lattice.f_cells_hz.len() {
+        for lt in 0..lattice.t_cells_ns.len() {
+            let key = parse_key(&geom, &params(&geom, lf, lt)).unwrap();
+            let said = {
+                let p = state.view_history.as_ref().unwrap().lock().unwrap();
+                servable(&p, &key)
+            };
+            match (
+                said,
+                hk_api::tiles::tiles_json(&state, &params(&geom, lf, lt)),
+            ) {
+                (true, Ok(v)) => {
+                    if v["resolution"]["short_circuit"]["applied"] != serde_json::json!(true) {
+                        wrong.push(format!("({lf},{lt}) served without the shortcut: {v}"));
+                    }
+                }
+                (false, Err(e)) if e.status == 400 => {
+                    if lf > max_f || lt > max_t {
+                        refused_past_ceiling += 1;
+                    }
+                }
+                (said, got) => wrong.push(format!(
+                    "({lf},{lt}) servable={said} but the route answered {}",
+                    match got {
+                        Ok(_) => "200".to_string(),
+                        Err(e) => format!("{}: {}", e.status, e.message),
+                    }
+                )),
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    // Not vacuous: the ceiling's own one-past neighbours are among the refusals.
+    assert!(refused_past_ceiling > 0);
+    for (lf, lt) in [(max_f + 1, max_t), (max_f, max_t + 1)] {
+        let e = hk_api::tiles::tiles_json(&state, &params(&geom, lf, lt)).unwrap_err();
+        assert_eq!(
+            e.status, 400,
+            "({lf},{lt}) over an unobserved band: {}",
+            e.message
+        );
+    }
+}

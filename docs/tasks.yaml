@@ -13200,7 +13200,8 @@ tasks:
   - id: T-466
     milestone: M2-hardening
     title: ui/e2e/selftest.mjs cannot hold app-page faults, so per-guard attribution is meaningless for two specs
-    status: in-progress
+    status: done
+    commit: "b7070787"
     priority: normal
     parallel_group: UI
     depends_on: []
@@ -15193,7 +15194,8 @@ tasks:
   - id: T-507
     milestone: MLIVE
     title: A server that has lost its history answers every tile all-unknown - a wall of purple the user sees
-    status: in-progress
+    status: done
+    commit: "3b352889"
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15224,7 +15226,8 @@ tasks:
   - id: T-508
     milestone: MLIVE
     title: A failed re-plumb ends the run for good while hk serve stays up saying finished - the other road to "retune never recovers"
-    status: in-progress
+    status: done
+    commit: "51bc8aae"
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15259,7 +15262,8 @@ tasks:
   - id: T-509
     milestone: M2-hardening
     title: tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell saw an all-unobserved plane once under a full gate
-    status: todo
+    status: done
+    commit: "3b352889"
     priority: normal
     parallel_group: PIPE
     model: opus
@@ -15412,7 +15416,8 @@ tasks:
   - id: T-515
     milestone: MLIVE
     title: The coverage-only tile shortcut answers 200 above the declared readable ceiling, where docs/api.md says 400
-    status: todo
+    status: done
+    commit: "3b352889"
     priority: low
     parallel_group: PIPE
     model: opus
@@ -15518,7 +15523,7 @@ tasks:
   - id: T-520
     milestone: MSCAN
     title: "Fog-of-war 2B: the client's SHADOW tier - a dim last-known ramp, unmistakable from live, grey untouched"
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CANVAS-FE
     model: opus
@@ -15555,6 +15560,26 @@ tasks:
       the air was truly observed before.
     notes: |
       Filed 2026-09-18.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-522
+    milestone: MSCAN
+    title: A toggle to show or hide the found-signal boxes on the canvas, remembered per viewer
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: sonnet
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      USER, 2026-09-18: the Candidate/Confirmed detection boxes are sometimes too cluttered. Add a
+      TOGGLE in the canvas/surface controls that shows or hides them. Pure client presentation - the
+      boxes are drawn from detection data already in the UI; this changes only their visibility,
+      never what is fetched or detected. Remember the choice in localStorage (wrapped in try/catch;
+      the page must work without it). Default: shown. test-ui gate.
+      PRIORITY: BELOW the fog-of-war chain (T-519 -> T-520 -> T-521). Slot into spare UI capacity;
+      never let it delay fog-of-war.
+    notes: |
+      Filed 2026-09-18 from the user's request.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening

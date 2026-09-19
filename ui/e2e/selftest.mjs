@@ -206,6 +206,93 @@ export const __selftestMark = __selftestPredicate(1);
       return src.replace(from, "  return true; // injected by ui/e2e/selftest.mjs — everything is retryable");
     },
   },
+  {
+    // T-466: `surface-region.e2e.mjs` and `app-surface.e2e.mjs` are the first specs that drive the
+    // APP (`/`), not `/surface.html` — and until now `build()` compiled only the surface bundle, so
+    // a fault meant for either one failed every app-tier spec at once (the page never mounted at
+    // all) rather than the guard named for it. Per-guard attribution for these two was therefore
+    // never actually measured. Now that `build()` also compiles the app bundle (T-460's fix,
+    // 6f4c7052), the two faults below restore two of the three `surface-region.e2e.mjs`'s own header
+    // comment (T-458) recorded as tested BY HAND against `ui/src` directly and never captured here
+    // as a standing fault: the browser tier's non-vacuity claim about this file rested on a manual
+    // run that nothing re-checks. (The header's third fault is addressed, not reproduced, just
+    // below — it no longer measures true against this tree.)
+    //
+    // `dragIntent` first: the shift modifier is read but never trusted, so every stroke is a pan and
+    // shift+drag behaves exactly like a plain drag. T-458 measured this as reddening tests 1, 3 and
+    // 4 of `surface-region.e2e.mjs`. It cannot touch `app-surface.e2e.mjs`'s own drag test, which
+    // never holds shift — `dragIntent(e)` returns "pan" for that stroke either way.
+    name: "t458-region-modifier-ignored",
+    expect: "surface-region.e2e.mjs",
+    what: "T-458: `dragIntent` stops reading the shift modifier, so shift+drag pans the view instead " +
+      "of marking out a region — the gesture T-458 added is unreachable.",
+    file: "surface/preview.ts",
+    patch: (src) => {
+      const from = "  return e.shiftKey === true ? \"region\" : \"pan\";";
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in preview.ts: ${from}`);
+      return src.replace(from, "  return \"pan\"; // injected by ui/e2e/selftest.mjs — the modifier is never read");
+    },
+  },
+  {
+    // The second of T-458's three: the modifier is still read correctly and a region is still
+    // tracked, but the early `return` that keeps a region stroke from also panning is gone, so the
+    // pane's window drags right along under the rectangle being drawn. T-458 measured this as tests
+    // 1 and 3. `app-surface.e2e.mjs`'s drag test holds no modifier, so `dragging.region` is never set
+    // for it and this branch is never entered — the fault cannot reach that file.
+    name: "t458-region-falls-through-and-pans",
+    expect: "surface-region.e2e.mjs",
+    what: "T-458: a region stroke's early return is removed, so marking out a region also pans the " +
+      "view under the rectangle being drawn — the load-bearing negative the file's test 1 checks.",
+    file: "surface/input.ts",
+    patch: (src) => {
+      const from =
+        "      dragging.region = { ...dragging.region, b: point(e) };\n" +
+        "      opts.onRegionDrag?.(dragging.region);\n" +
+        "      return; // a region stroke is not a pan: the view must not move under the rectangle\n";
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in input.ts: ${from}`);
+      return src.replace(from,
+        "      dragging.region = { ...dragging.region, b: point(e) };\n" +
+        "      opts.onRegionDrag?.(dragging.region);\n" +
+        "      // injected by ui/e2e/selftest.mjs — a region stroke falls through and pans too\n");
+    },
+  },
+  // T-458's THIRD fault — the tap gate (`far`) hard-wired true — is deliberately NOT here. It was
+  // measured (build a scratch copy, patch `input.ts`'s `far` to always be `true`, rebuild, run
+  // `surface-region.e2e.mjs` alone) and came back GREEN, twice, against this tree: test 3's 2 px
+  // shift-tap still marks out nothing, because `commitRegion` (`app/explore/region.ts`) has its OWN
+  // independent gate, `regionIsReal` (`f1Hz > f0Hz && t1Ns > t0Ns`), and at this test's zoom level a
+  // 2-device-px stroke apparently still degenerates there even once the pointer-side gate is
+  // disabled. `surface-region.e2e.mjs`'s own header comment states this fault reddens test 3 "alone"
+  // (recorded when T-458 landed); that no longer measures true here, whether because the domain gate
+  // was added or tightened since, or the header's original claim was never quite right. Recorded
+  // rather than silently dropped: a FAULTS entry that comes back green is a hole, and shipping one
+  // that is already known not to redden anything would be exactly the vacuity this file exists to
+  // rule out.
+  {
+    // `app-surface.e2e.mjs` is the cutover's own guard (T-445): the retired widgets — `timenav`,
+    // `freqnav`, `live`, `axis` — must be GONE from the page, not merely unmounted. A leftover slot
+    // sitting in `index.html`, dead HTML nobody mounts into any more, is exactly the incomplete
+    // retirement T-445 was written to rule out — the widget itself is gone, but its hook survives.
+    //
+    // The first attempt at this fault dropped `data-slot="outputs"` instead: `dom.ts`'s `slot()`
+    // THROWS on a missing slot (by design — "a layout bug"), so that patch crashed the app's whole
+    // eager mount sequence and reddened every app-tier spec, reproducing the exact defect T-466
+    // exists to fix rather than a fault this file alone catches. `querySelector` returns the FIRST
+    // match, so an EXTRA slot never throws — mounting proceeds untouched, and only the one assertion
+    // that counts `[data-slot="timenav"]` sees it.
+    name: "t445-app-retired-slot-left-behind",
+    expect: "app-surface.e2e.mjs",
+    what: "T-445: a `data-slot=\"timenav\"` element is left in `index.html` after the widget it named " +
+      "was retired — the cutover's own check that a gone widget stays gone.",
+    file: "app/index.html",
+    patch: (src) => {
+      const from = '      <div class="capture" data-slot="capture"></div>\n';
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in index.html: ${from}`);
+      return src.replace(from,
+        from + '      <div data-slot="timenav" hidden></div>' +
+        ' <!-- injected by ui/e2e/selftest.mjs — a retired slot left behind -->\n');
+    },
+  },
 ];
 
 function build(fault) {
