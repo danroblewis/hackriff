@@ -79,7 +79,7 @@ Never returns content, only stream *metadata*: every offered stream's header fie
 
 `tcp` is `null` when no TCP stream server runs. See [Streams](#streams-websocket-tcp-and-on-demand-openers) below and `docs/stream-contract.md` §10/§12/§13 for what each named stream/opener actually carries.
 
-`dc_excluded_hz` (T-167, ADR-0013 §4.9 gap 10) is the half-width, Hz, of the DC/LO-leakage notch centred on `center_hz` that the producer's own detector excludes from analysis (the spectrum stream's `hk-pipeline` producer sets it from `hk_detect::DcRule::default().tolerance_hz`, the same value `GET /api/observations` `records[].window.dc_excluded` already reflects). It is additive on both `/api/streams` and the stream header itself (below) and `null` when a producer applies no DC mask to that stream — never a guess.
+`dc_excluded_hz` (T-167, ADR-0013 §4.9 gap 10) is the half-width, Hz, of the DC/LO-leakage notch centred on `center_hz` that the producer's own detector excludes from analysis (the spectrum stream's `hk-pipeline` producer sets it from `hk_detect::DcRule::default().tolerance_hz`, the same value `GET /api/observations` `records[].window.dc_excluded` already reflects). It is additive on both `/api/streams` and the stream header itself (below) and `null` when a producer applies no DC mask to that stream — never a guess. **T-524:** the cells inside that notch in every spectrum row (and in spectrum history, so tiles and the trace too) are **synthesized, not measured** — a straight dB line between the measured bins either side, replacing the LO-leakage spike — so a client that wants to mark them reads them from this field; detection runs on its own un-interpolated frames.
 
 ### `GET /api/history` — region-over-time grid (T-017, AWARE-042)
 
