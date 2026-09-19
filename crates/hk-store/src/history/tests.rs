@@ -16,6 +16,7 @@ use super::*;
 mod bias_tee;
 mod coverage_fold;
 mod followups;
+mod last_known;
 mod lattice;
 mod lattice_cost;
 mod maturity;
