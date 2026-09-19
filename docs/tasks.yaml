@@ -15584,6 +15584,28 @@ tasks:
     notes: |
       Filed 2026-09-18 from the user's request.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-523
+    milestone: MSCAN
+    title: Fog-of-war regressed the live view - the live edge stalls until a resize, and zoom bursts draw 502s
+    status: in-progress
+    priority: high
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER, 2026-09-18, on the demo after T-519/T-520 merged. (1) Live view: newest rows/tiles stop
+      arriving; a refresh is correct; a window RESIZE restarts both live and shadow. (2) Rapid zoom
+      draws 502s from the tunnel - T-519's per-tile last-known search (~84 ms per 819 MHz tile) now
+      also runs on the coverage short-circuit. (3) Shadow too dark: raise it a notch, still clearly
+      dimmer than live. LEADING HYPOTHESIS (to measure, not assume): 502s arm T-499's whole-transport
+      backoff (to 30 s), throttling T-460's live-edge refresh; a resize re-issues requests. DoD: a
+      regression test RED on main - live edge advances through a zoom burst with injected 502s and
+      no resize; shadow-search cost cut and measured; honesty cap test kept meaningful.
+    notes: |
+      Filed 2026-09-18. The user's #1 with ~3% weekly budget left; if unfinished at the cap, it is
+      the FIRST thing resumed after the reset (Sun 02:00). Branch task-t523.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
