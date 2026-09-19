@@ -43,8 +43,9 @@ import type { NavigationGrid } from "../../navigation";
 import { attachSurfaceInput, type GlPoint } from "../../surface/input";
 import {
   markAt, markQuads, normalizeRegion, pendingMarkBox, pointOn, selectionMarkBoxes, signalMarkBoxes,
-  type MarkBox, type MarkRegion,
+  type MarkBox, type MarkRegion, type MarkRow, type MarkSelection,
 } from "../../surface/marks";
+import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { rangeLabel } from "../../surface/legend";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
@@ -81,6 +82,42 @@ const TRACE_PX = 96;
  * (`ui/test/surface-retune.test.ts` asserts that), so which spans to offer as buttons lives here,
  * beside "Retune"'s own label text. An unachievable one is still offered, stated and disabled. */
 const WIDTH_PRESETS_HZ: readonly number[] = [500e3, 2e6, 5e6, 10e6, 20e6];
+/** T-522: the found-signal overlay's shown/hidden preference, kept in `localStorage` the same way
+ * `shell.ts`'s `PREFS_KEY` is — a per-viewer convenience, wrapped in try/catch so the page works
+ * with storage unavailable, and never anything the backend needs to know about. */
+const SHOW_SIGNALS_KEY = "hk-mui-show-signals";
+
+/** Read the persisted preference. Defaults to shown — absent, empty or thrown all mean shown. */
+export function readShowSignals(): boolean {
+  try {
+    return localStorage.getItem(SHOW_SIGNALS_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+export function writeShowSignals(shown: boolean): void {
+  try { localStorage.setItem(SHOW_SIGNALS_KEY, shown ? "true" : "false"); } catch { /* storage unavailable */ }
+}
+
+/**
+ * The rectangles one pane draws, T-522's gate included. Kept as its own pure function — rather than
+ * inline in the frame callback — so a test can assert on exactly what the render path is asked to
+ * draw for a given `showSignals`, not on a boolean read off to the side. The toggle changes only
+ * this composition: `rows`, `sels` and `pendingRegion` are unchanged, so nothing about what is
+ * fetched, polled or detected moves when it flips.
+ */
+export function paneMarkBoxes(
+  rows: readonly MarkRow[], focusId: string | null,
+  sels: readonly MarkSelection[], selId: string | null, paneBox: Box,
+  pendingRegion: MarkRegion | null, showSignals: boolean,
+): MarkBox[] {
+  return [
+    ...(showSignals ? signalMarkBoxes(rows, focusId) : []),
+    ...selectionMarkBoxes(sels, selId, paneBox),
+    ...pendingMarkBox(pendingRegion),
+  ];
+}
 
 function mount(el: HTMLElement, ctx: AppContext) {
   const { store, client } = ctx;
@@ -103,8 +140,16 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // hatch for digging into weak signals, and the label beside it states the range and which way
   // round it is — a fixed scale is honest only if it is quoted.
   const contrastBtn = h("button", { class: "mini sf-contrast", type: "button" }, "Auto-contrast: off");
+  // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
+  // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
+  // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
+  let showSignals = readShowSignals();
+  const signalsBtn = h("button", {
+    class: "mini sf-signalsbtn", type: "button", "aria-pressed": String(showSignals),
+    title: "Show or hide the found-signal boxes (Candidate/Confirmed detections) on the canvas. Display only — changes nothing about what is detected.",
+  }, "Signals");
   const rangeEl = h("span", { class: "sf-range", role: "status" });
-  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn,
+  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn, signalsBtn,
     h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved.", onclick: () => preview?.split("columns") }, "Split ⇔"),
     h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => preview?.closeActive() }, "Close"),
     h("button", { class: "mini", type: "button", title: "Zoom the active viewport out to the device-available spectrum over the whole record horizon.", onclick: () => preview?.fitToSurface() }, "Whole surface"));
@@ -151,13 +196,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const s = store.get();
     const focusId = s.focus.kind === "signal" ? s.focus.id : null;
     const selId = s.focus.kind === "selection" ? s.focus.id : null;
-    return [
-      ...signalMarkBoxes(Object.values(s.inventory.rows), focusId),
-      ...selectionMarkBoxes(s.selections.list, selId, pane.box),
-      // The rubber band goes through the same pass on the same frame as everything else it is being
-      // drawn over, and only on the pane it is being stroked on (T-458).
-      ...pendingMarkBox(pending && pending.pane === pane.id ? pending.region : null),
-    ];
+    // The rubber band goes through the same pass on the same frame as everything else it is being
+    // drawn over, and only on the pane it is being stroked on (T-458).
+    const pendingRegion = pending && pending.pane === pane.id ? pending.region : null;
+    return paneMarkBoxes(Object.values(s.inventory.rows), focusId, s.selections.list, selId, pane.box, pendingRegion, showSignals);
   };
 
   // ---- the spectrum trace (T-457, docs/16 §8.5b finding 1) ----
@@ -297,6 +339,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
     traceBtn.setAttribute("aria-pressed", String(traceOn));
     traceEl.hidden = !traceOn;
     if (!traceOn) traceEl.textContent = "";
+  });
+  // T-522: presentation only — no store write, no route, no poll. `boxesFor` reads `showSignals`
+  // fresh every frame (the same discipline as `traceOn` above), so the next frame just draws fewer
+  // boxes; there is no cache or subscription to invalidate.
+  signalsBtn.addEventListener("click", () => {
+    showSignals = !showSignals;
+    signalsBtn.setAttribute("aria-pressed", String(showSignals));
+    writeShowSignals(showSignals);
   });
 
   // ---- mirror the active viewport into the app's one window (CLAUDE.md's whole-UI window rule) ----
