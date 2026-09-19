@@ -18,13 +18,19 @@ Rust core builds and runs on macOS or Linux; the web UI runs in any modern brows
 | Rust (stable) | [rustup.rs](https://rustup.rs) | [rustup.rs](https://rustup.rs) |
 | `just` task runner | `brew install just` | `cargo install just` |
 | Node + npm (builds the UI) | `brew install node` | `apt install nodejs npm` |
-| HackRF driver + tools | `brew install hackrf` | `apt install hackrf libhackrf-dev` |
+| HackRF driver + tools + pkg-config | `brew install hackrf pkg-config` | `apt install hackrf libhackrf-dev pkg-config` |
 
 Plug in the HackRF and confirm the OS sees it:
 
 ```sh
 hackrf_info      # should print the serial + firmware; if not, fix the USB/driver first
 ```
+
+> **Build fails with `` `libhackrf` was not found `` / pkg-config?** The HackRF *dev* library or
+> `pkg-config` is missing. Install both per the table above (on Debian it must be `libhackrf-**dev**`,
+> not just `libhackrf`). If it's installed but still not found — common on Apple Silicon — run
+> `export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig"` before `just run`. As a last resort, set
+> `HACKRF_LIB_DIR` to the folder containing `libhackrf.dylib`/`libhackrf.so` to bypass pkg-config.
 
 **2. Build and run** — one command:
 
