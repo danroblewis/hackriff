@@ -291,12 +291,12 @@ async function coverage(backend, { loHz, hiHz }, t0S = null, t1S = null, cells =
   // denominator rather than counted on either side.
   //
   // `unknown` means "the record that would say whether we looked is gone" (T-423) — a third state
-  // that is neither grey nor a level, and on a young backend it is simply everything before
-  // `horizon.oldest_record_s`. Counting it as coverage would overstate what the radio saw; counting
-  // it as unobserved would demand grey where grey would be a lie. Measured on this fixture: over the
-  // last 20 s the tuned window is 2305 observed, 0 unobserved and 1383 unknown purely because the
-  // server is younger than the window asked for. Of the cells where it is known, it is 100 %
-  // observed — which is the fact the pane is being compared against.
+  // that is neither grey nor a level. Since T-507 it is only what a server recorded and LOST (rows
+  // between `horizon.recording_began_s` and `horizon.oldest_record_s`, or everything before the
+  // latter when `horizon.forgotten` says so); time before a young server began recording is
+  // `unobserved`, and grey. Counting `unknown` as coverage would overstate what the radio saw;
+  // counting it as unobserved would demand grey where grey would be a lie — so it stays out of the
+  // denominator either way.
   const known = observed + unobserved;
   return { total: cs.length, observed, unknown, unobserved, known,
     observedShare: known ? observed / known : 0,
@@ -639,15 +639,11 @@ async function centreOf(page) {
  * **The recent window the coverage question has to be asked over, and why it is not the default.**
  *
  * `/api/coverage` with no `t0`/`t1` answers over the *capture window*, which on this server is a
- * fixed 120 s while the record itself begins at `horizon.oldest_record_s`. Rows wholly before that
- * are `unknown` — "we no longer know whether we looked" — and on a young backend that is 50 of 64
- * rows. Measured on this very fixture: 99.6–102 MHz over the default window is 3200 `unknown` and
- * 896 `observed`; the same band over the last 10 s is 1984 `observed` and 64 `unobserved`.
- *
- * `unknown` is neither grey nor a level (T-413/T-423: forgetting is not a measurement of nothing),
- * so folding it into either side of a grey comparison would make the comparison meaningless. Asking
- * over a recent window is how the question "is there data here?" gets an answer about the span the
- * pane is actually showing.
+ * fixed 120 s — on a young backend mostly time before the server began recording, which is
+ * `unobserved` (T-507; before T-507 it was served `unknown`, and on this fixture that was 50 of 64
+ * rows). Either way it is not the span the pane is showing, so asking over a recent window is how
+ * the question "is there data here?" gets an answer about the rows actually on screen — and
+ * [[waitForRecordToCover]] makes sure those rows are ones the server could have sampled.
  *
  * **The rows must not be finer than the store's own cells either**: the same 20 s asked as 64 rows
  * (0.3 s each) comes back with 1536 `unknown` cells and as 8 rows (2.5 s each) with none, because a
@@ -656,6 +652,53 @@ async function centreOf(page) {
  */
 const RECENT_S = 20;
 const recent = () => { const now = Date.now() / 1000; return [now - RECENT_S, now]; };
+
+/**
+ * **An upper bound on how many seconds a pane spans, read off its own ruler** (T-459): the oldest
+ * time tick's age plus the widest gap between ticks. Ticks sit on every multiple of one step inside
+ * the window, so the window's older edge lies less than one step past the oldest tick. `null` when
+ * the ruler states fewer than two time ticks.
+ */
+function paneSpanBoundS(ruler) {
+  const m = /time (.*)$/.exec(ruler ?? "");
+  if (!m) return null;
+  const unit = { ms: 1e-3, s: 1, m: 60, h: 3600 };
+  const ages = m[1].split(",").map((x) => {
+    const mm = /([\d.]+) m ([\d.]+) s/.exec(x);
+    if (mm) return Number(mm[1]) * 60 + Number(mm[2]);
+    const t = /([\d.]+) (ms|s|h)/.exec(x);
+    return t ? Number(t[1]) * unit[t[2]] : NaN;
+  }).filter(Number.isFinite).sort((a, b) => a - b);
+  if (ages.length < 2) return null;
+  let gap = 0;
+  for (let i = 1; i < ages.length; i++) gap = Math.max(gap, ages[i] - ages[i - 1]);
+  return ages[ages.length - 1] + gap;
+}
+
+/**
+ * **Wait until this server's record covers both the pane and the comparison window** (T-507):
+ * `horizon.recording_began_s` older than the pane's span (bounded from its ruler) and than
+ * `RECENT_S`, with a second's margin. Before that, the oldest rows of both are time before the
+ * server existed — honestly unobserved, honestly grey — and a claim about "rows the radio sampled"
+ * would be measured against rows it could not have sampled. Throws if it never gets there.
+ */
+async function waitForRecordToCover(page, backend, view, { timeoutMs = 60000 } = {}) {
+  const t0 = Date.now();
+  for (;;) {
+    const ruler = await page.eval(
+      `document.querySelector('.hk-surface-viewport[data-viewport="pane"] .hk-surface-ruler')?.textContent ?? ""`);
+    const paneS = paneSpanBoundS(ruler);
+    assert.ok(paneS !== null, `the pane's ruler states no time extent to bound: ${JSON.stringify(ruler)}`);
+    const h = (await get(backend,
+      `/api/coverage?f_lo=${Math.round(view.loHz)}&f_hi=${Math.round(view.hiHz)}&cells=1`)).horizon;
+    assert.ok(typeof h?.recording_began_s === "number", `the server names no recording_began_s: ${JSON.stringify(h)}`);
+    const ageS = Date.now() / 1000 - h.recording_began_s;
+    if (ageS > Math.max(paneS, RECENT_S) + 1) return { ageS, paneS, ruler, waitedMs: Date.now() - t0 };
+    assert.ok(Date.now() - t0 < timeoutMs,
+      `the server's record (${ageS.toFixed(1)} s) never came to cover the pane (${paneS.toFixed(1)} s)`);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
 
 // ===========================================================================
 // 1. PAN AND ZOOM: tiles where data exists, grey where it does not, zero 4xx
@@ -747,6 +790,19 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
       const n = Math.max(1, Math.min(4096, Math.round(view.spanHz / cellHz)));
       return { cov: await coverage(backend, view, ...recent(), n), cellHz, n };
     };
+    // **Like with like (T-507).** This claim is about rows the radio SAMPLED, so the pane must lie
+    // wholly after the moment this server began recording — and so must the server window it is
+    // compared against. On a young backend it does not: the backend here is ~15 s old at this point
+    // and the pane spans ~20 s, so its oldest quarter is time before the server existed. Those rows
+    // are genuinely never sampled and are now drawn grey — correctly — where until T-507 they were
+    // drawn as the `unknown` hatch and so escaped a grey count. Measured on the run that surfaced it:
+    // grey by tenth 0 0 0 0 0 0 0 68 100 90 (newest first), `recording_began_s` 14.8 s ago, the
+    // ruler's oldest tick −15 s, and the server's own last-20-s answer 1 of 8 rows unobserved —
+    // exactly its one pre-start row. So wait until the record reaches back past both windows; a
+    // grey pixel over a sampled row still fails the claim below exactly as before.
+    const insideAge = await waitForRecordToCover(page, backend, zi.view);
+    t.diagnostic(`recording began ${insideAge.ageS.toFixed(1)} s ago; the pane spans at most ` +
+      `${insideAge.paneS.toFixed(1)} s (ruler: ${insideAge.ruler}); waited ${insideAge.waitedMs} ms`);
     const insideRes = await waitForResident(page);
     t.diagnostic(`INSIDE residency after ${insideRes.ms} ms: ${insideRes.counts}`);
     const insideG = await sampleGrey(page, bodyRect(g.pane, LIVE_EDGE_ZONE));
@@ -1160,12 +1216,12 @@ test("3. a live tile panned off-screen and back shows no grey gap: its coverage 
  * A killed server never answers, so nothing new reaches the ramp at all. What DOES produce the
  * user's purple was measured separately, by restarting `hk serve` under a live page with a fresh
  * data dir: **54.3 % of the pane at rgb(112,77,133) at +3 s, 20.4 % at +8 s, 9.3 % at +15 s, 0 at
- * +25 s**. That ink is `CELL_MARKS[CELL.UNKNOWN]`, decoded from a well-formed 200 — `hk-api`'s
- * `unknown_rows` serves EVERY row as `"unknown"` while no record survives anywhere, so a server that
- * has just lost its history paints the whole window in the fourth state until it re-accumulates.
- * Nothing malformed, no NaN, and the ramp never sees it: `cellMark` returns the hatch before `x` is
- * read. The count below still stands as a guard — if a value ever does reach the ramp and land in
- * that corner of the cube, this is where it shows.
+ * +25 s**. That ink is `CELL_MARKS[CELL.UNKNOWN]`, decoded from a well-formed 200: until T-507
+ * `hk-api` served every row before the server's first sample as `"unknown"`, so a freshly started
+ * server painted its whole past in the fourth state until the window slid past its start. T-507
+ * fixed that at the route — time before a server began recording is `"unobserved"` (grey), and
+ * `unknown` is only what it recorded and lost. The count below still stands as a guard — if a value
+ * ever does reach the ramp and land in that corner of the cube, this is where it shows.
  *
  * Draw calls are the WRONG counter here and the file says so where it counts them: the surface
  * renders from an unconditional rAF loop (~2.5 M draws per run) and could never "settle". The
@@ -1177,8 +1233,9 @@ test("4. a killed backend degrades to grey with no purple and no re-render thras
   await goLive(page);
   const g = await paneGeometry(page);
   // **The freshest third of the pane, not the whole of it.** The magenta test needs a strip whose
-  // rows are inside the record, because a row wholly before `horizon.oldest_record_s` is `unknown`
-  // coverage and `unknown` is drawn as a MAGENTA HATCH (T-413/T-423) — a legitimate mark this
+  // rows are inside the record, because a row the server recorded and lost (T-507: between
+  // `horizon.recording_began_s` and `horizon.oldest_record_s`) is `unknown` coverage, and
+  // `unknown` is drawn as a MAGENTA HATCH (T-413/T-423) — a legitimate mark this
   // measurement must not have to tell apart from the defect. The newest rows are at the top, so the
   // strip is the top third, and the premise below is asked of the server over the matching window.
   const body = bodyRect(g.pane, 0.06, 0.60);
