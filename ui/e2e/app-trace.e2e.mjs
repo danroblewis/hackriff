@@ -141,6 +141,9 @@ const SNAPSHOT = `(() => {
   return JSON.stringify({
     trace: document.querySelector('.sf-trace')?.textContent ?? "",
     headline: row ? row.children[1].textContent : "",
+    // PaneReport, as the pane itself states it: N tiles - N coarse stand-ins - N pending. What the
+    // renderer actually drew this frame WITH; see isResident below.
+    counts: row?.querySelector('.hk-surface-counts')?.textContent ?? "",
     tap: { headers: window.__hkTap.headers, rows: window.__hkTap.rows, geom: window.__hkTap.geom,
            held: window.__hkTap.held, withheld: window.__hkTap.withheld,
            recent: window.__hkTap.recent.slice(-400) },
@@ -365,11 +368,40 @@ function topWithin(cols, centrePx, widthPx) {
  * far one pan happens to travel — which is the thing that has moved twice under this file already.
  */
 const CELL_SLICE_RE = /slice [\d:]+Z \(\d[^)]*(ms|s|min) cell\) · peak/;
-const scrubbedExpr = (lagS) => `(() => {
+/**
+ * **The pane drew this frame with the tiles it is addressing, and nothing standing in for them.**
+ *
+ * A coarse stand-in is a real measurement — the parent level's, max-held over a cell several times
+ * larger — stretched across a child's place while the child is in flight. It is drawn honestly
+ * (`uFallback`), and it is a *different dB* from the one the trace read at the fine level. So a
+ * pixel comparison made while one is on screen is not about the ramp at all: `surface-colour.e2e
+ * .mjs` measured a stand-in swap moving 5 038 px of an untouched pane, and calls blaming that on
+ * the ramp "the adjacent-question error this file is written against". `live-edge` and
+ * `canvas-journey` both gate their pixel claims on this same readout; the colour check below was
+ * the one that did not, and its failure message accordingly named T-397 for a state T-397 is not.
+ *
+ * `tiles > 0` as well, because `0 tiles · 0 coarse stand-ins · 0 pending` is a pane that addressed
+ * nothing — a true statement about a frame this claim is not about.
+ */
+const COUNTS_RE = /(\d+) tiles · (\d+) coarse stand-ins? · (\d+) pending/;
+const isResident = (counts) => {
+  const m = COUNTS_RE.exec(counts ?? "");
+  return !!m && Number(m[1]) > 0 && Number(m[2]) === 0 && Number(m[3]) === 0;
+};
+const scrubbedExpr = (lagS, { resident = false } = {}) => `(() => {
   const txt = document.querySelector('.sf-trace')?.textContent ?? "";
   const m = /slice (\\d\\d):(\\d\\d):(\\d\\d)Z \\(\\d[^)]*(ms|s|min) cell\\) · peak/.exec(txt);
   const r = window.__hkTap?.recent?.[window.__hkTap.recent.length - 1];
   if (!m || !r) return false;
+  if (${resident}) {
+    // The same condition as isResident(), in the page, so the wait establishes exactly the state
+    // the accept predicate re-verifies. Two spellings of one rule is the defect this file was
+    // rewritten for; this is one rule in the two places the harness needs it.
+    const row = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+    const c = /(\\d+) tiles · (\\d+) coarse stand-ins? · (\\d+) pending/
+      .exec(row?.querySelector('.hk-surface-counts')?.textContent ?? "");
+    if (!c || Number(c[1]) === 0 || Number(c[2]) !== 0 || Number(c[3]) !== 0) return false;
+  }
   const at = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
   const now = new Date(r.tS * 1000);
   const nowS = now.getUTCHours() * 3600 + now.getUTCMinutes() * 60 + now.getUTCSeconds();
@@ -698,6 +730,16 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // PYRAMID, the slice IS the row of cells at the top of the pane's window (`sliceColumns` is
   // `maxHoldColumns` over a one-cell window), so the trace and the top row of the waterfall are two
   // renderings of *the same cells* — and the colours must match, not merely look similar.
+  //
+  // **And the pane has to be drawing those cells.** A coarse stand-in is the parent level's dB
+  // stretched across a child's place, so a frame containing one is two renderings of *different*
+  // cells and says nothing about the ramp. `isResident` is that precondition,
+  // established by the wait and re-verified on the observed readout like every other one here.
+  // Measured over 81 observations of this check on this fixture: 80 scored 89.1–97.4 % with the
+  // pane reporting `N tiles · 0 coarse stand-ins · 0 pending`, and the single failure scored
+  // 74.9 % — 147 of 586 columns, which is one of the four tiles this band is cut into, and the one
+  // frame whose residency nobody recorded. The residency gate is what makes the next occurrence
+  // legible either way; the diagnostics below are the rest of it.
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
@@ -710,12 +752,13 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // pyramid and the comparison above is between two readings of one set of cells.
   const parked = await scrubOntoCell(page, 2);
   const obs = await heldObservation(page, path.join(ART, "app-trace-colour.png"), {
-    what: "the trace to be drawn from a pyramid cell at least 2 s behind the live edge, with a peak",
-    expr: scrubbedExpr(2),
-    accept: (snap) => CELL_SLICE_RE.test(snap.trace),
+    what: "the trace to be drawn from a pyramid cell at least 2 s behind the live edge, with a peak, " +
+      "in a pane holding every tile it is addressing (no coarse stand-ins, nothing pending)",
+    expr: scrubbedExpr(2, { resident: true }),
+    accept: (snap) => CELL_SLICE_RE.test(snap.trace) && isResident(snap.counts),
     timeoutMs: 20000,
   });
-  t.diagnostic(`parked on an observed cell on attempt ${parked}`);
+  t.diagnostic(`parked on an observed cell on attempt ${parked}; the pane drew it with ${obs.snap.counts}`);
   const s = strip(obs.img, rect);
   t.diagnostic(`readout: ${obs.snap.trace}`);
   t.diagnostic(`strip ink: ${s.slicePx} ramp px, ${s.holdPx} max-hold px, ${s.greyPx} afterglow/bloom px`);
@@ -727,6 +770,12 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   const ROWS = 6;
   let compared = 0, matched = 0, worst = 0;
   const misses = [];
+  // **Where the misses are, not just that there are some.** The two causes this check can see are
+  // told apart by their SHAPE, and one number cannot do it: a ramp or range divergence is every
+  // column at once, while a place drawn from something other than the fine cells is a CONTIGUOUS
+  // BLOCK about as wide as whatever drew it. The one recorded failure was 147 of 586 columns —
+  // a quarter of a band this pane cuts into four tiles — and there was no record of which.
+  const missAt = [];
   for (let x = 0; x < s.w; x++) {
     if (s.cols[x] < 0) continue;
     compared++;
@@ -734,16 +783,31 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
     const cells = cellColours(obs.img, rect, x, halfPx, ROWS);
     const d = nearestDist(ink, cells);
     if (d <= 8) { matched++; worst = Math.max(worst, d); }
-    else if (misses.length < 3) misses.push({ x, d, ink, cells: cells.slice(0, 8) });
+    else {
+      missAt.push(x);
+      if (misses.length < 3) misses.push({ x, d, ink, cells: cells.slice(0, 8) });
+    }
   }
+  // The misses as runs, and the widest of them — a whole tile's worth is the tell.
+  const runs = [];
+  for (const x of missAt) {
+    const last = runs[runs.length - 1];
+    if (last && x === last[1] + 1) last[1] = x; else runs.push([x, x]);
+  }
+  const widest = runs.reduce((w, [a, b]) => Math.max(w, b - a + 1), 0);
+  const shape = `${runs.length} run(s), widest ${widest} column(s) = ${((widest / Math.max(1, compared)) * 100).toFixed(1)}% ` +
+    `of the drawn span; drawn with ${obs.snap.counts}`;
   const rate = matched / Math.max(1, compared);
   t.diagnostic(`${s.drawn}/${s.w} columns drawn; ${matched}/${compared} trace columns carry a colour the cells below them also carry ` +
-    `(worst matched distance ${worst}/255)${misses.length ? `; first misses ${JSON.stringify(misses)}` : ""}`);
+    `(worst matched distance ${worst}/255); misses in ${shape}` +
+    `${misses.length ? `; first misses ${JSON.stringify(misses)}` : ""}`);
   assert.ok(rate >= 0.8,
     `only ${(rate * 100).toFixed(1)}% of trace columns are painted a colour the waterfall paints at ` +
-    `the same frequency. The trace and the cells below it are using different ramps or different ` +
-    `ranges — which is T-397, in the one place T-475 exists to join up. First misses: ` +
-    JSON.stringify(misses));
+    `the same frequency, with the pane reporting fully resident tiles — so the trace and the cells ` +
+    `below it are using different ramps or different ranges, which is T-397 in the one place T-475 ` +
+    `exists to join up. Misses in ${shape}: one wide block would say some place was drawn from ` +
+    `something other than these cells after all; misses spread across every run say the ramp. ` +
+    `First misses: ${JSON.stringify(misses)}`);
 
   // **The control, and it is the whole reason the number above means anything.** Match every column's
   // trace colour against a DISTANT column's cells instead. If a near-match were easy — because the

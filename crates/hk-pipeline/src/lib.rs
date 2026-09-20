@@ -92,7 +92,7 @@ pub use class::{ClassRule, classify_emitter, source_class};
 pub use config::{
     DISPLAY_AVERAGING_MAX, DISPLAY_FFT_MAX, DISPLAY_FFT_MIN, DISPLAY_ROWS_MAX, DISPLAY_ROWS_MIN,
     DisplayPatch, DisplaySettings, ListenSettings, PipelineConfig, PipelineSettings, StreamSink,
-    StreamUnsink, detection_resolution, load_calibrations, replay_plan,
+    StreamUnsink, detection_bin_hz, detection_resolution, load_calibrations, replay_plan,
 };
 pub use control::SwitchableControl;
 pub use events::Candidate;

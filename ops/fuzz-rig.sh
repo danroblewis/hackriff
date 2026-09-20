@@ -35,7 +35,7 @@ GET(){  curl -s -m 20 -o /dev/null -H "Authorization: Bearer $TOK" "$@"; }
 
 start_server(){
   rm -rf "$DATA"; mkdir -p "$DATA"
-  HK_TOKEN=$TOK nohup "$BIN" serve --device "mock:$FIX" \
+  RUST_BACKTRACE=full HK_TOKEN=$TOK nohup "$BIN" serve --device "mock:$FIX" \
     --ui-dist "$REPO/ui/dist" --data-dir "$DATA" --bind 127.0.0.1:"$PORT" \
     --iq-retention 20m --iq-buffer-max 4GiB > "$SLOG" 2>&1 &
 }
@@ -47,9 +47,11 @@ monitor(){
   while true; do
     if ! server_up; then
       if [ "$n" -gt 0 ]; then
+        CF="$S/crash-logs/crash-$n-$(date +%Y%m%d-%H%M%S).log"; mkdir -p "$S/crash-logs"; cp "$SLOG" "$CF" 2>/dev/null
         { echo "===================================================================="
           echo "CRASH #$n  $(date '+%F %T')  mode=[$(cat "$MODEFILE" 2>/dev/null)]"
-          echo "--- last 30 lines of the crashed server log ---"; tail -30 "$SLOG" 2>/dev/null; echo; } >> "$CRASHES"
+          echo "full server log saved: $CF"
+          echo "--- tail ---"; tail -40 "$SLOG" 2>/dev/null; echo; } >> "$CRASHES"
         wlog "!!! SERVER DOWN (crash #$n) during mode [$(cat "$MODEFILE" 2>/dev/null)] — restarting"
       fi
       start_server; n=$((n+1)); sleep 15
@@ -80,20 +82,21 @@ do_hop(){
   done
 }
 do_tileflood(){
-  set_mode "tile-flood"; local CELLS=(8 32 64 256) i lf lt fi ti cc
+  set_mode "tile-flood"; local CELLS=(8 32 64 256) i lf lt fi ti cc; local pids=()
   for i in $(seq 1 400); do
     server_up || break
     lf=$(r 10); lt=$(r 10); fi=$(( RANDOM % 8192 )); ti=$(( RANDOM * 64 % 4000000 )); cc=${CELLS[$(r ${#CELLS[@]})]}
-    GET "http://127.0.0.1:$PORT/api/tiles?level_f=$lf&level_t=$lt&f_index=$fi&t_index=$ti&cells=$cc" &
-    if [ $(( i % 24 )) -eq 0 ]; then wait; fi
-  done; wait
+    GET "http://127.0.0.1:$PORT/api/tiles?level_f=$lf&level_t=$lt&f_index=$fi&t_index=$ti&cells=$cc" & pids+=($!)
+    if [ $(( i % 24 )) -eq 0 ]; then wait "${pids[@]}" 2>/dev/null; pids=(); fi
+  done
+  wait "${pids[@]}" 2>/dev/null
 }
 do_idle(){ set_mode "idle"; sleep $(( 600 + RANDOM % 1200 )); }
 
 # --- boot: coexists with the demo (mock uses no HackRF). Monitor owns all starts/restarts. ---
 pkill -f "hk serve .*--bind 127.0.0.1:$PORT" 2>/dev/null; sleep 2
 wlog "=== fuzz-rig up (mock, port $PORT); crashes -> $CRASHES ==="
-monitor &
+monitor & disown
 for _ in $(seq 1 45); do curl -s -m3 -o /dev/null "http://127.0.0.1:$PORT/" && break; sleep 2; done
 wlog "server reachable — starting workload"
 while true; do

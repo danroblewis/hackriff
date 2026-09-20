@@ -63,6 +63,18 @@ pub fn detection_resolution(fs: f64, settings: &PipelineSettings) -> (usize, usi
     (fft, k)
 }
 
+/// The detection **and history** bin width, Hz, at sample rate `fs` under a detection FFT
+/// override `fft_len` (`None`: sized per rate as [`detection_resolution`] does). T-517: the in-app
+/// sweep widens a coarse step only where this is unchanged — coarse is fewer windows, never
+/// blurrier ones.
+pub fn detection_bin_hz(fs: f64, fft_len: Option<usize>) -> f64 {
+    let s = PipelineSettings {
+        fft_len,
+        ..PipelineSettings::default()
+    };
+    fs / detection_resolution(fs, &s).0 as f64
+}
+
 /// Overridable settings (`ScanPlan.extra.pipeline`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -499,6 +511,21 @@ pub fn replay_plan(center_hz: f64, sample_rate_hz: f64, t: Timestamp) -> ScanPla
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-517: a power-of-two multiple of the rate keeps the bin width exactly — the property a
+    /// coarse sweep step relies on — and a fixed FFT override does not, which is why the sweep
+    /// checks rather than assumes it.
+    #[test]
+    fn a_power_of_two_rate_multiple_keeps_the_bin_width() {
+        assert_eq!(detection_bin_hz(2.4e6, None), 4_687.5);
+        assert_eq!(detection_bin_hz(19.2e6, None), 4_687.5);
+        assert_eq!(detection_bin_hz(2e6, None), detection_bin_hz(16e6, None));
+        assert_ne!(detection_bin_hz(2.4e6, None), detection_bin_hz(20e6, None));
+        assert_ne!(
+            detection_bin_hz(2.4e6, Some(1024)),
+            detection_bin_hz(19.2e6, Some(1024))
+        );
+    }
 
     #[test]
     fn resolution_follows_the_s4_geometry() {

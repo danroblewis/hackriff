@@ -7142,6 +7142,11 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
 /// - **Observed now = its own value.** No run ever covers a cell the grid measured.
 /// - **Never observed = nothing.** A tile over spectrum the radio never tuned carries no run and the
 ///   search reports no column found — grey's meaning is unchanged.
+/// - **Every gap in an observed column is filled, and the wire says which way it was read** (T-527).
+///   A column the grid measures anywhere has *every* other row of it covered: below its last sample
+///   by a `forward` run (the nearest past sample), above its first by a `forward` run from an older
+///   value or — where there is none — by the `backward` fill, which is the column's first-ever
+///   sample and the only value here read backward in time.
 #[test]
 fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
     let (_dir_guard, serving, addr) = start_server();
@@ -7203,16 +7208,24 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
     );
     let (sh, grid) = (&v["shadow"], v["grid"]["max_db"].as_array().unwrap());
     let arr = |k: &str| sh[k].as_array().unwrap().clone();
-    let (f, row, rows, db, t, src) = (
+    let (f, row, rows, db, t, src, fill) = (
         arr("f"),
         arr("row"),
         arr("rows"),
         arr("last_db"),
         arr("last_t_s"),
         arr("src"),
+        arr("fill"),
+    );
+    // T-527: the direction alphabet is on the wire, and `fill` indexes it — never a bare bool, and
+    // never inferred from the source table.
+    assert_eq!(
+        sh["fills"],
+        json!(["forward", "backward"]),
+        "the fill alphabet: {sh}"
     );
     assert_eq!(sh["runs"].as_u64().unwrap() as usize, f.len(), "{sh}");
-    for a in [&row, &rows, &db, &t, &src] {
+    for a in [&row, &rows, &db, &t, &src, &fill] {
         assert_eq!(a.len(), f.len(), "parallel arrays: {sh}");
     }
     let (t0, t_cell) = (
@@ -7223,6 +7236,7 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         .as_f64()
         .expect("a server with frames has an edge");
     let mut covered = vec![false; n * n];
+    let mut backward = 0usize;
     for i in 0..f.len() {
         let (c, r0, k) = (
             f[i].as_u64().unwrap() as usize,
@@ -7231,18 +7245,41 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         );
         let last_db = db[i].as_f64().expect("a run always carries a value");
         let last_t = t[i].as_f64().unwrap();
-        // Last seen at or before the run's first row: never a value from its future.
-        assert!(
-            last_t <= t0 + r0 as f64 * t_cell + 1e-6,
-            "run {i}: {last_t} after row {r0}"
-        );
+        let is_back = fill[i].as_u64().expect("a fill code") == 1;
         // Never past the data edge.
         assert!(
             t0 + r0 as f64 * t_cell < edge,
             "run {i} starts at or past the edge {edge}"
         );
         let source = &sh["sources"][src[i].as_u64().unwrap() as usize];
-        if source["from"] == "this-tile" {
+        if is_back {
+            // **The one backward read** (T-527): the column's FIRST-EVER sample, carried up into
+            // the stretch before it. So it starts at row 0, stops exactly where that sample begins,
+            // carries that sample's value, and its instant lies AFTER its own rows — the mirror of
+            // every other run here, which is precisely why it is labelled.
+            backward += 1;
+            assert_eq!(source["from"], json!("this-tile"), "run {i}: {sh}");
+            assert_eq!(r0, 0, "a backward run below the head: {sh}");
+            assert_eq!(
+                grid[k * n + c].as_f64(),
+                Some(last_db),
+                "run {i} carries the first sample at ({k}, {c})"
+            );
+            assert!(
+                (0..k).all(|r| grid[r * n + c].is_null()),
+                "run {i} covers a measurement in column {c}: {sh}"
+            );
+            assert!(
+                last_t >= t0 + k as f64 * t_cell - 1e-6,
+                "run {i}: first seen {last_t} is not after its rows (row {k} starts at {})",
+                t0 + k as f64 * t_cell
+            );
+        } else if source["from"] == "this-tile" {
+            // Forward: last seen at or before the run's first row, never a value from its future.
+            assert!(
+                last_t <= t0 + r0 as f64 * t_cell + 1e-6,
+                "run {i}: {last_t} after row {r0}"
+            );
             // T-315: the value IS the grid's own, in the last measured row above the run.
             assert!(r0 > 0, "a this-tile run below row 0: {sh}");
             assert_eq!(
@@ -7251,6 +7288,10 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
                 "run {i} at ({r0}, {c})"
             );
         } else {
+            assert!(
+                last_t <= t0 + r0 as f64 * t_cell + 1e-6,
+                "run {i}: {last_t} after row {r0}"
+            );
             assert_eq!(source["from"], json!("before-tile"), "{source}");
             assert!(
                 source["f_cell_hz"].as_f64().is_some_and(|x| x > 0.0),
@@ -7272,8 +7313,41 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         (0..n).any(|r| covered[r * n + station_col]),
         "the departed station carries a shadow: {sh}"
     );
+    assert_eq!(
+        sh["backward_runs"].as_u64().unwrap() as usize,
+        backward,
+        "the count on the wire must be the runs on the wire: {sh}"
+    );
+    // **T-527's invariant, over every column this tile measures at all**: no gap is left grey. A
+    // column with any sample has every other row of it covered exactly once — above its first
+    // sample and below its last — because a column that was observed was observed, and grey is
+    // reserved for the columns that were not.
+    let mut filled_heads = 0;
+    for c in 0..n {
+        let first = (0..n).find(|&r| !grid[r * n + c].is_null());
+        let Some(first) = first else { continue };
+        for r in 0..n {
+            // Rows at or past the data edge are the future and carry nothing, by the same rule
+            // that stops a forward carry there. Everything before it is this invariant's.
+            if t0 + r as f64 * t_cell >= edge - 1e-6 {
+                continue;
+            }
+            let measured = !grid[r * n + c].is_null();
+            assert_eq!(
+                !measured,
+                covered[r * n + c],
+                "column {c} row {r}: measured {measured}, shadowed {} — an observed column may \
+                 have no grey gap (T-527) and no shadow over a measurement: {sh}",
+                covered[r * n + c]
+            );
+        }
+        if first > 0 {
+            filled_heads += 1;
+        }
+    }
     eprintln!(
-        "T-519 contract: {} runs, sources {}, station rows shadowed {}, search {}",
+        "T-519/T-527 contract: {} runs ({backward} backward), {filled_heads} columns whose first \
+         sample is below row 0, sources {}, station rows shadowed {}, search {}",
         f.len(),
         sh["sources"],
         (0..n).filter(|&r| covered[r * n + station_col]).count(),
@@ -9004,3 +9078,106 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
 
     stop_server(serving);
 }
+
+/// T-517: the sweep's step width. A fine step tiles at the span in force (the fixture's 2.4 Msps:
+/// 1.8 MHz per step); a coarse step tiles at the widest power-of-two multiple of it the device
+/// supports at which the run's bins keep their width (19.2 Msps: 14.4 MHz per step). Values, not
+/// shapes (T-315) — and the bin width is asserted IDENTICAL, against the pipeline's own function,
+/// so "coarse" can never later be read as permission to degrade the frequency resolution.
+#[test]
+fn a_coarse_sweep_step_is_fewer_windows_at_the_same_bin_width() {
+    let (_dir_guard, serving, addr) = start_server();
+    wait_for("a live front end", Duration::from_secs(30), || {
+        get(addr, "/api/control/state").1["tuning"]["center_hz"].as_f64() == Some(FIXTURE_CENTER_HZ)
+    });
+    let price = |q: &str| {
+        let (st, v) = get(addr, &format!("/api/control/scan?{q}"));
+        assert_eq!(st, 200, "{v}");
+        v["proposed"].clone()
+    };
+    // The whole tunable range (no f_lo/f_hi), at a fast dwell.
+    let omitted = price("dwell_s=0.5");
+    let fine = price("dwell_s=0.5&step=fine");
+    let coarse = price("dwell_s=0.5&step=coarse");
+    assert_eq!(
+        omitted["plan"], fine["plan"],
+        "omitting step is today's fine step"
+    );
+    assert_eq!(fine["plan"]["step"], json!("fine"), "{fine}");
+    assert_eq!(coarse["plan"]["step"], json!("coarse"), "{coarse}");
+    assert_eq!(fine["plan"]["steps"], json!(FINE_STEPS), "{fine}");
+    assert_eq!(coarse["plan"]["steps"], json!(COARSE_STEPS), "{coarse}");
+    assert_eq!(fine["budget"]["step_span_hz"], json!(1.8e6), "{fine}");
+    assert_eq!(coarse["budget"]["step_span_hz"], json!(14.4e6), "{coarse}");
+    assert_eq!(
+        fine["budget"]["pass_s"],
+        json!(FINE_STEPS as f64 * 0.5),
+        "{fine}"
+    );
+    assert_eq!(
+        coarse["budget"]["pass_s"],
+        json!(COARSE_STEPS as f64 * 0.5),
+        "{coarse}"
+    );
+    assert_eq!(fine["plan"]["sample_rate_hz"], json!(2.4e6), "{fine}");
+    assert_eq!(fine["plan"]["changes_rate"], json!(false), "{fine}");
+    assert_eq!(coarse["plan"]["sample_rate_hz"], json!(19.2e6), "{coarse}");
+    assert_eq!(coarse["plan"]["rate_in_force_hz"], json!(2.4e6), "{coarse}");
+    assert_eq!(coarse["plan"]["changes_rate"], json!(true), "{coarse}");
+    // FREQUENCY RESOLUTION IS UNCHANGED, coarse vs fine, and it is the pipeline's own bin width.
+    let bin = hk_pipeline::detection_bin_hz(2.4e6, None);
+    assert_eq!(bin, 4_687.5);
+    assert_eq!(fine["plan"]["bin_hz"], json!(bin), "{fine}");
+    assert_eq!(coarse["plan"]["bin_hz"], json!(bin), "{coarse}");
+    // Pricing moved nothing.
+    let (_, state) = get(addr, "/api/control/state");
+    assert_eq!(state["tuning"]["sample_rate_hz"], json!(2.4e6), "{state}");
+    assert_eq!(
+        state["tuning"]["center_hz"].as_f64(),
+        Some(FIXTURE_CENTER_HZ)
+    );
+
+    // Anything but fine/coarse is refused, on either route.
+    let (st, v) = get(addr, "/api/control/scan?step=medium");
+    assert_eq!((st, v["code"].clone()), (400, json!("invalid")), "{v}");
+    let (st, v) = post(addr, "/api/control/scan", r#"{"step": 3}"#);
+    assert_eq!((st, v["code"].clone()), (400, json!("invalid")), "{v}");
+    let (st, v) = post(
+        addr,
+        "/api/control/scan",
+        r#"{"resume": true, "step": "coarse"}"#,
+    );
+    assert_eq!(st, 400, "resume takes no step: {v}");
+
+    // A coarse start names the rate change it commits the front end to, beside the retunes.
+    let (st, v) = post(
+        addr,
+        "/api/control/scan",
+        r#"{"f_lo_hz": 88000000, "f_hi_hz": 108000000, "dwell_s": 2, "step": "coarse"}"#,
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["device"]["commissions"], json!("retune"), "{v}");
+    assert_eq!(v["device"]["commissions_rate_hz"], json!(19.2e6), "{v}");
+    assert_eq!(
+        v["scan"]["plan"]["steps"],
+        json!(2),
+        "20 MHz at 14.4 MHz per step: {v}"
+    );
+    let (st, _) = post(addr, "/api/control/scan/stop", "{}");
+    assert_eq!(st, 200);
+    // A fine start commits no rate change.
+    let (st, v) = post(
+        addr,
+        "/api/control/scan",
+        r#"{"f_lo_hz": 88000000, "f_hi_hz": 108000000, "dwell_s": 2}"#,
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["device"]["commissions_rate_hz"], Value::Null, "{v}");
+    let (st, _) = post(addr, "/api/control/scan/stop", "{}");
+    assert_eq!(st, 200);
+    stop_server(serving);
+}
+
+/// Full-range steps at the fixture's 2.4 Msps: fine 1.8 MHz, coarse 14.4 MHz.
+const FINE_STEPS: u64 = 3334;
+const COARSE_STEPS: u64 = 418;

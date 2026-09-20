@@ -69,11 +69,22 @@ export interface ScanPlan {
   /** Whether the dwell is inside the 10-30 s the survey is sized for. A dwell outside it still
    * runs — configurable, never clamped — and this is what lets the panel say it is unusual. */
   recommended_dwell: boolean;
-  /** The span in force: the pass is tiled at the window the run is actually capturing. */
+  /** The rate the pass is tiled at: the span in force for a fine step, the wider coarse rate
+   * the sweep sets before its first step otherwise (T-517). */
   sample_rate_hz: number;
+  /** T-517: the span in force when this was priced, and whether the sweep changes it. */
+  rate_in_force_hz?: number;
+  changes_rate?: boolean;
+  /** T-517: how far a step advances. */
+  step?: ScanStep;
+  /** T-517: the detection/history bin width at `sample_rate_hz` — identical fine vs coarse. */
+  bin_hz?: number | null;
   steps: number;
   warnings: string[];
 }
+/** T-517: how far a sweep step advances. `coarse` is fewer, wider windows at the same bin width. */
+export type ScanStep = "fine" | "coarse";
+
 /** What one pass costs and buys (T-406's own pricing, served by T-452). */
 export interface ScanBudget {
   steps: number; dwell_s: number; pass_s: number; revisit_s: number;
@@ -324,9 +335,15 @@ function passText(s: number): string {
  * ~80 minutes at a 0.25 % duty, and a user who reads that first is making a different decision
  * from one who finds out by waiting.
  */
-export function commitmentText(b: ScanBudget): string {
+export function commitmentText(b: ScanBudget, plan: ScanPlan | null = null): string {
   const duty = b.duty >= 0.01 ? `${(b.duty * 100).toFixed(1)} %` : `${(b.duty * 100).toFixed(3)} %`;
-  return `${b.steps} steps × ${b.dwell_s} s = ${passText(b.pass_s)} per pass; `
+  // T-517: which step this pass is priced at, and how wide one step is — so choosing coarse
+  // visibly shortens the pass. Bin width is the server's, shown so "coarse" never reads as blurrier.
+  const step = plan?.step
+    ? `${plan.step} steps of ${(b.step_span_hz / 1e6).toFixed(1)} MHz`
+      + (plan.bin_hz ? ` (bins ${(plan.bin_hz / 1e3).toFixed(2)} kHz either way)` : "") + ": "
+    : "";
+  return `${step}${b.steps} steps × ${b.dwell_s} s = ${passText(b.pass_s)} per pass; `
     + `each band is heard ${b.dwell_s} s in every ${passText(b.revisit_s)} (duty ${duty}).`;
 }
 
@@ -358,6 +375,9 @@ export function scanPanelModel(
     if (!plan.recommended_dwell) {
       notes.push(`a ${plan.dwell_s} s dwell is outside the 10-30 s the survey is sized for; the pass is linear in it`);
     }
+    if (plan.changes_rate && plan.rate_in_force_hz !== undefined) {
+      notes.push(`the sweep sets the span to ${(plan.sample_rate_hz / 1e6).toFixed(1)} MHz (from ${(plan.rate_in_force_hz / 1e6).toFixed(1)} MHz) before its first step`);
+    }
   }
   const p = scan?.progress ?? null;
   const progressText = p && scan?.plan
@@ -373,7 +393,7 @@ export function scanPanelModel(
       enabled: gate.enabled && state !== "running" && !pending,
     },
     stopEnabled: gate.enabled && state !== "idle" && !pending,
-    commitment: shown ? commitmentText(shown) : "",
+    commitment: shown ? commitmentText(shown, plan) : "",
     statement: shown?.statement ?? "",
     progressText,
     yieldText: scan?.yielded
@@ -385,7 +405,7 @@ export function scanPanelModel(
 
 /** What the sweep inputs ask for, on the wire. Omitted fields take the server's own defaults:
  * everything this front end can tune, and T-406's 15 s dwell. */
-export interface ScanQuery { f_lo_hz?: number; f_hi_hz?: number; dwell_s?: number }
+export interface ScanQuery { f_lo_hz?: number; f_hi_hz?: number; dwell_s?: number; step?: ScanStep }
 
 /**
  * The scan request the range/dwell boxes mean. Megahertz in the boxes, hertz on the wire.
@@ -394,7 +414,7 @@ export interface ScanQuery { f_lo_hz?: number; f_hi_hz?: number; dwell_s?: numbe
  * never handed a half request and this layer never invents the other end. Blank boxes mean "the
  * whole front end", which is a real answer and not a missing one.
  */
-export function scanQueryFrom(input: { loMHz: string; hiMHz: string; dwellS: string }): ScanQuery {
+export function scanQueryFrom(input: { loMHz: string; hiMHz: string; dwellS: string; step?: string }): ScanQuery {
   const mhz = (s: string): number | null => {
     const v = Number(s);
     return s.trim() !== "" && Number.isFinite(v) ? v * 1e6 : null;
@@ -404,7 +424,25 @@ export function scanQueryFrom(input: { loMHz: string; hiMHz: string; dwellS: str
   const q: ScanQuery = {};
   if (lo !== null && hi !== null) { q.f_lo_hz = lo; q.f_hi_hz = hi; }
   if (input.dwellS.trim() !== "" && Number.isFinite(dwell) && dwell > 0) q.dwell_s = dwell;
+  // T-517: only a step the server names is sent; anything else is left for its default (fine).
+  if (input.step === "fine" || input.step === "coarse") q.step = input.step;
   return q;
+}
+
+/** T-516: the "scan everything" one-click's own dwell — fast enough that a full 1 MHz-6 GHz pass
+ * at T-517's coarse step is minutes, not the ~13 h a 12 s/step fine sweep costs today. Kept inside
+ * the 0.1 s floor the dwell box already enforces. */
+export const FAST_SCAN_DWELL_S = 0.3;
+
+/**
+ * T-516: the request the "scan everything" one-click means — the whole tunable range (an empty
+ * range already means that, so it names neither end), a fast dwell and T-517's coarse step, so
+ * pressing it commits the radio to a pass of minutes rather than hours. The panel sets its fields
+ * to match this and reprices before it starts (`DeviceTab.onScanAll`), so the commitment line the
+ * user already trusts is what they see before the radio is committed, not a guess made here.
+ */
+export function everythingScanQuery(): ScanQuery {
+  return { dwell_s: FAST_SCAN_DWELL_S, step: "coarse" };
 }
 
 /** The `GET /api/control/scan` path that prices `q` without starting it; bare when `q` is empty. */

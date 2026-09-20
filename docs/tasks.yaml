@@ -4919,7 +4919,7 @@ tasks:
     milestone: M1
     title: 'rds.recipe.json has no group-4A Clock-Time node, so RDS clock (CT) can
       never be served'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: RECIPE
@@ -13080,7 +13080,7 @@ tasks:
   - id: T-469
     milestone: MPLAY
     title: No GET /api/recordings - nothing enumerates the persisted IQ that extends the audio horizon
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -13174,7 +13174,7 @@ tasks:
   - id: T-465
     milestone: M2-hardening
     title: drain-timeout discards the recorder's queued records without counting them, so the books do not balance
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -13299,7 +13299,8 @@ tasks:
   - id: T-471
     milestone: MCANVAS
     title: Prefetch a bounded ring of tiles around the viewport, at lower priority, cancelled on move
-    status: todo
+    status: done
+    commit: "c38cb349"
     priority: low
     parallel_group: CANVAS-FE
     depends_on: [T-467]
@@ -13418,7 +13419,7 @@ tasks:
   - id: T-474
     milestone: M2-hardening
     title: A --loop replay makes capture time go BACKWARDS while the client's edge clamps monotone
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: PIPE
     depends_on: []
@@ -14586,7 +14587,7 @@ tasks:
   - id: T-493
     milestone: M2-hardening
     title: The hk-plugins spawn race is capped at 8 threads where T-257 measured zero only at 6
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CI
     depends_on: []
@@ -15086,7 +15087,7 @@ tasks:
   - id: T-505
     milestone: MLIVE
     title: One lattice cannot be both the display stream's own bin and device-wide over the horizon - give wide-and-long viewports a coarse tier
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15435,7 +15436,8 @@ tasks:
   - id: T-516
     milestone: MSCAN
     title: Scan is built - make it discoverable and satisfying - verify the Survey-sweep panel end to end and add a one-click "scan everything"
-    status: todo
+    status: done
+    commit: "b847e114"
     priority: high
     parallel_group: SCAN
     model: sonnet
@@ -15462,7 +15464,8 @@ tasks:
   - id: T-517
     milestone: MSCAN
     title: A step-width (coarse/fine) control for the sweep - advance by the usable window, not ~1.5 MHz, so a full pass is ~10x fewer hops
-    status: in-progress
+    status: done
+    commit: "8b8fab5c"
     priority: high
     parallel_group: SCAN
     core_interface: true
@@ -15548,7 +15551,8 @@ tasks:
   - id: T-521
     milestone: MSCAN
     title: "Fog-of-war 2C: the standing guard - sweep then leave = shadow, never swept = grey, re-sweep = bright"
-    status: in-progress
+    status: done
+    commit: "b5afa659"
     priority: high
     parallel_group: CANVAS-FE
     model: sonnet
@@ -15687,6 +15691,233 @@ tasks:
       the scanline texture is asserted at min/default/max - near the top of the range texture, not
       brightness, is what separates a shadow from live. T-523 raises the DEFAULT gain; reconcile
       the two when it lands.
+  - id: T-527
+    milestone: MSCAN
+    title: Fog-of-war fills EVERY time gap in an observed column - nearest PAST sample, and the future's first sample only before the first-ever
+    status: done
+    commit: "16d8d7aa"
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-519, T-520]
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER 2026-09-20, extending fog-of-war. Today T-519 carries the last-known value FORWARD from
+      before the viewport; a column observed only in the MIDDLE of the view still leaves grey gaps
+      above and below its samples. Fill EVERY time gap in a column that was ever observed:
+      - a gap after any sample takes the NEAREST PAST sample (carry forward, as now);
+      - the stretch BEFORE the column's FIRST-EVER sample takes that first sample (the one and only
+        backward fill) - nothing else ever reads backward in time.
+      GREY REMAINS for a column never observed at all, and for spectrum outside the record horizon.
+      That distinction is the whole invariant: grey = we never looked.
+      Build on RegionHistory::fold_newest / Pyramid::last_known_* (hk-store history/query.rs) and the
+      `shadow` plane (hk-api tiles.rs). Watch the COST: T-519 measured ~84 ms on an 819 MHz tile and
+      that is already suspected in T-523's 502s - measure before and after, and do not make the
+      short-circuit path heavier. Age is on the wire (last_t_s); a backward-filled run must be
+      distinguishable on the wire from a forward-filled one.
+      docs/api.md + api_contract.rs together; extend ADR-0020.
+    notes: |
+      Filed 2026-09-20. Sequenced AFTER T-523 lands, since T-523 is cutting the same query's cost.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-528
+    milestone: MSCAN
+    title: Viewport-dynamic auto-contrast as a toggle - scale to what is on screen now
+    status: in-progress
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER 2026-09-20. Auto-contrast today anchors its scale over the region (T-470/T-475 measured
+      the colours-shift-on-zoom tradeoff the user accepted). The user wants a VIEWPORT-DYNAMIC mode:
+      the scale is computed from what is currently on screen, so a quiet band spreads across the
+      full ramp instead of sitting in the bottom few percent. Ship it as a TOGGLE beside the existing
+      auto-contrast control (the user keeps both), persisted like the other surface prefs.
+      HONESTY: the pane must still state the scale it drew at, and the readout's numbers must agree
+      with the pixels (T-475's rule). Shadow cells must not drag the scale - they are not
+      measurements of the current viewport.
+      Client-side presentation over data already held; no new route.
+    notes: |
+      Filed 2026-09-20. Below the fog-of-war and crash work in the user's order.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-529
+    milestone: MLIVE
+    title: A UI retune is TWO posts down TWO paths, so T-508's one-shot mock fault lands on whichever wins - the test flakes on main
+    status: in-progress
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND 2026-09-20 while merging main into task-t506 (a branch with NO crates/ changes at all -
+      `git diff main -- crates/` empty), so it is main's defect, not the branch's.
+      canvas-journey test 5 ("a retune the device refuses restarts capture") failed twice with
+      capture_failures 0 - the armed one-shot mock fault never fired - then passed three times.
+      MECHANISM: the UI commits a retune as TWO posts ~1.5 ms apart, POST /api/control/rate then
+      POST /api/control/center. The RATE change goes through the RE-PLUMB path; the CENTRE change
+      goes through the mailbox to apply_pending, which is where T-508's RetuneApplyFails lives.
+      Which post the one-shot fault lands on is TIMING-DEPENDENT, and under load (a hackrf serve at
+      1400 % CPU during the failing runs) it can be swallowed by the re-plumb and counted as
+      something other than capture_failures.
+      TWO QUESTIONS, and the second matters more than the test: (1) should a single user retune be
+      ONE device action rather than two posts down two paths? If the rate and centre can disagree
+      mid-flight, that is a real-time-path defect the flake is merely reporting. (2) Whatever the
+      answer, the fault must be deterministic for the test - arm it per-path, or make the test
+      commit the retune the way the fault expects.
+      Do NOT fix this by retrying the test or loosening the assertion.
+    notes: |
+      Filed 2026-09-20 from the T-506/T-517 conflict-resolution report. It will flake on main too.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-530
+    milestone: MLIVE
+    title: A re-plumb leaves /ws/spectrum/live answering 410 "finished" during a gap that is not the end
+    status: in-progress
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-525]
+    use_cases: [AWARE-011]
+    acceptance: |
+      FOUND BY T-525, MEASURED, AND DELIBERATELY OUT OF ITS SCOPE. After T-525's fix a re-plumb still
+      leaves /ws/spectrum/live with no publisher until the new segment's first row (~0.17 s), and the
+      route answers 410 GONE "stream finished" during it. THAT IS THE WRONG ANSWER: the run has not
+      finished, it is between segments. It matters beyond tidiness because ops/stage.sh's healthy()
+      is `/` PLUS that handshake - so a long enough 410 window reads as "hk serve crashed" and the
+      demo is restarted under the user (T-525 measured a 21.43 s unbroken non-101 run before its fix;
+      0.17 s after).
+      Output::finish at segment end while the run continues (shared.continues) is where to look. The
+      contract question to settle: a consumer across a re-plumb should see a GAP, not an end - either
+      the handshake waits briefly for the successor, or it answers something that means "not now"
+      rather than "never again". T-417's rule (a retune must not disconnect stream consumers) is the
+      same principle one level down.
+      DoD: a re-plumb never produces 410; a test that a handshake during a re-plumb succeeds or
+      yields a not-an-end answer; stage.sh's healthy() no longer reads a re-plumb as a crash.
+    notes: |
+      Filed 2026-09-20 from T-525's report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-531
+    milestone: M2-hardening
+    title: /api/streams grows without bound during a sweep - 1299 entries and 659 KB in 40 minutes - and SIGTERM takes over 78 s
+    status: in-progress
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      TWO OBSERVATIONS FROM T-525's 40-MINUTE LIVE SWEEP, both measured, neither its subject:
+      (1) /api/streams reached 1299 entries / 659 KB - one `bits` stream per emitter - and kept
+      growing. A survey across 6 GHz meets a great many emitters, so an unbounded per-emitter
+      registry is a leak in the shape the inventory invariants already reject elsewhere
+      (no unbounded seen-count accumulators; candidates decay). Decide the lifetime of a `bits`
+      stream and bound the registry; a client that lists streams should not pay for the whole
+      history of a sweep.
+      (2) The server took over 78 s to exit on SIGTERM mid-sweep. Find what does not observe the
+      shutdown signal and make shutdown prompt; a supervisor that restarts on a health check will
+      otherwise overlap two servers on one device.
+      MEASURE both before changing anything.
+    notes: |
+      Filed 2026-09-20 from T-525's report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-534
+    milestone: MLIVE
+    title: --loop silently stops looping after any re-plumb or capture recovery
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-474 while measuring looped replay. replumb() and recover() both call
+      start_segment(..., reopen: None, ...), so after ANY re-plumb or capture recovery a
+      `--replay --loop` run simply ENDS at the recording's end instead of looping. The user's demo
+      runs a looping replay, so this is how a demo quietly stops producing data after a retune.
+      Fix in the t525/t529/t530 area of run.rs: a segment started by a re-plumb or a recovery must
+      carry the run's reopen policy rather than dropping it. Regression test: loop a short recording,
+      force a re-plumb, assert the replay still wraps.
+    notes: |
+      Filed 2026-09-20 from T-474's report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-535
+    milestone: MLIVE
+    title: A capture-recovery gap still answers 410 - the reader cannot tell recovery from the end
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-530]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-530, deliberately out of its scope. T-530 made a RE-PLUMB gap answer
+      "between windows" (wait, then 503) instead of 410 Gone. A CAPTURE-RECOVERY gap (T-508's
+      recover(), 0.25-4 s backoff x 5, so longer-lived than a re-plumb) still answers 410, because
+      at Output::finish time the reader cannot know whether the supervisor will recover or end the
+      run - `continues` is false for both. Same defect shape, same consequence: a client told
+      "finished" stops, and ops/stage.sh reads it as a crash.
+      Give the reader a way to distinguish "recovering" from "ended" - T-508 already tracks that
+      state on the run (run.capture: running | recovering | ended); the stream lifecycle should
+      read it rather than guess.
+    notes: |
+      Filed 2026-09-20 from T-530's report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-536
+    milestone: M2-hardening
+    title: A re-plumb stalls every always-on reader for seconds while a multi-GB IQ ring opens
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      OBSERVED BY T-531 while instrumenting shutdown: its straggler report fired during a NORMAL
+      re-plumb with a 4 GiB IQ ring opening - "still waiting after 3s for: hk-capture, hk-detect, ...".
+      So opening the ring blocks the readers that are supposed to be always-on, for seconds, on a
+      routine retune. Measure it as a function of ring size, then make the open not block them
+      (open lazily, open off the path, or admit readers before it completes).
+    notes: |
+      Filed 2026-09-20 from T-531's report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-537
+    milestone: M2-hardening
+    title: The live-edge unit guard sampled ONE frame after a wall-clock budget, so load made it read a frame drawn before any answer existed
+    status: done
+    commit: "5e0d673a"
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      Blocked TWO merge gates (task-t523, task-t528) with "the renderer drew no resident tile this
+      frame". NOT ui/e2e/live-edge.e2e.mjs as first assumed - the assertion lives in
+      ui/test/surface-preview.test.ts, the node unit tier, which has no port, no data dir, no
+      browser and a stubbed fetch, so the shared-resource hypothesis was ruled out structurally.
+      MECHANISM: run(preview, 700) drew frames "for 700 ms of wall clock", each iteration ending in
+      await setTimeout(10). Under load a 10 ms timer fires ~700 ms late, so the budget bought
+      EXACTLY ONE frame - the opening one, drawn before any answer could arrive - while 157 tiles
+      had in fact become resident (which is why only `drew > 0` failed). Reproduced: 0/20 failures
+      at load 38, 1/15 at 135, 11/25 at 150.
+      FIX: drive() draws until the property holds, bounded in FRAMES (600) not milliseconds, and
+      returns its measurement; the live edge becomes a virtual capture clock stepped once per frame
+      (also the faithful instrument - the edge is a number the backend tells the client); pending is
+      checked on EVERY frame of the claim phase, exempting only frames where a new address appeared.
+      The cache's real-time gates are deliberately NOT bypassed - they are the behaviour under test.
+      Nothing loosened, nothing retried. Guard re-verified: stubbing refreshLiveEdge (T-460's
+      defect) and dropping the resident copy before revalidation both go RED.
+      Old vs new bundles interleaved run-for-run under 130 burners (load 150-198): 20/35 assertion
+      failures before, 0/35 after; 8/8 green idle; the file also got ~2x faster.
+    notes: |
+      Filed 2026-09-20 after the fact by the coordinator - the agent could not add it without
+      conflicting with a board file that moves every tick.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate

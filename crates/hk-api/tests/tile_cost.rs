@@ -428,3 +428,176 @@ fn the_shadow_search_cost_on_the_coverage_short_circuit_is_measured_across_a_zoo
         "the budget is the TILE's scale: cells x SHADOW_SEARCH_ROWS (T-523)"
     );
 }
+
+// ——— T-527: what the BACKWARD fill costs, and how often its case actually occurs ————————————————
+//
+// T-519 carried a column's last-known value FORWARD. That leaves a column first seen part-way down
+// the view grey ABOVE its samples, although it was observed — the gap T-527 fills with the
+// column's first-ever sample. Two things want measuring, in the order that decides whether the
+// ticket was worth building:
+//
+//   1. **Does the case occur?** A head gap needs a column whose record BEGINS inside the viewed
+//      window and has nothing older: the start of a capture, or a retune onto new spectrum. Where a
+//      band was tuned for the whole window there is no gap to fill, and the count is zero. So the
+//      number below is per address, not a global claim.
+//   2. **What does it cost?** Nothing on the coverage short-circuit (that path passes no grid, so
+//      there is no first-ever sample to read back from — T-523's budgeted search is untouched), and
+//      on the full path only the row walk `carry_forward` already makes over the tile's own cells.
+
+/// The mirror of [`departed_band_fixture`]: the radio is parked at 5 GHz for one tile window and
+/// only THEN arrives on `B`, so `B`'s record begins half-way down the tile under test and nothing
+/// older than it exists. That is the only shape in which a head gap can occur at all.
+fn arrived_band_fixture(dir: &std::path::Path) -> (ApiState, f64, i64) {
+    let mut p = hk_store::Pyramid::open(dir.join("history"), PyramidConfig::default()).unwrap();
+    let g = p.geometry().clone();
+    let (t_cell, f_cell) = (g.levels[0].t_cell_ns, g.levels[0].f_cell_hz);
+    let t0 = T_INDEX * t_cell * CELLS as i64;
+    let f_lo = F_INDEX as f64 * f_cell * CELLS as f64;
+    let f_hi = f_lo + f_cell * CELLS as f64;
+    let window = t_cell * CELLS as i64;
+    const AWAY_LO: f64 = 5.0e9;
+    const NB: usize = 256;
+    let bin_hz = (f_hi - f_lo) / NB as f64;
+    // Window 1: 5 GHz only. Window 2: its first half at 5 GHz, then B for the rest — so the tile
+    // over window 2 holds B from row CELLS/2 down, and nothing above it.
+    for k in 0..2 * CELLS as i64 {
+        let mut away = [1e-12f32; 64];
+        away[7] = 1e-6;
+        p.ingest(&FrameInput::new(
+            Timestamp::from_unix_nanos(t0 + k * t_cell),
+            t_cell,
+            AWAY_LO,
+            f_cell,
+            PowerUnit::Dbfs,
+            &away,
+        ))
+        .unwrap();
+        if k >= CELLS as i64 + CELLS as i64 / 2 {
+            let mut psd = [1e-12f32; NB];
+            psd[40] = 1e-6;
+            psd[(k as usize) % NB] = 1e-7;
+            p.ingest(&FrameInput::new(
+                Timestamp::from_unix_nanos(t0 + k * t_cell),
+                t_cell,
+                f_lo,
+                bin_hz,
+                PowerUnit::Dbfs,
+                &psd,
+            ))
+            .unwrap();
+        }
+    }
+    let obs = hk_store::observation::ObservationStore::open(
+        hk_store::observation::ObservationLogConfig::new(dir.join("observations")),
+    )
+    .unwrap();
+    obs.append(&dwell(
+        AWAY_LO,
+        AWAY_LO + f_cell * 64.0,
+        t0,
+        t0 + 2 * window,
+    ));
+    obs.append(&dwell(
+        f_lo,
+        f_hi,
+        t0 + window + window / 2,
+        t0 + 2 * window,
+    ));
+    obs.flush();
+    (
+        ApiState {
+            history: Some(Arc::new(Mutex::new(p))),
+            observations: Some(obs),
+            ..ApiState::default()
+        },
+        f_lo,
+        t0 + window,
+    )
+}
+
+/// **T-527's measurement**: per zoom-burst address over an arriving band, the cells the shadow now
+/// fills that T-519 left grey, beside what the answer costs. Printed, not thresholded on absolute
+/// milliseconds; the assertions are about the shape of the answer.
+#[test]
+fn the_backward_fill_is_measured_and_its_case_counted_across_a_zoom_burst() {
+    let dir = TempDir::new("backward-fill");
+    let (state, f_lo, t_ns) = arrived_band_fixture(&dir.0);
+    eprintln!(
+        "\n=== T-527: a zoom burst's tiles over an ARRIVING band (full path) ===\n\
+         {:>7}  {:>11}  {:>9}  {:>10}  {:>6}  {:>9}  {:>12}  {:>10}",
+        "level_f",
+        "tile width",
+        "route ms",
+        "shadow ms",
+        "runs",
+        "backward",
+        "cells filled",
+        "still grey"
+    );
+    let mut total_backward = 0u64;
+    let mut with_head_gap = 0;
+    for level_f in 0..=9u32 {
+        let (ms, v) = shadow_cost(&state, level_f, f_lo, t_ns);
+        let sh = &v["shadow"];
+        let n = v["extent"]["nf"].as_u64().unwrap() as usize;
+        let back: Vec<usize> = (0..sh["runs"].as_u64().unwrap() as usize)
+            .filter(|&i| sh["fill"][i].as_u64() == Some(1))
+            .collect();
+        let filled: u64 = back.iter().map(|&i| sh["rows"][i].as_u64().unwrap()).sum();
+        // What T-519 would have left grey here is exactly the cells the backward runs cover: every
+        // other run is a forward carry, which T-519 already drew.
+        let grid = v["grid"]["max_db"].as_array();
+        let unmeasured = grid.map_or(n * n, |g| g.iter().filter(|c| c.is_null()).count());
+        let covered: u64 = (0..sh["runs"].as_u64().unwrap() as usize)
+            .map(|i| sh["rows"][i].as_u64().unwrap())
+            .sum();
+        eprintln!(
+            "{level_f:>7}  {:>8.1} MHz  {ms:>6.2} ms  {:>7.2} ms  {:>6}  {:>9}  {filled:>12}  {:>10}",
+            (v["extent"]["f_hi_hz"].as_f64().unwrap() - v["extent"]["f_lo_hz"].as_f64().unwrap())
+                / 1e6,
+            sh["search"]["build_ms"].as_f64().unwrap_or(0.0),
+            sh["runs"],
+            back.len(),
+            unmeasured as u64 - covered,
+        );
+        if !back.is_empty() {
+            with_head_gap += 1;
+        }
+        total_backward += filled;
+        // Every backward run starts at row 0 and stops where the column's first sample begins: it
+        // is the HEAD's rule, never a second way to answer an ordinary gap.
+        for &i in &back {
+            assert_eq!(sh["row"][i], serde_json::json!(0), "run {i}: {sh}");
+            let c = sh["f"][i].as_u64().unwrap() as usize;
+            let r = sh["rows"][i].as_u64().unwrap() as usize;
+            if let Some(g) = grid {
+                assert!(g[(r - 1) * n + c].is_null(), "run {i} covers a measurement");
+                assert!(
+                    g[r * n + c].is_number(),
+                    "run {i} must stop at the first sample it reads: {}",
+                    g[r * n + c]
+                );
+            }
+        }
+    }
+    eprintln!(
+        "  {with_head_gap} of 10 addresses had a column whose record BEGINS inside the window; \
+         {total_backward} cells now carry the first-ever sample that T-519 left grey.\n\
+         The case is not universal and is not claimed to be: a band tuned for the whole window has \
+         no head gap, and a column never observed at all still carries no run.\n"
+    );
+    assert!(
+        with_head_gap > 0,
+        "the fixture must actually arrive mid-window, or this measures nothing"
+    );
+    // Grey's meaning is unchanged: the band the radio never tuned carries no run at all, backward
+    // or forward, on the same server.
+    let (_, never) = shadow_cost(&state, 0, f_lo + 1.6e9, t_ns);
+    assert_eq!(
+        never["shadow"]["runs"],
+        serde_json::json!(0),
+        "a never-observed column carries NO run: {}",
+        never["shadow"]
+    );
+    assert_eq!(never["shadow"]["backward_runs"], serde_json::json!(0));
+}
