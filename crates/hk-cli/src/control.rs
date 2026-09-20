@@ -91,6 +91,12 @@ impl RunControl for PipelineRunControl {
             segment: s.segment,
             replumbing: s.replumbing,
             finished: s.finished,
+            capture: match s.capture {
+                hk_pipeline::CaptureState::Running => hk_api::CaptureStatus::Running,
+                hk_pipeline::CaptureState::Recovering => hk_api::CaptureStatus::Recovering,
+                hk_pipeline::CaptureState::Ended => hk_api::CaptureStatus::Ended,
+            },
+            capture_note: s.capture_note,
             display: display(s.display),
             recording: recording(s.recording),
         }
@@ -159,6 +165,8 @@ impl WindowRetuner for PipelineRetuner {
             center_hz: s.center_hz,
             sample_rate_hz: s.sample_rate_hz,
             settling: s.replumbing,
+            // T-508: capture recoveries are the pipeline moving the window by itself.
+            pipeline_moves: s.stats["capture_recoveries"].as_u64().unwrap_or(0),
         })
     }
 }

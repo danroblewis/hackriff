@@ -155,3 +155,16 @@ test("app CSS keeps the mockup breakpoints, both themes and no page-wide horizon
   assert.match(css, /:root\[data-theme="light"\]/);
   assert.doesNotMatch(css, /min-width: *[4-9]\d\dpx|min-width: *\d{4}px/, "no fixed min-width wider than a phone");
 });
+
+// T-508: the run's capture state is carried from the backend, never inferred. An older server
+// without `run.capture` is read from `finished`, and a failure's cause travels with it.
+test("device slice carries the run's capture state and its cause", () => {
+  assert.equal(deviceFrom(replayState).capture, replayState.run?.finished ? "ended" : "running");
+  const recovering = { ...replayState, run: { ...replayState.run!, capture: "recovering" as const, capture_note: "mock-sdr: retune failed" } };
+  const d = deviceFrom(recovering);
+  assert.equal(d.capture, "recovering");
+  assert.equal(d.captureNote, "mock-sdr: retune failed");
+  const oldEnded = { ...replayState, run: { ...replayState.run!, finished: true, capture: undefined, capture_note: undefined } };
+  assert.equal(deviceFrom(oldEnded).capture, "ended", "an older server's finished run reads as ended");
+  assert.equal(deviceFrom({ ...replayState, run: undefined } as unknown as ControlState).capture, null);
+});

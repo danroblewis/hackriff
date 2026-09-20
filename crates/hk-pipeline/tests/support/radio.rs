@@ -31,6 +31,10 @@ pub struct RadioControl {
     hold_at: AtomicU64,
     finish: AtomicBool,
     emitted: AtomicU64,
+    /// T-497: accept `tune` and never apply it (see [`RadioControl::lose_center`]).
+    lose_center: AtomicBool,
+    /// T-508: every read fails (see [`RadioControl::fail_reads`]).
+    fail_reads: AtomicBool,
     /// `(stream index of the first block, centre, rate)` for every applied window change.
     pub windows: Mutex<Vec<(u64, f64, f64)>>,
     /// Receive-side control calls, in order.
@@ -56,6 +60,28 @@ impl RadioControl {
     /// Samples delivered so far (the next stream index).
     pub fn emitted(&self) -> u64 {
         self.emitted.load(Ordering::SeqCst)
+    }
+
+    /// **Accept `tune` and never apply it** — a front end that takes the command and does not move
+    /// (T-497).
+    ///
+    /// This is not a contrived fault. `hk_core`'s HackRF driver applies a posted control **field by
+    /// field and returns on the first `SourceError`** (`apply_change`: sample rate, then baseband
+    /// filter, then gains, then centre), so a baseband-filter write that fails leaves the new
+    /// *rate* in the block provenance and the centre never applied. Every block then reports a
+    /// window one component away from the one the re-plumb asked for — which is the state
+    /// [`hk_pipeline::run::WINDOW_SETTLE_TIMEOUT`] exists to get out of, and which no mock SDR can
+    /// produce, because a mock echoes whatever it was told.
+    ///
+    /// The call is still logged, so a test can see the front end *was* commanded.
+    pub fn lose_center(&self, on: bool) {
+        self.lose_center.store(on, Ordering::SeqCst);
+    }
+
+    /// **Every read fails with a device error** (T-508) — a front end that is gone: unplugged, or
+    /// a USB stall the driver reports as `SourceError::Device` (`hackrf.rs`'s `check_stall`).
+    pub fn fail_reads(&self, on: bool) {
+        self.fail_reads.store(on, Ordering::SeqCst);
     }
 
     /// Waits until `emitted() >= n`; `false` after `limit`.
@@ -88,7 +114,11 @@ impl SourceControl for RadioControl {
             });
         }
         self.log(format!("tune {center_hz}"));
-        self.mailbox.post(|p| p.center_hz = Some(center_hz));
+        // T-497: a front end that takes the command and does not move. The call is logged either
+        // way, so "the radio was told" and "the radio went" stay separable.
+        if !self.lose_center.load(Ordering::SeqCst) {
+            self.mailbox.post(|p| p.center_hz = Some(center_hz));
+        }
         Ok(())
     }
 
@@ -181,6 +211,8 @@ impl Radio {
             hold_at: AtomicU64::new(u64::MAX),
             finish: AtomicBool::new(false),
             emitted: AtomicU64::new(0),
+            lose_center: AtomicBool::new(false),
+            fail_reads: AtomicBool::new(false),
             windows: Mutex::new(vec![(0, center_hz, rate_hz)]),
             calls: Mutex::new(Vec::new()),
         });
@@ -258,6 +290,14 @@ impl Source for Radio {
         let c = &self.control;
         if c.finish.load(Ordering::SeqCst) {
             return Ok(None);
+        }
+        if c.fail_reads.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+            return Err(SourceError::Device {
+                source_name: "scripted-radio",
+                operation: "receive",
+                message: "the front end is gone (scripted)".into(),
+            });
         }
         let index = c.emitted();
         if let Some(p) = c.mailbox.take(&mut self.seen) {

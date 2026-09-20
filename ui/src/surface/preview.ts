@@ -366,6 +366,19 @@ export function wheelZoom(e: WheelLike): { factor: number; axes: { freq: boolean
   return { delta, factor: zoomFactor(delta, e.deltaMode ?? 0), axes: wheelAxes(e) };
 }
 
+/**
+ * **Ctrl+Shift+wheel is the shadow-brightness gesture, not a zoom** (T-526).
+ *
+ * Decided here, beside [[wheelAxes]], under the same rule the doc comment above states: a host's
+ * listener may not read a modifier bit itself, so this is the one place that says what Ctrl+Shift on
+ * a wheel means, and `input.ts` only calls it. It must be checked **before** [[wheelZoom]] — shift
+ * alone already means "zoom frequency only", so the ordinary zoom path is a different gesture, not a
+ * degraded form of this one.
+ */
+export function isShadowGainWheel(e: { ctrlKey?: boolean; shiftKey?: boolean }): boolean {
+  return e.ctrlKey === true && e.shiftKey === true;
+}
+
 /** The part of a `PointerEvent` a drag gesture reads. */
 export interface PointerLike {
   readonly shiftKey?: boolean;

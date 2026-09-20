@@ -62,6 +62,21 @@ export const CELL = {
    * states the absence and stops there.
    */
   AWAITING: 4,
+  /**
+   * **The sixth state (T-520, ADR-0020): unobserved HERE, but a real measurement of an earlier
+   * time is carried down to this cell** — the band was swept, then the radio left.
+   *
+   * `coverage` says `unobserved` for this cell, and `/api/tiles`'s `shadow` plane carries the
+   * band's newest max-hold from `last_t_s` and earlier. That is a measurement, just **not of this
+   * cell**: the last-known / stale honesty tier. It is drawn from the *same* ramp at the *same*
+   * scale (the colour of a shadow is the colour that level had when it was live), then pushed down
+   * under a hard brightness ceiling and ruled with a texture no live cell ever carries — see
+   * [[SHADOW_MARK]] for why both, and why not graded by age.
+   *
+   * **Grey is untouched.** A cell is SHADOW only on positive evidence (a run over it); an
+   * `unobserved` cell with no run is still [[UNOBSERVED]], THE grey, and nothing else is.
+   */
+  SHADOW: 5,
 } as const;
 
 export type CellState = (typeof CELL)[keyof typeof CELL];
@@ -94,6 +109,9 @@ export const PATTERNS = {
    * statement about *this client's* last request rather than about the radio, and the only one on
    * the surface that is neither a single diagonal, nor dots, nor a lattice. */
   cross: "fract((px.x + px.y) / p.x) < 0.22 || fract((px.y - px.x) / p.x) < 0.22",
+  /** Horizontal rules only: scanlines. The last-known [[CELL.SHADOW]] mark (T-520) — the one mark
+   * ruled along a single axis, and ruled along *time*, the axis the value is carried down. */
+  scan: "fract(px.y / p.y) < 0.4",
 } as const;
 
 export type PatternName = keyof typeof PATTERNS;
@@ -129,6 +147,7 @@ const COMPILED: Readonly<Record<PatternName, PatternFn>> = {
   dots: (px, p, fr) => fr(px.x / p.x) < 0.34 && fr(px.y / p.y) < 0.34,
   grid: (px, p, fr) => fr(px.x / p.x) < 0.10 || fr(px.y / p.y) < 0.10,
   cross: (px, p, fr) => fr((px.x + px.y) / p.x) < 0.22 || fr((px.y - px.x) / p.x) < 0.22,
+  scan: (px, p, fr) => fr(px.y / p.y) < 0.4,
 };
 
 /** Is this pixel on the pattern? The same expression the shader runs, evaluated on the CPU. */
@@ -145,7 +164,11 @@ export type CellMark =
   | { readonly kind: "flat"; readonly rgb: Rgb }
   /** A ground with a pattern inked over it — a mark that reads as *texture*, so it can never be
    * mistaken for a level however the display range moves. */
-  | { readonly kind: "pattern"; readonly rgb: Rgb; readonly ink: Rgb; readonly pattern: PatternName; readonly pitchPx: number };
+  | { readonly kind: "pattern"; readonly rgb: Rgb; readonly ink: Rgb; readonly pattern: PatternName; readonly pitchPx: number }
+  /** **The ramp, remembered** (T-520): `cmap(x) * gain` — the same ramp at the same scale, held
+   * under a hard ceiling — with a pattern inked over it in a fixed colour. The ground carries the
+   * level; the ink says it is not a level of *this* cell. */
+  | { readonly kind: "shadow"; readonly gain: number; readonly ink: Rgb; readonly pattern: PatternName; readonly pitchPx: number };
 
 /**
  * The rule, as data. Index is the state byte.
@@ -153,7 +176,7 @@ export type CellMark =
  * The marks are deliberately far apart in hue, lightness **and shape**: a viewer must be able to
  * tell "never looked" from "looked, kept nothing" from "no longer know" from "looked, nothing
  * folded yet" at a glance, and T-413 declined the obvious rendering precisely because reusing one
- * mark for two of them spells *looked and it was quiet* as *never looked*. Five states, five marks.
+ * mark for two of them spells *looked and it was quiet* as *never looked*. Six states, six marks.
  */
 export const CELL_MARKS: readonly CellMark[] = [
   { kind: "flat", rgb: [0.155, 0.16, 0.18] }, // UNOBSERVED — THE grey
@@ -163,7 +186,37 @@ export const CELL_MARKS: readonly CellMark[] = [
   { kind: "pattern", rgb: [0.15, 0.1, 0.18], ink: [0.44, 0.3, 0.52], pattern: "hatchUp", pitchPx: 7 },
   // AWAITING — the fifth. Sparse dots on a cold ground: visibly *empty*, and visibly not grey.
   { kind: "pattern", rgb: [0.08, 0.1, 0.15], ink: [0.3, 0.42, 0.6], pattern: "dots", pitchPx: 9 },
+  // SHADOW — the sixth (T-520). The last-known spectrum, dimmed under a ceiling and scanlined.
+  { kind: "shadow", gain: 0.25, ink: [0.24, 0.19, 0.1], pattern: "scan", pitchPx: 5 },
 ];
+
+/**
+ * **The last-known mark** (T-520), named so the tests can hold it to its two guarantees.
+ *
+ * A shadow is a real measurement drawn where the radio is *not* looking, so the only unacceptable
+ * failure is a viewer reading it as live. Two independent defences, because either alone fails
+ * somewhere on the ramp:
+ *
+ *  1. **A hard brightness ceiling.** The ground is `cmap(x) * gain`, so no shadow pixel is brighter
+ *     than `gain` (0.25) in any channel or in luminance — the ramp's white, remembered, is a dark
+ *     grey-white. Every live colour from about a third of the way up the ramp (the cyan on) is
+ *     brighter than any shadow can be, so **a signal in shadow can never look like a signal on
+ *     air.** The hue is kept on purpose: a remembered carrier is still recognisably *which* level
+ *     it was, which is the point of showing it.
+ *  2. **A texture no live cell carries.** The ceiling cannot help at the bottom of the ramp: a
+ *     remembered noise floor and a live noise floor are both near-black. So every shadow cell is
+ *     ruled with horizontal scanlines in a fixed warm ink that is on no position of the ramp, not
+ *     the grey, not magenta, and lighter than a dimmed noise floor — visible exactly where the
+ *     ceiling is not. Horizontal because the value is carried down the *time* axis; single-axis
+ *     because no other mark on this surface is (the survey lattice is both axes, and darkens).
+ *
+ * **Not graded by age, deliberately.** Darker-with-age converges every old shadow on the dark end
+ * of the ramp, and from there on grey, [[PENDING]] and [[BACKDROP]] — eroding precisely the
+ * distinction this state exists to draw. Age is carried on the wire (`last_t_s`), exact, and is a
+ * number to *read* (hover), not a shade to guess from. A constant mark is also one a viewer learns
+ * once.
+ */
+export const SHADOW_MARK = CELL_MARKS[CELL.SHADOW] as Extract<CellMark, { kind: "shadow" }>;
 
 /** The grey, named once so a test can count its occurrences in the generated shader. */
 export const GREY: Rgb = (CELL_MARKS[CELL.UNOBSERVED] as { rgb: Rgb }).rgb;
@@ -318,11 +371,18 @@ export function cellPixel(args: {
   readonly tier: number;
   readonly srcPx: Vec2;
   readonly fallback: boolean;
+  /** The shadow's brightness multiplier, client-adjustable (T-526, `./shadow-gain.ts`). Defaults to
+   * [[SHADOW_MARK]]'s own gain, which is what every caller that does not pass one still gets. */
+  readonly shadowGain?: number;
 }): [number, number, number] {
   const m = markFor(args.state);
   let col: [number, number, number];
   if (m.kind === "ramp") col = cmap(args.x);
-  else if (m.kind === "flat") col = [...m.rgb] as [number, number, number];
+  else if (m.kind === "shadow") {
+    const gain = args.shadowGain ?? m.gain;
+    if (patternHit(m.pattern, args.px, { x: m.pitchPx, y: m.pitchPx })) col = [...m.ink] as [number, number, number];
+    else { const c = cmap(args.x); col = [c[0] * gain, c[1] * gain, c[2] * gain]; }
+  } else if (m.kind === "flat") col = [...m.rgb] as [number, number, number];
   else col = [...(patternHit(m.pattern, args.px, { x: m.pitchPx, y: m.pitchPx }) ? m.ink : m.rgb)] as [number, number, number];
 
   if (args.state === CELL.OBSERVED) {
@@ -353,7 +413,7 @@ const patFn = (name: PatternName) => `pat_${name}`;
  * [[FALLBACK_MARK]]:
  *
  * ```glsl
- * vec3 cellMark(int s, float x, vec2 px);         // the five states
+ * vec3 cellMark(int s, float x, vec2 px, float gain); // the six states; `gain` is the shadow's only
  * vec3 tierMark(int t, vec3 col, vec2 px, vec2 srcPx);  // the three honesty tiers
  * vec3 fallbackMark(vec3 col, vec2 px);           // the stand-in
  * ```
@@ -369,11 +429,17 @@ export const CELL_RULE_GLSL: string = (() => {
     (k) => `bool ${patFn(k)}(vec2 px, vec2 p) { return ${PATTERNS[k]}; }`,
   );
 
+  // `gain` is a parameter, not a baked-in literal (T-526): the shadow's brightness multiplier is
+  // user-adjustable client-side, so the generated function takes it from the caller (`uShadowGain`
+  // in surface.ts) rather than compiling [[SHADOW_MARK]]'s default into the shader text. Every other
+  // mark ignores the parameter; only the shadow branch reads it, exactly as `cellPixel` does above.
   const cell = CELL_MARKS.map((m, s) => {
     const body =
       m.kind === "ramp"
         ? "cmap(x)"
-        : m.kind === "flat"
+        : m.kind === "shadow"
+          ? `(${patFn(m.pattern)}(px, ${vec2(m.pitchPx)}) ? ${vec3(m.ink)} : cmap(x) * gain)`
+          : m.kind === "flat"
           ? vec3(m.rgb)
           : `(${patFn(m.pattern)}(px, ${vec2(m.pitchPx)}) ? ${vec3(m.ink)} : ${vec3(m.rgb)})`;
     return s === CELL_MARKS.length - 1 ? `  return ${body};` : `  if (s == ${s}) return ${body};`;
@@ -392,7 +458,7 @@ export const CELL_RULE_GLSL: string = (() => {
   return `
 ${pats.join("\n")}
 
-vec3 cellMark(int s, float x, vec2 px) {
+vec3 cellMark(int s, float x, vec2 px, float gain) {
 ${cell.join("\n")}
 }
 

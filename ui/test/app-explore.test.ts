@@ -904,8 +904,13 @@ test("T-386/T-389: the sidebar list and the surface's marks come from ONE collec
   // box — the same box the tiles were drawn in, on the same frame. A mark cannot be drawn where
   // the pane is not looking, so there is nothing left for a window filter to disagree with.
   const src = readFileSync("src/app/centre/surface.ts", "utf8");
-  assert.match(src, /signalMarkBoxes\(Object\.values\(s\.inventory\.rows\)/, "the marks come from the store's rows");
-  assert.match(src, /selectionMarkBoxes\(s\.selections\.list/, "and from the store's selections");
+  // T-522 moved the composition into `paneMarkBoxes` (so the found-signal toggle has one place to
+  // gate), but the rows and selections still flow straight from the store, through it, to
+  // `signalMarkBoxes`/`selectionMarkBoxes` — no second filter appeared.
+  assert.match(src, /paneMarkBoxes\(Object\.values\(s\.inventory\.rows\).*s\.selections\.list/,
+    "the marks are composed from the store's rows and selections, straight through");
+  assert.match(src, /signalMarkBoxes\(rows, focusId\)/, "…into the same signalMarkBoxes…");
+  assert.match(src, /selectionMarkBoxes\(sels, selId, paneBox\)/, "…and the same selectionMarkBoxes");
   assert.match(src, /markQuads\(boxesFor\(pane\), edge, pane\.box, pane\.rect\)/,
     "placed in the pane's own box and rect — the renderer's mapping, not a second one");
   // And the sidebar's window is the pane's window: `mirror()` is the ONE writer of `live.view`

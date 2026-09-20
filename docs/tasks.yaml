@@ -13200,7 +13200,8 @@ tasks:
   - id: T-466
     milestone: M2-hardening
     title: ui/e2e/selftest.mjs cannot hold app-page faults, so per-guard attribution is meaningless for two specs
-    status: todo
+    status: done
+    commit: "b7070787"
     priority: normal
     parallel_group: UI
     depends_on: []
@@ -13386,7 +13387,8 @@ tasks:
   - id: T-473
     milestone: M2-hardening
     title: The e2e tier has no per-spec timeout and can hang the gate indefinitely - observed at 31 minutes
-    status: todo
+    status: done
+    commit: "e55f627e"
     priority: high
     parallel_group: CI
     depends_on: []
@@ -14627,7 +14629,8 @@ tasks:
   - id: T-494
     milestone: MLIVE
     title: affordable_levels admits nodes materialize refuses, so the ladder cannot deepen past 4 x 4
-    status: in-progress
+    status: done
+    commit: "dbed8242"
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -14772,7 +14775,8 @@ tasks:
   - id: T-497
     milestone: MLIVE
     title: A retune tears the live capture down again - the server stays up and the live view never recovers
-    status: in-progress
+    status: done
+    commit: "13222163"
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15190,7 +15194,8 @@ tasks:
   - id: T-507
     milestone: MLIVE
     title: A server that has lost its history answers every tile all-unknown - a wall of purple the user sees
-    status: todo
+    status: done
+    commit: "3b352889"
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15221,7 +15226,8 @@ tasks:
   - id: T-508
     milestone: MLIVE
     title: A failed re-plumb ends the run for good while hk serve stays up saying finished - the other road to "retune never recovers"
-    status: todo
+    status: done
+    commit: "51bc8aae"
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15253,6 +15259,434 @@ tasks:
       NOT YET CONFIRMED ON THE USER'S HARDWARE: T-497's fix matches the symptom exactly, but no agent
       may touch the demo's HackRF. The user's next retune on the demo is the real test.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-509
+    milestone: M2-hardening
+    title: tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell saw an all-unobserved plane once under a full gate
+    status: done
+    commit: "3b352889"
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      OBSERVED ONCE, 2026-09-18, in the T-497 merge gate (a diff that does not touch hk-api):
+      api_contract.rs:6712 "a plane that is part unknown and part unobserved is not uniform" got
+      uniform "unobserved", 1024/1024 cells, 0 unknown. It FAILED IN 0.167 s where it PASSES in
+      ~0.65 s - a different path, not a slow one. 3/3 green in isolation on the same merged tree;
+      the full gate re-run from scratch was green.
+      HYPOTHESIS, NOT VERDICT: the test depends on the record horizon falling INSIDE the requested
+      tile, and under load the store has either no record yet or one that lands elsewhere - the
+      same unknown_rows/oldest_record machinery as T-507. Measure it under load (with a builder
+      competing) before touching it; do NOT add it to the quarantine list without the
+      isolation-versus-load measurement docs/10 section 3.5 requires.
+      DoD: the failing path reproduced deliberately, and either the test made to construct its
+      horizon deterministically or the product defect it caught fixed (read T-507 first - fixing
+      that may change what this test should expect).
+    notes: |
+      Filed 2026-09-18 by the coordinator so an intermittent red is recorded, not waved through.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-510
+    milestone: MSDR
+    title: Multi-source capture composition - one Pipeline spawning N source/ring/capture-thread sets into the shared per-device stores
+    status: todo
+    priority: high
+    parallel_group: SDR
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      MSDR TRACK A (user, 2026-09-18). A second SDR is connected and verified receiving live RF: a
+      NooElec NESDR Nano 3 (RTL2832U + R820T, serial 7673444264; 25 MHz-1.75 GHz, ~2.4 Msps, 8-bit),
+      beside the HackRF, on a separate USB controller. CLAUDE.md already requires the source layer,
+      scheduler and inventory to be N-source-capable; this is the ticket that makes the PIPELINE so.
+      GROUNDWORK, DO NOT REDO: generic device interface (T-048), the single-device audit (T-259),
+      device_id provenance throughout (T-302/T-304/T-283/T-325/T-332), /api/navigation windows[]
+      already a list (T-340), coverage already per-device (hk-store coverage.rs Device::Id/Unknown/Any),
+      and the mock SDR can stand in as device 2. The gap is the COMPOSITION SEAM: opening and wiring N
+      sources into the serving layer. hk-core/src/source/mod.rs:482-511 names every single-device
+      consumer; hk-api/src/navigation.rs:173-196 documents the exact change.
+      SCOPE: one Pipeline spawns N {source, ring, capture-thread} into the already-per-device stores
+      (shared history, coverage, floor). Files: hk-pipeline/src/run.rs (Pipeline::start, Shared,
+      workers), capture.rs, iqbuffer.rs (a ring per device). THE ONLY GENUINELY HARD TICKET in the
+      slice: per-arriving-row cost on the capture thread is paid whether or not anyone looks, so
+      MEASURE it for N=1 and N=2 and do not regrow residency (the T-453 constraint).
+      N=1 MUST BE BEHAVIOURALLY IDENTICAL to today - the whole existing suite is the guard for that.
+      Device 2 is the MOCK SDR here; no hardware. Reviewed by Opus before merge (core_interface).
+      DoD: two mock sources run concurrently in one Pipeline, each with its own ring and device_id,
+      writing the shared stores with correct per-device provenance; N=1 unchanged; measured
+      per-row cost at N=1 vs N=2 recorded.
+    notes: |
+      PAUSED 2026-09-18 by the user (budget; scan + fog-of-war took priority). Resumes after the weekly
+      reset (Sun 02:00). CHECKPOINT: branch task-t510 @ 96d073a3 builds clean, untested. Handover:
+      the seam was where the survey said for STORAGE (history keys by frame device_id, per-device floor,
+      coverage from ring segments), plus three things it missed - (1) the shared pyramids have ONE
+      forward-only watermark, so all devices in a run must share a clock (live radios do; replays
+      generally don't); (2) the end-of-run seal must happen ONCE after every device drains, not by
+      the first reader to finish; (3) each extra device needs its own Counters or it overwrites the
+      primary's live state. WIP: src/devices.rs (ExtraSource/RunDevice, validate/start/finish),
+      Pipeline::start -> start_multi, Shared.seal_at_end, Common.aux/defer_seal/sealed, per-device
+      iqbuffer dirs, source/history cpu_ns counters. N=1 baseline: ~11.1 ms CPU per Msample on the
+      capture thread, 13.0-13.6 ms per history row, 273-279 MB peak. NEXT: N=2 in
+      tests/multi_source.rs, then two_mock_front_ends_share_the_stores, then targeted tests + the
+      threading/cost note. T-508 also changed run.rs (supervise recovery) - rebase before resuming.
+      Filed 2026-09-18 from /tmp/claude-501/multi-sdr-brief.md (planning log B0.690). Paced to ONE
+      builder slot: the user is near the weekly budget cap and retune/live fixes keep priority.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-511
+    milestone: MSDR
+    title: The serving layer holds N live controls, and device-control routes take a device selector
+    status: todo
+    priority: normal
+    parallel_group: SDR
+    core_interface: true
+    model: opus
+    depends_on: [T-510]
+    use_cases: [AWARE-011]
+    acceptance: |
+      ApiState.live_control: Option<...> becomes a collection keyed by device_id, with one DeviceGate
+      per device (one capture at a time PER DEVICE, settle gap, device_id recorded). The
+      device-control routes (retune, rate, gains, bias-tee) take a device selector; with exactly one
+      device the selector may be omitted and behaviour is unchanged. navigation.windows_json needs no
+      change - it is already a list. docs/api.md and api_contract.rs are updated TOGETHER (T-079).
+      A pan or wheel still never reaches a device route (T-340's spy assertions stay green).
+    notes: |
+      Filed 2026-09-18, MSDR track (B0.690).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-512
+    milestone: MSDR
+    title: hk serve / hk run / hackriffd accept a repeatable --device
+    status: todo
+    priority: normal
+    parallel_group: SDR
+    model: sonnet
+    depends_on: [T-510, T-511]
+    use_cases: [AWARE-011]
+    acceptance: |
+      `hk serve --device X --device Y` (repeatable), and the same for `hk run` and hackriffd. One
+      --device keeps today's behaviour exactly. Each device's settings (centre, rate, gains) are
+      addressable per device on the command line; an unknown or duplicated device is a clear error,
+      not a silent drop.
+    notes: |
+      Filed 2026-09-18, MSDR track (B0.690). Well-specified CLI plumbing over T-510/T-511.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-513
+    milestone: MSDR
+    title: Two-device mock e2e - both windows, both coverages, shared air merged, device physics kept apart
+    status: todo
+    priority: normal
+    parallel_group: SDR
+    model: sonnet
+    depends_on: [T-510, T-511]
+    use_cases: [AWARE-011]
+    acceptance: |
+      Two MockSdrDriver instances on two bands, through the device interface (CLAUDE.md's e2e rule).
+      Assert: both appear in /api/navigation windows[]; both in /api/coverage devices[] and /api/tiles;
+      an emitter seen by both (shared air) merges into one inventory entry carrying both devices'
+      provenance, while device-local physics (spurs, DC, overload, gain state) stays per-device and
+      never crosses. NO HARDWARE.
+    notes: |
+      Filed 2026-09-18, MSDR track (B0.690).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-514
+    milestone: MSDR
+    title: RTL-SDR source - a native librtlsdr driver behind an rtlsdr feature, for the NooElec Nano 3
+    status: todo
+    priority: normal
+    parallel_group: SDR
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      A native librtlsdr FFI source behind an `rtlsdr` cargo feature, mirroring the `hackrf` feature:
+      tune, rate, gain (29 steps 0-49.6 dB on the R820T), timestamps and overruns through the generic
+      Device/SourceControl trait, passing the existing device conformance suite. Addresses the device
+      BY SERIAL (7673444264), never by index. SoapySDR is NOT needed; librtlsdr and rtl_test are
+      installed. Model the RTL's real capabilities explicitly (25 MHz-1.75 GHz, ~2.4 Msps, 8-bit, no
+      bias-tee assumption) so the UI never implies what it cannot do.
+      OP NOTE: the Nano 3's R820T takes ~10 s to lock on this Mac - any harness allows ~10 s before
+      expecting samples, and that is not a failure.
+      HIL: against the real Nano 3. RECEIVE ONLY. One process per device; the HackRF stays with the
+      user's demo on :8899 and must not be opened.
+    notes: |
+      Filed 2026-09-18, MSDR track (B0.690). Only ticket in the slice that needs hardware; it is
+      present and verified (100.3 MHz FM capture, std 10.66 - live signal, not a dead input).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-515
+    milestone: MLIVE
+    title: The coverage-only tile shortcut answers 200 above the declared readable ceiling, where docs/api.md says 400
+    status: done
+    commit: "3b352889"
+    priority: low
+    parallel_group: PIPE
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-507. A tile whose plane is uniform (all unobserved) takes the coverage-only fast path
+      and returns 200 even at a level above the route's declared max_level, where docs/api.md says the
+      route answers 400. Decide which is right - the ceiling is a claim about what can be READ, and a
+      uniform-unobserved answer reads nothing - and make the doc and the route agree, with a contract
+      assertion. T-507 moved the ceiling test's walk to the tuned band to avoid depending on this.
+    notes: |
+      Filed 2026-09-18 from T-507's report; T-494's area, which has now merged.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-516
+    milestone: MSCAN
+    title: Scan is built - make it discoverable and satisfying - verify the Survey-sweep panel end to end and add a one-click "scan everything"
+    status: todo
+    priority: high
+    parallel_group: SCAN
+    model: sonnet
+    depends_on: [T-517]
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER TOP PRIORITY 2026-09-18 (with fog-of-war). THE SCAN IS ALREADY BUILT - do NOT rebuild it:
+      T-406 engine, T-452 in-app trigger and UI, T-439 live-edge tiles, T-457/T-460. GET/POST
+      /api/control/scan works live (it priced a full 1 MHz-6 GHz sweep on the demo). The "Survey
+      sweep" fieldset (From/To/Dwell + Start/Stop) is at ui/src/app/review/device.ts:74-191, model
+      ui/src/controls/model.ts:60-360.
+      (1) VERIFY END TO END on the mock that the panel is reachable in the shipped UI and that starting
+      a sweep visibly fills the canvas in real time.
+      (2) ONE-CLICK "SCAN EVERYTHING": empty From/To already means the whole range; default the
+      one-click to a FAST dwell (~0.2-0.5 s) AND the COARSE step from T-517, so a full pass is
+      minutes, not the 13 hours 12 s/step costs today. The pricing line already shows the time
+      cost; it must show the one-click's.
+      UI-only here (test-ui gate); T-517 carries the step parameter.
+    notes: |
+      Filed 2026-09-18 from /tmp/claude-501/scan-fog-brief.md. LOW-priority follow-up, deferred: the
+      Survey-sweep panel should not live under the Device panel - give it its own home later (user,
+      "works for now").
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-517
+    milestone: MSCAN
+    title: A step-width (coarse/fine) control for the sweep - advance by the usable window, not ~1.5 MHz, so a full pass is ~10x fewer hops
+    status: in-progress
+    priority: high
+    parallel_group: SCAN
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER, 2026-09-18, after finding the Survey-sweep panel. Today the scan steps ~1.5 MHz per hop,
+      ~4000 steps for 1 MHz-6 GHz - why a full pass takes forever - although the HackRF window is
+      ~15-20 MHz and the config already has usable_fraction=0.75 (=> ~15 MHz usable) and
+      max_span_hz=20 MHz. MEASURE the actual hop first: confirm where the 1.5 MHz comes from.
+      Add a step-width (or coarse/fine "resolution") parameter through GET/POST /api/control/scan into
+      the scan plan (CompiledPlan tiling). COARSE advances by about the full usable window (~15 MHz,
+      ~400 steps, ~10x faster); FINE keeps small overlapping steps for detail. The planner snaps to
+      achievable configurations as today.
+      FREQUENCY RESOLUTION IS UNCHANGED: FFT bins per window stay fine; coarse means fewer redundant
+      hops, not blurrier data - assert it (bin width identical coarse vs fine) so nobody later reads
+      "coarse" as permission to degrade.
+      Add the control to the sweep panel next to From/To/Dwell; the pricing line shows the cost, so
+      the user sees coarse = fast. docs/api.md + api_contract.rs move together (T-079), assert values.
+    notes: |
+      Filed 2026-09-18. The one-click default to COARSE lives in T-516.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-519
+    milestone: MSCAN
+    title: "Fog-of-war 2A: a last-known (carry-forward) query and a shadow plane on the tile route"
+    status: done
+    commit: "45c37dbc"
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER TOP PRIORITY 2026-09-18. Today a cell with no data for the viewed (t, f) renders GREY. The
+      user wants a THIRD state: a cell observed at SOME past time shows its MOST-RECENT-KNOWN spectrum
+      in a very dim colormap ("shadow"); grey stays ONLY for never-observed. Semantics (user): swept
+      then departed = shadow; never swept = grey; re-swept = re-illuminated to full brightness.
+      THE DATA GAP: the backend keeps recency (Sampled.last) and max-hold (overview(), strongest ever)
+      but NOT last-known-value-carried-forward. Add it.
+      (1) A QUERY-TIME FOLD beside RegionHistory::overview() in crates/hk-store/src/history/query.rs
+      (near :245-254, :388-406): per frequency cell, the NEWEST observed max_db and its timestamp at
+      or before the viewport time, over the retained horizon - last-write-wins by time, reading the
+      same pyramid. No new maintained structure and no per-arriving-row cost (the T-453 constraint).
+      It must reach OUTSIDE the viewed tile's time extent: a column observed only before t0 has no
+      cell in [t0, t1]. Measure the query's cost on a device-wide viewport.
+      (2) Carry it on the tile route: a shadow / last_db plane (+ age) beside grid.max_db in
+      crates/hk-api/src/tiles.rs (near :94-119). docs/api.md + api_contract.rs together (T-079);
+      assert the VALUE (T-315), including that a never-observed column carries NO shadow.
+      (3) A short ADR note beside ADR-0017/0019 recording the "last-known / stale" honesty tier and
+      confirming GREY'S MEANING IS UNCHANGED. A note, not a gate.
+      DoD: the route answers a shadow value exactly where a cell was observed before and nothing where
+      it never was; cost measured; api.md, contract test and ADR note landed. Reviewed before merge.
+    notes: |
+      Filed 2026-09-18 from /tmp/claude-501/scan-fog-brief.md. Option (b), a maintained per-frequency
+      structure, is deliberately NOT built yet.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-520
+    milestone: MSCAN
+    title: "Fog-of-war 2B: the client's SHADOW tier - a dim last-known ramp, unmistakable from live, grey untouched"
+    status: done
+    commit: "2ec2179e"
+    priority: high
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: [T-519]
+    use_cases: [AWARE-011]
+    acceptance: |
+      ui/src/surface/cellrule.ts: add CELL.SHADOW (a 6th state, :31-65) and a CELL_MARKS entry
+      (:158-166) of a NEW kind (e.g. shadow-ramp): sample cmap(x) then multiply brightness far down,
+      optionally age-graded (older = darker). The GLSL is generated from those tables (:367-411) - no
+      hand shader math. GREY STAYS FLAT AND ONLY FOR UNOBSERVED - the invariant is preserved, and a
+      shadow must be UNMISTAKABLE from a live observed cell (a hard brightness ceiling and/or a subtle
+      texture). ui/src/surface/tile.ts decodeTile (:172-220): coverage=unobserved WITH a
+      carried-forward value => CELL.SHADOW with that value; no value => grey. Widen
+      ui/test/surface-honesty.test.ts for the new mark (it is not grey, not on the live ramp's
+      brightness range, not the unknown hatch, not REFUSED_MARK). Reuse cmap.ts unchanged.
+      Land together with T-519 so the effect is visible.
+    notes: |
+      Filed 2026-09-18. Touches the honesty model - Opus, reviewed.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-521
+    milestone: MSCAN
+    title: "Fog-of-war 2C: the standing guard - sweep then leave = shadow, never swept = grey, re-sweep = bright"
+    status: in-progress
+    priority: high
+    parallel_group: CANVAS-FE
+    model: sonnet
+    depends_on: [T-519, T-520]
+    use_cases: [AWARE-011]
+    acceptance: |
+      Through the MOCK SDR (the e2e rule): sweep a band, move away - that band renders SHADOW (dim);
+      a band never swept stays GREY; a re-sweep re-illuminates it to full brightness. Measured in
+      pixels in a real browser against the server's own coverage and shadow planes. This is the
+      standing guard that grey = genuinely unobserved still holds and a shadow appears ONLY where
+      the air was truly observed before.
+    notes: |
+      Filed 2026-09-18.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-522
+    milestone: MSCAN
+    title: A toggle to show or hide the found-signal boxes on the canvas, remembered per viewer
+    status: done
+    commit: "472af52a"
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: sonnet
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      USER, 2026-09-18: the Candidate/Confirmed detection boxes are sometimes too cluttered. Add a
+      TOGGLE in the canvas/surface controls that shows or hides them. Pure client presentation - the
+      boxes are drawn from detection data already in the UI; this changes only their visibility,
+      never what is fetched or detected. Remember the choice in localStorage (wrapped in try/catch;
+      the page must work without it). Default: shown. test-ui gate.
+      PRIORITY: BELOW the fog-of-war chain (T-519 -> T-520 -> T-521). Slot into spare UI capacity;
+      never let it delay fog-of-war.
+    notes: |
+      Filed 2026-09-18 from the user's request.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-523
+    milestone: MSCAN
+    title: Fog-of-war regressed the live view - the live edge stalls until a resize, and zoom bursts draw 502s
+    status: in-progress
+    priority: high
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER, 2026-09-18, on the demo after T-519/T-520 merged. (1) Live view: newest rows/tiles stop
+      arriving; a refresh is correct; a window RESIZE restarts both live and shadow. (2) Rapid zoom
+      draws 502s from the tunnel - T-519's per-tile last-known search (~84 ms per 819 MHz tile) now
+      also runs on the coverage short-circuit. (3) Shadow too dark: raise it a notch, still clearly
+      dimmer than live. LEADING HYPOTHESIS (to measure, not assume): 502s arm T-499's whole-transport
+      backoff (to 30 s), throttling T-460's live-edge refresh; a resize re-issues requests. DoD: a
+      regression test RED on main - live edge advances through a zoom burst with injected 502s and
+      no resize; shadow-search cost cut and measured; honesty cap test kept meaningful.
+    notes: |
+      PAUSED 2026-09-18 by the user (budget: DC notch only). CHECKPOINT task-t523 @ 91a2ee1e.
+      MECHANISM CONFIRMED, AND IT IS NOT THE BACKOFF: tile.ts fetchTile turns a proxy 502/504 into a
+      status error and tilecache.ts retryable() treats ANY status as terminal, so a place the tunnel
+      failed is never re-asked; the live-edge tile stays undrawn until a resize changes the addresses
+      (6 of 10 failed places never re-asked, measured in a browser). WIP: 502/504 go to T-499's
+      silence backoff (the route never emits them itself); unit test + live-edge.e2e test 3 (RED on
+      main). NEXT: run live-edge e2e green; shadow brightness (cellrule.ts:190 gain 0.25, cap test
+      surface-honesty.test.ts:125 FROM=0.3); server-side shadow-search cost on the short-circuit
+      (tiles.rs fold_newest) not yet measured.
+      Filed 2026-09-18. The user's #1 with ~3% weekly budget left; if unfinished at the cap, it is
+      the FIRST thing resumed after the reset (Sun 02:00). Branch task-t523.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-524
+    milestone: MSCAN
+    title: Notch-and-interpolate the LO-leakage spike at every tune centre, in the backend, so a sweep stops stamping a false pattern
+    status: done
+    commit: "294597f2"
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER, 2026-09-18, important for sweeps. Every HackRF tune has an LO-leakage (DC) spike at its
+      centre; a sweep stamps that false spike at each hop's centre - "the repeated pattern that
+      isn't really there". FIX: notch-and-INTERPOLATE - replace the DC-notch cells with a LINEAR
+      gradient between the values just left and just right of the notch. NOT black/grey (that reads
+      as missing data). Applied once in the BACKEND spectrum path, so it appears everywhere at once
+      (live rows, history pyramid, tiles, trace, sweep) - never a per-view client patch. Real-time
+      path: Opus, reviewed. Known notch width, per device.
+      Check existing DC handling first (T-418 off-DC placement, the DC twin, spur masks) and reuse it.
+      Detection must not treat the interpolated cells as measured energy.
+    notes: |
+      Filed 2026-09-18; top tier with T-523 under the ~3% budget; if unfinished, resumes first after
+      the reset (Sun 02:00).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-525
+    milestone: MSCAN
+    title: A full 1-6000 MHz sweep on the LIVE HackRF crashes hk serve - a failed or edge retune must skip the step, never take the server down
+    status: in-progress
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER-REPORTED 2026-09-19. Scanning the live HackRF 1 MHz-6000 MHz at dwell 1 s crashes the
+      backend (unhealthy; stage.sh restarts it). The SAME scan on the mock (hk serve --device mock:)
+      runs fine, so it is NOT the scan logic or the DC notch: it is the REAL-DEVICE retune path under
+      a ~3334-step cadence. Suspects: a retune to an edge frequency (near 1 MHz or 6000 MHz), or a
+      libhackrf/USB error that panics instead of being handled.
+      FIX: (1) the scan's per-step retune is fault-tolerant - a failed or edge retune yields or skips
+      that step, is logged and counted, and NEVER panics the server; (2) clamp the scan range to the
+      device's achievable tune configurations. FIRST find the actual panic (the crashed serve's log /
+      backtrace, RUST_BACKTRACE=1) - measure, don't assume. Reproduce on the mock with T-508's
+      HK_MOCK_FAULT (extend it with an edge/USB-error fault if needed) so the regression test runs
+      without hardware, RED on main. Relates to T-497/T-508's retune hardening.
+      HARDWARE: only with the user's say-so - the HackRF is the demo's device on :8899.
+    notes: |
+      Filed 2026-09-19; queued for after the weekly reset (Sun 02:00) given budget.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-526
+    milestone: MSCAN
+    title: Ctrl+Shift+wheel sets how dark the fog-of-war shadow renders
+    status: done
+    commit: "cc04109e"
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: sonnet
+    depends_on: [T-520]
+    use_cases: []
+    acceptance: |
+      USER 2026-09-19. Client-only: the shadow ramp's brightness multiplier becomes a uniform
+      (uShadowGain); Ctrl+Shift+wheel steps it in [0.05, 0.7] without zooming or panning, persisted
+      under hk-mui-shadow-gain (default 0.25). Backend values untouched.
+      MERGED WITHOUT THE GATE by the user's explicit one-time override (low-risk, UI-only, wanted
+      live immediately); tsc + 48/48 unit files passed. Every other ticket keeps the normal gate.
+    notes: |
+      The honesty ceiling now holds at the MAXIMUM gain (0.7) rather than the shipped default, and
+      the scanline texture is asserted at min/default/max - near the top of the range texture, not
+      brightness, is what separates a shadow from live. T-523 raises the DEFAULT gain; reconcile
+      the two when it lands.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate

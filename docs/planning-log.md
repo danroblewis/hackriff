@@ -5468,3 +5468,50 @@ caught three false claims about its own subject before it was trusted — reacha
 merged-ness, branch state standing in for agent activity, and a `\b` word boundary that git's ERE
 silently ignores. The board is a claim about the world and it goes stale in exactly the direction
 nobody checks.
+
+### B0.690 — MSDR: a second SDR is on the bench, and the first slice is the composition seam (2026-09-18)
+
+**Hardware.** A NooElec NESDR Nano 3 (RTL2832U + Rafael R820T, serial 7673444264) is connected beside
+the HackRF on a separate USB controller and **verified receiving live RF** by the user (100.3 MHz FM:
+mean 127.4, std 10.66 — a real signal, not a dead input; 29 gain steps 0–49.6 dB). 25 MHz–1.75 GHz,
+~2.4 Msps, 8-bit: complementary to the HackRF, and the natural parallel second-band/dwell device the
+multi-SDR constraint in CLAUDE.md anticipated. librtlsdr and `rtl_test` are installed; **SoapySDR is
+not needed** — a native FFI source mirroring the HackRF source. Op note: the R820T takes **~10 s to
+lock** on this Mac, so any harness waits before expecting samples.
+
+**What already exists, so the slice does not redo it.** The generic device interface (T-048), the
+single-device audit (T-259), device_id provenance end to end (T-302/304/283/325/332), an
+N-capable `/api/navigation windows[]` (T-340) and a per-device coverage map. The mock SDR can stand in
+as device 2 with no hardware. **The gap is only the composition seam** — opening and wiring N sources
+into the pipeline and the serving layer; `hk-core/src/source/mod.rs:482-511` names every single-device
+consumer.
+
+**The slice, milestone MSDR.** T-510 multi-source capture composition (core, Opus — the one hard
+ticket: per-arriving-row cost must be measured at N=1 and N=2, residency must not regrow, and N=1
+must be behaviourally identical); T-511 N live controls + a device selector on control routes (core,
+Opus, api.md and contract tests together); T-512 repeatable `--device` on the CLI (Sonnet); T-513
+two-device mock e2e — shared air merges, device-local physics does not cross (Sonnet, no hardware);
+T-514 the RTL-SDR source behind an `rtlsdr` feature, addressed by serial, HIL against the real Nano 3.
+A–D are device-agnostic and buildable now; only E needs the hardware.
+
+**Pacing.** The user is near the weekly budget cap (resets Sunday 02:00), so MSDR takes **one builder
+slot**: T-510 starts now; the rest follow it serially. The retune/live/phosphor user-visible fixes keep
+priority for the other slots.
+
+### B0.691 — Reprioritised: scan UI + fog-of-war first; MSDR paused until the budget resets (2026-09-18)
+
+The user moved **full-spectrum scan UX** and **fog-of-war shadow tiles** to the top, to land before the
+weekly budget runs low; **MSDR is paused** until the reset (Sun 02:00). T-510 was stopped at the end
+of its turn and checkpointed (task-t510 @ 96d073a3, builds, untested); its handover is on the board.
+Retune/live/phosphor user-visible fixes keep flowing.
+
+**Scan is already built** (T-406/T-452/T-439), so milestone MSCAN is small there: T-516 verifies the
+Survey-sweep panel end to end and adds a one-click "scan everything" (fast dwell, coarse step), and
+T-517 adds the step-width control the user asked for after finding the panel — today's ~1.5 MHz hop is
+~4000 steps for 1 MHz–6 GHz against a ~15 MHz usable window; coarse is ~10× fewer hops **at unchanged
+FFT resolution**. **Fog-of-war is the net-new work:** a third honesty state — observed before, not now
+— shown as a dim last-known spectrum, with grey kept for never-observed only (swept then departed =
+shadow; never swept = grey; re-swept = bright). T-519 (2A) adds the missing carry-forward query as a
+query-time fold (no per-row capture cost) and a shadow plane on the tile route, plus a short ADR note;
+T-520 (2B) the client tier; T-521 (2C) the standing e2e guard. Sequence 2A → 2B → 2C, 2A+2B landing
+together so the effect is visible.

@@ -253,13 +253,47 @@ impl Source for Lent {
     }
 }
 
+/// **How long a re-plumb may wait for the window it asked for before it stops waiting** (T-497).
+///
+/// The settle gap after a retune is honest and expected — the front end is moving, and blocks
+/// still in the pipe describe the tuning that has ended, so [`WindowGuard`] drops them. What was
+/// missing is a **bound**: `expect` was cleared only by a block that matched to within 1 Hz, so a
+/// device that never reports that window had **every block dropped for ever**. Capture went silent
+/// and stayed silent while `hk serve` answered normally, `run.finished` stayed false and
+/// `replumbing` stayed false — the user's report, three times: *"the live capture dies on retune
+/// and never recovers"*.
+///
+/// That state is reachable without anything exotic. [`crate::run`] does not fabricate it;
+/// `hk_core`'s HackRF driver applies a posted control **field by field and returns on the first
+/// `SourceError`** (`apply_change`: rate, then baseband filter, then gains, then centre), so a
+/// failed baseband-filter write leaves the new *rate* in the block provenance and the centre never
+/// applied — exactly one component of `expect` off, for ever. [`replumb`]'s own failure path is the
+/// second door: it reverts a failed `apply_window` with `let _ =`, and then starts a segment
+/// expecting the window the revert may not have restored.
+///
+/// So the wait is bounded and the bound is generous: whole seconds, orders of magnitude longer than
+/// any real in-flight block (a HackRF block is milliseconds), so a device that *is* going to arrive
+/// always arrives first and nothing about a normal retune changes. Past it the guard stops
+/// demanding the requested window and admits on the **class** check alone.
+///
+/// **The class check is the legal guardrail and does not move.** Giving up on `expect` is giving up
+/// on "is this the window we asked for", never on "may this content reach a ring gated for another
+/// class". A device sitting on a restricted-class window still produces no blocks, which is correct
+/// and is the documented behaviour.
+pub const WINDOW_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Keeps a segment to its class (legal guardrail; see the module docs): drops blocks until the
 /// requested window arrives, then any block whose window has another class. A dropped block is
 /// returned empty (the capture thread skips empty blocks); the next admitted block carries `GAP`.
+///
+/// The wait for the requested window is bounded by [`WINDOW_SETTLE_TIMEOUT`]; the class check is
+/// not bounded by anything, because it is the legal guardrail.
 struct WindowGuard {
     inner: Box<dyn Source>,
     class: ContentClass,
     expect: Option<(f64, f64)>,
+    /// When the segment started waiting for `expect`. `None` when there is nothing to wait for.
+    waiting_since: Option<Instant>,
     dropped: bool,
     stats: Arc<ControlStats>,
 }
@@ -275,6 +309,7 @@ impl WindowGuard {
             inner,
             class,
             expect,
+            waiting_since: expect.map(|_| Instant::now()),
             dropped: false,
             stats: Arc::clone(stats),
         })
@@ -287,9 +322,19 @@ impl WindowGuard {
         );
         if let Some((c, r)) = self.expect {
             if (center - c).abs() > 1.0 || (rate - r).abs() > 1.0 {
-                return self.reject();
+                // T-497: the settle gap is bounded. Past the bound the front end is where it is,
+                // and a view of the window it is actually on beats silence for ever over the window
+                // it was asked for. The give-up is counted, not swallowed.
+                let waited = self
+                    .waiting_since
+                    .is_some_and(|t| t.elapsed() >= WINDOW_SETTLE_TIMEOUT);
+                if !waited {
+                    return self.reject();
+                }
+                inc(&self.stats.window_settle_timeouts);
             }
             self.expect = None;
+            self.waiting_since = None;
         }
         if window_class(center, rate) != self.class {
             return self.reject();
@@ -543,6 +588,25 @@ pub struct ControlStats {
     pub retunes_in_place: AtomicU64,
     /// Blocks the window guard dropped (not yet the requested window, or another class).
     pub blocks_dropped_window: AtomicU64,
+    /// Re-plumbs whose requested window never arrived, so the guard stopped waiting for it
+    /// ([`WINDOW_SETTLE_TIMEOUT`], T-497). Non-zero means the front end is **not** on the window
+    /// the control plane asked for, and capture resumed on the one it is actually on rather than
+    /// staying silent for ever. It is a defect signal, not a normal outcome.
+    pub window_settle_timeouts: AtomicU64,
+    /// Live segments that ended on a **device error** rather than a stop or a re-plumb (T-508):
+    /// the capture thread's read failed. Each one is followed by a recovery attempt, never by the
+    /// run quietly ending.
+    pub capture_failures: AtomicU64,
+    /// Re-plumbs that failed after the old segment stopped (T-508): its state could not be
+    /// recovered cleanly, the device was not handed back, or the new segment did not start. Each
+    /// is followed by a recovery attempt.
+    pub replumb_failures: AtomicU64,
+    /// Segments restarted after a capture or re-plumb failure (T-508).
+    pub capture_recoveries: AtomicU64,
+    /// Segments whose state was **salvaged** because a thread of the old segment still held it
+    /// past [`unwrap_shared`]'s bound (T-508): a fresh database connection, and the inventory taken
+    /// from under the straggler. It used to end the run.
+    pub segments_salvaged: AtomicU64,
     /// Manual recordings started.
     pub recordings_started: AtomicU64,
     /// Manual recordings refused by the content class.
@@ -615,12 +679,48 @@ pub struct ControlStatus {
     pub replumbing: bool,
     /// The run has finished.
     pub finished: bool,
+    /// Whether the front end is delivering samples (T-508): `running`, `recovering` or `ended`.
+    pub capture: CaptureState,
+    /// Why capture is recovering or has ended, `None` while it runs. Carried until capture is
+    /// delivering again, so a client that polls between two failures still reads the cause.
+    pub capture_note: Option<String>,
     /// Display settings.
     pub display: DisplaySettings,
     /// The current or last manual recording.
     pub recording: RecordingStatus,
     /// Control counters.
     pub stats: Value,
+}
+
+/// Whether a run's front end is delivering samples (T-508).
+///
+/// `finished` alone could not say this: a run that died on a device error and a run whose
+/// recording reached its end both read `finished: true`, and a run that was *restarting* capture
+/// read exactly like one that was running. The user's report — a live edge frozen with nothing on
+/// screen saying so — was the product failing to distinguish these, so the control plane states
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureState {
+    /// A segment is running and has delivered samples since it started (or is the first).
+    Running,
+    /// Capture failed and a new segment is being started, or has started and not yet delivered
+    /// a sample. The live edge is not advancing, and that is the true state, not a stall.
+    Recovering,
+    /// The run has ended. Nothing more will arrive; `capture_note` says why when it was not a
+    /// requested stop or the end of a recording.
+    Ended,
+}
+
+/// How many times in a row capture may be restarted without delivering a sample before the run
+/// is ended for real (T-508). Each attempt waits [`recovery_backoff`] first.
+pub const MAX_RECOVERY_ATTEMPTS: u32 = 5;
+
+/// The wait before recovery attempt `n` (1-based): 0.25 s doubling to a 4 s cap, about 8 s in all
+/// over [`MAX_RECOVERY_ATTEMPTS`] — long enough for a USB hiccup to clear, short enough that a
+/// front end that is really gone is reported as gone within seconds.
+pub fn recovery_backoff(attempt: u32) -> Duration {
+    Duration::from_millis(250u64 << attempt.saturating_sub(1).min(4))
 }
 
 /// How long [`PipelineController::retune`] waits for a re-plumb.
@@ -683,6 +783,9 @@ struct Common {
     /// segment: the constellation overhead and the quiet in-band reference are properties of the
     /// site and the receiver, not of a re-plumb.
     gnss: Arc<crate::gnss::GnssDwell>,
+    /// T-508 test seam: segment starts still to fail, at the last step (after every reader has
+    /// spawned, before the capture thread), so the cleanup path is the one exercised.
+    fail_segment_starts: std::sync::atomic::AtomicU32,
 }
 
 impl Common {
@@ -715,6 +818,19 @@ struct SupState {
     finished: bool,
     /// Summary inputs of the last segment.
     resolution: (f64, usize, usize),
+    /// T-508: a recovery is under way (set when capture fails, cleared by the next segment that
+    /// delivers a sample — read lazily by [`PipelineController::status`]).
+    recovering: bool,
+    /// T-508: why capture is recovering or why the run ended.
+    capture_note: Option<String>,
+    /// T-508: `counters.source.samples` when the running segment started, so "has it delivered?"
+    /// is a comparison rather than a flag some thread must remember to set.
+    samples_at_start: u64,
+    /// T-508: the window (and its class) of the last segment that delivered samples — where a
+    /// recovery goes back to when retrying the requested window has not worked.
+    last_good: ((f64, f64), ContentClass),
+    /// T-508: recovery attempts since a segment last delivered samples.
+    attempts: u32,
 }
 
 struct Supervisor {
@@ -926,6 +1042,7 @@ impl Pipeline {
             )
             .map_err(|e| eprintln!("observation log disabled: {e:#}"))
             .ok(),
+            fail_segment_starts: std::sync::atomic::AtomicU32::new(0),
         };
         // T-118: visits and tiers from the T-115 log when it opened.
         if let Some(log) = &common.observations {
@@ -939,11 +1056,16 @@ impl Pipeline {
         );
         let class = cfg.source_class;
         let window = (info.center_hz, info.sample_rate_hz);
+        let parts = Parts {
+            cfg,
+            repo,
+            inventory,
+        };
         let Started {
             shared,
             tx,
             workers,
-        } = start_segment(&common, cfg, repo, info, source, reopen, inventory, None)?;
+        } = start_segment(&common, parts, info, source, reopen, None).map_err(|f| f.error)?;
         let resolution = (shared.fs, shared.fft_len, shared.averages);
         let sup = Arc::new(Supervisor {
             common,
@@ -958,6 +1080,11 @@ impl Pipeline {
                 result: None,
                 finished: false,
                 resolution,
+                recovering: false,
+                capture_note: None,
+                samples_at_start: 0,
+                last_good: (window, class),
+                attempts: 0,
             }),
             cv: Condvar::new(),
         });
@@ -979,19 +1106,37 @@ impl Pipeline {
     }
 }
 
-/// Starts one segment's threads (see the module docs). The source is lent first, so it returns
-/// to the slot if anything below fails.
-#[allow(clippy::too_many_arguments)]
-fn start_segment(
-    common: &Common,
+/// The parts of a segment that outlive it: handed from each segment to the next at a re-plumb,
+/// and — since T-508 — **never lost on a failure**, so a failed re-plumb can start another
+/// segment instead of ending the run.
+struct Parts {
     cfg: PipelineConfig,
     repo: Repository,
+    inventory: Box<dyn Inventory>,
+}
+
+/// A segment that did not start, with its parts when they could be kept (T-508).
+struct SegmentFailure {
+    error: anyhow::Error,
+    parts: Option<Box<Parts>>,
+}
+
+/// Starts one segment's threads (see the module docs). The source is lent first, so it returns
+/// to the slot if anything below fails; since T-508 the [`Parts`] come back too, so the caller
+/// can try again rather than end the run.
+fn start_segment(
+    common: &Common,
+    parts: Parts,
     info: SourceInfo,
     source: Box<dyn Source>,
     reopen: Option<SourceFactory>,
-    inventory: Box<dyn Inventory>,
     expect: Option<(f64, f64)>,
-) -> anyhow::Result<Started> {
+) -> Result<Started, SegmentFailure> {
+    let Parts {
+        cfg,
+        repo,
+        inventory,
+    } = parts;
     let mut source = Lent::wrap(source, &common.slot);
     if cfg.live_window_class {
         source = WindowGuard::wrap(source, cfg.source_class, expect, &common.stats);
@@ -1017,7 +1162,7 @@ fn start_segment(
         }) as SourceFactory
     });
     let mut sched = if cfg.drive_scheduler {
-        Some(SchedState::new(
+        match SchedState::new(
             &cfg.plan,
             Arc::clone(&common.switch),
             fs,
@@ -1025,7 +1170,19 @@ fn start_segment(
             Arc::clone(&common.counters),
             cfg.settings.verify_pois,
             common.attention.clone(),
-        )?)
+        ) {
+            Ok(s) => Some(s),
+            Err(error) => {
+                return Err(SegmentFailure {
+                    error,
+                    parts: Some(Box::new(Parts {
+                        cfg,
+                        repo,
+                        inventory,
+                    })),
+                });
+            }
+        }
     } else {
         None
     };
@@ -1102,82 +1259,108 @@ fn start_segment(
 
     let (tx, rx) = mpsc::channel::<ControlEvent>();
     let mut workers: Vec<Worker> = Vec::new();
-    let spawn = |name: &'static str,
-                 f: Box<dyn FnOnce() -> anyhow::Result<()> + Send>|
-     -> anyhow::Result<Worker> {
-        Ok((name, thread::Builder::new().name(name.into()).spawn(f)?))
-    };
-    {
-        let (s, t) = (Arc::clone(&shared), tx.clone());
-        workers.push(spawn(
-            "hk-detect",
-            Box::new(move || crate::detect::run(s, t)),
-        )?);
-    }
-    {
-        let (s, p, a, v) = (
-            Arc::clone(&shared),
-            Arc::clone(&common.product),
-            common.attention.clone(),
-            common.view.clone(),
-        );
-        workers.push(spawn(
-            "hk-history",
-            Box::new(move || crate::history::run(s, p, a, v)),
-        )?);
-    }
-    if common.iq_buffer.active() {
-        // T-157: positioned before the capture thread starts, so the first block is buffered
-        // (T-178: once the ring has opened in the background; until then blocks are read and
-        // not buffered).
-        let (s, b) = (Arc::clone(&shared), Arc::clone(&common.iq_buffer));
-        let reader = shared.ring.reader_at(0);
-        let cursor = shared.gate.register(0);
-        workers.push(spawn(
-            "hk-iqbuffer",
-            Box::new(move || b.feed(s, reader, cursor)),
-        )?);
-    }
-    {
-        let s = Arc::clone(&shared);
-        workers.push(spawn(
-            "hk-spectrum",
-            Box::new(move || crate::spectrum::run(s)),
-        )?);
-    }
-    {
-        // T-399: the receiver-line survey. One window per capture state, on its own thread, so
-        // nothing on the detection path waits for the second of capture it needs.
-        let (s, r) = (Arc::clone(&shared), Arc::clone(&common.receiver));
-        workers.push(spawn(
-            "hk-survey",
-            Box::new(move || crate::survey::run(s, r)),
-        )?);
-    }
-    {
-        // T-322: the C36 L1 dwell reader. It holds nothing until C04 grants a scheduled L1 step,
-        // so on every run whose plan does not cover L1 it reads the ring and drops it.
-        let (s, g) = (Arc::clone(&shared), Arc::clone(&common.gnss));
-        workers.push(spawn("hk-gnss", Box::new(move || crate::gnss::run(s, g)))?);
-    }
-    {
-        let s = Arc::clone(&shared);
-        let attention = common.attention.clone();
-        workers.push(spawn(
-            "hk-control",
-            Box::new(move || crate::control::run(s, rx, sched, interactive, attention)),
-        )?);
-    }
-    let s = Arc::clone(&shared);
-    let capture = hk_core::rt::spawn_capture_thread("hk-capture", move |_priority| {
-        let (writer, s) = (writer, s);
-        let r = crate::capture::run(source, reopen, writer, Arc::clone(&s));
-        if r.is_err() {
-            s.stop.store(true, Ordering::SeqCst);
+    // Everything below can fail after `shared` exists and readers are running. Run it as one
+    // fallible step so a failure can stop and join what did start and hand the parts back
+    // (T-508) — the source is already back in the slot by then, because whatever held it has been
+    // dropped with this closure.
+    let spawned = (|| -> anyhow::Result<()> {
+        let spawn = |name: &'static str,
+                     f: Box<dyn FnOnce() -> anyhow::Result<()> + Send>|
+         -> anyhow::Result<Worker> {
+            Ok((name, thread::Builder::new().name(name.into()).spawn(f)?))
+        };
+        {
+            let (s, t) = (Arc::clone(&shared), tx.clone());
+            workers.push(spawn(
+                "hk-detect",
+                Box::new(move || crate::detect::run(s, t)),
+            )?);
         }
-        r
-    })?;
-    workers.insert(0, ("hk-capture", capture));
+        {
+            let (s, p, a, v) = (
+                Arc::clone(&shared),
+                Arc::clone(&common.product),
+                common.attention.clone(),
+                common.view.clone(),
+            );
+            workers.push(spawn(
+                "hk-history",
+                Box::new(move || crate::history::run(s, p, a, v)),
+            )?);
+        }
+        if common.iq_buffer.active() {
+            // T-157: positioned before the capture thread starts, so the first block is buffered
+            // (T-178: once the ring has opened in the background; until then blocks are read and
+            // not buffered).
+            let (s, b) = (Arc::clone(&shared), Arc::clone(&common.iq_buffer));
+            let reader = shared.ring.reader_at(0);
+            let cursor = shared.gate.register(0);
+            workers.push(spawn(
+                "hk-iqbuffer",
+                Box::new(move || b.feed(s, reader, cursor)),
+            )?);
+        }
+        {
+            let s = Arc::clone(&shared);
+            workers.push(spawn(
+                "hk-spectrum",
+                Box::new(move || crate::spectrum::run(s)),
+            )?);
+        }
+        {
+            // T-399: the receiver-line survey. One window per capture state, on its own thread, so
+            // nothing on the detection path waits for the second of capture it needs.
+            let (s, r) = (Arc::clone(&shared), Arc::clone(&common.receiver));
+            workers.push(spawn(
+                "hk-survey",
+                Box::new(move || crate::survey::run(s, r)),
+            )?);
+        }
+        {
+            // T-322: the C36 L1 dwell reader. It holds nothing until C04 grants a scheduled L1 step,
+            // so on every run whose plan does not cover L1 it reads the ring and drops it.
+            let (s, g) = (Arc::clone(&shared), Arc::clone(&common.gnss));
+            workers.push(spawn("hk-gnss", Box::new(move || crate::gnss::run(s, g)))?);
+        }
+        {
+            let s = Arc::clone(&shared);
+            let attention = common.attention.clone();
+            workers.push(spawn(
+                "hk-control",
+                Box::new(move || crate::control::run(s, rx, sched, interactive, attention)),
+            )?);
+        }
+        // T-508 test seam: fail here, with every reader running, so the cleanup below is exercised.
+        if common
+            .fail_segment_starts
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            anyhow::bail!("injected segment-start failure (T-508 test seam)");
+        }
+        let s = Arc::clone(&shared);
+        let capture = hk_core::rt::spawn_capture_thread("hk-capture", move |_priority| {
+            let (writer, s) = (writer, s);
+            let r = crate::capture::run(source, reopen, writer, Arc::clone(&s));
+            if r.is_err() {
+                s.stop.store(true, Ordering::SeqCst);
+            }
+            r
+        })?;
+        workers.insert(0, ("hk-capture", capture));
+        Ok(())
+    })();
+    if let Err(error) = spawned {
+        shared.stop.store(true, Ordering::SeqCst);
+        drop(tx);
+        let mut ignored = Vec::new();
+        join_workers_bounded(&mut workers, &mut ignored, SEGMENT_JOIN_BOUND);
+        let parts = take_parts(common, shared)
+            .map_err(|e| eprintln!("{e}"))
+            .ok()
+            .map(Box::new);
+        return Err(SegmentFailure { error, parts });
+    }
     Ok(Started {
         shared,
         tx,
@@ -1190,8 +1373,43 @@ struct Finished {
     errors: Vec<String>,
 }
 
-fn join_workers(workers: &mut Vec<Worker>, errors: &mut Vec<String>) {
+/// Joins a segment's threads. Returns the capture thread's error, if it ended on one — the one
+/// failure the supervisor treats as "the front end stopped delivering" (T-508).
+fn join_workers(workers: &mut Vec<Worker>, errors: &mut Vec<String>) -> Option<String> {
+    let mut capture = None;
     for (name, join) in workers.drain(..) {
+        let failed = match join.join() {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(format!("{e:#}")),
+            Err(_) => Some("panicked".to_owned()),
+        };
+        if let Some(e) = failed {
+            if name == "hk-capture" {
+                capture = Some(e.clone());
+            }
+            errors.push(format!("{name}: {e}"));
+        }
+    }
+    capture
+}
+
+/// How long a segment that failed to start may take to wind down what it did start.
+const SEGMENT_JOIN_BOUND: Duration = Duration::from_secs(10);
+
+/// [`join_workers`] with a bound: a thread still running after `bound` is left behind (and named
+/// in `errors`) rather than holding up a recovery for ever.
+fn join_workers_bounded(workers: &mut Vec<Worker>, errors: &mut Vec<String>, bound: Duration) {
+    let deadline = Instant::now() + bound;
+    for (name, join) in workers.drain(..) {
+        while !join.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        if !join.is_finished() {
+            errors.push(format!(
+                "{name}: still running after {bound:?}; left behind"
+            ));
+            continue;
+        }
         match join.join() {
             Ok(Ok(())) => {}
             Ok(Err(e)) => errors.push(format!("{name}: {e:#}")),
@@ -1200,68 +1418,280 @@ fn join_workers(workers: &mut Vec<Worker>, errors: &mut Vec<String>) {
     }
 }
 
-/// Runs segments until one ends without a re-plumb request (see the module docs).
+/// A re-plumb or segment start that failed, with whatever could be kept (T-508).
+struct Failure {
+    parts: Option<Box<Parts>>,
+    why: String,
+}
+
+/// Runs segments until the run ends (see the module docs).
+///
+/// # T-508: a failure restarts capture; only a stop or the end of a recording ends the run
+///
+/// A segment ends for one of four reasons, and before T-508 three of them ended the run for good
+/// while `hk serve` stayed up reporting `finished: true` to a client that showed nothing:
+///
+/// 1. **A re-plumb was requested** — start the next segment on the new window.
+/// 2. **The re-plumb itself failed** — the old segment's state still held by a straggler past
+///    [`unwrap_shared`]'s bound, the device not handed back, or [`start_segment`] failing. The
+///    state is now salvaged ([`take_parts`]) and the parts survive a failed start, so this goes to
+///    recovery.
+/// 3. **The capture thread's read failed on a live run** — how a HackRF reports a retune it could
+///    not apply (its driver applies controls on the capture thread and a failed libhackrf call is
+///    a read error), and how it reports a USB stall. Recovery.
+/// 4. **The source ended, or a stop was requested** — the run ends. A recording reaching its end
+///    is a real end; so is the user stopping it.
+///
+/// Recovery ([`recover`]) re-sends the whole window to the device (never a difference: the point
+/// is to put the front end into a *known* state), first the window the failed segment was built
+/// for, then the last window that delivered samples, with [`recovery_backoff`] between attempts.
+/// A segment that delivers a sample resets the count. After [`MAX_RECOVERY_ATTEMPTS`] in a row
+/// that delivered nothing the run ends — **visibly**: [`CaptureState::Ended`] with the last
+/// failure in `capture_note`.
 fn supervise(sup: &Supervisor, mut workers: Vec<Worker>) -> Finished {
+    let c = &sup.common;
     let mut errors = Vec::new();
     loop {
-        join_workers(&mut workers, &mut errors);
+        let capture_failed = join_workers(&mut workers, &mut errors);
         let mut st = sup.lock();
-        let Some(req) = st.request.take() else {
-            sup.common.occupancy.finish(); // T-118: close the last interval after the readers drain
-            st.finished = true;
-            sup.cv.notify_all();
-            return Finished { errors };
-        };
-        if sup.common.user_stop.load(Ordering::SeqCst) {
-            st.result = Some(Err(ControlFailure::Finished("the run is stopping".into())));
-            sup.common.occupancy.finish(); // T-118
-            st.finished = true;
-            sup.cv.notify_all();
-            return Finished { errors };
+        if get(&c.counters.source.samples) > st.samples_at_start {
+            st.last_good = (st.window, st.class);
+            st.attempts = 0;
+            st.recovering = false;
         }
-        let old = st.shared.take().expect("a running segment");
-        st.tx = None;
-        drop(st);
-        match replumb(&sup.common, old, &req) {
-            Ok((started, outcome, window, class)) => {
-                let mut st = sup.lock();
-                if sup.common.user_stop.load(Ordering::SeqCst) {
-                    started.shared.stop.store(true, Ordering::SeqCst);
-                }
-                st.resolution = (
-                    started.shared.fs,
-                    started.shared.fft_len,
-                    started.shared.averages,
-                );
-                st.shared = Some(started.shared);
-                st.tx = Some(started.tx);
-                st.window = window;
-                st.class = class;
-                st.segment += 1;
-                st.result = Some(outcome.map(|mut o| {
-                    o.segment = st.segment;
-                    o
-                }));
-                inc(&sup.common.stats.replumbs);
-                sup.cv.notify_all();
-                workers = started.workers;
+        let req = st.request.take();
+        if c.user_stop.load(Ordering::SeqCst) {
+            if req.is_some() {
+                st.result = Some(Err(ControlFailure::Finished("the run is stopping".into())));
             }
-            Err(e) => {
-                errors.push(format!("re-plumb: {e}"));
+            return end_run(sup, st, errors, None);
+        }
+        // A re-plumb that failed is answered once recovery has settled where capture went.
+        let mut answer: Option<Replumb> = None;
+        let failure = match (req, capture_failed) {
+            (Some(req), _) => {
+                let old = st.shared.take().expect("a running segment");
+                st.tx = None;
+                drop(st);
+                match replumb(c, old, &req) {
+                    Ok((started, outcome, window, class)) => {
+                        inc(&c.stats.replumbs);
+                        workers = install(sup, started, window, class, Some(outcome));
+                        continue;
+                    }
+                    Err(f) => {
+                        inc(&c.stats.replumb_failures);
+                        errors.push(format!("re-plumb: {}", f.why));
+                        let mut st = sup.lock();
+                        // The re-plumb was going to the requested window; recovery retries it.
+                        st.window = req.to;
+                        st.class = req.class;
+                        answer = Some(req);
+                        f
+                    }
+                }
+            }
+            (None, Some(e)) if st.live => {
+                inc(&c.stats.capture_failures);
+                let old = st.shared.take().expect("a running segment");
+                st.tx = None;
+                drop(st);
+                Failure {
+                    parts: take_parts(c, old)
+                        .map_err(|e| eprintln!("{e}"))
+                        .ok()
+                        .map(Box::new),
+                    why: format!("the front end stopped delivering: {e}"),
+                }
+            }
+            // The source ended (a recording's end is not a failure), or a source that cannot be
+            // re-commanded failed: the run ends, and a failure says why.
+            (None, e) => {
+                let why = e.map(|e| format!("the source failed: {e}"));
+                return end_run(sup, st, errors, why);
+            }
+        };
+        let cause = failure.why.clone();
+        match recover(sup, failure) {
+            Ok(w) => {
+                workers = w;
+                if let Some(req) = answer {
+                    let mut st = sup.lock();
+                    st.result = Some(if st.window == req.to {
+                        Ok(RetuneOutcome {
+                            content_class: st.class,
+                            replumbed: true,
+                            segment: st.segment,
+                        })
+                    } else {
+                        Err(ControlFailure::Failed(format!(
+                            "the re-plumb failed ({cause}); capture restarted on {} Hz / {} Hz",
+                            st.window.0, st.window.1
+                        )))
+                    });
+                    sup.cv.notify_all();
+                }
+            }
+            Err(why) => {
+                errors.push(format!("capture: {why}"));
                 let mut st = sup.lock();
-                st.result = Some(Err(ControlFailure::Failed(format!(
-                    "the re-plumb failed and the run ended: {e}"
-                ))));
-                st.finished = true;
-                sup.cv.notify_all();
-                return Finished { errors };
+                if answer.is_some() {
+                    st.result = Some(Err(ControlFailure::Failed(format!(
+                        "the re-plumb failed and capture could not be restarted: {why}"
+                    ))));
+                }
+                return end_run(sup, st, errors, Some(why));
             }
         }
     }
 }
 
-fn unwrap_shared(mut arc: Arc<Shared>) -> Result<Shared, String> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+/// Marks the run finished; `why` is set when it ended on a failure rather than a stop or the end
+/// of its source.
+fn end_run(
+    sup: &Supervisor,
+    mut st: MutexGuard<'_, SupState>,
+    errors: Vec<String>,
+    why: Option<String>,
+) -> Finished {
+    sup.common.occupancy.finish(); // T-118: close the last interval after the readers drain
+    st.finished = true;
+    st.recovering = false;
+    // A requested stop or a recording's end carries no note, whatever an earlier, recovered
+    // failure left behind.
+    st.capture_note = why;
+    sup.cv.notify_all();
+    Finished { errors }
+}
+
+/// Installs a started segment as the running one; returns its workers.
+fn install(
+    sup: &Supervisor,
+    started: Started,
+    window: (f64, f64),
+    class: ContentClass,
+    outcome: Option<Result<RetuneOutcome, ControlFailure>>,
+) -> Vec<Worker> {
+    let mut st = sup.lock();
+    if sup.common.user_stop.load(Ordering::SeqCst) {
+        started.shared.stop.store(true, Ordering::SeqCst);
+    }
+    st.resolution = (
+        started.shared.fs,
+        started.shared.fft_len,
+        started.shared.averages,
+    );
+    st.shared = Some(started.shared);
+    st.tx = Some(started.tx);
+    st.window = window;
+    st.class = class;
+    st.segment += 1;
+    st.samples_at_start = get(&sup.common.counters.source.samples);
+    if let Some(outcome) = outcome {
+        // A requested re-plumb, not a recovery: nothing is being recovered from.
+        st.recovering = false;
+        st.result = Some(outcome.map(|mut o| {
+            o.segment = st.segment;
+            o
+        }));
+    }
+    sup.cv.notify_all();
+    started.workers
+}
+
+/// Starts a new segment after a failure (T-508; see [`supervise`]). `Err` only when capture cannot
+/// be restarted at all: the attempts are used up, the device was not handed back, the segment's
+/// state was lost, or a stop was requested meanwhile.
+fn recover(sup: &Supervisor, failure: Failure) -> Result<Vec<Worker>, String> {
+    let c = &sup.common;
+    let Failure { mut parts, mut why } = failure;
+    loop {
+        let (attempt, window, class) = {
+            let mut st = sup.lock();
+            st.attempts += 1;
+            st.recovering = true;
+            st.capture_note = Some(why.clone());
+            sup.cv.notify_all();
+            if st.attempts > MAX_RECOVERY_ATTEMPTS {
+                return Err(format!(
+                    "capture could not be restarted: {MAX_RECOVERY_ATTEMPTS} attempts in a row \
+                     delivered nothing; the last failure: {why}"
+                ));
+            }
+            // First the window the failed segment was built for (a transient fault clears, and
+            // the user's retune still lands); after that, the last window that delivered.
+            let (window, class) = if st.attempts == 1 {
+                (st.window, st.class)
+            } else {
+                st.last_good
+            };
+            (st.attempts, window, class)
+        };
+        let wake = Instant::now() + recovery_backoff(attempt);
+        while Instant::now() < wake {
+            if c.user_stop.load(Ordering::SeqCst) {
+                return Err("stopped while capture was being restarted".into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let Some(mut p) = parts.take() else {
+            return Err(format!(
+                "the segment's state could not be recovered, so capture cannot restart ({why})"
+            ));
+        };
+        let Some(source) = c.slot.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+            return Err(format!(
+                "the capture thread did not hand the device back, and a device cannot be reopened \
+                 from inside a run ({why})"
+            ));
+        };
+        eprintln!(
+            "capture recovery {attempt}/{MAX_RECOVERY_ATTEMPTS}: restarting on {} Hz / {} Hz after: \
+             {why}",
+            window.0, window.1
+        );
+        // The whole window, not a difference: the device's state is what is unknown here.
+        if let Err(e) = c
+            .switch
+            .set_sample_rate(window.1)
+            .and_then(|()| c.switch.tune(window.0))
+        {
+            *c.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(source);
+            parts = Some(p);
+            why = format!(
+                "re-sending {} Hz / {} Hz to the device failed: {e}",
+                window.0, window.1
+            );
+            continue;
+        }
+        p.cfg.source_class = class;
+        let info = SourceInfo {
+            center_hz: window.0,
+            sample_rate_hz: window.1,
+            start_time: Timestamp::from_unix_nanos(
+                c.counters.stream_time_ns.load(Ordering::Relaxed),
+            ),
+        };
+        match start_segment(c, *p, info, source, None, Some(window)) {
+            Ok(started) => {
+                inc(&c.stats.capture_recoveries);
+                return Ok(install(sup, started, window, class, None));
+            }
+            Err(f) => {
+                parts = f.parts;
+                why = format!("restarting the segment failed: {:#}", f.error);
+            }
+        }
+    }
+}
+
+/// How long [`unwrap_shared`] waits for the old segment's last holder to let go.
+const UNWRAP_BOUND: Duration = Duration::from_secs(5);
+
+/// The old segment's state, once every thread has let go of it; `Err` hands the `Arc` back when
+/// one still holds it after [`UNWRAP_BOUND`].
+fn unwrap_shared(mut arc: Arc<Shared>) -> Result<Shared, Arc<Shared>> {
+    let deadline = Instant::now() + UNWRAP_BOUND;
     loop {
         match Arc::try_unwrap(arc) {
             Ok(s) => return Ok(s),
@@ -1269,9 +1699,68 @@ fn unwrap_shared(mut arc: Arc<Shared>) -> Result<Shared, String> {
                 arc = a;
                 thread::sleep(Duration::from_millis(2));
             }
-            Err(_) => return Err("a thread of the previous segment still holds its state".into()),
+            Err(a) => return Err(a),
         }
     }
+}
+
+/// The [`Parts`] of a segment that has ended: unwrapped when nothing else holds its state, else
+/// **salvaged** (T-508). A straggler still holding the old `Shared` — a chain or tap thread that
+/// did not end with its segment — used to end the run ("a thread of the previous segment still
+/// holds its state"). Now the next segment gets its own database connection and the inventory is
+/// taken from under the straggler (which is left a [`crate::inventory::NullInventory`]), counted
+/// as `segments_salvaged`. `Err` only when the database cannot be opened again.
+fn take_parts(c: &Common, old: Arc<Shared>) -> Result<Parts, String> {
+    let arc = match unwrap_shared(old) {
+        Ok(s) => {
+            return Ok(Parts {
+                cfg: s.cfg,
+                repo: s.repo.into_inner().unwrap_or_else(PoisonError::into_inner),
+                inventory: s
+                    .inventory
+                    .into_inner()
+                    .unwrap_or_else(PoisonError::into_inner),
+            });
+        }
+        Err(arc) => arc,
+    };
+    inc(&c.stats.segments_salvaged);
+    eprintln!(
+        "segment state still held {} s after its threads ended ({} holders); salvaging it",
+        UNWRAP_BOUND.as_secs(),
+        Arc::strong_count(&arc) - 1
+    );
+    let repo = Repository::open(&c.db_path).map_err(|e| {
+        format!("a thread of the previous segment still holds its state, and reopening the database failed: {e}")
+    })?;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let inventory: Box<dyn Inventory> = loop {
+        match arc.inventory.try_lock() {
+            Ok(mut g) => {
+                break std::mem::replace(&mut *g, Box::new(crate::inventory::NullInventory));
+            }
+            Err(std::sync::TryLockError::Poisoned(p)) => {
+                break std::mem::replace(
+                    &mut *p.into_inner(),
+                    Box::new(crate::inventory::NullInventory),
+                );
+            }
+            Err(std::sync::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                eprintln!(
+                    "the old segment's inventory is locked by its straggler; continuing without inventory"
+                );
+                break Box::new(crate::inventory::NullInventory);
+            }
+        }
+    };
+    Ok(Parts {
+        cfg: arc.cfg.clone(),
+        repo,
+        inventory,
+    })
 }
 
 fn apply_window(
@@ -1295,26 +1784,23 @@ type Replumbed = (
     ContentClass,
 );
 
-/// Steps 2–5 of the module docs, after the old segment's threads have all ended.
-fn replumb(common: &Common, old: Arc<Shared>, req: &Replumb) -> Result<Replumbed, String> {
+/// Steps 2–5 of the module docs, after the old segment's threads have all ended. A failure keeps
+/// the [`Parts`] whenever it can, so [`supervise`] can restart capture (T-508).
+fn replumb(common: &Common, old: Arc<Shared>, req: &Replumb) -> Result<Replumbed, Failure> {
     common.finish_recorder();
-    let Shared {
-        mut cfg,
-        repo,
-        inventory,
-        ..
-    } = unwrap_shared(old)?;
-    let repo = repo.into_inner().unwrap_or_else(PoisonError::into_inner);
-    let inventory = inventory
-        .into_inner()
-        .unwrap_or_else(PoisonError::into_inner);
-    let source = common
+    let mut parts = take_parts(common, old).map_err(|why| Failure { parts: None, why })?;
+    let Some(source) = common
         .slot
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .take()
-        .ok_or("the capture thread did not hand the source back")?;
-    let old_class = cfg.source_class;
+    else {
+        return Err(Failure {
+            parts: Some(Box::new(parts)),
+            why: "the capture thread did not hand the source back".into(),
+        });
+    };
+    let old_class = parts.cfg.source_class;
     let (window, class, outcome) = match apply_window(common.switch.as_ref(), req.to, req.from) {
         Ok(()) => (
             req.to,
@@ -1327,11 +1813,29 @@ fn replumb(common: &Common, old: Arc<Shared>, req: &Replumb) -> Result<Replumbed
         ),
         Err(e) => {
             // Back to the window the old segment had (its class still holds there).
-            let _ = apply_window(common.switch.as_ref(), req.from, req.to);
-            (req.from, old_class, Err(ControlFailure::Source(e)))
+            //
+            // **T-497: the revert's own failure is reported, not discarded.** It used to be
+            // `let _ =`, and then the segment started `expect`ing `req.from` — a window the revert
+            // had just failed to restore. [`WindowGuard`] would then drop every block for ever
+            // (it now gives up after [`WINDOW_SETTLE_TIMEOUT`] instead), and the caller was told
+            // only about the first failure, so "the retune was refused and the radio is back where
+            // it was" and "the retune was refused and nobody knows where the radio is" read
+            // identically. They are not the same fact.
+            match apply_window(common.switch.as_ref(), req.from, req.to) {
+                Ok(()) => (req.from, old_class, Err(ControlFailure::Source(e))),
+                Err(back) => (
+                    req.from,
+                    old_class,
+                    Err(ControlFailure::Failed(format!(
+                        "the retune failed ({e}) and restoring the previous window failed too \
+                         ({back}): the front end may not be on {} Hz / {} Hz",
+                        req.from.0, req.from.1
+                    ))),
+                ),
+            }
         }
     };
-    cfg.source_class = class;
+    parts.cfg.source_class = class;
     let info = SourceInfo {
         center_hz: window.0,
         sample_rate_hz: window.1,
@@ -1339,17 +1843,11 @@ fn replumb(common: &Common, old: Arc<Shared>, req: &Replumb) -> Result<Replumbed
             common.counters.stream_time_ns.load(Ordering::Relaxed),
         ),
     };
-    let started = start_segment(
-        common,
-        cfg,
-        repo,
-        info,
-        source,
-        None,
-        inventory,
-        Some(window),
-    )
-    .map_err(|e| format!("starting the new segment: {e:#}"))?;
+    let started =
+        start_segment(common, parts, info, source, None, Some(window)).map_err(|f| Failure {
+            parts: f.parts,
+            why: format!("starting the new segment: {:#}", f.error),
+        })?;
     Ok((started, outcome, window, class))
 }
 
@@ -1425,6 +1923,16 @@ impl PipelineController {
         let st = self.sup.lock();
         let c = &self.sup.common;
         let stats = &c.stats;
+        // Recovering until the new segment has delivered a sample: a segment that started and
+        // then died on its first read is not "running", whatever `shared` says.
+        let delivering = get(&c.counters.source.samples) > st.samples_at_start;
+        let capture = if st.finished {
+            CaptureState::Ended
+        } else if st.recovering && !delivering {
+            CaptureState::Recovering
+        } else {
+            CaptureState::Running
+        };
         ControlStatus {
             live: st.live,
             content_class: st.class,
@@ -1433,6 +1941,10 @@ impl PipelineController {
             segment: st.segment,
             replumbing: st.request.is_some() || (st.shared.is_none() && !st.finished),
             finished: st.finished,
+            capture,
+            capture_note: (capture != CaptureState::Running)
+                .then(|| st.capture_note.clone())
+                .flatten(),
             display: c.display.get(),
             recording: self.recording(),
             stats: serde_json::json!({
@@ -1440,6 +1952,18 @@ impl PipelineController {
                 "replumbs": get(&stats.replumbs),
                 "retunes_in_place": get(&stats.retunes_in_place),
                 "blocks_dropped_window": get(&stats.blocks_dropped_window),
+                // T-497: non-zero means a re-plumb's requested window never arrived and capture
+                // resumed on whatever the front end is actually on. Served rather than kept
+                // internal, because "the radio is not where you asked it to be" is exactly the kind
+                // of thing this product refuses to render as if it were.
+                "window_settle_timeouts": get(&stats.window_settle_timeouts),
+                // T-508: a device read failed on a live run / a re-plumb failed, and how many times
+                // capture was restarted after either. Non-zero failures with matching recoveries
+                // is a front end that misbehaved and a run that kept going.
+                "capture_failures": get(&stats.capture_failures),
+                "replumb_failures": get(&stats.replumb_failures),
+                "capture_recoveries": get(&stats.capture_recoveries),
+                "segments_salvaged": get(&stats.segments_salvaged),
                 "recordings_started": get(&stats.recordings_started),
                 "recordings_refused_class": get(&stats.recordings_refused_class),
             }),
@@ -1483,7 +2007,11 @@ impl PipelineController {
             )));
         }
         let Some(shared) = st.shared.clone().filter(|_| st.request.is_none()) else {
-            return Err(ControlFailure::Conflict("a re-plumb is in progress".into()));
+            return Err(ControlFailure::Conflict(if st.recovering {
+                "capture is being restarted after a device failure".into()
+            } else {
+                "a re-plumb is in progress".into()
+            }));
         };
         let class = window_class(center_hz, sample_rate_hz);
         if class == st.class && sample_rate_hz == st.window.1 {
@@ -1612,6 +2140,10 @@ impl PipelineController {
         }
     }
 }
+
+/// A segment's state held from outside, as a straggling thread would ([`PipelineHandle::hold_segment`]).
+#[doc(hidden)]
+pub struct SegmentHold(#[allow(dead_code)] Arc<Shared>);
 
 /// A running pipeline.
 pub struct PipelineHandle {
@@ -2069,6 +2601,23 @@ impl PipelineHandle {
     /// recorded there, quota-managed. `None` when the store could not be opened.
     pub fn decoded_captures(&self) -> Option<hk_store::decoded::DecodedCaptures> {
         self.recipe_runtime().capture_store().cloned()
+    }
+
+    /// **Test seam (T-508).** Holds the running segment's state the way a straggling chain thread
+    /// would, so a re-plumb finds it still held past its bound. Drop the hold to release it.
+    #[doc(hidden)]
+    pub fn hold_segment(&self) -> Option<SegmentHold> {
+        self.sup.lock().shared.clone().map(SegmentHold)
+    }
+
+    /// **Test seam (T-508).** The next `n` segment starts fail at their last step (every reader
+    /// running, the capture thread not yet), so the failed-start cleanup is what runs.
+    #[doc(hidden)]
+    pub fn fail_segment_starts(&self, n: u32) {
+        self.sup
+            .common
+            .fail_segment_starts
+            .store(n, Ordering::SeqCst);
     }
 
     /// The run's rolling IQ capture buffer (T-157): status and clip export.

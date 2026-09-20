@@ -322,6 +322,13 @@ test-ui-e2e:
 test-ui-e2e-selftest:
     cd ui && npm run e2e:selftest
 
+# The per-spec timeout's own non-vacuity check (T-473): run the real `run.mjs` against a
+# deliberately hanging spec (`ui/e2e/selftest-fixtures/hang.e2e.mjs`, invisible to every normal run)
+# and require it to be killed, reported red by name, and to leave no Chrome or `hk serve` behind.
+# ~15 s. Not part of any gate, same as test-ui-e2e-selftest above.
+test-ui-e2e-selftest-timeout:
+    cd ui && npm run e2e:selftest-timeout
+
 # Serve the web UI over a replayed recording, e.g. `just serve fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta --loop`
 serve fixture *args:
     cargo run -p hk-cli --bin hk -- serve --replay "{{fixture}}" {{args}}
@@ -379,3 +386,41 @@ deploy-jetson:
         --exclude .git --exclude .venv/ --exclude node_modules/ \
         ./ "$JETSON_HOST:~/hackriff/"
     ssh "$JETSON_HOST" 'source "$HOME/.cargo/env" 2>/dev/null || true; cd ~/hackriff && cargo build --release --features hk-dsp/gpu'
+
+# Build the web UI + the `hk` binary (with HackRF support) and start the server.
+# Autodetects an attached HackRF; then open the http://127.0.0.1:8080/#token=... URL it prints.
+# No radio? It tells you how to replay a recording instead. Ctrl-C to stop.
+run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -d ui/node_modules ] || ( cd ui && npm install )
+    ( cd ui && npm run build )
+    cargo build --release -p hk-cli --bin hk --features hackrf
+    BIN=target/release/hk
+    if hackrf_info >/dev/null 2>&1; then
+        echo ">> HackRF detected - starting live. Open the http://127.0.0.1:8080/#token=... URL printed below."
+        exec "$BIN" serve --hackrf --center-hz 100800000 --rate 2400000 --lna 32 --vga 30 --amp --ui-dist ui/dist --bind 127.0.0.1:8080
+    else
+        echo ">> No HackRF found. Run 'hackrf_info' to check the USB connection."
+        echo ">> To try the UI without a radio, run:  just demo"
+        exit 1
+    fi
+
+# Demo / sample mode: run against a bundled recording — NO HackRF and NO libhackrf needed.
+# Great for trying the UI on a machine with no radio. Open the printed .../#token=... URL. Ctrl-C stops it.
+demo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -d ui/node_modules ] || ( cd ui && npm install )
+    ( cd ui && npm run build )
+    cargo build --release -p hk-cli --bin hk
+    FIX=fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta
+    DATA="${FIX%.sigmf-meta}.sigmf-data"
+    if [ ! -s "$DATA" ] || head -c 80 "$DATA" 2>/dev/null | grep -ql 'git-lfs'; then
+        echo ">> The demo recording is a Git LFS pointer, not the real data (cloned without LFS)."
+        echo ">> Fetch it once, then re-run 'just demo':"
+        echo ">>   git lfs install && git lfs pull"
+        exit 1
+    fi
+    echo ">> Demo (replay) mode - open the http://127.0.0.1:8080/#token=... URL printed below."
+    exec target/release/hk serve --replay "$FIX" --loop --ui-dist ui/dist --bind 127.0.0.1:8080

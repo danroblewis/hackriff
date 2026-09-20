@@ -17,7 +17,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BACKDROP, CELL, CELL_MARKS, CELL_RULE_GLSL, GREY, PENDING, REFUSED_MARK, markFor, type Rgb } from "../src/surface/cellrule";
+import { BACKDROP, CELL, CELL_MARKS, CELL_RULE_GLSL, GREY, PENDING, REFUSED_MARK, SHADOW_MARK, cellPixel, markFor, patternHit, type Rgb } from "../src/surface/cellrule";
+import { SHADOW_GAIN_DEFAULT, SHADOW_GAIN_MAX, SHADOW_GAIN_MIN } from "../src/surface/shadow-gain";
 import { cmap } from "../src/cmap";
 import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { Surface, type PaneView } from "../src/surface/surface";
@@ -82,7 +83,7 @@ test("the grey constant lives in exactly one place in the shader: the coverage-s
 test("the rule in TypeScript and the rule in GLSL are the same rule, because one generates the other", () => {
   assert.deepEqual(markFor(CELL.UNOBSERVED), { kind: "flat", rgb: GREY });
   assert.deepEqual(markFor(CELL.OBSERVED), { kind: "ramp" });
-  // FIVE states, five marks (T-413/T-441): any two of them drawn alike is the collapse this
+  // SIX states, six marks (T-413/T-441/T-520): any two of them drawn alike is the collapse this
   // refuses — "looked and it was quiet" spelled as "never looked", in either direction.
   const marks = CELL_MARKS.map((m) => JSON.stringify(m));
   assert.equal(new Set(marks).size, CELL_MARKS.length, `two cell states share a mark: ${marks}`);
@@ -90,9 +91,126 @@ test("the rule in TypeScript and the rule in GLSL are the same rule, because one
   // …and no mark that is not the unobserved one may use the grey, in ANY of its parts.
   for (const [s, m] of CELL_MARKS.entries()) {
     if (s === CELL.UNOBSERVED) continue;
-    for (const c of m.kind === "flat" ? [m.rgb] : m.kind === "pattern" ? [m.rgb, m.ink] : []) {
+    for (const c of m.kind === "flat" ? [m.rgb] : m.kind === "pattern" ? [m.rgb, m.ink] : m.kind === "shadow" ? [m.ink] : []) {
       assert.notDeepEqual([...c], [...GREY], `state ${s} draws THE grey`);
     }
+  }
+});
+
+// ——— T-520: the last-known (shadow) tier ———
+//
+// Swept then departed = shadow; never swept = grey; re-swept = full brightness. The shadow is a real
+// measurement drawn where the radio is NOT looking, so it has two ways to lie and each gets a test:
+// read as grey (the radio never looked — false, it did) or read as live (the radio is looking — false,
+// it left). Defended by a hard brightness ceiling (upper ramp) and a texture no live cell carries
+// (lower ramp, where the ceiling cannot help).
+
+const lum = (c: readonly number[]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+const shadowPx = (x: number, px: { x: number; y: number }) =>
+  cellPixel({ state: CELL.SHADOW, x, px, tier: 0, srcPx: { x: 1, y: 1 }, fallback: false });
+
+test("the shadow is not THE grey — at any level, on any pixel — and grey is still only the unobserved branch", () => {
+  for (let i = 0; i <= 200; i++) {
+    for (let y = 0; y < SHADOW_MARK.pitchPx; y++) {
+      assert.ok(!near(shadowPx(i / 200, { x: 0.5, y: y + 0.5 }), [...GREY]), `shadow at x=${i / 200} row ${y} is THE grey`);
+    }
+  }
+  assert.notDeepEqual([...SHADOW_MARK.ink], [...GREY]);
+  // The generated shader still holds exactly one grey, and the shadow branch is generated from the
+  // table — cmap scaled by a gain, not hand-written arithmetic. T-526 makes that gain a PARAMETER
+  // (`uShadowGain`, client-adjustable) rather than a literal baked from [[SHADOW_MARK]]'s default, so
+  // what the generated source must show is the parameter, not the number.
+  assert.equal(CELL_RULE_GLSL.split(`vec3(${GREY.join(",")})`).length - 1, 1, "the shadow branch added a second grey");
+  assert.ok(CELL_RULE_GLSL.includes("cmap(x) * gain"), "the shadow ground must be the ONE ramp, dimmed by the caller-supplied gain");
+  assert.ok(CELL_RULE_GLSL.includes("float gain"), "the gain is a uniform PARAMETER (T-526), not a literal baked into the shader");
+  assert.ok(!CELL_RULE_GLSL.includes(`cmap(x) * ${SHADOW_MARK.gain}`), "the default must not be compiled in as a literal — it would fight the runtime uniform");
+  assert.ok(CELL_RULE_GLSL.includes(`pat_${SHADOW_MARK.pattern}(px`), "the shadow texture must be a generated pattern");
+});
+
+// **T-526: the ceiling now guards the user's MAXIMUM, not only the shipped default.** The gain is a
+// client-adjustable uniform (`./shadow-gain.ts`), clamped to [0.05, 0.7]. The guarantee this test
+// holds is stated at the top of that range, because it is the binding case: at ANY gain a viewer can
+// reach — up to and including 0.7 — a shadow pixel can never be as bright as a live signal from
+// about a third of the way up the ramp. (At the shipped default, 0.25, the same ceiling holds with
+// far more headroom; 0.7 is where it is actually tested.)
+test("the shadow's HARD CEILING holds at the user's MAXIMUM gain (0.7): no shadow pixel is as bright as the live ramp from a third of the way up", () => {
+  const GAIN = SHADOW_GAIN_MAX;
+  const shadowAt = (x: number, px: { x: number; y: number }) =>
+    cellPixel({ state: CELL.SHADOW, x, px, tier: 0, srcPx: { x: 1, y: 1 }, fallback: false, shadowGain: GAIN });
+  // Every pixel a shadow can produce, at every level, at the maximum the user may set.
+  let brightest = 0;
+  for (let i = 0; i <= 400; i++) {
+    for (let y = 0; y < SHADOW_MARK.pitchPx; y++) {
+      const c = shadowAt(i / 400, { x: 0.5, y: y + 0.5 });
+      assert.ok(Math.max(...c) <= GAIN + 1e-9, `a shadow channel exceeds the ceiling at x=${i / 400}, gain=${GAIN}`);
+      brightest = Math.max(brightest, lum(c));
+    }
+  }
+  assert.ok(brightest <= GAIN + 1e-9);
+  // The live ramp still clears the brightest possible shadow somewhere and stays above it from there
+  // — but WHERE moves up the ramp as gain rises, so this finds the crossing point at gain=0.7 rather
+  // than assuming the default's 0.3. (Raising the ceiling narrows the always-brighter-than-any-shadow
+  // band; it does not remove it, and the scanline texture above is what keeps a shadow readable as a
+  // shadow once brightness alone can no longer tell it from live at the low end of that narrower band.)
+  let from = 401;
+  for (let i = 400; i >= 0; i--) { if (lum(cmap(i / 400)) > brightest) from = i; else break; }
+  assert.ok(from <= 400, "no point on the ramp ever clears the brightest possible shadow at max gain — the ceiling is meaningless");
+  for (let i = from; i <= 400; i++) {
+    assert.ok(lum(cmap(i / 400)) > brightest, `live cmap(${i / 400}) is no brighter than the brightest shadow at gain=${GAIN} — a remembered signal could read as live`);
+  }
+  // …and the shadow of the strongest possible signal is exactly gain × the live peak, and therefore
+  // still strictly below it, however high the user turns the gain.
+  const peak = shadowAt(1, { x: 0.5, y: 3.5 });
+  assert.ok(near(peak, [cmap(1)[0] * GAIN, cmap(1)[1] * GAIN, cmap(1)[2] * GAIN]));
+  assert.ok(lum(peak) < lum(cmap(1)), "even at maximum gain, a shadow never reaches the live peak it remembers");
+  // And the shipped default (0.25) sits well inside that ceiling, with much more headroom.
+  assert.ok(SHADOW_GAIN_DEFAULT < GAIN && SHADOW_GAIN_MIN < SHADOW_GAIN_DEFAULT);
+});
+
+test("the shadow's TEXTURE: where the ceiling cannot help (a remembered noise floor), the scanlines can", () => {
+  // At the bottom of the ramp a live cell and its shadow are both near-black. The scanline ink is on
+  // no position of the ramp, so a ruled row can never be a live level…
+  for (let i = 0; i <= 200; i++) {
+    assert.ok(!near(cmap(i / 200), [...SHADOW_MARK.ink]), `the scanline ink is cmap(${i / 200})`);
+  }
+  // …it is clearly lighter than a dimmed floor, so the rules are visible exactly there…
+  assert.ok(lum(SHADOW_MARK.ink) > 5 * lum(shadowPx(0, { x: 0.5, y: 3.5 })));
+  // **T-526: the ink wins on a ruled pixel at ANY gain** — it is chosen by the pattern, not the
+  // ramp, so it is what keeps a shadow distinguishable from live once the user turns the brightness
+  // all the way up and the ceiling alone can no longer do that job.
+  const RULED_PX = { x: 0.5, y: 0.5 }; // patternHit true at this pitch (asserted below, `y0=0` band)
+  assert.ok(patternHit(SHADOW_MARK.pattern, RULED_PX, { x: SHADOW_MARK.pitchPx, y: SHADOW_MARK.pitchPx }));
+  for (const g of [SHADOW_GAIN_MIN, SHADOW_GAIN_DEFAULT, SHADOW_GAIN_MAX]) {
+    const ruled = cellPixel({ state: CELL.SHADOW, x: 1, px: RULED_PX, tier: 0, srcPx: { x: 1, y: 1 }, fallback: false, shadowGain: g });
+    assert.deepEqual(ruled, [...SHADOW_MARK.ink], `gain=${g}: a ruled pixel of even the brightest shadow is the ink, not the ramp`);
+  }
+  // …and every pitch-high band of a shadow cell carries a rule, running along time only.
+  for (let y0 = 0; y0 < 40; y0++) {
+    let hits = 0;
+    for (let y = y0; y < y0 + SHADOW_MARK.pitchPx; y++) if (patternHit(SHADOW_MARK.pattern, { x: 3.5, y: y + 0.5 }, { x: SHADOW_MARK.pitchPx, y: SHADOW_MARK.pitchPx })) hits++;
+    assert.ok(hits >= 1 && hits < SHADOW_MARK.pitchPx, `band at ${y0}: ${hits} ruled rows`);
+  }
+  for (let x = 0; x < 40; x++) {
+    assert.equal(patternHit(SHADOW_MARK.pattern, { x: x + 0.5, y: 0.5 }, { x: SHADOW_MARK.pitchPx, y: SHADOW_MARK.pitchPx }), true, "a rule is horizontal: constant along frequency");
+  }
+});
+
+test("the shadow is not the unknown hatch, not the refused X, not pending, not any other mark's shape", () => {
+  const others = CELL_MARKS.filter((_, s) => s !== CELL.SHADOW);
+  for (const m of others) if (m.kind === "pattern") assert.notEqual(m.pattern, SHADOW_MARK.pattern, "the shadow shares a cell mark's shape");
+  assert.notEqual(SHADOW_MARK.pattern, REFUSED_MARK.pattern);
+  assert.notEqual(SHADOW_MARK.pattern, (CELL_MARKS[CELL.UNKNOWN] as { pattern: string }).pattern);
+  for (const c of [REFUSED_MARK.ink, REFUSED_MARK.rgb, PENDING, BACKDROP, (CELL_MARKS[CELL.UNKNOWN] as { ink: Rgb }).ink]) {
+    assert.ok(!near([...SHADOW_MARK.ink], [...c]), `the scanline ink is ${c}`);
+  }
+  // Not magenta, by the e2e's own predicate (magenta is `unknown`'s alone).
+  const [r, g, b] = SHADOW_MARK.ink.map((v) => Math.round(v * 255));
+  assert.ok(!(r > g + 20 && b > g + 20 && (r + b) / 2 > 60));
+  // No honesty-tier wash reaches a shadow: it is not a measurement of this cell, so it has no
+  // resolution to qualify — the same pixel whatever tier the tile was answered at.
+  for (const tier of [0, 1, 2]) {
+    assert.deepEqual(cellPixel({ state: CELL.SHADOW, x: 0.6, px: { x: 1.5, y: 3.5 }, tier, srcPx: { x: 2, y: 2 }, fallback: false }),
+      shadowPx(0.6, { x: 1.5, y: 3.5 }));
   }
 });
 

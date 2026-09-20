@@ -150,6 +150,14 @@ pub struct Pyramid {
     /// Every tile whose block ends at or before this has sealed.
     watermark_ns: i64,
     latest_ns: i64,
+    /// T-507: when this store began recording, as it knew it **when it was opened** — the
+    /// persisted [`RECORDING_BEGAN_FILE`], else (a store written before T-507) the start of the
+    /// oldest block it held. `None`: opened empty.
+    resumed_from_ns: Option<i64>,
+    /// T-507: [`Pyramid::recording_began`] is on disk, so it is never written again.
+    began_persisted: bool,
+    /// T-507: the start of the earliest frame folded by this process (`i64::MAX`: none yet).
+    first_folded_ns: i64,
     next_seal_ns: i64,
     last_checkpoint_ns: Option<i64>,
     scratch: Vec<f32>,
@@ -190,6 +198,10 @@ pub(super) struct Ages {
 
 /// File of the per-source front-end state (T-126), under the scheme root.
 const SOURCE_STATE_FILE: &str = "front_end.state";
+
+/// File of [`Pyramid::recording_began`] (T-507), under the scheme root: 8 bytes, the Unix ns of
+/// the earliest frame the store ever folded, little-endian.
+pub(super) const RECORDING_BEGAN_FILE: &str = "recording_began";
 
 /// Producer tiles one [`Pyramid::materialize`] call may fold, over the whole recursion.
 ///
@@ -282,6 +294,9 @@ impl Pyramid {
             floors: HashMap::new(),
             watermark_ns: i64::MIN,
             latest_ns: i64::MIN,
+            resumed_from_ns: None,
+            began_persisted: false,
+            first_folded_ns: i64::MAX,
             next_seal_ns: i64::MAX,
             last_checkpoint_ns: None,
             scratch: Vec::new(),
@@ -305,7 +320,81 @@ impl Pyramid {
         p.scan()?;
         p.load_source_states();
         p.recover()?;
+        p.load_recording_began();
         Ok(p)
+    }
+
+    /// Reads [`RECORDING_BEGAN_FILE`]; without one, a store that already holds tiles (written
+    /// before T-507) is bounded by the start of its oldest block — a lower bound, so it can only
+    /// widen `"unknown whether we looked"`, never claim `"nothing looked"` over a recorded span.
+    fn load_recording_began(&mut self) {
+        let path = self.root.join(RECORDING_BEGAN_FILE);
+        let persisted = fs::read(&path)
+            .ok()
+            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+            .map(i64::from_le_bytes);
+        self.began_persisted = persisted.is_some();
+        self.resumed_from_ns = persisted.or_else(|| self.earliest_held_ns());
+    }
+
+    /// Writes [`Pyramid::recording_began`] once, the first time there is one to write (temp →
+    /// fsync → rename, like tiles). Rides the seal/checkpoint path that already writes the
+    /// per-source state, so the capture thread pays it once per store, not per frame.
+    fn save_recording_began(&mut self) -> Result<(), StoreError> {
+        if self.began_persisted {
+            return Ok(());
+        }
+        let Some(t) = self.recording_began() else {
+            return Ok(());
+        };
+        let path = self.root.join(RECORDING_BEGAN_FILE);
+        let tmp = self
+            .root
+            .join(format!("{RECORDING_BEGAN_FILE}.tmp{}", std::process::id()));
+        let write = || -> std::io::Result<()> {
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(&t.as_unix_nanos().to_le_bytes())?;
+            f.sync_all()?;
+            fs::rename(&tmp, &path)
+        };
+        if let Err(e) = write() {
+            let _ = fs::remove_file(&tmp);
+            return Err(StoreError::Io { path, source: e });
+        }
+        self.began_persisted = true;
+        Ok(())
+    }
+
+    /// The start of the oldest time block any level holds, sealed or open, ns.
+    fn earliest_held_ns(&self) -> Option<i64> {
+        let sealed = self.sealed.iter().enumerate().filter_map(|(level, m)| {
+            m.first_key_value()
+                .map(|(&(tb, _), _)| tb.saturating_mul(self.geom.levels[level].t_block_ns()))
+        });
+        let open = self.open.iter().enumerate().flat_map(|(level, m)| {
+            let t = self.geom.levels[level].t_block_ns();
+            m.keys().map(move |&(_, tb)| tb.saturating_mul(t))
+        });
+        sealed.chain(open).min()
+    }
+
+    /// **When this store began recording** (T-507): the earliest frame it has ever folded,
+    /// persisted across restarts in [`RECORDING_BEGAN_FILE`]; `None` when it has never held a
+    /// frame.
+    ///
+    /// It is a recorded fact, **not** re-derived from the tiles held now, so evicting a tile does
+    /// not move it: the store still knows it began recording then. It is the boundary the coverage
+    /// map needs to tell *"nothing looked"* (before this installation recorded anything) from *"we
+    /// no longer know whether we looked"* (after it, where a tune record may since have been
+    /// discarded). A store written before T-507 has no file; its oldest held block's start stands
+    /// in, a lower bound that can only widen the second, never claim the first.
+    pub fn recording_began(&self) -> Option<Timestamp> {
+        let folded = (self.first_folded_ns != i64::MAX).then_some(self.first_folded_ns);
+        match (self.resumed_from_ns, folded) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+        .map(Timestamp::from_unix_nanos)
     }
 
     /// The front-end state and resolved level-0 cell shape of the last frame folded from `source`
@@ -568,6 +657,7 @@ impl Pyramid {
             i = j;
         }
         self.stats.frames_folded += 1;
+        self.first_folded_ns = self.first_folded_ns.min(frame.t.as_unix_nanos());
         // T-453: this frame has just changed level 0, so any live-edge summary folded from it is
         // stale. Cheap when nothing is cached, which is every ingest of a run nobody is watching.
         self.invalidate_derived();
@@ -675,6 +765,7 @@ impl Pyramid {
             .min()
             .unwrap_or(i64::MAX);
         self.save_source_states()?;
+        self.save_recording_began()?;
         self.enforce_budget()
     }
 
@@ -1013,14 +1104,36 @@ impl Pyramid {
     ///   contract.
     /// - **Frequency is exact and time is a bound**, because that is how the caller uses them: a
     ///   tile read passes its whole frequency extent and *chunks* time into whole output rows, so
-    ///   the time window's offset is not known here while the frequency range is. `window_ns` is
-    ///   therefore charged the most blocks any half-open window of that length can touch,
-    ///   `floor(window / block) + 1`.
+    ///   the time window's offset is not known here while the frequency range is. What the caller
+    ///   *can* promise is the **grid its windows start on**: every chunk of a `/api/tiles` read
+    ///   starts on a multiple of the tile's own time cell. `start_step_ns` is that grid, and the
+    ///   window is charged the most blocks it can touch from **any** start on it —
+    ///   `floor((window - 1 + block - g) / block) + 1` with `g = gcd(start_step, block)`, which is
+    ///   exact: the worst start is `block - g` past a boundary. A caller that can promise nothing
+    ///   passes `start_step_ns <= 0`, meaning every nanosecond (`g = 1`).
+    ///
+    /// # The block count was `floor(window / block) + 1`, and that is NOT the worst case (T-494)
+    ///
+    /// It is the count for a window that starts **on** a block boundary, which the caller cannot
+    /// promise: a tile is chunked into whole output *rows*, a row can be finer than a block, and
+    /// then chunks after the first start mid-block. Measured on a 4 x 5 store at address `(8, 3)`:
+    /// the read's only candidate was level 19, whose 240 s window over a 1024 s block was charged
+    /// one block for 1016 budget units, under the 1024 cap, and was then refused for real at output
+    /// row 120, where the same window straddles two blocks and costs 2032. So `/api/tiles` could
+    /// declare a ceiling and still 400 inside it. On the shipped 4 x 4 store the error never
+    /// surfaced. That was luck, not soundness: the addresses it hit were already refused for
+    /// another reason.
+    ///
+    /// The start grid is what keeps this from simply over-charging instead. A plain worst case
+    /// over every nanosecond costs the shipped ceiling `(9, 1)`, where every chunk *is*
+    /// block-aligned and the extra block is never touched. Measured, that dropped the ceiling to
+    /// `(8, 2)`.
     pub fn materialize_cost_bound(
         &self,
         level: usize,
         freq: FreqRange,
         window_ns: i64,
+        start_step_ns: i64,
     ) -> Option<usize> {
         if !self.cfg.coarse_on_demand || level >= self.geom.n_levels() {
             return Some(0);
@@ -1033,7 +1146,16 @@ impl Pyramid {
         let c_lo = (freq.lo_hz / g.f_cell_hz).floor() as i64;
         let c_hi = ((freq.hi_hz / g.f_cell_hz).ceil() as i64 - 1).max(c_lo);
         let fb = c_hi.div_euclid(nf) - c_lo.div_euclid(nf) + 1;
-        let tb = window_ns.div_euclid(g.t_block_ns().max(1)) + 1;
+        // Blocks a half-open window of this length touches, maximised over every start on the
+        // caller's grid. The worst start is `block - g` past a boundary (see the doc comment).
+        let block = g.t_block_ns().max(1);
+        let step = if start_step_ns <= 0 { 1 } else { start_step_ns };
+        let g_align = gcd(step, block);
+        let tb = if window_ns <= 0 {
+            1
+        } else {
+            (window_ns - 1 + block - g_align).div_euclid(block) + 1
+        };
         let asked = u128::from(fb.max(1) as u64).saturating_mul(tb.max(1) as u64 as u128);
         if asked > MAX_MATERIALIZE_TILES as u128 {
             return None;
@@ -1493,7 +1615,8 @@ impl Pyramid {
         self.keys = keys;
         self.last_checkpoint_ns = Some(self.latest_ns);
         result?;
-        self.save_source_states()
+        self.save_source_states()?;
+        self.save_recording_began()
     }
 
     /// Checkpoints and closes. Dropping without `close` loses at most one checkpoint interval of
@@ -1733,4 +1856,12 @@ impl Pyramid {
         }
         Ok(())
     }
+}
+
+/// Greatest common divisor of two positive integers.
+fn gcd(mut a: i64, mut b: i64) -> i64 {
+    while b != 0 {
+        (a, b) = (b, a.rem_euclid(b));
+    }
+    a.abs().max(1)
 }

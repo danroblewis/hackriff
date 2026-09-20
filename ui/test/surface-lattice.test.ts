@@ -133,3 +133,64 @@ test("the lattice is read off a response, never chosen by the client", () => {
   assert.equal(lat.levelsF, 20);
   assert.equal(lat.levelsT, 15);
 });
+
+// T-501: THE GUARD THAT WOULD HAVE CAUGHT T-484.
+//
+// `just gate`'s one blind spot is a client that asks the backend for the WRONG THING, and the
+// wrong thing here is not a wrong URL — it is a right URL asked ten thousand times. `tilesFor` has
+// no budget: `Surface.render` walks every address it returns, every frame, and `TileCache` queues
+// every miss behind a four-slot in-flight cap. So the number of addresses a viewport enumerates is
+// a **product property**, and it is the number that went dark.
+//
+// **The ceiling is a bound on level INDEX, and it does not move with the floor.** Measured on both
+// geometries with `hk_api::tiles::readable_ceiling` (T-501, a depth sweep over
+// `f_levels x t_levels` in 2..=10): the answer is identical at a 6250 Hz x 1 s floor and at a
+// 585.9375 Hz x 40.106667 ms one — 4x4 declares (9, 1) for both — and the best `level_f + level_t`
+// anywhere in that sweep is **11**, past which (F + T >= 13) the ceiling collapses to (0, 0). A
+// floor N doublings finer therefore shrinks the coarsest ADDRESSABLE tile by exactly 2^N, and no
+// lattice depth gives it back.
+//
+// The numbers below are that statement in tiles.
+const surfaceViewports = (lat: Lattice, spanS: number) => {
+  const nowNs = 1_789_300_000e9;
+  const t0Ns = nowNs - spanS * 1e9;
+  const n = (box: { f0Hz: number; f1Hz: number; t0Ns: number; t1Ns: number }, w: number, h: number) => {
+    const { levelF, levelT } = levelsFor(lat, box, w, h);
+    return tilesFor(lat, box, levelF, levelT).length;
+  };
+  return {
+    // The tuned pane, opened on the observed extent (`surfaceBounds`), 1600 x 800.
+    pane: n({ f0Hz: 99.6e6, f1Hz: 102.0e6, t0Ns, t1Ns: nowNs }, 1600, 800),
+    // The minimap: the whole device range over the whole record horizon, a 1600 x 120 strip.
+    minimap: n({ f0Hz: 0, f1Hz: 6e9, t0Ns, t1Ns: nowNs }, 1600, 120),
+  };
+};
+
+/** The shipped view lattice: node (0, 0) 6250 Hz x 1 s, ceiling (9, 1). */
+const SHIPPED: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 12, levelsT: 15, maxLevelF: 9, maxLevelT: 1 };
+/** T-484's floor: the display STFT's own bin and row at 2.4 Msps, at the SAME declared ceiling. */
+const T484: Lattice = { ...SHIPPED, f0Hz: 585.9375, t0Ns: 40_106_667, levelsF: 16, levelsT: 19 };
+
+test("a viewport must be drawable in a bounded number of tiles, at every horizon", () => {
+  // 100 tiles is generous: it is ~3x what the shipped floor needs for the deepest viewport the
+  // surface can open, and well inside a 96 MB LRU and a four-slot in-flight cap.
+  const BUDGET = 100;
+  for (const spanS of [20, 60, 300, 1200, 1800]) {
+    const v = surfaceViewports(SHIPPED, spanS);
+    assert.ok(v.pane <= BUDGET, `pane at ${spanS}s asks for ${v.pane} tiles`);
+    assert.ok(v.minimap <= BUDGET, `minimap at ${spanS}s asks for ${v.minimap} tiles`);
+  }
+});
+
+test("T-484's floor blows that budget by two orders of magnitude, and this is why the map went dark", () => {
+  // Non-vacuity, and the measurement itself. Exact counts, so neither the defect nor a repair of it
+  // can move unnoticed. The pane is survivable at a live edge and hopeless once the surface opens
+  // on twenty minutes of observed extent; the minimap is hopeless from ~100 s of capture onward,
+  // which is why every suite that runs against a seconds-old server stayed green.
+  assert.deepEqual(surfaceViewports(T484, 20), { pane: 15, minimap: 158 });
+  assert.deepEqual(surfaceViewports(T484, 100), { pane: 30, minimap: 474 });
+  assert.deepEqual(surfaceViewports(T484, 1200), { pane: 300, minimap: 4740 });
+  assert.deepEqual(surfaceViewports(T484, 1800), { pane: 445, minimap: 7031 });
+  // The same viewports on the shipped floor, for the ratio.
+  assert.deepEqual(surfaceViewports(SHIPPED, 1800), { pane: 8, minimap: 32 });
+});

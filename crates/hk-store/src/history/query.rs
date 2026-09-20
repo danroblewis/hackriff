@@ -299,6 +299,264 @@ pub struct Overview {
     pub range_db: Option<(f32, f32)>,
 }
 
+/// Output cells `[a, b)` of `n` cells of width `step` from `origin` that `[lo, hi)` overlaps.
+/// Half-open, so a boundary landing exactly on an output boundary reaches the later cell only —
+/// [`RegionHistory::overview`]'s rule.
+fn cell_span(lo: f64, hi: f64, origin: f64, step: f64, n: usize) -> (usize, usize) {
+    let a = ((lo - origin) / step).floor().max(0.0) as usize;
+    let b = (((hi - origin) / step).ceil().max(0.0) as usize).min(n);
+    (a.min(n), b.max(a.min(n)))
+}
+
+/// The most-recent-known value of one frequency column (T-519): the **last-known / stale** tier.
+///
+/// Not a measurement *of the time it is drawn at* — a measurement of `t_ns` and earlier, carried
+/// forward. That is why it carries its own timestamp: a value without the instant it was last true
+/// is exactly the "implying detail the front end can't deliver" the view invariants forbid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LastKnownCell {
+    /// Max-hold of the newest observed source cell, dB/Hz; `NaN` when none was found.
+    pub max_db: f32,
+    /// When it was last seen: the end of that source cell, clamped to the search's `before`, Unix
+    /// ns. An upper bound — the cell's frames all lie at or before it. `i64::MIN` when none.
+    pub t_ns: i64,
+    /// Store level the source cell came from; `u8::MAX` when none.
+    pub level: u8,
+}
+
+impl LastKnownCell {
+    /// Nothing observed in the searched reach.
+    pub const NONE: LastKnownCell = LastKnownCell {
+        max_db: f32::NAN,
+        t_ns: i64::MIN,
+        level: u8::MAX,
+    };
+
+    /// Whether a value was found.
+    pub fn found(&self) -> bool {
+        self.level != u8::MAX
+    }
+}
+
+/// One stage of a [`LastKnown`] search: a time window read at one level, or skipped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LastKnownStage {
+    /// Store level of the stage.
+    pub level: u8,
+    /// Window start, Unix ns.
+    pub from_ns: i64,
+    /// Window end (exclusive), Unix ns.
+    pub to_ns: i64,
+    /// Source cells read (0 when skipped).
+    pub source_cells: usize,
+    /// Columns this stage resolved.
+    pub found: usize,
+    /// Not read: its grid would not fit the work budget, or the window is not aligned to the
+    /// level's cell. A skipped window is **not searched**, and says so, rather than being reported
+    /// as empty.
+    pub skipped: bool,
+}
+
+/// Per-column most-recent-known values before an instant ([`Pyramid::last_known`], T-519).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LastKnown {
+    /// The instant the values are known at or before, Unix ns.
+    pub before_ns: i64,
+    /// Low edge of column 0, Hz.
+    pub f_lo_hz: f64,
+    /// Column width, Hz.
+    pub f_cell_hz: f64,
+    /// Columns.
+    pub nf: usize,
+    /// Per column.
+    pub cells: Vec<LastKnownCell>,
+    /// Stages, newest window first.
+    pub stages: Vec<LastKnownStage>,
+    /// The oldest instant the search reached, Unix ns. A column with no value was not observed in
+    /// `[searched_from_ns, before_ns)` outside any skipped stage — **nothing is claimed about
+    /// earlier**.
+    pub searched_from_ns: i64,
+    /// Source cells read, over every stage.
+    pub source_cells: usize,
+}
+
+impl LastKnown {
+    fn empty(freq: FreqRange, before_ns: i64, nf: usize) -> Self {
+        let nf = nf.max(1);
+        let hi = freq.hi_hz.max(freq.lo_hz + f64::EPSILON);
+        LastKnown {
+            before_ns,
+            f_lo_hz: freq.lo_hz,
+            f_cell_hz: (hi - freq.lo_hz) / nf as f64,
+            nf,
+            cells: vec![LastKnownCell::NONE; nf],
+            stages: Vec::new(),
+            searched_from_ns: before_ns,
+            source_cells: 0,
+        }
+    }
+
+    /// Columns with a value.
+    pub fn found(&self) -> usize {
+        self.cells.iter().filter(|c| c.found()).count()
+    }
+
+    /// Carries the values forward down an `nt`-row grid starting at `before_ns` (T-519): the
+    /// **shadow** plane, as runs per column.
+    ///
+    /// Row `r` covers `[before_ns + r·Δt, …)`. Down each column the carried value starts as this
+    /// search's value, and is **replaced** by `grid`'s own value at every row where `grid` holds
+    /// one — so a band observed part-way down a tile and then departed carries the value it was last
+    /// seen with, not the older one from before the tile. A row where `grid` holds a value gets
+    /// **no** run: the shadow never stands in for a measurement of that row. Rows starting at or
+    /// after `edge_ns` (the store's data edge) get no run either: carrying forward past the newest
+    /// frame would paint the future.
+    ///
+    /// `grid`, when given, must be `nt × nf` on the same columns; `None` is a grid holding
+    /// nothing (the coverage-map short-circuit's tile).
+    pub fn carry_forward(
+        &self,
+        grid: Option<&Overview>,
+        t_cell_ns: f64,
+        nt: usize,
+        edge_ns: Option<i64>,
+    ) -> Vec<ShadowRun> {
+        let grid = grid.filter(|g| g.nt == nt && g.nf == self.nf && g.cells.len() == nt * g.nf);
+        let edge = edge_ns.unwrap_or(i64::MAX);
+        let mut runs = Vec::new();
+        for f in 0..self.nf {
+            let seed = self.cells[f];
+            let mut cur: Option<(f32, i64, Option<u8>)> =
+                seed.found()
+                    .then_some((seed.max_db, seed.t_ns, Some(seed.level)));
+            let mut open: Option<ShadowRun> = None;
+            for r in 0..nt {
+                let row_start = self.before_ns + (r as f64 * t_cell_ns).round() as i64;
+                if row_start >= edge {
+                    break;
+                }
+                let here = grid.map(|g| &g.cells[r * g.nf + f]);
+                if let Some(c) = here.filter(|c| c.observed()) {
+                    runs.extend(open.take());
+                    let row_end = self.before_ns + ((r + 1) as f64 * t_cell_ns).round() as i64;
+                    cur = Some((c.max_db, row_end.min(edge), None));
+                    continue;
+                }
+                let Some((db, t, level)) = cur else {
+                    continue;
+                };
+                match open.as_mut() {
+                    Some(o) if o.row + o.rows == r && o.t_ns == t && o.level == level => {
+                        o.rows += 1;
+                    }
+                    _ => {
+                        runs.extend(open.take());
+                        open = Some(ShadowRun {
+                            f,
+                            row: r,
+                            rows: 1,
+                            max_db: db,
+                            t_ns: t,
+                            level,
+                        });
+                    }
+                }
+            }
+            runs.extend(open.take());
+        }
+        runs
+    }
+}
+
+/// One run of a carried-forward value down one column of a grid ([`LastKnown::carry_forward`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShadowRun {
+    /// Column.
+    pub f: usize,
+    /// First row.
+    pub row: usize,
+    /// Rows.
+    pub rows: usize,
+    /// The carried value, dB/Hz.
+    pub max_db: f32,
+    /// When it was last seen, Unix ns (see [`LastKnownCell::t_ns`]).
+    pub t_ns: i64,
+    /// The store level of a value carried in from before the grid, or `None` for a value the grid
+    /// itself holds (a band seen part-way down the grid, then departed).
+    pub level: Option<u8>,
+}
+
+/// Rows a [`LastKnown`] search's final stage may read, whatever the budget allows.
+pub const LAST_KNOWN_MAX_TOP_ROWS: usize = 4096;
+
+/// What is known about the time **after** a search's `before`, which is what lets a source cell
+/// straddling `before` be used (T-519).
+///
+/// A coarse cell containing `before` folds frames from both sides of it. If nothing reached a
+/// column between `before` and the cell's end, every frame the cell holds for that column is from
+/// before — so its value is a legitimate last-known one. The caller knows that because it is about
+/// to draw exactly that interval: a tile's own grid says, per column, when it first holds a value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StraddleGuard {
+    /// Per output column, the earliest instant at or after `before` at which the column holds any
+    /// observation, Unix ns; `i64::MAX` when none is known up to `known_until_ns`.
+    pub first_after: Vec<i64>,
+    /// How far `first_after` is known, Unix ns (`i64::MAX` when it is known to the end of the data,
+    /// because the newest frame lies inside it).
+    pub known_until_ns: i64,
+}
+
+impl StraddleGuard {
+    /// Output columns `[a, b)` saw nothing from `before` up to `end`, as far as this guard knows.
+    fn admits(&self, a: usize, b: usize, end: i64) -> bool {
+        end <= self.known_until_ns && self.first_after[a..b].iter().all(|&t| t >= end)
+    }
+}
+
+/// One stage being read, a frequency slice per step.
+#[derive(Clone, Copy, Debug)]
+struct ActiveStage {
+    level: usize,
+    lo: i64,
+    hi: i64,
+    c_hi: i64,
+    slice_cols: i64,
+    c_next: i64,
+    stage: usize,
+}
+
+/// A [`Pyramid::last_known`] search in progress, run a step at a time by
+/// [`Pyramid::last_known_step`] so a caller can release the store's lock between steps.
+#[derive(Clone, Debug)]
+pub struct LastKnownSearch {
+    out: LastKnown,
+    freq: FreqRange,
+    guard: Option<StraddleGuard>,
+    chain: Vec<usize>,
+    /// Start of the oldest tile held: nothing before it can be found.
+    oldest_ns: Option<i64>,
+    next: usize,
+    end_ns: i64,
+    per_step: usize,
+    remaining: usize,
+    active: Option<ActiveStage>,
+    /// Columns resolved by an earlier (newer) stage: final.
+    frozen: Vec<bool>,
+    done: bool,
+}
+
+impl LastKnownSearch {
+    /// Whether no step remains.
+    pub fn done(&self) -> bool {
+        self.done
+    }
+
+    /// The result so far.
+    pub fn finish(self) -> LastKnown {
+        self.out
+    }
+}
+
 impl RegionHistory {
     /// The grid's coverage mask digest: observed cells, mean coverage, fully unobserved time runs.
     pub fn coverage_summary(&self) -> CoverageSummary {
@@ -490,6 +748,82 @@ impl RegionHistory {
             src_nf: self.nf,
             range_db: (observed_cells > 0).then_some((lo_db, hi_db)),
         }
+    }
+
+    /// Folds this grid into a carry-forward search (T-519): for each of `out`'s columns, the
+    /// **newest** observed cell here that ends at or before `out.before_ns` — last-write-wins by
+    /// time. Returns the columns this grid gave a value that had none.
+    ///
+    /// This is [`Self::overview`]'s sibling and folds by the same geometry (a source cell reaches
+    /// every output column it overlaps; a coarser source replicates, T-334's safe direction), but
+    /// keeps a different value: `overview` keeps the *strongest* in an extent, this keeps the
+    /// *latest*. Newer beats older by the source cell's end; cells ending together fold by
+    /// max-hold, exactly as `overview` would. So one grid, or several folded in any order, give the
+    /// same answer. Columns marked in `frozen` are left alone: a search freezes what a newer stage
+    /// already found, because a coarse fallback cell's *end* can be later than a fine cell's while
+    /// its data is older.
+    ///
+    /// **Never carries backward.** A cell whose true extent (recomputed from `level_t_cells` at the
+    /// level that *answered* it — a coarser fallback can stand in for an evicted tile) ends after
+    /// `before_ns` may hold frames from after it. It is used only when `guard` proves it cannot:
+    /// its end is within what the guard knows and no output column it reaches was observed between
+    /// `before_ns` and its end. Otherwise it is skipped — the conservative direction for a value
+    /// that would come from the future.
+    pub fn fold_newest(
+        &self,
+        out: &mut LastKnown,
+        level_t_cells: &[i64],
+        guard: Option<&StraddleGuard>,
+        frozen: &[bool],
+    ) -> usize {
+        let nf = out.nf;
+        let mut found = 0;
+        for t in 0..self.nt {
+            let row_start = (self.t_first_cell + t as i64) * self.t_cell_ns;
+            for f in 0..self.nf {
+                let c = self.cell(t, f);
+                if !c.observed() {
+                    continue;
+                }
+                let tc = level_t_cells
+                    .get(usize::from(c.level))
+                    .copied()
+                    .unwrap_or(self.t_cell_ns)
+                    .max(1);
+                let end = (row_start.div_euclid(tc) + 1) * tc;
+                let f0 = (self.f_first_cell + f as i64) as f64 * self.f_cell_hz;
+                let (a, b) = cell_span(f0, f0 + self.f_cell_hz, out.f_lo_hz, out.f_cell_hz, nf);
+                if a >= b {
+                    continue;
+                }
+                if end > out.before_ns && !guard.is_some_and(|g| g.admits(a, b, end)) {
+                    continue;
+                }
+                let t_ns = end.min(out.before_ns);
+                for (of, cur) in out.cells[a..b].iter_mut().enumerate() {
+                    if frozen.get(a + of).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    if !cur.found() {
+                        found += 1;
+                        *cur = LastKnownCell {
+                            max_db: c.max_db,
+                            t_ns,
+                            level: c.level,
+                        };
+                    } else if t_ns > cur.t_ns {
+                        *cur = LastKnownCell {
+                            max_db: c.max_db,
+                            t_ns,
+                            level: c.level,
+                        };
+                    } else if t_ns == cur.t_ns {
+                        cur.max_db = cur.max_db.max(c.max_db);
+                    }
+                }
+            }
+        }
+        found
     }
 
     /// Per-channel summaries over the grid. See [`ChannelSummary`] for the estimators.
@@ -850,6 +1184,318 @@ impl Pyramid {
             tiles_read,
             filter: filtered.then_some(summary),
         })
+    }
+
+    /// The levels a [`Self::last_known`] search walks, finest first: from level 0, each next level
+    /// is the one with the smallest time cell that is a whole multiple of the current one and
+    /// coarsens it on both axes (ties to the finer frequency cell). On a welded ladder that is the
+    /// ladder itself; on a view lattice it is the `level_f = 0` time column.
+    fn time_chain(&self) -> Vec<usize> {
+        let lv = &self.geom.levels;
+        let mut chain = vec![0usize];
+        if self.cfg.coarse_on_demand {
+            // A lattice's coarse nodes exist only once a read has materialised them, and this
+            // search reads without building (it takes `&self`): level 0 is the one level capture
+            // always fills, so it is the only one walked, as far back as the budget reaches.
+            return chain;
+        }
+        loop {
+            let cur = *chain.last().expect("non-empty");
+            let tc = lv[cur].t_cell_ns;
+            let next = (0..lv.len())
+                .filter(|&l| {
+                    lv[l].t_cell_ns > tc
+                        && lv[l].t_cell_ns % tc == 0
+                        && self.geom.coarsens_or_equals(cur, l)
+                })
+                .min_by(|&a, &b| {
+                    (lv[a].t_cell_ns, lv[a].f_cell_hz)
+                        .partial_cmp(&(lv[b].t_cell_ns, lv[b].f_cell_hz))
+                        .expect("cell sizes are finite")
+                });
+            match next {
+                Some(l) => chain.push(l),
+                None => return chain,
+            }
+        }
+    }
+
+    /// Start of the oldest tile the pyramid holds at any level, open or sealed; `None` when it holds
+    /// none. What the search's final stage need not reach past.
+    fn oldest_block_ns(&self) -> Option<i64> {
+        let mut oldest: Option<i64> = None;
+        for (l, g) in self.geom.levels.iter().enumerate() {
+            let sealed = self.sealed[l].keys().next().map(|&(tb, _)| tb);
+            let open = self.open[l].keys().map(|&(_, tb)| tb).min();
+            for tb in sealed.into_iter().chain(open) {
+                let t = tb.saturating_mul(g.t_block_ns());
+                oldest = Some(oldest.map_or(t, |o| o.min(t)));
+            }
+        }
+        oldest
+    }
+
+    /// Whether any tile — open, derived or sealed — at `level` or a level that may stand in for it
+    /// ([`Geometry::coarsens_or_equals`], the query's own fallback set) overlaps `freq × [t0, t1)`.
+    /// `false` means [`Self::query`] over that box can only answer unobserved cells, so the search
+    /// can say so from the tile index without walking them: the empty case, which across 6 GHz is
+    /// the common one, costs a key lookup rather than a cell walk (T-461's rule, applied here).
+    fn holds_any(&self, level: usize, freq: FreqRange, t0: i64, t1: i64) -> bool {
+        let nf = self.geom.nf as i64;
+        (0..self.geom.n_levels())
+            .filter(|&l| self.geom.coarsens_or_equals(level, l))
+            .any(|l| {
+                let g = &self.geom.levels[l];
+                let fb_lo = ((freq.lo_hz / g.f_cell_hz).floor() as i64).div_euclid(nf);
+                let fb_hi = (((freq.hi_hz / g.f_cell_hz).ceil() as i64 - 1).max(0)).div_euclid(nf);
+                let blk = g.t_block_ns().max(1);
+                let (tb_lo, tb_hi) = (t0.div_euclid(blk), (t1 - 1).max(t0).div_euclid(blk));
+                let fits = |fb: i64, tb: i64| {
+                    (fb_lo..=fb_hi).contains(&fb) && (tb_lo..=tb_hi).contains(&tb)
+                };
+                self.sealed[l]
+                    .range((tb_lo, i64::MIN)..=(tb_hi, i64::MAX))
+                    .any(|(&(tb, fb), _)| fits(fb, tb))
+                    || self.open[l].keys().any(|&(fb, tb)| fits(fb, tb))
+                    || self
+                        .derived
+                        .keys()
+                        .any(|&(dl, fb, tb)| dl == l && fits(fb, tb))
+            })
+    }
+
+    /// Starts a carry-forward search (T-519): per column of `nf` over `freq`, the **newest**
+    /// observed max-hold at or before `before`, over whatever the pyramid retains.
+    ///
+    /// # How it stays cheap: newest-first, fine-to-coarse, aligned
+    ///
+    /// The walk goes **backward** from `before` through [`Self::time_chain`]. Each stage reads one
+    /// level over `[align_down(end, next level's cell), end)` and hands everything older to the
+    /// next, coarser level — so a fine level only ever covers the newest part-cell of the level
+    /// above it, and each coarser stage covers exactly the whole cells the finer one did not. On
+    /// scheme 1's ladder that is ≤ 59 one-second rows, ≤ 14 minutes, ≤ 3 quarter-hours, ≤ 23
+    /// hours, then days: the whole retained horizon in a few hundred rows per column, whatever its
+    /// length. It is also the ladder's seal cadence — a level's cell is complete when the finer
+    /// level's tile seals — so each stage reads a level that already holds its window. The search
+    /// ends as soon as every column has a value. Nothing is maintained for this and ingest pays
+    /// nothing (the T-453 constraint): it reads tiles the pyramid already holds.
+    ///
+    /// # The bounds, and what they cost
+    ///
+    /// `total_cells` bounds the whole search. A stage that would exceed what is left of it is not
+    /// read, and its window is **merged into the next, coarser stage**, which then starts at its
+    /// own cell boundary *at or after* `before`: that top cell straddles `before` and is used only
+    /// where `guard` proves the part after `before` is empty (see [`StraddleGuard`]). What cannot be
+    /// proven is reported as a skipped window, never as empty. On a very wide region the fine
+    /// stages are the expensive ones, so the cost of the bound is time resolution on the newest
+    /// part of the past, not reach. Each call to [`Self::last_known_step`] reads at most
+    /// `per_step_cells` source cells — a stage wider than that is read in frequency slices, which
+    /// fold independently because columns do — so a caller that releases the lock between steps
+    /// bounds every hold.
+    pub fn last_known_search(
+        &self,
+        freq: FreqRange,
+        before: Timestamp,
+        nf: usize,
+        guard: Option<StraddleGuard>,
+        per_step_cells: usize,
+        total_cells: usize,
+    ) -> LastKnownSearch {
+        let before_ns = before.as_unix_nanos();
+        let out = LastKnown::empty(freq, before_ns, nf);
+        let guard = guard.filter(|g| g.first_after.len() == out.nf);
+        LastKnownSearch {
+            out,
+            freq,
+            guard,
+            chain: self.time_chain(),
+            oldest_ns: self.oldest_block_ns(),
+            next: 0,
+            end_ns: before_ns,
+            per_step: per_step_cells.max(1),
+            remaining: total_cells,
+            active: None,
+            frozen: Vec::new(),
+            done: !(freq.lo_hz.is_finite() && freq.hi_hz > freq.lo_hz),
+        }
+    }
+
+    /// Plans the next stage of `s`, or finishes it. Returns whether a stage is active.
+    fn last_known_plan(&self, s: &mut LastKnownSearch) -> bool {
+        while s.active.is_none() && !s.done {
+            let Some(&l) = s.chain.get(s.next) else {
+                s.done = true;
+                break;
+            };
+            let Some(oldest) = s.oldest_ns.filter(|&o| o < s.end_ns) else {
+                // Nothing older than `end` is held at any level: the search is complete, not cut.
+                s.done = true;
+                break;
+            };
+            let last = s.next + 1 == s.chain.len();
+            s.next += 1;
+            let g = self.geom.levels[l];
+            let cell = g.t_cell_ns.max(1);
+            // With a guard the top cell may straddle `end` (it is admitted per column); without
+            // one it may not, and the part-cell is reported unsearched.
+            let hi = if s.guard.is_some() {
+                (s.end_ns + cell - 1).div_euclid(cell) * cell
+            } else {
+                s.end_ns.div_euclid(cell) * cell
+            };
+            let (c_lo, c_hi) = (
+                (s.freq.lo_hz / g.f_cell_hz).floor() as i64,
+                ((s.freq.hi_hz / g.f_cell_hz).ceil() as i64)
+                    .max((s.freq.lo_hz / g.f_cell_hz).floor() as i64 + 1),
+            );
+            let cols = (c_hi - c_lo) as usize;
+            let lo = if last {
+                let rows = (s.remaining / cols).min(LAST_KNOWN_MAX_TOP_ROWS);
+                hi.saturating_sub(rows as i64 * cell)
+                    .max(oldest.div_euclid(cell) * cell)
+            } else {
+                let next_cell = self.geom.levels[s.chain[s.next]].t_cell_ns.max(1);
+                s.end_ns.div_euclid(next_cell) * next_cell
+            }
+            .max(0);
+            if hi <= lo {
+                // No whole cell of this level here; the next stage covers the window.
+                s.done |= last;
+                continue;
+            }
+            let rows = ((hi - lo) / cell) as usize;
+            let cost = rows.saturating_mul(cols);
+            if cost > s.remaining {
+                if last {
+                    s.out.stages.push(LastKnownStage {
+                        level: l as u8,
+                        from_ns: lo,
+                        to_ns: hi.min(s.end_ns),
+                        source_cells: 0,
+                        found: 0,
+                        skipped: true,
+                    });
+                    s.done = true;
+                }
+                // Not last: `end` stays, so the next (coarser) stage takes this window.
+                continue;
+            }
+            let straddle_unprovable = s
+                .guard
+                .as_ref()
+                .is_some_and(|g| hi > s.end_ns && hi > g.known_until_ns);
+            // A straddling top cell of a level folded from a finer one is complete only once the
+            // finer tiles under it have sealed. Past the watermark it may hold part of its window
+            // or none of it, so that part is reported unsearched rather than read as empty.
+            let unfolded =
+                hi > s.end_ns && g.from.is_some() && hi > self.watermark().as_unix_nanos();
+            if straddle_unprovable || unfolded {
+                // The top cell cannot be admitted (it reaches past what the guard knows) or may not
+                // hold its window yet: its part before `end` is unsearched, and says so.
+                s.out.stages.push(LastKnownStage {
+                    level: l as u8,
+                    from_ns: hi - cell,
+                    to_ns: s.end_ns,
+                    source_cells: 0,
+                    found: 0,
+                    skipped: true,
+                });
+            }
+            if hi.min(s.end_ns) < s.end_ns {
+                // Unguarded and unaligned: the newest part-cell cannot be read without folding
+                // frames from after `before`.
+                s.out.stages.push(LastKnownStage {
+                    level: l as u8,
+                    from_ns: hi,
+                    to_ns: s.end_ns,
+                    source_cells: 0,
+                    found: 0,
+                    skipped: true,
+                });
+            }
+            let slice_cols = (s.per_step / rows.max(1)).max(1) as i64;
+            s.frozen = s.out.cells.iter().map(LastKnownCell::found).collect();
+            s.active = Some(ActiveStage {
+                level: l,
+                lo,
+                hi,
+                c_hi,
+                slice_cols,
+                c_next: c_lo,
+                stage: s.out.stages.len(),
+            });
+            s.out.stages.push(LastKnownStage {
+                level: l as u8,
+                from_ns: lo,
+                to_ns: hi,
+                source_cells: 0,
+                found: 0,
+                skipped: false,
+            });
+            s.end_ns = lo;
+        }
+        s.active.is_some()
+    }
+
+    /// Runs the next step of `s`: one frequency slice of one stage (a no-op once it is done).
+    pub fn last_known_step(&self, s: &mut LastKnownSearch) -> Result<(), StoreError> {
+        if !self.last_known_plan(s) {
+            return Ok(());
+        }
+        let a = s.active.expect("planned");
+        let g = self.geom.levels[a.level];
+        let c1 = (a.c_next + a.slice_cols).min(a.c_hi);
+        let freq = FreqRange::new(
+            (a.c_next as f64 * g.f_cell_hz).max(s.freq.lo_hz),
+            (c1 as f64 * g.f_cell_hz).min(s.freq.hi_hz),
+        );
+        let (found, read) = if self.holds_any(a.level, freq, a.lo, a.hi) {
+            let h = self.query(&RegionQuery {
+                freq,
+                time: TimeRange::new(
+                    Timestamp::from_unix_nanos(a.lo),
+                    Timestamp::from_unix_nanos(a.hi),
+                ),
+                resolution: Resolution::Level(a.level as u8),
+            })?;
+            let t_cells: Vec<i64> = self.geom.levels.iter().map(|g| g.t_cell_ns).collect();
+            let found = h.fold_newest(&mut s.out, &t_cells, s.guard.as_ref(), &s.frozen);
+            (found, h.nt * h.nf)
+        } else {
+            (0, 0)
+        };
+        s.remaining = s.remaining.saturating_sub(read);
+        s.out.source_cells += read;
+        s.out.searched_from_ns = s.out.searched_from_ns.min(a.lo);
+        let st = &mut s.out.stages[a.stage];
+        st.source_cells += read;
+        st.found += found;
+        if c1 >= a.c_hi {
+            s.active = None;
+            if s.out.cells.iter().all(LastKnownCell::found) {
+                s.done = true;
+            }
+        } else {
+            s.active = Some(ActiveStage { c_next: c1, ..a });
+        }
+        Ok(())
+    }
+
+    /// [`Self::last_known_search`] run to completion under one borrow.
+    pub fn last_known(
+        &self,
+        freq: FreqRange,
+        before: Timestamp,
+        nf: usize,
+        guard: Option<StraddleGuard>,
+        per_step_cells: usize,
+        total_cells: usize,
+    ) -> Result<LastKnown, StoreError> {
+        let mut s = self.last_known_search(freq, before, nf, guard, per_step_cells, total_cells);
+        while !s.done() {
+            self.last_known_step(&mut s)?;
+        }
+        Ok(s.finish())
     }
 
     fn load_source(

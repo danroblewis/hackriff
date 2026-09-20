@@ -335,7 +335,7 @@ test("the generated shader is the only implementation: one grey, one tier rule, 
   assert.match(fs, /vec3 fallbackMark\(vec3 col, vec2 px\)/);
   assert.equal(fs.split(`vec3(${GREY.join(",")})`).length - 1, 1, "a second grey");
   // A cell mark for every state, and a tier byte that is never permissive about an unknown tier.
-  assert.equal(CELL_MARKS.length, 5);
+  assert.equal(CELL_MARKS.length, 6);
   assert.equal(tierByte("live-iq"), TIER.LIVE_IQ);
   assert.equal(tierByte("something-new"), TIER.SURVEY_OVERVIEW, "an unrecognised tier must be the MOST qualified, never the most trusted");
   assert.ok(FALLBACK_MARK.pattern !== (CELL_MARKS[CELL.UNKNOWN] as { pattern: string }).pattern, "the stand-in and the fourth state must not share a hatch");

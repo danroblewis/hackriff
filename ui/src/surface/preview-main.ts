@@ -16,6 +16,7 @@ import { fmtShare } from "./bootstrap";
 import { attachSurfaceInput } from "./input";
 import { legendEntries, rangeEntry, rangeLabel, swatchPixels, type LegendEntry } from "./legend";
 import { SurfacePreview, isBackpressure, probeSurface } from "./preview";
+import { loadShadowGain, shadowGainWheelHandler } from "./shadow-gain";
 import type { DisplayRange } from "./surface";
 
 const SWATCH_W = 54, SWATCH_H = 22;
@@ -160,7 +161,10 @@ async function main(): Promise<void> {
   // own wheel and drag arithmetic is T-412's wheel-zoom mismatch rebuilt. So the listeners are
   // registered in one file, the meaning of a wheel is `preview.ts`'s `wheelZoom`, and this page and
   // the app cannot disagree about either.
-  attachSurfaceInput(canvas, preview);
+  // The shadow's brightness is a per-viewer display preference (T-526): loaded once here, never
+  // fetched, and changed only by the Ctrl+Shift+wheel gesture `input.ts` claims before any zoom.
+  preview.view.surface.setShadowGain(loadShadowGain());
+  attachSurfaceInput(canvas, preview, { onShadowGain: shadowGainWheelHandler(preview.view.surface) });
 
   // ——— size, and the loop ———
   const fit = () => {

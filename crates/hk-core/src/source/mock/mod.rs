@@ -75,6 +75,15 @@
 //!   keeps its `timestamp_method`; [`MockClock::Wall`] anchors at open, method `synthetic`.
 //! - **End:** [`MockEnd::Stop`] ends the stream with the recording; [`MockEnd::Loop`] splices it
 //!   again (the first block after the splice carries `GAP` with `dropped_before` 0).
+//! - **Faults (T-508):** [`MockFault`] makes the mock *fail* a retune the way the HackRF driver
+//!   does, instead of echoing every window it is told. The HackRF source applies a posted control on
+//!   the capture thread, at a block boundary, and a failed libhackrf call surfaces as the **read**
+//!   returning [`SourceError::Device`] (`hackrf.rs`'s `apply_pending`), not as an error from `tune`.
+//!   [`MockFault::RetuneApplyFails`] is exactly that: the control call is accepted, the change that
+//!   would move the centre or the rate is refused when applied, the read errors, and the front end
+//!   **stays on the tuning it had** (the stream itself keeps working, so a later read succeeds). No
+//!   fault is armed by default; `hk serve --device mock:…` arms one from `HK_MOCK_FAULT`
+//!   ([`MockFault::parse`]) and a test from [`MockSdrControl::arm_retune_faults`].
 //! - **Bias tee:** a flag (accepted, settles, no effect on samples). **Baseband filter:** recorded
 //!   in provenance only.
 //! - **Legal class:** the mock carries no class of its own. Callers derive it from the tuned window
@@ -114,7 +123,7 @@ pub use dsp::Coverage;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -216,6 +225,59 @@ pub enum MockClock {
     Wall,
 }
 
+/// A device fault the mock can be told to produce (T-508). Off unless armed.
+///
+/// Every retune guard in this repo was green over the user's "retune kills the live view" because
+/// the mock always lands exactly where it is told. A fault gives the harness a front end that can
+/// refuse, so a guard can be red.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MockFault {
+    /// The next `count` control changes that would **move the centre or the rate** are refused by
+    /// the device when the capture thread applies them: the read returns
+    /// [`SourceError::Device`] and the front end stays on its previous tuning. `u32::MAX` is
+    /// "every one, for ever". Gain, filter and bias-tee changes are unaffected, and so is a change
+    /// that re-sends the tuning already in force.
+    RetuneApplyFails {
+        /// How many retunes fail (`u32::MAX`: all of them).
+        count: u32,
+    },
+    /// The first change that would move the centre or the rate **takes the device away**: that
+    /// read and every read after it return [`SourceError::Device`], whatever is sent to it — a
+    /// front end unplugged, or wedged on a USB stall, mid-retune. Nothing can recover capture, so
+    /// this is how a harness produces a run that has genuinely ended.
+    GoneOnRetune,
+}
+
+impl MockFault {
+    /// Parses a harness fault spec: `retune-apply-fails` (one), `retune-apply-fails:N`,
+    /// `retune-apply-fails:always`, or `gone-on-retune`. `None` for an empty spec (or `none`);
+    /// `Err` names what was not understood.
+    pub fn parse(spec: &str) -> Result<Option<Self>, String> {
+        let spec = spec.trim();
+        if spec.is_empty() || spec == "none" {
+            return Ok(None);
+        }
+        if spec == "gone-on-retune" {
+            return Ok(Some(Self::GoneOnRetune));
+        }
+        let (name, arg) = spec.split_once(':').unwrap_or((spec, "1"));
+        if name != "retune-apply-fails" {
+            return Err(format!(
+                "unknown mock fault {name:?}: use retune-apply-fails[:N|:always] or gone-on-retune"
+            ));
+        }
+        let count = match arg {
+            "always" => u32::MAX,
+            n => n
+                .parse::<u32>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| format!("mock fault count {n:?} is not a positive integer"))?,
+        };
+        Ok(Some(Self::RetuneApplyFails { count }))
+    }
+}
+
 /// Mock device options.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MockOptions {
@@ -239,6 +301,8 @@ pub struct MockOptions {
     pub seed: u64,
     /// Injects an overrun of `.1` samples every `.0` blocks.
     pub overrun_every: Option<(u64, u64)>,
+    /// A device fault armed at open (T-508); `None` (the default) is a mock that never fails.
+    pub fault: Option<MockFault>,
 }
 
 impl Default for MockOptions {
@@ -254,6 +318,7 @@ impl Default for MockOptions {
             transition: 0.08,
             seed: 0x6d6f_636b_5344_5221,
             overrun_every: None,
+            fault: None,
         }
     }
 }
@@ -634,6 +699,12 @@ impl MockSdrDriver {
             device,
             counters: MockCounters::default(),
             injected: Mutex::new(Vec::new()),
+            retune_faults: AtomicU32::new(match self.options.fault {
+                Some(MockFault::RetuneApplyFails { count }) => count,
+                _ => 0,
+            }),
+            gone_on_retune: AtomicBool::new(self.options.fault == Some(MockFault::GoneOnRetune)),
+            gone: AtomicBool::new(false),
         });
         *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&control));
         MockSdrSource::new(
@@ -677,6 +748,7 @@ struct MockCounters {
     uncovered: AtomicU64,
     loops: AtomicU64,
     control_changes: AtomicU64,
+    faults: AtomicU64,
 }
 
 /// Mock-specific counters on top of [`SourceStats`].
@@ -701,6 +773,8 @@ pub struct MockStats {
     pub loops: u64,
     /// Control changes applied.
     pub control_changes: u64,
+    /// Retunes the device refused under an armed [`MockFault`] (T-508).
+    pub faults: u64,
 }
 
 /// The mock's control handle: validates like the HackRF's, applies at the next block boundary.
@@ -712,9 +786,32 @@ pub struct MockSdrControl {
     device: DeviceInfo,
     counters: MockCounters,
     injected: Mutex<Vec<u64>>,
+    /// Retunes still to refuse ([`MockFault::RetuneApplyFails`]); `u32::MAX` never runs out.
+    retune_faults: AtomicU32,
+    /// [`MockFault::GoneOnRetune`] is armed.
+    gone_on_retune: AtomicBool,
+    /// The device has gone ([`MockFault::GoneOnRetune`] fired): every read fails from now on.
+    gone: AtomicBool,
 }
 
 impl MockSdrControl {
+    /// Arms [`MockFault::RetuneApplyFails`]: the next `count` changes that move the centre or the
+    /// rate fail when applied (`u32::MAX`: all of them; 0 disarms).
+    pub fn arm_retune_faults(&self, count: u32) {
+        self.retune_faults.store(count, Ordering::SeqCst);
+    }
+
+    /// Consumes one armed retune fault; `true` if this retune must fail.
+    fn take_retune_fault(&self) -> bool {
+        self.retune_faults
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| match n {
+                0 => None,
+                u32::MAX => Some(u32::MAX),
+                n => Some(n - 1),
+            })
+            .is_ok()
+    }
+
     /// Drops `samples` output samples as a device overrun at the next block boundary.
     pub fn inject_overrun(&self, samples: u64) {
         if samples > 0 {
@@ -742,6 +839,7 @@ impl MockSdrControl {
             uncovered_samples: g(&c.uncovered),
             loops: g(&c.loops),
             control_changes: g(&c.control_changes),
+            faults: g(&c.faults),
         }
     }
 
@@ -1068,10 +1166,42 @@ impl MockSdrSource {
     }
 
     /// Applies posted controls; returns output samples to skip for settling.
-    fn apply_pending(&mut self) -> u64 {
+    ///
+    /// Under an armed [`MockFault::RetuneApplyFails`] a change that would move the centre or the
+    /// rate is refused **here**, on the capture thread, as the HackRF driver's `apply_pending`
+    /// refuses one: the read errors and nothing of the change reaches the tuning.
+    fn apply_pending(&mut self) -> Result<u64, SourceError> {
         let Some(change) = self.control.mailbox.take(&mut self.mailbox_seen) else {
-            return 0;
+            return Ok(0);
         };
+        let moves = change.center_hz.is_some_and(|hz| hz != self.tune.center_hz)
+            || change
+                .sample_rate_hz
+                .is_some_and(|hz| hz != self.tune.sample_rate_hz);
+        if moves && self.control.gone_on_retune.swap(false, Ordering::SeqCst) {
+            self.control.gone.store(true, Ordering::SeqCst);
+            self.control.counters.faults.fetch_add(1, Ordering::Relaxed);
+            return Err(SourceError::Device {
+                source_name: NAME,
+                operation: "retune",
+                message: "injected fault (T-508): the device went away mid-retune".into(),
+            });
+        }
+        if moves && self.control.take_retune_fault() {
+            self.control.counters.faults.fetch_add(1, Ordering::Relaxed);
+            return Err(SourceError::Device {
+                source_name: NAME,
+                operation: "retune",
+                message: format!(
+                    "injected fault (T-508): the device refused {} Hz / {} Hz and stays on {} Hz / {} \
+                     Hz",
+                    change.center_hz.unwrap_or(self.tune.center_hz),
+                    change.sample_rate_hz.unwrap_or(self.tune.sample_rate_hz),
+                    self.tune.center_hz,
+                    self.tune.sample_rate_hz
+                ),
+            });
+        }
         let before = self.tune.clone();
         let bias_before = self.bias_tee;
         if let Some(hz) = change.sample_rate_hz {
@@ -1121,7 +1251,7 @@ impl MockSdrSource {
             let flags = self.mint();
             self.pending_flags |= flags;
         }
-        u64::from(self.options.settle_blocks) * self.options.block_len as u64
+        Ok(u64::from(self.options.settle_blocks) * self.options.block_len as u64)
     }
 
     fn speed(&self) -> f64 {
@@ -1141,12 +1271,21 @@ impl MockSdrSource {
             return Ok(None);
         }
         let control = Arc::clone(&self.control);
+        if control.gone.load(Ordering::SeqCst) {
+            // A device that has gone does not answer quickly either; don't spin a reader.
+            std::thread::sleep(Duration::from_millis(5));
+            return Err(SourceError::Device {
+                source_name: NAME,
+                operation: "receive",
+                message: "injected fault (T-508): the device has gone".into(),
+            });
+        }
         let c = &control.counters;
         let block = self.options.block_len;
         let mut gap = 0u64;
 
         // Skipped output: settle, injected and periodic overruns, a late real-time reader.
-        let settle = self.apply_pending();
+        let settle = self.apply_pending()?;
         let fs = self.tune.sample_rate_hz;
         if settle > 0 {
             self.render.skip(settle);
