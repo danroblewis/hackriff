@@ -22,6 +22,14 @@
 //! (and is stored) metadata-only. The recorder is exempt from the publisher's slow-consumer
 //! disconnect, so a disk stall of any length loses (and counts) records but never the recording.
 //!
+//! **The books balance even when the queue is thrown away** (T-465). Closing this consumer — the
+//! publisher's `drain_timeout` at stream end, or a detach — frees its queue, and what was in it
+//! is never written. That loss used to be uncounted: `dropped_records` stayed as it was while
+//! everything still queued vanished. It is now reconciled at close from the publisher's own
+//! lifetime total (`records_enqueued + records_dropped`) against what this writer parsed, and the
+//! difference is added to `dropped_records`, so `frames + dropped_records` is what was published
+//! whatever ended the capture. See [`CaptureWriter::drop`].
+//!
 //! **Failures.** A write error never writes a byte twice (a retry resumes after the bytes that
 //! landed) and a segment that ends on an error is truncated to its last complete commit. On open,
 //! a capture left recording by a crashed process is cut back to its last complete, indexed record
@@ -401,7 +409,7 @@ impl DecodedCaptures {
         {
             return Ok(None);
         }
-        let reason = Arc::new(Mutex::new(None));
+        let closed = Arc::new(Mutex::new(None));
         let writer = CaptureWriter {
             store: Arc::clone(&self.0),
             dec: FrameDecoder::new(HEADER_MAX_LEN),
@@ -409,15 +417,22 @@ impl DecodedCaptures {
             header_frame: Vec::new(),
             seg: None,
             next_segment: 0,
-            reason: Arc::clone(&reason),
+            closed: Arc::clone(&closed),
             failed: false,
+            received: 0,
+            marked: 0,
         };
         let queue = self.quota().queue_bytes.max(MIN_QUEUE_BYTES);
         handle
             .subscribe_recorder(
                 "decoded-capture",
                 Declared::local(writer),
-                Box::new(move |r| *lock(&reason) = Some(r)),
+                Box::new(move |reason, stats| {
+                    *lock(&closed) = Some(Closed {
+                        reason,
+                        offered: stats.records_enqueued + stats.records_dropped,
+                    });
+                }),
                 queue,
             )
             .map(Some)
@@ -439,6 +454,15 @@ struct Segment {
     meta_at: Instant,
 }
 
+/// What the publisher reported when it closed this consumer (T-465). `offered` is every record
+/// the publisher gave this consumer over its lifetime — enqueued plus dropped-because-full — and
+/// is what the writer's own counts are reconciled against.
+#[derive(Clone, Copy, Debug)]
+struct Closed {
+    reason: CloseReason,
+    offered: u64,
+}
+
 /// The per-stream consumer writer: runs on the publisher's writer thread for this consumer.
 struct CaptureWriter {
     store: Arc<Inner>,
@@ -447,8 +471,14 @@ struct CaptureWriter {
     header_frame: Vec<u8>,
     seg: Option<Segment>,
     next_segment: u32,
-    reason: Arc<Mutex<Option<CloseReason>>>,
+    closed: Arc<Mutex<Option<Closed>>>,
     failed: bool,
+    /// Records that reached this writer over the whole stream (every payload after the header
+    /// except drop markers), across segments. Half of the books; see [`CaptureWriter::drop`].
+    received: u64,
+    /// Records the publisher told this writer it had dropped, summed from every drop marker that
+    /// arrived, across segments. The other half.
+    marked: u64,
 }
 
 /// Writes `buf` to `w`, removing what was written: after an error (e.g. a partial write on a full
@@ -583,6 +613,7 @@ impl CaptureWriter {
                             }
                             p
                         });
+                self.received += 1;
                 let body = reencoded.as_deref().unwrap_or(payload);
                 if encode_frame(&mut rec, body, max).is_err() {
                     rec.clear();
@@ -591,13 +622,17 @@ impl CaptureWriter {
                 self.store_frame(&rec, t)
             }
             (kind, v) => {
-                if kind == "dropped"
-                    && let Some(seg) = self.seg.as_mut()
-                {
-                    seg.dropped += v
+                if kind == "dropped" {
+                    let count = v
                         .and_then(|v| v.get("count"))
                         .and_then(Value::as_u64)
                         .unwrap_or(1);
+                    self.marked += count;
+                    if let Some(seg) = self.seg.as_mut() {
+                        seg.dropped += count;
+                    }
+                } else {
+                    self.received += 1;
                 }
                 encode_frame(&mut rec, payload, max).map_err(invalid)?;
                 if let Some(seg) = self.seg.as_mut() {
@@ -801,8 +836,26 @@ impl Write for CaptureWriter {
 }
 
 impl Drop for CaptureWriter {
+    /// Ends the last segment, **closing the books first** (T-465).
+    ///
+    /// Closing this consumer freed its queue, and whatever was in it was never written: on a
+    /// `drain-timeout` that is every record the writer had not caught up with, plus any pending
+    /// drop marker, which alone can stand for thousands of records. The publisher cannot count
+    /// those (a queue is framed bytes, a pop can split a record, and one discarded marker covers
+    /// many), but this writer can, because it parsed what arrived:
+    ///
+    /// ```text
+    /// lost = offered - (received + marked)
+    /// ```
+    ///
+    /// `offered` is every record the publisher gave this consumer, `received` every record that
+    /// reached this writer and `marked` every drop it was told about. `lost` is 0 on a clean
+    /// drain; otherwise it is added to the final segment's `dropped_records`, so
+    /// `frames + dropped_records` still adds up to what was published and the loss is a
+    /// measurement rather than a hole.
     fn drop(&mut self) {
-        let reason = match *lock(&self.reason) {
+        let closed = *lock(&self.closed);
+        let reason = match closed.map(|c| c.reason) {
             _ if self.failed => "write-failed",
             Some(CloseReason::SlowConsumer) => "slow-consumer",
             Some(CloseReason::PeerGone) => "write-failed",
@@ -810,6 +863,12 @@ impl Drop for CaptureWriter {
             Some(CloseReason::Detached) => "detached",
             Some(CloseReason::PublisherFinished) | None => "finished",
         };
+        let lost = closed.map_or(0, |c| c.offered.saturating_sub(self.received + self.marked));
+        if lost > 0
+            && let Some(seg) = self.seg.as_mut()
+        {
+            seg.dropped += lost;
+        }
         self.finish_segment(reason);
     }
 }
@@ -918,6 +977,7 @@ mod tests {
         RecordedFrames,
     };
     use hk_stream::{Publisher, PublisherConfig};
+    use std::sync::Condvar;
 
     struct TempDir(PathBuf);
 
@@ -1159,6 +1219,100 @@ mod tests {
         assert_eq!(c.frames + c.dropped_records, n, "{c:?}");
         let r = RecordedFrames::open(store.open(&c.id).unwrap().unwrap()).unwrap();
         assert_eq!(r.count() as u64, c.frames);
+    }
+
+    /// A stream file whose writes block until the gate opens.
+    struct GatedFile(Arc<(Mutex<bool>, Condvar)>, File);
+
+    impl Write for GatedFile {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let (m, cv) = &*self.0;
+            let mut open = m.lock().unwrap();
+            while !*open {
+                open = cv.wait(open).unwrap();
+            }
+            drop(open);
+            self.1.write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.1.flush()
+        }
+    }
+
+    fn set_gate(g: &Arc<(Mutex<bool>, Condvar)>, open: bool) {
+        *g.0.lock().unwrap() = open;
+        g.1.notify_all();
+    }
+
+    /// T-465: a drain timeout discards the recorder's queue, and every record in it is counted.
+    ///
+    /// The disk is blocked, so at stream end the recorder is still holding a full queue and a
+    /// pending drop marker covering everything the publisher had already refused. The publisher's
+    /// `drain_timeout` fires and frees all of it. That loss used to be invisible: `frames` stopped
+    /// where the disk did and `dropped_records` never moved, so the capture claimed a completeness
+    /// it did not have. The books must close instead — every published record is stored or
+    /// counted as dropped, and `end_reason` says what ended it.
+    #[test]
+    fn a_drain_timeout_counts_every_record_it_throws_away() {
+        let dir = TempDir::new("drain");
+        let store = DecodedCaptures::open(&dir.0, CaptureQuota::default()).unwrap();
+        let gate = Arc::new((Mutex::new(true), Condvar::new()));
+        let g = Arc::clone(&gate);
+        store.set_data_writer(Arc::new(move |p: &Path| {
+            Ok(Box::new(GatedFile(Arc::clone(&g), File::create(p)?)) as Box<dyn Write + Send>)
+        }));
+        let mut p = publisher_with(
+            ContentClass::Unrestricted,
+            PublisherConfig {
+                drain_timeout: Duration::from_millis(200),
+                ..PublisherConfig::default()
+            },
+        );
+        store.tee(p.header(), &p.handle()).unwrap();
+
+        // A healthy start, so there is a real capture to lose records from.
+        let mut n = 0u64;
+        for _ in 0..20 {
+            p.publish_frame(&frame(n)).unwrap();
+            n += 1;
+        }
+        wait_frames(&store, 20);
+
+        // The disk stops. Fill the 4 MiB queue and keep publishing past it: what fits is queued
+        // and what does not is dropped with a marker the blocked writer will never be handed.
+        set_gate(&gate, false);
+        let big = "ab".repeat(50_000);
+        for _ in 0..200 {
+            let mut f = frame(n);
+            f.content.as_mut().unwrap().hex = big.clone();
+            p.publish_frame(&f).unwrap();
+            n += 1;
+        }
+        let queued = p.handle().consumer_stats().swap_remove(0);
+        assert!(queued.queued_bytes > 0, "the queue is not full: {queued:?}");
+        assert!(
+            queued.records_dropped > 0,
+            "nothing was refused: {queued:?}"
+        );
+
+        // Stream end: the consumer drains, the blocked disk means it cannot, and the watchdog
+        // closes it and frees the queue.
+        drop(p);
+        std::thread::sleep(Duration::from_millis(500));
+        set_gate(&gate, true);
+        wait_ended(&store);
+
+        let list = store.list().unwrap();
+        let c = list.last().unwrap();
+        assert_eq!(c.end_reason.as_deref(), Some("drain-timeout"), "{c:?}");
+        let frames: u64 = list.iter().map(|c| c.frames).sum();
+        let dropped: u64 = list.iter().map(|c| c.dropped_records).sum();
+        assert!(
+            frames < n,
+            "nothing was lost, so nothing is proved: {list:?}"
+        );
+        assert!(dropped > 0, "the discarded queue was not counted: {list:?}");
+        assert_eq!(frames + dropped, n, "the books do not balance: {list:?}");
     }
 
     #[test]

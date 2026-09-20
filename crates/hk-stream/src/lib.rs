@@ -53,7 +53,7 @@ pub use policy::{Charset, IdentitySpec, MetadataPolicy, MetadataType};
 pub use publisher::{
     CloseReason, ConsumerId, ConsumerState, ConsumerStats, Declared, DecoderFeed, EgressWriter,
     FeedAttacher, FeedFraming, GateStats, Locality, PublishOutcome, Publisher, PublisherConfig,
-    PublisherHandle, SpectrumGateReason, StreamError,
+    PublisherHandle, RecorderCloser, SpectrumGateReason, StreamError,
 };
 pub use record::{
     BINARY_RECORD_HEADER_LEN, BinaryData, BinaryRecord, BinaryRecordHeader, BinaryRecordType,

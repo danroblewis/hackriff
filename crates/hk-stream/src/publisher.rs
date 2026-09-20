@@ -15,6 +15,11 @@
 //!   ([`PublisherHandle::subscribe_recorder`]) is exempt: it keeps dropping and counting instead.
 //! - At most [`PublisherConfig::max_consumers`] consumers are open at once; after the publisher
 //!   finishes, a consumer still draining after [`PublisherConfig::drain_timeout`] is closed.
+//! - **Closing a consumer discards its queue, and the discard is countable** (T-465): the bytes
+//!   are in [`ConsumerStats::bytes_discarded`], and the closer is handed the consumer's final
+//!   counters so a consumer that keeps books can say how many *records* went with them — see
+//!   [`RecorderCloser`]. A dropped record that is counted is a measurement; one that vanishes is
+//!   a lie about what was captured.
 //!
 //! # Producer cost
 //! Per record: build the frame (binary: a 36-byte prefix+header on the stack, payload borrowed;
@@ -482,7 +487,29 @@ struct Inner {
     consecutive_drops: u64,
 }
 
-type Closer = Box<dyn FnOnce(CloseReason) + Send>;
+/// The close callback of a book-keeping consumer ([`PublisherHandle::subscribe_recorder`]): it is
+/// handed the reason **and the consumer's final counters** (T-465).
+///
+/// # Closing the books on a discarded queue
+/// Closing a consumer frees its queue, and what was in it is never written. The bytes are counted
+/// ([`ConsumerStats::bytes_discarded`]) but the publisher cannot count the *records*: a queue holds
+/// framed bytes, a pop can split a record, and a discarded drop marker stands for many records at
+/// once. A consumer that keeps books can close them exactly, because it parsed what it received:
+///
+/// ```text
+/// offered = records_enqueued + records_dropped      // what the publisher gave this consumer
+/// lost    = offered - (records parsed + drops read from markers)
+/// ```
+///
+/// `lost` is 0 on a clean drain and is exactly what a [`CloseReason::DrainTimeout`],
+/// [`CloseReason::Detached`] or [`CloseReason::SlowConsumer`] close threw away — including records
+/// covered by a pending drop marker that was never delivered. Silent loss is the defect; a loss
+/// that is counted is a measurement.
+pub type RecorderCloser = Box<dyn FnOnce(CloseReason, ConsumerStats) + Send>;
+
+/// Every consumer's closer is a [`RecorderCloser`]; the plain [`PublisherHandle::subscribe`]
+/// signature simply ignores the counters.
+type Closer = RecorderCloser;
 
 struct Consumer {
     id: ConsumerId,
@@ -502,6 +529,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Consumer {
     /// Closes the consumer (idempotent): frees the ring, wakes the writer, runs the closer.
+    ///
+    /// The closer is handed the final counters as well as the reason, so a consumer that keeps
+    /// books can account for the queue that was just discarded (see [`RecorderCloser`]). No new
+    /// record can reach a closed consumer, so these counters are final.
     fn close(&self, reason: CloseReason) -> bool {
         {
             let mut g = lock(&self.inner);
@@ -514,7 +545,7 @@ impl Consumer {
         self.closed.store(true, Ordering::Release);
         self.cv.notify_all();
         if let Some(closer) = lock(&self.closer).take() {
-            closer(reason);
+            closer(reason, self.stats());
         }
         true
     }
@@ -744,6 +775,14 @@ impl Shared {
 
     /// Stops new subscriptions, lets open consumers drain, and closes any consumer still
     /// draining after `drain_timeout`.
+    ///
+    /// **The drain itself is already bounded** (T-465): a draining consumer is skipped by
+    /// [`Publisher::offer`], so no record is ever added after `finish`, and what is left to write
+    /// is at most one queue (`queue_bytes`). `drain_timeout` is therefore not a bound on an
+    /// unbounded drain — it is the bound on a *write that may never return* (a stalled disk, a
+    /// peer that has stopped reading). Lengthening it would only make the loss rarer, so instead
+    /// the close hands the consumer its final counters and a book-keeping consumer counts what was
+    /// thrown away ([`RecorderCloser`]).
     fn finish(self: &Arc<Self>) {
         let consumers = {
             let mut list = lock(&self.list);
@@ -817,18 +856,28 @@ impl PublisherHandle {
         closer: Box<dyn FnOnce(CloseReason) + Send>,
         queue_bytes: usize,
     ) -> Result<ConsumerId, StreamError> {
-        self.subscribe_inner(label.into(), writer, closer, queue_bytes, false)
+        self.subscribe_inner(
+            label.into(),
+            writer,
+            Box::new(move |r, _| closer(r)),
+            queue_bytes,
+            false,
+        )
     }
 
     /// [`PublisherHandle::subscribe_with_queue`] for a local recorder (T-092 decoded captures):
     /// the slow-consumer policy never closes it. While it stays full it keeps dropping, and the
     /// drop marker it gets on the next record it accepts counts them, so a disk stall longer than
     /// [`PublisherConfig::disconnect_after`] loses records but not the recording.
+    ///
+    /// Its `closer` is a [`RecorderCloser`]: it is handed the consumer's **final counters** as
+    /// well as the reason, so the recorder can account for a queue discarded at close (T-465)
+    /// instead of ending with books that do not add up.
     pub fn subscribe_recorder<W: EgressWriter>(
         &self,
         label: impl Into<String>,
         writer: W,
-        closer: Box<dyn FnOnce(CloseReason) + Send>,
+        closer: RecorderCloser,
         queue_bytes: usize,
     ) -> Result<ConsumerId, StreamError> {
         self.subscribe_inner(label.into(), writer, closer, queue_bytes, true)
@@ -838,7 +887,7 @@ impl PublisherHandle {
         &self,
         label: String,
         writer: W,
-        closer: Box<dyn FnOnce(CloseReason) + Send>,
+        closer: Closer,
         queue_bytes: usize,
         slow_exempt: bool,
     ) -> Result<ConsumerId, StreamError> {
@@ -1847,7 +1896,7 @@ impl FeedAttacher {
             }),
             // A child's stdin pipe stays on this host.
             Locality::Local,
-            Box::new(move |reason| {
+            Box::new(move |reason, _| {
                 if reason == CloseReason::SlowConsumer {
                     on_stall();
                 }
