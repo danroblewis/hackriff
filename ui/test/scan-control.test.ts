@@ -7,8 +7,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  type ControlState, type ScanBudget, type ScanState, commitmentText, scanPanelModel,
-  scanPreviewPath, scanQueryFrom,
+  type ControlState, type ScanBudget, type ScanState, FAST_SCAN_DWELL_S, commitmentText,
+  everythingScanQuery, scanPanelModel, scanPreviewPath, scanQueryFrom,
 } from "../src/controls/model";
 import replayState from "./control_state_replay.json";
 
@@ -198,4 +198,41 @@ test("the step control sits in the sweep fieldset beside From/To/Dwell and repri
   assert.match(src, /"Dwell ", this\.scanDwell\),\s*h\("label"[^\n]*"Step ", this\.scanStep\)/);
   assert.match(src, /scanStep = h\("select", \{ onchange: \(\) => void this\.priceScan\(\) \}/);
   assert.match(src, /step: \(this\.scanStep as HTMLSelectElement\)\.value/);
+});
+
+// ---- T-516: the one-click "scan everything" ----
+
+test("the one-click 'scan everything' request: no range (already means everything), a fast dwell, coarse step", () => {
+  assert.deepEqual(everythingScanQuery(), { dwell_s: FAST_SCAN_DWELL_S, step: "coarse" });
+  assert.ok(FAST_SCAN_DWELL_S >= 0.2 && FAST_SCAN_DWELL_S <= 0.5, "T-516: a fast dwell, not a fine one");
+  // What the panel actually sets the fields to must build exactly this request — the same
+  // `scanQueryFrom` every other sweep goes through, not a second bespoke request shape.
+  assert.deepEqual(
+    scanQueryFrom({ loMHz: "", hiMHz: "", dwellS: String(FAST_SCAN_DWELL_S), step: "coarse" }),
+    everythingScanQuery(),
+  );
+  // At the coarse step's ~418-step full-range pass (T-517's own numbers), this dwell is minutes,
+  // not the ~13 h a 12 s/step fine sweep over 1 MHz-6 GHz costs.
+  const passMinutes = (418 * FAST_SCAN_DWELL_S) / 60;
+  assert.ok(passMinutes < 5, `expected a pass of a few minutes, got ${passMinutes.toFixed(1)} min`);
+});
+
+test("the one-click is visible next to the sweep controls, prices before it starts, and never resumes", () => {
+  const src = readFileSync("src/app/review/device.ts", "utf8");
+  // A control nobody can see is not a control (the T-409 rule) - it must be in the fieldset's tree.
+  assert.match(src, /scanAll = h\("button"/);
+  assert.match(src, /"Scan everything/);
+  assert.match(src, /this\.scanAll, h\("span"/, "sits beside the sweep controls, not off on its own");
+  assert.match(src, /h\("div", \{\}, this\.scanAll,[\s\S]*?h\("label", \{\}, "From "/, "lives in the sweep fieldset, above From/To");
+  // The handler: set the fields, reprice, THEN start - the commitment line must state this pass's
+  // own cost before the radio is committed, exactly like every other sweep.
+  const body = src.match(/private async onScanAll\(\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body, "onScanAll must exist");
+  assert.ok(body!.includes("everythingScanQuery()"), "must build its request the same way it is tested");
+  assert.ok(body!.includes("this.priceScan()"), "must reprice for the fast/coarse defaults it just set");
+  assert.ok(body!.includes("this.onScanStart()"), "must actually start it - one click, not a second button");
+  assert.ok(
+    body!.indexOf("this.priceScan()") < body!.indexOf("this.onScanStart()"),
+    "price before it runs (T-516) - never start first and price after",
+  );
 });
