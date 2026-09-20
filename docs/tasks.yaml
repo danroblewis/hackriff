@@ -15886,6 +15886,38 @@ tasks:
     notes: |
       Filed 2026-09-20 from T-531's report.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-537
+    milestone: M2-hardening
+    title: The live-edge unit guard sampled ONE frame after a wall-clock budget, so load made it read a frame drawn before any answer existed
+    status: done
+    commit: "5e0d673a"
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      Blocked TWO merge gates (task-t523, task-t528) with "the renderer drew no resident tile this
+      frame". NOT ui/e2e/live-edge.e2e.mjs as first assumed - the assertion lives in
+      ui/test/surface-preview.test.ts, the node unit tier, which has no port, no data dir, no
+      browser and a stubbed fetch, so the shared-resource hypothesis was ruled out structurally.
+      MECHANISM: run(preview, 700) drew frames "for 700 ms of wall clock", each iteration ending in
+      await setTimeout(10). Under load a 10 ms timer fires ~700 ms late, so the budget bought
+      EXACTLY ONE frame - the opening one, drawn before any answer could arrive - while 157 tiles
+      had in fact become resident (which is why only `drew > 0` failed). Reproduced: 0/20 failures
+      at load 38, 1/15 at 135, 11/25 at 150.
+      FIX: drive() draws until the property holds, bounded in FRAMES (600) not milliseconds, and
+      returns its measurement; the live edge becomes a virtual capture clock stepped once per frame
+      (also the faithful instrument - the edge is a number the backend tells the client); pending is
+      checked on EVERY frame of the claim phase, exempting only frames where a new address appeared.
+      The cache's real-time gates are deliberately NOT bypassed - they are the behaviour under test.
+      Nothing loosened, nothing retried. Guard re-verified: stubbing refreshLiveEdge (T-460's
+      defect) and dropping the resident copy before revalidation both go RED.
+      Old vs new bundles interleaved run-for-run under 130 burners (load 150-198): 20/35 assertion
+      failures before, 0/35 after; 8/8 green idle; the file also got ~2x faster.
+    notes: |
+      Filed 2026-09-20 after the fact by the coordinator - the agent could not add it without
+      conflicting with a board file that moves every tick.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
