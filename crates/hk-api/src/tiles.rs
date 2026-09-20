@@ -155,6 +155,41 @@ pub const TILE_MAX_SOURCE_CELLS: usize = crate::query::MAX_API_CELLS;
 /// the measured per-cell cost (`docs/16` §6.4).
 pub const TILE_MAX_TOTAL_SOURCE_CELLS: usize = 4 * TILE_MAX_SOURCE_CELLS;
 
+/// How deep the **shadow search** may read, in rows across the tile's own columns (T-523).
+///
+/// A tile's budget is `cells × SHADOW_SEARCH_ROWS`, which is [`TILE_MAX_SHADOW_SOURCE_CELLS`] at
+/// the route's own 256-cell unit. Rows rather than an area, so the *reach* of the search is the
+/// same for a probe-sized tile as for a full one — the quantity the shadow is about is "how far
+/// back can this look", and it should not depend on how many pixels someone asked for.
+///
+/// # Why the shadow is not budgeted like a tile read
+///
+/// T-519 gave the last-known search the tile read's own two budgets, on the reasoning that "the
+/// shadow can at most double a tile's work". On the **full** path that is true and harmless. On
+/// T-461's **coverage short-circuit** it is neither: that path exists precisely because the answer
+/// is already known from the coverage plane and the pyramid read is 65 536 source cells spent to
+/// confirm it — and then the shadow spent up to 2 000 000 on the same tile. The route's cheapest
+/// answer became one of its most expensive, and the user met it as `502`s from the tunnel during a
+/// zoom, where the burst asks for the same place at every level at once.
+///
+/// The right scale is the **tile**, not the store: the shadow decorates a `cells × cells` grid with
+/// at most `cells` column values, so a few hundred rows across those columns is the most it can be
+/// worth — 512, two per row of a full tile. What a tighter budget costs is stated by [`hk_store::Pyramid::last_known_search`] and is exactly what
+/// makes it safe: the search plans fine-to-coarse and **skips a stage it cannot afford, leaving the
+/// next coarser one to cover that window** — so the bound is paid in the shadow's frequency/time
+/// *resolution*, which the wire reports per run (`shadow.sources[].level`), never in reach and
+/// never in a silently-missing run. A window it genuinely could not read is reported in
+/// `shadow.search.unsearched`, as it was before.
+///
+/// 512 rows is the number [`hk_store::Pyramid::last_known_search`]'s own documentation is written
+/// against — *"the whole retained horizon costs a few hundred rows per column"* — because the ladder
+/// is fine-to-coarse: 512 rows spread over the chain reach days, not 512 seconds.
+pub const SHADOW_SEARCH_ROWS: usize = 512;
+
+/// Source cells the shadow search may read for one tile of the route's own unit ([`TILE_CELLS`]),
+/// and the ceiling on the per-tile budget computed in [`shadow`]. See [`SHADOW_SEARCH_ROWS`].
+pub const TILE_MAX_SHADOW_SOURCE_CELLS: usize = TILE_CELLS * SHADOW_SEARCH_ROWS;
+
 /// Tile reads in flight at once (`docs/16` §5.5 cap 3: **server backpressure**, not a browser's
 /// connection limit).
 ///
@@ -1255,9 +1290,13 @@ fn grid_json(o: &Overview) -> Value {
 ///
 /// # The search's lock holds
 ///
-/// One step per history lock hold, each at most [`TILE_MAX_SOURCE_CELLS`] source cells, and the
-/// whole search at most [`TILE_MAX_TOTAL_SOURCE_CELLS`] — the same two bounds as the tile read, so
-/// the shadow can at most double a tile's work and never lengthens a hold.
+/// One step per history lock hold, and the **whole search** at most
+/// `cells × `[`SHADOW_SEARCH_ROWS`] source cells,
+/// capped by [`TILE_MAX_SHADOW_SOURCE_CELLS`] (T-523). That total is a quarter of
+/// [`TILE_MAX_SOURCE_CELLS`], the *single-hold* bound, so no hold this search takes can come near
+/// lengthening one. T-519's original bounds were the tile read's own, which made the coverage
+/// short-circuit — the route's cheapest answer — one of its most expensive. A budget costs the
+/// shadow *resolution*, never reach: see [`TILE_MAX_SHADOW_SOURCE_CELLS`].
 struct Shadow {
     runs: Vec<hk_store::ShadowRun>,
     known: hk_store::LastKnown,
@@ -1265,6 +1304,8 @@ struct Shadow {
     edge_ns: Option<i64>,
     chunks: usize,
     elapsed_ms: f64,
+    /// Source cells this search was allowed (T-523), on the wire as `search.max_source_cells`.
+    budget: usize,
     /// Per level of the searched store: `(f_cell_hz, t_cell_ns)`.
     levels: Vec<(f64, i64)>,
 }
@@ -1290,6 +1331,11 @@ fn shadow(
     let started = std::time::Instant::now();
     let store = shadow_store(state, tile_store);
     let (t0, t1, n) = (key.region.t0_ns, key.region.t1_ns, key.cells);
+    // T-523: budgeted against the TILE, not against the store. See [`TILE_MAX_SHADOW_SOURCE_CELLS`]
+    // for why the tile read's own budget was the wrong scale on the coverage short-circuit.
+    let budget = n
+        .saturating_mul(SHADOW_SEARCH_ROWS)
+        .clamp(1, TILE_MAX_SHADOW_SOURCE_CELLS);
     let latest = |s: TileStore| {
         with_tile_history(state, s, |p| {
             Ok(p.latest_frame_end().map(Timestamp::as_unix_nanos))
@@ -1333,8 +1379,12 @@ fn shadow(
                 Timestamp::from_unix_nanos(t0),
                 n,
                 Some(guard),
-                TILE_MAX_SOURCE_CELLS,
-                TILE_MAX_TOTAL_SOURCE_CELLS,
+                // The per-hold bound is the whole budget, which is already a quarter of
+                // [`TILE_MAX_SOURCE_CELLS`]: slicing a read that small into smaller holds would
+                // only add lock acquisitions. The search still takes several holds — one per
+                // stage/slice — but no single one can exceed the route's per-hold cap.
+                budget,
+                budget,
             ),
             levels,
         ))
@@ -1357,6 +1407,7 @@ fn shadow(
         edge_ns,
         chunks,
         elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
+        budget,
         levels,
     })
 }
@@ -1438,16 +1489,20 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
                 }))
                 .collect::<Vec<_>>(),
             "source_cells": k.source_cells,
+            "max_source_cells": sh.budget,
             "chunks": sh.chunks,
             "build_ms": (sh.elapsed_ms * 1000.0).round() / 1000.0,
             "rule": "newest-first, fine-to-coarse: each stage reads one level over the part of the \
                 past the finer stage above it did not, so the whole retained horizon costs a few \
                 hundred rows per column; the search stops when every column has a value or the \
-                store holds nothing older. Bounded by the tile read's own two budgets \
-                (`resolution.budget`), one lock hold per step. A window in `unsearched` was NOT read \
-                (over budget, or its coarse cell is not folded yet): a column with no run is \
-                unobserved in [searched_from_s, before_s) OUTSIDE those windows, and nothing is \
-                claimed about earlier.",
+                store holds nothing older. Bounded by `max_source_cells` (T-523: cells x 512 rows, \
+                the TILE's scale and not the store's — the whole search's total is a quarter of what \
+                `resolution.budget` allows ONE lock hold). The budget is paid in RESOLUTION, \
+                never in reach: a stage it cannot afford is skipped and the next COARSER level \
+                covers that window, which is why `sources[].level` is on the wire per run. A window \
+                in `unsearched` was NOT read (over budget, or its coarse cell is not folded yet): a \
+                column with no run is unobserved in [searched_from_s, before_s) OUTSIDE those \
+                windows, and nothing is claimed about earlier.",
         },
         "rule": "the LAST-KNOWN tier (docs/adr/0020), NOT a measurement of the row it is drawn on. \
             Run i covers rows [row[i], row[i] + rows[i]) of column f[i], in `grid.order`'s axes; \

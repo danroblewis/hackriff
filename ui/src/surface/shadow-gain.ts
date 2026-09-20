@@ -1,5 +1,5 @@
 // **User-adjustable shadow brightness** (T-526, client-only). `cellrule.ts`'s `SHADOW_MARK.gain`
-// (0.25) is still the default and still the number the shadow's hard-ceiling guarantee is written
+// (0.32) is still the default and still the number the shadow's hard-ceiling guarantee is written
 // against at its top end (0.7, this module's `SHADOW_GAIN_MAX`) — `surface-honesty.test.ts` asserts
 // the live ramp clears any gain up to that max from about a third of the way up, so widening how
 // dark a viewer may render a shadow can never turn one into something read as live. Nothing here
@@ -7,12 +7,21 @@
 // (`Surface.shadowGain`, set from `uShadowGain`) and re-rendered instantly — no refetch, no change
 // to what was recorded.
 
+import { SHADOW_MARK } from "./cellrule";
+
 /** Where the choice is remembered. A per-viewer convenience (browser storage), not shared state:
  * see CLAUDE.md's rule on what belongs in `localStorage` versus a runtime capability. */
 export const SHADOW_GAIN_KEY = "hk-mui-shadow-gain";
 
-/** Must match `SHADOW_MARK.gain` in `cellrule.ts` — the shadow's shipped default. */
-export const SHADOW_GAIN_DEFAULT = 0.25;
+/**
+ * The shipped default — **the same number as `SHADOW_MARK.gain`, not a copy of it** (T-523).
+ *
+ * T-526 left the default written twice, here and in `cellrule.ts`'s mark table, with a comment
+ * asking that they be kept equal; raising it was the first change to test that comment, so the
+ * duplicate is gone instead. The mark table is the source: it is where all six cell marks live as
+ * data, and the shader is generated from it. See [[SHADOW_MARK]] for why the number is 0.32.
+ */
+export const SHADOW_GAIN_DEFAULT: number = SHADOW_MARK.gain;
 export const SHADOW_GAIN_MIN = 0.05;
 export const SHADOW_GAIN_MAX = 0.7;
 
