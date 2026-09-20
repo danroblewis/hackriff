@@ -15548,7 +15548,7 @@ tasks:
   - id: T-521
     milestone: MSCAN
     title: "Fog-of-war 2C: the standing guard - sweep then leave = shadow, never swept = grey, re-sweep = bright"
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CANVAS-FE
     model: sonnet
@@ -15587,7 +15587,7 @@ tasks:
   - id: T-523
     milestone: MSCAN
     title: Fog-of-war regressed the live view - the live edge stalls until a resize, and zoom bursts draw 502s
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CANVAS-FE
     model: opus
@@ -15618,7 +15618,8 @@ tasks:
   - id: T-524
     milestone: MSCAN
     title: Notch-and-interpolate the LO-leakage spike at every tune centre, in the backend, so a sweep stops stamping a false pattern
-    status: in-progress
+    status: done
+    commit: "294597f2"
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15642,7 +15643,7 @@ tasks:
   - id: T-525
     milestone: MSCAN
     title: A full 1-6000 MHz sweep on the LIVE HackRF crashes hk serve - a failed or edge retune must skip the step, never take the server down
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15665,6 +15666,27 @@ tasks:
     notes: |
       Filed 2026-09-19; queued for after the weekly reset (Sun 02:00) given budget.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-526
+    milestone: MSCAN
+    title: Ctrl+Shift+wheel sets how dark the fog-of-war shadow renders
+    status: done
+    commit: "cc04109e"
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: sonnet
+    depends_on: [T-520]
+    use_cases: []
+    acceptance: |
+      USER 2026-09-19. Client-only: the shadow ramp's brightness multiplier becomes a uniform
+      (uShadowGain); Ctrl+Shift+wheel steps it in [0.05, 0.7] without zooming or panning, persisted
+      under hk-mui-shadow-gain (default 0.25). Backend values untouched.
+      MERGED WITHOUT THE GATE by the user's explicit one-time override (low-risk, UI-only, wanted
+      live immediately); tsc + 48/48 unit files passed. Every other ticket keeps the normal gate.
+    notes: |
+      The honesty ceiling now holds at the MAXIMUM gain (0.7) rather than the shipped default, and
+      the scanline texture is asserted at min/default/max - near the top of the range texture, not
+      brightness, is what separates a shadow from live. T-523 raises the DEFAULT gain; reconcile
+      the two when it lands.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
