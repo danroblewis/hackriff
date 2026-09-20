@@ -1420,6 +1420,10 @@ fn scan_proposal(query: &[(String, String)]) -> Result<Option<crate::scan::ScanR
         }
     };
     let (lo, hi, dwell_s) = (num("f_lo_hz")?, num("f_hi_hz")?, num("dwell_s")?);
+    let step = match query.iter().find(|(n, _)| n == "step") {
+        None => None,
+        Some((_, v)) => Some(scan_step(v)?),
+    };
     let freq = match (lo, hi) {
         (Some(lo), Some(hi)) => Some(hk_model::FreqRange::new(lo, hi)),
         (None, None) => None,
@@ -1430,7 +1434,24 @@ fn scan_proposal(query: &[(String, String)]) -> Result<Option<crate::scan::ScanR
             ));
         }
     };
-    Ok((freq.is_some() || dwell_s.is_some()).then_some(crate::scan::ScanRequest { freq, dwell_s }))
+    Ok(
+        (freq.is_some() || dwell_s.is_some() || step.is_some()).then_some(
+            crate::scan::ScanRequest {
+                freq,
+                dwell_s,
+                step,
+            },
+        ),
+    )
+}
+
+/// A `step` (T-517): `"fine"` or `"coarse"`, nothing else.
+fn scan_step(v: &str) -> Result<hk_core::scheduler::ScanStep, Fail> {
+    hk_core::scheduler::ScanStep::parse(v).ok_or_else(|| {
+        Fail::invalid(format!(
+            "step must be \"fine\" or \"coarse\", got {v:?}; omit it for fine"
+        ))
+    })
 }
 
 fn bookmark_json(b: &Bookmark) -> Value {
@@ -1622,7 +1643,7 @@ fn apply_action(
         // none here, so the answer names the device it commits and the plan it will walk, and the
         // first step is taken by the driver.
         Action::ScanStart => {
-            only(body, &["f_lo_hz", "f_hi_hz", "dwell_s", "resume"])?;
+            only(body, &["f_lo_hz", "f_hi_hz", "dwell_s", "step", "resume"])?;
             let runner = scan_runner(state)?;
             let old = runner.json();
             let resume = match body.get("resume") {
@@ -1657,17 +1678,38 @@ fn apply_action(
                     None => None,
                     Some(_) => Some(required(body, "dwell_s")?),
                 };
+                let step = match body.get("step") {
+                    None => None,
+                    Some(Value::String(v)) => Some(scan_step(v)?),
+                    Some(_) => {
+                        return Err(Fail::invalid(
+                            "step must be \"fine\" or \"coarse\"; omit it for fine",
+                        ));
+                    }
+                };
                 runner
-                    .start(&crate::scan::ScanRequest { freq, dwell_s })
+                    .start(&crate::scan::ScanRequest {
+                        freq,
+                        dwell_s,
+                        step,
+                    })
                     .map_err(scan_fail)?
                     .json()
             };
             let new = runner.json();
+            // A coarse step from a narrower window also commits the front end to one rate change
+            // before its first retune (T-517): the answer names it, as it names the retunes.
+            let mut device = commissioned_json(state, DeviceAction::Retune);
+            let rate = new["plan"]["changes_rate"]
+                .as_bool()
+                .unwrap_or(false)
+                .then(|| new["plan"]["sample_rate_hz"].clone());
+            device["commissions_rate_hz"] = rate.unwrap_or(Value::Null);
             Ok(ok(
                 json!({
                     "scan": new.clone(),
                     "proposed": plan,
-                    "device": commissioned_json(state, DeviceAction::Retune),
+                    "device": device,
                 }),
                 old,
                 new,

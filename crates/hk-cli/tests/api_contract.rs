@@ -9004,3 +9004,106 @@ fn a_survey_sweep_can_be_started_from_the_app_and_yields_to_the_user() {
 
     stop_server(serving);
 }
+
+/// T-517: the sweep's step width. A fine step tiles at the span in force (the fixture's 2.4 Msps:
+/// 1.8 MHz per step); a coarse step tiles at the widest power-of-two multiple of it the device
+/// supports at which the run's bins keep their width (19.2 Msps: 14.4 MHz per step). Values, not
+/// shapes (T-315) — and the bin width is asserted IDENTICAL, against the pipeline's own function,
+/// so "coarse" can never later be read as permission to degrade the frequency resolution.
+#[test]
+fn a_coarse_sweep_step_is_fewer_windows_at_the_same_bin_width() {
+    let (_dir_guard, serving, addr) = start_server();
+    wait_for("a live front end", Duration::from_secs(30), || {
+        get(addr, "/api/control/state").1["tuning"]["center_hz"].as_f64() == Some(FIXTURE_CENTER_HZ)
+    });
+    let price = |q: &str| {
+        let (st, v) = get(addr, &format!("/api/control/scan?{q}"));
+        assert_eq!(st, 200, "{v}");
+        v["proposed"].clone()
+    };
+    // The whole tunable range (no f_lo/f_hi), at a fast dwell.
+    let omitted = price("dwell_s=0.5");
+    let fine = price("dwell_s=0.5&step=fine");
+    let coarse = price("dwell_s=0.5&step=coarse");
+    assert_eq!(
+        omitted["plan"], fine["plan"],
+        "omitting step is today's fine step"
+    );
+    assert_eq!(fine["plan"]["step"], json!("fine"), "{fine}");
+    assert_eq!(coarse["plan"]["step"], json!("coarse"), "{coarse}");
+    assert_eq!(fine["plan"]["steps"], json!(FINE_STEPS), "{fine}");
+    assert_eq!(coarse["plan"]["steps"], json!(COARSE_STEPS), "{coarse}");
+    assert_eq!(fine["budget"]["step_span_hz"], json!(1.8e6), "{fine}");
+    assert_eq!(coarse["budget"]["step_span_hz"], json!(14.4e6), "{coarse}");
+    assert_eq!(
+        fine["budget"]["pass_s"],
+        json!(FINE_STEPS as f64 * 0.5),
+        "{fine}"
+    );
+    assert_eq!(
+        coarse["budget"]["pass_s"],
+        json!(COARSE_STEPS as f64 * 0.5),
+        "{coarse}"
+    );
+    assert_eq!(fine["plan"]["sample_rate_hz"], json!(2.4e6), "{fine}");
+    assert_eq!(fine["plan"]["changes_rate"], json!(false), "{fine}");
+    assert_eq!(coarse["plan"]["sample_rate_hz"], json!(19.2e6), "{coarse}");
+    assert_eq!(coarse["plan"]["rate_in_force_hz"], json!(2.4e6), "{coarse}");
+    assert_eq!(coarse["plan"]["changes_rate"], json!(true), "{coarse}");
+    // FREQUENCY RESOLUTION IS UNCHANGED, coarse vs fine, and it is the pipeline's own bin width.
+    let bin = hk_pipeline::detection_bin_hz(2.4e6, None);
+    assert_eq!(bin, 4_687.5);
+    assert_eq!(fine["plan"]["bin_hz"], json!(bin), "{fine}");
+    assert_eq!(coarse["plan"]["bin_hz"], json!(bin), "{coarse}");
+    // Pricing moved nothing.
+    let (_, state) = get(addr, "/api/control/state");
+    assert_eq!(state["tuning"]["sample_rate_hz"], json!(2.4e6), "{state}");
+    assert_eq!(
+        state["tuning"]["center_hz"].as_f64(),
+        Some(FIXTURE_CENTER_HZ)
+    );
+
+    // Anything but fine/coarse is refused, on either route.
+    let (st, v) = get(addr, "/api/control/scan?step=medium");
+    assert_eq!((st, v["code"].clone()), (400, json!("invalid")), "{v}");
+    let (st, v) = post(addr, "/api/control/scan", r#"{"step": 3}"#);
+    assert_eq!((st, v["code"].clone()), (400, json!("invalid")), "{v}");
+    let (st, v) = post(
+        addr,
+        "/api/control/scan",
+        r#"{"resume": true, "step": "coarse"}"#,
+    );
+    assert_eq!(st, 400, "resume takes no step: {v}");
+
+    // A coarse start names the rate change it commits the front end to, beside the retunes.
+    let (st, v) = post(
+        addr,
+        "/api/control/scan",
+        r#"{"f_lo_hz": 88000000, "f_hi_hz": 108000000, "dwell_s": 2, "step": "coarse"}"#,
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["device"]["commissions"], json!("retune"), "{v}");
+    assert_eq!(v["device"]["commissions_rate_hz"], json!(19.2e6), "{v}");
+    assert_eq!(
+        v["scan"]["plan"]["steps"],
+        json!(2),
+        "20 MHz at 14.4 MHz per step: {v}"
+    );
+    let (st, _) = post(addr, "/api/control/scan/stop", "{}");
+    assert_eq!(st, 200);
+    // A fine start commits no rate change.
+    let (st, v) = post(
+        addr,
+        "/api/control/scan",
+        r#"{"f_lo_hz": 88000000, "f_hi_hz": 108000000, "dwell_s": 2}"#,
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["device"]["commissions_rate_hz"], Value::Null, "{v}");
+    let (st, _) = post(addr, "/api/control/scan/stop", "{}");
+    assert_eq!(st, 200);
+    stop_server(serving);
+}
+
+/// Full-range steps at the fixture's 2.4 Msps: fine 1.8 MHz, coarse 14.4 MHz.
+const FINE_STEPS: u64 = 3334;
+const COARSE_STEPS: u64 = 418;

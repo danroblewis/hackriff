@@ -156,3 +156,46 @@ test("the sweep control is mounted in the SDR panel, and prices through the serv
     assert.ok(!model.includes(f), `the client must not re-derive the sweep's plan (${f})`);
   }
 });
+
+// ---- T-517: the step width ----
+
+test("the step width is on the wire exactly as chosen, on both the price and the start", () => {
+  const coarse = scanQueryFrom({ loMHz: "", hiMHz: "", dwellS: "0.5", step: "coarse" });
+  // The start POSTs this same object (device.ts `onScanStart` sends `this.scanQuery()`).
+  assert.deepEqual(coarse, { dwell_s: 0.5, step: "coarse" });
+  assert.equal(scanPreviewPath(coarse), "/api/control/scan?dwell_s=0.5&step=coarse");
+  assert.deepEqual(
+    scanQueryFrom({ loMHz: "88", hiMHz: "108", dwellS: "12", step: "fine" }),
+    { f_lo_hz: 88e6, f_hi_hz: 108e6, dwell_s: 12, step: "fine" },
+  );
+  // Anything the server does not name is left to its default rather than sent.
+  assert.deepEqual(scanQueryFrom({ loMHz: "", hiMHz: "", dwellS: "", step: "medium" }), {});
+  assert.deepEqual(scanQueryFrom({ loMHz: "", hiMHz: "", dwellS: "" }), {});
+});
+
+test("the price line shows the chosen step, so coarse visibly = fast, at the same bin width", () => {
+  const plan = (step: "fine" | "coarse", rate: number, steps: number) => ({
+    f_lo_hz: 1e6, f_hi_hz: 6e9, dwell_s: 0.5, recommended_dwell: false, sample_rate_hz: rate,
+    rate_in_force_hz: 2.4e6, changes_rate: rate !== 2.4e6, step, bin_hz: 4687.5, steps, warnings: [],
+  });
+  const fine = scanPanelModel(live(scan()), {
+    plan: plan("fine", 2.4e6, 3334),
+    budget: budget({ steps: 3334, dwell_s: 0.5, pass_s: 1667, revisit_s: 1667, step_span_hz: 1.8e6, duty: 1 / 3334 }),
+  });
+  const coarse = scanPanelModel(live(scan()), {
+    plan: plan("coarse", 19.2e6, 418),
+    budget: budget({ steps: 418, dwell_s: 0.5, pass_s: 209, revisit_s: 209, step_span_hz: 14.4e6, duty: 1 / 418 }),
+  });
+  assert.match(fine.commitment, /^fine steps of 1\.8 MHz \(bins 4\.69 kHz either way\): 3334 steps × 0\.5 s = 28 min per pass/);
+  assert.match(coarse.commitment, /^coarse steps of 14\.4 MHz \(bins 4\.69 kHz either way\): 418 steps × 0\.5 s = 3 min per pass/);
+  // A coarse step that changes the span says so before the button.
+  assert.ok(coarse.notes.some((n) => /sets the span to 19\.2 MHz \(from 2\.4 MHz\)/.test(n)), coarse.notes.join(" | "));
+  assert.ok(!fine.notes.some((n) => /sets the span/.test(n)));
+});
+
+test("the step control sits in the sweep fieldset beside From/To/Dwell and reprices on change", () => {
+  const src = readFileSync("src/app/review/device.ts", "utf8");
+  assert.match(src, /"Dwell ", this\.scanDwell\),\s*h\("label"[^\n]*"Step ", this\.scanStep\)/);
+  assert.match(src, /scanStep = h\("select", \{ onchange: \(\) => void this\.priceScan\(\) \}/);
+  assert.match(src, /step: \(this\.scanStep as HTMLSelectElement\)\.value/);
+});
