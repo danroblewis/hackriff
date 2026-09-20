@@ -89,7 +89,7 @@ test("GET / mounts the unified surface in the app, under the product CSP", async
   // (7) **Nothing the page did on its own reached the front end.** Loading is not a gesture, and
   // the cutover put a retune offer on this surface (T-444) — so the control this asserts is that it
   // is an OFFER: no device route is touched until a button is pressed.
-  const control = page.requests.filter((r) => /\/api\/control\/(center|rate|gains|bias_tee|baseband_filter)/.test(r.url));
+  const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
   assert.deepEqual(control.map((r) => r.url), [], "the app commanded the front end just by opening");
 
   t.diagnostic(`load-to-drawn ${Date.now() - t0} ms · ${page.requests.length} requests`);
@@ -117,7 +117,7 @@ test("a drag on the app's surface moves the view and still reaches no device rou
     `(document.querySelector('.sf-chrome')?.textContent ?? "") !== ${JSON.stringify(before)}`,
     { timeoutMs: 15000 });
 
-  const control = page.requests.filter((r) => /\/api\/control\/(center|rate|gains|bias_tee|baseband_filter)/.test(r.url));
+  const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
   assert.deepEqual(control.map((r) => r.url), [], "a drag reached the front end");
   assert.deepEqual(page.exceptions, [], "uncaught exception while dragging");
 });

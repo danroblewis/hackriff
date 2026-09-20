@@ -1538,7 +1538,9 @@ struct Failure {
 /// A segment ends for one of four reasons, and before T-508 three of them ended the run for good
 /// while `hk serve` stayed up reporting `finished: true` to a client that showed nothing:
 ///
-/// 1. **A re-plumb was requested** — start the next segment on the new window.
+/// 1. **A re-plumb was requested** — start the next segment on the new window. A capture failure
+///    that arrived in the same wake-up is *counted* (T-529) and then superseded: the re-plumb
+///    re-commands the whole window, so recovering first would be work undone.
 /// 2. **The re-plumb itself failed** — the old segment's state still held by a straggler past
 ///    [`unwrap_shared`]'s bound, the device not handed back, or [`start_segment`] failing. The
 ///    state is now salvaged ([`take_parts`]) and the parts survive a failed start, so this goes to
@@ -1576,7 +1578,25 @@ fn supervise(sup: &Supervisor, mut workers: Vec<Worker>) -> Finished {
         // A re-plumb that failed is answered once recovery has settled where capture went.
         let mut answer: Option<Replumb> = None;
         let failure = match (req, capture_failed) {
-            (Some(req), _) => {
+            (Some(req), failed) => {
+                // **T-529: a device failure that arrives together with a re-plumb request is still
+                // a device failure.** This branch takes the request and goes on, which is right —
+                // the re-plumb is about to re-command the whole window anyway, so recovering first
+                // would be work undone. What was wrong is that the failure vanished from the
+                // *count*: `capture_failures` stayed 0 while a front end had just refused a
+                // change, so "the device refused something" and "nothing went wrong" read
+                // identically on `/api/status`.
+                //
+                // It is not a hypothetical. Until T-529 one user retune was two posts, so the
+                // second post's request routinely landed on the first segment's first read — which
+                // is where a HackRF reports a refused retune — and T-508's one-shot mock fault was
+                // swallowed here about half the time. That is what made `canvas-journey` test 5
+                // flake. Counting it costs nothing and cannot change control flow; the error text
+                // is already in `errors` from `join_workers`.
+                if let Some(e) = &failed {
+                    inc(&c.stats.capture_failures);
+                    eprintln!("the front end failed while a re-plumb was queued: {e}");
+                }
                 let old = st.shared.take().expect("a running segment");
                 st.tx = None;
                 drop(st);

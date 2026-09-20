@@ -862,6 +862,12 @@ mod tests {
         fn set_rate(&self, _hz: f64) -> Result<LiveTuning, LiveControlError> {
             Ok(self.tuning())
         }
+        // T-529: the sweep's steps are `set_center` and nothing else (see the module docs), so a
+        // whole-window commit is not something this fake has to model. Refusing says that out
+        // loud; silently applying half of it is the defect that route exists to remove.
+        fn set_window(&self, _c: f64, _r: f64) -> Result<LiveTuning, LiveControlError> {
+            Err(LiveControlError::Unsupported("window"))
+        }
         fn set_gains(&self, _g: &[NamedGain]) -> Result<LiveTuning, LiveControlError> {
             Ok(self.tuning())
         }

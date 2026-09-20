@@ -178,7 +178,19 @@ after(async () => {
   j?.backend?.stop();
 });
 
-async function open({ port = 8801, mockFault = null } = {}) {
+/**
+ * Base port for **this file's own** backends (tests 1–4 here, 5 and 6 on `+2` and `+4`).
+ *
+ * Overridable because the repo runs several agents at once (T-470's own comment says so) and this
+ * spec's ports were literals. `startBackend`'s `freePort` probes a port and then releases it, so
+ * two copies of this file starting together can both be told 8801 is free and one loses the bind
+ * with `Address already in use` — T-470's neighbour problem one layer down, and it is an
+ * infrastructure collision that reads exactly like a product failure. Setting a different base per
+ * agent removes it; the default is unchanged, so a single run is unaffected.
+ */
+const JOURNEY_PORT = Number(process.env.HK_E2E_JOURNEY_PORT ?? 8801);
+
+async function open({ port = JOURNEY_PORT, mockFault = null } = {}) {
   // Its own port, not the tier's default: this backend is KILLED by test 4, and the shared one is
   // every other file's. Tests 5 and 6 bring up their own on other ports, each with a device FAULT
   // (T-508), so a fault can never reach the journey's backend.
@@ -1378,7 +1390,7 @@ test("4. a killed backend degrades to grey with no purple and no re-render thras
 // "front end reaches the destination" check — test 2's check — passed on the dead run. That is why
 // the run-state assertion comes first.
 test("5. a retune the device refuses restarts capture: rows resume and the run does not end", async (t) => {
-  const { page, browser, backend } = await open({ port: 8803, mockFault: "retune-apply-fails:1" });
+  const { page, browser, backend } = await open({ port: JOURNEY_PORT + 2, mockFault: "retune-apply-fails:1" });
   try {
     assert.match(backend.log(), /mock SDR: fault armed from HK_MOCK_FAULT/,
       "the harness asked for a device fault and the server did not arm one, so this would be test 2 again");
@@ -1386,8 +1398,24 @@ test("5. a retune the device refuses restarts capture: rows resume and the run d
 
     // Press, and read where the FRONT END is — as test 2 does, including its re-press: a press can
     // legitimately land inside a re-plumb (or, here, a recovery) and come back busy.
+    //
+    // ——— T-529: WHY THIS TEST IS DETERMINISTIC ———
+    // It was not. `retune-apply-fails:1` arms ONE refusal, and the press used to commit the retune
+    // as TWO device requests ~1.5 ms apart: `/api/control/rate` (which re-plumbs) and then
+    // `/api/control/center`. The fault fires on the capture thread of whichever change reaches
+    // `apply_pending` first, and the second request's re-plumb — already queued by then — made the
+    // supervisor take its request-first branch, where the failure was counted as neither a capture
+    // failure nor a recovery. So `capture_failures` read 0 and the premise below failed, twice in
+    // five runs under load, with nothing wrong. The fix is not here and is not a retry: one user
+    // retune is now ONE device action (`POST /api/control/window`), so there is exactly one change
+    // for the one armed fault to land on. `deviceRequests` asserts that property directly, so a
+    // client that splits the retune again fails this test loudly instead of flaking it.
+    const deviceIdx = page.requests.length;
+    const DEVICE_ROUTE = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)$/;
+    let presses = 0;
     let w1 = w0;
     for (let attempt = 0; attempt < 6; attempt++) {
+      presses++;
       await page.click(`document.querySelector('${PANE_ACTION}')`);
       await page.frames(4);
       for (let i = 0; i < 24; i++) {
@@ -1398,10 +1426,43 @@ test("5. a retune the device refuses restarts capture: rows resume and the run d
       if (Math.abs(w1.centerHz - wantCenterHz) < 100) break;
       t.diagnostic(`press ${attempt + 1}: front end at ${MHz(w1.centerHz)} MHz; toast: ${await page.$text("#toast")}`);
     }
+    const deviceReqs = page.requests.slice(deviceIdx)
+      .filter((r) => DEVICE_ROUTE.test(new URL(r.url).pathname));
+
+    // **Wait for the refusal, do not assume the counter has caught up** (T-529). The press loop
+    // above exits as soon as the front end reports the destination — and it reports it as soon as
+    // the control plane COMMANDS it, which is before the new segment has read a single block. The
+    // device's refusal happens on that first read (`apply_pending` on the capture thread, exactly
+    // as the HackRF driver applies controls), so reading `capture_failures` at command time is
+    // reading it too early. Under the old two-post client the second post tuned the RUNNING segment
+    // in place, so the fault landed while the loop was still polling and the counter usually had
+    // moved by the time it was read — "usually" being the other half of the flake.
+    //
+    // This is a wait for an effect that is now GUARANTEED, not a retry of the action: one command
+    // that moves the window, one armed fault, so exactly one refusal must occur. Nothing is
+    // re-pressed, and the assertion below is unchanged (`>= 1`); if the fault never fires this
+    // still fails, 20 s later.
+    let stats = {};
+    for (const deadline = Date.now() + 20000; Date.now() < deadline;) {
+      stats = (await get(backend, "/api/status")).control?.stats ?? {};
+      if ((stats.capture_failures ?? 0) >= 1) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
     const st = (await get(backend, "/api/control/state")).run;
-    const stats = (await get(backend, "/api/status")).control?.stats ?? {};
-    t.diagnostic(`after the presses: run finished=${st.finished} capture=${st.capture} segment=${st.segment}; ` +
-      `capture_failures=${stats.capture_failures} capture_recoveries=${stats.capture_recoveries}`);
+    t.diagnostic(`after ${presses} press(es): run finished=${st.finished} capture=${st.capture} segment=${st.segment}; ` +
+      `capture_failures=${stats.capture_failures} capture_recoveries=${stats.capture_recoveries}; ` +
+      `device requests ${JSON.stringify(deviceReqs.map((r) => new URL(r.url).pathname))}`);
+    // T-529, and the reason the premise below is now a fact rather than a coin toss: **no press
+    // produces more than one device request**, and the one it produces carries the whole window.
+    // Bounded by `presses` rather than equal to it: a press onto a momentarily disabled control is
+    // a legitimate no-op (the loop re-presses), and the claim here is about splitting, not about
+    // how many of the six attempts landed.
+    assert.ok(deviceReqs.length >= 1 && deviceReqs.length <= presses,
+      `${presses} press(es) produced ${deviceReqs.length} device requests ` +
+      `(${JSON.stringify(deviceReqs.map((r) => new URL(r.url).pathname))}). One user retune is one device ` +
+      "action; more than one per press means the armed fault can land on either, which is the flake this test had.");
+    assert.deepEqual([...new Set(deviceReqs.map((r) => new URL(r.url).pathname))], ["/api/control/window"],
+      `a press reached a device route other than the whole-window one: ${JSON.stringify(deviceReqs.map((r) => r.url))}`);
     assert.equal(st.finished, false,
       "the run ENDED after a retune the device refused once, while hk serve kept answering. This is T-508: " +
       "a recoverable failure must restart capture, not end the run.");
@@ -1453,7 +1514,7 @@ test("5. a retune the device refuses restarts capture: rows resume and the run d
 // exists, no state was ever stated (`[]`), and the only trace of it was the top bar's "run
 // finished" label.
 test("6. a front end that is gone ends the run, and the surface says capture stopped", async (t) => {
-  const { page, browser, backend } = await open({ port: 8805, mockFault: "gone-on-retune" });
+  const { page, browser, backend } = await open({ port: JOURNEY_PORT + 4, mockFault: "gone-on-retune" });
   try {
     assert.match(backend.log(), /mock SDR: fault armed from HK_MOCK_FAULT/,
       "the harness asked for a device fault and the server did not arm one");

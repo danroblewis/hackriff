@@ -12,6 +12,7 @@
 //! | GET | `/api/control/state` | – | `live`, `device` (capabilities), `tuning`, `run` (content class, segment, display, recording), `display_limits` (T-067: FFT size/averaging/rows-per-s bounds, allowed windows), `transmit.available: false`, `routes` |
 //! | POST | `/api/control/center` | `{"center_hz"}` | `tuning`, `run`. A window of another class **re-plumbs** the run with that class |
 //! | POST | `/api/control/rate` | `{"sample_rate_hz"}` | `tuning`, `run` (a rate change re-plumbs the run) |
+//! | POST | `/api/control/window` (T-529) | `{"center_hz", "sample_rate_hz"}` | `tuning`, `run`. **One** device action for a whole capture configuration — what a user retune is |
 //! | POST | `/api/control/gains` | `{"gains": {"lna": 24, ...}}` | `tuning` (quantised per stage) |
 //! | POST | `/api/control/bias_tee` | `{"enabled"}` | `tuning` (501 without a bias tee) |
 //! | POST | `/api/control/baseband_filter` (T-067) | `{"bandwidth_hz"}` | `tuning` (validated against `device.baseband_filter`; 501 without one) |
@@ -47,7 +48,7 @@
 //!
 //! # Device actions vs view changes (T-343)
 //!
-//! Those five endpoints, and only those five, **reach the front end**. [`Action::device_action`]
+//! Those six endpoints, and only those six, **reach the front end**. [`Action::device_action`]
 //! is the classification — an exhaustive match, so a new route has to choose a side — and each
 //! device route names its [`DeviceAction`]. The consequences are visible on the wire:
 //!
@@ -68,7 +69,7 @@
 //! and audit entry carry `device: {commissions, id}` rather than `{action, id}`, so the log says
 //! which radio was committed without ever reading as if the request itself moved it. Every step
 //! the sweep then takes *is* a `DeviceAction::Retune` through the same gate, recorded against the
-//! same `device_id`: there is no second device path, and "exactly five routes reach the front end"
+//! same `device_id`: there is no second device path, and "exactly six routes reach the front end"
 //! is still true.
 //!
 //! **Arbitration** between the sweep and interactive tuning is one rule, applied in [`apply`]: an
@@ -81,6 +82,32 @@
 //! scrubbing and zooming never reach the device (T-339) — they reach no route at all (T-347); a
 //! retune does, and that asymmetry is the point. A client must therefore only call it for an
 //! **explicit** user action — never as the continuation of a pan.
+//!
+//! # A window is one action, not two posts (T-529)
+//!
+//! A user retune to a region names a **capture configuration**: a centre *and* a span. Until this
+//! ticket the client committed it as `POST /api/control/rate` then `POST /api/control/center`,
+//! ~1.5 ms apart, and each route completed the pair from the tuning in force. So one press
+//! commanded **two** windows, and the intermediate one — the *old* centre at the *new* rate — is a
+//! window no user ever asked for. It was not a formality:
+//!
+//! - `GET /api/control/state` reports it between the two calls, and the client's own poll can read
+//!   it;
+//! - a whole segment is captured at it, with headers and provenance to match, so the coverage map
+//!   records "observed" over a band chosen by an HTTP artefact — `Coverage::Observed` is supposed
+//!   to mean the radio was pointed there on purpose;
+//! - it costs a re-plumb of its own, tearing the always-on readers down twice for one press;
+//! - and the second post races the first's new segment: a device refusal arriving while the second
+//!   re-plumb is already queued is taken by `hk_pipeline`'s request-first branch and counted as
+//!   neither a capture failure nor a recovery. That is what made T-508's one-shot mock fault land
+//!   sometimes on one path and sometimes on the other, and `canvas-journey` test 5 flake.
+//!
+//! [`Action::Window`] is the fix, and it is the shape the pipeline always had:
+//! `hk_pipeline::PipelineController::retune` takes `(center_hz, sample_rate_hz)` together. Both
+//! fields are **required** — completing a half from what happens to be in force is the defect — and
+//! `/api/control/center` and `/api/control/rate` keep working unchanged for the callers that
+//! genuinely mean one field: a nudge, a bookmark, a typed frequency, the SDR panel's rate picker,
+//! and the sweep, whose steps are centre-only by design ([`crate::scan`]).
 //!
 //! # Security properties
 //! - **Token in the header only.** Mutating requests (`POST`, `PUT`, `DELETE`) must carry
@@ -750,6 +777,8 @@ enum Action {
     State,
     Center,
     Rate,
+    /// Centre **and** rate as one device action (T-529).
+    Window,
     Gains,
     BiasTee,
     BasebandFilter,
@@ -772,6 +801,7 @@ impl Action {
             Self::State => "state",
             Self::Center => "center",
             Self::Rate => "rate",
+            Self::Window => "window",
             Self::Gains => "gains",
             Self::BiasTee => "bias_tee",
             Self::BasebandFilter => "baseband_filter",
@@ -802,12 +832,13 @@ impl Action {
     /// every route did one or the other. `POST /api/control/scan` does neither: it moves no front
     /// end within the call, and it is emphatically not a view change, because it commits this
     /// radio to a programme of retunes that will run for as long as the pass takes. Lumping it
-    /// with `display` would have made "only five routes touch the device" true on a technicality
+    /// with `display` would have made "only six routes touch the device" true on a technicality
     /// and false in effect, so the classification gained a third answer instead of a looser one.
     fn reach(self) -> Reach {
         match self {
             Self::Center => Reach::Device(DeviceAction::Retune),
             Self::Rate => Reach::Device(DeviceAction::Rate),
+            Self::Window => Reach::Device(DeviceAction::Window),
             Self::Gains => Reach::Device(DeviceAction::Gains),
             Self::BiasTee => Reach::Device(DeviceAction::BiasTee),
             Self::BasebandFilter => Reach::Device(DeviceAction::BasebandFilter),
@@ -888,6 +919,7 @@ fn resolve(method: &str, path: &str) -> Option<Result<Action, Option<&'static st
             "state" => pick("GET", Action::State),
             "center" => pick("POST", Action::Center),
             "rate" => pick("POST", Action::Rate),
+            "window" => pick("POST", Action::Window),
             "gains" => pick("POST", Action::Gains),
             "bias_tee" => pick("POST", Action::BiasTee),
             "baseband_filter" => pick("POST", Action::BasebandFilter),
@@ -1618,6 +1650,24 @@ fn apply_action(
                 new,
             ))
         }
+        // T-529: one user retune, one device action. Both halves are required — a window is a
+        // pair, and the whole defect this route exists for is a pair completed from whatever was
+        // in force at the time. Nothing is filled in here; `LiveControl::set_window` hands both to
+        // the pipeline, which derives one class and re-plumbs at most once.
+        Action::Window => {
+            only(body, &["center_hz", "sample_rate_hz"])?;
+            let center_hz = required(body, "center_hz")?;
+            let sample_rate_hz = required(body, "sample_rate_hz")?;
+            let lc = live(state)?;
+            let old = tuning_json(&lc.tuning());
+            let new = tuning_json(&lc.set_window(center_hz, sample_rate_hz)?);
+            let device = device_json(state, DeviceAction::Window);
+            Ok(ok(
+                json!({ "tuning": new, "run": run_body(state), "device": device }),
+                old,
+                new,
+            ))
+        }
         // T-452: start or resume the in-app survey sweep. It commissions retunes; it performs
         // none here, so the answer names the device it commits and the plan it will walk, and the
         // first step is taken by the driver.
@@ -1833,14 +1883,15 @@ fn apply_action(
 mod tests {
     use super::*;
 
-    /// T-343: exactly five control routes reach the front end, and every other one is a view (or
-    /// store) change. The table is asserted by route, not by the enum, so adding
+    /// T-343: exactly six control routes reach the front end (T-529 added the sixth), and every
+    /// other one is a view (or store) change. The table is asserted by route, not by the enum, so adding
     /// `/api/control/something` and quietly classifying it as harmless fails here.
     #[test]
-    fn only_the_five_device_routes_reach_the_front_end() {
+    fn only_the_six_device_routes_reach_the_front_end() {
         let device: Vec<(&str, &str)> = [
             ("/api/control/center", "retune"),
             ("/api/control/rate", "rate"),
+            ("/api/control/window", "window"),
             ("/api/control/gains", "gains"),
             ("/api/control/bias_tee", "bias_tee"),
             ("/api/control/baseband_filter", "baseband_filter"),
@@ -1874,7 +1925,7 @@ mod tests {
                 "{path} changes the view, not the device"
             );
         }
-        // Every control route is one or the other, and the device ones are exactly those five.
+        // Every control route is one or the other, and the device ones are exactly those six.
         let reached: Vec<&str> = ROUTES
             .iter()
             .filter(|(m, p)| {
@@ -1895,7 +1946,7 @@ mod tests {
     /// T-452: starting a sweep is the third answer, and the classification says so rather than
     /// letting it pass as harmless.
     ///
-    /// The route moves no front end within the call — so `only_the_five_device_routes...` above is
+    /// The route moves no front end within the call — so `only_the_six_device_routes...` above is
     /// still literally true — but it commits this radio to hundreds of retunes, which is not a view
     /// change by any reading. Classifying it as `View` would make that test pass on a technicality,
     /// so this one asserts the middle category exists and that `scan` is in it.

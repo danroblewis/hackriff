@@ -772,7 +772,7 @@ const SRC = (f: string) => readFileSync(f, "utf8");
 const T450_FILES = ["src/surface/preview.ts", "src/surface/preview-main.ts", "src/surface/bootstrap.ts", "src/surface/legend.ts"];
 
 test("no gesture can reach the radio: the preview names no device route and never imports retune", () => {
-  const DEVICE_ROUTES = ["/api/control/center", "/api/control/rate", "/api/control/gains", "/api/control/bias_tee", "/api/control/baseband_filter"];
+  const DEVICE_ROUTES = ["/api/control/center", "/api/control/rate", "/api/control/window", "/api/control/gains", "/api/control/bias_tee", "/api/control/baseband_filter"];
   for (const f of T450_FILES) {
     const src = SRC(f);
     for (const r of DEVICE_ROUTES) assert.ok(!src.includes(`"${r}"`), `${f} names the device route ${r}`);

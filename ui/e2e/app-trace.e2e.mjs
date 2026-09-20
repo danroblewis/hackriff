@@ -750,7 +750,7 @@ test("a drag that STARTS IN THE TRACE STRIP pans the pane — the strip is a rea
 
   // T-340's control, unchanged: a pan is a pan. A gesture that began over the trace must be no more
   // able to reach the radio than one that began over the waterfall.
-  const control = page.requests.filter((r) => /\/api\/control\/(center|rate|gains|bias_tee|baseband_filter)/.test(r.url));
+  const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
   assert.deepEqual(control.map((r) => r.url), [], "a drag begun in the trace strip reached the front end");
   assert.deepEqual(page.exceptions, [], "uncaught exception while dragging from the strip");
 });

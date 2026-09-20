@@ -132,7 +132,7 @@ test("T-343: a busy radio is reported, never retried into a race", () => {
 });
 
 test("T-343: gestures.ts names no device route, and the device routes have exactly two callers", () => {
-  const DEVICE_ROUTES = ["/api/control/center", "/api/control/rate", "/api/control/gains", "/api/control/bias_tee", "/api/control/baseband_filter"];
+  const DEVICE_ROUTES = ["/api/control/center", "/api/control/rate", "/api/control/window", "/api/control/gains", "/api/control/bias_tee", "/api/control/baseband_filter"];
   const gestures = readFileSync("src/controls/gestures.ts", "utf8");
   for (const r of DEVICE_ROUTES) assert.ok(!gestures.includes(r), `gestures.ts must not name ${r}`);
   assert.ok(!/controls\/client|ControlClient|app\/context/.test(gestures), "gestures.ts must not reach the API client");

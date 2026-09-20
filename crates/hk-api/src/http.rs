@@ -133,6 +133,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
     ("POST", "/api/control/rate"),
+    // T-529: centre AND rate as one device action, because a user retune names a whole capture
+    // configuration and committing the halves separately commands a window nobody asked for.
+    ("POST", "/api/control/window"),
     ("POST", "/api/control/gains"),
     ("POST", "/api/control/bias_tee"),
     ("POST", "/api/control/baseband_filter"),
