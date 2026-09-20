@@ -57,6 +57,13 @@ enum CLen {
     },
 }
 
+/// A compiled `timestamp` term: `raw(slot) × scale`.
+#[derive(Clone, Debug)]
+struct CTerm {
+    slot: usize,
+    scale: f64,
+}
+
 #[derive(Clone, Debug)]
 enum CCond {
     All(Vec<CCond>),
@@ -91,6 +98,8 @@ struct CField {
     value_unit: Option<String>,
     display: Option<Display>,
     children: Vec<CField>,
+    /// `timestamp`: terms summed into the value.
+    terms: Vec<CTerm>,
 }
 
 struct Declared {
@@ -202,11 +211,25 @@ impl Compiler<'_> {
             .condition
             .as_ref()
             .map(|c| self.condition(c, &path, scope));
-        let length = match &f.length {
-            None => CLen::Unset,
-            Some(l) => self.length(l, unit, &path, scope),
+        // A timestamp field is derived, not read from bits: always zero-width, whatever `length`
+        // says (validation requires it to be absent).
+        let length = if f.ty == FieldType::Timestamp {
+            CLen::Bits(0)
+        } else {
+            match &f.length {
+                None => CLen::Unset,
+                Some(l) => self.length(l, unit, &path, scope),
+            }
         };
         let repeat = f.repeat.as_ref().map(|l| self.length(l, 1, &path, scope));
+        let terms: Vec<CTerm> = f
+            .terms
+            .iter()
+            .map(|t| CTerm {
+                slot: self.resolve(&t.field, &path, scope),
+                scale: t.scale,
+            })
+            .collect();
         let first_slot = self.slots;
         let slot = (f.ty.is_integer() && f.repeat.is_none()).then(|| {
             self.slots += 1;
@@ -253,6 +276,7 @@ impl Compiler<'_> {
             value_unit: f.value_unit.clone(),
             display: f.display,
             children,
+            terms,
         }
     }
 
@@ -570,8 +594,51 @@ impl Run<'_> {
                 );
                 self.decoded += 1;
             }
+            FieldType::Timestamp => self.timestamp(f, &path, index, parent, &p),
         }
         Some(p.len)
+    }
+
+    /// A `timestamp` field: `Σ raw(term.field) × term.scale + f.add`. An out-of-range component
+    /// (e.g. RDS CT's hour/minute) is rejected upstream by the field's own `condition`, which
+    /// makes it absent rather than reaching here at all — not wrong or default, "not decoded"
+    /// (the T-207/T-164 rule). A term whose field failed to decode for another reason (a
+    /// truncated frame) is a genuine fit error, reported like any other missing reference.
+    fn timestamp(
+        &mut self,
+        f: &CField,
+        path: &str,
+        index: Option<u64>,
+        parent: Option<u32>,
+        p: &Placed,
+    ) {
+        let mut sum = f.add.unwrap_or(0.0);
+        for t in &f.terms {
+            let Some(raw) = self.slots[t.slot] else {
+                self.push(f, path, index, parent, p.start, p.len, None, None, true);
+                self.error(path, FitErrorKind::MissingReference, None, None);
+                return;
+            };
+            sum += raw as f64 * t.scale;
+        }
+        let secs = sum.round();
+        let mut text = fmt_f64(secs);
+        if let Some(u) = &f.value_unit {
+            text.push(' ');
+            text.push_str(u);
+        }
+        self.push(
+            f,
+            path,
+            index,
+            parent,
+            p.start,
+            p.len,
+            Number::from_f64(secs).map(Value::Number),
+            Some(text),
+            false,
+        );
+        self.decoded += 1;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -819,6 +886,8 @@ const fn node_type(t: FieldType) -> NodeType {
         FieldType::Bitfield => NodeType::Bitfield,
         FieldType::Bytes => NodeType::Bytes,
         FieldType::Layer => NodeType::Layer,
+        // A derived number like any other signed integer node; `value_unit` carries its unit.
+        FieldType::Timestamp => NodeType::Int,
     }
 }
 

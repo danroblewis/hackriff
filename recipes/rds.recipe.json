@@ -207,6 +207,45 @@
               "label": "Two characters (2B)"
             }
           ]
+        },
+        {
+          "name": "ct",
+          "type": "layer",
+          "label": "Group 4A: Clock-time and date (EN 50067 §3.1.5.6)",
+          "offset": 27,
+          "length": 37,
+          "condition": { "all": [{ "field": "group_type", "eq": 4 }, { "field": "version", "eq": 0 }] },
+          "fields": [
+            { "name": "mjd", "type": "uint", "length": 17, "label": "Modified Julian Day" },
+            { "name": "hour", "type": "uint", "length": 5, "label": "UTC hour, as broadcast" },
+            { "name": "minute", "type": "uint", "length": 6, "label": "UTC minute, as broadcast" },
+            {
+              "name": "offset_sign",
+              "type": "enum",
+              "length": 1,
+              "values": { "0": "+", "1": "-" },
+              "label": "Local time offset sign (0 = local ahead of UTC)"
+            },
+            {
+              "name": "offset_half_hours",
+              "type": "uint",
+              "length": 5,
+              "label": "Local time offset from UTC, half hours"
+            },
+            {
+              "name": "utc",
+              "type": "timestamp",
+              "label": "UTC instant the station reported (MJD + hour + minute; the local offset is not folded in — Hour/Minute are already UTC). Never used to set or correct the device clock: it is the station's claim, not truth, and stations are known to send it wrong or not at all.",
+              "condition": { "all": [{ "field": "hour", "le": 23 }, { "field": "minute", "le": 59 }] },
+              "value_unit": "unix-s",
+              "add": -3506716800,
+              "terms": [
+                { "field": "mjd", "scale": 86400 },
+                { "field": "hour", "scale": 3600 },
+                { "field": "minute", "scale": 60 }
+              ]
+            }
+          ]
         }
       ]
     }
@@ -243,6 +282,17 @@
         "frame_model": "rds-rt",
         "identity": { "scheme": "rds-pi", "field": "radiotext.key", "format": "hex" },
         "content": ["radiotext.text"],
+        "service": "rds"
+      }
+    },
+    {
+      "id": "ct",
+      "kind": "messages",
+      "from": "group",
+      "decode": {
+        "frame_model": "rds-ct",
+        "identity": { "scheme": "rds-pi", "field": "pi", "format": "hex" },
+        "content": ["ct.utc", "ct.mjd", "ct.hour", "ct.minute", "ct.offset_sign", "ct.offset_half_hours"],
         "service": "rds"
       }
     },
