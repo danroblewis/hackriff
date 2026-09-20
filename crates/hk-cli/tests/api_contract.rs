@@ -5055,6 +5055,9 @@ fn decoded_captures_are_recorded_listed_scrubbed_reparsed_and_replayed_as_docume
     let (_, cap) = get(addr, &format!("/api/captures/{cid}"));
     let total = cap["frames"].as_u64().unwrap();
     assert_eq!(cap["end_reason"], json!("finished"), "{cap}");
+    // T-465: the books close on every capture. This one drained cleanly, so nothing was thrown
+    // away and the counted drops are zero — the value, not just the field's presence (T-315).
+    assert_eq!(cap["dropped_records"], json!(0), "{cap}");
 
     // Frame scrub.
     let (st, all) = get(addr, &format!("/api/captures/{cid}/frames?limit=500"));

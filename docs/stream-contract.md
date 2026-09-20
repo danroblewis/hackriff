@@ -216,7 +216,8 @@ Gating also covers persistence: the repository refuses content under a forbiddin
   - A record that doesn't fit is dropped for that consumer only.
   - The drop is counted, and a marker (§5.3) follows.
   - The producer never waits for socket I/O.
-- **End of stream.** When the publisher finishes, consumers drain their queues; drops just before the end still get their marker. A consumer still draining after `drain_timeout` (default 5 s) is closed (`CloseReason::DrainTimeout`).
+- **End of stream.** When the publisher finishes, consumers drain their queues; drops just before the end still get their marker. A consumer still draining after `drain_timeout` (default 5 s) is closed (`CloseReason::DrainTimeout`). The drain is already bounded — a draining consumer is offered no further record, so at most one queue is left to write — and `drain_timeout` bounds only a **write that may never return**; it is not lengthened to make the loss rarer.
+- **A discarded queue is countable (T-465).** Closing a consumer for any reason frees its queue and what was in it is never written. The bytes are `bytes_discarded`, but the publisher cannot count the *records*: a queue holds framed bytes, a pop can split a record, and one discarded drop marker stands for many records. So a consumer that keeps books (`subscribe_recorder`) is handed its **final counters** with the close reason and closes them itself: `lost = (records_enqueued + records_dropped) - (records it parsed + drops it read from markers)`. `hk_store::decoded` adds that to a capture's `dropped_records`, so `frames + dropped_records` is what was published however the capture ended. Silent loss is the defect; a counted loss is a measurement.
 - **Slow consumers.** A consumer is disconnected, and its transport shut down, when either:
   - its ring stays full for `disconnect_after` (default 5 s); or
   - it drops `disconnect_after_drops` consecutive records (default: never by count).
