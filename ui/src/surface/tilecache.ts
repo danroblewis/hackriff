@@ -112,8 +112,57 @@
 // it was asked at had already reached the end of what it could hold**, which is `extent.t1_s` from
 // the route's own answer. That test seals a tile exactly once and forever, so the fix costs one extra
 // request per tile per lifetime and cannot become a poll.
+//
+// ## T-471: a bounded ring around the viewport, at the lowest priority in the file
+//
+// A pan or a zoom is a miss the instant it crosses a tile boundary, even when the user has been
+// sitting still: the ordinary queue only ever learns what is wanted the frame it becomes wanted.
+// [[prefetchRing]] is a third lane, alongside the ordinary queue and the refresh lane, that asks for
+// the tiles **one tile-width outside** each viewport's own box, at the SAME level it is drawn at, so
+// a pan of one tile finds its destination already resident. It is not called from [[setViewports]] —
+// it is its own method, called once a frame, after [[refreshEdge]], by the one caller that calls
+// either (`SurfacePreview.frame`, `ui/src/surface/preview.ts`), for the same reason `refreshEdge`
+// itself is a separate call and not baked into `setViewports`: a policy nothing invokes costs
+// nothing, and a caller that never asks for the ring never pays for it. `Surface.render` — what every
+// other `ui/src/surface/*.test.ts` file drives directly — never calls it, so the large majority of
+// this file's own unit tests, which construct a `TileCache` and call
+// `acquire`/`setViewports`/`endFrame` without ever calling `prefetchRing`, are completely unaffected.
+//
+// **Three rules make it unable to cost the visible path anything:**
+//
+//  1. **Strictly the lowest priority.** [[pumpPrefetch]] runs last inside [[pump]], after the
+//     ordinary queue and the refresh lane have both had first refusal on every slot in the budget —
+//     the same "last refusal, not first" shape [[pumpRefresh]] already uses for the same reason. At
+//     most **one** ring request is ever in flight, so it can take at most one of however many slots
+//     the AIMD cap currently allows, never more.
+//  2. **Cancelled the instant the viewport moves.** [[prefetchRing]]'s cancellation half runs on
+//     EVERY call — not on the scan cadence below — because a ring left over from where the user WAS
+//     is exactly the stale work this exists to avoid holding, the same distinction [[setViewports]]
+//     already draws between "cancel now" and "the parent-pin queue only grows forward". An in-flight
+//     ring request that is no longer wanted is aborted the same way [[setViewports]] aborts an
+//     ordinary one — through the same `AbortController`, charged to [[abandonedSlots]] exactly as
+//     T-454 requires, because the route does not learn of the abort until it tries to write.
+//  3. **Backing off means asking nothing, not asking less.** [[pumpPrefetch]] is reached only after
+//     [[pump]]'s own `busyUntil`/`silentUntil` guards, which gate the WHOLE method — so a `503` or a
+//     silent server stops the ring exactly as completely as it stops everything else, with no
+//     separate flag to keep in sync. It is a nice-to-have; a server under pressure is not owed
+//     speculative reads on top of the backpressure T-454 already built for the ones that matter.
+//
+// **Bounded by bytes, not by tile count** (`cells` makes a tile's body vary, docs/16 §5.5), which is
+// the same reasoning [[budgetBytes]]'s own doc gives. [[prefetchBudgetBytes]] (default
+// `budgetBytes / 16` — 6 MB at the 96 MB default, ~31 tiles at T-467's post-fix ~192 KB) is converted
+// to a queue-length cap through the AVERAGE size of what is actually resident
+// ([[trimPrefetchQueue]]), the same estimate-from-measurement approach [[serverMs]] uses for time.
+// Residency itself needs no second budget: an arrived ring tile is pinned for the one frame it lands
+// on (the same rule every arrival gets, so it is not evicted before it has been drawn once) and after
+// that is an ordinary LRU entry like any other — if nobody ever looks at it, [[evict]] reclaims it
+// under real pressure exactly as it would a stale visible one, which is the existing budget doing the
+// job rather than a second one built to duplicate it.
 
-import { extentOf, intersects, keyOf, tCellNs, type Box, type Lattice, type TileAddr } from "./lattice";
+import {
+  extentOf, fTileHz, intersects, keyOf, tCellNs, tTileNs, tilesFor,
+  type Box, type Lattice, type TileAddr,
+} from "./lattice";
 import { TileBusyError, TileDecodeError, type TileData } from "./tile";
 
 /** The GPU side, kept behind an interface so the cache is testable without a GL context. */
@@ -217,6 +266,14 @@ export interface TileCacheOptions {
    * 11.4 ms: guessing *fast* and being wrong is the failure this exists to stop.
    */
   serverMsGuess?: number;
+  /**
+   * Byte budget the T-471 ring-prefetch queue may occupy, converted to a tile count through the
+   * cache's own measured average tile size ([[TileCache.trimPrefetchQueue]]). Default
+   * `budgetBytes / 16`: at the 96 MB default that is 6 MB, ~31 tiles at T-467's ~192 KB post-fix
+   * size — generous enough to ring one viewport, small enough that a pan storm's queued ring can
+   * never compete with the budget it shares residency with.
+   */
+  prefetchBudgetBytes?: number;
 }
 
 export interface TileCacheStats {
@@ -255,6 +312,13 @@ export interface TileCacheStats {
    * from `failures` because they are the only retryable outcome left, and so the only one whose
    * rate is a property of this client's policy rather than of the route's. */
   silentFailures: number;
+  /** Ring-prefetch requests actually issued (T-471) — apart from `requests`, which also counts
+   * every visible miss, so this is the number that answers "what did the ring cost" on its own. */
+  prefetchIssued: number;
+  /** Ring-prefetch addresses dropped before they were fetched: cancelled because the viewport moved
+   * away, or trimmed by [[TileCache.prefetchBudgetBytes]]. Apart from `cancelled`, which also counts
+   * ordinary and in-flight cancellations, so this says whether the ring itself stayed well-behaved. */
+  prefetchCancelled: number;
 }
 
 const MB = 1024 * 1024;
@@ -292,6 +356,14 @@ const laneOf = (a: TileAddr): string => `${a.levelF}/${a.levelT}`;
 /** How often [[TileCache.refreshEdge]] may walk the resident set, ms. The walk is cheap; doing it
  * at frame rate would still be 60× more often than the finest tile can change. */
 const EDGE_SCAN_MS = 250;
+
+/**
+ * How often [[TileCache.prefetchRing]] may generate NEW ring candidates, ms (T-471). Cancellation
+ * of stale ones is not on this clock — it runs every call, i.e. every frame — because the ring is
+ * bordering tiles the user is not looking at yet, so discovering more of them at frame rate would be
+ * work spent on a screen nobody has asked for, the same reasoning [[EDGE_SCAN_MS]] gives for its walk.
+ */
+const PREFETCH_SCAN_MS = 250;
 
 /**
  * **The silence backoff** (T-499): after a failure that carried no answer at all, how long before
@@ -334,6 +406,8 @@ interface InFlight {
 
 export class TileCache<T> {
   readonly budgetBytes: number;
+  /** The T-471 ring's own byte budget. See [[TileCacheOptions.prefetchBudgetBytes]]. */
+  readonly prefetchBudgetBytes: number;
   private readonly maxQueue: number;
   private readonly busyBackoffMs: number;
   private readonly now: () => number;
@@ -441,6 +515,17 @@ export class TileCache<T> {
    * tiles a following viewport is drawing.
    */
   private edgeNs = Number.NEGATIVE_INFINITY;
+  /**
+   * The T-471 ring-prefetch lane's own queue: addresses just outside a viewport, wanted but not yet
+   * asked for. Never [[queue]] — that is what keeps it from ever being served ahead of a visible
+   * miss, since [[nextAddr]] never looks in here.
+   */
+  private prefetchQueue: TileAddr[] = [];
+  private prefetchQueued = new Set<string>();
+  /** Keys with a ring-prefetch fetch in flight (at most one, by [[pumpPrefetch]]'s own rule) — what
+   * lets [[issue]]'s completion requeue into THIS lane rather than the ordinary one. */
+  private prefetching = new Set<string>();
+  private nextPrefetchScan = 0;
   private clock = 0;
   private frame = 0;
   private bytes = 0;
@@ -462,7 +547,7 @@ export class TileCache<T> {
     uploads: 0, hits: 0, misses: 0, evictions: 0, refetchAfterEvict: 0, requests: 0,
     failures: 0, busyRefusals: 0, cancelled: 0, abandoned: 0, overBudgetFrames: 0, distinctKeys: 0,
     edgeRefreshes: 0, edgeRefreshApplied: 0, terminalFailures: 0, edgeRefreshCompletions: 0,
-    silentFailures: 0,
+    silentFailures: 0, prefetchIssued: 0, prefetchCancelled: 0,
   };
 
   constructor(
@@ -471,6 +556,7 @@ export class TileCache<T> {
     opts: TileCacheOptions = {},
   ) {
     this.budgetBytes = opts.budgetBytes ?? 96 * MB;
+    this.prefetchBudgetBytes = opts.prefetchBudgetBytes ?? this.budgetBytes / 16;
     this.ceiling = this.limit = Math.max(1, opts.inFlight ?? 4);
     this.maxQueue = opts.maxQueue ?? 4096;
     this.busyBackoffMs = opts.busyBackoffMs ?? 200;
@@ -489,6 +575,8 @@ export class TileCache<T> {
     for (const q of this.refreshLanes.values()) n += q.length;
     return n;
   }
+  /** Ring-prefetch addresses queued but not yet issued (T-471). Its own lane, never [[queue]]. */
+  get prefetchDepth(): number { return this.prefetchQueue.length; }
   /** What the measurements say one tile costs the route, ms. */
   get serverEstimateMs(): number { return this.serverMs; }
 
@@ -615,6 +703,12 @@ export class TileCache<T> {
     }
     this.queue = keep;
     for (const [key, f] of this.inflight) {
+      // **A ring-prefetch fetch is never "wanted" by this predicate — that is what makes it a ring**
+      // (T-471): it is asked for BECAUSE it sits just outside every viewport's own box. Without this
+      // exclusion this loop would abort it on the very next call, viewport unmoved, since `wanted`
+      // only ever means "inside a box". Its own cancellation is [[prefetchRing]]'s job, which asks
+      // the right question — "still in ANY viewport's ring?" — not this one's.
+      if (this.prefetching.has(key)) continue;
       const a = parseKey(key);
       if (a && !wanted(a) && f.ctrl) { f.ctrl.abort(); this.stats.cancelled++; this.abandon(f); }
     }
@@ -824,6 +918,120 @@ export class TileCache<T> {
     return !box || (ext.f1Hz > box.f0Hz && ext.f0Hz < box.f1Hz);
   }
 
+  /**
+   * **Enqueue the ring just outside the current viewports, at the lowest priority in the cache**
+   * (T-471). Call once a frame, same as [[refreshEdge]] — it is not run from [[setViewports]], so a
+   * caller that never calls this pays nothing for it and every existing behaviour of [[setViewports]]
+   * is unchanged. See the file header for the three rules that keep it from ever costing the visible
+   * path anything. Returns how many new addresses were queued, for the tests and the stats.
+   */
+  prefetchRing(lat: Lattice, viewports: readonly Viewport[]): number {
+    const wanted = (a: TileAddr) => viewports.some((v) => this.wants(lat, v, a));
+    const ringWanted = (a: TileAddr) => viewports.some((v) => this.ringWants(lat, v, a));
+
+    // **Cancel on every call — never on the scan cadence.** A ring tile no viewport's ring (or
+    // ordinary box) still wants is exactly the stale work T-471 exists to stop holding, the instant
+    // the viewport moves rather than up to [[PREFETCH_SCAN_MS]] later.
+    const keep: TileAddr[] = [];
+    for (const a of this.prefetchQueue) {
+      // Already wanted for real (a pan landed on it): drop it from HERE, `acquire`'s own `schedule`
+      // has already — or will this frame — put it on the ordinary queue at ordinary priority.
+      if (ringWanted(a) && !wanted(a)) keep.push(a);
+      else { this.prefetchQueued.delete(keyOf(a)); this.stats.prefetchCancelled++; }
+    }
+    this.prefetchQueue = keep;
+    for (const key of [...this.prefetching]) {
+      const a = parseKey(key);
+      const f = this.inflight.get(key);
+      if (a && f?.ctrl && !(ringWanted(a) || wanted(a))) {
+        f.ctrl.abort();
+        this.stats.cancelled++;
+        this.stats.prefetchCancelled++;
+        this.abandon(f);
+      }
+    }
+
+    // **Generation is throttled; cancellation above is not.** The ring is tiles nobody is looking at
+    // yet, so finding more of them at frame rate would be work spent on a screen nobody asked for.
+    const t = this.now();
+    if (t >= this.nextPrefetchScan) {
+      this.nextPrefetchScan = t + PREFETCH_SCAN_MS;
+      for (const v of viewports) {
+        for (const a of this.ringTiles(lat, v)) {
+          const key = keyOf(a);
+          if (this.map.has(key) || this.inflight.has(key) || this.queued.has(key) ||
+              this.prefetchQueued.has(key) || this.terminal.has(key)) continue;
+          this.prefetchQueue.push(a);
+          this.prefetchQueued.add(key);
+        }
+      }
+      this.trimPrefetchQueue();
+    }
+    this.pump();
+    return this.prefetchQueue.length;
+  }
+
+  /** Is this tile in the one-tile border just outside that viewport's own box, at its own level?
+   * Same level only: the parent-pin already covers the coarser level ([[Surface.pinParents]]), and
+   * widening this to more levels is exactly the "tune later" the ticket names. */
+  private ringWants(lat: Lattice, v: Viewport, a: TileAddr): boolean {
+    if (a.scheme !== lat.scheme || a.levelF !== v.levelF || a.levelT !== v.levelT) return false;
+    return intersects(lat, a, this.ringBox(lat, v));
+  }
+
+  /** The viewport's own box expanded by one tile-width per axis, at the viewport's own level — the
+   * default radius the ticket asks for. */
+  private ringBox(lat: Lattice, v: Viewport): Box {
+    const fw = fTileHz(lat, v.levelF), tw = tTileNs(lat, v.levelT);
+    return {
+      f0Hz: v.box.f0Hz - fw, f1Hz: v.box.f1Hz + fw,
+      t0Ns: v.box.t0Ns - tw, t1Ns: v.box.t1Ns + tw,
+    };
+  }
+
+  /** The border tiles themselves: everything the expanded box covers, minus what the viewport's own
+   * (unexpanded) box already covers — the latter is asked for at ordinary priority elsewhere and
+   * must not be duplicated here at a lower one. */
+  private ringTiles(lat: Lattice, v: Viewport): TileAddr[] {
+    const inner = new Set(tilesFor(lat, v.box, v.levelF, v.levelT).map(keyOf));
+    return tilesFor(lat, this.ringBox(lat, v), v.levelF, v.levelT).filter((a) => !inner.has(keyOf(a)));
+  }
+
+  /**
+   * **Bounded by bytes, not by tile count** (T-471): converts [[prefetchBudgetBytes]] to a queue cap
+   * through the AVERAGE size of what is actually resident, the same measurement-over-a-guess move
+   * [[serverMs]] makes for time. Before anything is resident there is nothing to measure yet, so the
+   * fallback is deliberately conservative (a 512th of the whole budget) rather than optimistic.
+   */
+  private trimPrefetchQueue(): void {
+    const avgBytes = this.map.size > 0 ? this.bytes / this.map.size : this.budgetBytes / 512;
+    const cap = Math.max(1, Math.floor(this.prefetchBudgetBytes / Math.max(1, avgBytes)));
+    if (this.prefetchQueue.length <= cap) return;
+    const dropped = this.prefetchQueue.splice(0, this.prefetchQueue.length - cap);
+    for (const d of dropped) this.prefetchQueued.delete(keyOf(d));
+    this.stats.prefetchCancelled += dropped.length;
+  }
+
+  /**
+   * Issue at most one ring-prefetch request, and only once the ordinary queue and the live-edge
+   * refresh have BOTH had first refusal on every slot this frame (it runs last in [[pump]]). One in
+   * flight at a time, same discipline as [[pumpRefresh]] — so the ring can never grow to hold more of
+   * the shared budget than speculative work deserves, and a due refresh that lands on the next
+   * [[pump]] finds the slot the ring is not allowed to have taken from it.
+   */
+  private pumpPrefetch(): void {
+    if (this.prefetching.size) return;
+    if (this.inflight.size + this.abandonedSlots >= this.effectiveLimit) return;
+    const addr = this.prefetchQueue.pop(); // LIFO: nearest-queued first, same reason as [[queue]]
+    if (!addr) return;
+    const key = keyOf(addr);
+    this.prefetchQueued.delete(key);
+    if (this.map.has(key) || this.inflight.has(key)) return;
+    this.prefetching.add(key);
+    this.stats.prefetchIssued++;
+    this.issue(addr, -1);
+  }
+
   /** Drop one tile so the growing edge can rewrite it (T-439's live tiles are not immutable). */
   invalidate(addr: TileAddr): boolean {
     const key = keyOf(addr);
@@ -856,6 +1064,10 @@ export class TileCache<T> {
     this.terminal.clear();
     this.silences = 0;
     this.silentUntil = 0;
+    this.prefetchQueue = [];
+    this.prefetchQueued.clear();
+    this.prefetching.clear();
+    this.nextPrefetchScan = 0;
   }
 
   /**
@@ -891,6 +1103,7 @@ export class TileCache<T> {
       this.issue(addr, owner);
     }
     this.pumpRefresh();
+    this.pumpPrefetch();
   }
 
   /**
@@ -1063,6 +1276,19 @@ export class TileCache<T> {
         const lane = this.refreshingLane ?? laneOf(addr);
         this.refreshingLane = null;
         this.refreshNextIssue.set(lane, this.now() + (REFRESH_DUTY - 1) * this.refreshCostOf(lane, spent));
+      }
+      // **A ring-prefetch requeue stays in its own lane** (T-471): a 503 or a stale-retune on
+      // speculative work must not promote it to ordinary priority, which is what calling the shared
+      // `schedule` below would do — the address would then be indistinguishable from something the
+      // user is actually waiting on for the rest of its life in the queue.
+      if (this.prefetching.delete(key)) {
+        if (requeue && !this.map.has(key) && !this.inflight.has(key) && !this.queued.has(key) &&
+            !this.prefetchQueued.has(key)) {
+          this.prefetchQueue.push(addr);
+          this.prefetchQueued.add(key);
+        }
+        this.pump();
+        return;
       }
       if (requeue) this.schedule(addr);
       this.pump();

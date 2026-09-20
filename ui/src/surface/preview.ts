@@ -578,6 +578,12 @@ export class SurfacePreview {
   frame(): SurfaceFrame {
     this.lastFrame = this.view.frame(this.edgeNs, this.windowsFn?.() ?? []);
     if (this.edgeFn) this.refreshLiveEdge(this.lastFrame);
+    // **After the refresh, never before** (T-471): both end in `TileCache`'s own `pump`, and pump
+    // spends the budget ordinary-queue-first, refresh-lane-second, ring-third within ONE call — but
+    // that ordering only protects a refresh that has ALREADY been told the edge moved. Calling this
+    // first would let the ring's own trailing pump take a free slot before refreshLiveEdge got the
+    // chance to enqueue a due lane at all, which is the live edge losing to a nice-to-have.
+    this.prefetchRing(this.lastFrame);
     return this.lastFrame;
   }
 
@@ -609,6 +615,28 @@ export class SurfacePreview {
       if (live) following.push({ box: v.box, levelF: r.levelF, levelT: r.levelT });
     }
     if (following.length) this.view.surface.cache.refreshEdge(this.view.surface.lat, f.edgeNs, following);
+  }
+
+  /**
+   * **T-471: the bounded ring just outside every current viewport, at the cache's lowest priority.**
+   *
+   * Unlike [[refreshLiveEdge]] this is not restricted to following panes — a paused pane benefits
+   * from a ring exactly as much as a following one, since the ring is about panning, not about the
+   * growing edge. It is still driven from the `PaneReport`s the renderer just drew with, for the same
+   * T-397 reason [[refreshLiveEdge]] is: prefetching a level the pane is not showing would be a second
+   * derivation of a number this frame already computed once.
+   *
+   * `TileCache.prefetchRing` costs nothing when never called — this is the one call site, so the
+   * feature exists only where a real server is actually asked, and every `Surface`-level and
+   * `TileCache`-level unit test that never constructs a `SurfacePreview` is completely unaffected.
+   */
+  private prefetchRing(f: SurfaceFrame): void {
+    const viewports: Viewport[] = [];
+    for (const r of f.reports) {
+      const v = f.views.find((x) => x.id === r.id);
+      if (v) viewports.push({ box: v.box, levelF: r.levelF, levelT: r.levelT });
+    }
+    if (viewports.length) this.view.surface.cache.prefetchRing(this.view.surface.lat, viewports);
   }
 
   /** Match the drawing buffer to the element's CSS box at the device's pixel ratio. */
