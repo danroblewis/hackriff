@@ -15,8 +15,9 @@ import type { ControlClient } from "../../controls/client";
 import { formatFrequency } from "../../controls/freq";
 import {
   type ControlState, type GainControl, type PanelModel, type ScanBudget, type ScanPlan,
-  type ScanQuery, classLabel, fftSizeOptions, panelModel, recordingText, rowRateOptions,
-  scanPanelModel, scanPreviewPath, scanQueryFrom, segmentNotice, windowLabel,
+  type ScanQuery, FAST_SCAN_DWELL_S, classLabel, everythingScanQuery, fftSizeOptions, panelModel,
+  recordingText, rowRateOptions, scanPanelModel, scanPreviewPath, scanQueryFrom, segmentNotice,
+  windowLabel,
 } from "../../controls/model";
 import { fmtBandwidth } from "../../axis";
 import { h } from "../dom";
@@ -77,8 +78,18 @@ export class DeviceTab {
   private readonly scanLo = h("input", { type: "number", class: "mono", placeholder: "from MHz", onchange: () => void this.priceScan() });
   private readonly scanHi = h("input", { type: "number", class: "mono", placeholder: "to MHz", onchange: () => void this.priceScan() });
   private readonly scanDwell = h("input", { type: "number", class: "mono", min: "0.1", value: "15", placeholder: "dwell s", onchange: () => void this.priceScan() });
+  // T-517: the step width. Coarse advances by about a whole usable window (the server picks the
+  // rate that keeps the bins the same width); the commitment line reprices so coarse visibly = fast.
+  private readonly scanStep = h("select", { onchange: () => void this.priceScan() },
+    option("fine", "fine"), option("coarse", "coarse"));
   private readonly scanStart = h("button", { class: "mini", type: "button", onclick: () => void this.onScanStart() }, "Start sweep");
   private readonly scanStop = h("button", { class: "mini", type: "button", onclick: () => void this.call("sweep stop", () => this.client.post("/api/control/scan/stop")) }, "Stop sweep");
+  // T-516: the one-click "scan everything" - the range boxes already sweep everything this front
+  // end can tune when left empty, so the only thing this needs to set is the dwell and step: a
+  // fast dwell at T-517's coarse step turns a full 1 MHz-6 GHz pass from ~13 h into minutes. It
+  // fills the fields a new user would otherwise have to know to set by hand, reprices so the
+  // commitment line states THIS pass's cost before it runs, and then starts it — one click.
+  private readonly scanAll = h("button", { class: "mini", type: "button", onclick: () => void this.onScanAll() }, "Scan everything (fast)");
   private readonly scanCommit = h("div", { class: "hint" });
   private readonly scanStatus = h("div", { class: "hint" });
   private readonly scanNotes = h("div", { class: "hint" });
@@ -86,7 +97,9 @@ export class DeviceTab {
   private readonly scanFields = h("fieldset", { class: "rv-fieldset" },
     h("legend", {}, "Survey sweep"),
     h("div", { class: "hint" }, "Steps the tune across a range. Leave the range empty to sweep everything this front end can tune."),
+    h("div", {}, this.scanAll, h("span", { class: "hint" }, ` a coarse pass of the whole range at a ${FAST_SCAN_DWELL_S} s dwell`)),
     h("label", {}, "From ", this.scanLo), h("label", {}, "To ", this.scanHi), h("label", {}, "Dwell ", this.scanDwell),
+    h("label", { title: "Coarse steps by a whole window: ~10x fewer steps at the same frequency resolution" }, "Step ", this.scanStep),
     h("div", {}, this.scanStart, this.scanStop),
     this.scanCommit, this.scanStatus, this.scanNotes);
 
@@ -193,6 +206,9 @@ export class DeviceTab {
     this.scanStart.textContent = m.primary.label;
     (this.scanStart as HTMLButtonElement).disabled = !m.primary.enabled;
     (this.scanStop as HTMLButtonElement).disabled = !m.stopEnabled;
+    // T-516: "scan everything" always starts a fresh sweep (never a resume), so it shares Start's
+    // own enablement rather than Resume's label - a running sweep must not be double-started.
+    (this.scanAll as HTMLButtonElement).disabled = !m.primary.enabled;
     this.scanCommit.textContent = m.commitment;
     this.scanCommit.title = m.statement;
     this.scanStatus.textContent = m.yieldText || m.progressText;
@@ -206,6 +222,7 @@ export class DeviceTab {
       loMHz: (this.scanLo as HTMLInputElement).value,
       hiMHz: (this.scanHi as HTMLInputElement).value,
       dwellS: (this.scanDwell as HTMLInputElement).value,
+      step: (this.scanStep as HTMLSelectElement).value,
     });
   }
 
@@ -231,6 +248,22 @@ export class DeviceTab {
     const resume = this.state?.scan?.state === "yielded";
     const body = resume ? { resume: true } : this.scanQuery();
     await this.call(resume ? "sweep resume" : "sweep start", () => this.client.post("/api/control/scan", body));
+  }
+
+  /**
+   * T-516: sets the fields to `everythingScanQuery()` (the whole range, a fast dwell, coarse step),
+   * reprices so the commitment line states this pass's own cost, and only then starts it — the
+   * price the user relies on before every other sweep is not skipped just because this one is one
+   * click. A sweep already running or yielded is left to Start/Resume: this is the fresh-sweep path.
+   */
+  private async onScanAll() {
+    const q = everythingScanQuery();
+    (this.scanLo as HTMLInputElement).value = "";
+    (this.scanHi as HTMLInputElement).value = "";
+    (this.scanDwell as HTMLInputElement).value = String(q.dwell_s);
+    (this.scanStep as HTMLSelectElement).value = q.step ?? "fine";
+    await this.priceScan();
+    await this.onScanStart();
   }
 
   private renderLimits(m: PanelModel) {

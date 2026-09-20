@@ -219,7 +219,7 @@ uniform vec2  uSizePx;      // the quad's size in device px, so every mark keeps
 uniform int   uTier;        // 0 live-iq, 1 spectrum-history, 2 survey-overview (cellrule.ts's TIER)
 uniform vec2  uSrcPx;       // the on-screen size of one cell the front end ACTUALLY measured
 uniform float uShadowGain;  // the shadow's brightness multiplier (T-526): client-adjustable, default
-                             // SHADOW_MARK.gain (0.25) from ./shadow-gain.ts; the shadow shape itself
+                             // SHADOW_MARK.gain (0.32) from ./shadow-gain.ts; the shadow shape itself
                              // (scanlines, which ramp) stays whatever CELL_MARKS says
 ${CMAP_GLSL}
 ${CELL_RULE_GLSL}

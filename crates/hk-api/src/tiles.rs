@@ -155,6 +155,41 @@ pub const TILE_MAX_SOURCE_CELLS: usize = crate::query::MAX_API_CELLS;
 /// the measured per-cell cost (`docs/16` §6.4).
 pub const TILE_MAX_TOTAL_SOURCE_CELLS: usize = 4 * TILE_MAX_SOURCE_CELLS;
 
+/// How deep the **shadow search** may read, in rows across the tile's own columns (T-523).
+///
+/// A tile's budget is `cells × SHADOW_SEARCH_ROWS`, which is [`TILE_MAX_SHADOW_SOURCE_CELLS`] at
+/// the route's own 256-cell unit. Rows rather than an area, so the *reach* of the search is the
+/// same for a probe-sized tile as for a full one — the quantity the shadow is about is "how far
+/// back can this look", and it should not depend on how many pixels someone asked for.
+///
+/// # Why the shadow is not budgeted like a tile read
+///
+/// T-519 gave the last-known search the tile read's own two budgets, on the reasoning that "the
+/// shadow can at most double a tile's work". On the **full** path that is true and harmless. On
+/// T-461's **coverage short-circuit** it is neither: that path exists precisely because the answer
+/// is already known from the coverage plane and the pyramid read is 65 536 source cells spent to
+/// confirm it — and then the shadow spent up to 2 000 000 on the same tile. The route's cheapest
+/// answer became one of its most expensive, and the user met it as `502`s from the tunnel during a
+/// zoom, where the burst asks for the same place at every level at once.
+///
+/// The right scale is the **tile**, not the store: the shadow decorates a `cells × cells` grid with
+/// at most `cells` column values, so a few hundred rows across those columns is the most it can be
+/// worth — 512, two per row of a full tile. What a tighter budget costs is stated by [`hk_store::Pyramid::last_known_search`] and is exactly what
+/// makes it safe: the search plans fine-to-coarse and **skips a stage it cannot afford, leaving the
+/// next coarser one to cover that window** — so the bound is paid in the shadow's frequency/time
+/// *resolution*, which the wire reports per run (`shadow.sources[].level`), never in reach and
+/// never in a silently-missing run. A window it genuinely could not read is reported in
+/// `shadow.search.unsearched`, as it was before.
+///
+/// 512 rows is the number [`hk_store::Pyramid::last_known_search`]'s own documentation is written
+/// against — *"the whole retained horizon costs a few hundred rows per column"* — because the ladder
+/// is fine-to-coarse: 512 rows spread over the chain reach days, not 512 seconds.
+pub const SHADOW_SEARCH_ROWS: usize = 512;
+
+/// Source cells the shadow search may read for one tile of the route's own unit ([`TILE_CELLS`]),
+/// and the ceiling on the per-tile budget computed in [`shadow`]. See [`SHADOW_SEARCH_ROWS`].
+pub const TILE_MAX_SHADOW_SOURCE_CELLS: usize = TILE_CELLS * SHADOW_SEARCH_ROWS;
+
 /// Tile reads in flight at once (`docs/16` §5.5 cap 3: **server backpressure**, not a browser's
 /// connection limit).
 ///
@@ -1253,11 +1288,30 @@ fn grid_json(o: &Overview) -> Value {
 /// one. A row where the grid holds a value gets no run: the shadow never stands in for a
 /// measurement. Rows at or after the store's newest frame get no run either.
 ///
+/// # Every gap in an observed column, not only the ones after a sample (T-527)
+///
+/// A column this tile observes only part-way down used to leave the rows **above** its first sample
+/// grey whenever the search found nothing older — and grey claims *nothing ever looked here*, which
+/// for that column is false. So `carry_forward` fills the head of such a column with its
+/// **first-ever** sample, marked `backward` on the wire and distinguishable there from every
+/// forward carry, because the two are different claims: *what it looked like when we last saw it*
+/// against *when we first saw it*. Nothing else in this plane ever reads backward in time, and a
+/// column with neither a sample nor an older value still carries no run — grey is its right answer.
+///
+/// This costs the **coverage short-circuit** nothing: that path passes `grid: None`, and with no
+/// sample in the grid there is no first-ever sample to read back from. The added work on the full
+/// path is inside the row walk `carry_forward` already does over the tile's own cells, with no
+/// extra source cell read and no change to the search T-523 budgeted.
+///
 /// # The search's lock holds
 ///
-/// One step per history lock hold, each at most [`TILE_MAX_SOURCE_CELLS`] source cells, and the
-/// whole search at most [`TILE_MAX_TOTAL_SOURCE_CELLS`] — the same two bounds as the tile read, so
-/// the shadow can at most double a tile's work and never lengthens a hold.
+/// One step per history lock hold, and the **whole search** at most
+/// `cells × `[`SHADOW_SEARCH_ROWS`] source cells,
+/// capped by [`TILE_MAX_SHADOW_SOURCE_CELLS`] (T-523). That total is a quarter of
+/// [`TILE_MAX_SOURCE_CELLS`], the *single-hold* bound, so no hold this search takes can come near
+/// lengthening one. T-519's original bounds were the tile read's own, which made the coverage
+/// short-circuit — the route's cheapest answer — one of its most expensive. A budget costs the
+/// shadow *resolution*, never reach: see [`TILE_MAX_SHADOW_SOURCE_CELLS`].
 struct Shadow {
     runs: Vec<hk_store::ShadowRun>,
     known: hk_store::LastKnown,
@@ -1265,6 +1319,8 @@ struct Shadow {
     edge_ns: Option<i64>,
     chunks: usize,
     elapsed_ms: f64,
+    /// Source cells this search was allowed (T-523), on the wire as `search.max_source_cells`.
+    budget: usize,
     /// Per level of the searched store: `(f_cell_hz, t_cell_ns)`.
     levels: Vec<(f64, i64)>,
 }
@@ -1290,6 +1346,11 @@ fn shadow(
     let started = std::time::Instant::now();
     let store = shadow_store(state, tile_store);
     let (t0, t1, n) = (key.region.t0_ns, key.region.t1_ns, key.cells);
+    // T-523: budgeted against the TILE, not against the store. See [`TILE_MAX_SHADOW_SOURCE_CELLS`]
+    // for why the tile read's own budget was the wrong scale on the coverage short-circuit.
+    let budget = n
+        .saturating_mul(SHADOW_SEARCH_ROWS)
+        .clamp(1, TILE_MAX_SHADOW_SOURCE_CELLS);
     let latest = |s: TileStore| {
         with_tile_history(state, s, |p| {
             Ok(p.latest_frame_end().map(Timestamp::as_unix_nanos))
@@ -1333,8 +1394,12 @@ fn shadow(
                 Timestamp::from_unix_nanos(t0),
                 n,
                 Some(guard),
-                TILE_MAX_SOURCE_CELLS,
-                TILE_MAX_TOTAL_SOURCE_CELLS,
+                // The per-hold bound is the whole budget, which is already a quarter of
+                // [`TILE_MAX_SOURCE_CELLS`]: slicing a read that small into smaller holds would
+                // only add lock acquisitions. The search still takes several holds — one per
+                // stage/slice — but no single one can exceed the route's per-hold cap.
+                budget,
+                budget,
             ),
             levels,
         ))
@@ -1357,6 +1422,7 @@ fn shadow(
         edge_ns,
         chunks,
         elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
+        budget,
         levels,
     })
 }
@@ -1376,8 +1442,10 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
     let mut sources = vec![json!({
         "from": "this-tile",
         "level": tile_level,
-        "statement": "a value this tile's own grid holds, carried down the rows below it after the \
-            band was departed",
+        "statement": "a value this tile's own grid holds: carried DOWN the rows below it after the \
+            band departed (fill \"forward\"), or — for the rows above the column's FIRST-EVER \
+            sample, where nothing older exists — that first sample carried UP (fill \"backward\", \
+            T-527). Which one a run is, is `fill[i]`, never inferred from this entry.",
     })];
     let mut src_of_level: Vec<(u8, usize)> = Vec::new();
     let mut src = Vec::with_capacity(sh.runs.len());
@@ -1413,6 +1481,21 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
         "last_t_s": sh.runs.iter().map(|r| s_of(r.t_ns)).collect::<Vec<_>>(),
         "src": src,
         "sources": sources,
+        // T-527. Which WAY in time the run reads, as a code into `fills` — the same shape as
+        // `coverage.states`, and for the same reason: the two are different claims about the same
+        // shadow, and a client that cannot tell them apart is being told something false about one
+        // of them. `fills[0]` is the default a pre-T-527 reader already assumes.
+        "fill": sh
+            .runs
+            .iter()
+            .map(|r| u8::from(r.fill == hk_store::ShadowFill::Backward))
+            .collect::<Vec<_>>(),
+        "fills": ["forward", "backward"],
+        "backward_runs": sh
+            .runs
+            .iter()
+            .filter(|r| r.fill == hk_store::ShadowFill::Backward)
+            .count(),
         "edge_s": sh.edge_ns.map(s_of),
         "search": {
             "store": store_name(sh.store),
@@ -1438,27 +1521,39 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
                 }))
                 .collect::<Vec<_>>(),
             "source_cells": k.source_cells,
+            "max_source_cells": sh.budget,
             "chunks": sh.chunks,
             "build_ms": (sh.elapsed_ms * 1000.0).round() / 1000.0,
             "rule": "newest-first, fine-to-coarse: each stage reads one level over the part of the \
                 past the finer stage above it did not, so the whole retained horizon costs a few \
                 hundred rows per column; the search stops when every column has a value or the \
-                store holds nothing older. Bounded by the tile read's own two budgets \
-                (`resolution.budget`), one lock hold per step. A window in `unsearched` was NOT read \
-                (over budget, or its coarse cell is not folded yet): a column with no run is \
-                unobserved in [searched_from_s, before_s) OUTSIDE those windows, and nothing is \
-                claimed about earlier.",
+                store holds nothing older. Bounded by `max_source_cells` (T-523: cells x 512 rows, \
+                the TILE's scale and not the store's — the whole search's total is a quarter of what \
+                `resolution.budget` allows ONE lock hold). The budget is paid in RESOLUTION, \
+                never in reach: a stage it cannot afford is skipped and the next COARSER level \
+                covers that window, which is why `sources[].level` is on the wire per run. A window \
+                in `unsearched` was NOT read (over budget, or its coarse cell is not folded yet): a \
+                column with no run is unobserved in [searched_from_s, before_s) OUTSIDE those \
+                windows, and nothing is claimed about earlier.",
         },
         "rule": "the LAST-KNOWN tier (docs/adr/0020), NOT a measurement of the row it is drawn on. \
             Run i covers rows [row[i], row[i] + rows[i]) of column f[i], in `grid.order`'s axes; \
-            last_db[i] is the newest max-hold known there at or before those rows, last seen at \
-            last_t_s[i] (absolute capture time; age is the row's time minus it), resolved at \
-            sources[src[i]]'s cells. A row where `grid` holds a value is never covered: a shadow \
-            never replaces a measurement. Rows at or after `edge_s` (the newest frame) are never \
-            covered. GREY IS UNCHANGED AND IS STILL DECIDED BY `coverage` ALONE: draw a shadow only \
-            where the coverage plane says \"unobserved\", and a cell with no run over it stays grey \
-            — no retained measurement reaches it. The plane is not device-scoped: the pyramid is \
-            not, and this carries its values.",
+            last_db[i] is a max-hold measured at last_t_s[i] (absolute capture time), resolved at \
+            sources[src[i]]'s cells. EVERY time gap in a column that was ever observed is filled \
+            (T-527), and fill[i] says which way the value was read: \"forward\" — the nearest PAST \
+            sample, last seen at last_t_s[i], which is at or before the run — or \"backward\" — the \
+            column's FIRST-EVER sample, first seen at last_t_s[i], which is AFTER the run and is \
+            the only value in this plane read backward in time. A backward run exists only above a \
+            column's first sample and only where the search found nothing older; everything else is \
+            forward. Either way last_t_s[i] is the boundary NEAREST the run, so |row time - \
+            last_t_s[i]| is the smallest age the evidence supports. A row where `grid` holds a \
+            value is never covered: a shadow never replaces a measurement. Rows at or after \
+            `edge_s` (the newest frame) are never covered. A column with NO sample and NO older \
+            value carries NO run at all — it was never observed. GREY IS UNCHANGED AND IS STILL \
+            DECIDED BY `coverage` ALONE: draw a shadow only where the coverage plane says \
+            \"unobserved\", and a cell with no run over it stays grey — no retained measurement \
+            reaches it. The plane is not device-scoped: the pyramid is not, and this carries its \
+            values.",
     })
 }
 
@@ -2665,33 +2760,50 @@ mod tests {
         (state, t0)
     }
 
-    /// Expands the `shadow` block's runs into a per-cell `(last_db, last_t_s, source f cell)` plane;
-    /// the source's frequency cell is the tile's own for a value this tile holds.
-    fn shadow_plane(v: &Value) -> Vec<Option<(f64, f64, f64)>> {
+    /// Expands the `shadow` block's runs into a per-cell
+    /// `(last_db, last_t_s, source f cell, fill)` plane; the source's frequency cell is the tile's
+    /// own for a value this tile holds, and `fill` is the run's direction as the wire spells it
+    /// (T-527) — read through the `fills` legend, never assumed from the code.
+    fn shadow_plane(v: &Value) -> Vec<Option<(f64, f64, f64, String)>> {
         let sh = &v["shadow"];
         assert_eq!(sh["encoding"], json!("column-runs"), "{sh}");
         let n = v["extent"]["nf"].as_u64().unwrap() as usize;
         let tile_f_cell = v["extent"]["f_cell_hz"].as_f64().unwrap();
         let mut out = vec![None; n * n];
         let arr = |k: &str| sh[k].as_array().unwrap().clone();
-        let (f, row, rows, db, t, src) = (
+        let (f, row, rows, db, t, src, fill) = (
             arr("f"),
             arr("row"),
             arr("rows"),
             arr("last_db"),
             arr("last_t_s"),
             arr("src"),
+            arr("fill"),
         );
+        let fills = arr("fills");
+        assert_eq!(fills, vec![json!("forward"), json!("backward")], "{sh}");
         assert_eq!(sh["runs"].as_u64().unwrap() as usize, f.len());
+        for a in [&row, &rows, &db, &t, &src, &fill] {
+            assert_eq!(a.len(), f.len(), "parallel arrays: {sh}");
+        }
         for i in 0..f.len() {
             let source = &sh["sources"][src[i].as_u64().unwrap() as usize];
             assert!(source.is_object(), "src indexes `sources`: {sh}");
             let f_cell = source["f_cell_hz"].as_f64().unwrap_or(tile_f_cell);
+            let dir = fills[fill[i].as_u64().expect("a fill code") as usize]
+                .as_str()
+                .expect("`fill` indexes `fills`")
+                .to_string();
             let c = f[i].as_u64().unwrap() as usize;
             let r0 = row[i].as_u64().unwrap() as usize;
             for r in r0..r0 + rows[i].as_u64().unwrap() as usize {
                 assert!(out[r * n + c].is_none(), "runs overlap at ({r}, {c})");
-                out[r * n + c] = Some((db[i].as_f64().unwrap(), t[i].as_f64().unwrap(), f_cell));
+                out[r * n + c] = Some((
+                    db[i].as_f64().unwrap(),
+                    t[i].as_f64().unwrap(),
+                    f_cell,
+                    dir.clone(),
+                ));
             }
         }
         out
@@ -2725,7 +2837,10 @@ mod tests {
                 } else {
                     // Departed part-way down this tile: the value it was last seen with, and when.
                     assert!(grid[r * n + f].is_null());
-                    let (db, t, _) = plane[r * n + f].expect("shadow below the departure");
+                    let (db, t, _, fill) = plane[r * n + f]
+                        .clone()
+                        .expect("shadow below the departure");
+                    assert_eq!(fill, "forward", "a departure carries FORWARD ({r}, {f})");
                     assert_eq!((db, t), (seen, t0_s + half as f64), "({r}, {f})");
                 }
             }
@@ -2747,7 +2862,10 @@ mod tests {
         let tile_f_cell = next["extent"]["f_cell_hz"].as_f64().unwrap();
         for r in 0..n {
             for f in 0..n {
-                let (db, t, f_cell) = plane[r * n + f].expect("every cell of the departed band");
+                let (db, t, f_cell, fill) = plane[r * n + f]
+                    .clone()
+                    .expect("every cell of the departed band");
+                assert_eq!(fill, "forward", "({r}, {f})");
                 let k = (f_cell / tile_f_cell).round().max(1.0) as usize;
                 let g = f / k * k;
                 let expect = (g..g + k)
@@ -2761,7 +2879,7 @@ mod tests {
         assert!(
             plane
                 .iter()
-                .any(|c| c.is_some_and(|(db, _, _)| db == carrier))
+                .any(|c| c.as_ref().is_some_and(|(db, ..)| *db == carrier))
         );
         assert_eq!(next["shadow"]["search"]["columns_found"], json!(n));
 
@@ -2782,6 +2900,137 @@ mod tests {
             next["shadow"].to_string().len(),
             next["shadow"]["search"]["build_ms"],
             next["shadow"]["search"]["source_cells"],
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-527's fixture: band X (tile `F_INDEX`) is **first ever seen** `x_from` rows down tile
+    /// `T_INDEX` — it has no past whatever — and is observed from there on. Band Y
+    /// (tile `F_INDEX + 2`) is observed throughout both tiles, so the store's edge is past
+    /// `T_INDEX` and tile `F_INDEX + 1` is still never observed at all.
+    fn state_arrived_mid_tile(dir: &std::path::Path, x_from: i64) -> (ApiState, i64) {
+        let mut p = hk_store::Pyramid::open(dir, PyramidConfig::default()).unwrap();
+        let g = p.geometry().clone();
+        let (t_cell, f_cell) = (g.levels[0].t_cell_ns, g.levels[0].f_cell_hz);
+        let t0 = T_INDEX * t_cell * N as i64;
+        const NB: usize = 128;
+        let bin_hz = f_cell * N as f64 / NB as f64;
+        for k in 0..2 * N as i64 {
+            let mut psd = [1e-12f32; NB];
+            psd[40] = 1e-6;
+            let bands = if k >= x_from {
+                &[0i64, 2][..]
+            } else {
+                &[2i64][..]
+            };
+            for &b in bands {
+                p.ingest(&hk_store::history::FrameInput::new(
+                    Timestamp::from_unix_nanos(t0 + k * t_cell),
+                    t_cell,
+                    (F_INDEX + b) as f64 * f_cell * N as f64,
+                    bin_hz,
+                    hk_model::PowerUnit::Dbfs,
+                    &psd,
+                ))
+                .unwrap();
+            }
+        }
+        (
+            ApiState {
+                history: Some(Arc::new(std::sync::Mutex::new(p))),
+                ..ApiState::default()
+            },
+            t0,
+        )
+    }
+
+    /// **T-527, on the wire.** A column observed only part-way down the view leaves no grey gap
+    /// above its samples: the stretch before its **first-ever** sample carries that sample, marked
+    /// `backward`, and every row after a sample carries the nearest past one, marked `forward`.
+    /// A column never observed at all still carries **no run** — that is what keeps grey meaning
+    /// *we never looked*.
+    #[test]
+    fn the_rows_above_a_columns_first_ever_sample_carry_it_backward_and_say_so() {
+        let dir = temp_dir("shadow-backward");
+        let half = N as i64 / 2;
+        let h = half as usize;
+        let (state, t0) = state_arrived_mid_tile(&dir, half);
+        let (n, t0_s) = (N, t0 as f64 / 1e9);
+
+        let here = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        let grid = here["grid"]["max_db"].as_array().unwrap().clone();
+        let sh = &here["shadow"];
+        // Nothing older than this tile exists for band X: the whole head gap is the backward fill's
+        // to answer, and if the search had found something this would be a different test.
+        assert_eq!(
+            sh["search"]["columns_found"],
+            json!(0),
+            "the fixture must have no past for band X: {sh}"
+        );
+        assert_eq!(sh["backward_runs"], json!(n), "one per column: {sh}");
+        let plane = shadow_plane(&here);
+        for f in 0..n {
+            // The first-ever sample: the value in the first row the grid measures.
+            let first = grid[h * n + f].as_f64().expect("row half measured");
+            for r in 0..n {
+                if r >= h {
+                    assert!(grid[r * n + f].is_number(), "({r}, {f})");
+                    assert_eq!(
+                        plane[r * n + f],
+                        None,
+                        "a shadow over a measurement ({r}, {f})"
+                    );
+                    continue;
+                }
+                assert!(grid[r * n + f].is_null(), "({r}, {f}) must be a gap");
+                let (db, t, _, fill) = plane[r * n + f]
+                    .clone()
+                    .unwrap_or_else(|| panic!("row {r} of column {f} left grey"));
+                assert_eq!(fill, "backward", "({r}, {f})");
+                assert_eq!(db, first, "the first-ever sample's value ({r}, {f})");
+                // First seen at the START of that sample's cell — which lies AFTER these rows.
+                // That is the whole difference from a forward run, and it is on the wire.
+                assert_eq!(t, t0_s + half as f64, "({r}, {f})");
+                assert!(
+                    t > t0_s + r as f64,
+                    "a backward run's instant is after its rows"
+                );
+            }
+        }
+        // The same tile's source table is the tile's own grid, not a store level: a backward fill
+        // can only ever be a value this tile holds.
+        for i in 0..sh["runs"].as_u64().unwrap() as usize {
+            let s = &sh["sources"][sh["src"][i].as_u64().unwrap() as usize];
+            assert_eq!(s["from"], json!("this-tile"), "{sh}");
+        }
+
+        // **Never observed stays grey.** The next band over has no sample and nothing older, so it
+        // carries NO run — there is no first-ever sample to read back from, and the backward fill
+        // must never invent one.
+        let never = tiles_json(&state, &tile_params(F_INDEX + 1, T_INDEX)).unwrap();
+        assert_eq!(never["shadow"]["runs"], json!(0), "{}", never["shadow"]);
+        assert_eq!(never["shadow"]["backward_runs"], json!(0));
+        assert_eq!(never["shadow"]["f"], json!([]), "{}", never["shadow"]);
+        assert_eq!(never["shadow"]["search"]["columns_found"], json!(0));
+        assert!(shadow_plane(&never).iter().all(Option::is_none));
+
+        // And the tile BELOW (later than) the arrival carries the band forward, as before: the
+        // backward fill is the head's rule only, never a second way to answer an ordinary gap.
+        let below = tiles_json(&state, &tile_params(F_INDEX, T_INDEX + 1)).unwrap();
+        assert_eq!(
+            below["shadow"]["backward_runs"],
+            json!(0),
+            "{}",
+            below["shadow"]
+        );
+
+        eprintln!(
+            "T-527: {} runs ({} backward), {} B shadow block, search {} ms / {} cells",
+            sh["runs"],
+            sh["backward_runs"],
+            sh.to_string().len(),
+            sh["search"]["build_ms"],
+            sh["search"]["source_cells"],
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

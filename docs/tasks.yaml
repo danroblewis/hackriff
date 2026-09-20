@@ -15737,6 +15737,88 @@ tasks:
     notes: |
       Filed 2026-09-20. Below the fog-of-war and crash work in the user's order.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-529
+    milestone: MLIVE
+    title: A UI retune is TWO posts down TWO paths, so T-508's one-shot mock fault lands on whichever wins - the test flakes on main
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND 2026-09-20 while merging main into task-t506 (a branch with NO crates/ changes at all -
+      `git diff main -- crates/` empty), so it is main's defect, not the branch's.
+      canvas-journey test 5 ("a retune the device refuses restarts capture") failed twice with
+      capture_failures 0 - the armed one-shot mock fault never fired - then passed three times.
+      MECHANISM: the UI commits a retune as TWO posts ~1.5 ms apart, POST /api/control/rate then
+      POST /api/control/center. The RATE change goes through the RE-PLUMB path; the CENTRE change
+      goes through the mailbox to apply_pending, which is where T-508's RetuneApplyFails lives.
+      Which post the one-shot fault lands on is TIMING-DEPENDENT, and under load (a hackrf serve at
+      1400 % CPU during the failing runs) it can be swallowed by the re-plumb and counted as
+      something other than capture_failures.
+      TWO QUESTIONS, and the second matters more than the test: (1) should a single user retune be
+      ONE device action rather than two posts down two paths? If the rate and centre can disagree
+      mid-flight, that is a real-time-path defect the flake is merely reporting. (2) Whatever the
+      answer, the fault must be deterministic for the test - arm it per-path, or make the test
+      commit the retune the way the fault expects.
+      Do NOT fix this by retrying the test or loosening the assertion.
+    notes: |
+      Filed 2026-09-20 from the T-506/T-517 conflict-resolution report. It will flake on main too.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-530
+    milestone: MLIVE
+    title: A re-plumb leaves /ws/spectrum/live answering 410 "finished" during a gap that is not the end
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-525]
+    use_cases: [AWARE-011]
+    acceptance: |
+      FOUND BY T-525, MEASURED, AND DELIBERATELY OUT OF ITS SCOPE. After T-525's fix a re-plumb still
+      leaves /ws/spectrum/live with no publisher until the new segment's first row (~0.17 s), and the
+      route answers 410 GONE "stream finished" during it. THAT IS THE WRONG ANSWER: the run has not
+      finished, it is between segments. It matters beyond tidiness because ops/stage.sh's healthy()
+      is `/` PLUS that handshake - so a long enough 410 window reads as "hk serve crashed" and the
+      demo is restarted under the user (T-525 measured a 21.43 s unbroken non-101 run before its fix;
+      0.17 s after).
+      Output::finish at segment end while the run continues (shared.continues) is where to look. The
+      contract question to settle: a consumer across a re-plumb should see a GAP, not an end - either
+      the handshake waits briefly for the successor, or it answers something that means "not now"
+      rather than "never again". T-417's rule (a retune must not disconnect stream consumers) is the
+      same principle one level down.
+      DoD: a re-plumb never produces 410; a test that a handshake during a re-plumb succeeds or
+      yields a not-an-end answer; stage.sh's healthy() no longer reads a re-plumb as a crash.
+    notes: |
+      Filed 2026-09-20 from T-525's report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-531
+    milestone: M2-hardening
+    title: /api/streams grows without bound during a sweep - 1299 entries and 659 KB in 40 minutes - and SIGTERM takes over 78 s
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      TWO OBSERVATIONS FROM T-525's 40-MINUTE LIVE SWEEP, both measured, neither its subject:
+      (1) /api/streams reached 1299 entries / 659 KB - one `bits` stream per emitter - and kept
+      growing. A survey across 6 GHz meets a great many emitters, so an unbounded per-emitter
+      registry is a leak in the shape the inventory invariants already reject elsewhere
+      (no unbounded seen-count accumulators; candidates decay). Decide the lifetime of a `bits`
+      stream and bound the registry; a client that lists streams should not pay for the whole
+      history of a sweep.
+      (2) The server took over 78 s to exit on SIGTERM mid-sweep. Find what does not observe the
+      shutdown signal and make shutdown prompt; a supervisor that restarts on a health check will
+      otherwise overlap two servers on one device.
+      MEASURE both before changing anything.
+    notes: |
+      Filed 2026-09-20 from T-525's report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
