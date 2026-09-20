@@ -15737,6 +15737,36 @@ tasks:
     notes: |
       Filed 2026-09-20. Below the fog-of-war and crash work in the user's order.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-529
+    milestone: MLIVE
+    title: A UI retune is TWO posts down TWO paths, so T-508's one-shot mock fault lands on whichever wins - the test flakes on main
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND 2026-09-20 while merging main into task-t506 (a branch with NO crates/ changes at all -
+      `git diff main -- crates/` empty), so it is main's defect, not the branch's.
+      canvas-journey test 5 ("a retune the device refuses restarts capture") failed twice with
+      capture_failures 0 - the armed one-shot mock fault never fired - then passed three times.
+      MECHANISM: the UI commits a retune as TWO posts ~1.5 ms apart, POST /api/control/rate then
+      POST /api/control/center. The RATE change goes through the RE-PLUMB path; the CENTRE change
+      goes through the mailbox to apply_pending, which is where T-508's RetuneApplyFails lives.
+      Which post the one-shot fault lands on is TIMING-DEPENDENT, and under load (a hackrf serve at
+      1400 % CPU during the failing runs) it can be swallowed by the re-plumb and counted as
+      something other than capture_failures.
+      TWO QUESTIONS, and the second matters more than the test: (1) should a single user retune be
+      ONE device action rather than two posts down two paths? If the rate and centre can disagree
+      mid-flight, that is a real-time-path defect the flake is merely reporting. (2) Whatever the
+      answer, the fault must be deterministic for the test - arm it per-path, or make the test
+      commit the retune the way the fault expects.
+      Do NOT fix this by retrying the test or loosening the assertion.
+    notes: |
+      Filed 2026-09-20 from the T-506/T-517 conflict-resolution report. It will flake on main too.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
