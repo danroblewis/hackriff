@@ -419,23 +419,39 @@ function paneRectOf(rect, dpr) {
 }
 
 /**
- * **The newest third of a pane is the LIVE-EDGE ZONE, and no grey claim in this file is made over
- * it.** Found by this file, and recorded here because it is the reason for the rect every grey
- * assertion uses.
+ * **The newest 40 % of a pane: the LIVE-EDGE ZONE, and since T-532 it carries a claim of its own.**
  *
- * Over a viewport the server reports 100 % observed, fully resident (`0 coarse stand-ins · 0
- * pending`), the pane's THE-grey share pulses between 0 % and 54 % from one frame to the next — and
- * the profile by vertical tenth says exactly where it lives: `100% 53% 35% 0% 0% 0% 0% 0% 0% 0%` in
- * one run, `15% 0% 0% …` two minutes later, `33% 2% 0% …` in a third. **Every grey pixel is in the
- * newest tenths and none is below them**, and it drains as each live-tile revalidation lands. That
- * is a real defect — grey is the one colour that may only mean "the radio never looked", and these
- * rows were recorded and are served — but its amplitude varies by a factor of fifty run to run, so
- * a threshold over it would be a coin toss rather than a guard. It is reported as a diagnostic in
- * every test below, and asserted nowhere.
+ * It did not, and that is why this nearly shipped. Over a viewport the server reported 100 %
+ * observed, fully resident (`0 coarse stand-ins · 0 pending`), the pane's THE-grey share pulsed
+ * between 0 % and 54 % from one frame to the next, and the profile by vertical tenth said exactly
+ * where it lived: `100% 53% 35% 0% 0% 0% 0% 0% 0% 0%` in one run, `15% 0% 0% …` in another. Every
+ * grey pixel was in the newest tenths and none below them, draining as each live-tile revalidation
+ * landed. It was reported here as a diagnostic and asserted nowhere, on the reasoning that its
+ * amplitude varied fiftyfold run to run and a threshold over it would be a coin toss.
  *
- * Below the zone the same measurement reads 0.0 % in every run, which is where the claims live.
+ * **That reasoning was wrong, and it cost a revert.** The amplitude varied because the quantity was
+ * a *staleness*: the newest rows of a resident tile's coverage plane were written before those rows
+ * were recorded, so how much grey a frame showed was how long ago the tile had last been re-asked.
+ * A varying number is still a number that must be zero — grey is the one colour that may only mean
+ * *the radio never looked*, and these rows were recorded and served. T-532 makes the renderer stop
+ * drawing past the instant each answer's evidence reaches (`coverage.horizon.as_of_s`), so over a
+ * band the server reports fully observed the honest answer here is **none at all**, in every frame,
+ * whatever the refresh happens to be doing.
+ *
+ * So the claim is asserted, at [[EDGE_GREY_MAX]], and only where its premise is measured from the
+ * server: a window that is >90 % observed. Over spectrum that was never sampled the newest rows are
+ * legitimately grey and this zone says nothing.
  */
 const LIVE_EDGE_ZONE = 0.40;
+/**
+ * The most grey the live-edge zone may show over a band the server reports fully observed.
+ *
+ * Five per cent, the same allowance the body of the pane already carries below — not a tuned number
+ * but the same one, because it is the same claim about the same colour and there is no reason for
+ * the newest rows to be held to a looser standard than the rest. Measured after T-532: **0.0 %**,
+ * every frame of every run; before it, 10–38 %.
+ */
+const EDGE_GREY_MAX = 0.05;
 
 /** The pane's data rect minus the newest few per cent, which are legitimately not yet folded. */
 function bodyRect(pane, from = 0.06, to = 1.0) {
@@ -874,8 +890,6 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
       `census ${insidePix.census.distinct} distinct, dominant ${(insidePix.census.dominantShare * 100).toFixed(0)} %`);
     t.diagnostic(`INSIDE grey by vertical tenth over the WHOLE pane (newest first): ` +
       `${insideG.all[insideG.all.length - 1].bandsText}`);
-    // DIAGNOSTIC, not a claim — see [[LIVE_EDGE_ZONE]]. A live edge drawing recorded rows as
-    // never-looked-at is a real defect; its amplitude varies fiftyfold, so it is reported, not gated.
     t.diagnostic(`INSIDE the live-edge zone (newest ${(LIVE_EDGE_ZONE * 100).toFixed(0)} % of the pane): ` +
       `${(insideEdge.mean * 100).toFixed(1)} % THE grey (${insideEdge.text}) over spectrum the server ` +
       "reports fully observed");
@@ -928,6 +942,17 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
       `grey does not track coverage: the pane draws ${(wideG.mean * 100).toFixed(1)} % THE grey over a band ` +
       `the server reports ${(wideCov.unobservedShare * 100).toFixed(1)} % unobserved. Grey is the load-bearing ` +
       "claim that the radio never looked, and it must be neither more nor less than the truth.");
+    // **THE LIVE-EDGE CLAIM** (T-532), asserted rather than reported — see [[LIVE_EDGE_ZONE]] for
+    // what it cost to leave this as a diagnostic. Its premise is the same `insideCov` the assertion
+    // above already checked: the server says this band is >90 % observed, so any grey in the newest
+    // rows is the surface claiming the radio never looked at rows it recorded.
+    assert.ok(insideEdge.mean < EDGE_GREY_MAX,
+      `${(insideEdge.mean * 100).toFixed(1)} % of the LIVE-EDGE ZONE (newest ${(LIVE_EDGE_ZONE * 100).toFixed(0)} % of ` +
+      `a pane over a band the server reports ${(insideCov.observedShare * 100).toFixed(1)} % OBSERVED) is drawn as ` +
+      `THE grey (${insideEdge.text}; by vertical tenth over the whole pane, newest first: ${insidePix.bandsText}). ` +
+      "The newest rows were recorded, folded and served — a resident tile's coverage plane is evidence only up to " +
+      "`coverage.horizon.as_of_s`, and drawing grey past it says the radio never looked at rows it did look at " +
+      "(T-532; CLAUDE.md: the live view renders like a classic SDR waterfall).");
     assert.ok(isRender(insidePix.census),
       `the pane over observed spectrum is not a render: ${insidePix.census.distinct} distinct, ` +
       `dominant ${(insidePix.census.dominantShare * 100).toFixed(0)} %`);

@@ -6725,6 +6725,42 @@ fn coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it
         "row 0 is inside capture and row 2 is a full row past the edge: {states:?} in {g}"
     );
 
+    // ---- 1b. the answer states WHERE ITS EVIDENCE STOPS at the young end (T-532) ----
+    //
+    // The grey above is honest **at the instant it is served** and false a moment later: the rows
+    // past the edge are being recorded while any copy of this answer ages, and a tile cache keeps
+    // copies. So the answer names the horizon the grey is relative to, exactly as `oldest_record_s`
+    // names the one at the other end, and a client that holds the answer may not draw grey past it.
+    //
+    // Asserted against the grid's own axes rather than against a clock: `as_of_s` must land in the
+    // row where coverage stops — after the last `observed` row starts, and no later than the end of
+    // the first `unobserved` one. Anything else and the field is not describing this plane.
+    let as_of = g["horizon"]["as_of_s"]
+        .as_f64()
+        .expect("the horizon states how far forward this answer reaches");
+    let row_t0 = |r: usize| t0 + r as f64 * ROW_S;
+    assert!(
+        as_of >= row_t0(edge_row - 1) && as_of <= row_t0(edge_row + 1),
+        "`as_of_s` {as_of} does not land in the row where coverage stops (row {edge_row}, \
+         [{}, {})): the young-end horizon and the plane it describes disagree, so a client \
+         obeying it would draw grey over rows this answer never reached. {g}",
+        row_t0(edge_row),
+        row_t0(edge_row + 1)
+    );
+    // And a band this radio has never been near names no horizon at all — `null` is "no record
+    // touches this band", which is not "reaches everywhere": everything there is honestly grey at
+    // every instant, and the answer stands as served.
+    let (st, far) = get(
+        addr,
+        &format!("/api/coverage?f_lo=2400000000&f_hi=2450000000&cells=8&rows=2&t0={t0}&t1={t1}"),
+    );
+    assert_eq!(st, 200, "{far}");
+    assert_eq!(
+        far["horizon"]["as_of_s"],
+        Value::Null,
+        "no record touches 2.4 GHz on this run, so there is no forward horizon to state: {far}"
+    );
+
     // ---- 2. the column is the SUM of the rows, and its duty is re-derived ----
     // The control for property 1, and the answer T-405/T-411 were reading: at rows=1 the very same
     // window still says "observed" for all of it.

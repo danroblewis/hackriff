@@ -694,6 +694,9 @@ export interface PaneStatus {
   readonly tiles: number;
   readonly fallbacks: number;
   readonly pending: number;
+  /** **Resident tiles whose answer does not reach the live edge** (T-532) — see
+   * [[PaneReport.behind]]. Not part of `pending`: the tile arrived, its newest rows had not. */
+  readonly behind: number;
   /** Other panes in this frame resolved to a different `(levelF, levelT)`. Not a warning: a fact
    * the pane must say about itself, so a legitimate difference is not read as a bug. */
   readonly differsFrom: readonly string[];
@@ -781,6 +784,7 @@ export function paneStatuses(
       tiles: r.tiles,
       fallbacks: r.fallbacks,
       pending: r.pending,
+      behind: r.behind,
       differsFrom,
     });
   }

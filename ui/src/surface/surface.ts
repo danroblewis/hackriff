@@ -118,6 +118,17 @@ export interface PaneReport {
    * **not** counted in `pending` — "wait" and "nothing is coming" are different states, and a
    * readout that folds them together is the progress bar that never finishes. */
   readonly refused: number;
+  /**
+   * **Resident tiles whose answer does not reach the live edge** (T-532): the copy is in hand, and
+   * its newest rows were recorded after it was built, so that strip is left as the pane's PENDING
+   * ground rather than drawn from a plane that cannot speak about it (see [[TileData.asOfNs]]).
+   *
+   * It is a **fourth** count and not part of `pending`, deliberately: the tile arrived, so a
+   * readout that called it pending would say the fetch had not landed. On a following pane it is
+   * the normal state of the live-edge column and is the number to watch when the edge stops
+   * keeping up — `ui/test/surface-edge.test.ts` and the canvas journey both read it.
+   */
+  readonly behind: number;
 }
 
 const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
@@ -522,16 +533,19 @@ export class Surface {
       // the overview tier addresses, falls back, pins and cancels entirely inside that lattice.
       const { tier, lat, levelF, levelT, addrs, clamped } = tierFor(this.lattices, pane.box, r.w, r.h, pane.device ?? "any");
       viewports.push({ box: pane.box, levelF, levelT, lat });
-      let tiles = 0, fallbacks = 0, pending = 0, refused = 0;
+      let tiles = 0, fallbacks = 0, pending = 0, refused = 0, behind = 0;
       for (const a of addrs) {
         const res = this.cache.acquire(a);
         if (res.kind === "resident") {
           const region = extentOf(lat, a);
-          this.drawRegion(pane, lat, region, res.entry, "tile", r);
+          const shown = this.drawUpToHorizon(pane, lat, region, res.entry, "tile", r);
+          if (shown.behind) behind++;
           // The cells of this tile that are inside this pane's box — the measurement the viewport
           // mode is a scale over. A resident tile draws its own extent, so the texture's extent and
-          // the region are the same box.
-          measure?.add(res.entry.data, region, region, pane.box);
+          // the region are the same box — **clipped at the horizon** (T-532) when the answer stops
+          // short, so the scale is measured over what was DRAWN and never over rows this copy does
+          // not reach.
+          if (shown.drawn) measure?.add(res.entry.data, region, shown.drawn, pane.box);
           // **The one read of a tile's own range, and it is inside the opt-in branch** (T-470). What
           // is on screen decides the scale only when the user has asked for that; otherwise the
           // scale is anchored and this loop cannot touch it. `ui/test/surface-range.test.ts` asserts
@@ -546,12 +560,13 @@ export class Surface {
         const stand = this.fallbackFor(lat, a);
         if (stand) {
           const region = extentOf(lat, a);
-          this.drawRegion(pane, lat, region, stand, "fallback", r);
+          const shown = this.drawUpToHorizon(pane, lat, region, stand, "fallback", r);
+          if (shown.behind) behind++;
           // A coarse stand-in's cells ARE what is on the screen here, so they count — but the
           // texture is the ancestor's, so the visible sub-rect is mapped through the ancestor's own
           // extent, not the child's. Getting that pair the wrong way round would read a different
           // corner of the ancestor than the one being displayed.
-          measure?.add(stand.data, extentOf(lat, stand.addr), region, pane.box);
+          if (shown.drawn) measure?.add(stand.data, extentOf(lat, stand.addr), shown.drawn, pane.box);
           fallbacks++;
         }
         // **`pending` and `refused` are drawn apart** (T-499). A place with no usable answer is not
@@ -571,7 +586,7 @@ export class Surface {
           this.cache.prefetch(a);
         }
       }
-      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused });
+      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind });
     }
     gl.disable(gl.SCISSOR_TEST);
     if (this.autoScale && lo < hi) {
@@ -611,6 +626,57 @@ export class Surface {
       if (e) return e;
     }
     return null;
+  }
+
+  /**
+   * Draw `region` from `entry`, **but only as far forward as that answer's evidence reaches**
+   * (T-532). Returns true when the answer stopped short and a strip was left undrawn.
+   *
+   * # The defect this exists to make impossible
+   *
+   * A tile cache keeps answers; the radio keeps recording. The route's coverage plane is written
+   * from tune records, which stop at the newest sample, so a live tile's rows after that are served
+   * `unobserved` — honest at the instant of the read, **false a moment later**. The copy is then
+   * held for as long as the revalidation lane takes to come round (T-460/T-490/T-491), and every
+   * row recorded in the meantime is drawn as THE grey: *the radio never looked here*, over rows the
+   * radio recorded and the server is serving. That is the one claim this surface may never make by
+   * accident.
+   *
+   * It was invisible while the finest time cell was one second, because the error hid inside the
+   * cell the live edge was already in. At T-501's fidelity floor the cell is 40 ms and the same
+   * staleness is a visible band across the newest second or two of every following pane.
+   *
+   * # Why nothing is drawn there rather than something else
+   *
+   * The pane's ground is already PENDING — *not loaded*, the honest statement for a place this
+   * client has no answer for — and for this strip that is exactly true: the copy in hand does not
+   * reach it. Drawing a mark of its own would be a seventh cell state for a condition that is a
+   * property of the **answer**, not of the cell, and `cellrule.ts`'s standing rule is that
+   * not-having-it is a tile property and never a cell state. So the strip falls through to the
+   * ground, one comparison and no new vocabulary.
+   *
+   * A sealed tile is untouched: its extent ends before the horizon, so the whole of it is drawn.
+   */
+  private drawUpToHorizon(
+    pane: PaneView, lat: Lattice, region: Box, entry: TileEntry<TilePlanes>, kind: DrawKind, rect: PaneRect,
+  ): { behind: boolean; drawn: Box | null } {
+    const asOf = entry.data.asOfNs;
+    // No stated horizon is not "reaches everywhere": it is a band no record touches (or a server
+    // that predates the field), and then the answer stands exactly as served.
+    //
+    // **Anything but a finite number is "no horizon", and that is deliberate** — the test named
+    // *"a tile with NO `measured` renders"* is the standing rule that no missing input may blank a
+    // pane, and a horizon read as `undefined` would blank every one of them.
+    if (!Number.isFinite(asOf as number) || (asOf as number) >= region.t1Ns) {
+      this.drawRegion(pane, lat, region, entry, kind, rect);
+      return { behind: false, drawn: region };
+    }
+    if ((asOf as number) > region.t0Ns) {
+      const drawn = { ...region, t1Ns: asOf as number };
+      this.drawRegion(pane, lat, drawn, entry, kind, rect);
+      return { behind: true, drawn };
+    }
+    return { behind: true, drawn: null };
   }
 
   /** Draws `region` of the surface from `entry`'s texture — the whole tile when they coincide, a

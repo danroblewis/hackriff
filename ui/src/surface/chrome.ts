@@ -133,7 +133,11 @@ export function readoutOf(
       level: s.levelLabel,
       tier: s.tier,
       tierLabel: s.tierLabel,
-      counts: `${s.tiles} tiles · ${s.fallbacks} coarse stand-in${s.fallbacks === 1 ? "" : "s"} · ${s.pending} pending`,
+      // The fourth count is appended rather than folded into `pending` (T-532): a tile whose
+      // newest rows are not yet in hand HAS arrived, and a readout that called that pending would
+      // report the fetch as outstanding. It is also, on a following pane, the one number that says
+      // the live edge has stopped keeping up.
+      counts: `${s.tiles} tiles · ${s.fallbacks} coarse stand-in${s.fallbacks === 1 ? "" : "s"} · ${s.pending} pending · ${s.behind} behind the edge`,
       differsFrom: s.differsFrom,
       // The map is a viewport, but it is not one you *look* through — it is the thing that says
       // where the panes are — so a control that acts on "this viewport's window" has no meaning on

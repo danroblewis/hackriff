@@ -57,6 +57,23 @@ export interface TileData {
    * party that decided it.
    */
   readonly t1Ns: number | null;
+  /**
+   * **`coverage.horizon.as_of_s`: how far FORWARD this answer's coverage evidence reaches, in ns**
+   * — or `null` when the answer named no horizon (no record touches this band, or a pre-T-532
+   * server).
+   *
+   * It is the young-end twin of the route's `oldest_record_s`, and it exists because a tile cache
+   * *keeps* answers. A tune record is written as capture proceeds, so it stops at the newest
+   * sample; every row of a live tile after that is served `unobserved` — which is true at the
+   * instant it is served and **false a moment later**, because those rows are being recorded while
+   * this copy ages. Grey is the one mark that may only mean *the radio never looked*, so the
+   * renderer draws nothing at all past this instant and leaves the pane's PENDING ground showing:
+   * *this copy does not reach here* ([[Surface.drawUpToHorizon]]).
+   *
+   * `null` is **not** "reaches everywhere": with no horizon the answer stands as served, which is
+   * right, because a band no record touches was never observed at any instant in it.
+   */
+  readonly asOfNs: number | null;
   /** Row-major `[t * nf + f]`, earliest row first, lowest frequency first — the route's own order.
    * `NaN` wherever the state plane does not say `OBSERVED`; never a sentinel that could be read as
    * a level. */
@@ -117,6 +134,8 @@ export interface TileResponse {
     any?: { plane: number };
     devices?: { device: string; plane: number }[];
     selected?: { device: string; named: boolean; present: boolean; plane?: number | null };
+    /** T-532: `as_of_s` is how far forward this answer's records reach. See [[TileData.asOfNs]]. */
+    horizon?: { as_of_s?: number | null };
   };
   resolution: {
     source: string;
@@ -267,6 +286,12 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     // Seconds on the wire, ns everywhere in this client. A response that omits it, or states
     // something unreadable, says nothing — and nothing said is not "sealed" (see [[TileData.t1Ns]]).
     t1Ns: Number.isFinite(resp.extent?.t1_s) ? Math.round((resp.extent!.t1_s as number) * 1e9) : null,
+    // Same reading as `t1Ns`: the answer's own number, in ns, or `null` when it stated none. A
+    // server that does not carry the field, or carries something unreadable, says nothing — and
+    // nothing said leaves the answer standing as served (see [[TileData.asOfNs]]).
+    asOfNs: Number.isFinite(resp.coverage?.horizon?.as_of_s)
+      ? Math.round((resp.coverage!.horizon!.as_of_s as number) * 1e9)
+      : null,
     value,
     state,
     tier: src as Tier,
