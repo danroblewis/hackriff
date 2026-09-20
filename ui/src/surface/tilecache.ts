@@ -153,6 +153,15 @@ export interface Viewport {
   readonly box: Box;
   readonly levelF: number;
   readonly levelT: number;
+  /**
+   * **The lattice this viewport's levels are indices into** (T-505).
+   *
+   * Since the surface draws from two tiers, one lattice per cache is not enough to say what a
+   * viewport wants: a level index means a different cell on each lattice, and a tile of the other
+   * scheme is not this viewport's tile at all. Omitted, the cache falls back to the lattice
+   * [[TileCache.setViewports]] was handed — which is what a single-tier caller has always passed.
+   */
+  readonly lat?: Lattice;
 }
 
 /**
@@ -663,11 +672,19 @@ export class TileCache<T> {
     }
   }
 
-  /** Is this tile one that viewport is drawing — at its level, or one step coarser (the pin)? */
+  /** Is this tile one that viewport is drawing — at its level, or one step coarser (the pin)?
+   *
+   * **Scheme first** (T-505): a level index is a statement about one lattice, so a tile of the
+   * other tier is never this viewport's, whatever its indices say. Without this a detail-tier tile
+   * and an overview-tier tile with the same `(level_f, level_t)` would each keep the other alive
+   * and cancellation would silently stop cancelling — the T-443 defect the levels were added to
+   * fix, one lattice up. */
   private wants(lat: Lattice, v: Viewport, a: TileAddr): boolean {
-    return a.levelF >= v.levelF && a.levelF <= v.levelF + 1 &&
+    const l = v.lat ?? lat;
+    return a.scheme === l.scheme &&
+      a.levelF >= v.levelF && a.levelF <= v.levelF + 1 &&
       a.levelT >= v.levelT && a.levelT <= v.levelT + 1 &&
-      intersects(lat, a, v.box);
+      intersects(l, a, v.box);
   }
 
   /**

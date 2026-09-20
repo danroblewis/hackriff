@@ -51,8 +51,8 @@
 import { CMAP_GLSL } from "../cmap";
 import { BACKDROP, CELL, CELL_RULE_GLSL, PENDING, SHADOW_MARK, tierByte, type DrawKind } from "./cellrule";
 import {
-  ancestorsOf, extentOf, keyOf, levelsFor, tilesFor,
-  type Box, type Lattice, type TileAddr,
+  ancestorsOf, extentOf, keyOf, oneTier, tierFor, tilesFor,
+  type Box, type Lattice, type LatticeSet, type TileAddr, type ViewTier,
 } from "./lattice";
 import { TileCache, type TileEntry, type TileTextures, type Viewport } from "./tilecache";
 import type { TileData } from "./tile";
@@ -94,6 +94,21 @@ export interface PaneView {
  * viewports at different levels legitimately differ, and the fix is to say so, not to hide it. */
 export interface PaneReport {
   readonly id: string;
+  /**
+   * **Which tier this pane drew from** (T-505), and the lattice it was addressed on.
+   *
+   * §8.5a's rule one level up: a pane states the level it was drawn at, and since the honesty
+   * tiers became real in the tile *source* it must also state **which source**. `levelF`/`levelT`
+   * are indices into `lat`, so they are meaningless without it — and a caller that read them
+   * against a second lattice of its own would be back to two derivations of one picture, which is
+   * the T-388 family. Everything downstream (the chrome's cell size, the trace's slice, the tick
+   * pitch) reads `lat` from here rather than from the host.
+   */
+  readonly tier: ViewTier;
+  readonly lat: Lattice;
+  /** True when the viewport asked for a level past `lat`'s ceiling: the stated reason a pane left
+   * the detail tier, and honest to show, since the cells drawn are finer than a pixel. */
+  readonly clamped: boolean;
   readonly levelF: number;
   readonly levelT: number;
   readonly tiles: number;
@@ -353,12 +368,15 @@ export class Surface {
   private readonly maxFallbackSteps: number;
   private readonly pinParents: boolean;
 
+  private lattices: LatticeSet;
+
   constructor(
     readonly canvas: HTMLCanvasElement,
-    private lattice: Lattice,
+    lattice: Lattice | LatticeSet,
     cache: TileCache<TilePlanes> | ((tex: TileTextures<TilePlanes>) => TileCache<TilePlanes>),
     opts: SurfaceOptions = {},
   ) {
+    this.lattices = "detail" in lattice ? lattice : oneTier(lattice);
     const gl = canvas.getContext("webgl2", { antialias: false, alpha: false }) as GL | null;
     if (!gl) throw new Error("WebGL2 unavailable");
     this.gl = gl;
@@ -377,10 +395,15 @@ export class Surface {
     this.cache = typeof cache === "function" ? cache(new GlTileTextures(gl)) : cache;
   }
 
-  /** The lattice both axes are addressed on. Set once from a probe; changing it drops nothing —
-   * the cache keys carry the scheme, so tiles of two lattices cannot be confused. */
-  setLattice(lat: Lattice): void { this.lattice = lat; }
-  get lat(): Lattice { return this.lattice; }
+  /** The **detail** lattice both axes are addressed on. Set once from a probe; changing it drops
+   * nothing — the cache keys carry the scheme, so tiles of two lattices cannot be confused. */
+  setLattice(lat: Lattice): void { this.lattices = { ...this.lattices, detail: lat }; }
+  /** Both tiers at once (T-505). The overview lattice is a second probe, so a host that has not
+   * got one yet sets only the detail lattice and every viewport stays on it. */
+  setLattices(set: LatticeSet): void { this.lattices = set; }
+  /** The detail lattice — the live edge's own, which is what an edge invalidation is about. */
+  get lat(): Lattice { return this.lattices.detail; }
+  get tiers(): LatticeSet { return this.lattices; }
 
   /**
    * **Anchor** the display range: one `(lo, hi)` for every pane, held whatever the viewport does
@@ -493,15 +516,18 @@ export class Surface {
       gl.clearColor(PENDING[0], PENDING[1], PENDING[2], 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
 
-      const { levelF, levelT } = levelsFor(this.lattice, pane.box, r.w, r.h);
-      viewports.push({ box: pane.box, levelF, levelT });
-      const addrs = tilesFor(this.lattice, pane.box, levelF, levelT, pane.device ?? "any");
+      // **Which tier answers this viewport** (T-505). Decided per pane, per frame, from the pane's
+      // own box and rectangle — the same pass that lays out everything else, never a mode a host
+      // sets. `lat` then stands for `this.lattices.detail` everywhere below, so a pane drawn from
+      // the overview tier addresses, falls back, pins and cancels entirely inside that lattice.
+      const { tier, lat, levelF, levelT, addrs, clamped } = tierFor(this.lattices, pane.box, r.w, r.h, pane.device ?? "any");
+      viewports.push({ box: pane.box, levelF, levelT, lat });
       let tiles = 0, fallbacks = 0, pending = 0, refused = 0;
       for (const a of addrs) {
         const res = this.cache.acquire(a);
         if (res.kind === "resident") {
-          const region = extentOf(this.lattice, a);
-          this.drawRegion(pane, region, res.entry, "tile", r);
+          const region = extentOf(lat, a);
+          this.drawRegion(pane, lat, region, res.entry, "tile", r);
           // The cells of this tile that are inside this pane's box — the measurement the viewport
           // mode is a scale over. A resident tile draws its own extent, so the texture's extent and
           // the region are the same box.
@@ -517,35 +543,35 @@ export class Surface {
           tiles++;
           continue;
         }
-        const stand = this.fallbackFor(a);
+        const stand = this.fallbackFor(lat, a);
         if (stand) {
-          const region = extentOf(this.lattice, a);
-          this.drawRegion(pane, region, stand, "fallback", r);
+          const region = extentOf(lat, a);
+          this.drawRegion(pane, lat, region, stand, "fallback", r);
           // A coarse stand-in's cells ARE what is on the screen here, so they count — but the
           // texture is the ancestor's, so the visible sub-rect is mapped through the ancestor's own
           // extent, not the child's. Getting that pair the wrong way round would read a different
           // corner of the ancestor than the one being displayed.
-          measure?.add(stand.data, extentOf(this.lattice, stand.addr), region, pane.box);
+          measure?.add(stand.data, extentOf(lat, stand.addr), region, pane.box);
           fallbacks++;
         }
         // **`pending` and `refused` are drawn apart** (T-499). A place with no usable answer is not
         // waiting for one — the route refused it, or the server is unreachable and this client is
         // backing off — and painting it as PENDING is a progress bar that never finishes. Neither
         // branch can produce grey: both are [[DrawKind]]s, and grey comes only from a state byte.
-        else if (res.failed) { this.drawRefused(pane, extentOf(this.lattice, a), r); refused++; }
-        else { this.drawFlat(pane, extentOf(this.lattice, a), PENDING, r); pending++; }
+        else if (res.failed) { this.drawRefused(pane, extentOf(lat, a), r); refused++; }
+        else { this.drawFlat(pane, extentOf(lat, a), PENDING, r); pending++; }
       }
       // §5.5's second pin, and a **coarse-first fill**. These go on the queue *after* the pane's
       // own tiles, and the queue is LIFO, so a parent is fetched FIRST — deliberately: at 11.4 ms a
       // tile one parent covers four children's worth of screen through the fallback path, so a cold
       // viewport shows something honest in a quarter of the time. It is also what makes a zoom-out
       // draw instead of flash.
-      if (this.pinParents && levelF + 1 < this.lattice.levelsF) {
-        for (const a of tilesFor(this.lattice, pane.box, levelF + 1, Math.min(levelT + 1, this.lattice.levelsT - 1), pane.device ?? "any")) {
+      if (this.pinParents && levelF + 1 < lat.levelsF) {
+        for (const a of tilesFor(lat, pane.box, levelF + 1, Math.min(levelT + 1, lat.levelsT - 1), pane.device ?? "any")) {
           this.cache.prefetch(a);
         }
       }
-      reports.push({ id: pane.id, levelF, levelT, tiles, fallbacks, pending, refused });
+      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused });
     }
     gl.disable(gl.SCISSOR_TEST);
     if (this.autoScale && lo < hi) {
@@ -571,7 +597,7 @@ export class Surface {
         ? { ...want, source: viewportSource(vscale.blocks, want) }
         : { lo: this.lo, hi: this.hi, source: VIEWPORT_SOURCE_EMPTY };
     }
-    this.cache.setViewports(this.lattice, viewports);
+    this.cache.setViewports(this.lattices.detail, viewports);
     this.cache.endFrame();
     this.lastFrame = reports;
     return reports;
@@ -579,8 +605,8 @@ export class Surface {
 
   /** The nearest resident coarser tile containing `a`, or null. Peeks only: the ancestor search
    * must not enqueue a fetch at every level it tries, or one miss becomes `maxFallbackSteps²`. */
-  private fallbackFor(a: TileAddr): TileEntry<TilePlanes> | null {
-    for (const anc of ancestorsOf(this.lattice, a, this.maxFallbackSteps)) {
+  private fallbackFor(lat: Lattice, a: TileAddr): TileEntry<TilePlanes> | null {
+    for (const anc of ancestorsOf(lat, a, this.maxFallbackSteps)) {
       const e = this.cache.peek(anc, true);
       if (e) return e;
     }
@@ -589,9 +615,9 @@ export class Surface {
 
   /** Draws `region` of the surface from `entry`'s texture — the whole tile when they coincide, a
    * sub-rect when an ancestor is standing in for one of its children. */
-  private drawRegion(pane: PaneView, region: Box, entry: TileEntry<TilePlanes>, kind: DrawKind, rect: PaneRect): void {
+  private drawRegion(pane: PaneView, lat: Lattice, region: Box, entry: TileEntry<TilePlanes>, kind: DrawKind, rect: PaneRect): void {
     const gl = this.gl;
-    const tex = extentOf(this.lattice, entry.addr);
+    const tex = extentOf(lat, entry.addr);
     const clip = toClip(region, pane.box);
     const u0 = (region.f0Hz - tex.f0Hz) / (tex.f1Hz - tex.f0Hz);
     const u1 = (region.f1Hz - tex.f0Hz) / (tex.f1Hz - tex.f0Hz);

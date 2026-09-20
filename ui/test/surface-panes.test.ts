@@ -18,7 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { CELL } from "../src/surface/cellrule";
-import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
+import { keyOf, type Lattice, type LatticeSet, type TileAddr } from "../src/surface/lattice";
 import {
   PaneModel, boxOf, freezeAt, following, levelDivergenceNote, paneStatuses,
   type PaneState, type TimeWindow,
@@ -54,11 +54,11 @@ function data(a: TileAddr): TileData {
 }
 
 /** A surface over the stub, recording every tile address the client asks for. */
-function harness() {
+function harness(lattice: Lattice | LatticeSet = LAT) {
   const g = stubGl(W, H);
   const asked: TileAddr[] = [];
   const surface = new Surface(
-    g.canvas, LAT,
+    g.canvas, lattice,
     (tex) => new TileCache(tex, (a) => { asked.push(a); return Promise.resolve(data(a)); }, { inFlight: 64, now: () => 0 }),
     { pinParents: false },
   );
@@ -337,7 +337,7 @@ test("each pane STATES the level it resolved to, from the report the renderer ac
   m.zoomTime(b, 64);
   m.pause(a, T0);
   const reports = h.surface.render(m.views(T0 + 45 * S));
-  const st = paneStatuses(m.list(), reports, LAT, T0 + 45 * S, m.rects());
+  const st = paneStatuses(m.list(), reports, T0 + 45 * S, m.rects());
 
   const A = st.find((s) => s.id === a)!, B = st.find((s) => s.id === b)!;
   assert.equal(A.levelF, reports.find((r) => r.id === a)!.levelF, "the stated level must be the DRAWN level, not a second calculation");
@@ -362,10 +362,44 @@ test("…and when two panes are at the same level there is nothing to explain", 
   const a = m.list()[0].id;
   m.split(a, "rows");
   const reports = h.surface.render(m.views(T0));
-  const st = paneStatuses(m.list(), reports, LAT, T0, m.rects());
+  const st = paneStatuses(m.list(), reports, T0, m.rects());
   assert.equal(st.length, 2);
   assert.deepEqual(st[0].differsFrom, []);
   assert.equal(levelDivergenceNote(st), null);
+});
+
+// ——— T-505: the pane states WHICH TIER it drew from, not only which level ———
+
+test("a pane that leaves the detail tier SAYS SO, and its cell size comes off the lattice it drew on", () => {
+  // The detail lattice with a display-bin floor and the ceiling that does not move with it — the
+  // geometry that made a half-hour viewport cost 445 tiles — and the overview tier beside it.
+  const DETAIL: Lattice = { scheme: "view", cells: 256, f0Hz: 585.9375, t0Ns: 40_106_667, levelsF: 16, levelsT: 19, maxLevelF: 9, maxLevelT: 1 };
+  const OVER: Lattice = { scheme: "overview", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 20, levelsT: 20, maxLevelF: 11, maxLevelT: 14 };
+  const h = harness({ detail: DETAIL, overview: OVER });
+  const m = model({ lattice: DETAIL });
+  const a = m.list()[0].id;
+  const b = m.split(a, "rows")!;
+  m.zoomTime(b, 90);                      // 20 s -> 30 min on one pane, and only that one
+  const reports = h.surface.render(m.views(T0));
+  const st = paneStatuses(m.list(), reports, T0, m.rects());
+
+  const A = st.find((s) => s.id === a)!, B = st.find((s) => s.id === b)!;
+  assert.equal(A.tier, "detail", "a live-window pane stays on the tier that measured it");
+  assert.equal(B.tier, "overview", "a half-hour window cannot be READ on the detail lattice");
+  assert.match(A.levelLabel, /detail tier/);
+  assert.match(B.levelLabel, /overview tier/);
+  assert.match(B.tierLabel, /spectrum-history/, `the pane must say WHERE the pixels came from: ${B.tierLabel}`);
+  assert.match(B.tierLabel, /not live-IQ detail/);
+  // The stated cell is the OVERVIEW lattice's cell, not the detail lattice's at the same index —
+  // the whole reason the report carries its own lattice.
+  assert.equal(B.cellHz, OVER.f0Hz * 2 ** B.levelF);
+  assert.notEqual(B.cellHz, DETAIL.f0Hz * 2 ** B.levelF);
+  // And the addresses actually requested are on that scheme.
+  assert.ok(h.asked.some((x) => x.scheme === "overview"), "the client must ASK the overview route");
+  assert.ok(h.asked.some((x) => x.scheme === "view"), "…and go on asking the detail route for the live pane");
+  // Two tiers is a real divergence and the note says so rather than hiding it.
+  const note = levelDivergenceNote(st);
+  assert.ok(note && /different pyramid levels/.test(note), "panes on two tiers must not read as one picture");
 });
 
 test("a pane carries WHOSE coverage decides its grey, and it reaches the renderer", () => {

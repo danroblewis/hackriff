@@ -7540,6 +7540,48 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         "{v}"
     );
     assert_eq!(v["resolution"]["answered"]["levels"], json!(5), "{v}");
+    // ---- T-505: the OVERVIEW tier is its own lattice, answered by the spectrum-history store ----
+    //
+    // One lattice cannot be both the display stream's own bin at its floor and device-wide over the
+    // record horizon at its ceiling: `max_level` bounds level INDICES, so a finer floor shrinks the
+    // coarsest ADDRESSABLE tile by the same factor. The client draws wide-and-long viewports from
+    // this tier instead, and `docs/api.md` states its ceiling — so the contract is that the route
+    // answers the address, names the scheme back, and reads the store whose cells do not move when
+    // the view pyramid's floor does.
+    let (st, v) = get(
+        addr,
+        &format!(
+            "/api/tiles?scheme=overview&level_f=0&level_t=0&f_index={f_index}&t_index={}&cells={N}",
+            t_index_of(0)
+        ),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["key"]["scheme"], json!("overview"), "{v}");
+    assert_eq!(
+        v["resolution"]["answered"]["store"],
+        json!("spectrum-history"),
+        "the overview tier must never be answered by the view pyramid: {v}"
+    );
+    // Its axes are the de-welded ladder, NOT scheme 1's welded diagonal — so an off-diagonal node
+    // that scheme 1 refuses above is a real address here.
+    let (st, off) = get(
+        addr,
+        &format!("/api/tiles?scheme=overview&level_f=0&level_t=3&f_index=0&t_index=0&cells={N}"),
+    );
+    assert_eq!(
+        st, 200,
+        "a de-welded lattice has no diagonal to fall off: {off}"
+    );
+    assert_eq!(off["key"]["scheme"], json!("overview"), "{off}");
+    // And its ceiling reaches past the whole surface, which is the property the tier exists for:
+    // the view lattice's own is (9, 1) at the shipped floor and shrinks with any finer one.
+    let max_f = v["axes"]["frequency"]["max_level"].as_u64().unwrap();
+    let max_t = v["axes"]["time"]["max_level"].as_u64().unwrap();
+    assert!(
+        max_f >= 11 && max_t >= 14,
+        "overview ceiling ({max_f}, {max_t}): {v}"
+    );
+
     // Past the end of an axis is the other "no such node", and names both extents.
     let (st, v) = get(addr, &tile(99, 0, 0, 0));
     assert_eq!(st, 404, "{v}");

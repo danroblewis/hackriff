@@ -1254,6 +1254,69 @@ bounded by *observed* area rather than by viewport area. Raising `readable_ceili
 prerequisite either way, and starts with the `affordable_levels`/`materialize` disagreement that
 collapses the ceiling past `f_levels + t_levels = 12`.
 
+### 8.5f Two tiers, because one lattice cannot be both ends of one budget (T-505, 2026-09-20)
+
+§8.5e ends with *"the wide-and-long viewports must be answered from a coarser tier … the honesty
+tiers made real in the tile **source** rather than only in the label"*. That is now built, and the
+shape was chosen on measurement rather than on the two candidates' relative cost.
+
+**Shape (2) — the coverage-first minimap — was measured first and is not sufficient.** Asking
+`/api/coverage` and enumerating tiles only where something was observed is a large constant factor
+on a device-wide viewport and **nothing at all** on a tuned one. Measured through the client's own
+`tilesFor` at T-484's floor over a thirty-minute horizon, with the observed region modelled as the
+tuned band (`ui/test/surface-lattice.test.ts`):
+
+| viewport | addresses | of which observed |
+|---|---|---|
+| minimap, 6 GHz × 30 min | 7031 | **89** |
+| tuned pane, 2.4 MHz × 30 min | 445 | **356** |
+
+79× on the map, 1.25× on the pane — and 89 is already close enough to a 100-tile budget to fail on
+the next band tuned. The pane is untouchable by construction: **the surface opens on the observed
+extent**, so almost every address a pane enumerates is inside coverage. It is a factor, not a bound.
+
+**Shape (1) — a second, coarse view lattice — is what shipped, and the reason it works is not depth
+but the STORE behind it.** `readable_ceiling` bounds level *indices*, and the real constraint is
+work: a tile's source grid is `tile_hz / f_cell` by `tile_s / t_cell` over the store's **coarsest**
+level, so reach is proportional to that level's *absolute* cell size. A store whose finest cell is
+the display STFT's own bin has a coarsest cell finer in the same proportion, and genuinely cannot
+back a device-wide tile at any price. So the coarse tier needs a **source whose cells do not move
+when the display's do** — and one is already open, already fed and unaffected by any view floor:
+`/api/history`'s scheme-1 pyramid. `scheme=overview` is the same de-welded construction anchored on
+it. Measured on real pyramids (`hk_api::tiles::the_overview_tier_reaches_past_the_whole_surface…`):
+
+| lattice's store | node (0, 0) | ceiling | coarsest addressable tile |
+|---|---|---|---|
+| view pyramid, shipped floor | 6250 Hz × 1 s | (9, 1) | 819.2 MHz × 512 s |
+| view pyramid, T-484's floor | 585.9375 Hz × 40.1 ms | (9, 1) | 76.8 MHz × 20.5 s |
+| **scheme 1, `scheme=overview`** | 6250 Hz × 1 s | **(11, 14)** | **3276.8 MHz × 48.5 days** |
+
+**The client picks by the budget, not by a span threshold** (`lattice.ts`, `tierFor`): *the detail
+tier answers unless it cannot draw the viewport inside `VIEWPORT_TILE_BUDGET` (100), and then the
+overview tier does.* A threshold would be a second number to keep in step with the one that
+matters, which is how the ceiling and the floor drifted apart in the first place. At a thirty-minute
+horizon and T-484's floor: minimap **7031 → 4**, tuned pane **445 → 6**, and the live window stays
+on the detail tier (15 addresses at 20 s, 80 at five minutes) — so the fidelity T-483 measured as
+missing is delivered exactly where it is looked at. **On the shipped floor nothing moves**: every
+viewport is inside the budget on the detail lattice, so the tier lands before the change that needs
+it and the overview lattice is never fetched.
+
+**Each pane states which tier it drew from** (`PaneStatus.tier`/`tierLabel`, `data-tier` in the
+chrome), and `PaneReport` carries the lattice it drew on so nothing downstream — the trace, the
+tick pitch, the cell-size readout — can re-derive it against the wrong one. Grey does not move with
+the tier: the coverage plane is record-derived, so the two tiers cannot disagree about where the
+radio looked; and `resolution.source` still downgrades an overview tile folded from a coarser
+source cell to `survey-overview`, because a tier that answered cheaply still has to say what it is.
+
+**The harness gap this closes, and the one it does not.** Every count above is taken at an explicit
+horizon against a faked observed extent, because **the defect is a function of elapsed capture
+time** and no suite varies it: the surface opens on the observed extent, so a server alive for
+seconds asks for a handful of tiles, and every suite runs against exactly such a server. That is
+why T-484 passed a full gate and went dark on a demo that had been capturing twenty minutes. The
+guard is a unit test with the horizon as a parameter; it is *not* a server that has been running for
+half an hour, and the general fix — ageing a server, or faking its extent, in the e2e tier — is
+still owed.
+
 ### 8.5a What the spike proved, and the three places §8 and §6 were wrong (T-437, 2026-09-17)
 
 **Verdict: YES for the renderer, NO for the system as it stands** — and two of the blockers are

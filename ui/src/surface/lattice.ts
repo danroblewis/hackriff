@@ -297,6 +297,111 @@ export function tileUrl(a: TileAddr, path = "/api/tiles"): string {
   return `${path}?${q.toString()}`;
 }
 
+// ---------------------------------------------------------------------------------------------
+// T-505: the two tiers, and which one a viewport is drawn from.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Which lattice a pane drew from.
+ *
+ * - `detail` — the fine view lattice, whose node (0, 0) is the live chain's own cell. It answers
+ *   the tuned window at the resolution the front end measured.
+ * - `overview` — `scheme=overview`, the same de-welded construction anchored on the
+ *   **spectrum-history** pyramid, whose cells are absolutely coarse. It answers wide-and-long
+ *   viewports.
+ *
+ * **This is CLAUDE.md's honesty tiers made real in the tile SOURCE, not in a label.** Until T-505
+ * one lattice was asked to be both, and it cannot be: `axes.*.max_level` bounds level *indices*,
+ * never cell size, so a floor N doublings finer shrinks the coarsest *addressable* tile by exactly
+ * 2^N. T-484 spent eight doublings on fidelity and the 6 GHz × 30 min minimap went from 32
+ * addresses to **7031** behind a four-slot in-flight cap — nothing arrived, and the map went dark.
+ * No lattice depth recovers it (T-501 swept it), because the binding constraint is the *work* of
+ * folding a tile out of the store's coarsest cell.
+ */
+export type ViewTier = "detail" | "overview";
+
+/** The two lattices a surface draws from, each read back off its own tile answer. */
+export interface LatticeSet {
+  readonly detail: Lattice;
+  readonly overview: Lattice;
+}
+
+/**
+ * **The stated tile budget, per viewport, per frame.**
+ *
+ * `tilesFor` has no budget of its own: `Surface.render` walks every address a viewport enumerates,
+ * every frame, and `TileCache` queues each miss behind the route's four-slot in-flight cap under a
+ * 96 MB LRU. So the number of addresses a viewport enumerates is a **product property** — it is the
+ * number that went dark — and it needs a bound that is asserted rather than hoped for.
+ *
+ * 100 is generous and measured: the shipped floor's deepest viewport (6 GHz over a 30-minute
+ * record) needs 32, and a pane at one cell per pixel on a 3520 × 2000 rig needs ~135 *across every
+ * pane on the screen* (`TileCacheOptions`), so a per-viewport 100 leaves room for the fine tier to
+ * keep answering everything it can actually deliver.
+ */
+export const VIEWPORT_TILE_BUDGET = 100;
+
+/** One tier evaluated against one viewport: what it would draw, and what it would cost. */
+export interface TierChoice {
+  readonly tier: ViewTier;
+  readonly lat: Lattice;
+  readonly levelF: number;
+  readonly levelT: number;
+  /** The addresses this viewport enumerates on `lat`, least-wanted first ([[tilesFor]]). */
+  readonly addrs: readonly TileAddr[];
+  /**
+   * The viewport asked for a level past this lattice's ceiling, so the level actually used is
+   * finer than the screen can show — which is both wasted resolution and, at the coarse end, the
+   * tile explosion. Reported so a pane can say *why* it left the fine tier.
+   */
+  readonly clamped: boolean;
+}
+
+function evaluate(lat: Lattice, tier: ViewTier, box: Box, wPx: number, hPx: number, device: string): TierChoice {
+  const hzPerPx = (box.f1Hz - box.f0Hz) / Math.max(1, wPx);
+  const nsPerPx = (box.t1Ns - box.t0Ns) / Math.max(1, hPx);
+  const { levelF, levelT } = levelsFor(lat, box, wPx, hPx);
+  return {
+    tier, lat, levelF, levelT,
+    addrs: tilesFor(lat, box, levelF, levelT, device),
+    clamped: levelDemandF(lat, hzPerPx) > levelCapF(lat) || levelDemandT(lat, nsPerPx) > levelCapT(lat),
+  };
+}
+
+/**
+ * **Which tier answers this viewport** — decided by the budget, not by a span threshold.
+ *
+ * The rule, and it is one sentence: *the detail tier answers unless it cannot draw the viewport
+ * inside [[VIEWPORT_TILE_BUDGET]], and then the overview tier does.* That is deliberately the
+ * budget itself rather than a span or a zoom level, because the budget is the property that broke
+ * — a threshold would be a second number that has to be kept in step with the one that matters,
+ * and the two would drift exactly as the ceiling and the floor did.
+ *
+ * Two consequences worth stating:
+ *
+ * - **On the shipped floor nothing moves.** Every viewport the surface can open is inside the
+ *   budget on the detail lattice (32 at the deepest), so this function returns `detail` for all of
+ *   them and the overview tier is never fetched. It becomes load-bearing exactly when the fidelity
+ *   floor lands, which is the point: the prerequisite is in place before the change that needs it.
+ * - **The live/tuned window stays on the detail tier even at the fine floor** (15 addresses for
+ *   2.4 MHz × 20 s), so the resolution T-483 measured as missing is delivered where it is looked
+ *   at. What moves to the overview tier is the wide sweep and the deep scrub, which are survey
+ *   questions and are answered — and *stated* — as survey.
+ *
+ * Total by construction: if neither tier fits the budget the cheaper one is used, so this always
+ * returns the smallest enumeration available rather than failing.
+ */
+export function tierFor(set: LatticeSet, box: Box, wPx: number, hPx: number, device = "any"): TierChoice {
+  const d = evaluate(set.detail, "detail", box, wPx, hPx, device);
+  if (d.addrs.length <= VIEWPORT_TILE_BUDGET) return d;
+  const o = evaluate(set.overview, "overview", box, wPx, hPx, device);
+  return o.addrs.length < d.addrs.length ? o : d;
+}
+
+/** A set in which both tiers are the same lattice: what a host has before the overview probe
+ * answers, and what a server with one pyramid honestly offers. */
+export const oneTier = (lat: Lattice): LatticeSet => ({ detail: lat, overview: lat });
+
 /** Does `a`'s extent intersect `box`? Used to cancel queued tiles for a viewport the user has left. */
 export function intersects(lat: Lattice, a: TileAddr, box: Box): boolean {
   const e = extentOf(lat, a);

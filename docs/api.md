@@ -852,7 +852,7 @@ A record that names no device — every record written before T-378, and any sou
 
 ### `GET /api/tiles` — one tile of the unified surface, at independent `(level_f, level_t)` (T-438, [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5 / §8)
 
-Query parameters: `level_f`&`level_t`&`f_index`&`t_index` (**required**, integers ≥ 0), `scheme` (`view` — the default — or a store scheme id), `device` (`any` by default, or a device id), `cells` (8…256, default 256).
+Query parameters: `level_f`&`level_t`&`f_index`&`t_index` (**required**, integers ≥ 0), `scheme` (`view` — the default — `overview`, or a store scheme id), `device` (`any` by default, or a device id), `cells` (8…256, default 256).
 
 One route serves every viewport — the panes, the zoomable minimap and the live edge — because they are **projections of the same pyramid**, and one route is what stops them ever disagreeing on one screen ([docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5, strengthened by §8: there is no live-versus-history split left to keep consistent).
 
@@ -929,9 +929,29 @@ One route serves every viewport — the panes, the zoomable minimap and the live
 - **`scheme` is the lattice the address is expressed in — and, since T-439, which store answers it.** It is what makes *"no such node"* an answerable question rather than a theoretical one. The two halves cannot come apart: expressing an address in the view lattice while reading scheme 1's ladder is the gap T-438 left, where the off-diagonal nodes had nothing behind them. `resolution.answered.store` names the pyramid that answered — `view-lattice` or `spectrum-history`.
   - `scheme=view` (default) is the de-welded view lattice. Node `(0, 0)` is the open pyramid's **own level-0 cell** and each axis doubles **independently**, so every `(level_f, level_t)` inside the axes is a node. Frequency runs up to a tile wide enough to put 1 MHz–6 GHz in two tiles; time up to a tile a month tall (§6.2's V7 corner, kept).
   - **A run opens a view-scheme pyramid and the live chain writes its finest node** (T-439, `PipelineSettings.view_history`), so `scheme=view` addresses a real 8 × 8 lattice — `(level_f 0, level_t 3)` is a node with tiles in it, not a fold out of a ladder's diagonal. On a server with no view pyramid open, `scheme=view` still resolves against the spectrum-history pyramid exactly as it did before, and `answered.store` says so.
+  - **`scheme=overview` is the second tier** (T-505): the same de-welded construction, anchored at the **spectrum-history** pyramid's level-0 cell and answered by that pyramid, whichever store `scheme=view` resolves to. It exists because *one lattice cannot be both the display stream's own bin at its floor and device-wide over the record horizon at its ceiling* — see [the two tiers](#the-two-tiers-the-honesty-tiers-made-real-in-the-tile-source-t-505) below.
   - `scheme=<n>` addresses a store scheme's own levels, read off the geometry by T-434's `Geometry::f_axis`/`t_axis`. **A welded ladder is the *diagonal* of its own lattice**, so `(level_f 0, level_t 3)` on scheme 1 has no node and is a `404` that says so — never a silent snap to a level whose time cell is a day.
   - `axes.store_node` is the store level whose cells are *exactly* this tile's, or `null` when the tile sits off the ladder's diagonal and is therefore folded rather than read whole.
 - **`device` is whose coverage decides this tile's grey.** Coverage is device-local (T-259/T-305, §6.3), so it belongs in the key and never in a cell. `any` is the union and keeps `device_named: false`, so a merged plane can never wear one radio's identity; `coverage.selected` echoes the choice, and `present: false` says a named front end contributed no record over this tile — a coverage answer, not a missing one.
+
+#### The two tiers: the honesty tiers made real in the tile **source** (T-505)
+
+`axes.{frequency,time}.max_level` bounds level **indices**, never cell **size**, and `servable` reasons about *ratios* (tile span over source cell), so it is blind to absolute size. **A floor N doublings finer therefore shrinks the coarsest *addressable* tile by exactly 2^N**, and no lattice depth gives it back — T-501 swept `f_levels × t_levels` in `2..=10` at two floors and the declared ceiling is identical index for index on every depth. The binding constraint is *work*: a tile's source grid is `tile_hz / f_cell` by `tile_s / t_cell` over the store's **coarsest** level, so reach is proportional to that level's absolute cell size, and a store whose finest cell is the display STFT's own bin genuinely cannot back a device-wide tile at any price.
+
+Measured on real pyramids (`hk_api::tiles::the_overview_tier_reaches_past_the_whole_surface_whatever_the_view_floor_is`):
+
+| lattice's store | node (0, 0) | ceiling | coarsest addressable tile |
+|---|---|---|---|
+| view pyramid, shipped floor | 6250 Hz × 1 s | `(9, 1)` | 819.2 MHz × 512 s |
+| view pyramid, a display-bin floor | 585.9375 Hz × 40.1 ms | `(9, 1)` | **76.8 MHz × 20.5 s** |
+| **scheme 1 — `scheme=overview`** | 6250 Hz × 1 s | **`(11, 14)`** | **3276.8 MHz × 48.5 days** |
+
+The middle row is a measured outage: at that floor a 6 GHz × 30-minute minimap enumerates **7031** addresses instead of 32, behind this route's four-slot in-flight cap, and nothing arrives. So the client draws each viewport from the tier that can answer it — `scheme=view` for the tuned window at the resolution the front end measured, `scheme=overview` for wide-and-long viewports — and **the pane states which tier it drew from** (`ui/src/surface/panes.ts`, `PaneStatus.tier`). `ui/test/surface-lattice.test.ts` pins the counts per viewport at a thirty-minute horizon against a stated budget of 100 tiles, and pins the 7031 as the non-vacuity case.
+
+Two properties make this a tier rather than a second opinion:
+
+- **Grey does not move with it.** The coverage plane is record-derived (`crate::coverage::TileOverlay`), not read out of whichever pyramid answered, so the two tiers cannot disagree about where the radio looked.
+- **The claim shrinks with the resolution.** `resolution.source` is computed exactly as it is on the fine tier: an overview tile folded from a coarser source cell reports `survey-overview` and `resolution.fold` says which axis replicated. A tier that answered cheaply still has to say what it is.
 
 #### `axes.*.max_level` — how far up each axis can actually be **read** (T-482)
 

@@ -306,6 +306,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (!p) return [];
     const s = p.view.surface;
     const dev = pane.device ?? "any";
+    // **The pane's OWN lattice, off the report the data pass just produced** (T-505). Since the
+    // surface draws from two tiers, `report.levelF/levelT` are indices into `report.lat` and mean
+    // a different cell on the other one — reading them against the host's lattice would put the
+    // trace on tiles the pane never drew, which is the T-388 family (two derivations of one
+    // picture) with a scheme in it.
+    const lat = report.lat;
     const n = Math.max(16, Math.min(TRACE_COLUMNS, Math.floor(strip.w)));
     const out: TracePath[] = [];
 
@@ -316,7 +322,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // It keeps a FLAT ink (T-475), and that is the one place the ramp deliberately does not reach:
     // the max-hold answers a different question over a different interval than the slice, so giving
     // both the ramp would put two identically-coloured lines on one strip.
-    const hold = maxHoldColumns(s.lat, s.cache, pane.box, report.levelF, report.levelT, dev, n);
+    const hold = maxHoldColumns(lat, s.cache, pane.box, report.levelF, report.levelT, dev, n);
     out.push(...tracePaths(hold, pane.box, strip, s.lo, s.hi, "trace-hold", pane.id,
       { ink: [HOLD_INK[0], HOLD_INK[1], HOLD_INK[2]], alpha: HOLD_INK[3], widthPx: HOLD_PX }));
 
@@ -324,19 +330,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // genuinely finer — inside the cell the slice is asking about — and the pyramid answers
     // everywhere else, which is what makes a scrubbed pane show the spectrum of *then*.
     const tAtNs = pane.box.t1Ns;
-    const win = sliceWindow(s.lat, report.levelT, tAtNs);
+    const win = sliceWindow(lat, report.levelT, tAtNs);
     const fr = liveRow.get();
     const live = liveFrameFits(fr, win);
     const slice = live && fr
       ? sampleFrame(fr, pane.box, n)
-      : sliceColumns(s.lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);
+      : sliceColumns(lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);
 
     // **The afterglow** (T-475): the rows just before THIS pane's time position, oldest first so the
     // newest shadow sits on top of the older ones and the current slice on top of all of them. They
     // come from the pyramid at the level the pane drew — the same cells under the strip — so a pane
     // scrubbed into last hour glows with last hour, which is the whole point of deriving them from
     // the window instead of from a buffer of whatever the page received.
-    const shadows = persistenceSlices(s.lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);
+    const shadows = persistenceSlices(lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);
     for (const sh of [...shadows].reverse()) {
       out.push(...tracePaths(sh.cols, pane.box, strip, s.lo, s.hi, "trace-glow", pane.id,
         { alpha: sh.alpha, widthPx: SHADOW_PX, shade: "mono" }));
