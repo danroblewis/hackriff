@@ -12,6 +12,7 @@
 // The fixture is a SigMF recording replayed through `--replay`; nothing here touches a radio and
 // nothing here can retune one.
 import { spawn } from "node:child_process";
+import net from "node:net";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -25,27 +26,40 @@ const FORBIDDEN = new Set([8788, 8789, 8899, 8900]);
 
 export const DEFAULT_FIXTURE = "fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta";
 
+/** Can this process actually take the port? The real question, asked the only way that answers it. */
+const canBind = (port) => new Promise((res) => {
+  const s = net.createServer();
+  s.once("error", () => res(false));
+  s.listen(port, "127.0.0.1", () => s.close(() => res(true)));
+});
+
 /**
- * The first port from `first` that nothing is already answering on, skipping the reserved ones.
+ * The first port from `first` that this run can actually take, skipping the reserved ones.
  *
- * "Answering" is the same question the readiness loop asks — an HTTP response to `/surface.html` —
- * because that is exactly what the readiness loop would mistake for its own server. A refused
- * connection is the answer we want; anything else means the port is taken.
+ * Two questions, and both have to be asked. **Is something SERVING it** — an HTTP response to
+ * `/surface.html`, the same question the readiness loop asks, because that is exactly what the
+ * readiness loop would mistake for its own server (T-470). And **can this process BIND it**,
+ * because "nothing speaks HTTP here" is not the same as "this port is free": `canvas-journey`'s
+ * test 4 holds the port of the server it killed with a socket that refuses every connection, so
+ * that nobody can take it over mid-measurement — which answers the HTTP probe exactly like an empty
+ * port and would hand this caller a port whose bind then fails and kills `hk serve` on startup.
+ * A bind test costs one syscall and cannot be fooled by what the occupant chooses to say.
  */
 async function freePort(first, tries = 24) {
   for (let p = first; p < first + tries; p++) {
     if (FORBIDDEN.has(p)) continue;
+    let serving = false;
     try {
       await fetch(`http://127.0.0.1:${p}/surface.html`, { signal: AbortSignal.timeout(1500) });
-    } catch {
-      return p; // nothing listening (or nothing that speaks HTTP): ours to take
-    }
+      serving = true;
+    } catch { /* nothing listening, or nothing that speaks HTTP — still has to be bindable */ }
+    if (!serving && await canBind(p)) return p;
     if (p === first) {
-      console.error(`e2e: port ${p} is already serving — another e2e run is using it; stepping past it ` +
-        "rather than testing that run's bundle");
+      console.error(`e2e: port ${p} is already ${serving ? "serving" : "bound"} — another e2e run is using ` +
+        "it; stepping past it rather than testing that run's bundle");
     }
   }
-  throw new Error(`no free port in ${first}..${first + tries - 1}: every one is already serving. ` +
+  throw new Error(`no free port in ${first}..${first + tries - 1}: every one is already taken. ` +
     "Another e2e run (or several) is in flight; wait for it, or set HK_E2E_PORT.");
 }
 
