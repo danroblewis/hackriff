@@ -7,8 +7,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  type ControlState, type ScanBudget, type ScanState, commitmentText, scanPanelModel,
-  scanPreviewPath, scanQueryFrom,
+  type ControlState, type ScanBudget, type ScanState, FAST_SCAN_DWELL_S, commitmentText,
+  everythingScanQuery, scanPanelModel, scanPreviewPath, scanQueryFrom,
 } from "../src/controls/model";
 import replayState from "./control_state_replay.json";
 
@@ -155,4 +155,84 @@ test("the sweep control is mounted in the SDR panel, and prices through the serv
   for (const f of ["usable_fraction", "region_dwell", "hop_", "IterativeScan"]) {
     assert.ok(!model.includes(f), `the client must not re-derive the sweep's plan (${f})`);
   }
+});
+
+// ---- T-517: the step width ----
+
+test("the step width is on the wire exactly as chosen, on both the price and the start", () => {
+  const coarse = scanQueryFrom({ loMHz: "", hiMHz: "", dwellS: "0.5", step: "coarse" });
+  // The start POSTs this same object (device.ts `onScanStart` sends `this.scanQuery()`).
+  assert.deepEqual(coarse, { dwell_s: 0.5, step: "coarse" });
+  assert.equal(scanPreviewPath(coarse), "/api/control/scan?dwell_s=0.5&step=coarse");
+  assert.deepEqual(
+    scanQueryFrom({ loMHz: "88", hiMHz: "108", dwellS: "12", step: "fine" }),
+    { f_lo_hz: 88e6, f_hi_hz: 108e6, dwell_s: 12, step: "fine" },
+  );
+  // Anything the server does not name is left to its default rather than sent.
+  assert.deepEqual(scanQueryFrom({ loMHz: "", hiMHz: "", dwellS: "", step: "medium" }), {});
+  assert.deepEqual(scanQueryFrom({ loMHz: "", hiMHz: "", dwellS: "" }), {});
+});
+
+test("the price line shows the chosen step, so coarse visibly = fast, at the same bin width", () => {
+  const plan = (step: "fine" | "coarse", rate: number, steps: number) => ({
+    f_lo_hz: 1e6, f_hi_hz: 6e9, dwell_s: 0.5, recommended_dwell: false, sample_rate_hz: rate,
+    rate_in_force_hz: 2.4e6, changes_rate: rate !== 2.4e6, step, bin_hz: 4687.5, steps, warnings: [],
+  });
+  const fine = scanPanelModel(live(scan()), {
+    plan: plan("fine", 2.4e6, 3334),
+    budget: budget({ steps: 3334, dwell_s: 0.5, pass_s: 1667, revisit_s: 1667, step_span_hz: 1.8e6, duty: 1 / 3334 }),
+  });
+  const coarse = scanPanelModel(live(scan()), {
+    plan: plan("coarse", 19.2e6, 418),
+    budget: budget({ steps: 418, dwell_s: 0.5, pass_s: 209, revisit_s: 209, step_span_hz: 14.4e6, duty: 1 / 418 }),
+  });
+  assert.match(fine.commitment, /^fine steps of 1\.8 MHz \(bins 4\.69 kHz either way\): 3334 steps × 0\.5 s = 28 min per pass/);
+  assert.match(coarse.commitment, /^coarse steps of 14\.4 MHz \(bins 4\.69 kHz either way\): 418 steps × 0\.5 s = 3 min per pass/);
+  // A coarse step that changes the span says so before the button.
+  assert.ok(coarse.notes.some((n) => /sets the span to 19\.2 MHz \(from 2\.4 MHz\)/.test(n)), coarse.notes.join(" | "));
+  assert.ok(!fine.notes.some((n) => /sets the span/.test(n)));
+});
+
+test("the step control sits in the sweep fieldset beside From/To/Dwell and reprices on change", () => {
+  const src = readFileSync("src/app/review/device.ts", "utf8");
+  assert.match(src, /"Dwell ", this\.scanDwell\),\s*h\("label"[^\n]*"Step ", this\.scanStep\)/);
+  assert.match(src, /scanStep = h\("select", \{ onchange: \(\) => void this\.priceScan\(\) \}/);
+  assert.match(src, /step: \(this\.scanStep as HTMLSelectElement\)\.value/);
+});
+
+// ---- T-516: the one-click "scan everything" ----
+
+test("the one-click 'scan everything' request: no range (already means everything), a fast dwell, coarse step", () => {
+  assert.deepEqual(everythingScanQuery(), { dwell_s: FAST_SCAN_DWELL_S, step: "coarse" });
+  assert.ok(FAST_SCAN_DWELL_S >= 0.2 && FAST_SCAN_DWELL_S <= 0.5, "T-516: a fast dwell, not a fine one");
+  // What the panel actually sets the fields to must build exactly this request — the same
+  // `scanQueryFrom` every other sweep goes through, not a second bespoke request shape.
+  assert.deepEqual(
+    scanQueryFrom({ loMHz: "", hiMHz: "", dwellS: String(FAST_SCAN_DWELL_S), step: "coarse" }),
+    everythingScanQuery(),
+  );
+  // At the coarse step's ~418-step full-range pass (T-517's own numbers), this dwell is minutes,
+  // not the ~13 h a 12 s/step fine sweep over 1 MHz-6 GHz costs.
+  const passMinutes = (418 * FAST_SCAN_DWELL_S) / 60;
+  assert.ok(passMinutes < 5, `expected a pass of a few minutes, got ${passMinutes.toFixed(1)} min`);
+});
+
+test("the one-click is visible next to the sweep controls, prices before it starts, and never resumes", () => {
+  const src = readFileSync("src/app/review/device.ts", "utf8");
+  // A control nobody can see is not a control (the T-409 rule) - it must be in the fieldset's tree.
+  assert.match(src, /scanAll = h\("button"/);
+  assert.match(src, /"Scan everything/);
+  assert.match(src, /this\.scanAll, h\("span"/, "sits beside the sweep controls, not off on its own");
+  assert.match(src, /h\("div", \{\}, this\.scanAll,[\s\S]*?h\("label", \{\}, "From "/, "lives in the sweep fieldset, above From/To");
+  // The handler: set the fields, reprice, THEN start - the commitment line must state this pass's
+  // own cost before the radio is committed, exactly like every other sweep.
+  const body = src.match(/private async onScanAll\(\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(body, "onScanAll must exist");
+  assert.ok(body!.includes("everythingScanQuery()"), "must build its request the same way it is tested");
+  assert.ok(body!.includes("this.priceScan()"), "must reprice for the fast/coarse defaults it just set");
+  assert.ok(body!.includes("this.onScanStart()"), "must actually start it - one click, not a second button");
+  assert.ok(
+    body!.indexOf("this.priceScan()") < body!.indexOf("this.onScanStart()"),
+    "price before it runs (T-516) - never start first and price after",
+  );
 });

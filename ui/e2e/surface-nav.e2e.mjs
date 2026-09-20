@@ -29,6 +29,10 @@
 //   * after the last viewport change, the cap recovers **to the ceiling and stays there** through
 //     ~3 700 further tile requests over 25 s with **zero** refusals. A leak keeps leaking;
 //     discovery, once the share is found and demand is steady, stops.
+//     **That third measurement no longer describes this fixture and is kept only as the history of
+//     why the bound is what it is:** re-measured in 2026-09, the page asks for NOTHING once the view
+//     stops moving, so the cap does not recover either (it rises only on a completion) and the
+//     steady-state set is empty. See the steady-state block below, which now asks the route itself.
 //
 // So forbidding the residual would forbid the mechanism that keeps the user from ever seeing one.
 //
@@ -183,16 +187,66 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   const navigationRefusals = page.requests.filter((r) => r.status === 503).length;
 
   // ——— STEADY STATE: the page keeps rendering, nothing moves the view ———
-  // This window is the discriminator the bound rests on. The AIMD cap recovers to its ceiling
-  // during it (measured at 12.2–13.8 s from load, comfortably inside), so the client spends most of
-  // it running at the full server cap — exactly the condition under which a leaked server slot
-  // would refuse it. Measured across runs: zero refusals here, through thousands of further tile
-  // requests. A regression that reintroduces leakage shows up here first and unambiguously,
-  // because nothing in this window is contending for the budget except the client itself.
+  //
+  // **What this window actually contains, measured rather than assumed.** The note here used to say
+  // the AIMD cap recovers to its ceiling during it (12.2–13.8 s from load) and that the client keeps
+  // asking for thousands of tiles, so a leaked server slot would refuse it. Neither half is true on
+  // this fixture. Re-measured over six full-suite runs after T-471's ring prefetch was removed:
+  //
+  //     tile requests by the page during the 8 s window: 0, every run.
+  //     the operating cap: pinned at whatever the last refusal left it (1 or 2), every run.
+  //
+  // Both for the same reason. The view is not moving, nothing is falling off the live edge fast
+  // enough to miss, so the client wants nothing — and the cap only rises in `succeeded()`, which
+  // needs a completion, so a client that asks for nothing recovers nothing. **`steadyRefusals` was
+  // therefore judging an empty set: 0 of 0.** That is how T-471's prefetch ring got in — its defect
+  // was visible here precisely BECAUSE it kept asking during this window, and a client that keeps
+  // quiet passes the same assertion without being tested by it.
+  //
+  // So the window asks for itself, twice over, and the two halves do different jobs.
+  //
+  // **The probe (2b): the route's budget, asked from outside the client.** Once per second, from
+  // THIS process rather than the page, one tile is requested — serially, never more than one
+  // outstanding, over the same address `tileCost` uses at startup, so it is known-servable and
+  // cheap. `/api/tiles` takes its slot before it does any work, so a budget permanently short of
+  // slots refuses this, and the answer comes from outside the client whose own bookkeeping cannot
+  // be the witness to it (this file's opening rule). **Measured honestly: this is a floor, not the
+  // detector.** Run against T-471's ring restored, all eight probes were answered `200` while the
+  // page was being refused 1-2 times in the same window — the leak's slots are held only while the
+  // server finishes producing an abandoned tile, so a serial probe usually lands between them. What
+  // it does guarantee is that (2) is never again judging an empty set. It costs nothing when the
+  // client is well-behaved, and the page's own requests are unaffected: the probe is not a browser
+  // request, so it never enters `page.requests` and never perturbs the concurrency watch or the
+  // counter cross-check below.
+  const probeUrl = `${ORIGIN}/api/tiles?` + new URLSearchParams({
+    token: TOKEN, level_f: "0", level_t: "0", f_index: "0", t_index: "0", cells: "8",
+  });
+  // **The still-view claim (2c): what the page itself may ask for.** Its premise is measured at
+  // both ends of the window rather than assumed. **No pane is
+  // following the live edge** by the time the gestures are over — every one of them was dragged or
+  // scrubbed off it, which `data-following` states as a fact rather than a measurement (T-478, and
+  // the same attribute `live-edge.e2e.mjs` asserts on). A frozen pane over already-captured data,
+  // with nothing moving it, **wants nothing**: the record may well still be growing (it is — the
+  // replay ingests throughout, `latest_s` advances ~8 s across this window), but no pane is showing
+  // the place it is growing at. So the second assertion below is that the page asks for nothing,
+  // and it is the one T-471's ring fails outright (27-33 requests here, against 0 for a client that
+  // asks only for what it draws). If a pane IS following, new rows are legitimately wanted and the
+  // claim is not made — reported as not made, never assumed away.
+  const FOLLOWING = `[...document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]')]` +
+    `.map((v) => v.getAttribute('data-following')).join(",")`;
+  const followingBefore = await page.eval(FOLLOWING);
+  const probes = [];
   for (let i = 0; i < STEADY_STATE_MS / 500; i++) {
     await new Promise((r) => setTimeout(r, 500));
     await sampleCap();
+    if (i % 2 === 1) {
+      const t0 = Date.now();
+      const status = await fetch(probeUrl).then((r) => r.status, () => 0);
+      probes.push({ status, ms: Date.now() - t0 });
+    }
   }
+  const followingAfter = await page.eval(FOLLOWING);
+  const frozen = (f) => f.length > 0 && !f.split(",").includes("true");
 
   // ——— the evidence, gathered and PRINTED before anything is asserted ———
   // A failing guard whose first assertion hides the rest of the picture is a guard people bisect by
@@ -212,6 +266,13 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   t.diagnostic(`503s: ${navigationRefusals} during ${gestures} viewport changes, ` +
     `${steadyRefusals.length} during ${(STEADY_STATE_MS / 1000).toFixed(0)} s of steady state ` +
     `(${steadyRequests} requests) · ${backpressure} counted by the client`);
+  const probeRefusals = probes.filter((p) => p.status === 503);
+  t.diagnostic(`panes following the live edge across the steady window: [${followingBefore}] -> ` +
+    `[${followingAfter}] (${frozen(followingBefore) && frozen(followingAfter)
+      ? "all frozen: the still-view claim applies" : "one is live: claim not made"})`);
+  t.diagnostic(`steady-state slot probes: ${probes.length} asked, ` +
+    `${probes.filter((p) => p.status === 200).length} answered, ${probeRefusals.length} refused · ` +
+    `statuses ${probes.map((p) => p.status).join(" ")} · ${probes.map((p) => `${p.ms}ms`).join(" ")}`);
   if (refused.length) {
     t.diagnostic(`refusals at: ${refused.map((r) => `${r.startedMs - loadedAt}ms`).join(" ")} after load`);
   }
@@ -239,6 +300,40 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
     `${(STEADY_STATE_MS / 1000).toFixed(0)} s in which NOTHING moved the view. After the AIMD ` +
     "controller has found its share, backpressure must stop: a refusal here is not discovery, it " +
     "is a slot that was never released — the leak T-454's abandoned-slot accounting exists to close.");
+
+  // (2b) …AND THE WINDOW WAS ACTUALLY ASKED. (2) is a claim about a set the page may leave empty —
+  // measured empty on this fixture, every run — so on its own it certifies nothing. These two say
+  // the window was exercised and by what: the route answered every serial probe made while the page
+  // sat idle, so its slot budget was genuinely free. A page that walked away from reads the server
+  // is still producing refuses these, which is the leak stated as the user's own experience of it:
+  // a second tab, or this page's next gesture, being told the route is full.
+  assert.ok(probes.length >= 4,
+    `only ${probes.length} slot probes were made during the steady-state window — too few for (2) ` +
+    "to be a test rather than a formality");
+  assert.deepEqual(probeRefusals, [],
+    `the tile route refused ${probeRefusals.length} of ${probes.length} single, serial tile ` +
+    `requests made while the page was idle (statuses: ${probes.map((p) => p.status).join(" ")}). ` +
+    "Nothing else was asking, so the budget those slots came out of was held by reads this client " +
+    "abandoned and the server is still producing — T-454's leak, from outside the client.");
+  assert.ok(probes.every((p) => p.status === 200),
+    `a steady-state slot probe did not get an answer at all (statuses: ${probes.map((p) => p.status).join(" ")}) — ` +
+    "a probe that errors proves nothing either way, so the assertion above would be vacuous");
+
+  // (2c) A FROZEN VIEW THAT NOTHING TOUCHES ASKS FOR NOTHING. The premise is measured at both ends
+  // of the window, not assumed: every pane is off the live edge, so nothing new can be wanted, and
+  // only then is "it must ask for nothing" the right claim. What this forbids is speculation — and
+  // speculation is not free: every speculative read that a later gesture aborts leaves the server
+  // producing a tile nobody will read, holding the slot (2) and (2b) are about.
+  if (frozen(followingBefore) && frozen(followingAfter)) {
+    assert.equal(steadyRequests, 0,
+      `the page made ${steadyRequests} tile requests during ${(STEADY_STATE_MS / 1000).toFixed(0)} s ` +
+      "in which nothing moved the view and no pane was following the live edge. With nothing new on " +
+      "screen to draw, a tile request is speculation — and speculation a later gesture aborts is a " +
+      "server slot spent on a read nobody will ever look at (T-471).");
+  } else {
+    t.diagnostic(`a pane was still following the live edge ([${followingBefore}] -> [${followingAfter}]), ` +
+      "so new rows were legitimately wanted: the still-view claim is NOT made this run");
+  }
 
   // (3) A REFUSAL MUST ACTUALLY BACK THE CLIENT OFF. This is the assertion that separates a
   // controller from a client that merely counts refusals, and it is the sharp one: the permitted

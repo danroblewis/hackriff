@@ -882,6 +882,9 @@ struct Common {
     /// segment: the constellation overhead and the quiet in-band reference are properties of the
     /// site and the receiver, not of a re-plumb.
     gnss: Arc<crate::gnss::GnssDwell>,
+    /// T-517: the run's detection FFT override (`PipelineSettings::fft_len`), kept so
+    /// [`PipelineHandle::detection_bin_hz`] answers for any rate a re-plumb could move to.
+    detection_fft_len: Option<usize>,
     /// T-508 test seam: segment starts still to fail, at the last step (after every reader has
     /// spawned, before the capture thread), so the cleanup path is the one exercised.
     fail_segment_starts: std::sync::atomic::AtomicU32,
@@ -1129,6 +1132,7 @@ impl Pipeline {
             recorder: Mutex::new(None),
             last_recording: Mutex::new(RecordingStatus::default()),
             listen: Arc::new(Mutex::new(cfg.settings.listen.clone())),
+            detection_fft_len: cfg.settings.fft_len,
             bursts: Arc::default(),
             // T-115: never fails the run; a log that cannot open is reported and skipped.
             scheduler: Arc::new(crate::control::SchedulerHub::default()),
@@ -2638,6 +2642,13 @@ impl PipelineHandle {
             Arc::new(move || sup.lock().shared.clone()),
             Arc::clone(&self.sup.common.listen),
         ))
+    }
+
+    /// The run's detection FFT override (`PipelineSettings::fft_len`; `None` sizes it per rate).
+    /// With [`crate::config::detection_bin_hz`] it states the detection **and history** bin width
+    /// at any rate a re-plumb could move to (T-517).
+    pub fn detection_fft_len(&self) -> Option<usize> {
+        self.sup.common.detection_fft_len
     }
 
     /// The listen limits in force (T-066).

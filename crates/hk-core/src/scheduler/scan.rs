@@ -234,6 +234,83 @@ impl IterativeScan {
     }
 }
 
+/// How far one scan step advances (T-517): the **width of the window the pass is tiled at**, never
+/// the resolution inside it.
+///
+/// # Where the old ~1.5 MHz step came from
+///
+/// [`CompiledPlan::compile`] tiles a range into slices of `sweep_rate_hz × usable_fraction` (capped
+/// at `max_span_hz`). The in-app sweep (T-452) tiles at the sample rate **in force**, because a step
+/// is one retune and nothing else — so a live run left at the HackRF's 2 Msps floor (where T-418's
+/// narrow selection snaps it) steps `2 Msps × 0.75 = 1.5 MHz`, and ~4 000 steps cover 1 MHz–6 GHz.
+/// `usable_fraction = 0.75` and `max_span_hz = 20 MHz` were never the limit; the rate was.
+///
+/// # Coarse widens the window, and the bins stay the same width
+///
+/// [`ScanStep::Coarse`] tiles the pass at the widest rate `rate × 2^k` the source supports **at
+/// which the caller's bin width is unchanged** ([`coarse_step_rate`]). The pipeline sizes its
+/// detection and history FFT as `next_pow2(fs / 5 kHz)`, so a power-of-two multiple of the rate
+/// takes the same power-of-two multiple of bins and each bin is exactly as wide as before: coarse
+/// means fewer, wider windows at identical frequency resolution, never blurrier data. A step that
+/// cannot hold the bin width (a fixed FFT override, a rate list with no such multiple) is not
+/// taken — coarse then degenerates to fine rather than degrade.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScanStep {
+    /// Today's behaviour: tile at the rate in force, one retune per step and nothing else.
+    #[default]
+    Fine,
+    /// Tile at the widest bin-width-preserving rate: ~10× fewer steps from a 2–2.4 Msps window.
+    Coarse,
+}
+
+impl ScanStep {
+    /// The name on the wire.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fine => "fine",
+            Self::Coarse => "coarse",
+        }
+    }
+
+    /// Parses the wire name.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "fine" => Some(Self::Fine),
+            "coarse" => Some(Self::Coarse),
+            _ => None,
+        }
+    }
+}
+
+/// The rate a [`ScanStep::Coarse`] pass is tiled at, starting from `rate_hz` (the rate in force).
+///
+/// The widest `rate_hz × 2^k`, `k ≥ 0`, that `caps` supports and at which `bin_hz` — the caller's
+/// frequency resolution at a given rate, e.g. the pipeline's detection/history bin width — is the
+/// same as at `rate_hz` (to 1 part in 10⁹). `k = 0` always qualifies, so the answer is never
+/// narrower than the rate in force and never a rate that would coarsen a bin.
+pub fn coarse_step_rate(
+    rate_hz: f64,
+    caps: &SourceCapabilities,
+    bin_hz: impl Fn(f64) -> f64,
+) -> f64 {
+    let want = bin_hz(rate_hz);
+    let mut best = rate_hz;
+    if !(rate_hz.is_finite() && rate_hz > 0.0 && want.is_finite() && want > 0.0) {
+        return best;
+    }
+    for k in 1..=10 {
+        let r = rate_hz * f64::from(1u32 << k);
+        if !caps.sample_rates.supports(r) {
+            continue;
+        }
+        let b = bin_hz(r);
+        if (b - want).abs() <= want * 1e-9 {
+            best = r;
+        }
+    }
+    best
+}
+
 /// The price of one iterative-scan pass: how many steps, how long each, how long until the tune
 /// comes back.
 ///
@@ -348,6 +425,75 @@ mod tests {
             sweep_rate_hz: 20e6,
             ..SchedulerConfig::default()
         }
+    }
+
+    /// The pipeline's detection/history bin width (`hk_pipeline::detection_resolution`'s rule:
+    /// `fft = next_pow2(fs / 5 kHz)` clamped to 512..4096), restated so this crate can test against
+    /// it without depending upward. hk-cli's contract test asserts the served `bin_hz` against the
+    /// real function.
+    fn pipeline_bin_hz(fs: f64) -> f64 {
+        let fft = ((fs / 5_000.0).ceil().max(1.0) as usize)
+            .next_power_of_two()
+            .clamp(512, 4096);
+        fs / fft as f64
+    }
+
+    /// Full-range step counts, fine vs coarse, compiled the way the in-app sweep compiles them.
+    fn full_range_steps(rate_hz: f64) -> usize {
+        let caps = SourceCapabilities::hackrf_one();
+        let scan = IterativeScan::from_seconds(0.5).unwrap();
+        let plan = scan.plan_over_capabilities(&caps, Timestamp::from_unix_nanos(0));
+        let mut c = SchedulerConfig::from_plan(&plan).unwrap();
+        c.sweep_rate_hz = rate_hz;
+        c.max_span_hz = c.max_span_hz.max(rate_hz);
+        c.validate(&caps).unwrap();
+        let compiled = CompiledPlan::compile(&plan, &c, &caps).unwrap();
+        scan.budget(&compiled).steps
+    }
+
+    /// T-517: WHERE THE ~1.5 MHz STEP CAME FROM, and what coarse does about it — measured, with
+    /// the bin width held identical so "coarse" can never be read as permission to degrade.
+    #[test]
+    fn coarse_widens_the_window_by_a_power_of_two_and_keeps_the_bin_width() {
+        let caps = SourceCapabilities::hackrf_one();
+        // The HackRF floor (2 Msps) and the demo's 2.4 Msps: x8 is the widest multiple <= 20 Msps.
+        for (fine, coarse) in [(2e6, 16e6), (2.4e6, 19.2e6), (8e6, 16e6), (20e6, 20e6)] {
+            let r = coarse_step_rate(fine, &caps, pipeline_bin_hz);
+            assert_eq!(r, coarse, "coarse rate from {fine}");
+            assert_eq!(
+                pipeline_bin_hz(r),
+                pipeline_bin_hz(fine),
+                "bin width must be identical coarse vs fine at {fine}"
+            );
+        }
+        // A resolution that would coarsen with the rate (a fixed FFT) is never widened.
+        assert_eq!(coarse_step_rate(2.4e6, &caps, |fs| fs / 4096.0), 2.4e6);
+        // A discrete rate list with no power-of-two multiple stays put.
+        let mut d = caps.clone();
+        d.sample_rates = SampleRates::Discrete(vec![2.4e6, 10e6]);
+        assert_eq!(coarse_step_rate(2.4e6, &d, pipeline_bin_hz), 2.4e6);
+
+        // The measured step counts over the HackRF's whole 1 MHz-6 GHz range.
+        assert_eq!(
+            full_range_steps(2e6),
+            4000,
+            "fine at the 2 Msps floor: 1.5 MHz steps"
+        );
+        assert_eq!(
+            full_range_steps(16e6),
+            501,
+            "coarse from 2 Msps: 12 MHz steps"
+        );
+        assert_eq!(
+            full_range_steps(2.4e6),
+            3334,
+            "fine at 2.4 Msps: 1.8 MHz steps"
+        );
+        assert_eq!(
+            full_range_steps(19.2e6),
+            418,
+            "coarse from 2.4 Msps: 14.4 MHz steps"
+        );
     }
 
     #[test]

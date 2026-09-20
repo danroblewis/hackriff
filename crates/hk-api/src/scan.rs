@@ -79,6 +79,13 @@
 //! step simply starts later, because the scan times its dwell from when `set_center` returns. A
 //! range inside one class — which is what a survey of a band usually is — never re-plumbs at all.
 //!
+//! **The one exception is a coarse step (T-517, [`ScanStep`]).** A fine step tiles at the rate in
+//! force, so from a 2 Msps window it advances 1.5 MHz (~4000 steps for 1 MHz–6 GHz). A coarse
+//! step tiles at the widest power-of-two multiple of that rate at which the run's bins keep their
+//! width ([`coarse_step_rate`], ~10× fewer steps), and so commits the front end to **one** rate
+//! change before its first retune, through the same `LiveControl`. The plan says so before
+//! anything moves (`changes_rate`), and the start answer names it.
+//!
 //! # What the user is committing to, before they commit
 //!
 //! [`ScanRunner::prepare`] is reachable without starting anything (`GET /api/control/scan` with a
@@ -92,8 +99,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hk_core::scheduler::{
-    CompiledPlan, DEFAULT_DWELL_NS, Hop, HopKind, IterativeScan, PlanWarning, ScanBudget,
-    SchedulerConfig,
+    CompiledPlan, DEFAULT_DWELL_NS, Hop, HopKind, IterativeScan, PlanWarning, ScanBudget, ScanStep,
+    SchedulerConfig, coarse_step_rate,
 };
 use hk_model::{FreqRange, Timestamp};
 use serde_json::{Value, json};
@@ -179,6 +186,8 @@ pub struct ScanRequest {
     pub freq: Option<FreqRange>,
     /// Seconds per step; `None` is [`DEFAULT_DWELL_NS`].
     pub dwell_s: Option<f64>,
+    /// How far a step advances (T-517); `None` is [`ScanStep::Fine`], today's behaviour.
+    pub step: Option<ScanStep>,
 }
 
 /// A scan refused, with the status and stable code the control API answers.
@@ -220,9 +229,17 @@ pub struct Prepared {
     /// ([`IterativeScan::recommended`]). Outside it still runs — the user asked for a configurable
     /// number, not a clamped one — and this is what lets the control say it is unusual.
     pub recommended_dwell: bool,
-    /// The sample rate the hops were tiled at: the one **in force**, so a scan never implies a
-    /// window the run is not capturing.
+    /// The sample rate the hops were tiled at: the one **in force** for a fine step, so a scan
+    /// never implies a window the run is not capturing; for a coarse step the wider rate the scan
+    /// sets before its first step (T-517).
     pub rate_hz: f64,
+    /// The sample rate in force when the scan was prepared.
+    pub rate_in_force_hz: f64,
+    /// Fine or coarse (T-517).
+    pub step: ScanStep,
+    /// The detection/history bin width at [`Prepared::rate_hz`], Hz; `None` when the server
+    /// cannot state it. Identical fine vs coarse by construction ([`coarse_step_rate`]).
+    pub bin_hz: Option<f64>,
     /// The steps, in visit order.
     hops: Vec<Hop>,
     /// The price of one pass.
@@ -237,6 +254,12 @@ impl Prepared {
         self.hops.len()
     }
 
+    /// Whether the scan sets a different sample rate before stepping (a coarse step from a
+    /// narrower window).
+    pub fn changes_rate(&self) -> bool {
+        self.rate_hz != self.rate_in_force_hz
+    }
+
     /// The plan and its price, as the control API serves them.
     pub fn json(&self) -> Value {
         let b = &self.budget;
@@ -247,6 +270,10 @@ impl Prepared {
                 "dwell_s": self.dwell_ns as f64 / NS_PER_S,
                 "recommended_dwell": self.recommended_dwell,
                 "sample_rate_hz": self.rate_hz,
+                "rate_in_force_hz": self.rate_in_force_hz,
+                "changes_rate": self.changes_rate(),
+                "step": self.step.as_str(),
+                "bin_hz": self.bin_hz,
                 "steps": self.hops.len(),
                 "warnings": self.warnings,
             },
@@ -315,6 +342,9 @@ struct State {
     shutdown: bool,
 }
 
+/// The detection/history bin width, Hz, at a sample rate (T-517).
+pub type BinWidth = Arc<dyn Fn(f64) -> f64 + Send + Sync>;
+
 struct Shared {
     live: Arc<dyn LiveControl>,
     state: Mutex<State>,
@@ -333,6 +363,9 @@ impl Shared {
 pub struct ScanRunner {
     shared: Arc<Shared>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    /// The run's frequency resolution as a function of rate; without it a coarse step cannot
+    /// promise identical bins and is refused.
+    bin_hz: Option<BinWidth>,
 }
 
 impl std::fmt::Debug for ScanRunner {
@@ -360,7 +393,16 @@ impl ScanRunner {
                 wake: Condvar::new(),
             }),
             worker: Mutex::new(None),
+            bin_hz: None,
         }
+    }
+
+    /// States the run's detection/history bin width as a function of the sample rate (T-517), so
+    /// a coarse step can widen the window exactly where the bins stay the same width.
+    #[must_use]
+    pub fn with_bin_width(mut self, bin_hz: BinWidth) -> Self {
+        self.bin_hz = Some(bin_hz);
+        self
     }
 
     /// Whether this front end can be swept at all, and why not when it cannot.
@@ -415,11 +457,28 @@ impl ScanRunner {
         let plan = scan.plan("in-app scan", &ranges, Timestamp::now());
         let mut cfg = SchedulerConfig::from_plan(&plan)
             .map_err(|e| ScanError::invalid(format!("scan plan: {e}")))?;
-        // Tile the pass at the span **actually in use**. A scan must not imply a window the run is
-        // not capturing, and it must not change the user's span behind their back either: the one
-        // device action a step takes is the retune, and nothing else.
-        cfg.sweep_rate_hz = tuning.sample_rate_hz;
-        cfg.max_span_hz = cfg.max_span_hz.max(tuning.sample_rate_hz);
+        // Tile the pass at the span **actually in use** for a fine step. A scan must not imply a
+        // window the run is not capturing, and a fine step does not change the user's span: the
+        // one device action it takes is the retune. A coarse step (T-517) asks for a wider window
+        // up front — the widest power-of-two multiple of the rate in force at which the bins keep
+        // their width — and says so in the plan (`changes_rate`) before anything moves.
+        let step = req.step.unwrap_or_default();
+        let rate_in_force = tuning.sample_rate_hz;
+        let rate_hz = match step {
+            ScanStep::Fine => rate_in_force,
+            ScanStep::Coarse => {
+                let bin = self.bin_hz.as_ref().ok_or_else(|| {
+                    ScanError::refused(
+                        "this server cannot state its frequency resolution, so a coarse step \
+                         cannot promise identical bins; use a fine step",
+                    )
+                })?;
+                coarse_step_rate(rate_in_force, caps, |fs| bin(fs))
+            }
+        };
+        let bin_hz = self.bin_hz.as_ref().map(|b| b(rate_hz));
+        cfg.sweep_rate_hz = rate_hz;
+        cfg.max_span_hz = cfg.max_span_hz.max(rate_hz);
         cfg.validate(caps)
             .map_err(|e| ScanError::invalid(format!("scan plan: {e}")))?;
         let compiled = CompiledPlan::compile(&plan, &cfg, caps)
@@ -440,7 +499,10 @@ impl ScanRunner {
             requested,
             dwell_ns: scan.dwell_ns(),
             recommended_dwell: scan.recommended(),
-            rate_hz: tuning.sample_rate_hz,
+            rate_hz,
+            rate_in_force_hz: rate_in_force,
+            step,
+            bin_hz,
             budget: scan.budget(&compiled),
             warnings: compiled.warnings.iter().map(warning_text).collect(),
             hops,
@@ -662,6 +724,10 @@ struct Step {
     index: usize,
     center_hz: f64,
     dwell_ns: i64,
+    /// The rate the plan was tiled at: a step first restores it when the window in force differs
+    /// (a coarse scan's first step, or a resume after the user changed the rate while yielded),
+    /// because a hop tiled at one rate taken at another would leave holes or overlap.
+    rate_hz: f64,
 }
 
 /// The worker: wait for the step to fall due, retune, then hold for the dwell.
@@ -707,10 +773,18 @@ fn worker(shared: &Arc<Shared>) {
                     index: a.step,
                     center_hz: hop.center_on_pass(a.pass),
                     dwell_ns: hop.duration_ns.max(1),
+                    rate_hz: p.rate_hz,
                 };
             }
         };
-        let result = shared.live.set_center(step.center_hz);
+        let result = if shared.live.tuning().sample_rate_hz == step.rate_hz {
+            shared.live.set_center(step.center_hz)
+        } else {
+            shared
+                .live
+                .set_rate(step.rate_hz)
+                .and_then(|_| shared.live.set_center(step.center_hz))
+        };
         let mut st = shared.lock();
         if st.generation != step.generation || st.phase != Phase::Running {
             // A stop, a resume or a user action landed while this retune was in flight: its
@@ -796,6 +870,7 @@ mod tests {
         centers: Mutex<Vec<f64>>,
         refuse: Mutex<bool>,
         calls: AtomicU64,
+        rates: Mutex<Vec<f64>>,
     }
 
     impl Fake {
@@ -805,7 +880,10 @@ mod tests {
                 min_hz: 100e6,
                 max_hz: 160e6,
             }];
-            caps.sample_rates = SampleRates::Discrete(vec![20e6]);
+            caps.sample_rates = SampleRates::Continuous {
+                min_hz: 2e6,
+                max_hz: 20e6,
+            };
             Arc::new(Self {
                 caps,
                 tuning: Mutex::new(LiveTuning {
@@ -818,7 +896,23 @@ mod tests {
                 centers: Mutex::new(Vec::new()),
                 refuse: Mutex::new(false),
                 calls: AtomicU64::new(0),
+                rates: Mutex::new(Vec::new()),
             })
+        }
+        /// The same front end left at a narrow window, as a live run at 2.4 Msps is.
+        fn at_rate(rate_hz: f64) -> Arc<Self> {
+            let f = Self::new();
+            f.tuning
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .sample_rate_hz = rate_hz;
+            f
+        }
+        fn rates(&self) -> Vec<f64> {
+            self.rates
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
         }
         fn centers(&self) -> Vec<f64> {
             self.centers
@@ -859,8 +953,14 @@ mod tests {
             t.center_hz = center_hz;
             Ok(t.clone())
         }
-        fn set_rate(&self, _hz: f64) -> Result<LiveTuning, LiveControlError> {
-            Ok(self.tuning())
+        fn set_rate(&self, hz: f64) -> Result<LiveTuning, LiveControlError> {
+            self.rates
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(hz);
+            let mut t = self.tuning.lock().unwrap_or_else(PoisonError::into_inner);
+            t.sample_rate_hz = hz;
+            Ok(t.clone())
         }
         // T-529: the sweep's steps are `set_center` and nothing else (see the module docs), so a
         // whole-window commit is not something this fake has to model. Refusing says that out
@@ -900,6 +1000,7 @@ mod tests {
             .prepare(&ScanRequest {
                 freq: None,
                 dwell_s: Some(12.0),
+                step: None,
             })
             .expect("prepared");
         // 60 MHz of tunable range at a 15 MHz usable span (0.75 x 20 Msps) is four steps.
@@ -923,6 +1024,7 @@ mod tests {
             .prepare(&ScanRequest {
                 freq: None,
                 dwell_s: Some(2.0),
+                step: None,
             })
             .expect("prepared");
         assert!(!p.recommended_dwell);
@@ -939,6 +1041,7 @@ mod tests {
             .prepare(&ScanRequest {
                 freq: Some(FreqRange::new(2.4e9, 2.5e9)),
                 dwell_s: None,
+                step: None,
             })
             .expect_err("refused");
         assert_eq!(e.status, 400);
@@ -958,6 +1061,7 @@ mod tests {
         r.start(&ScanRequest {
             freq: None,
             dwell_s: Some(0.02),
+            step: None,
         })
         .expect("started");
         assert!(wait_for(|| live.centers().len() >= 4));
@@ -979,6 +1083,7 @@ mod tests {
         r.start(&ScanRequest {
             freq: None,
             dwell_s: Some(10.0),
+            step: None,
         })
         .expect("started");
         assert!(wait_for(|| !live.centers().is_empty()));
@@ -1023,6 +1128,7 @@ mod tests {
         r.start(&ScanRequest {
             freq: None,
             dwell_s: Some(0.02),
+            step: None,
         })
         .expect("started");
         // It tried, and it is still running on step 0 — not advanced past it, not yielded.
@@ -1056,6 +1162,7 @@ mod tests {
         r.start(&ScanRequest {
             freq: None,
             dwell_s: Some(10.0),
+            step: None,
         })
         .expect("started");
         assert!(wait_for(|| r.json()["state"] == "yielded"));
@@ -1086,10 +1193,106 @@ mod tests {
         let req = ScanRequest {
             freq: None,
             dwell_s: Some(10.0),
+            step: None,
         };
         r.start(&req).expect("started");
         let e = r.start(&req).expect_err("refused");
         assert_eq!(e.status, 409);
         r.stop();
+    }
+
+    /// The pipeline's bin-width rule (`hk_pipeline::detection_resolution`), restated for tests;
+    /// the contract test in hk-cli checks the served value against the real one.
+    fn bins() -> BinWidth {
+        Arc::new(|fs: f64| {
+            let fft = ((fs / 5_000.0).ceil() as usize)
+                .next_power_of_two()
+                .clamp(512, 4096);
+            fs / fft as f64
+        })
+    }
+
+    /// T-517: coarse widens the window and keeps the bins. From 2.4 Msps (1.8 MHz usable) the
+    /// fake's 60 MHz is 34 fine steps; coarse tiles at 19.2 Msps (14.4 MHz usable): 5 steps, with
+    /// the SAME bin width, and it says before anything moves that it will change the rate.
+    #[test]
+    fn coarse_is_fewer_wider_steps_at_the_same_bin_width() {
+        let live = Fake::at_rate(2.4e6);
+        let r = ScanRunner::new(live.clone() as Arc<dyn LiveControl>).with_bin_width(bins());
+        let price = |step| {
+            r.prepare(&ScanRequest {
+                freq: None,
+                dwell_s: Some(0.5),
+                step,
+            })
+            .expect("prepared")
+        };
+        let (omitted, fine, coarse) = (
+            price(None),
+            price(Some(ScanStep::Fine)),
+            price(Some(ScanStep::Coarse)),
+        );
+        assert_eq!(
+            omitted.steps(),
+            fine.steps(),
+            "omitting the step is today's fine step"
+        );
+        assert_eq!(fine.steps(), 34);
+        assert_eq!(coarse.steps(), 5);
+        assert!((fine.budget.step_span_hz - 1.8e6).abs() < 1e-3);
+        assert!((coarse.budget.step_span_hz - 14.4e6).abs() < 1e-3);
+        assert_eq!(coarse.rate_hz, 19.2e6);
+        assert!(coarse.changes_rate() && !fine.changes_rate());
+        // FREQUENCY RESOLUTION IS UNCHANGED: coarse is fewer windows, never blurrier ones.
+        assert_eq!(fine.bin_hz, Some(4_687.5));
+        assert_eq!(coarse.bin_hz, fine.bin_hz);
+        let j = coarse.json();
+        assert_eq!(j["plan"]["step"], "coarse");
+        assert_eq!(j["plan"]["bin_hz"], json!(4_687.5));
+        assert_eq!(j["plan"]["changes_rate"], json!(true));
+        // Pricing moved nothing.
+        assert!(live.rates().is_empty() && live.centers().is_empty());
+    }
+
+    /// Without a stated resolution a coarse step cannot promise identical bins, so it is refused
+    /// rather than taken blind; fine still works.
+    #[test]
+    fn coarse_without_a_stated_resolution_is_refused() {
+        let live = Fake::at_rate(2.4e6);
+        let r = ScanRunner::new(live as Arc<dyn LiveControl>);
+        let e = r
+            .prepare(&ScanRequest {
+                step: Some(ScanStep::Coarse),
+                ..ScanRequest::default()
+            })
+            .expect_err("refused");
+        assert_eq!(e.status, 409);
+        assert!(r.prepare(&ScanRequest::default()).is_ok());
+    }
+
+    /// A coarse scan sets its wider rate once, through the same device path, and then steps by
+    /// retunes alone.
+    #[test]
+    fn a_coarse_scan_sets_its_rate_once_then_retunes() {
+        let live = Fake::at_rate(2.4e6);
+        let r = ScanRunner::new(live.clone() as Arc<dyn LiveControl>).with_bin_width(bins());
+        r.start(&ScanRequest {
+            freq: None,
+            dwell_s: Some(0.02),
+            step: Some(ScanStep::Coarse),
+        })
+        .expect("started");
+        assert!(wait_for(|| live.centers().len() >= 6));
+        r.stop();
+        assert_eq!(
+            live.rates(),
+            vec![19.2e6],
+            "one rate change, before the first step"
+        );
+        let c = live.centers();
+        assert!(
+            (c[0] - 106e6).abs() < 1e-3,
+            "60 MHz in five 12 MHz slices: {c:?}"
+        );
     }
 }

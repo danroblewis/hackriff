@@ -64,9 +64,50 @@
 // from the defect the ticket names, run against `main`.
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
+import net from "node:net";
 import path from "node:path";
 import { Browser, census } from "./harness.mjs";
 import { UI_DIR, startBackend } from "./backend.mjs";
+
+/**
+ * The base of the three ports this file's own backends take (the journey's, and one each for tests
+ * 5 and 6). `startBackend` steps past an occupied port, so the default is safe against one other
+ * run — but this file KILLS a backend in test 4 and starts two more after it, and two copies of
+ * THIS file racing over one pool hand each other the port the other just freed. Overridable so an
+ * intermittent in here can be measured the only way an intermittent can be: many copies at once.
+ */
+const PORT_BASE = Number(process.env.HK_E2E_JOURNEY_PORT ?? 8801);
+
+/**
+ * **Take over a port a killed `hk serve` just freed, and refuse everything on it.**
+ *
+ * T-470 stopped this tier from adopting somebody else's server at startup. Test 4 is the other half
+ * of that hole: it KILLS its backend and then spends twenty seconds asserting that nothing reaches
+ * the page — while the page reconnects to that same origin on a loop and the port sits free for
+ * anyone to bind. Measured here with four copies of this file running at once: a concurrent run's
+ * own `hk serve` took the freed port, the page reconnected to it, and **59, 156 and 215 rows**
+ * arrived from a stranger's radio in three of twelve runs. Read literally that is "the killed
+ * server kept streaming", which is false and unfalsifiable from inside the page.
+ *
+ * So the test holds the port instead of leaving it open. Every connection is destroyed on accept,
+ * which is what a dead server looks like from the client's side, and no other process can bind it
+ * while this test is making claims about it. `null` if it could not be taken within the grace
+ * period — the caller fails rather than measuring something it cannot name.
+ */
+async function holdPort(port, { graceMs = 5000 } = {}) {
+  const t0 = Date.now();
+  do {
+    const srv = net.createServer((s) => s.destroy());
+    srv.on("error", () => {});
+    const bound = await new Promise((res) => {
+      srv.once("error", () => res(false));
+      srv.listen(port, "127.0.0.1", () => res(true));
+    });
+    if (bound) return srv.unref();   // never a reason for this process to outlive its own tests
+    await new Promise((r) => setTimeout(r, 25));
+  } while (Date.now() - t0 < graceMs);
+  return null;
+}
 
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
 
@@ -101,10 +142,19 @@ const ZOOM = { shift: true }; // a FREQUENCY zoom; T-472 stops a plain wheel at 
  *
  * It forwards everything and changes nothing: a script that altered what the page does would make
  * this tier a test of a page nobody ships.
+ *
+ * **`armDeath` / `deadAt` (test 4).** The instant the stream is observed to END, recorded in the
+ * close handler itself so it is exact rather than the moment a poll happened to notice. Test 4
+ * arms it immediately before it kills the backend; the first close after that is the boundary
+ * everything in that test is counted against. It is armed rather than "the first close of the run"
+ * because earlier tests reconnect, and it is one-shot because the client keeps retrying a dead
+ * server and each refused attempt closes another socket — a boundary that marched forward with
+ * them would shrink the measurement window to nothing.
  */
 const WS_TAP = `(() => {
   const Base = WebSocket;
-  const tap = { sockets: [], opens: 0, closes: 0, errors: 0, headers: [], rows: [], geom: null };
+  const tap = { sockets: [], opens: 0, closes: 0, errors: 0, headers: [], rows: [], geom: null,
+                closeAt: [], armDeath: false, deadAt: null };
   window.__hkWs = tap;
   const observe = (e) => {
     if (typeof e.data === "string") {
@@ -130,7 +180,12 @@ const WS_TAP = `(() => {
       super(...a);
       tap.sockets.push(this);
       this.addEventListener("open", () => { tap.opens++; });
-      this.addEventListener("close", () => { tap.closes++; });
+      this.addEventListener("close", () => {
+        tap.closes++;
+        const at = Date.now();
+        tap.closeAt.push(at);
+        if (tap.armDeath && tap.deadAt === null) tap.deadAt = at;
+      });
       this.addEventListener("error", () => { tap.errors++; });
       this.addEventListener("message", (e) => { try { observe(e); } catch (_) {} });
     }
@@ -178,19 +233,7 @@ after(async () => {
   j?.backend?.stop();
 });
 
-/**
- * Base port for **this file's own** backends (tests 1–4 here, 5 and 6 on `+2` and `+4`).
- *
- * Overridable because the repo runs several agents at once (T-470's own comment says so) and this
- * spec's ports were literals. `startBackend`'s `freePort` probes a port and then releases it, so
- * two copies of this file starting together can both be told 8801 is free and one loses the bind
- * with `Address already in use` — T-470's neighbour problem one layer down, and it is an
- * infrastructure collision that reads exactly like a product failure. Setting a different base per
- * agent removes it; the default is unchanged, so a single run is unaffected.
- */
-const JOURNEY_PORT = Number(process.env.HK_E2E_JOURNEY_PORT ?? 8801);
-
-async function open({ port = JOURNEY_PORT, mockFault = null } = {}) {
+async function open({ port = PORT_BASE, mockFault = null } = {}) {
   // Its own port, not the tier's default: this backend is KILLED by test 4, and the shared one is
   // every other file's. Tests 5 and 6 bring up their own on other ports, each with a device FAULT
   // (T-508), so a fault can never reach the journey's backend.
@@ -1289,14 +1332,53 @@ test("4. a killed backend degrades to grey with no purple and no re-render thras
     `(e.g. ${JSON.stringify(basePix.worstMagenta)}), so this test cannot attribute any to the loss`);
 
   // ——— the kill. SIGKILL, so nothing shuts anything down politely. ———
-  const tKill = Date.now();
+  //
+  // **The boundary is the socket's close, not this process's clock** (T-506's second failure). The
+  // instant `backend.stop()` returns is not the instant the page stops being fed, and the gap is
+  // not small: the server's last frames are already in the kernel's socket buffer and in Chrome's,
+  // and the page dispatches them whenever its event loop next gets there. Measured on this rig
+  // under six concurrent e2e runs, over ten kills: the page received rows up to **388 ms after the
+  // SIGKILL** (7, 7 and 10 rows in three of the six loaded runs, at the stream's own ~40 ms
+  // cadence), and in **every one of the ten** the last row preceded the `close` event — by 21 to
+  // 63 ms, one to two row periods. Nothing was ever produced by the dead server; the drain is a
+  // fact about measurement latency, not about the stream.
+  //
+  // So the earlier version of this assertion — `atMs > tKill`, with `tKill` taken in *this* process
+  // and, worse, one CDP round trip *before* the signal (28 ms in an unloaded run, enough for one
+  // row that arrived 5 ms BEFORE the kill to be counted after it) — was asking a question the test
+  // cannot observe the answer to. It went red on drained frames roughly one run in three under
+  // load. What the page CAN observe is its socket closing, and that is the boundary used below:
+  // the tap pins it in the close handler, and both measurement windows start after it. The claim
+  // is unweakened — arguably stronger, since it now also requires that the client NOTICE.
   const failedBefore = page.requests.filter((r) => r.error !== null).length;
   const uploadsAtKill = await page.eval("window.__hkGl.uploads");
+  await page.eval("window.__hkWs.armDeath = true");
+  const killedPort = Number(new URL(backend.origin).port);
+  const tKill = Date.now();   // nothing awaited between here and the signal
   backend.stop();
-  t.diagnostic("hk serve killed (SIGKILL) under the live page");
+  const holder = await holdPort(killedPort);
+  t.after(() => holder?.close());
+  t.diagnostic(`hk serve killed (SIGKILL) under the live page; port ${killedPort} ` +
+    (holder ? "held open by a socket that refuses everything" : "COULD NOT BE HELD"));
+  assert.ok(holder,
+    `the killed server's port ${killedPort} could not be taken over within the grace period, so nothing ` +
+    "here can promise the page is not being fed by somebody else's `hk serve` that bound it instead");
 
-  // Two successive windows. The first is the legitimate reaction — in-flight requests fail, the
-  // client notices, the page says so. The second is whether it SETTLED.
+  await page.waitFor("the page's own stream socket to close under the dead server",
+    "window.__hkWs.deadAt !== null", { timeoutMs: 20000, everyMs: 25 });
+  const deadAt = Number(await page.eval("window.__hkWs.deadAt"));
+  const drained = JSON.parse(await page.eval(`JSON.stringify({
+    rows: window.__hkWs.rows.filter((r) => r.atMs > ${tKill}).length,
+    lastMs: window.__hkWs.rows.length ? window.__hkWs.rows[window.__hkWs.rows.length - 1].atMs : null,
+  })`));
+  t.diagnostic(`the stream's observed end: the socket closed ${deadAt - tKill} ms after the signal; ` +
+    `${drained.rows} row(s) were delivered in between (the last ${deadAt - drained.lastMs} ms before ` +
+    "the close) — frames already on the wire when the server died, which is why the boundary below " +
+    "is the close and not the clock");
+
+  // Two successive windows, both wholly AFTER the stream's observed end. The first is the
+  // legitimate reaction — in-flight requests fail, the client notices, the page says so. The
+  // second is whether it SETTLED.
   const WINDOW_MS = 5000;
   await new Promise((r) => setTimeout(r, WINDOW_MS));
   const uploadsW1 = (await page.eval("window.__hkGl.uploads")) - uploadsAtKill;
@@ -1312,18 +1394,28 @@ test("4. a killed backend degrades to grey with no purple and no re-render thras
   // only worth something if the same counter reads ZERO when the stream really is gone. It does —
   // measured on the same page, the same tap, the same counter, with the server killed. Without this
   // the passing half of test 2 would be a number nobody had ever seen fail.
+  //
+  // The window is the two measurement windows above — the same ten seconds test 2 counts over, so
+  // the two numbers are directly comparable — and it begins at the stream's OBSERVED end, so every
+  // frame the dead server had already put on the wire is on the other side of the boundary. A row
+  // after the close is what this asks about, and there is no benign way to produce one: the socket
+  // is shut, so the byte would have to come from somewhere the page is not listening to.
   const wsAfterKill = JSON.parse(await page.eval(`JSON.stringify({
     total: window.__hkWs.rows.length,
-    afterKill: window.__hkWs.rows.filter((r) => r.atMs > ${tKill}).length,
-    beforeKill: window.__hkWs.rows.filter((r) => r.atMs > ${tBeforeKill} && r.atMs <= ${tKill}).length,
-    openNow: window.__hkWs.sockets.filter((s) => s.readyState === 1).length,
+    afterClose: window.__hkWs.rows.filter((r) => r.atMs > window.__hkWs.deadAt).length,
+    beforeKill: window.__hkWs.rows.filter((r) => r.atMs > ${tBeforeKill} && r.atMs <= window.__hkWs.deadAt).length,
+    reopened: window.__hkWs.sockets.filter((s) => s.readyState === 1).length,
   })`));
-  t.diagnostic(`the tap across the kill: ${wsAfterKill.beforeKill} rows in the seconds BEFORE it ` +
-    `(from ${rowsBeforeKill} total), ${wsAfterKill.afterKill} in the ${((Date.now() - tKill) / 1000).toFixed(0)} s ` +
-    `after; ${wsAfterKill.openNow} socket(s) open now`);
-  assert.equal(wsAfterKill.afterKill, 0,
-    `${wsAfterKill.afterKill} spectrum rows arrived AFTER the server was killed, so the tap test 2 relies on ` +
-    "does not actually go to zero when the stream dies — and test 2's ≥ 20 rows would then prove nothing");
+  const sinceDead = ((Date.now() - deadAt) / 1000).toFixed(0);
+  t.diagnostic(`the tap across the kill: ${wsAfterKill.beforeKill} rows in the seconds BEFORE the stream ` +
+    `closed (from ${rowsBeforeKill} total), ${wsAfterKill.afterClose} in the ${sinceDead} s after it ` +
+    `closed; ${wsAfterKill.reopened} socket(s) open now`);
+  assert.equal(wsAfterKill.afterClose, 0,
+    `${wsAfterKill.afterClose} spectrum rows reached the page in the ${sinceDead} s AFTER its stream socket ` +
+    `closed on a killed server — and port ${killedPort} was held throughout by a socket that refuses every ` +
+    "connection, so they cannot have come from another run's `hk serve` taking it over. The tap test 2 " +
+    "relies on does not go to zero when the stream dies, and test 2's ≥ 20 rows in ten seconds would " +
+    "then prove nothing");
   assert.ok(wsAfterKill.beforeKill > 0,
     "the tap recorded no rows in the seconds before the kill either, so it was not observing a live " +
     "stream and the zero above says nothing");
@@ -1390,7 +1482,7 @@ test("4. a killed backend degrades to grey with no purple and no re-render thras
 // "front end reaches the destination" check — test 2's check — passed on the dead run. That is why
 // the run-state assertion comes first.
 test("5. a retune the device refuses restarts capture: rows resume and the run does not end", async (t) => {
-  const { page, browser, backend } = await open({ port: JOURNEY_PORT + 2, mockFault: "retune-apply-fails:1" });
+  const { page, browser, backend } = await open({ port: PORT_BASE + 2, mockFault: "retune-apply-fails:1" });
   try {
     assert.match(backend.log(), /mock SDR: fault armed from HK_MOCK_FAULT/,
       "the harness asked for a device fault and the server did not arm one, so this would be test 2 again");
@@ -1514,7 +1606,7 @@ test("5. a retune the device refuses restarts capture: rows resume and the run d
 // exists, no state was ever stated (`[]`), and the only trace of it was the top bar's "run
 // finished" label.
 test("6. a front end that is gone ends the run, and the surface says capture stopped", async (t) => {
-  const { page, browser, backend } = await open({ port: JOURNEY_PORT + 4, mockFault: "gone-on-retune" });
+  const { page, browser, backend } = await open({ port: PORT_BASE + 4, mockFault: "gone-on-retune" });
   try {
     assert.match(backend.log(), /mock SDR: fault armed from HK_MOCK_FAULT/,
       "the harness asked for a device fault and the server did not arm one");
