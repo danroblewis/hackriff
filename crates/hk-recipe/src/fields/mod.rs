@@ -108,6 +108,14 @@ pub enum FieldType {
     Bytes,
     /// A container of `fields`.
     Layer,
+    /// A value derived from earlier integer fields, not read from the frame itself: `terms`
+    /// summed (`raw(field) × scale`, plus the field's own `add`) into one number, e.g. an RDS
+    /// Clock-Time group's MJD/hour/minute combined into a Unix-epoch instant. Has no `offset`/
+    /// `length` of its own (zero-width in the layer tree) and cannot be referenced by
+    /// conditions, lengths or repeats. `value_unit` is required, so the unit travels with the
+    /// number (every serialized time declares its unit, docs/CLAUDE.md). A term whose field is
+    /// absent makes the whole value absent too — not a wrong or default one.
+    Timestamp,
 }
 
 impl FieldType {
@@ -378,10 +386,13 @@ pub struct Field {
     /// `value_unit`). Absent: 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<f64>,
-    /// `uint`/`int`: addend after `scale`. Absent: 0.
+    /// `uint`/`int`: addend after `scale`. `timestamp`: the constant added once to the sum of
+    /// `terms` (e.g. the negated Unix-epoch MJD × 86400, so a term's `raw(mjd) × 86400` lands
+    /// on epoch seconds). Absent: 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add: Option<f64>,
     /// `uint`/`int`: unit of the (scaled) value, a short token (`ft`, `kt`, `ft/min`).
+    /// `timestamp`: required, the unit of the summed value (e.g. `unix-s`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_unit: Option<String>,
     /// Rendering of the value.
@@ -390,6 +401,21 @@ pub struct Field {
     /// `layer`: children.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<Field>,
+    /// `timestamp`: terms summed into the value, each `raw(field) × scale`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<TimestampTerm>,
+}
+
+/// One term of a `timestamp` field: `raw(field) × scale`, summed with the field's other terms
+/// and its own `add`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimestampTerm {
+    /// Reference to an earlier integer field (its **raw**, unscaled value — the same rule as
+    /// `condition`/`length`/`repeat` references).
+    pub field: String,
+    /// Multiplier (output units per raw unit, e.g. 86400 seconds per MJD day).
+    pub scale: f64,
 }
 
 /// A field map.
@@ -604,13 +630,27 @@ impl Checker<'_> {
                 "`charset`/`char_bits`/`parity` are only valid on ascii fields",
             );
         }
-        let scaled = f.scale.is_some() || f.add.is_some() || f.value_unit.is_some();
-        if (scaled || !f.skip_bits.is_empty()) && !matches!(f.ty, FieldType::Uint | FieldType::Int)
+        if (f.scale.is_some() || !f.skip_bits.is_empty())
+            && !matches!(f.ty, FieldType::Uint | FieldType::Int)
         {
             self.error(
                 path,
-                "`skip_bits`/`scale`/`add`/`value_unit` are only valid on uint and int fields",
+                "`skip_bits`/`scale` are only valid on uint and int fields",
             );
+        }
+        if (f.add.is_some() || f.value_unit.is_some())
+            && !matches!(
+                f.ty,
+                FieldType::Uint | FieldType::Int | FieldType::Timestamp
+            )
+        {
+            self.error(
+                path,
+                "`add`/`value_unit` are only valid on uint, int and timestamp fields",
+            );
+        }
+        if !f.terms.is_empty() && !is(FieldType::Timestamp) {
+            self.error(path, "`terms` is only valid on timestamp fields");
         }
         if f.scale.is_some_and(|x| !x.is_finite() || x == 0.0)
             || f.add.is_some_and(|x| !x.is_finite())
@@ -686,6 +726,27 @@ impl Checker<'_> {
                 if f.length.is_none() {
                     self.error(path, "bytes fields need a length");
                 }
+            }
+            FieldType::Timestamp => {
+                if f.length.is_some() {
+                    self.error(
+                        path,
+                        "timestamp fields are derived, not read from bits: no length",
+                    );
+                }
+                if f.value_unit.is_none() {
+                    self.error(path, "timestamp fields need value_unit");
+                }
+                if f.terms.is_empty() {
+                    self.error(path, "timestamp fields need at least one term");
+                }
+                for t in &f.terms {
+                    if !t.scale.is_finite() || t.scale == 0.0 {
+                        self.error(path, "terms scale must be finite and non-zero");
+                    }
+                    self.reference(&t.field, path, scope);
+                }
+                return Some(0);
             }
         }
         if is(FieldType::Enum) {
