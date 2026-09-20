@@ -412,8 +412,32 @@ impl LastKnown {
     /// after `edge_ns` (the store's data edge) get no run either: carrying forward past the newest
     /// frame would paint the future.
     ///
+    /// # Every gap in an observed column is filled (T-527)
+    ///
+    /// A column observed only *part-way down* the grid used to leave the rows **above** its first
+    /// sample grey, because nothing older than them existed to carry forward — and grey means
+    /// *nothing was ever observed here*, which for such a column is false. So the stretch before a
+    /// column's **first-ever** sample takes that first sample, marked [`ShadowFill::Backward`]:
+    ///
+    /// - a gap **after** any sample takes the nearest **past** sample ([`ShadowFill::Forward`]);
+    /// - the stretch **before the first-ever** sample takes that first sample — **the one and only
+    ///   backward read in time**, and only where this search found nothing older (a column with a
+    ///   before-tile value has no first-ever sample here, so its head is a forward carry — and
+    ///   "first-ever" is only as strong as the search was: where a stage was skipped, something
+    ///   older may live in a window that was not read, which `LastKnown::stages` states);
+    /// - a column with **no sample and no before-tile value carries no run at all**: it was never
+    ///   observed, and grey is exactly the right answer for it.
+    ///
+    /// The two directions are not interchangeable and travel separately on the wire: a forward run
+    /// claims *this is what it looked like when we last saw it*, a backward run *this is what it
+    /// looked like when we first saw it*. Each reports the instant of the boundary **nearest** its
+    /// own rows — a forward run the source cell's end, a backward run the source cell's start — so
+    /// `|row time − t_ns|` is in both directions the smallest age the evidence supports.
+    ///
     /// `grid`, when given, must be `nt × nf` on the same columns; `None` is a grid holding
-    /// nothing (the coverage-map short-circuit's tile).
+    /// nothing (the coverage-map short-circuit's tile) — which is also why that path pays nothing
+    /// for the backward fill: with no sample in the grid there is no first-ever sample to read back
+    /// from, and the walk is the one T-523 budgeted.
     pub fn carry_forward(
         &self,
         grid: Option<&Overview>,
@@ -430,6 +454,10 @@ impl LastKnown {
                 seed.found()
                     .then_some((seed.max_db, seed.t_ns, Some(seed.level)));
             let mut open: Option<ShadowRun> = None;
+            // T-527: rows above the column's first-ever sample, still waiting for it. Set only when
+            // the search found nothing older than the grid — a column with a before-tile value has
+            // its head carried FORWARD from that value, and nothing else ever reads backward.
+            let mut head = cur.is_none();
             for r in 0..nt {
                 let row_start = self.before_ns + (r as f64 * t_cell_ns).round() as i64;
                 if row_start >= edge {
@@ -438,6 +466,20 @@ impl LastKnown {
                 let here = grid.map(|g| &g.cells[r * g.nf + f]);
                 if let Some(c) = here.filter(|c| c.observed()) {
                     runs.extend(open.take());
+                    if std::mem::take(&mut head) && r > 0 {
+                        // The one backward read: the stretch before the first-ever sample takes
+                        // that sample, timestamped at its cell's START — the earliest instant the
+                        // value can be true, and the boundary of the stretch that carries it.
+                        runs.push(ShadowRun {
+                            f,
+                            row: 0,
+                            rows: r,
+                            max_db: c.max_db,
+                            t_ns: row_start,
+                            level: None,
+                            fill: ShadowFill::Backward,
+                        });
+                    }
                     let row_end = self.before_ns + ((r + 1) as f64 * t_cell_ns).round() as i64;
                     cur = Some((c.max_db, row_end.min(edge), None));
                     continue;
@@ -458,6 +500,7 @@ impl LastKnown {
                             max_db: db,
                             t_ns: t,
                             level,
+                            fill: ShadowFill::Forward,
                         });
                     }
                 }
@@ -468,7 +511,21 @@ impl LastKnown {
     }
 }
 
-/// One run of a carried-forward value down one column of a grid ([`LastKnown::carry_forward`]).
+/// Which way in time a [`ShadowRun`] carries its value (T-527).
+///
+/// The two are **different claims**, so they are different values rather than a detail of the
+/// timestamp: a client may draw them differently, and a reader must never take one for the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShadowFill {
+    /// The value is from **before** the run's rows: the nearest past sample, carried forward.
+    /// *This is what it looked like when we last saw it.*
+    Forward,
+    /// The value is the column's **first-ever** sample, which lies **after** the run's rows — the
+    /// only backward read there is. *This is what it looked like when we first saw it.*
+    Backward,
+}
+
+/// One run of a carried value down one column of a grid ([`LastKnown::carry_forward`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShadowRun {
     /// Column.
@@ -479,11 +536,20 @@ pub struct ShadowRun {
     pub rows: usize,
     /// The carried value, dB/Hz.
     pub max_db: f32,
-    /// When it was last seen, Unix ns (see [`LastKnownCell::t_ns`]).
+    /// When the value was true, Unix ns: for [`ShadowFill::Forward`] when it was last seen (the
+    /// source cell's end, see [`LastKnownCell::t_ns`]), for [`ShadowFill::Backward`] when it was
+    /// **first** seen (the source cell's start, which lies *after* these rows). Either way it is
+    /// the boundary nearest the run, so the age it implies is the smallest one the evidence
+    /// supports.
     pub t_ns: i64,
     /// The store level of a value carried in from before the grid, or `None` for a value the grid
-    /// itself holds (a band seen part-way down the grid, then departed).
+    /// itself holds (a band seen part-way down the grid, then departed — or, for a backward fill,
+    /// first arrived).
     pub level: Option<u8>,
+    /// Which way in time this run reads. A backward fill is always the grid's own first sample, so
+    /// it always carries `level: None`; the two are nonetheless reported separately, because
+    /// `level` states *resolution* and this states *the direction of the claim*.
+    pub fill: ShadowFill,
 }
 
 /// Rows a [`LastKnown`] search's final stage may read, whatever the budget allows.

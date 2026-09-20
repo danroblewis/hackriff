@@ -3,8 +3,15 @@
 //!
 //! The semantics under test are the user's: a band swept and then departed carries its
 //! most-recent-known value; a band never swept carries **nothing**; a cell observed now is its own
-//! value and never a shadow. And the one direction that must never happen: a value from *after*
-//! the instant asked about carried backward into it.
+//! value and never a shadow.
+//!
+//! **The search never reads backward; the carry does, exactly once** (T-527). `last_known` still
+//! refuses any value from after the instant it was asked about — that is what
+//! [`a_value_from_after_the_instant_is_never_carried_backward`] holds it to. The single backward
+//! read in the system is [`LastKnown::carry_forward`]'s, over the tile's **own** grid: the stretch
+//! before a column's first-ever sample takes that sample, so a column observed only in the middle
+//! of a view has no grey gap above it either. It is marked [`ShadowFill::Backward`] wherever it
+//! goes.
 
 use super::*;
 
@@ -231,6 +238,25 @@ fn overview(nt: usize, nf: usize, t0: i64, fill: impl Fn(usize, usize) -> Option
     }
 }
 
+/// `(f, row, rows, max_db, t_ns relative to `before` in seconds, level, fill)` per run.
+type Run = (usize, usize, usize, f32, i64, Option<u8>, ShadowFill);
+
+fn runs_of(k: &LastKnown, runs: &[ShadowRun]) -> Vec<Run> {
+    runs.iter()
+        .map(|r| {
+            (
+                r.f,
+                r.row,
+                r.rows,
+                r.max_db,
+                (r.t_ns - k.before_ns) / S,
+                r.level,
+                r.fill,
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn the_carry_runs_down_each_column_yield_to_the_grid_and_stop_at_the_data_edge() {
     let before = T0 + 1000 * S;
@@ -256,22 +282,136 @@ fn the_carry_runs_down_each_column_yield_to_the_grid_and_stop_at_the_data_edge()
         _ => None,
     });
     let runs = k.carry_forward(Some(&g), S as f64, 6, Some(before + 5 * S));
-    let got: Vec<_> = runs
-        .iter()
-        .map(|r| (r.f, r.row, r.rows, r.max_db, (r.t_ns - before) / S, r.level))
-        .collect();
     assert_eq!(
-        got,
+        runs_of(&k, &runs),
         vec![
             // Departed before the tile: the seed, down to the data edge and no further.
-            (0, 0, 5, -50.0, -10, Some(3)),
-            // Never observed before row 2, so NOTHING above it; then its own row-2 value, seen
-            // until row 2's end.
-            (1, 3, 2, -70.0, 3, None),
+            (0, 0, 5, -50.0, -10, Some(3), ShadowFill::Forward),
+            // T-527: nothing older than row 2 exists for this column, so the rows ABOVE its
+            // first-ever sample take that sample — the one backward read — timestamped at the
+            // start of the cell it came from, which is where the unknown stretch ends.
+            (1, 0, 2, -70.0, 2, None, ShadowFill::Backward),
+            // …and below it the same value carries forward, seen until row 2's end.
+            (1, 3, 2, -70.0, 3, None, ShadowFill::Forward),
             // Observed at rows 0–1: those rows carry no shadow (a measurement is not replaced),
-            // and the carry that follows is the tile's own value, not the older seed.
-            (2, 2, 3, -45.0, 2, None),
+            // and the carry that follows is the tile's own value, not the older seed. Its head
+            // needs no fill of either kind, because the grid measures row 0.
+            (2, 2, 3, -45.0, 2, None, ShadowFill::Forward),
         ]
+    );
+}
+
+/// **T-527, the fill rule and its one exception.** Every gap in a column that was ever observed is
+/// filled; a column never observed at all carries **no run**, which is what keeps grey meaning
+/// *we never looked*.
+#[test]
+fn every_gap_in_an_observed_column_is_filled_and_a_never_observed_one_carries_no_run() {
+    let before = T0;
+    let k = LastKnown {
+        before_ns: before,
+        f_lo_hz: 0.0,
+        f_cell_hz: 1000.0,
+        nf: 4,
+        cells: vec![
+            LastKnownCell::NONE,
+            LastKnownCell::NONE,
+            LastKnownCell::NONE,
+            // Column 3 has an older value, so it has no "first-ever" sample in this grid.
+            LastKnownCell {
+                max_db: -30.0,
+                t_ns: before - 7 * S,
+                level: 2,
+            },
+        ],
+        stages: Vec::new(),
+        searched_from_ns: before - 100 * S,
+        source_cells: 0,
+    };
+    // Column 0: observed in the MIDDLE only (rows 3–4) — the user's case. Column 1: observed at
+    // row 0, so no head gap at all. Column 2: never observed, and nothing older. Column 3:
+    // observed at row 5, with an older value above it.
+    let g = overview(8, 4, before, |t, f| match (t, f) {
+        (3 | 4, 0) => Some(-60.0),
+        (0, 1) => Some(-65.0),
+        (5, 3) => Some(-20.0),
+        _ => None,
+    });
+    let runs = k.carry_forward(Some(&g), S as f64, 8, None);
+    assert_eq!(
+        runs_of(&k, &runs),
+        vec![
+            // The gap ABOVE the first-ever sample: that sample, read backward, and nothing else in
+            // this plane ever reads backward.
+            (0, 0, 3, -60.0, 3, None, ShadowFill::Backward),
+            // The gap BELOW it: the nearest past sample, carried forward, to the end of the grid.
+            (0, 5, 3, -60.0, 5, None, ShadowFill::Forward),
+            // Observed at row 0: one forward carry and no backward fill — there is no gap above a
+            // sample in row 0 to fill.
+            (1, 1, 7, -65.0, 1, None, ShadowFill::Forward),
+            // Column 3's head is the OLDER value carried FORWARD, not its row-5 sample read
+            // backward: a backward fill happens only where nothing older exists.
+            (3, 0, 5, -30.0, -7, Some(2), ShadowFill::Forward),
+            (3, 6, 2, -20.0, 6, None, ShadowFill::Forward),
+        ]
+    );
+    // The invariant the wire rests on: NO run touches column 2.
+    assert!(
+        !runs.iter().any(|r| r.f == 2),
+        "a column never observed and with nothing older carries no run: {runs:?}"
+    );
+    // And every row of every column that WAS observed is either measured or covered exactly once.
+    for f in [0usize, 1, 3] {
+        for r in 0..8 {
+            let measured = g.cells[r * 4 + f].observed();
+            let covered = runs
+                .iter()
+                .filter(|x| x.f == f && x.row <= r && r < x.row + x.rows)
+                .count();
+            assert_eq!(
+                usize::from(!measured),
+                covered,
+                "column {f} row {r}: measured {measured}, covered {covered}"
+            );
+        }
+    }
+}
+
+/// A backward fill is read **only** from the column's own first sample, and never from a cell
+/// belonging to some other column or to the future beyond it: the rows it covers end exactly where
+/// that sample begins.
+#[test]
+fn a_backward_fill_reaches_no_further_than_the_first_ever_sample_it_reads() {
+    let before = T0;
+    let k = LastKnown {
+        before_ns: before,
+        f_lo_hz: 0.0,
+        f_cell_hz: 1000.0,
+        nf: 1,
+        cells: vec![LastKnownCell::NONE],
+        stages: Vec::new(),
+        searched_from_ns: before,
+        source_cells: 0,
+    };
+    let g = overview(4, 1, before, |t, _| (t == 2).then_some(-77.0));
+    let runs = k.carry_forward(Some(&g), S as f64, 4, None);
+    let back = runs
+        .iter()
+        .find(|r| r.fill == ShadowFill::Backward)
+        .expect("the head takes the first-ever sample");
+    assert_eq!((back.row, back.rows), (0, 2), "stops at the sample's row");
+    assert_eq!(back.max_db, -77.0);
+    // First seen at the START of the source cell: the instant the unknown stretch above it ends,
+    // and the smallest age any row in the run can claim.
+    assert_eq!(back.t_ns, before + 2 * S);
+    assert!(
+        back.t_ns > before + S,
+        "a backward run's instant lies AFTER its own rows: that is what makes it backward"
+    );
+    // A grid with nothing in it (the coverage short-circuit's tile) has no first-ever sample, so
+    // the backward fill cannot fire there at all — the path T-523 budgeted pays nothing for it.
+    assert!(
+        k.carry_forward(None, S as f64, 4, None).is_empty(),
+        "no grid, no sample, no run"
     );
 }
 
