@@ -315,6 +315,12 @@ const EDGE_SCAN_MS = 250;
  * It is not terminal, and must not become terminal: a server that restarts *is* a change of answer,
  * which is exactly [[retryable]]'s enumeration. A client that gave up for the session would need a
  * page reload to come back, and that is the defect one step further on.
+ *
+ * **T-523 widened what arrives here**, and the widening is safe *because* of the shape above: a
+ * `5xx` the route cannot emit ([[fromTheRoute]]) is a proxy saying the origin did not answer, so it
+ * is the same outcome as a refused socket and takes the same ladder. Being wrong about one costs a
+ * backed-off probe; being wrong the other way — the pre-T-523 reading — costs a region of the
+ * canvas that never draws again this session.
  */
 const OFFLINE_BACKOFF_MS = 500, OFFLINE_MAX_BACKOFF_MS = 30_000;
 
@@ -1251,6 +1257,10 @@ export class TileCache<T> {
  *     server said nothing, so nothing it said is permanent, and blanking a place for the rest of the
  *     session over a momentary disconnect would be the opposite defect. It is not re-queued either:
  *     the next frame's `acquire` asks, so the retry is paced by the render loop.
+ *  3. **A status the ROUTE cannot emit** (T-523) — see [[fromTheRoute]]. A proxy answers in the same
+ *     channel the origin does, so a status line is not by itself proof that the *server* answered:
+ *     a `502 Bad Gateway` is a proxy saying the origin did not. It is case 2 wearing a status line,
+ *     and counting it as an answer left a live-edge tile terminal until a resize re-addressed it.
  *
  * Everything the server *said* is terminal — a status (400, 404, 413, 500), **and a body this client
  * could not read**. The second half was missing, and merging T-467 proved why it matters rather than
@@ -1268,7 +1278,48 @@ function retryable(err: unknown): boolean {
   if (err instanceof TileBusyError) return true;
   if (err instanceof TileDecodeError) return false;
   const status = (err as { status?: unknown } | null)?.status;
-  return typeof status !== "number";
+  return typeof status !== "number" || !fromTheRoute(status);
+}
+
+/**
+ * **Could `/api/tiles` itself have said this?** (T-523.)
+ *
+ * T-479 asked "did the server answer?" and read a status line as proof that it had. It is not:
+ * between this client and `hk serve` there is at least one proxy (the user's cloudflared tunnel,
+ * and in any deployment a reverse proxy), and **a proxy answers in the same channel the origin
+ * does**. A `502 Bad Gateway` is a status line whose entire content is *the origin did not answer*
+ * — case 2 of [[retryable]], not case "everything the server said". A place refused that way is
+ * never asked for again, so it stays undrawn until a resize changes the tile addresses — the
+ * user's "it stalls until I resize it", exactly. `ui/e2e/live-edge` test 3 holds the fix to it,
+ * and measures the defect from **the page's own residency readout** rather than from the request
+ * log: with this rule reverted, a pane whose zoom-out the proxy answered 502 sits at `0 tiles ·
+ * 3 coarse stand-ins · 0 pending` for as long as anyone watches, because a terminal place is never
+ * re-asked and an upscaled coarser ancestor is all the renderer has left to draw. (The request log
+ * is the wrong instrument here and the test says why: with the view held still, every refused
+ * address is one T-460's refresh lane re-picks anyway, terminal or not.)
+ *
+ * **The rule is over the route's vocabulary, not over a list of proxy codes**, because the proxy
+ * set is open (Cloudflare alone adds 520–527 and 530; another deployment invents its own) while the
+ * route's is closed and lives in this repo:
+ *
+ *  - **Every `4xx` is the route's** — a refusal about the request, which asking again cannot change.
+ *    A proxy can also send a `4xx`, and that is fine: those say something about the request too.
+ *  - **Of the `5xx`, the route emits exactly `500`, `501` and `503`** — `ApiError::new(500)`,
+ *    `/api/analyze`'s T-190 `501`, and T-454's backpressure `503` (which never reaches here; it
+ *    arrives as [[TileBusyError]] and takes the AIMD branch). `crates/hk-api/src/http.rs` sends no
+ *    other 5xx; its `reason()` table names `502`/`504` only so a *proxy's* status can be printed.
+ *  - **Every other `5xx` is therefore something between us and the route**, and is silence.
+ *
+ * **Why the default may now be "ask again" here, when T-479 made it "terminal".** T-479's danger
+ * was a *frame-rate* storm: 157 requests in 700 ms for one place. The unenumerated-status branch no
+ * longer lands there — since T-499 it lands on the silence ladder, which backs the whole transport
+ * off, probes once while armed, and clears on the first answer. So the cost of being wrong in this
+ * direction is a paced probe; the cost of being wrong in the other is a region of the canvas that
+ * never draws again this session. Those are not symmetric, and the honest default follows the
+ * asymmetry.
+ */
+function fromTheRoute(status: number): boolean {
+  return status < 500 || status === 500 || status === 501 || status === 503;
 }
 
 /** The route's own words for a refusal, for the readout and for a test's failure message. */

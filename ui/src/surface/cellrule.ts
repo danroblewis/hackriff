@@ -187,7 +187,11 @@ export const CELL_MARKS: readonly CellMark[] = [
   // AWAITING — the fifth. Sparse dots on a cold ground: visibly *empty*, and visibly not grey.
   { kind: "pattern", rgb: [0.08, 0.1, 0.15], ink: [0.3, 0.42, 0.6], pattern: "dots", pitchPx: 9 },
   // SHADOW — the sixth (T-520). The last-known spectrum, dimmed under a ceiling and scanlined.
-  { kind: "shadow", gain: 0.25, ink: [0.24, 0.19, 0.1], pattern: "scan", pitchPx: 5 },
+  // The gain is the SHIPPED DEFAULT and the only place it is written (T-523 raised it from 0.25;
+  // `./shadow-gain.ts` re-exports this number rather than keeping a second copy of it). Why 0.32
+  // and not higher is [[SHADOW_MARK]]'s second paragraph: above ~0.349 the always-brighter-than-
+  // shadow band collapses off the bottom of the ramp.
+  { kind: "shadow", gain: 0.32, ink: [0.24, 0.19, 0.1], pattern: "scan", pitchPx: 5 },
 ];
 
 /**
@@ -198,11 +202,24 @@ export const CELL_MARKS: readonly CellMark[] = [
  * somewhere on the ramp:
  *
  *  1. **A hard brightness ceiling.** The ground is `cmap(x) * gain`, so no shadow pixel is brighter
- *     than `gain` (0.25) in any channel or in luminance — the ramp's white, remembered, is a dark
+ *     than `gain` (0.32) in any channel or in luminance — the ramp's white, remembered, is a dark
  *     grey-white. Every live colour from about a third of the way up the ramp (the cyan on) is
  *     brighter than any shadow can be, so **a signal in shadow can never look like a signal on
  *     air.** The hue is kept on purpose: a remembered carrier is still recognisably *which* level
  *     it was, which is the point of showing it.
+ *
+ *     **Why the default is 0.32 and not more** (T-523: the user reported the shadow as too dark).
+ *     The ramp's luminance is not monotonic — the red stop at x=0.9 is `lum ≈ 0.349`, a dip between
+ *     the yellow below it and the white above. So "live clears the brightest possible shadow from
+ *     here up" holds over the whole cyan→red span only while `gain < 0.349`: at 0.25 the band began
+ *     at x≈0.273, at 0.32 it begins at x≈0.313 (unchanged, still about a third), and at 0.35 it
+ *     jumps to x≈0.902 — brightness alone stops separating a remembered carrier from a live one
+ *     across two thirds of the ramp. 0.32 is therefore the brightest default that keeps defence 1
+ *     doing the work the paragraph above claims for it, and it is ~28 % brighter than 0.25 on
+ *     screen. A viewer who wants more can have it — [[SHADOW_GAIN_MAX]] is 0.7 — but past the dip
+ *     it is defence 2, the scanlines, carrying the distinction, which is a choice a viewer makes
+ *     rather than one that ships. `surface-honesty.test.ts` asserts both ends: the ceiling at 0.7,
+ *     and that the DEFAULT keeps its crossing point in the lower third.
  *  2. **A texture no live cell carries.** The ceiling cannot help at the bottom of the ramp: a
  *     remembered noise floor and a live noise floor are both near-black. So every shadow cell is
  *     ruled with horizontal scanlines in a fixed warm ink that is on no position of the ramp, not
