@@ -14,14 +14,33 @@ QUEUE=$S/merge-queue.txt
 NEEDS=$S/merge-needs-attention.txt
 DONELOG=$S/merge-done.txt
 LOG=$S/merge-runner.log
+# T-534: per-branch gate-attempt ledger, "<branch> <tip-sha> <attempts>" one per line.
+ATTEMPTS=$S/merge-attempts.txt
+MAX_ATTEMPTS=${MAX_ATTEMPTS:-2}
 DRY_RUN=${DRY_RUN:-0}
-touch "$QUEUE" "$NEEDS" "$DONELOG"
+touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS"
 
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 notify_coordinator(){ tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
 ticket_of(){ echo "$1" | sed -E 's/^task-t0*([0-9]+)$/T-\1/I'; }
 worktree_of(){ git -C "$REPO" worktree list --porcelain \
   | awk -v b="refs/heads/$1" '/^worktree /{p=substr($0,10)} /^branch /{if(substr($0,8)==b) print p}'; }
+
+# --- gate-attempt ledger (T-534) -------------------------------------------
+# A branch that failed its gate and has NOT been touched since will fail the same
+# way: re-gating it costs 20 minutes and teaches nothing. So record the tip that
+# failed, and refuse to spend a gate on that same tip twice. After MAX_ATTEMPTS
+# distinct attempts on one branch, stop retrying entirely and say so loudly —
+# repeated automatic retries hide a branch that needs a person.
+attempt_line(){ grep -E "^$1 " "$ATTEMPTS" 2>/dev/null | tail -1; }
+attempts_of(){ local l; l=$(attempt_line "$1"); [ -n "$l" ] && echo "$l" | awk '{print $3}' || echo 0; }
+failed_sha_of(){ local l; l=$(attempt_line "$1"); [ -n "$l" ] && echo "$l" | awk '{print $2}' || echo ""; }
+record_attempt(){ # branch sha
+  local n; n=$(attempts_of "$1"); n=$((n+1))
+  grep -vE "^$1 " "$ATTEMPTS" > "$ATTEMPTS.tmp" 2>/dev/null || true
+  printf '%s %s %s\n' "$1" "$2" "$n" >> "$ATTEMPTS.tmp"; mv "$ATTEMPTS.tmp" "$ATTEMPTS"
+}
+clear_attempts(){ grep -vE "^$1 " "$ATTEMPTS" > "$ATTEMPTS.tmp" 2>/dev/null || true; mv "$ATTEMPTS.tmp" "$ATTEMPTS"; }
 
 # returns: 0 = handled (merged/skipped/flagged), 1 = transient (requeue + wait)
 process(){
@@ -34,6 +53,19 @@ process(){
   local ahead; ahead=$(git rev-list --count "main..$branch" 2>/dev/null || echo 0)
   if [ "${ahead:-0}" -eq 0 ]; then log "SKIP $branch: nothing ahead of main (already merged?)"; return 0; fi
 
+  local tip prev tries; tip=$(git rev-parse "$branch"); prev=$(failed_sha_of "$branch"); tries=$(attempts_of "$branch")
+  if [ -n "$prev" ] && [ "$prev" = "$tip" ]; then
+    log "SKIP $branch: UNCHANGED SINCE ITS GATE FAILURE ($tip) - needs a fix, not a re-queue"
+    echo "$(date '+%m-%d %H:%M')  $branch  $ticket  UNCHANGED_SINCE_FAIL ($tip)" >> "$NEEDS"
+    notify_coordinator "$ticket ($branch) was re-queued UNCHANGED since its gate failure - fix the branch first; it was NOT re-gated."
+    return 0
+  fi
+  if [ "${tries:-0}" -ge "$MAX_ATTEMPTS" ]; then
+    log "GIVE UP $branch: $tries gate attempts already (cap $MAX_ATTEMPTS) - escalating, no further automatic retries"
+    echo "$(date '+%m-%d %H:%M')  $branch  $ticket  GAVE_UP after $tries attempts - NEEDS A PERSON" >> "$NEEDS"
+    notify_coordinator "$ticket ($branch) has now FAILED $tries gate attempts; the runner has GIVEN UP and will not retry it."
+    return 0
+  fi
   if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN would merge $branch ($ticket, $ahead ahead)"; return 0; fi
 
   log "MERGE start $branch ($ticket, $ahead commits ahead)"
@@ -46,6 +78,7 @@ process(){
   if just gate-merge >>"$LOG" 2>&1; then
     git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1
     log "MERGED $branch ✓"
+    clear_attempts "$branch"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MERGED" >> "$DONELOG"
     local wt; wt=$(worktree_of "$branch")
     if [ -n "$wt" ] && [ "$(cd "$wt" && pwd -P)" != "$(cd "$REPO" && pwd -P)" ]; then
@@ -53,7 +86,8 @@ process(){
     fi
   else
     git merge --abort 2>/dev/null || true
-    log "GATE FAILED $branch -> abort + flag for AI"
+    record_attempt "$branch" "$tip"
+    log "GATE FAILED $branch (attempt $((tries+1))/$MAX_ATTEMPTS, tip $tip) -> abort + flag for AI"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  GATE_FAIL" >> "$NEEDS"; notify_coordinator "$ticket ($branch) FAILED the merge gate (tests)."
   fi
   return 0

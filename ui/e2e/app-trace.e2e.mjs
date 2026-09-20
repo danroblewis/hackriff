@@ -141,6 +141,9 @@ const SNAPSHOT = `(() => {
   return JSON.stringify({
     trace: document.querySelector('.sf-trace')?.textContent ?? "",
     headline: row ? row.children[1].textContent : "",
+    // PaneReport, as the pane itself states it: N tiles - N coarse stand-ins - N pending. What the
+    // renderer actually drew this frame WITH; see isResident below.
+    counts: row?.querySelector('.hk-surface-counts')?.textContent ?? "",
     tap: { headers: window.__hkTap.headers, rows: window.__hkTap.rows, geom: window.__hkTap.geom,
            held: window.__hkTap.held, withheld: window.__hkTap.withheld,
            recent: window.__hkTap.recent.slice(-400) },
@@ -178,28 +181,73 @@ function statedSlice(trace) {
  * line on the strip is drawn from the ramp.** So
  *
  *  - **the afterglow and the bloom are neutral grey** — achromatic, `max − min ≈ 0`;
- *  - **the max-hold is magenta**, which is off the ramp entirely: no point on the ramp has a high red
- *    *and* a high blue with a low green (`ui/test/surface-trace.test.ts` asserts that of every point
- *    on the ramp, so this classification cannot quietly stop being true);
+ *  - **the max-hold is magenta**, which is off the ramp entirely: no point on the ramp has red
+ *    *and* blue both above green (`ui/test/surface-trace.test.ts` asserts that of every point on
+ *    the ramp, so this classification cannot quietly stop being true);
  *  - **the current slice is everything else that is bright** — chromatic, or near-white at the very
  *    top of the ramp, which no grey here can reach because the mono ramp stops at 0.6.
+ *
+ * ## The max-hold rule is an ORDERING, not a ratio — and why the ratio was wrong (T-532)
+ *
+ * The first form of this asked `r > g * 1.3 && b > g * 1.3`, and it was **a ratio applied to
+ * anti-aliased pixels**, which is the part that does not hold. A stroke's outermost pixel is a
+ * partial blend, the compositor mixes in **linear** light and the framebuffer is **sRGB-encoded**,
+ * and that encoding does not preserve channel *ratios* under partial coverage — it compresses the
+ * high channels more than the low one, and a shadow row underneath lifts the low channel further.
+ * So the magenta line's own feather slides down the ratio scale until one of the two tests fails
+ * while the other still passes, and the pixel is then read as the current slice.
+ *
+ * Measured, on the failures this rewrite came from: the max-hold's top edge came back as
+ * `(121, 91, 114)` and `(132, 99, 125)` — `b` under `1.3 g` by four units in each, while `r` cleared
+ * it — and the same edge two columns along came back as `(144, 96, 132)`, which passes. Two columns
+ * apart, a
+ * coin-flip about sub-pixel coverage, and the loser was counted as the highest ink of the *slice*:
+ * at row 2 of the strip while the slice itself was drawn at row 16, 12 px lower, where the readout
+ * said it was. Under concurrent load **9 of 24 runs** failed that way. Nothing about the product
+ * moved; the instrument was reading the wrong line.
+ *
+ * The property that **does** survive compositing is the ordering. Blending is `a·H + (1-a)·B` per
+ * channel, and every other series on this strip is achromatic or near it (the backdrop is
+ * `rgb(10,10,13)`, the afterglow and the bloom are grey), so `b - g` and `r - g` keep the sign the
+ * max-hold's own ink gives them: `HOLD_INK` is `[1.0, 0.45, 0.85]`, magenta, with blue and red both
+ * **above** green. sRGB encoding is monotonic, so the sign survives the 8-bit write too. And the
+ * ramp never has that shape: wherever a point on the ramp has `r > g` (its yellow-to-white end) its
+ * blue is far *below* green, and wherever blue is above green (its black-to-cyan end) red is below
+ * it. `ui/test/surface-trace.test.ts` asserts exactly that of every point on the ramp — in this
+ * form, the one this file relies on — so the classification cannot quietly stop being true.
+ *
+ * `HOLD_MARGIN` is the slack. A hold pixel faint enough to fall under it is also far below
+ * `isRampInk`'s chroma floor (magenta holds `b - g ≈ 0.75 (r - g)` across every coverage, so a
+ * pixel with `r - g ≥ 30` carries `b - g ≈ 22`), which is what keeps the two rules from meeting in
+ * the middle.
  */
 const CHROMA = (r, g, b) => Math.max(r, g, b) - Math.min(r, g, b);
-const isHoldInk = (r, g, b) => r > g * 1.3 && b > g * 1.3 && r + g + b > 150;
+/** Well under the `b - g ≈ 22` a pixel has by the time it is bright enough to be ramp ink. */
+const HOLD_MARGIN = 8;
+const isHoldInk = (r, g, b) => r - g >= HOLD_MARGIN && b - g >= HOLD_MARGIN;
 const isRampInk = (r, g, b) => r + g + b >= 120 && (CHROMA(r, g, b) >= 30 || r + g + b >= 620)
   && !isHoldInk(r, g, b);
 const isGreyInk = (r, g, b) => r + g + b >= 60 && CHROMA(r, g, b) < 12;
+/** What the retired ratio rule called the max-hold. Kept only to count what it used to leak. */
+const wasHoldInk = (r, g, b) => r > g * 1.3 && b > g * 1.3 && r + g + b > 150;
 
 function strip(img, rect) {
   const x0 = Math.round(rect.x), y0 = Math.round(rect.y), w = Math.round(rect.w);
   const cols = new Array(w).fill(-1);       // topmost slice pixel per column, -1 = none
   const ink = new Array(w).fill(null);      // and the colour it was drawn in
-  let slicePx = 0, holdPx = 0, greyPx = 0;
+  let slicePx = 0, holdPx = 0, greyPx = 0, rescued = 0;
   for (let x = 0; x < w; x++) {
     for (let y = 0; y < TRACE_PX; y++) {
       const d = ((y0 + y) * img.width + (x0 + x)) * 4;
       const r = img.data[d], g = img.data[d + 1], b = img.data[d + 2];
-      if (isHoldInk(r, g, b)) { holdPx++; continue; }
+      if (isHoldInk(r, g, b)) {
+        holdPx++;
+        // The pixels the ratio rule used to hand to the slice: max-hold ink whose feather had
+        // slid under `1.3 g`. Counted, not just excluded, so this stays a measured claim — a tree
+        // where it drops to zero is one where the ordering rule is no longer doing any work.
+        if (!wasHoldInk(r, g, b) && r + g + b >= 120 && CHROMA(r, g, b) >= 30) rescued++;
+        continue;
+      }
       if (isRampInk(r, g, b)) {
         slicePx++;
         if (cols[x] < 0) { cols[x] = y; ink[x] = [r, g, b]; }
@@ -212,7 +260,7 @@ function strip(img, rect) {
     if (cols[x] < peakY) { peakY = cols[x]; peakCol = x; }
     if (cols[x] > lowY) lowY = cols[x];
   }
-  return { w, cols, ink, slicePx, holdPx, greyPx, peakCol, peakY, lowY,
+  return { w, cols, ink, slicePx, holdPx, greyPx, rescued, peakCol, peakY, lowY,
     drawn: cols.filter((v) => v >= 0).length };
 }
 
@@ -320,11 +368,40 @@ function topWithin(cols, centrePx, widthPx) {
  * far one pan happens to travel — which is the thing that has moved twice under this file already.
  */
 const CELL_SLICE_RE = /slice [\d:]+Z \(\d[^)]*(ms|s|min) cell\) · peak/;
-const scrubbedExpr = (lagS) => `(() => {
+/**
+ * **The pane drew this frame with the tiles it is addressing, and nothing standing in for them.**
+ *
+ * A coarse stand-in is a real measurement — the parent level's, max-held over a cell several times
+ * larger — stretched across a child's place while the child is in flight. It is drawn honestly
+ * (`uFallback`), and it is a *different dB* from the one the trace read at the fine level. So a
+ * pixel comparison made while one is on screen is not about the ramp at all: `surface-colour.e2e
+ * .mjs` measured a stand-in swap moving 5 038 px of an untouched pane, and calls blaming that on
+ * the ramp "the adjacent-question error this file is written against". `live-edge` and
+ * `canvas-journey` both gate their pixel claims on this same readout; the colour check below was
+ * the one that did not, and its failure message accordingly named T-397 for a state T-397 is not.
+ *
+ * `tiles > 0` as well, because `0 tiles · 0 coarse stand-ins · 0 pending` is a pane that addressed
+ * nothing — a true statement about a frame this claim is not about.
+ */
+const COUNTS_RE = /(\d+) tiles · (\d+) coarse stand-ins? · (\d+) pending/;
+const isResident = (counts) => {
+  const m = COUNTS_RE.exec(counts ?? "");
+  return !!m && Number(m[1]) > 0 && Number(m[2]) === 0 && Number(m[3]) === 0;
+};
+const scrubbedExpr = (lagS, { resident = false } = {}) => `(() => {
   const txt = document.querySelector('.sf-trace')?.textContent ?? "";
   const m = /slice (\\d\\d):(\\d\\d):(\\d\\d)Z \\(\\d[^)]*(ms|s|min) cell\\) · peak/.exec(txt);
   const r = window.__hkTap?.recent?.[window.__hkTap.recent.length - 1];
   if (!m || !r) return false;
+  if (${resident}) {
+    // The same condition as isResident(), in the page, so the wait establishes exactly the state
+    // the accept predicate re-verifies. Two spellings of one rule is the defect this file was
+    // rewritten for; this is one rule in the two places the harness needs it.
+    const row = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+    const c = /(\\d+) tiles · (\\d+) coarse stand-ins? · (\\d+) pending/
+      .exec(row?.querySelector('.hk-surface-counts')?.textContent ?? "");
+    if (!c || Number(c[1]) === 0 || Number(c[2]) !== 0 || Number(c[3]) !== 0) return false;
+  }
   const at = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
   const now = new Date(r.tS * 1000);
   const nowS = now.getUTCHours() * 3600 + now.getUTCMinutes() * 60 + now.getUTCSeconds();
@@ -509,7 +586,9 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
   // resident for this pane's window, which is a claim about when the pyramid materialises a node —
   // not about the trace, and exactly the thing the incremental-tile work is about to change. Its
   // arithmetic is pinned in `ui/test/surface-trace.test.ts`, where the residency is the fixture.
-  t.diagnostic(`strip ink: ${s.slicePx} slice px, ${s.holdPx} max-hold px`);
+  t.diagnostic(`strip ink: ${s.slicePx} slice px, ${s.holdPx} max-hold px ` +
+    `(${s.rescued} of them bright, chromatic max-hold feather the retired ratio rule handed to the ` +
+    "slice — T-532; this is the count that used to decide the assertion below)");
 
   // **The claim: the highest ink in the strip is in the very column the readout names.**
   //
@@ -651,6 +730,16 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // PYRAMID, the slice IS the row of cells at the top of the pane's window (`sliceColumns` is
   // `maxHoldColumns` over a one-cell window), so the trace and the top row of the waterfall are two
   // renderings of *the same cells* — and the colours must match, not merely look similar.
+  //
+  // **And the pane has to be drawing those cells.** A coarse stand-in is the parent level's dB
+  // stretched across a child's place, so a frame containing one is two renderings of *different*
+  // cells and says nothing about the ramp. `isResident` is that precondition,
+  // established by the wait and re-verified on the observed readout like every other one here.
+  // Measured over 81 observations of this check on this fixture: 80 scored 89.1–97.4 % with the
+  // pane reporting `N tiles · 0 coarse stand-ins · 0 pending`, and the single failure scored
+  // 74.9 % — 147 of 586 columns, which is one of the four tiles this band is cut into, and the one
+  // frame whose residency nobody recorded. The residency gate is what makes the next occurrence
+  // legible either way; the diagnostics below are the rest of it.
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
@@ -663,12 +752,13 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // pyramid and the comparison above is between two readings of one set of cells.
   const parked = await scrubOntoCell(page, 2);
   const obs = await heldObservation(page, path.join(ART, "app-trace-colour.png"), {
-    what: "the trace to be drawn from a pyramid cell at least 2 s behind the live edge, with a peak",
-    expr: scrubbedExpr(2),
-    accept: (snap) => CELL_SLICE_RE.test(snap.trace),
+    what: "the trace to be drawn from a pyramid cell at least 2 s behind the live edge, with a peak, " +
+      "in a pane holding every tile it is addressing (no coarse stand-ins, nothing pending)",
+    expr: scrubbedExpr(2, { resident: true }),
+    accept: (snap) => CELL_SLICE_RE.test(snap.trace) && isResident(snap.counts),
     timeoutMs: 20000,
   });
-  t.diagnostic(`parked on an observed cell on attempt ${parked}`);
+  t.diagnostic(`parked on an observed cell on attempt ${parked}; the pane drew it with ${obs.snap.counts}`);
   const s = strip(obs.img, rect);
   t.diagnostic(`readout: ${obs.snap.trace}`);
   t.diagnostic(`strip ink: ${s.slicePx} ramp px, ${s.holdPx} max-hold px, ${s.greyPx} afterglow/bloom px`);
@@ -680,6 +770,12 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   const ROWS = 6;
   let compared = 0, matched = 0, worst = 0;
   const misses = [];
+  // **Where the misses are, not just that there are some.** The two causes this check can see are
+  // told apart by their SHAPE, and one number cannot do it: a ramp or range divergence is every
+  // column at once, while a place drawn from something other than the fine cells is a CONTIGUOUS
+  // BLOCK about as wide as whatever drew it. The one recorded failure was 147 of 586 columns —
+  // a quarter of a band this pane cuts into four tiles — and there was no record of which.
+  const missAt = [];
   for (let x = 0; x < s.w; x++) {
     if (s.cols[x] < 0) continue;
     compared++;
@@ -687,16 +783,31 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
     const cells = cellColours(obs.img, rect, x, halfPx, ROWS);
     const d = nearestDist(ink, cells);
     if (d <= 8) { matched++; worst = Math.max(worst, d); }
-    else if (misses.length < 3) misses.push({ x, d, ink, cells: cells.slice(0, 8) });
+    else {
+      missAt.push(x);
+      if (misses.length < 3) misses.push({ x, d, ink, cells: cells.slice(0, 8) });
+    }
   }
+  // The misses as runs, and the widest of them — a whole tile's worth is the tell.
+  const runs = [];
+  for (const x of missAt) {
+    const last = runs[runs.length - 1];
+    if (last && x === last[1] + 1) last[1] = x; else runs.push([x, x]);
+  }
+  const widest = runs.reduce((w, [a, b]) => Math.max(w, b - a + 1), 0);
+  const shape = `${runs.length} run(s), widest ${widest} column(s) = ${((widest / Math.max(1, compared)) * 100).toFixed(1)}% ` +
+    `of the drawn span; drawn with ${obs.snap.counts}`;
   const rate = matched / Math.max(1, compared);
   t.diagnostic(`${s.drawn}/${s.w} columns drawn; ${matched}/${compared} trace columns carry a colour the cells below them also carry ` +
-    `(worst matched distance ${worst}/255)${misses.length ? `; first misses ${JSON.stringify(misses)}` : ""}`);
+    `(worst matched distance ${worst}/255); misses in ${shape}` +
+    `${misses.length ? `; first misses ${JSON.stringify(misses)}` : ""}`);
   assert.ok(rate >= 0.8,
     `only ${(rate * 100).toFixed(1)}% of trace columns are painted a colour the waterfall paints at ` +
-    `the same frequency. The trace and the cells below it are using different ramps or different ` +
-    `ranges — which is T-397, in the one place T-475 exists to join up. First misses: ` +
-    JSON.stringify(misses));
+    `the same frequency, with the pane reporting fully resident tiles — so the trace and the cells ` +
+    `below it are using different ramps or different ranges, which is T-397 in the one place T-475 ` +
+    `exists to join up. Misses in ${shape}: one wide block would say some place was drawn from ` +
+    `something other than these cells after all; misses spread across every run say the ramp. ` +
+    `First misses: ${JSON.stringify(misses)}`);
 
   // **The control, and it is the whole reason the number above means anything.** Match every column's
   // trace colour against a DISTANT column's cells instead. If a near-match were easy — because the
