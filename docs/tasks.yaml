@@ -4919,7 +4919,8 @@ tasks:
     milestone: M1
     title: 'rds.recipe.json has no group-4A Clock-Time node, so RDS clock (CT) can
       never be served'
-    status: in-progress
+    status: done
+    commit: "411423dd"
     priority: normal
     deps: []
     parallel_group: RECIPE
@@ -13080,7 +13081,8 @@ tasks:
   - id: T-469
     milestone: MPLAY
     title: No GET /api/recordings - nothing enumerates the persisted IQ that extends the audio horizon
-    status: in-progress
+    status: done
+    commit: "887a8b63"
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -13174,7 +13176,8 @@ tasks:
   - id: T-465
     milestone: M2-hardening
     title: drain-timeout discards the recorder's queued records without counting them, so the books do not balance
-    status: in-progress
+    status: done
+    commit: "14498f82"
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -13299,7 +13302,7 @@ tasks:
   - id: T-471
     milestone: MCANVAS
     title: Prefetch a bounded ring of tiles around the viewport, at lower priority, cancelled on move
-    status: done
+    status: todo
     commit: "c38cb349"
     priority: low
     parallel_group: CANVAS-FE
@@ -15803,7 +15806,8 @@ tasks:
   - id: T-531
     milestone: M2-hardening
     title: /api/streams grows without bound during a sweep - 1299 entries and 659 KB in 40 minutes - and SIGTERM takes over 78 s
-    status: in-progress
+    status: done
+    commit: "d23b1fd3"
     priority: normal
     parallel_group: PIPE
     model: opus
@@ -15918,6 +15922,84 @@ tasks:
     notes: |
       Filed 2026-09-20 after the fact by the coordinator - the agent could not add it without
       conflicting with a board file that moves every tick.
+  - id: T-538
+    milestone: MLIVE
+    title: Re-land the viewport tile prefetch WITHOUT leaking the route's slots, and with a guard that cannot pass vacuously
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      T-471's ring prefetch WAS MERGED AND IS NOW REVERTED (check-main, 70ebe71f). It made main red
+      on ui/e2e/surface-nav.e2e.mjs's steady-state assertion - measured by bisection: 4 failures in
+      4 full-suite runs with the ring, 0 in 3 with it disabled.
+      TWO MECHANISMS, both measured: (1) a speculative tile aborted on the next viewport move does
+      NOT return the SERVER's slot - hk-api keeps producing a read nobody wants (46-53 wire aborts
+      against 6-8), so other tenants get refused; (2) "backing off means asking nothing" was gated
+      on the BUDGET, not the CAP, so after a 503 the ring still took the one remaining slot every
+      250 ms for ever and the cap never climbed back.
+      A first fix (two guards in pumpPrefetch) was ALSO REVERTED because it hid the defect rather
+      than fixing it: 6 of 7 passing runs issued ZERO requests in the assertion's window, so the
+      assertion judged nothing, and it introduced a self-lock (see T-539).
+      TO RE-LAND: a speculative fetch must be cancellable WITHOUT charging the server a slot it will
+      not use (ask only when the route is idle enough that an abort costs nothing, or make the route
+      cancel production), and prefetch must stop entirely while backing off. THE GUARD IS ALREADY
+      NON-VACUOUS: surface-nav now asserts a still view issues ZERO tile requests and was verified
+      to go RED with the ring restored (31-33 requests, 1-2 refusals). Re-landing means keeping it
+      green for the right reason.
+      Measured benefit to beat: ~5 speculative requests to save one blocking miss on a one-tile pan.
+    notes: |
+      Filed 2026-09-20. Branch task-t471 holds the reverted implementation.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-539
+    milestone: MLIVE
+    title: The tile cache's AIMD cap only rises on a completion, so a still view never recovers from one 503
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND WHILE REVERTING T-471. `limit` rises only inside succeeded(), which runs on a completed
+      request. With a frozen view producing no other traffic, a client that takes a single 503 keeps
+      its reduced cap indefinitely - measured: pinned at 1-2 for the remaining ~16 s of every run,
+      against a ceiling of 4. Nothing recovers it until the user moves the view.
+      That is backpressure that never lets go: the route says "busy" once and the client throttles
+      itself for the rest of the session. Decide how the cap recovers WITHOUT speculative traffic
+      (a timed probe after the backoff window, or recovery on elapsed quiet rather than on
+      completions) and assert it - the existing 503 test pins the clock at 0 and so never leaves the
+      200 ms busy window, certifying only the regime that was already correct.
+    notes: |
+      Filed 2026-09-20. Blocks a clean re-land of T-538.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-540
+    milestone: M2-hardening
+    title: The plugin host kills a decoder as hung after 10 s, but a cold-linked subprocess can take 30 s to reach its first instruction
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-493]
+    use_cases: []
+    acceptance: |
+      T-493 measured, from inside run_once: a freshly linked plugin binary is created in 193 us
+      (posix_spawn returns, the host's stdout reader is running at +320 us) and then EXECUTES
+      NOTHING for up to 30 s - not even its first eprintln. It reproduces at load average 9 and
+      vanishes at 150; the trigger is a fresh link, not CPU pressure.
+      T-493 fixed the TESTS (they now wait off their own clock for a sign of life). THIS IS THE
+      PRODUCT SIDE: hk-plugins' stall_timeout is 10 s, so on a machine that has just built or
+      updated a decoder the host would judge a perfectly healthy plugin hung, kill it, and restart
+      it - repeatedly, since each restart pays the same cost.
+      Decide what "hung" means for a process that has not yet run at all: the first sign of life is
+      a different event from a stalled stream, and the two deserve different budgets. Measure the
+      cold-start distribution before choosing a number (T-383: no bound over a range nobody measured).
+    notes: |
+      Filed 2026-09-20 from T-493's report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
