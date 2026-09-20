@@ -78,6 +78,12 @@
 //! - **Timestamps:** each block's `host_time` and its provenance `timestamp_method`
 //!   (`host-arrival` for USB radios, `synthetic` for generated data, `external-reference` with a
 //!   disciplined clock); `SourceCapabilities::hardware_timestamps` says whether the device stamps.
+//!   **Times never go backwards** — the conformance suite's `timestamps` check — and that promise
+//!   is kept for a *composition* of sources too (T-474): a `--loop` replay re-opens this interface
+//!   on the same recording, so each pass starts at the recording's own datetime again, and
+//!   `hk_pipeline::capture`'s `Axis` splices the pass onto one monotone capture-time axis before
+//!   anything downstream sees it. So a source replays its own timestamps; the *stream* a consumer
+//!   reads is monotone. No reader has to defend against a clock that rewinds.
 //! - **Overruns and drops:** [`SourceControl::stats`] ([`SourceStats`]: blocks, samples, overrun
 //!   events, dropped and discarded samples), consistent with the stream's gaps.
 //! - **Identity:** [`SourceControl::device_info`] ([`DeviceInfo`]: provenance `device_id`, SigMF

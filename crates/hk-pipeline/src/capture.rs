@@ -4,7 +4,8 @@
 //! codes the detector's clip counts need). Other datatypes are quantised to ci8 (`round(x·128)`,
 //! hk-core's normalisation) and counted. With `--loop` the source is reopened at its end and the
 //! stream continues: sample indices and times are shifted past the previous pass and the first
-//! block of each pass carries `GAP`, so every reader resets instead of splicing.
+//! block of each pass carries `GAP`, so every reader resets instead of splicing. See [`Axis`] for
+//! the rule that governs that splice — capture time is one monotone axis per run (T-474).
 //!
 //! - **Lossless gate:** each block waits in [`crate::gate::FlowGate::wait_for_block`] with the
 //!   ring's oldest and newest positions, so claims below a recording's `core:global_index` never
@@ -27,7 +28,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use hk_core::source::SourceKind;
-use hk_core::{Discontinuity, ProvenanceHandle, RingWriter, Source, SourceError};
+use hk_core::{BlockHeader, Discontinuity, ProvenanceHandle, RingWriter, Source, SourceError};
 use hk_model::ProvenanceId;
 use num_complex::{Complex, Complex32};
 
@@ -56,6 +57,107 @@ fn wait_for_coverage(shared: &Shared, seq: u64) {
             return;
         }
         std::thread::sleep(Duration::from_micros(200));
+    }
+}
+
+/// The run's capture-time axis, maintained by the capture thread (T-474).
+///
+/// **The decision.** A looping replay presents **one monotonically increasing capture time**. A
+/// loop is a new *pass* spliced onto the same axis — index and time both continue from the end of
+/// the previous pass, by the **same** offset, and the pass's first block carries `GAP` — not a new
+/// epoch, and never a jump backwards. The recording's own timestamps survive in provenance and in
+/// the recording; they are not the axis.
+///
+/// **Why this side rather than teaching every consumer to expect a wrap.** Capture time going
+/// backwards is silent *data loss*, not a cosmetic glitch: `hk-store`'s spectrum-history pyramid
+/// keeps one forward-only watermark and answers a frame for an already-sealed tile with
+/// `IngestOutcome::Late` — counted, never errored — so rows behind it are dropped and no view can
+/// ever show them again. That is measured, not feared: T-446 advanced the same watermark by an
+/// hour on a retune and `frames_ingested` froze while `frames_late` climbed into the hundreds,
+/// with every suite green (see [`crate::history`]'s note, and the `Late` case in `hk-store`'s
+/// `history::tests`). The device contract already promises "times never go backwards" for a
+/// single source (`hk_core::source::conformance`); the capture thread is the one place where
+/// several sources (the passes of a `--loop`, the segments of a run) are composed into one stream,
+/// so it is where that promise is kept for the composition. No reader, no pyramid and no client
+/// then has to defend against a clock that runs backwards.
+///
+/// **Two offsets, one splice.** The index shift and the time shift are the same splice expressed
+/// in the two units, so `host_time` still follows the sample counter at the tuned rate across a
+/// wrap — the property the conformance suite's `timestamps` check asserts within a source.
+///
+/// **It splices at seams only, never per block** — see [`Axis::resume_if_rewound`] for what
+/// happened when it did not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Axis {
+    /// Stream index just past the last block pushed to **this segment's** ring (0 at its start,
+    /// because a new segment gets a new ring).
+    end_index: u64,
+    /// Capture time just past the last block pushed anywhere in **this run**. Segments share it:
+    /// the ring restarts, the clock does not.
+    end_ns: i64,
+    /// `(index, time)` offsets applied to the source's own numbers.
+    shift: Option<(u64, i64)>,
+}
+
+impl Axis {
+    /// A capture thread's axis, resuming the run's clock (`counters.stream_time_ns`, 0 before any
+    /// block). A segment that restarts under a source whose own clock is behind — a `--loop`
+    /// replay re-plumbed after some passes, say — therefore resumes where the run had reached
+    /// instead of rewinding to the recording's datetime.
+    fn resuming(end_ns: i64) -> Self {
+        Self {
+            end_index: 0,
+            end_ns,
+            shift: None,
+        }
+    }
+
+    /// Splices a reopened source's first block onto the axis (`--loop`): one offset, applied to
+    /// both units, so the new pass starts exactly where the last one ended — no overlap, and no
+    /// hole either. `saturating_sub` only ever shifts *forward*: a source whose own index is
+    /// already past the axis keeps its gap (flagged `GAP` below) rather than being pulled back.
+    fn begin_pass(&mut self, h: &BlockHeader) {
+        self.shift = Some((
+            self.end_index.saturating_sub(h.time.sample_index),
+            self.end_ns.saturating_sub(h.time.host_time.as_unix_nanos()),
+        ));
+    }
+
+    /// The **first** block of a capture thread, when the run's clock is already past it: the
+    /// segment restarted (a retune's re-plumb, a capture recovery) under a source whose own clock
+    /// is behind — a `--loop` replay carried across a re-plumb has its passes' worth of offset in
+    /// this thread's dead locals, not in the source. Splices it forward exactly as a pass start is,
+    /// `GAP` and all, and returns `true` so the caller can count it.
+    ///
+    /// **Only at this seam, and deliberately.** Re-checking every block was tried and is wrong:
+    /// a block's own stamp and `previous start + n/rate` are two roundings of the same instant, so
+    /// they disagree by a nanosecond constantly (measured: 944 of ~950 mock blocks, every one of
+    /// them exactly 1 ns). Treating that as a rewind marked a third of all blocks `GAP`, reset the
+    /// STFTs and produced *no* history frames at all. Inside a source, "times never go backwards"
+    /// is the source's own contract (`hk_core::source::conformance`); this is the one place where
+    /// two of them meet, so it is the only place worth checking.
+    fn resume_if_rewound(&mut self, h: &mut BlockHeader) -> bool {
+        if self.end_ns <= 0 || h.time.host_time.as_unix_nanos() >= self.end_ns {
+            return false;
+        }
+        self.begin_pass(h);
+        h.discontinuity |= Discontinuity::GAP;
+        true
+    }
+
+    /// Places `h` on the axis, in place.
+    fn place(&self, h: &mut BlockHeader) {
+        let Some((di, dn)) = self.shift else {
+            return;
+        };
+        h.time.sample_index = h.time.sample_index.wrapping_add(di);
+        h.time.host_time = h.time.host_time.saturating_add_nanos(dn);
+    }
+
+    /// Records where the block just pushed ended, on the axis.
+    fn advance(&mut self, end_index: u64, end_ns: i64) {
+        self.end_index = end_index;
+        self.end_ns = end_ns;
     }
 }
 
@@ -107,9 +209,11 @@ pub(crate) fn run(
     let mut ci8: Vec<Complex<i8>> = Vec::new();
     let mut f32s: Vec<Complex32> = Vec::new();
     let mut native = true;
-    let mut shift: Option<(u64, i64)> = None;
     let mut pass_start = false;
-    let (mut end_index, mut end_ns) = (0u64, 0i64);
+    let mut first_block = true;
+    // T-474: the run's capture clock, not this segment's. A segment that restarts (a retune's
+    // re-plumb, a capture recovery) gets a new ring but the same time axis.
+    let mut axis = Axis::resuming(shared.counters.stream_time_ns.load(Ordering::SeqCst));
     let mut marks = (shared.cfg.drive_scheduler
         && source.capabilities().kind == SourceKind::Replay)
         .then(VirtualMarks::default);
@@ -174,22 +278,19 @@ pub(crate) fn run(
             continue;
         }
         let fs = h.provenance.tune.sample_rate_hz;
+        let first_of_thread = std::mem::take(&mut first_block);
         if pass_start {
             pass_start = false;
-            let per_sample_ns = (1e9 / fs).round() as i64;
-            shift = Some((
-                end_index.saturating_sub(h.time.sample_index),
-                end_ns + per_sample_ns - h.time.host_time.as_unix_nanos(),
-            ));
+            axis.begin_pass(&h);
+            // The stream did not start again: it continued. Readers reset on the `GAP` instead.
             h.discontinuity = Discontinuity::from_bits_truncate(
                 (h.discontinuity.bits() & !Discontinuity::STREAM_START.bits())
                     | Discontinuity::GAP.bits(),
             );
+        } else if first_of_thread && axis.resume_if_rewound(&mut h) {
+            inc(&c.time_splices);
         }
-        if let Some((di, dn)) = shift {
-            h.time.sample_index += di;
-            h.time.host_time = h.time.host_time.saturating_add_nanos(dn);
-        }
+        axis.place(&mut h);
         if let Some(m) = marks.as_mut() {
             m.apply(&mut h.provenance, &shared.counters);
         }
@@ -212,8 +313,8 @@ pub(crate) fn run(
         inc(&c.blocks);
         add(&c.source_dropped, h.dropped_before);
         set(&c.gate_waits, shared.gate.waits());
-        end_index = end;
-        end_ns = h.time.host_time.as_unix_nanos() + (n as f64 * 1e9 / fs).round() as i64;
+        let end_ns = h.time.host_time.as_unix_nanos() + (n as f64 * 1e9 / fs).round() as i64;
+        axis.advance(end, end_ns);
         let counters = &shared.counters;
         counters.stream_time_ns.store(end_ns, Ordering::Relaxed);
         counters
@@ -297,6 +398,209 @@ mod tests {
                 .virtual_provenances
                 .load(Ordering::Relaxed),
             1
+        );
+    }
+
+    // ---- T-474: the capture-time axis ----
+
+    /// The pretend recording: 5 blocks of 100 k samples at 2 Msps — 0.25 s a pass.
+    const AX_FS: f64 = 2e6;
+    const AX_BLOCK: u64 = 100_000;
+    const AX_BLOCKS: u64 = 5;
+    const AX_PASS_NS: i64 = 250_000_000;
+    /// The recording's own datetime: every pass starts here, because a reopened source starts the
+    /// recording again. That is the fact this axis exists to absorb.
+    const AX_T0: i64 = 1_789_000_000_000_000_000;
+
+    fn ax_raw(index: u64, stream_start: bool) -> BlockHeader {
+        BlockHeader {
+            time: hk_model::SampleTime {
+                sample_index: index,
+                host_time: hk_model::Timestamp::from_unix_nanos(
+                    AX_T0 + (index as f64 * 1e9 / AX_FS).round() as i64,
+                ),
+            },
+            provenance: provenance(24.0),
+            discontinuity: if stream_start {
+                Discontinuity::STREAM_START
+            } else {
+                Discontinuity::NONE
+            },
+            dropped_before: 0,
+        }
+    }
+
+    /// Drives `axis` through `passes` passes of the recording exactly as [`run`] does, returning
+    /// each placed header and whether it had to be rescued forward.
+    fn ax_drive(axis: &mut Axis, passes: u64) -> Vec<(BlockHeader, bool)> {
+        let mut out = Vec::new();
+        for p in 0..passes {
+            for b in 0..AX_BLOCKS {
+                let mut h = ax_raw(b * AX_BLOCK, p == 0 && b == 0);
+                let mut rescued = false;
+                if p > 0 && b == 0 {
+                    axis.begin_pass(&h);
+                    h.discontinuity = Discontinuity::from_bits_truncate(
+                        (h.discontinuity.bits() & !Discontinuity::STREAM_START.bits())
+                            | Discontinuity::GAP.bits(),
+                    );
+                } else if p == 0 && b == 0 {
+                    rescued = axis.resume_if_rewound(&mut h);
+                }
+                axis.place(&mut h);
+                let end = h.time.sample_index + AX_BLOCK;
+                let end_ns = h.time.host_time.as_unix_nanos()
+                    + (AX_BLOCK as f64 * 1e9 / AX_FS).round() as i64;
+                axis.advance(end, end_ns);
+                out.push((h, rescued));
+            }
+        }
+        out
+    }
+
+    /// The decision, asserted: a looping replay is one monotone axis, and the splice is exact in
+    /// both units. A wrap that moved time backwards would be silently dropped by the history
+    /// pyramid (see [`Axis`]), so "monotone" is a data-integrity claim, not a cosmetic one.
+    #[test]
+    fn a_looping_replay_presents_one_monotone_capture_time_axis() {
+        let mut axis = Axis::resuming(0);
+        let placed = ax_drive(&mut axis, 3);
+        let per_block_ns = (AX_BLOCK as f64 * 1e9 / AX_FS).round() as i64;
+        let (first, _) = &placed[0];
+        let t0 = first.time.host_time.as_unix_nanos();
+        let i0 = first.time.sample_index;
+        for (k, (h, rescued)) in placed.iter().enumerate() {
+            assert!(
+                !rescued,
+                "block {k} needed rescuing: the splice was not exact"
+            );
+            let t = h.time.host_time.as_unix_nanos();
+            let i = h.time.sample_index;
+            // Contiguous in both units, with no hole and no overlap at a wrap.
+            assert_eq!(
+                t,
+                t0 + k as i64 * per_block_ns,
+                "block {k}: capture time is not contiguous across the wrap"
+            );
+            assert_eq!(
+                i,
+                i0 + k as u64 * AX_BLOCK,
+                "block {k}: index is not contiguous"
+            );
+            // The two units carry the SAME splice: time still follows the sample counter at the
+            // tuned rate, which is what the device contract promises within one source.
+            assert_eq!(
+                t - t0,
+                ((i - i0) as f64 * 1e9 / AX_FS).round() as i64,
+                "block {k}: time and the sample counter disagree"
+            );
+        }
+        // Three passes of it, and the axis really did advance by three passes.
+        assert_eq!(
+            axis.end_ns - t0,
+            3 * AX_PASS_NS,
+            "the passes were spliced onto the axis, not laid on top of each other"
+        );
+        // Each wrap is marked, and the stream started exactly once.
+        for (k, (h, _)) in placed.iter().enumerate() {
+            let wrap = k as u64 % AX_BLOCKS == 0 && k > 0;
+            assert_eq!(
+                h.discontinuity.contains(Discontinuity::GAP),
+                wrap,
+                "block {k}: GAP should mark a wrap and nothing else"
+            );
+            assert_eq!(
+                h.discontinuity.contains(Discontinuity::STREAM_START),
+                k == 0,
+                "block {k}: the stream starts once, and a wrap is not a start"
+            );
+        }
+    }
+
+    /// A segment that restarts (a retune's re-plumb, a capture recovery) gets a new ring but not a
+    /// new clock: the source it inherits has been looping and its own timestamps are back at the
+    /// recording's datetime, hundreds of seconds behind what the run has published. Before T-474
+    /// the splice lived in the capture thread's locals and died with the segment, so the clock
+    /// rewound there — into already-sealed tiles, where frames are dropped as late.
+    #[test]
+    fn a_segment_that_restarts_under_a_rewound_source_never_rewinds_the_clock() {
+        let mut first = Axis::resuming(0);
+        let a = ax_drive(&mut first, 4);
+        let reached = first.end_ns;
+        assert_eq!(reached, AX_T0 + 4 * AX_PASS_NS);
+
+        // The new segment: a new ring (so `end_index` starts at 0) and the run's clock.
+        let mut next = Axis::resuming(reached);
+        let b = ax_drive(&mut next, 2);
+        assert!(b[0].1, "the rewound first block was not rescued");
+        assert_eq!(
+            b[0].0.time.host_time.as_unix_nanos(),
+            reached,
+            "the new segment must resume where the run had reached"
+        );
+        assert!(
+            b[0].0.discontinuity.contains(Discontinuity::GAP),
+            "a rescued block is a discontinuity: readers must reset, not splice the waveform"
+        );
+        let mut prev = a.last().unwrap().0.time.host_time.as_unix_nanos();
+        for (k, (h, _)) in b.iter().enumerate() {
+            let t = h.time.host_time.as_unix_nanos();
+            assert!(
+                t > prev,
+                "block {k} of the new segment moved capture time backwards"
+            );
+            prev = t;
+        }
+        assert_eq!(
+            next.end_ns,
+            reached + 2 * AX_PASS_NS,
+            "the new segment's passes land after everything the run had published"
+        );
+    }
+
+    /// **The rounding-noise case, which this nearly got wrong.** A block's own stamp and
+    /// `previous start + n/rate` are two roundings of one instant, so they disagree by a
+    /// nanosecond constantly — measured on the mock SDR at 944 of ~950 blocks, every one of them
+    /// exactly 1 ns. An earlier draft checked monotonicity on *every* block and duly "rescued"
+    /// each of those: a third of all blocks were marked `GAP`, every reader's STFT reset, and the
+    /// run folded **no history frames at all** (`hk-cli`'s decoded-capture contract test timed out
+    /// waiting for frames). Inside a pass the source's own contract governs and nothing here
+    /// second-guesses it.
+    #[test]
+    fn a_nanosecond_of_rounding_noise_inside_a_pass_is_not_a_rewind() {
+        let block_ns = (AX_BLOCK as f64 * 1e9 / AX_FS).round() as i64;
+        let mut axis = Axis::resuming(0);
+        let mut h0 = ax_raw(0, true);
+        axis.place(&mut h0);
+        axis.advance(AX_BLOCK, h0.time.host_time.as_unix_nanos() + block_ns);
+        // The next block stamps itself 1 ns before the end the axis derived for the previous one.
+        let mut h1 = ax_raw(AX_BLOCK, false);
+        let jittered = h1.time.host_time.as_unix_nanos() - 1;
+        h1.time.host_time = hk_model::Timestamp::from_unix_nanos(jittered);
+        axis.place(&mut h1);
+        assert_eq!(
+            h1.time.host_time.as_unix_nanos(),
+            jittered,
+            "a nanosecond of rounding noise is not a rewind and must not move the block"
+        );
+        assert!(
+            !h1.discontinuity.contains(Discontinuity::GAP),
+            "rounding noise must not be marked as a discontinuity: every reader would reset"
+        );
+    }
+
+    /// The seam check is a floor, not a clamp: a source whose clock is legitimately ahead — a live
+    /// radio after a gap, a recording that starts later — is left exactly as it is.
+    #[test]
+    fn a_source_whose_clock_is_ahead_is_left_alone() {
+        let mut axis = Axis::resuming(AX_T0 - 60_000_000_000);
+        let placed = ax_drive(&mut axis, 1);
+        assert!(placed.iter().all(|(_, r)| !r), "nothing needed rescuing");
+        assert_eq!(placed[0].0.time.host_time.as_unix_nanos(), AX_T0);
+        assert_eq!(placed[0].0.time.sample_index, 0);
+        assert!(
+            !placed[0].0.discontinuity.contains(Discontinuity::GAP),
+            "an untouched block is not a discontinuity"
         );
     }
 }
