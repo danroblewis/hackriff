@@ -15,7 +15,7 @@ use crate::detection::{Detection, DetectionFlags, SpurReason};
 use crate::ids::{DetectionId, ProvenanceId, ScanPlanId, SpurMaskId, SurveyId};
 use crate::plan::{ScanPlan, Survey, SurveyState, SurveySummary};
 use crate::provenance::Provenance;
-use crate::recording::{Recording, RecordingTrigger};
+use crate::recording::{Recording, RecordingKind, RecordingTrigger};
 use crate::region::{Region, TimeRange};
 use crate::time::Timestamp;
 
@@ -494,6 +494,40 @@ impl Repository {
             "SELECT body FROM recording WHERE trigger_detection_id = ?1 ORDER BY t_start",
             [blob(id)],
         )
+    }
+
+    /// Recordings whose samples overlap `[t0_ns, t1_ns)` (either bound open when `None`), of
+    /// `kind` when given, **newest first**, at most `limit`; with the total that matched, so a
+    /// caller can say how many it omitted rather than implying the page is everything (T-469).
+    ///
+    /// A plain query over the existing `idx_recording_t_start` index — **no second index is
+    /// maintained**: what is on disk is whatever rows are here, and a catalogue kept beside them
+    /// could only go stale. Half-open in both directions, like every other window in the model:
+    /// a recording ending exactly at `t0` does not overlap.
+    pub fn recordings_in(
+        &self,
+        t0_ns: Option<i64>,
+        t1_ns: Option<i64>,
+        kind: Option<RecordingKind>,
+        limit: usize,
+    ) -> Result<(Vec<Recording>, u64), RepoError> {
+        const WHERE: &str = "WHERE t_end > ?1 AND t_start < ?2 AND (?3 IS NULL OR kind = ?3)";
+        let (t0, t1) = (t0_ns.unwrap_or(i64::MIN), t1_ns.unwrap_or(i64::MAX));
+        let kind = kind.map(|k| enum_text(&k)).transpose()?;
+        let matched: i64 = self
+            .conn
+            .prepare_cached(&format!("SELECT count(*) FROM recording {WHERE}"))?
+            .query_row(params![t0, t1, kind], |r| r.get(0))?;
+        // Newest first, ties broken by id so a page is stable across calls.
+        let rows = bodies(
+            &self.conn,
+            &format!(
+                "SELECT body FROM recording {WHERE} ORDER BY t_start DESC, recording_id DESC \
+                 LIMIT ?4"
+            ),
+            params![t0, t1, kind, int(limit as u64, "limit")?],
+        )?;
+        Ok((rows, matched.max(0) as u64))
     }
 }
 

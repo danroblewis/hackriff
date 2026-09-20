@@ -1318,6 +1318,48 @@ With `band`, only segments whose tuned window (`center ± rate/2`) overlaps `[f_
 - **`Clip`**: `{id, label, meta_uri, data_uri, meta_path, data_path, t0, t1, t0_ns, t1_ns, samples, bytes, sample_rate_hz, center_hz, band ([f_lo, f_hi] or null), content_class, captures: [{sample_start, samples, global_index, t0, t0_ns, segment, run, center_hz, sample_rate_hz, bandwidth_hz, lna_db, vga_db, amp_on, device_id}]}` (`*_uri` relative to the data directory).
 - **Errors** `{"error", "code"}`: `400 invalid` (no range or more than one, a negative time, start ≥ end, zero `samples`, bad `band`/`label`/`run`, unknown field or query parameter, a clip over `max_clip_bytes`), `404 not_found` (nothing buffered in the range, band and run, e.g. already evicted, or overwritten during the export), `409 conflict` (the range spans a sample-rate change: SigMF has one rate per file, so export each side; or a time range spans runs), `503 unavailable` (the run has no buffer, or this server has none), `507 insufficient_storage` (the clip does not fit above the free-space floor), `500 failed` (storage), `405` other methods. Messages never echo values.
 
+## Persisted IQ recordings (T-469)
+
+**The other half of the audio horizon.** Raw IQ — and so demodulation, decode and audio on playback — exists in exactly two places: the rolling IQ ring (minutes; `GET /api/iqbuffer` above answers its extent exactly) and **persisted SigMF recordings** under `<data dir>/recordings/`, written by the manual recorder (`POST /api/outputs/record/start`), the record chain and the ring's clip export. `GET /api/captures` serves **decoded** captures, which is a different thing. Nothing enumerated the recordings, so "where can I hear audio" was answerable for the ring alone and a playhead built on it would silently under-report the horizon over every recording beyond the ring. CLAUDE.md's playback invariant requires IQ availability to be *its own visible, predictable boundary on the time axis*, and a client cannot draw a boundary for files it cannot enumerate.
+
+Code: `hk_store::recordings` (the query and the on-disk check), `crates/hk-api/src/recordings.rs` (the route). It is a **read**, not an index: a query over the immutable `Recording` rows (`docs/07` §2.12) on their existing `t_start` index, joined to their `Provenance`. Nothing is maintained beside the rows — a catalogue kept next to them could only go stale.
+
+| Method | Path | Query | Response |
+|---|---|---|---|
+| GET | `/api/recordings` | `?[t0=<unix s>][&t1=<unix s>][&kind=iq-snippet\|channel-decimated\|audio][&limit=1..1000, default 200]` | `{recordings: [Recording], count, matched, omitted, iq_available}` |
+
+- `t0`/`t1` select recordings **overlapping** `[t0, t1)`: a recording ending exactly at `t0` does not overlap. Both are optional and independent. Each is converted once to integer ns by `round(s × 10⁹)`; near today's epoch an f64 resolves only ≈ 240 ns, so a boundary given in seconds is not exact to the sample (the same caveat as the clip route's `{t0, t1}` form).
+- `kind` filters the query itself, so `matched` narrows with it. `limit` pages the **newest first**; `matched` counts every recording that matched and `omitted` = `matched − count` those the page left out.
+
+**The row is a claim; the file is the fact.** A `Recording` row is written *after* its samples are and is immutable, so it keeps claiming what it claimed when the file is later truncated, evicted or moved to another data directory. Each listed recording is therefore checked against the filesystem once, at list time, and `state` is what is on disk **now**:
+
+| `state` | Meaning | `available` |
+|---|---|---|
+| `complete` | Both files present and the data file is **exactly** `size_bytes` | `true` |
+| `partial` | Present but not what the row describes: a short data file (partially written or truncated), one longer than the row records, or a missing `.sigmf-meta` without which the samples cannot be read as SigMF | `false` |
+| `missing` | No data file at all, or a `*_uri` that is not a path inside the data directory | `false` |
+
+A partially written or missing recording **is listed** — hiding it would be its own dishonesty — but never as available and never in `iq_available.spans`. `detail` says why in words when `state` is not `complete`.
+
+**What this does not cover.** A recording still being written has **no row yet** (the recorder inserts one when it stops), so it cannot appear here at all; while it is in progress the ring covers the same samples and `GET /api/control/state` reports the recorder. The check is existence and length, not a CRC over the samples.
+
+**`Recording`**: `{id, kind, iq, t0, t1, t0_ns, t1_ns, duration_s, center_hz, sample_rate_hz, f_lo, f_hi, pre_trigger_s, post_trigger_s, trigger, retention_class, content_class, meta_uri, data_uri, size_bytes, state, available, bytes_on_disk, meta_present, detail, device_id, antenna_port, bias_tee, bandwidth_hz, lna_db, vga_db, amp_on, overload}`.
+- `kind` is `iq-snippet`, `channel-decimated` or `audio`; **`iq`** is true for the first two — what can be re-demodulated and re-decoded on playback. Audio cannot, so it never extends the demod/decode horizon.
+- `f_lo`/`f_hi` are the tuned window as captured, `center_hz ± sample_rate_hz/2` — the same convention the IQ ring's segments and its clip band filter use.
+- `meta_uri`/`data_uri` are **relative to the data directory**, exactly as written, so the pipeline (and a `SigmfReplaySource`) can open them.
+- `size_bytes` is what the row records; `bytes_on_disk` is what the data file holds now (`null` when there is none).
+- `trigger` is `{"kind": "detection" \| "demodulation" \| "scheduler" \| "manual", "id"?}`; `retention_class` is the C25 eviction class (`pinned`/`unknown`/`decoder-confirmed`/`routine`).
+- `device_id`, `antenna_port`, `bias_tee`, `bandwidth_hz`, `lna_db`, `vga_db`, `amp_on` and `overload` come from the recording's `Provenance` — which front end captured it and under what state. All are `null` when that provenance row cannot be read; none is ever guessed. `bias_tee` follows the same three-valued rule as the ring's segments: `"unknown"` means the source could not report it and is never to be read as `"off"`.
+
+**`iq_available`**: `{horizon: "iq-ring + recordings", ring, spans: [Span]}` — the whole answer to "where is raw IQ still readable", **ring plus these recordings** rather than the ring alone.
+- **`ring`**: `{enabled, reason, t0, t1}`, the ring's own window read from the same status `GET /api/iqbuffer` serves (`t0`/`t1` `null` when it holds nothing; `enabled: false` with a `reason` when there is no ring).
+- **`Span`**: `{t0, t1, t0_ns, t1_ns, span_s, source: "recording" \| "ring", recording}` — `recording` is the recording's id for `source: "recording"`, `null` for the ring. Oldest first, on the one shared time axis whatever the source.
+- Only **`state: "complete"` recordings with `iq: true`** contribute a span.
+- **The spans are deliberately not merged into one `t0`/`t1` envelope.** IQ availability has holes, and an envelope over a hole promises audio that does not exist — the same defect as implying resolution that was never captured. The client unions the spans it is given and draws the gaps.
+- The spans cover **exactly the page listed**, so a truncated page (`omitted > 0`) carries a truncated horizon; widen `limit` or the window to see more. The ring's span is always present.
+
+- **Errors** `{"error", "code"}`: `400 invalid` (unknown query parameter, a non-numeric or negative `t0`/`t1`, `t0 ≥ t1`, an unknown `kind`, a `limit` outside 1..1000), `503 unavailable` (this server has no recording catalogue — no data directory or database), `500 failed` (storage), `405` other methods.
+
 ## Classification taxonomy (T-218, ADR-0016 §1–§2)
 
 | Method | Path | Body / query | Response |

@@ -49,6 +49,7 @@ pub mod outputs;
 pub mod presence; // T-264 (ADR-0017 TM-8): one emitter's presence track
 pub mod query;
 pub mod recipes;
+pub mod recordings; // T-469: the persisted IQ recordings that extend the audio horizon
 pub mod scan; // T-452: the in-app survey sweep, stepping the interactive front end
 pub mod selections;
 pub mod signatures; // T-201
@@ -82,6 +83,7 @@ pub use live_control::{
     LiveTuning, SourceLiveControl, WindowPolicy, WindowRetuner, validate_gains,
 };
 pub use outputs::{OutputControl, OutputFailure, OutputStart, OutputTarget};
+pub use recordings::{RecordingCatalog, RecordingsFailure};
 pub use scan::{Phase as ScanPhase, Prepared as ScanPlan, ScanError, ScanRequest, ScanRunner};
 
 #[cfg(test)]
