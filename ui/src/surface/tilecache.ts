@@ -1018,10 +1018,31 @@ export class TileCache<T> {
    * flight at a time, same discipline as [[pumpRefresh]] — so the ring can never grow to hold more of
    * the shared budget than speculative work deserves, and a due refresh that lands on the next
    * [[pump]] finds the slot the ring is not allowed to have taken from it.
+   *
+   * **Running last is not by itself enough, and a browser run proved it.** Two further conditions
+   * are below, each with its measurement: the ring asks nothing while the operating cap is below its
+   * ceiling, and nothing while anything else of this cache's is outstanding at the route.
    */
   private pumpPrefetch(): void {
     if (this.prefetching.size) return;
-    if (this.inflight.size + this.abandonedSlots >= this.effectiveLimit) return;
+    // **Backing off means asking NOTHING** — rule 3 in the file header, which the first version of
+    // this function stated but did not enforce. It gated the ring on the *budget* (`>= effectiveLimit`),
+    // which after a `503` halves to 1 and still lets the ring have that one slot: the ring then asks
+    // once per [[PREFETCH_SCAN_MS]] forever, is refused, resets [[succeeded]]'s recovery counter, and
+    // the operating cap never climbs back. Measured in the browser tier (`ui/e2e/surface-nav.e2e.mjs`,
+    // full-suite ordering, 3 runs each): with the ring as merged, 27–30 tile requests and 2–3
+    // refusals during the 8 s in which NOTHING moved the view, and the cap pinned at 1; with the ring
+    // disabled, **0 requests and 0 refusals** in the same window and the cap at 4. Speculative work
+    // must not be what a recovering client spends its share on.
+    if (this.limit < this.ceiling) return;
+    // **Only when this cache is otherwise IDLE at the route**, not merely under its cap. A ring tile
+    // issued beside real work is a tile that gets ABORTED the moment the viewport moves — and an
+    // abort does not return the server's slot, it charges [[abandonedSlots]] for a production
+    // `hk-api` carries on doing and throws away ([[abandon]]). Same three runs: 46–53 aborts on the
+    // wire with the ring issuing under the cap, 6–8 with it silent. The ring is a nice-to-have, so
+    // the right response to "the route is busy" is to wait for the next frame, never to take the
+    // last slot and then walk away from it.
+    if (this.inflight.size + this.abandonedSlots > 0) return;
     const addr = this.prefetchQueue.pop(); // LIFO: nearest-queued first, same reason as [[queue]]
     if (!addr) return;
     const key = keyOf(addr);

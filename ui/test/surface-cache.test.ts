@@ -1283,6 +1283,84 @@ test("T-471: the ring asks for nothing while the cache is backing off from a 503
   assert.equal(h.cache.stats.prefetchIssued, 0);
 });
 
+// ——— THE TWO RULES THE BROWSER TIER CAUGHT THE RING BREAKING ———
+//
+// The test above is real but narrow: with the clock pinned at 0 it never leaves the `busyBackoffMs`
+// window, so it certifies "the ring is quiet for 200 ms after a 503" and nothing more. `main` failed
+// `ui/e2e/surface-nav.e2e.mjs` on exactly the regime it does not reach — the 8 s AFTER that window,
+// in which the operating cap is still halved. Measured there, three runs each, full-suite ordering:
+// with the ring as merged, 27–30 tile requests and 2–3 refusals during the seconds in which NOTHING
+// moved the view; with the ring disabled outright, 0 and 0. The two tests below are those two
+// findings, each as the smallest fact that would have failed.
+
+test("T-471: the ring stays silent AFTER the 503 backoff expires — until the cap is back at its ceiling", async () => {
+  let clock = 0;
+  const h = harness({ inFlight: 4, busyBackoffMs: 200, now: () => clock });
+  const view = paneView(0, 1);
+  h.cache.beginFrame();
+  h.cache.acquire(addr(0));
+  h.cache.setViewports(LAT, [view]);
+  h.cache.endFrame();
+  await flush();
+  await h.fail(addr(0), new TileBusyError(4, "too many tile reads in flight (limit 4)"));
+
+  // Well past the backoff window, so `pump` runs freely and only the OPERATING CAP is left to hold
+  // the ring back. The requeued visible miss goes out on this pump; settling it leaves the cache
+  // completely idle, which is what makes the assertion below about the cap and nothing else.
+  clock = 5000;
+  h.cache.prefetchRing(LAT, [view]);
+  await flush();
+  await h.settle(addr(0));
+  assert.equal(h.cache.inFlightCount, 0, "the cache must be idle, or the budget — not the cap — is what is being tested");
+  assert.equal(h.cache.inFlightLimit, 2, "the 503 must have halved the operating cap, or this tests nothing");
+  assert.ok(h.cache.prefetchDepth > 0, "the ring must still know what it wants, or there is nothing to withhold");
+  assert.equal(h.cache.stats.prefetchIssued, 0,
+    "the ring asked while the client was still recovering from a refusal: speculative work must not " +
+    "spend the share the visible path is trying to win back — and being refused for it resets the recovery");
+
+  // …and it is a PAUSE, not a kill switch. `RECOVER_AFTER` successes buy a slot back, so 16 of them
+  // take the cap 2 -> 3 -> 4, and at the ceiling the ring is allowed out again.
+  for (let i = 0; i < 16; i++) {
+    const a = addr(100 + i);
+    h.cache.beginFrame();
+    h.cache.acquire(a);
+    h.cache.endFrame();
+    await flush();
+    await h.settle(a);
+  }
+  assert.equal(h.cache.inFlightLimit, 4, "the cap must be back at its ceiling, or the resume below proves nothing");
+  h.cache.prefetchRing(LAT, [view]);
+  await flush();
+  assert.ok(h.cache.stats.prefetchIssued >= 1, "once recovered, the ring gets its turn again");
+});
+
+test("T-471: the ring asks for nothing while ANY request of this cache's is outstanding at the route", async () => {
+  // **Four slots, deliberately** — not the one-slot harness the tests above use. With one slot
+  // "under the budget" and "idle" are the same sentence, which is why the merged rule read as
+  // correct: it said `>= effectiveLimit`, so with three slots free the ring took one and sat beside
+  // work the next viewport change would abort. An abort does not give the route its slot back — it
+  // charges `abandonedSlots` for a production `hk-api` carries on doing and throws away — so that is
+  // how a ring tile turns into a refusal for somebody else. Measured on the wire: 46–53 aborts a run
+  // with the ring issuing under the cap, 6–8 with it silent.
+  const h = harness({ inFlight: 4 });
+  const view = paneView(0, 1);
+  h.cache.beginFrame();
+  h.cache.acquire(addr(0));
+  h.cache.setViewports(LAT, [view]);
+  h.cache.endFrame();
+  await flush();
+  assert.equal(h.cache.inFlightCount, 1, "the visible miss must be outstanding, or this tests nothing");
+  assert.ok(h.cache.inFlightCount < h.cache.inFlightLimit, "…with slots to spare, or the budget rule alone would explain the result");
+
+  const n = h.cache.prefetchRing(LAT, [view]);
+  await flush();
+  assert.ok(n > 0, "the ring must want something, or there is nothing to withhold");
+  assert.equal(h.cache.stats.prefetchIssued, 0, "the ring took a free slot beside work that can still be aborted");
+
+  await h.settle(addr(0));
+  assert.ok(h.cache.stats.prefetchIssued >= 1, "and it is not starved: once the cache is idle the ring goes out");
+});
+
 test("T-471: the ring also stops while the transport is silent (T-499)", async () => {
   const h = harness({ inFlight: 4 });
   const view = paneView(0, 1);
