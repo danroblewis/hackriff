@@ -15687,6 +15687,56 @@ tasks:
       the scanline texture is asserted at min/default/max - near the top of the range texture, not
       brightness, is what separates a shadow from live. T-523 raises the DEFAULT gain; reconcile
       the two when it lands.
+  - id: T-527
+    milestone: MSCAN
+    title: Fog-of-war fills EVERY time gap in an observed column - nearest PAST sample, and the future's first sample only before the first-ever
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-519, T-520]
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER 2026-09-20, extending fog-of-war. Today T-519 carries the last-known value FORWARD from
+      before the viewport; a column observed only in the MIDDLE of the view still leaves grey gaps
+      above and below its samples. Fill EVERY time gap in a column that was ever observed:
+      - a gap after any sample takes the NEAREST PAST sample (carry forward, as now);
+      - the stretch BEFORE the column's FIRST-EVER sample takes that first sample (the one and only
+        backward fill) - nothing else ever reads backward in time.
+      GREY REMAINS for a column never observed at all, and for spectrum outside the record horizon.
+      That distinction is the whole invariant: grey = we never looked.
+      Build on RegionHistory::fold_newest / Pyramid::last_known_* (hk-store history/query.rs) and the
+      `shadow` plane (hk-api tiles.rs). Watch the COST: T-519 measured ~84 ms on an 819 MHz tile and
+      that is already suspected in T-523's 502s - measure before and after, and do not make the
+      short-circuit path heavier. Age is on the wire (last_t_s); a backward-filled run must be
+      distinguishable on the wire from a forward-filled one.
+      docs/api.md + api_contract.rs together; extend ADR-0020.
+    notes: |
+      Filed 2026-09-20. Sequenced AFTER T-523 lands, since T-523 is cutting the same query's cost.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-528
+    milestone: MSCAN
+    title: Viewport-dynamic auto-contrast as a toggle - scale to what is on screen now
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER 2026-09-20. Auto-contrast today anchors its scale over the region (T-470/T-475 measured
+      the colours-shift-on-zoom tradeoff the user accepted). The user wants a VIEWPORT-DYNAMIC mode:
+      the scale is computed from what is currently on screen, so a quiet band spreads across the
+      full ramp instead of sitting in the bottom few percent. Ship it as a TOGGLE beside the existing
+      auto-contrast control (the user keeps both), persisted like the other surface prefs.
+      HONESTY: the pane must still state the scale it drew at, and the readout's numbers must agree
+      with the pixels (T-475's rule). Shadow cells must not drag the scale - they are not
+      measurements of the current viewport.
+      Client-side presentation over data already held; no new route.
+    notes: |
+      Filed 2026-09-20. Below the fog-of-war and crash work in the user's order.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
