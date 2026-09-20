@@ -109,7 +109,9 @@ try_bulk(){
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 while true; do
   # read every queued (non-comment) branch, in order
-  queued=$(grep -vE '^\s*(#|$)' "$QUEUE" 2>/dev/null | tr -d '[:space:]' | grep -v '^$' || true)
+  # NOTE: strip whitespace PER LINE — a plain `tr -d '[:space:]'` deletes the newlines
+  # too and glues every queued branch into one unmergeable name (observed 2026-09-20).
+  queued=$(grep -vE '^\s*(#|$)' "$QUEUE" 2>/dev/null | awk '{gsub(/[[:space:]]/,""); if ($0 != "") print}' || true)
   if [ -n "$queued" ] && main_ready; then
     # keep only branches that still exist and are ahead of main
     ready=$(ready_filter $queued)
