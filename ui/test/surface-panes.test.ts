@@ -373,8 +373,8 @@ test("…and when two panes are at the same level there is nothing to explain", 
 test("a pane that leaves the detail tier SAYS SO, and its cell size comes off the lattice it drew on", () => {
   // The detail lattice with a display-bin floor and the ceiling that does not move with it — the
   // geometry that made a half-hour viewport cost 445 tiles — and the overview tier beside it.
-  const DETAIL: Lattice = { scheme: "view", cells: 256, f0Hz: 585.9375, t0Ns: 40_106_667, levelsF: 16, levelsT: 19, maxLevelF: 9, maxLevelT: 1 };
-  const OVER: Lattice = { scheme: "overview", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 20, levelsT: 20, maxLevelF: 11, maxLevelT: 14 };
+  const DETAIL: Lattice = { scheme: "view", cells: 256, f0Hz: 2343.75, t0Ns: 40_106_667, levelsF: 14, levelsT: 19, maxLevelF: 9, maxLevelT: 1 };
+  const OVER: Lattice = { scheme: "overview", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 12, levelsT: 15, maxLevelF: 11, maxLevelT: 14 };
   const h = harness({ detail: DETAIL, overview: OVER });
   const m = model({ lattice: DETAIL });
   const a = m.list()[0].id;

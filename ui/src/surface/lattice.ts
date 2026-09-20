@@ -313,10 +313,11 @@ export function tileUrl(a: TileAddr, path = "/api/tiles"): string {
  * **This is CLAUDE.md's honesty tiers made real in the tile SOURCE, not in a label.** Until T-505
  * one lattice was asked to be both, and it cannot be: `axes.*.max_level` bounds level *indices*,
  * never cell size, so a floor N doublings finer shrinks the coarsest *addressable* tile by exactly
- * 2^N. T-484 spent eight doublings on fidelity and the 6 GHz × 30 min minimap went from 32
- * addresses to **7031** behind a four-slot in-flight cap — nothing arrived, and the map went dark.
- * No lattice depth recovers it (T-501 swept it), because the binding constraint is the *work* of
- * folding a tile out of the store's coarsest cell.
+ * 2^N. T-484 spent six doublings of cell AREA on fidelity — 6250 Hz × 1 s to the display plan's own
+ * 2343.75 Hz × 40.1 ms — and the 6 GHz × 30 min minimap went from 32 addresses to **1780** behind a
+ * four-slot in-flight cap; nothing arrived, and the map went dark. Patch the display to 4096 bins
+ * and it is **7031**. No lattice depth recovers it (T-501 swept it), because the binding constraint
+ * is the *work* of folding a tile out of the store's coarsest cell.
  */
 export type ViewTier = "detail" | "overview";
 

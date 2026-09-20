@@ -1098,12 +1098,23 @@ fn tier(key: &TileKey, r: &TileRead, max_live_span_hz: Option<f64>) -> DetailSou
 
 /// The tier before any replication claim: what a tile of this **width** is, whatever answered it.
 ///
-/// Never `live-iq`, and **T-439 does not change that**. T-439 makes the finest node of the view
-/// lattice the growing edge — "live" is a viewport, not a mode (docs/16 §8.1) — but a tile is still
-/// a *pyramid* read, served at a level's cell size, and `DetailSource::LiveIq` means exactly "live
-/// IQ from the front end at the resolution shown". A 6.25 kHz × 1 s cell is not that, however
-/// recently it was written. Claiming otherwise would trade §4's honesty rule for a word, and the
-/// ring is where a client goes for live-IQ resolution.
+/// Never `live-iq` — and since **T-484 that is an under-claim, kept on purpose**.
+///
+/// T-439 made the view lattice's finest node the growing edge ("live" is a viewport, not a mode,
+/// docs/16 §8.1), and the reasoning that stood here said a tile is still a *pyramid* read served at
+/// a level's cell size, so a 6.25 kHz × 1 s cell is not "live IQ from the front end at the
+/// resolution shown" however recently it was written. **That premise has gone:** T-484 sets node
+/// (0, 0)'s cell to the display STFT's own bin and row and folds the published rows into it 1:1, so
+/// such a tile now *is* the front end at the resolution shown, and `LiveIq` would be true.
+///
+/// It still answers `SpectrumHistory`, because [`crate::navigation::live_window_verdict`] defines
+/// the enum as a claim about **span** — could this width have come from one capture window — and
+/// four routes share that definition. Re-pointing it at *resolution* for one of them is a contract
+/// change nothing has asked for, and docs/api.md's own rule settles the direction: under-claiming
+/// costs a styling cue, over-claiming is the lie the invariant forbids. The distinction a reader
+/// actually needs is served per tile and is now sharper than the enum: `resolution.answered.level`
+/// `0` with `resolution.fold.*.direction` `exact` on both axes means one published row per cell,
+/// and anything coarser is a declared fold of those.
 fn base_tier(key: &TileKey, max_live_span_hz: Option<f64>) -> DetailSource {
     match crate::navigation::live_window_verdict(key.region.freq.width_hz(), max_live_span_hz) {
         DetailSource::LiveIq => DetailSource::SpectrumHistory,

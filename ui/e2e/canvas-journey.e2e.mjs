@@ -384,7 +384,9 @@ async function waitForCoverage(backend, timeoutMs) {
  * is a comparison of two different claims.
  */
 function levelOf(row) {
-  const m = /\(level (\d+)\/(\d+)\)/.exec(row.level);
+  // T-505 put the TIER inside the same parenthesis ("… (detail tier, level 2/0)"), so the open
+  // paren is no longer adjacent to the word `level`. Match the level alone.
+  const m = /level (\d+)\/(\d+)\)/.exec(row.level);
   assert.ok(m, `the pane states no level: ${JSON.stringify(row.level)}`);
   return { levelF: Number(m[1]), levelT: Number(m[2]) };
 }
