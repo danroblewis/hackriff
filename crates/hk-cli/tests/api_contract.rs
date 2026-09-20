@@ -7142,6 +7142,11 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
 /// - **Observed now = its own value.** No run ever covers a cell the grid measured.
 /// - **Never observed = nothing.** A tile over spectrum the radio never tuned carries no run and the
 ///   search reports no column found — grey's meaning is unchanged.
+/// - **Every gap in an observed column is filled, and the wire says which way it was read** (T-527).
+///   A column the grid measures anywhere has *every* other row of it covered: below its last sample
+///   by a `forward` run (the nearest past sample), above its first by a `forward` run from an older
+///   value or — where there is none — by the `backward` fill, which is the column's first-ever
+///   sample and the only value here read backward in time.
 #[test]
 fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
     let (_dir_guard, serving, addr) = start_server();
@@ -7203,16 +7208,24 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
     );
     let (sh, grid) = (&v["shadow"], v["grid"]["max_db"].as_array().unwrap());
     let arr = |k: &str| sh[k].as_array().unwrap().clone();
-    let (f, row, rows, db, t, src) = (
+    let (f, row, rows, db, t, src, fill) = (
         arr("f"),
         arr("row"),
         arr("rows"),
         arr("last_db"),
         arr("last_t_s"),
         arr("src"),
+        arr("fill"),
+    );
+    // T-527: the direction alphabet is on the wire, and `fill` indexes it — never a bare bool, and
+    // never inferred from the source table.
+    assert_eq!(
+        sh["fills"],
+        json!(["forward", "backward"]),
+        "the fill alphabet: {sh}"
     );
     assert_eq!(sh["runs"].as_u64().unwrap() as usize, f.len(), "{sh}");
-    for a in [&row, &rows, &db, &t, &src] {
+    for a in [&row, &rows, &db, &t, &src, &fill] {
         assert_eq!(a.len(), f.len(), "parallel arrays: {sh}");
     }
     let (t0, t_cell) = (
@@ -7223,6 +7236,7 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         .as_f64()
         .expect("a server with frames has an edge");
     let mut covered = vec![false; n * n];
+    let mut backward = 0usize;
     for i in 0..f.len() {
         let (c, r0, k) = (
             f[i].as_u64().unwrap() as usize,
@@ -7231,18 +7245,41 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         );
         let last_db = db[i].as_f64().expect("a run always carries a value");
         let last_t = t[i].as_f64().unwrap();
-        // Last seen at or before the run's first row: never a value from its future.
-        assert!(
-            last_t <= t0 + r0 as f64 * t_cell + 1e-6,
-            "run {i}: {last_t} after row {r0}"
-        );
+        let is_back = fill[i].as_u64().expect("a fill code") == 1;
         // Never past the data edge.
         assert!(
             t0 + r0 as f64 * t_cell < edge,
             "run {i} starts at or past the edge {edge}"
         );
         let source = &sh["sources"][src[i].as_u64().unwrap() as usize];
-        if source["from"] == "this-tile" {
+        if is_back {
+            // **The one backward read** (T-527): the column's FIRST-EVER sample, carried up into
+            // the stretch before it. So it starts at row 0, stops exactly where that sample begins,
+            // carries that sample's value, and its instant lies AFTER its own rows — the mirror of
+            // every other run here, which is precisely why it is labelled.
+            backward += 1;
+            assert_eq!(source["from"], json!("this-tile"), "run {i}: {sh}");
+            assert_eq!(r0, 0, "a backward run below the head: {sh}");
+            assert_eq!(
+                grid[k * n + c].as_f64(),
+                Some(last_db),
+                "run {i} carries the first sample at ({k}, {c})"
+            );
+            assert!(
+                (0..k).all(|r| grid[r * n + c].is_null()),
+                "run {i} covers a measurement in column {c}: {sh}"
+            );
+            assert!(
+                last_t >= t0 + k as f64 * t_cell - 1e-6,
+                "run {i}: first seen {last_t} is not after its rows (row {k} starts at {})",
+                t0 + k as f64 * t_cell
+            );
+        } else if source["from"] == "this-tile" {
+            // Forward: last seen at or before the run's first row, never a value from its future.
+            assert!(
+                last_t <= t0 + r0 as f64 * t_cell + 1e-6,
+                "run {i}: {last_t} after row {r0}"
+            );
             // T-315: the value IS the grid's own, in the last measured row above the run.
             assert!(r0 > 0, "a this-tile run below row 0: {sh}");
             assert_eq!(
@@ -7251,6 +7288,10 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
                 "run {i} at ({r0}, {c})"
             );
         } else {
+            assert!(
+                last_t <= t0 + r0 as f64 * t_cell + 1e-6,
+                "run {i}: {last_t} after row {r0}"
+            );
             assert_eq!(source["from"], json!("before-tile"), "{source}");
             assert!(
                 source["f_cell_hz"].as_f64().is_some_and(|x| x > 0.0),
@@ -7272,8 +7313,41 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         (0..n).any(|r| covered[r * n + station_col]),
         "the departed station carries a shadow: {sh}"
     );
+    assert_eq!(
+        sh["backward_runs"].as_u64().unwrap() as usize,
+        backward,
+        "the count on the wire must be the runs on the wire: {sh}"
+    );
+    // **T-527's invariant, over every column this tile measures at all**: no gap is left grey. A
+    // column with any sample has every other row of it covered exactly once — above its first
+    // sample and below its last — because a column that was observed was observed, and grey is
+    // reserved for the columns that were not.
+    let mut filled_heads = 0;
+    for c in 0..n {
+        let first = (0..n).find(|&r| !grid[r * n + c].is_null());
+        let Some(first) = first else { continue };
+        for r in 0..n {
+            // Rows at or past the data edge are the future and carry nothing, by the same rule
+            // that stops a forward carry there. Everything before it is this invariant's.
+            if t0 + r as f64 * t_cell >= edge - 1e-6 {
+                continue;
+            }
+            let measured = !grid[r * n + c].is_null();
+            assert_eq!(
+                !measured,
+                covered[r * n + c],
+                "column {c} row {r}: measured {measured}, shadowed {} — an observed column may \
+                 have no grey gap (T-527) and no shadow over a measurement: {sh}",
+                covered[r * n + c]
+            );
+        }
+        if first > 0 {
+            filled_heads += 1;
+        }
+    }
     eprintln!(
-        "T-519 contract: {} runs, sources {}, station rows shadowed {}, search {}",
+        "T-519/T-527 contract: {} runs ({backward} backward), {filled_heads} columns whose first \
+         sample is below row 0, sources {}, station rows shadowed {}, search {}",
         f.len(),
         sh["sources"],
         (0..n).filter(|&r| covered[r * n + station_col]).count(),
