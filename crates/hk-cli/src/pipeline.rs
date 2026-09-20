@@ -46,7 +46,8 @@ use hk_pipeline::{
 };
 
 use crate::control::{
-    PipelineDatasets, PipelineIqBuffer, PipelineOutputs, PipelineRetuner, PipelineRunControl,
+    PipelineDatasets, PipelineIqBuffer, PipelineOutputs, PipelineRecordings, PipelineRetuner,
+    PipelineRunControl,
 };
 use crate::signal;
 
@@ -1161,6 +1162,11 @@ pub fn serve_api(
             handle.iq_buffer(),
             handle.data_dir(),
         ))), // T-205
+        // T-469: the persisted IQ recordings that extend the audio horizon past the ring.
+        recordings: Some(Arc::new(PipelineRecordings::new(
+            handle.data_dir().join("hackriff.db"),
+            handle.data_dir().to_path_buf(),
+        ))),
         // T-438: the tile route's ingest-backpressure cap, per server.
         tiles_in_flight: Default::default(),
     };

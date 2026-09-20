@@ -2647,6 +2647,11 @@ fn analyze_stub_validates_targets_and_answers_not_implemented() {
 /// `POST /api/iqbuffer/clip` exports a span as a SigMF recording, as `docs/api.md` "IQ capture
 /// buffer" documents; bad queries and bodies answer 400, an empty band 404, other methods 405,
 /// and the clip needs the header token.
+///
+/// T-469 rides on the same exported clip, because a clip *is* a persisted IQ recording: the tail
+/// of this test asserts `GET /api/recordings` enumerates it with its extent, tuning, device and
+/// on-disk state, and that truncating and then removing its data file moves it from `complete` to
+/// `partial` to `missing` — out of the audio horizon each time.
 #[test]
 fn iq_buffer_status_and_clip_export_answer_as_documented() {
     let (_dir_guard, serving, addr) = start_server();
@@ -2931,6 +2936,188 @@ fn iq_buffer_status_and_clip_export_answer_as_documented() {
     let (st, _) = get(addr, "/api/iqbuffer/clip");
     assert_eq!(st, 405);
     let (st, _) = post(addr, "/api/iqbuffer", "{}");
+    assert_eq!(st, 405);
+
+    // ---- T-469: `GET /api/recordings` enumerates what that clip persisted -------------------
+    //
+    // The ring answers "where is IQ still buffered"; this answers "where is IQ still on disk",
+    // and only the two together are the audio horizon. `docs/api.md` "Persisted IQ recordings".
+    let (st, list) = get(addr, "/api/recordings");
+    assert_eq!(st, 200, "{list}");
+    // Two clips were exported above (by index and by ns), so at least two rows exist.
+    assert!(list["matched"].as_u64().unwrap() >= 2, "{list}");
+    assert_eq!(
+        list["count"].as_u64(),
+        list["recordings"].as_array().map(|a| a.len() as u64),
+        "{list}"
+    );
+    let find = |v: &Value, want: &str| -> Value {
+        v["recordings"]
+            .as_array()
+            .expect("recordings")
+            .iter()
+            .find(|e| e["id"].as_str() == Some(want))
+            .unwrap_or_else(|| panic!("{want} not listed: {v}"))
+            .clone()
+    };
+    let e = find(&list, id);
+    // The same extent, tuning and URIs the clip export reported: one recording, one truth.
+    assert_eq!(e["kind"], json!("iq-snippet"), "{e}");
+    assert_eq!(e["iq"], json!(true), "{e}");
+    assert_eq!(e["t0_ns"], r["t0_ns"], "{e}");
+    assert_eq!(e["t1_ns"], r["t1_ns"], "{e}");
+    assert_eq!(e["t0"], r["t0"], "{e}");
+    assert_eq!(e["duration_s"], json!(0.1), "{e}");
+    assert_eq!(e["center_hz"], json!(FIXTURE_CENTER_HZ), "{e}");
+    assert_eq!(e["sample_rate_hz"], json!(2.4e6), "{e}");
+    assert_eq!(e["f_lo"], json!(FIXTURE_CENTER_HZ - 1.2e6), "{e}");
+    assert_eq!(e["f_hi"], json!(FIXTURE_CENTER_HZ + 1.2e6), "{e}");
+    assert_eq!(e["meta_uri"], r["meta_uri"], "{e}");
+    assert_eq!(e["data_uri"], r["data_uri"], "{e}");
+    assert_eq!(e["trigger"], json!({"kind": "manual"}), "{e}");
+    assert_eq!(e["retention_class"], json!("pinned"), "{e}");
+    assert_eq!(e["content_class"], r["content_class"], "{e}");
+    // Provenance: which front end captured it, and under what state. The mock reports its bias
+    // tee, so assert the value - "unknown" here would mean it never reached the route.
+    assert_eq!(e["device_id"], seg["device_id"], "{e}");
+    assert_eq!(e["bias_tee"], json!("off"), "{e}");
+    assert_eq!(e["bandwidth_hz"], seg["bandwidth_hz"], "{e}");
+    assert_eq!(e["lna_db"], seg["lna_db"], "{e}");
+    assert_eq!(e["vga_db"], seg["vga_db"], "{e}");
+    assert_eq!(e["overload"], json!(false), "{e}");
+    // What is on disk now: exactly the bytes the row records (2 per ci8 sample).
+    assert_eq!(e["size_bytes"].as_u64(), Some(2 * n), "{e}");
+    assert_eq!(e["bytes_on_disk"].as_u64(), Some(2 * n), "{e}");
+    assert_eq!(e["state"], json!("complete"), "{e}");
+    assert_eq!(e["available"], json!(true), "{e}");
+    assert_eq!(e["meta_present"], json!(true), "{e}");
+    assert!(e["detail"].is_null(), "{e}");
+
+    // The horizon is the ring PLUS these recordings, as separate labelled spans - never merged
+    // into one envelope over a gap that has no IQ in it.
+    let iq = &list["iq_available"];
+    assert_eq!(iq["horizon"], json!("iq-ring + recordings"), "{iq}");
+    assert_eq!(iq["ring"]["enabled"], json!(true), "{iq}");
+    assert!(
+        iq["ring"]["t0"].is_f64() && iq["ring"]["t1"].is_f64(),
+        "{iq}"
+    );
+    assert!(iq.get("t0").is_none(), "no envelope over the gaps: {iq}");
+    let spans = iq["spans"].as_array().expect("spans");
+    let mine = spans
+        .iter()
+        .find(|s| s["recording"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("{id} has no span: {iq}"));
+    assert_eq!(mine["source"], json!("recording"), "{mine}");
+    assert_eq!(mine["t0_ns"], r["t0_ns"], "{mine}");
+    assert_eq!(mine["span_s"], json!(0.1), "{mine}");
+    assert_eq!(
+        spans
+            .iter()
+            .filter(|s| s["source"] == json!("ring"))
+            .count(),
+        1,
+        "{iq}"
+    );
+    // Spans are oldest first, on the one shared time axis, whatever their source.
+    let mut ordered: Vec<i64> = spans.iter().map(|s| s["t0_ns"].as_i64().unwrap()).collect();
+    let given = ordered.clone();
+    ordered.sort_unstable();
+    assert_eq!(given, ordered, "{iq}");
+
+    // A kind filter narrows the query, not just the page: no audio has been recorded here.
+    let (st, none) = get(addr, "/api/recordings?kind=audio");
+    assert_eq!(st, 200, "{none}");
+    assert_eq!(none["matched"], json!(0), "{none}");
+    assert!(none["recordings"].as_array().unwrap().is_empty(), "{none}");
+    assert!(
+        none["iq_available"]["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["source"] == json!("ring")),
+        "{none}"
+    );
+    // The window is an overlap test: a window ending a second before the clip starts excludes
+    // it. (A second, not zero: `t0`/`t1` are Unix SECONDS, and an f64 near today's epoch resolves
+    // only ~240 ns, so a boundary given in seconds is not exact to the sample - as the clip
+    // route's own `{t0, t1}` form documents.)
+    let before = format!("/api/recordings?t1={}", r["t0"].as_f64().unwrap() - 1.0);
+    let (st, v) = get(addr, &before);
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        !v["recordings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"].as_str() == Some(id)),
+        "{v}"
+    );
+    // A page smaller than the catalogue says what it left out.
+    let (st, page) = get(addr, "/api/recordings?limit=1");
+    assert_eq!(st, 200, "{page}");
+    assert_eq!(page["count"], json!(1), "{page}");
+    assert_eq!(
+        page["omitted"].as_u64(),
+        Some(page["matched"].as_u64().unwrap() - 1),
+        "{page}"
+    );
+
+    // HONESTY: a partially written file is listed, and is NOT available. Truncating the data
+    // file is exactly what an interrupted recording leaves behind.
+    let data_path = r["data_path"].as_str().unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(data_path)
+        .unwrap()
+        .set_len(n) // half the bytes: 1 of the 2 per sample
+        .unwrap();
+    let (st, after) = get(addr, "/api/recordings");
+    assert_eq!(st, 200, "{after}");
+    let e = find(&after, id);
+    assert_eq!(e["state"], json!("partial"), "{e}");
+    assert_eq!(e["available"], json!(false), "{e}");
+    assert_eq!(e["bytes_on_disk"].as_u64(), Some(n), "{e}");
+    assert_eq!(e["size_bytes"].as_u64(), Some(2 * n), "{e}");
+    assert!(
+        e["detail"].as_str().unwrap().contains("partially written"),
+        "{e}"
+    );
+    assert!(
+        !after["iq_available"]["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["recording"].as_str() == Some(id)),
+        "a truncated recording must not extend the audio horizon: {after}"
+    );
+
+    // ...and a file that is gone is `missing`, never a silently available row.
+    std::fs::remove_file(data_path).unwrap();
+    let (st, gone) = get(addr, "/api/recordings");
+    assert_eq!(st, 200, "{gone}");
+    let e = find(&gone, id);
+    assert_eq!(e["state"], json!("missing"), "{e}");
+    assert_eq!(e["available"], json!(false), "{e}");
+    assert!(e["bytes_on_disk"].is_null(), "{e}");
+    assert_eq!(e["meta_present"], json!(true), "{e}");
+    assert!(e["detail"].as_str().unwrap().contains("not on disk"), "{e}");
+
+    for q in [
+        "bogus=1",
+        "limit=0",
+        "limit=1001",
+        "limit=x",
+        "t0=abc",
+        "t0=-5",
+        "t0=5&t1=4",
+        "kind=video",
+        "kind=iq",
+    ] {
+        let (st, v) = get(addr, &format!("/api/recordings?{q}"));
+        assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{q}: {v}");
+    }
+    let (st, _) = post(addr, "/api/recordings", "{}");
     assert_eq!(st, 405);
 
     stop_server(serving);
@@ -8521,6 +8708,8 @@ fn time_law_routes(now: f64, emitter: Option<&str>, selection: Option<&str>) -> 
         "/api/scheduler/arms",
         "/api/scheduler/leases",
         "/api/datasets",
+        // T-469: the persisted IQ recordings that extend the audio horizon past the ring
+        "/api/recordings",
         "/api/captures",
         "/api/recipes",
         "/api/pipelines",

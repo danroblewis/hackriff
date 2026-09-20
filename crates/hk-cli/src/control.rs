@@ -418,3 +418,44 @@ impl OutputControl for PipelineOutputs {
         self.0.file(id, name).map_err(output_failure)
     }
 }
+
+/// The persisted IQ recordings catalogue (T-469) over the run's database and data directory —
+/// the other half of the audio horizon the IQ ring answers for.
+///
+/// The repository is opened **fresh per call**, like [`PipelineDatasets`] and
+/// `hk_pipeline::iqbuffer::IqBufferService`'s own `Recording` writer: the listing is an
+/// occasional read, and borrowing the run's handle would put a listing on the ingest path.
+pub struct PipelineRecordings {
+    db_path: PathBuf,
+    data_dir: PathBuf,
+}
+
+impl PipelineRecordings {
+    /// `data_dir` is the run's data directory: what every `Recording`'s `meta_uri`/`data_uri` is
+    /// relative to, and where `hackriff.db` lives.
+    pub fn new(db_path: PathBuf, data_dir: PathBuf) -> Self {
+        Self { db_path, data_dir }
+    }
+}
+
+impl hk_api::RecordingCatalog for PipelineRecordings {
+    fn list(
+        &self,
+        query: &hk_store::recordings::RecordingsQuery,
+    ) -> Result<hk_store::recordings::RecordingsCatalogue, hk_api::RecordingsFailure> {
+        let fail = |status: u16, code: &str, message: String| hk_api::RecordingsFailure {
+            status,
+            code: code.into(),
+            message,
+        };
+        let repo = hk_model::Repository::open(&self.db_path).map_err(|e| {
+            fail(
+                500,
+                "failed",
+                format!("opening the recordings database: {e}"),
+            )
+        })?;
+        hk_store::recordings::catalogue(&repo, &self.data_dir, query)
+            .map_err(|e| fail(500, "failed", format!("listing recordings: {e}")))
+    }
+}

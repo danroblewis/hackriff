@@ -129,6 +129,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     // coarse-zoom event aggregate that a tile deliberately does not carry (docs/16 §5.3)
     ("GET", "/api/tiles"),
     ("GET", "/api/tiles/events"),
+    // T-469: the persisted IQ recordings that extend the audio horizon past the IQ ring
+    ("GET", "/api/recordings"),
     ("GET", "/api/status"),
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
@@ -355,6 +357,10 @@ pub struct ApiState {
     /// T-205: labelled-capture dataset export for `/api/datasets*` ([`crate::datasets`]); `None`
     /// answers 503.
     pub datasets: Option<Arc<dyn crate::datasets::DatasetControl>>,
+    /// T-469: the persisted IQ recordings behind `GET /api/recordings`
+    /// ([`crate::recordings`]) - the half of the audio horizon the IQ ring is not. `None`
+    /// answers 503.
+    pub recordings: Option<Arc<dyn crate::recordings::RecordingCatalog>>,
     /// T-166: the region watch behind `GET /api/selections/{id}/watch`
     /// ([`crate::selections::WatchControl`]); `None` answers 503.
     pub watch: Option<Arc<dyn crate::selections::WatchControl>>,
@@ -942,6 +948,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::analyze::route(state, &ctl)) // T-190
         .or_else(|| crate::iqbuffer::route(state, &ctl)) // T-157
         .or_else(|| crate::datasets::route(state, &ctl)) // T-205
+        .or_else(|| crate::recordings::route(state, &ctl)) // T-469
         // Decoder workbench (ADR-0011 §7): one line per owning task, pre-added by T-085.
         .or_else(|| crate::recipes::route(state, &ctl)) // T-088
         .or_else(|| crate::inspector::route(state, &ctl)) // T-089
