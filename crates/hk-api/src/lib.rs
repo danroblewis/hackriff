@@ -69,7 +69,7 @@ pub use hk_stream as stream;
 pub use tcp::{StreamServer, StreamServerConfig, StreamServerStats};
 
 pub use auth::{Token, default_token_path};
-pub use bridge::{StreamInfo, StreamRegistry};
+pub use bridge::{FINISHED_LINGER, MAX_STREAMS, StreamInfo, StreamRegistry};
 pub use control::{
     AuditLog, CaptureStatus, DisplayLimits, DisplayState, DisplayUpdate, RecordingState,
     RunControl, RunState,

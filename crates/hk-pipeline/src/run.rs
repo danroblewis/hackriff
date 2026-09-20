@@ -1379,7 +1379,14 @@ struct Finished {
 
 /// Joins a segment's threads. Returns the capture thread's error, if it ended on one — the one
 /// failure the supervisor treats as "the front end stopped delivering" (T-508).
-fn join_workers(workers: &mut Vec<Worker>, errors: &mut Vec<String>) -> Option<String> {
+fn join_workers(
+    workers: &mut Vec<Worker>,
+    errors: &mut Vec<String>,
+    stopping: bool,
+) -> Option<String> {
+    if stopping {
+        report_stragglers(workers);
+    }
     let mut capture = None;
     for (name, join) in workers.drain(..) {
         let failed = match join.join() {
@@ -1399,6 +1406,41 @@ fn join_workers(workers: &mut Vec<Worker>, errors: &mut Vec<String>) -> Option<S
 
 /// How long a segment that failed to start may take to wind down what it did start.
 const SEGMENT_JOIN_BOUND: Duration = Duration::from_secs(10);
+
+/// How long [`join_workers`] waits before naming the threads it is still waiting for (T-531).
+const STRAGGLER_REPORT_AFTER: Duration = Duration::from_secs(3);
+
+/// Names, once, the workers that have not finished after [`STRAGGLER_REPORT_AFTER`].
+///
+/// Only on a **stop**: a segment ending for a re-plumb legitimately waits on a slow step (opening
+/// a multi-gigabyte IQ ring, for one), and that is not the thing this is looking for.
+///
+/// The join below is unbounded on purpose — every one of these threads owns state the run is about
+/// to close, so abandoning one to close the stores underneath it is worse than waiting. But an
+/// unbounded wait with nothing to show for it is how a 78-second SIGTERM (T-525) became a mystery:
+/// the process sat there and no one could say which thread was not observing the stop. This costs
+/// nothing when the drain is prompt (it returns as soon as they are all finished, which is the
+/// wait the join would have done anyway) and says the name out loud when it is not.
+fn report_stragglers(workers: &[Worker]) {
+    let deadline = Instant::now() + STRAGGLER_REPORT_AFTER;
+    while Instant::now() < deadline {
+        if workers.iter().all(|(_, j)| j.is_finished()) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let left: Vec<&str> = workers
+        .iter()
+        .filter(|(_, j)| !j.is_finished())
+        .map(|(name, _)| *name)
+        .collect();
+    if !left.is_empty() {
+        eprintln!(
+            "hk-pipeline: still waiting after {STRAGGLER_REPORT_AFTER:?} for: {}",
+            left.join(", ")
+        );
+    }
+}
 
 /// [`join_workers`] with a bound: a thread still running after `bound` is left behind (and named
 /// in `errors`) rather than holding up a recovery for ever.
@@ -1456,7 +1498,11 @@ fn supervise(sup: &Supervisor, mut workers: Vec<Worker>) -> Finished {
     let c = &sup.common;
     let mut errors = Vec::new();
     loop {
-        let capture_failed = join_workers(&mut workers, &mut errors);
+        let capture_failed = join_workers(
+            &mut workers,
+            &mut errors,
+            c.user_stop.load(Ordering::SeqCst),
+        );
         let mut st = sup.lock();
         if get(&c.counters.source.samples) > st.samples_at_start {
             st.last_good = (st.window, st.class);

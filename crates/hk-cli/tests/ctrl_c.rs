@@ -215,3 +215,68 @@ fn hackriffd_stops_gracefully_on_ctrl_c() {
     assert_graceful(&out, &data);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// T-531: **shutdown is prompt and bounded.** A 40-minute live sweep took over 78 s to exit on
+/// SIGTERM (T-525), which is an operational fault and not untidiness: `ops/stage.sh` restarts the
+/// server on a failed health check and waits 10 s before `SIGKILL`, so a slow exit overlaps two
+/// servers on one device, and only one process can open the HackRF.
+///
+/// The assertion is the promise a supervisor needs: **the process is gone within
+/// [`hk_cli::signal::SHUTDOWN_BOUND`]** of the signal, on the graceful path if it can and on the
+/// armed deadline if it cannot. It is deliberately *not* "the drain finished in X ms" — a machine
+/// with four agents building on it makes that number meaningless — and it is measured from the
+/// signal, not from the spawn.
+#[test]
+fn hk_serve_exits_within_the_shutdown_bound_on_sigterm() {
+    let dir = scratch("serve-sigterm");
+    let meta = recording(&dir.join("src"));
+    let data = dir.join("data");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hk"))
+        .arg("serve")
+        .arg("--replay")
+        .arg(&meta)
+        .arg("--loop")
+        .arg("--data-dir")
+        .arg(&data)
+        .arg("--bind")
+        .arg("127.0.0.1:0")
+        .env("HK_TOKEN", "t531-serve-sigterm-token-0123456789")
+        .env("HK_IQ_BUFFER_MAX", "16MiB")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = collect(child.stdout.take().unwrap());
+    let stderr = collect(child.stderr.take().unwrap());
+    wait_until(Duration::from_secs(60), "the server to listen", || {
+        stderr.lock().unwrap().contains("listening on")
+    });
+    // Long enough that detection, the history writer and the IQ buffer are all doing work, so the
+    // signal lands mid-drain rather than on an idle run.
+    std::thread::sleep(Duration::from_secs(4));
+
+    let t0 = Instant::now();
+    // SAFETY: sends SIGTERM to our own child process.
+    let rc = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(rc, 0, "kill(SIGTERM)");
+    // The margin is process teardown and a loaded machine's scheduling, not slack in the bound.
+    let limit = hk_cli::signal::SHUTDOWN_BOUND + Duration::from_secs(4);
+    let status = wait_exit(&mut child, limit);
+    let elapsed = t0.elapsed();
+    std::thread::sleep(Duration::from_millis(100));
+    let (out, err) = (
+        stdout.lock().unwrap().clone(),
+        stderr.lock().unwrap().clone(),
+    );
+    eprintln!("[T-531] hk serve exited {elapsed:?} after SIGTERM");
+    assert!(
+        elapsed <= limit,
+        "SIGTERM to exit took {elapsed:?}, over {limit:?}\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        status.success(),
+        "{status:?}\nstdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(err.contains("stopping"), "{err}");
+    let _ = std::fs::remove_dir_all(dir);
+}

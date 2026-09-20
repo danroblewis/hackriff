@@ -120,6 +120,8 @@ pub struct Serving {
     pub source_control: Option<Arc<dyn SourceControl>>,
     /// The run's data directory.
     pub data_dir: PathBuf,
+    /// The streams this server offers (T-531: withdrawn on shutdown, see [`run`]).
+    pub streams: StreamRegistry,
 }
 
 /// Starts the pipeline over the source and the API server.
@@ -177,6 +179,7 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
                 live_control: lp.live_control,
                 source_control: Some(lp.control),
                 data_dir,
+                streams: registry,
             })
         }
         ServeSource::Replay {
@@ -241,6 +244,7 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
                 live_control: None,
                 source_control: None,
                 data_dir,
+                streams: registry,
             })
         }
     }
@@ -252,8 +256,32 @@ pub fn run(opts: ServeOptions) -> anyhow::Result<()> {
         server,
         handle,
         source_control,
+        streams,
         ..
     } = start(&opts)?;
+    // T-531: withdraw the offered streams as soon as a shutdown signal arrives, on a thread of its
+    // own because `handle.wait()` below is what the drain happens inside.
+    //
+    // Without it, a stop leaves every bridged connection waiting on nothing: the run stops, every
+    // publisher finishes, and each connection settles into the `CARRY_OVER_GRACE` wait for the
+    // next offer (T-417/T-425) — a wait that is right between windows and wrong for ever when the
+    // producer is finished for good. Withdrawing says "this stream is over", which
+    // `bridge::watch_peer` already answers by ending the connection at once.
+    //
+    // **Reasoning, not a measurement.** T-525's 78-second SIGTERM was on a live 40-minute run with
+    // the demo UI open, and 60 s of grace plus a drain is close enough to 78 s to be worth saying;
+    // but it did not reproduce on the mock (0.86–1.91 s there, before and after alike), so this is
+    // a wait that should not exist being removed, not a demonstrated cure. What actually bounds
+    // shutdown is `signal::SHUTDOWN_BOUND`.
+    {
+        let streams = streams.clone();
+        let _ = std::thread::Builder::new()
+            .name("hk-serve-withdraw".into())
+            .spawn(move || {
+                signal::wait_for_signal();
+                streams.clear();
+            });
+    }
     let watch = signal::stop_on_signal(handle.stopper());
     let summary = handle.wait()?;
     drop(watch);

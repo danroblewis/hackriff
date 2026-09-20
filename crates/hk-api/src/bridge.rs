@@ -120,6 +120,19 @@ struct Entry {
     header: StreamHeader,
     handle: PublisherHandle,
     generation: u64,
+    /// When this offer was registered — what [`StreamRegistry::reap`] ages a finished stream by.
+    offered: Instant,
+}
+
+impl Entry {
+    /// No publisher is going to publish on this stream again and nobody is attached to it: it is
+    /// over, and only [`StreamRegistry::linger`] still holds the id open for a carry-over.
+    ///
+    /// A *live* publisher with no consumers is not spent — the spectrum stream with no browser
+    /// open is exactly that — so both halves are required.
+    fn spent(&self) -> bool {
+        self.handle.finished() && self.handle.open_consumers() == 0
+    }
 }
 
 /// The publisher currently offered under a `stream_id`, and **which** offer it is.
@@ -136,20 +149,91 @@ pub struct Offer {
     pub generation: u64,
 }
 
+/// How long a stream whose publisher has finished, with nobody attached, is still offered under
+/// its id before the registry withdraws it (T-531).
+///
+/// It is exactly [`CARRY_OVER_GRACE`] and must not be shorter: the grace is how long
+/// [`watch_peer`] will wait in a settle gap for the producer's next offer, and withdrawing the id
+/// inside that window would end a connection that was still legitimately waiting. At the grace the
+/// waiter gives up of its own accord, so from then on the entry can serve nobody — a new
+/// subscriber is refused ([`StreamError::Finished`]) and no consumer is left to carry over.
+pub const FINISHED_LINGER: Duration = CARRY_OVER_GRACE;
+
+/// Hard ceiling on registered streams, a fail-closed backstop under [`FINISHED_LINGER`] (T-531).
+///
+/// The linger bounds the registry at *offer rate × linger*, which is the real bound; this only
+/// stops a pathological rate from making that number large. Over the cap the **oldest spent**
+/// entries go first, and a live publisher is never evicted: live streams are bounded by the
+/// things that make them (one spectrum, one presence, one per plugin, one per recipe output, one
+/// per chain slot), so an over-cap registry is always over-cap in spent entries.
+pub const MAX_STREAMS: usize = 256;
+
 /// The streams a server offers, by `stream_id`. Registering an id again replaces the entry (e.g.
 /// a new publisher per replay pass, or the next window after a retune).
-#[derive(Clone, Default)]
+///
+/// # A registration has a lifetime (T-531)
+/// A stream is offered from the moment a publisher is registered under its id until that
+/// publisher has **finished**, has **no open consumer**, and has not been re-offered for
+/// [`FINISHED_LINGER`]. Then the registry withdraws it, exactly as a producer's
+/// `PipelineConfig::stream_unsink` would.
+///
+/// Without that, one producer shape leaked the whole run: `hk-pipeline`'s FSK chains publish each
+/// emitter's bursts on `bits/fsk-bursts/<emitter>` by creating a publisher, registering it,
+/// writing the bursts and finishing it — all inside one call. The entry then sat in the map for
+/// ever, listed by `/api/streams`, attachable by nobody (subscribing to a finished publisher is
+/// [`StreamError::Finished`]). A 40-minute sweep across 6 GHz met ~1300 emitters and the discovery
+/// document grew to 659 KB of them (T-525). That is the accumulator the inventory invariants
+/// reject elsewhere — "no unbounded seen-count accumulators; candidates decay and expire when a
+/// region goes quiet" — and the same rule applies here: the listing is **time-scoped**, it is what
+/// this server is offering *now*, not everything it ever offered.
+///
+/// Nothing that can still serve a consumer is touched: a publisher between windows (the retune
+/// carry-over, T-417/T-425) has not finished its id, only its publisher, and is re-offered long
+/// inside the linger; a live publisher with no consumers is not spent at all.
+#[derive(Clone)]
 pub struct StreamRegistry {
     inner: Arc<RwLock<BTreeMap<String, Entry>>>,
     /// Generation counter and the signal that it moved (T-425): a consumer in a settle gap waits
     /// on this instead of polling, so it is re-subscribed before the next window's first record.
     offers: Arc<(Mutex<u64>, Condvar)>,
+    /// [`FINISHED_LINGER`], overridable by [`StreamRegistry::with_linger`] so a test can age a
+    /// spent entry without sleeping a minute.
+    linger: Duration,
+}
+
+impl Default for StreamRegistry {
+    fn default() -> Self {
+        Self {
+            inner: Arc::default(),
+            offers: Arc::default(),
+            linger: FINISHED_LINGER,
+        }
+    }
 }
 
 impl StreamRegistry {
     /// An empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// [`StreamRegistry::new`] with a different [`FINISHED_LINGER`] (tests).
+    pub fn with_linger(linger: Duration) -> Self {
+        Self {
+            linger,
+            ..Self::default()
+        }
+    }
+
+    /// Withdraws every spent entry older than the linger, then, if the map is still over
+    /// [`MAX_STREAMS`], the oldest spent entries until it is not (see the [type docs](Self)).
+    ///
+    /// Called where the map can grow ([`Self::register`]) and where it is read out
+    /// ([`Self::listing`]), so no timer thread is needed and a quiet run still answers a listing
+    /// with what it is offering now. The scan is over a map the same rule keeps small.
+    fn reap(&self) {
+        let mut map = self.inner.write().unwrap_or_else(|p| p.into_inner());
+        reap_locked(&mut map, self.linger);
     }
 
     /// Offers `handle` under `header.stream_id`.
@@ -166,11 +250,40 @@ impl StreamRegistry {
                 header: header.clone(),
                 handle,
                 generation: *generation,
+                offered: Instant::now(),
             },
         );
+        // After the insert and under the same lock: the id being registered is never transiently
+        // absent, so a consumer carrying over cannot read the map between a withdrawal and the
+        // offer that replaces it.
+        reap_locked(&mut map, self.linger);
         drop(map);
         drop(generation);
         cv.notify_all();
+    }
+
+    /// Streams currently offered (after a reap).
+    pub fn len(&self) -> usize {
+        self.reap();
+        self.inner.read().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    /// No stream is offered.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Stops offering **every** stream: the run behind them is over (T-531).
+    ///
+    /// A bridged consumer whose publisher finishes waits [`CARRY_OVER_GRACE`] for the next offer,
+    /// because between windows is the normal case (T-417). On a shutdown there is no next offer
+    /// and nothing said so, so every attached browser sat out the full grace while the process
+    /// tried to exit under it. This is the contract's own answer — *"a producer that is done
+    /// withdraws the id and the connection ends at once"* — applied to the producer being done
+    /// for good.
+    pub fn clear(&self) {
+        let mut map = self.inner.write().unwrap_or_else(|p| p.into_inner());
+        map.clear();
     }
 
     /// Stops offering `stream_id`.
@@ -233,8 +346,10 @@ impl StreamRegistry {
         }
     }
 
-    /// The `/api/streams` JSON: metadata only.
+    /// The `/api/streams` JSON: metadata only, and only what is offered now (see the
+    /// [type docs](Self) for the lifetime a registration has).
     pub fn listing(&self) -> Value {
+        self.reap();
         let map = self.inner.read().unwrap_or_else(|p| p.into_inner());
         let streams: Vec<Value> = map
             .values()
@@ -261,6 +376,25 @@ impl StreamRegistry {
             })
             .collect();
         json!({ "streams": streams })
+    }
+}
+
+/// [`StreamRegistry::reap`]'s body, with the map already locked.
+fn reap_locked(map: &mut BTreeMap<String, Entry>, linger: Duration) {
+    let now = Instant::now();
+    map.retain(|_, e| !(e.spent() && now.duration_since(e.offered) >= linger));
+    if map.len() <= MAX_STREAMS {
+        return;
+    }
+    let mut spent: Vec<(Instant, String)> = map
+        .iter()
+        .filter(|(_, e)| e.spent())
+        .map(|(id, e)| (e.offered, id.clone()))
+        .collect();
+    spent.sort_unstable();
+    let over = map.len().saturating_sub(MAX_STREAMS);
+    for (_, id) in spent.into_iter().take(over) {
+        map.remove(&id);
     }
 }
 

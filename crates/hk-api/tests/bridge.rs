@@ -570,3 +570,155 @@ fn slow_browser_is_dropped_while_the_producer_keeps_rate() {
     );
     assert!(records >= N / 2, "the reading browser kept receiving");
 }
+
+// ---------------------------------------------------------------------------
+// T-531: a registration has a lifetime
+// ---------------------------------------------------------------------------
+
+fn bits_header(id: &str) -> StreamHeader {
+    let mut h = StreamHeader::new(
+        id,
+        StreamKind::Bits,
+        ContentClass::Unrestricted,
+        "hk-api-test",
+    );
+    h.datatype = Some("ru8".into());
+    h.center_hz = Some(915e6);
+    h.bandwidth_hz = Some(50e3);
+    h
+}
+
+/// The `publish_bits` shape: one publisher per emitter, created, registered, written and finished
+/// inside one call, so nothing is ever attached to it. Before T-531 each one stayed in the map for
+/// the life of the run — 1299 entries / 659 KB after 40 minutes of sweeping (T-525). The registry
+/// must instead hold only what it is offering now.
+#[test]
+fn a_long_sweep_of_per_emitter_streams_does_not_accumulate() {
+    const EMITTERS: u32 = 4000;
+    let linger = Duration::from_millis(30);
+    let registry = StreamRegistry::with_linger(linger);
+    let mut peak = 0;
+    for i in 0..EMITTERS {
+        let header = bits_header(&format!("bits/fsk-bursts/{i}"));
+        let publisher = Publisher::new(header.clone(), PublisherConfig::default()).unwrap();
+        registry.register(&header, publisher.handle());
+        publisher.finish(); // exactly what the FSK chain does: the stream is over on return
+        peak = peak.max(registry.len());
+        if i % 200 == 0 {
+            thread::sleep(linger + Duration::from_millis(5));
+        }
+    }
+    thread::sleep(linger + Duration::from_millis(5));
+    let left = registry.len();
+    eprintln!("[T-531] {EMITTERS} emitters: peak {peak} entries, {left} left");
+    assert!(
+        peak <= 250,
+        "the registry grew with the sweep: {peak} entries for {EMITTERS} emitters"
+    );
+    assert!(left <= 1, "spent streams outlived the linger: {left}");
+    let listed = registry.listing()["streams"].as_array().unwrap().len();
+    assert_eq!(
+        listed, left,
+        "the listing is the registry, not a capped view"
+    );
+}
+
+/// The cap is the fail-closed backstop under the linger: even with the linger far in the future,
+/// the map does not grow past [`MAX_STREAMS`]. It is not the fix (the linger is) — it is what
+/// keeps a pathological offer rate from making the linger's bound large.
+#[test]
+fn the_registry_is_capped_even_inside_the_linger() {
+    let registry = StreamRegistry::with_linger(Duration::from_secs(3600));
+    for i in 0..(hk_api::MAX_STREAMS * 4) {
+        let header = bits_header(&format!("bits/fsk-bursts/{i}"));
+        let publisher = Publisher::new(header.clone(), PublisherConfig::default()).unwrap();
+        registry.register(&header, publisher.handle());
+        publisher.finish();
+    }
+    assert!(
+        registry.len() <= hk_api::MAX_STREAMS,
+        "over the cap: {}",
+        registry.len()
+    );
+}
+
+/// Only *spent* entries are reaped. A publisher that is still live with no browser attached — the
+/// spectrum stream on a server nobody has open — is idle, not over, and must stay offered.
+#[test]
+fn a_live_stream_with_no_consumers_is_never_withdrawn() {
+    let registry = StreamRegistry::with_linger(Duration::from_millis(10));
+    let live = Publisher::new(
+        spectrum_header("spectrum/live", ContentClass::Unrestricted, 30.0, 16),
+        PublisherConfig::default(),
+    )
+    .unwrap();
+    registry.register(live.header(), live.handle());
+    let spent_header = bits_header("bits/fsk-bursts/7");
+    let spent = Publisher::new(spent_header.clone(), PublisherConfig::default()).unwrap();
+    registry.register(&spent_header, spent.handle());
+    spent.finish();
+    assert_eq!(registry.len(), 2, "both are offered while the linger holds");
+
+    thread::sleep(Duration::from_millis(20));
+    let ids: Vec<String> = registry.listing()["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["stream_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, vec!["spectrum/live".to_owned()]);
+    assert_eq!(live.handle().open_consumers(), 0, "and nobody was attached");
+}
+
+/// The linger is [`CARRY_OVER_GRACE`], so the retune carry-over (T-417/T-425) is untouched: a
+/// finished publisher whose next offer arrives inside the grace is still there to carry over to,
+/// and the browser sees the new window's header on the same socket.
+#[test]
+fn a_retune_carry_over_is_inside_the_linger() {
+    assert!(
+        hk_api::FINISHED_LINGER >= hk_api::bridge::CARRY_OVER_GRACE,
+        "withdrawing a stream inside the carry-over grace would end a waiting connection"
+    );
+    let registry = StreamRegistry::new();
+    let first = Publisher::new(
+        spectrum_header("spectrum/r", ContentClass::Unrestricted, 60.0, 16),
+        PublisherConfig::default(),
+    )
+    .unwrap();
+    registry.register(first.header(), first.handle());
+    let server = serve(&registry);
+    let mut ws = authed(server.local_addr(), "spectrum/r").unwrap();
+    wait_for("the browser to attach", || {
+        first.handle().open_consumers() == 1
+    });
+    assert_eq!(header_of(&ws.read().unwrap()).stream_id, "spectrum/r");
+    first.finish();
+
+    let mut next = Publisher::new(
+        spectrum_header("spectrum/r", ContentClass::Unrestricted, 30.0, 16),
+        PublisherConfig::default(),
+    )
+    .unwrap();
+    registry.register(next.header(), next.handle());
+    next.publish_binary(BinaryRecord {
+        t: Timestamp::from_unix_nanos(1),
+        sample_index: 0,
+        flags: RecordFlags::empty(),
+        payload: &row(0, 16),
+    })
+    .unwrap();
+    // The second header on the same socket: the id survived its publisher finishing.
+    let mut saw_next_header = false;
+    for _ in 0..8 {
+        if let Ok(m) = ws.read() {
+            if let Message::Text(_) = &m {
+                let h = header_of(&m);
+                if h.sample_rate_hz == Some(30.0) {
+                    saw_next_header = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(saw_next_header, "the connection did not carry over");
+}

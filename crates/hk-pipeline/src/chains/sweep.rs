@@ -318,6 +318,10 @@ fn write_characterisation(shared: &Shared, center_hz: f64, bandwidth_hz: f64, te
     let c = &shared.counters.chains;
     let deadline = Instant::now() + EMITTER_WAIT;
     loop {
+        // T-531: same rule as `stored_detection` — the row this waits for is written by a thread
+        // that is itself stopping, so once the run is stopping the wait is shutdown latency and
+        // nothing else.
+        let stopping = shared.stop.load(std::sync::atomic::Ordering::SeqCst);
         let found = {
             let repo = shared.repo();
             crate::refine::emitter_for_channel(&repo, center_hz, bandwidth_hz).ok()
@@ -355,7 +359,7 @@ fn write_characterisation(shared: &Shared, center_hz: f64, bandwidth_hz: f64, te
             }
             return;
         }
-        if Instant::now() >= deadline {
+        if stopping || Instant::now() >= deadline {
             inc(&c.sweep_no_emitter);
             return;
         }
