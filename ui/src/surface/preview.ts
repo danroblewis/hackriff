@@ -45,7 +45,7 @@ import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } fr
 import { TileCache, type Viewport } from "./tilecache";
 import {
   FALLBACK_RANGE, FALLBACK_RANGE_SOURCE,
-  type DisplayRange, type PaneRect, type PaneReport, type PaneView, type TilePlanes,
+  type DisplayRange, type PaneRect, type PaneReport, type PaneView, type RangeMode, type TilePlanes,
 } from "./surface";
 import { SurfaceView, type SurfaceFrame } from "./view";
 
@@ -774,9 +774,21 @@ export class SurfacePreview {
    * colour, which is why it is a deliberate press rather than a side effect of navigating.
    */
   setAutoScale(on: boolean): DisplayRange {
+    return this.setRangeMode(on ? "auto" : "anchored");
+  }
+
+  /**
+   * Put the surface on one of the three ways of deciding the range (T-528).
+   *
+   * Going back to `anchored` returns to **the anchor the probe measured**, not to wherever tracking
+   * happened to leave the numbers: that is the one range in the set with a stated provenance a
+   * viewer can check, so it is what "off" means here even though `Surface.setRangeMode` on its own
+   * would hold the tracked pair.
+   */
+  setRangeMode(mode: RangeMode): DisplayRange {
     const s = this.view.surface;
-    if (on) s.setAutoScale(true);
-    else s.setScale(this.anchor.lo, this.anchor.hi, this.anchor.source);
+    if (mode === "anchored") s.setScale(this.anchor.lo, this.anchor.hi, this.anchor.source);
+    else s.setRangeMode(mode);
     return s.range;
   }
 

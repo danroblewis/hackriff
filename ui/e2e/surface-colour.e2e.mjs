@@ -534,6 +534,51 @@ test("T-470: zooming one viewport does not re-colour another showing the same da
     `after the round trip the untouched viewport differs from its first frame by ${back.pixels} of ` +
     `${back.total} pixels (worst channel sum ${back.worst}): the anchor is not a fixed point`);
 
+  // ——— 5. T-528: the viewport-dynamic mode, in the product ———
+  //
+  // The unit tier (`ui/test/surface-vscale.test.ts`) pins the arithmetic — which cells are measured,
+  // which are excluded, and that the stated pair is the pair the uniforms carried. What it cannot
+  // show is that the control **exists on the page and repaints it**, which is T-450's standing
+  // reason for this tier. So: press it, read what the page says it measured, and measure what it did
+  // to the pixels of the very viewport the anchored round trip just returned to byte-for-byte.
+  const anchoredRange = await rangeText(page);
+  await page.click(`document.querySelector('[data-slot="viewport-scale"]')`);
+  await page.frames(6);
+  await waitResident(page);
+  const viewportSettled = await settle(page, panes, { timeoutMs: 25000 });
+  const vsLegend = await page.$text('.sp-legend-row[data-mark="range"]');
+  assert.match(vsLegend, /viewport-dynamic/i, "the viewport-dynamic mode is not reachable from the page");
+  assert.match(vsLegend, /shadows excluded/,
+    "the mode does not state what its measurement left out — a scale nobody can check");
+  // The status line is chrome on a 500 ms tick, so this waits for its cadence rather than racing it
+  // — the same correction the anchored round trip below already carries. Waiting on *both* facts
+  // (the mode is named AND the numbers have left the anchor) is what makes it a wait for the
+  // measurement rather than for the press: the first tick after a press legitimately carries the new
+  // mode with the range the frame before it was drawn at.
+  await page.waitFor("the status line to state a viewport-measured range",
+    `(() => { const s = document.querySelector('[data-slot="status"]')?.textContent ?? "";
+       return /viewport-dynamic/.test(s) && !s.includes(${JSON.stringify(anchoredRange)}); })()`,
+    { timeoutMs: 5000 });
+  const viewportRange = await rangeText(page);
+  assert.notEqual(viewportRange, anchoredRange,
+    "the viewport mode stated the anchored range: it measured nothing, or it is not in force");
+  const moved = diff(closed.img, viewportSettled.img, left);
+  t.diagnostic(`T-528 viewport scale: ${anchoredRange} → ${viewportRange}; repainted ` +
+    `${(moved.share * 100).toFixed(1)} % of the viewport the anchored round trip had restored exactly`);
+  assert.ok(moved.share > 0.02,
+    `the viewport-dynamic scale repainted only ${(moved.share * 100).toFixed(2)} % of the viewport, ` +
+    "so it is stating a range it is not drawing with");
+
+  // …and it is a toggle from here too: Auto-contrast off returns to the anchor by its own name.
+  await page.click(`document.querySelector('[data-slot="contrast"]')`);
+  await page.frames(4);
+  assert.match(await page.$text('.sp-legend-row[data-mark="range"]'), /Anchored/);
+  await page.waitFor("the status line to state the anchored range again",
+    `(document.querySelector('[data-slot="status"]')?.textContent ?? "").includes(${JSON.stringify(anchoredRange)})`,
+    { timeoutMs: 5000 });
+  assert.equal(await rangeText(page), anchoredRange,
+    "leaving the viewport mode did not restore the anchor");
+
   await page.shot(path.join(ART, "surface-colour.png"));
   assert.deepEqual(page.requests.filter((r) => /\/api\/control\//.test(r.url)), [],
     "a colour control reached a device route");

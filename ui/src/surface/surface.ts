@@ -56,6 +56,7 @@ import {
 } from "./lattice";
 import { TileCache, type TileEntry, type TileTextures, type Viewport } from "./tilecache";
 import type { TileData } from "./tile";
+import { HEADROOM_DB, MIN_SPAN_DB, ViewportScale } from "./vscale";
 
 /** A pane's pixel rectangle, in **GL convention**: origin at the bottom-left of the drawing buffer. */
 export interface PaneRect { readonly x: number; readonly y: number; readonly w: number; readonly h: number }
@@ -71,6 +72,22 @@ export interface PaneView {
   readonly box: Box;
   /** Whose coverage decides this pane's grey. Default `any` (the union). */
   readonly device?: string;
+  /**
+   * **Does what this viewport shows decide the shared display range?** Default `true`; the minimap
+   * passes `false` (T-528).
+   *
+   * It exists because the minimap is a viewport over the *whole surface*. In the viewport-dynamic
+   * mode that would make "the range of what is on screen" mean "the range of the entire survey" at
+   * all times, and the mode would silently do nothing — the quiet band the user zoomed into would
+   * still be scaled against a carrier 4 GHz away, which is precisely the complaint. The map is
+   * where you see *where the panes are*, not a subject (`view.ts`'s own words for why it is capped
+   * at half the canvas), so it is coloured by the panes' scale rather than deciding it.
+   *
+   * It is read **only** by the viewport mode. `auto` still takes the union over every viewport
+   * including the map, unchanged, because that mode's own claim is about tiles on the canvas and
+   * T-470's browser-tier measurements are calibrated against it.
+   */
+  readonly scales?: boolean;
 }
 
 /** What one pane drew, this frame. `levelF`/`levelT` are §8.5a's "state the level per pane": two
@@ -90,8 +107,19 @@ export interface PaneReport {
 
 const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
 
-/** How the one display range was decided. `anchored` is the default and is zoom-invariant. */
-export type RangeMode = "anchored" | "auto";
+/**
+ * How the one display range was decided. `anchored` is the default and is zoom-invariant.
+ *
+ * - `anchored` — one `(lo, hi)` measured once over the region and held (T-470). The same measured
+ *   dB is the same colour at every zoom, and anything outside the range clips.
+ * - `auto` — the union of the `range_db` **of the tiles on screen**. Cheap, nothing clips, and the
+ *   tile is the granularity: a carrier off screen in a tile that is partly on screen still sets the
+ *   top of the ramp.
+ * - `viewport` — measured from the **observed cells actually inside the viewport** (T-528), shadow
+ *   cells excluded. What a user means by "scale to what I am looking at": a quiet band spreads
+ *   across the ramp instead of sitting in the bottom few percent. See `./vscale.ts`.
+ */
+export type RangeMode = "anchored" | "auto" | "viewport";
 
 /** The display range, and **where it came from** — a range with no provenance is a number a user
  * cannot check. Every surface that states the scale states this whole record. */
@@ -140,6 +168,27 @@ export const FALLBACK_RANGE_SOURCE =
  * show, so in practice the anchored ramp clips neither end while still being a fixed scale.
  */
 export const ANCHOR_SPAN_DB = 60;
+
+/**
+ * The provenance of a [[RangeMode]] `viewport` range (T-528), in its three states.
+ *
+ * It is written here rather than in the legend because it is a claim about a **measurement this
+ * renderer took**, and the one rule the display range has never been allowed to break is that the
+ * number and the account of where it came from travel together. The mode moves the range as the
+ * view moves, so the sentence moves with it: it names the cells it measured and, when it widened a
+ * nearly-flat viewport to [[MIN_SPAN_DB]], says that too — a stretched flat band that did not say
+ * it was stretched would be structure invented out of quantisation.
+ */
+export const VIEWPORT_SOURCE_PENDING =
+  "auto-contrast (viewport): measured from the observed cells on screen, shadows excluded — no frame drawn yet";
+export const VIEWPORT_SOURCE_EMPTY =
+  "auto-contrast (viewport): no observed cell is on screen, so the last measured range is held";
+function viewportSource(blocks: number, r: { lo: number; hi: number }): string {
+  const flat = r.hi - r.lo <= MIN_SPAN_DB + 1e-6;
+  return `auto-contrast (viewport): measured over ${blocks} block${blocks === 1 ? "" : "s"} of observed cells`
+    + ` now on screen (shadows excluded, ±${HEADROOM_DB} dB headroom)`
+    + (flat ? `, widened to the stated ${MIN_SPAN_DB} dB minimum because the viewport is flat` : "");
+}
 
 const VS = `#version 300 es
 precision highp float;
@@ -266,12 +315,30 @@ export class Surface {
   /** The one display range every pane's colour is relative to. */
   lo: number = FALLBACK_RANGE.lo;
   hi: number = FALLBACK_RANGE.hi;
+  /** Which of the three ways [[lo]]/[[hi]] is being decided. `anchored` unless a host opts out. */
+  private mode: RangeMode = "anchored";
   /**
    * **Opt-in** (T-470). On, the range tracks the `range_db` of the tiles currently on screen, so the
    * same measured dB changes colour as the viewport changes — useful as a manual contrast control,
    * wrong as a default. Off (the default) the range is whatever [[setScale]] anchored it to.
+   *
+   * A derived reading of [[mode]] since T-528: it is `true` for `auto` and **false for `viewport`**,
+   * because the tile-`range_db` branch in [[render]] is exactly what the viewport mode replaces.
    */
-  autoScale = false;
+  get autoScale(): boolean { return this.mode === "auto"; }
+  /**
+   * The range this frame's screen asked for, applied at the **start** of the next [[render]].
+   *
+   * Why it is not applied where it is computed. The scale a frame was drawn with is uploaded before
+   * the first quad; a range computed from that same frame's geometry can only be known once every
+   * quad has been resolved. Assigning it at the end of `render` therefore leaves [[lo]]/[[hi]] —
+   * what the legend, the readout and the trace strip's y axis all quote — describing a frame that
+   * has not been drawn yet, which is T-475's rule ("the readout's numbers must be the pixels' own")
+   * broken by one frame. Holding it here instead means [[lo]]/[[hi]] are **always** the pair the
+   * last frame was drawn with, and the geometry the range came from is one frame old rather than
+   * the statement being one frame early. A frame at 60 Hz is not visible; a wrong number is.
+   */
+  private next: { lo: number; hi: number; source: string } | null = null;
   /** Where [[lo]]/[[hi]] came from, so every surface that states the range can state its provenance. */
   rangeSource: string = FALLBACK_RANGE_SOURCE;
   /** The shadow's brightness multiplier (T-526), a per-viewer display preference — set via
@@ -328,7 +395,8 @@ export class Surface {
     if (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) {
       this.lo = lo;
       this.hi = hi;
-      this.autoScale = false;
+      this.mode = "anchored";
+      this.next = null;
       this.rangeSource = source;
     }
   }
@@ -341,14 +409,25 @@ export class Surface {
    * should do. `setScale` is how a caller returns to a stated anchor.
    */
   setAutoScale(on: boolean): void {
-    this.autoScale = on;
-    if (on) this.rangeSource = "auto-contrast: the range of the tiles currently on screen";
+    this.setRangeMode(on ? "auto" : "anchored");
+  }
+
+  /**
+   * Choose how the range is decided (T-528). Like [[setAutoScale]], leaving a tracking mode holds
+   * the range where tracking left it rather than jumping: the picture on screen does not change
+   * under the press, only what will move it next.
+   */
+  setRangeMode(mode: RangeMode): void {
+    this.mode = mode;
+    this.next = null;
+    if (mode === "auto") this.rangeSource = "auto-contrast: the range of the tiles currently on screen";
+    else if (mode === "viewport") this.rangeSource = VIEWPORT_SOURCE_PENDING;
     else this.rangeSource = `held at ${this.lo.toFixed(1)}…${this.hi.toFixed(1)} dBFS, where auto-contrast left it`;
   }
 
-  /** The one display range, with its provenance. What a legend states, in either mode. */
+  /** The one display range, with its provenance. What a legend states, in every mode. */
   get range(): DisplayRange {
-    return { lo: this.lo, hi: this.hi, mode: this.autoScale ? "auto" : "anchored", source: this.rangeSource };
+    return { lo: this.lo, hi: this.hi, mode: this.mode, source: this.rangeSource };
   }
 
   /** Set the shadow's brightness multiplier (clamped by the caller — `./shadow-gain.ts`'s
@@ -365,6 +444,15 @@ export class Surface {
    */
   render(panes: readonly PaneView[]): PaneReport[] {
     const gl = this.gl;
+    // **Apply the range the previous frame asked for, before a single quad is drawn.** See
+    // [[next]]: this is what makes `lo`/`hi` the pair the frame really was drawn with, for the
+    // legend, the readout and the trace strip that all read them after `render` returns.
+    if (this.next) {
+      this.lo = this.next.lo;
+      this.hi = this.next.hi;
+      this.rangeSource = this.next.source;
+      this.next = null;
+    }
     this.cache.beginFrame();
     this.frames++;
     this.drawCalls = 0;
@@ -386,7 +474,14 @@ export class Surface {
     // the surface. See TileCache.setViewports.
     const viewports: Viewport[] = [];
     let lo = Infinity, hi = -Infinity;
+    // T-528's accumulator, built fresh every frame and discarded with it — nothing about the range
+    // may outlive the geometry it was measured over. `null` in every other mode, so the per-cell
+    // path costs exactly nothing unless the user asked for it.
+    const vscale = this.mode === "viewport" ? new ViewportScale() : null;
     for (const pane of panes) {
+      // The map is a viewport over the whole surface, so it may not be the thing the scale is
+      // measured over. See [[PaneView.scales]].
+      const measure = vscale && pane.scales !== false ? vscale : null;
       const r = pane.rect;
       if (!(r.w > 0) || !(r.h > 0)) continue;
       gl.viewport(r.x, r.y, r.w, r.h);
@@ -405,7 +500,12 @@ export class Surface {
       for (const a of addrs) {
         const res = this.cache.acquire(a);
         if (res.kind === "resident") {
-          this.drawRegion(pane, extentOf(this.lattice, a), res.entry, "tile", r);
+          const region = extentOf(this.lattice, a);
+          this.drawRegion(pane, region, res.entry, "tile", r);
+          // The cells of this tile that are inside this pane's box — the measurement the viewport
+          // mode is a scale over. A resident tile draws its own extent, so the texture's extent and
+          // the region are the same box.
+          measure?.add(res.entry.data, region, region, pane.box);
           // **The one read of a tile's own range, and it is inside the opt-in branch** (T-470). What
           // is on screen decides the scale only when the user has asked for that; otherwise the
           // scale is anchored and this loop cannot touch it. `ui/test/surface-range.test.ts` asserts
@@ -418,7 +518,16 @@ export class Surface {
           continue;
         }
         const stand = this.fallbackFor(a);
-        if (stand) { this.drawRegion(pane, extentOf(this.lattice, a), stand, "fallback", r); fallbacks++; }
+        if (stand) {
+          const region = extentOf(this.lattice, a);
+          this.drawRegion(pane, region, stand, "fallback", r);
+          // A coarse stand-in's cells ARE what is on the screen here, so they count — but the
+          // texture is the ancestor's, so the visible sub-rect is mapped through the ancestor's own
+          // extent, not the child's. Getting that pair the wrong way round would read a different
+          // corner of the ancestor than the one being displayed.
+          measure?.add(stand.data, extentOf(this.lattice, stand.addr), region, pane.box);
+          fallbacks++;
+        }
         // **`pending` and `refused` are drawn apart** (T-499). A place with no usable answer is not
         // waiting for one — the route refused it, or the server is unreachable and this client is
         // backing off — and painting it as PENDING is a progress bar that never finishes. Neither
@@ -444,8 +553,23 @@ export class Surface {
       // two strengths on one screen (T-397's honesty problem, one layer up). This is the **opt-in**
       // contrast control since T-470 — as a default it is the defect, because the "energy" whose
       // colour it holds steady across panes is not held steady across *zooms*.
-      this.lo += 0.15 * (lo - 8 - this.lo);
-      this.hi += 0.15 * (hi + 3 - this.hi);
+      this.next = {
+        lo: this.lo + 0.15 * (lo - 8 - this.lo),
+        hi: this.hi + 0.15 * (hi + 3 - this.hi),
+        source: this.rangeSource,
+      };
+    }
+    if (vscale) {
+      // **One range for every pane here too**, measured over the union of what all of them are
+      // showing. A per-pane scale would put the same dB on two colours on one screen, which is the
+      // thing this renderer has one `(uLo, uHi)` to prevent; the mode changes *which* measurement
+      // decides the pair, not how many pairs there are.
+      const want = vscale.range();
+      // Nothing observed on screen is a real state of this surface, not an empty measurement: hold
+      // the range and say so, rather than stretch a ramp over grey.
+      this.next = want
+        ? { ...want, source: viewportSource(vscale.blocks, want) }
+        : { lo: this.lo, hi: this.hi, source: VIEWPORT_SOURCE_EMPTY };
     }
     this.cache.setViewports(this.lattice, viewports);
     this.cache.endFrame();
