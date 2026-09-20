@@ -95,6 +95,15 @@ pub(crate) fn attach_refusal(e: &StreamError) -> OpenRefusal {
             OpenRefusal::new(503, "busy", format!("consumer limit {max} reached"))
         }
         StreamError::Finished => OpenRefusal::new(410, "finished", "stream finished"),
+        // T-530: the producer said a successor is coming under this id. The same answer a chain
+        // gives for a request that arrives mid-re-plumb (`chains::listen`, `chains::iq`): try
+        // again, not "it is gone". Unlike `/ws/{stream_id}` there is no registry offer to wait on
+        // here — the caller already holds the handle it resolved — so it is refused, not held.
+        StreamError::BetweenWindows => OpenRefusal::new(
+            503,
+            "replumbing",
+            "the stream is moving to a new window; try again",
+        ),
         _ => OpenRefusal::new(500, "subscribe", "subscription failed"),
     }
 }

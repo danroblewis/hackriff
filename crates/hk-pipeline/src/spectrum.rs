@@ -140,7 +140,9 @@ impl<'a> Output<'a> {
     /// Finishes the publisher in force and offers one whose header describes `key`.
     fn reoffer(&mut self, key: HeaderKey) -> Result<(), anyhow::Error> {
         if let Some(old) = self.publisher.take() {
-            old.finish();
+            // The successor is offered a few lines below, under the same id: a consumer that
+            // lands in between is between windows, not at the end of the stream (T-530).
+            old.finish_between_windows();
         }
         self.key = None;
         let header = spectrum_header(
@@ -234,9 +236,22 @@ impl<'a> Output<'a> {
         }
     }
 
+    /// Ends this segment's publisher.
+    ///
+    /// **T-530: a segment's end is not the stream's end.** A re-plumb ([`crate::run`]) tears this
+    /// reader down and builds another around the same still-open device, which offers a new
+    /// publisher under the same id when the new segment's first samples arrive — measured at
+    /// ~0.17 s after T-525. For that gap the run has *not* finished, so the publisher says a
+    /// successor is expected and a client arriving in it is told "not now", not "never again".
+    /// `continues` is the run's own record of which end this is: it is set by the re-plumb before
+    /// the segment is stopped, and false when the source ended or the user stopped the run.
     fn finish(mut self) {
         if let Some(p) = self.publisher.take() {
-            p.finish();
+            if self.shared.continues.load(Ordering::SeqCst) {
+                p.finish_between_windows();
+            } else {
+                p.finish();
+            }
         }
     }
 }

@@ -74,13 +74,18 @@ smoke(){
   log "SMOKE OK (root 200, streams 200, ws 101)"; echo "ok" > "$S/stage-smoke"; return 0
 }
 
+# T-530: 101 is the healthy answer; 503 is the server telling us it is alive and between windows
+# (`replumbing`) or at its consumer cap. Neither is a crashed server, and restarting on one takes
+# the demo down under the user. A real end says 410 and a dead server says nothing at all, so both
+# still fail here. The server waits ~2 s for the re-plumb before it answers 503 at all, so in
+# practice this arm is reached only when a re-plumb is genuinely stuck.
 healthy(){
   curl -s -o /dev/null -m5 "http://127.0.0.1:$PORT/" || return 1
   local ws
-  ws=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 -m6 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  ws=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 -m8 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
        -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
        "http://127.0.0.1:$PORT/ws/spectrum/live?token=$TOKEN")
-  [ "$ws" = 101 ]
+  [ "$ws" = 101 ] || [ "$ws" = 503 ]
 }
 
 ensure_tunnel(){

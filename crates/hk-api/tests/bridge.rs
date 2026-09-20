@@ -570,3 +570,93 @@ fn slow_browser_is_dropped_while_the_producer_keeps_rate() {
     );
     assert!(records >= N / 2, "the reading browser kept receiving");
 }
+
+/// T-530: **a re-plumb is a gap in the stream, not the end of it — for the client that arrives
+/// during it, too.**
+///
+/// The test above carries a consumer that was *already attached* across the gap. One that knocks
+/// while the gap is open used to be told `410 Gone, "stream finished"` — a run that was still
+/// capturing, described as permanently over. `ops/stage.sh`'s health check is `/` plus exactly
+/// this handshake, so a long enough gap read as "hk serve crashed" and restarted the demo under
+/// the user (T-525 measured 21.43 s of it before its fix, 0.17 s after).
+///
+/// The producer now says which end it is ([`hk_api::stream::Publisher::finish_between_windows`] vs
+/// `finish`), and the handshake honours it: wait for the successor, else `503 replumbing` — *not
+/// now*, never *never again*. A publisher that really finished still answers `410` at once, so a
+/// run that has ended is not made to look like a gap.
+#[test]
+fn a_handshake_between_windows_waits_for_the_successor_and_never_says_gone() {
+    let registry = StreamRegistry::new();
+    let bins = 16u32;
+    let first = Publisher::new(
+        spectrum_header("spectrum/live", ContentClass::Unrestricted, 30.0, bins),
+        PublisherConfig::default(),
+    )
+    .unwrap();
+    registry.register(first.header(), first.handle());
+    let server = serve(&registry);
+    let addr = server.local_addr();
+
+    // (1) The gap opens: the segment's publisher is finished, saying a successor is coming.
+    first.finish_between_windows();
+    let knock = thread::spawn(move || authed(addr, "spectrum/live"));
+    thread::sleep(Duration::from_millis(250));
+    let mut header = spectrum_header("spectrum/live", ContentClass::Unrestricted, 30.0, bins);
+    header.center_hz = Some(101.8e6);
+    let second = Publisher::new(header, PublisherConfig::default()).unwrap();
+    registry.register(second.header(), second.handle());
+
+    // The client that knocked during the gap gets the upgrade and the *new* window's header. It
+    // never learns there was a gap at all, which is the point: nothing it can do about one.
+    let mut ws = knock
+        .join()
+        .unwrap()
+        .expect("the handshake waited and upgraded");
+    assert_eq!(
+        header_of(&ws.read().unwrap()).center_hz,
+        Some(101.8e6),
+        "the successor's header"
+    );
+    drop(ws);
+
+    // (2) A gap whose successor never arrives is still not an end: `503`, after a bounded wait.
+    second.finish_between_windows();
+    let started = Instant::now();
+    let refused = authed(addr, "spectrum/live");
+    let (status, body) = match refused {
+        Err(tungstenite::Error::Http(r)) => (
+            r.status().as_u16(),
+            String::from_utf8_lossy(r.body().as_deref().unwrap_or(&[])).into_owned(),
+        ),
+        Err(e) => panic!("expected an HTTP refusal, got {e}"),
+        Ok(_) => panic!("expected a refusal: no successor was ever offered"),
+    };
+    assert_eq!(status, 503, "not 410: the run has not ended, {body}");
+    assert!(body.contains("replumbing"), "{body}");
+    assert!(
+        started.elapsed() >= Duration::from_millis(1500),
+        "it refused at once instead of waiting for the successor first: {:?}",
+        started.elapsed()
+    );
+
+    // (3) …and a publisher that really finished says so at once. A gap and an end are different
+    // things, and the fix must not have blurred them.
+    let third = Publisher::new(
+        spectrum_header("spectrum/live", ContentClass::Unrestricted, 30.0, bins),
+        PublisherConfig::default(),
+    )
+    .unwrap();
+    registry.register(third.header(), third.handle());
+    third.finish();
+    let started = Instant::now();
+    assert_eq!(
+        status_of(authed(addr, "spectrum/live")),
+        410,
+        "a finished stream still says it is gone"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(1000),
+        "the end was treated as a gap and waited out: {:?}",
+        started.elapsed()
+    );
+}

@@ -226,6 +226,13 @@ pub enum StreamError {
     /// The publisher has finished; no new consumers.
     #[error("stream finished")]
     Finished,
+    /// The publisher has finished but a **successor is expected under the same stream id**
+    /// ([`Publisher::finish_between_windows`]): the stream is between windows, not over (T-530).
+    ///
+    /// A caller must not tell its client the stream is gone. Wait for the next publisher of this
+    /// id, or refuse with something that means *not now* (`503`), never `410`.
+    #[error("stream is between windows")]
+    BetweenWindows,
     /// A status record was not a flat metadata object (contract 1.1); nothing was published.
     #[error("status record is not a flat metadata object")]
     NotMetadata,
@@ -589,10 +596,34 @@ enum Mode {
     FeedRaw,
 }
 
+/// How long after [`Publisher::finish_between_windows`] a would-be consumer is told the stream is
+/// **between windows** rather than over (T-530).
+///
+/// It is a bound on a claim about the future, so it expires by itself: the producer promised a
+/// successor under this id, and if none has been offered by now the promise has failed and
+/// [`StreamError::Finished`] is the honest answer again. Nothing has to come back and retract it —
+/// which matters because the thread that would (the segment's) is exactly the one that died. Sized
+/// over the pipeline's own re-plumb bound (`WINDOW_SETTLE_TIMEOUT`, 5 s): a re-plumb that has not
+/// produced a row by then is not a gap any more.
+pub const BETWEEN_WINDOWS_GRACE: Duration = Duration::from_secs(5);
+
 struct List {
     active: Vec<Arc<Consumer>>,
     finished: VecDeque<Arc<Consumer>>,
     closed_for_new: bool,
+    /// Set by [`Publisher::finish_between_windows`]: until this instant a refused subscription is
+    /// [`StreamError::BetweenWindows`], not [`StreamError::Finished`] (T-530).
+    successor_until: Option<Instant>,
+}
+
+impl List {
+    /// Why a subscription is refused once the publisher has finished.
+    fn closed_error(&self) -> StreamError {
+        match self.successor_until {
+            Some(t) if Instant::now() < t => StreamError::BetweenWindows,
+            _ => StreamError::Finished,
+        }
+    }
 }
 
 struct Shared {
@@ -636,7 +667,7 @@ impl Shared {
         {
             let list = lock(&self.list);
             if list.closed_for_new {
-                return Err(StreamError::Finished);
+                return Err(list.closed_error());
             }
             if Self::open_count(&list) >= self.config.max_consumers {
                 return Err(StreamError::TooManyConsumers {
@@ -678,7 +709,7 @@ impl Shared {
             .spawn(move || writer_loop(for_thread, writer, binary, markers))?;
         let mut list = lock(&self.list);
         let refusal = if list.closed_for_new {
-            Some(StreamError::Finished)
+            Some(list.closed_error())
         } else if Self::open_count(&list) >= self.config.max_consumers {
             Some(StreamError::TooManyConsumers {
                 max: self.config.max_consumers,
@@ -688,6 +719,15 @@ impl Shared {
         };
         if let Some(e) = refusal {
             drop(list);
+            // **A refused subscription leaves the caller's transport exactly as it found it**
+            // (T-530). The closer is the caller's "shut this socket down", and nothing was ever
+            // admitted to close: the first check, before the consumer exists, already refuses
+            // without touching it, and this one — reached only when the publisher finished
+            // between the two checks — must behave the same. It did not, and a `/ws` handshake
+            // that lost this race had its socket torn down before its own refusal could be
+            // written, so the client saw an aborted connection instead of an answer. The writer
+            // thread still stops: `close` sets the state and wakes it.
+            let _ = lock(&consumer.closer).take();
             consumer.close(CloseReason::Detached);
             return Err(e);
         }
@@ -1101,6 +1141,7 @@ impl Publisher {
                     active: Vec::new(),
                     finished: VecDeque::new(),
                     closed_for_new: false,
+                    successor_until: None,
                 }),
                 generation: AtomicU64::new(0),
                 next_id: AtomicU64::new(0),
@@ -1677,7 +1718,24 @@ impl Publisher {
     }
 
     /// Finishes the stream: consumers drain their queues and close. Same as dropping.
+    ///
+    /// This says the **stream** is over. When a successor will be offered under the same
+    /// `stream_id` — a re-plumb, or a header that has to change because the window moved — use
+    /// [`Publisher::finish_between_windows`] instead, or every consumer that arrives in the gap is
+    /// told the stream is gone for good.
     pub fn finish(self) {}
+
+    /// Finishes this publisher, saying a **successor is expected under the same stream id**
+    /// (T-530): for [`BETWEEN_WINDOWS_GRACE`] a new subscription is refused with
+    /// [`StreamError::BetweenWindows`] rather than [`StreamError::Finished`].
+    ///
+    /// Open consumers are unaffected — they drain and close exactly as on [`Publisher::finish`],
+    /// and it is the *registry* in front of the publisher that carries them to the next one. What
+    /// this changes is the answer given to someone who arrives **during** the gap, which used to
+    /// be indistinguishable from the end of the run.
+    pub fn finish_between_windows(self) {
+        lock(&self.shared.list).successor_until = Some(Instant::now() + BETWEEN_WINDOWS_GRACE);
+    }
 }
 
 impl Drop for Publisher {
