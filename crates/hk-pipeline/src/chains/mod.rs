@@ -189,7 +189,11 @@ pub(crate) fn stored_detection(
         if shared.repo().detection(d).is_ok() {
             return Some(d);
         }
-        if std::time::Instant::now() >= deadline {
+        // T-531: the row is written by the detect writer, and on a stop that writer is already
+        // finishing — so once the run is stopping the wait can only ever time out, and waiting it
+        // out is pure shutdown latency on the thread the control thread is joining. Give up now
+        // and count it exactly as the timeout does.
+        if std::time::Instant::now() >= deadline || shared.stop.load(Ordering::SeqCst) {
             inc(&shared.counters.chains.detection_ref_missing);
             return None;
         }

@@ -892,6 +892,16 @@ impl PublisherHandle {
         Shared::open_count(&lock(&self.shared.list))
     }
 
+    /// The producer has finished this stream ([`Publisher::finish`] or the publisher dropped), so
+    /// no further record will be published and [`Self::subscribe`] refuses with
+    /// [`StreamError::Finished`]. Open consumers may still be draining what is queued.
+    ///
+    /// A registry uses it to tell a stream that is **over** from one that is merely idle (T-531):
+    /// a live publisher nobody is listening to is not finished.
+    pub fn finished(&self) -> bool {
+        lock(&self.shared.list).closed_for_new
+    }
+
     /// Force-closes one consumer (queued bytes are discarded).
     pub fn close(&self, id: ConsumerId) -> bool {
         self.shared.close(id, CloseReason::Detached)

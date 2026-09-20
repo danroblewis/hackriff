@@ -79,6 +79,21 @@ Never returns content, only stream *metadata*: every offered stream's header fie
 
 `tcp` is `null` when no TCP stream server runs. See [Streams](#streams-websocket-tcp-and-on-demand-openers) below and `docs/stream-contract.md` §10/§12/§13 for what each named stream/opener actually carries.
 
+**`streams` is what this server is offering *now*, not everything it has ever offered (T-531).** A
+stream appears when a producer registers a publisher under its id and disappears when that
+publisher has **finished**, has **no open consumer**, and has not been re-offered for 60 s — the
+same `CARRY_OVER_GRACE` the WebSocket bridge waits in a settle gap, so a retune or re-plumb (which
+finishes one publisher and offers the next under the same id) never withdraws anything and a
+connected consumer is never cut short. Past that grace the entry can serve nobody: subscribing to a
+finished publisher is refused, and no consumer is left to carry over. A hard ceiling of 256
+registered streams backs the rule up, evicting the oldest finished-and-unattached entries first and
+never a live publisher. The listing is therefore **time-scoped**, like the Explore inventory — a
+40-minute sweep across 6 GHz meets thousands of emitters, and the `bits/fsk-bursts/<emitter>`
+stream each one produced is not still on offer an hour later. A client that wants the durable
+record of what was heard reads `/api/events` and `/api/inventory`, not this document. On shutdown
+every id is withdrawn at once, so a bridged consumer's connection ends immediately instead of
+waiting out the carry-over grace for an offer that is never coming.
+
 `dc_excluded_hz` (T-167, ADR-0013 §4.9 gap 10) is the half-width, Hz, of the DC/LO-leakage notch centred on `center_hz` that the producer's own detector excludes from analysis (the spectrum stream's `hk-pipeline` producer sets it from `hk_detect::DcRule::default().tolerance_hz`, the same value `GET /api/observations` `records[].window.dc_excluded` already reflects). It is additive on both `/api/streams` and the stream header itself (below) and `null` when a producer applies no DC mask to that stream — never a guess. **T-524:** the LO tone's main-lobe cells at the centre of that notch (±2 bins) in every spectrum row (and in spectrum history, so tiles and the trace too) are **synthesized, not measured** — a straight dB line between the measured bins either side, replacing the LO-leakage spike — so a client that wants to mark them reads them from this field; detection runs on its own un-interpolated frames.
 
 ### `GET /api/history` — region-over-time grid (T-017, AWARE-042)

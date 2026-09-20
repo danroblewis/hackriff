@@ -680,6 +680,22 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         );
     }
 
+    // T-531: the listing is what this server is **offering now**, and it is bounded. A stream is
+    // offered until its publisher has finished, nothing is attached to it and no new publisher has
+    // been offered under that id for `hk_api::FINISHED_LINGER`; then the id is withdrawn. Before
+    // that rule a sweep's per-emitter `bits/fsk-bursts/<emitter>` streams accumulated for the life
+    // of the run (1299 entries / 659 KB in 40 minutes). The bound is asserted as a value, and it
+    // is a bound on the registry, not a cap applied to the response.
+    assert_eq!(hk_api::MAX_STREAMS, 256);
+    assert_eq!(hk_api::FINISHED_LINGER, hk_api::bridge::CARRY_OVER_GRACE);
+    let (_, v) = get(addr, "/api/streams");
+    let offered = v["streams"].as_array().unwrap();
+    assert!(
+        offered.len() <= hk_api::MAX_STREAMS,
+        "the discovery document is unbounded: {} streams",
+        offered.len()
+    );
+
     // dc_excluded_hz (T-167, ADR-0013 gap 10): the spectrum stream's DC-notch half-width, taken
     // from the detector's own DC rule, not hardcoded on the wire.
     let (_, v) = get(addr, "/api/streams");
