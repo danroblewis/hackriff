@@ -429,6 +429,22 @@ export function scanQueryFrom(input: { loMHz: string; hiMHz: string; dwellS: str
   return q;
 }
 
+/** T-516: the "scan everything" one-click's own dwell — fast enough that a full 1 MHz-6 GHz pass
+ * at T-517's coarse step is minutes, not the ~13 h a 12 s/step fine sweep costs today. Kept inside
+ * the 0.1 s floor the dwell box already enforces. */
+export const FAST_SCAN_DWELL_S = 0.3;
+
+/**
+ * T-516: the request the "scan everything" one-click means — the whole tunable range (an empty
+ * range already means that, so it names neither end), a fast dwell and T-517's coarse step, so
+ * pressing it commits the radio to a pass of minutes rather than hours. The panel sets its fields
+ * to match this and reprices before it starts (`DeviceTab.onScanAll`), so the commitment line the
+ * user already trusts is what they see before the radio is committed, not a guess made here.
+ */
+export function everythingScanQuery(): ScanQuery {
+  return { dwell_s: FAST_SCAN_DWELL_S, step: "coarse" };
+}
+
 /** The `GET /api/control/scan` path that prices `q` without starting it; bare when `q` is empty. */
 export function scanPreviewPath(q: ScanQuery): string {
   const search = new URLSearchParams(Object.entries(q).map(([k, v]) => [k, String(v)]));
