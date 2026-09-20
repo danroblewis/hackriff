@@ -23,6 +23,8 @@ export function deviceFrom(cs: ControlState): AppState["device"] {
   const run = cs.run;
   return {
     loaded: true, live: !!cs.live, finished: !!run?.finished, contentClass: run?.content_class ?? null,
+    capture: run ? run.capture ?? (run.finished ? "ended" : "running") : null,
+    captureNote: run?.capture_note ?? null,
     centerHz: cs.tuning?.center_hz ?? run?.center_hz ?? null,
     sampleRateHz: cs.tuning?.sample_rate_hz ?? run?.sample_rate_hz ?? null,
     rowsPerS: run?.display?.rows_per_s ?? null, recording: !!run?.recording?.active,
@@ -86,8 +88,12 @@ export function mountShell(ctx: AppContext) {
 
   // Device and readouts
   store.select((s) => s.device, (d) => {
-    byId("device-label")!.textContent = !d.loaded ? "connecting…" : d.finished ? "run finished" : d.live ? "live" : "replay";
-    byId("device")!.dataset.state = !d.loaded ? "connecting" : d.live && !d.finished ? "live" : "idle";
+    byId("device-label")!.textContent = !d.loaded ? "connecting…"
+      : d.capture === "recovering" ? "capture restarting…"
+      : d.finished ? "capture stopped" : d.live ? "live" : "replay";
+    byId("device")!.dataset.state = !d.loaded ? "connecting"
+      : d.capture === "recovering" ? "recovering"
+      : d.live && !d.finished ? "live" : "idle";
     byId("ro-centre")!.textContent = d.centerHz === null ? "–" : formatFrequency(d.centerHz);
     byId("ro-span")!.textContent = d.sampleRateHz === null ? "–" : formatFrequency(d.sampleRateHz);
   }, { immediate: true });

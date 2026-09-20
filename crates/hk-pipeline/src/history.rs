@@ -540,6 +540,25 @@ pub(crate) fn frame_site(attention: Option<&AttentionService>, t: Timestamp) -> 
     attention.map_or(SiteKey::Unassigned, |a| a.site_at_peek(t))
 }
 
+/// Reader 2's STFT: the history bin width, `K` for ~`rows_per_s` frames/s, T-139 partial rows
+/// and the T-524 DC notch-and-interpolate.
+pub(crate) fn history_stft_config(fs: f64, fft_len: usize, rows_per_s: f64) -> StftConfig {
+    let welch = history_welch(fft_len);
+    let rows = rows_per_s.max(0.01);
+    let k = ((fs / (welch.hop() as f64 * rows)).round() as usize).max(1);
+    let mut stft_cfg = StftConfig::new(welch, k);
+    // T-524: history (the pyramid, the view lattice, the tiles, the trace and every sweep hop) is
+    // folded from notch-and-interpolated frames, so a sweep does not stamp the LO spike at each
+    // hop's centre. Detection runs its own STFT without this and keeps its DC rule.
+    stft_cfg.dc_notch_half_bins = Some(crate::observe::DC_INTERP_HALF_BINS);
+    // T-139: scheduler steps shorter than a row still leave a (reduced-averaging) row.
+    stft_cfg.partial = Some(PartialFrames {
+        min_segments: k.div_ceil(PARTIAL_MIN_DIVISOR),
+        arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE,
+    });
+    stft_cfg
+}
+
 /// Runs reader 2 until the ring closes.
 pub(crate) fn run(
     shared: Arc<Shared>,
@@ -547,15 +566,8 @@ pub(crate) fn run(
     attention: Option<Arc<AttentionService>>,
     view: Option<Arc<Mutex<Pyramid>>>,
 ) -> anyhow::Result<()> {
-    let welch = history_welch(shared.fft_len);
-    let rows = shared.cfg.settings.history_rows_per_s.max(0.01);
-    let k = ((shared.fs / (welch.hop() as f64 * rows)).round() as usize).max(1);
-    let mut stft_cfg = StftConfig::new(welch, k);
-    // T-139: scheduler steps shorter than a row still leave a (reduced-averaging) row.
-    stft_cfg.partial = Some(PartialFrames {
-        min_segments: k.div_ceil(PARTIAL_MIN_DIVISOR),
-        arm_on: Discontinuity::RETUNE | Discontinuity::RATE_CHANGE,
-    });
+    let rows = shared.cfg.settings.history_rows_per_s;
+    let stft_cfg = history_stft_config(shared.fs, shared.fft_len, rows);
     let mut stft = crate::compute::stft(
         &shared.compute,
         &shared.counters.compute,
@@ -905,6 +917,98 @@ mod tests {
         assert!(
             served - quiet > 0.5 * expect_loss,
             "the stored max must be a max-hold, not a max of means: {served:.1} over {quiet:.1}"
+        );
+    }
+
+    /// T-524: two adjacent sweep hops, each with an LO-leakage carrier at its own centre on top of
+    /// noise. Through reader 2's STFT config and into the pyramid, neither hop's centre shows the
+    /// spike in stored history; without the notch the same input does (so the test bites).
+    #[test]
+    fn t524_adjacent_sweep_hops_store_no_spike_at_either_centre() {
+        let hop_centres = [CENTER, CENTER + FS / 2.0];
+        let peak_over_floor = |notch: bool| -> Vec<f32> {
+            let mut cfg = super::history_stft_config(FS, N, 20.0);
+            if !notch {
+                cfg.dc_notch_half_bins = None;
+            }
+            let dir = TempDir::new(if notch { "t524n" } else { "t524r" });
+            let mut p = Pyramid::open(&dir.0, PyramidConfig::default()).unwrap();
+            let mut stft = hk_dsp::StftProcessor::new(cfg).unwrap();
+            let per_hop = 4 * cfg.frame_samples() as usize;
+            let mut rng = 0x5eed_u64;
+            let mut noise = || {
+                rng = rng
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((rng >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.02
+            };
+            for (h, &c) in hop_centres.iter().enumerate() {
+                let mut prov = provenance().get().clone();
+                prov.tune.center_hz = c;
+                let prov = ProvenanceHandle::new(prov);
+                // Noise plus a constant DC offset: the LO leakage every tune carries.
+                let samples: Vec<Complex32> = (0..per_hop)
+                    .map(|_| Complex32::new(0.05 + noise(), noise()))
+                    .collect();
+                let start = (h * per_hop) as u64;
+                stft.push(
+                    InputInfo {
+                        time: SampleTime {
+                            sample_index: start,
+                            host_time: Timestamp::from_unix_nanos(
+                                T0 + (start as f64 * 1e9 / FS) as i64,
+                            ),
+                        },
+                        discontinuity: if h == 0 {
+                            Discontinuity::STREAM_START
+                        } else {
+                            Discontinuity::RETUNE
+                        },
+                        dropped_before: 0,
+                        provenance: &prov,
+                    },
+                    &samples,
+                    |frame: &SpectrumFrame| {
+                        p.ingest(&FrameInput::from_dsp(frame)).unwrap();
+                    },
+                );
+            }
+            p.seal_through(Timestamp::from_unix_nanos(T0 + 3600 * S))
+                .unwrap();
+            hop_centres
+                .iter()
+                .map(|&c| {
+                    let h = p
+                        .query(&RegionQuery {
+                            freq: FreqRange::centered(c, 0.4 * FS),
+                            time: TimeRange::new(
+                                Timestamp::from_unix_nanos(T0),
+                                Timestamp::from_unix_nanos(T0 + 60 * S),
+                            ),
+                            resolution: Resolution::Level(0),
+                        })
+                        .unwrap();
+                    let mut vals: Vec<f32> = h
+                        .cells
+                        .iter()
+                        .filter(|c| c.observed() && c.max_db.is_finite())
+                        .map(|c| c.max_db)
+                        .collect();
+                    assert!(!vals.is_empty(), "no stored history around {c} Hz");
+                    vals.sort_by(f32::total_cmp);
+                    vals[vals.len() - 1] - vals[vals.len() / 2]
+                })
+                .collect()
+        };
+        let raw = peak_over_floor(false);
+        assert!(
+            raw.iter().all(|&d| d > 20.0),
+            "the un-notched input must show the LO spike (else the test does not bite): {raw:?}"
+        );
+        let notched = peak_over_floor(true);
+        assert!(
+            notched.iter().all(|&d| d < 6.0),
+            "stored history still shows a spike at a hop centre: {notched:?} dB over the median"
         );
     }
 }

@@ -56,7 +56,13 @@ export interface Recording {
 export interface Run {
   live: boolean; content_class: string; content_permitted: boolean; center_hz: number; sample_rate_hz: number;
   segment: number; replumbing: boolean; finished: boolean; display: Display; recording: Recording;
+  /** T-508: whether the front end is delivering. Optional only for a server older than it. */
+  capture?: CaptureState;
+  /** T-508: why capture is recovering or ended; null while it runs. */
+  capture_note?: string | null;
 }
+/** `run.capture` (T-508): stated by the backend, never inferred from row arrival. */
+export type CaptureState = "running" | "recovering" | "ended";
 /** `/api/control/scan`'s `plan` (T-452): the sweep as compiled against this front end. */
 export interface ScanPlan {
   f_lo_hz: number; f_hi_hz: number; dwell_s: number;
@@ -256,6 +262,7 @@ export function panelModel(s: ControlState, pending = false): PanelModel {
   if (!s.audit) device = display = off("control disabled: this server has no audit log");
   else if (!run) display = off("no running pipeline on this server");
   else if (run.finished) device = display = off("the run has finished");
+  else if (run.capture === "recovering") device = off("capture is being restarted after a device failure");
   if (device.enabled) {
     if (!live) device = off("not_live: this server replays a recording; device settings need a live source");
     else if (!s.device!.controllable) device = off(`${s.device!.driver} is not controllable`);

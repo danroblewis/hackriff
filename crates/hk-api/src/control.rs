@@ -199,6 +199,31 @@ pub struct RecordingState {
     pub ended: Option<String>,
 }
 
+/// Whether a run's front end is delivering samples (T-508). `finished` alone could not tell a
+/// run that died on a device error from one whose recording ended, nor a run restarting capture
+/// from one that is running — and a frozen edge that nothing explains is what the user kept seeing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaptureStatus {
+    /// Samples are arriving.
+    #[default]
+    Running,
+    /// Capture failed and is being restarted; the edge is not advancing, and that is the truth.
+    Recovering,
+    /// The run has ended; nothing more will arrive.
+    Ended,
+}
+
+impl CaptureStatus {
+    /// The wire name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Recovering => "recovering",
+            Self::Ended => "ended",
+        }
+    }
+}
+
 /// The running pipeline as the control API sees it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunState {
@@ -216,6 +241,10 @@ pub struct RunState {
     pub replumbing: bool,
     /// The run has finished.
     pub finished: bool,
+    /// Whether the front end is delivering samples (T-508).
+    pub capture: CaptureStatus,
+    /// Why capture is recovering or has ended; `None` while it runs.
+    pub capture_note: Option<String>,
     /// Display settings.
     pub display: DisplayState,
     /// The current or last manual recording.
@@ -1268,6 +1297,8 @@ fn run_json(r: &RunState) -> Value {
         "segment": r.segment,
         "replumbing": r.replumbing,
         "finished": r.finished,
+        "capture": r.capture.as_str(),
+        "capture_note": r.capture_note,
         "display": display_json(&r.display),
         "recording": recording_json(&r.recording),
     })

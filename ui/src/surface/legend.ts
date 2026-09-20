@@ -70,6 +70,13 @@ export function legendEntries(): readonly LegendEntry[] {
       pixel: cell(CELL.AWAITING),
     },
     {
+      key: "shadow",
+      label: "Last known",
+      note: "Swept earlier, not being looked at now: the band's most recent measurement carried forward (T-520). "
+        + "Same ramp, held under a brightness ceiling and scanlined — a measurement of an earlier time, never of this cell.",
+      pixel: cell(CELL.SHADOW),
+    },
+    {
       key: "tier-history",
       label: "Tier · spectrum-history",
       note: "A measurement from the record rather than from live IQ. The stipple darkens; it never moves the ramp.",

@@ -89,6 +89,12 @@
 //! it stays `observed` past the horizon (`docs/16` §5.4, explicitly). Only `unobserved` can become
 //! `unknown`, and only on a row wholly before the oldest surviving record.
 //!
+//! **And only where something was recorded and lost (T-507).** A row wholly before this server
+//! began recording at all is `unobserved`: nothing looked, and a server that has never recorded has
+//! forgotten nothing. Serving every pre-record row as `unknown` painted a freshly started server's
+//! whole past in the fourth state — the magenta wall. `Evidence::unknown_rows` states the three
+//! cases; `horizon.recording_began_s` and `horizon.forgotten` make each checkable on the wire.
+//!
 //! # Where the map comes from: provenance already written
 //!
 //! Nothing new is journalled for this. Two records already say "for each interval, which
@@ -298,11 +304,26 @@ pub(crate) struct Evidence {
     /// instant past which its silence stops being evidence. Before the earlier of the two, neither
     /// record can speak, and `unobserved` would be a claim nothing supports.
     pub oldest_record: Option<Timestamp>,
+    /// **When this server's memory of recording begins** (T-507): the earliest instant any source
+    /// knows recording happened here — the spectrum history's own record of when it began, the IQ
+    /// ring's oldest sample, the observation log's oldest hour. `None` when nothing here has ever
+    /// recorded anything.
+    ///
+    /// This is what keeps `"unknown"` narrow. Before it, nothing this installation knows of was
+    /// recording, so an unsampled cell there is honestly `unobserved` — a fresh server's first
+    /// minute is not a forgotten past. Between it and [`Evidence::oldest_record`] recording
+    /// happened but the tune record of it did not survive (a restart lost the previous run's
+    /// journal): that span, and only that span, is `"unknown"`.
+    pub recording_began: Option<Timestamp>,
+    /// A source has **discarded** records that could reach back before `recording_began`, so that
+    /// boundary is not a floor and every row before `oldest_record` is `"unknown"`. `Some(why)`.
+    pub forgotten: Option<&'static str>,
 }
 
 impl Evidence {
     /// Reads both tune histories over `freq × window`, and each one's reach.
     pub(crate) fn collect(state: &ApiState, freq: FreqRange, window: TimeRange) -> Self {
+        let memory = Memory::of(state);
         let mut spans = ring_spans(state, freq, window);
         let ring = spans.len();
         let ring_named = spans.iter().filter(|s| s.device.is_named()).count();
@@ -321,7 +342,9 @@ impl Evidence {
             log_named,
             ring_available: state.iq_buffer.is_some(),
             log_available: state.observations.is_some(),
-            oldest_record: oldest_record(state),
+            oldest_record: memory.oldest_record,
+            recording_began: memory.recording_began,
+            forgotten: memory.forgotten,
         }
     }
 
@@ -342,61 +365,182 @@ impl Evidence {
         ])
     }
 
-    /// How many leading rows of `g` lie wholly before the record horizon — the rows whose
-    /// `unobserved` cells must be served as `"unknown"` instead.
+    /// The rows of `g` whose unsampled cells must be served as `"unknown"`: those wholly before the
+    /// record horizon **and not wholly before this server's memory of recording begins** (T-507).
     ///
-    /// With **no** surviving record anywhere, every row is beyond the horizon: a server that has
-    /// forgotten (or never had) its tune history cannot say the radio was not there, and greying
-    /// the window would be precisely the claim this route exists to refuse.
-    fn unknown_rows(&self, g: &CoverageGrid) -> usize {
-        match self.oldest_record {
+    /// Three cases, and the first is the one T-423 left wide open:
+    ///
+    /// - **Nothing has ever recorded here** (`recording_began` is `None`, nothing forgotten): no
+    ///   row is unknown. A server that never recorded has forgotten nothing; its answer about
+    ///   every row is the true one, `unobserved`. This is what a freshly started or reset store
+    ///   says about the time before it started — **T-507's purple wall** was every such row
+    ///   served as `"unknown"` while live frames arrived.
+    /// - **Recording began, and every record since survives** — the rows before `recording_began`
+    ///   are `unobserved` for the same reason; the rows between it and `oldest_record` (a span
+    ///   whose tune record did not survive, e.g. the previous run's IQ journal across a restart)
+    ///   are `"unknown"`.
+    /// - **A source discarded records that could predate both** (`forgotten`), or **there is no
+    ///   tune history on this server at all** (no ring, no log): every row before `oldest_record`
+    ///   — every row, if there is none — is `"unknown"`, T-423's rule unchanged. Those are the
+    ///   cases where the server genuinely cannot say whether it looked.
+    fn unknown_rows(&self, g: &CoverageGrid) -> std::ops::Range<usize> {
+        let no_tune_history = !self.ring_available && !self.log_available;
+        let end = match self.oldest_record {
             Some(t) => g.unknown_rows_before(t),
             None => g.nt,
+        };
+        if no_tune_history || self.forgotten.is_some() {
+            return 0..end;
+        }
+        match self.recording_began {
+            // Rows wholly before recording began are unobserved; a row straddling it stays
+            // unknown (it may hold some of the forgotten span).
+            Some(t) => g.unknown_rows_before(t).min(end)..end,
+            None => 0..0,
         }
     }
 
     /// The horizon block: the boundary, where it came from, and what lies before it.
     fn horizon_json(&self, g: &CoverageGrid) -> Value {
         let unknown = self.unknown_rows(g);
+        let secs = |t: Option<Timestamp>| t.map(|t| t.as_unix_nanos() as f64 * 1e-9);
         json!({
             // Unix s, or null when nothing on this server holds a tune record at all.
-            "oldest_record_s": self.oldest_record.map(|t| t.as_unix_nanos() as f64 * 1e-9),
-            // Leading rows of the grid that lie wholly before it — the rows whose unobserved cells
-            // are served as `"unknown"`. Served so a client can check the states it was sent.
-            "unknown_rows": unknown,
+            "oldest_record_s": secs(self.oldest_record),
+            // Unix s: when this server's memory of recording begins (T-507), or null when nothing
+            // here has ever recorded. Rows wholly before it are `"unobserved"`, not `"unknown"`,
+            // unless `forgotten` says a discarded record could reach back past it.
+            "recording_began_s": secs(self.recording_began),
+            // Why this server cannot bound what it forgot, or null when it can.
+            "forgotten": self.forgotten,
+            // The rows served as `"unknown"` are exactly `[unknown_from_row, unknown_from_row +
+            // unknown_rows)` — a contiguous band, so a client can check the states it was sent.
+            "unknown_rows": unknown.len(),
+            "unknown_from_row": unknown.start,
             "rows": g.nt,
-            "rule": "a row wholly before `oldest_record_s` has no surviving record either way, so \
-                its unsampled cells are \"unknown\" (we no longer know whether we looked), never \
-                \"unobserved\" (nothing looked). An observed cell is never relabelled: a surviving \
-                measurement is itself proof we looked.",
+            "rule": "a row wholly before `oldest_record_s` has no surviving tune record, so its \
+                unsampled cells are \"unknown\" (we no longer know whether we looked) - UNLESS the \
+                row is also wholly before `recording_began_s` and nothing is `forgotten`: before \
+                this installation recorded anything, nothing looked, and the cell is \
+                \"unobserved\". A server that has never recorded has forgotten nothing. An observed \
+                cell is never relabelled: a surviving measurement is itself proof we looked.",
             "state_rule": "\"unknown\" carries no measurement keys, exactly like \"unobserved\", \
-                and must be drawn as neither grey nor a level — forgetting is not a measurement of \
+                and must be drawn as neither grey nor a level - forgetting is not a measurement of \
                 nothing.",
         })
     }
 }
 
-/// The earliest instant either tune history still holds a record for — the record horizon.
-///
-/// The IQ ring reports what it actually buffers; the observation log retains whole hour segments
-/// and drops whole hour segments, so its oldest hour's start is the exact boundary. A source that
-/// is absent, or holds nothing, contributes no reach — it is not evidence of anything.
-fn oldest_record(state: &ApiState) -> Option<Timestamp> {
-    let ring = crate::timeline::capture_window(state)
-        .0
-        .buffered
-        .map(|(t0, _)| (t0 * 1e9).round() as i64);
-    let log = state.observations.as_ref().and_then(|s| {
-        s.hours()
-            .into_iter()
-            .min()
-            .map(|h| h.saturating_mul(hk_store::observation::segment::HOUR_NS))
-    });
-    match (ring, log) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (x, y) => x.or(y),
+/// What this server remembers about its own recording, read once per answer (T-423, T-507).
+struct Memory {
+    oldest_record: Option<Timestamp>,
+    recording_began: Option<Timestamp>,
+    forgotten: Option<&'static str>,
+}
+
+impl Memory {
+    /// The record horizon, the start of recording, and whether anything that could reach past the
+    /// latter has been discarded.
+    ///
+    /// **The record horizon** (`oldest_record`): the earliest instant either tune history still
+    /// holds a record for. The IQ ring reports what it actually buffers; the observation log
+    /// retains whole hour segments and drops whole hour segments, so its oldest hour's start is
+    /// the exact boundary. A source that is absent, or holds nothing, contributes no reach.
+    ///
+    /// **The start of recording** (`recording_began`): the earliest of the same two reaches and
+    /// the spectrum history's own record of when it began ([`hk_store::Pyramid::recording_began`]
+    /// — a fact it keeps from open and ingest, so it outlives the tiles that proved it).
+    ///
+    /// **Forgetting** is a discard that could predate that start: the observation log deleting a
+    /// segment (its retention outlives the history's, so its oldest records can be the oldest
+    /// anywhere), or the IQ ring evicting or discarding data on a server with no spectrum history
+    /// to remember when recording began. The ring's routine eviction on a server *with* history is
+    /// not forgetting in this sense: the history was recording over the same span and still knows
+    /// when it began.
+    fn of(state: &ApiState) -> Self {
+        let ring = state.iq_buffer.as_deref().map(|c| {
+            c.status(&crate::iqbuffer::IqBufferQuery {
+                t0: None,
+                t1: None,
+                limit: 1,
+            })
+        });
+        let ring_t0 = ring
+            .as_ref()
+            .and_then(|s| match (f64_of(s, "t0"), f64_of(s, "t1")) {
+                (Some(a), Some(b)) if b > a => Some((a * 1e9).round() as i64),
+                _ => None,
+            });
+        let ring_discarded = ring.as_ref().is_some_and(|s| {
+            s.pointer("/evicted/samples")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                > 0
+                || s.get("discarded_slots")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    > 0
+        });
+        let log_t0 = state.observations.as_ref().and_then(|s| {
+            s.hours()
+                .into_iter()
+                .min()
+                .map(|h| h.saturating_mul(hk_store::observation::segment::HOUR_NS))
+        });
+        let log_deleted = state.observations.as_ref().is_some_and(|s| {
+            s.stats()
+                .segments_deleted
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+        });
+        let (history_present, history_began) = history_began(state);
+        let min = |a: Option<i64>, b: Option<i64>| match (a, b) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (x, y) => x.or(y),
+        };
+        let oldest_record = min(ring_t0, log_t0);
+        let forgotten = if log_deleted {
+            Some("the observation log has deleted segments by retention")
+        } else if ring_discarded && !history_present {
+            Some(
+                "the IQ ring has discarded data and no spectrum history remembers when recording began",
+            )
+        } else {
+            None
+        };
+        Memory {
+            oldest_record: oldest_record.map(Timestamp::from_unix_nanos),
+            recording_began: min(oldest_record, history_began).map(Timestamp::from_unix_nanos),
+            forgotten,
+        }
     }
-    .map(Timestamp::from_unix_nanos)
+}
+
+/// Whether any spectrum history is present, and the earliest instant any of them began recording.
+///
+/// Both lattices are read: the pyramid behind `/api/history` (or the floor's, when that is what
+/// this server keeps) and the view lattice behind `/api/tiles`. Each lock is held for two field
+/// reads.
+fn history_began(state: &ApiState) -> (bool, Option<i64>) {
+    let mut present = false;
+    let mut began: Option<i64> = None;
+    let mut note = |t: Option<Timestamp>| {
+        present = true;
+        if let Some(t) = t.map(|t| t.as_unix_nanos()) {
+            began = Some(began.map_or(t, |b| b.min(t)));
+        }
+    };
+    if state.history.is_some() || state.floor.is_some() {
+        if let Ok(t) = crate::http::with_history(state, |p| Ok(p.recording_began())) {
+            note(t);
+        }
+    }
+    if let Some(v) = state.view_history.as_ref() {
+        if let Ok(p) = v.lock() {
+            note(p.recording_began());
+        }
+    }
+    (present, began)
 }
 
 /// The wire vocabulary of a coverage cell's state, **indexed by its code** (T-467).
@@ -466,18 +610,22 @@ fn cell_json(c: &Coverage, shade: Option<Option<f32>>, beyond_horizon: bool) -> 
     }
 }
 
-/// One grid's JSON, with `unknown_rows` leading rows served as the fourth state.
+/// One grid's JSON, with the `unknown_rows` band of rows served as the fourth state.
 ///
-/// `unknown_rows` is a **row** count because the horizon is a time: a discarded record takes every
-/// frequency with it (this module's header, reason 2).
-fn grid_json(g: &CoverageGrid, shades: Option<&[Option<f32>]>, unknown_rows: usize) -> Value {
+/// `unknown_rows` is a band of **rows** because the horizon is a time: a discarded record takes
+/// every frequency with it (this module's header, reason 2).
+fn grid_json(
+    g: &CoverageGrid,
+    shades: Option<&[Option<f32>]>,
+    unknown_rows: std::ops::Range<usize>,
+) -> Value {
     let mut unknown_cells = 0usize;
     let cells: Vec<Value> = g
         .cells
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let beyond = g.nf > 0 && i / g.nf < unknown_rows;
+            let beyond = g.nf > 0 && unknown_rows.contains(&(i / g.nf));
             unknown_cells += usize::from(beyond && !c.is_observed());
             cell_json(c, shades.map(|s| s.get(i).copied().flatten()), beyond)
         })
@@ -1018,11 +1166,11 @@ impl TileOverlay {
 }
 
 /// One grid's per-cell state codes, row-major, in exactly [`grid_json`]'s cell order.
-fn state_codes(g: &CoverageGrid, unknown_rows: usize) -> Vec<u8> {
+fn state_codes(g: &CoverageGrid, unknown_rows: std::ops::Range<usize>) -> Vec<u8> {
     g.cells
         .iter()
         .enumerate()
-        .map(|(i, c)| state_code(c, g.nf > 0 && i / g.nf < unknown_rows))
+        .map(|(i, c)| state_code(c, g.nf > 0 && unknown_rows.contains(&(i / g.nf))))
         .collect()
 }
 
@@ -1530,7 +1678,7 @@ mod tests {
             .len();
         // What the same information cost before: `grid_json`'s per-cell objects, twice, because
         // `any` and the single device's plane were byte-identical.
-        let per_cell = serde_json::to_string(&grid_json(&o.any, None, 0))
+        let per_cell = serde_json::to_string(&grid_json(&o.any, None, 0..0))
             .unwrap()
             .len();
         let before = per_cell * 2;
@@ -1584,5 +1732,141 @@ mod tests {
             v["state"],
             cell_json(&Coverage::Unobserved, Some(None), false)["state"]
         );
+    }
+
+    // ---- T-507: "unknown" is what was recorded and lost, never the default for a young store ----
+
+    /// One dwell over the whole of [`band`] for `[t0, t1)` (Unix s).
+    fn dwell_at(t0: i64, t1: i64) -> ObservationRecord {
+        let mut r = dwell_over(Some(RUNNING), 100e6, 200e6);
+        if let ObservationRecord::Dwell(d) = &mut r {
+            d.planned = TimeRange::new(t(t0), t(t1));
+            d.observed = d.planned;
+        }
+        r
+    }
+
+    /// A spectrum history that began recording at `began` (Unix s): one frame folded there.
+    fn history_began_at(
+        dir: &TempDir,
+        began: i64,
+    ) -> std::sync::Arc<std::sync::Mutex<hk_store::Pyramid>> {
+        let mut p = hk_store::Pyramid::open(
+            dir.0.join("history-root"),
+            hk_store::history::PyramidConfig::default(),
+        )
+        .unwrap();
+        let psd = [1e-12f32; 16];
+        p.ingest(&hk_store::history::FrameInput::new(
+            t(began),
+            1_000_000_000,
+            100e6,
+            1e6,
+            hk_model::PowerUnit::Dbfs,
+            &psd,
+        ))
+        .unwrap();
+        assert_eq!(p.recording_began(), Some(t(began)));
+        std::sync::Arc::new(std::sync::Mutex::new(p))
+    }
+
+    /// Per-row states of `overlay_json`'s union over 10 rows × 1 cell of `window`.
+    fn row_states(state: &ApiState, window: TimeRange) -> (Vec<String>, Value) {
+        let v = overlay_json(state, band(), window, 10, 1);
+        let rows = v["any"]["cells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["state"].as_str().unwrap().to_string())
+            .collect();
+        (rows, v["horizon"].clone())
+    }
+
+    fn states(spec: &[(&str, usize)]) -> Vec<String> {
+        spec.iter()
+            .flat_map(|&(s, n)| std::iter::repeat_n(s.to_string(), n))
+            .collect()
+    }
+
+    /// **T-507, the ticket.** The plane's answer in each state a server's memory can be in:
+    ///
+    /// 1. **nothing has ever recorded here** (an empty log, before the first frame): every row
+    ///    `unobserved`, `recording_began_s` null. Before this ticket, every row was `"unknown"` —
+    ///    the purple wall;
+    /// 2. **recording began and every record since survives**: rows before recording began are
+    ///    `unobserved`; the rows between it and the oldest surviving tune record — recorded, record
+    ///    since lost — are `"unknown"`; the dwell's own rows `observed`; after it, `unobserved`;
+    /// 3. **a source discarded records that could predate that** (the log deleted a segment): the
+    ///    boundary is no floor, so every row before the oldest record is `"unknown"` — T-423's rule;
+    /// 4. **no tune history on this server at all** (no ring, no log): every row `"unknown"`. The
+    ///    narrow case T-441 named: this server cannot say whether it looked.
+    ///
+    /// Window: `[7080, 7280)` s in ten 20-s rows. The dwell is `[7200, 7260)` — whole rows 6..9,
+    /// and on an hour boundary so the log's hour-granular reach is exactly its start; the history
+    /// began at 7100, the start of row 1.
+    #[test]
+    fn unknown_is_what_was_recorded_and_lost_and_a_young_store_has_lost_nothing() {
+        let window = TimeRange::new(t(7080), t(7280));
+
+        // 1. Nothing ever recorded.
+        let dir = TempDir::new("t507-never");
+        let state = ApiState {
+            observations: Some(store_of(&dir, &[])),
+            ..ApiState::default()
+        };
+        let (rows, h) = row_states(&state, window);
+        assert_eq!(rows, states(&[("unobserved", 10)]), "{h}");
+        assert_eq!(h["recording_began_s"], Value::Null, "{h}");
+        assert_eq!(h["oldest_record_s"], Value::Null, "{h}");
+        assert_eq!(h["forgotten"], Value::Null, "{h}");
+        assert_eq!(h["unknown_rows"], json!(0), "{h}");
+
+        // 2. Recorded since 7100; the only surviving tune record starts at 7200.
+        let dir = TempDir::new("t507-lost");
+        let state = ApiState {
+            observations: Some(store_of(&dir, &[dwell_at(7200, 7260)])),
+            history: Some(history_began_at(&dir, 7100)),
+            ..ApiState::default()
+        };
+        let (rows, h) = row_states(&state, window);
+        assert_eq!(
+            rows,
+            states(&[
+                ("unobserved", 1),
+                ("unknown", 5),
+                ("observed", 3),
+                ("unobserved", 1)
+            ]),
+            "{h}"
+        );
+        assert_eq!(h["recording_began_s"], json!(7100.0), "{h}");
+        assert_eq!(h["oldest_record_s"], json!(7200.0), "{h}");
+        assert_eq!(h["unknown_from_row"], json!(1), "{h}");
+        assert_eq!(h["unknown_rows"], json!(5), "{h}");
+        assert_eq!(h["forgotten"], Value::Null, "{h}");
+
+        // 3. The same, after the log has deleted a segment by retention.
+        let dir = TempDir::new("t507-forgot");
+        let log = store_of(&dir, &[dwell_at(7200, 7260)]);
+        log.stats()
+            .segments_deleted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let state = ApiState {
+            observations: Some(log),
+            history: Some(history_began_at(&dir, 7100)),
+            ..ApiState::default()
+        };
+        let (rows, h) = row_states(&state, window);
+        assert_eq!(
+            rows,
+            states(&[("unknown", 6), ("observed", 3), ("unobserved", 1)]),
+            "{h}"
+        );
+        assert!(h["forgotten"].is_string(), "{h}");
+        assert_eq!(h["unknown_from_row"], json!(0), "{h}");
+
+        // 4. No tune history at all.
+        let (rows, h) = row_states(&ApiState::default(), window);
+        assert_eq!(rows, states(&[("unknown", 10)]), "{h}");
     }
 }

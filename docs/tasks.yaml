@@ -13200,7 +13200,8 @@ tasks:
   - id: T-466
     milestone: M2-hardening
     title: ui/e2e/selftest.mjs cannot hold app-page faults, so per-guard attribution is meaningless for two specs
-    status: in-progress
+    status: done
+    commit: "b7070787"
     priority: normal
     parallel_group: UI
     depends_on: []
@@ -15193,7 +15194,8 @@ tasks:
   - id: T-507
     milestone: MLIVE
     title: A server that has lost its history answers every tile all-unknown - a wall of purple the user sees
-    status: in-progress
+    status: done
+    commit: "3b352889"
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15224,7 +15226,8 @@ tasks:
   - id: T-508
     milestone: MLIVE
     title: A failed re-plumb ends the run for good while hk serve stays up saying finished - the other road to "retune never recovers"
-    status: in-progress
+    status: done
+    commit: "51bc8aae"
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15259,7 +15262,8 @@ tasks:
   - id: T-509
     milestone: M2-hardening
     title: tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell saw an all-unobserved plane once under a full gate
-    status: todo
+    status: done
+    commit: "3b352889"
     priority: normal
     parallel_group: PIPE
     model: opus
@@ -15412,7 +15416,8 @@ tasks:
   - id: T-515
     milestone: MLIVE
     title: The coverage-only tile shortcut answers 200 above the declared readable ceiling, where docs/api.md says 400
-    status: todo
+    status: done
+    commit: "3b352889"
     priority: low
     parallel_group: PIPE
     model: opus
@@ -15484,7 +15489,8 @@ tasks:
   - id: T-519
     milestone: MSCAN
     title: "Fog-of-war 2A: a last-known (carry-forward) query and a shadow plane on the tile route"
-    status: in-progress
+    status: done
+    commit: "45c37dbc"
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15518,7 +15524,8 @@ tasks:
   - id: T-520
     milestone: MSCAN
     title: "Fog-of-war 2B: the client's SHADOW tier - a dim last-known ramp, unmistakable from live, grey untouched"
-    status: todo
+    status: done
+    commit: "2ec2179e"
     priority: high
     parallel_group: CANVAS-FE
     model: opus
@@ -15541,7 +15548,7 @@ tasks:
   - id: T-521
     milestone: MSCAN
     title: "Fog-of-war 2C: the standing guard - sweep then leave = shadow, never swept = grey, re-sweep = bright"
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CANVAS-FE
     model: sonnet
@@ -15555,6 +15562,180 @@ tasks:
       the air was truly observed before.
     notes: |
       Filed 2026-09-18.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-522
+    milestone: MSCAN
+    title: A toggle to show or hide the found-signal boxes on the canvas, remembered per viewer
+    status: done
+    commit: "472af52a"
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: sonnet
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      USER, 2026-09-18: the Candidate/Confirmed detection boxes are sometimes too cluttered. Add a
+      TOGGLE in the canvas/surface controls that shows or hides them. Pure client presentation - the
+      boxes are drawn from detection data already in the UI; this changes only their visibility,
+      never what is fetched or detected. Remember the choice in localStorage (wrapped in try/catch;
+      the page must work without it). Default: shown. test-ui gate.
+      PRIORITY: BELOW the fog-of-war chain (T-519 -> T-520 -> T-521). Slot into spare UI capacity;
+      never let it delay fog-of-war.
+    notes: |
+      Filed 2026-09-18 from the user's request.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-523
+    milestone: MSCAN
+    title: Fog-of-war regressed the live view - the live edge stalls until a resize, and zoom bursts draw 502s
+    status: in-progress
+    priority: high
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER, 2026-09-18, on the demo after T-519/T-520 merged. (1) Live view: newest rows/tiles stop
+      arriving; a refresh is correct; a window RESIZE restarts both live and shadow. (2) Rapid zoom
+      draws 502s from the tunnel - T-519's per-tile last-known search (~84 ms per 819 MHz tile) now
+      also runs on the coverage short-circuit. (3) Shadow too dark: raise it a notch, still clearly
+      dimmer than live. LEADING HYPOTHESIS (to measure, not assume): 502s arm T-499's whole-transport
+      backoff (to 30 s), throttling T-460's live-edge refresh; a resize re-issues requests. DoD: a
+      regression test RED on main - live edge advances through a zoom burst with injected 502s and
+      no resize; shadow-search cost cut and measured; honesty cap test kept meaningful.
+    notes: |
+      PAUSED 2026-09-18 by the user (budget: DC notch only). CHECKPOINT task-t523 @ 91a2ee1e.
+      MECHANISM CONFIRMED, AND IT IS NOT THE BACKOFF: tile.ts fetchTile turns a proxy 502/504 into a
+      status error and tilecache.ts retryable() treats ANY status as terminal, so a place the tunnel
+      failed is never re-asked; the live-edge tile stays undrawn until a resize changes the addresses
+      (6 of 10 failed places never re-asked, measured in a browser). WIP: 502/504 go to T-499's
+      silence backoff (the route never emits them itself); unit test + live-edge.e2e test 3 (RED on
+      main). NEXT: run live-edge e2e green; shadow brightness (cellrule.ts:190 gain 0.25, cap test
+      surface-honesty.test.ts:125 FROM=0.3); server-side shadow-search cost on the short-circuit
+      (tiles.rs fold_newest) not yet measured.
+      Filed 2026-09-18. The user's #1 with ~3% weekly budget left; if unfinished at the cap, it is
+      the FIRST thing resumed after the reset (Sun 02:00). Branch task-t523.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-524
+    milestone: MSCAN
+    title: Notch-and-interpolate the LO-leakage spike at every tune centre, in the backend, so a sweep stops stamping a false pattern
+    status: done
+    commit: "294597f2"
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER, 2026-09-18, important for sweeps. Every HackRF tune has an LO-leakage (DC) spike at its
+      centre; a sweep stamps that false spike at each hop's centre - "the repeated pattern that
+      isn't really there". FIX: notch-and-INTERPOLATE - replace the DC-notch cells with a LINEAR
+      gradient between the values just left and just right of the notch. NOT black/grey (that reads
+      as missing data). Applied once in the BACKEND spectrum path, so it appears everywhere at once
+      (live rows, history pyramid, tiles, trace, sweep) - never a per-view client patch. Real-time
+      path: Opus, reviewed. Known notch width, per device.
+      Check existing DC handling first (T-418 off-DC placement, the DC twin, spur masks) and reuse it.
+      Detection must not treat the interpolated cells as measured energy.
+    notes: |
+      Filed 2026-09-18; top tier with T-523 under the ~3% budget; if unfinished, resumes first after
+      the reset (Sun 02:00).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-525
+    milestone: MSCAN
+    title: A full 1-6000 MHz sweep on the LIVE HackRF crashes hk serve - a failed or edge retune must skip the step, never take the server down
+    status: in-progress
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER-REPORTED 2026-09-19. Scanning the live HackRF 1 MHz-6000 MHz at dwell 1 s crashes the
+      backend (unhealthy; stage.sh restarts it). The SAME scan on the mock (hk serve --device mock:)
+      runs fine, so it is NOT the scan logic or the DC notch: it is the REAL-DEVICE retune path under
+      a ~3334-step cadence. Suspects: a retune to an edge frequency (near 1 MHz or 6000 MHz), or a
+      libhackrf/USB error that panics instead of being handled.
+      FIX: (1) the scan's per-step retune is fault-tolerant - a failed or edge retune yields or skips
+      that step, is logged and counted, and NEVER panics the server; (2) clamp the scan range to the
+      device's achievable tune configurations. FIRST find the actual panic (the crashed serve's log /
+      backtrace, RUST_BACKTRACE=1) - measure, don't assume. Reproduce on the mock with T-508's
+      HK_MOCK_FAULT (extend it with an edge/USB-error fault if needed) so the regression test runs
+      without hardware, RED on main. Relates to T-497/T-508's retune hardening.
+      HARDWARE: only with the user's say-so - the HackRF is the demo's device on :8899.
+    notes: |
+      Filed 2026-09-19; queued for after the weekly reset (Sun 02:00) given budget.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-526
+    milestone: MSCAN
+    title: Ctrl+Shift+wheel sets how dark the fog-of-war shadow renders
+    status: done
+    commit: "cc04109e"
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: sonnet
+    depends_on: [T-520]
+    use_cases: []
+    acceptance: |
+      USER 2026-09-19. Client-only: the shadow ramp's brightness multiplier becomes a uniform
+      (uShadowGain); Ctrl+Shift+wheel steps it in [0.05, 0.7] without zooming or panning, persisted
+      under hk-mui-shadow-gain (default 0.25). Backend values untouched.
+      MERGED WITHOUT THE GATE by the user's explicit one-time override (low-risk, UI-only, wanted
+      live immediately); tsc + 48/48 unit files passed. Every other ticket keeps the normal gate.
+    notes: |
+      The honesty ceiling now holds at the MAXIMUM gain (0.7) rather than the shipped default, and
+      the scanline texture is asserted at min/default/max - near the top of the range texture, not
+      brightness, is what separates a shadow from live. T-523 raises the DEFAULT gain; reconcile
+      the two when it lands.
+  - id: T-527
+    milestone: MSCAN
+    title: Fog-of-war fills EVERY time gap in an observed column - nearest PAST sample, and the future's first sample only before the first-ever
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-519, T-520]
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER 2026-09-20, extending fog-of-war. Today T-519 carries the last-known value FORWARD from
+      before the viewport; a column observed only in the MIDDLE of the view still leaves grey gaps
+      above and below its samples. Fill EVERY time gap in a column that was ever observed:
+      - a gap after any sample takes the NEAREST PAST sample (carry forward, as now);
+      - the stretch BEFORE the column's FIRST-EVER sample takes that first sample (the one and only
+        backward fill) - nothing else ever reads backward in time.
+      GREY REMAINS for a column never observed at all, and for spectrum outside the record horizon.
+      That distinction is the whole invariant: grey = we never looked.
+      Build on RegionHistory::fold_newest / Pyramid::last_known_* (hk-store history/query.rs) and the
+      `shadow` plane (hk-api tiles.rs). Watch the COST: T-519 measured ~84 ms on an 819 MHz tile and
+      that is already suspected in T-523's 502s - measure before and after, and do not make the
+      short-circuit path heavier. Age is on the wire (last_t_s); a backward-filled run must be
+      distinguishable on the wire from a forward-filled one.
+      docs/api.md + api_contract.rs together; extend ADR-0020.
+    notes: |
+      Filed 2026-09-20. Sequenced AFTER T-523 lands, since T-523 is cutting the same query's cost.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-528
+    milestone: MSCAN
+    title: Viewport-dynamic auto-contrast as a toggle - scale to what is on screen now
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER 2026-09-20. Auto-contrast today anchors its scale over the region (T-470/T-475 measured
+      the colours-shift-on-zoom tradeoff the user accepted). The user wants a VIEWPORT-DYNAMIC mode:
+      the scale is computed from what is currently on screen, so a quiet band spreads across the
+      full ramp instead of sitting in the bottom few percent. Ship it as a TOGGLE beside the existing
+      auto-contrast control (the user keeps both), persisted like the other surface prefs.
+      HONESTY: the pane must still state the scale it drew at, and the readout's numbers must agree
+      with the pixels (T-475's rule). Shadow cells must not drag the scale - they are not
+      measurements of the current viewport.
+      Client-side presentation over data already held; no new route.
+    notes: |
+      Filed 2026-09-20. Below the fog-of-war and crash work in the user's order.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening

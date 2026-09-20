@@ -108,8 +108,8 @@ pub use hackrf::{
     HackRfConfig, HackRfControl, HackRfDeviceInfo, HackRfDriver, HackRfSource, HackRfStats,
 };
 pub use mock::{
-    Coverage, MockClock, MockEnd, MockOptions, MockSdrControl, MockSdrDriver, MockSdrSource,
-    MockStats, Recording,
+    Coverage, MockClock, MockEnd, MockFault, MockOptions, MockSdrControl, MockSdrDriver,
+    MockSdrSource, MockStats, Recording,
 };
 pub use sigmf_replay::{Pacing, ReplayOptions, SigmfReplaySource};
 

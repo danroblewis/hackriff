@@ -47,6 +47,12 @@ pub const HANN_ENBW_BINS: f64 = 1.5;
 /// Half-width of the DC notch the observed extent excludes, Hz: the detector's DC-spur tolerance
 /// (`hk_detect::DcRule::default().tolerance_hz`).
 pub const DC_NOTCH_HALF_HZ: f64 = 15e3;
+/// Half-width, bins, of the DC notch the display and history frames interpolate across (T-524):
+/// the Hann main lobe of the LO-leakage tone (a pure DC tone reads in bins ±1 and nulls at ±2).
+/// Deliberately **not** [`DC_NOTCH_HALF_HZ`]: that is the detector's tolerance, and interpolating
+/// ±15 kHz of history smears neighbouring channels' real bursts across the centre (AWARE-042 ch3
+/// at 446.04375 MHz, next to a 446.05 MHz tune centre, read 0.436 occupancy against truth 0.294).
+pub const DC_INTERP_HALF_BINS: usize = 2;
 
 /// The run's observation log (see the module docs).
 pub struct ObservationLog {

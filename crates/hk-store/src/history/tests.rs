@@ -16,6 +16,7 @@ use super::*;
 mod bias_tee;
 mod coverage_fold;
 mod followups;
+mod last_known;
 mod lattice;
 mod lattice_cost;
 mod maturity;
@@ -715,4 +716,53 @@ fn sweep_frame_converter_regrids_density() {
         assert_eq!(h.cell(0, f).mean_db, want, "cell {f}");
         assert!((h.cell(0, f).coverage - 0.75).abs() < 1e-4);
     }
+}
+
+/// **T-507.** A store knows when it began recording, and that is a recorded fact rather than a
+/// reading of the tiles it holds: `None` before any frame, the earliest frame's start after, the
+/// same instant after a restart (persisted, not re-derived from a block start), and never moved by
+/// a later frame.
+/// The coverage map reads it to tell *"nothing looked"* (before it) from *"we no longer know
+/// whether we looked"* (after it).
+#[test]
+fn a_store_remembers_when_it_began_recording_across_a_restart() {
+    let dir = TempDir::new("began");
+    let c = || cfg(vec![level(1, 10), level(2, 6)], 16);
+    let mut p = Pyramid::open(&dir.0, c()).unwrap();
+    assert_eq!(
+        p.recording_began(),
+        None,
+        "a fresh store has never recorded"
+    );
+    let psd = vec![lin(-100.0); 16];
+    // Mid-block, so a block-start bound (T0) would be distinguishable from the fact (T0 + 3.5 s).
+    let first = T0 + 3 * S + S / 2;
+    for k in 0..40 {
+        p.ingest(&frame(first + k * S / 10, S / 10, 16_000.0, 1000.0, &psd))
+            .unwrap();
+    }
+    assert_eq!(p.recording_began(), Some(ts(first)));
+    p.seal_through(ts(T0 + 60 * S)).unwrap();
+    drop(p);
+
+    let mut p = Pyramid::open(&dir.0, c()).unwrap();
+    assert_eq!(
+        p.recording_began(),
+        Some(ts(first)),
+        "persisted exactly, not rounded down to the oldest block's start"
+    );
+    // Later frames never move it; nothing a new run records is older than what it remembers.
+    p.ingest(&frame(T0 + 100 * S, S / 10, 16_000.0, 1000.0, &psd))
+        .unwrap();
+    assert_eq!(p.recording_began(), Some(ts(first)));
+    drop(p);
+
+    // A store written before T-507 has tiles but no file: the oldest held block's start stands in,
+    // a lower bound — never later than the first frame.
+    fs::remove_file(dir.0.join("history/s7").join(store::RECORDING_BEGAN_FILE)).unwrap();
+    let p = Pyramid::open(&dir.0, c()).unwrap();
+    let bound = p
+        .recording_began()
+        .expect("a store holding tiles has recorded");
+    assert!(bound <= ts(first), "{bound:?} is a lower bound on {first}");
 }

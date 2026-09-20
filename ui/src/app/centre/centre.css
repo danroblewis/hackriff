@@ -22,6 +22,15 @@
 .sf-hover { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .sf-stage { position: relative; min-height: 0; min-width: 0; overflow: hidden; background: var(--ground); }
+/* T-508: capture recovering or ended, said over the picture. A frozen edge that looks live is the
+   defect this exists for, so it is loud, and it never takes the pointer from the surface. */
+.sf-capture {
+  position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 2;
+  max-width: min(720px, calc(100% - 32px)); padding: 6px 12px; border-radius: 4px;
+  font: 12px var(--mono); line-height: 1.4; pointer-events: none;
+  background: rgba(20, 22, 28, 0.88); color: #ffd27a; border: 1px solid #ffd27a;
+}
+.sf-capture[data-state="ended"] { color: #ff8a80; border-color: #ff8a80; }
 .sf-canvas {
   position: absolute; inset: 0; width: 100%; height: 100%; display: block;
   /* The surface owns its own pan and zoom, so the browser must not also scroll or pinch it. */

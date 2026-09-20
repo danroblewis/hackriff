@@ -56,7 +56,7 @@
 //! a second server fails at open, not here. This gate is the in-process half.
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -352,6 +352,10 @@ pub struct AppliedWindow {
     pub sample_rate_hz: f64,
     /// A re-plumb is still in progress (the values may still change).
     pub settling: bool,
+    /// How many times the pipeline has changed the window **by itself** — a capture recovery
+    /// (T-508) — rather than at a retune's request. A change in it is adopted even when nothing is
+    /// pending. 0 for a retuner that never moves the window on its own.
+    pub pipeline_moves: u64,
 }
 
 impl std::error::Error for LiveControlError {}
@@ -400,6 +404,8 @@ pub struct SourceLiveControl {
     tuning: Mutex<LiveTuning>,
     gate: DeviceGate,
     pending: AtomicBool,
+    /// The last [`AppliedWindow::pipeline_moves`] seen (T-508).
+    pipeline_moves: AtomicU64,
     policy: Option<WindowPolicy>,
     fixed_rate: bool,
     retuner: Option<Arc<dyn WindowRetuner>>,
@@ -418,6 +424,7 @@ impl SourceLiveControl {
             tuning: Mutex::new(initial),
             gate: DeviceGate::new(device_id),
             pending: AtomicBool::new(false),
+            pipeline_moves: AtomicU64::new(0),
             policy: None,
             fixed_rate: false,
             retuner: None,
@@ -429,19 +436,25 @@ impl SourceLiveControl {
         &self.gate
     }
 
-    /// After a timed-out retune: takes the pipeline's window once its re-plumb has settled.
+    /// Takes the pipeline's window once its re-plumb has settled: after a timed-out retune, and
+    /// (T-508) whenever the pipeline has **moved the window by itself** since the last look
+    /// ([`AppliedWindow::pipeline_moves`]). A capture recovery can put a front end that refused a
+    /// retune back on the last window that delivered, and the tuning this control reports must be
+    /// that window, not the one the device refused. Other reports are not re-read.
     fn refresh(&self) {
-        if !self.pending.load(Ordering::SeqCst) {
-            return;
-        }
         let Some(r) = &self.retuner else { return };
+        let pending = self.pending.load(Ordering::SeqCst);
         match r.applied_window() {
             Some(w) if w.settling => {}
             Some(w) => {
-                let mut t = self.lock();
-                t.center_hz = w.center_hz;
-                t.sample_rate_hz = w.sample_rate_hz;
-                self.pending.store(false, Ordering::SeqCst);
+                let moved = self.pipeline_moves.swap(w.pipeline_moves, Ordering::SeqCst)
+                    != w.pipeline_moves;
+                if pending || moved {
+                    let mut t = self.lock();
+                    t.center_hz = w.center_hz;
+                    t.sample_rate_hz = w.sample_rate_hz;
+                    self.pending.store(false, Ordering::SeqCst);
+                }
             }
             None => self.pending.store(false, Ordering::SeqCst),
         }
@@ -875,6 +888,7 @@ mod tests {
                 center_hz: 100.8e6,
                 sample_rate_hz: 2.4e6,
                 settling: true,
+                pipeline_moves: 0,
             })),
         });
         let (lc, _rec) = live(SourceCapabilities::hackrf_one());
@@ -922,6 +936,7 @@ mod tests {
             center_hz: 100.8e6,
             sample_rate_hz: 2.4e6,
             settling: false,
+            pipeline_moves: 0,
         });
         assert_eq!(lc.tuning().center_hz, 100.8e6);
         // The next window change starts from the refreshed window.
@@ -935,8 +950,31 @@ mod tests {
             center_hz: 1.0,
             sample_rate_hz: 1.0,
             settling: false,
+            pipeline_moves: 0,
         });
         assert_eq!(lc.tuning().sample_rate_hz, 10e6);
+
+        // T-508: a window the pipeline moved to BY ITSELF (a capture recovery falling back to the
+        // last window that delivered) is adopted with nothing pending — once.
+        *retuner.applied.lock().unwrap() = Some(AppliedWindow {
+            center_hz: 100.8e6,
+            sample_rate_hz: 2.4e6,
+            settling: false,
+            pipeline_moves: 1,
+        });
+        let t = lc.tuning();
+        assert_eq!((t.center_hz, t.sample_rate_hz), (100.8e6, 2.4e6));
+        *retuner.applied.lock().unwrap() = Some(AppliedWindow {
+            center_hz: 1.0,
+            sample_rate_hz: 1.0,
+            settling: false,
+            pipeline_moves: 1,
+        });
+        assert_eq!(
+            lc.tuning().center_hz,
+            100.8e6,
+            "the same move is not re-read"
+        );
     }
 
     /// T-343: the front end is one shared resource, so device actions serialise on one gate and a

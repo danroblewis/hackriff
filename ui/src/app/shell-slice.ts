@@ -2,6 +2,7 @@
 // nav, toast. `device` is T-150's alone (the top bar's reduction of `/api/control/state`); T-155's
 // Device tab keeps the full control state it needs in its own review slice, never here.
 import type { CenterGrid, FftBounds } from "../navigation";
+import type { CaptureState } from "../controls/model";
 import type { AppState } from "./state";
 
 /** T-264 (ADR-0017 TM-8): `history` is the durable all-time catalogue (workflow #3), a surface of
@@ -17,6 +18,11 @@ export interface ConnSlice { api: ApiConn; spectrum: StreamConn; message: string
 /** `GET /api/control/state`, reduced to what the top bar shows (T-150 only). */
 export interface DeviceSlice {
   loaded: boolean; live: boolean; finished: boolean; contentClass: string | null;
+  /** T-508: `run.capture` — whether the front end is delivering (null before the state loads or
+   * with no run). An older server that does not send it is read from `finished`. */
+  capture: CaptureState | null;
+  /** T-508: `run.capture_note`, the backend's own cause while recovering or after a failed end. */
+  captureNote: string | null;
   centerHz: number | null; sampleRateHz: number | null; rowsPerS: number | null; recording: boolean;
   /** The front end's provenance `device_id` (T-343), e.g. `hackrf:<serial>`; null when the source
    * reports no identity. A retune is a device action recorded against this id, so the UI names the
@@ -74,7 +80,7 @@ export function parsePrefs(raw: string | null): Prefs {
 export const shellInitial = (prefs: Prefs): ShellState => ({
   mode: prefs.mode, theme: prefs.theme,
   conn: { api: "connecting", spectrum: "idle", message: "" },
-  device: { loaded: false, live: false, finished: false, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, centerGrid: null, fftBounds: null },
+  device: { loaded: false, live: false, finished: false, capture: null, captureNote: null, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, centerGrid: null, fftBounds: null },
   nav: { gotoHz: null, seq: 0 },
   toast: { text: "", seq: 0 },
   openAlarms: 0,

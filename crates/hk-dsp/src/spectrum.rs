@@ -163,6 +163,33 @@ impl Spectrum {
         }
     }
 
+    /// The DC/LO-leakage notch bins (T-524): `N/2 − k ..= N/2 + k` for `k = half_bins`, clipped
+    /// so one measured bin is left each side as an anchor. `None` when `half_bins` is 0 or the
+    /// spectrum is too short to leave an anchor either side.
+    pub fn dc_notch_bins(&self, half_bins: usize) -> Option<Range<usize>> {
+        let n = self.psd.len();
+        if half_bins == 0 || n < 5 {
+            return None;
+        }
+        let c = n / 2;
+        let k = half_bins.min(c - 1).min(n - c - 2);
+        Some(c - k..c + k + 1)
+    }
+
+    /// Notch-and-interpolate (T-524): replaces the DC notch cells ([`Self::dc_notch_bins`]) of
+    /// `psd`, `max_hold` and `min_hold` with a straight line **in dB** between the measured bin
+    /// just left and just right of the notch (a geometric ramp in linear power), so the LO spike
+    /// at every tune centre is not drawn as a signal and the notch is not drawn as missing data.
+    /// O(notch width). Returns the replaced range. The cells are synthesized, not measured:
+    /// detection must run on a spectrum this was **not** applied to (it keeps its own DC rule).
+    pub fn interpolate_dc_notch(&mut self, half_bins: usize) -> Option<Range<usize>> {
+        let r = self.dc_notch_bins(half_bins)?;
+        for trace in [&mut self.psd, &mut self.max_hold, &mut self.min_hold] {
+            interpolate_log(trace, r.clone());
+        }
+        Some(r)
+    }
+
     /// Converts a linear FS²/Hz trace (`psd`, `max_hold`, `min_hold`) to dB in `unit`.
     pub fn write_db(&self, trace: &[f32], unit: PowerUnit, out: &mut [f32]) {
         assert_eq!(trace.len(), out.len(), "trace/output length mismatch");
@@ -262,5 +289,77 @@ impl Hold {
     /// Kind.
     pub fn kind(&self) -> HoldKind {
         self.kind
+    }
+}
+
+/// Replaces `trace[r]` with a straight dB line between `trace[r.start − 1]` and `trace[r.end]`.
+/// A trace shorter than `r.end + 1` (a hold that is off) is left alone.
+fn interpolate_log(trace: &mut [f32], r: Range<usize>) {
+    if r.start == 0 || trace.len() <= r.end {
+        return;
+    }
+    let tiny = f32::MIN_POSITIVE;
+    let a = trace[r.start - 1].max(tiny).ln();
+    let b = trace[r.end].max(tiny).ln();
+    let span = (r.end - r.start + 1) as f32;
+    for (j, v) in trace[r.clone()].iter_mut().enumerate() {
+        let t = (j + 1) as f32 / span;
+        *v = (a + t * (b - a)).exp();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::window::Window;
+
+    /// T-524: a spike at DC becomes a straight dB line between the neighbours across the notch;
+    /// every cell outside the notch is untouched.
+    #[test]
+    fn t524_dc_spike_is_replaced_by_a_straight_db_line() {
+        let (n, fs) = (64usize, 64_000.0);
+        let metrics = Window::new(WindowKind::Hann, n).metrics();
+        let res = Resolution {
+            window: WindowKind::Hann,
+            fft_len: n,
+            overlap: 0,
+            n_avg: 1,
+            bin_width_hz: fs / n as f64,
+            rbw_hz: metrics.enbw_bins * fs / n as f64,
+            window_metrics: metrics,
+        };
+        let mut s = Spectrum::empty(res, true, false);
+        s.f_center_hz = 100e6;
+        s.sample_rate_hz = fs;
+        // A ramp from −100 to −90 dB across the band, plus a +40 dB spike over ±2 bins at DC.
+        for (i, v) in s.psd.iter_mut().enumerate() {
+            *v = 10f32.powf((-100.0 + 10.0 * i as f32 / n as f32) / 10.0);
+        }
+        for i in n / 2 - 2..=n / 2 + 2 {
+            s.psd[i] *= 1e4;
+        }
+        s.max_hold.clone_from(&s.psd);
+        s.min_hold.clone_from(&s.psd);
+        let before = s.psd.clone();
+        let r = s.interpolate_dc_notch(3).expect("notch");
+        assert_eq!(r, n / 2 - 3..n / 2 + 4);
+        let db = |v: f32| 10.0 * v.log10();
+        let (a, b) = (db(s.psd[r.start - 1]), db(s.psd[r.end]));
+        let span = (r.end - r.start + 1) as f32;
+        for trace in [&s.psd, &s.max_hold, &s.min_hold] {
+            for (i, (&v, &was)) in trace.iter().zip(&before).enumerate() {
+                if r.contains(&i) {
+                    let want = a + (b - a) * (i + 1 - r.start) as f32 / span;
+                    assert!((db(v) - want).abs() < 1e-3, "bin {i}: {} vs {want}", db(v));
+                } else {
+                    assert_eq!(v, was, "bin {i} outside the notch changed");
+                }
+            }
+        }
+        // No spike left: the notch peak is at most the higher anchor.
+        let peak = r.clone().map(|i| db(s.psd[i])).fold(f32::MIN, f32::max);
+        assert!(peak <= a.max(b) + 1e-3);
+        assert_eq!(s.dc_notch_bins(1), Some(n / 2 - 1..n / 2 + 2));
+        assert_eq!(s.dc_notch_bins(0), None);
     }
 }

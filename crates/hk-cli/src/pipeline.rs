@@ -1319,6 +1319,22 @@ pub fn cli_mock_options_for(path: &Path) -> MockOptions {
     }
 }
 
+/// The environment variable that arms a **mock SDR** fault (T-508): `retune-apply-fails`,
+/// `retune-apply-fails:N` or `retune-apply-fails:always` ([`hk_core::MockFault::parse`]). It reaches
+/// only `--device mock:…`; a real radio has no such switch. The browser tier sets it so a retune
+/// guard can go red — every one of them was green on a mock that always lands where it is told.
+pub const MOCK_FAULT_ENV: &str = "HK_MOCK_FAULT";
+
+/// The fault [`MOCK_FAULT_ENV`] arms, if any. An unparseable spec is an error, never ignored: a
+/// harness that asked for a fault and silently got none would be a green guard over nothing.
+pub fn mock_fault_from_env() -> anyhow::Result<Option<hk_core::MockFault>> {
+    match std::env::var(MOCK_FAULT_ENV) {
+        Ok(spec) => hk_core::MockFault::parse(&spec)
+            .map_err(|e| anyhow::anyhow!("{MOCK_FAULT_ENV}={spec:?}: {e}")),
+        Err(_) => Ok(None),
+    }
+}
+
 /// The driver for a live source spec: `hackrf` / `hackrf:<serial>` (HackRF One) or
 /// `mock:<file.sigmf-meta>` (the mock SDR, `None` if the recording cannot be opened; [`open_live`]
 /// reports why). SoapySDR plugs in here later behind the same `SourceDriver` contract.
@@ -1434,7 +1450,14 @@ pub fn open_live(spec: &str, live: &LiveArgs) -> anyhow::Result<LiveSource> {
     let mut clock_start = None;
     let (driver, request): (Box<dyn SourceDriver>, OpenRequest) =
         if let Some(path) = mock_path(spec) {
-            let driver = MockSdrDriver::new(&path, cli_mock_options_for(&path))
+            let options = MockOptions {
+                fault: mock_fault_from_env()?,
+                ..cli_mock_options_for(&path)
+            };
+            if let Some(f) = options.fault {
+                eprintln!("mock SDR: fault armed from {MOCK_FAULT_ENV}: {f:?}");
+            }
+            let driver = MockSdrDriver::new(&path, options)
                 .with_context(|| format!("opening the mock device over {}", path.display()))?;
             if driver.options().clock == MockClock::Recording {
                 clock_start = Some(driver.recording().start_time);
