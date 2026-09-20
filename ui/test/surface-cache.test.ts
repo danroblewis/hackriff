@@ -764,9 +764,13 @@ test("a 400 is fetched at most ONCE per place, however many frames ask for it", 
   assert.match(h.cache.refusalFor(bad) ?? "", /HTTP 400/, "the route's own words are kept for the readout");
 });
 
-test("NO non-503 status is ever asked twice — the enumeration, not a list of special cases", async () => {
+test("NO status the ROUTE can emit is ever asked twice — the enumeration, not a list of special cases", async () => {
   // The guard the ticket asked for, stated over the statuses rather than over the one that bit us.
-  for (const status of [400, 401, 403, 404, 410, 413, 422, 500]) {
+  // T-523 narrows "every status" to "every status `/api/tiles` can answer with": every 4xx, plus
+  // the three 5xx `hk-api` emits (500, the T-190 501, and T-454's 503 — which arrives as a
+  // TileBusyError and is the test below). 501 is here because it is a real refusal that a proxy
+  // could be mistaken for: it must stay terminal.
+  for (const status of [400, 401, 403, 404, 405, 410, 413, 422, 429, 431, 500, 501]) {
     const h = harness({ inFlight: 4 });
     const a = addr(status % 7);
     h.cache.beginFrame(); h.cache.acquire(a); h.cache.endFrame();
@@ -819,10 +823,13 @@ test("…and 503 still retries with T-454's AIMD intact: the cap is discovery, n
   assert.equal(net.calls.length, 2, "…and once the backoff opens it does: a silence is not terminal");
 });
 
-test("a PROXY's 502/504 is the route saying nothing: silence ladder, never terminal (T-523)", async () => {
-  // The route never emits either; the user's tunnel does, for a slow tile. Terminal left a live-edge
-  // place undrawn until a resize re-addressed the view.
-  for (const status of [502, 504]) {
+test("a 5xx the ROUTE cannot emit is the route saying nothing: silence ladder, never terminal (T-523)", async () => {
+  // The route emits exactly 500, 501 and 503; every other 5xx reached us from something between
+  // this client and `hk serve`. The user's cloudflared tunnel answers 502 for a slow tile; a
+  // Cloudflare edge in front of it would answer 520/522/524; nginx would answer 502/504. The rule
+  // is over the route's vocabulary rather than over that open list, so a proxy nobody has met yet
+  // is handled too — and 598/599 below are exactly such a case, invented by proxies and in no RFC.
+  for (const status of [502, 504, 507, 508, 520, 521, 522, 524, 527, 530, 598, 599]) {
     let clock = 0;
     const h = harness({ inFlight: 4, now: () => clock });
     const a = addr(status % 7);

@@ -131,8 +131,10 @@ test("the shadow is not THE grey — at any level, on any pixel — and grey is 
 // client-adjustable uniform (`./shadow-gain.ts`), clamped to [0.05, 0.7]. The guarantee this test
 // holds is stated at the top of that range, because it is the binding case: at ANY gain a viewer can
 // reach — up to and including 0.7 — a shadow pixel can never be as bright as a live signal from
-// about a third of the way up the ramp. (At the shipped default, 0.25, the same ceiling holds with
-// far more headroom; 0.7 is where it is actually tested.)
+// about a third of the way up the ramp. (At the shipped default the same ceiling holds with far more
+// headroom; 0.7 is where it is actually tested. The default's own, stronger, property — that the
+// crossing point stays in the LOWER THIRD — is the test below this one, because T-523 raised the
+// default and that is the property raising it can break.)
 test("the shadow's HARD CEILING holds at the user's MAXIMUM gain (0.7): no shadow pixel is as bright as the live ramp from a third of the way up", () => {
   const GAIN = SHADOW_GAIN_MAX;
   const shadowAt = (x: number, px: { x: number; y: number }) =>
@@ -163,8 +165,42 @@ test("the shadow's HARD CEILING holds at the user's MAXIMUM gain (0.7): no shado
   const peak = shadowAt(1, { x: 0.5, y: 3.5 });
   assert.ok(near(peak, [cmap(1)[0] * GAIN, cmap(1)[1] * GAIN, cmap(1)[2] * GAIN]));
   assert.ok(lum(peak) < lum(cmap(1)), "even at maximum gain, a shadow never reaches the live peak it remembers");
-  // And the shipped default (0.25) sits well inside that ceiling, with much more headroom.
+  // And the shipped default sits well inside that ceiling, with much more headroom.
   assert.ok(SHADOW_GAIN_DEFAULT < GAIN && SHADOW_GAIN_MIN < SHADOW_GAIN_DEFAULT);
+});
+
+// **T-523: what pins the DEFAULT, now that raising it is a thing anyone may do.**
+//
+// The user reported the shadow as too dark, so the default went 0.25 → 0.32. The test above holds
+// the ceiling at the user's maximum and is therefore indifferent to the default — it would stay
+// green at 0.69. But the default is the number almost every viewer sees, and the property the
+// SHADOW_MARK docs claim for it is stronger than "a shadow is never the ramp's white": it is *every
+// live colour from about a third of the way up is brighter than any shadow*.
+//
+// That property has a cliff, because the ramp's luminance is NOT monotonic — the red stop at x=0.9
+// dips to lum ≈ 0.349, below the yellow under it. So the always-brighter band runs from the low
+// third only while the brightest shadow stays under that dip; one notch past it the band jumps to
+// the top tenth of the ramp and brightness alone stops separating a remembered carrier from a live
+// one over two thirds of the ramp. Nothing in the ceiling test can see that happen. This can.
+test("the shipped DEFAULT gain keeps the always-brighter-than-shadow band in the lower third of the ramp (T-523)", () => {
+  const shadowAt = (x: number, px: { x: number; y: number }) =>
+    cellPixel({ state: CELL.SHADOW, x, px, tier: 0, srcPx: { x: 1, y: 1 }, fallback: false, shadowGain: SHADOW_GAIN_DEFAULT });
+  let brightest = 0;
+  for (let i = 0; i <= 400; i++) {
+    for (let y = 0; y < SHADOW_MARK.pitchPx; y++) brightest = Math.max(brightest, lum(shadowAt(i / 400, { x: 0.5, y: y + 0.5 })));
+  }
+  let from = 401;
+  for (let i = 400; i >= 0; i--) { if (lum(cmap(i / 400)) > brightest) from = i; else break; }
+  assert.ok(from / 400 <= 1 / 3,
+    `at the shipped default (${SHADOW_GAIN_DEFAULT}) the live ramp only clears the brightest shadow from x=${(from / 400).toFixed(3)}; ` +
+    "the docs on SHADOW_MARK promise 'about a third of the way up'. The ramp's luminance dips at the red stop " +
+    "(x=0.9, lum≈0.349), so a default at or above that dip collapses the band to the top of the ramp — raise the " +
+    "default only below it, or rewrite defence 1 in cellrule.ts to claim what is actually true.");
+  // The red stop is the cliff, stated as a number so a change to the ramp fails here rather than silently.
+  assert.ok(brightest < lum(cmap(0.9)),
+    "the brightest possible shadow at the default is no darker than the ramp's red stop — the dip is what bounds the default");
+  // …and the raise was real: this is not still the 0.25 the user called too dark.
+  assert.ok(SHADOW_GAIN_DEFAULT > 0.25, "T-523 raised the default; it is back at or below the brightness the user reported as too dark");
 });
 
 test("the shadow's TEXTURE: where the ceiling cannot help (a remembered noise floor), the scanlines can", () => {
