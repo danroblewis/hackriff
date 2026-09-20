@@ -18,7 +18,7 @@
 // Screen y runs down and the drawing buffer's runs up, so the vertical delta is negated exactly
 // once, here, and every consumer below is in one convention.
 
-import { dragIntent, type SurfacePreview, wheelZoom } from "./preview";
+import { dragIntent, isShadowGainWheel, type SurfacePreview, wheelDelta, wheelZoom } from "./preview";
 
 /** A point in drawing-buffer coordinates, GL convention (origin bottom-left). */
 export interface GlPoint { x: number; y: number }
@@ -44,6 +44,12 @@ export interface SurfaceInputOptions {
   /** A region stroke that **committed**: shift was held at the press, the pointer travelled far
    * enough not to be a tap, and the rectangle is non-degenerate. */
   onRegion?: (r: SurfaceRegion) => void;
+  /** **Ctrl+Shift+wheel adjusts the shadow's brightness instead of zooming** (T-526) — a client-only
+   * display preference, never a view or device change. `notches` is the gesture's own signed count
+   * (positive brightens); the host clamps and persists (`./shadow-gain.ts`) and calls
+   * `Surface.setShadowGain`. Present only where a host wants the gesture; absent, ctrl+shift falls
+   * through to the ordinary zoom below (shift alone already zooms frequency only). */
+  onShadowGain?: (notches: number) => void;
 }
 
 /** A rectangle strokes out on one pane, as its two corners in drawing-buffer coordinates. The
@@ -194,6 +200,16 @@ export function attachSurfaceInput(
   // frequency axis inert on a real Mac while every synthesised test passed.
   const onWheel = (e: WheelEvent) => {
     e.preventDefault();
+    // **Ctrl+Shift is claimed for shadow brightness, before the zoom gesture is even read** (T-526).
+    // It must never reach `wheelZoom`/`preview.wheel*`: those are the only routes that can move a
+    // viewport, and this gesture changes nothing about time, frequency or the device — only how dark
+    // the last-known mark renders. Without a host-supplied handler the combo falls through unchanged
+    // to the ordinary zoom (shift alone already means "frequency only").
+    if (isShadowGainWheel(e) && opts.onShadowGain) {
+      const d = wheelDelta(e);
+      if (d !== 0) opts.onShadowGain(d < 0 ? 1 : -1);
+      return;
+    }
     const p = point(e);
     const { factor, axes } = wheelZoom(e);
     if (preview.onMap(p)) { preview.wheelMap(p, factor, axes); moved(); return; }
