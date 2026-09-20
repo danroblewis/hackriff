@@ -665,6 +665,27 @@ test("a trace is a STROKE with a width, so it can never be a wash over the pane 
     assert.ok(Math.hypot(r - hr, g - hg, b - hb) > 0.25,
       `the max-hold's ink is on the ramp at x=${x.toFixed(2)} — the two series would be confusable`);
   }
+  // **And apart in the one form that survives ANTI-ALIASING** (T-532), which the distance above does
+  // not. The browser tier reads composited pixels, and a stroke's outermost pixel is a partial blend
+  // of its ink with whatever is under it: the distance to the ramp shrinks toward zero along the
+  // feather, and so does any *ratio* between channels, because the framebuffer is sRGB-encoded and
+  // that encoding does not preserve ratios under partial coverage. A ratio rule (`b > 1.3 g`) read
+  // the max-hold's own top edge as the current slice in 9 of 24 runs under load.
+  //
+  // What blending cannot change is the SIGN of `r - g` and `b - g`, because every other series on
+  // the strip is achromatic or near it and sRGB encoding is monotonic. `HOLD_INK` is magenta, so
+  // both are positive for it; the assertion is that they are never both positive on the ramp — red
+  // above green only at the ramp's yellow-to-white end, where blue is far below it, and blue above
+  // green only at its black-to-cyan end, where red is below it.
+  for (let x = 0; x <= 1.0001; x += 0.005) {
+    const [r, g, b] = cmap(x);
+    assert.ok(!(r > g && b > g),
+      `the ramp at x=${x.toFixed(3)} is (${r.toFixed(3)}, ${g.toFixed(3)}, ${b.toFixed(3)}) — red and ` +
+      "blue both above green, which is the max-hold's own shape. `ui/e2e/app-trace.e2e.mjs` " +
+      "separates the two series in a composited framebuffer by exactly that ordering, and it would " +
+      "now read this ramp colour as the max-hold.");
+  }
+  assert.ok(hr > hg && hb > hg, "the max-hold's ink must have that shape for the rule to be about it");
 }); 
 
 // ---------------------------------------------------------------------------
