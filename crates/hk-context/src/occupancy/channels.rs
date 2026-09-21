@@ -547,6 +547,14 @@ pub struct ChannelPlan {
     version: u32,
     cfg: LearnConfig,
     clusters: Vec<Cluster>,
+    /// Cluster-pair comparisons [`Self::merge_at`] has made since the plan was built (T-558).
+    ///
+    /// The work the survey's cost is made of, counted rather than timed. The defect this bounds
+    /// was a pairwise merge over every pair after every detection; a wall-clock budget only
+    /// notices that once the machine is slow enough or `n` large enough, whereas the count
+    /// separates `O(clusters)` a detection from `O(clusters²)` on the first call and on any
+    /// hardware. One `u64` add per comparison, which is far less than the comparison itself.
+    comparisons: u64,
 }
 
 impl ChannelPlan {
@@ -558,6 +566,7 @@ impl ChannelPlan {
             version: 0,
             cfg,
             clusters: Vec::new(),
+            comparisons: 0,
         }
     }
 
@@ -629,6 +638,7 @@ impl ChannelPlan {
             version,
             cfg,
             clusters,
+            comparisons: 0,
         }
     }
 
@@ -640,6 +650,12 @@ impl ChannelPlan {
     /// Clusters held (published and not): the plan's residency, for tests and measurement.
     pub fn cluster_count(&self) -> usize {
         self.clusters.len()
+    }
+
+    /// Cluster-pair comparisons made since the plan was built ([`Self::comparisons`] on the
+    /// struct says why this is counted): the survey's learning cost, as work rather than seconds.
+    pub fn comparisons(&self) -> u64 {
+        self.comparisons
     }
 
     /// Grid scheme id.
@@ -866,11 +882,14 @@ impl ChannelPlan {
         let cfg = self.cfg;
         let mut i = at;
         loop {
-            let Some(j) = (0..self.clusters.len()).find(|&j| {
+            let counted = &mut self.comparisons;
+            let clusters = &self.clusters;
+            let Some(j) = (0..clusters.len()).find(|&j| {
                 if j == i {
                     return false;
                 }
-                let (a, b) = (&self.clusters[i], &self.clusters[j]);
+                *counted += 1;
+                let (a, b) = (&clusters[i], &clusters[j]);
                 (a.holds(b.center(), -tol) || b.holds(a.center(), -tol))
                     // Nested emitters of very different width, and a host and its fragments'
                     // cluster, never pool.

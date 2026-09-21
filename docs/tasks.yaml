@@ -16464,19 +16464,26 @@ tasks:
         (red: "1000 steps: 8000 clusters exceeds the 4096 cap")
       - hk-context::sweep_accumulators::an_unpublished_cluster_expires_once_its_region_has_been_quiet
         (red: left 3, right 2)
-      - hk-context::sweep_accumulators::a_full_sweep_of_learning_costs_a_bounded_time_per_step
-        (red: "2999 sweep steps took 520.7 s")
+      - hk-context::sweep_accumulators::merge_costs_a_bounded_number_of_comparisons_per_detection
+        (3048 comparisons/detection at 1000 steps, 3749 at 2999, bound 16384; red at the FIRST
+        length with the old pass reinstated: "1000 steps: 5536345 comparisons per detection
+        exceeds the 16384 bound"). Counted, not timed, per the user's 2026-09-21 rule: a
+        wall-clock budget loose enough not to flake would let a reintroduced quadratic merge
+        finish a whole sweep inside it on a fast machine. Wall clock is kept as an `#[ignore]`
+        measurement (0.65 s now, 520.7 s with the old merge and the cluster cap already in
+        place).
       - hk-pipeline::sweep_residency::a_sustained_survey_holds_a_bounded_number_of_chain_threads
         (red: "400 attaches left 401 chains running, above the 16 cap")
-      Each asserts at TWO survey lengths, so a cap cannot be mistaken for a slower climb. Two
-      `#[ignore]` measurement tests beside them print the tables.
+      Each asserts at TWO survey lengths, so a cap cannot be mistaken for a slower climb. Three
+      `#[ignore]` measurement tests beside them print the tables and the wall-clock figures.
 
       VERIFIED: hk-context + hk-core + hk-pipeline 679 pass, hk-api + hk-cli 289 pass, clippy and
       fmt clean. Full gate not run (coordinator runs it at merge).
 
-      FOLLOW-UP worth a ticket: `MAX_RUNTIME_CHAINS` is a const, not a setting. On a bigger box
-      16 is conservative and on a Jetson at 20 Msps even 16 x 32 MB of retain buffer is 512 MB;
-      it wants to come from `PipelineSettings` and be sized from the rate.
+      FOLLOW-UP filed as T-578: `MAX_RUNTIME_CHAINS` and `MAX_RETAIN_SAMPLES` are consts, not
+      settings. On a bigger box 16 is conservative and on a Jetson at 20 Msps even 16 x 32 MB of
+      retain buffer is 512 MB; both want to come from `PipelineSettings` and be derived from the
+      core count and the sample rate.
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -17483,6 +17490,39 @@ tasks:
       viewport poll drops to zero for the sealed part of the viewport. A response-size assertion
       belongs here too, since the point of the ticket is bytes not transferred.
       Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-578
+    milestone: M2-hardening
+    title: The chain concurrency cap and the retain buffer are consts - size them from the device and the settings
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    effort: medium
+    depends_on: [T-558]
+    use_cases: [AWARE-011]
+    acceptance: |
+      Filed 2026-09-21 from T-558, which bounded these but bounded them with constants.
+      T-558 stopped a sustained sweep reaching ~450 threads and multi-GB RSS by adding
+      `chains::MAX_RUNTIME_CHAINS = 16` and `chains::fsk::MAX_RETAIN_SAMPLES` (16 Msamp, 32 MB).
+      Both are hard-coded, and NEITHER KNOWS WHAT MACHINE IT IS ON OR WHAT RATE IT IS RUNNING.
+      That is wrong in both directions: on the dev Mac 16 concurrent chains is conservative and
+      needlessly refuses decodes a 28-core box could run; on a Jetson at the HackRF's 20 Msps,
+      16 chains x 32 MB of retain buffer is 512 MB of buffer alone, before anything else the
+      device is holding, on a module whose whole memory is the budget.
+      WHAT TO DO: take both from `PipelineSettings` (so a run can be configured, and a portable
+      low-power mode can lower them) with defaults DERIVED rather than typed - the chain cap from
+      the core count, the retain bound from a byte budget divided by the sample rate, so the
+      seconds a chain retains fall as the device gets faster rather than the bytes rising. Report
+      both in `/api/status` beside `chains.admission_refused`, which is how anyone would find out
+      the cap is the thing refusing their decode.
+      THE BOUND IS THE POINT, NOT THE NUMBER: whatever the settings say, the residency must stay
+      bounded. Keep T-558's tests (`hk-pipeline::sweep_residency`,
+      `hk-context::sweep_accumulators`) passing and add one that a CONFIGURED cap is the cap that
+      holds - set an unusual value and assert the residency matches it at two survey lengths, so
+      the setting is shown to be wired through rather than merely present.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): thread counts, running-chain counts,
+      buffer bytes. Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

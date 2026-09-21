@@ -161,21 +161,74 @@ fn an_unpublished_cluster_expires_once_its_region_has_been_quiet() {
     );
 }
 
-/// A whole 1 MHz-6 GHz survey's worth of learning finishes in seconds, not hours.
+/// The merge cost is bounded **per detection**, and the total is about linear in survey length.
 ///
-/// The budget is deliberately loose (a debug build on a loaded machine): before the fix this same
-/// loop needed **over 120 seconds to reach step 236 of 2999**, because `merge` compared every
-/// pair of clusters after every detection and recomputed four medians per comparison. Any return
-/// to quadratic-in-survey-length cost blows a 60 s budget long before it blows a tight one.
+/// Counted, not timed. The defect was a pairwise merge over every pair after every detection:
+/// `O(detections x clusters^2)`. A wall-clock budget is a poor guard for that — on a fast, quiet
+/// machine a reintroduced quadratic merge finishes a whole sweep inside any budget loose enough
+/// not to flake, and with the cluster cap in place `n` never grows to where seconds would show
+/// it. The comparison count separates the two shapes on the first call, at any `n`, on any
+/// hardware, and cannot flake: at the 4096-cluster cap the old pass made ~8.4 M comparisons per
+/// detection where `merge_at` makes at most a few thousand.
+///
+/// Both assertions run at two survey lengths, because one length cannot tell a bound from a
+/// slower climb.
 #[test]
-fn a_full_sweep_of_learning_costs_a_bounded_time_per_step() {
+fn merge_costs_a_bounded_number_of_comparisons_per_detection() {
+    let cfg = LearnConfig::default();
+    let per_step = 8;
+    // `merge_at` scans the clusters once per merge it performs, plus once to find there are no
+    // more, so a detection's comparisons are bounded by the cap and the merges it triggers.
+    let limit = 4 * cfg.max_clusters as u64;
+
+    let mut seen = Vec::new();
+    for steps in [1000usize, 2999] {
+        let plan = sweep(steps, per_step, cfg);
+        let detections = (steps * per_step) as u64;
+        let per_detection = plan.comparisons() / detections;
+        println!(
+            "{steps} steps: {} comparisons, {per_detection} per detection, {} clusters",
+            plan.comparisons(),
+            plan.cluster_count()
+        );
+        assert!(
+            per_detection <= limit,
+            "{steps} steps: {per_detection} comparisons per detection exceeds the {limit} bound \
+             ({} clusters held) — the merge is quadratic in the plan again, not linear",
+            plan.cluster_count()
+        );
+        seen.push(plan.comparisons());
+    }
+
+    // Beyond the point the cap is reached, each further step costs the same, so the total is
+    // about linear in steps. Quadratic-in-survey-length growth (a merge that re-walked history)
+    // would show here even though the per-detection bound above would not catch it.
+    let ratio = seen[1] as f64 / seen[0] as f64;
+    let steps_ratio = 2999.0 / 1000.0;
+    assert!(
+        ratio < 1.5 * steps_ratio,
+        "total comparisons grew {ratio:.2}x for a {steps_ratio:.2}x longer survey \
+         ({} -> {}): the cost is superlinear in how long the sweep has run",
+        seen[0],
+        seen[1]
+    );
+}
+
+/// What a full sweep's learning costs in seconds, on this machine, today.
+///
+/// A metric, never a gate (the work-count assertions above are the gate): a wall-clock budget
+/// measures the machine rather than the code. The figures are worth keeping in the record all the
+/// same — before the T-558 fix this loop needed **520.7 s** with the cluster cap already in
+/// place, and over **120 s to reach step 236 of 2999** without it.
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn measure_the_wall_clock_cost_of_a_full_sweep_of_learning() {
     let t0 = Instant::now();
     let plan = sweep(2999, 8, LearnConfig::default());
-    let dt = t0.elapsed();
-    assert!(
-        dt.as_secs_f64() < 60.0,
-        "2999 sweep steps took {:.1} s ({} clusters): the per-step cost is growing with the survey",
-        dt.as_secs_f64(),
-        plan.cluster_count()
+    println!(
+        "2999 sweep steps in {:.2} s: {} clusters, {} comparisons",
+        t0.elapsed().as_secs_f64(),
+        plan.cluster_count(),
+        plan.comparisons()
     );
 }
