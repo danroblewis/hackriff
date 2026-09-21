@@ -270,6 +270,12 @@ self_version(){
   fi
 }
 
+# The board's merge driver is named by .gitattributes (committed) but implemented by a command
+# in .git/config (not committed), so a fresh clone fails every tasks.yaml merge with "custom
+# merge driver hkboard lacks command line". Register it here too: the runner is the one path
+# that must never be tripped by a setup step nobody ran.
+( cd "$REPO" && just setup-git ) >>"$LOG" 2>&1 || log "WARN: just setup-git failed; tasks.yaml merges may conflict"
+
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 self_version
 while true; do
