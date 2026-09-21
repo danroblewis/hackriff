@@ -16041,6 +16041,83 @@ tasks:
     notes: |
       Filed 2026-09-20 from T-493's report.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-541
+    milestone: MLIVE
+    title: Degrade, don't crash - a device or retune error must never take the server down or look dead to a supervisor
+    status: in-progress
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER, Tier 0 of the 2026-09-20 milestone review. The point fixes are on main (T-525 superseded
+      windows, T-530 between-windows instead of 410, T-508 capture recovery + a visible ended state).
+      THIS IS THE GENERAL GUARD: no single device or retune error may end the run, wedge capture, or
+      make hk serve indistinguishable from a dead process.
+      THREE PROPERTIES, each asserted, none of them "we looked and it seemed fine":
+      (1) NO PANIC CROSSES A THREAD BOUNDARY INTO A DEAD SERVER. Audit every unwrap/expect/panic
+      reachable from the device path (hk-core source, hk-pipeline capture/run/control, the hackrf and
+      rtlsdr sources) and make each either impossible or a handled error. A capture thread that dies
+      must be observed and reported, not silently absent.
+      (2) EVERY DEVICE ERROR DEGRADES VISIBLY. The run states what happened (run.capture:
+      running | recovering | ended plus a cause, T-508) and the surface says so. A frozen edge that
+      looks live is the defect the user reported three times.
+      (3) A DEGRADED SERVER IS STILL ALIVE TO A SUPERVISOR. ops/stage.sh's healthy() is / plus the
+      spectrum handshake; a recovering server must answer something that means "not now" (T-530's
+      503) rather than 410 or silence, so it is not restarted underneath the user.
+      MECHANISM, not vibes: drive faults through the generic device contract (T-508's HK_MOCK_FAULT,
+      T-525's RadioControl::hold_changes, T-497's lose_center) and add whatever fault shapes are
+      missing - a read error mid-segment, a refused rate, a device that vanishes, a device that
+      returns garbage, a tune that lands elsewhere. Each must leave the server answering and the run
+      either recovered or honestly ended. Also fuzz it: ops/fuzz-rig.sh already runs sweep/hop/
+      tile-flood/idle workloads against a mock and found 0 crashes in 69 cycles - extend it with the
+      fault shapes so a crash has somewhere to show up.
+      DoD: a test per property; the fault matrix runs in CI against the mock; and a written statement
+      of what is NOT covered (anything only the real radio can do).
+    notes: |
+      Filed 2026-09-20. Pairs with T-542, which reproduces the user's two specific reports on the
+      real HackRF - this ticket is the general guard, that one is the evidence.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-542
+    milestone: MLIVE
+    title: Reproduce the user's two reported crashes on the LIVE HackRF - a full sweep at dwell 1 s, and the deepest zoom
+    status: in-progress
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER, 2026-09-20, insisting on evidence rather than inference: two reported crashes must be
+      reproduced ON THE REAL RADIO and fixed. (1) a 1 MHz-6000 MHz sweep at dwell 1 s takes the
+      backend down; (2) the HIGHEST zoom level takes the backend down.
+      WHY MOCK EVIDENCE IS NOT ENOUGH: ops/fuzz-rig.sh ran 69 workload cycles against a mock with
+      0 crashes, and the same scan on a mock is fine - so whatever this is, it is device-specific.
+      Do NOT conclude "no panic" from mock runs, and do not conclude it from one live window either:
+      T-525 ran ~40 minutes on the live HackRF with RUST_BACKTRACE=full and saw no panic, but it did
+      see /ws/spectrum/live answer 410 for many seconds, which stage.sh's health check reads as a
+      crash and restarts. That may be the whole story or only part of it; MAIN HAS CHANGED A LOT
+      SINCE (T-525/T-529/T-530/T-508 all landed), so re-run against current main.
+      WHAT THE EVIDENCE MUST DISTINGUISH, because the fixes differ:
+      - a TRUE PANIC or abort (capture the backtrace and the thread);
+      - the process alive but UNRESPONSIVE (which route, how long, what was it doing);
+      - the process healthy but the SUPERVISOR restarting it (stage.sh's healthy() failing);
+      - the process healthy but the VIEW dead (rows stop reaching the client).
+      Drive the zoom case with BROWSER AUTOMATION at the deepest level (ui/e2e/cdp.mjs + harness),
+      not curl loops, so the traffic is the real client's.
+      HARDWARE: the user's demo holds the HackRF on :8899. Take it deliberately
+      (pkill -f 'hk serve.*127.0.0.1:8899'; ops/stage.sh restarts it afterwards), run your own
+      server on a free port with RUST_BACKTRACE=full logging to a file, and RELEASE it when done.
+      RECEIVE ONLY, never transmit.
+      DoD: each report either reproduced with its failure captured and fixed, or shown not to
+      reproduce on current main WITH THE EVIDENCE that supports that - including what changed since
+      the user last saw it.
+    notes: |
+      Filed 2026-09-20. Pairs with T-541 (the general degrade-don't-crash guard).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
