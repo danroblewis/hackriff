@@ -19368,6 +19368,33 @@ tasks:
       per SNR, and the reasons sum to the number of classifications - a report whose parts do not
       account for the whole is how a skipped stage hides.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-600
+    milestone: M2-hardening
+    title: A resolved artefact does not rank below a clean row, because the evidence proxy counts only measured flag bits
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    effort: low
+    depends_on: [T-598]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-598. `EMITTER_DETECTION_EVIDENCE_SQL` in `crates/hk-model/src/repo/relate.rs`
+      counts only the flag bits stored ON the detection row. T-598 deliberately does NOT write to
+      that row - a detection is immutable by trigger (`detection_immutable`), because a measurement
+      is what was measured and an interpretation must not rewrite it - so the retune verdict lives
+      in `detection_retune` and is applied on the read path.
+      Consequence: a detection the system has resolved as LO-relative still ranks as though nothing
+      were known about it. Join `detection_retune.flag_bits` into the evidence proxy so a resolved
+      artefact ranks below a clean row.
+      KEEP T-598'S RULE INTACT WHILE DOING IT: read-path application, no write to the measurement.
+      The point of the split is that the measurement and the interpretation have different
+      lifetimes - the interpretation is revocable and the measurement is not.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): a resolved LO-relative detection ranks
+      strictly below an unflagged one with otherwise equal evidence, and revoking the verdict
+      restores its rank - the second half matters, because a one-way change would make the ranking
+      outlive the claim.
+      Prove the test goes RED without the fix.
   - id: T-601
     milestone: M2-hardening
     title: A retune-sibling artefact reads as a generic "retune artefact" while an image reads as prose
@@ -19396,33 +19423,6 @@ tasks:
       ASSERT ON THE RENDERED TEXT AND THE REQUEST THE CLIENT BUILDS, not wall-clock.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-600
-    milestone: M2-hardening
-    title: A resolved artefact does not rank below a clean row, because the evidence proxy counts only measured flag bits
-    status: todo
-    priority: normal
-    parallel_group: PIPE
-    model: sonnet
-    effort: low
-    depends_on: [T-598]
-    use_cases: []
-    acceptance: |
-      FOUND BY T-598. `EMITTER_DETECTION_EVIDENCE_SQL` in `crates/hk-model/src/repo/relate.rs`
-      counts only the flag bits stored ON the detection row. T-598 deliberately does NOT write to
-      that row - a detection is immutable by trigger (`detection_immutable`), because a measurement
-      is what was measured and an interpretation must not rewrite it - so the retune verdict lives
-      in `detection_retune` and is applied on the read path.
-      Consequence: a detection the system has resolved as LO-relative still ranks as though nothing
-      were known about it. Join `detection_retune.flag_bits` into the evidence proxy so a resolved
-      artefact ranks below a clean row.
-      KEEP T-598'S RULE INTACT WHILE DOING IT: read-path application, no write to the measurement.
-      The point of the split is that the measurement and the interpretation have different
-      lifetimes - the interpretation is revocable and the measurement is not.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): a resolved LO-relative detection ranks
-      strictly below an unflagged one with otherwise equal evidence, and revoking the verdict
-      restores its rank - the second half matters, because a one-way change would make the ranking
-      outlive the claim.
-      Prove the test goes RED without the fix.
   - id: T-602
     milestone: M2-hardening
     title: POI and occupancy still ask "was it covered?" and never "was it analysed?", so the tuned centre is silently a blind spot to them
@@ -19454,6 +19454,41 @@ tasks:
       report the notch width and the band width it judged.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-603
+    milestone: M2-hardening
+    title: The listen acceptance test's listener-cap assertion is load-sensitive, and the acceptance suites are outside every serial protection
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      MEASURED 2026-09-21. `hk-e2e acceptance_m0
+      listen::signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches` failed a merge gate
+      at `listen.rs:234` - the assertion that a SECOND listener is admitted before a third is
+      refused at the cap - and PASSED ALONE in 24.83 s on the same commit. Classic load-flake, and
+      the branch it sank (a merge driver plus Python tests) could not have touched it.
+      TWO SEPARATE THINGS, AND THE SECOND IS THE STRUCTURAL ONE.
+      (1) The assertion turns on a listener being admitted within some implicit window while the
+      machine is loaded. Make it wait on the ADMISSION EVENT rather than on whatever the cap
+      happens to do in time - the claim is about the cap's ORDERING (second admitted, third
+      refused with 503), not about elapsed time. Do not lengthen a wait; that makes it rarer, which
+      is the pattern this project rejects.
+      (2) THE ACCEPTANCE SUITES ARE OUTSIDE EVERY PROTECTION THE PROJECT THINKS IT HAS.
+      `.config/nextest.toml` caps `test-threads` and pins a `heavy-serial` group, but `just
+      acceptance` and `just e2e-harness` run through PLAIN `cargo test`, so neither applies. The
+      group's own filter is `package(hk-pipeline) and test(listen)`, and this test is in `hk-e2e` -
+      so a test whose name matches the protected pattern, in a suite that drives a real server, was
+      protected by neither. A `RUST_TEST_THREADS` cap now removes the self-inflicted parallelism,
+      but that only reduces false reds; it is not determinism.
+      AUDIT THE REST WHILE THERE: how many other timing-sensitive tests sit in `hk-e2e` believing
+      they are covered by a nextest group that cannot see them? That count is the real finding.
+      ASSERT WITH COUNTS AND ORDERING, NOT WALL-CLOCK (user, 2026-09-21). Measure the failure rate
+      under deliberate load before and after - "it passes now" on a quiet machine is the evidence
+      that misled everyone here.
+      Prove the fixed test still catches a real cap violation.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
