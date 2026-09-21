@@ -19165,6 +19165,42 @@ tasks:
       per SNR, and the reasons sum to the number of classifications - a report whose parts do not
       account for the whole is how a skipped stage hides.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-603
+    milestone: M2-hardening
+    title: The listen acceptance test's listener-cap assertion is load-sensitive, and the acceptance suites are outside every serial protection
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      MEASURED 2026-09-21. `hk-e2e acceptance_m0
+      listen::signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches` failed a merge gate
+      at `listen.rs:234` - the assertion that a SECOND listener is admitted before a third is
+      refused at the cap - and PASSED ALONE in 24.83 s on the same commit. Classic load-flake, and
+      the branch it sank (a merge driver plus Python tests) could not have touched it.
+      TWO SEPARATE THINGS, AND THE SECOND IS THE STRUCTURAL ONE.
+      (1) The assertion turns on a listener being admitted within some implicit window while the
+      machine is loaded. Make it wait on the ADMISSION EVENT rather than on whatever the cap
+      happens to do in time - the claim is about the cap's ORDERING (second admitted, third
+      refused with 503), not about elapsed time. Do not lengthen a wait; that makes it rarer, which
+      is the pattern this project rejects.
+      (2) THE ACCEPTANCE SUITES ARE OUTSIDE EVERY PROTECTION THE PROJECT THINKS IT HAS.
+      `.config/nextest.toml` caps `test-threads` and pins a `heavy-serial` group, but `just
+      acceptance` and `just e2e-harness` run through PLAIN `cargo test`, so neither applies. The
+      group's own filter is `package(hk-pipeline) and test(listen)`, and this test is in `hk-e2e` -
+      so a test whose name matches the protected pattern, in a suite that drives a real server, was
+      protected by neither. A `RUST_TEST_THREADS` cap now removes the self-inflicted parallelism,
+      but that only reduces false reds; it is not determinism.
+      AUDIT THE REST WHILE THERE: how many other timing-sensitive tests sit in `hk-e2e` believing
+      they are covered by a nextest group that cannot see them? That count is the real finding.
+      ASSERT WITH COUNTS AND ORDERING, NOT WALL-CLOCK (user, 2026-09-21). Measure the failure rate
+      under deliberate load before and after - "it passes now" on a quiet machine is the evidence
+      that misled everyone here.
+      Prove the fixed test still catches a real cap violation.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
