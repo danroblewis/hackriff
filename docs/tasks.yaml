@@ -19548,6 +19548,63 @@ tasks:
       under deliberate load before and after - "it passes now" on a quiet machine is the evidence
       that misled everyone here.
       Prove the fixed test still catches a real cap violation.
+  - id: T-614
+    milestone: M2-hardening
+    title: The parameter estimator labels bursty analogue FM as 2fsk at 2390 Hz deviation
+    status: todo
+    priority: normal
+    parallel_group: DETECT
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-545 while building the BART phase-2 blind suite, and it is the inverse of the gap
+      that ticket was looking for. The estimator gives `estimated_params` to the bursty ANALOGUE FM
+      neighbours - labelling them `"2fsk"`, `mod_order: 2`, deviation 2390 Hz - while the confirmed
+      digital C4FM control channel gets `null`.
+      So the failure is not "no answer for the digital signal". It is a CONFIDENT WRONG ANSWER for
+      an analogue one, in the same run, from the same estimator. An analogue FM burst has no symbol
+      alphabet at all; calling it 2-FSK with a deviation is the confidently-wrong outcome the
+      open-set stance exists to prevent, and it is worse than abstaining because a ranked
+      explanation built on it inherits the error.
+      Establish why the estimator commits rather than abstains here - is it that nothing in the
+      chain can return "analogue, no symbols", or that the abstention exists and is not reached?
+      T-589 found exactly that second shape (a stage structurally unable to fire looked like a
+      stage that fired and agreed), so check before concluding.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): over a scene containing both analogue
+      FM bursts and a digital channel, the analogue emissions do NOT receive a symbol-rate or
+      mod_order claim, and the count of each is reported so the test cannot pass on zero.
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-615
+    milestone: MAUTO
+    title: SIGNAL-085's claim is band-gated, not measurement-driven - the 851-869 MHz trigger is not the use case
+    status: todo
+    priority: normal
+    parallel_group: DETECT
+    model: opus
+    effort: medium
+    depends_on: [T-545]
+    use_cases: [SIGNAL-085]
+    acceptance: |
+      FOUND BY T-545, which was asked to rule on the `[851, 869] MHz` trigger band and did: a band
+      gate is not a frequency lookup, so it does not break the blind rule. BUT the ruling exposes a
+      gap it correctly did not close: SIGNAL-085's actual claim is to find a 100 %-duty narrowband
+      four-level emission ANYWHERE, and what runs is band-gated, so the use case as written is not
+      what is tested.
+      This matters beyond tidiness. The project's stance is that the known-signal database offers
+      ranked suggestions AFTER blind detection and never starts the search; a band gate is a
+      weaker version of the same shortcut - it does not look a frequency up, but it does decide
+      where to look from a prior rather than from the signal. The 902-928 MHz burst scene (T-254)
+      is the model for what measurement-driven looks like.
+      Decide whether the gate is a permanent engineering constraint (cost, dwell budget) that
+      should be recorded as one, or a scaffold to remove. If it stays, SIGNAL-085's text should say
+      so, because a use case that claims more than the test delivers is the same defect as a UI
+      implying resolution it never captured.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: a four-level 100 %-duty emission placed OUTSIDE the
+      trigger band is found, or the ticket records why it cannot be.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
