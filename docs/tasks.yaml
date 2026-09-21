@@ -16255,6 +16255,62 @@ tasks:
     notes: |
       Filed 2026-09-20.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-558
+    milestone: M2-hardening
+    title: A sustained sweep accumulates threads, RSS and a growing occupancy accumulator
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-542]
+    use_cases: []
+    acceptance: |
+      SEEN BY T-542 while reproducing the sweep crash on the live HackRF, not fixed there.
+      Under a sustained 1 MHz-6 GHz sweep the process reaches ~450 THREADS and multi-GB RSS from
+      accumulating hk-chain-fsk-bursts-* threads, and hk_context::occupancy::channels::ChannelPlan::
+      learn was 100 % busy on the hk-occupancy thread for the whole of an 8 second sample(1) capture
+      - an accumulator that grows with the survey.
+      This is the same shape the project's own inventory invariants reject elsewhere (no unbounded
+      seen-count accumulators; candidates decay and expire when a region goes quiet) and the same
+      shape T-531 found in the stream registry (815 of 819 entries unattachable from birth). A
+      device-wide survey meets a great many emitters; nothing that grows per emitter may be unbounded.
+      MEASURE FIRST: thread count, RSS and ChannelPlan::learn's cost as functions of sweep progress.
+      Then bound each - a chain's lifetime, and what the channel plan keeps versus recomputes.
+      A survey that cannot run to completion without exhausting the box is a capability limit, not
+      a tuning detail: the product's first workflow is "scan thorough regions on a schedule".
+    notes: |
+      Filed 2026-09-20 from T-542's report.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-559
+    milestone: M2-hardening
+    title: The 4-builder concurrency cap counts cargo builds but not the hk serve processes agents leave running
+    status: todo
+    priority: normal
+    parallel_group: CI
+    model: sonnet
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      MEASURED BY T-543: `cargo build -p hk-plugins --bins` - documented as ~0.05 s warm - took
+      500 SECONDS at load average 211. The top consumer was an `hk serve` at 930-1300 % CPU (T-542's
+      live-radio work), with two more at ~20 % each holding 5 h of CPU apiece, alongside mds_stores
+      (34 h CPU), syspolicyd, XprotectService and tccd.
+      CLAUDE.md's rule is "at most 4 Rust-building agents; the coordinator's full check counts as
+      one" - and it counts NO hk serve at all, although an e2e run or a live-radio session starts
+      one that can eat ten cores on its own. The cap therefore does not bound what it exists to
+      bound, which is how a 62-minute gate and several load-induced false reds happened on
+      2026-09-20.
+      Make the accounting real: count servers as well as builders (an agent running the browser tier
+      or a live session holds a slot), and give agents a way to report and release one. Consider a
+      cheap advisory lock under $HACKRIFF_OPS that the brief tells agents to take, so the coordinator
+      can see the true occupancy rather than inferring it from pgrep.
+      SEPARATELY, needs the user: Spotlight (mds_stores) and XProtect exclusions for the repo and
+      its target directories - 34 h of CPU indexing build output is pure loss.
+    notes: |
+      Filed 2026-09-20 from T-543's measurement. The coordinator's scheduling caused several of
+      today's gate failures; this is the rule that failed to prevent it.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
