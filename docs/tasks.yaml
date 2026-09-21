@@ -16030,13 +16030,32 @@ tasks:
   - id: T-540
     milestone: M2-hardening
     title: The plugin host kills a decoder as hung after 10 s, but a cold-linked subprocess can take 30 s to reach its first instruction
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
     model: opus
     depends_on: [T-493]
     use_cases: []
+    result: |
+      Done on task-t540. The one "input queue full past stall_timeout" budget is now two, split on
+      an OBSERVATION rather than a bigger constant: the child's first byte on stdout/stderr
+      (`SignsOfLife`, the only evidence the host has that it ran - starts/records_*/ready all tick
+      whether or not it did). Before that byte a full queue is judged against the new
+      `limits.startup_timeout_ms` (default 60 s, >= stall_timeout, validated); from that byte on
+      against the unchanged `stall_timeout` (10 s), measured FROM THE BYTE, so a genuine hang is
+      detected exactly as fast as before. A per-run watchdog thread in run_once owns the decision
+      (the publisher's own slow-consumer disconnect is now only a backstop, set past both budgets);
+      each kill names its budget in the log ring, in `PluginStats::last_hang`/`startup_kills` and in
+      `last_exit`, never as a generic "hung". A queue that is not full is still not evidence of
+      anything, so a quiet healthy plugin is untouched.
+      Tests: crates/hk-plugins/tests/startup_budget.rs (a: cold start not killed, then decodes;
+      b: wedged-after-start killed on the 300 ms budget, not the 30 s one; c: never-ran killed on
+      the startup budget with the right reason) + a manifest validation unit test. Proven red with
+      the old single budget reinstated: a failed with "a plugin that was merely slow to start was
+      killed" (killed at ~310 ms), c with "killed after 324 ms, before its own 3 s startup budget".
+      One run even hit the real phenomenon live - the plugin took 32.9 s to reach its first
+      instruction and was NOT killed. docs/stream-contract.md 9.2 and docs/10 updated.
     acceptance: |
       T-493 measured, from inside run_once: a freshly linked plugin binary is created in 193 us
       (posix_spawn returns, the host's stdout reader is running at +320 us) and then EXECUTES
