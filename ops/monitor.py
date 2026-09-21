@@ -7,6 +7,7 @@ REPO = "/Users/daniellewis/hackriff"
 SCRATCH = os.environ.get("HACKRIFF_OPS", os.path.expanduser("~/.hackriff-ops"))
 os.makedirs(SCRATCH, exist_ok=True)
 PROJ = "/Users/daniellewis/.claude/projects/-Users-daniellewis-hackriff"
+OPSDIR = os.path.dirname(os.path.abspath(__file__))   # so `import perf` (same dir) resolves
 
 # A self-contained ticket-detail modal: any element with data-tid opens it (fetches
 # /ticket.json and shows every field). Injected before </body> of any page, so a
@@ -341,8 +342,8 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:0}
 .wrap{flex:1;min-height:0;overflow:hidden;position:relative;cursor:grab;touch-action:none}
 .wrap.grabbing{cursor:grabbing}
-#g{position:absolute;top:14px;left:14px;transform-origin:0 0;will-change:transform}
-#g svg{max-width:none;height:auto}
+#g{position:absolute;inset:0}
+#g svg{width:100%;height:100%;max-width:none;display:block}
 #g .node{cursor:pointer}
 #g .node:hover rect,#g .node:hover polygon{filter:brightness(1.25)}
 @keyframes pulse{0%,100%{filter:drop-shadow(0 0 0 rgba(255,207,107,0))}50%{filter:drop-shadow(0 0 6px rgba(255,207,107,.8))}}
@@ -357,7 +358,7 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 </style></head><body>
 <div class=top><span>hack<b>riff</b> task map</span><span class=sub id=sub></span>
 <span class=scopes><button id=sc-frontier class=on>frontier</button><button id=sc-all>all tasks</button></span>
-<span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked class=on>blocked</button></span>
+<span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked>blocked</button></span>
 <span class=filters>milestone: <select id=msfilter><option value="">all milestones</option></select></span>
 <a href="/">← dashboard</a>
 <span class=legend><span><i style="background:#FFD98a"></i>working now</span><span><i style="background:#F0A542"></i>in progress</span><span><i style="background:#A395E0"></i>todo</span><span><i style="background:#E47B68"></i>blocked</span><span><i style="background:#52C2AE"></i>review</span><span><i style="background:#2f5d4e"></i>✓ done</span><span><i style="background:#5A6973"></i>deferred</span></span></div>
@@ -366,7 +367,7 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script>
 mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
-let last='',scope='frontier',flt={done:false,todo:false,blocked:true},msFilter='';
+let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter='';
 document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
@@ -383,21 +384,33 @@ async function draw(){
   wireNodes();
  }catch(e){ document.getElementById('g').textContent='render error: '+e; }
 }
-// --- pan / zoom / click-to-open (restored) ---
+// --- SVG viewBox pan / zoom / click-to-open (vector-crisp at any zoom) ---
 const wrap=document.querySelector('.wrap'), gg=document.getElementById('g');
-let tx=0,ty=0,k=1,down=false,px=0,py=0,dragMoved=false;
-function apply(){ gg.style.transform=`translate(${tx}px,${ty}px) scale(${k})`; }
-function wireNodes(){ gg.querySelectorAll('.node').forEach(n=>{ const m=(n.textContent||'').match(/T-\d+/); if(m) n.setAttribute('data-node-tid',m[0]); }); }
-wrap.addEventListener('wheel',e=>{ e.preventDefault();
-  const r=wrap.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
-  const nk=Math.min(6,Math.max(0.1,k*Math.exp(-e.deltaY*0.0015)));
-  tx=mx-(mx-tx)*(nk/k); ty=my-(my-ty)*(nk/k); k=nk; apply();
+let svgEl=null,W=0,H=0,vb=null,down=false,px=0,py=0,dragMoved=false;
+function setVB(){ if(svgEl&&vb) svgEl.setAttribute('viewBox', vb.x+' '+vb.y+' '+vb.w+' '+vb.h); }
+function wireNodes(){
+  svgEl=gg.querySelector('svg'); if(!svgEl) return;
+  const bb=svgEl.viewBox&&svgEl.viewBox.baseVal;
+  W=(bb&&bb.width)||svgEl.getBBox().width; H=(bb&&bb.height)||svgEl.getBBox().height;
+  svgEl.removeAttribute('width'); svgEl.removeAttribute('height');
+  svgEl.setAttribute('preserveAspectRatio','xMidYMid meet');
+  if(!vb) vb={x:(bb&&bb.x)||0,y:(bb&&bb.y)||0,w:W||1000,h:H||800};   // initial: fit whole graph, crisp
+  setVB();
+  gg.querySelectorAll('.node').forEach(n=>{ const m=(n.textContent||'').match(/T-\d+/); if(m) n.setAttribute('data-node-tid',m[0]); });
+}
+wrap.addEventListener('wheel',e=>{ e.preventDefault(); if(!vb)return;
+  const r=wrap.getBoundingClientRect(), fx=(e.clientX-r.left)/r.width, fy=(e.clientY-r.top)/r.height;
+  const nw=Math.min(W*3,Math.max(W*0.012,vb.w*Math.exp(e.deltaY*0.0015))), nh=nw*(vb.h/vb.w);
+  vb.x=(vb.x+fx*vb.w)-fx*nw; vb.y=(vb.y+fy*vb.h)-fy*nh; vb.w=nw; vb.h=nh; setVB();
 },{passive:false});
-wrap.addEventListener('pointerdown',e=>{ down=true; dragMoved=false; px=e.clientX; py=e.clientY; wrap.classList.add('grabbing'); try{wrap.setPointerCapture(e.pointerId);}catch(_){} });
-wrap.addEventListener('pointermove',e=>{ if(!down)return; const dx=e.clientX-px, dy=e.clientY-py; if(Math.abs(dx)+Math.abs(dy)>3)dragMoved=true; tx+=dx; ty+=dy; px=e.clientX; py=e.clientY; apply(); });
-function endDrag(e){ down=false; wrap.classList.remove('grabbing'); try{wrap.releasePointerCapture(e.pointerId);}catch(_){} }
-wrap.addEventListener('pointerup',endDrag); wrap.addEventListener('pointercancel',endDrag);
-wrap.addEventListener('click',e=>{ if(dragMoved){dragMoved=false;return;} const n=e.target.closest('[data-node-tid]'); if(n&&window.openTicketModal) window.openTicketModal(n.getAttribute('data-node-tid')); });
+wrap.addEventListener('pointerdown',e=>{ down=true; dragMoved=false; px=e.clientX; py=e.clientY; });
+wrap.addEventListener('pointermove',e=>{ if(!down||!vb)return; const r=wrap.getBoundingClientRect(), dx=e.clientX-px, dy=e.clientY-py;
+  if(!dragMoved&&Math.abs(dx)+Math.abs(dy)>3){ dragMoved=true; wrap.classList.add('grabbing'); try{wrap.setPointerCapture(e.pointerId);}catch(_){} }
+  if(dragMoved){ vb.x-=dx*(vb.w/r.width); vb.y-=dy*(vb.h/r.height); px=e.clientX; py=e.clientY; setVB(); } });
+function endDrag(e){ if(down&&!dragMoved){ const n=e.target.closest('[data-node-tid]'); if(n&&window.openTicketModal) window.openTicketModal(n.getAttribute('data-node-tid')); }
+  down=false; dragMoved=false; wrap.classList.remove('grabbing'); try{wrap.releasePointerCapture(e.pointerId);}catch(_){} }
+wrap.addEventListener('pointerup',endDrag);
+wrap.addEventListener('pointercancel',()=>{ down=false; dragMoved=false; wrap.classList.remove('grabbing'); });
 draw(); setInterval(draw,15000);
 </script></body></html>"""
 
@@ -509,9 +522,49 @@ def merge_status():
         queue = sum(1 for t in (d.get("tasks") or []) if t.get("status") == "in-progress")
     except Exception:
         pass
+    # 4. WHICH tickets are in the current test run vs. ahead-of-main and waiting
+    def _tk(s):
+        m = re.search(r"t(?:ask-t)?0*(\d+)", s or "", re.IGNORECASE)
+        return "T-" + m.group(1) if m else (s or "")
+    testing = []
+    if merging:
+        heads = []
+        try:
+            heads = open(os.path.join(REPO, ".git", "MERGE_HEAD")).read().split()
+        except Exception:
+            pass
+        for h in heads:
+            brs = [b for b in sh(["git", "for-each-ref", "--points-at", h,
+                                  "--format=%(refname:short)", "refs/heads/"], cwd=REPO).split()
+                   if b and b != "main"]
+            nm = brs[0] if brs else h[:7]
+            testing.append({"branch": nm, "ticket": _tk(nm if brs else mmsg)})
+        if not testing and mticket:
+            testing.append({"branch": "(staged)", "ticket": mticket})
+    tbranch = {t["branch"] for t in testing}
+    ahead = []
+    try:
+        wl = sh(["git", "worktree", "list", "--porcelain"], cwd=REPO)
+        for b in sorted({l[7:].replace("refs/heads/", "") for l in wl.splitlines() if l.startswith("branch ")}):
+            if b == "main" or b in tbranch:
+                continue
+            try:
+                n = int(sh(["git", "rev-list", "--count", "main..%s" % b], cwd=REPO).strip() or 0)
+            except Exception:
+                n = 0
+            if n > 0:
+                ahead.append({"branch": b, "ticket": _tk(b), "commits": n})
+    except Exception:
+        pass
+    gates_running = 0
+    try:
+        gates_running = len([1 for l in out.splitlines() if "just gate-merge" in l and " grep " not in l])
+    except Exception:
+        pass
     state = "merging" if merging else ("gating" if gate else "idle")
     return {"state": state, "msg": mmsg, "ticket": mticket,
-            "gate": gate, "elapsed_s": elapsed, "queue": queue}
+            "gate": gate, "elapsed_s": elapsed, "queue": queue,
+            "testing": testing, "ahead": ahead, "gates_running": gates_running}
 
 _PRI_RANK = {"high": 0, "medium": 1, "normal": 2, "low": 3}
 
@@ -1153,13 +1206,14 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   #syscard{order:-1}                /* System stats first on mobile */
 }
 </style></head><body><div class=app>
-<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
+<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/perf">perf ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
 <div class=cols>
   <div class=col>
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
   </div>
   <div class=col>
-    <div class="card" id=queuecard style="flex:0 0 auto;max-height:56%"><h2>Queue <em id=qn></em></h2><div class=bd id=queue></div></div>
+    <div class="card" id=mergecard style="flex:0 0 auto"><h2>Merge queue <em id=mqn></em></h2><div class=bd id=mergeq></div></div>
+    <div class="card" id=queuecard style="flex:0 0 auto;max-height:44%"><h2>Up next <em id=qn></em></h2><div class=bd id=queue></div></div>
     <div class="card fill"><h2>Work trees <em id=wtn></em></h2><div class=bd id=wts></div></div>
   </div>
   <div class=col>
@@ -1191,6 +1245,19 @@ async function tick(){
   if(mg.state==='merging'){ mgEl.textContent='⇄ merging'+(mg.gate?' · gate '+dur(mg.elapsed_s):''); mgEl.style.color='#A395E0'; mgEl.title='Merging: '+(mg.msg||'?'); }
   else if(mg.state==='gating'){ mgEl.textContent='⚙ '+mg.gate+' · '+dur(mg.elapsed_s); mgEl.style.color='#F0A542'; mgEl.title='Gate running before merge'; }
   else { mgEl.textContent='idle'+(mg.queue?' · '+mg.queue+' in-progress':''); mgEl.style.color='#5A6973'; mgEl.title='No merge or gate running'; }
+  // Merge queue panel: what's IN the current test run vs. ahead-of-main and waiting.
+  {
+    const testing=mg.testing||[], ahead=mg.ahead||[];
+    const row=(t,tag,col)=>`<div style="padding:1px 0"><span style="color:${col}">${tag}</span> <b data-tid="${esc(t.ticket)}" style="cursor:pointer">${esc(t.ticket||t.branch)}</b> <span style="color:#5A6973">${esc(t.branch)}${t.commits?(' +'+t.commits):''}</span></div>`;
+    const warn=(mg.gates_running||0)>1?`<div style="color:#E47B68;margin-bottom:4px">⚠ ${mg.gates_running} gate-merges running at once — likely duplicate/colliding</div>`:'';
+    const testCol=(mg.state==='gating'||mg.state==='merging')?'#F0A542':'#5A6973';
+    const gl=mg.gate?`<div style="color:#5A6973;margin-bottom:3px">gate: ${esc(mg.gate)} · ${dur(mg.elapsed_s)}</div>`:'';
+    const hdr=t=>`<div style="margin:6px 0 2px;color:#8595A0;font-size:11px;text-transform:uppercase;letter-spacing:.04em">${t}</div>`;
+    const ts=testing.length?testing.map(t=>row(t,'⚙ in test',testCol)).join(''):'<div style="color:#5A6973">— nothing being tested —</div>';
+    const wt=ahead.length?ahead.map(t=>row(t,'⏳ waiting','#8595A0')).join(''):'<div style="color:#5A6973">— none waiting —</div>';
+    const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wt;
+    const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting';
+  }
   const b=d.budget||{}; const bEl=$('#budget');
   if(b.weekly!=null||b.session!=null){
     const stale=b.age_s!=null&&b.age_s>3*3600;
@@ -1284,6 +1351,392 @@ async function sysTick(){
  }catch(e){}
 }
 sysTick(); setInterval(sysTick,5000); setInterval(playFrame,1000);
+</script></body></html>"""
+
+# ------------------------------------------------------------------------------
+# /perf — performance analytics page (data from ops/perf.py). Hand-drawn inline
+# SVG, no chart library, same dark tokens as GRAPH_PAGE/PAGE. Two-thumb time
+# slider + aggregate/split + per-session drilldown drive every chart.
+# ------------------------------------------------------------------------------
+PERF_PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>hackriff perf</title>
+<style>
+:root{--bg:#0D1317;--panel:#131B20;--line:#243039;--txt:#D5DEE2;--mut:#8595A0;--dim:#5A6973;--teal:#52C2AE;--amber:#F0A542;--lav:#A395E0;--coral:#E47B68;--blue:#3a6ea5;--mono:"SFMono-Regular",Menlo,monospace}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--txt);font:13px/1.5 -apple-system,system-ui,sans-serif;display:flex;flex-direction:column;overflow:hidden}
+.top{display:flex;align-items:center;gap:14px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel);flex:0 0 auto}
+.top span.nm b{color:var(--amber)}
+a{color:var(--mut);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:3px 9px;font-size:12px}
+a:hover{color:var(--txt)}
+.sub{color:var(--dim);font:12px var(--mono);margin-left:auto}
+.controls{display:flex;flex-wrap:wrap;gap:14px 22px;align-items:flex-end;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel);flex:0 0 auto}
+.ctl{display:flex;flex-direction:column;gap:6px;min-width:0}
+.ctl>label{font:10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+.slider{position:relative;width:min(420px,58vw);height:22px;user-select:none;touch-action:none}
+.slider .trk{position:absolute;top:9px;left:0;right:0;height:4px;background:var(--bg);border:1px solid var(--line);border-radius:3px}
+.slider .rng{position:absolute;top:9px;height:4px;background:linear-gradient(90deg,var(--blue),var(--teal));border-radius:3px}
+.slider .th{position:absolute;top:1px;width:13px;height:18px;margin-left:-6px;border-radius:4px;background:#1E2A33;border:1px solid var(--amber);cursor:grab;box-shadow:0 1px 4px rgba(0,0,0,.4)}
+.slider .th:active{cursor:grabbing}
+.rlabels{display:flex;justify-content:space-between;font:11px var(--mono);color:var(--mut);width:min(420px,58vw)}
+.seg{display:flex;gap:2px;background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:2px}
+.seg button{border:0;background:transparent;color:var(--mut);padding:3px 10px;border-radius:5px;cursor:pointer;font-size:12px}
+.seg button.on{background:#1E2A33;color:var(--txt)}
+select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:6px;font-size:12px;padding:4px 6px;max-width:300px;cursor:pointer}
+.chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);cursor:pointer}
+.chk input{accent-color:var(--amber)}
+.wrap{flex:1;min-height:0;overflow:auto;padding:14px}
+.grid{display:grid;grid-template-columns:1.5fr 1fr;gap:14px;align-items:start}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px 14px;min-width:0}
+.card.wide{grid-column:1/-1}
+.card h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--mut);margin:0 0 10px;display:flex;justify-content:space-between;gap:8px}
+.card h2 em{font-style:normal;color:var(--dim);text-transform:none;letter-spacing:0}
+.chart{width:100%;min-height:20px}
+svg{display:block;width:100%;height:auto}
+.tlink{cursor:pointer}
+.legend{display:flex;gap:12px;flex-wrap:wrap;font:11px var(--mono);color:var(--mut);margin-top:9px}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:0}
+table{width:100%;border-collapse:collapse;font:11.5px var(--mono);table-layout:fixed}
+th,td{text-align:left;padding:4px 6px;border-top:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+th{color:var(--dim);font-weight:400;text-transform:uppercase;letter-spacing:.06em;font-size:10px}
+td.num{text-align:right;color:var(--amber)}
+td.cmd{color:var(--mut)}
+.mini-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(208px,1fr));gap:10px}
+.mini{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 10px;cursor:pointer;transition:border-color .15s}
+.mini:hover{border-color:var(--dim)}
+.mini .m1{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.mini .mt{color:var(--amber);font:12px var(--mono);font-weight:600}
+.mini .mv{color:var(--txt);font:12px var(--mono)}
+.mini .ml{color:var(--mut);font-size:11px;margin:3px 0 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mini .mbar{height:8px;border-radius:4px;overflow:hidden;display:flex;background:#0a0f12}
+.mini .mbar i{display:block;height:100%}
+.mini .mf{display:flex;justify-content:space-between;font:10px var(--mono);color:var(--dim);margin-top:4px}
+.tokrow{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px}
+.tokrow div{font:11px var(--mono);color:var(--mut)}
+.tokrow b{color:var(--txt);font-size:15px;display:block;font-family:var(--mono)}
+.empty{color:var(--dim);font-size:12px;padding:10px 0}
+.bc{color:var(--dim);font:12px var(--mono);cursor:pointer;margin-bottom:10px}
+.bc:hover{color:var(--txt)}
+.errbox{color:var(--coral);font:12px var(--mono);padding:10px 0}
+*{scrollbar-width:thin;scrollbar-color:transparent transparent}
+::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:transparent;border-radius:4px}
+:hover::-webkit-scrollbar-thumb{background:rgba(133,149,160,.4)}::-webkit-scrollbar-thumb:hover{background:rgba(133,149,160,.7)}
+:hover{scrollbar-color:rgba(133,149,160,.4) transparent}
+</style></head><body>
+<div class=top><span class=nm>hack<b>riff</b> · perf</span><a href="/">← dashboard</a><a href="/graph">task map ↗</a><span class=sub id=sub>loading…</span></div>
+<div class=controls>
+  <div class=ctl><label>time range</label>
+    <div class=slider id=sld><div class=trk></div><div class=rng id=sldRng></div><div class=th id=thLo></div><div class=th id=thHi></div></div>
+    <div class=rlabels><span id=lblLo>—</span><span id=lblHi>—</span></div>
+  </div>
+  <div class=ctl><label>view</label>
+    <div class=seg><button id=segAgg class=on>Aggregate</button><button id=segSplit>Split</button></div>
+  </div>
+  <div class=ctl><label>metric</label>
+    <div class=seg id=segMetric><button data-m=time class=on>Time</button><button data-m=count>Count</button></div>
+  </div>
+  <div class=ctl><label>statistic</label>
+    <div class=seg id=segStat><button data-s=sum class=on>Sum</button><button data-s=avg>Avg</button><button data-s=p50>Median</button><button data-s=p90>P90</button><button data-s=p95>P95</button></div>
+  </div>
+  <div class=ctl><label>unit</label>
+    <div class=seg id=segUnit><button data-u=inv class=on>Per invocation</button><button data-u=agent>Per agent</button></div>
+  </div>
+  <div class=ctl><label>bars</label>
+    <div class=seg id=segBars><button data-b=all class=on>Across all</button><button data-b=agent>Per agent</button></div>
+  </div>
+  <div class=ctl><label>session</label>
+    <select id=agentSel><option value="">— all sessions —</option></select>
+  </div>
+  <div class=ctl><label>&nbsp;</label>
+    <label class=chk><input type=checkbox id=allChk> include firehose sessions</label>
+  </div>
+</div>
+<div class=wrap><div id=bc class=bc></div><div id=charts></div></div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const FM='ui-monospace,Menlo,monospace';
+const C={txt:'#D5DEE2',mut:'#8595A0',dim:'#5A6973',teal:'#52C2AE',amber:'#F0A542',lav:'#A395E0',coral:'#E47B68',blue:'#3a6ea5',cold:'#8a5a18'};
+const F={
+  dur(s){ if(s==null) return '—'; s=Math.round(s); if(s<1) return '0s'; if(s<60) return s+'s'; if(s<3600){const m=Math.floor(s/60);return m+'m '+(s%60)+'s';} const h=Math.floor(s/3600);return h+'h '+Math.floor(s%3600/60)+'m';},
+  tok(n){ if(n==null) return '—'; const a=Math.abs(n); if(a>=1e6) return (n/1e6).toFixed(2)+'M'; if(a>=1e3) return (n/1e3).toFixed(1)+'k'; return ''+Math.round(n);},
+  count(n){ if(n==null) return '—'; return Math.round(n).toLocaleString(); },
+  ratio(x){ if(x==null||!isFinite(x)) return '∞'; return x.toFixed(1)+'×'; },
+  pct(p){ if(p==null) return '—'; return Math.round(p)+'%'; },
+  date(ts){ if(!ts) return '—'; return new Date(ts*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});}
+};
+// metric: time|count · stat: sum|avg|p50|p90|p95 · unit: inv|agent · bars: all|agent
+const S={ frm:null, to:null, view:'agg', agent:null, all:0, loF:0, hiF:1,
+          metric:'time', stat:'sum', unit:'inv', bars:'all', fam:null };
+const STAT_LABEL={sum:'Sum',avg:'Avg',p50:'Median',p90:'P90',p95:'P95'};
+// value for a family under the current (metric,stat,unit); everything is carried in the row
+function famValue(f){
+  if(S.metric==='count'){
+    if(S.unit==='inv') return S.stat==='sum' ? (f.cnt_inv&&f.cnt_inv.sum||0) : 1; // 1 each per invocation
+    return (f.cnt_agent||{})[S.stat] || 0;
+  }
+  const blk = S.unit==='agent' ? (f.dur_agent||{}) : (f.dur_inv||{});
+  return blk[S.stat] || 0;
+}
+function famFmt(v){ return S.metric==='count' ? F.count(v) : F.dur(v); }
+// cold/incremental split is a SUM-of-time concept only
+function famSplitOn(){ return S.metric==='time' && S.stat==='sum'; }
+function ctlDesc(){
+  const u = S.metric==='count' && S.unit==='inv' ? 'per invocation' : (S.unit==='agent'?'per agent':'per invocation');
+  return `${S.metric==='count'?'count':'time'} · ${STAT_LABEL[S.stat].toLowerCase()} · ${u}`;
+}
+let win={min_ts:null,max_ts:null}, agentsList=[], lastData=null;
+
+function rect(x,y,w,h,fill){ return `<rect x="${(+x).toFixed(1)}" y="${(+y).toFixed(1)}" width="${Math.max(0,+w).toFixed(1)}" height="${h}" rx="2" fill="${fill}"/>`; }
+function tsAt(f){ if(win.min_ts==null) return null; return win.min_ts + f*(win.max_ts-win.min_ts); }
+function paintSlider(){
+  const sld=$('#sld'), w=sld.clientWidth||1;
+  const lo=Math.min(S.loF,S.hiF), hi=Math.max(S.loF,S.hiF);
+  $('#thLo').style.left=(S.loF*w)+'px'; $('#thHi').style.left=(S.hiF*w)+'px';
+  $('#sldRng').style.left=(lo*w)+'px'; $('#sldRng').style.width=((hi-lo)*w)+'px';
+  $('#lblLo').textContent=F.date(tsAt(lo)); $('#lblHi').textContent=F.date(tsAt(hi));
+}
+let drag=null;
+function fracAt(e){ const r=$('#sld').getBoundingClientRect(); return Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)); }
+$('#thLo').addEventListener('pointerdown',e=>{drag='lo';try{e.target.setPointerCapture(e.pointerId);}catch(_){}});
+$('#thHi').addEventListener('pointerdown',e=>{drag='hi';try{e.target.setPointerCapture(e.pointerId);}catch(_){}});
+window.addEventListener('pointermove',e=>{ if(!drag) return; const f=fracAt(e); if(drag==='lo') S.loF=f; else S.hiF=f; paintSlider(); });
+window.addEventListener('pointerup',()=>{ if(!drag) return; drag=null; commitRange(); });
+function commitRange(){
+  const lo=Math.min(S.loF,S.hiF), hi=Math.max(S.loF,S.hiF);
+  S.frm = lo>0.001 ? Math.floor(tsAt(lo)) : null;
+  S.to  = hi<0.999 ? Math.ceil(tsAt(hi))  : null;
+  load();
+}
+function query(){
+  const p=[];
+  if(S.frm!=null) p.push('frm='+S.frm);
+  if(S.to!=null) p.push('to='+S.to);
+  if(S.all) p.push('all=1');
+  if(S.agent){ p.push('scope=agent'); p.push('agent='+encodeURIComponent(S.agent)); }
+  return '/perf.json'+(p.length?'?'+p.join('&'):'');
+}
+function syncSeg(){ $('#segAgg').classList.toggle('on', S.view==='agg'||!!S.agent); $('#segSplit').classList.toggle('on', S.view==='split'&&!S.agent); }
+function populateAgents(){
+  const sel=$('#agentSel'), cur=S.agent||'';
+  let h='<option value="">— all sessions —</option>';
+  agentsList.forEach(a=>{ const lbl=(a.ticket?a.ticket+' · ':'')+String(a.label||a.id); h+=`<option value="${esc(a.id)}">${esc(lbl.slice(0,58))} · ${F.dur(a.total_s)}</option>`; });
+  sel.innerHTML=h; sel.value=cur;
+}
+function showErr(e){ $('#charts').innerHTML=`<div class=errbox>perf error: ${esc(e)}</div>`; $('#sub').textContent='error'; }
+
+async function load(){
+  try{
+    const data=await (await fetch(query(),{cache:'no-store'})).json();
+    if(data.error){ showErr(data.error); return; }
+    lastData=data;
+    if(data.window && data.window.min_ts!=null) win=data.window;
+    if(!S.agent) agentsList=data.agents||[];
+    populateAgents(); paintSlider();
+    const fam=(data.families||[]).length, ses=agentsList.length;
+    $('#sub').textContent=`${ses} session${ses===1?'':'s'}${S.all?' · +firehose':''} · ${fam} families · ${F.date(win.min_ts)} → ${F.date(win.max_ts)}`;
+    render(data);
+  }catch(e){ showErr(e); }
+}
+function render(d){ if(S.view==='split' && !S.agent) renderSplit(); else renderAgg(d); }
+
+function renderAgg(d){
+  $('#bc').innerHTML = S.agent ? '‹ back to all sessions' : '';
+  const fams=(d.families||[]);
+  const perAgent=S.bars==='agent';
+  // family focus for the per-agent view (default: top family)
+  if(perAgent){ if(!S.fam || !fams.some(f=>f.stem===S.fam)) S.fam = fams.length?fams[0].stem:null; }
+  const famHead = perAgent
+    ? `Command families · per agent <em>${esc(ctlDesc())}</em>`
+    : `Command families <em>${esc(ctlDesc())}${famSplitOn()?' · cold vs incremental':''}</em>`;
+  const famPicker = perAgent
+    ? `<select id=famPick style="max-width:180px">${fams.slice(0,40).map(f=>`<option value="${esc(f.stem)}"${f.stem===S.fam?' selected':''}>${esc(f.stem)}</option>`).join('')}</select>`
+    : '';
+  const famLegend = (!perAgent && famSplitOn())
+    ? `<div class=legend><span><i style="background:${C.cold}"></i>cold build</span><span><i style="background:${C.amber}"></i>incremental</span><span><i style="background:${C.blue}"></i>other build</span><span><i style="background:${C.teal}"></i>non-build</span></div>`
+    : '';
+  $('#charts').innerHTML=`
+  <div class=grid>
+    <div class="card wide"><h2><span>${famHead}</span>${famPicker}</h2>
+      <div id=cFam class=chart></div>${famLegend}
+    </div>
+    <div class=card><h2>Per-ticket time <em>top 25 · sum</em></h2>
+      <div id=cTick class=chart></div>
+      <div class=legend><span><i style="background:${C.teal}"></i>build</span><span><i style="background:${C.lav}"></i>test</span><span><i style="background:${C.amber}"></i>gate</span><span><i style="background:${C.blue}"></i>thinking</span><span><i style="background:${C.dim}"></i>other</span></div>
+    </div>
+    <div class=card><h2 title="Model time = wall-clock the model spent generating a turn (thinking + text + tool-call planning), clamped per turn. Not token count, not just <thinking> blocks.">Model time vs tool time</h2>
+      <div id=cThink class=chart></div>
+      <h2 style="margin-top:16px">Token spend</h2>
+      <div id=cTok></div>
+    </div>
+    <div class="card wide"><h2>P90-slowest command types <em>ranked by 90th-percentile invocation time</em></h2><div id=cSlow></div></div>
+  </div>`;
+  if(perAgent) drawFamiliesPerAgent($('#cFam'), d.per_agent||[], S.fam, d.n_agents_total);
+  else drawFamilies($('#cFam'), fams, d.n_agents_total);
+  drawTickets($('#cTick'), d.tickets||[]);
+  drawThinking($('#cThink'), d.thinking||{});
+  $('#cSlow').innerHTML=p90Table(d.p90_slowest||[]);
+  $('#cTok').innerHTML=tokenCard(d.tokens||{}, d.tickets||[]);
+  const fp=$('#famPick'); if(fp) fp.onchange=e=>{ S.fam=e.target.value; render(lastData); };
+}
+function renderSplit(){
+  $('#bc').innerHTML='';
+  const A=(agentsList||[]).slice();
+  if(!A.length){ $('#charts').innerHTML='<div class=empty>no sessions in range</div>'; return; }
+  let h='<div class=mini-grid>';
+  A.forEach(a=>{
+    const tot=a.total_s||0, th=a.thinking_s||0, tl=a.tool_s||0, s=(th+tl)||1;
+    const lbl=String(a.label||a.id);
+    h+=`<div class=mini data-aid="${esc(a.id)}">
+      <div class=m1><span class=mt>${esc(a.ticket||'—')}</span><span class=mv>${F.dur(tot)}</span></div>
+      <div class=ml title="${esc(lbl)}">${esc(lbl.slice(0,54))}</div>
+      <div class=mbar><i style="width:${(100*th/s).toFixed(1)}%;background:${C.blue}"></i><i style="width:${(100*tl/s).toFixed(1)}%;background:${C.amber}"></i></div>
+      <div class=mf><span>${a.n_cmds} cmds · ${F.dur(th)} think</span><span>${F.tok(a.tokens_out)} tok</span></div>
+    </div>`;
+  });
+  h+='</div>';
+  $('#charts').innerHTML=h;
+}
+
+function drawFamilies(el, fams, nAgTot){
+  // one bar per family, ordered by the selected (metric,stat,unit) value
+  const rows=(fams||[]).map(f=>({f,v:famValue(f)})).filter(r=>r.v>0)
+                       .sort((a,b)=>b.v-a.v).slice(0,14);
+  const W=el.clientWidth||600;
+  if(!rows.length){ el.innerHTML='<div class=empty>no commands in range</div>'; return; }
+  const rh=30, lblW=Math.min(140,Math.max(78,W*0.24)), barX=lblW+10, metaW=Math.min(240,W*0.40), barW=Math.max(20,W-barX-metaW-6);
+  const max=Math.max.apply(null,rows.map(r=>r.v).concat(1e-9)), H=8+rows.length*rh;
+  const split=famSplitOn();
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
+  rows.forEach((r,i)=>{
+    const f=r.f, y=6+i*rh, bh=16, by=y+3, w=barW*r.v/max;
+    s+=`<text x="${lblW}" y="${by+12}" text-anchor="end" fill="${C.txt}" font-size="12" font-family="${FM}">${esc(f.stem)}</text>`;
+    const cold=f.cold_sum||0, incr=f.incr_sum||0;
+    if(split && (cold+incr)>0.05){
+      const cw=barW*cold/max, iw=barW*incr/max, ow=Math.max(0,w-cw-iw);
+      if(cw>0.3) s+=rect(barX,by,cw,bh,C.cold);
+      if(iw>0.3) s+=rect(barX+cw,by,iw,bh,C.amber);
+      if(ow>0.3) s+=rect(barX+cw+iw,by,ow,bh,C.blue);
+    } else s+=rect(barX,by,w,bh,C.teal);
+    const pct = nAgTot? ` (${F.pct(f.pct_agents)})` : '';
+    const meta=`${famFmt(r.v)} · n=${f.n_invocations} · ${f.n_agents} agents${pct}`;
+    s+=`<text x="${W-2}" y="${by+12}" text-anchor="end" fill="${C.mut}" font-size="10.5" font-family="${FM}">${esc(meta)}</text>`;
+  });
+  el.innerHTML=s+'</svg>';
+}
+function drawFamiliesPerAgent(el, perAgent, stem, nAgTot){
+  // one bar per agent for the focused family, using that agent's own stat
+  if(!stem){ el.innerHTML='<div class=empty>no families in range</div>'; return; }
+  const rows=[];
+  (perAgent||[]).forEach(a=>{ const fe=(a.families||[]).find(x=>x.stem===stem); if(!fe) return;
+    let v; if(S.metric==='count') v=fe.count;
+    else if(S.stat==='sum') v=fe.total_s;
+    else if(S.stat==='avg') v=fe.count?fe.total_s/fe.count:0;
+    else if(S.stat==='p50') v=fe.p50_s;
+    else v=fe.p90_s; // p90 & p95 (p95 not tracked per agent) fall back to p90
+    if(v>0) rows.push({a,fe,v});
+  });
+  rows.sort((x,y)=>y.v-x.v);
+  const top=rows.slice(0,16), W=el.clientWidth||600;
+  if(!top.length){ el.innerHTML=`<div class=empty>no agent ran ${esc(stem)} in range</div>`; return; }
+  const rh=26, lblW=Math.min(150,Math.max(84,W*0.28)), barX=lblW+10, metaW=Math.min(150,W*0.26), barW=Math.max(20,W-barX-metaW-6);
+  const max=Math.max.apply(null,top.map(r=>r.v).concat(1e-9)), H=8+top.length*rh+16;
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
+  top.forEach((r,i)=>{
+    const y=6+i*rh, bh=14, by=y+3, w=barW*r.v/max;
+    const lbl=String(r.a.ticket||r.a.label||r.a.agent_id||'—');
+    const isT=/^T-\d/.test(lbl);
+    s+=`<text x="${lblW}" y="${by+11}" text-anchor="end" fill="${isT?C.amber:C.mut}" font-size="11" font-family="${FM}"${isT?` class=tlink data-tid="${esc(lbl)}"`:''}>${esc(lbl.slice(0,18))}</text>`;
+    s+=rect(barX,by,w,bh,C.lav);
+    const meta=`${famFmt(r.v)} · ${r.fe.count}×`;
+    s+=`<text x="${W-2}" y="${by+11}" text-anchor="end" fill="${C.mut}" font-size="10" font-family="${FM}">${esc(meta)}</text>`;
+  });
+  s+=`<text x="0" y="${H-1}" fill="${C.dim}" font-size="10" font-family="${FM}">${top.length} of ${rows.length} agents · ${nAgTot||'?'} ran any command</text>`;
+  el.innerHTML=s+'</svg>';
+}
+function drawTickets(el, ticks){
+  const rows=(ticks||[]).slice(0,25), W=el.clientWidth||500;
+  if(!rows.length){ el.innerHTML='<div class=empty>no ticket time in range</div>'; return; }
+  const rh=22, lblW=Math.min(112,Math.max(66,W*0.26)), barX=lblW+8, metaW=62, barW=Math.max(20,W-barX-metaW-4);
+  const max=Math.max.apply(null,rows.map(t=>t.total_s).concat(1));
+  const segs=[['build_s',C.teal],['test_s',C.lav],['gate_s',C.amber],['thinking_s',C.blue],['other_s',C.dim]];
+  const H=6+rows.length*rh;
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
+  rows.forEach((t,i)=>{
+    const y=5+i*rh, bh=13, by=y+2, id=String(t.ticket||t.label||''), isT=/^T-\d/.test(id);
+    s+=`<text x="${lblW}" y="${by+11}" text-anchor="end" fill="${isT?C.amber:C.mut}" font-size="11" font-family="${FM}"${isT?` class=tlink data-tid="${esc(id)}"`:''}>${esc(id.slice(0,16))}</text>`;
+    let x=barX;
+    segs.forEach(sg=>{ const v=t[sg[0]]||0; if(v<=0) return; const w=barW*v/max; if(w>0.3) s+=rect(x,by,w,bh,sg[1]); x+=w; });
+    s+=`<text x="${W-2}" y="${by+11}" text-anchor="end" fill="${C.mut}" font-size="10" font-family="${FM}">${F.dur(t.total_s)}</text>`;
+  });
+  el.innerHTML=s+'</svg>';
+}
+function drawThinking(el, th){
+  const W=el.clientWidth||400, m=th.model_s||0, t=th.tool_s||0, tot=m+t, H=64, bh=22, by=6;
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
+  if(tot<=0){ el.innerHTML=s+`<text x="0" y="22" fill="${C.dim}" font-size="12" font-family="${FM}">no activity in range</text></svg>`; return; }
+  const mw=W*m/tot, ratio=t>0?(m/t):Infinity;
+  s+=rect(0,by,mw,bh,C.lav)+rect(mw,by,W-mw,bh,C.amber);
+  s+=`<text x="0" y="${by+bh+18}" fill="${C.lav}" font-size="11.5" font-family="${FM}">▉ model ${F.dur(m)}</text>`;
+  s+=`<text x="${W-2}" y="${by+bh+18}" text-anchor="end" fill="${C.amber}" font-size="11.5" font-family="${FM}">tool ${F.dur(t)} ▉</text>`;
+  s+=`<text x="${W/2}" y="${by+bh+18}" text-anchor="middle" fill="${C.mut}" font-size="11" font-family="${FM}">ratio ${isFinite(ratio)?ratio.toFixed(2)+':1':'∞'}</text>`;
+  el.innerHTML=s+'</svg>';
+}
+function p90Table(rows){
+  if(!rows.length) return '<div class=empty>no commands in range</div>';
+  let h='<table><colgroup><col><col style="width:74px"><col style="width:74px"><col style="width:70px"><col style="width:64px"><col style="width:72px"></colgroup>'
+      +'<thead><tr><th>command</th><th>P90</th><th>avg</th><th title="P90 ÷ average — how much slower the tail is than the typical run">×slower</th><th>agents</th><th>% agents</th></tr></thead><tbody>';
+  rows.forEach(r=>{
+    h+=`<tr><td style="color:${C.txt}">${esc(r.stem)}</td>`
+      +`<td class=num>${F.dur(r.p90_s)}</td>`
+      +`<td class=num style="color:${C.mut}">${F.dur(r.avg_s)}</td>`
+      +`<td class=num style="color:${C.coral}">${F.ratio(r.p90_over_avg)}</td>`
+      +`<td class=num style="color:${C.mut}">${F.count(r.n_agents)}</td>`
+      +`<td class=num style="color:${C.mut}">${F.pct(r.pct_agents)}</td></tr>`;
+  });
+  return h+'</tbody></table>';
+}
+function tokenCard(tok, tickets){
+  const inn=tok.in||0, out=tok.out||0, cr=tok.cache_read||0, cc=tok.cache_creation||0;
+  let h=`<div class=tokrow><div><b>${F.tok(out)}</b>output</div><div><b>${F.tok(inn)}</b>input</div><div><b>${F.tok(cr)}</b>cache read</div><div><b>${F.tok(cc)}</b>cache create</div></div>`;
+  const rows=(tickets||[]).filter(t=>t.tokens_out>0).slice(0,12);
+  if(!rows.length) return h+'<div class=empty>no per-ticket tokens</div>';
+  const max=Math.max.apply(null,rows.map(t=>t.tokens_out).concat(1));
+  h+='<div style="display:flex;flex-direction:column;gap:4px">';
+  rows.forEach(t=>{ const id=String(t.ticket||t.label||''), isT=/^T-\d/.test(id);
+    h+=`<div style="display:flex;align-items:center;gap:8px">
+      <span style="width:76px;color:${C.mut};font:11px ${FM};overflow:hidden;text-overflow:ellipsis;white-space:nowrap"${isT?` class=tlink data-tid="${esc(id)}"`:''}>${esc(id.slice(0,13))}</span>
+      <span style="flex:1;height:10px;background:#0a0f12;border-radius:5px;overflow:hidden"><i style="display:block;height:100%;width:${(100*t.tokens_out/max).toFixed(1)}%;background:${C.teal}"></i></span>
+      <span style="width:52px;text-align:right;color:${C.amber};font:11px ${FM}">${F.tok(t.tokens_out)}</span>
+    </div>`;
+  });
+  return h+'</div>';
+}
+
+$('#segAgg').onclick=()=>{ S.view='agg'; syncSeg(); render(lastData); };
+$('#segSplit').onclick=()=>{ S.view='split'; if(S.agent){ S.agent=null; syncSeg(); load(); } else { syncSeg(); render(lastData); } };
+// metric/stat/unit/bars are pure client re-renders (all distributions are in the payload)
+function bindSeg(id, attr, key){
+  const seg=$(id); if(!seg) return;
+  seg.addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return;
+    S[key]=b.getAttribute(attr);
+    seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on', x===b));
+    if(lastData) render(lastData);
+  });
+}
+bindSeg('#segMetric','data-m','metric');
+bindSeg('#segStat','data-s','stat');
+bindSeg('#segUnit','data-u','unit');
+bindSeg('#segBars','data-b','bars');
+$('#agentSel').onchange=e=>{ S.agent=e.target.value||null; if(S.agent) S.view='agg'; syncSeg(); load(); };
+$('#allChk').onchange=e=>{ S.all=e.target.checked?1:0; load(); };
+document.addEventListener('click',e=>{
+  if(e.target.closest('#bc') && S.agent){ S.agent=null; syncSeg(); load(); return; }
+  const mini=e.target.closest('.mini'); if(mini){ S.agent=mini.getAttribute('data-aid'); S.view='agg'; syncSeg(); load(); }
+});
+let rz; window.addEventListener('resize',()=>{ clearTimeout(rz); rz=setTimeout(()=>{ paintSlider(); if(lastData) render(lastData); },150); });
+load();
 </script></body></html>"""
 
 class H(BaseHTTPRequestHandler):
@@ -1380,6 +1833,36 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body)))
             self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/perf.json"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            def _qi(k):
+                v = q.get(k, [None])[0]
+                if v in (None, ""):
+                    return None
+                try:
+                    return int(float(v))
+                except Exception:
+                    return None
+            frm = _qi("frm"); to = _qi("to")
+            scope = (q.get("scope", ["all"])[0] or "all")
+            agent = q.get("agent", [None])[0]
+            sub_only = q.get("all", ["0"])[0] not in ("1", "true", "yes", "on")
+            try:
+                import sys as _sys
+                if OPSDIR not in _sys.path:
+                    _sys.path.insert(0, OPSDIR)
+                import perf
+                data = perf.aggregate(frm=frm, to=to, scope=scope, agent=agent, subagents_only=sub_only)
+                body = json.dumps(data).encode()
+            except Exception as e:
+                body = json.dumps({"error": str(e)}).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store"); self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/perf"):
+            body = PERF_PAGE.replace("</body>", TICKET_MODAL + "</body>").encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/data.json"):
             try:
                 body = json.dumps(gather()).encode()
