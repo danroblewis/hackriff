@@ -2,7 +2,7 @@
 // at /app.html. Builds the store and the shell, then mounts every area's `mounts` table
 // (`<area>/index.ts`). Panel tasks edit their own area's index.ts, never this file.
 //
-// Bundle budget (ADR-0013 §1, ≤45 KB gzip): explore/centre/capture/dock mount eagerly, because
+// Bundle budget (ADR-0013 §1, ≤45 KB gzip): explore/centre/dock mount eagerly, because
 // they're the initial Explore screen (must work with no network round-trip beyond the app itself).
 // decode and review are the two rarely-used areas (Decode workbench, Review drawer) — each is
 // loaded with a dynamic `import()` the first time it's needed (first switch to Decode mode, first
@@ -10,7 +10,6 @@
 // load for a session that stays in Explore. `--format=esm` is required for splitting, so
 // `index.html`'s `<script>` is `type="module"`.
 import { ControlClient } from "../controls/client";
-import * as capture from "./capture";
 import * as centre from "./centre";
 import type { AppContext, AreaMounts } from "./context";
 import * as dock from "./dock";
@@ -21,7 +20,7 @@ import { PREFS_KEY, mountShell } from "./shell";
 import { createStore } from "./store";
 import { initialState, parsePrefs } from "./state";
 
-const EAGER_AREAS: readonly AreaMounts[] = [explore.mounts, centre.mounts, capture.mounts, dock.mounts];
+const EAGER_AREAS: readonly AreaMounts[] = [explore.mounts, centre.mounts, dock.mounts];
 
 function mountArea(area: AreaMounts, ctx: AppContext) {
   for (const [name, mount] of Object.entries(area)) mount(slot(name), ctx);

@@ -114,9 +114,17 @@ test("T-522: the pref round-trips through storage, defaults to shown, and surviv
 
 test("T-522: the toggle is pure presentation — the source names no route, and touches no inventory state", () => {
   const src = readFileSync("src/app/centre/surface.ts", "utf8");
-  const toggleRegion = src.slice(src.indexOf("SHOW_SIGNALS_KEY"), src.indexOf("signalsBtn.addEventListener") + 400);
-  assert.ok(!/\/api\//.test(toggleRegion), "no route is named anywhere near the toggle's own code");
-  assert.ok(!/store\.set/.test(toggleRegion), "the click handler writes no store state — it flips a local var only");
+  // The toggle's own code is two blocks: the persisted-preference helpers and the click handler.
+  // They are sliced separately rather than as one span from the first to the second, because
+  // T-506 re-homed the capture clock and the ring rules into the lines between them — unrelated
+  // code whose comments legitimately name `GET /api/timeline`. Asserting on the span would make
+  // this guard fail for whatever a neighbour does; asserting on the blocks is the actual claim.
+  const helpers = src.slice(src.indexOf("SHOW_SIGNALS_KEY"), src.indexOf("function mount("));
+  const handler = src.slice(src.indexOf("signalsBtn.addEventListener"), src.indexOf("signalsBtn.addEventListener") + 400);
+  for (const [what, region] of [["the preference helpers", helpers], ["the click handler", handler]] as const) {
+    assert.ok(!/\/api\//.test(region), `no route is named in ${what}`);
+    assert.ok(!/store\.set/.test(region), `${what} writes no store state — it flips a local var only`);
+  }
 });
 
 test("T-522: the button carries an accessible label and a pressed state", () => {

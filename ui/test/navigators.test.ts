@@ -34,7 +34,7 @@ import {
   unobservedCount, valueAt, zoomWithin, type CoverageCell, type CoverageResponse, type Range,
 } from "../src/navigators";
 import { CMAP_GLSL, CMAP_STOPS, cmapBytes } from "../src/cmap";
-import { captureWindow, currentSpan } from "../src/app/capture/timeline";
+import { captureWindow, currentSpan } from "../src/app/centre/capture-window";
 import { centreInitial, setNavigation } from "../src/app/centre/slice";
 import { applyDeviceAction, retuneAction, setLiveView, setRetuneOffer } from "../src/app/centre/view";
 import type { AppContext } from "../src/app/context";
@@ -175,7 +175,7 @@ const regionOf = (lo: number, hi: number) => {
 // The time navigator's extent is the capture window, not the history horizon
 // ---------------------------------------------------------------------------
 
-test("T-340: the time navigator's extent IS the capture window (T-338 span_s), never the history horizon", () => {
+test("T-340/T-506: the retained window's extent IS the capture window (T-338 span_s), never the history horizon — and the canvas uses it", () => {
   const t1 = 1_789_300_920;
   // The ring holds 90 s. The spectrum-history pyramid behind it reaches back a week — and the
   // navigation grid says so, right there in the same session.
@@ -204,6 +204,13 @@ test("T-340: the time navigator's extent IS the capture window (T-338 span_s), n
   for (const field of ["latest_s", "max_age_s", "min_t_cell_s", "max_t_cell_s"]) {
     assert.ok(!src.includes(field), `the time navigator must not size itself from ${field}`);
   }
+
+  // T-506: the time navigator is retired, and this guard no longer protects dead code. `timeExtent`
+  // is the canvas's live floor: `app/centre/surface.ts` extends the surface's time extent back to
+  // its `lo` whenever the capture window is reported, so the retained window is always reachable.
+  const live = readFileSync("src/app/centre/surface.ts", "utf8");
+  assert.match(live, /import \{[^}]*\btimeExtent\b[^}]*\} from "\.\.\/\.\.\/navigators"/, "the canvas imports it");
+  assert.match(live, /preview\.extendTimeFloor\(ext\.lo \* S_TO_NS\)/, "and floors its time extent on it");
 });
 
 // ---------------------------------------------------------------------------

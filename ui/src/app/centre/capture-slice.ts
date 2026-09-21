@@ -1,7 +1,9 @@
-// Capture-timeline state (ADR-0013 §3.1, §3.3). Owner: T-150. Top-level keys: time, captureWindow.
+// Time-cursor and capture-clock state (ADR-0013 §3.1, §3.3). Owner: T-150; moved from
+// `app/capture/slice.ts` by T-506 when the Capture panel was folded into the canvas. Top-level
+// keys: time, captureWindow.
 import type { AppState } from "../state";
-// Pure types only (`timeline.ts` imports nothing), so this is not a cycle.
-import type { CaptureWindow } from "./timeline";
+// Pure types only (`capture-window.ts` imports nothing), so this is not a cycle.
+import type { CaptureWindow } from "./capture-window";
 
 /**
  * The capture-timeline cursor: following live data, or reviewing a past instant (Unix s).

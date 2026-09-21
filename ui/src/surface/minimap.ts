@@ -156,9 +156,10 @@ export interface OverlayQuad {
   readonly rgba: readonly [number, number, number, number];
   /** `signal-box` and `selection-box` are T-445's in-pane marks (`./marks.ts`); `pending-region` is
    * T-458's in-flight stroke; `trace-slice` and `trace-hold` are T-457's spectrum trace
-   * (`./trace.ts`), drawn in the strip above a pane; the remaining two are the map's own. All seven
-   * are strokes, and `overlay.ts` can draw nothing else. */
-  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "pending-region" | "trace-slice" | "trace-hold";
+   * (`./trace.ts`), drawn in the strip above a pane; `time-rule` is T-506's full-width line at one
+   * capture instant (the IQ horizon and the retention bound); the remaining two are the map's own.
+   * All are strokes, and `overlay.ts` can draw nothing else. */
+  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "pending-region" | "trace-slice" | "trace-hold" | "time-rule";
   /** The pane id, or the device id, this mark is about. */
   readonly id: string;
 }

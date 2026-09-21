@@ -47,9 +47,11 @@ test("GET / mounts the unified surface in the app, under the product CSP", async
     assert.equal(await page.$count(`[data-slot="${gone}"]`), 0, `the retired ${gone} widget is still mounted`);
   }
   // The rest of Explore is still there: the cutover replaced the centre, not the app.
-  for (const kept of ["inventory", "selections", "capture", "focus", "outputs"]) {
+  for (const kept of ["inventory", "selections", "focus", "outputs"]) {
     assert.equal(await page.$count(`[data-slot="${kept}"]`), 1, `${kept} was lost in the cutover`);
   }
+  // T-506: the Capture panel is gone — its roles are on the canvas (the test at the bottom).
+  assert.equal(await page.$count('[data-slot="capture"]'), 0, "the retired Capture panel is still mounted");
 
   // (4) It addressed the surface, or said why it could not. `.sf-note` carries T-450's orientation
   // sentence on success and the failure text on every abort path, so waiting on "not still
@@ -120,4 +122,92 @@ test("a drag on the app's surface moves the view and still reaches no device rou
   const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
   assert.deepEqual(control.map((r) => r.url), [], "a drag reached the front end");
   assert.deepEqual(page.exceptions, [], "uncaught exception while dragging");
+});
+
+test("T-506: the canvas draws the IQ horizon and the retention bound where the ring window says", async (t) => {
+  // The retired Capture panel was the only place either boundary was drawn. This measures them on
+  // the canvas in a real browser: the ink is found in the screenshot, row by row, and its position
+  // is checked against the capture instants the page states it drew from — and those instants
+  // against what `GET /api/timeline` itself reports.
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page();
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitFor("the canvas to draw and the ring readout to hold an IQ horizon",
+    `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
+     !!document.querySelector('.sf-ring')?.dataset.iqS`, { timeoutMs: 60000 });
+
+  // The capture clock's request is the window alone: no band, no t0/t1 (T-367: assert the request).
+  const clockReqs = page.requests.filter((r) => r.url.includes("/api/timeline"));
+  assert.ok(clockReqs.some((r) => r.url.endsWith("/api/timeline?columns=1&rows=1") && r.status === 200),
+    `the capture clock never asked for the window: ${JSON.stringify(clockReqs.map((r) => r.url))}`);
+  assert.ok(clockReqs.every((r) => !/[?&](t0|t1)=/.test(r.url)), "the window is the server's to state");
+
+  // Whole surface: the extent now reaches the retained window, so both rules are on screen.
+  // A REAL click, not `el.click()`: T-506 found "Whole surface" hit-tested to the range sentence
+  // painted over it, so the button looked pressable and did nothing.
+  await page.click(`[...document.querySelectorAll('.sf-actions button')].find((b) => b.textContent === "Whole surface")`);
+  await page.waitFor("Whole surface to freeze the pane on the whole extent",
+    `document.querySelector('.sf-ring')?.dataset.backing !== "live"`, { timeoutMs: 10000 });
+  // Let the edge advance a little, so the retention bound (edge − retention) climbs off the frozen
+  // pane's bottom edge and is measured inside the pane rather than against its border.
+  await new Promise((r) => setTimeout(r, 3000));
+  await page.frames(3);
+
+  const read = () => page.eval(`(() => { const d = document.querySelector('.sf-ring').dataset;
+    return { ret: +d.retentionS, iq: +d.iqS, t0: +d.paneT0S, t1: +d.paneT1S, top: +d.paneTopPx, h: +d.paneHPx,
+      left: +d.paneLeftPx, w: +d.paneWPx, backing: d.backing, text: document.querySelector('.sf-ring').textContent }; })()`);
+  const st = await read();
+  t.diagnostic(`readout: ${st.text}`);
+  assert.ok(st.t0 <= st.ret && st.ret <= st.t1, `the retention bound is not inside the pane: ${JSON.stringify(st)}`);
+  assert.ok(st.t0 <= st.iq && st.iq <= st.t1, `the IQ horizon is not inside the pane: ${JSON.stringify(st)}`);
+
+  // The instants are the server's: retention bound = the live edge − retention_s, IQ horizon =
+  // buffered.t0_s (or later, once the ring is full).
+  const tl = await (await fetch(`${ORIGIN}/api/timeline?columns=1&rows=1`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
+  const w = tl.window;
+  t.diagnostic(`server window: retention_s ${w.retention_s}, t0 ${w.t0_s}, t1 ${w.t1_s}, buffered ${JSON.stringify(w.buffered)}`);
+  assert.ok(Math.abs((w.t1_s - w.retention_s) - st.ret) < 15, `retention bound ${st.ret} is not t1 − retention_s ${w.t1_s - w.retention_s}`);
+  assert.ok(w.buffered && st.iq >= w.buffered.t0_s - 1e-3, "the IQ horizon never claims IQ the ring does not hold");
+
+  // The pixels. Opaque inks (capture-window.ts): IQ horizon rgb(51,242,89), retention rgb(255,64,217).
+  const canvas = await page.$rect(".sf-canvas");
+  const img = await page.shot(path.join(ART, "app-surface-ring-rules.png"));
+  const st2 = await read();
+  const scale = img.width / (await page.eval("window.innerWidth"));
+  const near = (d, c) => Math.abs(img.data[d] - c[0]) <= 8 && Math.abs(img.data[d + 1] - c[1]) <= 8 && Math.abs(img.data[d + 2] - c[2]) <= 8;
+  const IQ = [51, 242, 89], RET = [255, 64, 217];
+  const x0 = Math.round((canvas.x + st.left) * scale), x1 = Math.round((canvas.x + st.left + st.w) * scale);
+  const rowsWith = (ink, share) => {
+    const out = [];
+    const y0 = Math.round((canvas.y + st.top) * scale), y1 = Math.round((canvas.y + st.top + st.h) * scale);
+    for (let y = y0; y < y1; y++) {
+      let n = 0;
+      for (let x = x0; x < x1; x++) if (near((y * img.width + x) * 4, ink)) n++;
+      if (n >= share * (x1 - x0)) out.push(y);
+    }
+    return out;
+  };
+  const iqRows = rowsWith(IQ, 0.6), retRows = rowsWith(RET, 0.3);
+  t.diagnostic(`IQ-horizon ink rows ${JSON.stringify(iqRows)}; retention ink rows ${JSON.stringify(retRows)}`);
+  assert.ok(iqRows.length > 0, "no full-width IQ-horizon line on the canvas");
+  assert.ok(retRows.length > 0, "no retention-bound line on the canvas");
+  assert.ok(iqRows[iqRows.length - 1] - iqRows[0] <= 6 * scale, "the IQ ink is one line, not a wash");
+  assert.ok(retRows[retRows.length - 1] - retRows[0] <= 8 * scale, "the retention ink is one line, not a wash");
+
+  // Where they should be: screen y from the pane's top is (t1 − t) / (t1 − t0) of its height.
+  const expectY = (tS, s) => (canvas.y + s.top + ((s.t1 - tS) / (s.t1 - s.t0)) * s.h) * scale;
+  const mid = (rows) => (rows[0] + rows[rows.length - 1]) / 2;
+  for (const [name, rows, pick] of [["IQ horizon", iqRows, (s) => s.iq], ["retention bound", retRows, (s) => s.ret]]) {
+    const lo = Math.min(expectY(pick(st), st), expectY(pick(st2), st2)) - 4 * scale;
+    const hi = Math.max(expectY(pick(st), st), expectY(pick(st2), st2)) + 4 * scale;
+    t.diagnostic(`${name}: measured y ${mid(rows).toFixed(1)} px, expected ${lo.toFixed(1)}…${hi.toFixed(1)}`);
+    assert.ok(mid(rows) >= lo && mid(rows) <= hi, `${name} drawn at y ${mid(rows)}, expected ${lo}…${hi}`);
+  }
+  // A ring younger than its retention: the two boundaries are different instants and different rows,
+  // with the IQ (newer) above the retention bound.
+  if (st.iq - st.ret > 5) assert.ok(mid(iqRows) < mid(retRows) - 2, "the IQ horizon is drawn above (newer than) the retention bound");
+  assert.match(st.text, /green line: oldest IQ/);
+  assert.match(st.text, /magenta dashes: retention bound/);
+  assert.deepEqual(page.exceptions, [], "uncaught exception");
 });

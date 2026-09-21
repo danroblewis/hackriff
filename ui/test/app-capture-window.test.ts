@@ -1,0 +1,240 @@
+// The capture window on the canvas's time axis (T-506). These are the invariants the retired
+// Capture panel's suite (`app-capture.test.ts`, T-150/T-263/T-338/T-386) held, re-pointed at the
+// code that now carries them: `app/centre/capture-window.ts` (pure), `capture-clock.ts` (the poll
+// and Record IQ) and `surface.ts` (where the rules are drawn and the extent is floored).
+//
+// What moved, what was deleted, and why:
+//  - MOVED: the window is the ring's retention (captureWindow); what the ring holds sits inside it
+//    and never resizes it (bufferedSpan → ringRules); the three IQ-backing answers (iqBackingAt);
+//    the one-clause note (scrubDataNote → iqNote); no default span; the T-386 clock guard.
+//  - DELETED with the band they described: scrub↔percent mapping, the overview shading and its
+//    T-342 guards, event marks on the band, selection spans on the band, the time-window drag, the
+//    T-386 band-key tagging, the T-391 collapse layout. The canvas draws the energy through the one
+//    cell rule, the signal boxes and selections through `marks.ts`, and region selection is its
+//    shift+drag (T-458) — each already under its own suite.
+//  - DELETED: scrubDataNote's coverage-gap clause. On the canvas an unobserved stretch is drawn as
+//    unobserved (grey) by the one cell rule, cell by cell, so a sentence restating it for the whole
+//    window is no longer the only place the distinction is made (`surface-honesty.test.ts`).
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import {
+  IQ_RULE_INK, RETENTION_RULE_INK, captureWindow, currentSpan, durationText, iqBackingAt, iqNote,
+  ringRuleQuads, ringRules, type CaptureWindow,
+} from "../src/app/centre/capture-window";
+import { CAPTURE_CLOCK_MS, CAPTURE_CLOCK_REQUEST } from "../src/app/centre/capture-clock";
+import { timeRuleQuads } from "../src/surface/marks";
+import { quadSizePx } from "../src/surface/minimap";
+import { timeExtent } from "../src/navigators";
+
+/** A capture window as `GET /api/timeline` reports it. */
+const winOf = (t1S: number, spanS: number, buffered: { t0S: number; t1S: number } | null = null): CaptureWindow =>
+  ({ t0S: t1S - spanS, t1S, spanS, buffered });
+
+const S = 1e9;
+const RECT = { x: 0, y: 0, w: 800, h: 400 };
+const boxOf = (t0S: number, t1S: number) => ({ f0Hz: 99e6, f1Hz: 101e6, t0Ns: t0S * S, t1Ns: t1S * S });
+/** The clip-space centre y of a horizontal rule quad. */
+const midY = (q: { clip: readonly number[] }) => (q.clip[1] + q.clip[3]) / 2;
+const clipYOf = (tS: number, box: { t0Ns: number; t1Ns: number }) => (2 * (tS * S - box.t0Ns)) / (box.t1Ns - box.t0Ns) - 1;
+
+test("captureWindow: the window is the ring's retention, and an incomplete window is unknown", () => {
+  const w = captureWindow({ window: { t0_s: 900, t1_s: 1000, span_s: 100, buffered: { t0_s: 970, t1_s: 1000 } } });
+  assert.deepEqual(w, { t0S: 900, t1S: 1000, spanS: 100, buffered: { t0S: 970, t1S: 1000 } });
+  assert.equal(captureWindow({ window: { t0_s: 900, t1_s: 1000, span_s: 3600, buffered: null } })!.spanS, 3600,
+    "a longer retention is a longer window, not a rescaled one");
+  assert.equal(captureWindow(null), null, "not answered yet");
+  assert.equal(captureWindow({ window: null }), null, "no capture window on this server");
+  assert.equal(captureWindow({ window: { t0_s: null, t1_s: null, span_s: null } }), null, "no live edge yet");
+  assert.equal(captureWindow({ window: { t0_s: 900, t1_s: 1000, span_s: 0 } }), null, "a zero retention is no window");
+});
+
+test("ringRules: what the ring holds sits inside the window and never resizes it", () => {
+  // A ring part-way through filling covers part of its retention. The retention bound stays at the
+  // configured span; the IQ horizon is where the ring actually starts. That difference is the thing
+  // the two rules exist to show.
+  const filling = ringRules(winOf(1000, 100, { t0S: 950, t1S: 1000 }), 1000)!;
+  assert.equal(filling.retentionS, 900, "the retention bound is edge − retention_s, whatever the ring holds");
+  assert.equal(filling.iqS, 950, "the IQ horizon is the oldest sample the ring holds");
+  const full = ringRules(winOf(1000, 100, { t0S: 900, t1S: 1000 }), 1000)!;
+  assert.equal(full.retentionS, 900);
+  assert.equal(full.iqS, 900, "a full ring's IQ horizon IS its retention bound");
+  assert.equal(ringRules(winOf(1000, 100, null), 1000)!.iqS, null, "a ring holding nothing is unknown, not empty");
+  assert.equal(ringRules(null, 1000), null, "not answered yet: no rules, never a default window");
+});
+
+test("ringRules: both rules advance with the edge the panes are drawn to, not on the poll", () => {
+  // The one-shared-time-axis rule: the rows move per frame, so a rule placed only on the 5 s poll
+  // would drift against them and then jump. The edge handed in is the capture clock's, per frame.
+  const w = winOf(1000, 100, { t0S: 900, t1S: 1000 });
+  const later = ringRules(w, 1003)!;
+  assert.equal(later.retentionS, 903, "the retention bound moves with the edge");
+  assert.equal(later.iqS, 903, "a full ring's horizon moves with it — never claims IQ the ring evicted");
+  // An edge older than the window's own (a stream that has not caught up) never drags it backwards.
+  assert.equal(ringRules(w, 990)!.retentionS, 900);
+  assert.equal(ringRules(w, null)!.retentionS, 900, "no edge yet: the window's own t1");
+  // A filling ring's horizon is a fixed instant; the edge moving does not move it.
+  assert.equal(ringRules(winOf(1000, 100, { t0S: 950, t1S: 1000 }), 1010)!.iqS, 950);
+});
+
+test("iqBackingAt: live, in the ring, past the ring, and unknown are four different answers", () => {
+  const rules = ringRules(winOf(1000, 3600, { t0S: 900, t1S: 1000 }), 1000);
+  assert.equal(iqBackingAt(1000, true, rules), "live");
+  assert.equal(iqBackingAt(950, false, rules), "ring");
+  assert.equal(iqBackingAt(500, false, rules), "outside-ring");
+  assert.equal(iqBackingAt(950, false, null), "unknown", "an unanswered window is not 'no ring'");
+  assert.equal(iqBackingAt(950, false, ringRules(winOf(1000, 100, null), 1000)), "unknown", "an empty ring is unknown");
+});
+
+test("iqNote: past the ring promises no audio, and no two situations share a sentence", () => {
+  const notes = (["live", "ring", "outside-ring", "unknown"] as const).map(iqNote);
+  assert.equal(new Set(notes).size, 4);
+  assert.match(iqNote("outside-ring"), /no IQ and no audio/, "promising audio that cannot be delivered is the defect");
+  assert.match(iqNote("outside-ring"), /spectrum history only/, "the waterfall still answers past the ring");
+  assert.match(iqNote("ring"), /demod and decode can re-run/);
+  assert.match(iqNote("unknown"), /unknown/);
+});
+
+test("currentSpan prefers the live geometry, falls back to the tuned device span, else null", () => {
+  assert.deepEqual(
+    currentSpan({ live: { loHz: 99_600_000, hiHz: 102_000_000 }, device: { centerHz: null, sampleRateHz: null } }),
+    { loHz: 99_600_000, hiHz: 102_000_000 },
+  );
+  assert.deepEqual(
+    currentSpan({ live: null, device: { centerHz: 100_800_000, sampleRateHz: 2_400_000 } }),
+    { loHz: 99_600_000, hiHz: 102_000_000 },
+  );
+  assert.equal(currentSpan({ live: null, device: { centerHz: null, sampleRateHz: null } }), null);
+});
+
+test("durationText keeps seconds: a 90 s retention is not rounded into minutes", () => {
+  assert.equal(durationText(45), "45 s");
+  assert.equal(durationText(89), "89 s");
+  assert.equal(durationText(120), "2 min");
+  assert.equal(durationText(3600), "1.0 h");
+});
+
+// ---- the rules, as drawn ----
+
+test("ringRuleQuads: both rules land at their capture instants through the pane's own mapping", () => {
+  const box = boxOf(880, 1000);
+  const rules = ringRules(winOf(1000, 100, { t0S: 950, t1S: 1000 }), 1000)!;
+  const quads = ringRuleQuads(rules, box, RECT);
+  const ret = quads.filter((q) => q.id === "retention"), iq = quads.filter((q) => q.id === "iq-horizon");
+  assert.ok(ret.length > 1, "the retention bound is drawn, dashed");
+  assert.equal(iq.length, 1, "the IQ horizon is drawn, solid");
+  for (const q of ret) assert.ok(Math.abs(midY(q) - clipYOf(900, box)) < 1e-9, "retention bound at edge − retention");
+  assert.ok(Math.abs(midY(iq[0]) - clipYOf(950, box)) < 1e-9, "IQ horizon at buffered.t0");
+  assert.deepEqual([iq[0].clip[0], iq[0].clip[2]], [-1, 1], "the IQ horizon spans the whole pane");
+  // Order: retention first, so the IQ horizon is drawn on top when the two coincide.
+  assert.ok(quads.indexOf(iq[0]) > quads.indexOf(ret[ret.length - 1]));
+});
+
+test("ringRuleQuads: strokes only, distinct from the coverage grey and from each other", () => {
+  const box = boxOf(880, 1000);
+  const quads = ringRuleQuads(ringRules(winOf(1000, 100, { t0S: 950, t1S: 1000 }), 1000), box, RECT);
+  for (const q of quads) {
+    assert.equal(q.kind, "time-rule");
+    assert.ok(quadSizePx(q, RECT).hPx <= 4 + 1e-9, "a rule, never a wash over the cells it marks");
+  }
+  const grey = (c: readonly number[]) => Math.abs(c[0] - c[1]) < 0.05 && Math.abs(c[1] - c[2]) < 0.05;
+  assert.ok(!grey(IQ_RULE_INK) && !grey(RETENTION_RULE_INK), "a neutral ink could be read as unobserved");
+  assert.notDeepEqual(IQ_RULE_INK, RETENTION_RULE_INK);
+  assert.equal(IQ_RULE_INK[3], 1, "opaque, so the ink on screen is exactly this value");
+  assert.equal(RETENTION_RULE_INK[3], 1);
+});
+
+test("ringRuleQuads: an instant outside the pane draws nothing, and an unanswered window draws nothing", () => {
+  // Pinning a rule to the pane's edge would claim a boundary at a time it is not.
+  const rules = ringRules(winOf(1000, 100, { t0S: 950, t1S: 1000 }), 1000);
+  assert.deepEqual(ringRuleQuads(rules, boxOf(960, 1000), RECT), [], "both instants are older than this pane");
+  assert.deepEqual(ringRuleQuads(null, boxOf(880, 1000), RECT), []);
+  assert.deepEqual(timeRuleQuads(Number.NaN, IQ_RULE_INK, "x", boxOf(880, 1000), RECT), []);
+});
+
+test("timeRuleQuads: dashes are laid out in device px and stay inside the pane", () => {
+  const q = timeRuleQuads(950 * S, RETENTION_RULE_INK, "r", boxOf(880, 1000), RECT, { thickPx: 4, dashPx: 10, gapPx: 6 });
+  assert.equal(q.length, Math.ceil(800 / 16));
+  for (const d of q) {
+    assert.ok(d.clip[0] >= -1 && d.clip[2] <= 1 && d.clip[2] > d.clip[0]);
+    assert.ok(quadSizePx(d, RECT).wPx <= 10 + 1e-9);
+  }
+});
+
+// ---- the extent, and the request ----
+
+test("T-338 on the canvas: the retained window's extent is the ring's, never the history horizon", () => {
+  // `timeExtent` is now live code: `surface.ts` floors the canvas's time extent at its `lo`, so the
+  // retention window is always reachable however young the spectrum history is. The history horizon
+  // may extend the extent further back (docs/16 §8: the canvas is also the history view); it can
+  // never shorten it below the retention.
+  const w = captureWindow({ window: { t0_s: 880, t1_s: 1000, span_s: 120, buffered: { t0_s: 990, t1_s: 1000 } } });
+  assert.deepEqual(timeExtent(w), { lo: 880, hi: 1000 }, "the buffered span does not shrink it");
+  const src = readFileSync("src/app/centre/surface.ts", "utf8");
+  assert.match(src, /const ext = timeExtent\(w\);\s*if \(ext && preview\) preview\.extendTimeFloor\(ext\.lo \* S_TO_NS\)/,
+    "the canvas's time floor is taken from the ring's window");
+  const prev = readFileSync("src/surface/preview.ts", "utf8");
+  assert.match(prev, /if \(!Number\.isFinite\(t0Ns\) \|\| !\(t0Ns < b\.t0Ns\)\) return false;/,
+    "the floor only ever moves older, so a poll can never yank a pane");
+});
+
+test("the capture clock asks for the window alone, on a cadence, and is the only writer of captureWindow", () => {
+  // Assert the request the client builds, not only the response it renders (T-367): no band means
+  // the server folds no grid, and there is no t0/t1 because the window is the server's to state.
+  assert.equal(CAPTURE_CLOCK_REQUEST, "/api/timeline?columns=1&rows=1");
+  assert.doesNotMatch(CAPTURE_CLOCK_REQUEST, /t0|t1|f_lo|f_hi/);
+  assert.ok(CAPTURE_CLOCK_MS > 0 && CAPTURE_CLOCK_MS <= 10_000, "fresh enough to catch the ring filling");
+  // T-379: every other live-edge reader falls back to this state. Deleting the panel deleted its
+  // only writer; this is the guard that the re-homed one exists and is started with the canvas.
+  const writers = srcFiles().filter((f) => /setCaptureWindow\(/.test(readFileSync(f, "utf8")) && !f.endsWith("capture-slice.ts"));
+  assert.deepEqual(writers, ["src/app/centre/capture-clock.ts"]);
+  assert.match(readFileSync("src/app/centre/surface.ts", "utf8"), /^\s*startCaptureClock\(ctx\);/m);
+});
+
+test("Record IQ survived the panel: it records the viewport's band through the outputs route", () => {
+  const src = readFileSync("src/app/centre/capture-clock.ts", "utf8");
+  assert.match(src, /"\/api\/outputs\/record\/start", \{ band: \{ f_lo: span\.loHz, f_hi: span\.hiHz \}, kinds: \["iq"\] \}/);
+  assert.match(src, /"\/api\/outputs\/record\/stop"/);
+  assert.match(readFileSync("src/app/centre/surface.ts", "utf8"), /recordIqButton\(ctx\)/, "it is mounted in the canvas bar");
+});
+
+test("no default span: nothing on the capture window's path can fall back to a constant window", () => {
+  // The regression T-338 removed: `WINDOW_S = 48 * 3600` sized the scrubber and offered times the
+  // IQ ring had already overwritten.
+  const src = readFileSync("src/app/centre/capture-window.ts", "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
+  assert.doesNotMatch(src, /(windowS|spanS)\s*:\s*number\s*=/, "a defaulted span is a constant in disguise");
+  assert.doesNotMatch(src, /WINDOW_S|RETENTION_S\s*=/, "the constant itself is gone, not merely unused");
+  assert.doesNotMatch(src, /\d+\s*\*\s*3600/);
+});
+
+test("T-386 CLOCK GUARD: no clock of the browser's own reaches the capture-window modules", () => {
+  for (const f of ["src/app/centre/capture-window.ts", "src/app/centre/capture-clock.ts"]) {
+    const src = readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    for (const word of ["Date.now", "performance.now", "new Date", "toLocaleTimeString", "getTimezoneOffset"]) {
+      assert.ok(!src.includes(word), `${f} must not contain "${word}"`);
+    }
+  }
+});
+
+test("the Capture panel is gone: no slot, no module, no pref, no grid row", () => {
+  const html = readFileSync("src/app/index.html", "utf8");
+  assert.doesNotMatch(html, /data-slot="capture"/);
+  for (const f of srcFiles()) assert.ok(!f.startsWith("src/app/capture/"), `${f} survived the removal`);
+  const css = readFileSync("src/app/base.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.doesNotMatch(css, /cap-collapsed|\.capture\s*\{|92px/);
+  assert.match(css, /\.centre\s*\{[^}]*grid-template-rows:\s*minmax\(0,1fr\);/, "the surface takes the whole column");
+  for (const f of ["src/app/shell-slice.ts", "src/app/shell.ts"]) {
+    assert.doesNotMatch(readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*/g, ""), /captureCollapsed/);
+  }
+});
+
+function srcFiles(dir = "src"): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(dir)) {
+    const p = join(dir, e);
+    if (statSync(p).isDirectory()) out.push(...srcFiles(p));
+    else if (/\.(ts|html|css)$/.test(e)) out.push(p);
+  }
+  return out.sort();
+}

@@ -172,7 +172,7 @@ test("T-410: no clock, no signal logic and no RF constant in the presence module
 // following applies a record, paused does not subscribe at all and its rows do not move.
 
 import { mountPresenceStream } from "../src/app/explore/presence-stream";
-import { goLive, reviewAt } from "../src/app/capture/slice";
+import { goLive, reviewAt } from "../src/app/centre/capture-slice";
 import { setInventoryRows } from "../src/app/explore/slice";
 import { createStore } from "../src/app/store";
 import { initialState } from "../src/app/state";
