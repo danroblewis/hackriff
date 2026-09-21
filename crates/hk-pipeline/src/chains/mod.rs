@@ -124,7 +124,29 @@ impl ChainReader {
     }
 
     /// Reads the next chunk into `buf` (waits up to 20 ms).
+    ///
+    /// **A stopped segment reads as closed** (T-542). `shared.stop` is how a segment ends — a
+    /// retune's re-plumb, a capture failure, a user stop — and once it is set no further sample of
+    /// *this* segment will ever be shown to anyone. A chain that keeps pulling from the ring past
+    /// it is doing work for a window that has gone, and it holds up far more than itself: the
+    /// segment's `hk-control` worker only returns once every chain it started has finished
+    /// ([`ChainManager::reap`]), and the supervisor's re-plumb waits on that worker.
+    ///
+    /// Measured on the live HackRF under a 1 MHz–6 GHz sweep at dwell 1 s with the canvas at its
+    /// finest level: at the step that crosses into `restricted-paging` the re-plumb took **88
+    /// seconds**, with ten `hk-chain-fsk-bursts-*` threads still reading and appending, the
+    /// supervisor parked in `pthread_join`, no capture at all, and `/ws/spectrum/live` answering
+    /// `410`/`404` for 85 s of it. Nothing had panicked and nothing was deadlocked — the segment
+    /// simply would not let go.
+    ///
+    /// Returning `Closed` (rather than adding a flag each chain must remember to test) is the
+    /// narrow version of the fix: every chain shape already has a wind-down for the ring ending,
+    /// because the ring does end, and this is that same ending arriving a few milliseconds
+    /// earlier.
     pub fn next(&mut self) -> Next {
+        if self.shared.stop.load(Ordering::SeqCst) {
+            return Next::Closed;
+        }
         let c = &self.shared.counters.chains;
         match self
             .reader
