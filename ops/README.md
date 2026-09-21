@@ -47,6 +47,21 @@ HACKRIFF_OPS=~/.hackriff-ops nohup bash ops/merge-runner.sh >/dev/null 2>&1 & di
 # failures: cat $HACKRIFF_OPS/merge-needs-attention.txt
 # merged:   cat $HACKRIFF_OPS/merge-done.txt   ·   log: $HACKRIFF_OPS/merge-runner.log
 ```
+**Always launch it from `ops/merge-runner.sh` in the repo, never from a copy in `$HACKRIFF_OPS`.**
+A bash script is read by the live process from its own inode, so a running runner keeps executing
+the code it started with: an edit to the script changes nothing until a restart, and an edit to a
+*copy* changes nothing ever. On 2026-09-20 the runner had been started from a stale copy, and the
+sequential-bulk fix sat committed and believed-live for hours while the process went on octopus-
+merging — eight bulk attempts, zero bulk merges. The runner now logs `VERSION:` at startup saying
+whether its own file matches `HEAD:ops/merge-runner.sh`; **read that line after every restart.**
+
+**Restarting it safely:** only between gates. Killing it mid-gate leaves a staged merge with no
+owner (`MERGE_HEAD` set, nothing to finish it) and the replacement waits on that merge for ever.
+Wait until no `gate-merge` process is running, kill it *by the pid you captured at spawn* (never a
+broad `pkill -f` — one of those killed a merge gate on 2026-09-20), `git merge --abort` if a merge
+is still staged, then start the new one. Note also that a fallback batch is held **in memory**: if
+the runner is stopped after a bulk attempt fell back to individual gates, the branches it had
+already consumed from the queue are lost and must be re-queued by hand.
 
 ## Restart-all (after a reboot)
 ```bash
