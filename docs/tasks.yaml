@@ -3,6 +3,14 @@
 # status: todo | in-progress | blocked | done. Update status + commit/pr as work proceeds.
 # needs: none | hardware | user  (hardware/user tasks stay with the coordinator, not background agents)
 # model/effort per prompts/model-selection.md. Tasks marked core_interface go to Fable/Opus and are reviewed before merge.
+# effort: low | medium | high | xhigh - the COMPLEXITY TIER, set with `model:` from the rubric in
+#   prompts/model-selection.md (T-563). Trivial/mechanical -> low; well-specified single-crate with tests
+#   -> medium; core_interface / real-time / novel DSP / hard debugging -> high or xhigh. A ticket whose
+#   MECHANISM IS ALREADY MEASURED by a prior ticket is well-specified however alarming its symptom: hand
+#   the agent the measurement and drop the tier. Reasoning time (184 h) exceeded all tool and build time
+#   (144 h) on 2026-09-20 because almost everything ran Opus-high regardless of the work.
+#   NOTE: the Agent tool exposes `model` but no `effort` parameter, so this field records the intended
+#   tier for briefs, agent definitions and review - it is not passed programmatically at spawn.
 version: 1
 milestone: "M0 COMPLETE 2026-09-13 (T-026 deferred to Jetson); M0b complete (T-100 deferred); M1 decoder workbench COMPLETE 2026-09-15; M2 attention + memory maturity COMPLETE 2026-09-15 (T-124 green, full check d0e74df; M2-hardening follow-ups open); current milestone M3 classification started 2026-09-15 (ADR-0016 design T-198); MUI in parallel; MAUTO design only (T-208), build after M3"
 # M0b (Live device + exploration UI) follows M0 and precedes decoder breadth (docs/11 §2); its tasks carry `milestone: M0b`. Tasks without the field are M0.
