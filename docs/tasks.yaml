@@ -19054,7 +19054,20 @@ tasks:
       hk-store `the_declared_dc_notch_rasterises_as_excluded_and_never_as_unobserved` covers the
       fold and the coarsen (a 200 kHz cell swallowing the notch reads analysed).
       TESTS: `cargo nextest run -p hk-store -p hk-api` 420/420; `hk-cli -E binary(api_contract)`
-      53/53; `just test-ui` 49/49. `just precheck hk-store hk-api hk-cli` clean.
+      53/53; `-p hk-pipeline -p hk-context` 542/542; `just test-ui` 49/49. `just precheck hk-store
+      hk-api hk-pipeline` clean.
+      FOLLOW-UP FIX (same branch): `hk-pipeline::iterative_scan::a_notched_dwell_reaches_the_
+      rasteriser_as_two_bands` counted the OLD shape (two spans and a hole) and failed a bulk gate.
+      The rasteriser is a COVERAGE consumer, not an analysis one - it must see the notch or it
+      answers "nothing ever looked" over rows we hold - so the test was rewritten, not the code:
+      renamed `..._as_two_analysed_bands_and_one_excluded_notch`, it now partitions the spans by
+      `analysis`, asserts 2/step analysed + 1/step excluded, keeps the original intent precisely
+      (no ANALYSED span may straddle the tuned centre; the one span that covers it is exactly the
+      producer's own +/-`dc_half_hz`), and adds the consequence through the same chain - the centre
+      cell reads `excluded`, a quarter MHz off centre reads ordinary `observed`.
+      NOTED, not chased: `hk-pipeline::data_path::a_live_chain_feeds_a_plugin_that_never_reports_
+      ready_after_its_bounded_wait` failed once under load (load avg ~9-13) and PASSES IN ISOLATION
+      and on a clean re-run (542/542) - a load-flake for the deflaker, unrelated to this diff.
 
   - id: T-598
     milestone: M2-hardening
