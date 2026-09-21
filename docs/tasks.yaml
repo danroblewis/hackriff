@@ -6099,7 +6099,7 @@ tasks:
     title: The 99.99 MHz reference-harmonic artefact is identified from a single tune, so the retune test
       that would settle it has not been run
     status: todo
-    priority: low
+    priority: high
     deps:
     - T-289
     parallel_group: PIPE
@@ -6113,7 +6113,17 @@ tasks:
       test is a retune: an artefact generated in the receive chain moves with the LO, an off-air carrier
       does not. Capture the same line at two or three different tuner centres and assert which it does.
       Hardware capture is USER-TRIGGERED - do not touch the HackRF while the users demo holds it. Until
-      then the annotation stays as it is, with the limitation recorded'
+      then the annotation stays as it is, with the limitation recorded LIVE FIELD REPORT, 2026-09-21 (user, staging
+      server on the real HackRF): the deciding experiment is no longer hypothetical - the user has now
+      SEEN the effect in four cases. 840-900 MHz disagrees between centres; a 892.5 MHz digital signal
+      near the band edge vanishes on zoom+retune (T-588 - that one may be a render bug instead); a
+      100.8 MHz FM signal is present at some centres and absent at others while staying consistent when
+      tuned directly to it, which is DC-spike-like; and a bright signal SHIFTS to a new ABSOLUTE
+      frequency on retune, which is the artefact signature outright. T-586 generalises this ticket into
+      a retune-diversity self-consistency acceptance test over a multi-centre fixture through the mock
+      SDR, so the non-hardware half proceeds now. THIS ticket stays the HARDWARE half: the capture over
+      100.x / 840-900 / 892.5 is a capture-agent session the supervisor schedules with the user, and the
+      99.99 MHz reference-harmonic question is settled by the same retunes.'
   - id: T-319
     milestone: M2-hardening
     title: Three more silent chain_emitter swallows would produce the same unnameable error count T-293
@@ -18237,6 +18247,115 @@ tasks:
       ASSERT: two branches each filing a ticket merge without conflict, and the merged board
       parses, has both tickets, and has no duplicate IDs. Prove the test goes RED with the
       current format.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-586
+    milestone: M2-hardening
+    title: Retune-diversity self-consistency - a real emitter keeps its absolute frequency across centres, an artefact moves with the LO
+    status: todo
+    priority: high
+    parallel_group: DETECT
+    core_interface: true
+    model: opus
+    effort: high
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER FIELD REPORT, 2026-09-21, staging server on the LIVE HackRF. Signals appear, shift and
+      vanish as the CENTRE FREQUENCY changes:
+        (a) 840-900 MHz - general disagreement between centres;
+        (b) 892.5 MHz digital signal near the BAND EDGE - vanishes on zoom+retune (see T-588: that
+            one may be a render/coverage bug rather than detection, and is ticketed separately);
+        (c) 100.4/100.8 MHz FM - a signal at 100.8 present at some centres, absent at others, and
+            consistent when tuned directly to it (DC-spike-like);
+        (d) a bright orange-red signal that SHIFTS to a new ABSOLUTE frequency when retuned.
+      THE DIAGNOSTIC IS ALREADY DECIDED BY PHYSICS, which is what makes this testable: a receiver
+      artefact - image, DC spike, IM3 product, reference spur - is LO-RELATIVE and moves with the
+      centre; a real emission is ABSOLUTE-FREQUENCY-INVARIANT and does not. Retune diversity turns
+      that into a measurement rather than an opinion. This generalises T-318, which asks the same
+      question for ONE artefact (the 99.99 MHz reference harmonic) and records that the deciding
+      retune has never been run.
+      BUILD THE NON-HARDWARE HALF FIRST AND DO NOT WAIT ON THE RADIO: a multi-centre SigMF fixture
+      replayed through the MOCK SDR at N centres over one region, asserting that
+        - every real emitter agrees in ABSOLUTE frequency across all N centres, within tolerance;
+        - every LO-relative artefact is FLAGGED as such, not reported as an emission;
+        - the flags use the EXISTING provenance model - `recording.rs`'s `f_center_hz` and
+          `provenance_ref` - rather than a new side channel. Each detection already records which
+          device and configuration saw it; this test is what makes that record load-bearing.
+      T-005/T-006 already flag DC, reference spur and IM3 on SYNTHETIC input. The gap this closes is
+      that nothing checks the INVARIANT ACROSS CENTRES, which is the property that actually
+      distinguishes the two classes, and nothing has validated it over the air (spike S4b, pending
+      the user's FM notch and antenna).
+      BLIND RULE APPLIES: hidden truth in the assertions only, thresholds a priori. Never look a
+      frequency up in the database and tune to it. An artefact correctly flagged is a SUCCESS, not
+      a missed detection - the point is that the system says which it is.
+      ASSERT WITH COUNTS AND FREQUENCIES, NOT WALL-CLOCK (user, 2026-09-21).
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-587
+    milestone: M2-hardening
+    title: An artefact reads as a LABELLED artefact in the UI - DC spike, image of X, IM3 product - not as a mystery signal
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    model: sonnet
+    effort: medium
+    depends_on: [T-586]
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER FIELD REPORT, 2026-09-21. The user watched signals appear and vanish with the centre
+      frequency and had no way to tell a receiver artefact from an emission. The backend already
+      computes the explanation: `artifact_detail()` discloses the arithmetic (lo_hz, orders, error,
+      and after T-307 the receive chain it was made on), and T-302 gates every image/harmonic/
+      intermod pairing on a ReceiveChain. NONE OF IT REACHES THE SCREEN.
+      Surface it: a detection the backend has explained as an artefact is drawn and listed AS an
+      artefact, with its reason in words - "DC spike", "image of the 100.8 MHz carrier",
+      "IM3 product of A and B" - and, where it applies, the emitter it is an artefact OF.
+      THIS IS PRESENTATION, NOT ANALYSIS. The UI is a thin client over docs/api.md: all the
+      recognition, the pairing and the reasoning stay in the backend. The client reads the
+      explanation and renders it. If a field it needs is not on the wire, add it to the route AND
+      to `docs/api.md` AND to `crates/hk-cli/tests/api_contract.rs` together (T-079) - do not
+      compute the explanation client-side.
+      HONESTY CONSTRAINT: an UNEXPLAINED signal must not be dressed up as an explained one. The
+      three states - explained artefact, real emission, and not yet decided - are distinct and must
+      read as distinct. Exploration-first means unknown signals stay visibly unknown; a label the
+      backend did not assert is the same defect as implying resolution that was never captured.
+      ASSERT THE REQUEST THE CLIENT BUILDS, not only what it renders (T-367: a client asked
+      /api/timeline with no band and drew an empty canvas while every suite stayed green). The guard
+      lives in `ui/test`.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-588
+    milestone: MLIVE
+    title: The 892.5 MHz signal vanishes on zoom+retune - does the backend have data the canvas never draws?
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER FIELD REPORT, 2026-09-21, live HackRF: a digital signal at 892.5 MHz, near the BAND EDGE,
+      VANISHES on zoom+retune. Ticketed separately from T-586 on purpose - it has two candidate
+      causes with completely different fixes, and assuming the wrong one wastes the work:
+        1. DETECTION/ARTEFACT: the signal is LO-relative and genuinely is not there at the new
+           centre. T-586 covers that, and this ticket closes as "not a render bug" if so.
+        2. RENDER/COVERAGE: the backend HAS data for that region after the retune and the canvas
+           does not draw it. The standing invariant is explicit - "whenever data exists for that
+           window it must be shown", and "we have it but did not render it is a bug". Band-edge is
+           the suspicious part: a region at the edge of the tuned window is exactly where a coverage
+           calculation, a tile-address rounding or an off-by-one in the observed-extent test is most
+           likely to answer "unobserved" for a span that was in fact sampled.
+      DECIDE WHICH, WITH EVIDENCE, BEFORE FIXING ANYTHING. Ask the backend directly for the region
+      after the retune - the tile route, the coverage map, the detections - and compare against what
+      the canvas drew. If the backend has it, this is a client or coverage bug and the reproduction
+      belongs in `ui/test` asserting the REQUEST the client builds (T-367). If the backend does not
+      have it, say so and hand the case to T-586.
+      Note grey is load-bearing here: "observed-but-not-yet-measured" and "unknown-whether-we-looked"
+      are DISTINCT marks and neither is grey (T-441). A band-edge span wrongly marked unobserved is
+      the failure this invariant exists to catch.
+      ASSERT WITH COUNTS AND COVERAGE STATES, NOT WALL-CLOCK (user, 2026-09-21).
+      Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
