@@ -11,7 +11,7 @@
 // **The coverage plane arrives run-length encoded, out of a table of distinct planes** (T-467).
 // It used to arrive as one JSON object per cell carrying six sampling fields this client never
 // read — 99 % of a 19.34 MB tile body, and duplicated, because `any` and `devices[0]` were the same
-// plane on a one-device server. The states themselves are unchanged and still three: `unobserved`,
+// plane on a one-device server. The states are `unobserved`,
 // `observed` and `unknown` are separate codes in an alphabet the answer serves beside the runs, and
 // a plane that does not decode exactly throws rather than resolving to any of them.
 //
@@ -234,7 +234,17 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     }
     if (s === "unknown") { state[i] = CELL.UNKNOWN; value[i] = NaN; continue; }
     const v = levelAt(i);
-    if (typeof v === "number" && Number.isFinite(v)) { state[i] = CELL.OBSERVED; value[i] = v; continue; }
+    // **`"excluded"` is an observation** (T-595): the radio sampled this cell and the analysis was
+    // deliberately not run on it (the DC/LO notch). The level is real and is drawn — on the ramp,
+    // with the exclusion inked over it — so the honest mark needs a level; with none in hand the
+    // cell falls through to the marks below, which claim less. An UNKNOWN state name also falls
+    // through here and draws its measurement rather than grey: a client that has not learned a new
+    // word must never invent "nothing looked" out of it.
+    if (typeof v === "number" && Number.isFinite(v)) {
+      state[i] = s === "excluded" ? CELL.EXCLUDED : CELL.OBSERVED;
+      value[i] = v;
+      continue;
+    }
     value[i] = NaN;
     state[i] = framesAt(i) === 0 ? CELL.AWAITING : CELL.NO_LEVEL;
   }

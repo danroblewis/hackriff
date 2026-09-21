@@ -300,6 +300,12 @@ fn ring_spans(state: &ApiState, freq: FreqRange, window: TimeRange) -> Vec<Cover
                     Timestamp::from_unix_nanos(t1),
                 ),
                 freq: f,
+                // The ring holds the **samples**, DC included, so a segment's whole tuned window
+                // is analysable: a client can re-run anything over it. The DC notch is a statement
+                // the *observation log* makes about one dwell's analysis (T-595), and a segment
+                // records no such exclusion — inventing one here would be a guess, and inventing
+                // the reverse is what greyed the notch in the first place.
+                analysis: hk_store::coverage::Analysis::Analysed,
                 center_hz,
                 sample_rate_hz: rate,
             })
@@ -609,13 +615,20 @@ fn history_began(state: &ApiState) -> (bool, Option<i64>) {
 /// order is fixed by [`state_code`], and [`cell_json`] — the per-cell form `/api/coverage` and
 /// `/api/timeline` still serve — is asserted against it cell-state for cell-state, so the two
 /// encodings cannot drift into disagreeing about what a cell is.
-pub(crate) const COVERAGE_STATES: [&str; 3] = ["unobserved", "observed", "unknown"];
+pub(crate) const COVERAGE_STATES: [&str; 4] = ["unobserved", "observed", "unknown", "excluded"];
 /// Nothing ever looked. Grey, and **only** this is grey.
 const UNOBSERVED: u8 = 0;
 /// The radio was here.
 const OBSERVED: u8 = 1;
 /// We no longer know whether we looked (T-423). Not grey, not a level, not `unobserved`.
 const UNKNOWN: u8 = 2;
+/// Sampled, and **deliberately excluded from analysis** (T-595): the receiver's own DC/LO notch.
+/// Observed — the measurement is there and must be drawn — with no detection claim over it.
+///
+/// Appended after `unknown` rather than inserted beside `observed` so every existing code keeps its
+/// value: the alphabet is served with the planes, but a client caching the old one must not read an
+/// old code as a new state.
+const EXCLUDED: u8 = 3;
 
 /// One cell's state as a code into [`COVERAGE_STATES`] — the same three-way decision
 /// [`cell_json`] makes, and written next to it so it stays the same decision.
@@ -625,6 +638,8 @@ fn state_code(c: &Coverage, beyond_horizon: bool) -> u8 {
         // horizon: the measurement is the proof.
         None if beyond_horizon => UNKNOWN,
         None => UNOBSERVED,
+        // Sampled, nothing of it analysed: the DC notch. Its own code (T-595), never grey.
+        Some(s) if s.excluded() => EXCLUDED,
         Some(_) => OBSERVED,
     }
 }
@@ -646,9 +661,14 @@ fn cell_json(c: &Coverage, shade: Option<Option<f32>>, beyond_horizon: bool) -> 
         None => json!({ "state": "unobserved" }),
         Some(s) => {
             let mut v = json!({
-                "state": "observed",
+                // `"excluded"` (T-595) is an **observed** cell: the radio sampled it, the history
+                // holds rows over it, and the only thing that did not happen is the analysis. It
+                // keeps every measurement key an `"observed"` cell has — and `analysed_s: 0.0`
+                // says, checkably, why it is not simply `"observed"`.
+                "state": if s.excluded() { "excluded" } else { "observed" },
                 "spans": s.spans,
                 "observed_s": s.observed_ns as f64 * 1e-9,
+                "analysed_s": s.analysed_ns as f64 * 1e-9,
                 "duty": s.duty,
                 "last_s": s.last.as_unix_nanos() as f64 * 1e-9,
                 "center_hz": s.center_hz,
@@ -694,7 +714,13 @@ fn grid_json(
         // Whether `device` is a real front-end identity. `"unknown"` and `"any"` are labels, not
         // radios, and a client must not attribute their coverage to a device.
         "named": g.device.is_named(),
-        "observed_cells": g.observed_cells(),
+        // Cells whose state is `"observed"`, strictly — the `"excluded"` ones are counted beside
+        // them, exactly as the compact plane form counts them, so the two encodings cannot drift
+        // into disagreeing about one cell (T-595).
+        "observed_cells": g.observed_cells() - g.excluded_cells(),
+        // Sampled, and wholly excluded from analysis (T-595) — the DC notch. `observed_cells +
+        // excluded_cells` is the sampled total.
+        "excluded_cells": g.excluded_cells(),
         // Cells that are genuinely grey: nothing looked, and a surviving record says so. The
         // `"unknown"` cells are **not** counted here — they are the fourth state, and adding them
         // in would be the collapse this route exists to refuse.
@@ -903,7 +929,9 @@ pub fn coverage_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
             // whether we looked is a different claim from having looked and found nothing, and
             // collapsing the two is the dishonesty this route exists to refuse (`docs/16` §5.4).
             "grey_rule": "grey a cell if and only if its state is \"unobserved\"; \"unknown\" is \
-                not grey and not a level — draw it as a fourth thing (hatching, per T-413)",
+                not grey and not a level — draw it as a fourth thing (hatching, per T-413); \
+                \"excluded\" (T-595) is spectrum the radio DID sample and the analysis skipped — \
+                draw the measurement, mark it distinctly, never grey",
             // And the shade is measured here and nowhere else: what it means, and against what,
             // is the `shade` block above (T-342).
             "shade_rule": "shade is the max-hold over the window, normalised over `shade.range_db`; \
@@ -968,7 +996,8 @@ pub(crate) fn overlay_json(
             journal and the observation log. `grid.coverage` is a different measurement — the \
             fraction for which the spectrum-history pyramid still holds frames — and is 0 both \
             where nothing looked and where the budget evicted what it saw. Grey is decided here: \
-            grey a cell if and only if its state is \"unobserved\".",
+            grey a cell if and only if its state is \"unobserved\" — \"excluded\" is sampled \
+            spectrum the analysis skipped (T-595), never grey.",
     })
 }
 
@@ -1016,7 +1045,13 @@ fn plane_json(codes: &[u8]) -> Value {
         "observed_cells": observed,
         "unobserved_cells": counts[usize::from(UNOBSERVED)],
         "unknown_cells": counts[usize::from(UNKNOWN)],
-        "observed_fraction": if codes.is_empty() { 0.0 } else { observed as f64 / codes.len() as f64 },
+        // T-595. Not in `observed_cells`: on this compact form each cell carries exactly one code,
+        // and `excluded` is its own code. `observed_cells + excluded_cells` is the sampled total.
+        "excluded_cells": counts[usize::from(EXCLUDED)],
+        // The fraction the radio SAMPLED, so an exclusion inside a tuned band never reads as a
+        // hole in the survey: `"excluded"` cells count here exactly as `"observed"` ones do, and
+        // `CoverageGrid::observed_fraction` — the per-cell form's source — does the same (T-595).
+        "observed_fraction": if codes.is_empty() { 0.0 } else { (observed + counts[usize::from(EXCLUDED)]) as f64 / codes.len() as f64 },
     })
 }
 
@@ -1198,8 +1233,9 @@ impl TileOverlay {
                 "present": selected != Selected::AbsentDevice,
                 "plane": plane_of(selected),
                 "rule": "grey a cell of this tile if and only if the selected plane's state is \
-                    \"unobserved\". `any` is the union; a named device is that front end alone, and \
-                    never the union.",
+                    \"unobserved\" - NOT \"excluded\", which is sampled spectrum the analysis \
+                    skipped (T-595) and whose level must still be drawn. `any` is the union; a \
+                    named device is that front end alone, and never the union.",
             },
             "horizon": self.evidence.horizon_json(&self.any),
             "sources": self.evidence.sources_json(),
@@ -1207,12 +1243,14 @@ impl TileOverlay {
                 journal and the observation log. `grid.coverage` is a different measurement — the \
                 fraction for which the spectrum-history pyramid still holds frames — and is 0 both \
                 where nothing looked and where the budget evicted what it saw. Grey is decided \
-                here: grey a cell if and only if its state is \"unobserved\".",
+                here: grey a cell if and only if its state is \"unobserved\" — \"excluded\" is \
+                sampled spectrum the analysis skipped (T-595), never grey.",
             "encoding_rule": "`planes[i].runs` is a flat [code, count, code, count, …] run-length \
                 encoding of that plane's cells in `grid.order`; the counts sum to `planes[i].cells` \
-                and each code indexes `states`. THREE states, never two: \"unobserved\" (nothing \
-                looked) and \"unknown\" (we no longer know whether we looked, T-423) are separate \
-                codes and neither is \"observed\". No cell on this plane carries a measurement key \
+                and each code indexes `states`. FOUR states, never two: \"unobserved\" (nothing \
+                looked), \"unknown\" (we no longer know whether we looked, T-423) and \
+                \"excluded\" (sampled, deliberately left out of analysis - the DC notch, T-595) \
+                are separate codes and none of them is \"observed\". No cell on this plane carries a measurement key \
                 of any kind, so there is nothing here a client can read as a level of zero — the \
                 measurement plane is `grid`, and it is separate on purpose.",
             "per_cell_metadata": "the per-cell sampling detail (`duty`, `observed_s`, `last_s`, \
@@ -1565,14 +1603,38 @@ mod tests {
     /// states a cell is, the compression has cost exactly what it was forbidden to cost.
     #[test]
     fn the_compact_code_and_the_per_cell_form_classify_every_cell_identically() {
-        let observed =
-            hk_store::coverage::Coverage::of(2, 30_000_000_000, 60_000_000_000, t(1030), 1e8, 2e6);
+        let observed = hk_store::coverage::Coverage::of(
+            2,
+            30_000_000_000,
+            30_000_000_000,
+            60_000_000_000,
+            t(1030),
+            1e8,
+            2e6,
+        );
+        // Sampled, and no part of it analysed: the DC notch (T-595).
+        let excluded = hk_store::coverage::Coverage::of(
+            2,
+            30_000_000_000,
+            0,
+            60_000_000_000,
+            t(1030),
+            1e8,
+            2e6,
+        );
+        assert!(
+            excluded.is_excluded() && excluded.is_observed(),
+            "{excluded:?}"
+        );
         for (c, beyond) in [
             (&Coverage::Unobserved, false),
             (&Coverage::Unobserved, true),
             (&observed, false),
             // An observed cell is NEVER relabelled past the horizon: the measurement is the proof.
             (&observed, true),
+            // Nor is an excluded one: it is an observation with an exclusion on it, not an absence.
+            (&excluded, false),
+            (&excluded, true),
         ] {
             let per_cell = cell_json(c, None, beyond);
             let code = state_code(c, beyond);
@@ -1582,12 +1644,28 @@ mod tests {
                 "the two encodings disagree for beyond_horizon={beyond}: {per_cell}"
             );
         }
-        // And the alphabet really does have three entries, all distinct: a two-state alphabet is
+        // And the alphabet really does have four entries, all distinct: a two-state alphabet is
         // the collapse this whole surface exists to refuse.
-        assert_eq!(COVERAGE_STATES.len(), 3);
+        assert_eq!(COVERAGE_STATES.len(), 4);
         assert_eq!(COVERAGE_STATES[usize::from(UNOBSERVED)], "unobserved");
         assert_eq!(COVERAGE_STATES[usize::from(OBSERVED)], "observed");
         assert_eq!(COVERAGE_STATES[usize::from(UNKNOWN)], "unknown");
+        // T-595, appended: every code an older client cached keeps its meaning.
+        assert_eq!(COVERAGE_STATES[usize::from(EXCLUDED)], "excluded");
+        // An excluded cell keeps its measurement keys — it IS an observation — and says, in a
+        // number rather than a word, why it is not simply "observed".
+        let v = cell_json(&excluded, None, false);
+        assert_eq!(v["state"], json!("excluded"), "{v}");
+        assert_eq!(v["analysed_s"], json!(0.0), "{v}");
+        assert!(
+            (v["observed_s"].as_f64().unwrap() - 30.0).abs() < 1e-6,
+            "an excluded cell keeps every measurement key an observed one has: {v}"
+        );
+        let o = cell_json(&observed, None, false);
+        assert!(
+            (o["analysed_s"].as_f64().unwrap() - 30.0).abs() < 1e-6,
+            "{o}"
+        );
     }
 
     /// The runs are lossless, and a run boundary is exactly a state change — never a merge.
@@ -1597,8 +1675,9 @@ mod tests {
             vec![],
             vec![UNOBSERVED; 5],
             vec![OBSERVED, OBSERVED, UNOBSERVED, UNKNOWN, UNKNOWN, OBSERVED],
+            vec![OBSERVED, EXCLUDED, EXCLUDED, OBSERVED, UNOBSERVED],
             // The pathological shape: every cell a different state from its neighbour.
-            (0..30).map(|i| (i % 3) as u8).collect(),
+            (0..40).map(|i| (i % 4) as u8).collect(),
         ] {
             let v = {
                 let mut p = plane_json(&codes);
@@ -1615,6 +1694,7 @@ mod tests {
             assert_eq!(v["observed_cells"], json!(n(OBSERVED)), "{v}");
             assert_eq!(v["unobserved_cells"], json!(n(UNOBSERVED)), "{v}");
             assert_eq!(v["unknown_cells"], json!(n(UNKNOWN)), "{v}");
+            assert_eq!(v["excluded_cells"], json!(n(EXCLUDED)), "{v}");
             // `uniform` is a statement about the runs, not a claim beside them.
             let uniform = codes.first().filter(|&&c| n(c) == codes.len());
             assert_eq!(
@@ -1772,8 +1852,15 @@ mod tests {
 
     #[test]
     fn an_observed_cell_states_the_sampling_that_makes_it_observed() {
-        let c =
-            hk_store::coverage::Coverage::of(2, 30_000_000_000, 60_000_000_000, t(1030), 1e8, 2e6);
+        let c = hk_store::coverage::Coverage::of(
+            2,
+            30_000_000_000,
+            30_000_000_000,
+            60_000_000_000,
+            t(1030),
+            1e8,
+            2e6,
+        );
         let v = cell_json(&c, Some(None), false);
         assert_eq!(v["state"], json!("observed"));
         assert_eq!(v["spans"], json!(2));
