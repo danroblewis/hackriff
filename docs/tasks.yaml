@@ -6227,7 +6227,7 @@ tasks:
     milestone: M2-hardening
     title: A purely analogue emitter now sits exactly on the shared-field floor, so one field dropping out
       stops it clustering entirely
-    status: todo
+    status: done
     priority: low
     deps:
     - T-309
@@ -6243,6 +6243,19 @@ tasks:
       with fewer measurable dimensions. Do NOT lower CLUSTER_MIN_SHARED_FIELDS: it is the matcher''s evidence
       floor, equal to MATCH_MIN_DISCRIMINATING per ADR-0016 section 5, and T-309 pinned that equality with
       a test. Fix the field supply, not the evidence bar'
+    notes: 'Fixed the field SUPPLY, not the evidence bar: CLUSTER_MIN_SHARED_FIELDS is unmoved and T-309''s
+      equality with MATCH_MIN_DISCRIMINATING still passes untouched. The analogue chain (crates/hk-pipeline/src/chains/analog.rs,
+      shape_observation + write_shape) now writes the C13 spectral `flatness` it had ALREADY measured for
+      that window (ParameterSet::shape.flatness) as a fourth measured clustering field, through the same
+      characterise_with seam the sweep chain uses for sweep_rate_hz_per_s. flatness needs no symbol clock,
+      is a property of the emission rather than of the look (the T-309 criterion), and was already in CLUSTER_FIELDS
+      with a tolerance - the field set was never the gap, the supply was. Measured: a purely analogue emitter
+      goes from 3 cluster fields to 4, and the degraded case (class did not measure) from 2 to 3, so it clusters
+      instead of silently vanishing; an unmeasured flatness contributes nothing, never a placeholder. Tests:
+      hk-pipeline characterise::analogue_field_supply_tests (4), proven red with the field supply stubbed
+      out. Follow-up surfaced, not chased: the clusterer''s too_few_fields abstention is recorded on the
+      emitter_cluster link row but no API route serves it, so a genuinely sub-floor emitter still reads as
+      a bare cluster_id: null to a client.'
   - id: T-322
     milestone: M5
     title: 'hk-gnss is reachable only from its own tests: nothing schedules an L1 dwell, so the acquisition
@@ -18528,6 +18541,39 @@ tasks:
       parses, has both tickets, and has no duplicate IDs. Prove the test goes RED with the
       current format.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-593
+    milestone: M2-hardening
+    title: The too_few_fields abstention is recorded but never served, so a sub-floor emitter reads as a bare cluster_id null
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: medium
+    depends_on: [T-321]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-321. `EmitterClusterLink.reason` stores `too_few_fields` on a column in the
+      `emitter_cluster` table - the system KNOWS why an emitter did not cluster - but no API route
+      exposes it, so a genuinely sub-floor emitter reads to a client as a bare `cluster_id: null`,
+      indistinguishable from one that simply has no partner yet.
+      That is the project's standing failure shape: an explained absence served as a silent one.
+      "Observed-but-not-yet-measured" and "unknown-whether-we-looked" are distinct marks and neither
+      is silence; the same rule applies to "did not cluster because the evidence floor was not met"
+      versus "did not cluster because nothing matched".
+      Serve the reason: a new inventory-row field, with `docs/api.md` and
+      `crates/hk-cli/tests/api_contract.rs` updated TOGETHER (T-079). Presentation of it is the UI's
+      job and can follow; the route carrying the fact is this ticket.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: an emitter under the floor carries the reason on the wire,
+      one that failed to match for a different cause carries THAT reason, and the two are
+      distinguishable. Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-594
+    milestone: M3
+    title: Fingerprint.structure has no producer, so entity resolution's envelope-shape comparison is dead in a real run
+    status: todo
+    priority: normal
+    parallel_group: M3A
   - id: T-586
     milestone: M2-hardening
     title: Retune-diversity self-consistency - a real emitter keeps its absolute frequency across centres, an artefact moves with the LO
@@ -18707,6 +18753,22 @@ tasks:
     depends_on: []
     use_cases: []
     acceptance: |
+      FOUND BY T-321. `hk_classify::modulation_structure` is called only by its own tests and a
+      probe binary - nothing in `hk-pipeline` ever populates `Fingerprint.structure` (T-233's
+      `envelope_shape`). So entity resolution compares a field that is always absent in production:
+      the comparison runs, contributes nothing, and nobody is told.
+      This is the same class as T-589 (a verifier that cannot run on the class it claims to handle)
+      and as T-321's own defect (an emitter silently not clustering): a stage that is structurally
+      unable to fire looks exactly like a stage that fired and agreed. It is worth measuring how
+      much of entity resolution is in this state rather than fixing only this one field.
+      Decide, with evidence: wire a producer in the pipeline, or remove the field and its comparison
+      and say so. A dead comparison kept "in case" is worse than an absent one, because its presence
+      implies a discrimination that is not happening.
+      If it is wired, note it also gives T-321's analogue-emitter field supply a fifth field, which
+      is margin rather than a reason to touch the floor.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: how many real-run fingerprints carry the field before and
+      after, and how many comparisons actually used it. A test that passes because the field was
+      absent on both sides is vacuous.
       FOUND BY T-254 WHILE BUILDING THE ISM BURST SCENE, measured not inferred: 3 of 3 events read
       `open: true` beside inventory rows for the same emitter in the same window reading `ended`.
       `crates/hk-api/src/events.rs:243` hard-codes `IdleGap::conservative()` (60 s), while
