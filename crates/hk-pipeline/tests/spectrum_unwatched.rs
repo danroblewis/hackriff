@@ -2,7 +2,8 @@
 //!
 //! Reader 3's STFT was T-348's measured ~13% of pipeline CPU and ran whether or not anything was
 //! subscribed. It is now skipped while no consumer is open — the headless scheduled-survey case
-//! (product workflow #2: hours on battery with no browser attached). The three things that must
+//! (product workflow #2: hours on battery with no browser attached) — **where "consumer" includes
+//! the view lattice since T-501** (see rule 2). The three things that must
 //! stay true, and what asserts them here:
 //!
 //! 1. **The ring is still drained.** Reader 3 holds a gate cursor, so a lossless run stalls capture
@@ -12,9 +13,11 @@
 //! 2. **The data does not change because nobody was looking.** The same test compares the stored
 //!    detections and the history/detection counters of the two runs: a skipped FFT that left a
 //!    hole in the pyramid or the coverage map would be a lie about what was observed, not a
-//!    saving. (It cannot: history, detection, the IQ ring and the receiver-line survey each hold
-//!    their own ring reader and their own STFT.) The only difference allowed is `/spectrum/rows`,
-//!    which honestly counts the display rows nobody asked for at zero.
+//!    saving. **T-501 turned that from a free property into the binding constraint**: the canvas's
+//!    finest tier is sized to this reader's own bin and row, so these rows are folded into stored
+//!    history and skipping them WOULD leave such a hole. The reader therefore counts the view
+//!    lattice as a watcher, the skip survives only for a run with no view lattice attached, and
+//!    the two runs here must now agree on `/spectrum/rows` as well.
 //! 3. **Attaching starts the rows again.** `rows_resume_when_a_subscriber_attaches` replays in
 //!    real time, subscribes part-way through, and requires the first row within one read timeout
 //!    plus a row period — and requires *every* row the run published to have reached that
@@ -143,7 +146,15 @@ fn an_unwatched_run_records_exactly_what_a_watched_one_does() {
         "the spectrum publisher is offered with no consumer"
     );
 
-    // The saving: the rows nobody asked for are not produced.
+    // **The saving is now conditional, and T-501 is the condition.** T-489 could skip the FFT
+    // because nothing but a subscriber read these rows. Since T-501 the canvas's finest tier IS
+    // this row — the view lattice folds every one of them into stored history — so a run with a
+    // view lattice attached computes them whether or not anybody is looking, and these runs have
+    // one. Skipping them would put a permanent hole in the recorded finest tier for every interval
+    // nobody watched, which the canvas cannot distinguish from "never observed": rule 2 of this
+    // file's own header, and the reason it outranks the CPU. The skip still applies to a run with
+    // no view lattice (`view_queue: None`); what this pair asserts is the rule that never moved —
+    // **the data does not change because nobody was looking**.
     assert!(
         watched.counter("/spectrum/rows") > 10,
         "watched rows {}",
@@ -151,13 +162,13 @@ fn an_unwatched_run_records_exactly_what_a_watched_one_does() {
     );
     assert_eq!(
         unwatched.counter("/spectrum/rows"),
-        0,
-        "no row is published with no consumer"
+        watched.counter("/spectrum/rows"),
+        "the rows the view lattice records must not depend on whether anyone subscribed"
     );
     assert_eq!(
         unwatched.counter("/readers/spectrum/frames"),
-        0,
-        "and no FFT frame is computed for one"
+        watched.counter("/readers/spectrum/frames"),
+        "and neither may the FFT frames behind them"
     );
     assert!(seen.bytes() > 0, "the watched consumer received bytes");
 
@@ -206,8 +217,12 @@ fn an_unwatched_run_records_exactly_what_a_watched_one_does() {
 
 #[test]
 fn rows_resume_when_a_subscriber_attaches() {
+    /// The recording's length, and so the run's, at real-time pacing — the denominator of the row
+    /// rate the bound below is computed at.
+    const RECORDING_S: f64 = 4.0;
+
     let dir = TempDir::new("t489-resume");
-    let src = tone_recording(&dir.0.join("src"), "tone", FS, 4.0, CENTER, None);
+    let src = tone_recording(&dir.0.join("src"), "tone", FS, RECORDING_S, CENTER, None);
     let (mut cfg, replay) = replay_config(&dir.0, &src, json!({}), Pacing::RealTime { speed: 1.0 });
     let offered: Arc<Mutex<Option<(PublisherHandle, u32)>>> = Arc::new(Mutex::new(None));
     let put = Arc::clone(&offered);
@@ -216,6 +231,7 @@ fn rows_resume_when_a_subscriber_attaches() {
             *put.lock().unwrap() = Some((handle, h.fft_size.unwrap_or(0)));
         }
     }));
+    let started = Instant::now();
     let handle = start(cfg, replay);
 
     // Let the run go unwatched for a while first.
@@ -239,6 +255,7 @@ fn rows_resume_when_a_subscriber_attaches() {
             Box::new(|_| {}),
         )
         .unwrap();
+    let lead = attached.duration_since(started);
     let bins = publisher.1 as usize;
     let first = loop {
         if records(&rows.0.lock().unwrap()) > 0 {
@@ -277,11 +294,32 @@ fn rows_resume_when_a_subscriber_attaches() {
         "the first row took {first:?} to arrive after a subscriber attached"
     );
     assert!(published > 0, "rows resumed");
-    // Every row the run published reached this subscriber, which can only be true if none was
-    // published before it attached.
-    assert_eq!(
-        received, published,
-        "the run published {published} rows and the subscriber that attached part-way through \
-         received {received}: rows were produced while nothing was subscribed"
+    // **What a latecomer may and may not miss, now that the view lattice watches (T-501).**
+    //
+    // This used to assert `received == published`: with the FFT skipped while nobody was
+    // subscribed, the first row of the whole run was the first row after the attach. Since T-501
+    // the rows are computed and RECORDED throughout — that is the point, and the parity test above
+    // is what guards it — so a subscriber that arrives `lead` into the run has honestly missed the
+    // rows produced before it, and demanding otherwise would be demanding the hole this branch
+    // exists to close.
+    //
+    // The claim that survives, and it is the one the ticket was about: **a latecomer is served
+    // promptly and then loses nothing.** Promptly is asserted above (first row inside a second).
+    // "Loses nothing" is asserted here as an arithmetic bound rather than an equality: at the run's
+    // own measured row rate the shortfall must be no more than the rows that fit in `lead`, so a
+    // subscriber silently dropped rows AFTER attaching would fail this even though it can never
+    // receive the ones from before.
+    let rate = published as f64 / RECORDING_S;
+    let missable = (rate * lead.as_secs_f64() * 1.5).ceil() as u64;
+    assert!(
+        received > 0 && received <= published,
+        "{received} received against {published} published"
+    );
+    assert!(
+        published - received <= missable,
+        "the subscriber attached {lead:?} into the run and missed {} of {published} rows, more \
+         than the {missable} that fit in that lead at {rate:.1} rows/s: rows were dropped AFTER it \
+         attached",
+        published - received
     );
 }

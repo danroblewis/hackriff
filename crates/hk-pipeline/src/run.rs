@@ -680,6 +680,11 @@ pub(crate) struct Shared {
     /// by the `hk-survey` reader and applied to every classification of a window captured under
     /// that state.
     pub receiver: Arc<crate::survey::ReceiverSurvey>,
+    /// T-484: the hand-off to the view lattice's writer thread. The **spectrum** reader fills it
+    /// (the finest node is that reader's own rows); the **history** reader owns the writer thread
+    /// that drains it and the T-446 decision about sealing. `None` when the view lattice is off or
+    /// could not open.
+    pub view_queue: Option<Arc<crate::history::ViewQueue>>,
 }
 
 impl Shared {
@@ -1262,6 +1267,14 @@ impl Pipeline {
         // T-439: the de-welded view lattice, in its own scheme root beside `calibrated/` and
         // `uncalibrated/`. Its own `Mutex`, deliberately: `/api/history` and `/api/floor` hold the
         // floor product for a whole query, and the growing edge must not be behind that lock.
+        // T-484: node (0, 0) is the display STFT's own bin and row, so the canvas's finest tier is
+        // the rows the spectrum stream publishes rather than a coarser second STFT's view of the
+        // same samples. It is fixed for the life of the pyramid — the store's geometry is checked
+        // bit-exactly on reopen — so it is taken from the run's opening rate and configured display
+        // plan. A later rate change or display patch still folds honestly (the regrid handles the
+        // bin width, the time assignment the row period); it just stops being 1:1.
+        let (view_f_cell_hz, view_t_cell) =
+            crate::history::view_geometry(info.sample_rate_hz, &cfg.settings, cfg.source_class);
         let view = cfg
             .settings
             .view_history
@@ -1269,7 +1282,7 @@ impl Pipeline {
                 let dir = cfg.data_dir.join("history").join("view");
                 Pyramid::open(
                     &dir,
-                    crate::history::view_config(cfg.settings.view_f_cell_hz),
+                    crate::history::view_config(view_f_cell_hz, view_t_cell),
                 )
                 .map(|p| Arc::new(Mutex::new(p)))
                 .map_err(|e| eprintln!("view-scheme history disabled: {e}"))
@@ -1596,6 +1609,11 @@ fn start_segment(
         claims: crate::chains::EmissionClaims::default(),
         track_decodes: Arc::default(),
         compute: common.compute.clone(),
+        view_queue: common.view.is_some().then(|| {
+            Arc::new(crate::history::ViewQueue::new(
+                crate::history::VIEW_QUEUE_FRAMES,
+            ))
+        }),
         cfg,
     });
     inc(&common.stats.segments);
@@ -1653,10 +1671,10 @@ fn start_segment(
             )?);
         }
         {
-            let s = Arc::clone(&shared);
+            let (s, a) = (Arc::clone(&shared), common.attention.clone());
             workers.push(spawn(
                 "hk-spectrum",
-                Box::new(move || crate::spectrum::run(s)),
+                Box::new(move || crate::spectrum::run(s, a)),
             )?);
         }
         {

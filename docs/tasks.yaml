@@ -15152,7 +15152,8 @@ tasks:
   - id: T-501
     milestone: MLIVE
     title: REDO T-484 - the FFT-resolution fidelity fix, gated by the canvas e2e that would have caught its tile breakage
-    status: todo
+    status: done
+    branch: task-t505-v2
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15240,10 +15241,20 @@ tasks:
       has NO RECORDED SECOND OBSERVATION behind it. The tile explosion is real and independently
       fatal regardless, but the attribution chain is worth knowing.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE and REBASED 2026-09-21 on `task-t505-v2`, on top of T-505. canvas_fidelity 5/5 with
+      T-483's four #[ignore]s deleted; the floor is asserted field for field against real pyramids
+      rather than written down. THE REBASE FOUND A COLLISION THE ORIGINAL COULD NOT HAVE: T-489
+      (landed after this branch was cut) skips the display FFT while nothing is subscribed, on the
+      ground that no STORED product consumes those rows - which this ticket falsifies, because the
+      canvas's finest tier IS that row. Unfixed it leaves a permanent hole in recorded history for
+      every interval nobody watched, indistinguishable from grey. `Output::watched` now counts the
+      view lattice as a watcher, so T-489's saving survives only for a run with no view lattice.
+      That is a REAL CPU COST (T-489 measured ~9 %) and it is accepted here deliberately.
   - id: T-505
     milestone: MLIVE
     title: One lattice cannot be both the display stream's own bin and device-wide over the horizon - give wide-and-long viewports a coarse tier
-    status: in-progress
+    status: done
+    branch: task-t505-v2
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15296,6 +15307,11 @@ tasks:
       is a gap in the harness, not only in this pipeline, and it generalises: several e2e
       assertions here are implicitly scoped to a young server.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE and REBASED 2026-09-21 onto `task-t505-v2`, together with T-501 and T-532 (they share
+      their conflict files, so one resolution). `scheme=overview` and `tierFor` land as written;
+      the client picks by VIEWPORT_TILE_BUDGET, each pane reports its tier, and on the shipped
+      floor nothing moves. The e2e failure both branches died on is GONE on current main and did
+      not need resolving.
   - id: T-506
     milestone: MCANVAS
     title: Remove the Capture panel - but first move the IQ horizon, the retention bound and the capture clock onto the canvas
@@ -20175,6 +20191,7 @@ tasks:
       one emission_features row per characterisation that should exist, and zero swallowed storage
       errors over an acceptance run. Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
   - id: T-614
     milestone: M2-hardening
     title: The parameter estimator labels bursty analogue FM as 2fsk at 2390 Hz deviation
@@ -20273,6 +20290,46 @@ tasks:
       cheapest fix (b) needs to be run past that rule before landing, not assumed to be a formatting
       nit.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-532
+    milestone: MLIVE
+    title: A kept tile answer may not claim the radio never looked at time it never saw
+    status: done
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-501, T-505]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      RECONSTRUCTED 2026-09-21 FROM THE LANDED WORK: this ticket was worked on `task-t532` and
+      never had a board block, which is why `just reconcile` could not see it.
+      THE DEFECT, MEASURED PER HOP. T-501's fidelity floor took the live-edge grey share in
+      canvas-journey test 1 from 0.2 % to 10-38 %. The backend is not the defect: its coverage
+      plane and grid are 30-90 ms AHEAD of the row the client calls the live edge. The defect is
+      the third hop, and it is two things.
+      (1) A TILE'S COVERAGE PLANE IS A POSITIVE `unobserved` CLAIM ABOUT ROWS THAT HAD NOT HAPPENED
+      WHEN IT WAS BUILT. A tune record stops at the newest sample, so every row of a live tile past
+      it is served `unobserved` - true when served, false a moment later, and a tile cache keeps
+      copies. At the old 1 s cell the error hid inside the cell the live edge was already in; at
+      40 ms it is ~32 rows of THE grey over rows the radio recorded.
+      (2) THE REFRESH PERIOD SCALED WITH HOW MANY TILES THE EDGE WAS CUT INTO, because the duty
+      gate was charged per TILE rather than per PASS over the edge.
+      DoD: `coverage.horizon.as_of_s` on the route, the young-end twin of `oldest_record_s`, taken
+      from the same spans the planes are rasterised from; the renderer draws nothing past it and
+      lets the pane's PENDING ground show; a resident tile whose answer stops short counts as
+      `behind the edge`, not as `pending`; and the live-edge grey share is ASSERTED at 5 %, not
+      merely measured.
+    branch: task-t505-v2
+    notes: |
+      DONE and REBASED 2026-09-21 onto `task-t505-v2`, on top of T-501 and T-505 - all three in one
+      worktree, because they share their conflict files.
+      MEASURED IN THE BROWSER over a band the server reports fully observed: live-edge zone grey
+      10-38 % -> 0.0 %; whole-pane grey 33 % -> 0.0 %; residency 11248 ms -> 401 ms; newest rows
+      after a retune 68 distinct / 96 % dominant -> 820 / 23 %. canvas-journey is now 6/6 on this
+      branch (it was 5/6 on both original branches; test 5, the T-529 retune window, since landed).
+      REBASE NOTE: `drawUpToHorizon` now reports the region it actually drew, so T-528's viewport
+      contrast measures what was DRAWN and never the rows the copy does not reach. That interaction
+      did not exist on the original branch - T-528 landed after it was cut.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
