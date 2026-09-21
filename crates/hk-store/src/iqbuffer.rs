@@ -6,8 +6,10 @@
 //! - **Storage** (`<data dir>/iqbuffer/`): three files whose number and sizes are fixed once
 //!   opened. `ring.ci8` holds `slot_count` fixed-size **slots** of [`IqBufferConfig::chunk_bytes`]
 //!   each (interleaved ci8, 2 bytes/sample), allocated up front ([`preallocate`]: `F_PREALLOCATE`
-//!   on macOS, `fallocate` on Linux, sparse elsewhere). `ring.journal` is an append-only journal of
-//!   CRC-framed records (header, run, slot open, slot seal, segment start), rewritten as a compact
+//!   on macOS, `fallocate` on Linux, sparse elsewhere) **and flushed as it is allocated**, because
+//!   the filesystem defers a reservation's real cost to the first fsync of the file and that bill
+//!   must not land on a writer later ([`allocate_stepwise`], T-536). `ring.journal` is an
+//!   append-only journal of CRC-framed records (header, run, slot open, slot seal, segment start), rewritten as a compact
 //!   snapshot on open and whenever it outgrows [`JOURNAL_COMPACT_MIN`]. `ring.lock` carries the
 //!   `flock` of the one buffer using the ring.
 //! - **Logical log.** Bytes are addressed on a monotonic logical log; logical slot `L` covers
@@ -376,6 +378,32 @@ pub fn preallocate(file: &File, len: u64) -> io::Result<bool> {
     }
 }
 
+/// Commits a completed allocation step to the **filesystem** — not to the drive (T-536).
+///
+/// [`allocate_stepwise`] explains why the flush has to happen at all. It is a plain `fsync`, and
+/// deliberately **not** [`File::sync_data`], which on macOS is `F_FULLFSYNC`: a barrier on the
+/// whole device that every other thread's I/O then queues behind. What has to be committed here is
+/// the *extent map* the reservation promised, so that a later fsync of this file is not the one
+/// that pays for it; there is no data in the ring yet, so there is nothing whose durability needs
+/// the drive's cache flushed — that is the checkpoint's job, and it still uses `sync_data`.
+/// Measured on APFS for a 4.8 GB ring: per-step `fsync` opens in 1.32 s and leaves later fsyncs at
+/// 0–1 ms; per-step `F_FULLFSYNC` opens in 2.02 s, leaves them at 8–11 ms, and stalls the rest of
+/// the process while it runs.
+pub fn sync_allocation(file: &File) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        // SAFETY: a valid open descriptor.
+        if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+            return Ok(());
+        }
+        Err(io::Error::last_os_error())
+    }
+    #[cfg(not(unix))]
+    {
+        file.sync_data()
+    }
+}
+
 /// The ring would not fit above the free-space floor even at two slots (the buffer is refused).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AllocationRefused {
@@ -480,6 +508,13 @@ pub trait IqBufferHooks: Send + Sync {
     /// Sizes the ring file ([`preallocate`]).
     fn preallocate(&self, file: &File, len: u64) -> io::Result<bool> {
         preallocate(file, len)
+    }
+
+    /// Commits one completed allocation step ([`allocate_stepwise`]). **This is where the cost of
+    /// a large ring is paid** — see that function — so it runs on the thread doing the open and
+    /// nowhere else.
+    fn sync_allocation(&self, file: &File) -> io::Result<()> {
+        sync_allocation(file)
     }
 
     /// Called before every ring fsync; an error fails that fsync (the unsealed bytes are then
@@ -1304,6 +1339,37 @@ fn journal_version(dir: &Path) -> Option<u64> {
 /// Sizes the ring from `from` to `len` bytes in steps of whole slots near
 /// [`ALLOCATION_STEP_BYTES`], reporting the fraction done and stopping when `cancel` is set.
 /// `Ok(true)`: every step reserved its blocks.
+///
+/// # Each step is flushed here, on purpose (T-536)
+///
+/// Reserving blocks is cheap and *deferred*: `F_PREALLOCATE` (and `fallocate`) return long before
+/// the filesystem has committed the extents they promised, and the bill lands on the **first fsync
+/// of that file** — whoever, whenever, on whatever thread. It used to land on
+/// [`IqBufferWriter::checkpoint`], i.e. on the feeder thread, and the feeder's last act before its
+/// segment ends is a checkpoint, so **a re-plumb's `join_workers` paid for the whole ring while
+/// capture was off**.
+///
+/// Measured on this Mac (APFS), the segment-end checkpoint inside a re-plumb, before → after:
+/// 244 ms → 38 ms at a 1.2 GB quota, 740 ms → under 20 ms at 4.8 GB (the default 2 min ×
+/// 20 Msps), **1.9 s → under 20 ms at 12 GB**. The syscall on its own says the same thing: first
+/// fsync after preallocation 30 ms / 194 ms / 2.0 s / 7.6 s at 0.2 / 1.2 / 4.8 / 12 GB, against
+/// 0–11 ms for every fsync after it. End to end, a re-plumb whose always-on readers stalled 55 ms
+/// with the buffer off stalled **3.0 s** with a 12 GB ring, and that is what T-531's straggler
+/// report caught in the act.
+///
+/// So the debt is paid where the allocation is: on `hk-iqbuffer-alloc`, the thread that exists
+/// precisely so a slow open never holds up the run (the status reports `allocating` with a
+/// progress fraction until it is done, and nothing is buffered meanwhile). Paying it **per step**
+/// rather than once at the end keeps `cancel`'s granularity at one step, which is what
+/// `hk_pipeline::iqbuffer::IqBufferService`'s drop waits for: worst measured step, 0.6 s at 12 GB.
+/// The open itself is correspondingly slower — 2.5 s → 6.8 s for a 12 GB ring — and that is the
+/// trade: it is the one window the design already declares as `allocating`, on a thread nothing
+/// waits for, with nothing buffered yet.
+///
+/// A failed flush is **not** fatal. The extents are reserved either way; all that is lost is the
+/// head start, and refusing to open the buffer over it would trade a slow re-plumb for no IQ
+/// history at all. The write path's own fsync failures are still handled where they matter
+/// ([`IqBufferWriter::checkpoint`] poisons the unsealed bytes).
 fn allocate_stepwise(
     hooks: &dyn IqBufferHooks,
     ring: &File,
@@ -1313,8 +1379,17 @@ fn allocate_stepwise(
     progress: &dyn Fn(f64),
     cancel: &AtomicBool,
 ) -> io::Result<bool> {
+    let flush = |at: u64| {
+        if let Err(e) = hooks.sync_allocation(ring) {
+            eprintln!(
+                "IQ capture ring: flushing the allocation at {at} bytes failed ({e}); the first \
+                 checkpoint will pay for it instead"
+            );
+        }
+    };
     if len <= from {
         let r = hooks.preallocate(ring, len);
+        flush(len);
         progress(1.0);
         return r;
     }
@@ -1331,6 +1406,7 @@ fn allocate_stepwise(
         }
         at = (at + step).min(len);
         reserved &= hooks.preallocate(ring, at)?;
+        flush(at);
         progress((at - from) as f64 / (len - from) as f64);
     }
     Ok(reserved)
@@ -3385,6 +3461,69 @@ mod tests {
             "the seal's CRC matches the disk: {s:?}"
         );
         assert_eq!(export(&buf, all, Some(1)).unwrap(), want);
+        drop(w);
+        drop(buf);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// T-536: **every allocation step is flushed before the open returns.** A reservation's real
+    /// cost falls on the first fsync of the file, so an open that reserves blocks and does not
+    /// flush them has not finished the work — it has handed it to whichever writer fsyncs next,
+    /// which for this ring is the segment feeder's checkpoint, inside a re-plumb.
+    #[test]
+    fn every_allocation_step_is_flushed_before_the_open_returns() {
+        /// Counts the two halves of an allocation and the order they happened in.
+        #[derive(Default)]
+        struct Counting {
+            steps: AtomicU64,
+            flushes: AtomicU64,
+            /// Reservations made since the last flush: zero when the open returns, or the open
+            /// has left blocks reserved and uncommitted for someone else to pay for.
+            unflushed_at_end: AtomicU64,
+        }
+        impl IqBufferHooks for Counting {
+            fn fs_space(&self, _: &Path) -> io::Result<FsSpace> {
+                Ok(FsSpace {
+                    free: 1 << 42,
+                    total: 1 << 43,
+                })
+            }
+            fn preallocate(&self, file: &File, len: u64) -> io::Result<bool> {
+                self.steps.fetch_add(1, Ordering::SeqCst);
+                self.unflushed_at_end.fetch_add(1, Ordering::SeqCst);
+                file.set_len(len)?;
+                Ok(true)
+            }
+            fn sync_allocation(&self, _: &File) -> io::Result<()> {
+                self.flushes.fetch_add(1, Ordering::SeqCst);
+                self.unflushed_at_end.store(0, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let dir = tmp("alloc-flush");
+        // Four 1 GiB steps, so "flushed once at the very end" is not enough to pass either.
+        let hooks = Arc::new(Counting::default());
+        let c = cfg(1e9, Some(4 << 30));
+        let (buf, w) = IqBuffer::open_with(&dir, c, Arc::clone(&hooks) as Arc<dyn IqBufferHooks>)
+            .expect("open");
+        let steps = hooks.steps.load(Ordering::SeqCst);
+        assert!(
+            steps >= 4,
+            "the ring was allocated in {steps} steps, not several"
+        );
+        assert_eq!(
+            hooks.flushes.load(Ordering::SeqCst),
+            steps,
+            "{} of {steps} allocation steps were flushed; an unflushed reservation is a bill for \
+             the next thread that fsyncs the ring",
+            hooks.flushes.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            hooks.unflushed_at_end.load(Ordering::SeqCst),
+            0,
+            "the open returned with blocks reserved and not committed"
+        );
         drop(w);
         drop(buf);
         let _ = fs::remove_dir_all(&dir);

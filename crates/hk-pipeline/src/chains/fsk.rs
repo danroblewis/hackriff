@@ -49,7 +49,7 @@ struct Group {
     detection: DetectionId,
 }
 
-fn add_member(groups: &mut Vec<Group>, m: MemberBox) {
+fn add_member(groups: &mut Vec<Group>, m: MemberBox, missed: &std::sync::atomic::AtomicU64) {
     let (s, e) = (m.samples.start, m.samples.end);
     if let Some(g) = groups.iter_mut().find(|g| s < g.end && e > g.start) {
         g.start = g.start.min(s);
@@ -66,7 +66,30 @@ fn add_member(groups: &mut Vec<Group>, m: MemberBox) {
         detection: m.detection,
     });
     groups.sort_by_key(|g| g.start);
+    // T-558: bounded. Dropping the oldest is counted as the missed box it is.
+    if groups.len() > MAX_PENDING_GROUPS {
+        let over = groups.len() - MAX_PENDING_GROUPS;
+        groups.drain(..over);
+        add(missed, over as u64);
+    }
 }
+
+/// Most samples one chain's retain buffer may hold, whatever the rate (T-558).
+///
+/// `retain_s` is a duration, so the buffer it asks for is `2 x retain_s x fs` samples — a figure
+/// that grows with the device. The built-in `fsk-bursts` spec's 3 s is 24 MB at the 2 Msps a
+/// replay runs at and **240 MB at the HackRF's 20 Msps**, per chain; a survey holding several at
+/// once is then gigabytes of buffer for bursts that are milliseconds long. Sixteen mega-samples
+/// (32 MB) is 8 s at 2 Msps and 0.8 s at 20 Msps, both far longer than a burst, and it is the
+/// same shortfall the chain already handles when a box's samples have aged out of the ring
+/// (`fsk_boxes_missed`) rather than a new failure mode.
+const MAX_RETAIN_SAMPLES: usize = 16 << 20;
+
+/// Most pending burst groups one chain queues (T-558). A group is only drained once its samples
+/// have arrived, so a chain whose member boxes outrun its reader would otherwise grow one entry
+/// per box for as long as it lives. The oldest go first: their samples are the ones the ring is
+/// about to lose anyway.
+const MAX_PENDING_GROUPS: usize = 4096;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
@@ -82,7 +105,7 @@ pub(crate) fn run(
     let fs = shared.fs;
     let c = &shared.counters.chains;
     let pad = (pad_s * fs) as u64;
-    let retain = ((retain_s * fs) as usize).max(1);
+    let retain = ((retain_s * fs) as usize).clamp(1, MAX_RETAIN_SAMPLES);
     let mut cr = ChainReader::new(
         Arc::clone(&shared),
         cand.first_sample.saturating_sub(pad),
@@ -118,7 +141,7 @@ pub(crate) fn run(
     loop {
         loop {
             match rx.try_recv() {
-                Ok(ChainMsg::Member(m)) => add_member(&mut groups, m),
+                Ok(ChainMsg::Member(m)) => add_member(&mut groups, m, &c.fsk_boxes_missed),
                 Ok(ChainMsg::Detach) => detach = true,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -154,7 +177,7 @@ pub(crate) fn run(
             }
         } else if !detach {
             match rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(ChainMsg::Member(m)) => add_member(&mut groups, m),
+                Ok(ChainMsg::Member(m)) => add_member(&mut groups, m, &c.fsk_boxes_missed),
                 Ok(ChainMsg::Detach) | Err(RecvTimeoutError::Disconnected) => detach = true,
                 Err(RecvTimeoutError::Timeout) => {}
             }
