@@ -22,6 +22,12 @@
 //!   T-406 raised both from 30 days / 512 MiB — `docs/16` §5.4, and the reasons and the measured
 //!   arithmetic are on [`DEFAULT_MAX_AGE_NS`]. [`ObservationLogConfig::with_retention`] and
 //!   `ScanPlan.extra.pipeline.observation_retention_days` lower them on a device with less disk.
+//! - **The dwell in flight** ([`ObservationStore::note_open_dwell`], T-596): a record is appended
+//!   when a dwell *closes*, so the log is silent about the band the radio is on until then. The
+//!   open dwell is held in its own slot, per front end, replaced on every control tick and dropped
+//!   the instant the sealed record can speak for it. It is read only by the coverage map
+//!   ([`ObservationStore::open_dwells`]) and never by [`ObservationStore::query`]: a provisional
+//!   record must not reach the occupancy, POI or report paths that count sealed visits.
 //! - **Never blocks the pipeline** ([`ObservationWriter`]): producers hand records to an
 //!   [`ObservationQueue`] (bounded; `offer` never waits: a full queue drops and counts) drained by
 //!   one writer thread.

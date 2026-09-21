@@ -600,7 +600,8 @@ The asymmetry is deliberate and it is the route's shape: **the window is the ser
                  "rule": "a row wholly before `oldest_record_s` … is \"unknown\" - UNLESS … wholly before `recording_began_s` …",
                  "state_rule": "\"unknown\" carries no measurement keys, exactly like \"unobserved\" …" },
     "sources": [ { "kind": "iq-ring", "spans": 37, "named_spans": 37, "device_known": true, "available": true },
-                 { "kind": "observation-log", "spans": 12, "named_spans": 12, "device_known": true, "available": true } ],
+                 { "kind": "observation-log", "spans": 12, "named_spans": 12, "device_known": true, "available": true },
+                 { "kind": "open-dwell", "spans": 1, "named_spans": 1, "device_known": true, "available": true } ],
     "rule": "record-derived: whether the front end was TUNED to this cell … `grid.coverage` is a different measurement …"
   },
   "resolution": { "source": "spectrum-history", "live": false, "statement": "…",
@@ -748,7 +749,8 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
                "state_rule": "\"unknown\" carries no measurement keys, exactly like \"unobserved\", and must be drawn as neither grey nor a level …" },
   "sources": [
     { "kind": "iq-ring",         "spans": 37, "named_spans": 37, "device_known": true, "available": true },
-    { "kind": "observation-log", "spans": 12, "named_spans": 12, "device_known": true, "available": true }
+    { "kind": "observation-log", "spans": 12, "named_spans": 12, "device_known": true, "available": true },
+    { "kind": "open-dwell",      "spans":  1, "named_spans":  1, "device_known": true, "available": true }  // T-596: the dwell in flight
   ],
   "shade": { "fold": "max-hold", "rule": "max-hold: a cell is the maximum of the source cells folded into it, … the max of nothing is unobserved, not zero",
              "statistic": "max-hold over the whole window, per frequency cell",
@@ -845,8 +847,11 @@ Nothing new is journalled for this. Two records already say "for each interval, 
 |---|---|---|---|---|
 | IQ ring journal ([`/api/iqbuffer`](#rolling-iq-capture-buffer-t-157) segments, ADR-0014) | yes | yes | **yes** (`device_id`) | the ring's retention |
 | observation log (`DwellRecord`/`SweepRecord`, ADR-0012 §1) | yes | yes (`ObservedWindow`) | **yes** (`device_id`, T-378) | 180 days / 2 GiB, whichever binds (T-406) |
+| the dwell **in flight** (`open-dwell`, T-596) | yes | yes (`ObservedWindow`) | **yes** (`device_id`) | from the settled tune to the newest sample |
 
 The ring journal opens a new segment on **every** provenance change, so retunes are segment boundaries by construction — it is already a tune history. **T-378** put the same `device_id` on the observation log's records — the source's own `DeviceInfo::device_id`, the one value the baseline chain key and the history source key are also hashed from — so the long horizon is device-local too, and coverage over the whole retention answers *"did **this** front end look here"* rather than only *"did anything"*.
+
+**The live edge has a third source, because a record appears only when a dwell *seals*** (T-596). An interactive dwell is written when the tune changes or after 60 s of a steady tune, so for up to a whole dwell after every retune the observation log says nothing about the band the radio is sitting on and measuring. With an IQ ring that gap is covered by the ring journal; **with the ring refused it is covered by nothing**, and T-588 measured the consequence — 18 rows (18 s) of `max_db` served `"unobserved"`, data that exists drawn grey. The ring had been refused *because the disk was full*, which on a portable device is the field failure mode rather than an exotic configuration. So the dwell in flight is served as coverage too, under `sources[].kind == "open-dwell"`. It is **not a weaker claim and carries no mark of its own**: the samples are sampled, the analysis has run over the rows that exist, and only the bookkeeping is outstanding — so it rasterises through the same mapping as a sealed record, declares the same `dc_excluded` notch (`"excluded"`, T-595), and a cell's state does not change when the seal catches up. What is new is the *source*, so a client can see which evidence carried the live edge. It never appears in `GET /api/observations`: a provisional record must not reach the paths that count sealed visits.
 
 A record that names no device — every record written before T-378, and any source that states no identity — stays `"unknown"`, and is **never** read as the radio that happens to be running now. `sources[]` therefore reports two numbers per record kind: `spans`, how many it contributed, and `named_spans`, how many of those actually named a front end. `device_known` is the measured `named_spans == spans`, not a declaration about the record kind, so a log still holding pre-T-378 lines says so. A source with no spans still appears, so a client can tell *this record had nothing here* from *this record was not consulted*.
 

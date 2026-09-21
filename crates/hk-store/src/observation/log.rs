@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use hk_model::attention::observation::{ObservationRecord, SweepGeometry};
+use hk_model::attention::observation::{DwellRecord, ObservationRecord, SweepGeometry};
 use serde_json::{Value, json};
 
 use super::segment::{HOUR_NS, encode_line, hour_of, list_segments, segment_path};
@@ -172,6 +172,17 @@ pub(super) struct Inner {
 pub struct ObservationStore {
     inner: Arc<Mutex<Inner>>,
     stats: Arc<ObservationLogStats>,
+    /// The dwell **each front end is inside right now**, per device (T-596). See
+    /// [`ObservationStore::note_open_dwell`]. Its own lock, deliberately: it is written from the
+    /// control thread on every tick and must never queue behind the writer's segment lock.
+    open: Arc<Mutex<BTreeMap<String, DwellRecord>>>,
+}
+
+/// Key of the per-device open-dwell slot. `Device::Unknown`'s records key on the empty string,
+/// which is not a device id any source states, so an unattributed observer cannot displace a named
+/// one's open dwell (T-510: one log, N radios).
+fn open_key(device_id: Option<&str>) -> String {
+    device_id.unwrap_or_default().to_string()
 }
 
 /// Holds the store's lock (tests: a stalled writer).
@@ -209,7 +220,63 @@ impl ObservationStore {
                 last_flush: Instant::now(),
             })),
             stats: Arc::new(ObservationLogStats::default()),
+            open: Arc::new(Mutex::new(BTreeMap::new())),
         })
+    }
+
+    /// **The dwell this front end is inside right now** (T-596): the tuning the radio is on, from
+    /// the instant it settled to the newest sample time, before any record has been sealed for it.
+    ///
+    /// # Why the log needs a slot that is not a record
+    ///
+    /// A record is appended when a dwell **closes** — when the tune changes, or after
+    /// `hk_pipeline::observe::INTERACTIVE_RECORD_MAX_NS` (60 s) of a steady tune. So between a
+    /// retune and the next seal the log holds no evidence at all for a band the radio is sitting
+    /// on and measuring. With the IQ ring present that gap is covered by the ring journal, whose
+    /// segments open on every provenance change; **with the ring refused it is covered by
+    /// nothing**, and T-588 measured the consequence: 18 rows (18 s) of `max_db` served with
+    /// `state: unobserved` right after a retune — data that exists, drawn grey. The ring was
+    /// refused because the disk was full, which is not an exotic configuration on a portable
+    /// device; it is the field failure mode, and it must be survived honestly rather than by
+    /// letting the canvas lie about what the radio looked at.
+    ///
+    /// # It is the same claim as a sealed dwell, not a weaker one
+    ///
+    /// The samples are sampled and the analysis has run over the rows that exist; only the
+    /// bookkeeping is outstanding. So an open dwell rasterises through exactly the same
+    /// [`crate::spans_from_records`] as a sealed one — including its
+    /// [`hk_model::attention::observation::ObservedWindow::dc_excluded`] notch, which T-595 marks
+    /// `excluded` — and the cell's state does not change when the seal catches up. Inventing a
+    /// third coverage state for it would stripe the live edge with a mark that vanished a minute
+    /// later, for samples that never changed.
+    ///
+    /// It is deliberately **not** returned by [`ObservationStore::query`]: a provisional record
+    /// must not reach the occupancy, POI or report paths that count sealed visits. The one
+    /// consumer is the coverage map, which asks for it by name.
+    pub fn note_open_dwell(&self, rec: DwellRecord) {
+        let key = open_key(rec.device_id.as_deref());
+        self.open_slot().insert(key, rec);
+    }
+
+    /// Drops the open dwell for `device_id` — the tune closed, and the sealed record now speaks
+    /// for it. Idempotent.
+    pub fn clear_open_dwell(&self, device_id: Option<&str>) {
+        self.open_slot().remove(&open_key(device_id));
+    }
+
+    /// Every front end's open dwell, as records (see [`Self::note_open_dwell`]). Empty extents are
+    /// dropped: a dwell that has not yet covered any time is not evidence of coverage.
+    pub fn open_dwells(&self) -> Vec<ObservationRecord> {
+        self.open_slot()
+            .values()
+            .filter(|d| d.observed.end > d.observed.start)
+            .cloned()
+            .map(ObservationRecord::Dwell)
+            .collect()
+    }
+
+    fn open_slot(&self) -> MutexGuard<'_, BTreeMap<String, DwellRecord>> {
+        self.open.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Counters.

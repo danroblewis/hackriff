@@ -345,6 +345,44 @@ fn observation_spans(
     (read.spans, read.named)
 }
 
+/// **The dwell each front end is inside right now** (T-596), as spans.
+///
+/// A record reaches the log when a dwell *closes* — on a retune, or after
+/// `hk_pipeline::observe::INTERACTIVE_RECORD_MAX_NS` (60 s) of a steady tune. So for up to a whole
+/// dwell after every retune the log holds nothing for the band the radio is sitting on and
+/// measuring. With an IQ ring that gap is covered by the ring journal, which opens a segment on
+/// every provenance change; **with the ring refused it is covered by nothing**, and T-588 measured
+/// what that does: 18 rows (18 s) of `max_db` served `unobserved` — data that exists, drawn grey.
+/// The ring was refused **because the disk was full**, which is the field failure mode of a
+/// portable device, not an exotic configuration: it must be survived honestly rather than by the
+/// canvas lying about where the radio looked.
+///
+/// The open dwell is not a weaker claim than a sealed one and does not get a mark of its own. The
+/// samples are sampled, the analysis has run over the rows that exist, and only the bookkeeping is
+/// outstanding — so it goes through the **same** [`hk_store::spans_from_records`], carries the
+/// same `dc_excluded` notch T-595 marks `"excluded"`, and a cell's state does not change when the
+/// seal catches up a minute later. A third coverage state here would stripe the live edge with a
+/// mark that vanished for samples that never changed; what *is* new is the third **source**, so a
+/// client can see which evidence carried the live edge.
+fn open_dwell_spans(
+    store: &ObservationStore,
+    freq: FreqRange,
+    window: TimeRange,
+) -> (Vec<CoverageSpan>, usize) {
+    let records: Vec<_> = store
+        .open_dwells()
+        .into_iter()
+        .filter(|r| match r {
+            hk_model::attention::observation::ObservationRecord::Dwell(d) => {
+                d.observed.start < window.end && d.observed.end > window.start
+            }
+            _ => false,
+        })
+        .collect();
+    let read = hk_store::spans_from_records(&records, &[], freq);
+    (read.spans, read.named)
+}
+
 /// The tune history behind one answer, and **how far back it reaches**.
 ///
 /// Both halves come from records that already exist; neither is a new ledger. The second half is
@@ -357,6 +395,10 @@ pub(crate) struct Evidence {
     ring_named: usize,
     log: usize,
     log_named: usize,
+    /// Spans from the dwells in flight (T-596): what the radio is on **now**, before the
+    /// observation log has sealed a record for it.
+    open: usize,
+    open_named: usize,
     ring_available: bool,
     log_available: bool,
     /// The earliest instant **any** consulted source still holds a record for; `None` when no
@@ -393,18 +435,30 @@ impl Evidence {
         let ring = spans.len();
         let ring_named = spans.iter().filter(|s| s.device.is_named()).count();
         let mut log_named = 0;
+        let mut open = 0;
+        let mut open_named = 0;
         if let Some(store) = state.observations.as_ref() {
             let (log_spans, named) = observation_spans(store, freq, window);
             log_named = named;
             spans.extend(log_spans);
         }
         let log = spans.len() - ring;
+        // T-596: the live edge, between the last seal and now. Counted as its own source: it is
+        // the one evidence a refused IQ ring leaves standing.
+        if let Some(store) = state.observations.as_ref() {
+            let (open_spans, named) = open_dwell_spans(store, freq, window);
+            open = open_spans.len();
+            open_named = named;
+            spans.extend(open_spans);
+        }
         Evidence {
             spans,
             ring,
             ring_named,
             log,
             log_named,
+            open,
+            open_named,
             ring_available: state.iq_buffer.is_some(),
             log_available: state.observations.is_some(),
             oldest_record: memory.oldest_record,
@@ -426,6 +480,13 @@ impl Evidence {
               "available": self.ring_available },
             { "kind": "observation-log", "spans": self.log, "named_spans": self.log_named,
               "device_known": self.log_named == self.log,
+              "available": self.log_available },
+            // T-596: the dwells in flight. Same claim as a sealed record and rasterised the same
+            // way; named separately so a client can see that the live edge was carried by a dwell
+            // the log has not sealed yet - which, with the IQ ring refused (a full disk on a
+            // portable device), is the only evidence there is.
+            { "kind": "open-dwell", "spans": self.open, "named_spans": self.open_named,
+              "device_known": self.open_named == self.open,
               "available": self.log_available },
         ])
     }
