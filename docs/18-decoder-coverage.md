@@ -486,7 +486,7 @@ a GR OOT that means pinning GNU Radio itself, because an OOT built against 3.10 
 ### 2.4 The per-decoder cost, and the shape of the curve
 
 The honest answer is that **nobody has measured it for a GNU Radio decoder**, which is why
-**T-553** is a spike and not an estimate. What can be said about the shape:
+**T-556** is a spike and not an estimate. What can be said about the shape:
 
 - The **first** one pays the runtime integration cost: getting GNU Radio to build and run on the
   Mac and on aarch64/JetPack, establishing the adapter pattern, deciding how a flowgraph is
@@ -496,7 +496,7 @@ The honest answer is that **nobody has measured it for a GNU Radio decoder**, wh
 - There is a **structural question that changes the slope**: whether one shared
   `hk-plugin-gnuradio` host that loads a named flowgraph can amortise the runtime across decoders,
   or whether per-decoder processes are unavoidable. If a shared host works, the marginal decoder is
-  a flowgraph file; if it does not, each one is a full process with a full runtime. T-553 answers
+  a flowgraph file; if it does not, each one is a full process with a full runtime. T-556 answers
   this, and the roadmap's slope depends on the answer.
 
 Until that number exists, **§3 ranks by disposition, and prefers dispositions that do not need it.**
@@ -507,7 +507,7 @@ Until that number exists, **§3 ranks by disposition, and prefers dispositions t
 
 Ranked by value per unit of work against [docs/05](05-use-cases-and-explorations.md) and the front
 end's real reach — 1 MHz – 6 GHz, ~20 Msps instantaneous, 8-bit, half-duplex, no preselector, **one
-tuned window at a time**. The disposition column is the claim this roadmap makes; **T-551** is the
+tuned window at a time**. The disposition column is the claim this roadmap makes; **T-554** is the
 ticket that tests each one properly and produces the block-catalogue delta.
 
 Today's `hk-blocks` catalogue, which is what "native" is measured against:
@@ -533,7 +533,7 @@ SIGNAL-051 (wM-Bus), SIGNAL-052 (rtl_433 long tail), SIGNAL-057 (ALERT gauges), 
 growth), RESEARCH-001/002/012.
 Why it is first: it converts "support many more decode types" from an engineering cost into a
 template-authoring cost, **and** every template is a MAUTO search seed, so it improves the synthesis
-engine at the same time. T-554 designs the bridge.
+engine at the same time. T-557 designs the bridge.
 
 **2. VHF/UHF data and paging beyond what is already built.**
 *Disposition: **native recipes**, existing blocks.* AFSK/AX.25 (APRS), railroad EOT and ATCS,
@@ -558,7 +558,7 @@ how that knowledge crosses. For the algorithms themselves the better reference i
 `gr-digital` (Costas, `symbol_sync_cc`, constellation soft decoder, equalisers) and `gr-fec`
 (convolutional/Viterbi, CCSDS R=1/2 K=7, Reed–Solomon, LDPC, polar) — mature, documented, and not
 subject to the OOT bitrot §1.2 measures.
-**The cost may be much lower than it looks**, and T-551 should check this first:
+**The cost may be much lower than it looks**, and T-554 should check this first:
 [liquid-dsp](https://github.com/jgaeddert/liquid-dsp) is **MIT**, already the project's designated
 DSP kernel library (ADR-0010), actively released (v1.8.2, 2026-08), and already ships PSK/QAM/ASK
 modems, NCO/PLL and framing, with FEC alongside. Under ADR-0011 §1.6 a block is an *adapter over an
@@ -632,9 +632,15 @@ is what tutorials 1–4 already do.
 
 ## 4. What "reference" means — the rule proposed to the user
 
-**This section is a proposal. It is the user's call, and T-552 exists to get it decided and
-recorded.** It is a working engineering rule for this project, not legal advice, and the project's
-own licence remains undecided (CLAUDE.md).
+> **UNRATIFIED — NOT IN FORCE.** This section is a **proposal**, written by the MAUTO design track
+> as a starting position. Nobody has agreed to it, it binds nothing, and **no implementing task may
+> cite it as authority.** It is the user's call; **T-555** exists to get it decided and recorded in
+> ADR-0010. Until then the standing rule is the conservative one that already exists: GPLv3 decoder
+> code stays in a subprocess (ADR-0003/ADR-0010) and nothing is derived from it in-core. A task that
+> would need this rule to proceed is blocked on T-555, not free to assume the answer.
+
+It is a working engineering rule for this project, not legal advice, and the project's own licence
+remains undecided (CLAUDE.md).
 
 Reading GPLv3 source to understand an algorithm and then writing an independent implementation is a
 different act from linking that source. The boundary between them is real, and it is not a line
@@ -706,15 +712,36 @@ The coverage direction is not a separate programme. It lands in three places tha
 
 | Where | What coverage adds |
 |---|---|
-| **ADR-0015 §4 templates** | The bulk of tier-1 coverage. Every imported protocol is a search seed as well as a decoder. T-554 designs the provenance and the fact/implementation line; T-551 says which families are template-shaped. |
-| **ADR-0011 §1.5 block catalogue** | The tier-2 and tier-3 families. T-551 produces the delta (PSK/Costas, Viterbi, Reed–Solomon, CSS, OFDM, DSSS, scramblers, SSB/CW) with an ordering. ADR-0015's M-14 covers only `psk_demod` and is too narrow on its own. Note the pattern ADR-0011 §1.6 already sets: **blocks are adapters over existing kernels, not rewrites** — today over hk-dsp, hk-demod and hk-estimate, and tomorrow over liquid-dsp (MIT), which already carries much of what tier 2 wants. A new block is often an adapter job, not a DSP job, and that is the first thing T-551 should check per family. |
-| **ADR-0003 / `plugins/`** | The handful of genuinely active, genuinely hard decoders where wrapping beats rebuilding — SatDump, op25, gr-satellites. T-553 measures whether that is true at all. |
+| **ADR-0015 §4 templates** | The bulk of tier-1 coverage. Every imported protocol is a search seed as well as a decoder. T-557 designs the provenance and the fact/implementation line; T-554 says which families are template-shaped. |
+| **ADR-0011 §1.5 block catalogue** | The tier-2 and tier-3 families. T-554 produces the delta (PSK/Costas, Viterbi, Reed–Solomon, CSS, OFDM, DSSS, scramblers, SSB/CW) with an ordering. ADR-0015's M-14 covers only `psk_demod` and is too narrow on its own. Note the pattern ADR-0011 §1.6 already sets: **blocks are adapters over existing kernels, not rewrites** — today over hk-dsp, hk-demod and hk-estimate, and tomorrow over liquid-dsp (MIT), which already carries much of what tier 2 wants. A new block is often an adapter job, not a DSP job, and that is the first thing T-554 should check per family. |
+| **ADR-0003 / `plugins/`** | The handful of genuinely active, genuinely hard decoders where wrapping beats rebuilding — SatDump, op25, gr-satellites. T-556 measures whether that is true at all. |
 
 And it changes one thing about how the engine tickets should be read: **a block-catalogue gap is a
 product-visible state, not a silent absence.** ADR-0015 §8 already says an unsupported structure is
-reported as the verdict reason; T-547 makes that distinguishable from "searched and failed", because
+reported as the verdict reason; T-550 makes that distinguishable from "searched and failed", because
 "we have no CSS block" and "this is not LoRa" must not read alike to a user. The coverage roadmap and
 the honesty rules are the same work seen from two sides.
+
+### Two gaps in the engine set, to settle before it is signed off
+
+Both were found while writing this document and neither is a coverage item — they are holes in
+ADR-0015 §10's own M-1…M-14 sketch.
+
+1. **Nothing owns the search trace.** M-3 builds the beam and prunes, M-8 serves the API, M-11
+   renders results — and between them the record of *what was rejected and why* is never produced.
+   M-3 as specified actively discards it: the beam keeps only "the best pruned node", and `progress`
+   keeps bare counts. The shipped system would be able to say "here is FSK at 4800 Bd" and unable to
+   say "why not PSK", or even whether PSK was looked at. **T-549** is the design; the build needs an
+   owner, and it must be *inside* M-3 — a beam that has already thrown the information away cannot
+   have it retrofitted, only re-instrumented.
+2. **M-14's scope stops short of being useful.** It is "optional `psk_demod`/Costas", and PSK with no
+   FEC reaches verdict `demodulated` and no further for essentially every real satellite downlink,
+   because CCSDS framing means convolutional coding plus Reed–Solomon. PSK + Viterbi + Reed–Solomon
+   is **one** investment, not one plus two optional extras, and it is the largest single block of
+   docs/05 use cases available (SIGNAL-034, -033, -024, -023, -069, SPACE-081). Check liquid-dsp
+   (MIT, already designated, already ships PSK/QAM modems and FEC) before scoping any of it — under
+   ADR-0011 §1.6 this may be an adapter job, which would also moot the T-555 licence question for
+   this family entirely.
 
 ---
 

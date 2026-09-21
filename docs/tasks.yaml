@@ -16295,7 +16295,7 @@ tasks:
       two-instant capture and its own tie-break; T-478's live-edge drift, whose first fix was
       backwards). Quarantining a fixed test would hide a regression.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-544
+  - id: T-547
     milestone: MAUTO
     title: 'MAUTO-RESEARCH: does the evidence-bits ladder survive 8-bit quantisation and gain state? Measure the calibrated nulls before any block implements evidence()'
     status: todo
@@ -16319,7 +16319,7 @@ tasks:
       WHY IT CANNOT WAIT FOR M-2. If those tails move with LNA/VGA/amp state or with the ci8
       clipping fraction, then bits from S0-S3 are not comparable with bits from S4-S6, the
       12-bit caps and 6-bit floors are arbitrary, the look-elsewhere subtraction is applied to a
-      quantity that is not a log-probability, and the 64-bit confirm threshold (T-545) means
+      quantity that is not a log-probability, and the 64-bit confirm threshold (T-548) means
       nothing. Every one of those is baked into the search engine and the /api/analyze contract.
       Discovering it inside M-2 means rebuilding M-2, M-3, M-7 and M-9.
       WHAT TO MEASURE, on the existing M1 blocks - no new block contract is needed, the metrics
@@ -16349,7 +16349,7 @@ tasks:
       Nothing here needs hk-synth to exist. The metrics are already computed by M1 blocks; this
       is a measurement harness over them plus a write-up.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-545
+  - id: T-548
     milestone: MAUTO
     title: 'MAUTO-DESIGN: derive the confirm-by-decode thresholds from a stated false-confirm budget, instead of the guessed 64 bits / 3 frames / width 16'
     status: todo
@@ -16394,14 +16394,14 @@ tasks:
       DoD: an ADR-0015 amendment replacing the guessed constants with derived ones, each with
       the budget assumption it came from, and stating what the residual false-confirm rate is at
       the chosen numbers. If the honest answer is that the numbers cannot be derived without
-      T-544's calibration, say so and record the dependency rather than inventing a figure.
+      T-547's calibration, say so and record the dependency rather than inventing a figure.
     notes: |
       Filed 2026-09-20 by the MAUTO design/research track. HIGH: it is a core_interface constant
       on an irreversible transition, and the engine tickets bake it into ConfirmPolicy.
-      Reads on T-544: bits that are not calibrated cannot be thresholded. Not a hard dep - the
+      Reads on T-547: bits that are not calibrated cannot be thresholded. Not a hard dep - the
       derivation can be written conditionally - but the final numbers need it.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-546
+  - id: T-549
     milestone: MAUTO
     title: 'MAUTO-DESIGN: the search trace - what the engine tried, what it pruned and why, so the decision tree is inspectable rather than a black box'
     status: todo
@@ -16451,12 +16451,20 @@ tasks:
       listed, and one worked example - a real signal where the second-ranked structure was a
       near miss, written out as the user would read it.
     notes: |
-      Filed 2026-09-20 by the MAUTO design/research track. Flagged in that work as MISSING from
-      the ADR-0015 section 10 engine sketch: M-3 builds the beam and M-8/M-11 surface results,
-      but no ticket owns the record of what was rejected. It is much cheaper to specify before
-      M-3 than to retrofit onto a beam that has already thrown the information away.
+      Filed 2026-09-20 by the MAUTO design/research track.
+      *** GAP IN THE ENGINE SET - READ THIS BEFORE SIGNING OFF THE ~13 ENGINE TICKETS. ***
+      NOTHING IN ADR-0015 SECTION 10's M-1..M-14 SKETCH OWNS THE SEARCH TRACE. M-3 builds the
+      beam and prunes; M-8 serves /api/analyze; M-11 renders the results panel. Between them,
+      the record of WHAT THE ENGINE REJECTED AND WHY is never produced by anyone, and M-3 as
+      specified actively discards it - the beam keeps only "the best pruned node", and
+      `progress` keeps bare counts (stage_max, beam, pruned, deferred). So the shipped system
+      would be able to say "here is FSK at 4800 Bd" and unable to say "why not PSK", or even
+      whether PSK was looked at.
+      This ticket is the DESIGN. The BUILD needs an owner too, and it must be INSIDE M-3 rather
+      than a later addition: a beam that has already thrown the information away cannot have it
+      retrofitted, only re-instrumented. Either widen M-3's scope or add a ticket beside it.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-547
+  - id: T-550
     milestone: MAUTO
     title: 'MAUTO-DESIGN: how an unknown stays unknown - the negative-result contract when the search finds nothing, and the guard against a search that always finds something'
     status: todo
@@ -16474,7 +16482,7 @@ tasks:
       NOT GUARDED, except by one acceptance number: a large enough search ALWAYS FINDS SOMETHING.
       Section 7's over-claim floor ("the verdict is above truth in <= 1 % of cases") is a
       measurement of the failure, not a mechanism against it. The only mechanism is the
-      look-elsewhere subtraction, and T-544 questions whether the quantity being subtracted from
+      look-elsewhere subtraction, and T-547 questions whether the quantity being subtracted from
       is a log-probability at all.
       THE PRODUCT STAKE. CLAUDE.md: unknown signals are THE PRIORITY to surface and catalogue.
       An engine that converts unknowns into plausible-looking wrong answers does not merely fail
@@ -16497,7 +16505,7 @@ tasks:
          Specify that a verdict reason of `unsupported-structure` is distinguishable from
          `searched-and-failed`, and that it names WHICH structure was suspected - otherwise the
          absence of a LoRa decode reads identically to a LoRa signal that was decoded as noise.
-         Cross-reference the block-catalogue gap list from T-551.
+         Cross-reference the block-catalogue gap list from T-554.
       4. THE RE-ANALYSIS RULE. CLAUDE.md's invariant: overlap is an error signal that triggers
          re-analysis. State when an unknown result is re-tried (more budget, better SNR, longer
          window, a new template, a new block) and when re-trying is just burning battery.
@@ -16512,10 +16520,10 @@ tasks:
     notes: |
       Filed 2026-09-20 by the MAUTO design/research track. Directly serves the CLAUDE.md
       invariant that unknown signals are the priority, and the docs/17 open-set work.
-      Pairs with T-546: the trace says what was tried, this says what the result MEANS when
+      Pairs with T-549: the trace says what was tried, this says what the result MEANS when
       nothing won.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-548
+  - id: T-551
     milestone: MAUTO
     title: 'MAUTO-DESIGN: the acceptance-fixture corpus spec for the blind synthesis suite - written and frozen BEFORE the engine exists, because thresholds may not be tuned to results'
     status: todo
@@ -16568,7 +16576,7 @@ tasks:
       Filed 2026-09-20 by the MAUTO design/research track. The value is entirely in the
       ORDERING - this is cheap, and it is worthless if written after M-12 runs.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-549
+  - id: T-552
     milestone: MAUTO
     title: 'MAUTO-RESEARCH: measure what one candidate evaluation actually costs on the M1 blocks, before quick/standard/deep are frozen into the /api/analyze contract'
     status: todo
@@ -16615,7 +16623,7 @@ tasks:
       The point is that the profile names reach the API in the engine set's M-8; this ticket
       wants the numbers behind them to exist first.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-550
+  - id: T-553
     milestone: MAUTO
     title: 'MAUTO-DESIGN: consolidate the ten open ADR-0015 questions into one decision brief for the user, with a recommendation and a cost per option'
     status: todo
@@ -16647,7 +16655,7 @@ tasks:
       (single-burst auto-confirm; whether deep search is allowed on battery; auto-analyze).
       Others are engineering defaults that were escalated because they were unverified (the
       4-bit supersession margin, the 0.6 channel-overlap fraction) - those should be presented
-      as "measure it in T-544/T-549 unless you want to overrule", not as questions.
+      as "measure it in T-547/T-552 unless you want to overrule", not as questions.
       DoD: one brief in docs/planning-log.md's open-questions section or a docs/15 appendix,
       ten questions, each with impact, cost-to-defer and a recommendation, ready to put in front
       of the user in one sitting.
@@ -16655,7 +16663,7 @@ tasks:
       Filed 2026-09-20 by the MAUTO design/research track. Cheap, and it unblocks the engine
       set without adding engine work - which is exactly what a design track is for.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-551
+  - id: T-554
     milestone: MAUTO
     title: 'DECODER COVERAGE: per-family disposition audit - for each GNU Radio decoder family, decide native recipe vs wrapped plugin vs out of reach, and produce the hk-blocks catalogue gap list'
     status: todo
@@ -16685,8 +16693,7 @@ tasks:
       deinterleave, assemble, length, crc, bch, parity, checksum, fields, text, consensus,
       follow_hops, identity. That set reaches 2-FSK/GFSK/MSK/OOK/PPM framed protocols with
       CRC/BCH - and stops. Name, per family, the blocks that would be needed, at minimum:
-      PSK/Costas (ADR-0015 already carries this as the optional M-14 and it is too narrow on its
-      own), QAM, OFDM, DSSS, CSS/chirp, convolutional + Viterbi, Reed-Solomon, LDPC, turbo,
+      PSK/Costas, QAM, OFDM, DSSS, CSS/chirp, convolutional + Viterbi, Reed-Solomon, LDPC, turbo,
       scrambler/descrambler, SSB/CW demod (still `legacy` in the Listen path, ADR-0015 section
       12.5), and any vocoder boundary. For each: which families it unlocks, rough cost, and
       whether it is additive to the ADR-0011 section 1.5 catalogue or a contract change.
@@ -16704,8 +16711,23 @@ tasks:
       "target the whole suite of GNU Radio decoders as the reference set". This is the ticket
       that makes that direction actionable without committing to any of it.
       core_interface because the catalogue delta lands in ADR-0011.
+      *** GAP IN THE ENGINE SET - READ THIS BEFORE SIGNING OFF THE ~13 ENGINE TICKETS. ***
+      ADR-0015 SECTION 10's ONLY BLOCK-CATALOGUE TICKET IS M-14, "OPTIONAL psk_demod/Costas",
+      AND THAT SCOPE STOPS SHORT OF BEING USEFUL. A PSK demodulator with no forward error
+      correction reaches verdict `demodulated` and no further for essentially every real
+      satellite downlink, because CCSDS framing means convolutional coding plus Reed-Solomon.
+      So M-14 as written buys one stage on a seven-stage ladder and unlocks almost no use case
+      on its own (SIGNAL-034, SIGNAL-033, SIGNAL-024, SIGNAL-023, SIGNAL-069, SPACE-081 all
+      need the FEC too). PSK + Viterbi + Reed-Solomon is ONE investment, not one plus two
+      optional extras, and it is the largest single block of docs/05 use cases available.
+      Before any of it is written, check liquid-dsp: it is MIT, it is already this project's
+      designated DSP kernel library (ADR-0010), it is actively released (v1.8.2, 2026-08), and
+      it already ships PSK/QAM modems, NCO/PLL, framing and FEC. Under ADR-0011 section 1.6 a
+      block is an ADAPTER OVER AN EXISTING KERNEL, so this may be an adapter job rather than a
+      DSP job - and that route needs no GPLv3 reference reading at all, which moots T-555 for
+      this family. Establish that before scoping the work, not after.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-552
+  - id: T-555
     milestone: MAUTO
     title: 'DECISION (user): the reference rule - what reading GPLv3 decoder source to understand an algorithm permits, and where independent reimplementation stops being independent'
     status: todo
@@ -16717,10 +16739,17 @@ tasks:
     core_interface: true
     acceptance: |
       DECISION ONLY. No code. The user's call; this ticket prepares it and records the answer.
+      *** THE RULE IN docs/18 SECTION 4 IS AN UNRATIFIED PROPOSAL. IT IS NOT IN FORCE. ***
+      Nobody has agreed to it. It was written by the MAUTO design track as a starting position
+      for this decision, it binds nothing until the user says so, and no implementing task may
+      cite it as authority in the meantime. Until it is ratified, the standing rule is the
+      conservative one that already exists: ADR-0010's process boundary, i.e. GPLv3 decoder
+      code stays in a subprocess and nothing is derived from it in-core. A task that would need
+      the proposed rule to proceed is blocked on this ticket, not free to assume the answer.
       WHY IT IS BLOCKING-SHAPED, not academic. The user's direction is to treat GNU Radio's
       decoders as the REFERENCE SET and "use their code as reference". ADR-0010 is unambiguous
       about the other half: GPLv3 code stays behind the plugin process boundary, never linked.
-      But the disposition audit (T-551) will conclude that the highest-value families want
+      But the disposition audit (T-554) will conclude that the highest-value families want
       NATIVE hk-blocks recipes, not plugins - because only native structures are searchable by
       MAUTO. So the question "what may an implementer take from reading gr-lora_sdr before
       writing hk-blocks' chirp demodulator" is on the critical path of the coverage roadmap, not
@@ -16746,13 +16775,13 @@ tasks:
       DoD: the user's decision recorded in ADR-0010 (or CLAUDE.md), and the per-block derivation
       field specified for implementing tasks to fill.
     notes: |
-      Filed 2026-09-20 with docs/18. HIGH because T-551's native dispositions and every
+      Filed 2026-09-20 with docs/18. HIGH because T-554's native dispositions and every
       subsequent block ticket depend on the answer, and because getting it wrong is not the kind
       of mistake that surfaces in a test.
       Deliberately NOT marked `blocked`: the brief can be written and the rule proposed without
       the user (CLAUDE.md - `blocked` is a checkable claim about the world, not a parking state).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-553
+  - id: T-556
     milestone: MAUTO
     title: 'DECODER COVERAGE (spike): wrap ONE real GNU Radio OOT decoder end to end and measure what a wrapped decoder actually costs - build, footprint, latency, manifest work'
     status: todo
@@ -16795,13 +16824,13 @@ tasks:
       for a spike, per the project's standing rule.
       DoD: a spike write-up with the numbers and a recommendation on whether wrapped GNU Radio
       decoders belong in the product at all, or whether the reference set is best used as a
-      SPECIFICATION source (T-552) with native recipes.
+      SPECIFICATION source (T-555) with native recipes.
     notes: |
       Filed 2026-09-20 with docs/18. This is the ticket that makes the coverage direction honest
       - the whole roadmap rests on a per-decoder wrapping cost that nobody has measured.
       A negative result is a good outcome and should be written up as one.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-554
+  - id: T-557
     milestone: MAUTO
     title: 'DECODER COVERAGE: how a protocol crosses the licence boundary as PARAMETERS - the GNU-Radio-informed template, so the reference set grows the MAUTO library without copying code'
     status: todo
@@ -16827,7 +16856,7 @@ tasks:
       1. THE PROVENANCE FIELD a template must carry. ADR-0015 section 4.1 has
          provenance: builtin | user | discovered. Add the SOURCE of the protocol facts - a
          standards document, a published specification, a wiki (sigidwiki), a paper, or "read
-         from a GPLv3 decoder" - which is exactly the derivation discipline T-552 is deciding.
+         from a GPLv3 decoder" - which is exactly the derivation discipline T-555 is deciding.
          A template whose parameters came from reading source must say so.
       2. THE LINE, drawn precisely. A sync word is a published protocol constant and a fact
          about the air interface; a CRC polynomial likewise; a field map is a fact about the

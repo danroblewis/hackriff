@@ -117,6 +117,6 @@ template is also a search seed. §6's "what it reuses" gains a fourth entry: the
 read as a specification corpus. And §8's non-goals gain a distinction: a structure with **no block**
 (OFDM, DSSS, CSS, QAM) is a coverage-roadmap item with an owner, not a permanent exclusion.
 
-Tickets: T-551 (per-family disposition audit + the hk-blocks catalogue gap list), T-552 (the
-"reference" licence rule — the user's decision), T-553 (spike: what wrapping one real GNU Radio OOT
-actually costs), T-554 (how a protocol crosses the licence boundary as template *parameters*).
+Tickets: T-554 (per-family disposition audit + the hk-blocks catalogue gap list), T-555 (the
+"reference" licence rule — the user's decision), T-556 (spike: what wrapping one real GNU Radio OOT
+actually costs), T-557 (how a protocol crosses the licence boundary as template *parameters*).
