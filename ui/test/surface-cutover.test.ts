@@ -74,9 +74,10 @@ test("the Explore centre is ONE surface: one mount, one canvas, and its CSS is s
   for (const slot of ["timenav", "freqnav", "live", "axis"]) {
     assert.ok(!html.includes(`data-slot="${slot}"`), `the retired ${slot} slot is still in the page`);
   }
-  // The capture band stays: it is the record control and the retained-window overview, not a
-  // spectrum renderer, and it writes the SAME time cursor the surface does.
-  assert.match(html, /data-slot="capture"/);
+  // T-506: the capture band is gone too. Its roles were folded into the canvas — the IQ horizon and
+  // the retention bound are rules on the surface's time axis, the capture clock is
+  // `centre/capture-clock.ts`, Record IQ is in the canvas bar (`app-capture-window.test.ts`).
+  assert.ok(!html.includes('data-slot="capture"'), "the retired Capture panel is still in the page");
 
   const css = readFileSync("src/app/centre/centre.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   const selectors = [...css.matchAll(/([^{}@]+)\{[^{}]*\}/g)].map((m) => m[1].trim()).filter((s) => s && !s.startsWith("@"));

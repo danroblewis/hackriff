@@ -6,7 +6,7 @@
 // (docs/api.md `GET /api/events`); what is here is region/range choice and presentation, per the
 // thin-client rule. In particular `duration_s` is served, never derived from `t_start_s`/`t_end_s`
 // here, and the empty-state wording is the backend's own `coverage.statement`.
-import { currentSpan } from "../capture/timeline";
+import { currentSpan } from "../centre/capture-window";
 
 /** One event: a presence interval, with its own timespan (docs/api.md `GET /api/events`). */
 export interface CatalogueEvent {

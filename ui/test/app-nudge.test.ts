@@ -185,7 +185,7 @@ test("T-409 THE CONTROL THAT MUST STILL HOLD: no pan and no wheel reaches a devi
 
 test("T-409: the nudge names no device route — the gate stays a type, not a convention", () => {
   const src = readFileSync("src/app/centre/nudge.ts", "utf8");
-  for (const r of ["/api/control/center", "/api/control/rate", "/api/control/gains", "/api/control/bias_tee", "/api/control/baseband_filter"]) {
+  for (const r of ["/api/control/center", "/api/control/rate", "/api/control/window", "/api/control/gains", "/api/control/bias_tee", "/api/control/baseband_filter"]) {
     assert.ok(!src.includes(r), `nudge.ts must not name ${r} — it goes through view.ts's DeviceAction`);
   }
   assert.ok(src.includes("applyDeviceAction"), "…and it must actually go through that gate");

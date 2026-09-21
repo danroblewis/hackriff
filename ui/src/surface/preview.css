@@ -52,6 +52,9 @@
   cursor: pointer;
 }
 .sp-btn:hover { border-color: #4a5266; }
+/* A toggle that is IN FORCE reads as pressed, not just as a label that happens to say "on" — the
+   two contrast controls (T-470/T-528) are the only buttons here that change what a colour means. */
+.sp-btn[aria-pressed="true"] { border-color: var(--hk-text); }
 
 .sp-note {
   margin: 0;

@@ -25,13 +25,18 @@
 //!
 //! # Device actions (T-343)
 //!
-//! Five of this trait's operations **reach the front end**; everything else in the control API
+//! Six of this trait's operations **reach the front end**; everything else in the control API
 //! (display, recording, bookmarks, selections) only changes what is shown. That
 //! asymmetry is now a type, [`DeviceAction`], not a comment: `set_center`, `set_rate`,
-//! `set_gains`, `set_bias_tee` and `set_baseband_filter` each name their variant, the control
-//! API classifies its routes into the same enum (`hk_api::control`'s `Action::device_action`),
-//! and a reader can see which paths are device actions from the enum alone. A view change cannot
-//! reach the device because a view change has no `DeviceAction` to name.
+//! `set_window`, `set_gains`, `set_bias_tee` and `set_baseband_filter` each name their variant,
+//! the control API classifies its routes into the same enum (`hk_api::control`'s
+//! `Action::device_action`), and a reader can see which paths are device actions from the enum
+//! alone. A view change cannot reach the device because a view change has no `DeviceAction` to
+//! name.
+//!
+//! [`LiveControl::set_window`] (T-529) is the one a **user retune** takes: a region names a centre
+//! *and* a span, and commanding them separately commands a window nobody asked for in between. See
+//! that method for what was observable in the gap.
 //!
 //! Every device action passes through one [`DeviceGate`], which:
 //!
@@ -86,7 +91,7 @@ pub struct LiveTuning {
 /// This enum is the boundary between changing the world and changing the view. Holding the view,
 /// scrubbing, zooming, display settings, recording and bookmarks have no variant here because they
 /// never touch the device (T-339's invariant) — and the first three reach no route at all (T-347);
-/// the five that do each name themselves, so a reader of a call site can see it is a device action
+/// the six that do each name themselves, so a reader of a call site can see it is a device action
 /// without tracing it to the driver.
 ///
 /// A retune in particular is not a view change: `hk_pipeline::PipelineController::retune` tunes
@@ -98,6 +103,9 @@ pub enum DeviceAction {
     Retune,
     /// Change the sample rate / instantaneous span (`POST /api/control/rate`).
     Rate,
+    /// Commit a whole window — centre **and** sample rate — as one action
+    /// (`POST /api/control/window`, T-529). See [`LiveControl::set_window`].
+    Window,
     /// Set named gain stages (`POST /api/control/gains`).
     Gains,
     /// Switch the antenna-port bias tee (`POST /api/control/bias_tee`).
@@ -112,6 +120,7 @@ impl DeviceAction {
         match self {
             Self::Retune => "retune",
             Self::Rate => "rate",
+            Self::Window => "window",
             Self::Gains => "gains",
             Self::BiasTee => "bias_tee",
             Self::BasebandFilter => "baseband_filter",
@@ -380,6 +389,39 @@ pub trait LiveControl: Send + Sync {
     fn set_center(&self, center_hz: f64) -> Result<LiveTuning, LiveControlError>;
     /// Changes the sample rate (span), Hz ([`DeviceAction::Rate`]).
     fn set_rate(&self, sample_rate_hz: f64) -> Result<LiveTuning, LiveControlError>;
+    /// Commits a whole window — centre **and** sample rate — as **one** device action
+    /// ([`DeviceAction::Window`], T-529).
+    ///
+    /// # Why this is not `set_rate` then `set_center`
+    ///
+    /// A user retune to a region names a capture *configuration*: the centre the radio will sit on
+    /// and the span it will open to. The pipeline has always taken it that way —
+    /// [`WindowRetuner::retune`] is `(center_hz, sample_rate_hz)`, one call, one class derivation,
+    /// one re-plumb. Only the HTTP surface split it, and [`SourceLiveControl::retune_window`] then
+    /// filled the half the caller had not named from the tuning *in force*. Two posts therefore
+    /// commanded two windows, the first of which — the **old centre at the new rate** — is a window
+    /// no user ever asked for and which nothing on the wire distinguishes from one they did:
+    ///
+    /// - it is what [`LiveControl::tuning`] (and so `GET /api/control/state`) reports in between;
+    /// - a whole segment is captured at it, with spectrum headers and provenance to match, so the
+    ///   coverage map records "we observed here" for a band chosen by an HTTP artefact — the exact
+    ///   dishonesty the grey-is-unobserved rule exists to prevent;
+    /// - it costs a re-plumb of its own, so one press tears the readers down twice;
+    /// - and the second request races the first segment's first block: a device refusal that lands
+    ///   while the second re-plumb is already queued is swallowed by the supervisor's
+    ///   request-first branch and counted as neither failure nor recovery.
+    ///
+    /// One call, one window, one class, at most one re-plumb. There is **no half-applied window to
+    /// observe**, because the intermediate one is never commanded.
+    ///
+    /// The single-field routes keep working: `set_center` means "this centre, keep the rate", which
+    /// is exactly what a nudge, a bookmark or a typed frequency asks for, and the sweep's steps are
+    /// centre-only by design (`crate::scan`).
+    fn set_window(
+        &self,
+        center_hz: f64,
+        sample_rate_hz: f64,
+    ) -> Result<LiveTuning, LiveControlError>;
     /// Sets named gain stages ([`DeviceAction::Gains`]; all validated before any is applied, each
     /// quantised to its stage).
     fn set_gains(&self, gains: &[NamedGain]) -> Result<LiveTuning, LiveControlError>;
@@ -509,6 +551,36 @@ impl SourceLiveControl {
         self
     }
 
+    /// The centre is one the device can reach.
+    fn check_center(&self, center_hz: f64) -> Result<(), LiveControlError> {
+        if center_hz.is_finite() && self.capabilities().supports_frequency(center_hz) {
+            return Ok(());
+        }
+        Err(LiveControlError::OutOfRange {
+            what: "centre frequency (Hz)".into(),
+            value: center_hz,
+        })
+    }
+
+    /// The sample rate is one the device offers.
+    fn check_rate(&self, sample_rate_hz: f64) -> Result<(), LiveControlError> {
+        if sample_rate_hz.is_finite() && self.capabilities().sample_rates.supports(sample_rate_hz) {
+            return Ok(());
+        }
+        Err(LiveControlError::OutOfRange {
+            what: "sample rate (Hz)".into(),
+            value: sample_rate_hz,
+        })
+    }
+
+    /// Why a run with a fixed rate refuses to change it.
+    fn fixed_rate_refusal(&self, in_force: f64) -> LiveControlError {
+        LiveControlError::Refused(format!(
+            "the sample rate is fixed at {in_force} Hz for this run (detection resolution, ring \
+             and history geometry); restart with the new rate"
+        ))
+    }
+
     fn check_window(&self, center_hz: f64, rate_hz: f64) -> Result<(), LiveControlError> {
         match &self.policy {
             Some(p) => p(center_hz, rate_hz).map_err(LiveControlError::Refused),
@@ -557,12 +629,7 @@ impl LiveControl for SourceLiveControl {
     }
 
     fn set_center(&self, center_hz: f64) -> Result<LiveTuning, LiveControlError> {
-        if !(center_hz.is_finite() && self.capabilities().supports_frequency(center_hz)) {
-            return Err(LiveControlError::OutOfRange {
-                what: "centre frequency (Hz)".into(),
-                value: center_hz,
-            });
-        }
+        self.check_center(center_hz)?;
         if let Some(r) = &self.retuner {
             return self.retune_window(r.as_ref(), DeviceAction::Retune, Some(center_hz), None);
         }
@@ -577,31 +644,66 @@ impl LiveControl for SourceLiveControl {
     }
 
     fn set_rate(&self, sample_rate_hz: f64) -> Result<LiveTuning, LiveControlError> {
-        if !(sample_rate_hz.is_finite()
-            && self.capabilities().sample_rates.supports(sample_rate_hz))
-        {
-            return Err(LiveControlError::OutOfRange {
-                what: "sample rate (Hz)".into(),
-                value: sample_rate_hz,
-            });
-        }
+        self.check_rate(sample_rate_hz)?;
         if let Some(r) = &self.retuner {
             return self.retune_window(r.as_ref(), DeviceAction::Rate, None, Some(sample_rate_hz));
         }
         let _op = self.gate.enter(DeviceAction::Rate)?;
         let mut t = self.lock();
         if self.fixed_rate && sample_rate_hz != t.sample_rate_hz {
-            return Err(LiveControlError::Refused(format!(
-                "the sample rate is fixed at {} Hz for this run (detection resolution, ring and \
-                 history geometry); restart with the new rate",
-                t.sample_rate_hz
-            )));
+            return Err(self.fixed_rate_refusal(t.sample_rate_hz));
         }
         self.check_window(t.center_hz, sample_rate_hz)?;
         self.control
             .set_sample_rate(sample_rate_hz)
             .map_err(LiveControlError::Source)?;
         t.sample_rate_hz = sample_rate_hz;
+        Ok(t.clone())
+    }
+
+    /// One window, one device action (T-529) — see [`LiveControl::set_window`].
+    ///
+    /// With a retuner this is [`retune_window`](SourceLiveControl::retune_window) with **both**
+    /// halves named, so the pipeline derives one content class and performs at most one re-plumb;
+    /// nothing is filled in from the tuning in force, which is where the phantom intermediate
+    /// window came from. Without one, both driver calls are made under a single
+    /// [`DeviceGate`] hold and a single tuning-lock hold, so no reader can catch the pair apart.
+    fn set_window(
+        &self,
+        center_hz: f64,
+        sample_rate_hz: f64,
+    ) -> Result<LiveTuning, LiveControlError> {
+        self.check_center(center_hz)?;
+        self.check_rate(sample_rate_hz)?;
+        if let Some(r) = &self.retuner {
+            return self.retune_window(
+                r.as_ref(),
+                DeviceAction::Window,
+                Some(center_hz),
+                Some(sample_rate_hz),
+            );
+        }
+        let _op = self.gate.enter(DeviceAction::Window)?;
+        let mut t = self.lock();
+        if self.fixed_rate && sample_rate_hz != t.sample_rate_hz {
+            return Err(self.fixed_rate_refusal(t.sample_rate_hz));
+        }
+        self.check_window(center_hz, sample_rate_hz)?;
+        // Rate first, then centre — the order `apply_window` uses, so the device is never asked to
+        // sit on a centre under a rate that is about to change underneath it. Both happen under the
+        // one lock: a partial application is a failure, not a state anything may read.
+        if sample_rate_hz != t.sample_rate_hz {
+            self.control
+                .set_sample_rate(sample_rate_hz)
+                .map_err(LiveControlError::Source)?;
+            t.sample_rate_hz = sample_rate_hz;
+        }
+        if center_hz != t.center_hz {
+            self.control
+                .tune(center_hz)
+                .map_err(LiveControlError::Source)?;
+            t.center_hz = center_hz;
+        }
         Ok(t.clone())
     }
 
@@ -845,6 +947,81 @@ mod tests {
         assert!(
             rec.calls.lock().unwrap().is_empty(),
             "window changes go through the pipeline, not straight to the device"
+        );
+    }
+
+    /// **T-529, the evidence.** A user retune names a centre *and* a span. Committed as two
+    /// single-field calls it commands **two** windows, and the first of them — the old centre at
+    /// the new rate — is a window no user asked for: a whole segment is captured there, and
+    /// `tuning()` (so `/api/control/state`) reports it in between. Committed as one `set_window`
+    /// the pipeline is asked for the window that was actually requested, once.
+    #[test]
+    fn a_window_is_one_command_where_two_single_field_calls_are_two() {
+        let split = Arc::new(FakeRetuner(Mutex::new(Vec::new())));
+        let (lc, _) = live(SourceCapabilities::hackrf_one());
+        let lc = lc.with_retuner(Arc::clone(&split) as Arc<dyn WindowRetuner>);
+        // What the UI used to do: post the rate, then the centre.
+        lc.set_rate(10e6).unwrap();
+        let between = lc.tuning();
+        lc.set_center(930.5e6).unwrap();
+        assert_eq!(
+            *split.0.lock().unwrap(),
+            vec![(100.8e6, 10e6), (930.5e6, 10e6)],
+            "two posts command two windows; the first is the OLD centre at the NEW rate"
+        );
+        assert_eq!(
+            (between.center_hz, between.sample_rate_hz),
+            (100.8e6, 10e6),
+            "and it is observable on /api/control/state between the two calls, so the coverage \
+             map records a band the user never asked to observe"
+        );
+
+        let one = Arc::new(FakeRetuner(Mutex::new(Vec::new())));
+        let (lc, _) = live(SourceCapabilities::hackrf_one());
+        let lc = lc.with_retuner(Arc::clone(&one) as Arc<dyn WindowRetuner>);
+        let t = lc.set_window(930.5e6, 10e6).unwrap();
+        assert_eq!((t.center_hz, t.sample_rate_hz), (930.5e6, 10e6));
+        assert_eq!(
+            *one.0.lock().unwrap(),
+            vec![(930.5e6, 10e6)],
+            "one window, one command: there is no intermediate window to observe"
+        );
+    }
+
+    /// A window is validated whole before anything reaches the driver: an unreachable half refuses
+    /// the pair rather than applying the other one. (Two posts could not do this — the first would
+    /// already have moved the radio.)
+    #[test]
+    fn an_unachievable_half_refuses_the_whole_window() {
+        let retuner = Arc::new(FakeRetuner(Mutex::new(Vec::new())));
+        let (lc, rec) = live(SourceCapabilities::hackrf_one());
+        let lc = lc.with_retuner(Arc::clone(&retuner) as Arc<dyn WindowRetuner>);
+        assert_eq!(lc.set_window(930.5e6, 40e6).unwrap_err().http_status(), 400);
+        assert_eq!(lc.set_window(500e3, 10e6).unwrap_err().http_status(), 400);
+        assert!(retuner.0.lock().unwrap().is_empty());
+        assert!(rec.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            (lc.tuning().center_hz, lc.tuning().sample_rate_hz),
+            (100.8e6, 2.4e6),
+            "a refused window leaves the front end exactly where it was"
+        );
+    }
+
+    /// Without a retuner both driver calls happen under one [`DeviceGate`] hold, in the order
+    /// `apply_window` uses (rate, then centre), and a half already in force is not re-sent.
+    #[test]
+    fn a_window_without_a_retuner_is_one_gated_pair_of_driver_calls() {
+        let (lc, rec) = live(SourceCapabilities::hackrf_one());
+        lc.set_window(930.5e6, 10e6).unwrap();
+        assert_eq!(
+            *rec.calls.lock().unwrap(),
+            vec!["rate 10000000", "tune 930500000"]
+        );
+        rec.calls.lock().unwrap().clear();
+        lc.set_window(930.5e6, 10e6).unwrap();
+        assert!(
+            rec.calls.lock().unwrap().is_empty(),
+            "re-committing the window in force sends nothing to the driver"
         );
     }
 

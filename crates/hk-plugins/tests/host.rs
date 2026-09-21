@@ -21,6 +21,8 @@ use hk_stream::{
 };
 use serde_json::json;
 
+mod common;
+
 const DUMMY: &str = env!("CARGO_BIN_EXE_hk-dummy-plugin");
 const RATE: f64 = 250_000.0;
 const ANCHOR_NS: i64 = 1_757_000_000_000_000_000;
@@ -93,6 +95,9 @@ fn shared_ingest(repo: Repository) -> Arc<Mutex<Ingest>> {
 
 fn wait_running(inst: &PluginInstance) {
     let mon = inst.monitor();
+    // Off the clock: the OS getting the plugin binary running is not what any of these bounds is
+    // about, and its range does not fit one. See `common`.
+    common::wait_started(&mon);
     assert!(
         mon.wait_for(Duration::from_secs(10), |s| s.state == PluginState::Running),
         "{:?} {:?}",
@@ -334,14 +339,6 @@ fn dummy_round_trip_into_repository() {
 /// still gets every queued record, then EOF; the host waits for it to flush and exit (a clean
 /// exit, not restarted) instead of killing it after a fixed settle time.
 #[test]
-#[ignore = "T-504: QUARANTINED, not broken — a macOS pipe(2)/FD_CLOEXEC race BETWEEN \
-            CONCURRENTLY SPAWNING TEST PROCESSES (mechanism documented in .config/nextest.toml \
-            and docs/10-test-strategy.md §3.4/§3.5, T-257). MEASURED: fails at 28.1s under a \
-            full gate with a builder agent competing; passes in isolation at 2.70s; zero \
-            failures in 25 hk-plugins runs at 6 threads (workspace default is 8). Fixing the \
-            race and deleting this line is T-493's definition of done, not this test's. Run it \
-            deliberately: cargo test -p hk-plugins --test host -- --ignored --exact \
-            finish_delivers_queued_input_to_a_slow_starting_plugin_then_waits_for_its_exit"]
 fn finish_delivers_queued_input_to_a_slow_starting_plugin_then_waits_for_its_exit() {
     const SAMPLES: usize = 1024;
     let mut m = repo_manifest();
@@ -367,7 +364,7 @@ fn finish_delivers_queued_input_to_a_slow_starting_plugin_then_waits_for_its_exi
             PushOutcome::Enqueued
         );
     }
-    let t0 = Instant::now();
+    let mon = inst.monitor();
     let stats = inst.finish(Duration::from_secs(30));
     assert_eq!(stats.decodes, 20, "{stats:?}");
     assert_eq!(
@@ -381,10 +378,14 @@ fn finish_delivers_queued_input_to_a_slow_starting_plugin_then_waits_for_its_exi
         "{stats:?}"
     );
     assert_eq!(stats.state, PluginState::Stopped);
+    // The claim is "finish returned on the plugin's exit, not on the idle timeout", and the host
+    // says so itself: it logs that line only when it gives up for want of progress. Asserting the
+    // log line rather than a wall clock shorter than the idle budget states the property directly
+    // and is not a bound on how fast a loaded machine schedules a subprocess (T-493, T-383).
+    let log = mon.log_tail();
     assert!(
-        t0.elapsed() < Duration::from_secs(20),
-        "finish returned on the plugin's exit, not on the idle timeout: {:?}",
-        t0.elapsed()
+        !log.lines.iter().any(|l| l.contains("no progress for")),
+        "finish gave up on the idle timeout instead of the plugin's exit: {log:?}"
     );
     let sink = sink.lock().unwrap();
     let decodes = all_adsb_decodes(sink.repo());
@@ -399,14 +400,6 @@ fn finish_delivers_queued_input_to_a_slow_starting_plugin_then_waits_for_its_exi
 /// A plugin that crashes mid-stream is restarted with backoff until the crash-loop cap; the
 /// producer never blocks, and every pushed record is counted in exactly one bucket.
 #[test]
-#[ignore = "T-504: QUARANTINED, not broken — a macOS pipe(2)/FD_CLOEXEC race BETWEEN \
-            CONCURRENTLY SPAWNING TEST PROCESSES (mechanism documented in .config/nextest.toml \
-            and docs/10-test-strategy.md §3.4/§3.5, T-257). MEASURED: fails at 25.2s under a \
-            full gate with a builder agent competing; passes in isolation at 0.29s; zero \
-            failures in 25 hk-plugins runs at 6 threads (workspace default is 8). Fixing the \
-            race and deleting this line is T-493's definition of done, not this test's. Run it \
-            deliberately: cargo test -p hk-plugins --test host -- --ignored --exact \
-            plugin_crash_restarts_and_capture_never_blocks"]
 fn plugin_crash_restarts_and_capture_never_blocks() {
     const SAMPLES: usize = 256;
     let mut m = repo_manifest();
@@ -422,6 +415,8 @@ fn plugin_crash_restarts_and_capture_never_blocks() {
     let mut inst =
         PluginInstance::spawn(m, input(), PluginContext::default(), Arc::clone(&sink)).unwrap();
     let mon = inst.monitor();
+    // Off the clock, as in `wait_running`: this test starts its own 30 s clock below.
+    common::wait_started(&mon);
     let payload = tone(0, SAMPLES);
     let start = Instant::now();
     let mut worst = Duration::ZERO;

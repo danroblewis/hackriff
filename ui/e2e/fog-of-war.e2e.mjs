@@ -77,7 +77,12 @@ const PORT = 8807; // not in FORBIDDEN (backend.mjs); startBackend steps past it
 
 const PANE_ROW = '.hk-surface-viewport[data-viewport="pane"]';
 const PANE_ACTION = `${PANE_ROW} .hk-surface-action:not([hidden])`;
-const DEVICE = /\/api\/control\/(center|rate|gains|bias_tee|baseband_filter)$/;
+// T-529 added `window`: a retune to a region is now ONE device action carrying centre and span
+// together (`POST /api/control/window`) instead of a `rate` post followed by a `center` one. It
+// belongs here for both of this file's uses. In `assertNoDeviceCalls` its absence silently WEAKENED
+// the control â€” a pure-view pan that wrongly commanded the radio through the new route would not
+// have been seen. And below, it is what a "centre change" now looks like.
+const DEVICE = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)$/;
 const ZOOM = { shift: true }; // frequency-only (T-472): every claim below is about frequency.
 const ZOOM_IN_DELTA = -400;
 const ZOOM_OUT_DELTA = 600;
@@ -754,7 +759,10 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright â€
   // so the shadow/grey/live states above are not an accident of a front end that never moved.
   // ===========================================================================
   const deviceCalls = page.requests.filter((r) => DEVICE.test(new URL(r.url).pathname));
-  const centerCalls = deviceCalls.filter((r) => new URL(r.url).pathname.endsWith("/center"));
+  // A press that moves the front end lands on `/center` (this centre, keep the rate) or, since
+  // T-529, on `/window` (this whole capture configuration, one action). Both are "the radio moved",
+  // which is the only thing this control is claiming.
+  const centerCalls = deviceCalls.filter((r) => /\/(center|window)$/.test(new URL(r.url).pathname));
   t.diagnostic(`device route calls over the whole run: ${deviceCalls.length} (${centerCalls.length} centre changes)`);
   assert.ok(centerCalls.length >= 2,
     `expected at least 2 centre changes (away to B, back to A) from the explicit retune presses; got ${centerCalls.length}: ` +

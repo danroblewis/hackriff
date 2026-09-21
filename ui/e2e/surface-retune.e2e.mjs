@@ -57,7 +57,7 @@ const PANE_ACTION = `${PANE_ROW} .hk-surface-action:not([hidden])`;
 const PANE_WHY = `${PANE_ROW} .hk-surface-why`;
 
 /** Every device route. A press on a replay must reach none of them, and neither may a gesture. */
-const DEVICE = /\/api\/control\/(center|rate|gains|bias_tee|baseband_filter)$/;
+const DEVICE = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)$/;
 
 /**
  * **The zoom gesture this file uses: SHIFT-held, a frequency-only zoom. T-472 is why.**
@@ -429,9 +429,14 @@ test("5. THE TICKET, enabled: a viewport INSIDE the tuned window retunes to wher
   // (1) ON THE WIRE: the press reached the device through T-343's gate, and nothing else did.
   const posts = page.requests.filter((r) => DEVICE.test(new URL(r.url).pathname));
   assert.ok(posts.length > 0, "the press reached no device route at all");
+  // T-529: ONE route, because one user retune is one device action. It used to be
+  // `/api/control/rate` then `/api/control/center`, which commanded a window — the old centre at
+  // the new rate — that nobody asked for and that a segment was captured at.
   assert.deepEqual([...new Set(posts.map((r) => new URL(r.url).pathname))].sort(),
-    ["/api/control/center", "/api/control/rate"],
+    ["/api/control/window"],
     `the press touched a route it should not: ${JSON.stringify(posts.map((r) => r.url))}`);
+  assert.equal(posts.length, 1,
+    `one press, one device request: ${JSON.stringify(posts.map((r) => r.url))}`);
 
   // (2) AT THE FRONT END: the window in force is the one the CONTROL NAMED, it is narrower than the
   //     one before, and it still contains the viewport the user was looking at. This is the claim —

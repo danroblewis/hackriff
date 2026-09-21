@@ -8,7 +8,7 @@ import {
   type TopEmitter, changeStatusText, fcoText, fmtNs, freqText, reportExportUrl, reportQuery,
 } from "../../report";
 import type { ControlClient } from "../../controls/client";
-import type { TimeCursor } from "../capture/slice";
+import type { TimeCursor } from "../centre/capture-slice";
 import type { LiveSlice } from "../centre/slice";
 import { h } from "../dom";
 import type { AppState, ReviewSlice } from "../state";

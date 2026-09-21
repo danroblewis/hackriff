@@ -279,6 +279,49 @@ export function pendingMarkBox(region: MarkRegion | null): MarkBox[] {
   }];
 }
 
+// ---- a rule across the pane at one capture instant (T-506) ----
+
+export interface TimeRuleStyle {
+  /** Line thickness, device px. */
+  thickPx?: number;
+  /** Dash and gap lengths, device px; absent is a solid line. */
+  dashPx?: number;
+  gapPx?: number;
+}
+
+/**
+ * A horizontal line across the whole pane at capture instant `tNs`, through the data pass's own
+ * [[toClip]] — so it is laid out in the same pass, on the same frame, as the rows it marks, and
+ * moves with them (the one-shared-time-axis rule).
+ *
+ * A stroke, never a wash: it marks a boundary *in time* and says nothing about the cells either side
+ * of it, so the coverage grey and the ramp under it are untouched. An instant outside the pane draws
+ * **nothing** — a rule pinned to the pane's edge would claim a boundary at a time it is not.
+ *
+ * Dashes are laid out from the pane's left edge in device px, so a dashed rule reads as the same
+ * pattern at every zoom; that is the second cue (after the ink) that tells two rules apart when
+ * they coincide.
+ */
+export function timeRuleQuads(
+  tNs: number, rgba: readonly [number, number, number, number], id: string,
+  paneBox: Box, rect: PaneRect, style: TimeRuleStyle = {},
+): OverlayQuad[] {
+  if (!Number.isFinite(tNs) || !(paneBox.t1Ns > paneBox.t0Ns)) return [];
+  if (tNs < paneBox.t0Ns || tNs > paneBox.t1Ns) return [];
+  const thick = (2 * (style.thickPx ?? 2)) / Math.max(1, rect.h);
+  const [, y] = toClip({ f0Hz: paneBox.f0Hz, f1Hz: paneBox.f1Hz, t0Ns: tNs, t1Ns: tNs }, paneBox);
+  const y0 = Math.max(-1, Math.min(1 - thick, y - thick / 2)), y1 = y0 + thick;
+  const dash = style.dashPx ?? 0, gap = style.gapPx ?? dash;
+  if (!(dash > 0)) return [{ clip: [-1, y0, 1, y1], rgba, kind: "time-rule", id }];
+  const out: OverlayQuad[] = [];
+  const w = Math.max(1, rect.w);
+  for (let x = 0; x < w; x += dash + gap) {
+    const x0 = (2 * x) / w - 1, x1 = (2 * Math.min(w, x + dash)) / w - 1;
+    out.push({ clip: [x0, y0, x1, y1], rgba, kind: "time-rule", id });
+  }
+  return out;
+}
+
 /** The widest a mark may be in device px and still be a stroke rather than a wash — the assertion
  * `ui/test/surface-minimap.test.ts` already makes about the map's own quads, available for these. */
 export { quadSizePx } from "./minimap";

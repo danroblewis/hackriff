@@ -282,18 +282,77 @@ impl Source for Lent {
 /// and is the documented behaviour.
 pub const WINDOW_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// **The window the run last commanded the front end to, and how many commands have been issued**
+/// (T-525).
+///
+/// [`WindowGuard`] takes its `expect` at segment start, but the control plane can command the front
+/// end again a millisecond later — the next step of a sweep, or the user pressing Retune — and the
+/// device's control mailbox **coalesces**: a change posted behind one the capture thread has not
+/// taken yet *replaces* it. The window the segment is waiting for is then a window nobody is
+/// commanding any more, and it can never arrive. Measured on the live HackRF under a 1 s-dwell
+/// 1 MHz–6 GHz sweep with the canvas driven at its finest level: `blocks_dropped_window` 1912 and
+/// `window_settle_timeouts` 9 in two minutes, with `spectrum/live` answering **410 Gone** for the
+/// whole of each 5 s wait (T-497's bound is what ends it) — which is what the demo watcher reads as
+/// "the server is unhealthy" and restarts it for.
+///
+/// So the expectation is **shared and versioned** rather than a snapshot: every place that commands
+/// the front end's window records it here, and the guard, seeing a newer generation than the one it
+/// started on, waits for *that* window instead. A superseded wait is abandoned, not served out.
+#[derive(Debug)]
+pub struct CommandedWindow {
+    center_bits: AtomicU64,
+    rate_bits: AtomicU64,
+    generation: AtomicU64,
+}
+
+impl CommandedWindow {
+    fn new(window: (f64, f64)) -> Self {
+        Self {
+            center_bits: AtomicU64::new(window.0.to_bits()),
+            rate_bits: AtomicU64::new(window.1.to_bits()),
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    /// Records a window the control plane has just commanded, bumping the generation.
+    fn set(&self, window: (f64, f64)) {
+        self.center_bits.store(window.0.to_bits(), Ordering::SeqCst);
+        self.rate_bits.store(window.1.to_bits(), Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The commanded window and the generation it was read at. The generation is read on both
+    /// sides of the two loads, so the pair returned is never half of one command and half of
+    /// another — a torn pair would make the guard wait for a window that was never commanded at
+    /// all, which is the very fault this type exists to remove.
+    fn get(&self) -> ((f64, f64), u64) {
+        loop {
+            let before = self.generation.load(Ordering::SeqCst);
+            let center = f64::from_bits(self.center_bits.load(Ordering::SeqCst));
+            let rate = f64::from_bits(self.rate_bits.load(Ordering::SeqCst));
+            if self.generation.load(Ordering::SeqCst) == before {
+                return ((center, rate), before);
+            }
+        }
+    }
+}
+
 /// Keeps a segment to its class (legal guardrail; see the module docs): drops blocks until the
 /// requested window arrives, then any block whose window has another class. A dropped block is
 /// returned empty (the capture thread skips empty blocks); the next admitted block carries `GAP`.
 ///
-/// The wait for the requested window is bounded by [`WINDOW_SETTLE_TIMEOUT`]; the class check is
-/// not bounded by anything, because it is the legal guardrail.
+/// The wait for the requested window is bounded by [`WINDOW_SETTLE_TIMEOUT`] and abandoned when a
+/// later command supersedes it ([`CommandedWindow`]); the class check is not bounded by anything,
+/// because it is the legal guardrail.
 struct WindowGuard {
     inner: Box<dyn Source>,
     class: ContentClass,
     expect: Option<(f64, f64)>,
+    /// The [`CommandedWindow`] generation `expect` came from (T-525).
+    expect_generation: u64,
     /// When the segment started waiting for `expect`. `None` when there is nothing to wait for.
     waiting_since: Option<Instant>,
+    commanded: Arc<CommandedWindow>,
     dropped: bool,
     stats: Arc<ControlStats>,
 }
@@ -303,13 +362,16 @@ impl WindowGuard {
         inner: Box<dyn Source>,
         class: ContentClass,
         expect: Option<(f64, f64)>,
+        commanded: &Arc<CommandedWindow>,
         stats: &Arc<ControlStats>,
     ) -> Box<dyn Source> {
         Box::new(Self {
             inner,
             class,
             expect,
+            expect_generation: commanded.get().1,
             waiting_since: expect.map(|_| Instant::now()),
+            commanded: Arc::clone(commanded),
             dropped: false,
             stats: Arc::clone(stats),
         })
@@ -320,6 +382,19 @@ impl WindowGuard {
             h.provenance.tune.center_hz,
             h.provenance.tune.sample_rate_hz,
         );
+        // T-525: a later command supersedes the window this segment started waiting for. Keeping
+        // the old one would be waiting for a window the run is no longer asking for, which can
+        // only end at [`WINDOW_SETTLE_TIMEOUT`] — five seconds of no capture, no spectrum rows and
+        // a `spectrum/live` that answers "stream finished" to everything that asks.
+        if self.expect.is_some() {
+            let (window, generation) = self.commanded.get();
+            if generation != self.expect_generation {
+                self.expect = Some(window);
+                self.expect_generation = generation;
+                self.waiting_since = Some(Instant::now());
+                inc(&self.stats.window_commands_superseded);
+            }
+        }
         if let Some((c, r)) = self.expect {
             if (center - c).abs() > 1.0 || (rate - r).abs() > 1.0 {
                 // T-497: the settle gap is bounded. Past the bound the front end is where it is,
@@ -332,6 +407,19 @@ impl WindowGuard {
                     return self.reject();
                 }
                 inc(&self.stats.window_settle_timeouts);
+                // T-525: counted AND said out loud. A settle timeout means the front end is not
+                // where the control plane sent it and capture was silent for the whole bound; a
+                // counter alone leaves the operator reading "the server went unhealthy" with
+                // nothing to attach it to. One line per give-up, and give-ups are rare by
+                // construction — every one of them is a defect.
+                eprintln!(
+                    "retune settle timeout after {:.1} s: asked for {} Hz / {} Hz, the front end \
+                     is on {center} Hz / {rate} Hz; capture resumes on the window it is actually \
+                     on (this step's window was not captured)",
+                    WINDOW_SETTLE_TIMEOUT.as_secs_f64(),
+                    c,
+                    r
+                );
             }
             self.expect = None;
             self.waiting_since = None;
@@ -593,6 +681,12 @@ pub struct ControlStats {
     /// the control plane asked for, and capture resumed on the one it is actually on rather than
     /// staying silent for ever. It is a defect signal, not a normal outcome.
     pub window_settle_timeouts: AtomicU64,
+    /// Segments whose requested window was **superseded** by a later command before it arrived
+    /// (T-525). The guard then waits for the newer window instead of serving out
+    /// [`WINDOW_SETTLE_TIMEOUT`] on one that can never come. Ordinary under a sweep whose steps
+    /// are closer together than the device's control path is long; a defect only if it is
+    /// accompanied by `window_settle_timeouts`.
+    pub window_commands_superseded: AtomicU64,
     /// Live segments that ended on a **device error** rather than a stop or a re-plumb (T-508):
     /// the capture thread's read failed. Each one is followed by a recovery attempt, never by the
     /// run quietly ending.
@@ -744,6 +838,11 @@ struct Common {
     slot: SourceSlot,
     pins: CalibrationPins,
     stats: Arc<ControlStats>,
+    /// T-525: the window the control plane last commanded the front end to. Written by every
+    /// path that moves it (a re-plumb's `apply_window`, an in-place retune, a capture recovery)
+    /// and read by every segment's [`WindowGuard`], so a segment never waits out the bound for a
+    /// window a later command has already replaced.
+    commanded: Arc<CommandedWindow>,
     user_stop: AtomicBool,
     recorder: Mutex<Option<ManualRecorder>>,
     last_recording: Mutex<RecordingStatus>,
@@ -1027,6 +1126,8 @@ impl Pipeline {
             slot: Arc::new(Mutex::new(None)),
             pins: calibration_pins(&cfg.calibrations),
             stats: Arc::new(ControlStats::default()),
+            // T-525: the run opens on the window it was opened with; nothing has been commanded.
+            commanded: Arc::new(CommandedWindow::new((info.center_hz, info.sample_rate_hz))),
             user_stop: AtomicBool::new(false),
             recorder: Mutex::new(None),
             last_recording: Mutex::new(RecordingStatus::default()),
@@ -1143,7 +1244,13 @@ fn start_segment(
     } = parts;
     let mut source = Lent::wrap(source, &common.slot);
     if cfg.live_window_class {
-        source = WindowGuard::wrap(source, cfg.source_class, expect, &common.stats);
+        source = WindowGuard::wrap(
+            source,
+            cfg.source_class,
+            expect,
+            &common.commanded,
+            &common.stats,
+        );
     }
     let source = Calibrated::wrap(source, &common.pins);
     let fs = info.sample_rate_hz;
@@ -1477,7 +1584,9 @@ struct Failure {
 /// A segment ends for one of four reasons, and before T-508 three of them ended the run for good
 /// while `hk serve` stayed up reporting `finished: true` to a client that showed nothing:
 ///
-/// 1. **A re-plumb was requested** — start the next segment on the new window.
+/// 1. **A re-plumb was requested** — start the next segment on the new window. A capture failure
+///    that arrived in the same wake-up is *counted* (T-529) and then superseded: the re-plumb
+///    re-commands the whole window, so recovering first would be work undone.
 /// 2. **The re-plumb itself failed** — the old segment's state still held by a straggler past
 ///    [`unwrap_shared`]'s bound, the device not handed back, or [`start_segment`] failing. The
 ///    state is now salvaged ([`take_parts`]) and the parts survive a failed start, so this goes to
@@ -1519,7 +1628,25 @@ fn supervise(sup: &Supervisor, mut workers: Vec<Worker>) -> Finished {
         // A re-plumb that failed is answered once recovery has settled where capture went.
         let mut answer: Option<Replumb> = None;
         let failure = match (req, capture_failed) {
-            (Some(req), _) => {
+            (Some(req), failed) => {
+                // **T-529: a device failure that arrives together with a re-plumb request is still
+                // a device failure.** This branch takes the request and goes on, which is right —
+                // the re-plumb is about to re-command the whole window anyway, so recovering first
+                // would be work undone. What was wrong is that the failure vanished from the
+                // *count*: `capture_failures` stayed 0 while a front end had just refused a
+                // change, so "the device refused something" and "nothing went wrong" read
+                // identically on `/api/status`.
+                //
+                // It is not a hypothetical. Until T-529 one user retune was two posts, so the
+                // second post's request routinely landed on the first segment's first read — which
+                // is where a HackRF reports a refused retune — and T-508's one-shot mock fault was
+                // swallowed here about half the time. That is what made `canvas-journey` test 5
+                // flake. Counting it costs nothing and cannot change control flow; the error text
+                // is already in `errors` from `join_workers`.
+                if let Some(e) = &failed {
+                    inc(&c.stats.capture_failures);
+                    eprintln!("the front end failed while a re-plumb was queued: {e}");
+                }
                 let old = st.shared.take().expect("a running segment");
                 st.tx = None;
                 drop(st);
@@ -1701,6 +1828,7 @@ fn recover(sup: &Supervisor, failure: Failure) -> Result<Vec<Worker>, String> {
             window.0, window.1
         );
         // The whole window, not a difference: the device's state is what is unknown here.
+        c.commanded.set(window);
         if let Err(e) = c
             .switch
             .set_sample_rate(window.1)
@@ -1813,11 +1941,20 @@ fn take_parts(c: &Common, old: Arc<Shared>) -> Result<Parts, String> {
     })
 }
 
+/// Moves the front end to `to`, and records it as the window the run is commanding (T-525).
+///
+/// The record is made **before** the calls, not after: the whole point is that a later command can
+/// arrive while these are still in the device's mailbox, and the guard's question is only ever
+/// "which window did the control plane ask for last". A call that then fails leaves the record
+/// pointing at a window the device is not on — which is exactly the case
+/// [`WINDOW_SETTLE_TIMEOUT`] bounds, and the caller's revert records `from` over it.
 fn apply_window(
     control: &dyn SourceControl,
+    commanded: &CommandedWindow,
     to: (f64, f64),
     from: (f64, f64),
 ) -> Result<(), SourceError> {
+    commanded.set(to);
     if to.1 != from.1 {
         control.set_sample_rate(to.1)?;
     }
@@ -1851,40 +1988,41 @@ fn replumb(common: &Common, old: Arc<Shared>, req: &Replumb) -> Result<Replumbed
         });
     };
     let old_class = parts.cfg.source_class;
-    let (window, class, outcome) = match apply_window(common.switch.as_ref(), req.to, req.from) {
-        Ok(()) => (
-            req.to,
-            req.class,
-            Ok(RetuneOutcome {
-                content_class: req.class,
-                replumbed: true,
-                segment: 0,
-            }),
-        ),
-        Err(e) => {
-            // Back to the window the old segment had (its class still holds there).
-            //
-            // **T-497: the revert's own failure is reported, not discarded.** It used to be
-            // `let _ =`, and then the segment started `expect`ing `req.from` — a window the revert
-            // had just failed to restore. [`WindowGuard`] would then drop every block for ever
-            // (it now gives up after [`WINDOW_SETTLE_TIMEOUT`] instead), and the caller was told
-            // only about the first failure, so "the retune was refused and the radio is back where
-            // it was" and "the retune was refused and nobody knows where the radio is" read
-            // identically. They are not the same fact.
-            match apply_window(common.switch.as_ref(), req.from, req.to) {
-                Ok(()) => (req.from, old_class, Err(ControlFailure::Source(e))),
-                Err(back) => (
-                    req.from,
-                    old_class,
-                    Err(ControlFailure::Failed(format!(
-                        "the retune failed ({e}) and restoring the previous window failed too \
+    let (window, class, outcome) =
+        match apply_window(common.switch.as_ref(), &common.commanded, req.to, req.from) {
+            Ok(()) => (
+                req.to,
+                req.class,
+                Ok(RetuneOutcome {
+                    content_class: req.class,
+                    replumbed: true,
+                    segment: 0,
+                }),
+            ),
+            Err(e) => {
+                // Back to the window the old segment had (its class still holds there).
+                //
+                // **T-497: the revert's own failure is reported, not discarded.** It used to be
+                // `let _ =`, and then the segment started `expect`ing `req.from` — a window the revert
+                // had just failed to restore. [`WindowGuard`] would then drop every block for ever
+                // (it now gives up after [`WINDOW_SETTLE_TIMEOUT`] instead), and the caller was told
+                // only about the first failure, so "the retune was refused and the radio is back where
+                // it was" and "the retune was refused and nobody knows where the radio is" read
+                // identically. They are not the same fact.
+                match apply_window(common.switch.as_ref(), &common.commanded, req.from, req.to) {
+                    Ok(()) => (req.from, old_class, Err(ControlFailure::Source(e))),
+                    Err(back) => (
+                        req.from,
+                        old_class,
+                        Err(ControlFailure::Failed(format!(
+                            "the retune failed ({e}) and restoring the previous window failed too \
                          ({back}): the front end may not be on {} Hz / {} Hz",
-                        req.from.0, req.from.1
-                    ))),
-                ),
+                            req.from.0, req.from.1
+                        ))),
+                    ),
+                }
             }
-        }
-    };
+        };
     parts.cfg.source_class = class;
     let info = SourceInfo {
         center_hz: window.0,
@@ -2007,6 +2145,10 @@ impl PipelineController {
                 // internal, because "the radio is not where you asked it to be" is exactly the kind
                 // of thing this product refuses to render as if it were.
                 "window_settle_timeouts": get(&stats.window_settle_timeouts),
+                // T-525: how often a segment's requested window was replaced by a later command
+                // before it arrived. Ordinary under a fast sweep; read it beside
+                // `window_settle_timeouts`, which is the defect.
+                "window_commands_superseded": get(&stats.window_commands_superseded),
                 // T-508: a device read failed on a live run / a re-plumb failed, and how many times
                 // capture was restarted after either. Non-zero failures with matching recoveries
                 // is a front end that misbehaved and a run that kept going.
@@ -2065,6 +2207,11 @@ impl PipelineController {
         };
         let class = window_class(center_hz, sample_rate_hz);
         if class == st.class && sample_rate_hz == st.window.1 {
+            // T-525: recorded before the call, so a segment still waiting for the window the
+            // previous command asked for learns that this one has replaced it. The device's
+            // control mailbox coalesces; without this the earlier window is one the front end
+            // will never report and the guard waits out the whole settle bound for it.
+            self.sup.common.commanded.set((center_hz, sample_rate_hz));
             self.sup
                 .common
                 .switch

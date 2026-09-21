@@ -286,7 +286,10 @@ export const __selftestMark = __selftestPredicate(1);
       "was retired — the cutover's own check that a gone widget stays gone.",
     file: "app/index.html",
     patch: (src) => {
-      const from = '      <div class="capture" data-slot="capture"></div>\n';
+      // T-506 retired the Capture panel, and with it the `data-slot="capture"` div this fault used
+      // to anchor on. Any surviving slot line does: the fault is "an EXTRA retired slot is left
+      // behind", and where it is injected does not matter.
+      const from = '      <div class="surface" data-slot="surface"></div>\n';
       if (!src.includes(from)) throw new Error(`selftest: anchor not found in index.html: ${from}`);
       return src.replace(from,
         from + '      <div data-slot="timenav" hidden></div>' +

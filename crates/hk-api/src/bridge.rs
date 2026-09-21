@@ -683,7 +683,11 @@ pub fn watch_peer(
                         waiting = None;
                         let _ = stream.set_read_timeout(Some(WATCH_TICK));
                     }
-                    // Local-only, the consumer cap, or already finished: end it honestly.
+                    // T-530: a second re-plumb finished the successor before we reached it. It
+                    // says so, so keep waiting on the id from *its* generation instead of
+                    // dropping the browser on a gap that is still a gap.
+                    Err(StreamError::BetweenWindows) if waiting.is_some() => offer = next,
+                    // Local-only, the consumer cap, or really finished: end it honestly.
                     Err(_) => break,
                 }
             }

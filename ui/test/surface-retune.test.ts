@@ -286,7 +286,7 @@ test("an unreported grid is stated, not silent: not knowing the front end's rang
 // 2. The explicit act, through the one gate
 // ---------------------------------------------------------------------------
 
-test("taking the offer retunes through T-343's gate: the covering rate, then the snapped centre", async () => {
+test("taking the offer retunes through T-343's gate: ONE window post carrying both halves", async () => {
   const m = model();
   const p = m.list()[0].id;
   m.panFreq(p, 300e6);          // ~400.8 MHz, nowhere near the tuned window
@@ -295,9 +295,12 @@ test("taking the offer retunes through T-343's gate: the covering rate, then the
   const { ctx, calls } = deviceSpyCtx();
   const out = await acceptPaneRetune(ctx, site, offer);
   assert.equal(out.ok, true);
-  assert.deepEqual(calls.map((c) => c.path), ["/api/control/rate", "/api/control/center"]);
-  assert.deepEqual(calls[0].body, { sample_rate_hz: 2_000_000 }, "the narrowest covering window, not the one in force");
-  const posted = (calls[1].body as { center_hz: number }).center_hz;
+  // T-529: ONE request, not a rate post followed by a centre post. Two posts commanded two windows
+  // and the first of them — the old centre at the new rate — is one nobody asked for.
+  assert.deepEqual(calls.map((c) => c.path), ["/api/control/window"]);
+  assert.equal((calls[0].body as { sample_rate_hz: number }).sample_rate_hz, 2_000_000,
+    "the narrowest covering window, not the one in force");
+  const posted = (calls[0].body as { center_hz: number }).center_hz;
   // On the achievable grid (T-341), and it is the plan's own centre — re-snapping it in the gate is
   // a no-op, so the number on the button is the number that goes out.
   assert.ok(offer.plan.ok);
@@ -312,7 +315,12 @@ test("taking the offer retunes through T-343's gate: the covering rate, then the
   );
 });
 
-test("the rate is not re-posted when the window in force is already the right width", async () => {
+// T-529: the client no longer decides whether the rate "needs" posting. It used to compare the
+// plan's span against its own copy of `device.sampleRateHz` and drop the rate post when they
+// matched — a plan, built from a polled value, about how many device actions one press is. Now it
+// states the window and the backend decides what that costs: a rate already in force re-plumbs
+// nothing (`hk_api::control`'s window route, asserted in `api_contract.rs`).
+test("a window already the right width is still ONE post, and it still names both halves", async () => {
   const m = new PaneModel({
     bounds: BOUNDS, lattice: LAT, width: 1200, height: 800,
     freq: { centerHz: 400e6, spanHz: 1.8e6 }, spanNs: 20 * S,
@@ -323,7 +331,10 @@ test("the rate is not re-posted when the window in force is already the right wi
   ctx.store.set((s) => ({ device: { ...s.device, sampleRateHz: 2_000_000 } }));
   const out = await acceptPaneRetune(ctx, site, site.offerNow(p)!);
   assert.equal(out.ok, true);
-  assert.deepEqual(calls.map((c) => c.path), ["/api/control/center"], "a rate already right is not re-posted");
+  assert.deepEqual(calls.map((c) => c.path), ["/api/control/window"],
+    "one press, one device action, whatever the rate in force happens to be");
+  assert.equal((calls[0].body as { sample_rate_hz: number }).sample_rate_hz, 2_000_000,
+    "the window is stated whole; whether that is a change is the backend's to know");
 });
 
 test("a replay is told so, and reaches nothing: the offer is still not a second path to the device", async () => {
@@ -367,7 +378,7 @@ test("the planned centre is on the grid and places the pane OFF DC, at T-418's d
 
 test("the offer module re-derives no RF arithmetic of its own: it calls the planner", () => {
   const src = readFileSync("src/surface/retune.ts", "utf8");
-  for (const route of ["/api/control/center", "/api/control/rate", "/api/control/gains"]) {
+  for (const route of ["/api/control/center", "/api/control/rate", "/api/control/window", "/api/control/gains"]) {
     assert.ok(!src.includes(route), `retune.ts must not name ${route}: the one path is applyDeviceAction`);
   }
   // The planner is imported, and neither the tuning step nor the quarter-band offset is restated.
@@ -480,8 +491,9 @@ test("T-476 THE COMMIT: what goes out is the CONTAINED viewport as it stands at 
   assert.ok(expected.ok);
   if (!expected.ok) return;
   const posted = Object.fromEntries(calls.map((c) => [c.path, c.body]));
-  assert.deepEqual(posted["/api/control/center"], { center_hz: expected.centerHz });
-  assert.deepEqual(posted["/api/control/rate"], { sample_rate_hz: expected.spanHz });
+  assert.deepEqual(posted["/api/control/window"],
+    { center_hz: expected.centerHz, sample_rate_hz: expected.spanHz },
+    "one window, both halves, exactly as the planner computed them");
   // …and the centre that went out is the OFF-DC placement for this viewport, not the viewport's own
   // midpoint: the plan is being obeyed, not approximated by something that happens to be nearby.
   assert.ok(Math.abs((box.centerHz - expected.centerHz) - expected.spanHz / 4) <= STEP / 2 + 1e-6,
@@ -706,12 +718,13 @@ test("T-496: taking a preset reaches the device exactly once, named pane-width, 
   return acceptPaneWidth(ctx, site, offer).then((out) => {
     assert.equal(out.ok, true);
     assert.equal(out.ok && out.action.source, "pane-width", "tellable apart from a plain retune in the audit trail");
-    assert.deepEqual(calls.map((c) => c.path), ["/api/control/rate", "/api/control/center"]);
+    assert.deepEqual(calls.map((c) => c.path), ["/api/control/window"]);
     // The posted rate is `Math.round(plan.spanHz)`, not a re-derivation of it — asserted against the
     // offer's own plan rather than a literal 2_000_000, since T-418's off-DC placement can widen the
     // achievable span past the bare 2 MHz floor by a fraction of a tuning step (see the label tests).
     assert.ok(offer.plan.ok);
-    assert.deepEqual(calls[0].body, { sample_rate_hz: offer.plan.ok ? Math.round(offer.plan.spanHz) : NaN });
+    assert.equal((calls[0].body as { sample_rate_hz: number }).sample_rate_hz,
+      offer.plan.ok ? Math.round(offer.plan.spanHz) : NaN);
     // T-498, applied to this control too: the toast names the span it actually committed.
     const wideMhz = offer.plan.ok ? (offer.plan.spanHz / 1e6).toFixed(3) : "?";
     assert.match(

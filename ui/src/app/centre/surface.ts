@@ -38,7 +38,7 @@
 // (CLAUDE.md's whole-UI window rule), and renders the retune control T-444 computes — persistent
 // and per-pane since T-476. The only device route it can reach is through `acceptPaneRetune` →
 // `applyDeviceAction`, T-343's one gate, on an explicit button press.
-import { activeWindows, type ActiveWindow } from "../../navigators";
+import { activeWindows, timeExtent, type ActiveWindow } from "../../navigators";
 import type { NavigationGrid } from "../../navigation";
 import { attachSurfaceInput, type GlPoint } from "../../surface/input";
 import {
@@ -47,6 +47,10 @@ import {
 } from "../../surface/marks";
 import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
+import {
+  autoContrastButton, loadRangeMode, pressAutoContrast, pressViewportScale, saveRangeMode,
+  viewportScaleButton, type ContrastButton,
+} from "../../surface/contrast";
 import { rangeLabel } from "../../surface/legend";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
@@ -54,13 +58,15 @@ import {
   acceptPaneRetune, acceptPaneWidth, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
 } from "../../surface/retune";
-import type { PaneRect, PaneReport, PaneView } from "../../surface/surface";
+import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
 import {
   GLOW_PX, HOLD_INK, HOLD_PX, SHADOW_PX, SLICE_PX, TRACE_COLUMNS, liveFrameFits, maxHoldColumns,
   peakOf, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
 } from "../../surface/trace";
 import type { OverlayQuad } from "../../surface/minimap";
 import { liveRow } from "./live-edge";
+import { recordIqButton, startCaptureClock } from "./capture-clock";
+import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
 import { captureBanner } from "./capture-state";
 import type { AppContext, AreaMounts } from "../context";
 import { h } from "../dom";
@@ -131,6 +137,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
   const traceEl = h("div", { class: "sf-trace", role: "status" });
+  // T-506: the IQ horizon and the retention bound, said in words beside the two rules that draw
+  // them. The data-* attributes are the same numbers the rules were drawn from on the same frame,
+  // so ui/e2e can check the pixels against them rather than against a second calculation.
+  const ringEl = h("div", { class: "sf-ring", role: "status" });
   const liveBtn = h("button", { class: "mini sf-live", type: "button" }, "Live");
   const traceBtn = h("button", {
     class: "mini sf-tracebtn on", type: "button", "aria-pressed": "true",
@@ -141,6 +151,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // hatch for digging into weak signals, and the label beside it states the range and which way
   // round it is — a fixed scale is honest only if it is quoted.
   const contrastBtn = h("button", { class: "mini sf-contrast", type: "button" }, "Auto-contrast: off");
+  // T-528: the second half of the same control. `Auto-contrast` decides *whether* the scale tracks
+  // the screen; this decides *what it measures* when it does — whole tiles (cheap, and a carrier
+  // off screen in a tile that is partly on screen still sets the top of the ramp) or the observed
+  // cells actually inside the view. Both are kept: they make opposite trades and the user has said
+  // they want each. Persisted per viewer like `Signals` above, defaulting to today's behaviour.
+  const vscaleBtn = h("button", { class: "mini sf-vscale", type: "button" }, "Viewport scale: off");
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
   // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
@@ -150,11 +166,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
     title: "Show or hide the found-signal boxes (Candidate/Confirmed detections) on the canvas. Display only — changes nothing about what is detected.",
   }, "Signals");
   const rangeEl = h("span", { class: "sf-range", role: "status" });
-  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn, signalsBtn,
+  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn, vscaleBtn, signalsBtn,
+    recordIqButton(ctx),
     h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved.", onclick: () => preview?.split("columns") }, "Split ⇔"),
     h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => preview?.closeActive() }, "Close"),
-    h("button", { class: "mini", type: "button", title: "Zoom the active viewport out to the device-available spectrum over the whole record horizon.", onclick: () => preview?.fitToSurface() }, "Whole surface"));
-  el.replaceChildren(h("div", { class: "sf-bar" }, actions, rangeEl, hoverEl), stage, traceEl, chrome, note);
+    h("button", { class: "mini", type: "button", title: "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", onclick: () => preview?.fitToSurface() }, "Whole surface"));
+  el.replaceChildren(h("div", { class: "sf-bar" }, actions, rangeEl, hoverEl), stage, traceEl, ringEl, chrome, note);
 
   let preview: SurfacePreview | null = null;
   let windows: ActiveWindow[] = [];
@@ -188,6 +205,52 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const s = store.get();
     const tS = s.live.edgeTS ?? s.captureWindow?.t1S ?? null;
     return tS === null ? 0 : tS * S_TO_NS;
+  };
+
+  // ---- the capture clock (T-379), re-homed from the retired Capture panel (T-506) ----
+  // The only writer of `state.captureWindow`. Started with the mount, not after the surface boots:
+  // the inventory lists and the History default period read it too, and a surface that failed to
+  // address must not take their live edge down with it.
+  startCaptureClock(ctx);
+
+  // ---- the IQ horizon and the retention bound (T-506) ----
+  //
+  // Two rules across every pane, from the ring window `GET /api/timeline` reports, laid out through
+  // the pane's own mapping on the same frame as the rows (`ringRuleQuads` → `toClip`). The edge is
+  // the one the panes are drawn to, so the retention bound advances with the rows, not on the poll.
+  // The readout says the same thing in words for the active pane, including which side of the IQ
+  // horizon that pane's own time position is on — the playback invariant's "no audio past the
+  // ring", stated where the user is looking rather than in a panel below it.
+  const ringQuads = (pane: PaneView, edge: number): OverlayQuad[] => {
+    const s = store.get();
+    const rules = ringRules(s.captureWindow, edge > 0 ? edge / S_TO_NS : null);
+    const p = preview;
+    if (p && pane.id === p.activePane) {
+      const following = p.view.panes.isFollowing(pane.id);
+      const posS = pane.box.t1Ns / S_TO_NS;
+      const backing = iqBackingAt(posS, following, rules);
+      const w = s.captureWindow;
+      const held = w?.buffered ? Math.max(0, w.buffered.t1S - (rules?.iqS ?? w.buffered.t0S)) : null;
+      setText(ringEl, !rules
+        ? "IQ ring: this server has not reported a capture window, so where raw IQ ends is unknown"
+        : `IQ ring: ${held === null ? "holds nothing yet" : `holds ${durationText(held)}`} of a ${durationText(rules.spanS)} retention`
+          + ` — green line: oldest IQ${rules.iqS === null ? " (none yet)" : ` ${clock(rules.iqS)}`}`
+          + `; magenta dashes: retention bound ${clock(rules.retentionS)}`
+          + ` · this viewport: ${iqNote(backing)}`);
+      const scale = canvas.height > 0 ? canvas.clientHeight / canvas.height : 1;
+      const d = ringEl.dataset;
+      d.retentionS = rules ? String(rules.retentionS) : "";
+      d.iqS = rules?.iqS != null ? String(rules.iqS) : "";
+      d.backing = backing;
+      d.paneT0S = String(pane.box.t0Ns / S_TO_NS);
+      d.paneT1S = String(pane.box.t1Ns / S_TO_NS);
+      // The pane's rectangle in CSS px from the canvas's top-left (PaneRect is GL, bottom-left).
+      d.paneTopPx = String((canvas.height - pane.rect.y - pane.rect.h) * scale);
+      d.paneHPx = String(pane.rect.h * scale);
+      d.paneLeftPx = String(pane.rect.x * scale);
+      d.paneWPx = String(pane.rect.w * scale);
+    }
+    return ringRuleQuads(rules, pane.box, pane.rect);
   };
 
   // ---- the marks: per frame, from the state they describe ----
@@ -326,10 +389,23 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // was decided. It used to read "measured from the served tiles" — true of the viewport-
         // tracking range, and exactly what stopped being true when the scale stopped following the
         // viewport. `app-trace.e2e.mjs` asserts this sentence, and was updated with it.
+        // T-528 adds the third case. The numbers are `s.lo`/`s.hi` — the pair the frame that is on
+        // the screen was uploaded with, not the one the next frame will use (see `Surface.next`) —
+        // so this sentence is true of the pixels beside it in every mode, which is T-475's rule and
+        // is what a re-measured-per-frame scale makes load-bearing rather than incidental.
         `scale ${fmtDb(s.lo)} … ${fmtDb(s.hi)}, ${s.range.mode === "anchored"
           ? "measured over the region and anchored there"
-          : "measured from the tiles on screen (auto-contrast)"}, shared with the ramp`,
+          : s.range.mode === "viewport"
+            ? "measured from the observed cells in this view, shadows excluded (viewport scale)"
+            : "measured from the tiles on screen (auto-contrast)"}, shared with the ramp`,
       ].join(" · "));
+      // **The bar's range line, on the FRAME, not on the 1 s chrome poll** (T-528). It was on the
+      // poll because the anchored range never moves and `auto` creeps; a viewport-measured range
+      // moves with every pan, and a bar quoting a second-old scale beside pixels drawn with the
+      // current one is the readout-disagrees-with-the-pixels defect in miniature. Set-if-changed,
+      // so the anchored mode still writes the DOM exactly once. The poll below stays as the path
+      // for when the trace strip is switched off and this callback does not run.
+      setText(rangeEl, rangeLabel(s.range));
     }
     return out;
   };
@@ -353,8 +429,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // ---- mirror the active viewport into the app's one window (CLAUDE.md's whole-UI window rule) ----
   // The inventory lists, the focus panel and the decode captures all scope themselves through
   // `state.live.view` + `state.time` (`explore/inventory.ts`'s `viewWindow`). Writing the viewport
-  // there is what keeps them answering about what is on screen; it is the same state the capture
-  // band's scrub writes, so there is one time cursor with two editors, not two cursors.
+  // there is what keeps them answering about what is on screen. Since T-506 retired the capture
+  // band's scrub, the viewport is the time cursor's only editor.
   let lastMirror = "";
   function mirror(): void {
     const p = preview;
@@ -494,6 +570,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // formatter that reaches for the host's timezone is one keystroke from a fallback that reaches
   // for the host's *time* — which on a replay or a time-compressed scene is not this data's time.
   const at = (ns: number) => `${new Date(ns / 1e6).toISOString().slice(11, 19)}Z`;
+  const clock = (sec: number) => at(sec * S_TO_NS);
 
   function hitAt(x: number, y: number): { pane: PaneView; mark: MarkBox | null; fHz: number; tNs: number } | null {
     const hit = paneUnder(x, y);
@@ -547,7 +624,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         widthActions, onWidthAction: pressWidth,
         edge: () => edgeNs() || probe.origin.edgeNs,
         windows: () => windows,
-        marks: (pane, edge) => markQuads(boxesFor(pane), edge, pane.box, pane.rect),
+        // The ring rules first, so a signal box or selection that crosses one is drawn over it.
+        marks: (pane, edge) => [...ringQuads(pane, edge), ...markQuads(boxesFor(pane), edge, pane.box, pane.rect)],
         trace: traceFor, tracePx: TRACE_PX,
       });
     } catch (e) {
@@ -559,6 +637,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // The shadow's brightness is a per-viewer display preference (T-526): loaded once here, never
     // fetched, and changed only by the Ctrl+Shift+wheel gesture `input.ts` claims before any zoom.
     preview.view.surface.setShadowGain(loadShadowGain());
+
+    // T-506: the time extent always reaches the retained capture window (T-338's span), and further
+    // back only where spectrum history exists. `timeExtent` is the ring's window and nothing else;
+    // the floor only ever moves older, so a pane is never yanked by a poll.
+    store.select((s) => s.captureWindow, (w) => {
+      const ext = timeExtent(w);
+      if (ext && preview) preview.extendTimeFloor(ext.lo * S_TO_NS);
+    }, { immediate: true });
 
     detach = attachSurfaceInput(canvas, preview, {
       onShadowGain: shadowGainWheelHandler(preview.view.surface),
@@ -647,23 +733,36 @@ function mount(el: HTMLElement, ctx: AppContext) {
     renderLive();
     store.select((s) => s.time.live, renderLive);
 
-    // ---- the colour scale (T-470). A view control; it reaches no route and no device. ----
+    // ---- the colour scale (T-470, T-528). A view control; it reaches no route and no device. ----
+    //
+    // Two buttons, ONE piece of state — the mode the surface is actually in — so the pair cannot
+    // get into a combination that means nothing. Every press goes through `./contrast.ts`'s pure
+    // functions and is persisted there; nothing here is fetched, polled or sent.
+    const paint = (btn: HTMLButtonElement, b: ContrastButton) => {
+      btn.textContent = b.label;
+      btn.title = b.title;
+      btn.classList.toggle("on", b.pressed);
+      btn.setAttribute("aria-pressed", String(b.pressed));
+    };
     const renderRange = () => {
       const p = preview;
       if (!p) return;
       const r = p.range;
       rangeEl.textContent = rangeLabel(r);
-      contrastBtn.textContent = r.mode === "anchored" ? "Auto-contrast: off" : "Auto-contrast: on";
-      contrastBtn.classList.toggle("on", r.mode === "auto");
-      contrastBtn.setAttribute("aria-pressed", r.mode === "auto" ? "true" : "false");
-      contrastBtn.title = r.mode === "anchored"
-        ? "The display range is anchored to the region, so the same measured dB is the same colour at every zoom — at the cost of clipping outside it. Press to track what is on screen instead."
-        : "The display range tracks the tiles currently on screen: nothing clips, but the same signal changes colour as you navigate. Press to go back to the anchored range.";
+      paint(contrastBtn as HTMLButtonElement, autoContrastButton(r.mode));
+      paint(vscaleBtn as HTMLButtonElement, viewportScaleButton(r.mode));
     };
-    contrastBtn.addEventListener("click", () => {
-      preview?.setAutoScale(preview.range.mode === "anchored");
+    const setMode = (mode: RangeMode) => {
+      preview?.setRangeMode(mode);
+      saveRangeMode(mode);
       renderRange();
-    });
+    };
+    contrastBtn.addEventListener("click", () => setMode(pressAutoContrast(preview?.range.mode ?? "anchored")));
+    vscaleBtn.addEventListener("click", () => setMode(pressViewportScale(preview?.range.mode ?? "anchored")));
+    // The remembered mode, applied once the surface exists. `anchored` — the default — is what the
+    // probe's anchor already put it in, so the common path sets nothing.
+    const remembered = loadRangeMode();
+    if (remembered !== "anchored") preview.setRangeMode(remembered);
     renderRange();
     // Auto-contrast moves the range every frame, so the statement follows it rather than only the
     // press: a label quoting a range the surface no longer draws with is worse than no label. At the

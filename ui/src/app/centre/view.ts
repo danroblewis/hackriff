@@ -1,6 +1,7 @@
 // Centre view logic (T-152; ADR-0013 §4.1, §4.3): the live geometry from the `live` slice, the view
 // after a new stream header, the Go to decision (pan inside the tuned band, retune outside it when
-// live), and the retune action (`POST /api/control/center`). Axis arithmetic only (axis.ts).
+// live), and the retune action (`POST /api/control/window` for a whole capture configuration,
+// `POST /api/control/center` when only a centre is named). Axis arithmetic only (axis.ts).
 //
 // T-343 — **device actions are a type here, not a threshold in a gesture handler.**
 //
@@ -21,11 +22,16 @@
 // That is why exactly two files under ui/src name a device route: this one, and the SDR control
 // panel (`app/review/device.ts`), whose whole purpose is device settings. `ui/test/app-centre.ts`
 // asserts that set against the source, so a third one has to be argued for rather than appear.
+//
+// T-529 — **one user retune is one request.** A retune to a region names a centre AND a span, and
+// this module used to commit it as two posts, deciding for itself whether the rate one was needed.
+// Two posts are two device actions over two windows, the first of which nobody asked for; see
+// `applyDeviceAction` and docs/api.md, "A window is one device action".
 import * as ax from "../../axis";
 import { ControlError } from "../../controls/client";
 import type { ViewHooks } from "../../controls/gestures";
 import { snapCenter, type DetailPlan } from "../../navigation";
-import { currentSpan } from "../capture/timeline";
+import { currentSpan } from "./capture-window";
 import type { AppContext } from "../context";
 import { toast } from "../shell-slice";
 import type { AppState } from "../state";
@@ -47,7 +53,7 @@ export function geometryOfLive(l: Pick<LiveSlice, "centerHz" | "bandwidthHz" | "
  * `/api/inventory` was answering with rows for exactly the band the device reports. That is "we
  * have it but didn't render it" with a single point of failure in front of it.
  *
- * The tuned band is the same fallback the capture band and the History surface already take
+ * The tuned band is the same fallback Record IQ and the History surface already take
  * ([[currentSpan]]), so this adds no new source of truth: it reads `/api/control/state`'s own
  * centre and sample rate. `null` stays *unknown* — nothing is invented when neither has answered.
  *
@@ -130,8 +136,13 @@ export type DeviceAction = {
    * A frequency-navigator region-select names a whole capture configuration, not just a centre: the
    * smallest achievable sample rate that covers the selection (`retunePlan`). A centre alone would
    * put the selection inside a window of whatever width the radio happened to be at, which for a
-   * selection wider than the current rate does not cover it at all. Non-null and different from the
-   * rate in force means one extra device call, `POST /api/control/rate`, before the centre.
+   * selection wider than the current rate does not cover it at all.
+   *
+   * **Non-null means the request is `POST /api/control/window`** — one device action carrying both
+   * halves (T-529). It is not compared against the rate in force first: "is this rate a change?"
+   * is a question about the device, and answering it here made the client decide how many device
+   * actions one press is, from a copy of the device state a poll had handed it. Null means "keep
+   * the rate", which `POST /api/control/center` already says.
    */
   spanHz?: number | null;
   /** The view to restore once the new header arrives, when the request implies one. */
@@ -201,14 +212,27 @@ export async function applyDeviceAction(ctx: AppContext, action: DeviceAction): 
   const centerHz = snapCenter(dev.centerGrid, action.centerHz) ?? Math.round(action.centerHz);
   store.set((s) => ({ live: { ...s.live, pendingView: action.want, retuneOffer: null } }));
   try {
-    // T-392: a configuration, not just a centre. The rate goes first so the last header the retune
-    // produces is the one carrying the requested centre, and it is skipped entirely when the window
-    // is already the right width — a rate change re-plumbs the capture, so it is not made idly.
+    // T-392: a configuration, not just a centre. T-529: and therefore **one** request.
+    //
+    // This used to be two posts — `/api/control/rate` when the width in force looked wrong, then
+    // `/api/control/center` — which made the client decide, from its own copy of the device state,
+    // *how many device actions one press is*. That is a plan, and planning is not this layer's job;
+    // worse, it is a plan the backend then completed from whatever was in force, so one press
+    // commanded two windows with the old centre at the new rate in between (docs/api.md, "A window
+    // is one device action"). The client now states the window it wants and nothing else: whether
+    // the rate really changes, whether that needs a re-plumb, and in what order the driver is
+    // touched are all the backend's to decide, and it decides them once.
+    //
+    // An action carrying no span still means "this centre, keep the rate", which is exactly what
+    // `/api/control/center` says — a nudge or a bookmark must not send a rate it merely read from a
+    // poll, because sending it would turn a stale read into a command.
     const spanHz = action.spanHz ?? null;
-    if (spanHz !== null && Number.isFinite(spanHz) && spanHz > 0 && Math.round(spanHz) !== dev.sampleRateHz) {
-      await ctx.client.post("/api/control/rate", { sample_rate_hz: Math.round(spanHz) });
+    const wholeWindow = spanHz !== null && Number.isFinite(spanHz) && spanHz > 0;
+    if (wholeWindow) {
+      await ctx.client.post("/api/control/window", { center_hz: centerHz, sample_rate_hz: Math.round(spanHz) });
+    } else {
+      await ctx.client.post("/api/control/center", { center_hz: centerHz });
     }
-    await ctx.client.post("/api/control/center", { center_hz: centerHz });
     const on = store.get().device.deviceId;
     // T-498: name the span too, when this action carries one (a nudge does not — it never touches
     // the span, so there is nothing here to claim). `spanHz` is already what was actually asked for

@@ -61,6 +61,10 @@ counter_group!(
         source_dropped,
         /// Replay passes restarted by `--loop`.
         loops,
+        /// Blocks pushed forward to keep capture time monotone because a source's own clock was
+        /// behind the run's (T-474). A `--loop` wrap is an expected splice and is counted in
+        /// `loops`, not here; a count here means a segment restarted under a rewound source.
+        time_splices,
         /// Blocks held back by the lossless gate.
         gate_waits,
         /// Blocks the ring refused.

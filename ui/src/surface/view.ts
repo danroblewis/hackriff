@@ -207,7 +207,10 @@ export class SurfaceView {
     const paneViews = this.panes.views(edgeNs, w, paneH)
       .map((v) => ({ ...v, rect: { ...v.rect, y: v.rect.y + mapH, h: Math.max(1, v.rect.h - traceH) } }));
     const mapRect: PaneRect | null = mapH > 0 ? { x: 0, y: 0, w, h: mapH } : null;
-    const mapView = mapRect ? this.minimap.view(mapRect, edgeNs) : null;
+    // `scales: false` (T-528): the map is another viewport onto the same surface and is drawn with
+    // the same ramp and the same range — but it is a viewport over the WHOLE surface, so it may not
+    // be what a viewport-measured range is measured over. See `Surface`'s `PaneView.scales`.
+    const mapView = mapRect ? { ...this.minimap.view(mapRect, edgeNs), scales: false } : null;
     const views = mapView ? [...paneViews, mapView] : paneViews;
 
     // 1. the data pass: one call, one context, one LRU, one ramp, one display range.

@@ -15,6 +15,8 @@ use hk_plugins::{
 use hk_stream::{BinaryRecord, RecordFlags};
 use serde_json::{Value, json};
 
+mod common;
+
 const DUMMY: &str = env!("CARGO_BIN_EXE_hk-dummy-plugin");
 const RATE: f64 = 250_000.0;
 
@@ -105,6 +107,8 @@ fn p3_orphaned_grandchild_does_not_hang_restart_or_shutdown() {
     )
     .unwrap();
     let mon = inst.monitor();
+    // Off the clock: see `common`.
+    common::wait_started(&mon);
     let t0 = Instant::now();
     wait(&mon, "crash loop", |s| s.state == PluginState::Failed);
     let restart_time = t0.elapsed();
@@ -146,6 +150,8 @@ fn p3b_stall_kill_of_a_wrapper_restarts_promptly() {
     )
     .unwrap();
     let mon = inst.monitor();
+    // Off the clock: see `common`.
+    common::wait_started(&mon);
     wait(&mon, "running", |s| s.state == PluginState::Running);
     let payload = [0u8; 4096];
     let t0 = Instant::now();
@@ -196,6 +202,8 @@ fn shutdown_with_a_live_grandchild_is_bounded() {
     )
     .unwrap();
     let mon = inst.monitor();
+    // Off the clock: see `common`.
+    common::wait_started(&mon);
     wait(&mon, "grandchild started", |_| {
         !grandchild_pids(&mon).is_empty()
     });

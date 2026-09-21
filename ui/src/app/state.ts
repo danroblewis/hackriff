@@ -2,7 +2,7 @@
 // actions) lives in its owning area's `slice.ts`, so panel tasks never edit this file. Every slice
 // is plain data from docs/api.md (or UI-only interaction state); no slice holds a derived signal
 // measurement computed in the browser. Actions are pure `(state) => patch` functions.
-import { captureInitial, type CaptureState } from "./capture/slice";
+import { captureInitial, type CaptureState } from "./centre/capture-slice";
 import { centreInitial, type CentreState } from "./centre/slice";
 import { inspectorInitial, type InspectorState } from "./decode/inspector-slice";
 import { decodeInitial, type DecodeState } from "./decode/slice";
@@ -12,7 +12,7 @@ import { reviewInitial, type ReviewState } from "./review/slice";
 import { parsePrefs, shellInitial, type Prefs, type ShellState } from "./shell-slice";
 
 export * from "./shell-slice";
-export * from "./capture/slice";
+export * from "./centre/capture-slice";
 export * from "./dock/slice";
 export * from "./explore/slice";
 export * from "./centre/slice";

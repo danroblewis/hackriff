@@ -13,11 +13,15 @@ import { ControlClient } from "../controls/client";
 import { h } from "../app/dom";
 import { takeToken } from "../app/net";
 import { fmtShare } from "./bootstrap";
+import {
+  autoContrastButton, loadRangeMode, pressAutoContrast, pressViewportScale, saveRangeMode,
+  viewportScaleButton, type ContrastButton,
+} from "./contrast";
 import { attachSurfaceInput } from "./input";
 import { legendEntries, rangeEntry, rangeLabel, swatchPixels, type LegendEntry } from "./legend";
 import { SurfacePreview, isBackpressure, probeSurface } from "./preview";
 import { loadShadowGain, shadowGainWheelHandler } from "./shadow-gain";
-import type { DisplayRange } from "./surface";
+import type { DisplayRange, RangeMode } from "./surface";
 
 const SWATCH_W = 54, SWATCH_H = 22;
 
@@ -130,22 +134,33 @@ async function main(): Promise<void> {
   // The one control that can make two zooms disagree about a colour, so it is a deliberate press and
   // it says which way round it is (T-470).
   const contrast = h("button", { type: "button", class: "sp-btn", "data-slot": "contrast" }) as HTMLButtonElement;
+  // T-528's second half, on this page too — the same three-mode state and the same pure presses as
+  // the app's Explore centre, from `./contrast.ts`. Two hosts with one rule; see that file's header.
+  const vscale = h("button", { type: "button", class: "sp-btn", "data-slot": "viewport-scale" }) as HTMLButtonElement;
+  const paint = (btn: HTMLButtonElement, b: ContrastButton) => {
+    btn.textContent = b.label;
+    btn.title = b.title;
+    btn.setAttribute("aria-pressed", String(b.pressed));
+  };
   const renderContrast = () => {
     const r = preview.range;
-    contrast.textContent = r.mode === "anchored" ? "Auto-contrast: off" : "Auto-contrast: on";
-    contrast.title = r.mode === "anchored"
-      ? "The display range is anchored to the region, so the same measured dB is the same colour at every zoom — at the cost of clipping outside it. Press to track what is on screen instead."
-      : "The display range tracks the tiles currently on screen: nothing clips, but the same signal changes colour as you navigate. Press to go back to the anchored range.";
-    contrast.setAttribute("aria-pressed", r.mode === "auto" ? "true" : "false");
+    paint(contrast, autoContrastButton(r.mode));
+    paint(vscale, viewportScaleButton(r.mode));
     showRange(r);
   };
-  contrast.addEventListener("click", () => {
-    preview.setAutoScale(preview.range.mode === "anchored");
+  const setMode = (mode: RangeMode) => {
+    preview.setRangeMode(mode);
+    saveRangeMode(mode);
     renderContrast();
-  });
+  };
+  contrast.addEventListener("click", () => setMode(pressAutoContrast(preview.range.mode)));
+  vscale.addEventListener("click", () => setMode(pressViewportScale(preview.range.mode)));
+  const remembered = loadRangeMode();
+  if (remembered !== "anchored") preview.setRangeMode(remembered);
   renderContrast();
   slot("actions").replaceChildren(
     contrast,
+    vscale,
     button("Fit to coverage", "Put the active pane back on the region the backend reported as observed.", () => preview.fitToCoverage()),
     button("Whole surface", "Zoom the active pane out to the device-available spectrum over the whole record horizon.", () => preview.fitToSurface()),
     button("Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved.", () => preview.split("columns")),
