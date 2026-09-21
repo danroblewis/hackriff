@@ -88,10 +88,7 @@ fn one_tile(p: &Pyramid, level: usize) -> (FreqRange, TimeRange) {
     let tb = T0.div_euclid(g.t_block_ns());
     (
         FreqRange::new(0.0, g.f_cell_hz * nf),
-        TimeRange::new(
-            ts(tb * g.t_block_ns()),
-            ts((tb + 1) * g.t_block_ns()),
-        ),
+        TimeRange::new(ts(tb * g.t_block_ns()), ts((tb + 1) * g.t_block_ns())),
     )
 }
 
@@ -322,7 +319,10 @@ fn committing_a_row_writes_nothing_and_a_tile_is_still_written_once() {
         "  {} rows committed into coarse nodes, {} tile writes, {files} tile files on disk",
         st.coarse_rows_folded, st.tiles_written
     );
-    assert!(st.coarse_rows_folded > 1000, "the run was too short to judge");
+    assert!(
+        st.coarse_rows_folded > 1000,
+        "the run was too short to judge"
+    );
     assert_eq!(
         st.tiles_written, files,
         "a tile was written more than once: a row commit must not write"
@@ -333,7 +333,10 @@ fn committing_a_row_writes_nothing_and_a_tile_is_still_written_once() {
         st.tiles_written,
         st.coarse_rows_folded
     );
-    assert_eq!(st.checkpoints_written, 0, "no checkpointing is configured here");
+    assert_eq!(
+        st.checkpoints_written, 0,
+        "no checkpointing is configured here"
+    );
 }
 
 /// Total frames each node holds over the whole run, per node — the quantity that says whether a

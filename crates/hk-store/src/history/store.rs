@@ -493,7 +493,8 @@ impl Pyramid {
 
     /// Zeroes [`Pyramid::source_tiles_read`], so one read can be counted on its own.
     pub fn reset_source_tiles_read(&self) {
-        self.source_tiles.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.source_tiles
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(super) fn count_source_tile(&self) {
@@ -989,7 +990,15 @@ impl Pyramid {
     /// true down a frequency chain: a node's row is filled by `f_factor` producer tiles, and if
     /// each arrival re-folded the whole row upwards the level above it would count the earlier
     /// arrivals again. Carrying the footprint through the cascade folds only what just changed.
-    fn fold_row_live(&mut self, level: usize, fb: i64, tb: i64, t: usize, f_lo: usize, f_hi: usize) {
+    fn fold_row_live(
+        &mut self,
+        level: usize,
+        fb: i64,
+        tb: i64,
+        t: usize,
+        f_lo: usize,
+        f_hi: usize,
+    ) {
         self.fold_row_from(level, fb, tb, t, f_lo, f_hi, true);
     }
 
@@ -1032,10 +1041,7 @@ impl Pyramid {
                 if self.sealed[up].contains_key(&(ptb, pfb)) {
                     continue;
                 }
-                let (ff, tf) = (
-                    self.geom.levels[up].f_factor,
-                    self.geom.levels[up].t_factor,
-                );
+                let (ff, tf) = (self.geom.levels[up].f_factor, self.geom.levels[up].t_factor);
                 out.clear();
                 let parent = open_tile(
                     &mut self.open[up],

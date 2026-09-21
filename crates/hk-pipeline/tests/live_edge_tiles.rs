@@ -522,7 +522,8 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     let edge_bound: f64 = (0..g.n_levels())
         .map(|l| {
             let bw = g.levels[l].f_cell_hz * f64::from(VIEW_F_CELLS_PER_BLOCK);
-            (LIVE_EDGE_HZ / bw).ceil() * (nf * g.levels[l].nt * BYTES_PER_CELL + nf * bins * 4) as f64
+            (LIVE_EDGE_HZ / bw).ceil()
+                * (nf * g.levels[l].nt * BYTES_PER_CELL + nf * bins * 4) as f64
         })
         .sum();
     eprintln!(

@@ -903,8 +903,8 @@ impl Tile {
         }
         let tp = tp as usize;
         // This row's footprint in **this** tile's frequency cells.
-        let p_lo = ((child.f_cell0 + f_lo as i64).div_euclid(m) - self.f_cell0).clamp(0, self.nf as i64)
-            as usize;
+        let p_lo = ((child.f_cell0 + f_lo as i64).div_euclid(m) - self.f_cell0)
+            .clamp(0, self.nf as i64) as usize;
         let p_hi = ((child.f_cell0 + f_hi as i64 - 1).div_euclid(m) + 1 - self.f_cell0)
             .clamp(0, self.nf as i64) as usize;
         // A row earlier than this one can receive nothing further: producer rows close in

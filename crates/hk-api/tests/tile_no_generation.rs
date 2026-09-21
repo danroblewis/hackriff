@@ -116,7 +116,9 @@ fn server(dir: &std::path::Path, live: bool) -> ApiState {
 
 /// The addresses one screen asks for: every `(level_f, level_t)` node over the run's own extent.
 fn viewport() -> Vec<(usize, usize)> {
-    (0..4).flat_map(|lf| (0..4).map(move |lt| (lf, lt))).collect()
+    (0..4)
+        .flat_map(|lf| (0..4).map(move |lt| (lf, lt)))
+        .collect()
 }
 
 fn params(lf: usize, lt: usize) -> Vec<(String, String)> {
@@ -243,7 +245,8 @@ fn a_viewport_of_tile_requests_generates_nothing_and_stays_inside_the_response_c
             serde_json::json!(0),
             "the never-tuned address held data: it is not the case this cap is about"
         );
-        coverage_largest = coverage_largest.max(serde_json::to_string(&v["coverage"]).unwrap().len());
+        coverage_largest =
+            coverage_largest.max(serde_json::to_string(&v["coverage"]).unwrap().len());
         empty_largest = empty_largest.max(serde_json::to_string(&v).unwrap().len());
         empty_checked += 1;
     }
