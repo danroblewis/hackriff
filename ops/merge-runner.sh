@@ -16,9 +16,16 @@ DONELOG=$S/merge-done.txt
 LOG=$S/merge-runner.log
 # T-534: per-branch gate-attempt ledger, "<branch> <tip-sha> <attempts>" one per line.
 ATTEMPTS=$S/merge-attempts.txt
+# T-543: one JSON line per LANDED ticket - {ticket, branch, first_commit_ts, merge_ts,
+# land_minutes, gate_attempts}. `merge-done.txt` records THAT a branch merged; this records
+# what it COST, which is the number T-543 exists to watch. Written next to the gate's own
+# per-run timings ($HACKRIFF_OPS/gate-timings.jsonl) so `just cycle-time` reads one directory.
+# No database and no daemon: append-only text, and `gate_attempts` is read from the ledger
+# this script already keeps rather than counted a second way.
+LANDED=$S/landed.jsonl
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-2}
 DRY_RUN=${DRY_RUN:-0}
-touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS"
+touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS" "$LANDED"
 
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 notify_coordinator(){ tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
@@ -41,6 +48,24 @@ record_attempt(){ # branch sha
   printf '%s %s %s\n' "$1" "$2" "$n" >> "$ATTEMPTS.tmp"; mv "$ATTEMPTS.tmp" "$ATTEMPTS"
 }
 clear_attempts(){ grep -vE "^$1 " "$ATTEMPTS" > "$ATTEMPTS.tmp" 2>/dev/null || true; mv "$ATTEMPTS.tmp" "$ATTEMPTS"; }
+
+# T-543: record what a landed ticket cost. Called BEFORE clear_attempts, so gate_attempts is
+# the count that branch actually spent. first_commit_ts comes from the merge commit's second
+# parent (the branch tip), which survives the branch and its worktree being deleted - the
+# reason `just cycle-time` could not report commit->merge for already-merged work until now.
+record_landed(){ # branch
+  local b=$1 t merge_sha first now land
+  t=$(ticket_of "$b")
+  # The merge commit NAMING THIS BRANCH, not HEAD: in a bulk batch HEAD is the last merge,
+  # so HEAD^2 would attribute every branch's commits to the last one merged.
+  merge_sha=$(git -C "$REPO" log HEAD --merges --format=%H --fixed-strings --grep "$b" -n 1 2>/dev/null)
+  [ -z "$merge_sha" ] && merge_sha=$(git -C "$REPO" rev-parse HEAD 2>/dev/null)
+  first=$(git -C "$REPO" log --format=%ct "${merge_sha}^1..${merge_sha}^2" 2>/dev/null | tail -1)
+  now=$(date +%s)
+  if [ -n "${first:-}" ]; then land=$(( (now - first) / 60 )); else first=null; land=null; fi
+  printf '{"ticket":"%s","branch":"%s","first_commit_ts":%s,"merge_ts":%s,"land_minutes":%s,"gate_attempts":%s,"merge":"%s"}\n' \
+    "$t" "$b" "$first" "$now" "$land" "$(( $(attempts_of "$b") + 1 ))" "$merge_sha" >> "$LANDED"
+}
 
 # returns: 0 = handled (merged/skipped/flagged), 1 = transient (requeue + wait)
 process(){
@@ -78,6 +103,7 @@ process(){
   if just gate-merge >>"$LOG" 2>&1; then
     git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1
     log "MERGED $branch ✓"
+    record_landed "$branch"
     clear_attempts "$branch"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MERGED" >> "$DONELOG"
     local wt; wt=$(worktree_of "$branch")
@@ -113,39 +139,88 @@ ready_filter(){
   done
 }
 
-# BULK: octopus-merge all branches, gate ONCE, commit only if green.
+# BULK: merge every queued branch, gate ONCE over the result, keep it only if green.
 # 0 = all merged; 1 = caller should fall back to merging each individually.
+#
+# T-543 MEASURED WHY THIS MATTERS, AND WHY IT NEVER WORKED. `just cycle-time` over this
+# very log: gate median 21.4 min, but QUEUE WAIT (a branch's last commit -> its gate)
+# median 119.7 min, p90 452 min, and commit->merge median 272.6 min. The gate is about 8 %
+# of a ticket's cycle; the queue behind N SERIAL gates is most of the rest. Bulk is
+# therefore the single biggest lever available, and it had never once fired:
+#
+#   8 BULK attempts in the log, 0 merges. Every one "BULK conflict across branches",
+#   and the attempt of 09-20 09:43 left a `git merge-octopus` wedged for over ten hours.
+#
+# The cause is `git merge A B C…` with three or more heads, which selects the OCTOPUS
+# strategy. Octopus refuses outright any path that more than one head modified — it does
+# not attempt a content merge at all. Nearly every branch here touches `docs/tasks.yaml`,
+# so octopus was guaranteed to refuse, every time, and the "fall back to individual" line
+# was not a rare safety net but the only path this code ever took.
+#
+# So: merge the branches ONE AT A TIME (two heads each, ordinary recursive merge, which
+# does resolve a shared `tasks.yaml`), then run ONE gate over the accumulated result. The
+# gate subject is `--base <pre-batch sha>`, i.e. exactly the commits this batch added and
+# nothing else. On red the whole batch is rewound to that sha and the caller isolates by
+# gating branches individually, which is the behaviour that was intended all along.
+#
+# Rewinding main with `reset --hard` is safe here and only here: this runner is the sole
+# merger to main, nothing has been pushed, and the batch is reconstructible from the
+# branches it merged. It is still guarded — the rewind happens only if HEAD is still the
+# commit this function created, so a concurrent commit is never discarded.
 try_bulk(){
-  local branches=("$@") tickets="" b wt
+  local branches=("$@") tickets="" b wt base after rc
   for b in "${branches[@]}"; do tickets="$tickets $(ticket_of "$b")"; done
   tickets="${tickets# }"
   log "BULK attempt (${#branches[@]}): ${branches[*]}"
   if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN would bulk-merge: $tickets"; return 0; fi
-  if ! git -C "$REPO" merge --no-commit "${branches[@]}" >>"$LOG" 2>&1; then
-    git -C "$REPO" merge --abort 2>/dev/null || true
-    log "BULK conflict across branches -> fall back to individual"; return 1
-  fi
-  log "BULK gate (just gate-merge over the combined index; may take 15-25 min)…"
-  if ( cd "$REPO" && just gate-merge ) >>"$LOG" 2>&1; then
-    git -C "$REPO" commit -m "Merge $tickets: bulk (${#branches[@]} branches), gate passed (automated, no AI)" >>"$LOG" 2>&1
+  base=$(git -C "$REPO" rev-parse HEAD)
+  for b in "${branches[@]}"; do
+    if ! git -C "$REPO" merge --no-ff -m "Merge $(ticket_of "$b") ($b): batch of ${#branches[@]}, gated together (automated, no AI)" "$b" >>"$LOG" 2>&1; then
+      git -C "$REPO" merge --abort 2>/dev/null || true
+      log "BULK conflict merging $b -> rewind to $base and fall back to individual"
+      git -C "$REPO" reset --hard "$base" >>"$LOG" 2>&1
+      return 1
+    fi
+  done
+  after=$(git -C "$REPO" rev-parse HEAD)
+  log "BULK gate (just gate --base $base over ${#branches[@]} branches; may take 15-25 min)…"
+  ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
+  if [ "$rc" -eq 0 ]; then
     log "BULK MERGED ✓ $tickets"
     for b in "${branches[@]}"; do
       echo "$(date '+%m-%d %H:%M')  $b  $(ticket_of "$b")  MERGED(bulk)" >> "$DONELOG"
+      record_landed "$b"
+      clear_attempts "$b"
       wt=$(worktree_of "$b")
       [ -n "$wt" ] && [ "$wt" != "$REPO" ] && git -C "$REPO" worktree remove "$wt" --force 2>>"$LOG" && log "worktree removed: $wt"
     done
     return 0
   fi
-  git -C "$REPO" merge --abort 2>/dev/null || true
-  log "BULK gate FAILED -> isolate by merging each individually"; return 1
+  if [ "$(git -C "$REPO" rev-parse HEAD)" = "$after" ]; then
+    git -C "$REPO" reset --hard "$base" >>"$LOG" 2>&1
+    log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
+  else
+    log "BULK gate FAILED but HEAD moved since the batch - NOT rewinding; needs a person"
+    echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  BULK_FAIL_HEAD_MOVED" >> "$NEEDS"
+  fi
+  return 1
 }
 
+SEEN_QUEUED=""   # branches already logged as QUEUED this run (T-543)
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 while true; do
   # read every queued (non-comment) branch, in order
   # NOTE: strip whitespace PER LINE — a plain `tr -d '[:space:]'` deletes the newlines
   # too and glues every queued branch into one unmergeable name (observed 2026-09-20).
   queued=$(grep -vE '^\s*(#|$)' "$QUEUE" 2>/dev/null | awk '{gsub(/[[:space:]]/,""); if ($0 != "") print}' || true)
+  # T-543: log the moment a branch is first SEEN in the queue. `MERGE start` already says
+  # when its gate began; the gap between the two is the queue wait, which `just cycle-time`
+  # measured at a median of 119.7 min against a 21.4 min gate. Without this line that gap
+  # has to be inferred from the branch's last commit, which also counts the time an agent
+  # spent finishing up. One line, and only ever the first sighting per branch.
+  for qb in $queued; do
+    case " $SEEN_QUEUED " in *" $qb "*) ;; *) SEEN_QUEUED="$SEEN_QUEUED $qb"; log "QUEUED $qb";; esac
+  done
   if [ -n "$queued" ] && main_ready; then
     # keep only branches that still exist and are ahead of main
     ready=$(ready_filter $queued)
