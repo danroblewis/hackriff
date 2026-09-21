@@ -18327,7 +18327,7 @@ tasks:
   - id: T-588
     milestone: MLIVE
     title: The 892.5 MHz signal vanishes on zoom+retune - does the backend have data the canvas never draws?
-    status: todo
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     model: opus
@@ -18357,6 +18357,59 @@ tasks:
       ASSERT WITH COUNTS AND COVERAGE STATES, NOT WALL-CLOCK (user, 2026-09-21).
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      VERDICT: NOT A RENDER BUG. The backend does NOT have data the canvas fails to draw at a
+      retuned band edge. Handed to T-586 (cause 1: LO-relative / band-edge artefact).
+      MEASURED, not inferred - `hk serve --device mock:ism_915M_10M...` on 127.0.0.1:8911 (mock SDR
+      behind the real device interface; the live HackRF was never touched), retuned through
+      `POST /api/control/window` and interrogated via /api/coverage, /api/observations and
+      /api/tiles:
+        - /api/coverage over 908-922 MHz at 100 kHz cells: unobserved 908.000-910.000,
+          OBSERVED 910.000-920.000, unobserved 920.000-922.000 - the tuned band to the cell, both
+          edges included. The fold takes every cell a span TOUCHES (floor/ceil in
+          `hk_store::coverage::fold`), so it errs generous at an edge, never grey.
+        - After 915 MHz/10 Msps -> 919 MHz/2 Msps, the new band 918-920 MHz is served immediately:
+          data rows and coverage rows both reach the live edge (latest row t-1.3 s),
+          `short_circuit.applied = false`, ZERO cells holding a measurement drawn grey.
+        - Full sweep, 30 tiles over 908-922 MHz x 10 min = 1 966 080 cells: 335 748 data+observed,
+          1212 data+unobserved, 57 748 observed-with-no-level (the honest AWAITING state), 719 404
+          unobserved+no data. ALL 1212 mismatches are the 25 kHz DC notch at the tuned centre.
+          NONE is at a band edge.
+        - The only band-edge asymmetry in the record is half an analysis bin
+          (`WindowRule::window`: usable.hi = centre + fs/2 - df/2, 2.4 kHz at 10 Msps), and the
+          fold's ceil covers it, so it can never grey a cell.
+        - The symptom DID reproduce, on the artefact side: at 915/10 Msps the strongest feature in
+          918.4-920.0 MHz was 919.99375 MHz (-74.8 dB, 14 dB above its neighbours) - i.e. +fs/2,
+          the band edge - with its mirror at 910.025 MHz. After the retune it is gone, while real
+          emitters keep their absolute frequency. That is the LO-relative signature T-586 exists to
+          measure, reproduced here as a band-edge feature that vanishes on retune.
+      GUARD LANDED: `hk-api::tiles::tests::a_retuned_windows_band_edge_never_greys_a_cell_the_store_
+      has_a_measurement_for`. Two eras (wide window, then a zoom+retune whose upper edge lands a
+      QUARTER OF A CELL past a cell boundary), frames ingested only where the radio was tuned so
+      "holds a measurement" and "was sampled" are the same set by construction. Asserts (1) zero of
+      the measured cells read `unobserved`, counted, with a floor on how many cells were judged so
+      it cannot pass on zero-of-zero; (2) the cell holding the retuned window's own edge reads
+      `observed`; (3) cells past that edge stay grey AND hold nothing, so (1) cannot pass by
+      observing everything. RED proof: mutating the fold's high edge from `ceil` to `floor` - the
+      off-by-one this ticket went looking for - fails (2) with
+      `left: "unobserved", right: "observed"` at cell 48 / 446.7016 MHz.
+      TESTS: `cargo test -p hk-api --lib tiles::` 19 passed, 0 failed. `just precheck hk-api`.
+      FOLLOW-UPS SURFACED, NOT CHASED (both are "data exists, drawn grey", neither is band-edge):
+        1. THE DC NOTCH GOES GREY ONCE THE IQ RING SEGMENT AGES OUT. `ObservedWindow.dc_excluded`
+           punches a 25 kHz hole in the observation log's coverage, but the history pyramid keeps
+           rows there. Inside the ring's retention the ring journal's full-band spans cover it;
+           past the horizon nothing does, and a 25 kHz stripe down the middle of every band the
+           radio sat on turns grey - "never looked" over rows we hold. Measured: 1212 cells.
+           T-441's rule says three states, three marks; this is a fourth thing painted as grey.
+        2. WITH THE IQ RING REFUSED, THE LIVE EDGE IS GREY FOR UP TO A DWELL PERIOD (~60 s).
+           The observation log only gains a record when a dwell SEALS, so with `iq_buffer: None`
+           coverage lags the live edge by the dwell period: measured 18 rows (18 s) of `max_db`
+           with `state: unobserved` immediately after a retune, growing to the seal. The ring was
+           refused here because the disk was at 100 % (`needs 134217728 bytes above the
+           8589934592-byte free-space floor and 4789297152 bytes are free`) - which is a live
+           condition on this machine, so it is reachable in the field, not a lab-only state.
+           (The staging server on :8899 had allocated 6.6 GiB of ring, so this is NOT the user's
+           892.5 MHz report; re-measured with the ring ON, on a RAM disk, and it vanishes.)
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
