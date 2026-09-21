@@ -47,6 +47,41 @@ fn authed(addr: SocketAddr, stream_id: &str) -> Result<Ws, tungstenite::Error> {
     connect(addr, &format!("/ws/{stream_id}?token={TOKEN}"))
 }
 
+/// A `/ws/…` handshake that is expected to be **refused**, read to EOF: `(status, body)`.
+///
+/// Not `tungstenite::connect`. On a non-101 it fills the error response's body with `tail` — the
+/// bytes that happened to be in its read buffer alongside the status line — and the server writes
+/// the head and the JSON body in two `write_all` calls, so whether the body is there at all
+/// depends on whether those two writes landed in one TCP read. On a quiet machine they do; under
+/// a loaded gate they do not, and `body` comes back **empty** while the status is the expected
+/// one (T-602: the whole flake, and nothing to do with the re-plumb wait it appeared to be about).
+/// The server sends `Connection: close` and closes, so reading to EOF is complete by construction.
+fn refusal(addr: SocketAddr, stream_id: &str) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    write!(
+        s,
+        "GET /ws/{stream_id}?token={TOKEN} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n\
+         Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).unwrap();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("no complete HTTP response: {text:?}"));
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or_else(|| panic!("no status in {head:?}"));
+    assert_ne!(status, 101, "expected a refusal, got an upgrade");
+    (status, body.to_string())
+}
+
 fn status_of(r: Result<Ws, tungstenite::Error>) -> u16 {
     match r {
         Err(tungstenite::Error::Http(resp)) => resp.status().as_u16(),
@@ -752,7 +787,15 @@ fn a_handshake_between_windows_waits_for_the_successor_and_never_says_gone() {
     // (1) The gap opens: the segment's publisher is finished, saying a successor is coming.
     first.finish_between_windows();
     let knock = thread::spawn(move || authed(addr, "spectrum/live"));
-    thread::sleep(Duration::from_millis(250));
+    // The ordering this test exists to protect, waited for as an *event*: the handshake has
+    // reached the gap and parked waiting for the successor, and only then is the successor
+    // offered. Sleeping a fixed 250 ms instead left it to the scheduler whether the knock had got
+    // that far — on a loaded machine it may not have, and the test then silently exercised a
+    // plain attach to an already-live publisher, proving nothing about a gap (T-602).
+    wait_for(
+        "the handshake to park in the gap waiting for a successor",
+        || registry.successor_waits_entered() >= 1,
+    );
     let mut header = spectrum_header("spectrum/live", ContentClass::Unrestricted, 30.0, bins);
     header.center_hz = Some(101.8e6);
     let second = Publisher::new(header, PublisherConfig::default()).unwrap();
@@ -771,24 +814,21 @@ fn a_handshake_between_windows_waits_for_the_successor_and_never_says_gone() {
     );
     drop(ws);
 
-    // (2) A gap whose successor never arrives is still not an end: `503`, after a bounded wait.
+    // (2) A gap whose successor never arrives is still not an end: `503`, after the handshake has
+    // waited for the successor it was promised.
+    let waits_before = registry.successor_waits_entered();
     second.finish_between_windows();
-    let started = Instant::now();
-    let refused = authed(addr, "spectrum/live");
-    let (status, body) = match refused {
-        Err(tungstenite::Error::Http(r)) => (
-            r.status().as_u16(),
-            String::from_utf8_lossy(r.body().as_deref().unwrap_or(&[])).into_owned(),
-        ),
-        Err(e) => panic!("expected an HTTP refusal, got {e}"),
-        Ok(_) => panic!("expected a refusal: no successor was ever offered"),
-    };
+    let (status, body) = refusal(addr, "spectrum/live");
     assert_eq!(status, 503, "not 410: the run has not ended, {body}");
     assert!(body.contains("replumbing"), "{body}");
-    assert!(
-        started.elapsed() >= Duration::from_millis(1500),
-        "it refused at once instead of waiting for the successor first: {:?}",
-        started.elapsed()
+    // *Why* it is a wait and not a refusal, stated as ordering rather than as elapsed time: the
+    // 503 is only reachable through a park in `wait_for_offer_after` that no offer ever ended, so
+    // a handshake that refused at once leaves this count where it was. Timing it instead made the
+    // answer a function of the machine.
+    assert_eq!(
+        registry.successor_waits_entered(),
+        waits_before + 1,
+        "it refused at once instead of waiting for the successor first"
     );
 
     // (3) …and a publisher that really finished says so at once. A gap and an end are different
@@ -800,16 +840,16 @@ fn a_handshake_between_windows_waits_for_the_successor_and_never_says_gone() {
     .unwrap();
     registry.register(third.header(), third.handle());
     third.finish();
-    let started = Instant::now();
+    let waits_before = registry.successor_waits_entered();
     assert_eq!(
         status_of(authed(addr, "spectrum/live")),
         410,
         "a finished stream still says it is gone"
     );
-    assert!(
-        started.elapsed() < Duration::from_millis(1000),
-        "the end was treated as a gap and waited out: {:?}",
-        started.elapsed()
+    assert_eq!(
+        registry.successor_waits_entered(),
+        waits_before,
+        "the end was treated as a gap and waited out for a successor that was never promised"
     );
 }
 

@@ -194,7 +194,9 @@ test("T-476: the control has a row on EVERY pane and none on the map, and the ch
   // node test has no document and "a control that renders is not a control that is reachable".
   const st = (id: string): PaneStatus => ({
     id, rect: null, following: true, device: "any", levelF: 0, levelT: 0, cellHz: 6250, cellS: 1,
-    levelLabel: "6.25 kHz × 1.0 s cells (level 0/0)", timeLabel: "LIVE", freqLabel: "100.800 MHz ± 500 kHz",
+    levelLabel: "6.25 kHz × 1.0 s cells (detail tier, level 0/0)", tier: "detail",
+    tierLabel: "detail tier: the live chain's own lattice, at the resolution the front end measured.",
+    timeLabel: "LIVE", freqLabel: "100.800 MHz ± 500 kHz",
     tiles: 1, fallbacks: 0, pending: 0, differsFrom: [],
   });
   const asked: string[] = [];

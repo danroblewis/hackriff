@@ -4050,7 +4050,7 @@ tasks:
     milestone: M3
     title: 'Verifier psk-qam ALRT is monotone in constellation size on every input:
       it re-ranks 8psk -> qam64 on 100%% of bpsk and qpsk snippets'
-    status: in-progress
+    status: done
     priority: normal
     deps: []
     parallel_group: M3A
@@ -4861,7 +4861,7 @@ tasks:
   - id: T-273
     milestone: M4
     title: 'M4 trunking load index (metadata only) over the API'
-    status: in-progress
+    status: done
     branch: task-t273
     priority: normal
     deps:
@@ -6534,7 +6534,7 @@ tasks:
     milestone: M2-hardening
     title: characterise uses emitter.count as a change detector, so an entry that just absorbed a partner
       by a discounted merge can skip re-characterisation
-    status: in-progress
+    status: done
     priority: low
     deps:
     - T-329
@@ -15129,7 +15129,8 @@ tasks:
   - id: T-501
     milestone: MLIVE
     title: REDO T-484 - the FFT-resolution fidelity fix, gated by the canvas e2e that would have caught its tile breakage
-    status: todo
+    status: done
+    branch: task-t505-v2
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15217,10 +15218,20 @@ tasks:
       has NO RECORDED SECOND OBSERVATION behind it. The tile explosion is real and independently
       fatal regardless, but the attribution chain is worth knowing.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE and REBASED 2026-09-21 on `task-t505-v2`, on top of T-505. canvas_fidelity 5/5 with
+      T-483's four #[ignore]s deleted; the floor is asserted field for field against real pyramids
+      rather than written down. THE REBASE FOUND A COLLISION THE ORIGINAL COULD NOT HAVE: T-489
+      (landed after this branch was cut) skips the display FFT while nothing is subscribed, on the
+      ground that no STORED product consumes those rows - which this ticket falsifies, because the
+      canvas's finest tier IS that row. Unfixed it leaves a permanent hole in recorded history for
+      every interval nobody watched, indistinguishable from grey. `Output::watched` now counts the
+      view lattice as a watcher, so T-489's saving survives only for a run with no view lattice.
+      That is a REAL CPU COST (T-489 measured ~9 %) and it is accepted here deliberately.
   - id: T-505
     milestone: MLIVE
     title: One lattice cannot be both the display stream's own bin and device-wide over the horizon - give wide-and-long viewports a coarse tier
-    status: in-progress
+    status: done
+    branch: task-t505-v2
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15273,6 +15284,11 @@ tasks:
       is a gap in the harness, not only in this pipeline, and it generalises: several e2e
       assertions here are implicitly scoped to a young server.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE and REBASED 2026-09-21 onto `task-t505-v2`, together with T-501 and T-532 (they share
+      their conflict files, so one resolution). `scheme=overview` and `tierFor` land as written;
+      the client picks by VIEWPORT_TILE_BUDGET, each pane reports its tier, and on the shipped
+      floor nothing moves. The e2e failure both branches died on is GONE on current main and did
+      not need resolving.
   - id: T-506
     milestone: MCANVAS
     title: Remove the Capture panel - but first move the IQ horizon, the retention bound and the capture clock onto the canvas
@@ -16194,7 +16210,7 @@ tasks:
   - id: T-541
     milestone: MLIVE
     title: Degrade, don't crash - a device or retune error must never take the server down or look dead to a supervisor
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -16649,7 +16665,7 @@ tasks:
   - id: T-559
     milestone: M2-hardening
     title: The 4-builder concurrency cap counts cargo builds but not the hk serve processes agents leave running
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CI
     model: sonnet
@@ -17050,7 +17066,7 @@ tasks:
   - id: T-549
     milestone: MAUTO
     title: 'MAUTO-DESIGN: the search trace - what the engine tried, what it pruned and why, so the decision tree is inspectable rather than a black box'
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -17113,7 +17129,7 @@ tasks:
   - id: T-550
     milestone: MAUTO
     title: 'MAUTO-DESIGN: how an unknown stays unknown - the negative-result contract when the search finds nothing, and the guard against a search that always finds something'
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -17337,7 +17353,7 @@ tasks:
   - id: T-554
     milestone: MAUTO
     title: 'DECODER COVERAGE: per-family disposition audit - for each GNU Radio decoder family, decide native recipe vs wrapped plugin vs out of reach, and produce the hk-blocks catalogue gap list'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -17398,6 +17414,24 @@ tasks:
       DSP job - and that route needs no GPLv3 reference reading at all, which moots the licence question for
       this family. Establish that before scoping the work, not after.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE 2026-09-21 on branch task-t554. The audit is docs/18 sections 6-9: 58 GNU Radio decoder
+      families, one disposition each - 36 native recipe (11 needing no new blocks, 5 of those already
+      shipped), 8 wrapped plugin, 8 out of reach, 6 unknown-and-marked, plus 2 sub-questions that are
+      cheap checks rather than research. GNSS excluded by the ADR-0018 carve-out.
+      TOP FIVE CATALOGUE GAPS by families unlocked: `psk_demod` 11, `descramble` 10, `viterbi` 10,
+      `reed_solomon` 8, `mlevel_slicer` 5. Filed as T-606 (the ADR-0011 amendment plus the one real
+      contract question), T-607, T-608, T-609, T-610, T-611, T-612, T-613. No block implemented, no
+      ADR rewritten, no ADR status changed.
+      THREE FINDINGS WORTH CARRYING FORWARD:
+      1. The ticket's premise is CONFIRMED - M-14 is too narrow. Eight families need PSK + Viterbi +
+         Reed-Solomon together and none of the eight gets past `demodulated` with only the first.
+      2. liquid-dsp is DESIGNATED IN ADR-0010 BUT NOT LINKED BY ANY CRATE (`grep liquid
+         crates/*/Cargo.toml` is empty). "It is only an adapter job" was an untested claim; T-607
+         tests it, and whichever block goes first otherwise pays silently for landing the FFI.
+      3. OFDM is the audit's sharpest inversion: it looks like the biggest unlock and is the
+         smallest. The front end takes Wi-Fi/LTE/5G/DroneID, gr-dtv's real receive chains make
+         DVB-T/ATSC/ISDB-T plugin jobs, nrsc5 takes HD Radio - ONE clean native family survives
+         (DAB+, 1.536 MHz), so an OFDM investment must be argued as "for DAB+".
   - id: T-555
     milestone: MAUTO
     title: 'DECISION (user): the reference rule - what reading GPLv3 decoder source to understand an algorithm permits, and where independent reimplementation stops being independent'
@@ -18024,7 +18058,7 @@ tasks:
   - id: T-571
     milestone: MLIVE
     title: Coarse view-lattice tiles are folded ON DEMAND at read time - up to 1024 producer tiles per tile - instead of maintained live
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -18584,26 +18618,27 @@ tasks:
     core_interface: true
     model: opus
     effort: medium
-    depends_on: [T-571]
+    depends_on: [T-571, T-572]
     use_cases: [AWARE-011]
     acceptance: |
-      FILED BY T-571, WHICH MEASURED IT. `Pyramid::fold_row_live` propagates a row to the level
-      above only when that level COMMITS - which is the "commits every N" rule and is what makes
-      the fold exactly-once - so a chain of in-progress rows compounds: node (i, j) trails the
-      finest closed row by up to 2^j - 1 of them, plus level 0's own still-open column. Measured
-      on the 4x4 test lattice at 1, 2 and 4 rows for level_t 1, 2 and 3; at the shipped four time
-      levels and a 1 s cell that is up to 7 s at level_t = 3.
-      Node (0, 0) - the live edge itself - is NOT affected: a direct level-0 read stands in for
-      its open column with `column_preview`. The cells are correct throughout; a partial row reads
-      as fewer observed seconds, never as wrong values. The on-demand fold it replaced had no such
-      lag, because it folded open producers on every read.
-      THE DECISION TO MAKE: whether a zoomed-out pane should see a node's in-progress row, the way
-      level 0 sees its open column. It is a product call, not an oversight - showing it means a
-      coarse cell that changes under the viewer as its remaining producer rows land. If the answer
-      is yes, the mechanism already exists (`Tile::row_pending` plus a `column_preview`-shaped
-      read); if no, the canvas should say what it is showing rather than quietly trailing.
-      Assert with COUNTS (a node's newest populated row against level 0's newest closed row),
-      never a wall-clock budget.
+      Filed 2026-09-21 from the user's tile-perf review (their S6; the review's R3).
+      DO THIS AFTER T-571 AND T-572, NOT BEFORE - the review is explicit that reworking the cap
+      first "just moves contention". This ticket exists so the dependency is recorded, not so it
+      is started now.
+      The history store is behind ONE mutex; concurrent tile reads serialise on it and compete
+      with ingest (`tiles.rs:193-202`). The route caps concurrency at TILE_MAX_IN_FLIGHT = 4 and
+      returns 503 above it; the client HALVES its operating limit on any 503 (AIMD,
+      `tilecache.ts:1243-1263`), so a couple of slow coarse tiles drop the whole fill to 1-2
+      in-flight. T-450 measured the consequence: 26 tiles resident against 17 268 CANCELLED in
+      75 s. (T-539, now landed, fixed the half that never recovered the cap on a still view.)
+      Once reads are cheap, consider a read-mostly snapshot / RwLock or per-scheme locks so the
+      cap can rise above 4. Measure the contention before and after rather than assuming it moved.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): concurrent readers admitted without
+      a 503 for a viewport of N tiles; 503s issued during a steady-state fill is zero; cancelled-
+      to-resident ratio for one screen stays under a stated bound. A test that counts 0 of 0
+      requests is vacuous - report what each run actually exercised.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-584
     milestone: MLIVE
     title: Late-path frames reach level 0 only and are invisible to every coarse node under coarse_live
@@ -18688,6 +18723,7 @@ tasks:
   - id: T-582
     milestone: M2-hardening
     title: Every pair of branches that files a ticket conflicts on docs/tasks.yaml's tail
+    status: done
     status: in-progress
     priority: normal
     parallel_group: OPS
@@ -18878,7 +18914,7 @@ tasks:
   - id: T-587
     milestone: M2-hardening
     title: An artefact reads as a LABELLED artefact in the UI - DC spike, image of X, IM3 product - not as a mystery signal
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     model: sonnet
@@ -19142,28 +19178,31 @@ tasks:
     parallel_group: PIPE
     core_interface: true
     model: opus
-    effort: medium
-    depends_on: []
+    effort: high
+    depends_on: [T-586]
     use_cases: [AWARE-011]
     acceptance: |
-      MEASURED BY T-588 while clearing the user's 892.5 MHz report: over a sweep of 1 966 080 cells,
-      1212 cells held a measurement and read `unobserved` - and ALL 1212 are the 25 kHz DC notch at
-      the tuned centre. None at a band edge.
-      `ObservedWindow.dc_excluded` punches a 25 kHz hole in the observation log's coverage while the
-      history pyramid KEEPS ROWS THERE. Inside the IQ ring's retention the ring journal's full-band
-      spans cover the hole; past the ring horizon nothing does, so a 25 kHz stripe down the middle
-      of every band the radio ever sat on turns grey - "we never looked", painted over rows we hold.
-      BOTH HALVES OF THE INVARIANT BREAK AT ONCE: "whenever data exists for that window it must be
-      shown", and "grey = genuinely unobserved". T-441 says three states, three distinct marks; the
-      DC notch is a FOURTH thing wearing the third one's mark. And it is a genuinely different
-      claim - a region deliberately excluded from measurement is useful to tell the user, just not
-      by calling it unobserved.
-      Give the notch its own mark rather than making the observation log lie in the other direction.
-      The ring-journal cover is why this went unseen: it is invisible for the whole ring retention
-      and appears only in older history.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): cells holding a measurement that read
-      unobserved past the ring horizon is ZERO, counted, WITH A FLOOR on how many cells were judged
-      so it cannot pass on zero-of-zero. T-588's guard in `crates/hk-api/src/tiles.rs` is the model.
+      FOUND BY T-586, and it is the half that actually fixes the user's 2026-09-21 field report.
+      T-586 built the cross-centre classifier and proved it works: `RetuneSlope::apply` resolves a
+      +370 kHz LO-relative spur across three centres and labels it. But the flags are COMPUTED AND
+      NEVER WRITTEN BACK, so the inventory still lists that one spur as THREE separate emitters at
+      three different absolute frequencies - which is exactly what the user saw.
+      T-586 also measured why the single-capture flaggers cannot cover this: they caught the DC
+      family (ref-harmonic, dc, dc) and caught the +370 kHz spur NOT AT ALL. Three detections, three
+      absolute frequencies, each individually indistinguishable from a real emission. Only the
+      cross-centre relationship separates them, which is the whole point of retune diversity.
+      Wire the verdict into the survey/scheduler path so the record is load-bearing: a detection
+      resolved as LO-relative carries that on the stored row, and the inventory merges the three
+      sightings into one artefact rather than minting three emitters.
+      MIND THE SIGNAL MODEL WHILE DOING IT. An artefact is still a time-frequency region with a
+      real extent, and "this is LO-relative" is a claim that can be REVOKED by later evidence, the
+      same way a detected end is provisional and revocable. Do not delete the sightings; relate
+      them. And `Absolute` is the weak claim - "not LO-relative", not "real" - because a reference
+      harmonic is absolute-fixed and still an artefact.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): a scene with one LO-relative spur over
+      N centres yields ONE artefact row, not N emitters; real emitters are unaffected in number and
+      in absolute frequency. T-586's fixture (`py/hkpy/synth/retune.py`, scenario
+      `retune_diversity`) reproduces it directly and its assertions already count what matters.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-596
@@ -19403,13 +19442,14 @@ tasks:
   - id: T-600
     milestone: M2-hardening
     title: A resolved artefact does not rank below a clean row, because the evidence proxy counts only measured flag bits
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     model: sonnet
     effort: low
     depends_on: [T-598]
     use_cases: []
+    branch: task-t600
     acceptance: |
       FOUND BY T-598. `EMITTER_DETECTION_EVIDENCE_SQL` in `crates/hk-model/src/repo/relate.rs`
       counts only the flag bits stored ON the detection row. T-598 deliberately does NOT write to
@@ -19427,6 +19467,31 @@ tasks:
       restores its rank - the second half matters, because a one-way change would make the ranking
       outlive the claim.
       Prove the test goes RED without the fix.
+    resolution: |
+      DONE 2026-09-21. `EMITTER_DETECTION_EVIDENCE_SQL` now reads each detection's currently-active
+      `detection_retune.flag_bits` (0 if none) via a correlated subquery alongside the row's own
+      `flags`, still read-path only - nothing is written back to `detection`, so the immutability
+      trigger and T-598's revocable-verdict design are untouched. The two OR'd together decide only
+      the suspect-fraction count `evidence()` builds for `RowEvidence::rank()`; the
+      `image_flagged`/`imd_flagged`/`spur_flagged` fields `RowEvidence::corroborates` reads stay
+      measurement-only, per their own doc comment.
+      Two tests in `crates/hk-model/src/repo/retune_tests.rs`, both proven RED without the join
+      (asserted `suspect_fraction` was 0.0 where 1.0 was expected):
+      `t600_resolved_lo_relative_artefact_ranks_below_a_clean_row` builds the real emitter and the
+      spur family's representative row with identical measured SNR/level/duty-cycle, resolves the
+      retune verdict, and asserts the artefact's rank is strictly below the clean row's despite the
+      equal underlying measurement. `t600_revoking_the_verdict_restores_the_artefacts_rank` then
+      withdraws the family's evidence (as T-598's own revocation test does) and re-resolves,
+      asserting the artefact's `suspect_fraction` and `rank()` return to exactly the clean row's -
+      the half that matters, since a one-way join would leave the ranking outliving the claim.
+      `just precheck hk-model` (fmt + clippy, `-D warnings`) clean. Targeted:
+      `cargo nextest run -p hk-model -E 'test(t600) or test(t598)'` - 7/7 pass, including T-598's
+      own suite unaffected.
+      NOTE FOR THE COORDINATOR: this worktree was branched from `main` while T-598 was still
+      mid-merge-runner-gate (uncommitted, `.git/MERGE_HEAD` present), so the branch also carries
+      T-598's files copied byte-for-byte from main's staged working tree, to build and test
+      standalone. Merge T-598 first; the overlap should be a trivial/no-op merge since the content
+      is identical.
   - id: T-601
     milestone: M2-hardening
     title: A retune-sibling artefact reads as a generic "retune artefact" while an image reads as prose
@@ -19494,6 +19559,34 @@ tasks:
     parallel_group: PIPE
     model: opus
     effort: medium
+    depends_on: [T-321]
+    use_cases: []
+    acceptance: |
+      SEEN IN FOUR SEPARATE GATES ON 2026-09-21, INCLUDING ONES THAT PASSED, which is why nobody
+      has chased it:
+        hk-pipeline: analog chain emitter: storage engine: UNIQUE constraint failed: emission_features.features_id
+        hk-pipeline: analog chain shape characterisation: storage engine: UNIQUE constraint failed: ...
+        hk-pipeline: plugin chain emitter: storage engine: UNIQUE constraint failed: ...
+      A storage-engine error is being caught, printed and continued past. The suite stays green, so
+      the only evidence is three lines of log nobody reads - which is the silent-failure shape this
+      project keeps finding (a stage that cannot run looks like a stage that ran and agreed).
+      SUSPECTED CAUSE, NOT CONFIRMED: T-321 wired `write_shape` in as a SECOND `characterise_with`
+      per analogue session, at both `identify` and the full-window path, and its own agent flagged
+      the added call as an unmeasured cost. Two characterisations of one session plausibly insert
+      `emission_features` twice under one `features_id`. "analog chain shape characterisation" is
+      exactly that path. CONFIRM BEFORE FIXING - T-246 and T-589 both refuted the obvious suspect.
+      THEN DECIDE WHAT THE WRITE SHOULD DO, which is the real question: is the second write a
+      duplicate that should be an upsert, or a genuinely new characterisation that should replace
+      the first? T-335 established that a re-characterisation must happen when the evidence changed;
+      if the second write is that, dropping it on a UNIQUE violation silently loses the very
+      re-characterisation T-335 added.
+      AND MAKE IT LOUD EITHER WAY. Whatever the fix, a storage error on this path must not be
+      swallowed: a caught-and-printed constraint violation in a test suite is a test that passed for
+      the wrong reason.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): an analogue session produces exactly
+      one emission_features row per characterisation that should exist, and zero swallowed storage
+      errors over an acceptance run. Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     depends_on: []
     use_cases: []
     acceptance: |
@@ -19521,6 +19614,469 @@ tasks:
       under deliberate load before and after - "it passes now" on a quiet machine is the evidence
       that misled everyone here.
       Prove the fixed test still catches a real cap violation.
+  - id: T-604
+    milestone: M2-hardening
+    title: The bridge re-plumb test read a 503 body that had not arrived yet - a tungstenite tail race, not the wait it looked like
+    status: done
+    priority: medium
+    parallel_group: API
+    model: opus
+    effort: medium
+    depends_on: [T-530, T-542]
+    use_cases: []
+    acceptance: |
+      Done 2026-09-21 on branch task-bridgeflake.
+      THE MEASUREMENT THAT IS THE WHOLE DIAGNOSIS, kept here so nobody triages it twice:
+      `hk-api::bridge a_handshake_between_windows_waits_for_the_successor_and_never_says_gone`
+      FAILED in a loaded five-branch merge gate at 2.282 s and PASSED alone on a quiet machine at
+      2.281 s - ONE MILLISECOND APART. The test ran to completion either way, so nothing timed out.
+      A same-duration pass/fail pair means the outcome turns on WHAT FINISHED INSIDE a fixed wait,
+      never on the wait being too short. None of the five branches touched hk-api.
+      THE ACTUAL CAUSE, and it was not the re-plumb wait the name points at. The test asserted
+      `body.contains("replumbing")` on a `tungstenite::Error::Http` response. tungstenite fills a
+      refused handshake's body from `tail` (handshake/client.rs: `*e.body_mut() = Some(tail)`) -
+      whatever bytes happened to sit in its read buffer next to the status line - and
+      `http.rs::respond_cached` writes the head and the JSON body in TWO `write_all` calls. Whether
+      the body is there at all is therefore whether those two writes landed in one TCP read. Quiet
+      machine: they do. Loaded gate: they do not, `body` comes back EMPTY, the status is still the
+      expected 503, and the assert panics printing nothing. That empty panic message is what made
+      the failure look like a timing bug.
+      FIX (deterministic, no wider timeout, no retry, no heavy-serial pin - task-flakes spent
+      2026-09-20 REMOVING a `retries = 1` and a serial pin that propped up a wall-clock bound):
+      (a) the refusal is now read over a plain TcpStream to EOF (`refusal()` in the test), so the
+      body is complete by construction - the server sends `Connection: close`;
+      (b) `StreamRegistry` counts parks in `wait_for_offer_after` (`successor_waits_entered`,
+      `successor_waiters`, T-604), and the test waits on THE EVENT - the handshake has parked in the
+      gap - instead of sleeping a fixed 250 ms before offering the successor. Under load the old
+      sleep could expire before the knock had even connected, and the test then silently exercised a
+      plain attach to a live publisher, proving nothing about a gap: a green test asserting nothing.
+      (c) both wall-clock assertions are gone. "It waited for the successor before refusing" is now
+      `successor_waits_entered() == before + 1` (the 503 is only reachable through a park), and "an
+      end was not treated as a gap" is that same count UNCHANGED - replacing `elapsed >= 1500 ms`
+      and `elapsed < 1000 ms`. The only bound left is the pre-existing 10 s `wait_for` backstop,
+      whose expiry names what never arrived.
+      ASSERT ON ORDERING AND COUNTS, NOT WALL-CLOCK (user, 2026-09-21).
+      MEASURED, running the whole `binary(bridge)` (13 tests, nextest's 8 threads - the flake needs
+      the sibling tests' concurrency; the test alone never failed, which is exactly what misled the
+      earlier triage) with 28-40 busy-loop processes on a 28-core machine:
+      BEFORE 3 failures in 36 runs (2/12 at 28 procs, 1/24 at 28 procs); AFTER 0 failures in 48 runs
+      (0/24 at 28 procs, 0/24 at 40 procs). Test duration also fell 2.28 s -> 2.02 s (the 250 ms
+      sleep is gone).
+      RED-WHEN-BROKEN, five mutants, each legible: gap answered 410 -> "timed out waiting for the
+      handshake to park in the gap waiting for a successor"; refuse without waiting -> "it refused
+      at once instead of waiting for the successor first, left: 1 right: 2" IN 12 ms (the old
+      wall-clock version needed 2 s to say less); wrong refusal `code` -> prints the ACTUAL body
+      (under load the old assert printed an empty one); every end treated as a gap -> "a finished
+      stream still says it is gone, left: 503 right: 410"; an end waited out as a gap while still
+      answering 410 -> "the end was treated as a gap and waited out for a successor that was never
+      promised, left: 3 right: 2" - the case only an ordering assertion can see.
+      RESIDUAL, for whoever writes the next one: ANY test asserting on a `tungstenite::Error::Http`
+      body has this trap. `bridge.rs` had exactly one and it is fixed; `status_of` (status only) is
+      safe. A grep for `.body()` in test code is the check. The server writing head+body in one
+      `write_all` would make it rarer and is NOT the fix - that is the masking this project rejects.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-606
+    milestone: MAUTO
+    title: 'ADR-0011 AMENDMENT: absorb the T-554 coverage catalogue delta, and decide what a PSK demodulator puts on its output port'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: high
+    depends_on: []
+    use_cases: [SIGNAL-034, SIGNAL-080, SIGNAL-053, SIGNAL-004, SIGNAL-054]
+    core_interface: true
+    acceptance: |
+      AMENDMENT / CONTRACT ONLY. No blocks implemented here. Filed 2026-09-21 by T-554; the delta is
+      written out in docs/18 section 8 and the ranking that justifies it is section 7.
+      WHAT THE AMENDMENT CARRIES:
+      1. CATALOGUE ROWS, additive to ADR-0011 section 1.5, each pinning a descriptor in
+         `planned()` so the existing `implemented_blocks_match_their_pinned_descriptors` drift test
+         enforces it: group `iq` - `psk_demod`, `css_demod`, `ssb_demod`, `cw_demod`, `ofdm_demod`;
+         group `symbol` - `mlevel_slicer`, `descramble`, `bitstuff`, `codeword_map`, `despread`,
+         `equalise`; group `fec` - `viterbi`, `reed_solomon`.
+      2. *** THE ONE REAL CONTRACT QUESTION, AND THE POINT OF THIS TICKET. *** ADR-0011 section 1.1
+         defines `soft` as "f32 soft symbol/BIT, positive = 1" - ONE value per item. That is a
+         complete answer for BPSK and for every 2-level family the catalogue serves today, and it is
+         NOT one for QPSK, 8PSK or any constellation whose symbol carries k bits jointly. Decide
+         between:
+         (a) ADDITIVE, and T-554's recommendation: `psk_demod` de-maps INSIDE the block and emits one
+             `soft` item per BIT at k x the symbol rate. No new port type; `slicer`, `descramble`,
+             `viterbi` and everything downstream are untouched; it works today. The cost is that the
+             joint-symbol information is discarded at the block boundary, which a soft-decision
+             equaliser or an iterative decoder would want.
+         (b) CONTRACT CHANGE: a new `symbols` port type carrying complex constellation points or LLR
+             vectors. Section 1.1 says adding a type is a contract change reviewed like the ADR, and
+             it touches every block that accepts `soft`.
+         NOTE THE SEQUENCING ARGUMENT: `ofdm_demod` forces the same question and CANNOT take (a),
+         because its natural output is a subcarrier x symbol grid. So the honest answer is to take
+         (a) for PSK now and treat the port-type change as OFDM's cost, not PSK's - and OFDM unlocks
+         exactly one native family (DAB+), which is docs/18 section 7's finding 2.
+      3. SOFT-DECISION FEC. `viterbi` wants soft input; the existing `fec` group is hard-decision
+         `frames -> frames`. A `soft|bits -> bits` streaming decoder sits inside the existing port
+         types, so it is additive - but it makes `fec` a group with two shapes in it, and section
+         1.5's table must SAY so rather than leave it to be discovered.
+      4. SECTION 1.6 NEEDS A SECOND COLUMN. It says blocks are adapters over existing kernels and
+         names in-repo ones. Four of the new rows would name liquid-dsp, which T-554 established is
+         DESIGNATED IN ADR-0010 BUT NOT LINKED BY ANY CRATE (T-607). The rule must record what a
+         block adapts AND whether that kernel is in the build, so the next audit cannot repeat the
+         mistake of pricing a DSP job as an adapter job.
+      5. A `raster` output kind IF it is taken: beside section 8.2's `audio`, same double gating
+         (`content_class` ceiling, `output_policy` clamp), same schema-version rule.
+      DoD: the amendment written as a new ADR-0011 section in the style of section 8, a stated
+      decision on (2) with its reason, and the descriptor shapes sketched for each new row. No
+      ADR status changes. No block implemented.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-9). core_interface: this is the block contract.
+      The block tickets T-608..T-613 depend on this one for their port shapes.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-607
+    milestone: MAUTO
+    title: 'liquid-dsp is DESIGNATED BUT NOT LINKED: land the FFI binding, or record the refusal and re-price the four block tickets that assume it'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: high
+    depends_on: []
+    use_cases: [SIGNAL-034, SIGNAL-024, SIGNAL-027]
+    core_interface: true
+    acceptance: |
+      *** THE FINDING THAT MAKES THIS A TICKET (T-554, docs/18 section 7.1). *** ADR-0010's table
+      names liquid-dsp (C, MIT) as this project's DSP kernel library, and ADR-0011 section 1.6's rule
+      is that a block is an ADAPTER OVER AN EXISTING KERNEL. Both are true. What is ALSO true, and
+      what nobody had checked: `grep liquid crates/*/Cargo.toml` returns NOTHING. Every block in the
+      catalogue today adapts an in-repo kernel (hk-dsp, hk-demod, hk-estimate). So "psk_demod is only
+      an adapter job" is a claim about a binding THAT DOES NOT EXIST, and whichever block goes first
+      silently pays for landing it.
+      WHAT THIS TICKET DECIDES, and it is a yes/no with a measured cost either way:
+      1. Does liquid-dsp build and link into this workspace on the Mac (the primary dev target) and
+         cross-compile for aarch64/JetPack (the Jetson is the product)? MEASURE it, do not assume it.
+      2. Vendored source in-tree vs a system library vs a `-sys` crate from crates.io: pick one and
+         say why, including what it does to `just build` from clean and to the Jetson deploy.
+      3. WHAT IT ACTUALLY SHIPS THAT WE WANT, checked against the T-554 gap list rather than against
+         its README: PSK/QAM modems, NCO/PLL, matched filters, framing, and its FEC (convolutional
+         and Reed-Solomon). Name, per block, whether liquid covers it, covers it partly, or not at
+         all - because `descramble` and `mlevel_slicer` need NOTHING from it and must not be made to
+         wait on it.
+      4. If the answer is no (build pain, cross-compile pain, licence surprise, or it does not
+         actually cover what we need): RECORD THE REFUSAL in ADR-0010 and re-price T-609/T-610/T-611
+         as DSP work rather than adapter work. A refusal recorded is a good outcome; a claim left
+         standing that nobody tested is not.
+      DoD: a measured answer with build times and artefact sizes on both targets, the ADR-0010 ledger
+      row updated either way, and a per-block coverage note the block tickets can be priced against.
+      ADR-0010's status is not changed by this ticket.
+    notes: |
+      Filed 2026-09-21 by T-554. This is the ticket that stops four block estimates resting on an
+      untested premise. It is NOT blocked on anything and nothing is blocked on it - T-608 and T-612
+      deliberately need nothing from liquid-dsp, so work can start in parallel.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-608
+    milestone: MAUTO
+    title: 'hk-blocks `descramble`: the LFSR de-whitener - rank 2 on the T-554 gap list, 10 families, and the cheapest block on it'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: medium
+    depends_on: [T-606]
+    use_cases: [SIGNAL-034, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-004, SIGNAL-053, SIGNAL-074, AWARE-025, AWARE-026, AWARE-020, RESEARCH-012]
+    core_interface: true
+    acceptance: |
+      *** BUILD THIS ONE FIRST, even though it is rank 2. *** T-554's gap list ranks `psk_demod`
+      first on families unlocked (11 vs 10), but rank 1 is a months-long investment and this is an
+      LFSR. It needs nothing from liquid-dsp (T-607), nothing from the port-type decision beyond
+      T-606's descriptor, and no reference reading of any kind - additive scramblers are defined in
+      published standards.
+      THE BLOCK. Group `symbol`, ports `bits -> bits`, additive to ADR-0011 section 1.5.
+      Parameters to pin: `poly` (hex), `init` (hex), `mode` (`additive`/`multiplicative`), the reset
+      rule (free-running, or reset per frame / on a sync event), and bit order. Cover at minimum the
+      CCSDS 8-bit pseudo-randomiser, PN9, and the BLE data whitener (LFSR seeded from the channel
+      index) - three real parameterisations, not one with two aliases.
+      WHAT IT UNLOCKS (docs/18 section 6.2): CCSDS satellite telemetry, Meteor-M LRPT, GOES HRIT /
+      GK-2A LRIT, HRPT/AHRPT, VDL Mode 2, Bluetooth LE advertising, ASTM F3411 Remote ID over its BLE
+      transport, radiosondes, TETRA control, LoRa. TEN families.
+      THE BLE POINT IS WORTH STATING SEPARATELY: docs/18 section 1.4 found there is NO maintained
+      GNU Radio BLE receiver at all - gr-bluetooth is archived at GR 3.7. So for BLE, native is not
+      the preferred path, it is the ONLY path, and this block plus the existing `fsk_demod`,
+      `clock_recovery`, `slicer`, `crc` and `follow_hops` is most of it.
+      ALSO SERVES DETECTION, not just decode: RESEARCH-012 is whitening/scrambler IDENTIFICATION -
+      spotting a PN9-like LFSR in an unknown burst - which is a MAUTO search capability, not a
+      decoder stage. Expose enough in `status()` (lock, error_rate) for the search to score it.
+      TESTS: the ADR-0011 section 1.6 pair every block owes - chunking invariance (output identical
+      however the input is split) and a synthetic-signal test - plus a known-vector test per
+      parameterisation. Prove each test goes RED without the block.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 2). core_interface because it adds a
+      catalogue row; the descriptor comes from T-606.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
+      BACK. Never `just gate`.
+  - id: T-609
+    milestone: MAUTO
+    title: 'hk-blocks `psk_demod`: carrier recovery + matched filter - rank 1 on the T-554 gap list (11 families), and it SUPERSEDES ADR-0015 M-14'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: xhigh
+    depends_on: [T-606, T-607]
+    use_cases: [SIGNAL-034, SIGNAL-033, SIGNAL-024, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-019, SIGNAL-004, SIGNAL-054, SIGNAL-069, SPACE-081]
+    core_interface: true
+    acceptance: |
+      *** THIS REPLACES ADR-0015 SECTION 10's M-14 ("OPTIONAL psk_demod/Costas"), WHICH IS TOO NARROW
+      TO BE USEFUL. *** T-554 confirmed the premise: eight of the eleven families this block unlocks
+      ALSO need `viterbi` (T-610) and `reed_solomon` (T-611), and NONE of the eight gets past verdict
+      `demodulated` with only the demodulator, because CCSDS framing means convolutional coding plus
+      Reed-Solomon. Scoped as one-plus-two-optional-extras it would deliver a PSK demodulator that
+      unlocks Orbcomm and nothing else. Read T-609/T-610/T-611 as ONE investment.
+      THE BLOCK. Group `iq`, ports `iq -> soft`, additive to ADR-0011 section 1.5.
+      Must cover BPSK, QPSK, OQPSK, D8PSK and pi/4-DQPSK - the five that the family list actually
+      needs (Zigbee is OQPSK, VDL2 is D8PSK, TETRA is pi/4-DQPSK; a BPSK-only block unlocks three
+      families, not eleven). Carrier recovery (Costas or decision-directed PLL), an FLL or band-edge
+      for acquisition, an RRC matched filter, and a stated acquisition/hold behaviour on
+      DISCONTINUITY.
+      OUTPUT PORT: take T-606's decision, do not re-open it. T-554's recommendation is that the block
+      DE-MAPS INTERNALLY and emits one `soft` item per BIT at k x the symbol rate, which needs no new
+      port type and leaves `slicer`/`descramble`/`viterbi` untouched.
+      DO NOT REDERIVE THE DSP IF T-607 SAYS IT IS THERE: liquid-dsp is MIT and ships PSK modems,
+      NCO/PLL and matched filters. Under ADR-0011 section 1.6 a block is an adapter over an existing
+      kernel. T-607 says whether that kernel is in the build; if it is, this is an adapter job.
+      LICENCE: every algorithm here has a published textbook description (Costas loop, Gardner/M&M
+      timing, RRC). Work from those. ADR-0010's standing rule holds - GPLv3 decoder source stays
+      behind the plugin process boundary and nothing is derived from it in-core - and docs/18
+      section 4 is CANCELLED and may not be cited as authority for anything.
+      TESTS: chunking invariance, synthetic signals per constellation at stated SNR, CFO and timing
+      offsets, and a locked/searching `status()` that the refinement loop and the MAUTO search can
+      read. Prove the tests go RED without the block.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 1). ADR-0015 section 10's M-14 row should
+      be read as superseded by this ticket; T-606's amendment is the place that records it.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
+      BACK. Never `just gate`.
+  - id: T-610
+    milestone: MAUTO
+    title: 'hk-blocks `viterbi`: convolutional/punctured FEC incl. CCSDS R=1/2 K=7 - rank 3 on the T-554 gap list, 10 families'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: xhigh
+    depends_on: [T-606, T-607]
+    use_cases: [SIGNAL-034, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-019, SIGNAL-080, SIGNAL-084, SIGNAL-064, SIGNAL-070, SPACE-081]
+    core_interface: true
+    acceptance: |
+      One third of the PSK+Viterbi+Reed-Solomon investment (T-609/T-610/T-611). See T-609's note on
+      why these are one ticket set and not one plus two optional extras.
+      THE BLOCK. Group `fec`, ports `soft|bits -> bits`, additive to ADR-0011 section 1.5.
+      *** NOTE THE SHAPE DIFFERENCE AND MAKE IT EXPLICIT. *** Every existing `fec` block (`crc`,
+      `bch`, `parity`, `checksum`) is hard-decision `frames -> frames`. A streaming convolutional
+      decoder is `soft|bits -> bits`. Both port types already exist, so this is ADDITIVE and not a
+      contract change - but it means the `fec` group has two shapes in it, and T-606's amendment has
+      to say so in section 1.5's table rather than leave it to be discovered by the next
+      implementer.
+      MUST COVER: CCSDS R=1/2 K=7 (the one that matters - it is what a satellite downlink means),
+      arbitrary rate/constraint-length polynomials, puncturing, and soft-decision input with a
+      stated traceback depth. Hard-decision input is allowed and costs the usual ~2 dB; the block
+      must not quietly present hard-decision output as if it were soft-decision performance.
+      UNLOCKS: CCSDS satellite telemetry, Meteor-M LRPT, GOES HRIT / GK-2A LRIT, HRPT/AHRPT,
+      Inmarsat STD-C/Aero, TETRA control, P25 Phase 1 trellis, NXDN, DAB+, MIL-STD-188-110.
+      T-607 first: liquid-dsp ships convolutional FEC. If it is in the build this is an adapter job.
+      LICENCE: Viterbi is textbook and CCSDS 131.0-B is a published standard. ADR-0010's boundary
+      holds; docs/18 section 4 is cancelled and is not authority.
+      TESTS: chunking invariance, a known-vector test against the CCSDS standard's own test data,
+      and a BER-vs-Eb/N0 curve at a stated tolerance. Prove they go RED without the block.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 3).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
+      BACK. Never `just gate`.
+  - id: T-611
+    milestone: MAUTO
+    title: 'hk-blocks `reed_solomon`: RS(255,223) dual-basis and friends - rank 4 on the T-554 gap list, 8 families'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: high
+    depends_on: [T-606]
+    use_cases: [SIGNAL-034, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-004, SIGNAL-074, SIGNAL-080, SIGNAL-064]
+    core_interface: true
+    acceptance: |
+      One third of the PSK+Viterbi+Reed-Solomon investment (T-609/T-610/T-611). Without this one the
+      satellite families stop one stage short of a decoded frame, which is exactly the gap T-554 was
+      filed to find.
+      THE BLOCK. Group `fec`, ports `frames -> frames` - the SAME shape as the existing `bch`, so it
+      sits beside it with no contract question at all. Additive to ADR-0011 section 1.5.
+      PARAMETERS TO PIN: `n`, `k`, `symbol_bits`, generator polynomial / `fcr` / `prim`,
+      `dual_basis` (the CCSDS convention, and getting this wrong is the classic silent failure),
+      interleave `depth` (CCSDS uses I=4/5), `strip`, `drop_invalid` (hot), and a corrected-symbol
+      count surfaced through `FrameInfo` the way `crc`'s correction already is.
+      MUST COVER: RS(255,223) dual-basis (CCSDS), RS(255,239), RS(204,188) (DVB/DAB+), and the short
+      P25 codes RS(24,12,13) / RS(24,16,9) / RS(36,20,17).
+      UNLOCKS: CCSDS satellite telemetry, Meteor-M LRPT, GOES HRIT / GK-2A LRIT, HRPT/AHRPT,
+      VDL Mode 2, radiosondes, P25 Phase 1 link control, DAB+.
+      T-607 first: liquid-dsp ships Reed-Solomon. If it is in the build this is an adapter job.
+      LICENCE: CCSDS 131.0-B is a published standard and the algorithm is textbook. ADR-0010's
+      boundary holds; docs/18 section 4 is cancelled and is not authority.
+      TESTS: chunking invariance, known-vector tests from the CCSDS standard including the
+      dual-basis transform, an erasure/error-count boundary test (t errors corrected, t+1 detected
+      not miscorrected), and the section 1.4 rule 1 allocation test. Prove they go RED without it.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 4). Does not depend on T-607 - if
+      liquid-dsp is refused this is still a well-bounded standalone implementation.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
+      BACK. Never `just gate`.
+  - id: T-612
+    milestone: MAUTO
+    title: 'hk-blocks `mlevel_slicer`: M-ary symbol decisions (4-level C4FM, 8-ary) - rank 5 on the T-554 gap list, and the whole trunking/paging unlock'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: medium
+    depends_on: [T-606]
+    use_cases: [SIGNAL-080, SIGNAL-082, SIGNAL-084, SIGNAL-086, SIGNAL-087, SIGNAL-070, AWARE-067]
+    core_interface: true
+    acceptance: |
+      THE GAP, precisely: today's `slicer` is `soft -> bits` with ONE threshold - a binary decision.
+      Every 4-level FSK / C4FM family (P25 Phase 1, DMR, NXDN, FLEX) and every M-ary FSK family
+      (2G ALE at 8-ary) is blocked on nothing else in the symbol stage. The discriminator output
+      from `fsk_demod` is already the right signal; only the decision is missing.
+      THE BLOCK. Group `symbol`, ports `soft -> bits` emitting k bits per symbol, additive to
+      ADR-0011 section 1.5. Parameters to pin: `levels` (4, 8, ...), threshold derivation
+      (`auto` from the observed histogram, or `fixed`), `gray` mapping, `bit_order`, and `invert`
+      to match `slicer`'s existing hot parameters. `auto` matters: C4FM deviation drifts and a fixed
+      threshold is exactly the sort of hand-set number CLAUDE.md says should be estimated.
+      UNLOCKS: FLEX paging, P25 Phase 1 control channel, DMR Tier III control, NXDN Type-C control,
+      2G ALE - and contingently P25 Phase 2, which T-554 marked UNKNOWN (H-DQPSK/H-CPM burst
+      structure, TIA standard paywalled) rather than guessing.
+      *** THE VOCODER IS NOT IN SCOPE AND IS NOT A BLOCKER. *** ADR-0010 puts AMBE/IMBE/AMBE+2 IP out
+      of reach, and docs/18 section 3 states the product consequence plainly: this device can
+      inventory, follow and characterise an LMR system without decoding a word of speech. The
+      control channel, the talkgroup/unit metadata, SIGNAL-086's encryption-aware call logging and
+      SIGNAL-087's blind auto-decode target are all unaffected by the vocoder wall.
+      TESTS: chunking invariance, a synthetic 4-level eye at several SNRs with the `auto` threshold
+      converging, a Gray-mapping vector test, and a test that an all-one-level input does NOT
+      produce confident output. Prove they go RED without the block.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 5). Needs nothing from liquid-dsp
+      (T-607) - it is a decision rule, not a kernel.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
+      BACK. Never `just gate`.
+  - id: T-613
+    milestone: MAUTO
+    title: 'hk-blocks `bitstuff`: HDLC flag framing and zero-destuffing - the smallest block on the T-554 gap list, and it unlocks AIS, AX.25 and VDL2'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: sonnet
+    effort: medium
+    depends_on: [T-606]
+    use_cases: [SIGNAL-015, SIGNAL-036, SIGNAL-004, AWARE-007, AWARE-012, PROP-024, PROP-025]
+    core_interface: false
+    acceptance: |
+      Rank 6 by families unlocked (3) but the best cost-per-family on the T-554 list: it is a
+      six-consecutive-ones rule and a flag detector.
+      THE BLOCK. Group `symbol`, ports `bits -> bits`, additive to ADR-0011 section 1.5.
+      Parameters to pin: `mode` (`hdlc`), `flag` (hex, default 0x7E), `stuff_after` (5 ones),
+      `direction` (`destuff`/`stuff`, mirroring `nrzi`'s existing `direction` precedent), and the
+      abort/idle rule (seven or more ones). Frame boundaries stay `sync_search`'s job - this block
+      removes the stuffed zeros so the bits downstream are the real ones.
+      UNLOCKS, with everything else already in the catalogue:
+      - AIS: GMSK + NRZI + HDLC + CRC-16 - `fsk_demod`, `nrzi`, `sync_search`, `crc` all exist, and
+        this is the only missing piece. Serves SIGNAL-015 and the AIS-derived propagation work
+        (PROP-024, PROP-025) and anomaly detection (AWARE-007, AWARE-012).
+      - AX.25 / APRS / ISS digipeater (SIGNAL-036), and the AX.25 half of amateur cubesat beacons.
+      - VDL Mode 2, in combination with T-609/T-608/T-611.
+      DO NOT GOLD-PLATE IT. It is one block with one rule; the value is in what it completes, not in
+      what it is. Resist folding flag-based framing into it - `sync_search` already owns that and
+      duplicating it would make two blocks that disagree about frame boundaries.
+      TESTS: chunking invariance (including a stuffed zero that falls exactly on a chunk boundary -
+      that is the bug this block will have), a known-vector AIS frame, and a round-trip
+      stuff/destuff test. Prove they go RED without the block.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 6). Sonnet: the descriptor is pinned by
+      T-606 and the rule is fully specified by ISO/IEC 13239 - this is a well-specified task with
+      tests, which is exactly the tier CLAUDE.md puts on Sonnet. Not core_interface: T-606 owns the
+      catalogue row.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
+      BACK. Never `just gate`.
+  - id: T-605
+    milestone: M2-hardening
+    title: A UNIQUE constraint failure on emission_features is logged and swallowed on every acceptance run
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: [T-321]
+    use_cases: []
+    acceptance: |
+      SEEN IN FOUR SEPARATE GATES ON 2026-09-21, INCLUDING ONES THAT PASSED, which is why nobody
+      has chased it:
+        hk-pipeline: analog chain emitter: storage engine: UNIQUE constraint failed: emission_features.features_id
+        hk-pipeline: analog chain shape characterisation: storage engine: UNIQUE constraint failed: ...
+        hk-pipeline: plugin chain emitter: storage engine: UNIQUE constraint failed: ...
+      A storage-engine error is being caught, printed and continued past. The suite stays green, so
+      the only evidence is three lines of log nobody reads - which is the silent-failure shape this
+      project keeps finding (a stage that cannot run looks like a stage that ran and agreed).
+      SUSPECTED CAUSE, NOT CONFIRMED: T-321 wired `write_shape` in as a SECOND `characterise_with`
+      per analogue session, at both `identify` and the full-window path, and its own agent flagged
+      the added call as an unmeasured cost. Two characterisations of one session plausibly insert
+      `emission_features` twice under one `features_id`. "analog chain shape characterisation" is
+      exactly that path. CONFIRM BEFORE FIXING - T-246 and T-589 both refuted the obvious suspect.
+      THEN DECIDE WHAT THE WRITE SHOULD DO, which is the real question: is the second write a
+      duplicate that should be an upsert, or a genuinely new characterisation that should replace
+      the first? T-335 established that a re-characterisation must happen when the evidence changed;
+      if the second write is that, dropping it on a UNIQUE violation silently loses the very
+      re-characterisation T-335 added.
+      AND MAKE IT LOUD EITHER WAY. Whatever the fix, a storage error on this path must not be
+      swallowed: a caught-and-printed constraint violation in a test suite is a test that passed for
+      the wrong reason.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): an analogue session produces exactly
+      one emission_features row per characterisation that should exist, and zero swallowed storage
+      errors over an acceptance run. Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+  - id: T-532
+    milestone: MLIVE
+    title: A kept tile answer may not claim the radio never looked at time it never saw
+    status: done
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-501, T-505]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      RECONSTRUCTED 2026-09-21 FROM THE LANDED WORK: this ticket was worked on `task-t532` and
+      never had a board block, which is why `just reconcile` could not see it.
+      THE DEFECT, MEASURED PER HOP. T-501's fidelity floor took the live-edge grey share in
+      canvas-journey test 1 from 0.2 % to 10-38 %. The backend is not the defect: its coverage
+      plane and grid are 30-90 ms AHEAD of the row the client calls the live edge. The defect is
+      the third hop, and it is two things.
+      (1) A TILE'S COVERAGE PLANE IS A POSITIVE `unobserved` CLAIM ABOUT ROWS THAT HAD NOT HAPPENED
+      WHEN IT WAS BUILT. A tune record stops at the newest sample, so every row of a live tile past
+      it is served `unobserved` - true when served, false a moment later, and a tile cache keeps
+      copies. At the old 1 s cell the error hid inside the cell the live edge was already in; at
+      40 ms it is ~32 rows of THE grey over rows the radio recorded.
+      (2) THE REFRESH PERIOD SCALED WITH HOW MANY TILES THE EDGE WAS CUT INTO, because the duty
+      gate was charged per TILE rather than per PASS over the edge.
+      DoD: `coverage.horizon.as_of_s` on the route, the young-end twin of `oldest_record_s`, taken
+      from the same spans the planes are rasterised from; the renderer draws nothing past it and
+      lets the pane's PENDING ground show; a resident tile whose answer stops short counts as
+      `behind the edge`, not as `pending`; and the live-edge grey share is ASSERTED at 5 %, not
+      merely measured.
+    branch: task-t505-v2
+    notes: |
+      DONE and REBASED 2026-09-21 onto `task-t505-v2`, on top of T-501 and T-505 - all three in one
+      worktree, because they share their conflict files.
+      MEASURED IN THE BROWSER over a band the server reports fully observed: live-edge zone grey
+      10-38 % -> 0.0 %; whole-pane grey 33 % -> 0.0 %; residency 11248 ms -> 401 ms; newest rows
+      after a retune 68 distinct / 96 % dominant -> 820 / 23 %. canvas-journey is now 6/6 on this
+      branch (it was 5/6 on both original branches; test 5, the T-529 retune window, since landed).
+      REBASE NOTE: `drawUpToHorizon` now reports the region it actually drew, so T-528's viewport
+      contrast measures what was DRAWN and never the rows the copy does not reach. That interaction
+      did not exist on the original branch - T-528 landed after it was cut.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

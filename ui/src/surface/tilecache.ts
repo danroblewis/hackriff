@@ -153,6 +153,15 @@ export interface Viewport {
   readonly box: Box;
   readonly levelF: number;
   readonly levelT: number;
+  /**
+   * **The lattice this viewport's levels are indices into** (T-505).
+   *
+   * Since the surface draws from two tiers, one lattice per cache is not enough to say what a
+   * viewport wants: a level index means a different cell on each lattice, and a tile of the other
+   * scheme is not this viewport's tile at all. Omitted, the cache falls back to the lattice
+   * [[TileCache.setViewports]] was handed — which is what a single-tier caller has always passed.
+   */
+  readonly lat?: Lattice;
 }
 
 /**
@@ -315,6 +324,11 @@ const MIN_SERVER_MS = 11, MAX_SERVER_MS = 6000;
  * property that stops this from becoming the poll the ticket forbids.
  */
 export const REFRESH_DUTY = 4;
+// **T-532: it is a share of the LANE, charged per pass over the edge.** It was charged per tile,
+// which made the period for any one live-edge tile `members × REFRESH_DUTY × cost` — so the same
+// rule delivered a 4× slower live edge the moment T-501's finer floor cut that edge into four tiles
+// instead of one. See [[TileCache.nextRefresh]] for the measurement and for why the bound this
+// comment states is only now the bound the code enforces.
 /**
  * The refresh lane a tile belongs to: its **cost class**, which on this route is its level.
  *
@@ -452,6 +466,12 @@ export class TileCache<T> {
   private refreshCursor = 0;
   /** The lane whose revalidation is in flight, so [[issue]]'s completion charges the right one. */
   private refreshingLane: string | null = null;
+  /**
+   * **How many of the current PASS over this lane are still to be issued** (T-532).
+   *
+   * The unit the duty gate is charged to. See [[nextRefresh]] for why it cannot be the tile.
+   */
+  private refreshPassLeft = new Map<string, number>();
   /** When each resident tile's data was last taken in, ms. The refresh interval is measured from
    * this, so a tile is never asked for again inside the period its newest cell spans. */
   private refreshedAt = new Map<string, number>();
@@ -663,11 +683,19 @@ export class TileCache<T> {
     }
   }
 
-  /** Is this tile one that viewport is drawing — at its level, or one step coarser (the pin)? */
+  /** Is this tile one that viewport is drawing — at its level, or one step coarser (the pin)?
+   *
+   * **Scheme first** (T-505): a level index is a statement about one lattice, so a tile of the
+   * other tier is never this viewport's, whatever its indices say. Without this a detail-tier tile
+   * and an overview-tier tile with the same `(level_f, level_t)` would each keep the other alive
+   * and cancellation would silently stop cancelling — the T-443 defect the levels were added to
+   * fix, one lattice up. */
   private wants(lat: Lattice, v: Viewport, a: TileAddr): boolean {
-    return a.levelF >= v.levelF && a.levelF <= v.levelF + 1 &&
+    const l = v.lat ?? lat;
+    return a.scheme === l.scheme &&
+      a.levelF >= v.levelF && a.levelF <= v.levelF + 1 &&
       a.levelT >= v.levelT && a.levelT <= v.levelT + 1 &&
-      intersects(lat, a, v.box);
+      intersects(l, a, v.box);
   }
 
   /**
@@ -891,6 +919,7 @@ export class TileCache<T> {
     this.stale.clear();
     this.refreshing.clear();
     this.refreshLanes.clear();
+    this.refreshPassLeft.clear();
     this.refreshNextIssue.clear();
     this.refreshCosts.clear();
     this.refreshingLane = null;
@@ -1008,9 +1037,36 @@ export class TileCache<T> {
       const q = this.refreshLanes.get(lane)!;
       if (!q.length) {
         this.refreshLanes.delete(lane);
+        this.refreshPassLeft.delete(lane);
         continue;
       }
-      if (t < (this.refreshNextIssue.get(lane) ?? 0)) continue;
+      // **The duty gate is charged to a PASS over the live edge, not to each tile on it** (T-532).
+      //
+      // The thing being kept fresh is the EDGE. How many tiles it is cut into is an accident of the
+      // addressing, and it changed under this code: T-501's fidelity floor makes a level-0 tile
+      // 150 kHz × 10.3 s where the old floor made it 1.6 MHz × 256 s, so a pane that used to draw
+      // its live edge in one tile now draws it in four. Gating each tile separately made the period
+      // for any ONE of them `members × REFRESH_DUTY × cost` — measured in a browser on this branch:
+      // a mean 1.5 s and a worst 4.4 s between re-asks of the same live address, against a server
+      // whose own answer is never more than 90 ms behind the newest recorded row. The lag was a
+      // function of the tile size, which is exactly what a refresh rule must not be.
+      //
+      // So: once a pass starts, its members go out back to back — still one in flight, still last
+      // refusal on the slot — and the gate is armed when the last of them lands ([[issue]]'s
+      // `done`). The period becomes `(members + REFRESH_DUTY - 1) × cost`, which is **unchanged at
+      // one member** (the old floor's case, and every unit test's) and stops growing with the tile
+      // count. The lane's share of the route is then `members / (members + REFRESH_DUTY - 1)` of
+      // its ONE in-flight slot, rising to at most that whole slot — and one slot of the route's
+      // `limit` (four) is exactly what [[REFRESH_DUTY]] says the lane may have. **The stated bound
+      // is now the bound the code enforces**; the per-tile gate spent only a quarter of it, which
+      // is why the edge could fall a second and a half behind a route answering in 90 ms.
+      const mid = (this.refreshPassLeft.get(lane) ?? 0) > 0;
+      if (!mid && t < (this.refreshNextIssue.get(lane) ?? 0)) continue;
+      // A new pass is exactly what is queued for this lane right now. Tiles queued after it starts
+      // wait for the next one, so a lane that re-queues faster than it drains cannot hold the slot
+      // forever by never letting the pass end.
+      const left = mid ? this.refreshPassLeft.get(lane)! : q.length;
+      this.refreshPassLeft.set(lane, Math.min(left, q.length) - 1);
       this.refreshCursor = (this.refreshCursor + i + 1) % lanes.length;
       return { lane, addr: q.shift()! };
     }
@@ -1113,7 +1169,14 @@ export class TileCache<T> {
         // became servable.
         const lane = this.refreshingLane ?? laneOf(addr);
         this.refreshingLane = null;
-        this.refreshNextIssue.set(lane, this.now() + (REFRESH_DUTY - 1) * this.refreshCostOf(lane, spent));
+        const cost = this.refreshCostOf(lane, spent);
+        // **Armed when the PASS ends, not when this tile lands** (T-532 — see [[nextRefresh]]).
+        // Mid-pass the next member goes straight out, so the edge is walked at the lane's own
+        // service time; the wait is paid once per walk, whatever the edge was cut into.
+        if ((this.refreshPassLeft.get(lane) ?? 0) <= 0) {
+          this.refreshPassLeft.delete(lane);
+          this.refreshNextIssue.set(lane, this.now() + (REFRESH_DUTY - 1) * cost);
+        }
       }
       if (requeue) this.schedule(addr);
       this.pump();

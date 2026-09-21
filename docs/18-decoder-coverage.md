@@ -1,7 +1,10 @@
 # 18 — Decoder coverage: GNU Radio as the reference set
 
-Status: **direction / planning** (2026-09-20, from the user). Milestone **MAUTO** (design track; build
-gated behind the robustness work). No product code comes from this document. Contracts it touches:
+Status: **direction / planning** (2026-09-20, from the user); **§§6–9 added 2026-09-21 by T-554** as the
+per-family **disposition audit** and the **ranked hk-blocks catalogue gap list**. Milestone **MAUTO**
+(design track; build gated behind the robustness work). No product code comes from this document.
+§4's proposed reference rule was **cancelled by the user** (T-555) and binds nothing; the standing rule
+is ADR-0010's process boundary, and the audit in §6 applies that rule rather than §4. Contracts it touches:
 [ADR-0010](adr/0010-language-and-licence-ledger.md) (licence boundary),
 [ADR-0003](adr/0003-process-plugin-model.md) (plugin process model),
 [ADR-0011](adr/0011-decoder-workbench-contracts.md) (blocks and recipes),
@@ -510,6 +513,10 @@ end's real reach — 1 MHz – 6 GHz, ~20 Msps instantaneous, 8-bit, half-duplex
 tuned window at a time**. The disposition column is the claim this roadmap makes; **T-554** is the
 ticket that tests each one properly and produces the block-catalogue delta.
 
+**§6 is the audit this section asked for**, and it revises two of the calls below: OFDM unlocks far
+less than it appears to (§7, finding 2) and DECT, SmartNet/EDACS and Z-Wave turn out to need no new
+blocks at all.
+
 Today's `hk-blocks` catalogue, which is what "native" is measured against:
 
 > `mix`, `lowpass`, `resample`, `fm_demod`, `am_demod`, `fsk_demod`, `msk_demod`, `ppm_demod`,
@@ -632,12 +639,15 @@ is what tutorials 1–4 already do.
 
 ## 4. What "reference" means — the rule proposed to the user
 
-> **UNRATIFIED — NOT IN FORCE.** This section is a **proposal**, written by the MAUTO design track
-> as a starting position. Nobody has agreed to it, it binds nothing, and **no implementing task may
-> cite it as authority.** It is the user's call; **T-555** exists to get it decided and recorded in
-> ADR-0010. Until then the standing rule is the conservative one that already exists: GPLv3 decoder
-> code stays in a subprocess (ADR-0003/ADR-0010) and nothing is derived from it in-core. A task that
-> would need this rule to proceed is blocked on T-555, not free to assume the answer.
+> **CANCELLED — NOT IN FORCE, AND NOT PENDING EITHER (user, 2026-09-20, T-555).** This section is a
+> **proposal** written by the MAUTO design track. The user cancelled the ticket that would have
+> ratified it, on the grounds that **there is no licence rule to ratify**: the standing position
+> stands unchanged and needs none. It binds nothing and **no implementing task may cite it as
+> authority.** The rule in force is the one that already exists: GPLv3 decoder code stays in a
+> subprocess (ADR-0003/ADR-0010) and nothing is derived from it in-core. §6's audit applies that
+> rule — every "native" disposition there rests on a public specification, a published
+> reverse-engineering write-up, or a licence-clean kernel, never on reading GPLv3 source. The
+> section is kept for the reasoning it records, not as a live proposal.
 
 It is a working engineering rule for this project, not legal advice, and the project's own licence
 remains undecided (CLAUDE.md).
@@ -742,6 +752,309 @@ ADR-0015 §10's own M-1…M-14 sketch.
    (MIT, already designated, already ships PSK/QAM modems and FEC) before scoping any of it — under
    ADR-0011 §1.6 this may be an adapter job, which would also moot the T-555 licence question for
    this family entirely.
+
+---
+
+## 6. The disposition audit (T-554)
+
+Status: **audit** (2026-09-21, T-554). Nothing here is implemented, no ADR status changes, and
+ADR-0011 is not rewritten — §8 lists what it would have to absorb. §3 ranked families by value;
+this section decides, per family, **where the capability lands in this codebase** and **what is
+missing before it can**.
+
+### 6.1 What the dispositions mean here, and the two constraints applied rather than rediscovered
+
+- **native recipe** — expressible as an `hk-blocks` DAG plus a recipe document, either with the
+  catalogue as it stands ("native now") or with a **named** small addition ("native + additions").
+  Licence-clean, hot-editable, and **the only form the MAUTO search can search over**.
+- **wrapped plugin** — a subprocess behind `hk-plugins` (ADR-0003). Cheap per decoder, opaque to
+  the search, and it brings a build and runtime dependency to both the Mac and the Jetson.
+- **out of reach** — the front end or the law of the thing forbids it: bandwidth, frequency,
+  coherent channels, transmit, or IP the project will not touch.
+- **unknown** — deliberately used, and marked rather than guessed. See §6.4.
+
+**Constraint 1 — the licence boundary decides "wrapped" by itself.** GPLv3 code (VOLK, GNU Radio,
+almost every decoder in §1.4) stays behind the plugin process boundary, ADR-0010. That is the
+standing rule and this audit applies it without reopening it: a family whose only implementation is
+a GPLv3 codebase, and whose algorithm has no public description to work from, takes the plugin
+disposition. **Nothing in §4 is relied on** — T-555 was cancelled by the user on the grounds that
+there is no rule to ratify, so every "native" call below rests on a public specification, a
+published reverse-engineering write-up, or a licence-clean kernel (liquid-dsp, MIT), never on
+reading GPLv3 source.
+
+**Constraint 2 — the front end.** 1 MHz – 6 GHz, receive only, ~20 Msps instantaneous, 8-bit, no
+preselector, one tuned window at a time. The `fit` column uses docs/06 §3's vocabulary exactly
+(`native`, `needs-accessory` + the accessory, `needs-tx`, `needs-other-sdr`, `out-of-band`), so a
+family marked `needs-accessory` is **reachable** with the named add-on and is not an honest
+exclusion; a family marked `needs-other-sdr` or `out-of-band` is.
+
+### 6.2 The disposition table
+
+Ordered by disposition, then roughly by value. "Blocks needed" names additions from §7's catalogue
+delta. Families already shipped are marked ✓.
+
+**Native recipe, with the catalogue as it stands today**
+
+| Family | Fit | Use cases | Note |
+|---|---|---|---|
+| ADS-B / Mode S ✓ | native | SIGNAL-001, AWARE-008, AWARE-010, RESEARCH-018 | Native recipe (tutorial 4) **and** the readsb plugin — the one family with both. |
+| ACARS ✓ | native | SIGNAL-003, SIGNAL-005 | Native recipe (tutorial 3). |
+| POCSAG ✓ | native | *(none — see §6.4)* | Native recipe (tutorial 2). **GNU Radio has no maintained POCSAG decoder at all** (§1.4). |
+| RDS / broadcast FM ✓ | native | SIGNAL-062 | Native recipe (tutorial 1), plus ADR-0011 §8.9's audio sibling. |
+| NFM / AM analog ✓ | native | SIGNAL-067, listening | Blocks exist or are specified by ADR-0011 §8.4. |
+| rtl_433 long tail (OOK/ASK/PWM/PPM/Manchester + CRC) | native | SIGNAL-052, SIGNAL-046, SIGNAL-049, SIGNAL-050, SIGNAL-057, SIGNAL-047, AWARE-070, AWARE-035, AWARE-027, RESEARCH-001, RESEARCH-002 | §3's Tier 1: **templates, not code**. ~380 protocols inside the existing expressive range. |
+| Z-Wave (G.9959) | native | SIGNAL-055 | GFSK + checksum. One of only two permissive GR modules in the survey (`gr-zwave_poore`, MIT) — and it is not needed. |
+| MPT1327 | native | SIGNAL-044 | FFSK + BCH(63,48): `fsk_demod` + `clock_recovery` + `sync_search` + `bch`. |
+| Motorola SmartNet / SmartZone, EDACS control channel | native | SIGNAL-083, SIGNAL-084, SIGNAL-085, SIGNAL-087, AWARE-067 | 3600 bps binary FSK + Manchester + BCH(63,16). Entirely inside today's catalogue — **the cheapest trunking win on the board** and the subject of SIGNAL-087's blind end-to-end target. |
+| Railroad EOT and ATCS | native | SIGNAL-041, SIGNAL-042 | 4-level and 2-level FSK data with CRC, entirely inside the catalogue — §3's Tier 1 row 2. |
+| DECT (base-station metadata, framing) | native | SIGNAL-056 | 1.152 Mbps GFSK in 1.728 MHz — comfortably inside 20 Msps. `gr-dect2` is maintained; it is not needed. |
+
+**Native recipe, with named additions**
+
+| Family | Fit | Blocks needed | Use cases |
+|---|---|---|---|
+| CCSDS / amateur-satellite telemetry (the `gr-satellites` corpus) | needs-accessory (Yagi) / native for strong passes | `psk_demod`, `viterbi`, `reed_solomon`, `descramble` | SIGNAL-034, SIGNAL-033, SPACE-081 |
+| Meteor-M LRPT | native | `psk_demod`, `viterbi`, `reed_solomon`, `descramble` | SIGNAL-027, SIGNAL-029 |
+| GOES HRIT / GK-2A LRIT | needs-accessory (1.7 GHz dish + LNA, bias-tee) | same four | SIGNAL-025, SIGNAL-026 |
+| Metop / FengYun HRPT, AHRPT | needs-accessory (tracked dish + LNA) | same four | SIGNAL-028 |
+| Inmarsat STD-C / EGC, Aero | needs-accessory (L-band patch + LNA) | `psk_demod`, `viterbi` | SIGNAL-019, SIGNAL-007 |
+| Orbcomm | native | `psk_demod` (`diff_decode` already exists) | SIGNAL-024 |
+| VDL Mode 2 | native | `psk_demod` (D8PSK), `descramble`, `bitstuff`, `reed_solomon` | SIGNAL-004, SIGNAL-008 |
+| AIS | native | `bitstuff` (HDLC destuff) — everything else exists | SIGNAL-015, AWARE-007, AWARE-012, PROP-024, PROP-025 |
+| AX.25 / APRS / ISS digipeater | native | `bitstuff` | SIGNAL-036, SIGNAL-042-adjacent |
+| Bluetooth LE (advertising, metadata) | native | `descramble` (whitening LFSR) — `follow_hops` already exists | AWARE-025, AWARE-026, AWARE-028, RESEARCH-029 |
+| ASTM F3411 Remote ID, **BLE transport** | native | `descramble` | AWARE-020 |
+| Radiosondes (RS41 and family) | native | `reed_solomon`, `descramble` | SIGNAL-074, PROP-037, AWARE-062 |
+| LoRa / CSS | native | `css_demod`, `descramble`, a short-block code (see §7's Golay/Hamming question) | SIGNAL-053, AWARE-069, RESEARCH-064, PROP-078 |
+| Zigbee / Thread (802.15.4, O-QPSK DSSS) | native | `psk_demod` (offset QPSK), `despread` | SIGNAL-054 |
+| Wireless M-Bus | native | `codeword_map` (3-of-6, mode T) — modes C/S need nothing | SIGNAL-051 |
+| FLEX paging | native | `mlevel_slicer` (2- and 4-level FSK) | *(none — see §6.4)* |
+| P25 Phase 1 — **control channel and metadata only** | native | `mlevel_slicer`, `viterbi` (trellis), `reed_solomon`, Golay/Hamming | SIGNAL-080, SIGNAL-085, SIGNAL-086, SIGNAL-087, AWARE-067 |
+| DMR Tier III / Capacity Plus — control and metadata | native | `mlevel_slicer`, Golay/Hamming (BPTC over the existing `deinterleave`) | SIGNAL-082, SIGNAL-086 |
+| NXDN Type-C — control and metadata | native | `mlevel_slicer`, `viterbi` | SIGNAL-084 |
+| TETRA — control and metadata | native | `psk_demod` (π/4-DQPSK), `viterbi` (RCPC), `descramble` | RESEARCH-019 |
+| HF data modems (STANAG 4285, MIL-STD-188-110, 2G ALE) | native | `psk_demod`, `equalise`, M-ary FSK via `mlevel_slicer`, Golay | SIGNAL-069, SIGNAL-070 |
+| RTTY / NAVTEX / SITOR-B / Marine DSC | native (DSC) · needs-accessory for 490/518 kHz (HF upconverter / LF loop) | `codeword_map` (CCIR-476), a `text` charset addition (Baudot/CCIR) | SIGNAL-016, SIGNAL-017 |
+| DAB+ | native | `ofdm_demod`, `viterbi`, `reed_solomon` | SIGNAL-064, PROP-027 |
+| HF radiofax / SSTV / APT / Tempest raster | native · needs-accessory below 1 MHz | a **`raster` output kind** — a contract change, not a block | SIGNAL-018, SIGNAL-036, RESEARCH-039 |
+| SSB / CW (analog, today `legacy` in Listen) | native | `ssb_demod`, `cw_demod` | SIGNAL-072, SIGNAL-037 (via LNB), SIGNAL-013 (via upconverter) |
+
+**Wrapped plugin**
+
+| Family | Fit | Why wrapped | Use cases |
+|---|---|---|---|
+| DVB-T | native (8 MHz fits 20 Msps, marginally) | `gr-dtv` is a **genuine in-tree receive chain** (§1.3), mature and maintained; rebuilding OFDM + Viterbi + RS + the DVB interleavers natively buys nothing the search can use at this size | PROP-027, AWARE-041 |
+| ATSC 1.0 (8VSB) | native (6 MHz) | same: `gr-dtv` has a real RX | SIGNAL-066 is **bootstrap detection only**, is native today and needs no decoder |
+| ISDB-T | native | `gr-isdbt` is a maintained receiver; same argument as DVB-T | PROP-027-adjacent |
+| GSM (BCCH / system information) | native | `gr-gsm` is the most-starred OOT in the ecosystem **and is pinned to GR 3.8** (§1.4) — wrapping it is a porting job before it is an adapter job. Flagged, not priced | AWARE-016, AWARE-017, AWARE-066, SIGNAL-048 |
+| HD Radio (NRSC-5) | native | The living decoder (`nrsc5`) is **not** GNU Radio; its licence was **not verified in this audit** and must be before adoption | SIGNAL-063 |
+| FT8 / FT4 / WSPR / JS8 | native | The canonical decoders are the WSJT-X family, non-GR. Native would need LDPC(174,91) and a Fano sequential decoder for **one** family — the worst ratio on the board | PROP-002, PROP-004, PROP-005, SIGNAL-073, AWARE-059 |
+| DVB-S / DVB-S2 **narrow feeds only** (≲ 8 MSym/s) | needs-accessory (Ku/C LNB + dish) | SatDump and `gr-dvbs2rx` already do this well; §3's "wrap rather than rebuild" archetype | RESEARCH-014, RESEARCH-017 |
+| Codec2 / FreeDV voice | native | A codec, not a demodulator; `gr-vocoder` carries it and there is no reason for it in-core | (no docs/05 ID claims it) |
+
+**Out of reach**
+
+| Family | Why | Accessory changes it? | Use cases |
+|---|---|---|---|
+| 802.11 a/g/n frame decode | 20 MHz at 8-bit with no preselector; in a city the front end shows intermodulation (docs/02). **Presence, channel occupancy and anomaly detection are already native** and are what docs/05 actually asks for | No | AWARE-023, AWARE-024, AWARE-048 |
+| LTE full demodulation | ≥ 10 MHz channels, 8-bit, no preselector; the living tooling is srsRAN, not GR | No | AWARE-018, RESEARCH-025 |
+| 5G NR | 100 MHz FR1 channels ≫ 20 Msps instantaneous | No | AWARE-019, RESEARCH-024 |
+| DVB-S2, typical transponder | tens of MSym/s ≫ 20 Msps | No — the LNB fixes the frequency, not the bandwidth | PROP-047, SIGNAL-025-adjacent |
+| AMBE / IMBE / AMBE+2 voice audio | IP, not capability (ADR-0010). **The control channel and the metadata are not blocked by this** | No | SIGNAL-080–SIGNAL-084 (voice halves only) |
+| TX-only modules (`gr-aistx`, `gr-mixalot`, `gr-paint`, DVB-S2/T2 TX) | `needs-tx`; C37 is gated | No | PROP-003, PROP-078, RESEARCH-063 |
+| Passive radar, DF, TDOA | phase-coherent multi-channel receive | `needs-other-sdr` | PROP-053, PROP-055, PROP-060, PROP-022 |
+| X-band deep space (~8.4 GHz) | above 6 GHz with no commodity downconverter | `out-of-band` — no accessory closes it | RESEARCH-014-adjacent |
+
+**Unknown — marked, not guessed**
+
+| Family | What is unknown | What would settle it |
+|---|---|---|
+| HFDL | The FEC, interleaver and frame geometry. There is **no GNU Radio OOT** (§1.4); `dumphfdl` is the living tool and is non-GR | A public HFDL PHY description, or a `dumphfdl` plugin spike |
+| Iridium bursts | The burst structure, LCW handling and the demod's acquisition strategy. The modulation is DQPSK and native-shaped, but whether the framing is expressible as a block DAG is not knowable from the outside | Reading the published Iridium RE write-ups, or a `gr-iridium` plugin spike |
+| P25 Phase 2 | H-DQPSK / H-CPM TDMA burst structure. The TIA standard is paywalled and the only public implementation is op25 | Access to the standard, or a scoped op25 plugin |
+| DJI DroneID / OcuSync | Proprietary OFDM; public RE exists but the scrambler/frame detail was not verified here | Reading the published DroneID papers |
+| TETRA voice | The ACELP codec's availability and licensing; `osmo-tetra` is **AGPL-3.0**, whose network clause is stricter than GPL's | A licence read, if voice is ever wanted. The control channel is unaffected |
+| GSM native partial | Whether a BCCH-only native recipe is expressible without the TDMA burst scheduler living outside the block DAG | A read of the GSM 05.03 channel coding spec against the catalogue |
+| LoRa's diagonal interleaver | Whether the existing `deinterleave` `permutation` parameter already expresses it, or whether CSS needs its own | A 30-minute check against `hk_blocks::blocks::framing` |
+| Golay(24,12) and Hamming(13,9,3) | Whether the existing `bch` block already expresses them — **both are BCH codes**, so it may already be a solved problem and one line of the gap list may not exist | A 30-minute check against `bch`'s `n`/`k`/`poly` parameters. **Do this before filing a `golay_hamming` ticket** |
+
+### 6.3 Counts
+
+| Disposition | Families |
+|---|---|
+| **native recipe** | **36** — 11 with the catalogue as it stands (5 of them shipped), 25 with named additions |
+| **wrapped plugin** | **8** |
+| **out of reach** | **8** |
+| **unknown** | **6** (plus two sub-questions that are cheap checks, not research) |
+
+Total **58 families** (60 table rows, two of which are the sub-questions). GNSS is **excluded by carve-out**, not counted: ADR-0018 makes it the one documented
+known-code-led exception and it is C36's business. `gr-inspector`, `gr-fhss_utils`, `gr-pdu_utils`
+and `gr-leo` are excluded too — they are analysis helpers and a simulator, not decoder families,
+and §1.4 already records them as prior art worth reading for C10.
+
+**The shape of the result, stated plainly:** the largest disposition by a wide margin is *native*,
+and that is not an optimistic reading — it falls out of the front end. The families this device can
+actually receive are overwhelmingly narrowband, and narrowband is exactly where a block DAG is a
+complete answer. The families that want GNU Radio's heavy machinery (OFDM television, cellular,
+wideband satellite) are mostly the families the 8-bit, unpreselected, 20 Msps front end cannot serve
+anyway. **Wrapping is the right answer for 8 families, not for 58**, which is the opposite of what
+"target the whole suite of GNU Radio decoders" sounds like it implies, and it is the audit's main
+finding.
+
+### 6.4 The honest exclusions, and the ADS-B point
+
+**Honest exclusions** (front-end facts, already recorded per use case in `docs/use-cases.yaml`):
+everything above 6 GHz with no commodity downconverter, everything needing transmit, everything
+needing phase-coherent multi-channel receive, and everything needing more than ~20 MHz of
+instantaneous bandwidth. Separately and *not* an exclusion: below 1 MHz (SPACE-001/002, SIGNAL-013,
+SIGNAL-016, SIGNAL-078) and Ku/C band (SIGNAL-037, PROP-036, RESEARCH-014) are `needs-accessory` —
+an upconverter, a VLF front end or an LNB genuinely brings them into range, and docs/06 §3 is
+explicit that this is a different tag from `out-of-band`.
+
+**The ADS-B / pagers / radiosondes point, explicitly.** Of the 58 families, ADS-B, POCSAG, ACARS and RDS
+are **already shipped** and radiosondes and AIS are one small block away each. They contribute **zero**
+of the top five catalogue gaps in §7 and account for 4 of the 58. A coverage roadmap whose
+visible progress is another ADS-B decoder has spent itself on the part that was already done —
+CLAUDE.md says so directly, and this audit is the arithmetic behind it. Their remaining value is as
+**oracles**: a family with a known-good external decoder is a family where a synthesized pipeline can
+be checked against ground truth, which is what tutorials 1–4 already do and what ADR-0015 §7's
+corpus needs.
+
+**And a gap in docs/05 itself, found while filling the use-case column: there is no paging use case.**
+Neither POCSAG nor FLEX has an ID — `grep -i 'POCSAG\|FLEX' docs/use-cases.yaml` is empty — even though
+this project ships a POCSAG recipe as tutorial 2 and `mlevel_slicer` would add FLEX. That is not an
+argument for renumbering anything (IDs are permanent and appended), and it is not this ticket's to
+fix; it is recorded so the next person filling a coverage table does not conclude the families are
+low-value when what is actually missing is the row in docs/05. AWARE-070 (IoT sensor census) is the
+nearest neighbour and is **not** about paging.
+
+---
+
+## 7. The catalogue gap list — ranked by families unlocked
+
+This is the audit's main product. Each row is an addition to ADR-0011 §1.5's catalogue. "Families"
+counts the §6.2 rows that **cannot reach a decode verdict without it**; a family blocked on four
+blocks is counted against all four, because none of them alone unlocks it.
+
+| Rank | Block | Families | Additive or contract change | Rough cost | Unlocks |
+|---|---|---|---|---|---|
+| **1** | **`psk_demod`** (carrier recovery + matched filter; BPSK, QPSK, OQPSK, D8PSK, π/4-DQPSK) | **11** | **Additive, with one contract question** (§8) | Medium, **possibly small** via liquid-dsp | CCSDS telemetry, LRPT, HRIT/LRIT, HRPT, Inmarsat, Orbcomm, VDL2, Zigbee, TETRA, HF modems, (Iridium) |
+| **2** | **`descramble`** (additive/multiplicative LFSR: CCSDS, PN9, BLE whitening, V.35) | **10** | Additive | **Small** — an LFSR and a reset rule | CCSDS telemetry, LRPT, HRIT/LRIT, HRPT, VDL2, BLE, Remote ID, radiosondes, TETRA, LoRa |
+| **3** | **`viterbi`** (convolutional, punctured, CCSDS R=1/2 K=7, trellis) | **10** | Additive (`soft\|bits → bits`, ports already exist) | Medium | CCSDS telemetry, LRPT, HRIT/LRIT, HRPT, Inmarsat, TETRA, P25 P1, NXDN, DAB+, MIL-STD-188-110 |
+| **4** | **`reed_solomon`** (RS(255,223) dual-basis, RS(255,239), RS(204,188), short P25 codes) | **8** | Additive — sits beside `bch` in group `fec`, same `frames → frames` shape | Medium | CCSDS telemetry, LRPT, HRIT/LRIT, HRPT, VDL2, radiosondes, P25 P1, DAB+ |
+| **5** | **`mlevel_slicer`** (M-ary symbol decision: 4-level C4FM dibits, 8-ary) | **5** (+1 contingent on P25 P2) | Additive — `soft → bits`, k bits per symbol | **Small** | FLEX, P25 P1, DMR, NXDN, 2G ALE |
+| 6 | `bitstuff` (HDLC flag/zero destuffing) | 3 | Additive | **Very small** | AIS, AX.25/APRS, VDL2 |
+| 7 | `codeword_map` (constant-weight / m-of-n table) | 2 | Additive | Very small | RTTY/NAVTEX/SITOR/DSC, wM-Bus mode T |
+| 8 | `ssb_demod`, `cw_demod` | 1 | Additive — ADR-0011 §8.4 **explicitly declined** them | Medium (carrier estimate, raster snap, clarifier) | SSB/CW; retires ADR-0015 §12.5's `legacy` path |
+| 9 | `css_demod` (dechirp + demap) | 1 | Additive | Medium | LoRa |
+| 10 | `despread` (chip-sequence correlator) | 1 | Additive | Small | Zigbee/802.15.4 |
+| 11 | `ofdm_demod` + chanest/equalise/demap | 1 | **Contract change** (symbol-vector output) | **Large** | DAB+ — and *only* DAB+ (see below) |
+| 12 | `equalise` (adaptive, decision-feedback) | 1 | Additive | Medium | HF data modems |
+| 13 | a `raster` output kind | 1 | **Contract change** — a new output kind beside §8.2's `audio` | Medium | HF fax, SSTV, APT, Tempest |
+| — | `ldpc`, `turbo`, `polar` | **0** | — | — | **Deliberately not on this list.** Every family they serve (DVB-S2 transponders, 5G, FT8) is *out of reach* or *wrapped* for reasons a block cannot fix |
+
+**Three things the ranking says that the intuition does not.**
+
+1. **`descramble` is the best buy on the board.** It ties `viterbi` at 10 families and costs an
+   LFSR — no liquid-dsp, no new port semantics, no reference reading. It also directly serves
+   RESEARCH-012 (whitening/scrambler identification) as a *detection* capability, not just a
+   decode stage. **Build it first**, even though `psk_demod` ranks above it, because rank 1 is a
+   months-long investment and rank 2 is a week.
+2. **OFDM is the audit's sharpest inversion.** It *looks* like the biggest unlock — Wi-Fi, LTE,
+   DAB, DVB-T, HD Radio, DroneID, ATSC — and it is the **smallest**, because the front end takes
+   Wi-Fi, LTE, 5G and DroneID off the table, `gr-dtv`'s real receive chains make DVB-T/ATSC/ISDB-T
+   plugin jobs, and `nrsc5` takes HD Radio. One clean native family survives: **DAB+**, at 1.536 MHz.
+   A large native OFDM investment for one family is not obviously wrong, but it must be argued as
+   "for DAB+", not as "for OFDM".
+3. **PSK + Viterbi + Reed–Solomon is one investment, and the ticket's premise is confirmed.**
+   ADR-0015 §10's M-14 ("optional `psk_demod`/Costas") buys one stage of a seven-stage ladder.
+   Eight families need all three; **none** of the eight reaches past verdict `demodulated` with only
+   the first. Scoping them as one-plus-two-optional-extras would deliver a PSK demodulator that
+   unlocks Orbcomm and nothing else. §9's tickets reflect this.
+
+### 7.1 Check liquid-dsp first — and the finding that changes the estimate
+
+The ticket asks that liquid-dsp be established **before** scoping, because ADR-0011 §1.6's rule is
+that a block is an **adapter over an existing kernel**, and liquid-dsp is MIT, already this
+project's designated DSP kernel library (ADR-0010's table names it for exactly this), actively
+released, and already ships PSK/QAM modems, NCO/PLL, framing and FEC — which would make ranks 1, 3,
+4 and 12 adapter jobs rather than DSP jobs, and would moot any licence question for them entirely.
+
+**The finding: liquid-dsp is designated in ADR-0010 but is not a dependency of any crate today.**
+`grep liquid crates/*/Cargo.toml` returns nothing; every block in the catalogue adapts an in-repo
+kernel (hk-dsp, hk-demod, hk-estimate) per §1.6's list. So "it is an adapter job" is a **claim about
+a binding that does not exist yet**, and the first of these blocks pays for landing the FFI — a C
+build in the workspace, aarch64/JetPack cross-compilation for the Jetson, and a decision about
+vendoring versus a system library. That is a real cost and it belongs to the first ticket, not
+spread invisibly across five. **T-607 lands or refuses that binding, and T-608/T-609/T-610 are
+priced against its answer.** This is exactly the check the ticket asked for, and the answer is "not
+yet", not "yes".
+
+---
+
+## 8. What ADR-0011 would have to absorb
+
+Not written here — ADR-0011 is untouched by this audit and its status is unchanged. This is the
+delta an amendment (T-606) would carry, in the style of §8's audio amendment.
+
+1. **Catalogue rows.** §7's ranks 1–13 as additive §1.5 entries, each pinning a descriptor in
+   `planned()` and enforced by the existing `implemented_blocks_match_their_pinned_descriptors`
+   drift test. Groups: `iq` (`psk_demod`, `css_demod`, `ssb_demod`, `cw_demod`, `ofdm_demod`),
+   `symbol` (`mlevel_slicer`, `descramble`, `bitstuff`, `codeword_map`, `despread`, `equalise`),
+   `fec` (`viterbi`, `reed_solomon`).
+2. **The one real contract question: what a PSK demodulator puts on its output port.** §1.1's
+   `soft` type is "`f32` soft symbol/**bit**, positive = 1" — one value per item. That is a complete
+   answer for BPSK and for every 2-level family the catalogue serves today, and it is **not** one
+   for QPSK, 8PSK or a constellation whose symbol carries k bits jointly. Two options, and the
+   amendment must pick one:
+   - **Additive (preferred):** `psk_demod` de-maps *inside the block* and emits **one `soft` item
+     per bit** at k × the symbol rate. No new port type, no change to `slicer`, `descramble`,
+     `viterbi` or anything downstream, and it works today. The cost is that the joint-symbol
+     information is discarded at the block boundary, which a soft-decision equaliser or an
+     iterative decoder would want.
+   - **Contract change:** a new `symbols` port type carrying complex constellation points or LLR
+     vectors. §1.1 says adding a type is a contract change reviewed like the ADR, and it would
+     touch every block that accepts `soft`.
+   **`ofdm_demod` forces the same question and cannot take the additive answer**, because its
+   natural output is a subcarrier × symbol grid. So the honest sequencing is: take the additive
+   answer for PSK now, and treat the port-type change as **OFDM's** cost rather than PSK's.
+3. **Soft-decision FEC.** `viterbi` at rank 3 wants soft input; the existing `fec` group is
+   hard-decision `frames → frames`. A `soft|bits → bits` streaming decoder sits inside the existing
+   port types, so this is additive — but it makes `fec` a group with two shapes in it, and §1.5's
+   table should say so rather than leave it to be discovered.
+4. **A new output kind, if rank 13 is taken.** `raster` beside §8.2's `audio`, with the same
+   double-gating (`content_class` ceiling, `output_policy` clamp) and the same schema-version rule.
+   §8.6 bumped `schema_version` 2 → 3 for three keys at once; this is a fourth key of the same shape.
+5. **§1.6's "adapter over an existing kernel" rule needs a second column.** Today it names in-repo
+   kernels. Ranks 1/3/4/12 would name **liquid-dsp**, which §7.1 establishes is not yet linked. The
+   rule should say what a block adapts *and whether that kernel is in the build*, so the next audit
+   cannot repeat this mistake.
+6. **A block-catalogue gap is a product-visible state.** Already ADR-0015 §8 and T-550's territory,
+   restated here because the gap list makes it concrete: "we have no `css_demod`" and "this is not
+   LoRa" must not read alike.
+
+---
+
+## 9. Tickets filed from this audit
+
+Filed 2026-09-21 by T-554, appended to `docs/tasks.yaml`. **No block is implemented by T-554.**
+
+| Ticket | What |
+|---|---|
+| **T-606** | ADR-0011 amendment: the coverage catalogue delta and §8.2's port-type decision (`core_interface`) |
+| **T-607** | liquid-dsp: land the FFI binding or record the refusal — §7.1's finding, and the thing four block tickets are priced against |
+| **T-608** | `descramble` — rank 2, the best cost-per-family on the list, and the one that needs neither T-607 nor a contract answer |
+| **T-609** | `psk_demod` — rank 1; **supersedes ADR-0015 §10's M-14**, which is too narrow on its own |
+| **T-610** | `viterbi` — rank 3 |
+| **T-611** | `reed_solomon` — rank 4 |
+| **T-612** | `mlevel_slicer` — rank 5, the trunking/paging unlock |
+| **T-613** | `bitstuff` — rank 6; smallest block on the list, three families |
+
+Not filed, and deliberately: `css_demod`, `despread`, `codeword_map`, `ssb_demod`/`cw_demod`,
+`ofdm_demod`, `equalise` and the `raster` output kind. Each unlocks one or two families, and filing
+thirteen tickets from an audit whose whole point is that one block can be worth six would be the
+error the audit exists to prevent. They are recorded in §7 and are ready to be filed when the top
+five have landed and the ratio has changed.
 
 ---
 

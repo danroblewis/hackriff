@@ -86,6 +86,16 @@ auto-waiting, so every wait here is an explicit named condition (`waitFor`, `wai
 `waitForSurfaceMounted`) — which is the honest form anyway; a sleep would be what eventually gets
 this tier disabled.
 
+**A wait answers about one frame; the read after it is a different frame.** `waitFor` returns a
+boolean and how long it took, so a spec that then reads the element gets whatever the page says a
+round trip later — and the product is under no obligation to still satisfy the condition. Where the
+value matters, wait with the read that produces it (`traceMatching` in `app-trace.e2e.mjs`) or
+bracket the two together (`heldObservation`, T-487). Measured cost of getting this wrong, on the
+readout `app-trace` parses: two states both match "a slice with a peak" — a live frame, which needs
+no tile, and a pyramid cell, which needs one — and a cold page passes through the first before the
+tile route answers for the second, so the re-read lands on a peak-less cell on ~1 load in 40 (same
+rate on `main` and on the tree that first tripped it).
+
 **M8's field check** (`docs/11`) names Playwright as a new dependency for browser-driven E2E over the
 live app on real hardware. It should use **this** harness rather than growing a second one: the parts
 M8 needs are exactly the parts here — drive the real page, assert on what is drawn and requested —

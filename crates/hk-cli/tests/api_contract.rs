@@ -6725,6 +6725,42 @@ fn coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it
         "row 0 is inside capture and row 2 is a full row past the edge: {states:?} in {g}"
     );
 
+    // ---- 1b. the answer states WHERE ITS EVIDENCE STOPS at the young end (T-532) ----
+    //
+    // The grey above is honest **at the instant it is served** and false a moment later: the rows
+    // past the edge are being recorded while any copy of this answer ages, and a tile cache keeps
+    // copies. So the answer names the horizon the grey is relative to, exactly as `oldest_record_s`
+    // names the one at the other end, and a client that holds the answer may not draw grey past it.
+    //
+    // Asserted against the grid's own axes rather than against a clock: `as_of_s` must land in the
+    // row where coverage stops — after the last `observed` row starts, and no later than the end of
+    // the first `unobserved` one. Anything else and the field is not describing this plane.
+    let as_of = g["horizon"]["as_of_s"]
+        .as_f64()
+        .expect("the horizon states how far forward this answer reaches");
+    let row_t0 = |r: usize| t0 + r as f64 * ROW_S;
+    assert!(
+        as_of >= row_t0(edge_row - 1) && as_of <= row_t0(edge_row + 1),
+        "`as_of_s` {as_of} does not land in the row where coverage stops (row {edge_row}, \
+         [{}, {})): the young-end horizon and the plane it describes disagree, so a client \
+         obeying it would draw grey over rows this answer never reached. {g}",
+        row_t0(edge_row),
+        row_t0(edge_row + 1)
+    );
+    // And a band this radio has never been near names no horizon at all — `null` is "no record
+    // touches this band", which is not "reaches everywhere": everything there is honestly grey at
+    // every instant, and the answer stands as served.
+    let (st, far) = get(
+        addr,
+        &format!("/api/coverage?f_lo=2400000000&f_hi=2450000000&cells=8&rows=2&t0={t0}&t1={t1}"),
+    );
+    assert_eq!(st, 200, "{far}");
+    assert_eq!(
+        far["horizon"]["as_of_s"],
+        Value::Null,
+        "no record touches 2.4 GHz on this run, so there is no forward horizon to state: {far}"
+    );
+
     // ---- 2. the column is the SUM of the rows, and its duty is re-derived ----
     // The control for property 1, and the answer T-405/T-411 were reading: at rows=1 the very same
     // window still says "observed" for all of it.
@@ -7123,12 +7159,30 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     };
 
     // The address is resolved against the open pyramid's own geometry, so the cell sizes come back
-    // from the server rather than being assumed here. Scheme 1's floor is 6.25 kHz x 1 s.
+    // from the server rather than being assumed here.
+    //
+    // **T-484: the floor is not a constant any more.** The view lattice's node (0, 0) is the display
+    // plan's own bin and row (`fs / spectrum_fft_len` x the display row period,
+    // `hk_pipeline::history::view_geometry`), so it moves with the run's sample rate; the 6250 Hz x
+    // 1 s that used to be asserted here was T-439's fixed floor. Pinning a number would restate that
+    // function in a second place, which is what this file exists to avoid. What the assertions below
+    // need is only that the floor is real and that the route reports one cell, not two.
     let (st, probe) = get(addr, &tile(0, 0, 0, 0));
     assert_eq!(st, 200, "{probe}");
     let f_cell = probe["extent"]["f_cell_hz"].as_f64().unwrap();
     let t_cell = probe["extent"]["t_cell_s"].as_f64().unwrap();
-    assert_eq!((f_cell, t_cell), (6250.0, 1.0), "{probe}");
+    assert!(
+        f_cell.is_finite() && f_cell > 0.0 && t_cell.is_finite() && t_cell > 0.0,
+        "{probe}"
+    );
+    assert_eq!(
+        (
+            probe["axes"]["frequency"]["cell_hz"].as_f64().unwrap(),
+            probe["axes"]["time"]["cell_s"].as_f64().unwrap()
+        ),
+        (f_cell, t_cell),
+        "`extent` and `axes` must name the same node (0, 0): {probe}"
+    );
     assert_eq!(probe["key"]["scheme"], json!("view"), "{probe}");
     assert_eq!(probe["key"]["device"], json!("any"), "{probe}");
     // `any` is the union and can never wear one radio's identity (T-259/T-305, docs/16 §6.3).
@@ -7521,12 +7575,19 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         v["error"].as_str().is_some_and(|s| s.contains("diagonal")),
         "the refusal must say WHY: {v}"
     );
-    // On the diagonal the same scheme answers.
+    // On the diagonal the same scheme answers — **addressed in SCHEME 1's own cells**, which since
+    // T-484 are no longer the view lattice's. Scheme 1's floor is still its fixed 6.25 kHz x 1 s;
+    // the view lattice's is now the display plan's own bin and row, so an index computed from one
+    // lands somewhere else in the other, and for time it lands outside the addressable range
+    // entirely. `scheme` names one store, and so does an index expressed in its cells.
+    let s1_f = 6250.0;
+    let s1_t = 1.0;
     let (st, v) = get(
         addr,
         &format!(
-            "/api/tiles?scheme=1&level_f=0&level_t=0&f_index={f_index}&t_index={}&cells={N}",
-            t_index_of(0)
+            "/api/tiles?scheme=1&level_f=0&level_t=0&f_index={}&t_index={}&cells={N}",
+            (STATION_HZ / (s1_f * N as f64)).floor() as u64,
+            (unix_now() / (s1_t * N as f64)) as u64,
         ),
     );
     assert_eq!(st, 200, "{v}");
@@ -7540,6 +7601,55 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         "{v}"
     );
     assert_eq!(v["resolution"]["answered"]["levels"], json!(5), "{v}");
+    // ---- T-505: the OVERVIEW tier is its own lattice, answered by the spectrum-history store ----
+    //
+    // One lattice cannot be both the display stream's own bin at its floor and device-wide over the
+    // record horizon at its ceiling: `max_level` bounds level INDICES, so a finer floor shrinks the
+    // coarsest ADDRESSABLE tile by the same factor. The client draws wide-and-long viewports from
+    // this tier instead, and `docs/api.md` states its ceiling — so the contract is that the route
+    // answers the address, names the scheme back, and reads the store whose cells do not move when
+    // the view pyramid's floor does.
+    //
+    // **Addressed in the OVERVIEW lattice's own cells (T-501).** It is anchored on scheme 1, whose
+    // floor is the fixed 6.25 kHz x 1 s — that is the whole point of the tier — while the view
+    // lattice's floor is the display plan's own bin and row and moves with it. An index computed in
+    // one lattice's cells names a different tile in the other, and on the time axis it lands
+    // outside the addressable range entirely, exactly as the scheme-1 address above.
+    let (st, v) = get(
+        addr,
+        &format!(
+            "/api/tiles?scheme=overview&level_f=0&level_t=0&f_index={}&t_index={}&cells={N}",
+            (STATION_HZ / (s1_f * N as f64)).floor() as u64,
+            (unix_now() / (s1_t * N as f64)) as u64,
+        ),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["key"]["scheme"], json!("overview"), "{v}");
+    assert_eq!(
+        v["resolution"]["answered"]["store"],
+        json!("spectrum-history"),
+        "the overview tier must never be answered by the view pyramid: {v}"
+    );
+    // Its axes are the de-welded ladder, NOT scheme 1's welded diagonal — so an off-diagonal node
+    // that scheme 1 refuses above is a real address here.
+    let (st, off) = get(
+        addr,
+        &format!("/api/tiles?scheme=overview&level_f=0&level_t=3&f_index=0&t_index=0&cells={N}"),
+    );
+    assert_eq!(
+        st, 200,
+        "a de-welded lattice has no diagonal to fall off: {off}"
+    );
+    assert_eq!(off["key"]["scheme"], json!("overview"), "{off}");
+    // And its ceiling reaches past the whole surface, which is the property the tier exists for:
+    // the view lattice's own is (9, 1) at the shipped floor and shrinks with any finer one.
+    let max_f = v["axes"]["frequency"]["max_level"].as_u64().unwrap();
+    let max_t = v["axes"]["time"]["max_level"].as_u64().unwrap();
+    assert!(
+        max_f >= 11 && max_t >= 14,
+        "overview ceiling ({max_f}, {max_t}): {v}"
+    );
+
     // Past the end of an axis is the other "no such node", and names both extents.
     let (st, v) = get(addr, &tile(99, 0, 0, 0));
     assert_eq!(st, 404, "{v}");
@@ -7946,16 +8056,6 @@ fn the_tile_routes_declared_readable_ceiling_is_true_and_is_stated_for_the_route
             }
         },
     );
-    // Scheme `view`: 6.25 kHz x 1 s at the floor, each level doubling its own axis's cell.
-    let at = |lf: u64, lt: u64, cells: u64| {
-        let f_tile = 6250.0 * (1u64 << lf) as f64 * cells as f64;
-        let t_tile = (1u64 << lt) as f64 * cells as f64;
-        format!(
-            "/api/tiles?level_f={lf}&level_t={lt}&f_index={}&t_index={}&cells={cells}",
-            (FIXTURE_CENTER_HZ / f_tile).floor() as u64,
-            (edge / t_tile).floor() as u64
-        )
-    };
     let probe = |cells: u64| {
         let (st, v) = get(
             addr,
@@ -7966,6 +8066,24 @@ fn the_tile_routes_declared_readable_ceiling_is_true_and_is_stated_for_the_route
     };
 
     let v = probe(256);
+    // Scheme `view`, each level doubling its own axis's cell — **and node (0, 0) READ OFF THE
+    // ROUTE, never written down here (T-501).** Since T-484 the floor is the display plan's own bin
+    // and row (`fs / spectrum_fft_len` x the row period, `hk_pipeline::history::view_geometry`),
+    // so it moves with the run's sample rate and display settings. The 6250 Hz x 1 s this closure
+    // used to assume was T-439's fixed floor, and assuming it silently addressed a DIFFERENT tile
+    // — one over a band the mock never tuned — where the coverage map short-circuits and the
+    // ceiling is never exercised at all.
+    let f0 = v["axes"]["frequency"]["cell_hz"].as_f64().unwrap();
+    let t0 = v["axes"]["time"]["cell_s"].as_f64().unwrap();
+    let at = |lf: u64, lt: u64, cells: u64| {
+        let f_tile = f0 * (1u64 << lf) as f64 * cells as f64;
+        let t_tile = t0 * (1u64 << lt) as f64 * cells as f64;
+        format!(
+            "/api/tiles?level_f={lf}&level_t={lt}&f_index={}&t_index={}&cells={cells}",
+            (FIXTURE_CENTER_HZ / f_tile).floor() as u64,
+            (edge / t_tile).floor() as u64
+        )
+    };
     let levels_f = v["axes"]["frequency"]["levels"].as_u64().unwrap();
     let levels_t = v["axes"]["time"]["levels"].as_u64().unwrap();
     let max_f = v["axes"]["frequency"]["max_level"]

@@ -525,3 +525,148 @@ fn t598_one_centre_claims_nothing() {
     assert_eq!(out.detections_marked, 0);
     assert_eq!(shown(&repo).len(), 2, "both rows stay visible: {a} {b}");
 }
+
+/// T-600: `EMITTER_DETECTION_EVIDENCE_SQL` counted only the flag bits stored ON the detection
+/// row, so a detection T-598 resolved as LO-relative still ranked as though nothing were known
+/// about it — the standing verdict lives in `detection_retune` (read-path only, per T-598's
+/// immutability rule) and the evidence proxy never joined it in.
+///
+/// The scene gives the real emitter and the spur's family representative *identical* measured
+/// evidence (same SNR, peak level and duty cycle, by construction of [`sighting`]), so any rank
+/// difference can only come from the retune verdict, not from the underlying measurement —
+/// otherwise this would be a vacuous comparison of two rows that already differed.
+#[test]
+fn t600_resolved_lo_relative_artefact_ranks_below_a_clean_row() {
+    let mut s = survey_three_centres();
+    let out = s
+        .repo
+        .resolve_retune(
+            s.spur[0],
+            "test/retune@1",
+            t(30),
+            &RetuneTolerance::default(),
+        )
+        .unwrap();
+    assert_eq!(out.families.len(), 1, "families: {:?}", out.families);
+    let primary = out.families[0].primary;
+
+    let clean = super::relate::evidence(&s.repo.conn, s.emitter[0])
+        .unwrap()
+        .unwrap();
+    let artefact = super::relate::evidence(&s.repo.conn, primary)
+        .unwrap()
+        .unwrap();
+
+    // Anti-vacuity: the two rows were measured identically. `evidence()` read three detections
+    // for each (one per centre) and the measured evidence agrees exactly.
+    assert_eq!(clean.snr_db, artefact.snr_db, "identical measured SNR");
+    assert_eq!(
+        clean.peak_dbfs, artefact.peak_dbfs,
+        "identical measured level"
+    );
+    assert_eq!(
+        clean.duty_cycle, artefact.duty_cycle,
+        "identical measured duty cycle"
+    );
+    assert_eq!(
+        clean.suspect_fraction, 0.0,
+        "the real emitter's own detections were never flagged"
+    );
+    assert_eq!(
+        artefact.suspect_fraction, 1.0,
+        "every one of the artefact's detections now carries the retune verdict's suspect bits"
+    );
+
+    assert!(
+        artefact.rank() < clean.rank(),
+        "a resolved LO-relative artefact (rank {}) must rank strictly below a clean row \
+         with equal measured evidence (rank {})",
+        artefact.rank(),
+        clean.rank()
+    );
+}
+
+/// T-600, second half: **a one-way join would leave the ranking outliving the claim.** T-598
+/// built revocation deliberately (a fourth centre, or here the evidence being withdrawn, appends
+/// `active = 0` over a standing verdict), so the evidence proxy must read the *current* standing
+/// verdict, not cache the bits from the moment it was first resolved.
+#[test]
+fn t600_revoking_the_verdict_restores_the_artefacts_rank() {
+    let mut s = survey_three_centres();
+    let out = s
+        .repo
+        .resolve_retune(
+            s.spur[0],
+            "test/retune@1",
+            t(30),
+            &RetuneTolerance::default(),
+        )
+        .unwrap();
+    let family = out.families[0].clone();
+    let primary = family.primary;
+
+    let clean = super::relate::evidence(&s.repo.conn, s.emitter[0])
+        .unwrap()
+        .unwrap();
+    let flagged = super::relate::evidence(&s.repo.conn, primary)
+        .unwrap()
+        .unwrap();
+    assert_eq!(flagged.suspect_fraction, 1.0);
+    assert!(
+        flagged.rank() < clean.rank(),
+        "sanity: the resolved artefact starts ranked below the clean row"
+    );
+
+    // Withdraw the diversity behind the verdict, exactly as `t598_an_lo_relative_verdict_is_revocable_...`
+    // does: delete the sibling sightings, so a second pass finds nothing left to support the
+    // family and appends the revocation.
+    for id in &family.deferred {
+        s.repo
+            .change_emitter_lifecycle(
+                *id,
+                LifecycleState::Deleted,
+                LifecycleAuthor::User,
+                "test",
+                "withdrawn",
+                t(40),
+            )
+            .unwrap();
+    }
+    let again = s
+        .repo
+        .resolve_retune(primary, "test/retune@1", t(50), &RetuneTolerance::default())
+        .unwrap();
+    assert!(
+        again.families.is_empty(),
+        "no family survives the withdrawal: {:?}",
+        again.families
+    );
+    assert!(
+        again.detections_cleared >= 1,
+        "the standing verdict was actually withdrawn, not left standing"
+    );
+    let idx = s
+        .spur
+        .iter()
+        .position(|id| *id == primary)
+        .expect("primary is one of the spur sightings");
+    assert_eq!(
+        s.repo.detection_retune(s.spur_dets[idx]).unwrap(),
+        None,
+        "no verdict stands on the primary's own detection after revocation"
+    );
+
+    let restored = super::relate::evidence(&s.repo.conn, primary)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        restored.suspect_fraction, 0.0,
+        "revoking the verdict restores the measured (unflagged) evidence"
+    );
+    assert_eq!(
+        restored.rank(),
+        clean.rank(),
+        "revoking the verdict restores the row's rank — a one-way join would leave the \
+         ranking outliving the claim"
+    );
+}
