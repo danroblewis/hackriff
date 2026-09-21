@@ -18,8 +18,13 @@
 //!   group is SIGKILLed before the leader is reaped (no pid/pgid reuse window), so descendants
 //!   holding the pipes cannot hang the host. The plugin is restarted with exponential backoff; a
 //!   run longer than `backoff_max` resets the backoff; more than `max_restarts` exits within
-//!   `window` is a crash loop (`Failed`). A plugin whose input stays full for `stall_timeout`
-//!   has its group killed as hung. Output readers are joined with a timeout: a descendant that
+//!   `window` is a crash loop (`Failed`). A plugin whose input stays full has its group killed as
+//!   hung, on **one of two budgets** told apart by observation, not by a longer constant (T-540):
+//!   before the child's first byte of output it is judged against `startup_timeout`, because a
+//!   freshly linked binary really can be spawned and then execute nothing for ~30 s (T-493);
+//!   from that first byte on, against the much tighter `stall_timeout`, measured from the byte.
+//!   Which budget expired is counted (`startup_kills` / `stall_kills`), logged and put in
+//!   `last_exit`. Output readers are joined with a timeout: a descendant that
 //!   escaped the group (setsid) cannot block restart or shutdown. Shutdown kills the group.
 //!
 //! Records queued for a process that exits are discarded with its queue.
@@ -51,6 +56,39 @@ use crate::output::{PluginOutput, SAMPLE_INDEX_OUT_OF_RANGE, parse_line};
 
 /// How long the host waits for a plugin's output readers after killing its process group.
 const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How often the per-run hang watchdog samples the input consumer.
+const WATCHDOG_POLL: Duration = Duration::from_millis(25);
+
+/// Which watchdog budget killed a plugin process (T-540).
+///
+/// The host cannot tell a hung decoder from one the OS has not started yet by waiting longer; it
+/// can only tell them apart by what it has *observed* of the child. One byte on stdout or stderr
+/// is that observation, so the two cases carry different budgets and are reported apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HangBudget {
+    /// `startup_timeout`: the process had produced no output at all, and its input queue stayed
+    /// full. It may never have reached its first instruction (a cold link: T-493).
+    NeverStarted,
+    /// `stall_timeout`: the process had produced output — it was running — and then left its
+    /// input queue full. This is a genuine hang.
+    Unresponsive,
+}
+
+impl HangBudget {
+    /// A short phrase for `last_exit`, naming the budget rather than saying "hung".
+    fn exit_note(self) -> &'static str {
+        match self {
+            Self::NeverStarted => {
+                "killed by the host: no output at all past startup_timeout (startup budget)"
+            }
+            Self::Unresponsive => {
+                "killed by the host: input queue full past stall_timeout after the plugin \
+                 had started (responsiveness budget)"
+            }
+        }
+    }
+}
 
 /// The input stream a plugin instance is fed.
 #[derive(Clone, Debug, PartialEq)]
@@ -167,8 +205,15 @@ pub struct PluginStats {
     pub clean_exits: u64,
     /// Spawn failures.
     pub spawn_failures: u64,
-    /// Kills by the hang watchdog (input stayed full past `stall_timeout`).
+    /// Kills by the hang watchdog of a process that **had started** (produced output) and then
+    /// left its input queue full past `stall_timeout`, timed from its first output byte (T-540).
     pub stall_kills: u64,
+    /// Kills by the hang watchdog of a process that had produced **no output at all** and left
+    /// its input queue full past the longer `startup_timeout` (T-540). A non-zero count here is
+    /// not a hung decoder: it is one that never ran.
+    pub startup_kills: u64,
+    /// Which budget last killed a process, if either has (never cleared by a restart).
+    pub last_hang: Option<HangBudget>,
     /// Decode lines stored.
     pub decodes: u64,
     /// Annotation lines stored.
@@ -223,6 +268,7 @@ struct Counters {
     clean_exits: AtomicU64,
     spawn_failures: AtomicU64,
     stall_kills: AtomicU64,
+    startup_kills: AtomicU64,
     decodes: AtomicU64,
     annotations: AtomicU64,
     class_clamped: AtomicU64,
@@ -282,6 +328,12 @@ struct Shared {
     finishing: AtomicBool,
     /// The running process sent its `ready` line (T-223). Cleared at every (re)start.
     ready: AtomicBool,
+    /// When the running process produced its **first byte** on stdout or stderr: the first
+    /// observable evidence that it reached its first instruction. `None` until then; cleared at
+    /// every (re)start, because a restarted process has its own start-up (T-540).
+    life: Mutex<Option<Instant>>,
+    /// Which watchdog budget last killed a process. Never cleared by a restart.
+    last_hang: Mutex<Option<HangBudget>>,
     /// The running process's input consumer (set while attached).
     consumer: Mutex<Option<ConsumerId>>,
     counters: Counters,
@@ -349,6 +401,8 @@ impl Shared {
             clean_exits: get(&c.clean_exits),
             spawn_failures: get(&c.spawn_failures),
             stall_kills: get(&c.stall_kills),
+            startup_kills: get(&c.startup_kills),
+            last_hang: *lock(&self.last_hang),
             decodes: get(&c.decodes),
             annotations: get(&c.annotations),
             class_clamped: get(&c.class_clamped),
@@ -441,7 +495,15 @@ impl PluginInstance {
             PublisherConfig {
                 queue_bytes: manifest.limits.input_queue_bytes,
                 disconnect_after_drops: u64::MAX,
-                disconnect_after: manifest.limits.stall_timeout,
+                // The publisher's own slow-consumer disconnect is a **backstop**, not the
+                // policy: only the host can see whether the child has shown a sign of life, so
+                // the host's per-run watchdog owns the decision (T-540). Set past both host
+                // budgets so it can never pre-empt one; it still frees the input if the
+                // watchdog itself is lost.
+                disconnect_after: manifest
+                    .limits
+                    .startup_timeout
+                    .saturating_add(manifest.limits.stall_timeout),
                 max_consumers: 2,
                 drain_timeout: Duration::from_secs(1),
             },
@@ -467,6 +529,8 @@ impl PluginInstance {
             shutdown: AtomicBool::new(false),
             finishing: AtomicBool::new(false),
             ready: AtomicBool::new(false),
+            life: Mutex::new(None),
+            last_hang: Mutex::new(None),
             consumer: Mutex::new(None),
             counters: Counters::default(),
             log: Mutex::new(VecDeque::new()),
@@ -704,8 +768,11 @@ fn describe(status: &ExitStatus) -> String {
 /// Runs one process (group) to completion.
 fn run_once(shared: &Arc<Shared>, attacher: &FeedAttacher, program: &PathBuf, args: &[String]) {
     let c = &shared.counters;
-    // A restarted process has its own start-up: it is not ready until it says so again (T-223).
+    // A restarted process has its own start-up: it is not ready until it says so again (T-223),
+    // and it has not shown a sign of life until it produces one of its own (T-540).
     shared.ready.store(false, Ordering::Release);
+    *lock(&shared.life) = None;
+    let spawned_at = Instant::now();
     let spawned = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
@@ -743,14 +810,22 @@ fn run_once(shared: &Arc<Shared>, attacher: &FeedAttacher, program: &PathBuf, ar
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let weak: Weak<Shared> = Arc::downgrade(shared);
+    // One report per run, shared by the watchdog and the publisher's backstop.
+    let reported = Arc::new(AtomicBool::new(false));
+    let stall_reported = Arc::clone(&reported);
     let consumer = attacher.attach_child_stdin(
         format!("plugin:{}:{pid}", shared.manifest.id),
         stdin,
         Box::new(move || {
             if let Some(s) = weak.upgrade() {
-                bump(&s.counters.stall_kills);
-                s.log("host: input stayed full past stall_timeout; killing plugin group".into());
-                s.kill();
+                // Reached only if the host watchdog was lost: it fires before this. Report it
+                // against the same two budgets rather than as a generic hang.
+                let life = *lock(&s.life);
+                let budget = match life {
+                    Some(_) => HangBudget::Unresponsive,
+                    None => HangBudget::NeverStarted,
+                };
+                kill_hung(&s, pid, budget, spawned_at, life, &stall_reported);
             }
         }),
     );
@@ -777,18 +852,50 @@ fn run_once(shared: &Arc<Shared>, attacher: &FeedAttacher, program: &PathBuf, ar
             })
     };
     let (out_shared, out_abandon) = (Arc::clone(shared), Arc::clone(&abandon));
+    let out_life = SignsOfLife::new(stdout, Arc::clone(shared));
     let _ = spawn_reader(
         "out",
-        Box::new(move || read_stdout(&out_shared, stdout, &out_abandon)),
+        Box::new(move || read_stdout(&out_shared, out_life, &out_abandon)),
     );
     let (err_shared, err_abandon) = (Arc::clone(shared), Arc::clone(&abandon));
+    let err_life = SignsOfLife::new(stderr, Arc::clone(shared));
     let _ = spawn_reader(
         "err",
-        Box::new(move || read_stderr(&err_shared, stderr, &err_abandon)),
+        Box::new(move || read_stderr(&err_shared, err_life, &err_abandon)),
     );
     drop(done_tx);
 
+    // Per-run hang watchdog: the input queue staying full means different things before and
+    // after the child's first byte, so the two are budgeted and reported separately (T-540).
+    let over = Arc::new(AtomicBool::new(false));
+    let watchdog = consumer.as_ref().ok().copied().and_then(|id| {
+        let (w_shared, w_attacher, w_over, w_reported) = (
+            Arc::clone(shared),
+            attacher.clone(),
+            Arc::clone(&over),
+            Arc::clone(&reported),
+        );
+        thread::Builder::new()
+            .name(format!("hk-plugin-{}-watchdog", shared.manifest.id))
+            .spawn(move || {
+                watch_for_hang(
+                    &w_shared,
+                    &w_attacher,
+                    id,
+                    pid,
+                    spawned_at,
+                    &w_over,
+                    &w_reported,
+                )
+            })
+            .ok()
+    });
+
     wait_exit_unreaped(pid);
+    over.store(true, Ordering::Release);
+    if let Some(h) = watchdog {
+        let _ = h.join();
+    }
     {
         // Kill the rest of the group while the leader is still a zombie, then reap.
         let mut g = lock(&shared.proc);
@@ -827,8 +934,146 @@ fn run_once(shared: &Arc<Shared>, attacher: &FeedAttacher, program: &PathBuf, ar
             format!("wait failed: {e}")
         }
     };
+    // A watchdog kill shows up as "signal 9"; say which budget it was and why (T-540).
+    let desc = match (reported.load(Ordering::Acquire), *lock(&shared.last_hang)) {
+        (true, Some(budget)) => format!("{desc} ({})", budget.exit_note()),
+        _ => desc,
+    };
     shared.log(format!("host: plugin pid {pid} ended: {desc}"));
     lock(&shared.proc).last_exit = Some(desc);
+}
+
+/// A child's output pipe that records the **first byte** read from it.
+///
+/// That byte is the host's only evidence that the process reached its first instruction. Nothing
+/// else will do: `starts`, every `records_*` counter and even `ready` (for a manifest without
+/// `input.ready_signal`) tick from the host's own bookkeeping whether or not the child ever ran —
+/// exactly what the T-493 traces showed, a child created in 193 µs that then executed nothing for
+/// 30 s while the host happily queued its whole input.
+struct SignsOfLife<R> {
+    inner: R,
+    shared: Arc<Shared>,
+    seen: bool,
+}
+
+impl<R: Read> SignsOfLife<R> {
+    fn new(inner: R, shared: Arc<Shared>) -> Self {
+        Self {
+            inner,
+            shared,
+            seen: false,
+        }
+    }
+}
+
+impl<R: Read> Read for SignsOfLife<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 && !self.seen {
+            self.seen = true;
+            // stdout and stderr race here; the first one to arrive is the birth time.
+            let mut life = lock(&self.shared.life);
+            if life.is_none() {
+                *life = Some(Instant::now());
+                self.shared.wake.notify_all();
+            }
+        }
+        Ok(n)
+    }
+}
+
+/// Kills a plugin process group on a named watchdog budget, once per run.
+fn kill_hung(
+    shared: &Arc<Shared>,
+    pid: u32,
+    budget: HangBudget,
+    spawned_at: Instant,
+    life: Option<Instant>,
+    reported: &AtomicBool,
+) {
+    if reported.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    *lock(&shared.last_hang) = Some(budget);
+    let limits = shared.manifest.limits;
+    match budget {
+        HangBudget::NeverStarted => {
+            bump(&shared.counters.startup_kills);
+            shared.log(format!(
+                "host: plugin pid {pid} has produced no output in the {:?} since it was \
+                 spawned and its input queue stayed full past startup_timeout ({:?}); killing \
+                 the plugin group (startup budget: the process may never have reached its \
+                 first instruction)",
+                spawned_at.elapsed(),
+                limits.startup_timeout,
+            ));
+        }
+        HangBudget::Unresponsive => {
+            let at = life.map_or(Duration::ZERO, |t| t.duration_since(spawned_at));
+            bump(&shared.counters.stall_kills);
+            shared.log(format!(
+                "host: plugin pid {pid} produced its first output at +{at:?} and then left \
+                 its input queue full past stall_timeout ({:?}); killing the plugin group \
+                 (responsiveness budget)",
+                limits.stall_timeout,
+            ));
+        }
+    }
+    shared.kill();
+}
+
+/// The per-run hang watchdog (T-540).
+///
+/// It watches one thing — whether the input queue is full and staying full, which is what the
+/// publisher's own slow-consumer rule watched — and judges it against one of two budgets
+/// depending on whether the child has shown a sign of life. Each budget runs **from its own
+/// subject's start**: the responsiveness budget from the child's first output byte (or from when
+/// the queue filled, whichever is later), never from a spawn whose child had not yet run.
+///
+/// A queue that is not full is not evidence of anything either way, so a quiet, healthy plugin
+/// with a producer that keeps up is never killed by either budget — the same as before.
+fn watch_for_hang(
+    shared: &Arc<Shared>,
+    attacher: &FeedAttacher,
+    consumer: ConsumerId,
+    pid: u32,
+    spawned_at: Instant,
+    over: &AtomicBool,
+    reported: &AtomicBool,
+) {
+    let limits = shared.manifest.limits;
+    let mut full_since: Option<Instant> = None;
+    let (mut enqueued, mut dropped) = (0u64, 0u64);
+    while !over.load(Ordering::Acquire) && !shared.shutdown.load(Ordering::Acquire) {
+        // Gone means the run is over (detached at exit), not that anything is wrong.
+        let Some(st) = attacher.stats(consumer) else {
+            return;
+        };
+        if st.records_enqueued > enqueued {
+            // It took a record: the queue had room, so it is not full.
+            full_since = None;
+        } else if st.records_dropped > dropped {
+            // Records are dropped only when the queue is full.
+            full_since.get_or_insert_with(Instant::now);
+        }
+        (enqueued, dropped) = (st.records_enqueued, st.records_dropped);
+        if let Some(full) = full_since {
+            let life = *lock(&shared.life);
+            let (budget, from) = match life {
+                Some(first_byte) => (limits.stall_timeout, full.max(first_byte)),
+                None => (limits.startup_timeout, full),
+            };
+            if from.elapsed() >= budget {
+                let budget = match life {
+                    Some(_) => HangBudget::Unresponsive,
+                    None => HangBudget::NeverStarted,
+                };
+                kill_hung(shared, pid, budget, spawned_at, life, reported);
+                return;
+            }
+        }
+        thread::sleep(WATCHDOG_POLL);
+    }
 }
 
 /// Blocks until `pid` has exited, without reaping it, so its pid cannot be reused while a kill
