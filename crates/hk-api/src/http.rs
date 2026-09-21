@@ -1321,9 +1321,9 @@ fn events(state: &ApiState, req: &Request) -> Result<Value, ApiError> {
             let h = h
                 .lock()
                 .map_err(|_| ApiError::new(500, "history store poisoned"))?;
-            crate::events::events_json(&repo, Some(&h), &req.query)
+            crate::events::events_json(state, &repo, Some(&h), &req.query)
         }
-        None => crate::events::events_json(&repo, None, &req.query),
+        None => crate::events::events_json(state, &repo, None, &req.query),
     }
 }
 

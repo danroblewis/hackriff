@@ -483,11 +483,12 @@ export function timelineRequest(band: Band | null, columns: number, rows: number
  * that can be misread as a low value. `shade` is present only on an observed cell, and `null` there
  * means *sampled, level not retained*: a third case, drawn as neither grey nor the ramp's bottom. */
 export interface CoverageCell {
-  /** `"observed"` (the front end was tuned here), `"unobserved"` (nothing ever looked), or
+  /** `"observed"` (the front end was tuned here), `"unobserved"` (nothing ever looked),
    * `"unknown"` (T-423: before the oldest surviving tune record — *we no longer know whether we
-   * looked*). `"unknown"` is **not** grey: grey is a measurement claim and this is the absence of
-   * one, so it is never counted or drawn as `"unobserved"`. */
-  state: "observed" | "unobserved" | "unknown";
+   * looked*) or `"excluded"` (T-595: sampled, and deliberately left out of the analysis — the
+   * receiver's DC notch). Neither `"unknown"` nor `"excluded"` is grey: grey is the claim that
+   * nothing ever looked, and neither of them is that claim. */
+  state: "observed" | "unobserved" | "unknown" | "excluded";
   /** Where on the served scale this cell sits, 0…1; absent or `null` when no level is retained. */
   shade?: number | null;
 }

@@ -166,6 +166,7 @@ fn kind_from(text: &str) -> Result<RelationKind, RepoError> {
         "suppressed-by" => RelationKind::SuppressedBy,
         "duplicate-of" => RelationKind::DuplicateOf,
         "artifact-of" => RelationKind::ArtifactOf,
+        "retune-sibling-of" => RelationKind::RetuneSiblingOf,
         other => {
             return Err(RepoError::Invalid(format!(
                 "unknown relation kind {other:?}"
@@ -233,7 +234,7 @@ fn relation_from(raw: RelationRaw) -> Result<EmitterRelation, RepoError> {
     })
 }
 
-fn read_relations(
+pub(super) fn read_relations(
     conn: &Connection,
     sql: &str,
     id: EmitterId,
@@ -274,7 +275,10 @@ fn read_relations(
     Ok(out)
 }
 
-fn insert_relation(conn: &Connection, claim: &RelationClaim) -> Result<EmitterRelation, RepoError> {
+pub(super) fn insert_relation(
+    conn: &Connection,
+    claim: &RelationClaim,
+) -> Result<EmitterRelation, RepoError> {
     if claim.emitter_id == claim.source_id {
         return Err(RepoError::Invalid(
             "a relation cannot name the same emitter on both sides".into(),
