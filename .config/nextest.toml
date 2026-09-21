@@ -270,6 +270,16 @@ test-group = 'heavy-serial'
 filter = 'package(hk-pipeline) and binary(replumb_spectrum_handshake)'
 test-group = 'heavy-serial'
 
+# T-489: the unwatched-spectrum tests. `rows_resume…` replays in REAL TIME and measures how long
+# the first row takes to arrive after a subscriber attaches — one read timeout (50 ms) plus a row
+# period — so a contended box reads as a slow producer. Per the rule above its bound is measured
+# rather than guessed: the first row landed 46.5 ms after the subscribe, against the 1 s it
+# asserts, and the whole test is 4.6 s of which 4 s is the recording it replays in real time.
+# `an_unwatched_run…` runs the same recording twice, unpaced (1.1 s), to compare what each stored.
+[[profile.default.overrides]]
+filter = 'package(hk-pipeline) and binary(spectrum_unwatched)'
+test-group = 'heavy-serial'
+
 # =========================================================================================
 # THE CI RUNNER IS NOT THIS BOX (T-436).
 #
