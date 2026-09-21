@@ -16204,7 +16204,7 @@ tasks:
     milestone: MAUTO
     title: "BART 851 MHz, phase 1: research the system and capture real IQ as a SigMF fixture with HIDDEN ground truth"
     status: blocked
-    blocked_on: user - BART is not receivable at the current antenna position (docs/19 section 7, measured 2026-09-20). Needs the user to state the location and move/replace the antenna (a physical RF change, reserved to the user), or to choose a different trunked system as SIGNAL-087's first instance.
+    blocked_on: user - BART is not receivable at 1177 Market St, San Francisco with the current antenna position (docs/19 section 7; re-measured 2026-09-20 at the corrected amp-ON gain, with a CFAR local floor: 0 of 16 BART channels above +4 dB while neighbours 12.5 kHz away run 43-93% duty). Location is confirmed in range, so the fix is a physical RF change - antenna to a window/outdoors/higher, or a proper 850 MHz antenna - which is reserved to the user. Alternative: approve the blind wideband 100%-duty hunt as SIGNAL-087's first instance instead of BART.
     priority: high
     parallel_group: FIXTURE
     model: opus
@@ -16262,6 +16262,37 @@ tasks:
       nine candidates measured 1:1 over a 30 dB range, proving them real external signals rather than
       intermodulation or internal birdies. That test needs no hardware change and should be standard.
       Device released; the demo fell back to looping replay while held and needs a restart for live.
+    result_2: |
+      RETRY 2026-09-20 21:00-21:25 after the user gave the location (1177 Market St, SF - downtown,
+      near Civic Center, confirmed in BART's service area). NEGATIVE CONFIRMED, and two errors of
+      mine found and corrected in the process. Device released; demo left on looping replay.
+      (1) GAIN PROVENANCE, since it was asked: every negative measurement was ALREADY taken at the
+      corrected amp-ON setting. The amp-off ladder was a discarded first pass. Nothing was inherited
+      from it. The new 60 s full-band sweep ran LNA 32 / VGA 32 / amp ON, clip 6.5e-6, p99.9 = 87/127.
+      (2) MY DUTY METRIC WAS BROKEN and the first write-up's "no channel above 95% duty" is WITHDRAWN.
+      It referenced each channel to its OWN 5th percentile over time, so a channel on ALL the time
+      scored 0% duty instead of 100% - blind to exactly the signature it existed to find. Seven
+      channels are in fact continuous. The BART conclusion did not change; the reasoning did.
+      (3) GLOBAL vs LOCAL FLOOR - the more important finding. Against a GLOBAL floor the 20 Msps
+      sweep showed all 16 BART channels at +7 to +11 dB and 59-92% duty. FALSE: the levels fall
+      MONOTONICALLY with frequency, which 16 independent emitters do not do - it is a pedestal under
+      the low end of the band. With a CFAR LOCAL floor (median over +/-40 channels, 2-channel guard)
+      it collapses to -0.3..+0.7 dB and <=3.8% duty, 0 of 16 above +4 dB. THE SAME DATA GIVES "no
+      signal", "sixteen signals" or "nine signals" depending ONLY on how the floor is estimated, and
+      the global-floor run would have manufactured 16 BART detections that are not there - then
+      "confirmed" the capture and produced a fixture built on nothing. Worked example for the
+      project's own detector; recorded in docs/19 section 7.4.
+      (4) THE DECISIVE EVIDENCE is adjacent-channel, so no pedestal/tilt/calibration argument touches
+      it: 851.3125 (BART, +0.3 dB) sits 12.5 kHz from 851.2375 (live, +5.3 dB, 43% duty); 853.8625
+      (BART, +0.7 dB) sits 12.5 kHz from 853.8750 (live, +10.3 dB, 93% duty). Same capture, same
+      gain, same instant.
+      (5) WHOLE BAND SWEPT: 1440 channels over 850.6-869.4 MHz, 60 s. Nine occupied, and exactly ONE
+      continuous: 866.8625 MHz, +7.4 dB, 100% duty, in the NPSPAC sub-band. It is NOT C4FM
+      (discriminator kurtosis 3.34, single mode; C4FM wants ~1.6-2.0 and four modes at +/-600/+/-1800
+      Hz). So there is still no P25 control channel reachable - not because nothing is continuous,
+      but because the one continuous thing is not four-level digital. BART is also not hiding on an
+      unlisted channel in this band.
+
   - id: T-545
     milestone: MAUTO
     title: "BART 851 MHz, phase 2: failing blind acceptance tests through the MOCK SDR replaying the capture"
