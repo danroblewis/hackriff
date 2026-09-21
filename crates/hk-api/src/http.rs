@@ -391,10 +391,15 @@ const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// successor publisher before answering `503 replumbing`.
 ///
 /// It bounds one connection thread, not the client's patience: past it the client is told to retry
-/// rather than held. Two seconds is an order of magnitude over the measured re-plumb gap (0.17 s
-/// after T-525) and well under [`hk_stream::BETWEEN_WINDOWS_GRACE`], so a producer that never
-/// offers its successor degrades to `503` here and then, once that grace expires, to the honest
-/// `410`.
+/// rather than held. Two seconds is an order of magnitude over the re-plumb gap of a run that is
+/// not being swept (0.17 s after T-525) and well under [`hk_stream::BETWEEN_WINDOWS_GRACE`], so a
+/// producer that never offers its successor degrades to `503` here and then, once that grace
+/// expires, to the honest `410`.
+///
+/// **T-542: two seconds is not an upper bound on a re-plumb and was never meant to be.** Under a
+/// 1 MHz–6 GHz sweep at dwell 1 s on the live HackRF, re-plumbs of 8–19 s are routine, so this
+/// wait *ends in `503`* many times a minute — which is the designed outcome ("not now, retry"),
+/// and is why [`hk_stream::BETWEEN_WINDOWS_GRACE`], not this, is the constant that had to move.
 const REPLUMB_HANDSHAKE_WAIT: Duration = Duration::from_secs(2);
 
 /// Connections accepted and not yet finished: one entry per handler thread, holding a cloned

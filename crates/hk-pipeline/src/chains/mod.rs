@@ -124,7 +124,29 @@ impl ChainReader {
     }
 
     /// Reads the next chunk into `buf` (waits up to 20 ms).
+    ///
+    /// **A stopped segment reads as closed** (T-542). `shared.stop` is how a segment ends — a
+    /// retune's re-plumb, a capture failure, a user stop — and once it is set no further sample of
+    /// *this* segment will ever be shown to anyone. A chain that keeps pulling from the ring past
+    /// it is doing work for a window that has gone, and it holds up far more than itself: the
+    /// segment's `hk-control` worker only returns once every chain it started has finished
+    /// ([`ChainManager::reap`]), and the supervisor's re-plumb waits on that worker.
+    ///
+    /// Measured on the live HackRF under a 1 MHz–6 GHz sweep at dwell 1 s with the canvas at its
+    /// finest level: at the step that crosses into `restricted-paging` the re-plumb took **88
+    /// seconds**, with ten `hk-chain-fsk-bursts-*` threads still reading and appending, the
+    /// supervisor parked in `pthread_join`, no capture at all, and `/ws/spectrum/live` answering
+    /// `410`/`404` for 85 s of it. Nothing had panicked and nothing was deadlocked — the segment
+    /// simply would not let go.
+    ///
+    /// Returning `Closed` (rather than adding a flag each chain must remember to test) is the
+    /// narrow version of the fix: every chain shape already has a wind-down for the ring ending,
+    /// because the ring does end, and this is that same ending arriving a few milliseconds
+    /// earlier.
     pub fn next(&mut self) -> Next {
+        if self.shared.stop.load(Ordering::SeqCst) {
+            return Next::Closed;
+        }
         let c = &self.shared.counters.chains;
         match self
             .reader
@@ -408,6 +430,26 @@ pub(crate) struct ChainManager {
 
 const BACKLOG_PER_TRACK: usize = 512;
 
+/// Most runtime chains and recorders alive at once, across the whole run (T-558).
+///
+/// **Why there has to be a number.** A chain is an OS thread plus that chain's retain buffer,
+/// and until this cap existed nothing bounded how many of them a run could hold: `attach_track`
+/// refused a duplicate *channel* (and only for a spec with a raster — `fsk-bursts` has none) and
+/// `attach_measuring` capped its own kind at the node spec's `max_chains`, but the decode chains
+/// were limited only by how many tracks got confirmed. A 1 MHz–6 GHz survey confirms a great
+/// many: T-542 measured the live process at **~450 threads and multi-GB RSS** under one.
+///
+/// Measured here (T-558, `tests/sweep_residency.rs`, mock device at 2 Msps): threads rose
+/// **one per attach** — 43 → 219 across 175 attaches — and RSS 64 → 1210 MiB, about 6.5 MiB a
+/// chain. The retain buffer scales with the sample rate, so at the HackRF's 20 Msps an
+/// `fsk-bursts` chain's `2 × retain_s` of `Complex<i8>` is ~240 MB on its own.
+///
+/// Above the cap an attach is **refused and counted** (`chains.admission_refused`), never
+/// queued: the candidate that could not be decoded now is still in the inventory, and a survey
+/// that keeps moving is worth more than one that stalls holding every region it ever saw. This
+/// counts recorders too, because a recorder is also a thread this run has to carry.
+pub(crate) const MAX_RUNTIME_CHAINS: usize = 16;
+
 impl ChainManager {
     pub fn new(shared: Arc<Shared>) -> Self {
         Self {
@@ -444,7 +486,15 @@ impl ChainManager {
 
     /// Spawns `spec` for `cand`; returns the chain id.
     pub fn attach(&mut self, spec: &ChainSpec, cand: Candidate) -> Option<u64> {
+        // T-558: the run-wide bound. Reap first so the cap counts chains that are still running
+        // rather than slots a finished thread has not been joined out of yet (`is_finished` is an
+        // atomic load, so asking is cheap enough to ask on every attach).
+        self.reap();
         let c = &self.shared.counters.chains;
+        if self.running.len() >= MAX_RUNTIME_CHAINS {
+            inc(&c.admission_refused);
+            return None;
+        }
         let shape = match spec.shape() {
             Ok(s) => s,
             Err(e) => {

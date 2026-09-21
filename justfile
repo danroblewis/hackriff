@@ -32,8 +32,38 @@ default:
 #
 # `just lint` + `just test` + `just acceptance-ci` by hand remain the periodic/milestone check.
 #
+# T-562: the gate, the acceptance suites and the full workspace test are the COORDINATOR's,
+# run once at merge from the main checkout. Measured from /perf: 42 of 47 agents that ran `just
+# gate` were implementation agents self-verifying, plus 111 of 122 on `just acceptance` and 93 of
+# 108 on full `just test` - about 23 hours of agent time on suites their brief forbids. Prose did
+# not stop it, so the rule lives in the runner (the same move as T-396 and T-477).
+# HK_ALLOW_FULL=1 lets a genuine repro/debug agent through: a default, not a wall.
+_coordinator-only recipe:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "${HK_ALLOW_FULL:-0}" = "1" ]; then exit 0; fi
+    root=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+    case "$root" in
+      */.claude/worktrees/*)
+        echo "REFUSED: 'just {{recipe}}' is the coordinator's, run once at merge from the main checkout." >&2
+        echo "You are in an agent worktree: $root" >&2
+        echo "" >&2
+        echo "Run instead, for what your diff touches:" >&2
+        echo "    just test-crate <crate>" >&2
+        echo "    cargo nextest run -p <crate> -E 'binary(<name>)'   # one binary" >&2
+        echo "NOT 'just test-one': it builds and lists ~280 binaries - over 8 min under load to" >&2
+        echo "run one test, against 7.5 s for the scoped form (T-489)." >&2
+        echo "" >&2
+        echo "Then HAND BACK. A full gate takes 7-25 min, the harness backgrounds it at 600 s, and" >&2
+        echo "an agent that waits on it ends its turn stalled with uncommitted work (T-416/426/430)." >&2
+        echo "" >&2
+        echo "If you genuinely need the full suite to reproduce something: HK_ALLOW_FULL=1 just {{recipe}}" >&2
+        exit 1
+        ;;
+    esac
+
 # THE merge gate (T-396): classify the diff, print the decision, run exactly the suites it needs.
-gate *args:
+gate *args: (_coordinator-only "gate")
     uv run --locked --project py python -m hkpy.gate {{args}}
 
 # THE COORDINATOR'S per-merge gate (T-424). Run it from inside `git merge --no-ff --no-commit`.
@@ -60,7 +90,7 @@ gate *args:
 #     No ignore list, nothing silent: `fixtures/` STAGED in a merge is still full.
 #
 # THE COORDINATOR'S per-merge gate: classify the MERGE INDEX, not the working tree (T-424).
-gate-merge *args:
+gate-merge *args: (_coordinator-only "gate-merge")
     uv run --locked --project py python -m hkpy.gate --merge {{args}}
 
 # THE SELF-CLEANING BOARD: which in-progress tickets git says are merged, stalled or empty (T-477).
@@ -70,6 +100,36 @@ gate-merge *args:
 # needs attention.
 reconcile *args:
     uv run --locked --project py python -m hkpy.reconcile {{args}}
+
+# IS IT SAFE TO LAUNCH ANOTHER BUILDING AGENT (T-559)? CLAUDE.md's worktree-launch cap is "at
+# most 4 Rust-building agents" - but a count-the-cargo-processes check misses the `hk serve`
+# processes agents leave running (e2e harnesses, demo servers, replay servers), which is exactly
+# how a 7-builder day hit load 129-211 and a 62-minute gate. Run this BEFORE launching another
+# worktree agent, same as `just reconcile` before launching anything else.
+# Prints: cargo/rustc processes grouped by worktree, hk serve/run processes with their bind port
+# and worktree, 1-minute load average, free disk (`df -h /`), and a one-line verdict. Counting
+# rule: an `hk serve`/`hk run`/`hackriffd` process counts toward the cap ON ITS OWN, whether or
+# not anything is compiling in its worktree; the coordinator's own full gate, run from the main
+# checkout, groups its cargo/rustc processes into one slot like any other worktree. Read-only -
+# it never kills or touches a process. The logic is the pure, tested function `hkpy.builders.assess`
+# (`py/tests/test_builders.py`); this recipe is a thin shell over it. `--strict` exits 1 when it
+# is not safe to launch another builder.
+builders *args:
+    uv run --locked --project py python -m hkpy.builders {{args}}
+# WHAT THE TICKET CYCLE ACTUALLY COSTS (T-543), from records rather than memory: gate duration
+# by class and by phase from $HACKRIFF_OPS/gate-timings.jsonl (which `just gate` writes on every
+# run), and branch cut -> first commit -> queued -> merged from ops/merge-runner.log plus git.
+# Run it when the loop feels slow; the point is that a slow-down shows up as data before anyone
+# has to notice it. First measurement, 2026-09-20: gate median 21.4 min, but QUEUE WAIT median
+# 119.7 min and commit->merge median 272.6 min - the gate is ~8 % of a ticket's cycle.
+cycle-time *args:
+    uv run --locked --project py python -m hkpy.cycletime {{args}}
+
+# p50/p90 of the gate, per class and per phase, from $HACKRIFF_OPS/gate-timings.jsonl, plus
+# whether any class's ROLLING MEDIAN is over budget. `py/tests/test_gate.py` asserts the same
+# budgets, so a slow-down trips a test instead of waiting for someone to notice it.
+gate-stats:
+    uv run --locked --project py python -m hkpy.cycletime --stats
 
 # Build the Rust workspace (CPU path; `gpu` off)
 build:
@@ -89,7 +149,7 @@ build:
 # `cargo test` if nextest isn't installed.
 # See `just test-seq` for a fully sequential run, and `just test-crate`/`just test-one` to run a
 # single crate or test (the T1-T4 subset an agent working on one crate should use, not full `test`).
-test: test-rust test-doc test-py test-ui
+test: (_coordinator-only "test") test-rust test-doc test-py test-ui
 
 # HK_E2E_REQUIRE_SYNTH=1 is set here, not by the caller: three workspace tests outside hk-e2e
 # (hk-detect e2e_synth + aware_006_wide_emissions, hk-context aware_006_e2e) skip silently when the
@@ -105,17 +165,60 @@ test-rust:
     # compile time. `--workspace` does not reliably rebuild them if hk-plugins' own fingerprint
     # is otherwise fresh — the same one line `acceptance` (below) already runs before its
     # hk-e2e tests, for the same reason. A no-op relink on a warm target (measured: ~0.05s).
+    # Unconditional: it is cheap, and it is a build the *selected* set may still spawn.
     cargo build -p hk-plugins --bins
+    scope=$(just _crate-scope hk-e2e)
     if command -v cargo-nextest >/dev/null 2>&1; then
-        cargo nextest run --workspace --exclude hk-e2e
+        cargo nextest run $scope
     else
         echo "test-rust: cargo-nextest not found; falling back to plain 'cargo test' (see just test-seq)" >&2
-        cargo test --workspace --exclude hk-e2e
+        cargo test $scope
     fi
 
 # nextest doesn't run doctests, so `just test` runs them separately.
 test-doc:
-    cargo test --workspace --exclude hk-e2e --doc
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo test $(just _crate-scope hk-e2e) --doc
+
+# T-543. The ONE place `$HK_GATE_CRATES` becomes cargo arguments, printed on stderr so a
+# narrowed run always says so. `$1` is a package to drop from the selection (hk-e2e, which
+# `just test` has always excluded and which `just acceptance-ci` owns instead).
+#
+# UNSET MEANS THE WHOLE WORKSPACE, and that is the safety property, not an implementation
+# detail: every way this path can go wrong — an old justfile, a `just test-rust` typed by
+# hand, a crashed classifier, a shell that dropped the variable — lands on `--workspace`,
+# the expensive answer. CORRECTED 2026-09-20: `just gate` only ever sets it when the caller
+# passes `--select-crates` (an agent's own opt-in for local iteration), and it is refused
+# unconditionally for `just gate-merge` and inside CI regardless of that flag — the merge
+# and CI gates always run the whole workspace. When it IS set, `py/hkpy/crates.py` has
+# already proved the closure, and returns "whole workspace" whenever it is not certain. Same
+# fail-closed shape as the class rule one level up, and the same reason: nothing said is
+# never permissive.
+_crate-scope exclude="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${HK_GATE_CRATES:-}" ]; then
+        if [ -n "{{exclude}}" ]; then echo "--workspace --exclude {{exclude}}"; else echo "--workspace"; fi
+        exit 0
+    fi
+    out=""; kept=0
+    for p in ${HK_GATE_CRATES}; do
+        # `if`, not `[ ... ] && continue`: under `set -e` a false test as the last command
+        # of the loop body kills the script, which would silently produce an empty scope.
+        if [ "$p" != "{{exclude}}" ]; then
+            out="$out -p $p"; kept=$((kept+1))
+        fi
+    done
+    if [ "$kept" -eq 0 ]; then
+        # Every selected crate was the excluded one: there is nothing for this suite to run,
+        # but "no arguments" would mean the current package, so fall back to the workspace
+        # rather than silently running something else.
+        if [ -n "{{exclude}}" ]; then echo "--workspace --exclude {{exclude}}"; else echo "--workspace"; fi
+        exit 0
+    fi
+    echo "crate scope (T-543, HK_GATE_CRATES):$out" >&2
+    echo "$out"
 
 # Fully sequential fallback (no nextest, no parallelism, no serial groups needed): matches
 # pre-T-077 behaviour, for bisecting a nextest-only failure or when nextest isn't installed.
@@ -169,7 +272,7 @@ e2e-harness *args:
 # plus the harness targets, after the census that keeps the target lists honest. Deliberately NOT
 # the milestone exit gates — see `acceptance-milestones`. Anyone can run this locally; it is the
 # same command CI runs.
-acceptance-ci: e2e-targets-check (acceptance "--" "--nocapture") (e2e-harness "--" "--nocapture")
+acceptance-ci: (_coordinator-only "acceptance-ci") e2e-targets-check (acceptance "--" "--nocapture") (e2e-harness "--" "--nocapture")
 
 # The milestone exit gates in one command: M2 attention, M3 classification, M4 trunking, chirp.
 # Deliberate, coordinator-run at milestone boundaries — kept out of CI's per-push gate because they
@@ -259,6 +362,29 @@ ui-build:
 test-ui:
     #!/usr/bin/env bash
     set -euo pipefail
+    # T-543: the gate skips this suite for a diff with no `ui/` path in it, and says so.
+    #
+    # This is NOT the T-358 defect it superficially resembles. T-358 was a suite that
+    # SELF-skipped, silently, when node was missing — green by doing nothing, on a machine
+    # nobody was watching. This skip is decided by the RUNNER from the diff, printed by the
+    # gate before anything runs, and attributable: same shape as the gate already skipping
+    # the Rust suite for a `ui`-only change. It is sound because `ui/` has no generated
+    # input — `npm run build` is esbuild over `ui/src`, `typecheck` is `tsc --noEmit` over
+    # the same tree, and `npm test` is node over `ui/test`. None of the three reads a Rust
+    # artifact, so a `crates/`-only change cannot alter their result.
+    #
+    # WHAT STILL RUNS, and it is the part that matters: `just test-ui-e2e`, the browser tier,
+    # which drives the real `hk serve` and is the ONLY suite that notices when a backend
+    # change breaks the page consuming it. It is in the gate's acceptance phase for the
+    # `full` class and is not skipped here or anywhere.
+    #
+    # Unset means RUN, so every failure of this path costs time rather than coverage.
+    if [ -n "${HK_GATE_SKIP_UI:-}" ]; then
+        echo "test-ui: SKIPPED by the gate — this diff contains no ui/ path, and ui/ has no"
+        echo "  generated input, so build+typecheck+node tests over unchanged TypeScript cannot"
+        echo "  change their answer. The BROWSER tier (just test-ui-e2e) still runs."
+        exit 0
+    fi
     if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
         echo "test-ui: node/npm not found — the UI gate cannot run, so it fails rather than passing." >&2
         echo "  Install Node >= 20 (the dev Mac and CI both run 24), or, to skip the UI deliberately," >&2
@@ -266,10 +392,35 @@ test-ui:
         exit 1
     fi
     cd ui
-    npm ci --no-audit --no-fund --prefer-offline
+    just _npm-deps
     npm run build
     npm run typecheck
     npm test
+
+# T-543: `npm ci` deletes node_modules and reinstalls it from scratch, every gate, ~30-60 s,
+# for a lockfile that almost never changes. Install only when the lockfile actually differs
+# from the one the current node_modules was built from.
+#
+# The stamp is written ONLY after a successful `npm ci`, and it records the lockfile's hash,
+# so the three ways this could go wrong all re-install: no stamp (first run, or a wiped
+# node_modules), a stamp that does not match (lockfile changed), or a failed install (which
+# never writes one). A half-installed tree therefore cannot be mistaken for a good one.
+#
+# It cds to ui/ itself: `just` runs a recipe from the justfile's directory whatever the
+# caller's cwd, so depending on the caller having cd'd would silently read the repo root's
+# (non-existent) package-lock.json and reinstall every time.
+_npm-deps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}/ui"
+    want=$(shasum -a 256 package-lock.json | cut -d" " -f1)
+    stamp=node_modules/.hk-lock-sha256
+    if [ -d node_modules ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ]; then
+        echo "npm deps: up to date (package-lock.json unchanged since the last npm ci)"
+        exit 0
+    fi
+    npm ci --no-audit --no-fund --prefer-offline
+    echo "$want" > "$stamp"
 
 # The BROWSER tier: drive /surface in headless Chrome against a real `hk serve` over a recorded
 # fixture, and assert on what is drawn and what is requested (T-455).
@@ -311,7 +462,7 @@ test-ui-e2e:
         cargo build -p hk-cli --bin hk
     fi
     cd ui
-    npm ci --no-audit --no-fund --prefer-offline
+    just _npm-deps
     npm run build
     npm run e2e
 
@@ -347,8 +498,12 @@ fmt:
 lint: lint-rust lint-py
 
 lint-rust:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `cargo fmt` is whole-tree always: it is seconds, and a narrowed format check would be
+    # the one place this ticket bought speed with coverage for no measurable gain.
     cargo fmt --all --check
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy $(just _crate-scope) --all-targets -- -D warnings
 
 lint-py:
     cd py && uv run --locked ruff check .

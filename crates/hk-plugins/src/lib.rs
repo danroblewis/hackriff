@@ -24,8 +24,8 @@ pub mod manifest;
 pub mod output;
 
 pub use host::{
-    HostError, InputStreamDesc, LogTail, PluginContext, PluginInstance, PluginMonitor, PluginState,
-    PluginStats, PushOutcome,
+    HangBudget, HostError, InputStreamDesc, LogTail, PluginContext, PluginInstance, PluginMonitor,
+    PluginState, PluginStats, PushOutcome,
 };
 pub use ingest::{Ingest, IngestStats, Stored};
 pub use manifest::{

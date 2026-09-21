@@ -129,6 +129,26 @@ const STEP_RETRIES: u32 = 3;
 /// `DEVICE_GATE_WAIT`, so a retry lands after the holder has finished rather than into it.
 const STEP_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
+/// **How long a step keeps retrying a `conflict` — "a re-plumb is in progress" — before the scan
+/// yields on it** (T-542).
+///
+/// [`STEP_RETRIES`] is a *count*, and a count is the wrong shape for this one refusal. The other
+/// two transients are another act holding the device gate, which is over in the gate's own wait;
+/// a `conflict` is **this run re-plumbing itself**, and the bound on that is
+/// `hk_pipeline::run::REPLUMB_TIMEOUT` — 30 s, the same number the control API states to the UI.
+/// Three retries at [`STEP_RETRY_BACKOFF`] is 1.5 s, so the budget for retrying was twenty times
+/// shorter than the thing it was retrying.
+///
+/// Measured on the live HackRF, `POST /api/control/scan` over 1 MHz–6000 MHz at dwell 1 s: a
+/// class-changing step re-plumbs, the re-plumb takes 8–19 s, and the sweep **yielded at step 19 of
+/// 3334** with *"could not retune to 34.300000 MHz after 3 retries: a re-plumb is in progress"* —
+/// 0.5 % of the survey the user asked for, and from their seat the sweep simply stopped. On a mock
+/// the re-plumb is far quicker than the retry budget, which is why no mock run ever showed it.
+///
+/// It is deliberately longer than `REPLUMB_TIMEOUT`: past *that*, the re-plumb has failed by the
+/// pipeline's own reckoning, and a refusal that outlives it is not transient any more.
+const REPLUMB_RETRY_BUDGET: Duration = Duration::from_secs(35);
+
 /// Where a scan is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -329,6 +349,9 @@ struct Active {
     due: Instant,
     /// Consecutive transient failures on `step` ([`STEP_RETRIES`]).
     retries: u32,
+    /// When the current run of consecutive transient failures on `step` began, for
+    /// [`REPLUMB_RETRY_BUDGET`]. `None` whenever the step has not been refused (T-542).
+    retry_since: Option<Instant>,
 }
 
 struct State {
@@ -535,6 +558,7 @@ impl ScanRunner {
                 center_hz: None,
                 due: Instant::now(),
                 retries: 0,
+                retry_since: None,
             });
             st.generation += 1;
         }
@@ -799,6 +823,7 @@ fn worker(shared: &Arc<Shared>) {
                     a.step_started_ns = Some(now_ns());
                     a.steps_done += 1;
                     a.retries = 0;
+                    a.retry_since = None;
                     a.step += 1;
                     if a.step >= steps {
                         a.step = 0;
@@ -818,12 +843,25 @@ fn worker(shared: &Arc<Shared>) {
                         | LiveControlError::Timeout(_)
                 );
                 let retries = st.active.as_ref().map_or(0, |a| a.retries);
-                if transient && retries < STEP_RETRIES {
+                // T-542: a `conflict` is this run re-plumbing itself, and that is bounded by time,
+                // not by a number of attempts — see [`REPLUMB_RETRY_BUDGET`]. The count stays as
+                // the floor for every transient; the budget only ever *extends* it, and only for
+                // the one refusal whose duration is known.
+                let waited = st
+                    .active
+                    .as_ref()
+                    .and_then(|a| a.retry_since)
+                    .map_or(Duration::ZERO, |t| t.elapsed());
+                let replumbing = matches!(e, LiveControlError::Conflict(_));
+                if transient
+                    && (retries < STEP_RETRIES || (replumbing && waited < REPLUMB_RETRY_BUDGET))
+                {
                     // Nothing the user did took the radio (a user action yields the scan before it
                     // is attempted, and this result would then have been discarded above). Take the
                     // same step again.
                     if let Some(a) = st.active.as_mut() {
                         a.retries += 1;
+                        a.retry_since.get_or_insert_with(Instant::now);
                         a.due = Instant::now() + STEP_RETRY_BACKOFF;
                     }
                     continue;
@@ -837,7 +875,10 @@ fn worker(shared: &Arc<Shared>) {
                         step.index + 1,
                         step.center_hz / 1e6,
                         if retries > 0 {
-                            format!(" after {retries} retries")
+                            format!(
+                                " after {retries} retries over {:.1} s",
+                                waited.as_secs_f64()
+                            )
                         } else {
                             String::new()
                         },
@@ -869,6 +910,10 @@ mod tests {
         tuning: Mutex<LiveTuning>,
         centers: Mutex<Vec<f64>>,
         refuse: Mutex<bool>,
+        /// T-542: refuse with `conflict` ("a re-plumb is in progress") rather than `device_busy`.
+        /// They are both transient, and the scan must treat them differently, because only one of
+        /// them is bounded by the pipeline's re-plumb budget.
+        replumbing: Mutex<bool>,
         calls: AtomicU64,
         rates: Mutex<Vec<f64>>,
     }
@@ -895,6 +940,7 @@ mod tests {
                 }),
                 centers: Mutex::new(Vec::new()),
                 refuse: Mutex::new(false),
+                replumbing: Mutex::new(false),
                 calls: AtomicU64::new(0),
                 rates: Mutex::new(Vec::new()),
             })
@@ -937,6 +983,15 @@ mod tests {
         }
         fn set_center(&self, center_hz: f64) -> Result<LiveTuning, LiveControlError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if *self
+                .replumbing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+            {
+                return Err(LiveControlError::Conflict(
+                    "a re-plumb is in progress".into(),
+                ));
+            }
             if *self.refuse.lock().unwrap_or_else(PoisonError::into_inner) {
                 return Err(LiveControlError::DeviceBusy {
                     device_id: Some("fake:1".into()),
@@ -1183,6 +1238,62 @@ mod tests {
         // The place is kept at the failed step, not advanced past it.
         assert_eq!(v["progress"]["step"], 0);
         assert!(live.centers().is_empty());
+    }
+
+    /// **T-542: a sweep must outlast a re-plumb, because a re-plumb is twenty times longer than
+    /// the retry budget used to be.**
+    ///
+    /// The user's report: a `POST /api/control/scan` over 1 MHz–6000 MHz at dwell 1 s takes the
+    /// backend down. On the live HackRF it yielded at **step 19 of 3334** —
+    /// *"could not retune to 34.300000 MHz after 3 retries: a re-plumb is in progress"* — because a
+    /// step that crosses a content-class boundary re-plumbs the segment, a re-plumb there takes
+    /// 8–19 s, and three retries at [`STEP_RETRY_BACKOFF`] gave up after 1.5 s. Every mock run
+    /// passed, because a mock re-plumbs far inside that.
+    ///
+    /// The refusal is transient and its duration is *known* ([`REPLUMB_RETRY_BUDGET`]), so the
+    /// step waits it out. Note what is not asserted: that the step is skipped. It never is.
+    #[test]
+    fn a_step_waits_out_a_re_plumb_far_past_the_retry_count() {
+        let live = Fake::new();
+        *live
+            .replumbing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
+        let r = ScanRunner::new(live.clone() as Arc<dyn LiveControl>);
+        r.start(&ScanRequest {
+            freq: None,
+            dwell_s: Some(10.0),
+            step: None,
+        })
+        .expect("started");
+
+        // Past STEP_RETRIES × STEP_RETRY_BACKOFF (1.5 s) by a clear margin, and well inside
+        // REPLUMB_RETRY_BUDGET: before the fix the scan had yielded by now.
+        assert!(
+            wait_for(|| live.calls.load(Ordering::SeqCst) >= STEP_RETRIES as u64 + 2),
+            "the step stopped being retried"
+        );
+        let v = r.json();
+        assert_eq!(
+            v["state"], "running",
+            "the sweep gave up on a re-plumb it should have waited out: {v}"
+        );
+        assert_eq!(v["progress"]["step"], 0, "and never skipped the step: {v}");
+        assert!(live.centers().is_empty());
+
+        // The re-plumb finishes; the sweep carries on from the same step, having lost nothing.
+        *live
+            .replumbing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = false;
+        assert!(wait_for(|| !live.centers().is_empty()));
+        assert!(
+            (live.centers()[0] - 107.5e6).abs() < 1e-3,
+            "{:?}",
+            live.centers()
+        );
+        assert_eq!(r.json()["state"], "running");
+        r.stop();
     }
 
     /// A second scan over one front end is two policies fighting for one tune.

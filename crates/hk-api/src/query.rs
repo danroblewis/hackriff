@@ -1102,6 +1102,12 @@ fn reason_is_identity_free(author: StatusAuthor) -> bool {
 /// currently-linked tracks ([`Repository::emitter_latest_measurement`]); both `null` when no
 /// detection is linked yet (e.g. an emitter seen only through a decode sighting).
 ///
+/// T-350: `measured` is that same measurement **with the detection's own time extent** —
+/// `snr_db`, `peak_dbfs`, `t_start_s`, `t_end_s`, `duration_s` — and is `null` exactly when they
+/// are. The flat pair says *what* was measured; only this says *when*, and without it an SNR from
+/// two days ago is indistinguishable from one from two seconds ago on a list whose whole point is
+/// what is on the air now.
+///
 /// T-163 (ADR-0013 gap 7a): `estimated_params` is the emitter's latest [`hk_model::EstimatedParams`]
 /// (symbol rate, modulation, deviation, CFO, bandwidth), from its latest demodulation session
 /// ([`Repository::latest_demodulation_for_emitter`]); `null` when none has run yet, and on a
@@ -1512,7 +1518,26 @@ pub fn inventory_entry_json_at(
         });
         // T-158: the newest linked detection's peak SNR and absolute peak level, or `null` when
         // the emitter has no linked detection yet (e.g. an identity-only sighting).
+        //
+        // T-350 (ADR-0017): it arrives with that detection's own `TimeRange`, and is served with
+        // it. A detection is a time-frequency region, so its SNR is a fact about *that region* and
+        // not a standing property of the emitter; a level with no time attached reads as current
+        // however old it is, which is exactly the "steady emitter parked on a frequency" shape the
+        // signal model rejects. `measured` below is the whole dated measurement in one object, so
+        // the numbers cannot be read apart from when they were taken.
         let measurement = repo.emitter_latest_measurement(e.id)?;
+        // T-350: `t_start_s`/`t_end_s`/`duration_s` spell the extent exactly as
+        // `/api/analysis/strongest` does for the cell its peak was measured in (T-337) — the same
+        // shape for the same reason, so the two dated measurements read alike.
+        let measured = measurement.map(|m| {
+            json!({
+                "snr_db": m.snr_peak_db,
+                "peak_dbfs": m.peak_level_dbfs,
+                "t_start_s": ts_s(m.time.start),
+                "t_end_s": ts_s(m.time.end),
+                "duration_s": m.time.duration_ns() as f64 / 1e9,
+            })
+        });
         // T-219 (C40): the standing relationship, when this row defers to another — suppressed by
         // an overlapping Confirmed entry, the weaker of a duplicate group, or a receiver artifact
         // attributed to its source. The reason is backend-rendered from emitter ids, frequency
@@ -1641,8 +1666,12 @@ pub fn inventory_entry_json_at(
             "identity_scheme": scheme,
             "identity_class": class,
             "withheld": withheld,
-            "snr_db": measurement.map(|(snr, _)| snr),
-            "peak_dbfs": measurement.map(|(_, peak)| peak),
+            "snr_db": measurement.map(|m| m.snr_peak_db),
+            "peak_dbfs": measurement.map(|m| m.peak_level_dbfs),
+            // T-350: the same two numbers **with the time they were measured over**. The flat
+            // pair above is the older spelling and is kept; this is the one that can be read
+            // honestly, and it is `null` exactly when they are.
+            "measured": measured,
             // T-219 (C40): why this row defers to another, when it does. Never a deletion — the
             // row, its detections, tracks and history are all kept and the claim is reversible.
             "relation": relation,

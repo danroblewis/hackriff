@@ -7,7 +7,9 @@
 #   - tests/e2e (hk-e2e): the harness + M0 acceptance suite drive the whole pipeline
 #     end to end and spawn real processes/servers.
 #   - hk-pipeline: tests named listen*/retune*/lossless*/refine*/stream* exercise
-#     live retune/listen/streaming timing against a running pipeline.
+#     live retune/listen/streaming timing against a running pipeline, and
+#     replumb_never_pays_for_the_ring (T-536) asserts a wall-clock bound on how long a
+#     re-plumb may stall capture.
 #   - hk-api, hk-cli: bind real TCP/WebSocket ports and (hk-cli) spawn the daemon
 #     process, so concurrent runs can collide on ports or process lifecycle.
 #   - hk-core: ring_concurrency/ring_stress race real reader/writer threads against
@@ -158,7 +160,7 @@ filter = 'package(hk-e2e)'
 test-group = 'heavy-serial'
 
 [[profile.default.overrides]]
-filter = 'package(hk-pipeline) and (test(listen) or test(retune) or test(lossless) or test(refine) or test(stream) or binary(scheduler_history))'
+filter = 'package(hk-pipeline) and (test(listen) or test(retune) or test(lossless) or test(refine) or test(stream) or binary(scheduler_history) or binary(replumb_never_pays_for_the_ring))'
 test-group = 'heavy-serial'
 
 [[profile.default.overrides]]
@@ -215,12 +217,14 @@ test-group = 'heavy-serial'
 filter = 'package(hk-pipeline) and binary(decoded_capture)'
 test-group = 'heavy-serial'
 
-# Found flaky under load (T-125 runs, 2026-09-15): asserts 400 publishes finish in < 4 s wall time
-# with a slow stub disk; took 4.2 s with five cargo jobs competing, passes alone in 2.0 s.
-[[profile.default.overrides]]
-filter = 'test(a_slow_disk_drops_and_counts_without_blocking_the_publisher)'
-test-group = 'heavy-serial'
-retries = 1
+# T-125 put `a_slow_disk_drops_and_counts_without_blocking_the_publisher` here with `retries = 1`:
+# it asserted 400 publishes finish in < 4 s of wall clock against a stub disk that slept 20 ms per
+# write, and took 4.2 s with five cargo jobs competing. That bound was a throughput budget on a
+# shared box, so the group and the retry were both treating the symptom. The test now stops the
+# stub disk outright and asserts the property instead — the publishing loop returns with ZERO disk
+# writes completed — which bounds no wall clock at all, so it needs neither the serial group nor
+# the retry, and it is not listed here any more (hk-store::decoded, renamed
+# `a_stalled_disk_drops_and_counts_without_blocking_the_publisher`).
 
 # Found flaky under load (full check after T-125, 2026-09-15, load ~37): hk-stream connect/close
 # flood test saw 4 of 8 expected consumers accepted before its deadline; passed 3/3 alone and in a
@@ -264,6 +268,16 @@ test-group = 'heavy-serial'
 # (a finished run's 410 inside 1.5 s) was measured at under 10 ms.
 [[profile.default.overrides]]
 filter = 'package(hk-pipeline) and binary(replumb_spectrum_handshake)'
+test-group = 'heavy-serial'
+
+# T-489: the unwatched-spectrum tests. `rows_resume…` replays in REAL TIME and measures how long
+# the first row takes to arrive after a subscriber attaches — one read timeout (50 ms) plus a row
+# period — so a contended box reads as a slow producer. Per the rule above its bound is measured
+# rather than guessed: the first row landed 46.5 ms after the subscribe, against the 1 s it
+# asserts, and the whole test is 4.6 s of which 4 s is the recording it replays in real time.
+# `an_unwatched_run…` runs the same recording twice, unpaced (1.1 s), to compare what each stored.
+[[profile.default.overrides]]
+filter = 'package(hk-pipeline) and binary(spectrum_unwatched)'
 test-group = 'heavy-serial'
 
 # =========================================================================================
