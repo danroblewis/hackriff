@@ -55,6 +55,15 @@ sequential-bulk fix sat committed and believed-live for hours while the process 
 merging — eight bulk attempts, zero bulk merges. The runner now logs `VERSION:` at startup saying
 whether its own file matches `HEAD:ops/merge-runner.sh`; **read that line after every restart.**
 
+**A conflicting branch is SKIPPED, not a reason to abandon the batch.** `try_bulk` merges the
+queued branches one at a time (two heads each, ordinary recursive merge) and then runs ONE gate
+over the accumulated result. If a branch conflicts it is aborted, flagged in
+`merge-needs-attention.txt` as `CONFLICT(skipped from bulk)` and left out — the branches that
+already merged stay merged, and the batch gates without it. It is never re-queued automatically:
+a conflict needs a fix, not a retry. (Before 2026-09-21 the first conflict rewound the entire
+batch and sent every branch through its own gate; one trivial justfile conflict in `task-t559`
+cost fourteen branches their shared gate.)
+
 **Restarting it safely:** only between gates. Killing it mid-gate leaves a staged merge with no
 owner (`MERGE_HEAD` set, nothing to finish it) and the replacement waits on that merge for ever.
 Wait until no `gate-merge` process is running, kill it *by the pid you captured at spawn* (never a

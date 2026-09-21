@@ -174,16 +174,45 @@ try_bulk(){
   log "BULK attempt (${#branches[@]}): ${branches[*]}"
   if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN would bulk-merge: $tickets"; return 0; fi
   base=$(git -C "$REPO" rev-parse HEAD)
+  # A branch that will not merge is the branch to SET ASIDE, not a reason to un-merge the ones
+  # that did. Rewinding the whole batch on the first conflict is what happened on 2026-09-21:
+  # `task-t559` conflicted on the justfile (two recipes added at the same line) and the other
+  # FOURTEEN branches - already merged cleanly in this very loop - were reset and sent through
+  # individual gates instead, turning one trivial conflict into ~5 full gates of code branches
+  # at ~21 min each. T-543 measured the gate at ~8 % of a ticket cycle and the QUEUE behind
+  # serial gates as most of the rest, so this fallback spent the exact resource the bulk path
+  # exists to save.
+  #
+  # So: skip the conflicting branch, keep the batch, and flag the skipped one for a person the
+  # same way an individual CONFLICT is flagged. It is still flagged and never silently dropped,
+  # and it is NOT re-queued here - a conflict needs a fix, not a retry (the unchanged-since-fail
+  # rule).
+  local merged=() skipped=""
   for b in "${branches[@]}"; do
-    if ! git -C "$REPO" merge --no-ff -m "Merge $(ticket_of "$b") ($b): batch of ${#branches[@]}, gated together (automated, no AI)" "$b" >>"$LOG" 2>&1; then
+    if git -C "$REPO" merge --no-ff -m "Merge $(ticket_of "$b") ($b): batch, gated together (automated, no AI)" "$b" >>"$LOG" 2>&1; then
+      merged+=("$b")
+    else
       git -C "$REPO" merge --abort 2>/dev/null || true
-      log "BULK conflict merging $b -> rewind to $base and fall back to individual"
-      git -C "$REPO" reset --hard "$base" >>"$LOG" 2>&1
-      return 1
+      skipped="$skipped $b"
+      log "BULK conflict merging $b -> SKIPPED, batch continues with the rest"
+      echo "$(date '+%m-%d %H:%M')  $b  $(ticket_of "$b")  CONFLICT(skipped from bulk)" >> "$NEEDS"
     fi
   done
+  [ -n "$skipped" ] && log "BULK skipped (need a fix, not a retry):$skipped"
+  if [ "${#merged[@]}" -eq 0 ]; then
+    log "BULK every branch conflicted -> nothing to gate"
+    git -C "$REPO" reset --hard "$base" >>"$LOG" 2>&1
+    return 0
+  fi
+  # Re-point the batch at what actually merged, so the gate, the done-log, the landed ledger and
+  # the worktree removals below all speak about the same set.
+  branches=("${merged[@]}")
+  BULK_MERGED_LIST="${merged[*]}"
+  tickets=""
+  for b in "${branches[@]}"; do tickets="$tickets $(ticket_of "$b")"; done
+  tickets="${tickets# }"
   after=$(git -C "$REPO" rev-parse HEAD)
-  log "BULK gate (just gate --base $base over ${#branches[@]} branches; may take 15-25 min)…"
+  log "BULK gate (just gate --base $base over ${#branches[@]} merged branches; may take 15-25 min)…"
   ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
   if [ "$rc" -eq 0 ]; then
     log "BULK MERGED ✓ $tickets"
@@ -256,9 +285,14 @@ while true; do
     if [ "$#" -eq 1 ]; then
       process "$1" || echo "$1" >> "$QUEUE"
     elif [ "$#" -ge 2 ]; then
+      BULK_MERGED_LIST=""
       if ! try_bulk "$@"; then
-        log "falling back to individual gates for: $*"
-        for b in "$@"; do process "$b" || echo "$b" >> "$QUEUE"; done
+        # Isolate only what the batch actually merged. A branch try_bulk SKIPPED conflicted, and
+        # is already flagged in merge-needs-attention.txt; sending it round again just conflicts
+        # a second time and writes a duplicate flag.
+        isolate="${BULK_MERGED_LIST:-$*}"
+        log "falling back to individual gates for: $isolate"
+        for b in $isolate; do process "$b" || echo "$b" >> "$QUEUE"; done
       fi
     fi
   fi
