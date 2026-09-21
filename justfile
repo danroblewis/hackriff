@@ -512,6 +512,17 @@ lint-rust:
 lint-py:
     cd py && uv run --locked ruff check .
 
+# Register the repo-local git merge driver for docs/tasks.yaml (T-582).
+#
+# `.gitattributes` names the driver and IS committed; the command that implements it lives in
+# .git/config and is NOT, so a fresh clone has the attribute pointing at nothing and git fails
+# the merge with "custom merge driver hkboard lacks command line". Run this once per clone.
+# `ops/merge-runner.sh` also calls it at startup, so the automated path cannot miss it.
+setup-git:
+    @git config merge.hkboard.name "append-only merge for docs/tasks.yaml (T-582)"
+    @git config merge.hkboard.driver "uv run --locked --project py python -m hkpy.boardmerge %O %A %B"
+    @echo "git: merge driver 'hkboard' registered for docs/tasks.yaml"
+
 # THE CHEAP CHECK TO RUN BEFORE QUEUING A BRANCH — seconds, not a gate.
 #
 # `lint-rust` is two halves, `cargo fmt --check` AND clippy, and a failure of either reads the

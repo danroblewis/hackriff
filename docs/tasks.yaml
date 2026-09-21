@@ -18557,7 +18557,7 @@ tasks:
   - id: T-582
     milestone: M2-hardening
     title: Every pair of branches that files a ticket conflicts on docs/tasks.yaml's tail
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: OPS
     model: sonnet

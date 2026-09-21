@@ -4,3 +4,10 @@ fixtures/**/*.sigmf-data filter=lfs diff=lfs merge=lfs -text
 # Append-only tables: parallel branches that each add rows merge without conflicts.
 docs/adr/0010-language-and-licence-ledger.md merge=union
 docs/planning-log.md merge=union
+
+# The board's task list: parallel branches each APPEND a ticket at the same point, so every pair
+# of them conflicts — nine times on 2026-09-21 alone, every one resolving identically to "keep
+# both". `merge=union` would be wrong here: unioning YAML can produce a file that PARSES and is
+# WRONG. `hkboard` automates only the append-only case and refuses everything else, validating
+# that the result parses, keeps every ticket and has no duplicate ids before it writes (T-582).
+docs/tasks.yaml merge=hkboard
