@@ -36,7 +36,10 @@ log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 coord_idle(){
   tmux has-session -t "$SESSION" 2>/dev/null || return 1
   local pane; pane=$(tmux capture-pane -t "$SESSION" -p 2>/dev/null) || return 1
-  printf '%s' "$pane" | grep -q 'esc to interrupt' && return 1   # busy
+  # BUSY if any of: an active turn/foreground command ("esc to interrupt"), the coordinator
+  # blocked waiting on background agents ("Waiting for N background agents" — note this state
+  # shows NO "esc to interrupt", so it must be matched explicitly), or a running shell command.
+  printf '%s' "$pane" | grep -qE 'esc to interrupt|Waiting for [0-9]+ background|Running [0-9]+ shell command' && return 1
   return 0
 }
 

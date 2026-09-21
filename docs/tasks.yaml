@@ -18110,6 +18110,134 @@ tasks:
       ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): thread counts, running-chain counts,
       buffer bytes. Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-579
+    milestone: MLIVE
+    title: Memoize the per-request tile geometry - readable_ceiling and the coverage raster are recomputed from scratch on every tile request
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      Filed 2026-09-21 from the user's tile-perf review (their S5, first half; the review's R4).
+      Every GET /api/tiles recomputes, with no memoization:
+        - `readable_ceiling`, which probes the WHOLE lattice (nf x nt levels calling
+          `servable` -> `materialize_cost_bound`) - `tiles.rs:1637-1642, 816`;
+        - `TileOverlay::collect`, which reads both tune histories and rasterises a 256x256
+          (65 536-cell) coverage grid to decide grey/short-circuit - `tiles.rs:1654`,
+          `coverage.rs:1017`;
+        - `shadow()`, the last-known search - `tiles.rs:1670/1678`.
+      At 135-290 requests per screen that is the same pure computation done hundreds of times.
+      `readable_ceiling` is a PURE FUNCTION OF GEOMETRY AND CONFIG, so it can be cached per
+      lattice outright. The coverage raster is a function of the tune history, so it is cacheable
+      until the history changes - derive the invalidation from the history's own version, never
+      from a timer or a guessed age.
+      CORRECTNESS RISK: a stale coverage raster shows grey where data now exists, or data where
+      nothing was observed. Both break "show all the data you have" and the grey-means-unobserved
+      invariant, so the cache key must be tied to what actually changes the answer.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): lattice probes and coverage
+      rasterisations per N-tile viewport drop from N to a small constant; the raster is recomputed
+      exactly once per tune-history change (assert it IS recomputed then - a cache that never
+      invalidates passes a "cheap" test while being wrong).
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-580
+    milestone: MLIVE
+    title: The client fetches known-grey regions in full - short-circuit unobserved spans before the request, not after
+    status: todo
+    priority: normal
+    parallel_group: CANVAS-FE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      Filed 2026-09-21 from the user's tile-perf review (their S5, second half; the review's R6).
+      The client has no coverage short-circuit before fetching (`surface.ts:500`, `tile.ts:198`):
+      a fully unobserved span still fires a complete tile grid. T-461 makes each such tile cheap
+      SERVER-side, but each is still its own round trip on its own connection. Across 6 GHz, where
+      docs/16 measured 55-99 % of the canvas grey, this is a large fraction of all requests for
+      zero data - and grey is not an edge case here, it is the normal state of the canvas.
+      Fetch the coverage/minimap first and enumerate tiles by OBSERVED area (docs/16 section 8.4a,
+      the wide-and-long enumeration T-483 flagged), requesting only where something was sampled.
+      HONESTY CONSTRAINT: "not fetched because unobserved" and "not fetched yet" must stay
+      distinguishable on screen. Observed-but-not-yet-measured and unknown-whether-we-looked are
+      distinct marks, not grey (T-441), and this ticket must not collapse them by skipping a
+      request. Skipping a fetch is only legitimate where the coverage map says NOTHING WAS
+      SAMPLED; anywhere else the tile is still owed.
+      ASSERT ON THE REQUESTS THE CLIENT BUILDS, NOT THE RENDER (T-367): a fully-grey viewport
+      issues ZERO tile requests; a half-observed viewport issues requests only for the observed
+      half; a viewport that becomes observed issues them then. No gate covers a client asking the
+      backend for the wrong thing, so this guard lives in `ui/test`.
+      NOT wall-clock (user, 2026-09-21) - request counts only.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-581
+    milestone: MLIVE
+    title: Rework the tile in-flight cap once T-571/T-572 land - one mutex and a cap of 4 starve the panes
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: medium
+    depends_on: [T-571, T-572]
+    use_cases: [AWARE-011]
+    acceptance: |
+      Filed 2026-09-21 from the user's tile-perf review (their S6; the review's R3).
+      DO THIS AFTER T-571 AND T-572, NOT BEFORE - the review is explicit that reworking the cap
+      first "just moves contention". This ticket exists so the dependency is recorded, not so it
+      is started now.
+      The history store is behind ONE mutex; concurrent tile reads serialise on it and compete
+      with ingest (`tiles.rs:193-202`). The route caps concurrency at TILE_MAX_IN_FLIGHT = 4 and
+      returns 503 above it; the client HALVES its operating limit on any 503 (AIMD,
+      `tilecache.ts:1243-1263`), so a couple of slow coarse tiles drop the whole fill to 1-2
+      in-flight. T-450 measured the consequence: 26 tiles resident against 17 268 CANCELLED in
+      75 s. (T-539, now landed, fixed the half that never recovered the cap on a still view.)
+      Once reads are cheap, consider a read-mostly snapshot / RwLock or per-scheme locks so the
+      cap can rise above 4. Measure the contention before and after rather than assuming it moved.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): concurrent readers admitted without
+      a 503 for a viewport of N tiles; 503s issued during a steady-state fill is zero; cancelled-
+      to-resident ratio for one screen stays under a stated bound. A test that counts 0 of 0
+      requests is vacuous - report what each run actually exercised.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-582
+    milestone: M2-hardening
+    title: Every pair of branches that files a ticket conflicts on docs/tasks.yaml's tail
+    status: todo
+    priority: normal
+    parallel_group: OPS
+    model: sonnet
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      Filed 2026-09-21 from repeated merge cost, not from a review. The board is one YAML file
+      with an append point just before the top-level `notes:` key, so ANY two branches that file
+      a ticket append at the same line and conflict. Measured on 2026-09-21: of thirteen pending
+      branches, four conflicted with main and THREE of those four were this exact conflict
+      (task-t549, task-t548, task-claudemd), each a pure "keep both" resolution carrying no
+      disagreement at all. One of them (task-t559) had already cost the whole batch its shared
+      gate before the skip fix landed.
+      This is pure operational waste: a conflict that always resolves the same way is a conflict
+      the format is causing. Options to weigh, with the cost of each stated:
+        - one file per ticket under docs/tasks.d/ with a loader that concatenates them (removes
+          the conflict entirely; changes every tool that reads the board);
+        - keep one file but give it a merge driver / `.gitattributes` union strategy for the
+          tasks list (cheap, but a union merge of YAML can produce a file that parses and is
+          wrong, so it needs the board test to run on every merge - which it now does, since
+          docs/tasks.yaml classifies as the `py` class);
+        - an explicit append sentinel plus a pre-merge normaliser.
+      WHICHEVER IS CHOSEN, THE BOARD TEST IS THE SAFETY NET AND MUST RUN: `py/tests/
+      test_task_board.py` already catches duplicate IDs and malformed YAML, and a malformed
+      board reached main once (2026-09-20) precisely because the docs class ran nothing.
+      ASSERT: two branches each filing a ticket merge without conflict, and the merged board
+      parses, has both tickets, and has no duplicate IDs. Prove the test goes RED with the
+      current format.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
