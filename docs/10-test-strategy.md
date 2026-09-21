@@ -521,3 +521,40 @@ failing on an absence of evidence is the fastest way to get a guard switched off
   merge log; each costs a full re-gate and a requeue, i.e. more than the 21.4 min median. T-430,
   T-433 and T-446 remain open; T-537's fix — drive frames rather than wall-clock milliseconds — is
   the precedent worth copying.
+
+##### The two levers T-543 rejected with numbers: the linker, and incremental-instead-of-sccache
+
+**`ld64.lld` is not faster than Apple's `ld` here — rejected.** Measured per target with
+`cargo rustc -p … -- -C link-arg=-fuse-ld=/opt/homebrew/bin/ld64.lld`, which changes the linker for
+**one** target and so does not invalidate the workspace the way a `RUSTFLAGS` change does. Six
+pairs, alternating, on the two most link-dominated targets available:
+
+| target | size | Apple `ld` | `ld64.lld` |
+|---|---|---|---|
+| `hk` binary (touch `bin/hk.rs`, 478 lines) | 47 MB | 1.33 / 1.35 / 1.38 s | 1.57 / 1.51 / 1.38 s |
+| `hk-pipeline::data_path` test binary | 28 MB | 1.94 / 2.29 / 2.23 s | 2.27 / 2.20 / 2.32 s |
+
+lld is equal-to-slightly-slower on both. Apple's shipped linker is `ld64-954` (the `ld-prime`
+generation), which is already fast; mold has no Mach-O backend and is not an option. Nothing to
+buy here. Worth re-measuring only if the toolchain changes.
+
+**`CARGO_INCREMENTAL=1` costs 21 GB per worktree — disqualifying at four worktrees, regardless of
+speed.** The proposal was reasonable on its face: sccache never hits (above), and `CARGO_INCREMENTAL=0`
+exists to serve it, so incremental might be free speed. Measured: a **partial** `-p hk-dsp` rebuild
+with `CARGO_INCREMENTAL=1` produced a **21 GB** `target/debug/incremental`, and free space on the dev
+Mac fell from 24 GB to 13 GB during the run — past CLAUDE.md's 20 GB floor, with three other agents
+on the box. The run was stopped and the space reclaimed. Four worktrees at that rate is 80+ GB the
+machine does not have.
+
+So `CARGO_INCREMENTAL=0` has a **second, independent justification** that has nothing to do with
+sccache: it is what keeps four worktree targets on this disk. The speed half of that A/B is
+therefore **unmeasured and not worth measuring** until the disk answer changes. For the record, the
+baseline it would have had to beat: `cargo nextest run -p hk-dsp --no-run` after touching
+`hk-dsp/src/lib.rs`, today's configuration, **54.6 / 47.9 s**.
+
+**A note on what these measurements cost.** Both A/Bs required whole-tree rebuilds because
+`RUSTFLAGS` and `CARGO_INCREMENTAL` are part of every crate's fingerprint, and a rebuilt APFS clone
+turns shared blocks private. Anyone repeating this should use a **dedicated throwaway worktree on
+an otherwise idle box**, watch `df` between runs, and prefer the per-target `cargo rustc` trick
+above wherever the question allows it — it answered the linker question for a few seconds of build
+instead of a few gigabytes.
