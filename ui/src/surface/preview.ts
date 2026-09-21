@@ -563,6 +563,13 @@ export class SurfacePreview {
    * historical preview). With one it is whatever capture has reported, clamped monotone: a
    * re-plumbed stream's first rows can repeat, and an edge that went backwards would drag every
    * following pane and every box on it backwards with it.
+   *
+   * **T-474 settled which side owns that (and it is not this one).** A `--loop` replay re-opens the
+   * recording, so the *source's* timestamps restart every pass; the backend splices each pass onto
+   * one monotone capture-time axis before anything is served (`hk_pipeline::capture`'s `Axis`),
+   * because a clock that rewound would be silently dropped rows in the history pyramid, not a
+   * drawing glitch. So the clamp here is a floor under a promise the server keeps, not a repair of
+   * a wrap this client expects: if it ever starts biting, the bug is upstream of the browser.
    */
   get edgeNs(): number {
     if (!this.edgeFn) return this.probe.origin.edgeNs;
