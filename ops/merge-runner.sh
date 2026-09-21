@@ -16,9 +16,16 @@ DONELOG=$S/merge-done.txt
 LOG=$S/merge-runner.log
 # T-534: per-branch gate-attempt ledger, "<branch> <tip-sha> <attempts>" one per line.
 ATTEMPTS=$S/merge-attempts.txt
+# T-543: one JSON line per LANDED ticket - {ticket, branch, first_commit_ts, merge_ts,
+# land_minutes, gate_attempts}. `merge-done.txt` records THAT a branch merged; this records
+# what it COST, which is the number T-543 exists to watch. Written next to the gate's own
+# per-run timings ($HACKRIFF_OPS/gate-timings.jsonl) so `just cycle-time` reads one directory.
+# No database and no daemon: append-only text, and `gate_attempts` is read from the ledger
+# this script already keeps rather than counted a second way.
+LANDED=$S/landed.jsonl
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-2}
 DRY_RUN=${DRY_RUN:-0}
-touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS"
+touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS" "$LANDED"
 
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 notify_coordinator(){ tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
@@ -41,6 +48,24 @@ record_attempt(){ # branch sha
   printf '%s %s %s\n' "$1" "$2" "$n" >> "$ATTEMPTS.tmp"; mv "$ATTEMPTS.tmp" "$ATTEMPTS"
 }
 clear_attempts(){ grep -vE "^$1 " "$ATTEMPTS" > "$ATTEMPTS.tmp" 2>/dev/null || true; mv "$ATTEMPTS.tmp" "$ATTEMPTS"; }
+
+# T-543: record what a landed ticket cost. Called BEFORE clear_attempts, so gate_attempts is
+# the count that branch actually spent. first_commit_ts comes from the merge commit's second
+# parent (the branch tip), which survives the branch and its worktree being deleted - the
+# reason `just cycle-time` could not report commit->merge for already-merged work until now.
+record_landed(){ # branch
+  local b=$1 t merge_sha first now land
+  t=$(ticket_of "$b")
+  # The merge commit NAMING THIS BRANCH, not HEAD: in a bulk batch HEAD is the last merge,
+  # so HEAD^2 would attribute every branch's commits to the last one merged.
+  merge_sha=$(git -C "$REPO" log HEAD --merges --format=%H --fixed-strings --grep "$b" -n 1 2>/dev/null)
+  [ -z "$merge_sha" ] && merge_sha=$(git -C "$REPO" rev-parse HEAD 2>/dev/null)
+  first=$(git -C "$REPO" log --format=%ct "${merge_sha}^1..${merge_sha}^2" 2>/dev/null | tail -1)
+  now=$(date +%s)
+  if [ -n "${first:-}" ]; then land=$(( (now - first) / 60 )); else first=null; land=null; fi
+  printf '{"ticket":"%s","branch":"%s","first_commit_ts":%s,"merge_ts":%s,"land_minutes":%s,"gate_attempts":%s,"merge":"%s"}\n' \
+    "$t" "$b" "$first" "$now" "$land" "$(( $(attempts_of "$b") + 1 ))" "$merge_sha" >> "$LANDED"
+}
 
 # returns: 0 = handled (merged/skipped/flagged), 1 = transient (requeue + wait)
 process(){
@@ -78,6 +103,7 @@ process(){
   if just gate-merge >>"$LOG" 2>&1; then
     git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1
     log "MERGED $branch ✓"
+    record_landed "$branch"
     clear_attempts "$branch"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MERGED" >> "$DONELOG"
     local wt; wt=$(worktree_of "$branch")
@@ -163,6 +189,7 @@ try_bulk(){
     log "BULK MERGED ✓ $tickets"
     for b in "${branches[@]}"; do
       echo "$(date '+%m-%d %H:%M')  $b  $(ticket_of "$b")  MERGED(bulk)" >> "$DONELOG"
+      record_landed "$b"
       clear_attempts "$b"
       wt=$(worktree_of "$b")
       [ -n "$wt" ] && [ "$wt" != "$REPO" ] && git -C "$REPO" worktree remove "$wt" --force 2>>"$LOG" && log "worktree removed: $wt"

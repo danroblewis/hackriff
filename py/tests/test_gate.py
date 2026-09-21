@@ -679,3 +679,110 @@ def test_the_merge_log_parses_into_branch_lives_and_deduplicates_its_doubled_lin
     assert life.gate_seconds == 22 * 60
     assert life.wait_seconds is None  # no commit times without a repo
     assert life.queued is not None and life.queued.hour == 10
+
+
+# ---------------------------------------------------------------------------------------
+# T-543: a slow-down must trip a TEST, not wait for somebody to notice.
+#
+# The check is a ROLLING MEDIAN, not a per-run bound, and that is deliberate. This box runs
+# up to four building agents plus an `hk serve` by policy, and one contended run says nothing
+# — `cargo build -p hk-plugins --bins`, documented in the justfile as ~0.05 s on a warm
+# target, was measured at 500 s at load 211 on the day this was written. A single red from
+# that would be noise, and a noisy guard gets muted. A median that moves is signal.
+# ---------------------------------------------------------------------------------------
+
+
+def _finished(klass, seconds, n):
+    from hkpy import gatelog
+
+    out = []
+    for _ in range(n):
+        rid = gatelog.new_run_id()
+        out.append(
+            gatelog.start_record(rid, klass=klass, phase="all", source="s", n_files=1)
+        )
+        out.append(
+            gatelog.end_record(rid, klass=klass, phase="all", seconds=seconds, rc=0)
+        )
+    return out
+
+
+def test_a_class_over_its_rolling_budget_is_reported():
+    from hkpy import gatelog
+    from hkpy.cycletime import budget_breaches
+
+    runs = gatelog.runs(_finished("full", 45 * 60, 6))
+    breaches = budget_breaches(runs)
+    assert len(breaches) == 1 and breaches[0].startswith("full:")
+
+
+def test_a_class_inside_its_budget_reports_nothing():
+    from hkpy import gatelog
+    from hkpy.cycletime import budget_breaches
+
+    assert budget_breaches(gatelog.runs(_finished("full", 20 * 60, 6))) == []
+
+
+def test_too_few_runs_is_silence_not_a_failure():
+    from hkpy import gatelog
+    from hkpy.cycletime import budget_breaches
+
+    # A fresh machine, or a class that has run twice. Failing here would make the guard fire
+    # on an absence of evidence, which is the fastest way to get a guard switched off.
+    assert budget_breaches(gatelog.runs(_finished("full", 99 * 60, 2))) == []
+
+
+def test_one_slow_run_among_fast_ones_does_not_trip_it():
+    from hkpy import gatelog
+    from hkpy.cycletime import budget_breaches
+
+    runs = gatelog.runs(_finished("full", 15 * 60, 6) + _finished("full", 62 * 60, 1))
+    assert budget_breaches(runs) == []
+
+
+def test_unfinished_runs_are_never_counted_as_fast():
+    from hkpy import gatelog
+    from hkpy.cycletime import rolling_medians
+
+    # A killed gate has no duration. Treating it as a zero would make starvation look like
+    # speed — the exact wrong conclusion.
+    records = _finished("full", 20 * 60, 5)
+    records.append(
+        gatelog.start_record(
+            gatelog.new_run_id(), klass="full", phase="all", source="s", n_files=1
+        )
+    )
+    median, n = rolling_medians(gatelog.runs(records))["full"]
+    assert n == 5 and median == 20 * 60
+
+
+def test_the_recorded_gate_history_is_within_budget():
+    """The guard itself, over whatever this machine has actually recorded.
+
+    Silent until `$HACKRIFF_OPS/gate-timings.jsonl` holds enough runs of a class, which is
+    the honest state on a fresh checkout or in CI. Once it does, a rolling-median regression
+    fails here rather than waiting for the user to notice the loop got slow again.
+    """
+    from hkpy import gatelog
+    from hkpy.cycletime import budget_breaches
+
+    breaches = budget_breaches(gatelog.runs(gatelog.read()))
+    assert not breaches, "gate duration has regressed:\n  " + "\n  ".join(breaches)
+
+
+def test_the_ui_suite_is_skipped_only_for_a_full_diff_with_no_ui_path():
+    from hkpy.gate import Source, forced_full, skip_ui
+
+    def decide(paths):
+        return classify(paths), Source("explicit --files", list(paths))
+
+    assert skip_ui(*decide(["crates/hk-cli/src/lib.rs"])) is True
+    # A ui/ path anywhere in the diff, and the UI suite runs.
+    assert skip_ui(*decide(["crates/hk-cli/src/lib.rs", "ui/src/app.ts"])) is False
+    # A forced full gate does not know what changed, so it cannot claim the UI is untouched.
+    assert (
+        skip_ui(
+            forced_full("CI push build"), Source("CI push build", None, forced="no base")
+        )
+        is False
+    )

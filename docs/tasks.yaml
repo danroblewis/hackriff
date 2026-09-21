@@ -16160,6 +16160,23 @@ tasks:
       supply concrete targets - prefer their numbers over re-deriving them, and coordinate rather
       than duplicating.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      MEASURED 2026-09-20 (branch task-t543; `just cycle-time`, reasoning in docs/10): gate median
+      21.4 min (p90 29.3), QUEUE WAIT median 119.7 min (p90 452), commit->merge median 272.6 min.
+      The gate is ~8 percent of the cycle; the serial queue is most of the rest. Landed, in value
+      order: (a) ops/merge-runner.sh bulk merge FIXED - 8 attempts, 0 merges, every one an octopus
+      refusal over docs/tasks.yaml, one wedged 10 h; now sequential two-head merges + ONE gate over
+      `just gate --base <pre-batch sha>`; (b) gate self-timing to $HACKRIFF_OPS/gate-timings.jsonl
+      plus `just cycle-time`; (c) affected-crate selection through HK_GATE_CRATES (hk-cli 2 of 20,
+      hk-pipeline 3, hk-dsp 14, hk-model 20) - acceptance and the UI tiers are NOT narrowed.
+      REJECTED WITH NUMBERS: sccache 0.00 percent hit rate, and cross-worktree reuse is structurally
+      impossible (sccache keys Rust entries on the cwd; SCCACHE_BASEDIR and --remap-path-prefix both
+      fail to fix it) - leave it on, stop counting it. Acceptance stays on plain cargo test, because
+      nextest would pin hk-e2e to max-threads=1 and serialise it.
+      THE REAL CONSTRAINT IS THE BOX, NOT THE GATE: `cargo build -p hk-plugins --bins`, documented
+      as ~0.05 s warm, took 500 s at load 211 with three agents building and an `hk serve` holding
+      9-13 cores. Follow-ups worth filing: count long-running `hk serve` against the 4-builder cap;
+      measure `-- --test-threads 6` for acceptance-ci; Spotlight/XProtect exclusions for the repo
+      (mds_stores had burned 34 h of CPU).
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate

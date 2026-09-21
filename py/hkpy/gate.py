@@ -601,6 +601,29 @@ def render(decision: Decision, source: Source, phase: str) -> list[str]:
 #: same fail-closed shape as `classify_path`'s unknown-is-FULL, moved one level down.
 CRATES_ENV = "HK_GATE_CRATES"
 
+#: T-543. Set for a `full`-class diff that contains no `ui/` path, so `just test-ui` (npm ci
+#: + esbuild + `tsc --noEmit` + the node suites, ~2.5 min every crate gate) does not run over
+#: TypeScript the diff did not touch. `ui/` has no generated input — nothing in that pipeline
+#: reads a Rust artifact — so a `crates/`-only change cannot change its answer.
+#:
+#: It skips the CHECK-phase UI suite only. `just test-ui-e2e`, the browser tier that drives a
+#: real `hk serve` and is the one suite that notices a backend change breaking the page, runs
+#: for the `full` class regardless and is never skipped.
+#:
+#: Unset means RUN, like `HK_GATE_CRATES`: a bug here costs 2.5 minutes, never coverage.
+SKIP_UI_ENV = "HK_GATE_SKIP_UI"
+
+
+def skip_ui(decision: Decision, source: Source) -> bool:
+    """True when the CHECK-phase UI suite can be skipped for this diff.
+
+    Only for a classified `full` diff whose path list is known and contains no `ui/` path.
+    A forced full gate has no path list, so it cannot claim the UI is untouched.
+    """
+    if not decision.is_full or decision.forced_reason or source.paths is None:
+        return False
+    return not any(normalize(str(p)).startswith("ui/") for p in source.paths)
+
 
 def resolve_selection(
     decision: Decision, source: Source, root: str, *, no_select: bool = False
@@ -736,6 +759,14 @@ def main(argv: list[str] | None = None) -> int:
     for line in render_selection(selection):
         print(line, flush=True)
 
+    ui_skipped = skip_ui(decision, source)
+    if ui_skipped:
+        print(
+            "gate: ui       = `just test-ui` SKIPPED — no ui/ path in this diff, and ui/ has "
+            "no generated input. The browser tier (just test-ui-e2e) still runs.",
+            flush=True,
+        )
+
     commands = decision.commands(args.phase)
     if args.dry_run or not commands:
         return 0
@@ -755,6 +786,10 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     env = selection_env(env, selection)
+    if ui_skipped:
+        env[SKIP_UI_ENV] = "1"
+    else:
+        env.pop(SKIP_UI_ENV, None)
 
     # T-543: the gate times itself, every run, and writes the result somewhere durable. The
     # start line goes out BEFORE the first suite so that a killed or starved run — the one

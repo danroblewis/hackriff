@@ -29,6 +29,7 @@ nothing else — the tool says "no data", it does not pretend.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import statistics
@@ -165,6 +166,26 @@ def lives_from_events(events: list[Event]) -> dict[str, BranchLife]:
             entry = life(ev.branch)
             entry.gate_failures += 1
     return lives
+
+
+def read_landed(ops: str) -> list[dict]:
+    """`$HACKRIFF_OPS/landed.jsonl`, one record per landed ticket. Missing file -> []."""
+    out: list[dict] = []
+    try:
+        with open(os.path.join(ops, "landed.jsonl"), encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    out.append(rec)
+    except OSError:
+        return []
+    return out
 
 
 def _commit_times(root: str, rev_range: str) -> tuple[datetime | None, datetime | None]:
@@ -328,6 +349,40 @@ def report(root: str, limit: int = 20) -> list[str]:
             f"{life.gate_failures:6d}  {life.merged:%m-%d %H:%M}"
         )
 
+    # T-543: the per-ticket ledger `ops/merge-runner.sh` writes on every land. It is the
+    # authoritative commit->merge number (the runner reads the merge commit's second parent,
+    # which survives the branch being deleted); the table above is the same figure recovered
+    # retroactively for tickets that landed before the ledger existed.
+    landed = read_landed(ops)
+    if landed:
+        minutes = [
+            float(rec["land_minutes"])
+            for rec in landed
+            if isinstance(rec.get("land_minutes"), (int, float))
+        ]
+        attempts = [
+            int(rec["gate_attempts"])
+            for rec in landed
+            if isinstance(rec.get("gate_attempts"), int)
+        ]
+        out.append("")
+        out.append(f"LANDED LEDGER ({len(landed)} ticket(s) in landed.jsonl)")
+        for rec in landed[-limit:]:
+            out.append(
+                f"  {str(rec.get('ticket')):10s} land {str(rec.get('land_minutes')):>6s} min"
+                f"  gate attempts {rec.get('gate_attempts')}"
+            )
+        if minutes:
+            out.append(
+                f"  first commit -> merged: median {statistics.median(minutes):.0f} min, "
+                f"p90 {_pct(minutes, 0.9):.0f} min over {len(minutes)} ticket(s)"
+            )
+        if attempts:
+            out.append(
+                f"  gate attempts per landed ticket: median {statistics.median(attempts):.1f}, "
+                f"max {max(attempts)}"
+            )
+
     gates = [life.gate_seconds for life in merged if life.gate_seconds]
     waits = [life.wait_seconds for life in merged if life.wait_seconds]
     totals = [life.total_seconds for life in merged if life.total_seconds]
@@ -349,6 +404,125 @@ def report(root: str, limit: int = 20) -> list[str]:
     return out
 
 
+#: The rolling-median budgets a regression test asserts against (T-543, user 2026-09-20).
+#: A slow-down should trip a TEST, not wait for someone to notice. Numbers are the measured
+#: 2026-09-20 medians with headroom, not aspirations: gate median was 21.4 min, so `full` is
+#: budgeted at 35 min; the cheap classes were seconds.
+#:
+#: The test is deliberately a MEDIAN over the most recent runs, not a per-run assertion: this
+#: box runs up to four agents plus an `hk serve` by policy, and a single contended run is not
+#: evidence of anything (a `cargo build -p hk-plugins --bins` documented at 0.05 s was
+#: measured at 500 s under load 211). A median that moves is.
+BUDGET_S: dict[str, float] = {
+    "full": 35 * 60,
+    "ui": 8 * 60,
+    "ui+docs": 8 * 60,
+    "py": 3 * 60,
+    "docs": 30,
+}
+
+#: How many recent runs of a class the rolling median is taken over, and the minimum number
+#: below which the test has nothing to say and must not fail.
+ROLLING_WINDOW = 7
+MIN_SAMPLES = 5
+
+
+def rolling_medians(
+    runs_: list[dict], window: int = ROLLING_WINDOW
+) -> dict[str, tuple[float, int]]:
+    """Per class: (median of the last `window` FINISHED runs, how many there were).
+
+    Unfinished runs are excluded — a killed gate has no duration — but they are counted and
+    reported elsewhere, never silently treated as fast.
+    """
+    per: dict[str, list[float]] = {}
+    for run in runs_:
+        if not run.get("finished"):
+            continue
+        secs = run.get("seconds")
+        klass = run.get("class")
+        if isinstance(secs, (int, float)) and isinstance(klass, str):
+            per.setdefault(klass, []).append(float(secs))
+    return {
+        klass: (statistics.median(vals[-window:]), len(vals[-window:]))
+        for klass, vals in per.items()
+    }
+
+
+def budget_breaches(
+    runs_: list[dict],
+    budgets: dict[str, float] | None = None,
+    window: int = ROLLING_WINDOW,
+    min_samples: int = MIN_SAMPLES,
+) -> list[str]:
+    """Classes whose rolling median exceeds its budget, as human sentences.
+
+    Empty means nothing to report — including "not enough runs yet", which is the common
+    case on a fresh machine and must never read as a pass or a failure.
+    """
+    budgets = BUDGET_S if budgets is None else budgets
+    out: list[str] = []
+    for klass, (median, n) in sorted(rolling_medians(runs_, window).items()):
+        budget = budgets.get(klass)
+        if budget is None or n < min_samples:
+            continue
+        if median > budget:
+            out.append(
+                f"{klass}: rolling median of the last {n} runs is {median / 60:.1f} min, "
+                f"over the {budget / 60:.1f} min budget"
+            )
+    return out
+
+
+def stats(runs_: list[dict]) -> list[str]:
+    """p50/p90 per class and per phase — `just gate-stats`."""
+    out: list[str] = []
+    by_class: dict[str, list[float]] = {}
+    by_cmd: dict[str, list[float]] = {}
+    unfinished = 0
+    for run in runs_:
+        if not run.get("finished"):
+            unfinished += 1
+            continue
+        secs = run.get("seconds")
+        if isinstance(secs, (int, float)):
+            by_class.setdefault(str(run.get("class")), []).append(float(secs))
+        for suite in run.get("suites", []):
+            sec = suite.get("seconds")
+            if isinstance(sec, (int, float)):
+                by_cmd.setdefault(str(suite.get("cmd")), []).append(float(sec))
+    if not by_class and not unfinished:
+        out.append(
+            "gate-stats: no runs recorded yet — "
+            f"{gatelog.log_path()} fills on the next `just gate`."
+        )
+        return out
+    out.append(f"{'class':14s} {'runs':>5s} {'p50':>8s} {'p90':>8s} {'max':>8s}")
+    for klass, vals in sorted(by_class.items()):
+        out.append(
+            f"{klass:14s} {len(vals):5d} {_fmt(statistics.median(vals)):>8s} "
+            f"{_fmt(_pct(vals, 0.9)):>8s} {_fmt(max(vals)):>8s}"
+        )
+    if unfinished:
+        out.append(f"(+{unfinished} run(s) started and never finished — killed or starved)")
+    if by_cmd:
+        out.append("")
+        out.append(f"{'phase':24s} {'runs':>5s} {'p50':>8s} {'p90':>8s} {'max':>8s}")
+        for cmd, vals in sorted(by_cmd.items(), key=lambda kv: -statistics.median(kv[1])):
+            out.append(
+                f"{cmd:24s} {len(vals):5d} {_fmt(statistics.median(vals)):>8s} "
+                f"{_fmt(_pct(vals, 0.9)):>8s} {_fmt(max(vals)):>8s}"
+            )
+    breaches = budget_breaches(runs_)
+    out.append("")
+    if breaches:
+        out.append("OVER BUDGET (py/tests/test_gate.py asserts this too):")
+        out.extend(f"  {line}" for line in breaches)
+    else:
+        out.append("within budget (or not enough runs yet to say)")
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="just cycle-time",
@@ -356,7 +530,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--limit", type=int, default=20, help="branches to list (default 20)")
     parser.add_argument("--root", default=None, help="repo root (default: git toplevel)")
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="p50/p90 per class and per phase only — what `just gate-stats` prints",
+    )
     args = parser.parse_args(argv)
+    if args.stats:
+        for line in stats(gatelog.runs(gatelog.read())):
+            print(line)
+        return 0
     root = args.root
     if root is None:
         proc = subprocess.run(

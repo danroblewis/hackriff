@@ -80,6 +80,12 @@ reconcile *args:
 cycle-time *args:
     uv run --locked --project py python -m hkpy.cycletime {{args}}
 
+# p50/p90 of the gate, per class and per phase, from $HACKRIFF_OPS/gate-timings.jsonl, plus
+# whether any class's ROLLING MEDIAN is over budget. `py/tests/test_gate.py` asserts the same
+# budgets, so a slow-down trips a test instead of waiting for someone to notice it.
+gate-stats:
+    uv run --locked --project py python -m hkpy.cycletime --stats
+
 # Build the Rust workspace (CPU path; `gpu` off)
 build:
     cargo build --workspace
@@ -308,6 +314,29 @@ ui-build:
 test-ui:
     #!/usr/bin/env bash
     set -euo pipefail
+    # T-543: the gate skips this suite for a diff with no `ui/` path in it, and says so.
+    #
+    # This is NOT the T-358 defect it superficially resembles. T-358 was a suite that
+    # SELF-skipped, silently, when node was missing — green by doing nothing, on a machine
+    # nobody was watching. This skip is decided by the RUNNER from the diff, printed by the
+    # gate before anything runs, and attributable: same shape as the gate already skipping
+    # the Rust suite for a `ui`-only change. It is sound because `ui/` has no generated
+    # input — `npm run build` is esbuild over `ui/src`, `typecheck` is `tsc --noEmit` over
+    # the same tree, and `npm test` is node over `ui/test`. None of the three reads a Rust
+    # artifact, so a `crates/`-only change cannot alter their result.
+    #
+    # WHAT STILL RUNS, and it is the part that matters: `just test-ui-e2e`, the browser tier,
+    # which drives the real `hk serve` and is the ONLY suite that notices when a backend
+    # change breaks the page consuming it. It is in the gate's acceptance phase for the
+    # `full` class and is not skipped here or anywhere.
+    #
+    # Unset means RUN, so every failure of this path costs time rather than coverage.
+    if [ -n "${HK_GATE_SKIP_UI:-}" ]; then
+        echo "test-ui: SKIPPED by the gate — this diff contains no ui/ path, and ui/ has no"
+        echo "  generated input, so build+typecheck+node tests over unchanged TypeScript cannot"
+        echo "  change their answer. The BROWSER tier (just test-ui-e2e) still runs."
+        exit 0
+    fi
     if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
         echo "test-ui: node/npm not found — the UI gate cannot run, so it fails rather than passing." >&2
         echo "  Install Node >= 20 (the dev Mac and CI both run 24), or, to skip the UI deliberately," >&2
@@ -315,10 +344,35 @@ test-ui:
         exit 1
     fi
     cd ui
-    npm ci --no-audit --no-fund --prefer-offline
+    just _npm-deps
     npm run build
     npm run typecheck
     npm test
+
+# T-543: `npm ci` deletes node_modules and reinstalls it from scratch, every gate, ~30-60 s,
+# for a lockfile that almost never changes. Install only when the lockfile actually differs
+# from the one the current node_modules was built from.
+#
+# The stamp is written ONLY after a successful `npm ci`, and it records the lockfile's hash,
+# so the three ways this could go wrong all re-install: no stamp (first run, or a wiped
+# node_modules), a stamp that does not match (lockfile changed), or a failed install (which
+# never writes one). A half-installed tree therefore cannot be mistaken for a good one.
+#
+# It cds to ui/ itself: `just` runs a recipe from the justfile's directory whatever the
+# caller's cwd, so depending on the caller having cd'd would silently read the repo root's
+# (non-existent) package-lock.json and reinstall every time.
+_npm-deps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}/ui"
+    want=$(shasum -a 256 package-lock.json | cut -d" " -f1)
+    stamp=node_modules/.hk-lock-sha256
+    if [ -d node_modules ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ]; then
+        echo "npm deps: up to date (package-lock.json unchanged since the last npm ci)"
+        exit 0
+    fi
+    npm ci --no-audit --no-fund --prefer-offline
+    echo "$want" > "$stamp"
 
 # The BROWSER tier: drive /surface in headless Chrome against a real `hk serve` over a recorded
 # fixture, and assert on what is drawn and what is requested (T-455).
@@ -360,7 +414,7 @@ test-ui-e2e:
         cargo build -p hk-cli --bin hk
     fi
     cd ui
-    npm ci --no-audit --no-fund --prefer-offline
+    just _npm-deps
     npm run build
     npm run e2e
 
