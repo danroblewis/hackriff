@@ -383,7 +383,15 @@ impl Classifier {
         // candidates above and may do nothing else: it never changes the family, never adds a class
         // the tree did not offer, and never turns an abstention into a claim (see [`crate::verify`]).
         // Without the symbol-geometry view, or without a C14 clock lock, it does not run at all.
-        if let (Some(samples), Some(rate)) = (request.symbol_samples, request.symbol_sample_rate_hz)
+        //
+        // **A skip is recorded, not swallowed (T-589).** The outcome used to be discarded here, so
+        // a classification whose verifier ran and agreed and one whose verifier never ran carried
+        // exactly the same reasons — and C14 not locking on a whole modulation class (genuine
+        // 8-PSK, 0 of 12 snippets) was therefore invisible in production. Every path now leaves a
+        // machine reason: `verifier_confirmed` / `verifier_reranked` from [`crate::verify::verify`]
+        // itself, or the [`SkipReason`](crate::verify::SkipReason) code from here.
+        let verified = if let (Some(samples), Some(rate)) =
+            (request.symbol_samples, request.symbol_sample_rate_hz)
         {
             crate::verify::verify(
                 &mut out,
@@ -393,7 +401,12 @@ impl Classifier {
                     symbols: request.symbols,
                     snr_db: request.snr_db,
                 },
-            );
+            )
+        } else {
+            crate::verify::VerifyOutcome::Skipped(crate::verify::SkipReason::NoSymbolView)
+        };
+        if let crate::verify::VerifyOutcome::Skipped(why) = verified {
+            push_reason(&mut out.reasons, why.as_str());
         }
         out
     }

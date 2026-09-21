@@ -532,6 +532,11 @@ pub(crate) fn carrier_line(
                 let q = v * v;
                 q * q
             }
+            8 => {
+                let q = v * v;
+                let f = q * q;
+                f * f
+            }
             _ => v.powu(p),
         };
         let a = f64::from(z.norm());
