@@ -105,9 +105,15 @@ const ANY_TIME: TimeRange = TimeRange::new(
 /// the emitter's currently-linked tracks, or linked directly. Parameter `?1` is the emitter id,
 /// `?2` the row cap.
 const EMITTER_DETECTION_EVIDENCE_SQL: &str = "\
-     SELECT snr_peak, peak_dbfs, xdb_bw, flags, lo, device_id, antenna_port FROM ( \
+     SELECT snr_peak, peak_dbfs, xdb_bw, flags, retune_bits, lo, device_id, antenna_port FROM ( \
        SELECT d.snr_peak AS snr_peak, d.peak_dbfs AS peak_dbfs, d.xdb_bw AS xdb_bw, \
-              d.flags AS flags, d.t_start AS t_start, \
+              d.flags AS flags, \
+              coalesce((SELECT dr.flag_bits FROM detection_retune dr \
+                        WHERE dr.detection_id = d.detection_id AND dr.active = 1 \
+                          AND dr.verdict_id = (SELECT max(verdict_id) FROM detection_retune \
+                                               WHERE detection_id = d.detection_id)), 0) \
+                AS retune_bits, \
+              d.t_start AS t_start, \
               json_extract(p.canonical, '$.tune.center_hz') AS lo, \
               p.device_id AS device_id, \
               json_extract(p.canonical, '$.antenna_port') AS antenna_port \
@@ -118,7 +124,13 @@ const EMITTER_DETECTION_EVIDENCE_SQL: &str = "\
        WHERE el.emitter_id = ?1 AND el.target_kind = 'track' AND el.superseded_by IS NULL \
        UNION ALL \
        SELECT d.snr_peak AS snr_peak, d.peak_dbfs AS peak_dbfs, d.xdb_bw AS xdb_bw, \
-              d.flags AS flags, d.t_start AS t_start, \
+              d.flags AS flags, \
+              coalesce((SELECT dr.flag_bits FROM detection_retune dr \
+                        WHERE dr.detection_id = d.detection_id AND dr.active = 1 \
+                          AND dr.verdict_id = (SELECT max(verdict_id) FROM detection_retune \
+                                               WHERE detection_id = d.detection_id)), 0) \
+                AS retune_bits, \
+              d.t_start AS t_start, \
               json_extract(p.canonical, '$.tune.center_hz') AS lo, \
               p.device_id AS device_id, \
               json_extract(p.canonical, '$.antenna_port') AS antenna_port \
@@ -392,6 +404,7 @@ pub(super) fn evidence(conn: &Connection, id: EmitterId) -> Result<Option<RowEvi
         f64,
         Option<f64>,
         i64,
+        i64,
         Option<f64>,
         String,
         Option<String>,
@@ -407,6 +420,7 @@ pub(super) fn evidence(conn: &Connection, id: EmitterId) -> Result<Option<RowEvi
                 r.get(4)?,
                 r.get(5)?,
                 r.get(6)?,
+                r.get(7)?,
             ))
         })?
         .collect::<Result<_, _>>()?
@@ -414,7 +428,7 @@ pub(super) fn evidence(conn: &Connection, id: EmitterId) -> Result<Option<RowEvi
     let (mut snr_db, mut peak_dbfs, mut xdb_bandwidth_hz) = (None, None, None);
     let (mut suspect, mut tuned_lo) = (0usize, Vec::<TunedLo>::new());
     let (mut image_flagged, mut imd_flagged, mut spur_flagged) = (false, false, false);
-    for (i, (snr, peak, xdb, flags, lo, device, port)) in dets.iter().enumerate() {
+    for (i, (snr, peak, xdb, flags, retune_bits, lo, device, port)) in dets.iter().enumerate() {
         if i == 0 {
             snr_db = Some(*snr);
             peak_dbfs = Some(*peak);
@@ -423,7 +437,19 @@ pub(super) fn evidence(conn: &Connection, id: EmitterId) -> Result<Option<RowEvi
             xdb_bandwidth_hz = xdb.filter(|v| v.is_finite() && *v > 0.0);
         }
         let f = DetectionFlags::from_bits(u32::try_from(*flags).unwrap_or(0));
-        if f.clipped || f.spur_candidate || f.image_candidate || f.suspect_imd || f.compressed {
+        // T-600: the measurement's own flags, OR'd on the read path with the standing retune
+        // verdict's implied bits (never written back to `flags` on the row — the verdict lives in
+        // `detection_retune` and is revocable, per T-598). This is what decides the rank proxy
+        // below, so a detection resolved LO-relative counts as suspect even though the stored row
+        // says nothing about it.
+        let with_verdict =
+            DetectionFlags::from_bits(f.bits() | u32::try_from(*retune_bits).unwrap_or(0));
+        if with_verdict.clipped
+            || with_verdict.spur_candidate
+            || with_verdict.image_candidate
+            || with_verdict.suspect_imd
+            || with_verdict.compressed
+        {
             suspect += 1;
         }
         // Which mechanism the measurement itself suspects, for [`RowEvidence::corroborates`].

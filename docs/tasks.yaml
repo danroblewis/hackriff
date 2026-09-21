@@ -19371,13 +19371,14 @@ tasks:
   - id: T-600
     milestone: M2-hardening
     title: A resolved artefact does not rank below a clean row, because the evidence proxy counts only measured flag bits
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     model: sonnet
     effort: low
     depends_on: [T-598]
     use_cases: []
+    branch: task-t600
     acceptance: |
       FOUND BY T-598. `EMITTER_DETECTION_EVIDENCE_SQL` in `crates/hk-model/src/repo/relate.rs`
       counts only the flag bits stored ON the detection row. T-598 deliberately does NOT write to
@@ -19395,6 +19396,31 @@ tasks:
       restores its rank - the second half matters, because a one-way change would make the ranking
       outlive the claim.
       Prove the test goes RED without the fix.
+    resolution: |
+      DONE 2026-09-21. `EMITTER_DETECTION_EVIDENCE_SQL` now reads each detection's currently-active
+      `detection_retune.flag_bits` (0 if none) via a correlated subquery alongside the row's own
+      `flags`, still read-path only - nothing is written back to `detection`, so the immutability
+      trigger and T-598's revocable-verdict design are untouched. The two OR'd together decide only
+      the suspect-fraction count `evidence()` builds for `RowEvidence::rank()`; the
+      `image_flagged`/`imd_flagged`/`spur_flagged` fields `RowEvidence::corroborates` reads stay
+      measurement-only, per their own doc comment.
+      Two tests in `crates/hk-model/src/repo/retune_tests.rs`, both proven RED without the join
+      (asserted `suspect_fraction` was 0.0 where 1.0 was expected):
+      `t600_resolved_lo_relative_artefact_ranks_below_a_clean_row` builds the real emitter and the
+      spur family's representative row with identical measured SNR/level/duty-cycle, resolves the
+      retune verdict, and asserts the artefact's rank is strictly below the clean row's despite the
+      equal underlying measurement. `t600_revoking_the_verdict_restores_the_artefacts_rank` then
+      withdraws the family's evidence (as T-598's own revocation test does) and re-resolves,
+      asserting the artefact's `suspect_fraction` and `rank()` return to exactly the clean row's -
+      the half that matters, since a one-way join would leave the ranking outliving the claim.
+      `just precheck hk-model` (fmt + clippy, `-D warnings`) clean. Targeted:
+      `cargo nextest run -p hk-model -E 'test(t600) or test(t598)'` - 7/7 pass, including T-598's
+      own suite unaffected.
+      NOTE FOR THE COORDINATOR: this worktree was branched from `main` while T-598 was still
+      mid-merge-runner-gate (uncommitted, `.git/MERGE_HEAD` present), so the branch also carries
+      T-598's files copied byte-for-byte from main's staged working tree, to build and test
+      standalone. Merge T-598 first; the overlap should be a trivial/no-op merge since the content
+      is identical.
   - id: T-601
     milestone: M2-hardening
     title: A retune-sibling artefact reads as a generic "retune artefact" while an image reads as prose
