@@ -522,9 +522,49 @@ def merge_status():
         queue = sum(1 for t in (d.get("tasks") or []) if t.get("status") == "in-progress")
     except Exception:
         pass
+    # 4. WHICH tickets are in the current test run vs. ahead-of-main and waiting
+    def _tk(s):
+        m = re.search(r"t(?:ask-t)?0*(\d+)", s or "", re.IGNORECASE)
+        return "T-" + m.group(1) if m else (s or "")
+    testing = []
+    if merging:
+        heads = []
+        try:
+            heads = open(os.path.join(REPO, ".git", "MERGE_HEAD")).read().split()
+        except Exception:
+            pass
+        for h in heads:
+            brs = [b for b in sh(["git", "for-each-ref", "--points-at", h,
+                                  "--format=%(refname:short)", "refs/heads/"], cwd=REPO).split()
+                   if b and b != "main"]
+            nm = brs[0] if brs else h[:7]
+            testing.append({"branch": nm, "ticket": _tk(nm if brs else mmsg)})
+        if not testing and mticket:
+            testing.append({"branch": "(staged)", "ticket": mticket})
+    tbranch = {t["branch"] for t in testing}
+    ahead = []
+    try:
+        wl = sh(["git", "worktree", "list", "--porcelain"], cwd=REPO)
+        for b in sorted({l[7:].replace("refs/heads/", "") for l in wl.splitlines() if l.startswith("branch ")}):
+            if b == "main" or b in tbranch:
+                continue
+            try:
+                n = int(sh(["git", "rev-list", "--count", "main..%s" % b], cwd=REPO).strip() or 0)
+            except Exception:
+                n = 0
+            if n > 0:
+                ahead.append({"branch": b, "ticket": _tk(b), "commits": n})
+    except Exception:
+        pass
+    gates_running = 0
+    try:
+        gates_running = len([1 for l in out.splitlines() if "just gate-merge" in l and " grep " not in l])
+    except Exception:
+        pass
     state = "merging" if merging else ("gating" if gate else "idle")
     return {"state": state, "msg": mmsg, "ticket": mticket,
-            "gate": gate, "elapsed_s": elapsed, "queue": queue}
+            "gate": gate, "elapsed_s": elapsed, "queue": queue,
+            "testing": testing, "ahead": ahead, "gates_running": gates_running}
 
 _PRI_RANK = {"high": 0, "medium": 1, "normal": 2, "low": 3}
 
@@ -1172,7 +1212,8 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
   </div>
   <div class=col>
-    <div class="card" id=queuecard style="flex:0 0 auto;max-height:56%"><h2>Queue <em id=qn></em></h2><div class=bd id=queue></div></div>
+    <div class="card" id=mergecard style="flex:0 0 auto"><h2>Merge queue <em id=mqn></em></h2><div class=bd id=mergeq></div></div>
+    <div class="card" id=queuecard style="flex:0 0 auto;max-height:44%"><h2>Up next <em id=qn></em></h2><div class=bd id=queue></div></div>
     <div class="card fill"><h2>Work trees <em id=wtn></em></h2><div class=bd id=wts></div></div>
   </div>
   <div class=col>
@@ -1204,6 +1245,19 @@ async function tick(){
   if(mg.state==='merging'){ mgEl.textContent='⇄ merging'+(mg.gate?' · gate '+dur(mg.elapsed_s):''); mgEl.style.color='#A395E0'; mgEl.title='Merging: '+(mg.msg||'?'); }
   else if(mg.state==='gating'){ mgEl.textContent='⚙ '+mg.gate+' · '+dur(mg.elapsed_s); mgEl.style.color='#F0A542'; mgEl.title='Gate running before merge'; }
   else { mgEl.textContent='idle'+(mg.queue?' · '+mg.queue+' in-progress':''); mgEl.style.color='#5A6973'; mgEl.title='No merge or gate running'; }
+  // Merge queue panel: what's IN the current test run vs. ahead-of-main and waiting.
+  {
+    const testing=mg.testing||[], ahead=mg.ahead||[];
+    const row=(t,tag,col)=>`<div style="padding:1px 0"><span style="color:${col}">${tag}</span> <b data-tid="${esc(t.ticket)}" style="cursor:pointer">${esc(t.ticket||t.branch)}</b> <span style="color:#5A6973">${esc(t.branch)}${t.commits?(' +'+t.commits):''}</span></div>`;
+    const warn=(mg.gates_running||0)>1?`<div style="color:#E47B68;margin-bottom:4px">⚠ ${mg.gates_running} gate-merges running at once — likely duplicate/colliding</div>`:'';
+    const testCol=(mg.state==='gating'||mg.state==='merging')?'#F0A542':'#5A6973';
+    const gl=mg.gate?`<div style="color:#5A6973;margin-bottom:3px">gate: ${esc(mg.gate)} · ${dur(mg.elapsed_s)}</div>`:'';
+    const hdr=t=>`<div style="margin:6px 0 2px;color:#8595A0;font-size:11px;text-transform:uppercase;letter-spacing:.04em">${t}</div>`;
+    const ts=testing.length?testing.map(t=>row(t,'⚙ in test',testCol)).join(''):'<div style="color:#5A6973">— nothing being tested —</div>';
+    const wt=ahead.length?ahead.map(t=>row(t,'⏳ waiting','#8595A0')).join(''):'<div style="color:#5A6973">— none waiting —</div>';
+    const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wt;
+    const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting';
+  }
   const b=d.budget||{}; const bEl=$('#budget');
   if(b.weekly!=null||b.session!=null){
     const stale=b.age_s!=null&&b.age_s>3*3600;
