@@ -213,6 +213,12 @@ _RULES: tuple[tuple[str, str, str, str], ...] = (
     ("exact", "Cargo.toml", FULL, "workspace manifest"),
     ("exact", "Cargo.lock", FULL, "workspace dependency lock"),
     ("prefix", "ui/", UI, "web client — thin presentation layer"),
+    # T-561: the board is DATA the tooling parses, not prose. A malformed `blocked_on:`
+    # (an unquoted value containing ": ") once reached main because docs/ runs NOTHING,
+    # so py/tests/test_task_board.py - which exists to catch exactly that - never ran,
+    # and it broke the board test, the dashboard and every gate that parses the file.
+    ("exact", "docs/tasks.yaml", PY, "the board - the Python suite parses and validates it"),
+    ("exact", "docs/use-cases.yaml", PY, "machine-readable use cases - the Python suite reads it"),
     ("prefix", "docs/", DOCS, "documentation"),
     ("prefix", "py/", PY, "Python tooling (orchestration/research only)"),
 )

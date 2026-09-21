@@ -19,7 +19,7 @@ use crate::ids::{
     AnnotationId, AnomalyId, DecodeId, DemodulationId, DetectionId, EmitterId, ExplanationId,
     RecordingId, TrackId,
 };
-use crate::region::{FreqRange, Region};
+use crate::region::{FreqRange, Region, TimeRange};
 use crate::time::Timestamp;
 
 /// Result of [`Repository::upsert_emitter_observation`].
@@ -76,22 +76,28 @@ pub(super) const EMITTER_REGION_SQL: &str = concat!(
      ORDER BY last_seen DESC, emitter_id"
 );
 
-/// T-158: `(snr_peak_db, peak_level_dbfs)` of the most recently started [`crate::Detection`]
-/// reachable from an emitter — directly linked, or through one of its currently-linked
+/// T-158/T-350: the most recently started [`crate::Detection`] reachable from an emitter — its
+/// `snr_peak_db`, `peak_level_dbfs` **and its own [`TimeRange`]**, which is what makes the two
+/// numbers a dated measurement rather than a standing property of the emitter.
+///
+/// Reached directly, or through one of the emitter's currently-linked
 /// [`crate::detection::Track`]s (`emitter_link.superseded_by IS NULL`; a merge re-points links to
 /// the survivor, so a merged-away emitter id contributes nothing here). Both current-link paths
 /// use the `emitter_link` primary key (`emitter_id, target_kind, target_id`) and the
-/// `track_detection`/`detection` primary keys, so this is index-only, no table scan. Parameter
-/// `?1` is the emitter id, given twice (once per source path).
+/// `track_detection`/`detection` primary keys, so this is index-only, no table scan. `t_start` was
+/// already read to order the rows; T-350 only stops it (and `t_end`) being thrown away at the
+/// `SELECT`. Parameter `?1` is the emitter id, given twice (once per source path).
 const EMITTER_LATEST_DETECTION_SQL: &str = "\
-     SELECT snr_peak, peak_dbfs FROM ( \
-       SELECT d.snr_peak AS snr_peak, d.peak_dbfs AS peak_dbfs, d.t_start AS t_start \
+     SELECT snr_peak, peak_dbfs, t_start, t_end FROM ( \
+       SELECT d.snr_peak AS snr_peak, d.peak_dbfs AS peak_dbfs, \
+              d.t_start AS t_start, d.t_end AS t_end \
        FROM emitter_link el \
        JOIN track_detection td ON td.track_id = el.target_id \
        JOIN detection d ON d.detection_id = td.detection_id \
        WHERE el.emitter_id = ?1 AND el.target_kind = 'track' AND el.superseded_by IS NULL \
        UNION ALL \
-       SELECT d.snr_peak AS snr_peak, d.peak_dbfs AS peak_dbfs, d.t_start AS t_start \
+       SELECT d.snr_peak AS snr_peak, d.peak_dbfs AS peak_dbfs, \
+              d.t_start AS t_start, d.t_end AS t_end \
        FROM emitter_link el \
        JOIN detection d ON d.detection_id = el.target_id \
        WHERE el.emitter_id = ?1 AND el.target_kind = 'detection' AND el.superseded_by IS NULL \
@@ -952,20 +958,46 @@ impl Repository {
             .collect()
     }
 
-    /// T-158: `(snr_peak_db, peak_level_dbfs)` of the emitter's latest (highest `t_start`) linked
-    /// detection, `None` when it has none (e.g. an emitter seen only through a decode sighting, or
-    /// a candidate whose track has not yet been offered as a sighting). See
+    /// T-158/T-350: the emitter's latest (highest `t_start`) linked detection as a dated
+    /// measurement, `None` when it has none (e.g. an emitter seen only through a decode sighting,
+    /// or a candidate whose track has not yet been offered as a sighting). See
     /// [`EMITTER_LATEST_DETECTION_SQL`] for how "linked" is reached.
     pub fn emitter_latest_measurement(
         &self,
         emitter_id: EmitterId,
-    ) -> Result<Option<(f64, f64)>, RepoError> {
+    ) -> Result<Option<LatestMeasurement>, RepoError> {
         Ok(self
             .conn
             .prepare_cached(EMITTER_LATEST_DETECTION_SQL)?
             .query_row([blob(emitter_id)], |r| {
-                Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?))
+                Ok(LatestMeasurement {
+                    snr_peak_db: r.get::<_, f64>(0)?,
+                    peak_level_dbfs: r.get::<_, f64>(1)?,
+                    time: TimeRange::new(
+                        Timestamp::from_unix_nanos(r.get::<_, i64>(2)?),
+                        Timestamp::from_unix_nanos(r.get::<_, i64>(3)?),
+                    ),
+                })
             })
             .optional()?)
     }
+}
+
+/// T-350: an emitter's latest linked-[`crate::Detection`] measurement **with the detection's own
+/// time extent**, from [`Repository::emitter_latest_measurement`].
+///
+/// The two levels used to be returned as a bare `(f64, f64)`, so every consumer — `/api/inventory`
+/// included — held a measurement with no statement of *when* it was measured. That quietly
+/// reasserts the "steady emitter parked on one frequency" shape the signal model rejects
+/// (ADR-0017): a detection **is** a time–frequency region, and its SNR is a fact about that
+/// region, not a standing property of the emitter. Keeping the value and its extent in one struct
+/// means the two cannot be read apart.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LatestMeasurement {
+    /// Peak SNR of that detection, dB ([`crate::Detection::snr_peak_db`]).
+    pub snr_peak_db: f64,
+    /// Absolute peak level of that detection, dBFS ([`crate::Detection::peak_level_dbfs`]).
+    pub peak_level_dbfs: f64,
+    /// The detection's own time extent — when these two numbers were measured.
+    pub time: TimeRange,
 }
