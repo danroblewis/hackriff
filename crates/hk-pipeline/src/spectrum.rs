@@ -195,7 +195,22 @@ impl<'a> Output<'a> {
     /// re-offer (a retune, a display-geometry change) builds a new one and its consumers have to
     /// resubscribe, which is exactly the interval in which nobody is reading.
     fn watched(&self) -> bool {
-        self.handle.as_ref().is_some_and(|h| h.open_consumers() > 0)
+        // **The view lattice is a consumer, and unlike every other one it is STORED (T-501).**
+        //
+        // The paragraph above was true when T-489 was written and T-501 falsifies it: since the
+        // canvas's finest tier is sized to *this* plan's own bin and row
+        // ([`crate::history::view_geometry`]), the rows this reader produces are folded into the
+        // view pyramid by [`Output::row`] and become history. Skipping the FFT because no browser
+        // is attached would therefore leave a permanent hole in the recorded finest tier for every
+        // interval nobody watched — and the canvas cannot tell that hole from "the radio never
+        // looked", which is the one thing grey is allowed to mean. A saving that changes what is
+        // recorded is not a saving; T-489's own first rule says so.
+        //
+        // So T-489's skip survives exactly where its premise still holds: a run with no view
+        // lattice attached (`view_queue: None`). With one attached the FFT runs, and what remains
+        // gated on a subscriber is everything downstream of it — the publish is still offered to
+        // nobody and costs nothing.
+        self.view.is_some() || self.handle.as_ref().is_some_and(|h| h.open_consumers() > 0)
     }
 
     /// Samples went by with nothing subscribed: the next row is not contiguous with the last one

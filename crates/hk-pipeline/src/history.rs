@@ -508,9 +508,20 @@ pub fn view_config(f_cell_hz: f64, t_cell: Duration) -> PyramidConfig {
     }
 }
 
-/// Frames the view writer may hold (about a minute at 10 rows/s, matching
-/// [`HISTORY_QUEUE_FRAMES`]).
-pub(crate) const VIEW_QUEUE_FRAMES: usize = HISTORY_QUEUE_FRAMES;
+/// Frames the view writer may hold: **about a minute at the DISPLAY row rate**, which is not the
+/// history reader's.
+///
+/// It was [`HISTORY_QUEUE_FRAMES`] (600, a minute at 10 rows/s) while this queue was fed from the
+/// history reader. Since T-501 it is fed from [`crate::spectrum`] at the display plan's own rate —
+/// ~25 rows/s at the shipped settings — so the same 600 frames is 24 seconds, and T-571's live
+/// cascade makes each one more work for the writer to retire. Measured: with a reader holding the
+/// pyramid for 15 ms out of every 16 (`live_edge_tiles::the_live_chain_grows_the_view_lattices_/// finest_node_without_blocking_capture`), 600 frames overflowed and 340 of the growing edge's
+/// frames were DROPPED — the same failure as blocking for a tile read, spelled as loss.
+///
+/// 1500 restores the minute the number was always meant to be. The cost is the queued PSDs:
+/// `fft_len` f32s each, ~4 kB at the shipped 1024 bins, so ~6 MB of headroom on a path whose
+/// resident tiles are already tens of MB.
+pub(crate) const VIEW_QUEUE_FRAMES: usize = 1500;
 
 /// The view pyramid's writer: **its own thread**, because the fold is not the expensive part —
 /// the seal is, and the seal must not land on a thread that gates capture.

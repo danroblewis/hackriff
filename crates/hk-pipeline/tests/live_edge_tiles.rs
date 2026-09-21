@@ -557,23 +557,31 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     let per_node: f64 = (0..g.n_levels())
         .map(|l| level_blocks(l) * (nf * g.levels[l].nt * BYTES_PER_CELL + nf * bins * 4) as f64)
         .sum();
-    let bound = per_node + blocks * per_tile as f64;
+    // **The seal-lag overlap is per NODE, and T-501's floor is what made that visible.** T-571
+    // measured this at a 1 s floor, where a level-0 tile is 64 s and a coarse one is minutes, so
+    // at most the finest node was ever mid-seal — the `+ blocks` term. At the display floor a
+    // level-0 tile is `VIEW_T_CELLS_PER_BLOCK` rows of ~40 ms, and one level-0 column close
+    // cascades through `fold_row_live`, so several nodes hold an outgoing tile and its successor
+    // at the same instant (measured here: 25 open tiles over 16 nodes). The honest worst case is
+    // therefore that EVERY node is mid-seal at once, which is twice the steady set.
+    let bound = 2.0 * per_node;
     let mb = |b: f64| b / (1 << 20) as f64;
     let per_mhz = |b: f64| mb(b) / (span_hz / 1e6);
     // What the same bound says at a real live edge, where the coarse nodes need fewer blocks.
-    let edge_bound: f64 = (0..g.n_levels())
-        .map(|l| {
-            let bw = g.levels[l].f_cell_hz * f64::from(VIEW_F_CELLS_PER_BLOCK);
-            (LIVE_EDGE_HZ / bw).ceil()
-                * (nf * g.levels[l].nt * BYTES_PER_CELL + nf * bins * 4) as f64
-        })
-        .sum();
+    let edge_bound: f64 = 2.0
+        * (0..g.n_levels())
+            .map(|l| {
+                let bw = g.levels[l].f_cell_hz * f64::from(VIEW_F_CELLS_PER_BLOCK);
+                (LIVE_EDGE_HZ / bw).ceil()
+                    * (nf * g.levels[l].nt * BYTES_PER_CELL + nf * bins * 4) as f64
+            })
+            .sum::<f64>();
     eprintln!(
         "T-571 view-lattice floor at T-501's shipped geometry ({:.2} kHz x {:.1} ms, \
          {nf}x{} cells/block, {} nodes), {:.1} MHz \
          tuned:\n  measured peak {peak_tiles} tiles, {:.1} MB resident, {:.0} KB/tile, \
-         {:.2} MB/MHz\n  bound (one open tile per node, plus a seal-lag overlap; {} nodes, and \
-         the count DOES enter — T-571's stated cost): {:.1} MB, \
+         {:.2} MB/MHz\n  bound (one open tile per node, plus a seal-lag overlap on every one of \
+         them; {} nodes, and the count DOES enter — T-571's stated cost): {:.1} MB, \
          {:.2} MB/MHz -> {:.0} MB at a {:.0} MHz live edge",
         f_cell / 1e3,
         t_cell.as_nanos() as f64 / 1e6,
@@ -620,8 +628,8 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     // The peak must sit inside the bound, and near enough to it that the bound is not vacuous.
     assert!(
         peak_bytes as f64 <= bound,
-        "residency exceeded node (0, 0)'s tile row plus a seal-lag overlap: {peak_bytes} > \
-         {bound:.0}"
+        "residency exceeded one open tile per node plus a seal-lag overlap on each: {peak_bytes} \
+         > {bound:.0}"
     );
     assert!(
         peak_bytes as f64 >= blocks * per_tile as f64,
@@ -879,11 +887,20 @@ fn the_finer_floor_costs_what_the_cell_rate_says_it_costs() {
         new_kb / old_kb,
         SPAN_HZ / 1e6,
     );
+    // **The ceiling is re-derived against T-571, not inherited from T-501.** T-501 measured this
+    // under `coarse_on_demand`, where capture wrote node (0, 0) and nothing else, and set the
+    // ceiling at 200 kB/s. T-571 made every node live, so capture now writes the WHOLE lattice —
+    // its own measurement is 4.80x the finest level in bytes, stated and accepted in its notes as
+    // the trade for deleting the read-time fold. 200 kB/s is therefore a bound on a code path that
+    // no longer exists; keeping it would fail this test for the feature it is measuring. Measured
+    // here: 310.9 kB/s at 2.4 MHz, which is 65 kB/s of finest level times T-571's 4.8x. The
+    // ceiling below is that with headroom, and it still forbids the failure this test is for — an
+    // order of magnitude more than the arithmetic predicts.
     assert!(
-        new_kb < 200.0,
+        new_kb < 500.0,
         "the finest tier writes {new_kb:.1} kB per second of capture, which is not a live edge's \
          worth of detail but a leak: the arithmetic is {new_cells:.0} cells/s at a couple of bytes \
-         each"
+         each, times T-571's whole-lattice write"
     );
     assert!(
         new_kb / old_kb <= 1.5 * (new_cells / old_cells),

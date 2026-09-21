@@ -474,16 +474,27 @@ async function scrubOntoCell(page, lagS, tries = 8) {
     "(window.__hkTap?.rows ?? 0) > 3 && !!window.__hkTap.geom", { timeoutMs: 60000 });
   let last = "";
   for (let i = 0; i < tries; i++) {
-    // Back to the growing edge. `.sf-live` toggles, so this presses until the trace says it is
-    // drawing the live frame rather than assuming one press means one direction.
+    // Back to the growing edge. `.sf-live` toggles, so this presses until the pane says it is
+    // following rather than assuming one press means one direction.
+    //
+    // **`data-following`, not the trace's source label** — T-478's standing rule in this suite, and
+    // T-501 is why it now matters here as well as in `surface-nav`. This used to press until the
+    // readout said `(live frame)`, which is a statement about which SOURCE answered the slice, not
+    // about where the pane is. At the old 1 s floor the socket's newest row always fell inside the
+    // cell at the pane's time position, so the two coincided; at the display floor the cell is
+    // 80 ms and the pane's live edge lags the socket by more than one of them, so a pane that is
+    // genuinely following is answered from the pyramid and `(live frame)` is a transient state this
+    // loop could wait out its whole timeout for. Measured: 0 of 6 attempts reached it, while the
+    // chrome said `LIVE` throughout. What this helper needs is the pane back at the growing edge,
+    // and that is a fact the chrome states.
     for (let k = 0; k < 3; k++) {
       // `page.eval` returns the VALUE, not its string form — comparing against "true" here silently
-      // clicked three times every attempt and left the viewport frozen, waiting for a live frame.
-      if ((await page.eval(LIVE_FRAME_EXPR)) === true) break;
+      // clicked three times every attempt and left the viewport frozen.
+      if ((await page.eval(FOLLOWING_EXPR)) === true) break;
       await page.click(`document.querySelector('.sf-live')`);
       await page.frames(8);
     }
-    await page.waitFor("the trace to state a live-frame slice with a peak", LIVE_FRAME_EXPR,
+    await page.waitFor("the pane to be back at the growing edge", FOLLOWING_EXPR,
       { timeoutMs: 30000 });
     await page.click(`document.querySelector('.sf-live')`);
     try {
@@ -498,6 +509,10 @@ async function scrubOntoCell(page, lagS, tries = 8) {
   throw new Error("could not park a viewport on an OBSERVED pyramid cell behind the live edge after " +
     `${tries} attempts — the last freeze landed somewhere the history has no cell: ${last}`);
 }
+
+/** The pane is at the growing edge — the chrome's own fact, never the readout string (T-478). */
+const FOLLOWING_EXPR =
+  `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"][data-following="true"]').length > 0`;
 
 const LIVE_FRAME_EXPR =
   `/slice [\\d:]+Z \\(live frame\\) · peak/.test(document.querySelector('.sf-trace')?.textContent ?? "")`;
