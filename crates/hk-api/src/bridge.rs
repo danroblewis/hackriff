@@ -120,8 +120,26 @@ struct Entry {
     header: StreamHeader,
     handle: PublisherHandle,
     generation: u64,
-    /// When this offer was registered — what [`StreamRegistry::reap`] ages a finished stream by.
+    /// When this offer was registered. Ordering only (the [`MAX_STREAMS`] backstop evicts the
+    /// oldest spent entries first); it is **not** what the linger is measured from — see
+    /// `spent_since`.
     offered: Instant,
+    /// When this entry was **first seen spent**, set by [`reap_locked`] and cleared if it ever
+    /// stops being spent (a successor re-registers under the id, or a consumer attaches).
+    ///
+    /// **T-542: the linger has to start here, not at `offered`.** It started at `offered`, which
+    /// made [`FINISHED_LINGER`] no protection at all for exactly the stream it exists to protect:
+    /// `spectrum/live` is registered once and then offered for as long as a segment lasts, so by
+    /// the time a re-plumb finishes its publisher the entry is already minutes older than the
+    /// linger and the very next [`StreamRegistry::register`] anywhere in the registry withdraws
+    /// it. Measured on the live HackRF under a 1 MHz–6 GHz sweep at dwell 1 s (the FSK-burst
+    /// chains register a stream per emitter, so `register` — and therefore the reap — runs
+    /// constantly): `/ws/spectrum/live` answered **404 no such stream** mid-re-plumb, which
+    /// `ops/stage.sh`'s health check reads as a dead server and restarts the demo for.
+    ///
+    /// A stream that has just stopped publishing is the one case the grace is *for*, and the age
+    /// that matters is the age of its silence.
+    spent_since: Option<Instant>,
 }
 
 impl Entry {
@@ -251,6 +269,7 @@ impl StreamRegistry {
                 handle,
                 generation: *generation,
                 offered: Instant::now(),
+                spent_since: None,
             },
         );
         // After the insert and under the same lock: the id being registered is never transiently
@@ -382,7 +401,17 @@ impl StreamRegistry {
 /// [`StreamRegistry::reap`]'s body, with the map already locked.
 fn reap_locked(map: &mut BTreeMap<String, Entry>, linger: Duration) {
     let now = Instant::now();
-    map.retain(|_, e| !(e.spent() && now.duration_since(e.offered) >= linger));
+    // T-542: the linger is measured from when the entry went silent, so it has to be *observed*
+    // going silent first. A pass that only ever compared `offered` gave a long-lived stream no
+    // grace at all.
+    map.retain(|_, e| {
+        if !e.spent() {
+            e.spent_since = None;
+            return true;
+        }
+        let since = *e.spent_since.get_or_insert(now);
+        now.duration_since(since) < linger
+    });
     if map.len() <= MAX_STREAMS {
         return;
     }
