@@ -16194,6 +16194,47 @@ tasks:
       9-13 cores. Follow-ups worth filing: count long-running `hk serve` against the 4-builder cap;
       measure `-- --test-threads 6` for acceptance-ci; Spotlight/XProtect exclusions for the repo
       (mds_stores had burned 34 h of CPU).
+      SCOPE CORRECTED BY THE USER 2026-09-20: affected-crate selection is an AGENT ITERATION
+      convenience only. The merge gate (`gate-merge`) and CI (`GITHUB_ACTIONS`) now always run the
+      full workspace, unconditionally - checked in `resolve_selection` BEFORE the opt-in flag is
+      even read, so neither path can be narrowed even by a future caller passing --select-crates by
+      accident. Narrowing itself moved behind `just gate --select-crates` (default off). Pinned by
+      py/tests/test_gate.py (merge/CI-never-narrow tests) rather than left to caller discipline.
+      Kept as-is after re-review: the `just test-ui` skip for a diff with no ui/ path, on the merge
+      gate too - it is provably not a coverage reduction (build+typecheck+node tests over ui/ are a
+      pure function of ui/ source, no generated Rust input reaches them) and the tier that actually
+      catches a backend break (test-ui-e2e) is never skipped.
+      THREE MORE LEVERS MEASURED 2026-09-20 (coordinator-requested follow-up, all coverage-preserving):
+      (1) split-debuginfo=unpacked on macOS: ALREADY rustc's default on this toolchain/target
+      (rustc/cargo 1.93.1, aarch64-apple-darwin) - a build with zero explicit config already emits
+      `-C split-debuginfo=unpacked`. No lever available; nothing to change. NOT pinning it explicitly
+      in a repo-level .cargo/config.toml, because CI runs on ubuntu-latest where the default differs,
+      and forcing macOS's value workspace-wide would be an unverified behaviour change on the one
+      runner nobody here can observe.
+      (2) ld64.lld AT SUITE SCALE: cold `cargo nextest run --workspace --no-run`, 2 interleaved pairs
+      (def/lld/def/lld), each arm in its own freshly-copied source tree + private CARGO_TARGET_DIR
+      (so sccache's cwd-keyed cache - 0% hit rate per the earlier finding - can't spuriously hit on a
+      repeat), CARGO_BUILD_JOBS=6, nice -n15. Results: def 132s/134s (266s total), lld 142s/124s
+      (266s total) - an EXACT TIE in aggregate, with lld showing far more run-to-run variance (18s
+      spread vs def's 2s) under load that climbed 27->32 during the ~9 min run. NO suite-scale case
+      for switching linkers; this extends, rather than overturns, the branch's earlier individual-link
+      rejection (6 pairs, equal-to-slightly-slower). A parallel single-crate measurement (hk-dsp
+      --tests, fresh targets, one pair, no interleaving) separately found def 34s vs lld 31s - a real
+      but smaller, noisier and non-interleaved signal that does not survive to suite scale.
+      (3) CONSOLIDATING ~190 TEST BINARIES to one tests/main.rs per crate, SIZED NOT IMPLEMENTED per
+      instruction. Counted: 189 crates/*/tests/*.rs files (hk-pipeline 47, hk-dsp 25, hk-api 17,
+      hk-detect 16, hk-core 15, matching the coordinator's numbers) + 15 more in tests/e2e = ~204,
+      matching the "~190" estimate. What it requires: (a) merge each crate's test files into
+      `tests/main.rs` submodules (`mod x;` per former file - qualified test names are preserved,
+      e.g. binary(ring_concurrency) becomes test(ring_concurrency::), mechanical and verifiable by
+      diffing `nextest --list` before/after); (b) rewrite exactly 10 `binary(X)` predicates in
+      .config/nextest.toml to the equivalent test() form. tests/e2e (hk-e2e) should STAY EXCLUDED -
+      its 15 files are deliberately separate binaries for wall-time isolation (acceptance,
+      acceptance-m2/m3/m4/chirp each run one named --test target by design), so realistic scope is
+      189 files -> ~18 binaries in crates/, still close to the claimed ~10x. CONFIRMED REAL CONFLICT
+      RISK: task-flakes is concurrently editing .config/nextest.toml plus two of the same test files
+      (hk-cli/tests/api_contract.rs, hk-plugins/tests/readsb.rs) - validates doing this as its own
+      ticket after task-flakes lands, not in this branch.
   - id: T-560
     milestone: M2-hardening
     title: "800 MHz raster fits must estimate and remove the receiver's clock error: this HackRF is -9.6 ppm, two thirds of a channel"
