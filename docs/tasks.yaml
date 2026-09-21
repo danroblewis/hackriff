@@ -18251,7 +18251,7 @@ tasks:
   - id: T-586
     milestone: M2-hardening
     title: Retune-diversity self-consistency - a real emitter keeps its absolute frequency across centres, an artefact moves with the LO
-    status: todo
+    status: done
     priority: high
     parallel_group: DETECT
     core_interface: true
@@ -18291,6 +18291,64 @@ tasks:
       ASSERT WITH COUNTS AND FREQUENCIES, NOT WALL-CLOCK (user, 2026-09-21).
       Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      DONE 2026-09-21 (branch task-t586). The non-hardware half, built without the radio.
+      FIXTURE: new synthetic scenario `retune_diversity` (py/hkpy/synth/retune.py): one region at
+      THREE centres 100.0 / 100.5 / 101.0 MHz, 4 Msps, 0.3 s dwell each, served through the mock
+      SDR by blind::SurveyDevice (one mock per centre, real tune()/start()/timestamps). Every line
+      in the scene is a CW tone in white noise, so NOTHING about a line's shape can separate the
+      classes - only its behaviour across centres. Nothing was committed under fixtures/;
+      regenerate with
+      `uv run --project py python -m hkpy.synth retune_diversity --seed 7 --out DIR`.
+      TRUTH, both classes, sealed and read only in the assertions: 3 real emitters at fixed
+      ABSOLUTE 99.78 / 100.68 / 101.18 MHz, each in all three captures; 2 LO-relative artefact
+      families - DC/LO leakage at offset 0 and an internal spur at a fixed +370 kHz IF offset -
+      each appearing at a DIFFERENT absolute frequency per centre (100.37 / 100.87 / 101.37 MHz).
+      An artefact correctly flagged is a PASS, not a miss.
+      PRODUCT CODE: `hk_model::retune`, the cross-centre classifier. It reads only Detection
+      `f_center_hz` and the LO from the detection's own `provenance_ref` ->
+      `Provenance.tune.center_hz` (the existing provenance model, no new side channel), projects
+      every detection into each slope's invariant coordinate `f - slope*f_LO`, clusters, and
+      refuses to say anything below 2 distinct LOs. Slopes: 0 absolute (a real emission - or an
+      absolute-frequency artefact such as a reference harmonic, so this is necessary and not
+      sufficient), 1 LO-locked (DC, IF spur, baseband product), 2 image (2*f_LO - f). Verdicts land
+      on the EXISTING DetectionFlags through `RetuneSlope::apply`: spur_candidate +
+      SpurReason::LoRelative, image_candidate + image_retune_confirmed - the same vocabulary
+      hk_detect::trust::RetuneLabel gives the pairwise live-spectrum test. This generalises that
+      pairwise test to N centres and to the STORED record, so a survey can be judged after the fact
+      with no extra dwell.
+      THRESHOLDS, ALL A PRIORI AND NEVER TUNED (the suite passed on its first run): grouping
+      RETUNE_MIN_TOLERANCE_HZ 10 kHz plus 0.25 x measured bandwidth, the same 10 kHz the pairwise
+      live test uses; acceptance MATCH_TOL_HZ 20 kHz, two orders under the 500 kHz centre step and
+      an order under the generator's enforced 180 kHz minimum in-capture line separation.
+      MEASURED: 15 detections = 5 lines x 3 centres, 0 unexplained. 3 truth emitters x 3 centres
+      compared, cross-centre spread 0-1 Hz. 2 artefact families x 3 centres compared, spread
+      2-3 Hz. 5 detections per LO at each of the 3 LOs.
+      THE GAP THIS CLOSES, MEASURED not assumed: the single-capture flaggers caught the DC family
+      (ref-harmonic / dc / dc) and caught the +370 kHz LO-relative spur NOT AT ALL - three
+      detections at three different absolute frequencies, each indistinguishable from an emission,
+      and the run duly put them in the inventory as three separate emitters. That is the user's
+      report (d) reproduced offline.
+      RED WHEN BROKEN, both proven: (1) make RetuneSlope::LoLocked's slope 0 (stop reading the LO)
+      and both artefact families become unexplained and the artefact assertion fails, while the
+      emitter assertions still pass; (2) pin the fixture's spur to a fixed ABSOLUTE frequency and
+      the test refuses to call it LO-relative and fails, while the DC family still resolves - so
+      the test measures the LO relationship, not mere presence. Anti-vacuity is asserted rather
+      than assumed: distinct LOs == 3, detections per LO >= 3, truth emitters == 3, artefact
+      families == 2, and each truth item present in every capture.
+      TESTS: tests/e2e/tests/acceptance/t586_retune_diversity.rs (wired into acceptance_m0, 0.65 s);
+      8 unit tests in crates/hk-model/src/retune.rs; 2 generator-physics tests in
+      py/tests/test_synth.py (the IQ really does hold fixed-absolute and fixed-offset lines, and
+      the generator refuses a layout whose lines would merge).
+      FOLLOW-UPS SURFACED, NOT CHASED: (a) the pipeline does not yet PERSIST the retune verdict -
+      `RetuneSlope::apply` is exercised by the acceptance test over stored rows, so the flags are
+      computed but never written back, and the inventory still shows the moving spur as three
+      emitters; wiring it into the survey/scheduler path is the next ticket. (b) `spur_decision`
+      labels the DC line at exactly 100.0 MHz `ref-harmonic` rather than `dc` because ref_harmonic
+      is tested first - harmless here, but the DC rule is the more specific one. (c) the IQ-image
+      slope (2) is unit-tested only; the fixture omits images deliberately, because their mirrors
+      collide with the emitter grid. (d) T-318's over-the-air half is untouched and still needs the
+      radio.
   - id: T-587
     milestone: M2-hardening
     title: An artefact reads as a LABELLED artefact in the UI - DC spike, image of X, IM3 product - not as a mystery signal
