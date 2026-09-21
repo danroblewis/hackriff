@@ -302,10 +302,17 @@ impl<'a> Output<'a> {
     /// successor is expected and a client arriving in it is told "not now", not "never again".
     /// `continues` is the run's own record of which end this is: it is set by the re-plumb before
     /// the segment is stopped, and false when the source ended or the user stopped the run.
+    /// **T-541: a device failure is also "a successor is expected".** `continues` is set by the
+    /// re-plumb *and* — since T-541 — by the capture thread when a read fails on a run that will
+    /// be recovered, with the grace it needs ([`crate::run::RECOVERY_SUCCESSOR_GRACE`]). Before
+    /// that, a device error answered every `/ws/spectrum/live` handshake `410 Gone` for the whole
+    /// recovery, which is the T-530 defect reached by the other door.
     fn finish(mut self) {
         if let Some(p) = self.publisher.take() {
             if self.shared.continues.load(Ordering::SeqCst) {
-                p.finish_between_windows();
+                p.finish_between_windows_for(Duration::from_millis(
+                    self.shared.successor_grace_ms.load(Ordering::SeqCst),
+                ));
             } else {
                 p.finish();
             }

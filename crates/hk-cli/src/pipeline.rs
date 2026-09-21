@@ -1325,10 +1325,12 @@ pub fn cli_mock_options_for(path: &Path) -> MockOptions {
     }
 }
 
-/// The environment variable that arms a **mock SDR** fault (T-508): `retune-apply-fails`,
-/// `retune-apply-fails:N` or `retune-apply-fails:always` ([`hk_core::MockFault::parse`]). It reaches
-/// only `--device mock:…`; a real radio has no such switch. The browser tier sets it so a retune
-/// guard can go red — every one of them was green on a mock that always lands where it is told.
+/// The environment variable that arms a **mock SDR** fault ([`hk_core::MockFault::parse`]):
+/// `retune-apply-fails[:N|:always]` and `gone-on-retune` (T-508), plus `read-fails-every:N` and
+/// `refuse-rate[:N|:always]` (T-541). It reaches only `--device mock:…`; a real radio has no such
+/// switch. The browser tier sets it so a retune guard can go red — every one of them was green on
+/// a mock that always lands where it is told — and `ops/fuzz-rig.sh` sets it so a soak run meets a
+/// device that keeps misbehaving rather than one that cannot fail.
 pub const MOCK_FAULT_ENV: &str = "HK_MOCK_FAULT";
 
 /// The fault [`MOCK_FAULT_ENV`] arms, if any. An unparseable spec is an error, never ignored: a
