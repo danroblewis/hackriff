@@ -47,6 +47,7 @@ SMALL: dict[str, dict] = {
     "trunk_nxdn_control_channel": {"duration_s": 0.2},
     "lora_ism_burst": {"duration_s": 0.15, "sf": 7, "first_packet_s": 0.02,
                        "packet_period_s": 0.06, "fsk_period_s": 0.05},
+    "retune_diversity": {"dwell_s": 0.05},
 }
 
 
@@ -1386,3 +1387,51 @@ def test_dmr_scene_baits_the_trap_it_asks_the_decoder_to_refuse(tmp_path):
     # The decoy is still there and still unconfirmable -- now under two framings, not one.
     assert t["continuous_decoy"]["expected_confirmed"] is False
     assert t["control_channel"]["sync_hex"] == tk.DMR_BS_DATA_SYNC_HEX
+
+
+# ---- retune_diversity (T-586) -----------------------------------------------------------------
+
+
+def test_retune_diversity_emitters_stay_put_and_artefacts_move_with_the_lo(tmp_path):
+    """The fixture's own physics, checked in the IQ rather than only in the annotations.
+
+    A real emitter must sit at the same ABSOLUTE frequency in every capture, which means a
+    different baseband offset in each; an LO-relative artefact must sit at the same BASEBAND
+    offset in every capture, which means a different absolute frequency in each. If the generator
+    ever stopped doing that, the acceptance suite built on it would be measuring nothing.
+    """
+    manifest = gen(tmp_path, "retune_diversity")
+    _, meta, x = load(manifest, 0)
+    fs = meta["global"]["core:sample_rate"]
+    st = scenario_truth(meta)["retune_diversity"]
+    centres = [c["core:frequency"] for c in meta["captures"]]
+    assert centres == st["centers_hz"] and len(centres) >= 2
+
+    for cap in meta["captures"]:
+        start = cap["core:sample_start"]
+        seg = x[start:start + int(round(SMALL["retune_diversity"]["dwell_s"] * fs))]
+        centre = cap["core:frequency"]
+        floor = median_floor_dbfs(seg, fs)
+        for f_abs in st["emitters_hz"]:
+            # Fixed absolute frequency: the baseband offset changes with the centre.
+            power = tone_power_dbfs(seg, fs, f_abs - centre)
+            assert power > floor + 6, f"emitter {f_abs} missing at centre {centre}: {power} dBFS"
+        for offset in st["lo_relative_offsets_hz"]:
+            # Fixed LO offset: the absolute frequency changes with the centre.
+            power = tone_power_dbfs(seg, fs, offset)
+            assert power > floor + 6, f"artefact at offset {offset} missing at centre {centre}"
+
+    # The annotations say the same thing.
+    for _, t in truths(meta, role="emission"):
+        assert t["center_hz"] in st["emitters_hz"]
+    for _, t in truths(meta, role="artefact"):
+        assert t["kind"] in ("dc-offset", "lo-spur")
+        assert t["offset_hz"] in st["lo_relative_offsets_hz"]
+        assert t["center_hz"] - t["offset_hz"] in centres
+
+
+def test_retune_diversity_refuses_a_layout_whose_lines_would_merge(tmp_path):
+    """The generator's a-priori separation guard, so a merged pair can never look like a moving
+    signal."""
+    with pytest.raises(ValueError, match="minimum separation"):
+        gen(tmp_path, "retune_diversity", lo_spur_offset_hz=20e3)

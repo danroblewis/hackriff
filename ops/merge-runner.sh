@@ -29,6 +29,13 @@ touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS" "$LANDED"
 
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 notify_coordinator(){ tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
+# Edge-triggered wake on a SUCCESSFUL merge: a clean merge drains the queue and may unblock
+# dependent tickets, but nothing else pings the coordinator for it (task-completions and the
+# failure ping above cover their cases). Without this, the coordinator can sit idle after a
+# green merge with startable work undone. It says "reconcile", never a computed to-do list:
+# the coordinator's `just reconcile` is the single source of truth, and any list we pasted here
+# would be stale by the time it acts.
+notify_ok(){ tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 Reconcile, then fill the builder cap from startable work." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
 ticket_of(){ echo "$1" | sed -E 's/^task-t0*([0-9]+)$/T-\1/I'; }
 worktree_of(){ git -C "$REPO" worktree list --porcelain \
   | awk -v b="refs/heads/$1" '/^worktree /{p=substr($0,10)} /^branch /{if(substr($0,8)==b) print p}'; }
@@ -110,6 +117,7 @@ process(){
     if [ -n "$wt" ] && [ "$(cd "$wt" && pwd -P)" != "$(cd "$REPO" && pwd -P)" ]; then
       git worktree remove "$wt" --force 2>>"$LOG" && log "worktree removed: $wt"
     fi
+    notify_ok "MERGED $ticket ($branch); queue now $(grep -vcE '^[[:space:]]*(#|$)' "$QUEUE" 2>/dev/null || echo 0) waiting."
   else
     git merge --abort 2>/dev/null || true
     record_attempt "$branch" "$tip"
@@ -223,6 +231,7 @@ try_bulk(){
       wt=$(worktree_of "$b")
       [ -n "$wt" ] && [ "$wt" != "$REPO" ] && git -C "$REPO" worktree remove "$wt" --force 2>>"$LOG" && log "worktree removed: $wt"
     done
+    notify_ok "MERGED batch ($tickets); queue now $(grep -vcE '^[[:space:]]*(#|$)' "$QUEUE" 2>/dev/null || echo 0) waiting."
     return 0
   fi
   if [ "$(git -C "$REPO" rev-parse HEAD)" = "$after" ]; then

@@ -674,6 +674,40 @@ fn t302_an_image_is_never_attributed_across_two_front_ends() {
     );
 }
 
+/// T-307: `artifact_detail()` discloses the arithmetic of a claim, but T-302 made the receive chain
+/// part of *why* the claim was made — every image/harmonic/intermod pairing is gated on it, so an
+/// auditor has to be able to see which front end a claim rests on. Run the same `image_scene` on two
+/// different devices and require the disclosed `receive_chain.device_id` to track the device the
+/// claim was actually made on, not a fixed string — a test asserting only that the field exists
+/// would pass against a hardcoded value.
+#[test]
+fn t307_artifact_detail_discloses_the_receive_chain_the_claim_was_made_on() {
+    for device in ["hackrf:A", "hackrf:C"] {
+        let (mut r, source, image) = image_scene(device, device);
+        let out = r
+            .resolve_overlaps(image, "test/overlap@1", t(5), &tol())
+            .unwrap();
+        assert_eq!(out.artifacts.len(), 1, "{out:?}");
+        let rel = r.emitter_relations(image).unwrap();
+        assert_eq!(rel[0].kind, RelationKind::ArtifactOf);
+        assert_eq!(rel[0].source_id, source);
+        let detail = rel[0]
+            .detail
+            .as_ref()
+            .expect("an artifact claim always carries its detail");
+        assert_eq!(
+            detail["receive_chain"]["device_id"].as_str(),
+            Some(device),
+            "the claim's receive chain names the front end it was made on, not a fixed value: \
+             {detail}"
+        );
+        assert!(
+            detail["receive_chain"]["antenna_port"].is_null(),
+            "no port was recorded in this scene: {detail}"
+        );
+    }
+}
+
 /// A relationship row is append-only: the table refuses an update or a delete, so a losing
 /// candidate can always be revived from the record.
 #[test]

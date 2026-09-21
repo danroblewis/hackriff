@@ -65,6 +65,7 @@ pub mod observations; // T-115
 pub mod occupancy; // T-118
 pub mod reports; // T-121
 pub mod schedule; // T-120
+pub mod trunking; // T-273
 
 pub use hk_stream as stream;
 pub use tcp::{StreamServer, StreamServerConfig, StreamServerStats};

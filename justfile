@@ -246,7 +246,7 @@ test-one name:
 # set did locally) cannot recur either. Adding a target means adding it here, deliberately.
 e2e_slice := "acceptance_m0"
 e2e_harness := "canvas_fidelity concurrent_demod floor_acceptance listen_live mock_device outputs_record refine smoke spectrum_axis stream_external"
-e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp"
+e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp acceptance_ism"
 
 # M0 slice acceptance suite (T-024, docs/11 §1.1): 7 use cases through the composed pipeline. Missing uv or LFS fixtures fail; only readsb-dependent parts skip. Extra args go to cargo test, e.g. `just acceptance -- --nocapture`
 acceptance *args:
@@ -280,7 +280,7 @@ acceptance-ci: (_coordinator-only "acceptance-ci") e2e-targets-check (acceptance
 # have pinned CI red), because m2/m3 are explicitly kept apart for wall time, and because scene
 # simulations with wall-clock dwell budgets already flake under load on a 28-core Mac and would be
 # worse on a 2-vCPU runner. Each also has its own recipe for running one alone.
-acceptance-milestones: acceptance-m2 acceptance-m3 acceptance-m4 acceptance-chirp
+acceptance-milestones: acceptance-m2 acceptance-m3 acceptance-m4 acceptance-chirp acceptance-ism
 
 # Census: every hk-e2e target on disk must appear in exactly one of the three lists above, and
 # every listed target must exist. This is the guard that makes the explicit `--test` lists safe —
@@ -332,6 +332,10 @@ acceptance-m4 *args:
 # Chirp acceptance (T-255, CLAUDE.md invariant 1): LoRa up-chirps in 902-928 MHz US ISM through the mock SDR — a signal with a time extent and no stable frequency, against a steady carrier and fixed-frequency bursts as controls. Extra args go to cargo test.
 acceptance-chirp *args:
     HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_chirp {{args}}
+
+# ISM burst acceptance (T-254, CLAUDE.md invariant 1): the 902-928 MHz short-burst playground through the mock SDR and the IQ ring - bounded time extents, one emitter per burst, ephemera catalogued as past events, plus the 100.3 MHz field case. Extra args go to cargo test.
+acceptance-ism *args:
+    HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_ism {{args}}
 
 # T-364: re-derive both curves of the burst-recall vs open-set trade (docs/17), over N seed bases
 # so every figure carries its draw spread (ADR-0016 §7.2). Runs the shipped feature set and the
@@ -507,6 +511,29 @@ lint-rust:
 
 lint-py:
     cd py && uv run --locked ruff check .
+
+# THE CHEAP CHECK TO RUN BEFORE QUEUING A BRANCH — seconds, not a gate.
+#
+# `lint-rust` is two halves, `cargo fmt --check` AND clippy, and a failure of either reads the
+# same in the log: "FAILED just lint". T-574 burned two ~20-minute merge gates on this in one
+# night — the first was a genuine clippy::too_many_arguments, the second was pure rustfmt
+# whitespace in a test file — and the merge-runner reported both to the coordinator as "tests".
+#
+# Formatting is never worth a gate cycle. This recipe is the whole-tree fmt check plus clippy
+# over the crates a branch actually touched, so it is fast enough to run every time and catches
+# the half of `lint` that has no business reaching a gate at all. It is NOT a substitute for the
+# gate (the gate stays full — coverage is not negotiable); it is the thing you run before you
+# put a branch in the queue.
+precheck *crates:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo fmt --all --check
+    if [ -n "{{crates}}" ]; then
+      cargo clippy $(for c in {{crates}}; do printf -- '-p %s ' "$c"; done) --all-targets -- -D warnings
+    else
+      cargo clippy $(just _crate-scope) --all-targets -- -D warnings
+    fi
+    echo "precheck: fmt clean, clippy clean"
 
 # Generate a synthetic IQ scenario, e.g. `just synth fsk_burst_train --seed 1 --out /tmp/fsk --param snr_db=12`
 synth *args:

@@ -791,6 +791,19 @@ fn probe_key(
 /// 6 GHz wide and always at full extent, while the time surface is a retention window that usually
 /// fits inside one tile whatever the level.
 ///
+/// **But not past zero on an axis** (T-571). Before the coarse nodes were maintained live the fold
+/// budget capped frequency, so the tie never reached the end of its anti-diagonal; with the fold
+/// gone it does, and the frequency preference alone picked `(10, 0)` over `(9, 1)` on the shipped
+/// geometry — identical area, identical 32 tiles for the widest view, and a `max_level` of **0**
+/// on the time axis. A zero there is not "one level less reach": `ui/src/surface/lattice.ts`
+/// skips any ancestor whose `levelT` exceeds the cap, so a cap of 0 emits **no time-coarser
+/// ancestor at all** and `docs/16` §5.5's draw-a-coarser-resident-tile-while-the-fine-one-loads
+/// path loses its time arm — a time zoom-out draws *not loaded* instead of a coarse stand-in. It
+/// also makes the tile count on that axis grow linearly with the span, and a pane over a tuned
+/// 20 MHz band is already narrower than one tile at `level_f = 9`, so the frequency level it was
+/// traded for buys that pane nothing. So a pair with both axes ≥ 1 wins an equal-area tie, and
+/// frequency decides only among those.
+///
 /// # Readability, not existence
 ///
 /// A node a scheme does not *have* — a welded ladder's off-diagonal, which `parse_key` answers with
@@ -837,11 +850,14 @@ pub fn readable_ceiling(p: &hk_store::Pyramid, lattice: &TileLattice) -> (usize,
         last
     };
     let (mut best, mut floor_f) = ((0usize, 0usize), usize::MAX);
+    // Among equal-area maxima, a pair that keeps BOTH axes alive beats one that does not; only
+    // then does frequency decide. See the doc comment: a `0` on an axis is not one level less
+    // reach, it deletes that axis's ancestor ladder in the client.
+    let rank = |(f, t): (usize, usize)| (f + t, usize::from(f >= 1 && t >= 1), f);
     for lt in 0..nt {
         let Some(r) = reach(lt) else { break };
         floor_f = floor_f.min(r);
-        // Maximise the coarsest tile's AREA (`2^(max_f + max_t)`), then reach in frequency.
-        if floor_f + lt > best.0 + best.1 || (floor_f + lt == best.0 + best.1 && floor_f > best.0) {
+        if rank((floor_f, lt)) > rank(best) {
             best = (floor_f, lt);
         }
     }
@@ -1077,17 +1093,28 @@ fn short_circuit_json(uniform: Option<&'static str>) -> Value {
 /// (`ui/src/surface/tile.ts`), so the measurement the full read would have produced is discarded by
 /// the renderer cell for cell — which is why this is observationally equivalent and not merely
 /// faster.
+/// This read's own diagnostics, grouped: `build_ms` and `in_flight` describe the *request*, not
+/// the tile. T-574 had to strip exactly these two before hashing a response into an ETag, because
+/// two reads of an unchanged sealed tile otherwise differ — so they are one concept, and passing
+/// them as one argument says so (and keeps this helper inside clippy's argument budget).
+struct ReadDiagnostics<'a> {
+    elapsed_ms: f64,
+    slot: &'a TileSlot,
+}
+
 fn unobserved_tile_json(
     key: &TileKey,
     store: TileStore,
     ceiling: (usize, usize),
     coverage: Value,
     max_live: Option<f64>,
-    elapsed_ms: f64,
-    slot: &TileSlot,
+    diags: ReadDiagnostics<'_>,
+    sealed: bool,
 ) -> Value {
+    let ReadDiagnostics { elapsed_ms, slot } = diags;
     let source = base_tier(key, max_live);
     json!({
+        "sealed": sealed,
         "key": key_json(key),
         "extent": {
             "f_lo_hz": key.region.freq.lo_hz,
@@ -1634,11 +1661,19 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         return Err(too_many_in_flight());
     };
     let store = tile_store(state, q);
-    let (key, ceiling, readable) = with_tile_history(state, store, |p| {
+    let (key, ceiling, readable, sealed) = with_tile_history(state, store, |p| {
         let key = parse_key(p.geometry(), q)?;
         let ceiling = readable_ceiling(p, &key.lattice);
         let readable = servable(p, &key);
-        Ok((key, ceiling, readable))
+        // T-574: sealedness is a fact about the ADDRESS, not about what answered it — a tile's
+        // whole time extent can never change again once the watermark has passed its end, because
+        // a frame landing before that end is by definition late and dropped (the same rule
+        // `Pyramid::materialize_tile` uses to decide sealed-vs-derived, `docs/16` §5.2/§5.3
+        // generalised from one store level's block to this tile's own extent). Computed here, from
+        // the pyramid's own state, and threaded out to `http.rs` rather than re-derived from a
+        // guess or the answering level/age.
+        let sealed = p.watermark().as_unix_nanos() >= key.region.t1_ns;
+        Ok((key, ceiling, readable, sealed))
     })?;
     let started = std::time::Instant::now();
     let max_live = crate::http::max_live_span_hz(state);
@@ -1669,8 +1704,18 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         // coverage map just said no tune touched this tile.
         let sh = shadow(state, store, &key, None)?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
-        let mut v =
-            unobserved_tile_json(&key, store, ceiling, coverage, max_live, elapsed_ms, &slot);
+        let mut v = unobserved_tile_json(
+            &key,
+            store,
+            ceiling,
+            coverage,
+            max_live,
+            ReadDiagnostics {
+                elapsed_ms,
+                slot: &slot,
+            },
+            sealed,
+        );
         v["shadow"] = shadow_json(&sh, None);
         return Ok(v);
     }
@@ -1680,6 +1725,11 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     let source = tier(&key, &r, max_live);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
     Ok(json!({
+        // T-574: whether this tile's own time extent has fully passed the watermark, so it can
+        // never change again — `http.rs` reads this to decide the ETag / Cache-Control, never a
+        // timestamp or an age. false at the live edge (or anywhere still inside the retained
+        // window), always, so a growing tile is never cached as immutable.
+        "sealed": sealed,
         "key": key_json(&key),
         "extent": {
             "f_lo_hz": key.region.freq.lo_hz,
@@ -2337,6 +2387,184 @@ mod tests {
         eprintln!(
             "T-438 chunking: level {}, {} source cells in {} lock hold(s)",
             r.level, r.source_cells, r.chunks
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- T-588: the band edge of a retuned window is OBSERVED, never grey ---------------------
+
+    /// One dwell at `center_hz` / `rate_hz` — a **tuned window**, the way a retune writes one —
+    /// over `[t0, t1)`. Unlike [`dwell`] this states the tuning rather than a band, because the
+    /// question here is exactly what a tuning's own edge does to the coverage plane.
+    fn tuned_dwell(
+        center_hz: f64,
+        rate_hz: f64,
+        t0_ns: i64,
+        t1_ns: i64,
+    ) -> hk_model::attention::observation::ObservationRecord {
+        let half = rate_hz / 2.0;
+        let mut r = dwell(center_hz - half, center_hz + half, t0_ns, t1_ns);
+        if let hk_model::attention::observation::ObservationRecord::Dwell(d) = &mut r {
+            d.window.center_hz = center_hz;
+            d.window.sample_rate_hz = rate_hz;
+        }
+        r
+    }
+
+    /// **T-588 — the user's 892.5 MHz report, as a standing guard.**
+    ///
+    /// A digital signal near the **band edge** vanished on zoom+retune. Two causes with completely
+    /// different fixes: the emission is LO-relative and genuinely is not there at the new centre
+    /// (T-586), or the backend **has** the region after the retune and the canvas greys it. The
+    /// band edge is where the second is most likely, because it is where a coverage rasterisation,
+    /// a tile-address rounding or an off-by-one in the observed-extent test would answer
+    /// *unobserved* for a span that was in fact sampled — and grey means *the radio never looked*.
+    ///
+    /// The measurement was taken against a live `hk serve` over the mock SDR first (a retune from
+    /// 915 MHz / 10 Msps to 919 MHz / 2 Msps and to 914 MHz / 4 Msps, then every tile of
+    /// 908–922 MHz × 10 min read back); this is that measurement pinned. **The fixture ingests
+    /// frames only where the radio was tuned**, era by era, so *"a cell holds a measurement"* and
+    /// *"a cell was sampled"* are the same set by construction and the assertion needs no carve-out.
+    ///
+    /// Three assertions, and the last two are what stop it being vacuous:
+    ///
+    /// 1. **no cell with a `max_db` reads `unobserved`** — the invariant, counted, not sampled;
+    /// 2. the cell **containing the retuned window's own edge frequency** reads `observed` — the
+    ///    off-by-one, named rather than hoped for (the fold takes every cell a span *touches*, so
+    ///    the edge cell is observed even though the span covers only part of it);
+    /// 3. cells **beyond** that edge, in the same rows, read `unobserved` — because a test that
+    ///    greys nothing would pass assertion 1 by observing everything, and grey being honest is
+    ///    the other half of the same invariant.
+    ///
+    /// RED without the rule: changing [`hk_store::coverage`]'s fold from `ceil` to `floor` on the
+    /// high edge of a span — the off-by-one this ticket went looking for — fails assertion 2 and
+    /// moves assertion 1's count off zero.
+    #[test]
+    fn a_retuned_windows_band_edge_never_greys_a_cell_the_store_has_a_measurement_for() {
+        let dir = temp_dir("t588-band-edge");
+        let secs = N as i64;
+        let f_cell = 6250.0;
+        let tile_hz = f_cell * N as f64;
+
+        let mut p = hk_store::Pyramid::open(&dir, PyramidConfig::default()).unwrap();
+        let t_cell = p.geometry().levels[0].t_cell_ns;
+        let t0 = T_INDEX * t_cell * N as i64;
+        let f_lo = F_INDEX as f64 * f_cell * N as f64;
+
+        // Era A is the wide window the user was browsing; era B is the zoom+retune, and its UPPER
+        // EDGE lands a quarter of a cell past a cell boundary inside the tile — the exact place a
+        // rounding error greys a band the radio was sitting on.
+        let edge_hz = f_lo + f_cell * (N as f64 * 0.75) + f_cell * 0.25;
+        let (rate_a, rate_b) = (tile_hz * 2.0, tile_hz / 2.0);
+        let (centre_a, centre_b) = (f_lo + tile_hz / 2.0, edge_hz - rate_b / 2.0);
+        let eras = [
+            (centre_a, rate_a, 0, secs / 2),
+            (centre_b, rate_b, secs / 2, secs),
+        ];
+
+        const NB: usize = 128;
+        for (centre, rate, k0, k1) in eras {
+            let bin_hz = rate / NB as f64;
+            let psd = [1e-9f32; NB];
+            for k in k0..k1 {
+                p.ingest(&hk_store::history::FrameInput::new(
+                    Timestamp::from_unix_nanos(t0 + k * t_cell),
+                    t_cell,
+                    centre - rate / 2.0,
+                    bin_hz,
+                    hk_model::PowerUnit::Dbfs,
+                    &psd,
+                ))
+                .unwrap();
+            }
+        }
+        let mut state = ApiState {
+            history: Some(Arc::new(std::sync::Mutex::new(p))),
+            ..ApiState::default()
+        };
+        let store = hk_store::observation::ObservationStore::open(
+            hk_store::observation::ObservationLogConfig::new(dir.join("observations")),
+        )
+        .unwrap();
+        for (centre, rate, k0, k1) in eras {
+            store.append(&tuned_dwell(
+                centre,
+                rate,
+                t0 + k0 * t_cell,
+                t0 + k1 * t_cell,
+            ));
+        }
+        store.flush();
+        state.observations = Some(store);
+
+        let v = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        assert_eq!(
+            v["resolution"]["short_circuit"]["applied"],
+            json!(false),
+            "a tile over a tuned band must not be answered from the coverage map: {v}"
+        );
+        let states: Vec<String> = v["coverage"]["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        let sel = v["coverage"]["selected"]["plane"].as_u64().unwrap() as usize;
+        let runs = v["coverage"]["planes"][sel]["runs"].as_array().unwrap();
+        let mut plane: Vec<&str> = Vec::with_capacity(N * N);
+        for pair in runs.chunks(2) {
+            let s = pair[0].as_u64().unwrap() as usize;
+            for _ in 0..pair[1].as_u64().unwrap() {
+                plane.push(&states[s]);
+            }
+        }
+        assert_eq!(plane.len(), N * N, "the plane is the tile's own grid: {v}");
+        let max_db = v["grid"]["max_db"].as_array().unwrap();
+        assert_eq!(max_db.len(), N * N, "{v}");
+
+        // 1. The invariant, as a count over cells that actually hold a measurement.
+        let measured = max_db.iter().filter(|x| !x.is_null()).count();
+        let greyed: Vec<usize> = (0..N * N)
+            .filter(|&i| !max_db[i].is_null() && plane[i] != "observed")
+            .collect();
+        assert!(
+            measured >= N * N / 4,
+            "the fixture must judge real measurements, not zero of zero: {measured} of {}",
+            N * N
+        );
+        assert!(
+            greyed.is_empty(),
+            "{} of {measured} cells hold a measurement and are drawn grey - \
+             \"we have it but didn't render it\". First at row {}, cell {} \
+             ({:.4} MHz), state {:?}",
+            greyed.len(),
+            greyed[0] / N,
+            greyed[0] % N,
+            (f_lo + (greyed[0] % N) as f64 * f_cell) / 1e6,
+            plane[greyed[0]]
+        );
+
+        // 2. The edge cell itself, in a row that is inside era B.
+        let row_b = N * 3 / 4;
+        let edge_cell = ((edge_hz - f_lo) / f_cell) as usize;
+        assert_eq!(
+            plane[row_b * N + edge_cell],
+            "observed",
+            "the cell holding the retuned window's edge ({:.4} MHz, cell {edge_cell}) is grey: {:?}",
+            edge_hz / 1e6,
+            &plane[row_b * N + edge_cell - 1..row_b * N + edge_cell + 2]
+        );
+
+        // 3. And grey still means something: past the edge, era B's rows are unobserved.
+        assert_eq!(
+            plane[row_b * N + N - 1],
+            "unobserved",
+            "spectrum the retuned window does not reach must stay grey, or assertion 1 \
+             passes by observing everything"
+        );
+        assert!(
+            max_db[row_b * N + N - 1].is_null(),
+            "and the store must hold nothing there, or this is the bug rather than the control"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

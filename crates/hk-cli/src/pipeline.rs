@@ -1108,6 +1108,7 @@ pub fn serve_api(
         view_history: handle.view_history(),
         floor: Some(handle.floor_product()),
         inventory: Some(Arc::clone(&db)),
+        trunking: Some(Arc::clone(&db)), // T-273: same run database, grant_event table (C23)
         status: Some(Arc::new(move || {
             let mut v = counters.to_json();
             if let Some(o) = v.as_object_mut() {

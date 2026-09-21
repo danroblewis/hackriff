@@ -64,6 +64,9 @@ mod report_scene;
 #[path = "acceptance/t118_occupancy.rs"]
 mod t118_occupancy;
 
+#[path = "acceptance/t586_retune_diversity.rs"]
+mod t586_retune_diversity;
+
 #[path = "acceptance/hil_hackrf.rs"]
 mod hil_hackrf;
 
