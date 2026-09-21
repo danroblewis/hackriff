@@ -4424,7 +4424,7 @@ tasks:
     milestone: M2-hardening
     title: 'Burst acceptance scene over 902-928 MHz (915 ISM) through the IQ ring: the
       canonical short-burst playground as a blind fixture'
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-250
@@ -4448,6 +4448,7 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    result: "tests/e2e/tests/acceptance_ism.rs + acceptance/t254_ism_bursts.rs (new `just acceptance-ism` target, listed in e2e_milestones and acceptance-milestones): the 902-928 MHz playground blind through the mock SDR AND the IQ ring. Scene = shared `lora_ism_burst` generator (seed 254, 6 s at 500 kSps, centre 903.0 MHz) with three species separating the claim: CW carrier at 902.82 MHz on air throughout (the control), six 16.7 ms FSK sensor bursts at 902.94 MHz over 0.20-1.22 s then silent (the rtl_433-shaped burster that stops), one 132 ms LoRa packet at 903.10 MHz at 2.00 s (the ephemeral one-off). Measured: every truth emission found blind with `ism` in its top-3; sensor detections occupy 2.0 % of the recording and the one-off 2.3 % (ceiling 34 %), the carrier 99.9 % (floor 66 %); last sensor detection ends 1.217 s, exactly when it stopped; ONE inventory row per species (3 rows total, no skirt fragments - T-250 holds in the burst band); /api/events catalogues sensor 0.197-1.217 s (1.02 s) and one-off 1.999-2.138 s (0.139 s), each with its own timespan; at the run's live edge /api/inventory reads sensor `ended` (confidence 0.023), one-off `ended` (0.057), carrier `live` (1.0), and hk_model::presence_in_window agrees. The ring is configured and its allocation waited on (T-178) because liveness inside a 6 s recording is only answerable from the ring-measured idle gap (ADR-0019 3); the test asserts the ring actually buffered (1 segment, 6.000 s, 3 000 000 samples) so no silent fallback to the conservative 60 s gap can pass. Thresholds a priori, none moved. 100.3 MHz field case (B0.497) checked on the real 2026-09-15 FM capture: the burst path fires 2 short detections (100.298/100.302 MHz, 4.4/5.2 dB, ms-long) in the window the annotation pass measured SILENT, minting 1 candidate, never confirmed - so the sighting is NOT reproduced from any recording we hold (it was off air at capture) and what sits there is the designed false-alarm allowance being spent, at its ceiling of 2. Two findings filed as follow-ups: /api/events refuses its own documented limit>500, and its `open` uses the conservative gap while /api/inventory uses the ring-measured one, so the two surfaces disagree about the same emitter in the same window (3 of 3 events open=true beside rows reading ended)."
   - id: T-255
     milestone: M2-hardening
     title: 'Synthetic LoRa scenario in the py/ synth tooling: deterministic up-chirps
@@ -18259,6 +18260,9 @@ tasks:
       ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): thread counts, running-chain counts,
       buffer bytes. Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-591
+    milestone: M2-hardening
+    title: /api/events and /api/inventory disagree about the same emitter's liveness, which docs/api.md promises cannot happen
   - id: T-589
     milestone: M3
     title: C14 never reports a trusted symbol rate on genuine 8-PSK at 20 or 30 dB, so in production the verifier can never run on it
@@ -18699,6 +18703,52 @@ tasks:
     parallel_group: PIPE
     core_interface: true
     model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-254 WHILE BUILDING THE ISM BURST SCENE, measured not inferred: 3 of 3 events read
+      `open: true` beside inventory rows for the same emitter in the same window reading `ended`.
+      `crates/hk-api/src/events.rs:243` hard-codes `IdleGap::conservative()` (60 s), while
+      `crates/hk-api/src/query.rs:1617` uses the RING-MEASURED gap (T-410). Two surfaces over one
+      fact, deriving it two different ways.
+      THIS BREAKS A DOCUMENTED PROMISE: docs/api.md states elsewhere that the two surfaces cannot
+      disagree about one emitter's liveness. It also breaks the signal model itself - an emitter's
+      presence is ONE interval `[start, end?]`, ongoing until an end is affirmatively detected and
+      revocable afterwards. Liveness is a property of the emitter, not of the route you asked.
+      Fix by deriving liveness ONCE and serving it from both routes, rather than by making the two
+      constants match - two independent derivations that happen to agree today will diverge again.
+      The ring-measured gap is the better source: the conservative 60 s constant is a guess where a
+      measurement exists.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): for a scene with a burster that stops,
+      every emitter's liveness is IDENTICAL across /api/events and /api/inventory, asserted over all
+      emitters in the window rather than a sampled one. A test that compares zero emitters is
+      vacuous - report how many it compared.
+      Prove the test goes RED without the fix (T-254's ISM scene reproduces it directly).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-592
+    milestone: M2-hardening
+    title: /api/events refuses its own documented limit - 501..2000 is a 400
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    effort: low
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-254. `MAX_EVENTS_LIMIT = 2_000` and docs/api.md documents a maximum of 2000, but
+      `events_json` then calls `parse_inventory_query` on the same params, which rejects
+      `limit > 500` with "limit must be an integer in 1..=500". Every value from 501 to 2000 is
+      documented as valid and answered with a 400.
+      Decide which number is right and make the code, the docs and the contract test say the same
+      one (T-079: docs/api.md and crates/hk-cli/tests/api_contract.rs move together). If 500 is the
+      real bound, the constant and the docs are wrong; if 2000 is, the shared validator needs a
+      per-route limit rather than the inventory one.
+      WHY IT SURVIVED: the contract tests evidently only ever exercise the DEFAULT limit, so the
+      documented range has never been tested at its edges. Whichever bound wins, test the boundary
+      values - the last accepted and the first rejected - not just a value in the middle. That is
+      the gap that let a doc/impl contradiction live on a core interface.
     effort: high
     depends_on: [T-586]
     use_cases: [AWARE-011]
