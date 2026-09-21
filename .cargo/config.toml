@@ -1,0 +1,12 @@
+# Faster dev/test linking on macOS (iteration-speed work).
+# rustc links via the `cc` (clang) driver; `--ld-path` points clang at LLVM lld's
+# Mach-O backend (ld64.lld) instead of Apple's default `ld`. sccache caches compiles,
+# not links, so linking the workspace's ~190 test binaries is the dominant cost of a
+# warm gate — ld64.lld is markedly faster there. This changes RUSTFLAGS, so it forces
+# one full rebuild when it lands; every link after that is faster.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=--ld-path=/opt/homebrew/opt/lld/bin/ld64.lld"]
+
+# Leave debug info in the .o files instead of running dsymutil — a further link speedup.
+[profile.dev]
+split-debuginfo = "unpacked"
