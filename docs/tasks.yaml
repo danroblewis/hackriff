@@ -19048,7 +19048,7 @@ tasks:
       per SNR, and the reasons sum to the number of classifications - a report whose parts do not
       account for the whole is how a skipped stage hides.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-602
+  - id: T-604
     milestone: M2-hardening
     title: The bridge re-plumb test read a 503 body that had not arrived yet - a tungstenite tail race, not the wait it looked like
     status: done
@@ -19080,7 +19080,7 @@ tasks:
       (a) the refusal is now read over a plain TcpStream to EOF (`refusal()` in the test), so the
       body is complete by construction - the server sends `Connection: close`;
       (b) `StreamRegistry` counts parks in `wait_for_offer_after` (`successor_waits_entered`,
-      `successor_waiters`, T-602), and the test waits on THE EVENT - the handshake has parked in the
+      `successor_waiters`, T-604), and the test waits on THE EVENT - the handshake has parked in the
       gap - instead of sleeping a fixed 250 ms before offering the successor. Under load the old
       sleep could expire before the knock had even connected, and the test then silently exercised a
       plain attach to a live publisher, proving nothing about a gap: a green test asserting nothing.
