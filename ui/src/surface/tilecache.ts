@@ -41,8 +41,9 @@
 //  2. **Adopting the named cap was a no-op.** `TILE_MAX_IN_FLIGHT` is a constant 4 and this cache
 //     started at 4, so `min(4, 4)` changed nothing — and the number is a **server-wide** budget
 //     across every pane, every tab and the bootstrap probe, not an allowance for one client. A
-//     refusal is now AIMD: **halve on refusal, recover one slot per [[RECOVER_AFTER]] successes**,
-//     with the server's number kept as the *ceiling* it actually is.
+//     refusal is now AIMD: **halve on refusal, recover one slot per [[RECOVER_AFTER]] successes**
+//     — or, once T-539 found that a frozen view has no successes to offer, per [[RECOVER_QUIET]]
+//     service times of quiet — with the server's number kept as the *ceiling* it actually is.
 //  3. **The coarse viewport could starve the fine ones.** One 5.2 s map tile holding a slot is a
 //     quarter of the budget for five seconds. Issue is now shared between viewports ([[nextAddr]]).
 //
@@ -262,6 +263,41 @@ const MB = 1024 * 1024;
 /** Consecutive completed requests before the cap recovers one slot. The additive half of AIMD. */
 export const RECOVER_AFTER = 8;
 /**
+ * **The other additive half: quiet, measured in service times** (T-539).
+ *
+ * [[RECOVER_AFTER]] counts *completions*, and a completion needs a request. A frozen view whose
+ * tiles are all resident issues nothing at all, so a client that took a single `503` while settling
+ * kept its halved cap for the rest of the session — measured pinned at 1–2 against a ceiling of 4
+ * for the remaining ~16 s of every run, with nothing able to recover it until the user moved a
+ * pane. That is backpressure that never lets go: the route says "busy" once and the client throttles
+ * itself indefinitely, and the next time the user *does* pan they pay for a refusal that expired
+ * long ago.
+ *
+ * The recovery is therefore **elapsed quiet, not traffic**. Nothing is requested to earn a slot
+ * back: the cap is an upper bound on concurrency, so raising it with an empty queue sends no bytes.
+ * That distinction is the whole point — a speculative ring of requests was the previous answer to
+ * "keep traffic flowing so the cap can recover", and it was reverted off main (T-471) for charging
+ * the route a slot it then abandoned. Recovery must not cost the server anything to happen.
+ *
+ * The window is `RECOVER_QUIET ×` the **measured** service time ([[TileCache.serverEstimateMs]]),
+ * which is the same currency the earned path is paid in and makes the timed path a *floor, never a
+ * shortcut*: `RECOVER_AFTER` completions at a cap of `n` take `RECOVER_AFTER / n` service times, so
+ * a client with traffic always recovers at least as fast as one sitting still, and the two coincide
+ * exactly at a cap of one — the state this exists to get out of. It scales with the route, too: an
+ * expensive 19 MB tile stretches the window without anything being retuned.
+ *
+ * The clock starts at the **end of the busy backoff**, not at the refusal: quiet means quiet after
+ * the route has stopped saying it is busy, and every request issued or answered restarts it. A
+ * further refusal halves the cap again, so the AIMD shape is unchanged — only the increase is no
+ * longer conditional on there being something to draw.
+ *
+ * And it applies **only while this client is idle** ([[TileCache.recoverElapsed]]): a client with
+ * work in hand has completions to be paid in, and probing upward while still asking is a sawtooth
+ * against a route whose other tenants are not going anywhere. Idle is what makes a refusal's
+ * evidence genuinely stale, and what makes the raise free.
+ */
+export const RECOVER_QUIET = RECOVER_AFTER;
+/**
  * Floor on what an abandoned request is charged, ms: the route's **measured** cost for one 256²
  * tile (T-438). A request cannot have cost the server nothing, and charging zero is what let the
  * frame loop become a request pump.
@@ -451,6 +487,11 @@ export class TileCache<T> {
   /** Consecutive refusals, for the backoff; and completions since the last one, for the recovery. */
   private refusals = 0;
   private goodRuns = 0;
+  /**
+   * The last instant this client touched the route, or was told to wait — the clock the
+   * elapsed-quiet recovery measures from (T-539). See [[RECOVER_QUIET]] and [[recoverElapsed]].
+   */
+  private lastWireAt = 0;
   /** Consecutive failures that carried **no answer at all**, and the instant the gate they arm
    * opens (T-499). Zero means the route is answering, and every path here reads `silences > 0`
    * rather than a second flag, so "are we backing off" has one source. */
@@ -480,7 +521,9 @@ export class TileCache<T> {
 
   get residentTiles(): number { return this.map.size; }
   get residentBytes(): number { return this.bytes; }
-  get inFlightLimit(): number { return this.limit; }
+  /** The AIMD cap as of **now** — the elapsed-quiet recovery is folded in on read (T-539), so a
+   * readout and a test see the same number the next pump would use. */
+  get inFlightLimit(): number { this.recoverElapsed(); return this.limit; }
   get inFlightCount(): number { return this.inflight.size; }
   get queueDepth(): number { return this.queue.length; }
   /** Live-edge revalidations queued but not yet issued (T-460). Its own lane, never [[queue]]. */
@@ -875,6 +918,10 @@ export class TileCache<T> {
   get silent(): boolean { return this.silences > 0; }
 
   private pump(): void {
+    // **Before the gates, because it is the one thing that must happen when they hold** (T-539):
+    // a cap that only falls is what a frozen view was left with. This sends nothing; see
+    // [[recoverElapsed]].
+    this.recoverElapsed();
     if (this.now() < this.busyUntil) return;
     // **Nothing at all while the silence gate is armed** (T-499). The queue keeps filling — it is
     // deduplicated and bounded — so recovery is immediate on the frame after the gate opens.
@@ -1034,11 +1081,15 @@ export class TileCache<T> {
     // built somewhere between the two, so this under-states what the copy holds, and under-stating
     // costs a request while over-stating leaves a permanent gap. See [[TileEntry.edgeAtFetchNs]].
     const edgeAtFetchNs = this.edgeNs;
+    // Asking is the opposite of quiet (T-539), and so is being answered — `done` stamps it again,
+    // so a tile that took five seconds does not hand back five seconds of credit when it lands.
+    this.lastWireAt = started;
     this.inflight.set(key, { ctrl, startedAt: started, owner });
     if (this.evicted.has(key)) this.stats.refetchAfterEvict++;
     // The request is off the in-flight list BEFORE anything is re-queued, or `schedule` would see
     // its own request still outstanding and silently drop the retry.
     const done = (requeue: boolean) => {
+      this.lastWireAt = Math.max(this.lastWireAt, this.now());
       this.inflight.delete(key);
       if (this.refreshing.delete(key)) {
         // **The lane's cadence is a share of the LANE'S OWN cost** — measured on its own requests
@@ -1137,6 +1188,52 @@ export class TileCache<T> {
     if (++this.goodRuns >= RECOVER_AFTER) { this.limit++; this.goodRuns = 0; }
   }
 
+  /** How long the wire must stay quiet to buy one slot back, ms. See [[RECOVER_QUIET]]. */
+  private quietMs(): number { return RECOVER_QUIET * this.serverMs; }
+
+  /** Whether this client wants nothing from the route right now — the precondition for the
+   * elapsed-quiet recovery, and the whole reason that recovery is safe. See [[recoverElapsed]]. */
+  private get idle(): boolean {
+    return this.inflight.size === 0 && this.queue.length === 0
+      && this.refreshing.size === 0 && this.refreshDepth === 0
+      && this.abandonedSlots === 0;
+  }
+
+  /**
+   * Raise the cap for every whole quiet window this client has spent wanting nothing (T-539).
+   *
+   * **It issues nothing.** The cap is a bound, not a schedule, so this is arithmetic on the clock —
+   * which is exactly why the recovery is allowed to happen with the view frozen and the wire
+   * silent. It is called from [[pump]], which the render loop reaches through `endFrame` on every
+   * frame whether or not anything is wanted, and from [[inFlightLimit]] so a readout can never show
+   * a cap the policy has already let go of.
+   *
+   * **Idle is a precondition, not an implementation detail.** A client with work in hand has
+   * completions to be paid in and [[RECOVER_AFTER]] already pays it; probing upward *while* asking
+   * is what turns a working client's AIMD into a faster sawtooth against a route whose other
+   * tenants are not going anywhere, and `ui/test`'s two-client guard bounds exactly that — the
+   * refusals a converged client takes per run of completions. An **idle** client's raised cap, by
+   * contrast, is unobservable to the route: there is nothing to issue with it. It is felt only on the next burst, which is then
+   * served exactly as a freshly loaded page would be, and re-halved by a fresh refusal if the route
+   * is still full. So the evidence a refusal carries decays only while this client has stopped
+   * competing, which is the one regime in which it is genuinely stale.
+   *
+   * The window is recomputed per slot because [[serverMs]] is a live measurement: a route that got
+   * slower while we were quiet stretches the remaining steps rather than being credited at the old
+   * rate. The loop is bounded by the ceiling, which is the route's own small number.
+   */
+  private recoverElapsed(): void {
+    if (this.limit >= this.ceiling || !this.idle) return;
+    const t = this.now();
+    let quiet = this.quietMs();
+    while (this.limit < this.ceiling && t - this.lastWireAt >= quiet) {
+      this.limit++;
+      this.goodRuns = 0;
+      this.lastWireAt += quiet;
+      quiet = this.quietMs();
+    }
+  }
+
   /** Whether the tile is still wanted after `err`. */
   private failed(addr: TileAddr, err: unknown, startedAt: number, aborted: boolean): boolean {
     // An abort is this cache's own doing — the viewport moved — so it is neither a failure nor a
@@ -1159,6 +1256,10 @@ export class TileCache<T> {
       // The refusal itself cost the server nothing, but whatever is holding the slots has not
       // finished — so wait longer each time rather than re-asking on the same cadence.
       this.busyUntil = this.now() + this.busyBackoffMs * 2 ** (this.refusals - 1);
+      // **And the quiet clock starts when that backoff ends** (T-539): completions are one way to
+      // earn a slot back, elapsed quiet is the other, and a frozen view only ever has the second.
+      // Quiet means quiet *after* the route has stopped saying it is busy.
+      this.lastWireAt = this.busyUntil;
       return true;
     }
     this.observe(startedAt);

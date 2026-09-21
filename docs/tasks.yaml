@@ -16467,6 +16467,127 @@ tasks:
       Filed 2026-09-20 from T-543's measurement. The coordinator's scheduling caused several of
       today's gate failures; this is the rule that failed to prevent it.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-561
+    milestone: M2-hardening
+    title: "docs/tasks.yaml classified as prose, so the board test never ran on the commit that broke the board"
+    status: in-progress
+    priority: high
+    parallel_group: CI
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      A malformed `blocked_on` on T-544 - an unquoted value containing a colon inside an English
+      sentence ("with a CFAR local floor: 0 of 16 BART channels...") - reached main and broke YAML
+      parsing at line 16207. It took out py/tests/test_task_board.py, so every later FULL gate failed
+      on it, and it broke the dashboard's task map.
+      IT GOT THERE BECAUSE docs/ CLASSIFIES AS DOCS AND THE DOCS CLASS RUNS NOTHING: the one test
+      written to catch a malformed board never ran on the commit that malformed it. An existing test
+      even ASSERTED that a diff including docs/tasks.yaml runs nothing - the bad assumption written
+      down as a guarantee.
+      FIX: docs/tasks.yaml and docs/use-cases.yaml classify as py (lint-py + test-py, which includes
+      the board test); prose in docs/ is unchanged. This follows the classifier's own principle - it
+      fails closed, and a file the tooling PARSES is data, not prose. The docs-only test now covers
+      prose only and says why in place. Every blocked_on value is now quoted.
+    notes: |
+      Filed 2026-09-20 after the fact; the fix is on task-gatefix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-562
+    milestone: M2-hardening
+    title: "Make the justfile REFUSE the gate, acceptance and the full workspace test when run from an agent worktree"
+    status: todo
+    priority: high
+    parallel_group: CI
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      USER, from the /perf metrics: agents run suites they are explicitly told never to run, and it
+      is the single largest measured waste of agent time. 42 of 47 agents that ran `just gate` were
+      IMPLEMENTATION agents self-verifying rather than debugging; 111 of 122 on `just acceptance` and
+      93 of 108 on the full `just test` were the same - about 23 HOURS of agent time on suites the
+      brief forbids. Prose has not worked; the rule belongs in the runner, for the same reason T-396
+      moved the which-suites decision into `just gate` and T-477 moved the board check into
+      `just reconcile`.
+      GUARD: gate, gate-merge, acceptance, acceptance-ci and the full-workspace test recipes detect
+      that they are running from an agent worktree - `git rev-parse --show-toplevel` under
+      .claude/worktrees/ - and REFUSE, naming what to run instead: `just test-crate <crate>`, or
+      `cargo nextest run -p <crate> -E 'binary(<name>)'` for one binary (NOT `just test-one`: T-489
+      measured it building and listing ~280 binaries, over 8 minutes under load to run one test,
+      against 7.5 s for the scoped form), and "hand back - the coordinator gates once, at merge".
+      OVERRIDE: HK_ALLOW_FULL=1 for the rare genuine repro/debug agent, so the guard is a default
+      rather than a wall, and the refusal says the override exists.
+      The coordinator's gate runs from the MAIN checkout and is unaffected; CI is unaffected (not a
+      worktree). Assert the refusal, the override, and both unaffected cases in py/tests. Reinforce
+      the same rule in the standard agent brief text.
+    notes: |
+      Filed 2026-09-20 from the user's /perf analysis.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-563
+    milestone: M2-hardening
+    title: "Reasoning time (184 h) exceeds all tool and build time (144 h) - the largest untouched cost"
+    status: todo
+    priority: high
+    parallel_group: CI
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      USER, from /perf: model/thinking time is 184 h against 144 h for ALL tool and build time, with
+      18.4 BILLION cache-read tokens - agents re-reading enormous context. After T-543 this is the
+      biggest remaining headroom, and unlike compile time nobody has touched it.
+      THREE LEVERS, each measured against the /perf per-agent "Model time" view rather than argued:
+      (1) ENFORCE THE MODEL/EFFORT TIERS in prompts/model-selection.md. Mechanical and well-specified
+      tickets belong on Haiku or a low effort setting, not Opus at high. Today almost every agent was
+      launched on Opus regardless of the work - that is the coordinator's habit, not the policy, and
+      the policy already says core-interface and real-time work is what earns Opus.
+      (2) LEANER BRIEFS AND LESS RE-READING. 18.4 B cache-read tokens says agents re-read the same
+      files across turns. Give each agent the exact files and the exact commands (CLAUDE.md already
+      says so), and prefer a pointer to a prior ticket's measurement over asking an agent to
+      re-derive it.
+      (3) FEWER ROUND-TRIPS: batch independent tool calls rather than serialising them.
+      METHOD: use the per-agent Model time view to find the PATHOLOGICAL sessions - the few that
+      dominate the total - and characterise what they were doing, before generalising. A long session
+      that was genuinely hard debugging is not the same as one that re-read the repo four times.
+      DoD: the outliers characterised; a stated tier rule the coordinator actually follows when
+      launching; and a measurable drop in model time per landed ticket.
+    notes: |
+      Filed 2026-09-20 from the user's /perf analysis. The coordinator is the main offender on (1)
+      and (2): most of today's agents were Opus, and several briefs asked agents to re-measure things
+      an earlier ticket had already measured.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-564
+    milestone: M3
+    title: "The synthetic grid's delivered analysis geometry is a statistic of the noise - OBW99 moves 2x with SNR on 23 percent of ladders"
+    status: todo
+    priority: high
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    depends_on: [T-296, T-246]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-435 while characterising the confidently-wrong family call, and it is the cause
+      rather than the symptom. synth::measured_obw / recentre_offset_hz read `occupied_band` on the
+      NOISY snippet, so `decim = floor(fs/(2*obw))` and the channel-filter cutoff are set by the
+      noise draw. Measured over 504 blind ladders: the OBW99 reported for ONE (class, seed) moves
+      with SNR by >= 2x on 115 (23 %) and >= 3x on 90 (18 %), in six of eight families - an `am`
+      carrier reads 82/31/1/1/1/1/1 kHz up the ladder; `ofdm` oscillates 30 kHz <-> 1 MHz on
+      adjacent rungs.
+      WHY IT MATTERS BEYOND TIDINESS: 5 of the 7 confidently-wrong FAMILY calls in 3 528
+      classifications sit on such a rung. The worst case (Qam16 seed 8 at the 15 dB gate) delivered
+      a 40 kHz emission in a 500 kHz band - a narrow line in empty space, which is exactly what
+      `ssb` is fitted as - and the classifier answered that question correctly at 0.999. Both
+      density files are fitted over this mixture, so the harness defect is baked into the model.
+      COST, STATED UP FRONT: fixing it changes every dev waveform, which means refitting both
+      data/densities-*.json and re-deriving all of ADR-0016 section 7.1. So it needs its own
+      measurement of what it buys and what it costs before anyone starts. Likely overlaps T-296's
+      unexplained EVM residue and is a plausible cause of psk-qam's weak open set.
+      Numbers and tables are in ADR-0016 section 7.3 (written by T-435).
+    notes: |
+      Filed 2026-09-20 from T-435's report. T-435 deliberately did NOT write a threshold against
+      this - a constant fitted to a harness defect is the thing this project forbids.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate

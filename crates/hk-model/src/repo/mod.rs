@@ -117,7 +117,7 @@ use crate::time::Timestamp;
 
 pub use bookmarks::{BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind};
 pub use harmonic::{HarmonicFamilyRow, MAX_FAMILY_CANDIDATES};
-pub use inventory::EmitterUpsert;
+pub use inventory::{EmitterUpsert, LatestMeasurement};
 pub use lifecycle::LIFECYCLE_TEXT_MAX;
 pub use refined::{REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning};
 pub use relate::{MAX_ARTIFACT_SOURCES, MAX_EVIDENCE_DETECTIONS, MAX_NEIGHBOURS, OverlapOutcome};

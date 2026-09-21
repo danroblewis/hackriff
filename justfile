@@ -32,8 +32,38 @@ default:
 #
 # `just lint` + `just test` + `just acceptance-ci` by hand remain the periodic/milestone check.
 #
+# T-562: the gate, the acceptance suites and the full workspace test are the COORDINATOR's,
+# run once at merge from the main checkout. Measured from /perf: 42 of 47 agents that ran `just
+# gate` were implementation agents self-verifying, plus 111 of 122 on `just acceptance` and 93 of
+# 108 on full `just test` - about 23 hours of agent time on suites their brief forbids. Prose did
+# not stop it, so the rule lives in the runner (the same move as T-396 and T-477).
+# HK_ALLOW_FULL=1 lets a genuine repro/debug agent through: a default, not a wall.
+_coordinator-only recipe:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "${HK_ALLOW_FULL:-0}" = "1" ]; then exit 0; fi
+    root=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+    case "$root" in
+      */.claude/worktrees/*)
+        echo "REFUSED: 'just {{recipe}}' is the coordinator's, run once at merge from the main checkout." >&2
+        echo "You are in an agent worktree: $root" >&2
+        echo "" >&2
+        echo "Run instead, for what your diff touches:" >&2
+        echo "    just test-crate <crate>" >&2
+        echo "    cargo nextest run -p <crate> -E 'binary(<name>)'   # one binary" >&2
+        echo "NOT 'just test-one': it builds and lists ~280 binaries - over 8 min under load to" >&2
+        echo "run one test, against 7.5 s for the scoped form (T-489)." >&2
+        echo "" >&2
+        echo "Then HAND BACK. A full gate takes 7-25 min, the harness backgrounds it at 600 s, and" >&2
+        echo "an agent that waits on it ends its turn stalled with uncommitted work (T-416/426/430)." >&2
+        echo "" >&2
+        echo "If you genuinely need the full suite to reproduce something: HK_ALLOW_FULL=1 just {{recipe}}" >&2
+        exit 1
+        ;;
+    esac
+
 # THE merge gate (T-396): classify the diff, print the decision, run exactly the suites it needs.
-gate *args:
+gate *args: (_coordinator-only "gate")
     uv run --locked --project py python -m hkpy.gate {{args}}
 
 # THE COORDINATOR'S per-merge gate (T-424). Run it from inside `git merge --no-ff --no-commit`.
@@ -60,7 +90,7 @@ gate *args:
 #     No ignore list, nothing silent: `fixtures/` STAGED in a merge is still full.
 #
 # THE COORDINATOR'S per-merge gate: classify the MERGE INDEX, not the working tree (T-424).
-gate-merge *args:
+gate-merge *args: (_coordinator-only "gate-merge")
     uv run --locked --project py python -m hkpy.gate --merge {{args}}
 
 # THE SELF-CLEANING BOARD: which in-progress tickets git says are merged, stalled or empty (T-477).
@@ -104,7 +134,7 @@ build:
 # `cargo test` if nextest isn't installed.
 # See `just test-seq` for a fully sequential run, and `just test-crate`/`just test-one` to run a
 # single crate or test (the T1-T4 subset an agent working on one crate should use, not full `test`).
-test: test-rust test-doc test-py test-ui
+test: (_coordinator-only "test") test-rust test-doc test-py test-ui
 
 # HK_E2E_REQUIRE_SYNTH=1 is set here, not by the caller: three workspace tests outside hk-e2e
 # (hk-detect e2e_synth + aware_006_wide_emissions, hk-context aware_006_e2e) skip silently when the
@@ -227,7 +257,7 @@ e2e-harness *args:
 # plus the harness targets, after the census that keeps the target lists honest. Deliberately NOT
 # the milestone exit gates — see `acceptance-milestones`. Anyone can run this locally; it is the
 # same command CI runs.
-acceptance-ci: e2e-targets-check (acceptance "--" "--nocapture") (e2e-harness "--" "--nocapture")
+acceptance-ci: (_coordinator-only "acceptance-ci") e2e-targets-check (acceptance "--" "--nocapture") (e2e-harness "--" "--nocapture")
 
 # The milestone exit gates in one command: M2 attention, M3 classification, M4 trunking, chirp.
 # Deliberate, coordinator-run at milestone boundaries — kept out of CI's per-push gate because they

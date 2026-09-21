@@ -71,7 +71,10 @@ def test_api_contract_doc_is_full_not_docs():
 
 
 def test_docs_only_has_no_suite_and_says_so():
-    d = classify(["docs/10-test-strategy.md", "docs/planning-log.md", "docs/tasks.yaml"])
+    # PROSE only. docs/tasks.yaml used to be in this list, which is precisely how a
+    # malformed board reached main: the one test that would have caught it never ran
+    # (T-561). A file the tooling parses is data, not prose - see the test below.
+    d = classify(["docs/10-test-strategy.md", "docs/planning-log.md"])
     assert d.label == DOCS
     assert d.commands() == []
     text = "\n".join(render(d, Source("test", []), "all"))
@@ -935,3 +938,46 @@ def test_the_ui_suite_is_skipped_only_for_a_full_diff_with_no_ui_path():
         )
         is False
     )
+
+
+def test_t561_the_board_file_runs_the_python_suite_not_nothing():
+    """docs/tasks.yaml is DATA, and `docs/` runs nothing.
+
+    A malformed `blocked_on:` - an unquoted value containing ": " - reached main
+    through a docs-class gate, so `py/tests/test_task_board.py`, which exists to
+    catch exactly that, never ran. It broke the board test, the dashboard's task
+    map, and every later gate that parses the file. Prose stays `docs`.
+    """
+    from hkpy.gate import classify, classify_path
+
+    assert classify_path("docs/tasks.yaml")[0] == "py"
+    assert classify_path("docs/use-cases.yaml")[0] == "py"
+    assert classify_path("docs/README.md")[0] == "docs"
+    assert classify(["docs/tasks.yaml"]).classes == ("py",)
+    # a board edit alongside prose still runs the Python suite
+    assert "py" in classify(["docs/tasks.yaml", "docs/README.md"]).classes
+
+
+def test_t562_the_coordinator_only_guard_is_wired_to_the_expensive_recipes():
+    """The gate, acceptance and the full workspace test refuse from an agent worktree.
+
+    /perf measured ~23 h of agent time on suites the brief forbids: 42 of 47 agents
+    that ran `just gate` were implementation agents self-verifying, 111 of 122 on
+    `just acceptance`, 93 of 108 on full `just test`. Prose did not stop it, so the
+    rule lives in the runner - the same move as T-396 (which-suites) and T-477 (the
+    board check). HK_ALLOW_FULL=1 is the documented escape for a genuine repro agent.
+    """
+    from pathlib import Path
+
+    jf = Path(__file__).resolve().parents[2] / "justfile"
+    text = jf.read_text()
+
+    assert "_coordinator-only recipe:" in text
+    for recipe in ("gate", "gate-merge", "test", "acceptance-ci"):
+        assert f'(_coordinator-only "{recipe}")' in text, recipe
+    # the escape hatch exists and is named in the refusal
+    assert "HK_ALLOW_FULL" in text
+    # the refusal points at the cheap forms, and away from the workspace-wide one
+    assert "just test-crate <crate>" in text
+    assert "cargo nextest run -p <crate> -E 'binary(<name>)'" in text
+    assert "NOT 'just test-one'" in text

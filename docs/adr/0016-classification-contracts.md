@@ -545,6 +545,91 @@ protocol cannot catch it — T-422 followed the protocol correctly and still got
 because the protocol checks *which tree* was measured and this failure is about *which
 line was read*.
 
+### 7.3 The class name moves with the SNR because the *grid's own geometry* does (T-435)
+
+T-429 measured, and deliberately did not assert, that the within-family **class name** changes
+with the SNR on 3 of 252 blind ladders — two `qam16`↔`qam64` swaps and, the one that mattered,
+**a 16-QAM returned as `analog`/`ssb` at 15 dB**, a confidently-wrong *family* at the gate.
+T-435 re-measured both on 21 classes × 7 SNR rungs × 24 seeds (3 528 classifications) and
+established the mechanism. **Neither half is a classifier defect.**
+
+**The family error: the generator hands the classifier a snippet at the wrong analysis
+geometry.** The same waveform (`Qam16`, one seed), read across the ladder:
+
+| SNR | delivered rate | reported OBW99 | `flatness` | `carrier_line_db` | tree's `analog` rule | verdict |
+|---|---|---|---|---|---|---|
+| 12.5 dB | 143 kHz | 34 kHz | 0.83 | 0.0 dB | denies `analog` | `unknown` |
+| **15 dB** | **500 kHz** | **172 kHz** | **0.24** | **18.4 dB** | **admits `analog`** | **`analog`/`ssb`, confidence 0.999, open set 0.000** |
+| 17.5 dB | 143 kHz | 40 kHz | 0.78 | 1.3 dB | denies `analog` | `psk-qam` |
+| 20 dB | 143 kHz | 40 kHz | 0.78 | 0.0 dB | denies `analog` | `psk-qam`/`qam16` |
+
+The emission is ~40 kHz wide at every rung. At 15 dB `synth::measured_obw` — a **noise-referenced**
+`occupied_band` over the noisy snippet — returned 172 kHz, so `decim = floor(fs / (2·obw))` came
+out 2 instead of 12 and the snippet was delivered at 500 kHz. A 40 kHz emission in a 500 kHz band
+is spectrally a narrow line in empty space: `flatness` collapses 0.78 → 0.24 and `carrier_line_db`
+jumps 0 → 18.4 dB. Those are **exactly the two dimensions `tree.rs` tests** to deny `analog`
+(`mu42_a > 1.5 ∧ flatness ≥ 0.45 ∧ carrier_line_db < 14`), so `analog` was admitted; and they are
+exactly what `ssb` is fitted as (`carrier_line_db` 35.5, `flatness` 0.10). `ssb` scored m 1.388 /
+plausibility 1.000 against `qam16`'s m 6.979 / plausibility 0.000. **The classifier answered
+correctly the question it was asked.** Nothing inside it distinguishes this case from a real SSB
+carrier, so no abstention rule, confidence cap or open-set threshold on the C15 side can fix it —
+any that appeared to would be a constant written against a harness defect.
+
+**And the geometry defect is two orders of magnitude larger than the symptom.** Over the 504
+blind ladders, the OBW99 the grid reports for **one** (class, seed) moves with the SNR by:
+
+| worst-rung / top-rung OBW99 | ladders |
+|---|---|
+| < 1.1× | 154 |
+| 1.1–1.5× | 203 |
+| 1.5–2× | 32 |
+| 2–3× | 25 |
+| **≥ 3×** | **90** |
+
+**115 of 504 ladders (23 %) move by ≥ 2× and 90 (18 %) by ≥ 3×**, in six of the eight families
+(`analog` 62/120, `ook-ask` 18/48, `psk-qam` 19/120, `fsk` 9/96, `pulsed` 4/48, `ofdm` 3/24;
+`css` 0/24 and `noise-like` 0/24 are the two that hold).
+The extremes: an `am` carrier reads 82 / 31 / 1 / 1 / 1 / 1 / 1 kHz up the ladder (the occupied
+band collapsing onto the carrier bin once the noise falls), and `ofdm` oscillates between 30 kHz
+and 1 000 kHz — the `fs/2` fallback — on adjacent rungs. **The delivered analysis geometry is a
+statistic of the noise**, which is T-427's `duty` and T-249's `sigma_af` one level up: a quantity
+named as a property of the emission that reads the receiver. The densities in
+`data/densities-1.json` are fitted over that mixture.
+
+This is also where the remaining wrong-family calls live. Of the **7 confidently-wrong family
+calls in 3 528** (0.0020; wrong-label of any confidence 10/3 528 = 0.0028), **5 sit on a rung
+whose delivered rate moved > 1.7× from the ladder's mode**, and the other two are below-gate
+`analog` absorption. Filed as its own ticket; it is **not** fixable inside a classifier test,
+because correcting it changes every waveform in the dev grid and so requires refitting both
+density files and re-deriving every figure in §7.1.
+
+**The name half is calibrated, and is T-246.** The within-family name reverses on **9 of 504**
+acceptance ladders (1.8 %) and 13 of 504 dev ladders (2.6 %) — so T-429's "3 of 252" reproduces
+as a rate of about 2 %, not as three special sequences. Six of the nine acceptance flips are the
+identical sequence `qam64 → qam16 → qam16`: at the lowest rung where `psk-qam` may name a class
+(gate + 5 dB) a 16-QAM is called 64-QAM and corrects upward. That direction is **T-246**'s open
+defect — the psk-qam ranking is monotone in constellation size on a smeared constellation — seen
+from the density side rather than the ALRT's. It is **not** T-422's shape: the deciding stage is
+`FeatureTree` in every one of these, and the post-sync verifier never ran. And the report is
+already honest about it: the flipped names carry `p` 0.47–0.66, i.e. the classifier declares the
+call a coin toss, while the `psk-qam` family under it holds at 0.999. **A reversing coin toss is
+a calibrated answer, not a wrong one**, so nothing here needs an abstention or a confidence cap.
+
+**What T-435 asserted, and what it did not.** Not the name ladder: a per-ladder exception list is
+seed-count fragile (T-429's own reason, measured — 1 flip at 6–8 seeds, 3 at 12), and its cause is
+already owned. Not a targeted seed regression: it would pin a harness artefact behind a magic seed.
+Not an abstention in the classifier, for the reason above. What it did assert is the gap the
+measurement actually exposed: §7's per-bin wrong-label floor of 0.05 says *any* bin, but §7.1's
+quoted "worst bin" figure is measured over **bins ≥ gate**, and the "overall" figure averages the
+below-gate bins into 630 snippets. So the below-gate bins are inside the floor and outside every
+figure anyone reads. `crates/hk-classify/tests/below_gate_absorption.rs` applies §7's **existing**
+0.05 to exactly those bins, for the three families that can be gated out while another family is
+still entitled to answer (`fsk`, `ook-ask`, `psk-qam` against `analog`'s 10 dB gate), and adds
+ADR-0016 §2 as a property: where the measurement was not allowed to be made, abstention must
+outnumber replacement. Measured there, worst bin `fsk` at gate − 7.5 dB: **4 wrong of 96 =
+0.0417 against the 0.05 floor, with 92 abstentions** — a 1-snippet margin, which is itself the
+finding: the below-gate densities are holding this line, and only just.
+
 ## 8. MAUTO interface (M3 side; ADR-0015 owns the search)
 
 `hk_model::classify::SearchSeed`, assembled by `hk-pipeline/src/seed.rs` (T-215) and served at `GET /api/inventory/{id}/seed`:

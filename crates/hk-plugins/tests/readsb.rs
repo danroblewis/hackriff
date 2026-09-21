@@ -567,9 +567,17 @@ fn readsb_child_crash_mid_stream_is_isolated_and_recovers() {
 /// The wrapper reacts to readsb's own "SDR wedged" self-destruct message the instant the stderr
 /// pump sees it, without waiting for the (possibly slow-to-actually-exit) child. Uses
 /// [`FAKE_READSB`] in `wedge_immediately` mode (module doc), which prints the line and then
-/// sleeps far longer than this test's timeout — so a fast crash here proves the stderr-detection
-/// path fired, not the waiter thread blocked on the child's own exit. Does not need readsb
+/// sleeps far longer than this test's timeout — so a crash whose *reason* names the stderr line
+/// proves the stderr-detection path fired; the waiter-thread path instead logs "readsb exited
+/// unexpectedly", which only happens once the child's 60s sleep ends. Does not need readsb
 /// installed.
+///
+/// The wait for that crash is given `common::START_GRACE`, not a short bound: `FAKE_READSB` is
+/// spawned by the wrapper, not this test, and is itself a freshly linked binary (T-493) that can
+/// independently take as long to reach its first instruction as the wrapper did — there is
+/// nothing to wedge until it runs at all. What the test actually asserts (stderr-detection vs.
+/// waiting on the child) is checked on the crash *reason*, not on wall time, so widening this
+/// wait cannot mask the behaviour it exists to catch.
 #[test]
 fn readsb_wedge_message_ends_the_wrapper_without_waiting_for_the_child() {
     let _guard = ENV_MUTEX.lock().unwrap();
@@ -597,12 +605,19 @@ fn readsb_wedge_message_ends_the_wrapper_without_waiting_for_the_child() {
     )
     .unwrap();
     let mon = inst.monitor();
-    // The clock starts once the wrapper is running: it measures the wrapper reacting to the wedge
-    // line, not the OS getting a subprocess started (see `common`).
+    // Off the wrapper's own clock (see `common`): this only proves the wrapper is alive, not that
+    // the readsb child it is about to spawn has reached its first instruction.
     common::wait_started(&mon);
-    let t0 = Instant::now();
-    wait(&mon, "a crash from the wedge message", |s| s.crashes >= 1);
-    let elapsed = t0.elapsed();
+    // FAKE_READSB is its own freshly linked binary and can independently stall on cold start
+    // (T-493), so give it the wrapper's own start grace rather than a budget sized for reaction
+    // time.
+    assert!(
+        mon.wait_for(common::START_GRACE, |s| s.crashes >= 1),
+        "timed out waiting for a crash from the wedge message: {:?} {:?}",
+        mon.stats(),
+        mon.log_tail()
+    );
+    let tail = mon.log_tail();
     drop(mon);
     let stats = inst.shutdown();
     // SAFETY: same as above.
@@ -611,10 +626,15 @@ fn readsb_wedge_message_ends_the_wrapper_without_waiting_for_the_child() {
         std::env::remove_var("FAKE_READSB_MODE");
     }
     assert!(stats.crashes >= 1, "{stats:?}");
+    // The behaviour under test: the wrapper must react to readsb's stderr line, not wait for the
+    // child to actually exit (its 60s sleep). Assert on *how* it crashed, which the child's own
+    // cold start (above) already makes wall time an unreliable proxy for.
     assert!(
-        elapsed < Duration::from_secs(10),
-        "took {elapsed:?}: looks like the wrapper waited for the child (60s sleep) \
-         instead of reacting to the wedge line in its stderr"
+        tail.lines
+            .iter()
+            .any(|l| l.contains("readsb reported itself wedged")),
+        "expected the wrapper to react to readsb's stderr wedge line, not wait for the child's \
+         own exit (its 60s sleep): {tail:?}"
     );
 }
 
@@ -696,7 +716,14 @@ fn first_squitter_is_stamped_exactly_when_readsbs_beast_connection_is_slow() {
     let squitter_index = next + 100;
     next = push_all(&mut inst, &marked, next);
     push_all(&mut inst, &vec![0u8; 8 * CHUNK_SAMPLES * 2], next);
-    let stats = inst.finish(Duration::from_secs(30));
+    // `finish`'s `idle` argument (host.rs) is a no-progress budget, not a wall-clock cap on the
+    // whole wait: it resets on every state/decode/bytes-written change, so it only needs to cover
+    // a genuine stall. FAKE_READSB is its own freshly linked binary (T-493) and, before it has
+    // read anything, a cold start on it reads as exactly that kind of stall while the wrapper
+    // waits to hand it the pushed input. Give it the wrapper's own start grace
+    // (`common::START_GRACE`), which comfortably covers the fake's later, deliberate 3 s connect
+    // delay too.
+    let stats = inst.finish(common::START_GRACE);
     // SAFETY: same as above.
     unsafe {
         std::env::remove_var("HK_READSB");

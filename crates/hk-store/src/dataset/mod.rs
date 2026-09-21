@@ -257,7 +257,7 @@ fn label_matches_filter(label: &str, filter: &DatasetFilter) -> bool {
 fn snr_of(repo: &Repository, emitter_id: EmitterId) -> Result<Option<f64>, DatasetError> {
     Ok(repo
         .emitter_latest_measurement(emitter_id)?
-        .map(|(snr_peak_db, _)| snr_peak_db))
+        .map(|m| m.snr_peak_db))
 }
 
 fn window_of(t: Timestamp, pad_pre_s: f64, pad_post_s: f64) -> TimeRange {
