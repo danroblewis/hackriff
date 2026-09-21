@@ -18410,6 +18410,66 @@ tasks:
            condition on this machine, so it is reachable in the field, not a lab-only state.
            (The staging server on :8899 had allocated 6.6 GiB of ring, so this is NOT the user's
            892.5 MHz report; re-measured with the ring ON, on a RAM disk, and it vanishes.)
+  - id: T-595
+    milestone: MLIVE
+    title: The DC notch turns grey once its IQ-ring segment ages out - a fourth thing painted with the third mark
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      MEASURED BY T-588 while clearing the user's 892.5 MHz report: over a sweep of 1 966 080 cells,
+      1212 cells held a measurement and read `unobserved` - and ALL 1212 are the 25 kHz DC notch at
+      the tuned centre. None at a band edge.
+      `ObservedWindow.dc_excluded` punches a 25 kHz hole in the observation log's coverage while the
+      history pyramid KEEPS ROWS THERE. Inside the IQ ring's retention the ring journal's full-band
+      spans cover the hole; past the ring horizon nothing does, so a 25 kHz stripe down the middle
+      of every band the radio ever sat on turns grey - "we never looked", painted over rows we hold.
+      BOTH HALVES OF THE INVARIANT BREAK AT ONCE: "whenever data exists for that window it must be
+      shown", and "grey = genuinely unobserved". T-441 says three states, three distinct marks; the
+      DC notch is a FOURTH thing wearing the third one's mark. And it is a genuinely different
+      claim - a region deliberately excluded from measurement is useful to tell the user, just not
+      by calling it unobserved.
+      Give the notch its own mark rather than making the observation log lie in the other direction.
+      The ring-journal cover is why this went unseen: it is invisible for the whole ring retention
+      and appears only in older history.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): cells holding a measurement that read
+      unobserved past the ring horizon is ZERO, counted, WITH A FLOOR on how many cells were judged
+      so it cannot pass on zero-of-zero. T-588's guard in `crates/hk-api/src/tiles.rs` is the model.
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-596
+    milestone: MLIVE
+    title: With the IQ ring refused, coverage lags the live edge by a whole dwell - 18 s of measured rows read unobserved
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      MEASURED BY T-588: with `iq_buffer: None`, 18 rows (18 s) of `max_db` carried
+      `state: unobserved` right after a retune. The observation log only gains a record when a dwell
+      SEALS, so without the ring journal covering the gap, coverage trails the live edge by up to a
+      dwell period (~60 s at the shipped setting).
+      Same invariant as T-595 - data exists and is drawn grey - but a different cause and a
+      different surface: this one is the LIVE EDGE, not the history horizon.
+      HOW T-588 HIT IT IS THE WARNING: the ring was refused because the disk was full ("needs
+      134217728 bytes above the 8589934592-byte free-space floor and 4789297152 bytes are free").
+      A device that fills its disk silently loses its live-edge coverage - and a PORTABLE device
+      will fill its disk. A refused ring is a state the system must survive honestly, not one that
+      makes the canvas lie about what it looked at.
+      NOT the user's 2026-09-21 field report: the staging server had 6.6 GiB of ring allocated, and
+      re-measuring with the ring on makes this vanish.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: with the ring refused, rows carrying a measurement that
+      read unobserved is zero, counted over a stated number of rows.
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
