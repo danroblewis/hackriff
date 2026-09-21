@@ -40,6 +40,8 @@ use hk_stream::{
 /// spawn that expects the unmodified environment.
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+mod common;
+
 const WRAPPER: &str = env!("CARGO_BIN_EXE_hk-plugin-readsb");
 /// A stand-in for readsb (see its module doc), used only by the crash/idle-handling tests below
 /// so they don't need a real 9s readsb watchdog wait or shell-timing tricks.
@@ -115,6 +117,8 @@ fn temp_dir(tag: &str) -> PathBuf {
 
 fn wait_running(inst: &PluginInstance) {
     let mon = inst.monitor();
+    // Off the clock: see `common`.
+    common::wait_started(&mon);
     assert!(
         mon.wait_for(Duration::from_secs(15), |s| s.state == PluginState::Running),
         "{:?} {:?}",
@@ -585,7 +589,6 @@ fn readsb_wedge_message_ends_the_wrapper_without_waiting_for_the_child() {
     let sink = Arc::new(Mutex::new(Ingest::new(
         Repository::open_in_memory().unwrap(),
     )));
-    let t0 = Instant::now();
     let inst = PluginInstance::spawn(
         m,
         input(anchor()),
@@ -594,6 +597,10 @@ fn readsb_wedge_message_ends_the_wrapper_without_waiting_for_the_child() {
     )
     .unwrap();
     let mon = inst.monitor();
+    // The clock starts once the wrapper is running: it measures the wrapper reacting to the wedge
+    // line, not the OS getting a subprocess started (see `common`).
+    common::wait_started(&mon);
+    let t0 = Instant::now();
     wait(&mon, "a crash from the wedge message", |s| s.crashes >= 1);
     let elapsed = t0.elapsed();
     drop(mon);

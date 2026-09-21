@@ -127,23 +127,26 @@ T-257 was filed on the belief that `hk-plugins::bin/hk-plugin-readsb tests::spaw
 
 **Verdict: a runner-side artifact, not a test bug and not a product defect.** Don't read a `LEAK` line as a leaked child, and don't silence it with a leak policy in `.config/nextest.toml` — that would hide the genuine orphaned-child case this project has actually been bitten by, which is exactly the class of pin T-228 was filed to remove. If a `LEAK` line ever does coincide with a real stray, `pgrep -fl <child>` straight after the run is the discriminator. And **if `just test` exits 1 on an all-passing Rust summary, the failure is in one of the other three steps the recipe chains** (`test-doc`, `test-py`, `test-ui` — `test-ui` runs `npm ci`, so it needs the network); `just` names the failing recipe on its last line. Re-measured on main at `1346085`, all four steps exit 0.
 
-### 3.5 Quarantined load-sensitive tests (T-504) — read this before re-diagnosing a failure here
+### 3.5 Quarantined load-sensitive tests — the list is empty (T-504 opened it, T-493 closed it)
 
-At least five agents in one session independently spent runs re-measuring the same two failures and each concluding "pre-existing, not mine". This section is the one place to check first, so a sixth agent doesn't have to.
+At least five agents in one session independently spent runs re-measuring the same two `hk-plugins::host` failures and each concluding "pre-existing, not mine". T-504 quarantined them with `#[ignore]` so a sixth wouldn't have to. **T-493 then found what was actually wrong, fixed it, and deleted both markers, so this list is now empty.** Keep the section: the next quarantine goes here, under the same rules, and the finding below is the one to check before re-diagnosing anything in `hk-plugins`.
 
-**The known set:**
+**What it turned out to be — and what it was not.** It was **not** §3.4's macOS `pipe(2)`/`FD_CLOEXEC` race. That race is real and T-493 reproduced it directly (11 leaked pipe write ends in 16 000 probes with 8 concurrently spawning threads in one process, 0 with 6), but it can only make nextest print `LEAK`, which is a pass — and it needs two spawns racing *inside one process*, which these tests, one per nextest process and spawning sequentially, never do. Baseline runs confirmed the split: at `--test-threads num-cpus` under load, runs came back "16 passed (3 leaky)" — leaks without failures.
 
-- `crates/hk-plugins/tests/host.rs`: `plugin_crash_restarts_and_capture_never_blocks` and `finish_delivers_queued_input_to_a_slow_starting_plugin_then_waits_for_its_exit`, both `#[ignore]`d with the measurement and the owning ticket inline.
+The failures were the **plugin host's own `nice`**. `plugins/*/manifest.json` ship `limits.nice = 10` so a decoder can never starve capture, and the host applies it with `setpriority(PRIO_PGRP, …)` immediately after the spawn. Every one of these tests then bounded, with a wall clock, how long a *deliberately de-prioritised* subprocess takes to produce output — on the machine CLAUDE.md commits to running four concurrent builders on. Nice +10 is a promise that the process runs when nothing else wants the CPU; on this box something always does, so that quantity has no upper bound at all.
 
-**What's wrong with them, already measured — don't re-measure it:** they FAIL at 25.2s and 28.1s under a full gate with a builder agent competing, and PASS IN ISOLATION at 0.29s and 2.70s. The mechanism is §3.4's macOS `pipe(2)`/`FD_CLOEXEC` race between concurrently *spawning* test processes (T-257): it scales with spawn concurrency and nothing else — zero failures in 25 `hk-plugins` runs at 6 threads, and the workspace default (`.config/nextest.toml`) is 8. **Owned by T-493**, not by whatever task an agent was actually sent to do.
+Traced, with timestamps inside `run_once`: the child was created in **193 µs** (`posix_spawn` returned; the host's stdout reader was running at +320 µs) and then **executed nothing for 30 s** — not even `hk-dummy-plugin`'s first `eprintln!`, which runs before it reads a byte of stdin. The test's 2 ms polling thread ran throughout and the host had already enqueued everything (`records_offered: 100, records_enqueued: 100, decodes: 0`, empty log tail). Whole-suite runs with the plugin binaries relinked cold before each:
 
-**What quarantine does and does not mean here (T-436, T-383).** A cap or a skip makes a defect rarer or invisible, not fixed, and a test must not bound a quantity whose natural range it hasn't measured. So these two are `#[ignore]`d, not deleted, not loosened, and not moved into `heavy-serial` (that's T-493's subject, and serializing them papers over the race rather than fixing it). Each stays runnable deliberately, by the exact command in its own `#[ignore = "..."]` message — e.g.:
+| `limits.nice` in the test manifests | load average | tests failing per run |
+|---|---|---|
+| `10` (as shipped) | 9–11 | 10, 1, 12, 0, 4, 10, 0 |
+| `0` (the fix) | 9–129 | 1, 1, 0, 0, 0 |
 
-```
-cargo test -p hk-plugins --test host -- --ignored --exact plugin_crash_restarts_and_capture_never_blocks
-```
+Note the load averages: removing the de-prioritisation survived 129 while keeping it failed at 9. Not a load threshold, not a thread count, not a retry — the tests simply stopped timing something the scheduler never promised to deliver, which is §3.2's and T-383's rule (*a test may not bound a quantity whose natural range it has not measured*). The test manifests set `nice = Some(0)`, not `None`, so the host still calls `setpriority` and that path stays exercised; the shipped manifests are untouched.
 
-**If you hit one of these two names failing (or missing) in a full-gate run: it is not your bug, move on.** If you find a *different* load-sensitive failure, it is not automatically part of this set — add it here only with its own isolation-vs-load measurement, the same way these two were established; a suspicion is not evidence. And don't quarantine a test that turned out to be a real, fixed defect (e.g. `tests/e2e/tests/app-trace.e2e.mjs`, `surface-region.e2e.mjs`) — quarantining a fixed test would hide a regression instead of hiding a runner artifact.
+**The product finding this leaves behind, which is not a test problem:** a decoder nice'd to 10 on a busy machine really can be starved for 30 s, and the host's own 10 s `stall_timeout` would kill and restart a perfectly healthy plugin for it. That needs its own ticket.
+
+**Rules for the next entry here (T-436, T-383).** A cap or a skip makes a defect rarer or invisible, not fixed. So a quarantine is `#[ignore]` with its measurement and its owning ticket inline, never a deletion, a looser bound or a new `heavy-serial` member; each stays runnable by the exact command in its own `#[ignore = "…"]` message. Add a test here only with its own isolation-vs-load measurement — a suspicion is not evidence — and never quarantine a test that turned out to be a real, fixed defect (e.g. `tests/e2e/tests/app-trace.e2e.mjs`, `surface-region.e2e.mjs`), which would hide a regression instead of a runner artifact.
 
 ## 4. From a use-case ID to tests
 
