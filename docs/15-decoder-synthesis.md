@@ -101,3 +101,22 @@ Refinements from live testing — architectural direction for MAUTO + the data m
 ## Pending user sign-off: time-bounded signals and a view-scoped inventory (2026-09-16)
 
 User direction from live Explore testing: the inventory answers "what has EVER been seen here" but is presented as "what is here NOW", so dead signals pile up as live candidates. The reframe - signals as time-bounded events (bursts and chirps first-class, no carrier or stable frequency required), Explore scoped to the viewed waterfall window with scrub-back over the IQ ring, and the all-time catalogue moved to a separate history surface - is **designed under T-253 and awaits the user's sign-off. Do not implement it from this note.**
+
+## 11. Decoder coverage: GNU Radio as the reference set (2026-09-20, from the user)
+
+Direction, not a plan to execute: **[docs/18](18-decoder-coverage.md)**.
+
+> "We expect to support many more demod/decode types. Target the whole suite of GNU Radio decoders
+> as the reference set (we can use their code as reference). Per ADR-0010 GPLv3 GNU Radio code
+> stays behind the plugin process boundary."
+
+What it changes about this document: §4's **template library** stops being a handful of built-ins
+for the shipped recipes and becomes the main vehicle for coverage — for every protocol the existing
+block catalogue can already express, adding support is template authoring, not engineering, and each
+template is also a search seed. §6's "what it reuses" gains a fourth entry: the reference set itself,
+read as a specification corpus. And §8's non-goals gain a distinction: a structure with **no block**
+(OFDM, DSSS, CSS, QAM) is a coverage-roadmap item with an owner, not a permanent exclusion.
+
+Tickets: T-551 (per-family disposition audit + the hk-blocks catalogue gap list), T-552 (the
+"reference" licence rule — the user's decision), T-553 (spike: what wrapping one real GNU Radio OOT
+actually costs), T-554 (how a protocol crosses the licence boundary as template *parameters*).

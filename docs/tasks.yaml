@@ -16295,6 +16295,568 @@ tasks:
       two-instant capture and its own tie-break; T-478's live-edge drift, whose first fix was
       backwards). Quarantining a fixed test would hide a regression.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-544
+    milestone: MAUTO
+    title: 'MAUTO-RESEARCH: does the evidence-bits ladder survive 8-bit quantisation and gain state? Measure the calibrated nulls before any block implements evidence()'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: []
+    use_cases: [RESEARCH-001, RESEARCH-008, SIGNAL-052]
+    acceptance: |
+      RESEARCH / MEASUREMENT ONLY. No hk-synth code, no Block::evidence implementation - this
+      ticket exists to find out whether the thing the engine tickets are about to build rests on
+      a true assumption.
+      THE ASSUMPTION. ADR-0015 section 1.3 makes every stage comparable by converting each stage
+      metric to SIGNIFICANCE BITS AGAINST A NULL, and section 2.2 admits the load-bearing part:
+      sync excess, CRC width and field fit have ANALYTIC nulls, but bimodality, eye openness,
+      EVM and SNR have only CALIBRATED ones - quantile tables of `raw` under noise and under a
+      mismatched-parameter hypothesis, shipped per block version as
+      synth/calibration/<block>.json. The ADR then states, in one line and without measurement:
+      "Whether these tails are stable enough across 8-bit quantisation and gain states is
+      UNVERIFIED; M-2 measures it."
+      WHY IT CANNOT WAIT FOR M-2. If those tails move with LNA/VGA/amp state or with the ci8
+      clipping fraction, then bits from S0-S3 are not comparable with bits from S4-S6, the
+      12-bit caps and 6-bit floors are arbitrary, the look-elsewhere subtraction is applied to a
+      quantity that is not a log-probability, and the 64-bit confirm threshold (T-545) means
+      nothing. Every one of those is baked into the search engine and the /api/analyze contract.
+      Discovering it inside M-2 means rebuilding M-2, M-3, M-7 and M-9.
+      WHAT TO MEASURE, on the existing M1 blocks - no new block contract is needed, the metrics
+      already exist as Status fields and diagnostics:
+      1. Per metric in ADR-0015's MetricId set that has NO analytic null (bimodality, eye_open,
+         timing_var, evm, snr, line_violations, bit_structure): sample the raw metric over >= 1000
+         windows of pure noise at each of a grid of gain states and input levels, and fit the
+         upper tail. Report whether one quantile table serves every gain state, or whether the
+         table must be conditioned on gain / clip fraction / measured SNR.
+      2. The same under the MISMATCHED-PARAMETER null (right block, wrong symbol rate / wrong
+         deviation / wrong centre), which is the null the search actually faces - a wrong
+         hypothesis is not noise, and a wrong-rate clock recovery can look locked.
+      3. The 8-bit question specifically: compare float IQ against ci8 at 3 clipping fractions.
+         The HackRF is 8-bit with no preselector; if quantisation alone shifts the tail by more
+         than the 6-bit floor, say so.
+      4. Real data, not only synthetic: at least one real capture (fixtures/hackrf, the FM
+         capture) run through the same measurement, since synthetic noise is the friendliest
+         possible null.
+      DoD: a findings section in docs/15 or a new docs/adr/0015 amendment stating, per metric,
+      (a) whether a fixed calibration table is valid, (b) what it must be conditioned on if not,
+      (c) the measured spread, and (d) a GO / CONDITIONAL / NO-GO on the bits formulation as
+      specified. A NO-GO is a legitimate and useful outcome - it is far cheaper here than in M-9.
+      If it is CONDITIONAL, name the conditioning key so M-2 builds it in rather than retrofits it.
+    notes: |
+      Filed 2026-09-20 by the MAUTO design/research track. HIGH because it gates the honesty of
+      every number the engine reports, and because it is cheap now and expensive later.
+      Nothing here needs hk-synth to exist. The metrics are already computed by M1 blocks; this
+      is a measurement harness over them plus a write-up.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-545
+    milestone: MAUTO
+    title: 'MAUTO-DESIGN: derive the confirm-by-decode thresholds from a stated false-confirm budget, instead of the guessed 64 bits / 3 frames / width 16'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: []
+    use_cases: [SIGNAL-001, SIGNAL-062, RESEARCH-009]
+    core_interface: true
+    acceptance: |
+      DESIGN / ANALYSIS ONLY. No code.
+      THE PROBLEM. ADR-0015 section 5.5 confirms a candidate when hold-out evidence >= 64 bits
+      after look-elsewhere, >= 3 distinct valid frames, and check width >= 16 (or BCH >= 10
+      parity bits over >= 8 codewords). Section 7 calls every threshold in the ADR an
+      "initial guess, UNVERIFIED". Those two facts sit badly next to a third one from section
+      11.5 and docs/07: NO RULE DEMOTES. `change_emitter_lifecycle` forbids a return to
+      candidate, so only a user ever undoes a confirmation. A guessed threshold on a ONE-WAY
+      DOOR is the wrong shape of decision.
+      WHAT A FALSE CONFIRM COSTS, stated rather than assumed. The product's claim is that a
+      Confirmed emitter is a VERIFIED REAL EMITTER carrying a real decode, and that the known-
+      signal database never overrides what was measured. A false confirm therefore does not just
+      add a wrong row: it manufactures a measurement-backed fact that outranks the database, it
+      is permanent, it seeds a C18 signature proposal and a C15 decoder-rank-1 classification
+      row (section 4.2 feedback), and it can become a discovered TEMPLATE that then biases later
+      searches. The blast radius is the reason to derive the number.
+      WHAT TO DERIVE. Start from an explicit budget - e.g. "at most one false confirm per N
+      hours of unattended operation across the expected hypothesis count" - and work back to the
+      bits threshold analytically, using the same look-elsewhere accounting the engine uses
+      (L_j = log2 hypotheses evaluated). Cover:
+      1. The hypothesis count actually reachable: quick/standard/deep profiles x beam width x
+         proposal operators (assist.codes alone can try 10^4 CRC hypotheses).
+      2. Whether look-elsewhere as specified (log2 of hypotheses tried IN THIS JOB) is the right
+         correction when jobs repeat: 100 analyze jobs on noise is 100 independent chances, and
+         section 7's negative protocol only asserts 200 noise windows at `deep` give 0 solved.
+         Say whether a per-job correction needs a per-emitter or per-session one beside it.
+      3. The interaction with T-210's rule that FEC-CORRECTED frames are never CRC-valid
+         evidence, and with a check width that was SEARCHED rather than template-fixed (a found
+         CRC-16 is weaker evidence than a specified one, and assist::codes already models the
+         chance factor).
+      4. Whether the asymmetry is right: an unattended auto-confirm and a user-triggered analyze
+         confirm need not share a threshold.
+      DoD: an ADR-0015 amendment replacing the guessed constants with derived ones, each with
+      the budget assumption it came from, and stating what the residual false-confirm rate is at
+      the chosen numbers. If the honest answer is that the numbers cannot be derived without
+      T-544's calibration, say so and record the dependency rather than inventing a figure.
+    notes: |
+      Filed 2026-09-20 by the MAUTO design/research track. HIGH: it is a core_interface constant
+      on an irreversible transition, and the engine tickets bake it into ConfirmPolicy.
+      Reads on T-544: bits that are not calibrated cannot be thresholded. Not a hard dep - the
+      derivation can be written conditionally - but the final numbers need it.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-546
+    milestone: MAUTO
+    title: 'MAUTO-DESIGN: the search trace - what the engine tried, what it pruned and why, so the decision tree is inspectable rather than a black box'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: []
+    use_cases: [RESEARCH-001, RESEARCH-003, RESEARCH-006]
+    core_interface: true
+    acceptance: |
+      DESIGN ONLY. No code. An ADR-0015 amendment plus the docs/api.md delta LISTED (not written).
+      THE GAP. ADR-0015 reports the WINNER well - PipelineResult carries a full stage ladder with
+      per-stage metric, raw value, support n, bits and quality, and section 3.4 gives ranked
+      partial results with backend-rendered summaries. What it does not report is the SEARCH: the
+      beam keeps only "the best pruned node" as a partial result, `progress` carries bare counts
+      (stage_max, beam, pruned, deferred), and everything else the engine considered and rejected
+      is discarded. So the system can answer "here is FSK at 4800 Bd" but not "why not PSK", and
+      it cannot show that it looked at all.
+      WHY THIS IS A PRODUCT REQUIREMENT, NOT A NICETY. CLAUDE.md's vision is RANKED, REASONED
+      SUGGESTIONS and explanations that are never a source of truth; docs/17 and ADR-0016 make
+      an honest `unknown` a first-class output; the UI rule is that the front end never implies
+      detail it cannot deliver. A search that returns one confident answer with no visible
+      alternatives is exactly the failure mode those rules exist to prevent - and it is worse
+      here than in classification, because the search ACTIVELY CHOSE not to look somewhere.
+      "Grey = genuinely unobserved" has a direct analogue: a family that was DEFERRED for budget
+      is not the same as a family that was TRIED AND FAILED, and the two must not read alike.
+      WHAT TO SPECIFY:
+      1. A bounded `SearchTrace` object: per stage, the alternatives considered, each with the
+         reason it left the beam - `pruned_floor` (b_j below floor_j, with the measured bits),
+         `pruned_bound` (optimistic bound below best), `deferred_prior` (posterior < 0.02),
+         `deferred_budget` (queue never reached), `unsupported` (no block exists - the OFDM /
+         DSSS / CSS / PSK case, section 8), `evaluated_worse`. Bounded means bounded: say the cap
+         and what falls off it, because an unbounded trace is a memory leak on a handheld.
+      2. The distinction that must survive to the UI: NOT TRIED (budget, no block) vs TRIED AND
+         REJECTED (measured bits below floor). A verdict of `energy` because the beam never got
+         past S0 is a different statement from `energy` because every S1 family measured below
+         its floor, and a user deciding whether to spend a `deep` budget needs to know which.
+      3. Where it lives: on AnalyzeJob, on the stream (a `trace` record or an extension of
+         `progress`), or fetched separately; and whether it survives into `emitter_synthesis` /
+         the CandidatePipeline row or is job-lifetime only.
+      4. Determinism. Beam search with memoisation is deterministic by choice (ADR-0015 Options);
+         state whether a trace is replayable - same window, same seeds, same tree - because a
+         trace that cannot be reproduced cannot be argued with.
+      5. What it must NOT become: a per-evaluation log. The engine may run thousands of
+         evaluations under `deep`; the trace is a summary of the DECISIONS, not of the work.
+      DoD: the amendment, a sketched JSON shape, the cap, the api.md/stream-contract deltas
+      listed, and one worked example - a real signal where the second-ranked structure was a
+      near miss, written out as the user would read it.
+    notes: |
+      Filed 2026-09-20 by the MAUTO design/research track. Flagged in that work as MISSING from
+      the ADR-0015 section 10 engine sketch: M-3 builds the beam and M-8/M-11 surface results,
+      but no ticket owns the record of what was rejected. It is much cheaper to specify before
+      M-3 than to retrofit onto a beam that has already thrown the information away.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-547
+    milestone: MAUTO
+    title: 'MAUTO-DESIGN: how an unknown stays unknown - the negative-result contract when the search finds nothing, and the guard against a search that always finds something'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: []
+    use_cases: [RESEARCH-001, RESEARCH-013, SIGNAL-052]
+    core_interface: true
+    acceptance: |
+      DESIGN ONLY. No code. ADR-0015 amendment; docs/07 delta listed.
+      THE TWO FAILURE DIRECTIONS, and the ADR only guards one.
+      GUARDED: priors starving the open search. Section 4.2 reserves >= max(P(unknown), 0.2) of
+      the budget for open skeletons and DEFERS rather than deletes low-posterior families.
+      NOT GUARDED, except by one acceptance number: a large enough search ALWAYS FINDS SOMETHING.
+      Section 7's over-claim floor ("the verdict is above truth in <= 1 % of cases") is a
+      measurement of the failure, not a mechanism against it. The only mechanism is the
+      look-elsewhere subtraction, and T-544 questions whether the quantity being subtracted from
+      is a log-probability at all.
+      THE PRODUCT STAKE. CLAUDE.md: unknown signals are THE PRIORITY to surface and catalogue.
+      An engine that converts unknowns into plausible-looking wrong answers does not merely fail
+      to help - it destroys the thing the product is for, and it does so invisibly, because a
+      wrong `framed` verdict looks exactly like a right one.
+      WHAT TO SPECIFY:
+      1. UNKNOWN AS A POSITIVE, DURABLE FINDING. Today a job that solves nothing leaves ranked
+         partials and an `emitter_synthesis` row. Specify what it means to record "this was
+         analysed at `deep` with the full skeleton set and did not frame" as an ASSERTION about
+         the signal, with its budget, its skeleton coverage and its date - so a second look knows
+         what the first one already ruled out, and so the inventory can show a genuinely
+         characterised unknown rather than an un-analysed one. This is the decode-side analogue
+         of the coverage map: not-yet-looked and looked-and-found-nothing are different states.
+      2. THE STRUCTURED-BUT-UNIDENTIFIED CASE, which is the interesting one and the one the
+         product should be proud of: framed, CRC-16 valid, payload entropy 7.9 bits/byte.
+         Section 8 says such a signal is "characterised and left there" - specify what that
+         characterisation IS as an object, since it is a real result and should rank, display
+         and persist like one.
+      3. THE UNSUPPORTED-STRUCTURE CASE. OFDM, DSSS, CSS and QAM have no blocks (section 8).
+         Specify that a verdict reason of `unsupported-structure` is distinguishable from
+         `searched-and-failed`, and that it names WHICH structure was suspected - otherwise the
+         absence of a LoRa decode reads identically to a LoRa signal that was decoded as noise.
+         Cross-reference the block-catalogue gap list from T-551.
+      4. THE RE-ANALYSIS RULE. CLAUDE.md's invariant: overlap is an error signal that triggers
+         re-analysis. State when an unknown result is re-tried (more budget, better SNR, longer
+         window, a new template, a new block) and when re-trying is just burning battery.
+      5. THE OVER-CLAIM MECHANISM, not only its measurement: what in the engine actively
+         prevents a deep search from manufacturing a verdict, beyond the look-elsewhere term.
+         Candidates to evaluate: a hold-out that must independently reach the same structure; a
+         randomised-null control run inside the job; a verdict ceiling tied to the hypothesis
+         count actually spent.
+      DoD: the amendment with the object shapes sketched, the docs/07 delta listed, and a stated
+      position on (5) - including "no additional mechanism, the look-elsewhere term is enough,
+      here is why", if that is the honest conclusion.
+    notes: |
+      Filed 2026-09-20 by the MAUTO design/research track. Directly serves the CLAUDE.md
+      invariant that unknown signals are the priority, and the docs/17 open-set work.
+      Pairs with T-546: the trace says what was tried, this says what the result MEANS when
+      nothing won.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-548
+    milestone: MAUTO
+    title: 'MAUTO-DESIGN: the acceptance-fixture corpus spec for the blind synthesis suite - written and frozen BEFORE the engine exists, because thresholds may not be tuned to results'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: []
+    use_cases: [SIGNAL-062, SIGNAL-001, SIGNAL-052, RESEARCH-002]
+    acceptance: |
+      DESIGN / SPEC ONLY. No generator code, no test code - the build is the engine set's M-12.
+      WHY A SEPARATE TICKET. ADR-0015 section 7 already states the rule that makes this
+      necessary: "All thresholds are fixed BEFORE implementation. The M-12 review may tighten
+      them, never loosen them after seeing results." A rule like that is only enforceable if the
+      fixtures and the thresholds are written down somewhere other than the head of the person
+      implementing the engine. Filing it as part of M-12 means the same agent that measures the
+      engine also chooses what counts as passing.
+      WHAT THE SPEC MUST PIN DOWN, extending section 7's table rather than restating it:
+      1. THE CORPUS. Per scene: the protocol, how it is generated (real capture, existing
+         synthetic from py/hkpy.synth, new generator), SNR points, CFO, symbol rate, sync word,
+         check polynomial, burst structure, and the hidden `hackriff:truth` annotation it
+         carries. The blind rule from CLAUDE.md applies without exception: truth is loaded ONLY
+         by the assert harness, targets come from blind detection, and no test may look a
+         frequency up and tune there.
+      2. THE GENERIC SWEEP. Section 7's generic FSK/OOK sweep (300 Bd - 50 kBd, random 16-32 bit
+         sync, RevEng-catalogue CRC-8/16, SNR 6/10/20 dB, CFO +/- 0.2 x bandwidth) is the only
+         row that measures REAL synthesis rather than template lookup. Specify its parameter
+         grid exactly, its seed policy (reproducible, and how many draws before a pass rate is
+         meaningful - docs/17 / T-428 measured a draw sd of 0.0084 on a comparable figure and
+         that lesson should not be relearned), and how the pass rate is reported with a spread
+         rather than a point.
+      3. THE NEGATIVES, which are the half that protects the product: noise, CW, analog FM
+         voice, synthetic OFDM (no blocks exist), and - added here - a signal whose CRC is a
+         RANDOM POLYNOMIAL not in the catalogue, and a structured-but-encrypted payload. Assert
+         0 solved, 0 confirmations, 0 created emitters. The over-claim floor (<= 1 %) needs a
+         stated number of trials to be a real bound.
+      4. TEMPLATES-ON VS TEMPLATES-OFF. Every scene runs both. Specify that the two are reported
+         SEPARATELY and never averaged, because templates-on measures the library and
+         templates-off measures the engine, and a strong library can hide a weak search.
+      5. WHAT EXISTS ALREADY vs what must be built: the FM/RDS capture, the T-095 POCSAG net,
+         the T-098 ACARS synthetic and the SIGNAL-001 squitter scene are in the repo; name which
+         rows need a new generator so M-12 is sized honestly.
+      6. FIXTURE PROVENANCE AND SIZE. SigMF plus `hackriff:truth` per docs/sigmf-extension.md;
+         small fixtures in fixtures/ (LFS), large ones external; every real capture records its
+         gain state and antenna per CLAUDE.md.
+      DoD: a spec section (docs/15 or docs/10) listing every scene, its truth, its threshold and
+      its trial count, signed off as frozen, with the not-yet-generatable rows flagged. A
+      threshold that cannot be justified before seeing results should be recorded as a
+      MEASUREMENT to report rather than a bar to pass.
+    notes: |
+      Filed 2026-09-20 by the MAUTO design/research track. The value is entirely in the
+      ORDERING - this is cheap, and it is worthless if written after M-12 runs.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-549
+    milestone: MAUTO
+    title: 'MAUTO-RESEARCH: measure what one candidate evaluation actually costs on the M1 blocks, before quick/standard/deep are frozen into the /api/analyze contract'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: sonnet
+    depends_on: []
+    use_cases: [RESEARCH-001, SIGNAL-052]
+    acceptance: |
+      RESEARCH / MEASUREMENT ONLY. No hk-synth, no search engine.
+      THE ASSUMPTION. ADR-0015 section 3.3 defines three budget profiles - `quick` 3 s wall / 3 s
+      CPU / 1 thread, `standard` 20 s / 40 s / 2, `deep` 120 s / 400 s / 4 - and says plainly:
+      "The numbers are UNVERIFIED GUESSES, measured in M-3 on the Mac and later on the Jetson."
+      Those three names then appear in the PUBLIC API as the `profile` parameter of
+      POST /api/analyze, in the power policy (battery refuses `deep`, low allows only `quick`)
+      and in the 503-busy queue depth. Names in a contract are cheap to change before the
+      contract ships and expensive after.
+      WHAT TO MEASURE, using blocks that already exist:
+      1. The cost of running a recipe PREFIX over a fixed window, per stage, on real hardware:
+         S0 channelise, S1 demod (each family), S2 clock recovery, S3 slice, S4 sync search,
+         S5 check, S6 fields. Report per-second-of-IQ cost at representative channel rates.
+      2. The MEMOISATION payoff the design leans on: how much of a prefix evaluation is the new
+         stage versus the re-run tail, since ADR-0015's beam only pays for the new stage. If the
+         S0/S1 head dominates, the beam is much cheaper than a naive estimate; if it does not,
+         `deep` is not 4x `standard`.
+      3. The proposal operators: what a bounded assist.sync / assist.codes / assist.fields call
+         costs on real bits, since section 3.2 charges them to the job budget and assist::codes
+         can search a large catalogue.
+      4. From (1)-(3), how many EVALUATIONS each profile's wall/CPU figure actually buys, and
+         therefore how deep a beam of width 8 down 7 stages can go. Compare against the search
+         as specified. If `quick` at 3 s buys fewer evaluations than the top-2 skeletons need,
+         say so.
+      5. The constraint that binds on a handheld: what fraction of the machine this is, and
+         whether a `synth` chain at lower OS priority can be believed not to disturb the ring
+         (T-453's rule: per-arriving-row and per-job cost on the capture thread is MEASURED, not
+         assumed).
+      DoD: a measurement write-up with the numbers, on a Mac release build, and a recommendation
+      - keep the three profiles, re-baseline them, or change their shape (e.g. budget by
+      EVALUATIONS rather than wall time, which is machine-independent and is what the Jetson
+      re-run would otherwise have to redo). Jetson figures are explicitly NOT in scope.
+    notes: |
+      Filed 2026-09-20 by the MAUTO design/research track. Sonnet: well-specified measurement
+      over existing blocks with a defined output, no core interface written.
+      The point is that the profile names reach the API in the engine set's M-8; this ticket
+      wants the numbers behind them to exist first.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-550
+    milestone: MAUTO
+    title: 'MAUTO-DESIGN: consolidate the ten open ADR-0015 questions into one decision brief for the user, with a recommendation and a cost per option'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      WRITING ONLY. No code, no ADR changes until the user answers.
+      THE PROBLEM. ADR-0015 carries TEN open questions for the user, in two places nobody reads
+      together - section 10 (single-burst confirmation; budget defaults and battery; whether the
+      attention scheduler may queue analyze jobs itself; discovered-template sharing; whether to
+      add generic PSK) and section 11.10 (lazy vs eager pipeline rows; one promoted pipeline or
+      one per output_kind; artifact visibility; the 4-bit supersession margin; user-versus-decode
+      authority). Several of them decide the shape of code the engine tickets will write, and
+      all of them are currently answered by a PROPOSAL in parentheses that no one has agreed to.
+      WHAT THE BRIEF MUST DO, per question:
+      1. State it in one sentence, without ADR jargon.
+      2. Say which engine ticket is affected and HOW MUCH it costs to defer - because several of
+         these are cheap to leave open (artifact visibility is a UI default) and one or two are
+         not (whether the attention scheduler may auto-queue jobs changes the power model and
+         the 503 queue).
+      3. Give the recommendation and the reason, so the user is confirming a judgement rather
+         than doing the analysis.
+      4. Flag the ones that DUPLICATE an ADR-0016 open question (user-versus-decode authority is
+         explicitly the same call as ADR-0016 open question 3) so they are answered once.
+      SEPARATE THE TWO KINDS. Some are genuine product calls only the user can make
+      (single-burst auto-confirm; whether deep search is allowed on battery; auto-analyze).
+      Others are engineering defaults that were escalated because they were unverified (the
+      4-bit supersession margin, the 0.6 channel-overlap fraction) - those should be presented
+      as "measure it in T-544/T-549 unless you want to overrule", not as questions.
+      DoD: one brief in docs/planning-log.md's open-questions section or a docs/15 appendix,
+      ten questions, each with impact, cost-to-defer and a recommendation, ready to put in front
+      of the user in one sitting.
+    notes: |
+      Filed 2026-09-20 by the MAUTO design/research track. Cheap, and it unblocks the engine
+      set without adding engine work - which is exactly what a design track is for.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-551
+    milestone: MAUTO
+    title: 'DECODER COVERAGE: per-family disposition audit - for each GNU Radio decoder family, decide native recipe vs wrapped plugin vs out of reach, and produce the hk-blocks catalogue gap list'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: []
+    use_cases: [SIGNAL-015, SIGNAL-053, SIGNAL-054, SIGNAL-080, SIGNAL-034, SIGNAL-004]
+    core_interface: true
+    acceptance: |
+      DESIGN / AUDIT ONLY. No blocks, no plugins, no recipes.
+      CONTEXT. docs/18 ranks the GNU Radio decoder families by what they pay against docs/05 and
+      the HackRF's reach. This ticket turns that ranking into a DISPOSITION: per family, where
+      the capability actually lands in this codebase, and what is missing before it can.
+      THREE DISPOSITIONS, and the choice is not free:
+      - NATIVE RECIPE (hk-blocks + a recipe document): licence-clean, in-core, hot-editable,
+        usable by the MAUTO search as a skeleton, and the ONLY form the synthesis engine can
+        search over. Costs new blocks.
+      - WRAPPED PLUGIN (a subprocess behind hk-plugins, ADR-0003/ADR-0010): cheap per decoder,
+        keeps GPLv3 out of the core licence, but is OPAQUE TO THE SEARCH - a plugin is a
+        consumer, not a searchable structure - and brings a build and runtime dependency.
+      - OUT OF REACH: needs hardware the device does not have (bandwidth, frequency, coherent
+        channels), or IP the project will not touch (AMBE/IMBE vocoders, ADR-0010).
+      THE CATALOGUE GAP, which is the audit's main product. hk-blocks today registers: mix,
+      lowpass, resample, fm_demod, am_demod, fsk_demod, msk_demod, ppm_demod, subcarrier,
+      clock_recovery, slicer, diff_decode, nrzi, manchester, sync_search, deframe, interleave,
+      deinterleave, assemble, length, crc, bch, parity, checksum, fields, text, consensus,
+      follow_hops, identity. That set reaches 2-FSK/GFSK/MSK/OOK/PPM framed protocols with
+      CRC/BCH - and stops. Name, per family, the blocks that would be needed, at minimum:
+      PSK/Costas (ADR-0015 already carries this as the optional M-14 and it is too narrow on its
+      own), QAM, OFDM, DSSS, CSS/chirp, convolutional + Viterbi, Reed-Solomon, LDPC, turbo,
+      scrambler/descrambler, SSB/CW demod (still `legacy` in the Listen path, ADR-0015 section
+      12.5), and any vocoder boundary. For each: which families it unlocks, rough cost, and
+      whether it is additive to the ADR-0011 section 1.5 catalogue or a contract change.
+      ALSO REQUIRED:
+      - Every disposition names the docs/05 use-case IDs it serves, so the ranking is checkable.
+      - The HONEST EXCLUSIONS: families the 1 MHz - 6 GHz / ~20 Msps / 8-bit / no-preselector
+        front end cannot serve, said plainly rather than left implied.
+      - The ADS-B / pagers / radiosondes point, explicitly: those are the WELL-KNOWN cases and
+        already largely covered (readsb plugin, POCSAG and ADS-B recipes). A coverage roadmap
+        that spends itself on them has missed the target.
+      DoD: a disposition table in docs/18, an ADR-0011 catalogue-delta list ready to become
+      tickets, and a stated ordering of which blocks to add first. No block is implemented here.
+    notes: |
+      Filed 2026-09-20 with docs/18 (decoder coverage direction), from the user's direction:
+      "target the whole suite of GNU Radio decoders as the reference set". This is the ticket
+      that makes that direction actionable without committing to any of it.
+      core_interface because the catalogue delta lands in ADR-0011.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-552
+    milestone: MAUTO
+    title: 'DECISION (user): the reference rule - what reading GPLv3 decoder source to understand an algorithm permits, and where independent reimplementation stops being independent'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: []
+    use_cases: []
+    core_interface: true
+    acceptance: |
+      DECISION ONLY. No code. The user's call; this ticket prepares it and records the answer.
+      WHY IT IS BLOCKING-SHAPED, not academic. The user's direction is to treat GNU Radio's
+      decoders as the REFERENCE SET and "use their code as reference". ADR-0010 is unambiguous
+      about the other half: GPLv3 code stays behind the plugin process boundary, never linked.
+      But the disposition audit (T-551) will conclude that the highest-value families want
+      NATIVE hk-blocks recipes, not plugins - because only native structures are searchable by
+      MAUTO. So the question "what may an implementer take from reading gr-lora_sdr before
+      writing hk-blocks' chirp demodulator" is on the critical path of the coverage roadmap, not
+      beside it. It is also a question about how AGENTS are briefed, since an agent that reads a
+      GPLv3 file into context and then writes a block has done something different from an agent
+      that read a specification.
+      docs/18 section 4 proposes a rule. This ticket puts it to the user, records the decision,
+      and makes it enforceable:
+      1. Get an explicit yes / no / amended on the proposed rule.
+      2. Record it where it BINDS - ADR-0010 is the licence ADR and the natural home; CLAUDE.md
+         if it must reach every agent brief.
+      3. Specify what an implementing task must record: per block, what its algorithm was derived
+         from (a published specification, a standards document, a paper, a clean-room
+         description, or GPL source) and by whom. The ADR-0010 ledger already does this for
+         DEPENDENCIES; the same discipline for DERIVATION costs one line per block and is the
+         only durable evidence of provenance. Note the precedent already in the ledger, where
+         T-012 records "redsea (MIT) and py/fixtures/rds_ref.py were references only, no code
+         copied" and T-013 records CRC parameters taken from the RevEng catalogue as
+         "parameters only, no code copied".
+      4. State what the rule does NOT cover, so it is not over-read: it is a working rule for
+         this project, not legal advice, and the project licence itself remains undecided
+         (CLAUDE.md).
+      DoD: the user's decision recorded in ADR-0010 (or CLAUDE.md), and the per-block derivation
+      field specified for implementing tasks to fill.
+    notes: |
+      Filed 2026-09-20 with docs/18. HIGH because T-551's native dispositions and every
+      subsequent block ticket depend on the answer, and because getting it wrong is not the kind
+      of mistake that surfaces in a test.
+      Deliberately NOT marked `blocked`: the brief can be written and the rule proposed without
+      the user (CLAUDE.md - `blocked` is a checkable claim about the world, not a parking state).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-553
+    milestone: MAUTO
+    title: 'DECODER COVERAGE (spike): wrap ONE real GNU Radio OOT decoder end to end and measure what a wrapped decoder actually costs - build, footprint, latency, manifest work'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: []
+    use_cases: [SIGNAL-034, SIGNAL-053]
+    acceptance: |
+      SPIKE. Throwaway, in spikes/, not product code, not merged into plugins/.
+      THE QUESTION. docs/18 argues that a wrapped subprocess is the cheap disposition for a
+      GNU Radio decoder and the only one ADR-0010 permits for GPLv3 code. "Cheap" is an
+      estimate. readsb is the worked example in the repo (plugins/readsb + hk-plugin-readsb) and
+      it is NOT REPRESENTATIVE: readsb is a self-contained C program that reads UC8 on stdin.
+      A GNU Radio OOT is a different animal - it drags in the GNU Radio runtime, its scheduler,
+      a Python interpreter for the flowgraph and bindings, VOLK (itself GPLv3), and a build
+      toolchain that must exist on the Jetson as well as the Mac.
+      WHAT TO MEASURE, on ONE decoder chosen for representativeness (gr-satellites and
+      gr-lora_sdr are the obvious candidates - both actively maintained, both with real use
+      cases in docs/05, and between them they cover the Python-flowgraph and C++-block styles):
+      1. BUILD: what it takes to get it running at all, on the Mac and - at least assessed, if
+         not run - on aarch64/JetPack. Record the dependency closure and its total size. The
+         answer "this is not practical to ship on a handheld" is a valid and valuable result.
+      2. THE WIRE CONTRACT: a manifest per plugins/README.md, IQ in on stdin at a channel rate,
+         NDJSON decode lines out. What does the adapter have to do that hk-plugin-readsb does
+         not? Specifically: sample format conversion, the ready signal, and re-stamping
+         timestamps from host sample indices rather than the flowgraph's wall clock (the C22
+         card's known pitfall).
+      3. RUNTIME FOOTPRINT: RSS, CPU at a representative channel rate, start-up latency to first
+         decode (readsb's is 1.6 s under load, T-223, and the ready_timeout is set from it), and
+         behaviour on kill/restart under the host's supervision.
+      4. THE PER-DECODER COST, stated as a number: hours to wrap the SECOND one, once this one
+         has established the pattern. That figure is what docs/18's roadmap is priced in and it
+         is currently a guess.
+      5. THE HONEST NEGATIVE: whether a shared "GNU Radio host" plugin that loads different
+         flowgraphs amortises the runtime cost across decoders, or whether per-decoder processes
+         are unavoidable. This changes the roadmap's slope, not just its intercept.
+      CONSTRAINTS: GPLv3 stays in the subprocess (ADR-0010); nothing is linked into the core;
+      add the wrapped tool and every new dependency to the ADR-0010 ledger with its licence even
+      for a spike, per the project's standing rule.
+      DoD: a spike write-up with the numbers and a recommendation on whether wrapped GNU Radio
+      decoders belong in the product at all, or whether the reference set is best used as a
+      SPECIFICATION source (T-552) with native recipes.
+    notes: |
+      Filed 2026-09-20 with docs/18. This is the ticket that makes the coverage direction honest
+      - the whole roadmap rests on a per-decoder wrapping cost that nobody has measured.
+      A negative result is a good outcome and should be written up as one.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-554
+    milestone: MAUTO
+    title: 'DECODER COVERAGE: how a protocol crosses the licence boundary as PARAMETERS - the GNU-Radio-informed template, so the reference set grows the MAUTO library without copying code'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: []
+    use_cases: [SIGNAL-053, SIGNAL-049, RESEARCH-002]
+    core_interface: true
+    acceptance: |
+      DESIGN ONLY. No code, no template files.
+      THE IDEA. ADR-0015 section 4 already has the object that makes the reference set useful
+      without touching its code: a TEMPLATE is a recipe or skeleton reference plus free-parameter
+      ranges, measured-parameter priors and plausibility checks. It contains modulation family,
+      symbol-rate ranges, sync words, check polynomials and expected bands - PROTOCOL FACTS, not
+      implementation. Those facts are in every GNU Radio decoder, and in the specifications those
+      decoders were themselves written from.
+      That is the clean bridge, and it is worth designing deliberately rather than falling into:
+      a template is DATA about a protocol, a block is CODE, and the licence question is entirely
+      about the second. It is also the disposition that scales - a template is hours, a block is
+      days, a wrapped plugin is a dependency forever.
+      WHAT TO SPECIFY:
+      1. THE PROVENANCE FIELD a template must carry. ADR-0015 section 4.1 has
+         provenance: builtin | user | discovered. Add the SOURCE of the protocol facts - a
+         standards document, a published specification, a wiki (sigidwiki), a paper, or "read
+         from a GPLv3 decoder" - which is exactly the derivation discipline T-552 is deciding.
+         A template whose parameters came from reading source must say so.
+      2. THE LINE, drawn precisely. A sync word is a published protocol constant and a fact
+         about the air interface; a CRC polynomial likewise; a field map is a fact about the
+         message format. A hand-tuned loop bandwidth, a filter tap set or a state machine is
+         implementation. Say where the line falls for each of ADR-0015's template fields, and
+         say what to do with the awkward middle (a symbol-rate range that is a tolerance someone
+         chose, not a spec number).
+      3. WHAT A TEMPLATE CAN AND CANNOT DO, restated because it is the safeguard: priors order
+         the search and NEVER rank a result or confirm one (ADR-0015 sections 1.3, 4.1); a
+         template can never confirm a signal on its own; bands only raise rank for an emitter
+         ALREADY DETECTED there. So a template imported from a reference decoder cannot make the
+         system claim something it did not measure - which is what makes this import safe in a
+         way that importing a decoder would not be.
+      4. THE BULK PATH. If the reference set is hundreds of protocols, say whether templates are
+         hand-written one at a time, generated from a structured source (rtl_433's device
+         definitions and the sigidwiki are candidate corpora with their own licences - check
+         them), or grown by the user through save-as-template (section 4.3). Include the
+         licence of any corpus proposed, per ADR-0010's ledger rule.
+      5. THE TEST. A template's parameters are a claim about the world and can be WRONG. Specify
+         how a template is validated - against a fixture, or by never being trusted, which is
+         already the design's position.
+      DoD: an ADR-0015 section 4 amendment with the provenance field, the fact/implementation
+      line stated per field, and a position on bulk import with its licence check.
+    notes: |
+      Filed 2026-09-20 with docs/18. This is the highest-leverage part of the coverage
+      direction: it converts "support many more decode types" from a per-decoder engineering
+      cost into a data-entry cost, for every protocol whose structure the existing block
+      catalogue can already express.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
