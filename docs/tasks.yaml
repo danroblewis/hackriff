@@ -17055,7 +17055,7 @@ tasks:
   - id: T-553
     milestone: MAUTO
     title: 'MAUTO-DESIGN: consolidate the ten open ADR-0015 questions into one decision brief for the user, with a recommendation and a cost per option'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -17092,6 +17092,31 @@ tasks:
       Filed 2026-09-20 by the MAUTO design/research track. Cheap, and it unblocks the engine
       set without adding engine work - which is exactly what a design track is for.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      Done 2026-09-20 on branch task-t553. Brief is `docs/20-mauto-decision-brief.md` (19 was taken
+      by the BART doc); indexed in docs/README.md; all three ADR-0015 open-question lists now point
+      at it. No ADR status changed, no tickets filed.
+      CORRECTION TO THE PREMISE: there are FIFTEEN open questions, not ten - the ticket counted
+      section 10 (5) and section 11.10 (5) and missed section 12.12's five (Listen retune, SSB/CW
+      blocks, keeping the legacy chain, stereo audio, promotion per output kind).
+      THE BLOCKING STRUCTURE IS SINGULAR: M-1's DoD includes "ADR-0015 -> ACCEPTED review", and an
+      ADR with open questions cannot be accepted - so every MAUTO engine ticket (M-1..M-14,
+      CP-1..CP-9, LP-1..LP-8) is downstream of this one page. There is no second blocker.
+      DISPOSITION of the fifteen: FIVE go to the user (U1 single-burst auto-confirm + the
+      false-confirm budget T-548 needs; U2 auto-analyze and deep-on-battery; U3 user-versus-decode
+      authority, merged with ADR-0016 open question 3; U4 fund PSK/SSB/CW blocks, merging section 10
+      Q5 with section 12.12 Q2; U5 stereo audio). SIX decided in the brief as engineering defaults
+      (local template files - same answer as ADR-0016 Q5; lazy pipeline rows; output_kinds as a set;
+      artifacts hidden behind the existing ?artifacts filter; retune still ends the audio stream;
+      legacy Listen chain kept). TWO of those six were the SAME question asked twice - section 11.10
+      Q2 and section 12.12 Q5 - and section 12.8 already answers both, so they are deleted rather
+      than decided. ONE (section 12.12 Q3) is a consequence of U4, not an independent question.
+      TWO sent to measurement: the 4-bit supersession margin and 0.6 overlap fraction -> T-547; the
+      quick/standard/deep budgets -> T-552.
+      RECOMMENDED ANSWERS: U1 auto-confirm only for template-fixed checks >= 24 bits, budget <= 1
+      wrong Confirmed emitter per week unattended; U2 auto-queue at `quick` only, mains only, deep
+      stays manual; U3 user wins at rank 0 with the contradiction shown; U4 fund psk_demod (M-14
+      becomes required), SSB/CW stay legacy permanently; U5 no stereo.
   - id: T-554
     milestone: MAUTO
     title: 'DECODER COVERAGE: per-family disposition audit - for each GNU Radio decoder family, decide native recipe vs wrapped plugin vs out of reach, and produce the hk-blocks catalogue gap list'
