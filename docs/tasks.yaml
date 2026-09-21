@@ -19251,33 +19251,6 @@ tasks:
       likely. A fixture whose emitter grid leaves room for the mirrors would close it.
       ASSERT WITH COUNTS AND FREQUENCIES, NOT WALL-CLOCK (user, 2026-09-21).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-600
-    milestone: M2-hardening
-    title: A resolved artefact does not rank below a clean row, because the evidence proxy counts only measured flag bits
-    status: todo
-    priority: normal
-    parallel_group: PIPE
-    model: sonnet
-    effort: low
-    depends_on: [T-598]
-    use_cases: []
-    acceptance: |
-      FOUND BY T-598. `EMITTER_DETECTION_EVIDENCE_SQL` in `crates/hk-model/src/repo/relate.rs`
-      counts only the flag bits stored ON the detection row. T-598 deliberately does NOT write to
-      that row - a detection is immutable by trigger (`detection_immutable`), because a measurement
-      is what was measured and an interpretation must not rewrite it - so the retune verdict lives
-      in `detection_retune` and is applied on the read path.
-      Consequence: a detection the system has resolved as LO-relative still ranks as though nothing
-      were known about it. Join `detection_retune.flag_bits` into the evidence proxy so a resolved
-      artefact ranks below a clean row.
-      KEEP T-598'S RULE INTACT WHILE DOING IT: read-path application, no write to the measurement.
-      The point of the split is that the measurement and the interpretation have different
-      lifetimes - the interpretation is revocable and the measurement is not.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): a resolved LO-relative detection ranks
-      strictly below an unflagged one with otherwise equal evidence, and revoking the verdict
-      restores its rank - the second half matters, because a one-way change would make the ranking
-      outlive the claim.
-      Prove the test goes RED without the fix.
   - id: T-597
     milestone: M3
     title: Nothing reports how often the psk-qam verifier actually runs, so a stage that never fires looks like one that always agrees
