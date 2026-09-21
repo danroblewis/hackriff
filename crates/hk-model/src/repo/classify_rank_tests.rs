@@ -475,8 +475,15 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
         // `emitter_observation` comes from 0001 and stays — so it needs DROP INDEX, and without it
         // replaying 0012 onto this file fails with "index ... already exists".
         // T-374: nor the 0014 harmonic-family tables (members first: they reference the family).
+        // T-598: nor the 0015 retune-verdict table (its own index and triggers go with it) and
+        // its expression index over provenance, which like 0012's is an INDEX on a table 0001
+        // creates and so needs its own DROP INDEX. 0015 also
+        // rebuilds `emitter_relation`, which 0008 recreates below it, so nothing extra is needed
+        // for that half.
         conn.execute_batch(
             "DROP INDEX IF EXISTS idx_emitter_observation_time; \
+             DROP INDEX IF EXISTS idx_provenance_tune_center; \
+             DROP TABLE IF EXISTS detection_retune; \
              DROP TABLE IF EXISTS harmonic_family_member; \
              DROP TABLE IF EXISTS harmonic_family; \
              DROP TABLE IF EXISTS emitter_relation; \
