@@ -17644,6 +17644,95 @@ tasks:
       ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): thread counts, running-chain counts,
       buffer bytes. Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-583
+    milestone: MLIVE
+    title: A coarse node trails the live edge by 2^j - 1 finest rows, because the live cascade propagates only on commit
+    status: todo
+    priority: medium
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: medium
+    depends_on: [T-571]
+    use_cases: [AWARE-011]
+    acceptance: |
+      FILED BY T-571, WHICH MEASURED IT. `Pyramid::fold_row_live` propagates a row to the level
+      above only when that level COMMITS - which is the "commits every N" rule and is what makes
+      the fold exactly-once - so a chain of in-progress rows compounds: node (i, j) trails the
+      finest closed row by up to 2^j - 1 of them, plus level 0's own still-open column. Measured
+      on the 4x4 test lattice at 1, 2 and 4 rows for level_t 1, 2 and 3; at the shipped four time
+      levels and a 1 s cell that is up to 7 s at level_t = 3.
+      Node (0, 0) - the live edge itself - is NOT affected: a direct level-0 read stands in for
+      its open column with `column_preview`. The cells are correct throughout; a partial row reads
+      as fewer observed seconds, never as wrong values. The on-demand fold it replaced had no such
+      lag, because it folded open producers on every read.
+      THE DECISION TO MAKE: whether a zoomed-out pane should see a node's in-progress row, the way
+      level 0 sees its open column. It is a product call, not an oversight - showing it means a
+      coarse cell that changes under the viewer as its remaining producer rows land. If the answer
+      is yes, the mechanism already exists (`Tile::row_pending` plus a `column_preview`-shaped
+      read); if no, the canvas should say what it is showing rather than quietly trailing.
+      Assert with COUNTS (a node's newest populated row against level 0's newest closed row),
+      never a wall-clock budget.
+  - id: T-584
+    milestone: MLIVE
+    title: Late-path frames reach level 0 only and are invisible to every coarse node under coarse_live
+    status: todo
+    priority: medium
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: medium
+    depends_on: [T-571]
+    use_cases: [AWARE-011]
+    acceptance: |
+      FILED BY T-571. A frame whose time cell has already closed takes `Tile::add_late_occupancy`,
+      which updates the level-0 cell IN PLACE. The live cascade folds a row when the row CLOSES,
+      so a late frame's contribution never reaches a coarse node - the row it belongs to was
+      folded before the frame arrived. The value is on disk at level 0 and absent from every zoom
+      above it, which is the same "present at the finest zoom, gone when you zoom out" shape T-571
+      fixed for checkpoints.
+      Two windows produce it: mild frame disorder inside a cell, and the residual T-571 documented
+      on `Pyramid::checkpoint` - a checkpoint closes the current column, so every frame arriving in
+      that same cell afterwards is late by construction. With the shipped 60 s checkpoint interval
+      over a 1 s cell, that is one cell in sixty exposed for the remainder of its second.
+      The on-demand fold did not have this, because it re-folded the open producer on every read.
+      Options: re-fold the affected row after a late update (needs a subtract-then-re-add, since
+      the cascade accumulates), accumulate late contributions into a pending delta flushed at
+      seal, or stop `checkpoint` closing the column and accept an unrecoverable in-progress column
+      on a crash. MEASURE THE SIZE FIRST with a count assertion - frames folded per node against
+      the on-demand control, with deliberate disorder in the fixture - because the answer decides
+      whether this is worth a mechanism at all.
+  - id: T-585
+    milestone: MLIVE
+    title: Coarse-tile residency is one open accumulator per node - hold committed rows encoded instead
+    status: todo
+    priority: medium
+    parallel_group: PIPE
+    core_interface: true
+    model: fable
+    effort: high
+    depends_on: [T-571]
+    use_cases: [AWARE-011]
+    acceptance: |
+      FILED BY T-571, WHOSE RESIDENCY DECISION THIS IS THE REMEDY FOR. Live maintenance means every
+      node holds an open accumulator for the tile it is filling, because THE TILE IS THE WRITE
+      UNIT: a row committed into a coarse tile must live somewhere between its commit and that
+      tile's seal, and `history::codec` has no row-granular form. Measured through a real pyramid:
+      0.91 MB/MHz on demand -> 7.76 MB/MHz at one 6.4 MHz block, ~94 MB at a 20 MHz live edge,
+      one open accumulator per node (16 nodes, 17 tiles). T-453's "residency must not grow back
+      with node count" is therefore not met, and T-571 states that rather than hiding it; the
+      reviewer accepted 94 MB as ~1.2 percent of an Orin Nano 8 GB.
+      THE FIX: hold a coarse tile's ALREADY-COMMITTED rows in their encoded form and keep only the
+      in-progress row as an accumulator - measured at ~3.5 B/cell on disk against 44 B/cell
+      resident, about 13x. That makes residency O(levels) as `docs/tile-perf-review-2026-09-21.md`
+      S1 describes, and it is a stored-format change, which is why it is not in T-571.
+      The cheaper lever, worth measuring alongside: VIEW_T_CELLS_PER_BLOCK, which the settings doc
+      already names as the MEMORY knob (a shorter tile is resident for less of its life). 64 -> 16
+      is ~4x for 4x the tile files and a scheme bump, and it also raises the tiles a read consults.
+      DO NOT re-litigate the streaming design itself - a reviewer checked T-571's fold cell for
+      cell against the on-demand control across all 16 nodes and it agrees exactly. Assert
+      residency with a measured bound, as `the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs`
+      already does, never with a wall-clock budget.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

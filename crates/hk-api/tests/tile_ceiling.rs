@@ -180,18 +180,16 @@ fn the_ceiling_is_maximal_for_this_geometry() {
     let (max_f, max_t) = ceiling_of(&state, &geom);
     // The shipped geometry's answer, stated so a change to either constant is visible here.
     //
-    // **T-571 moved this from `(9, 1)` to `(10, 0)`**, and the move is the ticket's, not a
-    // regression in reach: with the coarse nodes maintained live, `materialize_cost_bound` is
-    // `Some(0)` and the FOLD budget no longer binds anywhere, so the ceiling is decided by the
-    // read-work budget alone and frequency reaches one level further. The area is identical
-    // (`level_f + level_t == 10` either way), and so is the number `readable_ceiling`'s own
-    // measurement quotes for the canvas's widest view: 6 GHz needs 4 tiles at `level_f = 10` and
-    // 8 at 9, a tens-of-minutes window needs 8 rows at `level_t = 0` and 4 at 1 — 32 tiles both
-    // ways. The tie between them is settled toward frequency, which is the documented rule.
+    // **Unchanged by T-571, deliberately.** With the coarse nodes maintained live the FOLD budget
+    // no longer binds, so the anti-diagonal reaches one level further in frequency and `(10, 0)`
+    // became an equal-area maximum alongside `(9, 1)`. `readable_ceiling` now refuses to spend a
+    // tie on an axis's last level: a `max_level` of 0 deletes that axis's ancestor ladder in the
+    // client rather than shortening it. Both pairs cost the same 32 tiles for the canvas's widest
+    // view, so nothing is given up by preferring the one that keeps both axes.
     assert_eq!(
         (max_f, max_t),
-        (10, 0),
-        "the shipped 12 x 15 lattice over a 4 x 4 store reads to (10, 0)"
+        (9, 1),
+        "the shipped 12 x 15 lattice over a 4 x 4 store reads to (9, 1)"
     );
     for (lf, lt) in [(max_f + 1, max_t), (max_f, max_t + 1)] {
         assert!(
@@ -221,7 +219,7 @@ fn the_ceiling_is_stated_for_the_routes_own_tile_unit_and_not_for_the_probes() {
     let (state, geom) = server(&dir.0, view(6250.0, 4, 4));
     let (max_f, max_t) = ceiling_of(&state, &geom);
     // Same answer whatever the probe would have cost — there is no `cells` in the computation.
-    assert_eq!((max_f, max_t), (10, 0));
+    assert_eq!((max_f, max_t), (9, 1));
     // And the bound itself really is on area: at a smaller tile the SAME address that is refused at
     // 256 is served, which is the reach a cacheable pair gives up.
     let small = |lf: usize, lt: usize| {
@@ -309,9 +307,9 @@ fn agree_over_the_whole_lattice(fl: usize, tl: usize) {
 ///
 /// **T-571 re-measured these.** With the coarse nodes maintained live the fold budget no longer
 /// binds, so the anti-diagonal is set by the read-work budget alone and frequency reaches further;
-/// the documented tie-break toward frequency then moves each box along its own anti-diagonal. The
-/// claim the ceiling makes is unchanged and is still checked below — every address inside the box
-/// is servable and one level further on either axis is refused.
+/// the tie-break then moves each box along its own anti-diagonal, stopping short of spending an
+/// axis entirely. The claim the ceiling makes is unchanged and is still checked below — every
+/// address inside the box is servable and one level further on either axis is refused.
 #[test]
 fn deeper_stores_declare_a_deeper_ceiling_that_is_true_and_maximal() {
     // One store deeper in each axis. Before T-571 these read (7, 4) and (8, 3), with the fold
@@ -323,7 +321,7 @@ fn deeper_stores_declare_a_deeper_ceiling_that_is_true_and_maximal() {
     // store a fine interior read tries every one of ~20 candidate levels, and the full walk cost
     // 118 s in debug for two stores. The shipped store's interior is still walked in full by
     // `walks_the_declared_ceiling_and_finds_no_refusal`.
-    for (fl, tl, want) in [(4, 6, (11, 1)), (5, 4, (11, 0))] {
+    for (fl, tl, want) in [(4, 6, (11, 1)), (5, 4, (10, 1))] {
         let dir = TempDir::new(&format!("deep-{fl}x{tl}"));
         let (state, geom) = server(&dir.0, view(6250.0, fl, tl));
         let (max_f, max_t) = ceiling_of(&state, &geom);

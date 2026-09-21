@@ -335,3 +335,188 @@ fn committing_a_row_writes_nothing_and_a_tile_is_still_written_once() {
     );
     assert_eq!(st.checkpoints_written, 0, "no checkpointing is configured here");
 }
+
+/// Total frames each node holds over the whole run, per node — the quantity that says whether a
+/// row reached a coarse level at all.
+fn frames_per_node(p: &Pyramid, shape: ViewLattice, secs: i64) -> Vec<u64> {
+    (0..shape.f_levels * shape.t_levels)
+        .map(|l| {
+            query(
+                p,
+                (0.0, N_BINS as f64 * BW),
+                (T0, T0 + secs * S),
+                Resolution::Level(l as u8),
+            )
+            .cells
+            .iter()
+            .map(|c| u64::from(c.frames))
+            .sum()
+        })
+        .collect()
+}
+
+/// **A checkpoint closes a time column, and that column is a finished row.**
+///
+/// It was dropped: under `coarse_live` the only two paths into the cascade are the column advance
+/// in `ingest` and the pre-seal flush, and a column closed by `checkpoint` reaches neither — the
+/// next frame finds `col_t` at `None`, and the seal's own `close_column` returns `None`. The
+/// shipped `view_config` inherits a 60 s checkpoint interval over a 1 s time cell, so it fired
+/// every sixtieth row in production, and the loss was on disk and permanent: a burst inside a
+/// dropped second is there at the finest zoom and **gone when you zoom out**.
+///
+/// Every other test in this file sets `checkpoint_interval: None`, which is exactly why none of
+/// them saw it. This one turns checkpointing on and compares every node against the on-demand
+/// control, which folds open producers and so never had the hole.
+#[test]
+fn a_checkpoint_does_not_swallow_the_row_it_closes() {
+    let secs = 600;
+    let shape = lat(46);
+    // Every 60 rows, as the shipped config does.
+    let every = Duration::from_secs(60);
+
+    let ctl_dir = TempDir::new("live-cp-ctl");
+    let mut ctl = Pyramid::open(
+        &ctl_dir.0,
+        PyramidConfig {
+            checkpoint_interval: Some(every),
+            ..on_demand(shape)
+        },
+    )
+    .unwrap();
+    run(&mut ctl, secs);
+    // **Both stores are sealed past EVERY coarse block before they are compared**, and that is
+    // load-bearing rather than tidiness. An unsealed live store is legitimately behind at each
+    // time level — the cascade commits every N, so a chain of in-progress rows lags the edge by
+    // 2^j − 1 finest rows (T-583) — while the on-demand control folds open producers and lags by
+    // nothing. Measured, that lag alone is 1, 2 and 4 rows at time levels 1, 2 and 3, which is
+    // the same shape as the defect and would mask it. Sealing well past the run ends every
+    // coarse tile's block, which flushes every pending row.
+    let flush = ts(T0 + 2048 * S);
+    ctl.seal_through(flush).unwrap();
+    let whole = FreqRange::new(0.0, N_BINS as f64 * BW);
+    let span = TimeRange::new(ts(T0), ts(T0 + secs * S));
+    for l in 0..shape.f_levels * shape.t_levels {
+        ctl.materialize(l, whole, span).unwrap();
+    }
+    let want = frames_per_node(&ctl, shape, secs);
+
+    let dir = TempDir::new("live-cp");
+    let mut p = Pyramid::open(
+        &dir.0,
+        PyramidConfig {
+            checkpoint_interval: Some(every),
+            ..cfg_for(shape)
+        },
+    )
+    .unwrap();
+    run(&mut p, secs);
+    assert!(
+        p.stats().checkpoints_written > 0,
+        "no checkpoint fired, so this test judged nothing"
+    );
+    p.seal_through(flush).unwrap();
+    let got = frames_per_node(&p, shape, secs);
+
+    println!(
+        "  {} checkpoints over {secs} rows; frames per node, control vs live:",
+        p.stats().checkpoints_written
+    );
+    let mut short = Vec::new();
+    for (l, (&w, &g)) in want.iter().zip(&got).enumerate() {
+        let (i, j) = shape.coords(l);
+        if w != g {
+            short.push(format!("({i},{j}) {g} vs {w} (short by {})", w - g));
+        }
+    }
+    println!(
+        "    node (0,0) {} / {}, node (0,1) {} / {}, nodes short: {}",
+        got[shape.index(0, 0)],
+        want[shape.index(0, 0)],
+        got[shape.index(0, 1)],
+        want[shape.index(0, 1)],
+        if short.is_empty() {
+            "none".to_string()
+        } else {
+            short.join(", ")
+        }
+    );
+    assert!(
+        want.iter().all(|&w| w > 0),
+        "the control holds nothing, so an equality below would be vacuous"
+    );
+    assert_eq!(
+        got, want,
+        "a coarse node is short of the control: a checkpoint's closed column was dropped"
+    );
+}
+
+/// **A restart must not lose the open level-0 tile from every coarse node.**
+///
+/// The reopen rebuild re-folds *sealed* children, which is everything a seal-time scheme is fed
+/// by. A live scheme is also fed by the rows of the currently open level-0 tile, and that tile
+/// comes back from its checkpoint still open. Without the refold its closed rows reach level 0
+/// and no coarser node, and the coarse tiles covering them are never written at all — at the
+/// shipped 64 x 1 s level-0 tile, up to 64 consecutive seconds of **grey over time that was
+/// observed**, which the display invariant calls a bug twice over.
+#[test]
+fn a_restart_keeps_the_open_tiles_rows_in_every_coarse_node() {
+    let secs = 600;
+    let shape = lat(47);
+    let cfg = || PyramidConfig {
+        checkpoint_interval: Some(Duration::from_secs(60)),
+        ..cfg_for(shape)
+    };
+
+    // The control is the same store WITHOUT the restart: the run is identical, so any node that
+    // differs differs because of the reopen. Both are sealed past every coarse block first, so
+    // neither carries the in-progress-row lag (T-583) that would otherwise be read as a loss.
+    let flush = ts(T0 + 2048 * S);
+    let ctl_dir = TempDir::new("live-restart-ctl");
+    let mut ctl = Pyramid::open(&ctl_dir.0, cfg()).unwrap();
+    run(&mut ctl, secs);
+    ctl.seal_through(flush).unwrap();
+    let want = frames_per_node(&ctl, shape, secs);
+
+    let dir = TempDir::new("live-restart");
+    let mut p = Pyramid::open(&dir.0, cfg()).unwrap();
+    run(&mut p, secs);
+    p.close().unwrap();
+    let mut p = Pyramid::open(&dir.0, cfg()).unwrap();
+    assert!(
+        !p.open_keys(0).is_empty(),
+        "no open level-0 tile came back from its checkpoint, so this test judged nothing"
+    );
+    p.seal_through(flush).unwrap();
+    let got = frames_per_node(&p, shape, secs);
+
+    let mut short = Vec::new();
+    for (l, (&w, &g)) in want.iter().zip(&got).enumerate() {
+        let (i, j) = shape.coords(l);
+        if w != g {
+            short.push(format!("({i},{j}) {g} vs {w}"));
+        }
+    }
+    println!(
+        "  after restart: node (0,1) {} / {}, node ({},{}) {} / {}, nodes short: {}",
+        got[shape.index(0, 1)],
+        want[shape.index(0, 1)],
+        shape.f_levels - 1,
+        shape.t_levels - 1,
+        got[shape.index(shape.f_levels - 1, shape.t_levels - 1)],
+        want[shape.index(shape.f_levels - 1, shape.t_levels - 1)],
+        if short.is_empty() {
+            "none".to_string()
+        } else {
+            short.join(", ")
+        }
+    );
+    assert!(
+        want.iter().all(|&w| w > 0),
+        "the control holds nothing, so an equality below would be vacuous"
+    );
+    assert_eq!(
+        got, want,
+        "a coarse node lost rows across the restart: the reloaded open level-0 tile was not \
+         re-folded"
+    );
+}

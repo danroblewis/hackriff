@@ -565,7 +565,8 @@ impl PyramidConfig {
         }
         if self.coarse_live && self.coarse_on_demand {
             return bad(
-                "coarse_live and coarse_on_demand are alternatives: a coarse node is either                  maintained as rows arrive or folded when a read asks for it, never both"
+                "coarse_live and coarse_on_demand are alternatives: a coarse node is either \
+                 maintained as rows arrive or folded when a read asks for it, never both"
                     .into(),
             );
         }

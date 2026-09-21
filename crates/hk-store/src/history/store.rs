@@ -970,6 +970,18 @@ impl Pyramid {
     /// accumulator per node, and **no tile is written per row**: a coarse tile is written when it
     /// seals, exactly as before, which is why the commit-every-N rule costs zero extra writes.
     ///
+    /// # How far a coarse node trails the live edge (T-583)
+    ///
+    /// The cascade propagates **on commit**, so a node that downsamples time by `2^j` from the
+    /// finest one only hears about a row once `2^j` of them have closed, and a chain of
+    /// in-progress rows compounds: node `(i, j)` trails the finest row by up to `2^j − 1` of
+    /// them, plus the finest level's own still-open column. At the shipped four time levels and a
+    /// 1 s cell that is up to **7 s** at `level_t = 3`, measured at 1, 2 and 4 rows for
+    /// `level_t` 1, 2 and 3. The cells are *correct* throughout — a partial row reads as fewer
+    /// observed seconds, never as wrong values — and node (0, 0), which is the live edge, is not
+    /// affected at all. Whether a zoomed-out pane should instead see its in-progress row is a
+    /// product decision, ticketed rather than assumed.
+    ///
     /// # Exactly once
     ///
     /// A cell of a coarse tile is written by exactly one producer tile, so the fold accumulates
@@ -978,6 +990,25 @@ impl Pyramid {
     /// each arrival re-folded the whole row upwards the level above it would count the earlier
     /// arrivals again. Carrying the footprint through the cascade folds only what just changed.
     fn fold_row_live(&mut self, level: usize, fb: i64, tb: i64, t: usize, f_lo: usize, f_hi: usize) {
+        self.fold_row_from(level, fb, tb, t, f_lo, f_hi, true);
+    }
+
+    /// [`Pyramid::fold_row_live`], with the cascade optional.
+    ///
+    /// `cascade == false` folds one step and stops, which is what the reopen rebuild wants: it
+    /// walks the levels in ascending order and replays each one's rows in its own turn, so letting
+    /// the cascade run as well would fold every row twice.
+    #[allow(clippy::too_many_arguments)]
+    fn fold_row_from(
+        &mut self,
+        level: usize,
+        fb: i64,
+        tb: i64,
+        t: usize,
+        f_lo: usize,
+        f_hi: usize,
+        cascade: bool,
+    ) {
         if f_lo >= f_hi {
             return;
         }
@@ -1020,8 +1051,10 @@ impl Pyramid {
                 parent.fold_row(&child, t, f_lo, f_hi, ff, tf, &mut out);
                 self.stats.coarse_rows_folded += 1;
                 self.stats.coarse_cells_folded += (f_hi - f_lo) as u64;
-                for &(pt, pl, ph) in &out {
-                    q.push_back((up, pfb, ptb, pt, pl, ph));
+                if cascade {
+                    for &(pt, pl, ph) in &out {
+                        q.push_back((up, pfb, ptb, pt, pl, ph));
+                    }
                 }
             }
             self.consumers = ups;
@@ -1795,6 +1828,21 @@ impl Pyramid {
     /// Writes every open level-0 tile as an unsealed checkpoint (closing its in-progress time
     /// column first). Coarser open tiles are not written: they are rebuilt from their sealed
     /// children on open.
+    ///
+    /// **T-571: the column this closes is a finished row and is folded upwards like any other.**
+    /// It was not, and the loss was silent and permanent: under `coarse_live` the only paths into
+    /// [`Pyramid::fold_row_live`] are the column advance in [`Pyramid::ingest`] and the pre-seal
+    /// flush, and a column closed here reaches neither — the next frame finds `col_t` at `None`
+    /// and the seal's own `close_column` returns `None`. With the shipped 60 s checkpoint interval
+    /// over a 1 s time cell that is **one row in sixty missing from every coarse node, on disk**,
+    /// so a burst inside a dropped second is present at the finest zoom and vanishes when you zoom
+    /// out — the max-hold that would have carried it was never folded.
+    ///
+    /// One residual is left, and it is the checkpoint's own shape rather than the cascade's:
+    /// frames that arrive in the **same** time cell after a checkpoint has closed it take
+    /// [`Tile::add_late_occupancy`]'s late path, which updates level 0 in place and is invisible
+    /// to every coarser node (T-584). A checkpoint that did not close the column would trade that
+    /// for an unrecoverable in-progress column on a crash, which is what the column close is for.
     pub fn checkpoint(&mut self) -> Result<(), StoreError> {
         let margin = self.cfg.occupancy_margin_db;
         let pct = self.pct();
@@ -1806,9 +1854,14 @@ impl Pyramid {
             let Some(mut tile) = self.open[0].remove(&k) else {
                 continue;
             };
-            tile.close_column(margin, pct, &mut self.scratch);
+            let closed = tile.close_column(margin, pct, &mut self.scratch);
             let written = self.write_tile(0, &tile, false);
             self.open[0].insert(k, tile);
+            if self.cfg.coarse_live
+                && let Some(t) = closed
+            {
+                self.fold_row_live(0, k.0, k.1, t, 0, self.geom.nf);
+            }
             if let Err(e) = written {
                 result = Err(e);
                 break;
@@ -2005,12 +2058,92 @@ impl Pyramid {
                 }
             }
         }
+        // **T-571: a live lattice's coarse tiles are rebuilt by REPLAYING ROWS, level by level.**
+        //
+        // The seal-time rebuild below re-folds whole sealed child tiles into their consumers,
+        // which is everything a seal-time scheme is ever fed by. A live scheme is fed by **rows**,
+        // and two of its cases have no sealed child at all:
+        //
+        // 1. The currently open level-0 tile comes back from its checkpoint still open. Its closed
+        //    rows had reached every coarse node before the restart and reach none of them after
+        //    it. At the shipped 64 x 1 s level-0 tile that is up to 64 consecutive seconds of
+        //    **grey over time that was observed** — the display invariant's own failure case.
+        // 2. A coarse tile rebuilt here is itself a producer. Folding sealed level-0 tiles into an
+        //    open node (0, 1) leaves those rows short of node (0, 2), because (0, 1) is not
+        //    sealed and so is never walked as a child. Under the seal-time scheme that was
+        //    consistent (an unsealed (0, 1) had contributed nothing to (0, 2) yet); under a live
+        //    one it is a hole.
+        //
+        // So each level is replayed in ascending index order, from whatever holds its rows — the
+        // open tile, or a sealed tile read back — with the cascade OFF, because the level above
+        // gets its own turn once this one has been rebuilt.
+        //
+        // **Bounded.** Only time a coarse tile could still be open needs replaying: the coarsest
+        // block containing the watermark. At the shipped lattice that is 512 s, eight level-0
+        // tiles per frequency block, read once at open.
+        //
+        // **Exactly once.** `fold_row_from` skips a consumer whose covering tile is already
+        // sealed, and every open coarse tile at this point was created by this loop.
+        if self.cfg.coarse_live {
+            let nf = self.geom.nf;
+            // The earliest time a coarse tile could still be open: the start of each level's own
+            // block containing the watermark, whichever is earliest. Taken per level rather than
+            // from the coarsest block alone, because block boundaries on different levels do not
+            // nest unless the epoch happens to align.
+            let from_ns = (0..=top)
+                .map(|l| {
+                    let b = self.geom.levels[l].t_block_ns().max(1);
+                    self.watermark_ns.div_euclid(b).saturating_mul(b)
+                })
+                .min()
+                .unwrap_or(self.watermark_ns);
+            for level in 0..top {
+                if self.geom.consumers(level).is_empty() {
+                    continue;
+                }
+                let mut keys: Vec<(i64, i64)> = self.open[level].keys().copied().collect();
+                keys.extend(
+                    self.sealed[level]
+                        .keys()
+                        .filter(|&&(tb, _)| self.geom.block_end_ns(level, tb) > from_ns)
+                        .map(|&(tb, fb)| (fb, tb)),
+                );
+                keys.sort_unstable_by_key(|&(fb, tb)| (tb, fb));
+                keys.dedup();
+                for (fb, tb) in keys {
+                    // A sealed producer is read back and parked in `open` for the length of its
+                    // replay: the cascade takes its producer out of `open` while it borrows the
+                    // consumer mutably, so a tile it cannot find there folds nothing at all.
+                    let was_open = self.open[level].contains_key(&(fb, tb));
+                    if !was_open {
+                        let Some(t) = self.read_sealed(level, fb, tb)? else {
+                            continue;
+                        };
+                        self.open[level].insert((fb, tb), Box::new(t));
+                    }
+                    // Ascending time within a tile: the cascade's in-progress row is flushed by a
+                    // later row arriving, so out-of-order rows would strand it.
+                    let rows: Vec<usize> = {
+                        let tile = &self.open[level][&(fb, tb)];
+                        (0..tile.nt)
+                            .filter(|&t| (0..tile.nf).any(|f| tile.count[t * tile.nf + f] > 0))
+                            .collect()
+                    };
+                    for t in rows {
+                        self.fold_row_from(level, fb, tb, t, 0, nf, false);
+                    }
+                    if !was_open && let Some(t) = self.open[level].remove(&(fb, tb)) {
+                        self.pool[level].push(t);
+                    }
+                }
+            }
+        }
         // T-453: a lazy lattice has nothing to re-fold. A coarse tile of a lazy scheme is only ever
         // written once its own time block has elapsed, after which no further child can seal into
         // it (a frame for a sealed level-0 tile is refused as late), so every coarse tile on disk
         // is already complete and every one that is missing will be built when a read asks.
         for level in 0..=top {
-            if self.cfg.coarse_on_demand {
+            if self.cfg.coarse_on_demand || self.cfg.coarse_live {
                 break;
             }
             let ups: Vec<usize> = self.geom.consumers(level).to_vec();
