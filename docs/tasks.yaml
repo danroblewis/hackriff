@@ -16491,6 +16491,38 @@ tasks:
       and (2): most of today's agents were Opus, and several briefs asked agents to re-measure things
       an earlier ticket had already measured.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-564
+    milestone: M3
+    title: "The synthetic grid's delivered analysis geometry is a statistic of the noise - OBW99 moves 2x with SNR on 23 percent of ladders"
+    status: todo
+    priority: high
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    depends_on: [T-296, T-246]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-435 while characterising the confidently-wrong family call, and it is the cause
+      rather than the symptom. synth::measured_obw / recentre_offset_hz read `occupied_band` on the
+      NOISY snippet, so `decim = floor(fs/(2*obw))` and the channel-filter cutoff are set by the
+      noise draw. Measured over 504 blind ladders: the OBW99 reported for ONE (class, seed) moves
+      with SNR by >= 2x on 115 (23 %) and >= 3x on 90 (18 %), in six of eight families - an `am`
+      carrier reads 82/31/1/1/1/1/1 kHz up the ladder; `ofdm` oscillates 30 kHz <-> 1 MHz on
+      adjacent rungs.
+      WHY IT MATTERS BEYOND TIDINESS: 5 of the 7 confidently-wrong FAMILY calls in 3 528
+      classifications sit on such a rung. The worst case (Qam16 seed 8 at the 15 dB gate) delivered
+      a 40 kHz emission in a 500 kHz band - a narrow line in empty space, which is exactly what
+      `ssb` is fitted as - and the classifier answered that question correctly at 0.999. Both
+      density files are fitted over this mixture, so the harness defect is baked into the model.
+      COST, STATED UP FRONT: fixing it changes every dev waveform, which means refitting both
+      data/densities-*.json and re-deriving all of ADR-0016 section 7.1. So it needs its own
+      measurement of what it buys and what it costs before anyone starts. Likely overlaps T-296's
+      unexplained EVM residue and is a plausible cause of psk-qam's weak open set.
+      Numbers and tables are in ADR-0016 section 7.3 (written by T-435).
+    notes: |
+      Filed 2026-09-20 from T-435's report. T-435 deliberately did NOT write a threshold against
+      this - a constant fitted to a harness defect is the thing this project forbids.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
