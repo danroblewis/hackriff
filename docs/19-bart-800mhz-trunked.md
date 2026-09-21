@@ -1,6 +1,6 @@
 # 18 — BART's 800 MHz trunked system: research, capture plan and ground truth
 
-**Status: research complete, capture NOT YET TAKEN.** Written for T-544 (phase 1 of the
+**Status: research complete. CAPTURE TAKEN 2026-09-20 AND NEGATIVE — BART is not receivable at this location, and no trunked control channel is reachable anywhere in the 800 MHz downlink band. See §7, which supersedes the forward-looking language in §4 and §6.** Written for T-544 (phase 1 of the
 BART blind auto-decode target: T-544 research + capture, T-545 failing blind tests, T-546 make them
 pass). Use case: [`SIGNAL-087`](05-use-cases-and-explorations.md) — minted 2026-09-20 for exactly
 this target, because the three tickets were filed against `SIGNAL-001`, which is an existing
@@ -535,6 +535,184 @@ seconds of analysis, and settling it is reason enough to take the capture even i
 downstream turns out to be harder than hoped.
 
 ---
+
+---
+
+## 7. Capture attempt 1 (2026-09-20, ~20:38–20:50 local): BART IS NOT RECEIVABLE HERE
+
+**Result: no BART, and no trunked control channel anywhere in the 800 MHz downlink band.**
+Measured, not inferred. §6 called the antenna "probably fine" and the risk "dynamic range"; both
+turned out to be right about the *receiver* and wrong about the *outcome* — the receiver is working
+well and BART simply is not present.
+
+The status line at the top of this document stood as "capture NOT YET TAKEN"; it now reads: taken,
+and negative. **No fixture was produced and none should be manufactured from this material.**
+
+### 7.1 Equipment state
+
+HackRF One serial `0000000000000000d2b861dc263bc293`, firmware 2026.01.3 (API 1.10), board revision
+older than r6, on its own USB bus. Antenna: whatever whip was already attached — **not touched**,
+because changing the RF setup is reserved to the user (CLAUDE.md). **Location: not recorded.** No
+existing capture in `fixtures/` states one, so there was no convention to follow and I would rather
+leave it blank than invent a city. This matters for §7.6 and is the first thing to fix on a retry.
+
+### 7.2 The receiver is working — three independent proofs
+
+This has to come first, because "found nothing" is worthless unless the receiver is known good.
+
+1. **VHF reference.** At 100.8 MHz, 4 Msps, LNA 32 / VGA 30 / amp off: RMS 11.1 LSB, peak 47/127,
+   and FM broadcast carriers at 98.899, 99.700, 100.000 and 101.299 MHz, the strongest +33 dB over
+   floor. The antenna and receive chain are alive.
+2. **UHF reference.** At 875 MHz, 20 Msps, LNA 32 / VGA 40 / amp on: **39 % of samples clipping**,
+   RMS 132. Cellular downlink is enormous here. The receiver reaches 875 MHz with power to spare, so
+   a null at 852 MHz is not a UHF path failure.
+3. **The 800 MHz band itself is far from empty** — 28 occupied 12.5 kHz channels (§7.4), the
+   strongest 23 dB over floor. We are hearing 800 MHz LMR perfectly well. Just not BART's.
+
+### 7.3 Gain ladder, and why the first pass looked dead
+
+The planned ladder (amp **off**, LNA 16/24/32 × VGA 20/30) was run first and looked like a dead
+input: RMS 2.5–3.4 LSB, peak 11/127, everything quantisation-limited. That was a **planning error in
+§4.1, not a hardware fault** — at 852 MHz with the amp off the HackRF's noise figure is poor, and the
+ladder simply sat below the ADC's useful range. The plan said "amp on only if the whole ladder is
+quiet"; the ladder was quiet, and amp-on is where the band actually appears.
+
+| Config | clip | p99.9 | max | RMS | verdict |
+|---|---|---:|---:|---:|---|
+| LNA 32 / VGA 30 / amp off | 0 | 7 | 11 | 3.4 | quantisation-limited, unusable |
+| **LNA 32 / VGA 40 / amp on** | **1.0 × 10⁻⁶** | **63** | **111** | **26.2** | **chosen** |
+| LNA 32 / VGA 54 / amp off | 3.4 × 10⁻⁴ | — | — | — | usable, 14 dB less pre-mixer gain |
+| LNA 40 / VGA 62 / amp on | 0.81 | 128 | 128 | 168 | grossly overdriven |
+
+`LNA 32 / VGA 40 / amp on` is the setting to reuse: essentially no clipping, p99.9 at half scale.
+
+### 7.4 What is actually on the air here (851–862 MHz, 30 s, 12 Msps)
+
+Blind sweep of 850.9–862.1 MHz, per 12.5 kHz channel, duty measured over 10.9 ms rows:
+
+| Channel MHz | dB over floor | duty |
+|---|---:|---:|
+| 852.3750 | 18.9 | 88.2 % |
+| 853.6375 | 20.1 | 80.5 % |
+| 852.2000 | 17.2 | 79.0 % |
+| 851.2375 | 21.3 | 61.9 % |
+| 851.8000 | 21.9 | 54.7 % |
+| 853.7750 | 19.1 | 48.6 % |
+| 853.8750 | 23.2 | 43.4 % |
+| 853.2125 | 15.1 | 34.7 % |
+| …20 more | 6–19 | < 30 % |
+
+**28 occupied channels out of 880 probed. The highest duty in the entire band is 88 %. None exceeds
+95 %.** A P25 control channel transmits *continuously* — that is its defining, protocol-independent
+signature and the whole basis of `SIGNAL-085`. **There is no control channel here to find.** The
+traffic is conventional (non-trunked) LMR, which has no control channel by definition.
+
+Modulation check on the four busiest channels — down-convert to 48 kHz, FM-discriminate, histogram
+the instantaneous frequency: kurtosis **2.86 / 3.17 / 3.39 / 3.58** against ~1.6–2.0 for a flat
+four-level C4FM distribution; |Δf| 99th percentile ~7 kHz; a continuous Δf distribution clustered at
+zero rather than four discrete lobes at ±600/±1800 Hz; and **no symbol-rate structure near 4800 Bd**.
+These are **analogue FM voice**, not P25. So there is no digital LMR fixture to salvage here either.
+
+### 7.5 BART's own channels: empty, not weak
+
+Every one of the sixteen published frequencies (§1.2), probed in both the 69 s / 4 Msps capture and
+the 30 s / 12 Msps sweep:
+
+| | |
+|---|---|
+| dB over noise floor | **0.0 – 1.4 dB** on fifteen of sixteen |
+| duty | **0.0 %** on fifteen of sixteen |
+
+The sole apparent exception is 853.8625 at 14.2 dB / 3.3 % — which sits **12.5 kHz from the real,
+busy emitter at 853.8750** and is its filter skirt, not BART. Everything else is indistinguishable
+from noise.
+
+This is the difference that matters: the nine live channels are 15–23 dB over floor while BART's are
+at 0 dB. **BART is not attenuated, it is absent.** A marginal signal would have shown as a few dB of
+excess; nothing did.
+
+### 7.6 Two measured results worth keeping regardless
+
+**(a) The receiver's clock is −9.6 ppm off, and it nearly sent this investigation down a rabbit
+hole.** The emissions first appeared to sit *off* the US 800 MHz 12.5 kHz raster by awkward amounts
+(−29 to −80 kHz from published channels), which briefly looked like evidence they were spurious. They
+are not: fitting a single constant correction across all nine puts every one on the raster.
+
+| Observed MHz | Corrected | Channel | residual |
+|---|---|---|---:|
+| 851.24531 | 851.23711 | #18 = 851.2375 | −390 Hz |
+| 851.80781 | 851.79961 | #63 = 851.8000 | −390 Hz |
+| 852.20820 | 852.20000 | #95 = 852.2000 | 0 Hz |
+| 852.38398 | 852.37578 | #109 = 852.3750 | +780 Hz |
+| 853.64570 | 853.63750 | #210 = 853.6375 | 0 Hz |
+| 853.88203 | 853.87383 | #229 = 853.8750 | −1170 Hz |
+
+**Best constant correction −8200 Hz at 852.456 MHz = −9.6 ppm**, median raster residual 390 Hz. That
+is ordinary for a HackRF One (plain crystal, no TCXO; HackRF Pro adds one), but it is **larger than
+the 12.5 kHz raster tolerance matters at** — nearly ⅔ of a channel — so any raster-fitting or
+band-plan comparison this project does at 800 MHz must estimate and remove it rather than assume
+zero. Worth its own calibration ticket under C05; it is exactly the "blind raster fit" the detector
+should be doing anyway, and it fell out of the data in one line.
+
+**(b) The candidate emissions are real, proven by a gain-slope test — which also substitutes for the
+antenna-disconnected reference I could not take.** The coordinator specifically wanted the terminated
+capture so an internal birdie could not masquerade as a signal. **I could not take it: disconnecting
+the antenna is a physical change to the RF setup, reserved to the user.** So I used a different and
+arguably stronger discriminator — the RF amp and LNA sit *before* the mixer, so stepping pre-mixer
+gain while compensating with post-mixer VGA separates real signals (1 dB per dB) from third-order
+intermodulation (3 dB per dB), which was a live hypothesis given cellular clips the ADC here.
+
+| Pre-mixer gain step | real signal predicts | IM3 predicts | **measured** |
+|---|---|---|---|
+| 46 → 32 dB (amp off) | +14 dB | +42 dB | **+9.9 to +11.8 dB** |
+| 32 → 16 dB (LNA down) | +16 dB | +48 dB | **+14.0 to +16.6 dB** |
+
+All nine candidates track 1:1 across a 30 dB range. **Real external signals, not intermodulation and
+not internal birdies.** (The amp step measuring ~11 dB rather than 14 is the amp's real gain plus
+slight compression in the amp-off leg; the LNA step is exact.) This test needs no hardware change,
+takes three captures, and should be the standard way this project separates real from spurious.
+
+### 7.7 What this means for T-544/545/546
+
+- **T-544 cannot be completed at this location with this antenna.** No fixture; nothing to annotate.
+  Per the ticket's own DoD, an empty capture is a finding, and this is the finding.
+- **`SIGNAL-087` survives and does not need changing.** It was deliberately written as "a local
+  800 MHz trunked control channel… BART's above-ground simulcast is the reference instance; the claim
+  is the blind chain, not that one system." Any reachable trunked control channel satisfies it. The
+  problem is that *no* trunked control channel is reachable here, so the use case needs a different
+  instance, not a different definition.
+- **T-545 and T-546 are blocked on a fixture that does not exist.** They should not be started
+  against synthetic material — §3.4 is precisely why that would prove nothing.
+- **T-299 is NOT unblocked.** The note added to it on this branch was written in the expectation that
+  this capture would land. It did not. The note now says so.
+
+### 7.8 What to try next, in order of cost
+
+1. **Establish where we are.** Record the location (named city) and the distance and line-of-sight to
+   the nearest BART right-of-way or above-ground BART site. Without that, "BART not receivable" is a
+   measurement without a context, and we cannot tell a 3 km indoor-null problem from a 40 km
+   out-of-range one. **This needs the user and costs nothing.**
+2. **Move the antenna** — a window, outdoors, or higher. Indoor building loss at 850 MHz is easily
+   15–25 dB, and BART's channels are ≥ 15–23 dB below emitters we hear fine, which is exactly the
+   right order of magnitude. **The cheapest plausible fix, and it needs the user** (physical RF
+   change).
+3. **A better antenna for 800 MHz** — a proper 850 MHz whip or a small directional. The present whip
+   works (FM is strong, cellular clips), but nothing about it is matched at 852 MHz.
+4. **Reconsider the target.** If no trunked system is reachable, the honest options are to find one
+   that is (a wideband survey for any 100 %-duty narrowband emission across the LMR bands is the
+   blind, on-mission way to look, and is a good exercise in its own right), or to accept that
+   `SIGNAL-087`'s first instance is not BART.
+5. **Do not** trim any of this material into an acceptance fixture. It contains no control channel,
+   no digital LMR and no BART. A fixture built from it would encode a false premise into T-545 and
+   T-546 permanently.
+
+### 7.9 Data retained
+
+In the session scratchpad (not committed; ~1.2 GB, delete when read): the six-point amp-off gain
+ladder, the three-point pre-mixer gain sweep of §7.6(b), a 69 s 4 Msps capture at 852.456 MHz, a 30 s
+12 Msps sweep of 850.9–862.1 MHz, plus VHF and cellular reference captures. Every number in §7 is
+reproducible from them. **None of it is fixture material** — it is diagnostic evidence for this
+write-up, and its value is entirely in the tables above.
 
 ## Sources
 
