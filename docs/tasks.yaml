@@ -16118,6 +16118,48 @@ tasks:
     notes: |
       Filed 2026-09-20. Pairs with T-541 (the general degrade-don't-crash guard).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-543
+    milestone: M2-hardening
+    title: Cut the ticket cycle time - it is ~4 h start-to-land and the gate is most of it
+    status: in-progress
+    priority: high
+    parallel_group: CI
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      USER TOP PRIORITY 2026-09-20: development iteration is unbearably slow, ~4 h from starting a
+      ticket to landing it, and the user wants that cut SIGNIFICANTLY. Measured symptoms from today:
+      a full gate is 20-25 min and runs the WHOLE workspace for a one-crate diff; 17 branches queued
+      behind serial gates; one gate took 62 min while starved under load.
+      MEASURE FIRST, then fix - and the measurement must outlive this ticket.
+      (1) INSTRUMENT THE CYCLE. Record, automatically: gate start/end and duration per class and per
+      phase (lint / test / acceptance / test-ui / test-ui-e2e), branch created -> first commit ->
+      queued -> merged. Write it somewhere durable ($HACKRIFF_OPS, or a committed log) so a
+      slow-down is caught by data rather than by the user noticing. ops/merge-runner.sh already
+      knows when a gate starts and ends - that is the cheapest hook.
+      (2) THE LEVERS TO EVALUATE, each with a before/after number, not an opinion:
+      - A FASTER LINKER (mold / lld / zld against the default ld). Link time is paid on every test
+        binary; measure it on a one-line change to one crate.
+      - AFFECTED-CRATE TEST SELECTION so a one-crate diff does not run ~15 crates. py/hkpy/gate.py
+        already classifies the diff; extend it from "which SUITES" to "which CRATES", and be honest
+        about what that gives up (a change to hk-core can break hk-pipeline). Fail closed: if the
+        dependency answer is not certain, run everything.
+      - SCCACHE HIT RATE. `sccache --show-stats` before/after a gate. A low hit rate under parallel
+        worktrees is worth knowing; CLAUDE.md already forbids clearing it.
+      - ACCEPTANCE OFF PLAIN cargo test - it is a separate `just acceptance-ci` step on plain cargo,
+        outside nextest's parallelism and its thread cap.
+      (3) DO NOT BUY SPEED WITH COVERAGE. The gate exists because a green unit suite shipped a dark
+      demo (T-484). Anything that narrows what runs must state what it stops catching, and fail
+      closed when unsure - the same rule py/hkpy/gate.py already follows.
+      DoD: cycle-time instrumentation landed and recording; each lever measured with before/after
+      numbers; the ones that pay adopted; a stated new expected gate duration by class; and what was
+      given up, if anything.
+    notes: |
+      Filed 2026-09-20. The user has a diagnostic agent measuring cycle time in parallel and will
+      supply concrete targets - prefer their numbers over re-deriving them, and coordinate rather
+      than duplicating.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
