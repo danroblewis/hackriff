@@ -3516,6 +3516,10 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+    high_effort_reason: "T-563: GPU-provider integration under the hk-ml conformance suite, mirrored
+      from a Mac provider design nobody has run on this hardware yet - the kind of dropped-samples/
+      throughput judgment call model-selection.md reserves high effort for, not a bounded single-crate
+      change with an obvious test."
     rehomed_2026_09_16: 'Moved from its original milestone to M7 (Device hardening + TX, the hardware
       phase), which is when Jetson work begins. Status, needs: hardware and parallel_group JET are
       unchanged - still blocked on the Jetson purchase. This only stops it reading as a straggler
@@ -4920,9 +4924,15 @@ tasks:
     acceptance: 'tiered against the existing permanent ids, minting none: SIGNAL-027 (Meteor-M LRPT 137.1/137.9 MHz) and SIGNAL-029 (NOAA POES 137 MHz) are NATIVE - a simple V-dipole or QFH, no dish - via SatDump as the reused decoder, not a reimplementation; SIGNAL-025 (GOES HRIT 1694.1 MHz) and SIGNAL-028 (~1.7 GHz AHRPT) need a dish plus LNA; SIGNAL-040 X-band ~8 GHz is ABOVE THE 6 GHz CEILING and must be retagged out-of-band by T-258 rather than reading as needs-accessory. Hardware captures are user-triggered'
     area: plugins/ (SatDump wrapper), crates/hk-context, docs/use-cases.yaml
     needs: none
-    model: opus
-    effort: high
+    model: sonnet
+    effort: medium
     core_interface: false
+    retiered_2026_09_21: "T-563: was opus/high with no core_interface flag and no stated reason.
+      This is a SatDump plugin wrap plus hardware_fit/fit_note tiering of four already-permanent
+      use-case ids against an existing taxonomy - model-selection.md names both patterns
+      (\"wrapping existing decoders as plugins\", \"bulk mapping and classification work with a
+      fixed rubric\") as Sonnet/medium explicitly. Escalate one tier if T-258's coordination on
+      the X-band retag proves ambiguous."
   - id: T-276
     milestone: M5
     title: 'M5 pass scheduling: TLE / satellite-pass context feed drives the attention scheduler'
@@ -4937,7 +4947,11 @@ tasks:
     needs: none
     model: opus
     effort: high
-    core_interface: false
+    core_interface: true
+    retiered_2026_09_21: "T-563: was core_interface: false but this ticket changes the C04 attention
+      scheduler's reservation/pre-emption policy, which model-selection.md names explicitly under
+      Fable/Opus-high work and CLAUDE.md marks core_interface. Flagging it true is the accurate
+      record, not a downgrade - opus/high stands."
   - id: T-277
     milestone: M5
     title: 'M5 HF/VLF science front ends (accessory-gated)'
@@ -4949,9 +4963,13 @@ tasks:
     acceptance: 'the HF/VLF cluster behind its accessory (upconverter / VLF receiver + soundcard): SPACE-001 SID flare monitor, SPACE-041 research-grade ELF/VLF, PROP-019 phase and reflection height. Each stays needs-accessory and none is claimed reachable without it'
     area: crates/hk-core (source abstraction), docs/capabilities
     needs: none
-    model: opus
-    effort: high
+    model: sonnet
+    effort: medium
     core_interface: false
+    retiered_2026_09_21: "T-563: was opus/high with no core_interface flag and no stated reason.
+      This ticket's whole acceptance is tagging three already-permanent use-case ids as
+      needs-accessory in hardware_fit/fit_note - the fixed-rubric bulk-classification pattern
+      model-selection.md names for Sonnet/medium, not new capability design."
   - id: T-278
     milestone: M5
     title: 'M5 radiometry science (C33) behind a dish, and Ku via LNB'
@@ -4963,9 +4981,14 @@ tasks:
     acceptance: 'the radiometry cluster gated on a dish (and Ku behind an LNB): state the accessory in hardware_fit and fit_note for every use case it unlocks, and report what the 8-bit front end without preselection costs in radiometric accuracy rather than implying laboratory precision'
     area: crates/hk-dsp (radiometry), docs/capabilities/C33
     needs: none
-    model: opus
-    effort: high
+    model: sonnet
+    effort: medium
     core_interface: false
+    retiered_2026_09_21: "T-563: was opus/high with no core_interface flag and no stated reason.
+      Same bulk-tagging pattern as T-277 (hardware_fit/fit_note gating of existing use-case ids)
+      plus one stated accuracy caveat, not new detection logic. Escalation rule applies as-is if
+      the 8-bit/no-preselection radiometric-accuracy write-up turns out to need real DSP derivation
+      rather than a stated caveat."
   - id: T-279
     milestone: M1
     title: 'rds.recipe.json has no group-4A Clock-Time node, so RDS clock (CT) can
@@ -16517,7 +16540,7 @@ tasks:
   - id: T-545
     milestone: MAUTO
     title: "BART 851 MHz, phase 2: failing blind acceptance tests through the MOCK SDR replaying the capture"
-    status: todo
+    status: done
     priority: high
     parallel_group: FIXTURE
     core_interface: true
@@ -16543,6 +16566,65 @@ tasks:
     notes: |
       Filed 2026-09-20. Depends on T-544's fixture and truth list.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DONE 2026-09-21 on branch task-t545. `tests/e2e/tests/acceptance_mauto.rs` +
+      `tests/e2e/tests/acceptance/signal_087.rs`: SEVEN tests, FIVE RED (`#[ignore]`d, each
+      naming what T-546 must build) and TWO GREEN CONTROLS. Registered in the justfile as
+      `acceptance-mauto` / `e2e_milestones` (e2e-targets-check passes), so it is a milestone exit
+      gate and not in CI's per-push acceptance job.
+      SYNTHETIC, BY USER DIRECTION, AND THE SUITE SAYS SO. T-544's capture is negative (docs/19
+      section 7: 0 of 16 BART channels above +4 dB on a CFAR local floor) and T-318 owns the
+      hardware half. The scene is `trunk_encrypted_control_channel` (seed 545, 3 s) through the
+      MOCK SDR: continuous C4FM control channel issuing real TSBKs, a continuous unframed 4FSK
+      decoy, bursty analogue FM neighbours on the 12.5 kHz raster (what docs/19 section 7.4
+      actually measured at 800 MHz), and the granted voice channels radiating where the grants say.
+      Truth stripped by `TruthVault`; nothing passes a frequency, modulation or protocol in.
+      T-299'S CIRCULARITY CAVEAT COULD NOT BE AVOIDED AND IS STATED, not papered over: this
+      fixture's framing and this repo's P25 decoder were written from the same references, so a
+      shared misreading passes both. Writing a standards-compliant encoder from memory would only
+      move the unverified reading to the generator. The one non-circular claim in the suite -
+      grant -> IDEN_UP -> frequency -> RF energy actually radiating there (docs/19 section 5.3) -
+      is asserted and passes, and is flagged in the test as the one to believe over the others.
+      A-PRIORI THRESHOLDS (module `apriori`, each citing its source, none read off a run): symbol
+      rate 4800 +/- 48 Bd (1 %: looser cannot separate Phase 1 from Phase 2's 6000 Bd), outer
+      deviation 1800 +/- 360 Hz (+/-20 %: the slicer thresholds are 33 % below outer), centre
+      tolerance 6250 Hz (half a raster channel), OBW +/-60 %, time 50 ms, and the imposed clock
+      error -8200 Hz / -9.6 ppm (MEASURED on this HackRF, docs/19 section 7.6a).
+      THE FIVE RED MESSAGES, i.e. T-546's spec:
+      (B) estimate parameters - the CC has `estimated_params: null` while the ANALOGUE FM
+      neighbours get sessions, and every row written says `mod_order: 2` / `"2fsk"`, so there is
+      no four-level answer available at all. The gap is inverted, not merely undone.
+      (C) auto-select - `POST /api/analyze {emitter_id}` answers 501 not_implemented. No code path
+      in the repo picks a demod+decode chain for a digital emission from measurements. Reuse
+      hk_recipe::matching, classify::seed, AnalogAuto's shape and the M4 P25 decoder per the user.
+      (D) decode - two thirds ALREADY PASS and are asserted as named preconditions (protocol
+      P25Phase1, band plan read, 19 grants resolved: t268_tsbk's ground). The gap: the decoded
+      system is a `trunk_system` row, the blindly-detected emission is an inventory emitter at the
+      same frequency with `family`/`classification`/`estimated_params` all null, and NOTHING links
+      them. "Successful decode confirms it" (vision step 4) does not happen.
+      (E2) explanation quality - the only explanation offered scores `evidence_confidence: 0.0`
+      with flag `allocation-only`; the identical suggestion goes to the analogue FM neighbours.
+      hk_pipeline::family has no mapping from trunked-CC evidence to a service.
+      (F) THE BEST ONE, and it is BART's only surviving measurement: at the -9.6 ppm clock error
+      measured on this HackRF, 0 control channels are confirmed where 1 is with a perfect clock.
+      -8200 Hz is 5.5x RASTER_TOLERANCE_HZ (1500 Hz), so the raster fit rejects every channel and
+      candidacy never happens. A build that only works at 0 ppm works on synthetic IQ and nothing
+      else. Fit the raster offset and record it as receiver provenance (docs/19 section 4.4 step 1).
+      THE TWO GREEN CONTROLS are deliberate and NOT ignored: (A) blind detection with centre,
+      bandwidth and time extent, and (E) a sensible explanation (`public-safety`) in the top 3.
+      Without them a red suite cannot be told from a broken harness (docs/19 section 5.4's
+      argument). Assertion (3)'s server is wired with an audit log so the 501 is the real MAUTO
+      answer and not `503 no audit log` - a harness failure would have taught T-546 nothing.
+      FLAGGED, NOT CHASED: docs/19 section 3.1 asked T-545 to rule on the built-in trunk chain's
+      `[851, 869] MHz` trigger band. Ruling recorded in `signal_087::NO_LOOKUP`: a band gate is not
+      a frequency lookup (ADR-0017 permits band-plan priors as explainers), BUT it is band-gated
+      rather than measurement-driven, so SIGNAL-085's actual claim - find a 100 %-duty narrowband
+      four-level emission ANYWHERE - is not what runs. Worth its own ticket.
+      Also worth a ticket: the estimator calling bursty analogue FM `2fsk` at 2390 Hz deviation.
+      docs/19 section 7.7's blanket "T-545/T-546 should not be started against synthetic material"
+      is amended in place with why the synthetic route was sound for the chain AROUND the decoder.
+      TARGETED TESTS: `cargo test -p hk-e2e --test acceptance_mauto` = 2 passed, 5 ignored (gate
+      safe). `-- --include-ignored` = 2 passed, 5 failed, all for the reasons above. precheck clean.
   - id: T-546
     milestone: MAUTO
     title: "BART 851 MHz, phase 3: make the blind auto-decode tests pass - the first real MAUTO end-to-end"
@@ -16790,6 +16872,56 @@ tasks:
       and (2): most of today's agents were Opus, and several briefs asked agents to re-measure things
       an earlier ticket had already measured.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      WORKED 2026-09-21 (branch task-t563). Part of lever (1) was already done before this ticket
+      started: `prompts/model-selection.md` already carries the complexity rubric and
+      `test_task_board.py` already stops a core_interface ticket going to a cheap model. What was
+      missing was measurement and the symmetric (over-tiering) check, per the ticket's own framing.
+
+      MEASURED DISTRIBUTION (open tickets, i.e. not done/cancelled/deferred/reverted - 86 before,
+      87 after filing T-620): opus/no-effort 39, opus/medium 18, opus/high 10, sonnet/no-effort 6,
+      sonnet/low 3, sonnet/medium 2->3 (after retiering), opus/xhigh 2, fable/high 1, unset 4. So
+      today's OPEN board is not "almost everything is Opus-high" - that was true of the historical
+      /perf window (184h across ~500 done tickets, mostly before the rubric existed), but the open
+      board is already mostly opus/medium or below when effort is set at all. The real gap in (1)
+      was enforcement, not distribution: nothing stopped a non-core-interface ticket sitting at
+      opus/high by default, and 39 open opus tickets have effort unset entirely (reviewable but not
+      yet enforced - left as a finding, not fixed here, since backfilling 39 judgment calls is not
+      a mechanical task).
+
+      LEVER 1, symmetric check: added `test_high_effort_opus_or_fable_tickets_justify_it` to
+      `py/tests/test_task_board.py`, the mirror of the existing core_interface-vs-cheap-model test.
+      Rule: an open opus/fable ticket at effort high|xhigh must be core_interface: true or carry an
+      explicit reason field. BEFORE CHOOSING IT, checked what it would flag: exactly 5 of 86 open
+      tickets (T-216, T-275, T-276, T-277, T-278) - small enough to inspect each on the honesty
+      requirement rather than write a rule that fails on legitimate work. Outcome: T-277/T-278/T-275
+      were genuinely over-tiered and retiered to sonnet/medium (they match model-selection.md's own
+      "bulk mapping/classification with a fixed rubric" and "wrapping existing decoders as plugins"
+      Sonnet patterns exactly); T-276 turned out to touch the C04 attention scheduler and was
+      correctly reflagged core_interface: true (opus/high stands, now accurately); T-216
+      (Jetson/TensorRT, hardware-blocked) got an explicit `high_effort_reason` since it is real
+      GPU-provider design work. The test now passes cleanly against the whole board (0 tickets
+      flagged) - not "fixed by weakening the rule", fixed by correcting three tickets and truing up
+      one flag.
+
+      LEVER 3, context cost: capability cards are NOT the re-reading cost - all 14 are 107-125
+      lines, already the cheap scoped design CLAUDE.md intends. ADRs are: 23-799 lines, and the
+      large ones are cited constantly (ADR-0016 784 lines / 49 ticket references, ADR-0017 530/28,
+      ADR-0015 681/24, ADR-0013 560/19, ADR-0012 799/16, ADR-0011 558/15). A brief that names
+      "ADR-0016" with no section pointer pays for the whole 784-line document every time a fresh
+      agent is briefed into that area. Filed T-620 rather than editing the ADRs myself - CLAUDE.md
+      requires Fable + the user for any change to a settled ADR, and even a non-decision structural
+      addition (a table of contents) needs that sign-off first per the same rule; T-620 states the
+      three candidate fixes and which one needs that approval before landing.
+
+      LEVER 2 (fewer round-trips): not separately measured this session - it is a per-brief
+      discipline (CLAUDE.md already states it, e.g. "make all of the independent calls in the same
+      block"); no board-level artifact to check it against was found, so nothing filed for it beyond
+      noting it's covered by existing instruction text, not a gap.
+
+      NOT DONE: the DoD's "a measurable drop in model time per landed ticket" needs a day of tickets
+      landing under the corrected board to check against /perf, which this single session cannot
+      produce - that's the honest state to hand back with rather than claiming it.
   - id: T-564
     milestone: M3
     title: "The synthetic grid's delivered analysis geometry is a statistic of the noise - OBW99 moves 2x with SNR on 23 percent of ladders"
@@ -19273,7 +19405,7 @@ tasks:
   - id: T-592
     milestone: M2-hardening
     title: /api/events refuses its own documented limit - 501..2000 is a 400
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     model: sonnet
@@ -19293,6 +19425,29 @@ tasks:
       documented range has never been tested at its edges. Whichever bound wins, test the boundary
       values - the last accepted and the first rejected - not just a value in the middle. That is
       the gap that let a doc/impl contradiction live on a core interface.
+    notes: |
+      DONE 2026-09-21 (branch task-t592). 2000 is the right bound - docs/api.md already documented
+      it, and MAX_EVENTS_LIMIT = 2_000 was the correct call for the ticket's own note: /api/events
+      catalogues every past event, not what is live in a window, so it may legitimately want a
+      bigger page than /api/inventory's 500-row cap.
+      THE FIX. events_json already validated `limit` correctly against MAX_EVENTS_LIMIT at its own
+      `count(q, "limit", DEFAULT_EVENTS_LIMIT, MAX_EVENTS_LIMIT)` call - the bug was purely that it
+      then called the shared `parse_inventory_query(q)` a second time to pick up every other
+      `/api/inventory` filter, and that function re-parsed the SAME `limit` parameter against its
+      own MAX_API_INVENTORY_LIMIT (500), even though the `InventoryQuery.limit` it produces is
+      immediately discarded and replaced with MAX_EVENT_EMITTERS two lines later. Split
+      `parse_inventory_query` into a public wrapper (unchanged, still bounds at 500) and
+      `parse_inventory_query_limited(q, max_limit)`, and had events.rs call the latter with
+      MAX_EVENTS_LIMIT. No behaviour changed for /api/inventory or /api/tiles/events (both still
+      call the public wrapper).
+      TESTS: crates/hk-cli/tests/api_contract.rs now asserts the boundary, not the default -
+      limit=2000 (last accepted) returns 200, limit=2001 (first rejected) returns 400.
+      RED WHEN BROKEN: reverted the query.rs/events.rs fix locally and reran
+      `api_contract_smoke_flow` - it failed on the limit=2000 assertion with `limit must be an
+      integer in 1..=500`, confirming the new boundary test catches the defect the ticket
+      describes. Restored the fix; the test passes.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      Ran `just precheck hk-api hk-cli` clean.
     effort: high
     depends_on: [T-586]
     use_cases: [AWARE-011]
@@ -20077,6 +20232,104 @@ tasks:
       REBASE NOTE: `drawUpToHorizon` now reports the region it actually drew, so T-528's viewport
       contrast measures what was DRAWN and never the rows the copy does not reach. That interaction
       did not exist on the original branch - T-528 landed after it was cut.
+  - id: T-614
+    milestone: M2-hardening
+    title: The parameter estimator labels bursty analogue FM as 2fsk at 2390 Hz deviation
+    status: todo
+    priority: normal
+    parallel_group: DETECT
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-545 while building the BART phase-2 blind suite, and it is the inverse of the gap
+      that ticket was looking for. The estimator gives `estimated_params` to the bursty ANALOGUE FM
+      neighbours - labelling them `"2fsk"`, `mod_order: 2`, deviation 2390 Hz - while the confirmed
+      digital C4FM control channel gets `null`.
+      So the failure is not "no answer for the digital signal". It is a CONFIDENT WRONG ANSWER for
+      an analogue one, in the same run, from the same estimator. An analogue FM burst has no symbol
+      alphabet at all; calling it 2-FSK with a deviation is the confidently-wrong outcome the
+      open-set stance exists to prevent, and it is worse than abstaining because a ranked
+      explanation built on it inherits the error.
+      Establish why the estimator commits rather than abstains here - is it that nothing in the
+      chain can return "analogue, no symbols", or that the abstention exists and is not reached?
+      T-589 found exactly that second shape (a stage structurally unable to fire looked like a
+      stage that fired and agreed), so check before concluding.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): over a scene containing both analogue
+      FM bursts and a digital channel, the analogue emissions do NOT receive a symbol-rate or
+      mod_order claim, and the count of each is reported so the test cannot pass on zero.
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-615
+    milestone: MAUTO
+    title: SIGNAL-085's claim is band-gated, not measurement-driven - the 851-869 MHz trigger is not the use case
+    status: todo
+    priority: normal
+    parallel_group: DETECT
+    model: opus
+    effort: medium
+    depends_on: [T-545]
+    use_cases: [SIGNAL-085]
+    acceptance: |
+      FOUND BY T-545, which was asked to rule on the `[851, 869] MHz` trigger band and did: a band
+      gate is not a frequency lookup, so it does not break the blind rule. BUT the ruling exposes a
+      gap it correctly did not close: SIGNAL-085's actual claim is to find a 100 %-duty narrowband
+      four-level emission ANYWHERE, and what runs is band-gated, so the use case as written is not
+      what is tested.
+      This matters beyond tidiness. The project's stance is that the known-signal database offers
+      ranked suggestions AFTER blind detection and never starts the search; a band gate is a
+      weaker version of the same shortcut - it does not look a frequency up, but it does decide
+      where to look from a prior rather than from the signal. The 902-928 MHz burst scene (T-254)
+      is the model for what measurement-driven looks like.
+      Decide whether the gate is a permanent engineering constraint (cost, dwell budget) that
+      should be recorded as one, or a scaffold to remove. If it stays, SIGNAL-085's text should say
+      so, because a use case that claims more than the test delivers is the same defect as a UI
+      implying resolution it never captured.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: a four-level 100 %-duty emission placed OUTSIDE the
+      trigger band is found, or the ticket records why it cannot be.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-620
+    milestone: M2-hardening
+    title: "Briefs point agents at whole ADRs, not sections - the biggest ones are read in full repeatedly"
+    status: todo
+    priority: normal
+    parallel_group: CI
+    model: opus
+    effort: medium
+    core_interface: false
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-563's lever-3 measurement: docs/capabilities/*.md cards are NOT the problem - all
+      14 are 107-125 lines, exactly the cheap, scoped-small design CLAUDE.md describes. The cost is
+      ADRs. `docs/adr/*.md` ranges 23-799 lines; the largest are named by open+closed tickets a LOT:
+      ADR-0016 (784 lines) by 49 tickets, ADR-0017 (530 lines) by 28, ADR-0015 (681 lines) by 24,
+      ADR-0013 (560 lines) by 19, ADR-0012 (799 lines) by 16, ADR-0011 (558 lines) by 15. CLAUDE.md
+      tells agents to "read the ADRs a task names", with no per-task pointer to a section, so a task
+      that names ADR-0016 for one contract (say, the taxonomy-versioning rule) has no way to avoid
+      paying for the whole 784-line document, every time a fresh agent is briefed into that area -
+      and a fresh agent is briefed into ADR-0016's area on the order of once every couple of tickets,
+      given 49 references.
+      THE FIX IS NOT TO SHRINK THE ADRs. CLAUDE.md: "changing an ACCEPTED ADR goes to Fable + the
+      user" - this ticket must not edit ADR content, and splitting/summarising one is a change to a
+      settled document, not a formatting nit.
+      WHAT TO DO INSTEAD: (a) add a short "date/agents cite this ADR mostly for: <section>" pointer
+      to each `use_cases`/task-entry citation going forward, OR (b) add a table of contents with
+      line-anchored section names at the top of the 6+ large ADRs (a structural aid, arguably not a
+      decision change - confirm with Fable/the user before landing it, per the ADR-change rule) so a
+      brief can say "ADR-0016 SS3-4" instead of "ADR-0016", OR (c) if neither is cheap, at minimum
+      change the *briefing convention* in CLAUDE.md/coordinator role docs so a task entry that names
+      a >300-line ADR also names the section, going forward - cheapest lever, no ADR content touched.
+      MEASURE, do not assume: before landing anything, get a rough token cost of "read ADR-0016 in
+      full" vs "read the ~80-line section a task actually needs" from a live brief, so the fix is
+      justified by a number rather than the plausible story above.
+    notes: |
+      Filed by T-563 (2026-09-21), which found this while checking lever 3 (context re-reading) and
+      deliberately did not fix it itself - editing ADR content is a Fable+user decision, and the
+      cheapest fix (b) needs to be run past that rule before landing, not assumed to be a formatting
+      nit.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
