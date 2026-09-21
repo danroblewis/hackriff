@@ -85,6 +85,9 @@ mod refined;
 mod relate; // T-219
 #[cfg(test)]
 mod relate_tests;
+mod retune; // T-598 persisted cross-centre retune verdict
+#[cfg(test)]
+mod retune_tests;
 #[cfg(test)]
 mod same_emission_tests;
 mod selections;
@@ -121,6 +124,10 @@ pub use inventory::{EmitterUpsert, LatestMeasurement};
 pub use lifecycle::LIFECYCLE_TEXT_MAX;
 pub use refined::{REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning};
 pub use relate::{MAX_ARTIFACT_SOURCES, MAX_EVIDENCE_DETECTIONS, MAX_NEIGHBOURS, OverlapOutcome};
+pub use retune::{
+    MAX_LO_SPAN_HZ, MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, RETUNE_RULE, RetuneFamily,
+    RetuneOutcome, RetuneVerdict,
+};
 pub use selections::{
     SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX,
     SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, Selection, SelectionLink,
@@ -148,6 +155,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0013_trunking.sql"), // T-266 C23 trunking metadata (no call audio)
     include_str!("migrations/0012_observation_time_index.sql"), // T-262 ADR-0017 TM-5 (index only)
     include_str!("migrations/0014_harmonic_family.sql"), // T-374 C40 harmonic families
+    include_str!("migrations/0015_retune_verdict.sql"), // T-598 persisted retune verdict
 ];
 
 /// Schema version this build creates and understands.

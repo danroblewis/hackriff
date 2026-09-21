@@ -27,7 +27,14 @@ MAX_ATTEMPTS=${MAX_ATTEMPTS:-2}
 DRY_RUN=${DRY_RUN:-0}
 touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS" "$LANDED"
 
-log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
+# Log lines go to STDERR, never stdout. `ready_filter` runs inside `ready=$(ready_filter ...)`,
+# so anything it prints on stdout is read back as a BRANCH NAME. On 2026-09-21 that turned
+# "SKIP task-t307: nothing ahead of main (already merged?)" into the branches `ahead`, `of`,
+# `(already` and `merged?)`, reported a 7-branch batch as "BULK attempt (36)", and wrote those
+# words into merge-needs-attention.txt as branches needing a person. Harmless only by luck - the
+# bogus names failed the rev-parse check. Same family as the `tr -d` bug that once glued every
+# queued branch into one unmergeable token: a helper's diagnostics leaking into its data.
+log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG" >&2; }
 notify_coordinator(){ tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
 # Edge-triggered wake on a SUCCESSFUL merge: a clean merge drains the queue and may unblock
 # dependent tickets, but nothing else pings the coordinator for it (task-completions and the
@@ -269,6 +276,12 @@ self_version(){
     log "VERSION: restart from the repo between gates - see ops/README.md - or this runner keeps executing old code"
   fi
 }
+
+# The board's merge driver is named by .gitattributes (committed) but implemented by a command
+# in .git/config (not committed), so a fresh clone fails every tasks.yaml merge with "custom
+# merge driver hkboard lacks command line". Register it here too: the runner is the one path
+# that must never be tripped by a setup step nobody ran.
+( cd "$REPO" && just setup-git ) >>"$LOG" 2>&1 || log "WARN: just setup-git failed; tasks.yaml merges may conflict"
 
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 self_version

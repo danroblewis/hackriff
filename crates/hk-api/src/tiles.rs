@@ -122,7 +122,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use hk_model::{FreqRange, IdleGap, TimeRange, Timestamp};
+use hk_model::{FreqRange, TimeRange, Timestamp};
 use hk_store::history::Geometry;
 use hk_store::{Overview, OverviewCell, RegionQuery, Resolution};
 use serde_json::{Value, json};
@@ -1854,11 +1854,23 @@ pub fn tile_events_json(state: &ApiState, q: &Params) -> Result<Value, ApiError>
         .map_err(|_| ApiError::new(500, "event query failed"))?;
     let mut total = 0u64;
     let mut placed = 0u64;
+    // T-591: the same tune history `/api/events` and `/api/inventory` read, so a count on this
+    // tile is a count of the same events those surfaces list. It used to be
+    // `IdleGap::conservative` here, which is a *different* interval decomposition of the same
+    // ledger — the coarse view could disagree with the list it zooms into about how many events
+    // there were.
+    let coverage = crate::coverage::ObservedCoverage::of(state, window);
     for entry in &page.entries {
-        let intervals = repo
-            .presence_intervals(entry.emitter.id, IdleGap::conservative(), window.end)
+        let track = coverage
+            .track(
+                &repo,
+                entry.emitter.id,
+                entry.emitter.freq(),
+                window,
+                window.end,
+            )
             .map_err(|_| ApiError::new(500, "event query failed"))?;
-        for i in intervals.iter().filter(|i| i.time.overlaps(&window)) {
+        for i in track.intervals.iter().filter(|i| i.time.overlaps(&window)) {
             total += 1;
             let t = (i.time.start.as_unix_nanos() - key.region.t0_ns) / key.t_cell_ns;
             // An interval with no measured centre has no column: it is counted in `total` and not
@@ -2564,6 +2576,209 @@ mod tests {
         );
         assert!(
             max_db[row_b * N + N - 1].is_null(),
+            "and the store must hold nothing there, or this is the bug rather than the control"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- T-595: the DC notch is EXCLUDED, never grey -----------------------------------------
+
+    /// One dwell at `center_hz` / `rate_hz` with the producer's **DC notch declared**, the way a
+    /// real dwell record is written (`hk-core`'s `scheduler::observe`, `DcRule`'s ±15 kHz).
+    fn notched_dwell(
+        center_hz: f64,
+        rate_hz: f64,
+        dc_half_hz: f64,
+        t0_ns: i64,
+        t1_ns: i64,
+    ) -> hk_model::attention::observation::ObservationRecord {
+        let mut r = tuned_dwell(center_hz, rate_hz, t0_ns, t1_ns);
+        if let hk_model::attention::observation::ObservationRecord::Dwell(d) = &mut r {
+            d.window.dc_excluded = Some(FreqRange::new(
+                center_hz - dc_half_hz,
+                center_hz + dc_half_hz,
+            ));
+        }
+        r
+    }
+
+    /// **T-595 — the 25 kHz stripe down the middle of every band the radio ever sat on.**
+    ///
+    /// Measured by T-588 over a sweep of 1 966 080 cells: 1 212 cells held a measurement and read
+    /// `unobserved`, and **all 1 212 were the DC notch at the tuned centre**. The observation log
+    /// punched a hole in its own coverage (`ObservedWindow.dc_excluded`) while the history pyramid
+    /// kept rows right across it, so past the IQ ring's horizon — where the ring journal's
+    /// full-band segments no longer cover the hole — the canvas painted *"we never looked"* over
+    /// spectrum we hold. Both halves of the invariant at once: data that exists was not shown, and
+    /// grey stopped meaning genuinely unobserved.
+    ///
+    /// **This fixture has no IQ ring**, which is exactly what *past the ring horizon* means to the
+    /// coverage map: the observation log is the only evidence left. That is why nobody saw this
+    /// until history aged out — a test with a ring passes while the defect is intact.
+    ///
+    /// The notch gets its own mark, `"excluded"`: sampled, and deliberately left out of analysis.
+    /// Not `"observed"` (the detector really did ignore it, and an absence of detections there is
+    /// not a finding), and above all not `"unobserved"`.
+    ///
+    /// Four assertions, counted, with floors so none can pass on zero of zero:
+    ///
+    /// 1. **no cell holding a `max_db` reads `unobserved` or `unknown`** — the invariant;
+    /// 2. the notch cells read `"excluded"`, and there are some;
+    /// 3. the analysed band around them still reads `"observed"` — an exclusion that spread would
+    ///    be the same defect pointing the other way;
+    /// 4. spectrum the dwell never reached is still grey, and the store holds nothing there.
+    ///
+    /// RED without the fix: drop the `Analysis::Excluded` span in
+    /// [`hk_store::coverage::spans_from_records`] and assertion 1 counts the notch cells as grey.
+    #[test]
+    fn the_dc_notch_past_the_ring_horizon_is_excluded_never_a_cell_greyed_over_a_measurement() {
+        let dir = temp_dir("t595-dc-notch");
+        let secs = N as i64;
+        let f_cell = 6250.0;
+        let tile_hz = f_cell * N as f64;
+        let dc_half = 15e3;
+
+        let mut p = hk_store::Pyramid::open(&dir, PyramidConfig::default()).unwrap();
+        let t_cell = p.geometry().levels[0].t_cell_ns;
+        let t0 = T_INDEX * t_cell * N as i64;
+        let f_lo = F_INDEX as f64 * f_cell * N as f64;
+
+        // The dwell covers the lower three quarters of the tile, so the top quarter is the control:
+        // never tuned, nothing ingested, honestly grey.
+        let rate = tile_hz * 0.75;
+        let centre = f_lo + rate / 2.0;
+
+        // Frames span the WHOLE tuned band, notch included — that is what the FFT produces and what
+        // the pyramid keeps. The notch is an analysis exclusion, not a gap in the spectrum rows.
+        const NB: usize = 256;
+        let bin_hz = rate / NB as f64;
+        let psd = [1e-9f32; NB];
+        for k in 0..secs {
+            p.ingest(&hk_store::history::FrameInput::new(
+                Timestamp::from_unix_nanos(t0 + k * t_cell),
+                t_cell,
+                centre - rate / 2.0,
+                bin_hz,
+                hk_model::PowerUnit::Dbfs,
+                &psd,
+            ))
+            .unwrap();
+        }
+        let mut state = ApiState {
+            history: Some(Arc::new(std::sync::Mutex::new(p))),
+            // No IQ ring: the segment journal that used to paper over the notch is gone, which is
+            // the state of every window older than the ring's retention.
+            iq_buffer: None,
+            ..ApiState::default()
+        };
+        let store = hk_store::observation::ObservationStore::open(
+            hk_store::observation::ObservationLogConfig::new(dir.join("observations")),
+        )
+        .unwrap();
+        store.append(&notched_dwell(
+            centre,
+            rate,
+            dc_half,
+            t0,
+            t0 + secs * t_cell,
+        ));
+        store.flush();
+        state.observations = Some(store);
+
+        let v = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        let states: Vec<String> = v["coverage"]["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        let sel = v["coverage"]["selected"]["plane"].as_u64().unwrap() as usize;
+        let runs = v["coverage"]["planes"][sel]["runs"].as_array().unwrap();
+        let mut plane: Vec<&str> = Vec::with_capacity(N * N);
+        for pair in runs.chunks(2) {
+            let s = pair[0].as_u64().unwrap() as usize;
+            for _ in 0..pair[1].as_u64().unwrap() {
+                plane.push(&states[s]);
+            }
+        }
+        assert_eq!(plane.len(), N * N, "the plane is the tile's own grid: {v}");
+        let max_db = v["grid"]["max_db"].as_array().unwrap();
+        assert_eq!(max_db.len(), N * N, "{v}");
+
+        // 1. The invariant, counted: nothing we hold a measurement for is drawn as never-looked-at.
+        let measured = max_db.iter().filter(|x| !x.is_null()).count();
+        assert!(
+            measured >= N * N / 2,
+            "the fixture must judge real measurements, not zero of zero: {measured} of {}",
+            N * N
+        );
+        let greyed: Vec<usize> = (0..N * N)
+            .filter(|&i| {
+                !max_db[i].is_null() && (plane[i] == "unobserved" || plane[i] == "unknown")
+            })
+            .collect();
+        assert!(
+            greyed.is_empty(),
+            "{} of {measured} cells hold a measurement and are drawn grey - \
+             \"we have it but didn't render it\". First at row {}, cell {} ({:.4} MHz), state {:?}",
+            greyed.len(),
+            greyed[0] / N,
+            greyed[0] % N,
+            (f_lo + (greyed[0] % N) as f64 * f_cell) / 1e6,
+            plane[greyed[0]]
+        );
+
+        // 2. And the notch is not silently reclassified as ordinary coverage: the cells wholly
+        // inside it carry the exclusion, in every row the dwell covers.
+        let inside: Vec<usize> = (0..N)
+            .filter(|&f| {
+                let lo = f_lo + f as f64 * f_cell;
+                lo >= centre - dc_half && lo + f_cell <= centre + dc_half
+            })
+            .collect();
+        assert!(
+            inside.len() >= 2,
+            "the fixture must judge notch cells: {inside:?}"
+        );
+        let row = N / 2;
+        for &f in &inside {
+            assert_eq!(
+                plane[row * N + f],
+                "excluded",
+                "the DC notch cell at {:.4} MHz must read \"excluded\": {:?}",
+                (f_lo + f as f64 * f_cell) / 1e6,
+                &plane[row * N + f - 1..row * N + f + 2]
+            );
+            assert!(
+                !max_db[row * N + f].is_null(),
+                "and the store holds a measurement there - otherwise this is not the cell the \
+                 ticket is about"
+            );
+        }
+        let excluded = (0..N * N).filter(|&i| plane[i] == "excluded").count();
+        assert_eq!(
+            excluded,
+            inside.len() * N,
+            "the exclusion is exactly the notch, in every row: {excluded}"
+        );
+
+        // 3. The analysed band is still analysed.
+        assert_eq!(
+            plane[row * N],
+            "observed",
+            "{:?}",
+            &plane[row * N..row * N + 4]
+        );
+
+        // 4. Grey still means something: the quarter the dwell never reached.
+        assert_eq!(
+            plane[row * N + N - 1],
+            "unobserved",
+            "spectrum the dwell does not reach must stay grey, or assertion 1 passes by \
+             observing everything"
+        );
+        assert!(
+            max_db[row * N + N - 1].is_null(),
             "and the store must hold nothing there, or this is the bug rather than the control"
         );
         let _ = std::fs::remove_dir_all(&dir);

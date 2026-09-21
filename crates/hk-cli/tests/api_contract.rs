@@ -1831,6 +1831,7 @@ fn events_and_presence_serve_the_durable_catalogue() {
             "withheld",
             "events",
             "on_air_s",
+            "liveness",
             "count",
         ] {
             assert!(
@@ -1843,7 +1844,43 @@ fn events_and_presence_serve_the_durable_catalogue() {
             m["events"].as_u64().is_some_and(|n| n > 0),
             "an emitter is listed only when it has events in the window: {m}"
         );
+        assert!(
+            matches!(m["liveness"].as_str(), Some("live" | "ended" | "absent")),
+            "liveness is live/ended/absent: {m}"
+        );
     }
+    // T-591: **the two surfaces cannot disagree about one emitter's liveness.** An emitter's
+    // presence is one interval `[start, end?]` (ADR-0017/0019), so liveness is a property of the
+    // emitter and not of the route asked. `/api/events` used to derive it under
+    // `IdleGap::conservative()` (60 s) while `/api/inventory` measured the gap off the band's tune
+    // history (T-410), and they disagreed. Asserted over EVERY emitter the catalogue listed, with
+    // the count reported — a comparison of zero emitters would be vacuous.
+    let (st, inv) = get(
+        addr,
+        &format!("/api/inventory?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&limit=500"),
+    );
+    assert_eq!(st, 200, "{inv}");
+    let rows = inv["entries"].as_array().expect("inventory entries");
+    let mut compared = 0usize;
+    for m in emitters {
+        let id = m["id"].as_str().unwrap();
+        let Some(row) = rows.iter().find(|r| r["id"] == json!(id)) else {
+            continue;
+        };
+        assert_eq!(
+            m["liveness"], row["presence"]["liveness"],
+            "/api/events and /api/inventory disagree about emitter {id} in the same window: \
+             events {m}, inventory row presence {}",
+            row["presence"]
+        );
+        compared += 1;
+    }
+    assert!(
+        compared > 0,
+        "liveness was compared for {compared} emitters — a vacuous comparison: events {v}, \
+         inventory {inv}"
+    );
+    eprintln!("T-591: liveness compared across both surfaces for {compared} emitters");
     // Coverage always answers, and always in words a client can show beside an empty list: an
     // unobserved stretch is never reported as a quiet band (C26).
     let statement = v["coverage"]["statement"]
@@ -6270,10 +6307,26 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
         tuned["resolution"]["grey_rule"],
         json!(
             "grey a cell if and only if its state is \"unobserved\"; \"unknown\" is not grey and \
-             not a level — draw it as a fourth thing (hatching, per T-413)"
+             not a level — draw it as a fourth thing (hatching, per T-413); \"excluded\" (T-595) \
+             is spectrum the radio DID sample and the analysis skipped — draw the measurement, \
+             mark it distinctly, never grey"
         ),
         "{tuned}"
     );
+    // T-595: every OBSERVED cell states how much of its extent the analysis actually ran on, so
+    // "excluded" is a number a client can check and not a word it must take. An unobserved cell
+    // carries no such key — that absence is the structural rule above, unchanged.
+    for c in tuned["any"]["cells"].as_array().expect("cells") {
+        if c["state"] == json!("observed") {
+            let a = c["analysed_s"].as_f64().unwrap_or_else(|| panic!("{c}"));
+            let o = c["observed_s"].as_f64().unwrap();
+            assert!(a > 0.0 && a <= o, "an observed cell was analysed: {c}");
+        }
+    }
+    for c in fresh["any"]["cells"].as_array().expect("cells") {
+        assert!(c.get("analysed_s").is_none(), "{c}");
+    }
+    assert_eq!(fresh["any"]["excluded_cells"], json!(0), "{fresh}");
     // T-342: and so is the SHADE's rule. A 0–1 number normalised against a range the response never
     // named is a measurement the consumer cannot check or match: the strip must be able to share
     // the waterfall's scaling, which needs the range and the scale on the wire, not just the ratio.
@@ -7197,11 +7250,13 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         json!("plane-table-rle"),
         "{fine}"
     );
-    // THREE states, in the answer's own alphabet: a code is never read against one the client
-    // assumed, and `unknown` (T-423) is never spelled as `unobserved`.
+    // FOUR states, in the answer's own alphabet: a code is never read against one the client
+    // assumed, `unknown` (T-423) is never spelled as `unobserved`, and `excluded` (T-595 — sampled,
+    // deliberately left out of analysis: the DC notch) is neither. It is APPENDED, so every code an
+    // older client cached keeps its meaning.
     assert_eq!(
         fine["coverage"]["states"],
-        json!(["unobserved", "observed", "unknown"]),
+        json!(["unobserved", "observed", "unknown", "excluded"]),
         "{fine}"
     );
     let planes = fine["coverage"]["planes"].as_array().unwrap();
@@ -7217,9 +7272,9 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
             .collect();
         assert_eq!(runs.len() % 2, 0, "{p}");
         let mut total = 0u64;
-        let mut counts = [0u64; 3];
+        let mut counts = [0u64; 4];
         for pair in runs.chunks(2) {
-            assert!(pair[0] < 3, "code outside the served alphabet: {p}");
+            assert!(pair[0] < 4, "code outside the served alphabet: {p}");
             counts[pair[0] as usize] += pair[1];
             total += pair[1];
         }
@@ -7229,6 +7284,7 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         assert_eq!(p["observed_cells"], json!(counts[1]), "{p}");
         assert_eq!(p["unobserved_cells"], json!(counts[0]), "{p}");
         assert_eq!(p["unknown_cells"], json!(counts[2]), "{p}");
+        assert_eq!(p["excluded_cells"], json!(counts[3]), "{p}");
         // And no cell on this plane carries a measurement key of any kind — there is nothing here
         // that could be read as a level of zero. The measurement plane is `grid`, separately.
         for k in [

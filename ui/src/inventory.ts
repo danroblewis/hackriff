@@ -31,6 +31,24 @@ export interface Presence {
   liveness: "live" | "ended" | "absent"; ended_t_s: number | null;
 }
 
+/** T-219/T-587: why this row currently defers to another row — a Confirmed overlap, the weaker of
+ * a duplicate pair, or a receiver artifact (docs/api.md `relation`). `artifact` names the mechanism
+ * for `artifact-of` (`image`/`harmonic`/`intermod`); `null` for every other kind, including
+ * `retune-sibling-of` (T-598), whose own mechanism lives in `detail.slope`. `reason` is always
+ * backend-rendered prose — "image of the 100.8 MHz carrier" — and is the only source of that text;
+ * nothing client-side re-derives or paraphrases it. */
+export interface Relation {
+  kind: "suppressed-by" | "duplicate-of" | "artifact-of" | "retune-sibling-of";
+  artifact: "image" | "harmonic" | "intermod" | null;
+  source_id: string;
+  author: "system" | "user";
+  actor: string;
+  t_s: number;
+  reason: string;
+  score: number | null;
+  detail: Record<string, unknown> | null;
+}
+
 export interface Row {
   id: string; state: EntryState;
   f_center_hz: number; bandwidth_hz: number; f_lo_hz: number; f_hi_hz: number;
@@ -47,6 +65,10 @@ export interface Row {
    * every row, windowed or not (docs/api.md). `undefined` is treated exactly like a row with no
    * interval in the window — no box drawn — never a fabricated one. */
   presence?: Presence;
+  /** Optional for the same reason `presence` is: a server predating this field, or a fixture built
+   * before it, still typechecks. A current server always sends `null` on a row with no standing
+   * relation — never omits the key — so `undefined` here is treated exactly like `null`. */
+  relation?: Relation | null;
 }
 interface Page { entries: Row[]; next_cursor: string | null }
 type Key = "status" | "freq" | "bw" | "family" | "identity" | "count" | "recurrence" | "tags";
@@ -103,6 +125,11 @@ export interface Filters {
    * list re-derives the liveness its rows had then without being time-filtered. */
   at?: number;
   status?: string; tag?: string;
+  /** `relations=` (docs/api.md, T-219): `shown` (default) hides a row with a standing relation
+   * claim entirely; `all` lists it too, with `relation` set so the caller can render it. T-587
+   * asks for `all` on the Explore queries — an artefact the backend has already explained must
+   * reach the screen labelled, not vanish the way `shown` was hiding it. */
+  relations?: "shown" | "all";
 }
 
 /** The `/api/inventory` query for one state's list (T-080: candidates and confirmed load
@@ -117,6 +144,7 @@ export function inventoryQuery(state: "candidate" | "confirmed", f: Filters, cur
   if (f.at !== undefined) p.set("at", String(f.at));
   if (f.status) p.set("status", f.status);
   if (f.tag) p.set("tag", f.tag);
+  if (f.relations) p.set("relations", f.relations);
   p.set("limit", "200");
   if (cursor) p.set("cursor", cursor);
   return `/api/inventory?${p}`;

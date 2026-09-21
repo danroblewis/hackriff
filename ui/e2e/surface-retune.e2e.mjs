@@ -415,7 +415,9 @@ test("5. THE TICKET, enabled: a viewport INSIDE the tuned window retunes to wher
   // right answer to a busy radio is the one the client already gives: say so, and let the user press
   // again. So this presses again, and asserts on where the FRONT END ends up.
   let w1 = w0;
+  let presses = 0;
   for (let attempt = 0; attempt < 5; attempt++) {
+    presses += 1;
     await page.click(`document.querySelector('${PANE_ACTION}')`);
     await page.frames(4);
     for (let i = 0; i < 20; i++) {
@@ -435,8 +437,23 @@ test("5. THE TICKET, enabled: a viewport INSIDE the tuned window retunes to wher
   assert.deepEqual([...new Set(posts.map((r) => new URL(r.url).pathname))].sort(),
     ["/api/control/window"],
     `the press touched a route it should not: ${JSON.stringify(posts.map((r) => r.url))}`);
-  assert.equal(posts.length, 1,
-    `one press, one device request: ${JSON.stringify(posts.map((r) => r.url))}`);
+  // ONE PRESS, ONE DEVICE REQUEST — counted per press, not in total.
+  //
+  // The loop above presses again on purpose: a rate change re-plumbs the capture, so the centre
+  // can land inside the settle gap and come back `device_busy`, and the right answer to a busy
+  // radio is to say so and let the user press again (the comment above says exactly this). A flat
+  // `posts.length === 1` contradicted that: a busy radio made the test press again and then fail
+  // FOR having pressed again. It sank task-t598's gate on 2026-09-21 with three posts, and the
+  // same contradiction was already on `main` — it fires whenever the radio is slow to settle,
+  // which is whenever the machine is loaded.
+  //
+  // The invariant T-529 actually bought is intact and is what is asserted: a press commands the
+  // radio ONCE, down ONE route. Pressing twice because the first press was refused is the
+  // documented behaviour, not a violation — what would be a violation is one press fanning out
+  // into several device commands.
+  assert.equal(posts.length, presses,
+    `each press must command the device exactly once: ${presses} press(es) produced ` +
+    `${posts.length} request(s): ${JSON.stringify(posts.map((r) => r.url))}`);
 
   // (2) AT THE FRONT END: the window in force is the one the CONTROL NAMED, it is narrower than the
   //     one before, and it still contains the viewport the user was looking at. This is the claim —

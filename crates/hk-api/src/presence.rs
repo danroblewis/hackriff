@@ -151,9 +151,12 @@ fn read(state: &ApiState, id: EmitterId, q: &[(String, String)]) -> Result<Value
     // band comes from the row already read through the **gated** getter above — the ungated one is
     // not a shortcut worth taking for a frequency (`hk_api_never_calls_the_ungated_emitter_getters`).
     let span = w.unwrap_or_else(|| crate::query::presence_window(None, None).0);
-    let gap =
-        crate::coverage::ObservedCoverage::of(state, span).idle_gap(emitter.emitter.freq(), span);
-    let all = repo.presence_intervals(live, gap, now).map_err(repo_fail)?;
+    let freq = emitter.emitter.freq();
+    let coverage = crate::coverage::ObservedCoverage::of(state, span);
+    let track = coverage
+        .track(&repo, live, freq, span, now)
+        .map_err(repo_fail)?;
+    let all = &track.intervals;
     let selected: Vec<&PresenceInterval> = match w {
         Some(w) => all.iter().filter(|i| i.time.overlaps(&w)).collect(),
         None => all.iter().collect(),
@@ -171,7 +174,7 @@ fn read(state: &ApiState, id: EmitterId, q: &[(String, String)]) -> Result<Value
         .collect();
     // The same idle gap the intervals above were closed under — and the one `/api/inventory` reads
     // with — so the projection cannot contradict the track it accompanies.
-    let projected = hk_model::presence_in_window(&all, span, gap);
+    let projected = track.project(span);
     Ok(json!({
         "emitter": live.to_string(),
         "window": w.map(|w| json!({"t0_s": ts_s(w.start), "t1_s": ts_s(w.end)})),
