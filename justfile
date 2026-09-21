@@ -143,8 +143,11 @@ test-doc:
 # UNSET MEANS THE WHOLE WORKSPACE, and that is the safety property, not an implementation
 # detail: every way this path can go wrong — an old justfile, a `just test-rust` typed by
 # hand, a crashed classifier, a shell that dropped the variable — lands on `--workspace`,
-# the expensive answer. Only `just gate` sets it, only after `py/hkpy/crates.py` has proved
-# the closure, and `crates.py` returns "whole workspace" whenever it is not certain. Same
+# the expensive answer. CORRECTED 2026-09-20: `just gate` only ever sets it when the caller
+# passes `--select-crates` (an agent's own opt-in for local iteration), and it is refused
+# unconditionally for `just gate-merge` and inside CI regardless of that flag — the merge
+# and CI gates always run the whole workspace. When it IS set, `py/hkpy/crates.py` has
+# already proved the closure, and returns "whole workspace" whenever it is not certain. Same
 # fail-closed shape as the class rule one level up, and the same reason: nothing said is
 # never permissive.
 _crate-scope exclude="":

@@ -414,7 +414,8 @@ dominant term: measured on 2026-09-20, `cargo build -p hk-plugins --bins`, docum
 as "~0.05 s on a warm target", took **500 s** at load 211 with three agents building and an `hk serve`
 holding 9-13 cores. No gate change competes with that.
 
-**3. Within the `full` class, only the affected crates run.** `py/hkpy/crates.py` computes the
+**3. Affected-crate selection exists, but only for an agent's own local iteration — the merge and CI
+gates never use it (T-543, corrected by the user 2026-09-20).** `py/hkpy/crates.py` computes the
 reverse-dependency closure from `cargo metadata` at **target** level: a package's test binaries link
 its lib deps *plus* its dev-deps and each dev-dep's own lib closure, so both edge kinds are followed
 and they are followed differently. Measured here: `hk-cli` 2 of 20 packages, `hk-sim` 2,
@@ -423,15 +424,29 @@ and they are followed differently. Measured here: `hk-cli` 2 of 20 packages, `hk
 `hk-model` - everything else it names is a dev-dependency, which reaches hk-e2e's own tests and stops
 there rather than flowing into the eight crates that dev-depend on hk-e2e.
 
-**What the narrowing stops catching, stated plainly.** It follows the Cargo graph, so it cannot see a
-coupling that exists only at run time. Three answers:
+**The user's ruling, corrected into the gate itself, not just documented:** affected-crate selection is
+for the agent iteration path only. `just gate --select-crates` opts in; unset (the default) means the
+whole workspace. `py/hkpy/gate.py`'s `resolve_selection` checks `merge` and `ci` **first, unconditionally,
+before it even looks at the flag** - `just gate-merge` (T-424, the coordinator's per-merge gate) and
+`just gate` running inside `GITHUB_ACTIONS` (CI) both always get the whole workspace, so a future call
+site cannot recreate the original mistake by wiring `--select-crates` into the merge/CI path by
+accident. `py/tests/test_gate.py` pins this on the function, not on trust that no caller ever passes it.
 
-- **Acceptance is not narrowed.** `hk-e2e` is in the affected set of *every* crate, so
-  `just acceptance-ci` - the tier that caught T-484's dark demo - runs for every `crates/` change. That
-  is the graph agreeing with the policy, not the policy overriding the graph, and it is asserted by a
-  test so a future graph change cannot quietly drop it.
+**What the narrowing stops catching, stated plainly, for the opt-in case.** It follows the Cargo graph,
+so it cannot see a coupling that exists only at run time. Three answers:
+
+- **Acceptance is not narrowed, even when opted in.** `hk-e2e` is in the affected set of *every* crate,
+  so `just acceptance-ci` - the tier that caught T-484's dark demo - runs for every `crates/` change.
+  That is the graph agreeing with the policy, not the policy overriding the graph, and it is asserted by
+  a test so a future graph change cannot quietly drop it.
 - **The UI tiers are not narrowed.** `just test-ui` and `just test-ui-e2e` are untouched by the crate
-  selection.
+  selection. Separately, `just test-ui` (not `test-ui-e2e`) is skipped outright for a `full`-class diff
+  with no `ui/` path, on the merge/CI gate too - `npm run build`/`tsc --noEmit`/`npm test` are pure
+  functions of `ui/` source with no generated Rust input, so a `crates/`-only diff cannot change their
+  answer; `test-ui-e2e`, the browser tier that notices a backend change breaking the page, is never
+  skipped. That skip stays on the merge gate because it is provably not a coverage reduction, unlike
+  crate selection, which is a probabilistic-enough narrowing (it follows the *build* graph, not
+  everything a suite might assert against) that it stays opt-in only.
 - **Anything the graph does not model forces the whole workspace**: `Cargo.lock`, `Cargo.toml`,
   `.config/` (the thread cap and serial groups - *how* every test is scheduled), `fixtures/`,
   `plugins/`, `recipes/`, `.github/`, the `justfile`, and any path under `crates/` or `tests/` that
@@ -440,9 +455,9 @@ coupling that exists only at run time. Three answers:
 
 The selection reaches the suites through exactly one variable, `HK_GATE_CRATES`, read by `lint-rust`,
 `test-rust` and `test-doc`. **Unset means the whole workspace**, which is the safety property: an old
-justfile, a hand-typed `just test-rust`, a crashed classifier or a shell that dropped the variable all
-land on the expensive answer, never a cheap one. Same fail-closed shape as the class rule, one level
-down.
+justfile, a hand-typed `just test-rust`, a crashed classifier, a shell that dropped the variable, or
+simply not passing `--select-crates` all land on the expensive answer, never a cheap one. Same
+fail-closed shape as the class rule, one level down.
 
 **Levers measured and rejected.**
 

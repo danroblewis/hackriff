@@ -586,6 +586,155 @@ def test_a_non_full_class_has_no_rust_suite_to_narrow():
 
 
 # ---------------------------------------------------------------------------------------
+# T-543, CORRECTED BY THE USER (2026-09-20): affected-crate selection is for an agent's own
+# local iteration ONLY. The merge gate (`just gate-merge`) and the CI gate (`just gate`
+# inside GitHub Actions) must NEVER narrow, unconditionally — not "narrowing wasn't
+# requested this time" but structurally refused even if `--select-crates` is passed. These
+# pin that on `resolve_selection` itself, the one function every path (CLI, gate-merge, CI)
+# funnels through, rather than on trusting that no caller ever wires the flag in wrong.
+# ---------------------------------------------------------------------------------------
+
+
+def test_crate_narrowing_is_opt_in_and_off_by_default():
+    # A plain full-class diff, not a merge, not CI, `--select-crates` not passed: still the
+    # whole workspace. This is the corrected default — T-543 originally had this narrow
+    # automatically, which is exactly the mistake the user's ruling reverses.
+    from hkpy.gate import Source, resolve_selection
+
+    decision = classify(["crates/hk-cli/src/lib.rs"])
+    source = Source("explicit --files", ["crates/hk-cli/src/lib.rs"])
+    sel = resolve_selection(decision, source, ".")
+    assert sel.is_workspace
+    assert "opt-in" in sel.reason
+
+
+def test_select_crates_narrows_a_plain_local_run(monkeypatch):
+    # The opt-in DOES work, for the one path it is meant for: an agent's own local
+    # iteration, not a merge and not CI. Pin it with a deterministic fake workspace
+    # (`_MINI`, the same fixture `crates.py`'s own tests use) rather than the real
+    # `cargo metadata`, so the assertion doesn't depend on what's installed.
+    from hkpy import crates as crate_select
+    from hkpy.gate import Source, resolve_selection
+
+    monkeypatch.setattr(crate_select, "load_workspace", lambda root: _MINI)
+
+    decision = classify(["crates/hk-cli/src/main.rs"])
+    source = Source("explicit --files", ["crates/hk-cli/src/main.rs"])
+    sel = resolve_selection(decision, source, ".", select_crates=True)
+    assert not sel.is_workspace
+    assert sel.crates == ("hk-cli", "hk-e2e")
+
+    # And the same diff, still opted in, is refused for merge/CI regardless.
+    assert resolve_selection(
+        decision, source, ".", select_crates=True, merge=True
+    ).is_workspace
+    assert resolve_selection(
+        decision, source, ".", select_crates=True, ci=True
+    ).is_workspace
+
+
+def test_merge_gate_never_narrows_crates_even_if_select_crates_is_passed():
+    from hkpy.gate import Source, resolve_selection
+
+    decision = classify(["crates/hk-cli/src/lib.rs"])
+    source = Source(
+        "merge index [MERGE_HEAD]", ["crates/hk-cli/src/lib.rs"]
+    )
+    sel = resolve_selection(decision, source, ".", select_crates=True, merge=True)
+    assert sel.is_workspace
+    assert "merge gate" in sel.reason
+
+
+def test_ci_gate_never_narrows_crates_even_if_select_crates_is_passed():
+    from hkpy.gate import Source, resolve_selection
+
+    decision = classify(["crates/hk-model/src/lib.rs"])
+    source = Source(
+        "CI pull request, merge base with origin/main", ["crates/hk-model/src/lib.rs"]
+    )
+    sel = resolve_selection(decision, source, ".", select_crates=True, ci=True)
+    assert sel.is_workspace
+    assert "CI gate" in sel.reason
+
+
+def test_merge_and_ci_are_checked_before_the_opt_in_flag():
+    # Even a caller that forgot to pass select_crates at all still gets the merge/CI
+    # short-circuit reason, not the generic "opt-in, not requested" one — the two must not
+    # collapse into one message that could plausibly be satisfied by only one of the guards.
+    from hkpy.gate import Source, resolve_selection
+
+    decision = classify(["crates/hk-cli/src/lib.rs"])
+    source = Source("merge index [MERGE_HEAD]", ["crates/hk-cli/src/lib.rs"])
+    sel = resolve_selection(decision, source, ".", merge=True)
+    assert sel.is_workspace
+    assert "merge gate" in sel.reason
+
+
+def test_main_never_narrows_under_merge_even_with_select_crates(monkeypatch, tmp_path, capsys):
+    # Full round-trip through main(): `--merge --select-crates` together must still run the
+    # whole workspace, because it is the wiring in main() (ci = GITHUB_ACTIONS, merge =
+    # args.merge, both passed into resolve_selection) that has to get this right, not just
+    # the pure function in isolation.
+    from hkpy import gate as gate_mod
+
+    monkeypatch.setattr(gate_mod, "merge_state", lambda root: "MERGE_HEAD")
+    monkeypatch.setattr(
+        gate_mod, "staged_changes", lambda root: ["crates/hk-cli/src/lib.rs"]
+    )
+    monkeypatch.setattr(
+        gate_mod, "worktree_changes", lambda root: ["crates/hk-cli/src/lib.rs"]
+    )
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+    rc = gate_mod.main(
+        ["--merge", "--select-crates", "--dry-run", "--root", str(tmp_path)]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "WHOLE WORKSPACE" in out
+    assert "merge gate" in out
+
+
+def test_main_never_narrows_in_ci_even_with_select_crates(monkeypatch, tmp_path, capsys):
+    from hkpy import gate as gate_mod
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_BASE_REF", "main")
+    monkeypatch.setattr(
+        gate_mod,
+        "committed_changes",
+        lambda root, ref: ["crates/hk-model/src/lib.rs"],
+    )
+
+    rc = gate_mod.main(["--select-crates", "--dry-run", "--root", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "WHOLE WORKSPACE" in out
+    assert "CI gate" in out
+
+
+def test_main_default_ci_run_never_narrows_even_without_the_flag(
+    monkeypatch, tmp_path, capsys
+):
+    # The realistic case: CI's actual invocation (`just gate --phase check`, no
+    # `--select-crates` at all) over a diff that touches one crate.
+    from hkpy import gate as gate_mod
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_BASE_REF", "main")
+    monkeypatch.setattr(
+        gate_mod,
+        "committed_changes",
+        lambda root, ref: ["crates/hk-cli/src/lib.rs"],
+    )
+
+    rc = gate_mod.main(["--phase", "check", "--dry-run", "--root", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "WHOLE WORKSPACE" in out
+
+
+# ---------------------------------------------------------------------------------------
 # T-543: the gate records its own duration.
 # ---------------------------------------------------------------------------------------
 

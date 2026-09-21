@@ -594,11 +594,14 @@ def render(decision: Decision, source: Source, phase: str) -> list[str]:
     return out
 
 
-#: T-543. The one place the crate narrowing reaches the suites: the justfile's `lint-rust`,
-#: `test-rust` and `test-doc` read this variable and turn it into `-p` flags. **Unset means
-#: the whole workspace**, so the failure mode of every bug in this path — a crash, a missing
-#: `cargo`, a typo, an old justfile — is the expensive gate, never a cheap one. That is the
-#: same fail-closed shape as `classify_path`'s unknown-is-FULL, moved one level down.
+#: T-543, corrected 2026-09-20. The one place the crate narrowing reaches the suites: the
+#: justfile's `lint-rust`, `test-rust` and `test-doc` read this variable and turn it into
+#: `-p` flags. **Unset means the whole workspace**, so the failure mode of every bug in this
+#: path — a crash, a missing `cargo`, a typo, an old justfile — is the expensive gate, never
+#: a cheap one. That is the same fail-closed shape as `classify_path`'s unknown-is-FULL,
+#: moved one level down. It is now also the *default* shape: only `--select-crates` (an
+#: agent's own opt-in for local iteration) ever sets it, and `resolve_selection` refuses to
+#: set it at all for `--merge` or inside CI regardless of that flag — see its docstring.
 CRATES_ENV = "HK_GATE_CRATES"
 
 #: T-543. Set for a `full`-class diff that contains no `ui/` path, so `just test-ui` (npm ci
@@ -626,16 +629,46 @@ def skip_ui(decision: Decision, source: Source) -> bool:
 
 
 def resolve_selection(
-    decision: Decision, source: Source, root: str, *, no_select: bool = False
+    decision: Decision,
+    source: Source,
+    root: str,
+    *,
+    select_crates: bool = False,
+    no_select: bool = False,
+    merge: bool = False,
+    ci: bool = False,
 ) -> "crate_select.Selection":
     """Narrow the Rust suite to the crates a `full`-class diff can reach, or don't.
 
-    Only the `full` class is refined, and only when the changed-path list is known: a forced
-    full gate (an unreadable diff, a CI push build, `--merge` outside a merge) has no path
-    list to reason from, so by construction it gets the whole workspace.
+    T-543 CORRECTED BY THE USER (2026-09-20): affected-crate selection is a convenience for
+    an AGENT'S OWN local iteration only. It must never reduce coverage on a path that can
+    reach `main` — so this function checks the two paths that can, ``merge`` and ``ci``,
+    FIRST and unconditionally, before it even looks at ``select_crates``:
+
+      * ``merge=True`` is `just gate-merge` (T-424) — the coordinator's per-merge gate.
+      * ``ci=True`` is `just gate` running inside GitHub Actions.
+
+    Neither is ever narrowed, even if ``select_crates=True`` were somehow also passed — the
+    check is unconditional, not "narrowing wasn't requested this time", so a future caller
+    cannot recreate T-543's original mistake by wiring the flag into the merge/CI call site
+    by accident. `py/tests/test_gate.py` pins this the same way it pins classification's
+    fail-closed shape: as a test on the function, not as trust that no caller ever passes it.
+
+    Everywhere else, narrowing is OPT-IN via ``--select-crates``: unset (the default) means
+    the whole workspace, the same fail-closed shape as `classify_path`'s unknown-is-FULL.
+    ``no_select`` stays as an explicit "definitely don't" for a caller that has its own
+    reason to pass `--select-crates` and `--no-select` together in one invocation.
     """
-    if no_select:
-        return crate_select.Selection(None, "--no-select: crate narrowing disabled")
+    if merge:
+        return crate_select.Selection(None, "the merge gate never narrows crates (T-543, corrected)")
+    if ci:
+        return crate_select.Selection(None, "the CI gate never narrows crates (T-543, corrected)")
+    if no_select or not select_crates:
+        return crate_select.Selection(
+            None,
+            "crate narrowing is opt-in (--select-crates), for an agent's own local "
+            "iteration, and was not requested",
+        )
     if not decision.is_full:
         return crate_select.Selection(None, "not the full class — no Rust suite to narrow")
     if decision.forced_reason or source.paths is None:
@@ -735,11 +768,22 @@ def main(argv: list[str] | None = None) -> int:
         help="print the decision and the suites, run nothing",
     )
     parser.add_argument(
+        "--select-crates",
+        action="store_true",
+        help=(
+            "OPT-IN ONLY (T-543, corrected 2026-09-20): narrow the Rust suite to the crates "
+            "this diff can reach, for an agent's own local iteration. Off by default. "
+            "Never implied by class, never passed by `just gate-merge` or by CI, and "
+            "structurally refused under --merge or inside GITHUB_ACTIONS even if passed — "
+            "the merge/CI gate always runs the whole workspace regardless of this flag."
+        ),
+    )
+    parser.add_argument(
         "--no-select",
         action="store_true",
         help=(
-            "run the Rust suite over the whole workspace even when the diff touches only "
-            "a few crates (T-543). The expensive answer, for when you want it."
+            "explicitly disable crate narrowing (default already, since it's opt-in); wins "
+            "over --select-crates if both are given."
         ),
     )
     parser.add_argument(
@@ -761,10 +805,22 @@ def main(argv: list[str] | None = None) -> int:
     for line in render(decision, source, args.phase):
         print(line, flush=True)
 
-    # T-543: which CRATES, once the class is `full`. Purely a narrowing of the Rust suite
-    # inside the same class — never a change of class, and never applied when the answer is
-    # not certain (`crates.select` returns the whole workspace then). See `crates.py`.
-    selection = resolve_selection(decision, source, root, no_select=args.no_select)
+    # T-543, corrected 2026-09-20: which CRATES, ONLY when `--select-crates` opted in, and
+    # NEVER for `--merge` (the coordinator's per-merge gate) or inside GITHUB_ACTIONS (CI) —
+    # both checked unconditionally inside resolve_selection itself, not by this call site
+    # simply not passing the flag. Purely a narrowing of the Rust suite inside the same
+    # class — never a change of class, and never applied when the answer is not certain
+    # (`crates.select` returns the whole workspace then). See `crates.py`.
+    ci = os.environ.get("GITHUB_ACTIONS") == "true"
+    selection = resolve_selection(
+        decision,
+        source,
+        root,
+        select_crates=args.select_crates,
+        no_select=args.no_select,
+        merge=args.merge,
+        ci=ci,
+    )
     for line in render_selection(selection):
         print(line, flush=True)
 
