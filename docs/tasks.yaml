@@ -16745,7 +16745,8 @@ tasks:
   - id: T-564
     milestone: M3
     title: "The synthetic grid's delivered analysis geometry is a statistic of the noise - OBW99 moves 2x with SNR on 23 percent of ladders"
-    status: todo
+    status: review
+    branch: task-t564
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -16770,6 +16771,42 @@ tasks:
       measurement of what it buys and what it costs before anyone starts. Likely overlaps T-296's
       unexplained EVM residue and is a plausible cause of psk-qam's weak open set.
       Numbers and tables are in ADR-0016 section 7.3 (written by T-435).
+    result: |
+      DONE 2026-09-21 on task-t564. THE EFFECT STILL REPRODUCED after T-246 and T-589: re-measured
+      over 504 ladders (21 classes x 24 seeds x 7 rungs at gate-5..gate+10 dB), the OBW99 the grid
+      reported for one (class, seed) moved with the SNR by >= 2x on 142 (28.2 %) and >= 3x on 124
+      (24.6 %) - T-435's finding, not a symptom of either of those two.
+      THE FIX, in `synth::generate`: the delivered geometry is settled ONCE, from a reference
+      snippet at the family's own SNR gate (`geometry_reference_snr_db`, an existing a-priori
+      constant), and the channel is capped at the emission's design bandwidth - the same figure the
+      noise is already scaled over. The blind path is untouched: `SynthSignal::obw_hz`, what the
+      classifier is handed, is still measured on the delivered noisy snippet.
+      MEASURED, same 504 ladders: geometry >= 2x 142 -> 0, >= 3x 124 -> 0 (0.0 %). The measured
+      `obw_hz` spread also falls, 142 -> 54 and 124 -> 34, which is now honest measurement noise on
+      a fixed geometry rather than a moving experiment.
+      RED WHEN BROKEN: `tests/synth_geometry_stability.rs` (168 ladders) failed on 168 of 168 before
+      the fix, naming the rung and the geometry; the `#[ignore]`d measurement in the same file
+      reproduces the >= 2x / >= 3x table on demand.
+      COST PAID, as the ticket predicted: both density files refitted (`fit-densities`), and four
+      re-measurements. NOT a relaxation of any a-priori floor - every ADR-0016 section 7 floor holds
+      (overall top-1, per-bin wrong-label, below-gate, open set).
+      TWO ALTERNATIVES WERE BUILT AND MEASURED FIRST, and both cost more than they bought (recorded
+      in the code): OBW99 of the noise-free waveform collapses onto a carrier (686 Hz for a 9 kHz
+      AM emission), taking analog top-1 0.92 -> 0.77 and overall 0.933 -> 0.897, under the 0.90
+      floor; the design bandwidth alone makes the channel class-dependent and had the held-out 8-FSK
+      claimed `analog` 6 times of 8.
+      WHAT IT BOUGHT, beyond the stability: four of the five declared SNR-order exceptions in
+      `feature_length_invariance.rs` - `sigma_af`, `gamma_max` and `c42_norm` on `am` - stopped
+      reproducing and were DELETED with their re-measured ladders. They were `am` being handed a
+      different filter at each rung, not an inherent SNR law. C14 gained locks on bpsk (11/12 ->
+      12/12), pi4-dqpsk and qam64, and LOST them on `dsb-sc` (3+4 -> 0) and `ssb` (1 -> 0), neither
+      of which has a symbol clock to find.
+      ADR-0016 section 7.1's canonical figures re-derived by `acceptance_m3` on this grid: known
+      top-1 0.9365 / top-2 0.9841 at gate+5 dB over 1656 snippets (was 0.9345 / 0.9861), every
+      open-set family 1.000 unknown recall except fsk 0.958. The ADR text still quotes the old
+      numbers and needs updating (follow-up).
+      Targeted: `cargo nextest run -p hk-classify` 111 passed 1 skipped; hk-e2e acceptance_m3 green
+      with HK_E2E_REQUIRE_SYNTH=1.
     notes: |
       Filed 2026-09-20 from T-435's report. T-435 deliberately did NOT write a threshold against
       this - a constant fitted to a harness defect is the thing this project forbids.
