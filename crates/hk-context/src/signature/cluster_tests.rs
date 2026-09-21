@@ -405,8 +405,17 @@ fn t309_two_different_emitters_watched_identically_still_separate() {
 /// set, so retiring three fields does not move it.
 ///
 /// It also records what retiring them costs in reach, which is the tightest consequence of T-309:
-/// a purely analogue emitter measures exactly three clustering fields and so sits precisely on the
-/// floor. That is enough, and nothing more may be removed without it clustering nothing at all.
+/// on the fingerprint-and-classification path this test enumerates, a purely analogue emitter
+/// measures exactly three clustering fields and so sits precisely on the floor. That is enough, and
+/// nothing more may be removed without it clustering nothing at all.
+///
+/// **T-321 answered the no-margin half of that**, and did it by fixing the field *supply* rather
+/// than the evidence bar — which is why every assertion below is unchanged. The analogue chain now
+/// also writes the C13 spectral `flatness` it had already measured
+/// (`hk_pipeline::chains::analog::shape_observation`), a fourth measured field that needs no symbol
+/// clock, so such an emitter sits one field *above* this floor and survives its `class` call
+/// falling below its gate. The list here is the fingerprint's own reach and stays the measure of
+/// what T-309 cost.
 #[test]
 fn t309_the_shared_field_floor_is_the_matchers_and_does_not_move_with_the_field_set() {
     assert_eq!(

@@ -229,6 +229,23 @@ pub enum ObwSource {
 /// the level spread, is smaller than the difference the contrast exists to resolve.
 pub const MIN_ENVELOPE_TRANSITIONS: usize = 12;
 
+/// Order-8 line coherence at which order-8 linear structure starts to count (T-589).
+///
+/// The `c8` coherence is bias-corrected, so a record with no order-8 line reads **0** at every
+/// length ([`lines::carrier_line`]) — this is a level above that null, not a tuned separator.
+/// Measured over the 31-class synthetic grid at 20 and 30 dB, six seeds each, the classes with no
+/// order-8 structure at all sit at `c8` ≤ 0.12 (`ofdm` 0.02, `noise-like` 0.06, `apsk16` 0.09,
+/// `fsk8` 0.03, `costas-hop` 0.12), while genuine 8-PSK reads 0.33–0.36. 0.15 is between them and
+/// well clear of both. It is deliberately low, because it is the **ratio veto below** that does
+/// the discriminating: a high `c8` on its own is common and means nothing.
+const PSK8_C8_MIN: f64 = 0.15;
+
+/// Score at which [`RateTrust::higher_order_linear`] is asserted (T-589).
+///
+/// Half, matching the `digital` gate's own `ranked[0] ≥ 0.5`: the same bar the four family scores
+/// clear, applied to the same shape of statistic.
+const PSK8_STRUCTURE_MIN: f64 = 0.5;
+
 /// Largest envelope coefficient of variation that still reads as a keyed FREQUENCY rather than a
 /// keyed amplitude. Unchanged from the shipped test; see [`family::soft_veto`] for the ramp.
 const ENV_CV_MAX: f64 = 0.35;
@@ -313,6 +330,10 @@ pub struct FamilyFeatures {
     pub x2_second_line: f64,
     /// x⁴ line coherence.
     pub c4: f64,
+    /// x⁸ line coherence (T-589): the order-8 line, which is what a linear alphabet of order 8
+    /// leaves behind and what orders 2 and 4 cannot see.
+    #[serde(default)]
+    pub c8: f64,
 }
 
 /// Settings. Defaults are the S5 constants (see the [module docs](self) for their
@@ -541,8 +562,20 @@ pub struct RateTrust {
     pub trusted: bool,
     /// The consensus trust rule passed.
     pub consensus: bool,
-    /// Digital structure (family score ≥ 0.5 or an ok fit).
+    /// Digital structure (family score ≥ 0.5, an ok fit, or [`RateTrust::higher_order_linear`]).
     pub digital_structure: bool,
+    /// **Order-8 suppressed-carrier linear structure** (T-589): the evidence that licences a rate
+    /// lock on a linear alphabet whose order is above the four families C14 labels.
+    ///
+    /// C14's family taxonomy is `{ook, fsk, bpsk, qpsk}`, and the digital-structure gate used to
+    /// be exactly "one of those four scored ≥ 0.5, or a transition fit converged". Genuine 8-PSK
+    /// can satisfy neither — its alphabet collapses at the **eighth** power, not the second or the
+    /// fourth — so its rate was thrown away on 12 of 12 measured snippets even though the
+    /// consensus rule had already passed on all 12 from two independent method groups at 19.8 to
+    /// 26.5 dB. This flag is that missing evidence, and nothing else: it never becomes a family
+    /// label, never enters `features@1`, and never adds a classification hypothesis.
+    #[serde(default)]
+    pub higher_order_linear: bool,
     /// Independent groups with a direct line on the winner.
     pub groups: Vec<LineGroup>,
     /// Groups with a direct line ≥ the trust threshold.
@@ -1224,6 +1257,7 @@ impl BlindEstimator {
         let (c1, _, _, n1) = carrier_line(plans, &xon, fs, 1);
         let (c2, _, u2, n2) = carrier_line(plans, &xon, fs, 2);
         let (c4, _, _, n4) = carrier_line(plans, &xon, fs, 4);
+        let (c8, _, _, n8) = carrier_line(plans, &xon, fs, 8);
         // The two ratio tests compare two bias-corrected coherences, each of which is a maximum
         // whose residual spread is of order its own null. So `c1 − 0.5·c2` is tested against zero
         // over a width of `hypot(n1, 0.5·n2)` — the same soft-veto rule, with the width the
@@ -1236,6 +1270,14 @@ impl BlindEstimator {
             * soft_veto(u2, 0.6, u2_w, 0.2, true);
         let qpsk_score = ((c4 - 0.2) / 0.2).clamp(0.0, 1.0)
             * soft_veto(c2 - 0.5 * c4, 0.0, ratio_w(n2, n4), 0.2, true);
+        // T-589: the same ratio test one order up, used as **structure evidence only**.
+        //
+        // It is not a family score and deliberately does not join [`FamilyScores`]: C14 labels
+        // four families, `features@1` carries exactly those four scores, and widening the label
+        // set is a classification-behaviour change this does not make. What it decides is only
+        // whether the symbol rate the consensus rule already agreed on may be *trusted*.
+        let psk8_score = ((c8 - PSK8_C8_MIN) / PSK8_C8_MIN).clamp(0.0, 1.0)
+            * soft_veto(c4 - 0.5 * c8, 0.0, ratio_w(n4, n8), 0.2, true);
         let scores = FamilyScores {
             ook: ook_score,
             fsk: fsk_score,
@@ -1302,7 +1344,8 @@ impl BlindEstimator {
         );
         let fit = cons.fit.clone();
         let consensus_trusted = cons.trusted && !carrier_only;
-        let structure = digital || fit.is_some();
+        let higher_order_linear = psk8_score >= PSK8_STRUCTURE_MIN && !carrier_only;
+        let structure = digital || fit.is_some() || higher_order_linear;
         let snr_ok = snr_v >= cfg.rate_snr_db;
         let trusted = consensus_trusted && structure && snr_ok;
         if cons.candidates.is_empty() {
@@ -1345,12 +1388,14 @@ impl BlindEstimator {
             c2,
             x2_second_line: u2,
             c4,
+            c8,
         };
         out.analog_likely = analog_likely;
         out.rate_trust = RateTrust {
             trusted,
             consensus: cons.trusted,
             digital_structure: structure,
+            higher_order_linear,
             groups: cons.groups.clone(),
             strong_groups: cons.strong_groups.clone(),
         };

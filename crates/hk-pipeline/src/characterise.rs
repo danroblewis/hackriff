@@ -507,3 +507,203 @@ mod tests {
         assert_eq!(after[0].observations, 2, "the aggregate accumulates");
     }
 }
+
+#[cfg(test)]
+mod analogue_field_supply_tests {
+    //! **T-321: the clustering floor as a margin, not a snapshot.**
+    //!
+    //! T-309 removed the three observation statistics from `CLUSTER_FIELDS`, which left a purely
+    //! analogue emitter with exactly the fields `family`, `obw_hz` and `class` — *exactly*
+    //! `CLUSTER_MIN_SHARED_FIELDS`. Sufficient, with no margin: on a run where the within-family
+    //! class call fell below its gate, two such emitters shared two fields, the clusterer abstained
+    //! on every pair of them, and the operator saw no groups with nothing anywhere saying why.
+    //!
+    //! So these tests exercise the **degraded** case, not the healthy one only. Each reports the
+    //! field counts it actually measured, because the count *is* the thing under test.
+
+    use std::collections::BTreeMap;
+
+    use hk_context::signature::FeatureObservation;
+    use hk_context::signature::cluster::CLUSTER_MIN_SHARED_FIELDS;
+    use hk_model::signature::field;
+    use hk_model::{
+        Fingerprint, LinkTarget, Repository, Sighting, TimeRange, Timestamp, TrackId,
+        is_cluster_field,
+    };
+
+    use super::characterise_with;
+    use crate::chains::analog::shape_observation;
+
+    /// What C13 measured for the spectral flatness of one WFM window. Two stations of the same kind
+    /// measure alike; the small difference is what a real pair of measurements looks like.
+    const FLATNESS_A: f64 = 0.312;
+    const FLATNESS_B: f64 = 0.305;
+    const C13: &str = "hk-estimate/params@1";
+
+    fn t(sec: i64) -> Timestamp {
+        Timestamp::from_unix_nanos(1_789_000_000_000_000_000 + sec * 1_000_000_000)
+    }
+
+    /// One broadcast-FM-shaped emitter: a centre and an occupied bandwidth, and **no** symbol rate,
+    /// deviation, line code, sync word, packet length or CRC — a purely analogue emission has none
+    /// of those to measure.
+    fn analogue_emitter(repo: &mut Repository, f_hz: f64, at: i64) -> hk_model::EmitterId {
+        let s = Sighting {
+            source: LinkTarget::Track(TrackId::new()),
+            seen: TimeRange::new(t(at), t(at + 1)),
+            count: 1,
+            f_center_hz: f_hz,
+            bandwidth_hz: 180e3,
+            fingerprint: Some(Fingerprint::new(f_hz, 180e3)),
+            identity: None,
+            context: None,
+            classification: None,
+            tags: Vec::new(),
+        };
+        let id = repo.record_sighting(&s, None).unwrap().emitter_id;
+        repo.live_emitter_id(id).unwrap()
+    }
+
+    /// The observation the analogue chain writes: what it measured about the emission, with the
+    /// class carried only when the classifier actually called one.
+    fn analogue_observation(class: Option<&str>, flatness: Option<f64>) -> FeatureObservation {
+        let mut obs = FeatureObservation::new()
+            .text(field::FAMILY, "wfm", "classifier")
+            .num(field::OBW_HZ, 180e3, 0.0, C13);
+        if let Some(c) = class {
+            obs = obs.text(field::CLASS, c, "classifier");
+        }
+        // T-321: the same call the chain makes, so the field name and the "not measured means no
+        // field" rule are the ones under test rather than a copy of them.
+        if let Some(shape) = shape_observation(flatness, C13) {
+            for (name, feat) in shape.fields {
+                obs.fields.push((name, feat));
+            }
+        }
+        obs
+    }
+
+    /// The cluster-eligible fields one emitter has actually measured.
+    fn measured_cluster_fields(repo: &Repository, id: hk_model::EmitterId) -> BTreeMap<String, ()> {
+        repo.emitter_features(id)
+            .unwrap()
+            .map(|f| {
+                f.fields
+                    .keys()
+                    .filter(|n| is_cluster_field(n))
+                    .map(|n| (n.clone(), ()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// What two emitters' cluster ids say about them.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Grouping {
+        /// Both in the same cluster: they measure alike and the system says so.
+        OneCluster,
+        /// Both clustered, but apart.
+        TwoClusters,
+        /// At least one is in no cluster at all — the void.
+        NoCluster,
+    }
+
+    /// Runs two analogue emitters through the characterisation seam and reports what happened:
+    /// `(fields measured on each, how the two were grouped, the reason the clusterer recorded for
+    /// the second)`.
+    fn two_analogue_emitters(
+        class: Option<&str>,
+        flatness: (Option<f64>, Option<f64>),
+    ) -> (usize, usize, Grouping, String) {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let a = analogue_emitter(&mut repo, 101.3e6, 10);
+        let b = analogue_emitter(&mut repo, 95.8e6, 20);
+        characterise_with(&mut repo, a, analogue_observation(class, flatness.0), t(11)).unwrap();
+        let out = characterise_with(&mut repo, b, analogue_observation(class, flatness.1), t(21))
+            .unwrap();
+        // `None` (no cluster at all) is counted as its own answer and never as a shared group:
+        // "both are in nothing" is precisely the silent outcome this ticket exists to stop.
+        let shared = match (
+            repo.emitter_cluster_id(a).unwrap(),
+            repo.emitter_cluster_id(b).unwrap(),
+        ) {
+            (Some(x), Some(y)) if x == y => Grouping::OneCluster,
+            (Some(_), Some(_)) => Grouping::TwoClusters,
+            _ => Grouping::NoCluster,
+        };
+        (
+            measured_cluster_fields(&repo, a).len(),
+            measured_cluster_fields(&repo, b).len(),
+            shared,
+            out.cluster.map(|c| c.reason.to_owned()).unwrap_or_default(),
+        )
+    }
+
+    /// **The degraded case, which is the bug.** An analogue emitter whose `class` did not measure
+    /// keeps `family`, `obw_hz` and the C13 `flatness` the chain now supplies — three fields, so it
+    /// still clusters. Before T-321 it had two, and every pair of such emitters abstained with no
+    /// group and no explanation.
+    #[test]
+    fn an_analogue_emitter_whose_class_did_not_measure_still_clusters() {
+        let (fields_a, fields_b, grouping, reason) =
+            two_analogue_emitters(None, (Some(FLATNESS_A), Some(FLATNESS_B)));
+        assert_eq!(
+            (fields_a, fields_b),
+            (CLUSTER_MIN_SHARED_FIELDS, CLUSTER_MIN_SHARED_FIELDS),
+            "class absent leaves family + obw_hz + flatness, which is exactly the floor"
+        );
+        assert_eq!(
+            grouping,
+            Grouping::OneCluster,
+            "two analogue emitters that measure alike share one cluster; reason was {reason:?}"
+        );
+        assert_eq!(reason, "joined");
+    }
+
+    /// **The healthy case, so the margin was not bought by dropping the floor to nothing.** With
+    /// the class measured too, such an emitter carries four fields — one *above*
+    /// `CLUSTER_MIN_SHARED_FIELDS`, which is the margin T-321 exists to create.
+    #[test]
+    fn a_fully_measured_analogue_emitter_now_clusters_with_a_field_to_spare() {
+        let (fields_a, fields_b, grouping, reason) =
+            two_analogue_emitters(Some("wfm-stereo"), (Some(FLATNESS_A), Some(FLATNESS_B)));
+        assert_eq!((fields_a, fields_b), (4, 4));
+        assert!(
+            fields_a > CLUSTER_MIN_SHARED_FIELDS,
+            "a healthy analogue emitter must sit above the floor, not on it"
+        );
+        assert_eq!(grouping, Grouping::OneCluster, "reason was {reason:?}");
+        assert_eq!(reason, "joined");
+    }
+
+    /// **The floor still holds, and the absence is still explained.** With neither the class nor the
+    /// flatness measured, an analogue emitter has two fields — below the floor — and the clusterer
+    /// must abstain *and say so*. A vector that thin is close to everything; joining on it is the
+    /// wrong-merge failure the whole guard exists to prevent.
+    #[test]
+    fn below_the_floor_the_clusterer_still_abstains_and_names_the_shortfall() {
+        let (fields_a, fields_b, grouping, reason) = two_analogue_emitters(None, (None, None));
+        assert_eq!((fields_a, fields_b), (2, 2));
+        assert!(fields_a < CLUSTER_MIN_SHARED_FIELDS);
+        assert_eq!(
+            grouping,
+            Grouping::NoCluster,
+            "too thin to compare is not a group, and must not be served as one"
+        );
+        assert_eq!(
+            reason, "too_few_fields",
+            "the absence of a group is an explained result, never a void"
+        );
+    }
+
+    /// An unmeasurable window contributes **nothing**, never a placeholder: absent means not
+    /// measured, which is the rule every other field on this path already follows.
+    #[test]
+    fn an_unmeasured_flatness_contributes_no_field() {
+        assert!(shape_observation(None, C13).is_none());
+        let obs = shape_observation(Some(FLATNESS_A), C13).expect("a measured flatness is offered");
+        assert_eq!(obs.fields.len(), 1);
+        assert_eq!(obs.fields[0].0, field::FLATNESS);
+        assert!(is_cluster_field(field::FLATNESS));
+    }
+}
