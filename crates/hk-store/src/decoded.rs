@@ -978,6 +978,7 @@ mod tests {
     };
     use hk_stream::{Publisher, PublisherConfig};
     use std::sync::Condvar;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct TempDir(PathBuf);
 
@@ -1175,43 +1176,113 @@ mod tests {
         assert!(fs::read_dir(&dir.0).unwrap().count() <= list.len() * 3);
     }
 
-    /// A stream file that takes 20 ms per write.
-    struct SlowFile(File);
+    /// A stream file that **stops**: every write blocks on the gate, and both attempts and
+    /// completions are counted, so a test can state where the disk was without timing it.
+    struct CountedGate {
+        gate: Arc<(Mutex<bool>, Condvar)>,
+        started: Arc<AtomicUsize>,
+        done: Arc<AtomicUsize>,
+        file: File,
+    }
 
-    impl Write for SlowFile {
+    impl Write for CountedGate {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            std::thread::sleep(Duration::from_millis(20));
-            self.0.write(buf)
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let (m, cv) = &*self.gate;
+            let mut open = m.lock().unwrap();
+            while !*open {
+                open = cv.wait(open).unwrap();
+            }
+            drop(open);
+            let n = self.file.write(buf)?;
+            self.done.fetch_add(1, Ordering::SeqCst);
+            Ok(n)
         }
         fn flush(&mut self) -> io::Result<()> {
-            self.0.flush()
+            self.file.flush()
         }
     }
 
+    /// The publisher never waits for the consumer's disk — asserted as a **property**, not as a
+    /// wall clock.
+    ///
+    /// The old form published 400 × 200 KB frames against a stub disk that slept 20 ms per write
+    /// and asserted `publishing < 4 s`. That is a throughput budget, so it measured the machine
+    /// rather than the code: most of those seconds are the 400 `big.clone()`s and JSON encodings
+    /// the *test itself* does, none of which touch the disk. It failed at 4.2 s under five
+    /// competing cargo jobs (T-125, which added `retries = 1` in `.config/nextest.toml`) and again
+    /// at ~4.06 s on a gate.
+    ///
+    /// MEASURED before removing it, since T-383's rule cuts both ways: 346 runs of the old form on
+    /// this box, 10 concurrent lanes against repeated cargo builds, load average 27–46 —
+    /// **median 1.4 s, p99 1.9 s, max 1.90 s**. So the bound sat at ~2.1× the p99 of the regime it
+    /// was meant to survive, and the two recorded failures are the tail of exactly that
+    /// distribution. A bound 2× a p99 is not a property; it is a bet on the box. Both the bound and
+    /// the retry are gone.
+    ///
+    /// The property is a stronger claim than any duration, and it needs no clock: the disk is
+    /// **stopped** for the whole publishing loop, so a publisher that waited on it could not finish
+    /// at all, and **not one write has completed** when the loop returns — while the write the
+    /// recorder is blocked in proves the disk really is on the path and the claim is not vacuous.
+    /// The books then close as before: what fits in the queue is stored, the rest is counted as
+    /// dropped, and nothing is invented.
     #[test]
-    fn a_slow_disk_drops_and_counts_without_blocking_the_publisher() {
+    fn a_stalled_disk_drops_and_counts_without_blocking_the_publisher() {
         let dir = TempDir::new("slow");
         let store = DecodedCaptures::open(&dir.0, CaptureQuota::default()).unwrap();
-        store.set_data_writer(Arc::new(|p: &Path| {
-            Ok(Box::new(SlowFile(File::create(p)?)) as Box<dyn Write + Send>)
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (started, done) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (g, st, dn) = (Arc::clone(&gate), Arc::clone(&started), Arc::clone(&done));
+        store.set_data_writer(Arc::new(move |p: &Path| {
+            Ok(Box::new(CountedGate {
+                gate: Arc::clone(&g),
+                started: Arc::clone(&st),
+                done: Arc::clone(&dn),
+                file: File::create(p)?,
+            }) as Box<dyn Write + Send>)
         }));
         let mut p = publisher(ContentClass::Unrestricted);
         store.tee(p.header(), &p.handle()).unwrap();
-        let big = "ab".repeat(100_000);
-        let started = Instant::now();
-        let mut slowest = Duration::ZERO;
+
+        // Publish off the test thread, so a publisher that DID wait on the stopped disk shows up as
+        // a hang this test can name rather than as a wedged process nextest reports as a leak.
         let n = 400u64;
-        for i in 0..n {
-            let mut f = frame(i);
-            f.content.as_mut().unwrap().hex = big.clone();
-            let t = Instant::now();
-            p.publish_frame(&f).unwrap();
-            slowest = slowest.max(t.elapsed());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let big = "ab".repeat(100_000);
+            for i in 0..n {
+                let mut f = frame(i);
+                f.content.as_mut().unwrap().hex = big.clone();
+                p.publish_frame(&f).unwrap();
+            }
+            let _ = tx.send(());
+            p
+        });
+        // NOT a throughput budget (T-383): 120 s is a deadlock detector for a loop of in-memory
+        // publishes that takes single-digit seconds on the worst machine this has run on. Nothing
+        // below is bounded by it, and it cannot be reached by a slow box — only by a publisher that
+        // is waiting for a disk that will never answer.
+        rx.recv_timeout(Duration::from_secs(120))
+            .expect("the publisher is still waiting on the stopped disk");
+
+        // The disk is still stopped, so these two readings are stable, whatever the machine did.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while started.load(Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the recorder never reached the disk, so this test proves nothing"
+            );
+            std::thread::sleep(Duration::from_millis(2));
         }
-        let publishing = started.elapsed();
-        // A publisher waiting on the 20 ms/write disk would take >= 8 s for 400 frames.
-        assert!(slowest < Duration::from_millis(500), "{slowest:?}");
-        assert!(publishing < Duration::from_secs(4), "{publishing:?}");
+        assert_eq!(
+            done.load(Ordering::SeqCst),
+            0,
+            "the publisher finished after a disk write completed: it was waiting on the disk"
+        );
+
+        // Let the disk go, and check the books.
+        set_gate(&gate, true);
+        let p = worker.join().unwrap();
         drop(p);
         wait_ended(&store);
         let c = &store.list().unwrap()[0];

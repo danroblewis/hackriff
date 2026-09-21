@@ -18,6 +18,41 @@ How to set the model:
 - **Subagent:** the Agent tool's `model` parameter, or `model:` in a `.claude/agents/*.md` definition.
 - **Forks** always inherit the parent's model.
 
+## The complexity rubric (T-563) — set BOTH model and effort at spawn
+
+Measured 2026-09-20 from `/perf`: **model/thinking time was 184 h against 144 h for all tool and
+build time combined**, with 18.4 B cache-read tokens. Almost every subagent that day was launched on
+Opus at high effort regardless of the work — the coordinator's habit, not this policy. Reasoning time
+is now the largest single cost, and unlike compile time nothing had been done about it.
+
+So estimate complexity **before** spawning, and set the tier from it:
+
+| Complexity | Examples | Model | Effort |
+|---|---|---|---|
+| Trivial / mechanical | rename, move, doc edit, board hygiene, re-queue, cherry-pick | `haiku`, or `opus` | **low** |
+| Well specified, single crate, tests exist or are obvious | a route field, a contract assertion, a bounded fix whose mechanism is already measured | `sonnet` | **medium** |
+| Core interface, real-time path, novel DSP, hard debugging | schema/plugin/stream contracts, detection thresholds, scheduler, ring/timing races, anything CLAUDE.md marks `core_interface` | `opus` (or `fable`) | **high / xhigh** |
+
+Two rules that override the table:
+- **`core_interface` and the real-time path never go to Sonnet or Haiku alone** (CLAUDE.md), and a
+  cheaper model's output touching them is reviewed by Opus before merge.
+- **A measured mechanism lowers the tier.** A ticket whose cause is already established by a prior
+  ticket's measurement is *well specified*, however alarming its symptom — hand the agent the
+  measurement and drop to Sonnet. Re-deriving what another ticket already measured is the single
+  most common way reasoning time is wasted here.
+
+**The coordinator's own effort:** medium for routine orchestration (queueing, reconciling, briefing,
+merges). Reserve high for hard planning, reviews, and diagnosing a failure nobody has characterised.
+
+**Tool limitation, stated honestly:** the Agent tool exposes `model` but **no `effort` parameter**, so
+at spawn only the model tier can be set programmatically. Effort is set by the session/agent
+definition; `tasks.yaml`'s `effort:` field records the intended tier so a brief, an agent definition
+or a human can honour it, and so the choice is reviewable rather than implicit.
+
+**This is an experiment with a number attached:** re-check `/perf`'s Model time after a day of
+tiering. It should fall materially without throughput dropping. If it does not, the rubric is wrong
+and should be changed rather than quietly ignored.
+
 ## What runs where
 
 ### Fable — high effort

@@ -443,9 +443,19 @@ def term_pane():
     return "\n".join(lines[-60:])
 
 def stage_status():
+    # stage.sh writes stage.log to its own scratchpad dir, which may differ from SCRATCH
+    # (~/.hackriff-ops). Read from whichever candidate dir has the freshest stage.log.
+    sdir = SCRATCH; _best = -1.0
+    for d in (os.path.dirname(os.path.abspath(__file__)), SCRATCH):
+        try:
+            m = os.path.getmtime(os.path.join(d, "stage.log"))
+            if m > _best:
+                _best = m; sdir = d
+        except Exception:
+            pass
     lines = []
     try:
-        with open(os.path.join(SCRATCH, "stage.log")) as f:
+        with open(os.path.join(sdir, "stage.log")) as f:
             lines = [l.rstrip() for l in f.read().splitlines() if l.strip()][-16:]
     except Exception:
         pass
@@ -455,7 +465,7 @@ def stage_status():
         alive = False
     def rd(n):
         try:
-            return open(os.path.join(SCRATCH, n)).read().strip()
+            return open(os.path.join(sdir, n)).read().strip()
         except Exception:
             return ""
     smoke = ""
@@ -561,10 +571,65 @@ def merge_status():
         gates_running = len([1 for l in out.splitlines() if "just gate-merge" in l and " grep " not in l])
     except Exception:
         pass
+    # 5. gate PHASE / test-progress / typical-total — CI/CD progress for the panel
+    phase = ""; progress = ""; suites_done = []; typical_s = 0
+    if gate:
+        try:
+            import glob as _g
+            cscr = "/private/tmp/claude-501/-Users-daniellewis-hackriff/%s/scratchpad" % COORD
+            logs = sorted(_g.glob(cscr + "/gate*.log"), key=os.path.getmtime, reverse=True)
+            if logs and (time.time() - os.path.getmtime(logs[0]) < 180):
+                with open(logs[0], "rb") as _f:
+                    _f.seek(0, 2); _sz = _f.tell(); _f.seek(max(0, _sz - 20000))
+                    gtail = _f.read().decode("utf-8", "replace")
+                suites_done = re.findall(r"gate: just (\S+) took", gtail)
+                pm = re.findall(r"\((\d+)/(\d+)\)", gtail)
+                if pm:
+                    progress = "%s/%s" % (pm[-1][0], pm[-1][1])
+        except Exception:
+            pass
+        g = gate
+        if "lint" in g: phase = "linting"
+        elif "test-ui" in g: phase = "ui e2e"
+        elif "acceptance" in g: phase = "acceptance"
+        elif "nextest" in g or g.strip() == "just test":
+            phase = ("running tests " + progress) if progress else "building + testing"
+        elif "gate-merge" in g:
+            if "test-ui-e2e" in suites_done: phase = "ui e2e"
+            elif any("acceptance" in s for s in suites_done): phase = "acceptance"
+            elif "lint" in suites_done: phase = ("running tests " + progress) if progress else "building + testing"
+            else: phase = "linting"
+        else: phase = g
+    try:
+        import json as _j, statistics as _st
+        tf = os.path.expanduser("~/.hackriff-ops/gate-timings.jsonl")
+        durs = []
+        if os.path.exists(tf):
+            for line in open(tf):
+                try:
+                    o = _j.loads(line)
+                    if o.get("kind") == "gate_end" and o.get("class") not in ("py", "docs", "ui") and (o.get("seconds") or 0) > 60:
+                        durs.append(o["seconds"])
+                except Exception:
+                    pass
+        if durs:
+            typical_s = int(_st.median(durs[-15:]))
+    except Exception:
+        pass
+    if not typical_s:
+        typical_s = 1600  # ~27 min baseline for a full crates/ gate
+    # how long the CURRENT merge has been running = age of .git/MERGE_HEAD (survives between gate phases)
+    merge_age_s = 0
+    if merging:
+        try:
+            merge_age_s = int(time.time() - os.path.getmtime(os.path.join(REPO, ".git", "MERGE_HEAD")))
+        except Exception:
+            pass
     state = "merging" if merging else ("gating" if gate else "idle")
     return {"state": state, "msg": mmsg, "ticket": mticket,
             "gate": gate, "elapsed_s": elapsed, "queue": queue,
-            "testing": testing, "ahead": ahead, "gates_running": gates_running}
+            "testing": testing, "ahead": ahead, "gates_running": gates_running,
+            "phase": phase, "progress": progress, "typical_s": typical_s, "merge_age_s": merge_age_s}
 
 _PRI_RANK = {"high": 0, "medium": 1, "normal": 2, "low": 3}
 
@@ -1251,7 +1316,9 @@ async function tick(){
     const row=(t,tag,col)=>`<div style="padding:1px 0"><span style="color:${col}">${tag}</span> <b data-tid="${esc(t.ticket)}" style="cursor:pointer">${esc(t.ticket||t.branch)}</b> <span style="color:#5A6973">${esc(t.branch)}${t.commits?(' +'+t.commits):''}</span></div>`;
     const warn=(mg.gates_running||0)>1?`<div style="color:#E47B68;margin-bottom:4px">⚠ ${mg.gates_running} gate-merges running at once — likely duplicate/colliding</div>`:'';
     const testCol=(mg.state==='gating'||mg.state==='merging')?'#F0A542':'#5A6973';
-    const gl=mg.gate?`<div style="color:#5A6973;margin-bottom:3px">gate: ${esc(mg.gate)} · ${dur(mg.elapsed_s)}</div>`:'';
+    const mage=mg.merge_age_s||mg.elapsed_s||0;
+    const over=mg.typical_s&&mage>mg.typical_s;
+    const gl=(mg.state==='merging'||mg.gate)?`<div style="margin-bottom:3px"><span style="color:${over?'#E47B68':'#F0A542'}">⏱ ${dur(mage)}</span> <span style="color:#8595A0">· ${esc(mg.phase||mg.gate||'staged (between phases)')}</span>${mg.typical_s?`<span style="color:#5A6973"> · ~${Math.round(mg.typical_s/60)}m typical</span>`:''}</div>`:'';
     const hdr=t=>`<div style="margin:6px 0 2px;color:#8595A0;font-size:11px;text-transform:uppercase;letter-spacing:.04em">${t}</div>`;
     const ts=testing.length?testing.map(t=>row(t,'⚙ in test',testCol)).join(''):'<div style="color:#5A6973">— nothing being tested —</div>';
     const wt=ahead.length?ahead.map(t=>row(t,'⏳ waiting','#8595A0')).join(''):'<div style="color:#5A6973">— none waiting —</div>';

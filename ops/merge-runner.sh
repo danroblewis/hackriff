@@ -174,16 +174,45 @@ try_bulk(){
   log "BULK attempt (${#branches[@]}): ${branches[*]}"
   if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN would bulk-merge: $tickets"; return 0; fi
   base=$(git -C "$REPO" rev-parse HEAD)
+  # A branch that will not merge is the branch to SET ASIDE, not a reason to un-merge the ones
+  # that did. Rewinding the whole batch on the first conflict is what happened on 2026-09-21:
+  # `task-t559` conflicted on the justfile (two recipes added at the same line) and the other
+  # FOURTEEN branches - already merged cleanly in this very loop - were reset and sent through
+  # individual gates instead, turning one trivial conflict into ~5 full gates of code branches
+  # at ~21 min each. T-543 measured the gate at ~8 % of a ticket cycle and the QUEUE behind
+  # serial gates as most of the rest, so this fallback spent the exact resource the bulk path
+  # exists to save.
+  #
+  # So: skip the conflicting branch, keep the batch, and flag the skipped one for a person the
+  # same way an individual CONFLICT is flagged. It is still flagged and never silently dropped,
+  # and it is NOT re-queued here - a conflict needs a fix, not a retry (the unchanged-since-fail
+  # rule).
+  local merged=() skipped=""
   for b in "${branches[@]}"; do
-    if ! git -C "$REPO" merge --no-ff -m "Merge $(ticket_of "$b") ($b): batch of ${#branches[@]}, gated together (automated, no AI)" "$b" >>"$LOG" 2>&1; then
+    if git -C "$REPO" merge --no-ff -m "Merge $(ticket_of "$b") ($b): batch, gated together (automated, no AI)" "$b" >>"$LOG" 2>&1; then
+      merged+=("$b")
+    else
       git -C "$REPO" merge --abort 2>/dev/null || true
-      log "BULK conflict merging $b -> rewind to $base and fall back to individual"
-      git -C "$REPO" reset --hard "$base" >>"$LOG" 2>&1
-      return 1
+      skipped="$skipped $b"
+      log "BULK conflict merging $b -> SKIPPED, batch continues with the rest"
+      echo "$(date '+%m-%d %H:%M')  $b  $(ticket_of "$b")  CONFLICT(skipped from bulk)" >> "$NEEDS"
     fi
   done
+  [ -n "$skipped" ] && log "BULK skipped (need a fix, not a retry):$skipped"
+  if [ "${#merged[@]}" -eq 0 ]; then
+    log "BULK every branch conflicted -> nothing to gate"
+    git -C "$REPO" reset --hard "$base" >>"$LOG" 2>&1
+    return 0
+  fi
+  # Re-point the batch at what actually merged, so the gate, the done-log, the landed ledger and
+  # the worktree removals below all speak about the same set.
+  branches=("${merged[@]}")
+  BULK_MERGED_LIST="${merged[*]}"
+  tickets=""
+  for b in "${branches[@]}"; do tickets="$tickets $(ticket_of "$b")"; done
+  tickets="${tickets# }"
   after=$(git -C "$REPO" rev-parse HEAD)
-  log "BULK gate (just gate --base $base over ${#branches[@]} branches; may take 15-25 min)…"
+  log "BULK gate (just gate --base $base over ${#branches[@]} merged branches; may take 15-25 min)…"
   ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
   if [ "$rc" -eq 0 ]; then
     log "BULK MERGED ✓ $tickets"
@@ -207,7 +236,33 @@ try_bulk(){
 }
 
 SEEN_QUEUED=""   # branches already logged as QUEUED this run (T-543)
+
+# Say WHICH COPY of this script is running, and whether it matches the repo.
+#
+# On 2026-09-20 the runner had been started from a stale copy in $HACKRIFF_OPS rather than
+# from ops/merge-runner.sh. The sequential-bulk fix was committed, reviewed and believed
+# live for hours while the process kept executing the old octopus code from its own inode -
+# eight bulk attempts, zero bulk merges, and a log that gave no hint the running code was
+# not the committed code. A restart is the only way to pick up an edit, so the log must at
+# least say what it is running: a stale runner is invisible otherwise.
+#
+# This only REPORTS. It never re-execs itself - swapping code under a live gate is worse
+# than running old code, and the decision to restart belongs to whoever is watching.
+self_version(){
+  local self repo_copy
+  self=${BASH_SOURCE[0]}
+  repo_copy=$(git -C "$REPO" show HEAD:ops/merge-runner.sh 2>/dev/null)
+  if [ -z "$repo_copy" ]; then log "VERSION: $self (no repo copy to compare against)"; return; fi
+  if [ "$(cat "$self" 2>/dev/null)" = "$repo_copy" ]; then
+    log "VERSION: $self matches $(git -C "$REPO" rev-parse --short HEAD):ops/merge-runner.sh"
+  else
+    log "VERSION: *** STALE *** $self DIFFERS from $(git -C "$REPO" rev-parse --short HEAD):ops/merge-runner.sh"
+    log "VERSION: restart from the repo between gates - see ops/README.md - or this runner keeps executing old code"
+  fi
+}
+
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
+self_version
 while true; do
   # read every queued (non-comment) branch, in order
   # NOTE: strip whitespace PER LINE — a plain `tr -d '[:space:]'` deletes the newlines
@@ -230,9 +285,14 @@ while true; do
     if [ "$#" -eq 1 ]; then
       process "$1" || echo "$1" >> "$QUEUE"
     elif [ "$#" -ge 2 ]; then
+      BULK_MERGED_LIST=""
       if ! try_bulk "$@"; then
-        log "falling back to individual gates for: $*"
-        for b in "$@"; do process "$b" || echo "$b" >> "$QUEUE"; done
+        # Isolate only what the batch actually merged. A branch try_bulk SKIPPED conflicted, and
+        # is already flagged in merge-needs-attention.txt; sending it round again just conflicts
+        # a second time and writes a duplicate flag.
+        isolate="${BULK_MERGED_LIST:-$*}"
+        log "falling back to individual gates for: $isolate"
+        for b in $isolate; do process "$b" || echo "$b" >> "$QUEUE"; done
       fi
     fi
   fi

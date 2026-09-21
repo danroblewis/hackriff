@@ -101,6 +101,21 @@ gate-merge *args: (_coordinator-only "gate-merge")
 reconcile *args:
     uv run --locked --project py python -m hkpy.reconcile {{args}}
 
+# IS IT SAFE TO LAUNCH ANOTHER BUILDING AGENT (T-559)? CLAUDE.md's worktree-launch cap is "at
+# most 4 Rust-building agents" - but a count-the-cargo-processes check misses the `hk serve`
+# processes agents leave running (e2e harnesses, demo servers, replay servers), which is exactly
+# how a 7-builder day hit load 129-211 and a 62-minute gate. Run this BEFORE launching another
+# worktree agent, same as `just reconcile` before launching anything else.
+# Prints: cargo/rustc processes grouped by worktree, hk serve/run processes with their bind port
+# and worktree, 1-minute load average, free disk (`df -h /`), and a one-line verdict. Counting
+# rule: an `hk serve`/`hk run`/`hackriffd` process counts toward the cap ON ITS OWN, whether or
+# not anything is compiling in its worktree; the coordinator's own full gate, run from the main
+# checkout, groups its cargo/rustc processes into one slot like any other worktree. Read-only -
+# it never kills or touches a process. The logic is the pure, tested function `hkpy.builders.assess`
+# (`py/tests/test_builders.py`); this recipe is a thin shell over it. `--strict` exits 1 when it
+# is not safe to launch another builder.
+builders *args:
+    uv run --locked --project py python -m hkpy.builders {{args}}
 # WHAT THE TICKET CYCLE ACTUALLY COSTS (T-543), from records rather than memory: gate duration
 # by class and by phase from $HACKRIFF_OPS/gate-timings.jsonl (which `just gate` writes on every
 # run), and branch cut -> first commit -> queued -> merged from ops/merge-runner.log plus git.

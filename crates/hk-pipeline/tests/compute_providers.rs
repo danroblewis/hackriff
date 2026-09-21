@@ -17,6 +17,7 @@ mod radio;
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -24,6 +25,7 @@ use hk_dsp::compute::ProviderKind;
 use hk_model::{Detection, FreqRange, Region, TimeRange, Timestamp};
 use hk_pipeline::class::window_class;
 use hk_pipeline::{Pipeline, PipelineConfig, RunSummary, SourceInfo, TrackInventory, replay_plan};
+use hk_stream::{Declared, StreamKind};
 use serde_json::{Value, json};
 
 const READERS: [&str; 3] = ["detect", "history", "spectrum"];
@@ -38,6 +40,42 @@ fn env_overrides() -> bool {
     ]
     .iter()
     .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
+}
+
+/// [`common::run`] with a consumer attached to the spectrum stream.
+///
+/// **T-489:** the spectrum reader skips its STFT while nothing is subscribed, so an unwatched run
+/// produces no spectrum frames at all — and this test is about the three readers' STFTs agreeing
+/// across compute providers, which needs all three to run. The other two readers are always-on
+/// regardless.
+fn run_watched(dir: &Path, meta: &Path, extra: Value) -> RunSummary {
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (mut cfg, replay) = replay_config(dir, meta, extra, hk_core::Pacing::Unpaced);
+    cfg.stream_sink = Some(Arc::new(move |h, handle| {
+        if h.kind == StreamKind::Spectrum {
+            handle
+                .subscribe(
+                    "t056-watcher",
+                    Declared::local(Sink::default()),
+                    Box::new(|_| {}),
+                )
+                .unwrap();
+        }
+    }));
+    let summary = start(cfg, replay).wait().unwrap();
+    eprintln!("{}", summary.to_text());
+    assert!(summary.errors.is_empty(), "{:?}", summary.errors);
+    summary
 }
 
 fn provider(s: &RunSummary, reader: &str) -> String {
@@ -80,9 +118,9 @@ fn the_default_provider_matches_the_cpu_reference() {
     let src = tone_recording(&dir.0.join("src"), "tone", 2.4e6, 1.0, 433.5e6, None);
     let pipeline = |compute: Value| json!({ "pipeline": { "chains": [], "compute": compute } });
     let cpu_dir = dir.0.join("cpu");
-    let cpu = run(&cpu_dir, &src, pipeline(json!({ "provider": "cpu" })));
+    let cpu = run_watched(&cpu_dir, &src, pipeline(json!({ "provider": "cpu" })));
     let auto_dir = dir.0.join("auto");
-    let auto = run(&auto_dir, &src, pipeline(json!({})));
+    let auto = run_watched(&auto_dir, &src, pipeline(json!({})));
 
     for s in [&cpu, &auto] {
         assert_eq!(s.always_on_lost_samples, 0);

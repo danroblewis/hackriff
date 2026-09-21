@@ -10,6 +10,9 @@
 //! - `--read-delay-us N`: sleep N µs after reading each record (a slow decoder that still makes
 //!   progress, for lossless backpressure tests).
 //! - `--start-delay-ms N`: sleep N ms before reading anything from stdin (a slow start-up, T-103).
+//! - `--cold-start-ms N`: sleep N ms before **anything at all** — before the first `eprintln!`,
+//!   so the host sees not one byte of output. This is the cold-link phenomenon in miniature
+//!   (T-493/T-540): a process that exists, holds its pipes and has not yet run.
 //! - `--ready-after-ms N`: sleep N ms, then emit the contract's `{"type":"ready"}` line before
 //!   reading stdin (a decoder that needs setup, T-223).
 //! - `--claim-class C` / `--content TEXT`: claim a class and attach content (clamping, gating).
@@ -49,6 +52,7 @@ struct Args {
     stall_child: bool,
     read_delay_us: u64,
     start_delay_ms: u64,
+    cold_start_ms: u64,
     ready_after_ms: Option<u64>,
 }
 
@@ -68,6 +72,7 @@ fn parse_args() -> Result<Args, String> {
         stall_child: false,
         read_delay_us: 0,
         start_delay_ms: 0,
+        cold_start_ms: 0,
         ready_after_ms: None,
     };
     let mut it = std::env::args().skip(1);
@@ -113,6 +118,11 @@ fn parse_args() -> Result<Args, String> {
                 args.read_delay_us = value()?
                     .parse()
                     .map_err(|e| format!("--read-delay-us: {e}"))?
+            }
+            "--cold-start-ms" => {
+                args.cold_start_ms = value()?
+                    .parse()
+                    .map_err(|e| format!("--cold-start-ms: {e}"))?
             }
             "--start-delay-ms" => {
                 args.start_delay_ms = value()?
@@ -309,6 +319,11 @@ fn main() {
             exit(2);
         }
     };
+    if args.cold_start_ms > 0 {
+        // Nothing is written first: the host must see silence, as it does from a binary the
+        // loader has not finished with (T-540).
+        std::thread::sleep(Duration::from_millis(args.cold_start_ms));
+    }
     eprintln!("hk-dummy-plugin: started (every {})", args.every);
     if let Some(token) = &args.smuggle {
         smuggle(token);
