@@ -47,7 +47,10 @@ impl Drop for TempDir {
 }
 
 fn dwell(lo: f64, hi: f64, t0_ns: i64, t1_ns: i64) -> ObservationRecord {
-    let w = TimeRange::new(Timestamp::from_unix_nanos(t0_ns), Timestamp::from_unix_nanos(t1_ns));
+    let w = TimeRange::new(
+        Timestamp::from_unix_nanos(t0_ns),
+        Timestamp::from_unix_nanos(t1_ns),
+    );
     ObservationRecord::Dwell(DwellRecord {
         schema: hk_model::attention::ATTENTION_SCHEMA_VERSION,
         survey_id: None,
@@ -126,7 +129,10 @@ fn get(addr: SocketAddr, path: &str, extra_headers: &[(&str, &str)]) -> Resp {
         .and_then(|c| c.parse().ok())
         .unwrap();
     let headers = lines
-        .filter_map(|l| l.split_once(": ").map(|(k, v)| (k.to_string(), v.to_string())))
+        .filter_map(|l| {
+            l.split_once(": ")
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
         .collect();
     Resp {
         status,
@@ -152,8 +158,8 @@ struct Fixture {
 impl Fixture {
     fn build(filled_b: i64) -> Self {
         let dir = TempDir::new("headers");
-        let mut p = hk_store::Pyramid::open(dir.0.join("history"), PyramidConfig::default())
-            .unwrap();
+        let mut p =
+            hk_store::Pyramid::open(dir.0.join("history"), PyramidConfig::default()).unwrap();
         let g = p.geometry().clone();
         let t_cell = g.levels[0].t_cell_ns;
         let f_cell = g.levels[0].f_cell_hz;
@@ -194,8 +200,8 @@ impl Fixture {
         // a partial fill leaves it genuinely live (watermark short of its own extent's end).
         p.seal_through(Timestamp::from_unix_nanos(t0_b + filled_b * t_cell))
             .unwrap();
-        let obs = ObservationStore::open(ObservationLogConfig::new(dir.0.join("observations")))
-            .unwrap();
+        let obs =
+            ObservationStore::open(ObservationLogConfig::new(dir.0.join("observations"))).unwrap();
         obs.append(&dwell(f_lo, f_hi, t0_a, t0_b + CELLS as i64 * t_cell));
         obs.flush();
         let state = ApiState {
@@ -213,7 +219,6 @@ impl Fixture {
             t0_b,
         }
     }
-
 }
 
 /// Ingests more rows into tile B's own store, through the `Arc` clone kept before the state moved
@@ -262,7 +267,11 @@ fn sealed_tile_repeat_read_is_304_with_zero_body_bytes() {
     let addr = server.local_addr();
 
     let first = get(addr, &path_a(), &[]);
-    assert_eq!(first.status, 200, "first read of a sealed tile: {:?}", first.headers);
+    assert_eq!(
+        first.status, 200,
+        "first read of a sealed tile: {:?}",
+        first.headers
+    );
     assert!(
         !first.body.is_empty(),
         "first read of a sealed tile must carry the tile, got {} bytes",
@@ -283,7 +292,8 @@ fn sealed_tile_repeat_read_is_304_with_zero_body_bytes() {
 
     let second = get(addr, &path_a(), &[("If-None-Match", &etag)]);
     assert_eq!(
-        second.status, 304,
+        second.status,
+        304,
         "repeated read of an unchanged sealed tile must be 304, got {} body={} bytes",
         second.status,
         second.body.len()
@@ -319,7 +329,11 @@ fn live_tile_never_cached_and_body_changes_as_rows_arrive() {
     let addr = server.local_addr();
 
     let first = get(addr, &path_b(), &[]);
-    assert_eq!(first.status, 200, "first read of the live tile: {:?}", first.headers);
+    assert_eq!(
+        first.status, 200,
+        "first read of the live tile: {:?}",
+        first.headers
+    );
     let cache_control = first
         .header("cache-control")
         .expect("live tile must still carry a Cache-Control")

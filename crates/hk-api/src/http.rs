@@ -861,7 +861,14 @@ fn respond_tile(stream: &mut TcpStream, req: &Request, body: Value) {
         respond_cached(stream, 304, "application/json", cache_control, &extra, &[]);
         return;
     }
-    respond_cached(stream, 200, "application/json", cache_control, &extra, &bytes);
+    respond_cached(
+        stream,
+        200,
+        "application/json",
+        cache_control,
+        &extra,
+        &bytes,
+    );
 }
 
 /// Recursively nulls `build_ms` and `in_flight` wherever they appear (`cost` and
