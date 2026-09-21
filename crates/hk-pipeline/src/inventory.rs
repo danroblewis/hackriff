@@ -80,7 +80,8 @@ use hk_detect::track::TrackSummary;
 use hk_detect::track::inventory::{hop_set_sighting, track_sighting};
 use hk_model::{
     DemodulationId, EmitterId, EmitterLink, IdentityScheme, LifecycleAuthor, LifecycleState,
-    LinkTarget, MeasurementKey, RepoError, Repository, Sighting, Timestamp, Tolerances, TrackId,
+    LinkTarget, MeasurementKey, RETUNE_MIN_CENTRES, RETUNE_RULE, RepoError, Repository,
+    RetuneTolerance, Sighting, Timestamp, Tolerances, TrackId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -663,6 +664,13 @@ pub struct TrackInventory {
     /// [`Self::bind`]. Bounded like [`Self::bound`]: past the cap the map is cleared, which costs
     /// a refusal its link, never a wrong one.
     awaiting: HashMap<TrackId, Vec<(DemodulationId, Timestamp)>>,
+    /// T-598: the number of distinct tuning centres the last retune pass was decided at, and the
+    /// rows already resolved at it. A cross-centre verdict can only change when a **new centre**
+    /// appears, so the pass runs at most once per row per centre count — never once per sighting.
+    /// Bounded like [`Self::run`]: past the cap the set is cleared, which costs a repeat pass,
+    /// never a wrong verdict.
+    retune_centres: usize,
+    retuned: HashSet<EmitterId>,
     /// Provisional entries retracted because their track's end yielded no sighting (T-109).
     pub retracted: u64,
     /// Sightings recorded.
@@ -681,6 +689,11 @@ pub struct TrackInventory {
     pub duplicates: u64,
     /// T-219: candidates attributed to the source whose receiver artifact they are.
     pub artifacts: u64,
+    /// T-598: sightings related to another sighting of the same LO-relative receiver artefact,
+    /// so the inventory shows the artefact once instead of once per tuning centre.
+    pub retune_siblings: u64,
+    /// T-598: retune verdicts recorded on stored detections (`absolute`, `lo-locked`, `image`).
+    pub retune_verdicts: u64,
     /// T-369: overlapping regions the re-analysis could not resolve. Nothing was merged and
     /// nothing was hidden; the verdict records what blocked it. Bounded per row by
     /// `hk_model::relate::REGION_MAX_ROUNDS`.
@@ -712,12 +725,16 @@ impl TrackInventory {
             provisional: HashMap::new(),
             bound: HashMap::new(),
             awaiting: HashMap::new(),
+            retune_centres: 0,
+            retuned: HashSet::new(),
             retracted: 0,
             sightings: 0,
             created: 0,
             confirmed: 0,
             restated: 0,
             merged: 0,
+            retune_siblings: 0,
+            retune_verdicts: 0,
             suppressed: 0,
             duplicates: 0,
             artifacts: 0,
@@ -843,6 +860,49 @@ impl TrackInventory {
         self.duplicates += out.duplicates.len() as u64;
         self.artifacts += out.artifacts.len() as u64;
         self.contested += out.contested.len() as u64;
+        Ok(())
+    }
+
+    /// **T-598: the cross-centre retune verdict, persisted** (`hk_model::repo::retune`).
+    ///
+    /// A real emission keeps its absolute frequency when the front end is retuned; a receiver
+    /// artefact — DC/LO leakage, an internal spur at a fixed IF offset, an IQ image — moves with
+    /// the LO. T-586 measured that slope from the LO each detection's own provenance records and
+    /// proved it separates the two classes, then threw the verdict away: the inventory went on
+    /// listing one moving spur as N emitters at N absolute frequencies, which is what the user
+    /// saw on the air. This writes it down — the verdict on each detection, and a
+    /// `retune-sibling-of` relationship between the sightings of one artefact, so the inventory
+    /// shows **one** artefact and not one per centre. Nothing is deleted and every claim is
+    /// revocable.
+    ///
+    /// **What bounds it.** A verdict can only change when a *new tuning centre* appears, so the
+    /// pass runs at most once per row per distinct-centre count (and not at all below two
+    /// centres, where no slope can be measured). That is the difference between a bounded
+    /// cross-centre review and a query per sighting.
+    fn resolve_retune(
+        &mut self,
+        repo: &mut Repository,
+        emitter: EmitterId,
+    ) -> Result<(), RepoError> {
+        let centres = repo.tune_centre_count()?;
+        if centres < RETUNE_MIN_CENTRES {
+            return Ok(());
+        }
+        if centres != self.retune_centres {
+            self.retune_centres = centres;
+            self.retuned.clear();
+        }
+        let id = repo.live_emitter_id(emitter)?;
+        if !self.retuned.insert(id) {
+            return Ok(());
+        }
+        if self.retuned.len() > RUN_MEMORY {
+            self.retuned.clear();
+        }
+        let t = repo.emitter(id)?.last_seen;
+        let out = repo.resolve_retune(id, RETUNE_RULE, t, &RetuneTolerance::default())?;
+        self.retune_siblings += out.deferred() as u64;
+        self.retune_verdicts += out.detections_marked as u64;
         Ok(())
     }
 
@@ -1166,7 +1226,8 @@ impl TrackInventory {
         }
         self.characterise(repo, id, trust)?;
         self.review(repo, id, trust, None)?;
-        self.resolve_overlaps(repo, id)
+        self.resolve_overlaps(repo, id)?;
+        self.resolve_retune(repo, id)
     }
 
     /// T-242: aggregates what this entry has measured and asks the catalogue and the clusterer

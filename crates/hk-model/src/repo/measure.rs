@@ -403,8 +403,15 @@ impl Repository {
     }
 
     /// One detection.
+    ///
+    /// **T-598:** the measured columns come from the (immutable) row; the suspect flags a standing
+    /// cross-centre retune verdict implies are applied over them
+    /// ([`super::retune::apply_verdicts`]), so a reader sees what is known about the line now
+    /// without the measurement ever having been rewritten. Revoking the verdict takes them away
+    /// again by construction.
     pub fn detection(&self, id: DetectionId) -> Result<Detection, RepoError> {
-        self.conn
+        let mut found = self
+            .conn
             .prepare_cached(concat!(
                 "SELECT ",
                 detection_columns!(),
@@ -412,10 +419,14 @@ impl Repository {
             ))?
             .query_row([blob(id)], detection_from_row)
             .optional()?
+            .map(|d| [d])
             .ok_or_else(|| RepoError::NotFound {
                 kind: "detection",
                 id: id.to_string(),
-            })
+            })?;
+        super::retune::apply_verdicts(&self.conn, &mut found)?;
+        let [d] = found;
+        Ok(d)
     }
 
     /// Detections whose frequency × time box overlaps `region` (closed intervals), ordered by
@@ -424,12 +435,15 @@ impl Repository {
         let tx = self.read_tx()?;
         let p = region_bounds(&tx, "detection", region)?.detection_params();
         let mut stmt = tx.prepare_cached(DETECTION_REGION_SQL)?;
-        let rows = stmt
+        let mut rows = stmt
             .query_map(
                 params![p.0, p.1, p.2, p.3, p.4, p.5, p.6],
                 detection_from_row,
             )?
             .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        // T-598: the standing retune verdicts over these rows (see [`Self::detection`]).
+        super::retune::apply_verdicts(&tx, &mut rows)?;
         Ok(rows)
     }
 

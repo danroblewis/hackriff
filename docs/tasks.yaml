@@ -18623,7 +18623,7 @@ tasks:
   - id: T-582
     milestone: M2-hardening
     title: Every pair of branches that files a ticket conflicts on docs/tasks.yaml's tail
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: OPS
     model: sonnet
@@ -19022,7 +19022,7 @@ tasks:
   - id: T-598
     milestone: M2-hardening
     title: The retune verdict is computed and thrown away - the inventory still lists one moving spur as three emitters
-    status: todo
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -19166,6 +19166,68 @@ tasks:
       `retune_diversity`) reproduces it directly and its assertions already count what matters.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      DONE 2026-09-21 (branch task-t598). The verdict is now written down and load-bearing.
+      WHERE IT IS PERSISTED. Two records, both APPEND-ONLY and both revocable.
+      (a) `detection_retune` (migration 0015, hk-model): one row per claim ABOUT a detection -
+      slope (absolute / lo-locked / image), the invariant coordinate `f - slope*f_LO`, the number
+      of distinct LOs that decided it, the spread, and the flag bits the slope implies. It is a
+      separate table because a detection row is IMMUTABLE by trigger (`detection_immutable`): a
+      measurement is what was measured and an interpretation must never rewrite it. The implied
+      suspect flags are applied on the READ path (`Repository::detection` /
+      `detections_in_region` -> `repo::retune::apply_verdicts`), so a reader sees
+      spur_candidate + lo-relative without the measurement being edited, and a revocation takes
+      them away by construction rather than by guessing which bits to unset.
+      (b) `RelationKind::RetuneSiblingOf` on `emitter_relation`: the N sightings of one LO-relative
+      family are RELATED to the one that represents them, so `/api/inventory` (which already hides
+      deferring rows by default) shows ONE artefact. Nothing is deleted: every sighting keeps its
+      id, detections, time extent and history, and is listed with `relations=all`. It is its own
+      kind, not `duplicate-of` / `artifact-of`, because the T-219 overlap resolver CLAIMS AND
+      REVOKES those two over overlapping bands and these sightings do not overlap at all (that is
+      the whole point) - a shared kind would have the two rules revoking each other every pass.
+      Migration 0015 rebuilds `emitter_relation` to widen its kind CHECK (SQLite cannot relax one
+      in place), copying every row, and adds an expression index on the provenance tune centre.
+      REVOCATION. `Repository::resolve_retune` re-derives the verdict from the stored rows and:
+      appends `active = 0` over any standing verdict whose slope changed (then the new claim);
+      revokes the sibling relation of any row the measurement no longer places in a family. The
+      sweep includes rows that merely DEFER TO an examined row even when they are no longer live,
+      so a claim cannot outlive the evidence. A verdict identical to the one standing writes
+      nothing. An `absolute` verdict is recorded and implies zero flag bits: it is the WEAK claim,
+      "not LO-relative", never "real" (a reference harmonic is absolute-fixed and still an
+      artefact).
+      WIRING AND ITS BOUND. `hk_pipeline::inventory::TrackInventory::touch` calls it after
+      `resolve_overlaps`, i.e. on every seam that reaches an entry. A cross-centre verdict can only
+      change when a NEW CENTRE appears, so the pass runs at most once per row per distinct-centre
+      count (`Repository::tune_centre_count`, answered from the new index) and not at all below
+      two centres - never once per sighting. The neighbourhood is bounded at 64 rows, 32 detections
+      per row and a band derived from the LOs within 100 MHz of the seed's own.
+      MEASURED, on T-586's `retune_diversity` fixture through the mock SDR (15 detections, 3
+      centres, 5 lines): BEFORE 3 emitters + 6 artefact rows = 9 shown; AFTER 3 emitters + 2
+      artefact rows = 5 shown, with all 6 artefact sightings still present under `relations=all`.
+      Stored verdicts 6 lo-locked + 9 absolute over 15 detections. Real emitters unchanged in
+      number and in absolute frequency (99.78 / 100.68 / 101.18 MHz).
+      RED WHEN BROKEN, both halves proven by removing the `touch` call: the verdict check failed
+      with "0 detections were recorded LO-relative" and, with that check skipped, the inventory
+      check failed with "the artefact at LO offset 0.0 kHz is shown as 3 emitters, not one".
+      Neither is vacuous: the scene asserts 3 sightings were kept per family (so there was
+      something to collapse) and 3 distinct centres were compared.
+      TESTS: 5 unit tests in `crates/hk-model/src/repo/retune_tests.rs` (the bug reproduced; the
+      fix; absolute flags nothing; revocation restores the prior single-capture flags exactly;
+      one centre claims nothing) and 2 new checks in the T-586 acceptance scene
+      `tests/e2e/tests/acceptance/t586_retune_diversity.rs`. Targeted runs: hk-model 317/317,
+      hk-model + hk-context 548/548, hk-pipeline 307/307, acceptance_m0 t586 2/2 (and an earlier
+      full acceptance_m0 50/50). `just precheck hk-model hk-pipeline hk-context hk-e2e` clean.
+      API: `docs/api.md` documents the new `relation.kind` value and its `detail`. The ROW SHAPE
+      and every route are unchanged - only a new enum value in an existing field - so
+      `api_contract.rs` (which asserts the `relation` key, not its vocabulary) needed no change.
+      FOLLOW-UPS SURFACED, NOT CHASED: (a) `hk_context::watch::StandingRelation::label` now has a
+      sentence for the new kind, but the SQL rank/trust proxy in `repo/relate.rs` still counts only
+      the MEASURED flag bits, so a resolved artefact does not yet rank below a clean row - joining
+      `detection_retune.flag_bits` into `EMITTER_DETECTION_EVIDENCE_SQL` is a small follow-up;
+      (b) the primary of a family is the row with most sightings, then the earliest - a Confirmed
+      row is never hidden by this rule, which is deliberate but means a wrongly-confirmed artefact
+      stays visible until a person acts; (c) the image slope (2) is still exercised by unit tests
+      only, since T-586's fixture omits images on purpose.
   - id: T-599
     milestone: M2-hardening
     title: Two loose ends from T-586 - the DC line is labelled ref-harmonic, and the image slope is unit-tested only
@@ -19223,6 +19285,33 @@ tasks:
       per SNR, and the reasons sum to the number of classifications - a report whose parts do not
       account for the whole is how a skipped stage hides.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-600
+    milestone: M2-hardening
+    title: A resolved artefact does not rank below a clean row, because the evidence proxy counts only measured flag bits
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    effort: low
+    depends_on: [T-598]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-598. `EMITTER_DETECTION_EVIDENCE_SQL` in `crates/hk-model/src/repo/relate.rs`
+      counts only the flag bits stored ON the detection row. T-598 deliberately does NOT write to
+      that row - a detection is immutable by trigger (`detection_immutable`), because a measurement
+      is what was measured and an interpretation must not rewrite it - so the retune verdict lives
+      in `detection_retune` and is applied on the read path.
+      Consequence: a detection the system has resolved as LO-relative still ranks as though nothing
+      were known about it. Join `detection_retune.flag_bits` into the evidence proxy so a resolved
+      artefact ranks below a clean row.
+      KEEP T-598'S RULE INTACT WHILE DOING IT: read-path application, no write to the measurement.
+      The point of the split is that the measurement and the interpretation have different
+      lifetimes - the interpretation is revocable and the measurement is not.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): a resolved LO-relative detection ranks
+      strictly below an unflagged one with otherwise equal evidence, and revoking the verdict
+      restores its rank - the second half matters, because a one-way change would make the ranking
+      outlive the claim.
+      Prove the test goes RED without the fix.
   - id: T-601
     milestone: M2-hardening
     title: A retune-sibling artefact reads as a generic "retune artefact" while an image reads as prose
