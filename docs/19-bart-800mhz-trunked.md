@@ -732,8 +732,21 @@ takes three captures, and should be the standard way this project separates real
   is the blind chain, not that one system." Any reachable trunked control channel satisfies it. The
   problem is that *no* trunked control channel is reachable here, so the use case needs a different
   instance, not a different definition.
-- **T-545 and T-546 are blocked on a fixture that does not exist.** They should not be started
-  against synthetic material — §3.4 is precisely why that would prove nothing.
+- **T-545 and T-546 are blocked on a fixture that does not exist** *for the decode-compliance
+  half*. §3.4 is precisely why synthetic material cannot prove the framing is standards-correct.
+  **Amended 2026-09-21 (T-545, and §7.7's original blanket "should not be started" is withdrawn):**
+  the user directed phase 2 to proceed on synthetic IQ, and the distinction that makes that sound
+  is *which* assertions the fixture can carry. It cannot carry standards compliance — and
+  `tests/e2e/tests/acceptance_mauto.rs` says so in its header, in T-299's terms, rather than
+  quietly pretending otherwise. It **can** carry every assertion about the chain *around* the
+  decoder, and those turned out to be where the gaps are: nothing estimates parameters on a
+  digital emission (and `mod_order` has no value 4 to give), `POST /api/analyze` is a `501` stub
+  with no engine behind it, a successful decode lands in the `trunk_system` table and never
+  reaches the inventory emitter it describes, the only explanation offered is allocation-only, and
+  **§7.6a's own −9.6 ppm measurement hides the control channel completely** — 5.5× the raster
+  tolerance, so candidacy never happens. That last one is a real-receiver failure found *because*
+  the synthetic route was taken, and it would have been found on the first real capture instead,
+  at much greater cost.
 - **T-299 is NOT unblocked.** The note added to it on this branch was written in the expectation that
   this capture would land. It did not. The note now says so.
 
