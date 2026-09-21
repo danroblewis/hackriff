@@ -19427,6 +19427,39 @@ tasks:
   - id: T-605
     milestone: M2-hardening
     title: A UNIQUE constraint failure on emission_features is logged and swallowed on every acceptance run
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: [T-321]
+    use_cases: []
+    acceptance: |
+      SEEN IN FOUR SEPARATE GATES ON 2026-09-21, INCLUDING ONES THAT PASSED, which is why nobody
+      has chased it:
+        hk-pipeline: analog chain emitter: storage engine: UNIQUE constraint failed: emission_features.features_id
+        hk-pipeline: analog chain shape characterisation: storage engine: UNIQUE constraint failed: ...
+        hk-pipeline: plugin chain emitter: storage engine: UNIQUE constraint failed: ...
+      A storage-engine error is being caught, printed and continued past. The suite stays green, so
+      the only evidence is three lines of log nobody reads - which is the silent-failure shape this
+      project keeps finding (a stage that cannot run looks like a stage that ran and agreed).
+      SUSPECTED CAUSE, NOT CONFIRMED: T-321 wired `write_shape` in as a SECOND `characterise_with`
+      per analogue session, at both `identify` and the full-window path, and its own agent flagged
+      the added call as an unmeasured cost. Two characterisations of one session plausibly insert
+      `emission_features` twice under one `features_id`. "analog chain shape characterisation" is
+      exactly that path. CONFIRM BEFORE FIXING - T-246 and T-589 both refuted the obvious suspect.
+      THEN DECIDE WHAT THE WRITE SHOULD DO, which is the real question: is the second write a
+      duplicate that should be an upsert, or a genuinely new characterisation that should replace
+      the first? T-335 established that a re-characterisation must happen when the evidence changed;
+      if the second write is that, dropping it on a UNIQUE violation silently loses the very
+      re-characterisation T-335 added.
+      AND MAKE IT LOUD EITHER WAY. Whatever the fix, a storage error on this path must not be
+      swallowed: a caught-and-printed constraint violation in a test suite is a test that passed for
+      the wrong reason.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): an analogue session produces exactly
+      one emission_features row per characterisation that should exist, and zero swallowed storage
+      errors over an acceptance run. Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-602
     milestone: M2-hardening
     title: POI and occupancy still ask "was it covered?" and never "was it analysed?", so the tuned centre is silently a blind spot to them
