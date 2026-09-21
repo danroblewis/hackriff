@@ -3,6 +3,14 @@
 # status: todo | in-progress | blocked | done. Update status + commit/pr as work proceeds.
 # needs: none | hardware | user  (hardware/user tasks stay with the coordinator, not background agents)
 # model/effort per prompts/model-selection.md. Tasks marked core_interface go to Fable/Opus and are reviewed before merge.
+# effort: low | medium | high | xhigh - the COMPLEXITY TIER, set with `model:` from the rubric in
+#   prompts/model-selection.md (T-563). Trivial/mechanical -> low; well-specified single-crate with tests
+#   -> medium; core_interface / real-time / novel DSP / hard debugging -> high or xhigh. A ticket whose
+#   MECHANISM IS ALREADY MEASURED by a prior ticket is well-specified however alarming its symptom: hand
+#   the agent the measurement and drop the tier. Reasoning time (184 h) exceeded all tool and build time
+#   (144 h) on 2026-09-20 because almost everything ran Opus-high regardless of the work.
+#   NOTE: the Agent tool exposes `model` but no `effort` parameter, so this field records the intended
+#   tier for briefs, agent definitions and review - it is not passed programmatically at spawn.
 version: 1
 milestone: "M0 COMPLETE 2026-09-13 (T-026 deferred to Jetson); M0b complete (T-100 deferred); M1 decoder workbench COMPLETE 2026-09-15; M2 attention + memory maturity COMPLETE 2026-09-15 (T-124 green, full check d0e74df; M2-hardening follow-ups open); current milestone M3 classification started 2026-09-15 (ADR-0016 design T-198); MUI in parallel; MAUTO design only (T-208), build after M3"
 # M0b (Live device + exploration UI) follows M0 and precedes decoder breadth (docs/11 §2); its tasks carry `milestone: M0b`. Tasks without the field are M0.
@@ -6446,7 +6454,7 @@ tasks:
     milestone: M2-hardening
     title: characterise uses emitter.count as a change detector, so an entry that just absorbed a partner
       by a discounted merge can skip re-characterisation
-    status: todo
+    status: in-progress
     priority: low
     deps:
     - T-329
@@ -6956,7 +6964,7 @@ tasks:
     milestone: M2-hardening
     title: An inventory rows snr_db and peak_dbfs are a Detections numbers with its TimeRange stripped at
       the API boundary
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-337
@@ -10999,7 +11007,7 @@ tasks:
   - id: T-435
     milestone: M3
     title: The class NAME changes with SNR in 3 of 252 sequences, and one of them is a confidently-wrong FAMILY at the gate
-    status: todo
+    status: done
     priority: normal
     parallel_group: M3A
     deps: [T-429, T-422]
@@ -13068,7 +13076,8 @@ tasks:
   - id: T-462
     milestone: MLIVE
     title: Make the level_f=0 time column incrementally maintained - the 15 coarse nodes, not the whole lattice
-    status: todo
+    status: cancelled
+    cancelled_reason: "Absorbed by T-571 (user perf review S1, 2026-09-21). T-462 scoped only the in-memory incremental fold and left coarse tiles written-on-demand, which is what leaves the read-time fold in place; T-571 carries its measurements forward and commits every N."
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -16007,7 +16016,7 @@ tasks:
   - id: T-539
     milestone: MLIVE
     title: The tile cache's AIMD cap only rises on a completion, so a still view never recovers from one 503
-    status: todo
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     model: opus
@@ -16029,13 +16038,32 @@ tasks:
   - id: T-540
     milestone: M2-hardening
     title: The plugin host kills a decoder as hung after 10 s, but a cold-linked subprocess can take 30 s to reach its first instruction
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
     model: opus
     depends_on: [T-493]
     use_cases: []
+    result: |
+      Done on task-t540. The one "input queue full past stall_timeout" budget is now two, split on
+      an OBSERVATION rather than a bigger constant: the child's first byte on stdout/stderr
+      (`SignsOfLife`, the only evidence the host has that it ran - starts/records_*/ready all tick
+      whether or not it did). Before that byte a full queue is judged against the new
+      `limits.startup_timeout_ms` (default 60 s, >= stall_timeout, validated); from that byte on
+      against the unchanged `stall_timeout` (10 s), measured FROM THE BYTE, so a genuine hang is
+      detected exactly as fast as before. A per-run watchdog thread in run_once owns the decision
+      (the publisher's own slow-consumer disconnect is now only a backstop, set past both budgets);
+      each kill names its budget in the log ring, in `PluginStats::last_hang`/`startup_kills` and in
+      `last_exit`, never as a generic "hung". A queue that is not full is still not evidence of
+      anything, so a quiet healthy plugin is untouched.
+      Tests: crates/hk-plugins/tests/startup_budget.rs (a: cold start not killed, then decodes;
+      b: wedged-after-start killed on the 300 ms budget, not the 30 s one; c: never-ran killed on
+      the startup budget with the right reason) + a manifest validation unit test. Proven red with
+      the old single budget reinstated: a failed with "a plugin that was merely slow to start was
+      killed" (killed at ~310 ms), c with "killed after 324 ms, before its own 3 s startup budget".
+      One run even hit the real phenomenon live - the plugin took 32.9 s to reach its first
+      instruction and was NOT killed. docs/stream-contract.md 9.2 and docs/10 updated.
     acceptance: |
       T-493 measured, from inside run_once: a freshly linked plugin binary is created in 193 us
       (posix_spawn returns, the host's stdout reader is running at +320 us) and then EXECUTES
@@ -16093,7 +16121,7 @@ tasks:
   - id: T-542
     milestone: MLIVE
     title: Reproduce the user's two reported crashes on the LIVE HackRF - a full sweep at dwell 1 s, and the deepest zoom
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -16131,7 +16159,7 @@ tasks:
   - id: T-543
     milestone: M2-hardening
     title: Cut the ticket cycle time - it is ~4 h start-to-land and the gate is most of it
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CI
     model: opus
@@ -16170,6 +16198,71 @@ tasks:
       supply concrete targets - prefer their numbers over re-deriving them, and coordinate rather
       than duplicating.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      MEASURED 2026-09-20 (branch task-t543; `just cycle-time`, reasoning in docs/10): gate median
+      21.4 min (p90 29.3), QUEUE WAIT median 119.7 min (p90 452), commit->merge median 272.6 min.
+      The gate is ~8 percent of the cycle; the serial queue is most of the rest. Landed, in value
+      order: (a) ops/merge-runner.sh bulk merge FIXED - 8 attempts, 0 merges, every one an octopus
+      refusal over docs/tasks.yaml, one wedged 10 h; now sequential two-head merges + ONE gate over
+      `just gate --base <pre-batch sha>`; (b) gate self-timing to $HACKRIFF_OPS/gate-timings.jsonl
+      plus `just cycle-time`; (c) affected-crate selection through HK_GATE_CRATES (hk-cli 2 of 20,
+      hk-pipeline 3, hk-dsp 14, hk-model 20) - acceptance and the UI tiers are NOT narrowed.
+      Also landed: `just test-ui` skipped for a diff with no ui/ path (the browser tier still runs);
+      `npm ci` only when package-lock.json changed; `just gate-stats` p50/p90 plus a rolling-median
+      budget a py test asserts; $HACKRIFF_OPS/landed.jsonl per landed ticket.
+      REJECTED WITH NUMBERS: sccache 0.00 percent hit rate, and cross-worktree reuse is structurally
+      impossible (sccache keys Rust entries on the cwd; SCCACHE_BASEDIR and --remap-path-prefix both
+      fail to fix it) - leave it on, stop counting it. ld64.lld is equal-to-slightly-slower than
+      Apple's ld (6 alternating pairs, 47 MB binary 1.35 vs 1.51 s, 28 MB test binary 2.23 vs 2.27 s;
+      Apple ships ld64-954/ld-prime, mold has no Mach-O backend). CARGO_INCREMENTAL=1 produced a
+      21 GB target/debug/incremental for a PARTIAL -p hk-dsp rebuild and took free disk 24 -> 13 GB,
+      so the =0 has a second justification independent of sccache. Acceptance stays on plain cargo
+      test, because nextest would pin hk-e2e to max-threads=1 and serialise it.
+      THE REAL CONSTRAINT IS THE BOX, NOT THE GATE: `cargo build -p hk-plugins --bins`, documented
+      as ~0.05 s warm, took 500 s at load 211 with three agents building and an `hk serve` holding
+      9-13 cores. Follow-ups worth filing: count long-running `hk serve` against the 4-builder cap;
+      measure `-- --test-threads 6` for acceptance-ci; Spotlight/XProtect exclusions for the repo
+      (mds_stores had burned 34 h of CPU).
+      SCOPE CORRECTED BY THE USER 2026-09-20: affected-crate selection is an AGENT ITERATION
+      convenience only. The merge gate (`gate-merge`) and CI (`GITHUB_ACTIONS`) now always run the
+      full workspace, unconditionally - checked in `resolve_selection` BEFORE the opt-in flag is
+      even read, so neither path can be narrowed even by a future caller passing --select-crates by
+      accident. Narrowing itself moved behind `just gate --select-crates` (default off). Pinned by
+      py/tests/test_gate.py (merge/CI-never-narrow tests) rather than left to caller discipline.
+      Kept as-is after re-review: the `just test-ui` skip for a diff with no ui/ path, on the merge
+      gate too - it is provably not a coverage reduction (build+typecheck+node tests over ui/ are a
+      pure function of ui/ source, no generated Rust input reaches them) and the tier that actually
+      catches a backend break (test-ui-e2e) is never skipped.
+      THREE MORE LEVERS MEASURED 2026-09-20 (coordinator-requested follow-up, all coverage-preserving):
+      (1) split-debuginfo=unpacked on macOS: ALREADY rustc's default on this toolchain/target
+      (rustc/cargo 1.93.1, aarch64-apple-darwin) - a build with zero explicit config already emits
+      `-C split-debuginfo=unpacked`. No lever available; nothing to change. NOT pinning it explicitly
+      in a repo-level .cargo/config.toml, because CI runs on ubuntu-latest where the default differs,
+      and forcing macOS's value workspace-wide would be an unverified behaviour change on the one
+      runner nobody here can observe.
+      (2) ld64.lld AT SUITE SCALE: cold `cargo nextest run --workspace --no-run`, 2 interleaved pairs
+      (def/lld/def/lld), each arm in its own freshly-copied source tree + private CARGO_TARGET_DIR
+      (so sccache's cwd-keyed cache - 0% hit rate per the earlier finding - can't spuriously hit on a
+      repeat), CARGO_BUILD_JOBS=6, nice -n15. Results: def 132s/134s (266s total), lld 142s/124s
+      (266s total) - an EXACT TIE in aggregate, with lld showing far more run-to-run variance (18s
+      spread vs def's 2s) under load that climbed 27->32 during the ~9 min run. NO suite-scale case
+      for switching linkers; this extends, rather than overturns, the branch's earlier individual-link
+      rejection (6 pairs, equal-to-slightly-slower). A parallel single-crate measurement (hk-dsp
+      --tests, fresh targets, one pair, no interleaving) separately found def 34s vs lld 31s - a real
+      but smaller, noisier and non-interleaved signal that does not survive to suite scale.
+      (3) CONSOLIDATING ~190 TEST BINARIES to one tests/main.rs per crate, SIZED NOT IMPLEMENTED per
+      instruction. Counted: 189 crates/*/tests/*.rs files (hk-pipeline 47, hk-dsp 25, hk-api 17,
+      hk-detect 16, hk-core 15, matching the coordinator's numbers) + 15 more in tests/e2e = ~204,
+      matching the "~190" estimate. What it requires: (a) merge each crate's test files into
+      `tests/main.rs` submodules (`mod x;` per former file - qualified test names are preserved,
+      e.g. binary(ring_concurrency) becomes test(ring_concurrency::), mechanical and verifiable by
+      diffing `nextest --list` before/after); (b) rewrite exactly 10 `binary(X)` predicates in
+      .config/nextest.toml to the equivalent test() form. tests/e2e (hk-e2e) should STAY EXCLUDED -
+      its 15 files are deliberately separate binaries for wall-time isolation (acceptance,
+      acceptance-m2/m3/m4/chirp each run one named --test target by design), so realistic scope is
+      189 files -> ~18 binaries in crates/, still close to the claimed ~10x. CONFIRMED REAL CONFLICT
+      RISK: task-flakes is concurrently editing .config/nextest.toml plus two of the same test files
+      (hk-cli/tests/api_contract.rs, hk-plugins/tests/readsb.rs) - validates doing this as its own
+      ticket after task-flakes lands, not in this branch.
   - id: T-560
     milestone: M2-hardening
     title: "800 MHz raster fits must estimate and remove the receiver's clock error: this HackRF is -9.6 ppm, two thirds of a channel"
@@ -16204,7 +16297,7 @@ tasks:
     milestone: MAUTO
     title: "BART 851 MHz, phase 1: research the system and capture real IQ as a SigMF fixture with HIDDEN ground truth"
     status: blocked
-    blocked_on: user - BART is not receivable at 1177 Market St, San Francisco with the current antenna position (docs/19 section 7; re-measured 2026-09-20 at the corrected amp-ON gain, with a CFAR local floor: 0 of 16 BART channels above +4 dB while neighbours 12.5 kHz away run 43-93% duty). Location is confirmed in range, so the fix is a physical RF change - antenna to a window/outdoors/higher, or a proper 850 MHz antenna - which is reserved to the user. Alternative: approve the blind wideband 100%-duty hunt as SIGNAL-087's first instance instead of BART.
+    blocked_on: "user - BART is not receivable at 1177 Market St, San Francisco with the current antenna position (docs/19 section 7; re-measured 2026-09-20 at the corrected amp-ON gain, with a CFAR local floor: 0 of 16 BART channels above +4 dB while neighbours 12.5 kHz away run 43-93% duty). Location is confirmed in range, so the fix is a physical RF change - antenna to a window/outdoors/higher, or a proper 850 MHz antenna - which is reserved to the user. Alternative: approve the blind wideband 100%-duty hunt as SIGNAL-087's first instance instead of BART."
     priority: high
     parallel_group: FIXTURE
     model: opus
@@ -16349,7 +16442,75 @@ tasks:
   - id: T-558
     milestone: M2-hardening
     title: A sustained sweep accumulates threads, RSS and a growing occupancy accumulator
-    status: todo
+    status: done
+    branch: task-t558
+    result: |
+      Measured first, on the mock SDR device behind the normal source interface, then bounded.
+      Three leaks, one cause each; every bound has a test that was watched go red without its fix.
+
+      1. THREADS. `ChainManager::attach` had no run-wide cap. `attach_measuring` capped its own
+         kind at the node spec's `max_chains` (4) and `attach_track` refused a duplicate *channel*,
+         but only for a spec with a raster - and `fsk-bursts`, what a burst-rich survey attaches,
+         has none. So concurrent chains were simply "however many tracks got confirmed".
+         MEASURED (tests/sweep_residency.rs, mock device 2 Msps): threads rose ONE PER ATTACH,
+         43 -> 219 over 175 attaches; with the cap removed again at 400 attaches it reached
+         444 threads / 401 running chains, reproducing T-542's live ~450 almost exactly.
+         FIXED: `chains::MAX_RUNTIME_CHAINS = 16`, checked after a `reap()` so the count is of
+         chains still running; over it the attach is refused and counted
+         (`chains.admission_refused`), never queued. AFTER: threads flat at 59 at 25 attaches and
+         at 400.
+      2. RSS. Followed the threads, and each chain's own retain buffer is sized in SECONDS:
+         `2 x retain_s x fs`. The built-in `fsk-bursts` 3 s is 24 MB at 2 Msps and ~240 MB at the
+         HackRF's 20 Msps, per chain. MEASURED: 64 -> 1210 MiB over 175 attaches, ~6.5 MiB a
+         chain, still climbing. FIXED: the cap above, plus `fsk::MAX_RETAIN_SAMPLES` (16 Msamp,
+         32 MB) so the buffer no longer scales with the device, plus `MAX_PENDING_GROUPS` (4096)
+         on the queue of burst groups awaiting samples. AFTER: 482 MiB at 400 attaches, flat once
+         the live chains have filled - a steady state, not a climb.
+      3. THE OCCUPANCY ACCUMULATOR. `ChannelPlan::clusters` was never pruned, and `learn` called
+         the full O(n^2) pairwise `merge` after EVERY detection, each comparison recomputing four
+         medians by allocating and sorting a Vec. MEASURED over a 1 MHz-6 GHz sweep: step 236 of
+         2999 reached 1896 clusters and 1.46 s FOR ONE STEP, rising quadratically, 120 s for 8 %
+         of the sweep - and NONE of those 1896 had published. A survey that cannot finish, filled
+         entirely with candidates for regions that went quiet. FIXED: (a) cached medians on
+         `Cluster`, recomputed at every mutation site; (b) `merge_at(i)` - only the cluster that
+         just took a sample can have become mergeable, so the closure is followed from the
+         survivor at O(clusters) a detection instead of O(detections x clusters^2); (c) `forget()`
+         - `max_clusters` 4096 hard cap (weakest first: unpublished, then least evidence, then
+         oldest) and `forget_unpublished_ns`, an unpublished cluster unseen for the whole
+         persistence window expires. Published channels survive the quiet; the hard cap is the
+         backstop that holds whatever the survey meets.
+         AFTER: all 2999 steps in 0.65 s, 4096 clusters, 0.2 ms a step - a ~800x speedup measured
+         against the restored merge (520.7 s) with the cap already in place.
+
+      This is the "no unbounded seen-count accumulators, no ghost candidates for signals that have
+      stopped" invariant applied where it had not been: candidate confidence now decays and expires
+      when a region goes quiet.
+
+      TESTS (all watched red without their fix):
+      - hk-context::sweep_accumulators::the_channel_plan_holds_a_bounded_number_of_clusters_however_long_the_survey_runs
+        (red: "1000 steps: 8000 clusters exceeds the 4096 cap")
+      - hk-context::sweep_accumulators::an_unpublished_cluster_expires_once_its_region_has_been_quiet
+        (red: left 3, right 2)
+      - hk-context::sweep_accumulators::merge_costs_a_bounded_number_of_comparisons_per_detection
+        (3048 comparisons/detection at 1000 steps, 3749 at 2999, bound 16384; red at the FIRST
+        length with the old pass reinstated: "1000 steps: 5536345 comparisons per detection
+        exceeds the 16384 bound"). Counted, not timed, per the user's 2026-09-21 rule: a
+        wall-clock budget loose enough not to flake would let a reintroduced quadratic merge
+        finish a whole sweep inside it on a fast machine. Wall clock is kept as an `#[ignore]`
+        measurement (0.65 s now, 520.7 s with the old merge and the cluster cap already in
+        place).
+      - hk-pipeline::sweep_residency::a_sustained_survey_holds_a_bounded_number_of_chain_threads
+        (red: "400 attaches left 401 chains running, above the 16 cap")
+      Each asserts at TWO survey lengths, so a cap cannot be mistaken for a slower climb. Three
+      `#[ignore]` measurement tests beside them print the tables and the wall-clock figures.
+
+      VERIFIED: hk-context + hk-core + hk-pipeline 679 pass, hk-api + hk-cli 289 pass, clippy and
+      fmt clean. Full gate not run (coordinator runs it at merge).
+
+      FOLLOW-UP filed as T-578: `MAX_RUNTIME_CHAINS` and `MAX_RETAIN_SAMPLES` are consts, not
+      settings. On a bigger box 16 is conservative and on a Jetson at 20 Msps even 16 x 32 MB of
+      retain buffer is 512 MB; both want to come from `PipelineSettings` and be derived from the
+      core count and the sample rate.
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -16376,12 +16537,13 @@ tasks:
   - id: T-559
     milestone: M2-hardening
     title: The 4-builder concurrency cap counts cargo builds but not the hk serve processes agents leave running
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CI
     model: sonnet
     depends_on: []
     use_cases: []
+    branch: task-t559
     acceptance: |
       MEASURED BY T-543: `cargo build -p hk-plugins --bins` - documented as ~0.05 s warm - took
       500 SECONDS at load average 211. The top consumer was an `hk serve` at 930-1300 % CPU (T-542's
@@ -16401,6 +16563,136 @@ tasks:
     notes: |
       Filed 2026-09-20 from T-543's measurement. The coordinator's scheduling caused several of
       today's gate failures; this is the rule that failed to prevent it.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE on branch task-t559: `just builders` (justfile) over the pure, tested
+      `hkpy.builders.assess` (py/hkpy/builders.py) - cargo/rustc grouped by worktree, hk
+      serve/hackriffd processes counted individually (each toward the cap on its own, whether
+      or not that worktree is also building), load(1m) vs a configurable core budget, free disk
+      vs the 20 GB floor, one-line verdict. `py/tests/test_builders.py` (30 cases) covers under/at
+      the cap, hk-serve-alone pushing it over, the coordinator's own full-gate cargo/rustc grouping
+      into one slot, low-disk and high-load. CLAUDE.md's "Worktree launch step" now points at
+      `just builders` instead of relying on the agent to count correctly. Awaiting merge via the
+      merge-runner queue (not merged by this agent).
+  - id: T-561
+    milestone: M2-hardening
+    title: "docs/tasks.yaml classified as prose, so the board test never ran on the commit that broke the board"
+    status: done
+    priority: high
+    parallel_group: CI
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      A malformed `blocked_on` on T-544 - an unquoted value containing a colon inside an English
+      sentence ("with a CFAR local floor: 0 of 16 BART channels...") - reached main and broke YAML
+      parsing at line 16207. It took out py/tests/test_task_board.py, so every later FULL gate failed
+      on it, and it broke the dashboard's task map.
+      IT GOT THERE BECAUSE docs/ CLASSIFIES AS DOCS AND THE DOCS CLASS RUNS NOTHING: the one test
+      written to catch a malformed board never ran on the commit that malformed it. An existing test
+      even ASSERTED that a diff including docs/tasks.yaml runs nothing - the bad assumption written
+      down as a guarantee.
+      FIX: docs/tasks.yaml and docs/use-cases.yaml classify as py (lint-py + test-py, which includes
+      the board test); prose in docs/ is unchanged. This follows the classifier's own principle - it
+      fails closed, and a file the tooling PARSES is data, not prose. The docs-only test now covers
+      prose only and says why in place. Every blocked_on value is now quoted.
+    notes: |
+      Filed 2026-09-20 after the fact; the fix is on task-gatefix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-562
+    milestone: M2-hardening
+    title: "Make the justfile REFUSE the gate, acceptance and the full workspace test when run from an agent worktree"
+    status: done
+    priority: high
+    parallel_group: CI
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      USER, from the /perf metrics: agents run suites they are explicitly told never to run, and it
+      is the single largest measured waste of agent time. 42 of 47 agents that ran `just gate` were
+      IMPLEMENTATION agents self-verifying rather than debugging; 111 of 122 on `just acceptance` and
+      93 of 108 on the full `just test` were the same - about 23 HOURS of agent time on suites the
+      brief forbids. Prose has not worked; the rule belongs in the runner, for the same reason T-396
+      moved the which-suites decision into `just gate` and T-477 moved the board check into
+      `just reconcile`.
+      GUARD: gate, gate-merge, acceptance, acceptance-ci and the full-workspace test recipes detect
+      that they are running from an agent worktree - `git rev-parse --show-toplevel` under
+      .claude/worktrees/ - and REFUSE, naming what to run instead: `just test-crate <crate>`, or
+      `cargo nextest run -p <crate> -E 'binary(<name>)'` for one binary (NOT `just test-one`: T-489
+      measured it building and listing ~280 binaries, over 8 minutes under load to run one test,
+      against 7.5 s for the scoped form), and "hand back - the coordinator gates once, at merge".
+      OVERRIDE: HK_ALLOW_FULL=1 for the rare genuine repro/debug agent, so the guard is a default
+      rather than a wall, and the refusal says the override exists.
+      The coordinator's gate runs from the MAIN checkout and is unaffected; CI is unaffected (not a
+      worktree). Assert the refusal, the override, and both unaffected cases in py/tests. Reinforce
+      the same rule in the standard agent brief text.
+    notes: |
+      Filed 2026-09-20 from the user's /perf analysis.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-563
+    milestone: M2-hardening
+    title: "Reasoning time (184 h) exceeds all tool and build time (144 h) - the largest untouched cost"
+    status: todo
+    priority: high
+    parallel_group: CI
+    model: opus
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      USER, from /perf: model/thinking time is 184 h against 144 h for ALL tool and build time, with
+      18.4 BILLION cache-read tokens - agents re-reading enormous context. After T-543 this is the
+      biggest remaining headroom, and unlike compile time nobody has touched it.
+      THREE LEVERS, each measured against the /perf per-agent "Model time" view rather than argued:
+      (1) ENFORCE THE MODEL/EFFORT TIERS in prompts/model-selection.md. Mechanical and well-specified
+      tickets belong on Haiku or a low effort setting, not Opus at high. Today almost every agent was
+      launched on Opus regardless of the work - that is the coordinator's habit, not the policy, and
+      the policy already says core-interface and real-time work is what earns Opus.
+      (2) LEANER BRIEFS AND LESS RE-READING. 18.4 B cache-read tokens says agents re-read the same
+      files across turns. Give each agent the exact files and the exact commands (CLAUDE.md already
+      says so), and prefer a pointer to a prior ticket's measurement over asking an agent to
+      re-derive it.
+      (3) FEWER ROUND-TRIPS: batch independent tool calls rather than serialising them.
+      METHOD: use the per-agent Model time view to find the PATHOLOGICAL sessions - the few that
+      dominate the total - and characterise what they were doing, before generalising. A long session
+      that was genuinely hard debugging is not the same as one that re-read the repo four times.
+      DoD: the outliers characterised; a stated tier rule the coordinator actually follows when
+      launching; and a measurable drop in model time per landed ticket.
+    notes: |
+      Filed 2026-09-20 from the user's /perf analysis. The coordinator is the main offender on (1)
+      and (2): most of today's agents were Opus, and several briefs asked agents to re-measure things
+      an earlier ticket had already measured.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-564
+    milestone: M3
+    title: "The synthetic grid's delivered analysis geometry is a statistic of the noise - OBW99 moves 2x with SNR on 23 percent of ladders"
+    status: todo
+    priority: high
+    parallel_group: M3A
+    core_interface: true
+    model: opus
+    depends_on: [T-296, T-246]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-435 while characterising the confidently-wrong family call, and it is the cause
+      rather than the symptom. synth::measured_obw / recentre_offset_hz read `occupied_band` on the
+      NOISY snippet, so `decim = floor(fs/(2*obw))` and the channel-filter cutoff are set by the
+      noise draw. Measured over 504 blind ladders: the OBW99 reported for ONE (class, seed) moves
+      with SNR by >= 2x on 115 (23 %) and >= 3x on 90 (18 %), in six of eight families - an `am`
+      carrier reads 82/31/1/1/1/1/1 kHz up the ladder; `ofdm` oscillates 30 kHz <-> 1 MHz on
+      adjacent rungs.
+      WHY IT MATTERS BEYOND TIDINESS: 5 of the 7 confidently-wrong FAMILY calls in 3 528
+      classifications sit on such a rung. The worst case (Qam16 seed 8 at the 15 dB gate) delivered
+      a 40 kHz emission in a 500 kHz band - a narrow line in empty space, which is exactly what
+      `ssb` is fitted as - and the classifier answered that question correctly at 0.999. Both
+      density files are fitted over this mixture, so the harness defect is baked into the model.
+      COST, STATED UP FRONT: fixing it changes every dev waveform, which means refitting both
+      data/densities-*.json and re-deriving all of ADR-0016 section 7.1. So it needs its own
+      measurement of what it buys and what it costs before anyone starts. Likely overlaps T-296's
+      unexplained EVM residue and is a plausible cause of psk-qam's weak open set.
+      Numbers and tables are in ADR-0016 section 7.3 (written by T-435).
+    notes: |
+      Filed 2026-09-20 from T-435's report. T-435 deliberately did NOT write a threshold against
+      this - a constant fitted to a harness defect is the thing this project forbids.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
@@ -16868,7 +17160,7 @@ tasks:
   - id: T-553
     milestone: MAUTO
     title: 'MAUTO-DESIGN: consolidate the ten open ADR-0015 questions into one decision brief for the user, with a recommendation and a cost per option'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -16905,6 +17197,31 @@ tasks:
       Filed 2026-09-20 by the MAUTO design/research track. Cheap, and it unblocks the engine
       set without adding engine work - which is exactly what a design track is for.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      Done 2026-09-20 on branch task-t553. Brief is `docs/20-mauto-decision-brief.md` (19 was taken
+      by the BART doc); indexed in docs/README.md; all three ADR-0015 open-question lists now point
+      at it. No ADR status changed, no tickets filed.
+      CORRECTION TO THE PREMISE: there are FIFTEEN open questions, not ten - the ticket counted
+      section 10 (5) and section 11.10 (5) and missed section 12.12's five (Listen retune, SSB/CW
+      blocks, keeping the legacy chain, stereo audio, promotion per output kind).
+      THE BLOCKING STRUCTURE IS SINGULAR: M-1's DoD includes "ADR-0015 -> ACCEPTED review", and an
+      ADR with open questions cannot be accepted - so every MAUTO engine ticket (M-1..M-14,
+      CP-1..CP-9, LP-1..LP-8) is downstream of this one page. There is no second blocker.
+      DISPOSITION of the fifteen: FIVE go to the user (U1 single-burst auto-confirm + the
+      false-confirm budget T-548 needs; U2 auto-analyze and deep-on-battery; U3 user-versus-decode
+      authority, merged with ADR-0016 open question 3; U4 fund PSK/SSB/CW blocks, merging section 10
+      Q5 with section 12.12 Q2; U5 stereo audio). SIX decided in the brief as engineering defaults
+      (local template files - same answer as ADR-0016 Q5; lazy pipeline rows; output_kinds as a set;
+      artifacts hidden behind the existing ?artifacts filter; retune still ends the audio stream;
+      legacy Listen chain kept). TWO of those six were the SAME question asked twice - section 11.10
+      Q2 and section 12.12 Q5 - and section 12.8 already answers both, so they are deleted rather
+      than decided. ONE (section 12.12 Q3) is a consequence of U4, not an independent question.
+      TWO sent to measurement: the 4-bit supersession margin and 0.6 overlap fraction -> T-547; the
+      quick/standard/deep budgets -> T-552.
+      RECOMMENDED ANSWERS: U1 auto-confirm only for template-fixed checks >= 24 bits, budget <= 1
+      wrong Confirmed emitter per week unattended; U2 auto-queue at `quick` only, mains only, deep
+      stays manual; U3 user wins at rank 0 with the contradiction shown; U4 fund psk_demod (M-14
+      becomes required), SSB/CW stay legacy permanently; U5 no stereo.
   - id: T-554
     milestone: MAUTO
     title: 'DECODER COVERAGE: per-family disposition audit - for each GNU Radio decoder family, decide native recipe vs wrapped plugin vs out of reach, and produce the hk-blocks catalogue gap list'
@@ -16966,7 +17283,7 @@ tasks:
       designated DSP kernel library (ADR-0010), it is actively released (v1.8.2, 2026-08), and
       it already ships PSK/QAM modems, NCO/PLL, framing and FEC. Under ADR-0011 section 1.6 a
       block is an ADAPTER OVER AN EXISTING KERNEL, so this may be an adapter job rather than a
-      DSP job - and that route needs no GPLv3 reference reading at all, which moots T-555 for
+      DSP job - and that route needs no GPLv3 reference reading at all, which moots the licence question for
       this family. Establish that before scoping the work, not after.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-555
@@ -17069,7 +17386,7 @@ tasks:
       for a spike, per the project's standing rule.
       DoD: a spike write-up with the numbers and a recommendation on whether wrapped GNU Radio
       decoders belong in the product at all, or whether the reference set is best used as a
-      SPECIFICATION source (T-555) with native recipes.
+      SPECIFICATION source with native recipes.
     notes: |
       Filed 2026-09-20 with docs/18. This is the ticket that makes the coverage direction honest
       - the whole roadmap rests on a per-decoder wrapping cost that nobody has measured.
@@ -17101,7 +17418,7 @@ tasks:
       1. THE PROVENANCE FIELD a template must carry. ADR-0015 section 4.1 has
          provenance: builtin | user | discovered. Add the SOURCE of the protocol facts - a
          standards document, a published specification, a wiki (sigidwiki), a paper, or "read
-         from a GPLv3 decoder" - which is exactly the derivation discipline T-555 is deciding.
+         from a GPLv3 decoder" - which is exactly the derivation discipline ADR-0010 already sets: GPLv3 stays behind the process boundary; no separate licence rule (user, 2026-09-20).
          A template whose parameters came from reading source must say so.
       2. THE LINE, drawn precisely. A sync word is a published protocol constant and a fact
          about the air interface; a CRC polynomial likewise; a field map is a fact about the
@@ -17130,6 +17447,176 @@ tasks:
       direction: it converts "support many more decode types" from a per-decoder engineering
       cost into a data-entry cost, for every protocol whose structure the existing block
       catalogue can already express.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-571
+    milestone: MLIVE
+    title: Coarse view-lattice tiles are folded ON DEMAND at read time - up to 1024 producer tiles per tile - instead of maintained live
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: high
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER PRIORITY, FILED 2026-09-21 FROM THE USER'S PERF REVIEW (their S1). THE USER HAS ASKED FOR
+      LIVE TILES REPEATEDLY; THIS IS THE PRIMARY CAUSE OF TILE SLOWNESS AND IT IS A STANDING
+      INVARIANT VIOLATION, NOT AN OPTIMISATION.
+      CLAUDE.md, "Live rendering, tile maintenance and playback": "Tiles are maintained LIVE and
+      INCREMENTALLY, per downsample interval... A level that downsamples every N rows adjusts its
+      in-progress top row as rows arrive and COMMITS EVERY N - the same rule at 2, 4, 8, 16, 32.
+      Coarse levels are incrementally maintained structures, NOT batch materialize-on-demand work."
+      What the code does instead: a coarse tile is FOLDED AT READ TIME from its producers, up to
+      1024 producer tiles for one coarse tile, so a cold screen pays 50-110 s. That is the
+      "batch materialize-on-demand" the invariant names, and the live edge is gated on it.
+      THE FIX: true streaming incremental coarse maintenance. Each level keeps its in-progress top
+      row, adjusts it as rows arrive, and COMMITS EVERY N. Per arriving row the work is O(1) per
+      level and residency is O(levels), not O(tiles). A coarse tile read then becomes an ordinary
+      disk read of an already-committed tile.
+      ABSORBS T-462, WHICH IS CANCELLED IN FAVOUR OF THIS. T-462 scoped the in-memory incremental
+      fold and concluded coarse tiles should stay WRITTEN-ON-DEMAND; that half-measure is what
+      leaves the read-time fold in place. Its measurements stand and are the starting point:
+      level 0 is ALREADY incrementally maintained, so only the coarse nodes are at issue;
+      per-row folding of the whole lattice is ~4.5x today's level-0 arithmetic, about 0.7 percent
+      of one core on the hk-view ViewWriter thread, which already cannot reach the ring; and the
+      real cost is RESIDENCY - 2 open accumulators become 32, about 18 MB -> 145 MB at a 20 MHz
+      edge, which is why T-462 proposed building only the level_f=0 time column (+18 MB). Decide
+      that residency question explicitly here and state the number; do not inherit it silently.
+      T-453'S CONSTRAINT STILL BINDS AND IS WHAT TO MEASURE AGAINST: work on the capture thread is
+      paid whether or not anyone looks, and that thread gates the ring, so PER-ARRIVING-ROW COST
+      MUST BE MEASURED, NOT ASSUMED, and residency must not grow back with node count. Note that
+      T-453's own regression was FILE WRITES under 28-way harness concurrency (5.1x wall for
+      IDENTICAL CPU and RSS - the runs were WAITING, not computing), so commit-every-N must be
+      counted in WRITES, not guessed.
+      HOW TO ASSERT IT (USER, 2026-09-21): COUNT ASSERTIONS AND A RESPONSE-SIZE CAP, NEVER A
+      WALL-CLOCK BUDGET. A wall-clock bound measures the machine, not the code - T-537 is the
+      precedent, where a 700 ms budget bought exactly one frame under load. So assert: the number
+      of producer tiles read to serve a coarse tile is O(1) (1, not up to 1024); the number of
+      tile-generation runs triggered by a viewport read is ZERO; per-arriving-row fold work and
+      writes are bounded per level and do not grow with node count; a response-size cap on the
+      tile route. Each of these fails legibly and holds under any load.
+      Prove the tests go RED without the fix (standing project rule).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-572
+    milestone: MLIVE
+    title: An in-memory hot-tile LRU - a viewport re-read goes to RAM, not to the filesystem
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      Filed 2026-09-21 from the user's perf review (their S2), one of three fast wins behind T-571.
+      A viewport that has not moved re-reads the same tiles from the filesystem every poll. Hold a
+      bounded in-memory LRU of hot tiles in front of the tile route.
+      BOUNDED IS THE POINT: state the cap in bytes and in entries, and make eviction observable.
+      An unbounded cache is the "no unbounded accumulators" rule broken in a new place.
+      INVALIDATION IS THE CORRECTNESS RISK, NOT THE SPEED: a SEALED tile is immutable and may be
+      cached freely; a LIVE tile at the growing edge changes on every arriving row and must never
+      be served stale. Make that distinction explicit in the cache key/policy, and test it -
+      "show all the data that exists" is violated by a stale live tile just as much as by a
+      missing one.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): filesystem reads per repeated
+      viewport poll drops to zero for sealed tiles; a live tile is re-read (or invalidated) on
+      every commit; cache entries and bytes stay under the stated cap under sustained scrolling.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-573
+    milestone: MLIVE
+    title: HTTP keep-alive and a BATCH /api/tiles endpoint - one request per viewport, not one per tile
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      Filed 2026-09-21 from the user's perf review (their S3), one of three fast wins behind T-571.
+      A viewport needs many tiles and asks for them one HTTP request at a time. Add a BATCH tile
+      endpoint that takes the viewport's tile addresses in one request and returns them together,
+      and make sure connections are kept alive rather than re-established per tile.
+      THE BATCH ROUTE IS A CORE INTERFACE: adding it means updating `docs/api.md` AND its contract
+      tests (`crates/hk-cli/tests/api_contract.rs`) TOGETHER (T-079).
+      A PARTIAL ANSWER MUST STAY HONEST. The batch response must distinguish, per address, the
+      three marks the canvas already depends on: data, genuinely-unobserved, and
+      observed-but-not-yet-measured. A batch that collapses a missing tile into an empty one
+      recreates the exact defect the coverage map exists to prevent. A tile with no data is still
+      answered immediately from the coverage map and never runs the generation path.
+      RESPONSE-SIZE CAP IS PART OF THE CONTRACT (user, 2026-09-21): state a maximum number of
+      addresses per request and a maximum response size, and define what the route does when a
+      viewport exceeds them - refuse, or truncate with the remainder addressable. An unbounded
+      batch endpoint is a new way to stall the live edge.
+      ASSERT WITH COUNTS AND SIZES, NOT WALL-CLOCK: HTTP requests per viewport render drops to a
+      small constant; connections opened per render is bounded; the cap is enforced and its
+      refusal/truncation is asserted; the per-address marks survive batching.
+      ALSO GUARD THE CLIENT SIDE: no gate covers a client asking for the wrong thing (T-367
+      requested /api/timeline with no band and drew an empty canvas while every suite stayed
+      green). Assert the REQUEST the client builds in `ui/test`, not only the response it renders.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-574
+    milestone: MLIVE
+    title: Sealed tiles are immutable - serve them with an ETag and a long immutable cache, so a re-read is a 304
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      Filed 2026-09-21 from the user's perf review (their S4), one of three fast wins behind T-571.
+      A sealed tile can never change again, so it should carry an ETag and a long immutable
+      cache-control, and a re-read should be a 304 rather than a re-transfer.
+      THE SEALED/LIVE DISTINCTION IS THE WHOLE TICKET, and getting it wrong is a correctness bug,
+      not a performance one. A LIVE tile at the growing edge changes on every arriving row and
+      must NEVER be served as immutable - that would freeze the live edge in the browser cache,
+      which is the "we have it but did not render it" bug with a new cause. Derive
+      sealed-vs-live from the tile's own state, not from its age or from a guess.
+      ASSERT WITH COUNTS AND STATUS CODES, NOT WALL-CLOCK (user, 2026-09-21): a repeated request
+      for a sealed tile returns 304 and transfers no body; a live tile is never served with an
+      immutable cache-control and never returns a stale 304; bytes transferred per repeated
+      viewport poll drops to zero for the sealed part of the viewport. A response-size assertion
+      belongs here too, since the point of the ticket is bytes not transferred.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-578
+    milestone: M2-hardening
+    title: The chain concurrency cap and the retain buffer are consts - size them from the device and the settings
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    effort: medium
+    depends_on: [T-558]
+    use_cases: [AWARE-011]
+    acceptance: |
+      Filed 2026-09-21 from T-558, which bounded these but bounded them with constants.
+      T-558 stopped a sustained sweep reaching ~450 threads and multi-GB RSS by adding
+      `chains::MAX_RUNTIME_CHAINS = 16` and `chains::fsk::MAX_RETAIN_SAMPLES` (16 Msamp, 32 MB).
+      Both are hard-coded, and NEITHER KNOWS WHAT MACHINE IT IS ON OR WHAT RATE IT IS RUNNING.
+      That is wrong in both directions: on the dev Mac 16 concurrent chains is conservative and
+      needlessly refuses decodes a 28-core box could run; on a Jetson at the HackRF's 20 Msps,
+      16 chains x 32 MB of retain buffer is 512 MB of buffer alone, before anything else the
+      device is holding, on a module whose whole memory is the budget.
+      WHAT TO DO: take both from `PipelineSettings` (so a run can be configured, and a portable
+      low-power mode can lower them) with defaults DERIVED rather than typed - the chain cap from
+      the core count, the retain bound from a byte budget divided by the sample rate, so the
+      seconds a chain retains fall as the device gets faster rather than the bytes rising. Report
+      both in `/api/status` beside `chains.admission_refused`, which is how anyone would find out
+      the cap is the thing refusing their decode.
+      THE BOUND IS THE POINT, NOT THE NUMBER: whatever the settings say, the residency must stay
+      bounded. Keep T-558's tests (`hk-pipeline::sweep_residency`,
+      `hk-context::sweep_accumulators`) passing and add one that a CONFIGURED cap is the cap that
+      holds - set an unusual value and assert the residency matches it at two survey lengths, so
+      the setting is shown to be wired through rather than merely present.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): thread counts, running-chain counts,
+      buffer bytes. Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

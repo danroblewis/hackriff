@@ -13,7 +13,9 @@
 //!   new one with a matching header is offered under the same id **before** that row is
 //!   published. This covers every tune path (the control API, the scheduler, a raw
 //!   `SourceControl`, multi-capture recordings), not only blocks flagged `RETUNE`. The STFT resets
-//!   on a centre, rate or gain change, so no row mixes two windows.
+//!   on a centre, rate or gain change, so no row mixes two windows. While no row is being produced
+//!   at all (T-489 below) there is nothing for the header to follow, so it follows the *chunk's*
+//!   window instead and the offer stays true to what the front end is tuned to.
 //! - **Display settings (T-050)** come from [`DisplayControl`] and apply between chunks without a
 //!   restart: FFT size and row rate rebuild the STFT (and re-offer the header at the next row);
 //!   `averaging` is an exponential moving average over published rows in linear power (1 = off,
@@ -36,9 +38,32 @@
 //! and the newest trace row on it — a frozen pane still needs the first two, so `open_consumers()`
 //! stays ≥ 1 while any browser is open. The only lever on that 13% is therefore "nothing is
 //! subscribed at all", which is the headless scheduled-survey case rather than the paused-screen
-//! one; T-489 carries it with the hazards it has to handle. What can never be saved either way is
-//! the ring read and the `cursor.set` below: reader 3 holds a gate cursor, so it drains the ring
-//! whether or not anyone is looking, or a lossless run stalls capture behind it.
+//! one. What can never be saved either way is the ring read and the `cursor.set` below: reader 3
+//! holds a gate cursor, so it drains the ring whether or not anyone is looking, or a lossless run
+//! stalls capture behind it.
+//!
+//! **So the FFT is skipped while nothing is subscribed (T-489).** A *watcher* is an open consumer
+//! of the publisher in force — a `/ws/spectrum/live` websocket, a TCP stream client, an in-process
+//! `subscribe` — and nothing else reads these rows ([`Output::watched`] lists why). With none, the
+//! chunk is read, the gate cursor is advanced and the publisher is kept offered and current, but
+//! `stft.push` is skipped; the saving is ~9% of pipeline CPU (measured below), now reachable by
+//! the headless scheduled survey (workflow #2, hours on battery, no browser). **Nothing recorded
+//! changes**: history, detection, the IQ ring and the receiver-line survey each hold their own
+//! reader and their own STFT, so the tile pyramid, the coverage map, detections and every stored
+//! product are byte-for-byte what they were — the only difference is display rows nobody asked
+//! for, and `/spectrum/rows` honestly counting them at zero. Going idle flushes then clears the
+//! STFT so its partial buffer cannot be stitched across the gap into a frame with a timestamp
+//! from the far side; resuming restarts the average and flags the first row `DISCONTINUITY`.
+//!
+//! **Re-measured on today's main, and the 13% is nearer 9%.** Same subject and method as T-348
+//! (`hk serve --replay` of the 2.4 Msps FM fixture, `--loop`, fft 4096, 25 rows/s, headless, three
+//! interleaved 60 s windows of process CPU after a 15 s warm-up), baseline against this change:
+//! **10.50 / 10.74 / 11.46 CPU-s per 60 s of wall clock before, 9.75 / 9.65 / 10.21 after** —
+//! 1.03 CPU-s saved per 60 s on the means, **9.4% of the pipeline's CPU** (0.182 → 0.165 cores).
+//! All three pairs separate and the ranges do not overlap, but the effect is smaller than T-348's
+//! 1.7 CPU-s, which its own note says varied ±9% with other agents on the box; the direction and
+//! the order of magnitude hold, the exact 13% does not. Same run, the reader's own counters:
+//! `reader spectrum 179 388 000 samples, 0 frames, lost 0` — the ring drained in full, no FFT.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -47,7 +72,9 @@ use std::time::Duration;
 use hk_core::{Discontinuity, ReadOutcome};
 use hk_dsp::{InputInfo, PowerUnit, SpectrumFrame, StftProcessor};
 use hk_model::ContentClass;
-use hk_stream::{BinaryRecord, Publisher, PublisherConfig, RecordFlags, StreamError};
+use hk_stream::{
+    BinaryRecord, Publisher, PublisherConfig, PublisherHandle, RecordFlags, StreamError,
+};
 use num_complex::Complex;
 
 use crate::class::{RowPlan, row_plan, spectrum_header};
@@ -106,11 +133,16 @@ struct Output<'a> {
     plan: RowPlan,
     settings: DisplaySettings,
     publisher: Option<Publisher>,
+    /// The publisher's handle, kept only to ask how many consumers are open (T-489).
+    handle: Option<PublisherHandle>,
     key: Option<HeaderKey>,
     db: Vec<f32>,
     bytes: Vec<u8>,
     avg: Vec<f32>,
     avg_rows: u32,
+    /// Samples went by unwatched since the last published row, so the next one is not contiguous
+    /// with the one before it and says so (T-489).
+    gap: bool,
     error: Option<anyhow::Error>,
 }
 
@@ -122,11 +154,13 @@ impl<'a> Output<'a> {
             plan,
             settings,
             publisher: None,
+            handle: None,
             key: None,
             db: Vec::new(),
             bytes: Vec::new(),
             avg: Vec::new(),
             avg_rows: 0,
+            gap: false,
             error: None,
         }
     }
@@ -135,6 +169,27 @@ impl<'a> Output<'a> {
     fn set_plan(&mut self, plan: RowPlan) {
         self.plan = plan;
         self.avg_rows = 0;
+    }
+
+    /// Is anything subscribed to the publisher in force (T-489)?
+    ///
+    /// **This is the whole definition of "watched".** A watcher is an open consumer of *this*
+    /// publisher — a `/ws/spectrum/live` websocket, a `hk-api` TCP stream client, or an in-process
+    /// [`hk_stream::PublisherHandle::subscribe`] (what a test's `stream_sink` opens). Nothing else
+    /// reads these rows: history, detection, the IQ buffer and the receiver-line survey each hold
+    /// their own ring reader and their own STFT ([`crate::run`] spawns four independent readers),
+    /// so no stored product is a consumer of this stream. Note it is the *current* publisher: a
+    /// re-offer (a retune, a display-geometry change) builds a new one and its consumers have to
+    /// resubscribe, which is exactly the interval in which nobody is reading.
+    fn watched(&self) -> bool {
+        self.handle.as_ref().is_some_and(|h| h.open_consumers() > 0)
+    }
+
+    /// Samples went by with nothing subscribed: the next row is not contiguous with the last one
+    /// published, so it is flagged `DISCONTINUITY` and the average restarts ([`Self::row`] does
+    /// both off `reset`).
+    fn skipped(&mut self) {
+        self.gap = true;
     }
 
     /// Finishes the publisher in force and offers one whose header describes `key`.
@@ -160,6 +215,7 @@ impl<'a> Output<'a> {
                 ..PublisherConfig::default()
             },
         )?;
+        self.handle = Some(p.handle());
         if let Some(sink) = &self.shared.cfg.stream_sink {
             sink(&header, p.handle());
         }
@@ -183,7 +239,8 @@ impl<'a> Output<'a> {
             bins,
             declared_hz: self.plan.declared_hz,
         };
-        let reset = frame.discontinuity.bits() & !Discontinuity::STREAM_START.bits() != 0;
+        let gap = std::mem::take(&mut self.gap);
+        let reset = gap || frame.discontinuity.bits() & !Discontinuity::STREAM_START.bits() != 0;
         if reset || self.key != Some(key) {
             self.avg_rows = 0;
         }
@@ -305,6 +362,9 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
     let mut buf = vec![Complex::<i8>::default(); 1 << 16];
     let rc = &shared.counters.spectrum_reader;
     let mut bases = (0u64, 0u64);
+    // Was anything subscribed at the last chunk? Starts false: nothing can be subscribed before
+    // the publisher has been offered, which the first chunk does.
+    let mut was_watched = false;
     loop {
         let g = display.generation();
         if g != seen {
@@ -340,24 +400,54 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
                     );
                     rebuild(&shared, plan, &mut stft, &mut out, &mut bases)?;
                 }
+                // This chunk's window, as the header would describe it. The publisher is offered
+                // and kept current whether or not anything is subscribed: `reoffer` is what
+                // registers the handle with the hk-api bridge, so gating the offer on a consumer
+                // would mean no consumer could ever arrive (T-489).
+                let key = HeaderKey {
+                    center_hz: chunk.provenance.tune.center_hz,
+                    span_hz: fs,
+                    bins: out.plan.stft.welch.fft_len,
+                    declared_hz: out.plan.declared_hz,
+                };
                 if out.publisher.is_none() {
                     // Offer the stream as soon as samples arrive (clients connect before the
                     // first row), described by this chunk's window; a row whose own window
                     // differs still gets a new header first.
-                    let key = HeaderKey {
-                        center_hz: chunk.provenance.tune.center_hz,
-                        span_hz: fs,
-                        bins: out.plan.stft.welch.fft_len,
-                        declared_hz: out.plan.declared_hz,
-                    };
                     out.reoffer(key)?;
                 }
-                stft.push(InputInfo::from(&chunk), &buf[..chunk.len], |frame| {
-                    out.row(frame)
-                });
-                if let Some(e) = out.error.take() {
-                    return Err(e);
+                let watched = out.watched();
+                if watched {
+                    // Resuming needs nothing done here: the STFT was cleared when the idle began,
+                    // so no sample from before the gap survives to be stitched across it, and the
+                    // flag `skipped` left behind restarts the average and marks the first row.
+                    stft.push(InputInfo::from(&chunk), &buf[..chunk.len], |frame| {
+                        out.row(frame)
+                    });
+                    if let Some(e) = out.error.take() {
+                        return Err(e);
+                    }
+                } else {
+                    if was_watched {
+                        // Going idle: publish what is already framed, then clear the processor.
+                        // Its partial buffer would otherwise survive the gap and be stitched into
+                        // a frame carrying a timestamp from the far side of it.
+                        stft.flush(|frame| out.row(frame));
+                        if let Some(e) = out.error.take() {
+                            return Err(e);
+                        }
+                        stft.reset();
+                    }
+                    out.skipped();
+                    // No row will correct the header in force while none is produced, so the
+                    // offer follows the window here instead (T-057's rule has no rows to follow).
+                    if out.key != Some(key) {
+                        out.reoffer(key)?;
+                    }
                 }
+                was_watched = watched;
+                // Read and gate-cursor advance are NOT optional: reader 3 holds a gate cursor, so
+                // a lossless run stalls capture behind it if it stops draining the ring.
                 cursor.set(chunk.end_sample());
                 add(&rc.samples, chunk.len as u64);
             }

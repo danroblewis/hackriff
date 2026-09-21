@@ -1182,6 +1182,8 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         // T-158: measurement fields (present, possibly null).
         "snr_db",
         "peak_dbfs",
+        // T-350: the same measurement with the time it was measured over (present, possibly null).
+        "measured",
         // T-219: why this row defers to another, when it does (present, possibly null).
         "relation",
         // T-211: arbitrated classification and a differing latest row (present, possibly null).
@@ -1252,6 +1254,66 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         row["peak_dbfs"].is_null(),
         "snr_db and peak_dbfs come from the same detection, so they are null together: {row}"
     );
+    // T-350 (ADR-0017): `snr_db`/`peak_dbfs` are a *detection's* numbers, and a detection is a
+    // time-frequency region rather than a persistent carrier - so the row has to say WHEN they
+    // were measured, or an SNR from two days ago is indistinguishable from one from two seconds
+    // ago on a list whose whole question is what is on the air now. Asserted by VALUE (T-315): a
+    // shape check passes on a `measured` block filled with the request's own window, which is
+    // precisely the guess-dressed-as-a-measurement this exists to prevent.
+    {
+        let m = &row["measured"];
+        // Null exactly with the levels: all five values come from one detection, so there is no
+        // state in which a time exists without its levels, or levels without their time.
+        assert_eq!(
+            m.is_null(),
+            row["snr_db"].is_null(),
+            "`measured` is the dated form of snr_db/peak_dbfs, so they are null together: {row}"
+        );
+        if !m.is_null() {
+            // The levels are the SAME measurement, not a second one taken elsewhere.
+            assert_eq!(m["snr_db"], row["snr_db"], "measured.snr_db differs: {row}");
+            assert_eq!(
+                m["peak_dbfs"], row["peak_dbfs"],
+                "measured.peak_dbfs differs: {row}"
+            );
+            let (t0, t1) = (
+                m["t_start_s"].as_f64().expect("t_start_s"),
+                m["t_end_s"].as_f64().expect("t_end_s"),
+            );
+            let dur = m["duration_s"].as_f64().expect("duration_s");
+            // Unix SECONDS, per this API's units law (T-349): the band the sweep in
+            // `every_serialized_time_declares_its_unit` holds every `_s` field to, asserted here
+            // against this row's own clock rather than only against the magnitude.
+            let (first, last) = (
+                row["first_seen_s"].as_f64().expect("first_seen_s"),
+                row["last_seen_s"].as_f64().expect("last_seen_s"),
+            );
+            assert!(t1 >= t0, "measured extent runs backwards: {m}");
+            assert!(
+                (dur - (t1 - t0)).abs() < 1e-6,
+                "duration_s must be t_end_s - t_start_s: {m}"
+            );
+            // It is the DETECTION's extent, so it lies inside the emitter's first/last-seen hull
+            // and is never the hull itself: serving the hull (or the request window) would report
+            // a span over which nothing was measured. A tolerance of 1 s absorbs the detection's
+            // own frame quantisation against the hull's endpoints.
+            assert!(
+                t0 >= first - 1.0 && t1 <= last + 1.0,
+                "measured extent {t0}..{t1} is outside the row's seen hull {first}..{last}: {row}"
+            );
+            // A real detection is short - seconds, not the run - and never longer than the hull
+            // it sits in. This is the honesty claim the block exists for: the levels are dated to
+            // when they were taken, so a client can tell a live number from a stale one.
+            assert!(
+                dur <= (last - first) + 1.0,
+                "measured extent {dur}s is wider than the row's whole seen hull: {row}"
+            );
+            assert!(
+                (0.0..300.0).contains(&dur),
+                "a detection's extent should be seconds, not a whole survey: {m}"
+            );
+        }
+    }
     assert!(
         matches!(row["state"].as_str(), Some("candidate" | "confirmed")),
         "default listing excludes deleted entries: {row}"
@@ -7501,8 +7563,20 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
     let tile = |fi: u64, ti: u64| {
         format!("/api/tiles?level_f=0&level_t=0&f_index={fi}&t_index={ti}&cells={N}")
     };
-    let f_index = (STATION_HZ / (6250.0 * N as f64)).floor() as u64;
-    let t_now = || (unix_now() / N as f64) as u64;
+    // **Node (0, 0) is read off the route, never written down here.** The view lattice is anchored
+    // on the open pyramid's own level-0 cell, so the floor is the server's to state and a literal
+    // here would be a second copy of `hk_pipeline::history::view_geometry` — and a stale one would
+    // address a tile the front end never tuned, which is correctly unobserved and would make every
+    // assertion below vacuous rather than red.
+    let (st, probe) = get(addr, &tile(0, 0));
+    assert_eq!(st, 200, "{probe}");
+    let f_cell = probe["axes"]["frequency"]["cell_hz"].as_f64().unwrap();
+    let t_cell = probe["axes"]["time"]["cell_s"].as_f64().unwrap();
+    let f_index = (STATION_HZ / (f_cell * N as f64)).floor() as u64;
+    // A tile spans `N` rows of `t_cell`, and `t_index` names which of those blocks an instant is in.
+    let tile_s = t_cell * N as f64;
+    let t_index = |t: f64| (t / tile_s) as u64;
+    let t_now = || t_index(unix_now());
     wait_for(
         "the station's tile to be observed",
         Duration::from_secs(60),
@@ -7513,13 +7587,67 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         },
     );
 
+    // The station's own column within its tile: the one that carries the carrier.
+    let station_col = ((STATION_HZ - f_index as f64 * f_cell * N as f64) / f_cell) as usize;
+
     // Never observed: 3 GHz, which this 2.4 MHz front end has never been tuned near.
-    let (st, never) = get(addr, &tile((3.0e9 / (6250.0 * N as f64)) as u64, t_now()));
+    let (st, never) = get(addr, &tile((3.0e9 / (f_cell * N as f64)) as u64, t_now()));
     assert_eq!(st, 200, "{never}");
     assert_eq!(never["shadow"]["encoding"], json!("column-runs"), "{never}");
     assert_eq!(never["shadow"]["runs"], json!(0), "{}", never["shadow"]);
     assert_eq!(never["shadow"]["search"]["columns_found"], json!(0));
     assert_eq!(never["shadow"]["f"], json!([]), "{}", never["shadow"]);
+
+    // **Retune with room left in a tile the grid already holds, and then PIN that tile.**
+    //
+    // The subject of this test is one tile that carries both halves of the story: rows the grid
+    // measured while the station was swept, and rows it does not measure after the radio left. Two
+    // wall-clock alignments used to decide whether the tile this test looked at was that tile, and
+    // both were unmeasured:
+    //
+    //  1. A tile that *begins* after the retune has neither half. It is honestly unobserved end to
+    //     end, so the coverage map short-circuits it and its grid carries the `uniform` cell in
+    //     place of the four per-cell arrays (`tiles::unobserved_grid_json`) while STILL carrying a
+    //     shadow — a departed band's last-known value is exactly what such a tile is for. That
+    //     answer is right; asking for it here was not. Following `t_now()` rolled onto one whenever
+    //     the retune landed near a tile boundary (reproduced 1 run in 30, panicking on a
+    //     `grid.max_db` the honest answer does not have). So: retune with room left in the tile,
+    //     and then PIN that tile's index. A tile is a fixed region of time and the route answers it
+    //     just as well once it is past, which also puts every row of it safely below the data edge
+    //     rather than racing it.
+    //  2. The run below the last measured row begins at the first row the grid does *not* hold, so
+    //     "a run that starts after the retune" used to need the row CONTAINING the retune to be a
+    //     measured one. It is a live, partial row, and it enters the grid only once a frame has
+    //     been folded into it — so a retune in the first fraction of a row left that row
+    //     unmeasured, the run began AT it, and `t0 + row * t_cell > retuned_at` was false for ever
+    //     (the runs below it merge into that one, so no later run rescues the condition).
+    //
+    //     T-505 bought the room for that with a lead time: retune only in the first 70 % of a row,
+    //     leaving >= 0.3 s of it for the POST to complete in. THAT IS STILL A WALL CLOCK — 0.3 s
+    //     for an HTTP round trip on a box where four agents build by design — so the second
+    //     wait below no longer uses one. It asks the question in ROW INDICES instead: which row
+    //     the retune fell in is arithmetic on the pinned tile, and a run that COVERS any row
+    //     strictly below that one is unambiguously after the radio left, whether or not the
+    //     partial row the retune landed in had reached the grid. Nothing then depends on how long
+    //     the POST took, and the phase window this waits for widens from ~9.1 s of every tile to
+    //     ~13 s.
+    wait_for(
+        "a moment to retune at: inside a tile whose grid already holds the station's column",
+        Duration::from_secs(120),
+        || {
+            let into = unix_now().rem_euclid(tile_s);
+            // Room in the tile for both halves of the story. No sub-row condition: the assertion
+            // below is now indexed by row, so where in a row the POST lands does not matter.
+            if into < 3.0 * t_cell || into > 0.5 * tile_s {
+                return false;
+            }
+            // And the grid really holds this tile: a measured cell in the station's own column,
+            // read off the route rather than assumed from elapsed time.
+            get(addr, &tile(f_index, t_index(unix_now()))).1["grid"]["max_db"]
+                .as_array()
+                .is_some_and(|cells| (0..n).any(|r| !cells[r * n + station_col].is_null()))
+        },
+    );
 
     // Depart: retune 3 MHz up, so 102.6-105.0 MHz is watched and the station at 101.3 MHz is not.
     let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
@@ -7531,28 +7659,40 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
     );
     assert_eq!(st, 200, "{r}");
     let retuned_at = unix_now();
+    let t_pinned = t_index(retuned_at);
+
+    // The retune's own row within the pinned tile, by arithmetic. Every row strictly below it
+    // begins after the radio left, so a run that covers one is a post-retune shadow — no matter
+    // how long the POST above took, and no matter whether the partial row it landed in had been
+    // folded into the grid yet.
+    let retune_row = ((retuned_at - t_pinned as f64 * tile_s) / t_cell).floor() as i64;
 
     // Wait for a station-tile row after the retune that the grid does not measure and a shadow
-    // covers. (The station's own column carries the carrier.)
-    let station_col = ((STATION_HZ - f_index as f64 * 6250.0 * N as f64) / 6250.0) as usize;
+    // covers — in the PINNED tile, the one the retune happened in.
     let mut v = Value::Null;
     wait_for(
         "the departed station to carry a shadow",
         Duration::from_secs(60),
         || {
-            v = get(addr, &tile(f_index, t_now())).1;
-            let t0 = v["extent"]["t0_s"].as_f64().unwrap_or(0.0);
+            v = get(addr, &tile(f_index, t_pinned)).1;
             let sh = &v["shadow"];
-            let (f, row) = (&sh["f"], &sh["row"]);
+            let (f, row, rows) = (&sh["f"], &sh["row"], &sh["rows"]);
             f.as_array().is_some_and(|fs| {
                 fs.iter().enumerate().any(|(i, c)| {
-                    c.as_u64() == Some(station_col as u64)
-                        && t0 + row[i].as_f64().unwrap_or(0.0) > retuned_at
+                    let (r0, k) = (row[i].as_i64().unwrap_or(0), rows[i].as_i64().unwrap_or(0));
+                    c.as_u64() == Some(station_col as u64) && r0 + k > retune_row + 1
                 })
             })
         },
     );
-    let (sh, grid) = (&v["shadow"], v["grid"]["max_db"].as_array().unwrap());
+    let grid = v["grid"]["max_db"].as_array().unwrap_or_else(|| {
+        panic!(
+            "the pinned tile must hold the rows the grid measured BEFORE the retune — a tile with \
+             none is short-circuited from the coverage map and serves `grid.uniform` instead of \
+             the per-cell arrays, and there is then nothing for a shadow to have carried: {v}"
+        )
+    });
+    let sh = &v["shadow"];
     let arr = |k: &str| sh[k].as_array().unwrap().clone();
     let (f, row, rows, db, t, src, fill) = (
         arr("f"),

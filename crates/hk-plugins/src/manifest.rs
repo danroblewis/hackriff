@@ -159,8 +159,22 @@ pub struct RestartPolicy {
 pub struct ResourceLimits {
     /// Input queue (ring) size, bytes.
     pub input_queue_bytes: usize,
-    /// A plugin whose input queue stays full this long is killed (hang watchdog) and restarted.
+    /// A plugin that **has shown a sign of life** (a byte on stdout or stderr) and whose input
+    /// queue then stays full this long is killed (hang watchdog) and restarted. The clock runs
+    /// from the later of that first byte and the moment the queue filled, never from the spawn:
+    /// a process that has not started yet is not a process that has stopped responding (T-540).
     pub stall_timeout: Duration,
+    /// A plugin that has produced **no output at all** since it was spawned, and whose input
+    /// queue stays full this long, is killed (never-started watchdog) and restarted.
+    ///
+    /// It is a separate, longer budget because the thing it bounds is outside this repo's
+    /// control: on macOS a freshly linked binary is `posix_spawn`ed in ~193 µs and then executes
+    /// **nothing** for up to ~30 s while the loader/code-signing path warms (measured, T-493;
+    /// `crates/hk-plugins/tests/common/mod.rs`). Killing such a child on `stall_timeout` kills a
+    /// healthy decoder on its first launch after a rebuild or install. This budget is not a
+    /// bigger `stall_timeout`: it applies **only** before the first sign of life, and the moment
+    /// a byte arrives the tighter `stall_timeout` takes over (T-540).
+    pub startup_timeout: Duration,
     /// Longest a producer that cannot pause (a live chain) holds its first record waiting for
     /// `input.ready_signal`; after it, input is offered anyway and the wait is counted. A
     /// producer that can pause (a lossless replay) may wait longer.
@@ -324,6 +338,7 @@ struct RawRestart {
 struct RawLimits {
     input_queue_bytes: Option<usize>,
     stall_timeout_ms: Option<u64>,
+    startup_timeout_ms: Option<u64>,
     ready_timeout_ms: Option<u64>,
     max_message_bytes: Option<usize>,
     stderr_lines: Option<usize>,
@@ -722,6 +737,10 @@ impl PluginManifest {
         let limits = ResourceLimits {
             input_queue_bytes: raw.limits.input_queue_bytes.unwrap_or(8 * 1024 * 1024),
             stall_timeout: Duration::from_millis(raw.limits.stall_timeout_ms.unwrap_or(10_000)),
+            // 60 s: twice the worst start-up stall measured on this hardware (T-493), so a cold
+            // link cannot be mistaken for a hang, while a child that truly never runs still
+            // fails within a minute.
+            startup_timeout: Duration::from_millis(raw.limits.startup_timeout_ms.unwrap_or(60_000)),
             ready_timeout: Duration::from_millis(raw.limits.ready_timeout_ms.unwrap_or(5_000)),
             max_message_bytes: raw.limits.max_message_bytes.unwrap_or(1024 * 1024),
             stderr_lines: raw.limits.stderr_lines.unwrap_or(200),
@@ -731,6 +750,13 @@ impl PluginManifest {
             return Err(invalid(
                 "limits",
                 "max_message_bytes and stall_timeout_ms must be > 0",
+            ));
+        }
+        if limits.startup_timeout < limits.stall_timeout {
+            return Err(invalid(
+                "limits",
+                "startup_timeout_ms must be >= stall_timeout_ms: a child that has not started \
+                 yet cannot be given less time than one that has",
             ));
         }
         if let Some(n) = limits.nice
@@ -896,6 +922,21 @@ mod tests {
         }
     }
 
+    /// A startup budget shorter than the responsiveness one would re-create the T-540 defect in a
+    /// manifest: a child that has not run yet judged more harshly than one that has.
+    #[test]
+    fn a_startup_budget_under_the_stall_budget_is_refused() {
+        let mut v = base();
+        v["limits"] = json!({"stall_timeout_ms": 10_000, "startup_timeout_ms": 5_000});
+        let err = parse(&v).unwrap_err();
+        assert!(format!("{err}").contains("startup_timeout_ms"), "{err}");
+        v["limits"] = json!({"stall_timeout_ms": 10_000});
+        assert_eq!(
+            parse(&v).unwrap().limits.startup_timeout,
+            Duration::from_secs(60)
+        );
+    }
+
     #[test]
     fn valid_manifest_parses_with_defaults_and_renders_args() {
         let m = parse(&base()).unwrap();
@@ -904,6 +945,7 @@ mod tests {
         assert_eq!(m.output.metadata_policy, None);
         assert_eq!(m.restart.max_restarts, 5);
         assert_eq!(m.limits.stall_timeout, Duration::from_secs(10));
+        assert_eq!(m.limits.startup_timeout, Duration::from_secs(60));
         let args = m.render_args(&input(2.4e6, Some(1090e6))).unwrap();
         assert_eq!(
             args,

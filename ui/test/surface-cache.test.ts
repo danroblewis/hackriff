@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CELL } from "../src/surface/cellrule";
 import { keyOf, tileUrl, type Lattice, type TileAddr } from "../src/surface/lattice";
-import { RECOVER_AFTER, REFRESH_DUTY, TileCache, parseKey, type TileCacheOptions, type Viewport } from "../src/surface/tilecache";
+import { RECOVER_AFTER, RECOVER_QUIET, REFRESH_DUTY, TileCache, parseKey, type TileCacheOptions, type Viewport } from "../src/surface/tilecache";
 import { TileBusyError, TileDecodeError, type TileData } from "../src/surface/tile";
 
 const LAT: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 20, levelsT: 15 };
@@ -285,12 +285,20 @@ test("the cap in force is never exceeded, even when the budget is shared with an
   // The route's cap is SERVER-WIDE (hk-api's TileSlot on ApiState): a second tab holding two of the
   // four leaves two, and a client counting only its own four is over the budget while believing it
   // is under it. The refusal is the only thing that says so, so it must be acted on, not displayed.
-  const FREE = 2;
+  //
+  // **It asks for more than the route can finish** (T-539). It used to want eight tiles, which this
+  // route serves in six of the forty frames — so for the other thirty-four the client was idle, and
+  // both claims below were being made about a client that wanted nothing. `WANT` is larger than the
+  // frames are long, so the queue never empties and the cap being asserted on is the cap of a
+  // client that is still competing. (Idle is a different regime with a different rule: see the
+  // elapsed-quiet test below.)
+  const FREE = 2, WANT = 80;
   let open = 0, maxOpen = 0, refusals = 0;
   const done: (() => void)[] = [];
   let clock = 0;
+  let uploads = 0;
   const cache = new TileCache<{ id: number }>(
-    { upload: () => ({ id: 0 }), destroy: () => {} },
+    { upload: () => ({ id: uploads++ }), destroy: () => {} },
     (a) => {
       if (open >= FREE) {
         refusals++;
@@ -300,34 +308,48 @@ test("the cap in force is never exceeded, even when the budget is shared with an
       maxOpen = Math.max(maxOpen, open);
       return new Promise<TileData>((resolve) => done.push(() => { open--; resolve(data(a)); }));
     },
-    { inFlight: 4, budgetBytes: 64 * BYTES, busyBackoffMs: 10, now: () => clock, serverMsGuess: 20 },
+    { inFlight: 4, budgetBytes: 128 * BYTES, busyBackoffMs: 10, now: () => clock, serverMsGuess: 20 },
   );
 
-  for (let frame = 0; frame < 40; frame++) {
+  let busyFrames = 0;
+  const frame = async () => {
     clock += 16; // one animation frame
     cache.beginFrame();
-    for (let i = 0; i < 8; i++) cache.acquire(addr(i));
-    cache.setViewports(LAT, [paneView(0, 8)]);
+    for (let i = 0; i < WANT; i++) cache.acquire(addr(i));
+    cache.setViewports(LAT, [paneView(0, WANT)]);
     cache.endFrame();
     await flush();
     done.shift()?.(); // the route finishes one tile
     await flush();
-  }
+    if (cache.inFlightCount + cache.queueDepth > 0) busyFrames++;
+  };
+
+  for (let f = 0; f < 40; f++) await frame();
   assert.ok(maxOpen <= FREE + 1,
     `the client kept ${maxOpen} reads open against a route with ${FREE} free slots`);
   assert.ok(cache.inFlightLimit <= FREE + 1, `converged to ${cache.inFlightLimit}, not to its own guess of 4`);
-  const before = refusals;
-  for (let frame = 0; frame < 20; frame++) {
-    clock += 16;
-    cache.beginFrame();
-    for (let i = 0; i < 8; i++) cache.acquire(addr(i));
-    cache.setViewports(LAT, [paneView(0, 8)]);
-    cache.endFrame();
-    await flush();
-    done.shift()?.();
-    await flush();
-  }
-  assert.equal(refusals, before, "once converged the client stops being refused at all");
+  assert.equal(busyFrames, 40, "the cap above was sampled on a client that still wanted tiles");
+  const before = refusals, servedBefore = uploads;
+  for (let f = 0; f < 20; f++) await frame();
+  // **Converged means a trickle, not silence** (T-539). The claim used to be "no further refusals
+  // at all", and that was only ever true because the client had run out of tiles to ask for: a
+  // working AIMD client probes upward by construction — `RECOVER_AFTER` completions buy a slot,
+  // and against a route with no more to give the slot above the share is *found* by being refused.
+  // What the cap has to deliver is that the refusal is rare and self-correcting, not that it never
+  // happens: one per run of completions, against the every-frame flood a client that kept its own
+  // guess of four would take. (Verified on the pre-T-539 file, which refuses exactly as often here:
+  // the trickle is the earned path's, and nothing to do with the elapsed-quiet rule below, which
+  // the `busyFrames` assertion shows never fires in this test.)
+  const probes = refusals - before;
+  assert.ok(probes <= 20 / RECOVER_AFTER + 1,
+    `${probes} refusals over 20 frames: that is a flood, not the upward probe of a converged client`);
+  // **What that counts, and that it is not zero** (T-539). A refusal count is only a claim about
+  // the client if the client was asking: with the eight-tile version every one of these frames was
+  // a cache hit, so the assertion was judging 0 of 0 requests.
+  assert.ok(uploads - servedBefore >= 15,
+    `only ${uploads - servedBefore} tiles were served across the second run: it was not asking`);
+  assert.equal(busyFrames, 60, "and it never once ran out of work to be refused over");
+  assert.ok(maxOpen <= FREE + 1, `${maxOpen} reads open at once: the probe must never become a flood`);
 });
 
 test("recovery is EARNED: the halved cap climbs back, and never past the number the route named", async () => {
@@ -369,6 +391,104 @@ test("a coarse viewport cannot hold the whole budget while the panes wait", asyn
   await flush();
   assert.deepEqual(h.urls, [tileUrl(addr(3, 0, 8, 6)), tileUrl(addr(3, 0, 0, 0))],
     "one slot each: the map is a viewport, not a priority");
+});
+
+test("the cap recovers on ELAPSED QUIET, because a frozen view has no completions to offer (T-539)", async () => {
+  // The defect: `limit` rose only inside `succeeded()`, which needs a request to have completed.
+  // A view sitting still with its tiles resident issues nothing, so a client that took ONE 503 on
+  // the way in kept its halved cap for the rest of the session — measured pinned at 1–2 against a
+  // ceiling of 4 for the remaining ~16 s of every run. The route said "busy" once and the client
+  // throttled itself indefinitely.
+  //
+  // **What this test is careful about is that the recovery costs the route NOTHING.** A speculative
+  // ring of requests was the previous answer to "keep traffic flowing so the cap can recover", and
+  // it was reverted off main for charging the server a slot it then abandoned (T-471/T-538). So the
+  // load-bearing pair of assertions is: the cap climbs, AND `calls` — the addresses the source
+  // function was actually invoked with, i.e. the wire — does not grow by one.
+  //
+  // It also cannot pass by pinning the clock: the existing 503 test leaves `now` at 0 and so never
+  // leaves the 200 ms busy window, which certifies only the regime that was already correct.
+  let clock = 0;
+  const SERVER_MS = 400, BACKOFF_MS = 200;
+  const h = harness({ inFlight: 4, busyBackoffMs: BACKOFF_MS, serverMsGuess: SERVER_MS, now: () => clock });
+  const QUIET = RECOVER_QUIET * SERVER_MS; // the window one slot costs, in measured service times
+
+  // A tile arrives — and takes SERVER_MS to do it, so the measured estimate the window is expressed
+  // in is the one this test computes with rather than a decayed guess.
+  h.cache.beginFrame(); h.cache.acquire(addr(0)); h.cache.endFrame(); await flush();
+  clock += SERVER_MS;
+  await h.settle(addr(0));
+  assert.equal(h.cache.serverEstimateMs, SERVER_MS, "the quiet window is measured in THIS number");
+
+  // One 503, exactly one.
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame(); await flush();
+  const refusedAt = clock;
+  await h.fail(addr(1), new TileBusyError(4, "too many tile reads in flight (limit 4)"));
+  assert.equal(h.cache.inFlightLimit, 2, "a 503 still halves the cap");
+  assert.equal(h.cache.stats.busyRefusals, 1);
+
+  // The refusal re-queued the tile; let the backoff expire and let that one request finish, so the
+  // client is left with everything it wants resident and nothing outstanding. THIS is the frozen
+  // view: not a client that was never able to ask, but one that has nothing left to ask for.
+  clock = refusedAt + BACKOFF_MS + 1;
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame(); await flush();
+  clock += SERVER_MS;
+  await h.settle(addr(1));
+  // From here the wire is silent, and THIS is the instant the quiet window counts from: every
+  // request issued or answered restarts it, so the retry cannot hand back credit for itself.
+  const quietFrom = clock;
+  assert.equal(h.cache.inFlightCount, 0);
+  assert.equal(h.cache.queueDepth, 0);
+  const wireAtFreeze = h.calls.length, hitsAtFreeze = h.cache.stats.hits;
+  assert.equal(wireAtFreeze, 3, "addr(0), the refused addr(1) and its retry: this client DOES issue");
+  assert.equal(h.cache.inFlightLimit, 2, "and it is still throttled when the view goes still");
+
+  // The frozen view: a render loop that draws the same two resident tiles at 16 ms a frame.
+  let frames = 0;
+  const freezeUntil = (target: number) => {
+    while (clock < target) {
+      clock += 16;
+      h.cache.beginFrame();
+      h.cache.acquire(addr(0));
+      h.cache.acquire(addr(1));
+      h.cache.endFrame();
+      frames++;
+    }
+  };
+
+  // Half a window in: nothing yet. Recovery is a WINDOW, not "the backoff expired".
+  freezeUntil(quietFrom + QUIET / 2);
+  assert.equal(h.cache.inFlightLimit, 2, "half a quiet window is not a slot");
+
+  // One window past the end of the backoff: one slot, additively, exactly as a run of completions
+  // would have bought.
+  freezeUntil(quietFrom + QUIET + 16);
+  assert.equal(h.cache.inFlightLimit, 3, "one slot per quiet window, not a jump back to the guess");
+
+  // Two windows: back at the ceiling the route named, and not past it however long it stays quiet.
+  freezeUntil(quietFrom + 2 * QUIET + 16);
+  assert.equal(h.cache.inFlightLimit, 4, "the cap that fell on one refusal has let go of it");
+  freezeUntil(quietFrom + 20 * QUIET);
+  assert.equal(h.cache.inFlightLimit, 4, "quiet buys back the ceiling, never more");
+  await flush();
+
+  // **The recovery was not bought with traffic.** `calls` is what the source function was invoked
+  // with — the wire, not the acquires.
+  assert.equal(h.calls.length, wireAtFreeze,
+    `the frozen view issued ${h.calls.length - wireAtFreeze} request(s) to recover its cap; ` +
+    "recovery must cost the route nothing (T-471: a speculative ring is what this replaces)");
+  assert.equal(h.cache.stats.busyRefusals, 1, "and it was not re-refused into the same hole");
+
+  // ——— Non-vacuity: what the two assertions above are counting, and that it is not zero ———
+  // The climb is over real frames, against a cache that really was serving those frames...
+  assert.ok(frames > 100, `only ${frames} frozen frames: the loop has to have run to mean anything`);
+  assert.equal(h.cache.stats.hits - hitsAtFreeze, 2 * frames,
+    "the frozen loop must be drawing both resident tiles on every frame it claims to have run");
+  // ...and "no requests" is the view's silence, not a client that had been gated into never being
+  // able to issue again. Move the view: it asks at once.
+  h.cache.beginFrame(); h.cache.acquire(addr(2)); h.cache.endFrame(); await flush();
+  assert.equal(h.calls.length, wireAtFreeze + 1,
+    "a client that cannot issue at all would have passed the wire assertion vacuously");
 });
 
 test("keys round-trip, so an in-flight request can be tested against a viewport", () => {

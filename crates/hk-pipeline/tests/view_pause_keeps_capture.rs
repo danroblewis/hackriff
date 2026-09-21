@@ -32,6 +32,11 @@
 //! The cross-client half of T-347 — *two* connected browsers, one holding its view, the other still
 //! advancing — is asserted where clients actually are, over two real WebSockets:
 //! `crates/hk-cli/tests/api_contract.rs`, `one_clients_pause_never_freezes_another_clients_stream`.
+//!
+//! **T-489 put a viewer in the run.** The producer computes rows only while a consumer is open, so
+//! a run with no consumer at all publishes none — the headless-survey saving, not a lever any
+//! viewer holds. The claim asserted below is about "the stream every other viewer is reading", so
+//! the run now has one: a consumer open from the first offer to the end, across both phases.
 
 mod common;
 #[path = "support/radio.rs"]
@@ -49,6 +54,7 @@ use hk_pipeline::stats::Counters;
 use hk_pipeline::{
     DisplayPatch, Pipeline, PipelineConfig, PipelineHandle, SourceInfo, TrackInventory, replay_plan,
 };
+use hk_stream::{Declared, StreamKind};
 use serde_json::json;
 
 const CENTER: f64 = 433.92e6;
@@ -185,6 +191,23 @@ fn holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection() {
     cfg.live_window_class = true;
     cfg.lossless = true; // the flow gate is live: a stalled reader would stop the source
     cfg.settings.chains = Some(Vec::new());
+    // **A viewer, because the claim is about one (T-489).** The rows this test requires never to
+    // stop are "the stream every other viewer is reading", and since T-489 the producer computes
+    // them only while a consumer is open — an unwatched run publishes none, which is a saving, not
+    // a viewer's lever. So the test attaches the viewer whose stream it is asserting about. The
+    // consumer is a sink that drops what it reads: nothing here inspects the rows, only that they
+    // keep coming. It stays open for the whole run, so no phase below is measured unwatched.
+    cfg.stream_sink = Some(Arc::new(move |h, handle| {
+        if h.kind == StreamKind::Spectrum {
+            handle
+                .subscribe(
+                    "t347-viewer",
+                    Declared::local(std::io::sink()),
+                    Box::new(|_| {}),
+                )
+                .expect("a viewer subscribed to the spectrum stream");
+        }
+    }));
     let handle = Pipeline::start(
         cfg,
         Box::new(radio),
