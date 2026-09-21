@@ -32,6 +32,12 @@
 .side-inv .chip.unknown { color: var(--lav); border-color: color-mix(in srgb, var(--lav) 35%, transparent); }
 .side-inv .chip.flag { color: var(--coral); border-color: color-mix(in srgb, var(--coral) 40%, transparent); }
 .side-inv .chip.cluster { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
+/* T-587: an explained receiver artefact — deliberately neutral grey (`--dim`), distinct from the
+   teal/lavender "known"/"unknown" family chips and the coral off-raster flag, so it never reads as
+   a claim about the air (it is the opposite: the backend has explained the reading away). The
+   reason text itself is rendered separately (`.artifact-reason`), never hover-only. */
+.side-inv .chip.artifact { color: var(--dim); border-color: var(--line); background: var(--ground); }
+.side-inv .row .artifact-reason { flex-basis: 100%; color: var(--dim); font-size: 11px; font-style: italic; }
 .side-inv .dots { display: inline-flex; gap: 2px; align-items: flex-end; height: 10px; }
 .side-inv .dots i { width: 3px; background: var(--lav); border-radius: 1px; opacity: 0.85; display: block; }
 /* T-207: the unknown/open-set score, shown next to every row's frequency so it's visible without
@@ -60,6 +66,8 @@
 .focus .chip.unknown { color: var(--lav); border-color: color-mix(in srgb, var(--lav) 35%, transparent); }
 .focus .chip.flag { color: var(--coral); border-color: color-mix(in srgb, var(--coral) 40%, transparent); }
 .focus .chip.cluster { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
+.focus .chip.artifact { color: var(--dim); border-color: var(--line); background: var(--ground); }
+.focus .artifact-reason { color: var(--dim); font-size: 12px; font-style: italic; margin-top: 4px; }
 .focus .bigf { font-family: var(--mono); font-size: 28px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.05; margin-top: 8px; overflow-wrap: anywhere; }
 .focus .bigf small { font-size: 14px; color: var(--muted); margin-left: 4px; }
 .focus .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
