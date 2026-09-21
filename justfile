@@ -248,10 +248,21 @@ e2e_slice := "acceptance_m0"
 e2e_harness := "canvas_fidelity concurrent_demod floor_acceptance listen_live mock_device outputs_record refine smoke spectrum_axis stream_external"
 e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp acceptance_ism"
 
+# THREAD CAP, and why it lives here rather than in .config/nextest.toml. These suites run through
+# plain `cargo test`, NOT nextest, so nextest's `test-threads = 8` and its `heavy-serial` group do
+# not apply to them at all. The gap is not theoretical: `heavy-serial` covers
+# `package(hk-pipeline) and test(listen)`, while the test that sank a gate on 2026-09-21 -
+# `hk-e2e` `acceptance_m0` `listen::signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches` -
+# lives in `hk-e2e`, so it was protected by neither and drove a real server's listener cap at full
+# default parallelism under a loaded gate. It passed alone in 24.8 s.
+# `RUST_TEST_THREADS` is cargo test's own variable, so the cap applies however the recipe is
+# invoked and stays overridable (`RUST_TEST_THREADS=1 just acceptance`).
+# This REDUCES FALSE REDS; it is not a fix for a timing-bound test, exactly as CLAUDE.md says of
+# the nextest cap. T-603 owns making that test deterministic.
 # M0 slice acceptance suite (T-024, docs/11 §1.1): 7 use cases through the composed pipeline. Missing uv or LFS fixtures fail; only readsb-dependent parts skip. Extra args go to cargo test, e.g. `just acceptance -- --nocapture`
 acceptance *args:
     cargo build -p hk-plugins --bins
-    HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 cargo test -p hk-e2e --test {{e2e_slice}} {{args}}
+    HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 RUST_TEST_THREADS=${RUST_TEST_THREADS:-6} cargo test -p hk-e2e --test {{e2e_slice}} {{args}}
 
 # The hk-e2e harness targets: the composed pipeline, mock device, Listen, recording, streaming,
 # refinement and the C-stage floor acceptance, driven through the e2e harness. These are not
@@ -265,7 +276,7 @@ e2e-harness *args:
     set -euo pipefail
     flags=()
     for t in {{e2e_harness}}; do flags+=(--test "$t"); done
-    HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 cargo test -p hk-e2e "${flags[@]}" {{args}}
+    HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 RUST_TEST_THREADS="${RUST_TEST_THREADS:-6}" cargo test -p hk-e2e "${flags[@]}" {{args}}
 
 # THE acceptance gate: what CI's acceptance job runs, and one tracked definition rather than a copy
 # of it in the workflow (T-353's rule, applied to the opposite sign of drift). The M0 vertical slice
@@ -511,6 +522,17 @@ lint-rust:
 
 lint-py:
     cd py && uv run --locked ruff check .
+
+# Register the repo-local git merge driver for docs/tasks.yaml (T-582).
+#
+# `.gitattributes` names the driver and IS committed; the command that implements it lives in
+# .git/config and is NOT, so a fresh clone has the attribute pointing at nothing and git fails
+# the merge with "custom merge driver hkboard lacks command line". Run this once per clone.
+# `ops/merge-runner.sh` also calls it at startup, so the automated path cannot miss it.
+setup-git:
+    @git config merge.hkboard.name "append-only merge for docs/tasks.yaml (T-582)"
+    @git config merge.hkboard.driver "uv run --locked --project py python -m hkpy.boardmerge %O %A %B"
+    @echo "git: merge driver 'hkboard' registered for docs/tasks.yaml"
 
 # THE CHEAP CHECK TO RUN BEFORE QUEUING A BRANCH — seconds, not a gate.
 #

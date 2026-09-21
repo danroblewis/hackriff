@@ -363,10 +363,22 @@ fn rows_before_the_record_horizon_are_unknown_and_not_unobserved() {
     assert!(grid.observed_cells() > 0);
 }
 
-/// The DC notch survives the chain: a notched dwell contributes **two** bands, so the notch stays
-/// honestly unobserved instead of being papered over by the window around it.
+/// **The DC notch survives the chain, and since T-595 it survives it as a THIRD span.**
+///
+/// The purpose this test has always protected is unchanged: a notched dwell must never reach the
+/// rasteriser as **one wide band straddling the notch**, which would claim the analysis covered
+/// spectrum it deliberately skipped. What changed is the honest way to say so. Before T-595 the
+/// notch contributed *nothing*, so the fold answered `unobserved` — *nothing ever looked* — for a
+/// stripe the radio was sitting on and the spectrum history holds rows across. T-588 measured the
+/// cost: 1 212 cells held a measurement and read `unobserved`, every one of them this notch.
+///
+/// So a notched dwell is now **three** positive claims, not two and a hole: the two ANALYSED bands
+/// either side, plus the notch itself as [`Analysis::Excluded`] — *sampled, deliberately left out
+/// of analysis*. The wide-band claim is still refused, and refused more precisely: no **analysed**
+/// span may straddle the centre, and the one span that covers the centre must be exactly the notch
+/// and must be marked as excluded.
 #[test]
-fn a_notched_dwell_reaches_the_rasteriser_as_two_bands() {
+fn a_notched_dwell_reaches_the_rasteriser_as_two_analysed_bands_and_one_excluded_notch() {
     let scan = run_scan(1);
     let dir = tempdir("t406-notch");
     let window = TimeRange::new(
@@ -375,18 +387,62 @@ fn a_notched_dwell_reaches_the_rasteriser_as_two_bands() {
     );
     let band = FreqRange::new(LO_HZ - 12e6, HI_HZ + 12e6);
     let read = through_the_log(&dir, &scan.records, band, window);
-    // One record per step, two spans each: below the notch and above it.
+
+    // One record per step; three spans each, and the split between them is the whole model.
+    let (analysed, excluded): (Vec<_>, Vec<_>) =
+        read.spans.iter().partition(|s| s.analysis.is_analysed());
     assert_eq!(
-        read.spans.len(),
+        analysed.len(),
         2 * scan.steps.len(),
-        "each notched dwell is two positive claims, never one wide one"
+        "each notched dwell contributes two ANALYSED bands, one either side of the notch"
     );
-    for s in &read.spans {
+    assert_eq!(
+        excluded.len(),
+        scan.steps.len(),
+        "…and one EXCLUDED span for the notch itself: sampled, and deliberately not analysed.          Contributing nothing here is what greyed the notch (T-595)"
+    );
+
+    // **Never one wide band.** An analysed span may not reach across the tuned centre.
+    for s in &analysed {
         assert!(
             !(s.freq.lo_hz < s.center_hz && s.center_hz < s.freq.hi_hz),
-            "a span must not straddle the notched centre: {s:?}"
+            "an analysed span must not straddle the notched centre: {s:?}"
         );
     }
+    // And the one span that does cover the centre is the notch, exactly — the producer's own
+    // ±`dc_half_hz`, not a wider claim wearing the exclusion's name.
+    for s in &excluded {
+        assert!(
+            s.freq.lo_hz < s.center_hz && s.center_hz < s.freq.hi_hz,
+            "the excluded span is the notch AT the centre: {s:?}"
+        );
+        assert!(
+            (s.freq.width_hz() - 2.0 * RULE.dc_half_hz).abs() < 1.0,
+            "the exclusion is the producer's own notch width, never a wider claim: {s:?}"
+        );
+    }
+
+    // **The consequence the ticket is about**, measured through the same chain: the tuned centre
+    // rasterises as *sampled, excluded from analysis* — never as grey, which would be the claim
+    // that nothing ever looked at spectrum we hold rows for.
+    let centre = scan.steps[0].center_hz;
+    let f = FreqRange::new(centre - 1e6, centre + 1e6);
+    let step0 = TimeRange::new(scan.steps[0].t_start, scan.steps[0].t_end());
+    let g = grid_over(&read.spans, &Device::Id(DEVICE.into()), f, step0, 1, 400);
+    let c = g.at(centre).expect("a cell at the tuned centre");
+    assert!(
+        c.is_observed(),
+        "the tuned centre must not be grey - we have it and must not paint it over: {c:?}"
+    );
+    assert!(
+        c.is_excluded(),
+        "…and it must say WHY it is not ordinary coverage: the analysis skipped it. {c:?}"
+    );
+    assert_eq!(c.as_str(), "excluded");
+    // Grey still means something, and analysed still means analysed: a quarter MHz off centre is
+    // ordinary coverage, and the exclusion did not spread to it.
+    let side = g.at(centre + 250e3).expect("a cell beside the notch");
+    assert!(side.is_observed() && !side.is_excluded(), "{side:?}");
 }
 
 /// `docs/16` §5.4's retention arithmetic, **measured rather than assumed** — it is marked unverified

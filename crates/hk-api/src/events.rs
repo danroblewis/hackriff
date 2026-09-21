@@ -26,11 +26,13 @@
 //! catalogue; with no history store the answer is **unknown**, never "quiet".
 
 use hk_model::{
-    IdleGap, InventoryEntry, InventoryIdentity, PresenceInterval, Repository, TimeRange, Timestamp,
+    InventoryEntry, InventoryIdentity, Presence, PresenceInterval, Repository, TimeRange, Timestamp,
 };
 use hk_store::Pyramid;
 use serde_json::{Value, json};
 
+use crate::coverage::ObservedCoverage;
+use crate::http::ApiState;
 use crate::query::{
     ApiError, Params, Region, bad, count, explanations_json, parse_inventory_query, parse_region,
     region_coverage, ts_s,
@@ -84,6 +86,7 @@ fn emitter_json(
     entry: &InventoryEntry,
     events: u64,
     on_air_s: f64,
+    presence: &Presence,
 ) -> Result<Value, ApiError> {
     let e = &entry.emitter;
     let (scheme, value, class, withheld) = match &entry.identity {
@@ -117,6 +120,13 @@ fn emitter_json(
         // and never `count` (ADR-0017 §5).
         "events": events,
         "on_air_s": on_air_s,
+        // T-591: **the same liveness `/api/inventory` serves for this emitter in this window**,
+        // and literally the same derivation — [`ObservedCoverage::track`] over the intervals
+        // the events above were read from, under the gap measured off this band's tune history.
+        // Liveness is a property of the emitter, not of the route asked (ADR-0017/0019), and
+        // before this it was not served here at all, so a client reconstructed it from the `open`
+        // flags of a differently-derived track and disagreed with the row beside it.
+        "liveness": presence.liveness.as_str(),
         // The lifetime History total, which is exactly where a monotonic counter belongs.
         "count": e.count,
     });
@@ -203,6 +213,7 @@ fn coverage_json(history: Option<&Pyramid>, r: &Region) -> Value {
 /// `presence` (TM-2): an interval reads `open` when it was still running *then*, so a past window
 /// re-derives the truth of its own moment instead of being marked ended by the wall clock.
 pub fn events_json(
+    state: &ApiState,
     repo: &Repository,
     history: Option<&Pyramid>,
     q: &Params,
@@ -238,10 +249,18 @@ pub fn events_json(
     // timespan and inventing one would be a fabricated measurement. Disclosed rather than dropped
     // silently, so an empty catalogue is never quietly caused by them.
     let mut no_interval = 0u64;
+    // T-591: the tune history behind every emitter's idle gap, read **once** for the whole answer
+    // and then asked per band, exactly as `/api/inventory` reads it (`inventory_json`). This route
+    // used to pass `IdleGap::conservative()` — the 60 s "nobody recorded whether the receiver
+    // looked" — beside an inventory row deriving the same fact from the measurement, so the two
+    // disagreed about one emitter's liveness. The window's own `t1` is the live edge for both.
+    let coverage = ObservedCoverage::of(state, window);
     for entry in &page.entries {
-        let intervals = repo
-            .presence_intervals(entry.emitter.id, IdleGap::conservative(), window.end)
+        let freq = entry.emitter.freq();
+        let track = coverage
+            .track(repo, entry.emitter.id, freq, window, window.end)
             .map_err(|_| failed())?;
+        let intervals = &track.intervals;
         if intervals.is_empty() {
             no_interval += 1;
             continue;
@@ -265,7 +284,16 @@ pub fn events_json(
         }
         if n > 0 {
             let on_air_s = on_air_ns as f64 / 1e9;
-            emitters.push(emitter_json(repo, entry, n, on_air_s)?);
+            // The projection of the very intervals the events above came from, under the very gap
+            // that closed them — `/api/inventory`'s `presence.liveness` for this emitter over this
+            // window, by construction rather than by two blocks kept in step (T-591).
+            emitters.push(emitter_json(
+                repo,
+                entry,
+                n,
+                on_air_s,
+                &track.project(window),
+            )?);
         }
     }
     // Newest last-first, so the page a client opens on is the most recent activity in the box.

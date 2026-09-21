@@ -335,7 +335,17 @@ test("the generated shader is the only implementation: one grey, one tier rule, 
   assert.match(fs, /vec3 fallbackMark\(vec3 col, vec2 px\)/);
   assert.equal(fs.split(`vec3(${GREY.join(",")})`).length - 1, 1, "a second grey");
   // A cell mark for every state, and a tier byte that is never permissive about an unknown tier.
-  assert.equal(CELL_MARKS.length, 6);
+  assert.equal(CELL_MARKS.length, 7);
+  // T-595's seventh state is the RAMP with an ink over it: the measurement is real and undimmed —
+  // only the analysis was skipped — so the generated branch must call `cmap(x)` at full scale, and
+  // its rule must be ruled along the OTHER axis from the shadow's (frequency, not time).
+  // (It is the table's last entry, so the generator emits it as `cellMark`'s final `return`.)
+  assert.match(fs, /return \(pat_stripe\(px, vec2\([^)]*\)\) \? vec3\([^)]*\) : cmap\(x\)\);/);
+  assert.notEqual(
+    (CELL_MARKS[CELL.EXCLUDED] as { pattern: string }).pattern,
+    (CELL_MARKS[CELL.SHADOW] as { pattern: string }).pattern,
+    "the excluded mark and the last-known mark must not share a rule",
+  );
   assert.equal(tierByte("live-iq"), TIER.LIVE_IQ);
   assert.equal(tierByte("something-new"), TIER.SURVEY_OVERVIEW, "an unrecognised tier must be the MOST qualified, never the most trusted");
   assert.ok(FALLBACK_MARK.pattern !== (CELL_MARKS[CELL.UNKNOWN] as { pattern: string }).pattern, "the stand-in and the fourth state must not share a hatch");

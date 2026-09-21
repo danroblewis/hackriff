@@ -142,6 +142,16 @@ pub enum RelationKind {
     DuplicateOf,
     /// A candidate landing on a predicted image / harmonic / intermod frequency of the source.
     ArtifactOf,
+    /// T-598: the same **LO-relative receiver artefact** as the row it names, measured from a
+    /// different tuning centre. The cross-centre retune test ([`crate::retune`]) found both
+    /// sightings on one invariant coordinate `f − slope·f_LO`, so they are one artefact seen
+    /// twice, not two emissions — and unlike every other kind here the two bands do **not**
+    /// overlap, because an LO-relative line sits at a different absolute frequency at each centre.
+    ///
+    /// It is its own kind for that reason: [`Self::DuplicateOf`] and [`Self::ArtifactOf`] are
+    /// claimed *and revoked* by the overlap resolver over overlapping bands, and a shared kind
+    /// would have the two rules revoking each other every pass.
+    RetuneSiblingOf,
 }
 
 impl RelationKind {
@@ -151,6 +161,7 @@ impl RelationKind {
             Self::SuppressedBy => "suppressed-by",
             Self::DuplicateOf => "duplicate-of",
             Self::ArtifactOf => "artifact-of",
+            Self::RetuneSiblingOf => "retune-sibling-of",
         }
     }
 }

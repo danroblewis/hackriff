@@ -303,7 +303,7 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
 
 Detections remain **not** a served record kind (there is still no `/api/detections`), and this is why one is not needed for the level: the row carries the measurement and its extent together, rather than a reference a client would have to resolve to find out whether the number is two seconds or two days old.
 
-**`relation` and `relations=` (T-219, C40).** One physical signal can produce several overlapping inventory rows, and a receiver can manufacture a row out of thin air. `relation` says why a row **defers to another**, or is `null` (the normal case): `{"kind", "artifact", "source_id", "author", "actor", "t_s", "reason", "score", "detail"}`, where `kind` is `suppressed-by` (the row overlaps a **Confirmed** entry's band by at least 60 % of **both** the narrower and the wider band, with nothing to tell the two apart — so a narrow emission sitting inside a wide one is never hidden by it), `duplicate-of` (the weaker of two overlapping candidates, ranked by a provisional SNR × duty × trust proxy — `score` — until decode evidence in bits exists), or `artifact-of` (a receiver artifact, with `artifact` ∈ `image` / `harmonic` / `intermod` and `detail` carrying the arithmetic: `n`, `a`, `b`, the tuning centre used, `predicted_hz`, `error_hz`, `tolerance_hz`, `suppression_db`, and (T-307) `receive_chain: {device_id, antenna_port}` — the front end the claim rests on, since T-302 gates every image/harmonic/intermod pairing on the chain and an artifact is a property of **one** receive chain, never a universal claim). `reason` is backend-rendered and never names an identity. Rows with a standing relation are **hidden by default** and listed with `relations=all`; the default is `relations=shown`, and an unknown value is `400 invalid`.
+**`relation` and `relations=` (T-219, C40).** One physical signal can produce several overlapping inventory rows, and a receiver can manufacture a row out of thin air. `relation` says why a row **defers to another**, or is `null` (the normal case): `{"kind", "artifact", "source_id", "author", "actor", "t_s", "reason", "score", "detail"}`, where `kind` is `suppressed-by` (the row overlaps a **Confirmed** entry's band by at least 60 % of **both** the narrower and the wider band, with nothing to tell the two apart — so a narrow emission sitting inside a wide one is never hidden by it), `duplicate-of` (the weaker of two overlapping candidates, ranked by a provisional SNR × duty × trust proxy — `score` — until decode evidence in bits exists), or `artifact-of` (a receiver artifact, with `artifact` ∈ `image` / `harmonic` / `intermod` and `detail` carrying the arithmetic: `n`, `a`, `b`, the tuning centre used, `predicted_hz`, `error_hz`, `tolerance_hz`, `suppression_db`, and (T-307) `receive_chain: {device_id, antenna_port}` — the front end the claim rests on, since T-302 gates every image/harmonic/intermod pairing on the chain and an artifact is a property of **one** receive chain, never a universal claim). `retune-sibling-of` (T-598: the **same LO-relative receiver artefact** as the row it names, seen from a different tuning centre, with `detail` carrying `slope` (`lo-locked` / `image`), `slope_factor`, `invariant_hz` — the coordinate `f − slope·f_LO` both sightings sit on — `centres`, `spread_hz` and `los_hz`; unlike every other kind the two bands do **not** overlap, because an LO-relative line lands at a different absolute frequency at each centre, which is exactly why one artefact was showing up as N emitters). `reason` is backend-rendered and never names an identity. Rows with a standing relation are **hidden by default** and listed with `relations=all`; the default is `relations=shown`, and an unknown value is `400 invalid`.
 
 **Overlap is an error signal, and the resolution is re-analysis (T-369).** The three kinds above rank *hypotheses against each other*, and all of them are gated by that 60 %-of-both test — which is deliberately blind to the two geometries that actually stack boxes on a waterfall: a narrow box inside a wide one, and a staircase of offset boxes each overlapping the next by less than 60 %. Those pairs used to fall through every rule in silence and be served side by side. So after the ranking, any rows still overlapping in **time and frequency** are treated as proof the analysis is wrong (CLAUDE.md, "Overlap is an error signal that triggers re-analysis"), and their **region** — the connected component of overlapping boxes, closed transitively so the answer does not depend on which row a sighting happened to touch — is re-analysed against *the air* rather than against the rows: the measured `f_lo`/`f_hi` of every detection behind every member are merged into contiguous **modes**.
 
@@ -416,7 +416,7 @@ One row per `(decoder, frame_model)` pair the emitter's decoded identity has pro
       "f_lo_hz": 915140000.0, "f_hi_hz": 915260000.0, "known_status": "unknown", "family": null,
       "explanations": [ { "rank": 1, "service": "band-plan", "label": "ISM 902–928 MHz", "score": 0.4, "flags": [] } ],
       "identity_scheme": null, "identity_class": null, "withheld": false,
-      "events": 1, "on_air_s": 0.04, "count": 1 }
+      "events": 1, "on_air_s": 0.04, "liveness": "ended", "count": 1 }
   ],
   "total": 1, "limit": 200, "next_cursor": null,
   "emitters_truncated": false, "emitters_no_interval": 0,
@@ -428,8 +428,9 @@ One row per `(decoder, frame_model)` pair the emitter's decoded identity has pro
 }
 ```
 
-- **An event is a presence interval** (`hk_model::presence`, docs/07 §2.27), derived from the append-only `emitter_observation` ledger by the same `Repository::presence_intervals` the inventory row's `presence` uses. `duration_s` is the event's own length and `in_window_s` its intersection with the request — **both computed here**, because a client must never derive a timespan from two fields it was handed. `open` is read against the window's own `t1` (a caller's `t1` *is* its live edge, exactly as on `/api/inventory`), so a past window re-derives the truth of its own moment instead of being marked ended by the wall clock. `count` on an event is the sightings its source rows summed — a History total, and never a liveness or ranking input (ADR-0017 §5).
+- **An event is a presence interval** (`hk_model::presence`, docs/07 §2.27), derived from the append-only `emitter_observation` ledger by the same `Repository::presence_intervals` the inventory row's `presence` uses — and, since **T-591**, through the same *call*: `ObservedCoverage::track` is the one derivation of a presence track in `hk-api`, and this route, `/api/inventory`, `/api/inventory/{id}/presence` and `/api/tiles/events` all reach it there. It used to hard-code `IdleGap::conservative()` (60 s) while `/api/inventory` measured the gap off the band's tune history (T-410), and the two surfaces disagreed about one emitter's liveness in the same window — 3 of 3 events `open: true` beside rows reading `ended`, measured on T-254's ISM burst scene. The idle gap is **measured**, and one derivation is what makes that promise structural rather than two constants that happen to match. `duration_s` is the event's own length and `in_window_s` its intersection with the request — **both computed here**, because a client must never derive a timespan from two fields it was handed. `open` is read against the window's own `t1` (a caller's `t1` *is* its live edge, exactly as on `/api/inventory`), so a past window re-derives the truth of its own moment instead of being marked ended by the wall clock. `count` on an event is the sightings its source rows summed — a History total, and never a liveness or ranking input (ADR-0017 §5).
 - **`emitters[]`** lists each emitter with at least one event in the window, once, with its ranked `explanations` — suggestions beside the measurement, never truth (vision step 4). Its `events` and `on_air_s` describe the whole window, not the current page; `count` is the lifetime total, which is exactly where a monotonic counter belongs. Identities are gated as on `/api/inventory` (`identity_value` only when in clear).
+- **`liveness` (T-591)** — `live` / `ended` / `absent` for this emitter over **this** window: byte-for-byte the `presence.liveness` `/api/inventory` serves for the same emitter and the same `t0`/`t1`, because it is the same projection of the same track under the same measured gap (`PresenceTrack::project`). Liveness is a property of the emitter — one interval `[start, end?]`, ongoing until an end is affirmatively detected and revocable afterwards (ADR-0017/0019) — never a property of the route asked, so **the two surfaces cannot disagree**; an acceptance test asserts equality over *every* emitter in the window and reports how many it compared. Serving it here also removes the reason a client had to reconstruct liveness from the `open` flags itself.
 - **Nothing here can be erased by decay** (ADR-0017 conflict (b)). What decays (T-251/TM-6) is a *candidate's confidence* — a ranking over hypotheses that writes nothing and deletes nothing; this route never reads it. A signal that stopped hours ago left Explore because it is not in the window, and its events are still catalogued here. A **deleted** emitter's events are still recorded too, and are listed with `state=deleted` like any other inventory read.
 - **`coverage` keeps three answers apart, and never collapses them.** `statement` is backend-rendered and is what a client shows beside an empty catalogue: with no spectrum history on the server, coverage is **unknown** and an empty answer is evidence of nothing; with `observed_cells: 0` it reads *no data for this period, not a quiet band*; with `gaps[]` it says how much was observed and that the gaps are no data; only a box observed throughout says an empty catalogue means nothing was on the air. Unobserved is never reported as quiet (C26), and `gaps` are the fully unobserved time runs of `/api/history`'s own grid.
 - **Bounds, disclosed rather than silent.** At most 500 emitters are expanded per answer (`emitters_truncated` when more matched the box); `total` is the events found over those emitters, and `limit`/`cursor` page them newest first. `emitters_no_interval` counts rows the box selected that carry **no presence interval at all** (a legacy writer's row, matched on its `first_seen`/`last_seen` hull): they contribute no event, because a hull is not a timespan and inventing one would fabricate a measurement — so the count is disclosed instead.
@@ -712,7 +713,8 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
   "devices": [{                                // one entry per front end that actually sampled here
     "device": "hackrf:0000000000000000a06063c8234e925f",
     "named": true,                             // false for the "unknown" and "any" labels
-    "observed_cells": 2, "unobserved_cells": 2, "unknown_cells": 0, "observed_fraction": 0.5,
+    "observed_cells": 2, "unobserved_cells": 2, "unknown_cells": 0, "excluded_cells": 1,
+    "observed_fraction": 0.5,
     "cells": [
       // 1. observed, and there was energy
       { "state": "observed", "spans": 1, "observed_s": 600.0, "duty": 1.0,
@@ -725,9 +727,15 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
       // 3. never observed — no claim either way. This is the grey cell.
       { "state": "unobserved" },
       // observed, but the history keeps no level here: neither grey nor the ramp's bottom
-      { "state": "observed", "spans": 2, "observed_s": 41.5, "duty": 0.069,
+      { "state": "observed", "spans": 2, "observed_s": 41.5, "duty": 0.069, "analysed_s": 41.5,
         "last_s": 1789300880.0, "center_hz": 104000000.0, "sample_rate_hz": 2400000.0,
-        "shade": null }
+        "shade": null },
+      // 5. sampled, and DELIBERATELY excluded from analysis (T-595): the DC/LO notch. Every
+      // measurement key an observed cell has, plus `analysed_s: 0.0` saying why it is not
+      // simply "observed". NOT grey: the radio was here and the history holds rows.
+      { "state": "excluded", "spans": 1, "observed_s": 600.0, "duty": 1.0, "analysed_s": 0.0,
+        "last_s": 1789300920.0, "center_hz": 100800000.0, "sample_rate_hz": 2400000.0,
+        "shade": 0.41 }
     ]
   }],
   "any": { "device": "any", "named": false, "observed_cells": 3, "unobserved_cells": 1,
@@ -756,7 +764,7 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
 }
 ```
 
-#### Four states, and none of them can be spelled as another
+#### Five states, and none of them can be spelled as another
 
 | State | Meaning | On the wire |
 |---|---|---|
@@ -764,10 +772,26 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
 | 2 | observed, and it was **quiet** — a finding | `"state": "observed"` with a low `shade` |
 | 3 | **never observed** — no claim either way | `"state": "unobserved"`, **and no measurement keys at all** |
 | 4 | **we no longer know whether we looked** (T-423) | `"state": "unknown"`, and no measurement keys either |
+| 5 | observed, and **deliberately excluded from analysis** (T-595) | `"state": "excluded"`, with every measurement key an `"observed"` cell has and `"analysed_s": 0.0` |
 
 The pair that gets collapsed is 2 and 3, and collapsing them is how a view comes to report "nothing here" about spectrum nothing ever looked at. So an unobserved cell carries **no `shade`, no `duty`, no `observed_s`** — not `null` ones. That is stronger than a nullable number, because there is no field a client can read as zero: the absence is structural. It is the same rule as `bias_tee: "unknown"` ≠ `"off"` — **nothing said is never permissive** — and it holds in the type as well as the JSON: `hk_store::coverage::Coverage::of` refuses to mint an observation out of a zero span count or a zero sampled duration, and hands back `Coverage::Unobserved` instead.
 
 `shade: null` on an **observed** cell is a different thing again: sampled, but the spectrum history keeps no level for it. A client draws that differently from grey and differently from the bottom of the ramp. **Grey is `state == "unobserved"` and nothing else**, which is what `resolution.grey_rule` says in the response.
+
+#### The fifth state: `"excluded"` means *we sampled it and deliberately did not analyse it* (T-595)
+
+The receiver excludes its own DC/LO-leakage notch — ±15 kHz around the tuned centre, `hk_detect::DcRule`'s tolerance, the same number `dc_excluded_hz` reports on the spectrum header — from **detection**. The observation log records that as `records[].window.dc_excluded`, and until T-595 the coverage fold read the hole as an absence of *sampling*: the notch contributed no span at all, so it rasterised as `"unobserved"`.
+
+It is not unobserved. The ADC digitised it, the FFT produced bins for it, and the spectrum-history pyramid keeps rows right across it. **T-588 measured the consequence**: over a sweep of 1 966 080 cells, 1 212 cells held a measurement and read `unobserved` — and *all 1 212 were the DC notch*. Both halves of the invariant broke at once: data that exists was not shown, and grey stopped meaning genuinely unobserved.
+
+Why it went unseen for so long: inside the IQ ring's retention the **ring journal**'s segments cover the whole tuned window with no notch (the ring holds the samples, DC included, so a client can re-analyse them), and those spans paper over the hole. Past the ring horizon only the observation log is left, and the stripe appears. A test that looks only at recent history passes while the defect is intact.
+
+The fix gives the notch its own mark rather than making the observation log lie in the other direction by declaring it analysed:
+
+- **It is an observation, not an absence.** `"excluded"` carries every measurement key `"observed"` carries — `spans`, `observed_s`, `duty`, `last_s`, `center_hz`, `sample_rate_hz`, `shade` — because all of them are true. It is not a fourth kind of ignorance; `hk_store::coverage::Coverage` still has exactly two variants, and *excluded* is a property of the observation (`analysed_ns == 0`), not a value beside `Unobserved`.
+- **`analysed_s` is the number behind the word.** Every observed cell now carries it: of `observed_s`, how many seconds the analysis actually ran on. `analysed_s == 0.0` *is* `"excluded"`, so a client can check the claim instead of taking it. A cell whose extent is partly analysed (a coverage cell wider than the notch, or a coarse tile that swallows it) reports what it is — `0 < analysed_s <= observed_s` — and reads `"observed"`: a 30 kHz exclusion is not a claim about a 200 kHz cell.
+- **Draw the measurement, mark it distinctly, never grey.** `resolution.grey_rule` says so in the response. The canvas draws the level on the same ramp with a vertical-rule ink over it (`ui/src/surface/cellrule.ts`, the seventh cell state) — a mark ruled along the *frequency* axis, which is the axis the exclusion is a stripe on.
+- **It can change at the ring horizon, honestly.** Inside the ring the same cell reads `"observed"`, because the raw samples are there to analyse; past it, `"excluded"`, because the only surviving evidence is a record that says the analysis skipped it. Each is the truth about what we can still say.
 
 #### The time axis: `rows` (T-423)
 
@@ -854,10 +878,10 @@ One route serves every viewport — the panes, the zoomable minimap and the live
   "coverage": { "encoding": "plane-table-rle",
                 "grid": { "nt": 256, "nf": 256, "t0_s": …, "t_cell_s": 32.0, "f_lo_hz": …,
                           "f_cell_hz": 50000.0, "aligned": true, "order": "row-major: …" },
-                "states": ["unobserved", "observed", "unknown"],
+                "states": ["unobserved", "observed", "unknown", "excluded"],
                 "planes": [ { "runs": [0, 12288, 1, 53248], "cells": 65536, "uniform": null,
                               "observed_cells": 53248, "unobserved_cells": 12288,
-                              "unknown_cells": 0, "observed_fraction": 0.8125 } ],
+                              "unknown_cells": 0, "excluded_cells": 0, "observed_fraction": 0.8125 } ],
                 "any": { "device": "any", "named": false, "plane": 0 },
                 "devices": [ { "device": "hackrf:0000…925f", "named": true, "plane": 0 } ],
                 "selected": { "device": "any", "named": false, "present": true, "plane": 0,
@@ -924,13 +948,13 @@ One route serves every viewport — the panes, the zoomable minimap and the live
 
 `coverage` on this route is **not** `/api/coverage`'s per-cell form. It was, and measured against the demo backend that cost **99 % of a 19.34 MB tile body**: each of 65 536 cells serialised `{"state":…,"duty":…,"observed_s":…,"last_s":…,"spans":…,"center_hz":…,"sample_rate_hz":…}` at ~146 B, **twice** — once as `coverage.any` and once as `coverage.devices[0]`, byte-identical on a one-device server — to carry the one field a renderer reads. Measured in-process on the same 256 × 256 grid: **19 818 236 B → 2 906 B, a factor of 6 820**; end to end the tile body went **18.42 MB → 1.12 MB**.
 
-- **`states` is the alphabet, served with the planes.** A code is never resolved against an alphabet the answer did not state. There are **three** and they never collapse into two: `unobserved` (nothing ever looked — grey, and *only* this is grey), `observed`, and `unknown` (T-423: we no longer know whether we looked — not grey, not a level).
+- **`states` is the alphabet, served with the planes.** A code is never resolved against an alphabet the answer did not state. There are **four** and they never collapse: `unobserved` (nothing ever looked — grey, and *only* this is grey), `observed`, `unknown` (T-423: we no longer know whether we looked — not grey, not a level) and `excluded` (T-595: sampled, and **deliberately left out of analysis** — the receiver's own DC/LO notch. The measurement exists and must be drawn; only the detector skipped it). `excluded` was **appended**, so every code an older client cached keeps its meaning, and a client that does not know the word falls through to drawing the level — the safe direction, since the level is real.
 - **`planes[i].runs` is a flat `[code, count, code, count, …]`** over the cells in `grid.order`. The counts sum to `planes[i].cells`; each code indexes `states`. A coverage plane is the rasterisation of tuned **spans**, so it changes state only where a band begins or ends — a handful of runs a row, not an entry a cell.
 - **`planes[i].uniform`** is the one state the whole plane is in, or `null`. Derived from the same runs, never asserted beside them.
 - **A plane appears once.** `any.plane` and each `devices[].plane` are indices into `planes`, so two front ends whose coverage genuinely differs cost two entries and a front end whose coverage *is* the union costs an index. The duplication this ticket was filed about is gone by construction, not by a special case for one-device servers. When devices genuinely differ the cost is one RLE plane per distinct plane — a few KB each, linear in *distinct* planes rather than in devices × cells.
 - **`selected.plane`** is the index the route's own selection rule picks: `any` → the union; a named device → **that front end's plane and never the union**. `present: false` with `plane: null` is a named device this answer holds no plane for, which is `unobserved` *for that device* — a coverage answer, not a missing one.
 - **No cell on this plane carries a measurement key of any kind**, so there is nothing here a client can read as a level of zero. That is *stronger* than the per-cell form's rule that an unobserved cell carries no measurement keys, not weaker: here no cell does. The measurement plane is `grid`, and it is separate on purpose.
-- **The per-cell sampling metadata moved, it did not vanish.** `duty`, `observed_s`, `last_s`, `spans`, `center_hz` and `sample_rate_hz` are a question about *one* cell — hover — and [`GET /api/coverage`](#get-apicoverage--the-coverage-map-grey-means-genuinely-unobserved-t-368) answers it per cell over any `f_lo`/`f_hi`/`t0`/`t1`/`cells`/`rows`, in the same three-state vocabulary. `/api/timeline`'s overlay is unchanged and still serves the per-cell form.
+- **The per-cell sampling metadata moved, it did not vanish.** `duty`, `observed_s`, `last_s`, `spans`, `center_hz` and `sample_rate_hz` are a question about *one* cell — hover — and [`GET /api/coverage`](#get-apicoverage--the-coverage-map-grey-means-genuinely-unobserved-t-368) answers it per cell over any `f_lo`/`f_hi`/`t0`/`t1`/`cells`/`rows`, in the same four-state vocabulary. `/api/timeline`'s overlay is unchanged and still serves the per-cell form.
 - **A plane that does not decode exactly is not a coverage answer.** An odd run list, a code outside the alphabet, a run that overruns, a total that is not `cells`, or a missing `states`: the client throws and the place stays *pending*, never grey and never observed (`ui/src/surface/tile.ts`).
 
 #### `shadow` — the last-known / stale tier, a band's most-recent-known value (T-519, T-527, [ADR-0020](adr/0020-last-known-shadow-tier.md))
@@ -1211,7 +1235,7 @@ An armed watch offers every emission the pipeline first sights inside the extent
 
 **Alerts carry their reasoning and are reversible, never an automatic action.** Raising one tunes nothing, records nothing and changes no other row; alerts are dismissed and re-opened through `/api/anomalies/{id}/dismiss|reopen` like any other anomaly; and disarming the watch stops new alerts while keeping every alert already raised, with its reasoning and history. Suppressed activity is disclosed rather than dropped silently, the same stance ADR-0012 §7.3 takes towards alarm suppressions.
 
-`GET /api/selections/{id}/watch` answers `{selection_id, watch, armed, alerts, suppressed, alerted_total, suppressed_total}`. `alerts[]` is `{anomaly_id, emitter, f_lo, f_hi, t, reason}` and `suppressed[]` is `{emitter, reason ("deferred" | "already-alerted"), relation ("suppressed-by" | "duplicate-of" | "artifact-of" | null), artifact ("image" | "harmonic" | "intermod" | null), source, t, explanation}`, both oldest first and bounded (256 alerts, 64 suppressed). Counters are per run and also appear in `/api/status` as `watch_alerts` and `watch_suppressed`. `404 not_found` for an unknown selection, `503 unavailable` with no watch service.
+`GET /api/selections/{id}/watch` answers `{selection_id, watch, armed, alerts, suppressed, alerted_total, suppressed_total}`. `alerts[]` is `{anomaly_id, emitter, f_lo, f_hi, t, reason}` and `suppressed[]` is `{emitter, reason ("deferred" | "already-alerted"), relation ("suppressed-by" | "duplicate-of" | "artifact-of" | "retune-sibling-of" | null), artifact ("image" | "harmonic" | "intermod" | null), source, t, explanation}`, both oldest first and bounded (256 alerts, 64 suppressed). Counters are per run and also appear in `/api/status` as `watch_alerts` and `watch_suppressed`. `404 not_found` for an unknown selection, `503 unavailable` with no watch service.
 
 - **`t` is bare and carries Unix seconds** — the units convention's default, so no `_ns` rename applies here (T-370 audit): `hk_api::selections::WatchAlertView`/`WatchSkipView` declare `t: f64`, and `crates/hk-cli/src/pipeline.rs`'s `PipelineWatch::report` converts each `hk_pipeline::alarms::WatchAlertRecord`/`WatchSkipRecord`'s raw-nanosecond `Timestamp` to seconds (`secs(a.t)`) before it ever reaches this crate — the internal record and the view served here are different types, one nanosecond-native, one already seconds. This route was previously unreachable by `every_serialized_time_declares_its_unit` (no selection existed for it to address on a fresh server), so the value had never been swept and asserted; the sweep now creates one first and covers it.
 

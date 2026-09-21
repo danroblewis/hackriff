@@ -151,15 +151,50 @@ pub struct CoverageSpan {
     pub device: Device,
     /// The interval sampled.
     pub time: TimeRange,
-    /// The frequency extent this tune actually covered (the usable band, DC notch already removed
-    /// by the producer — a `CoverageSpan` is a positive claim about what was sampled, so a notched
-    /// window contributes two spans, not one wide one).
+    /// The frequency extent this span covers. A `CoverageSpan` is a positive claim about what was
+    /// sampled, so a notched window contributes **three** spans — the two analysed sides and the
+    /// notch itself as [`Analysis::Excluded`] (T-595) — never one wide one, and never a hole.
     pub freq: FreqRange,
+    /// Whether the analysis ran on these samples, or the producer declared them excluded from it
+    /// (T-595). [`Analysis::Analysed`] is the ordinary span; [`Analysis::Excluded`] is the DC notch.
+    pub analysis: Analysis,
     /// Tuned RF centre, Hz — the configuration in force, carried so a view can say *why* a cell is
     /// covered and at what resolution.
     pub center_hz: f64,
     /// Sample rate, Hz: the instantaneous bandwidth this interval was sampled at.
     pub sample_rate_hz: f64,
+}
+
+/// Whether a span's samples reached the analysis, or were deliberately left out of it (T-595).
+///
+/// A [`CoverageSpan`] is a positive claim that a front end sampled a band over an interval. It is a
+/// **separate** question whether the analysis then looked at those samples: a receiver excludes its
+/// own DC/LO-leakage notch from detection, and the observation log records that exclusion
+/// ([`ObservedWindow::dc_excluded`]). Before T-595 the notch simply did not become a span, so a
+/// 25 kHz stripe down the middle of every band the radio ever sat on rasterised as
+/// [`Coverage::Unobserved`] — *"nothing ever looked"* — painted over spectrum rows the history
+/// pyramid holds. Both halves of the invariant broke at once: data that exists was not shown, and
+/// grey stopped meaning genuinely unobserved.
+///
+/// So the notch is a span like any other, carrying the one thing that makes it different. The
+/// alternative — declaring the notch analysed — would have made the observation log lie in the
+/// other direction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Analysis {
+    /// Sampled, and the analysis ran on it. The ordinary span.
+    #[default]
+    Analysed,
+    /// Sampled, and **deliberately excluded** from analysis — today only the receiver's own DC/LO
+    /// notch. The samples exist and the spectrum history keeps rows here; no detection claim is
+    /// made about them.
+    Excluded,
+}
+
+impl Analysis {
+    /// Whether the analysis ran here.
+    pub fn is_analysed(self) -> bool {
+        matches!(self, Analysis::Analysed)
+    }
 }
 
 impl CoverageSpan {
@@ -188,6 +223,17 @@ pub struct Sampled {
     /// observed child with `f_factor − 1` never-observed ones holds `1/f_factor` of a child's
     /// seconds rather than a child's seconds (T-419).
     pub observed_ns: i64,
+    /// Of [`Self::observed_ns`], the nanoseconds the **analysis** actually ran on (T-595).
+    ///
+    /// `0 < analysed_ns <= observed_ns` for an ordinary cell and exactly `0` for a cell whose every
+    /// covering interval declared it excluded — the DC notch. It is a count, not a flag, so a cell
+    /// covered by one excluded span and one analysed one is reported as what it is (analysed for
+    /// part of its extent) instead of being rounded to either claim; [`Self::excluded`] is the
+    /// `== 0` test, named once so no consumer re-spells it.
+    ///
+    /// Folded exactly like `observed_ns` in [`CoverageGrid::coarsen`], and for the same reason: a
+    /// coarse cell pooling one analysed child with fifteen excluded ones was analysed, in part.
+    pub analysed_ns: i64,
     /// `observed_ns` as a fraction of the cell's own time extent, `0 < duty ≤ 1`. A cell sampled for
     /// part of its extent is observed for that part and unobserved for the rest — reported, not
     /// rounded away.
@@ -204,10 +250,25 @@ pub struct Sampled {
     pub sample_rate_hz: f64,
 }
 
+impl Sampled {
+    /// Sampled, and no part of it analysed — the DC notch (T-595).
+    pub fn excluded(&self) -> bool {
+        self.analysed_ns == 0
+    }
+}
+
 /// What is known about one cell of the coverage map.
 ///
 /// The two variants are the whole contract: an absence of measurement is a **different value** from
 /// a measurement of nothing, at every layer that carries this type.
+///
+/// **T-595 did not add a third variant.** *Excluded from analysis* is a property of an observation
+/// — [`Sampled::analysed_ns`] — not an absence of one: the radio sampled the notch, the history
+/// keeps rows there, and the only thing that did not happen is the analysis. Spelling it as a
+/// variant beside `Unobserved` would have put a cell we hold data for on the same footing as one
+/// nothing ever looked at, which is the collapse this type exists to refuse. It is
+/// [`Coverage::as_str`]'s third word and the wire's fourth state; it is not a fourth kind of
+/// ignorance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Coverage {
     /// Never sampled here, by this device, in this window. **No claim** about what is on the air —
@@ -235,6 +296,7 @@ impl Coverage {
     pub fn of(
         spans: u32,
         observed_ns: i64,
+        analysed_ns: i64,
         window_ns: i64,
         last: Timestamp,
         center_hz: f64,
@@ -246,6 +308,9 @@ impl Coverage {
         Coverage::Observed(Sampled {
             spans,
             observed_ns,
+            // Clamped into `0..=observed_ns`: the analysis cannot have run on more of the cell than
+            // was sampled, and a caller that thought otherwise is saying something no span supports.
+            analysed_ns: analysed_ns.clamp(0, observed_ns),
             duty: (observed_ns as f64 / window_ns as f64).clamp(f64::MIN_POSITIVE, 1.0),
             last,
             center_hz,
@@ -258,6 +323,12 @@ impl Coverage {
         matches!(self, Coverage::Observed(_))
     }
 
+    /// Sampled, and **no** part of it analysed: the DC notch (T-595). `false` for an unobserved
+    /// cell, which is a different claim — nothing looked there at all.
+    pub fn is_excluded(&self) -> bool {
+        matches!(self, Coverage::Observed(s) if s.analysed_ns == 0)
+    }
+
     /// The sampling behind an observed cell; `None` when nothing looked.
     pub fn sampled(&self) -> Option<&Sampled> {
         match self {
@@ -266,9 +337,10 @@ impl Coverage {
         }
     }
 
-    /// The wire value: `"observed"` or `"unobserved"`.
+    /// The wire value: `"observed"`, `"excluded"` (T-595) or `"unobserved"`.
     pub fn as_str(&self) -> &'static str {
         match self {
+            Coverage::Observed(s) if s.analysed_ns == 0 => "excluded",
             Coverage::Observed(_) => "observed",
             Coverage::Unobserved => "unobserved",
         }
@@ -311,6 +383,13 @@ impl CoverageGrid {
     /// Cells nothing ever sampled — the grey ones.
     pub fn unobserved_cells(&self) -> usize {
         self.cells.len() - self.observed_cells()
+    }
+
+    /// Cells sampled but wholly excluded from analysis — the DC notch (T-595). These are a
+    /// **subset** of [`Self::observed_cells`]: they were observed, and the count says how many of
+    /// them carry the exclusion, so no arithmetic here changes what grey means.
+    pub fn excluded_cells(&self) -> usize {
+        self.cells.iter().filter(|c| c.is_excluded()).count()
     }
 
     /// The fraction of the grid this device observed; `0.0` for an empty grid.
@@ -450,6 +529,10 @@ impl CoverageGrid {
             let parent_ns = out.row_time(tp).map_or(0, |r| r.duration_ns());
             for fp in 0..nf {
                 let mut sum_ns = 0i128;
+                // T-595: the analysed seconds fold exactly like the observed ones, so a parent
+                // pooling one analysed child with `f_factor - 1` excluded ones is analysed in
+                // part — never excluded outright, and never analysed outright either.
+                let mut sum_analysed_ns = 0i128;
                 // `spans` is a merged-run count, and a run crossing two children is one run in each.
                 // Summing would double it and the fold no longer holds the intervals to re-merge, so
                 // take the **most any child saw**: a lower bound, which is the safe direction — it is
@@ -464,6 +547,7 @@ impl CoverageGrid {
                         };
                         any = true;
                         sum_ns += i128::from(s.observed_ns);
+                        sum_analysed_ns += i128::from(s.analysed_ns);
                         spans = spans.max(s.spans);
                         let t_last = s.last.as_unix_nanos();
                         if t_last >= last_ns {
@@ -476,9 +560,20 @@ impl CoverageGrid {
                 // Over the parent's own frequency extent — the sum, not the best.
                 let observed_ns = (sum_ns / f_factor as i128).min(i128::from(i64::MAX)) as i64;
                 let observed_ns = if any { observed_ns.max(1) } else { 0 };
+                // Same integer division, and the same floor against it: a parent with any analysed
+                // child keeps at least one nanosecond, so arithmetic can never turn "analysed
+                // somewhere inside" into "excluded" — the coarse twin of the grey rule above.
+                let analysed_ns =
+                    (sum_analysed_ns / f_factor as i128).min(i128::from(i64::MAX)) as i64;
+                let analysed_ns = if sum_analysed_ns > 0 {
+                    analysed_ns.max(1)
+                } else {
+                    0
+                };
                 cells.push(Coverage::of(
                     spans,
                     observed_ns,
+                    analysed_ns,
                     parent_ns,
                     Timestamp::from_unix_nanos(if any { last_ns } else { 0 }),
                     center_hz,
@@ -494,6 +589,11 @@ impl CoverageGrid {
 #[derive(Default)]
 struct Acc {
     intervals: Vec<(i64, i64)>,
+    /// The subset of `intervals` contributed by [`Analysis::Analysed`] spans (T-595). Kept as its
+    /// own list, and merged by the same routine, because "how much of this cell did the analysis
+    /// run on" is a merged duration exactly like "how much of it was sampled" — a flag would round
+    /// a part-analysed cell to one claim or the other.
+    analysed: Vec<(i64, i64)>,
     center_hz: f64,
     sample_rate_hz: f64,
     last_ns: i64,
@@ -502,6 +602,9 @@ struct Acc {
 impl Acc {
     fn push(&mut self, t0: i64, t1: i64, s: &CoverageSpan) {
         self.intervals.push((t0, t1));
+        if s.analysis.is_analysed() {
+            self.analysed.push((t0, t1));
+        }
         if t1 >= self.last_ns {
             self.last_ns = t1;
             self.center_hz = s.center_hz;
@@ -514,10 +617,19 @@ impl Acc {
     /// Merged duration and merged-interval count. Overlapping dwells on the same cell are one
     /// observation of it, not two — double-counting them would report a duty above 1.
     fn merged(&mut self) -> (u32, i64) {
-        self.intervals.sort_unstable();
+        Self::merge(&mut self.intervals)
+    }
+
+    /// The same merge over the analysed subset: nanoseconds of this cell the analysis ran on.
+    fn merged_analysed(&mut self) -> i64 {
+        Self::merge(&mut self.analysed).1
+    }
+
+    fn merge(intervals: &mut [(i64, i64)]) -> (u32, i64) {
+        intervals.sort_unstable();
         let (mut n, mut total) = (0u32, 0i64);
         let mut cur: Option<(i64, i64)> = None;
-        for &(a, b) in &self.intervals {
+        for &(a, b) in intervals.iter() {
             match cur {
                 Some((s, e)) if a <= e => cur = Some((s, e.max(b))),
                 Some((s, e)) => {
@@ -575,8 +687,10 @@ pub struct RecordSpans {
 /// module exists to prevent, arriving through the input rather than the fold.
 ///
 /// [`ObservedWindow::covered`] has already removed the DC notch, so a notched window contributes two
-/// spans and the notch stays honestly unobserved. A visit of zero observed length contributes
-/// nothing: a hop cut before it settled sampled nothing, and [`Coverage::of`] would refuse it anyway.
+/// analysed spans — **plus the notch itself as an [`Analysis::Excluded`] span** (T-595). The notch
+/// is not unobserved: the radio sampled it and the spectrum history keeps rows there; it is
+/// *excluded from analysis*, which is a different claim and gets a different mark. A visit of zero
+/// observed length contributes nothing: a hop cut before it settled sampled nothing, and [`Coverage::of`] would refuse it anyway.
 ///
 /// `freq` filters: a covered extent that misses the band asked about is dropped rather than folded,
 /// because coverage of somewhere else is not coverage of here. Pass
@@ -595,13 +709,23 @@ pub fn spans_from_records<'a>(
         if t.duration_ns() <= 0 {
             return;
         }
-        for c in w.covered() {
+        // Every sub-range the tune SAMPLED, each carrying whether the analysis ran on it: the two
+        // analysed sides of the notch, and the notch itself as `Excluded` (T-595). The notch used
+        // to contribute no span at all, which rasterised as "nothing ever looked" over rows the
+        // history pyramid holds.
+        let ranges = w
+            .covered()
+            .into_iter()
+            .map(|c| (c, Analysis::Analysed))
+            .chain(w.dc_excluded.map(|dc| (dc, Analysis::Excluded)));
+        for (c, analysis) in ranges {
             if c.overlaps(&freq) {
                 out.named += usize::from(device.is_named());
                 out.spans.push(CoverageSpan {
                     device: device.clone(),
                     time: t,
                     freq: c,
+                    analysis,
                     center_hz: w.center_hz,
                     sample_rate_hz: w.sample_rate_hz,
                 });
@@ -783,12 +907,14 @@ fn fold(
         .enumerate()
         .map(|(i, a)| {
             let (n_merged, observed_ns) = a.merged();
+            let analysed_ns = a.merged_analysed();
             // The window each cell's duty is a fraction of is the **row's own** extent, so
             // `Coverage::of`'s refusal — and its `0 < duty <= 1` — apply per cell unchanged.
             let row_ns = edge(i / nf + 1) - edge(i / nf);
             Coverage::of(
                 n_merged,
                 observed_ns,
+                analysed_ns,
                 row_ns,
                 Timestamp::from_unix_nanos(a.last_ns),
                 a.center_hz,
@@ -865,6 +991,7 @@ mod tests {
             device: Device::Id(device.into()),
             time: TimeRange::new(t(t0), t(t1)),
             freq: FreqRange::new(lo, hi),
+            analysis: Analysis::Analysed,
             center_hz: (lo + hi) / 2.0,
             sample_rate_hz: hi - lo,
         }
@@ -877,6 +1004,7 @@ mod tests {
             device: Device::Id("dev-a".into()),
             time: w,
             freq,
+            analysis: Analysis::Analysed,
             center_hz: (freq.lo_hz + freq.hi_hz) / 2.0,
             sample_rate_hz: freq.hi_hz - freq.lo_hz,
         }]
@@ -1008,28 +1136,154 @@ mod tests {
         assert!(Device::Id("x".into()).is_named());
     }
 
+    // ---- T-595: the DC notch is EXCLUDED, never unobserved ------------------------------------
+
+    /// **T-595.** A dwell record whose window declares a DC notch must rasterise the notch as
+    /// *sampled, excluded from analysis* — never as [`Coverage::Unobserved`].
+    ///
+    /// The notch is 30 kHz of a 2 MHz tune, and the history pyramid keeps spectrum rows right
+    /// across it. Before this, [`spans_from_records`] emitted only the two analysed sides, so the
+    /// fold answered "nothing ever looked" for the middle: grey painted over rows we hold. The
+    /// assertion counts, and the counts are stated on both sides so it cannot pass by observing
+    /// everything or by excluding everything.
+    ///
+    /// RED without the fix: drop the `Analysis::Excluded` span from [`spans_from_records`] and the
+    /// notch cells go back to `Unobserved`, failing the first two assertions.
+    #[test]
+    fn the_declared_dc_notch_rasterises_as_excluded_and_never_as_unobserved() {
+        use hk_model::attention::baseline::SiteKey;
+        use hk_model::attention::observation::{
+            DwellRecord, ObservationRecord, ObservedWindow, Reason, Tier,
+        };
+        let centre = 100e6;
+        let w = TimeRange::new(t(1000), t(1060));
+        let rec = ObservationRecord::Dwell(DwellRecord {
+            schema: hk_model::attention::ATTENTION_SCHEMA_VERSION,
+            survey_id: None,
+            seq: 1,
+            plan_version: 1,
+            site: SiteKey::Unassigned,
+            device_id: Some("dev-a".into()),
+            reason: Reason::RegionDwell { hop: 0 },
+            tier: Tier::ScheduledPlan,
+            window: ObservedWindow {
+                center_hz: centre,
+                sample_rate_hz: 2e6,
+                usable: FreqRange::new(centre - 1e6, centre + 1e6),
+                dc_excluded: Some(FreqRange::new(centre - 15e3, centre + 15e3)),
+                rbw_hz: 1e3,
+            },
+            rf_path: 0,
+            planned: w,
+            observed: w,
+            preempted: false,
+            dropped_samples: 0,
+            overload: false,
+            provenance_ref: None,
+        });
+        let all = FreqRange::new(f64::NEG_INFINITY, f64::INFINITY);
+        let rs = spans_from_records([&rec], &[], all);
+        assert_eq!(
+            rs.spans.len(),
+            3,
+            "two analysed sides and the notch itself: {:?}",
+            rs.spans
+        );
+        assert_eq!(
+            rs.spans
+                .iter()
+                .filter(|s| !s.analysis.is_analysed())
+                .count(),
+            1,
+            "exactly one excluded span, and it is the notch: {:?}",
+            rs.spans
+        );
+
+        // 2 MHz of band in 10 kHz cells, so the 30 kHz notch is its own handful of cells.
+        let f = FreqRange::new(centre - 1e6, centre + 1e6);
+        let g = grid(&rs.spans, &Device::Id("dev-a".into()), f, w, 200);
+        let notch: Vec<usize> = (0..g.nf)
+            .filter(|&i| {
+                let r = g.freq_of(i).unwrap();
+                r.lo_hz >= centre - 15e3 && r.hi_hz <= centre + 15e3
+            })
+            .collect();
+        assert!(
+            notch.len() >= 2,
+            "the fixture must judge notch cells: {notch:?}"
+        );
+        let greyed = notch.iter().filter(|&&i| !g.cells[i].is_observed()).count();
+        assert_eq!(
+            greyed,
+            0,
+            "{greyed} of {} notch cells read unobserved - grey over spectrum the radio sampled",
+            notch.len()
+        );
+        for &i in &notch {
+            assert!(
+                g.cells[i].is_excluded(),
+                "notch cell {i} ({:?}) must carry the exclusion, not pass as ordinary coverage",
+                g.freq_of(i)
+            );
+            assert_eq!(g.cells[i].as_str(), "excluded");
+        }
+        assert_eq!(
+            g.excluded_cells(),
+            notch.len(),
+            "only the notch is excluded"
+        );
+
+        // And the analysed sides are analysed: an exclusion that spread would be the same defect
+        // pointed the other way.
+        let side = g.at(centre - 500e3).unwrap();
+        assert!(side.is_observed() && !side.is_excluded(), "{side:?}");
+        assert_eq!(side.as_str(), "observed");
+        assert!(
+            g.observed_cells() > notch.len() * 4,
+            "{}",
+            g.observed_cells()
+        );
+
+        // A coarse fold pools the notch into analysed neighbours and reads analysed: a 30 kHz
+        // exclusion is not a claim about a 200 kHz cell.
+        let coarse = g.coarsen(1, 20).expect("fold");
+        assert_eq!(
+            coarse.excluded_cells(),
+            0,
+            "the notch must not colour the cell that swallows it: {coarse:?}"
+        );
+    }
+
     /// State 3 is unrepresentable as state 2: the only constructor refuses to mint a `Sampled` that
     /// means "nothing was sampled", so no zeroed measurement can pass for a quiet one.
     #[test]
     fn nothing_sampled_cannot_be_built_as_an_observation() {
         let z = Timestamp::from_unix_nanos(0);
         assert_eq!(
-            Coverage::of(0, 60_000_000_000, 60_000_000_000, z, 1e8, 2e6),
+            Coverage::of(
+                0,
+                60_000_000_000,
+                60_000_000_000,
+                60_000_000_000,
+                z,
+                1e8,
+                2e6
+            ),
             Coverage::Unobserved,
             "no spans"
         );
         assert_eq!(
-            Coverage::of(1, 0, 60_000_000_000, z, 1e8, 2e6),
+            Coverage::of(1, 0, 0, 60_000_000_000, z, 1e8, 2e6),
             Coverage::Unobserved,
             "no sampled duration"
         );
         assert_eq!(
-            Coverage::of(1, 60_000_000_000, 0, z, 1e8, 2e6),
+            Coverage::of(1, 60_000_000_000, 60_000_000_000, 0, z, 1e8, 2e6),
             Coverage::Unobserved,
             "no window"
         );
         // A real, brief look is observed — with a duty that says how brief, never rounded to zero.
-        let c = Coverage::of(1, 1, 60_000_000_000, z, 1e8, 2e6);
+        let c = Coverage::of(1, 1, 1, 60_000_000_000, z, 1e8, 2e6);
         assert!(c.is_observed());
         assert!(c.sampled().unwrap().duty > 0.0);
         assert_eq!(c.as_str(), "observed");
@@ -1390,6 +1644,7 @@ mod tests {
                 Timestamp::from_unix_nanos(t(1000).as_unix_nanos() + 1),
             ),
             freq: FreqRange::new(0.0, 1e6),
+            analysis: Analysis::Analysed,
             center_hz: 0.5e6,
             sample_rate_hz: 1e6,
         }];
