@@ -16767,7 +16767,7 @@ tasks:
   - id: T-549
     milestone: MAUTO
     title: 'MAUTO-DESIGN: the search trace - what the engine tried, what it pruned and why, so the decision tree is inspectable rather than a black box'
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -16830,7 +16830,7 @@ tasks:
   - id: T-550
     milestone: MAUTO
     title: 'MAUTO-DESIGN: how an unknown stays unknown - the negative-result contract when the search finds nothing, and the guard against a search that always finds something'
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: MAUTOD
     model: opus
