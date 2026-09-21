@@ -18066,6 +18066,61 @@ tasks:
       ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): thread counts, running-chain counts,
       buffer bytes. Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-591
+    milestone: M2-hardening
+    title: /api/events and /api/inventory disagree about the same emitter's liveness, which docs/api.md promises cannot happen
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-254 WHILE BUILDING THE ISM BURST SCENE, measured not inferred: 3 of 3 events read
+      `open: true` beside inventory rows for the same emitter in the same window reading `ended`.
+      `crates/hk-api/src/events.rs:243` hard-codes `IdleGap::conservative()` (60 s), while
+      `crates/hk-api/src/query.rs:1617` uses the RING-MEASURED gap (T-410). Two surfaces over one
+      fact, deriving it two different ways.
+      THIS BREAKS A DOCUMENTED PROMISE: docs/api.md states elsewhere that the two surfaces cannot
+      disagree about one emitter's liveness. It also breaks the signal model itself - an emitter's
+      presence is ONE interval `[start, end?]`, ongoing until an end is affirmatively detected and
+      revocable afterwards. Liveness is a property of the emitter, not of the route you asked.
+      Fix by deriving liveness ONCE and serving it from both routes, rather than by making the two
+      constants match - two independent derivations that happen to agree today will diverge again.
+      The ring-measured gap is the better source: the conservative 60 s constant is a guess where a
+      measurement exists.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): for a scene with a burster that stops,
+      every emitter's liveness is IDENTICAL across /api/events and /api/inventory, asserted over all
+      emitters in the window rather than a sampled one. A test that compares zero emitters is
+      vacuous - report how many it compared.
+      Prove the test goes RED without the fix (T-254's ISM scene reproduces it directly).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-592
+    milestone: M2-hardening
+    title: /api/events refuses its own documented limit - 501..2000 is a 400
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    effort: low
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-254. `MAX_EVENTS_LIMIT = 2_000` and docs/api.md documents a maximum of 2000, but
+      `events_json` then calls `parse_inventory_query` on the same params, which rejects
+      `limit > 500` with "limit must be an integer in 1..=500". Every value from 501 to 2000 is
+      documented as valid and answered with a 400.
+      Decide which number is right and make the code, the docs and the contract test say the same
+      one (T-079: docs/api.md and crates/hk-cli/tests/api_contract.rs move together). If 500 is the
+      real bound, the constant and the docs are wrong; if 2000 is, the shared validator needs a
+      per-route limit rather than the inventory one.
+      WHY IT SURVIVED: the contract tests evidently only ever exercise the DEFAULT limit, so the
+      documented range has never been tested at its edges. Whichever bound wins, test the boundary
+      values - the last accepted and the first rejected - not just a value in the middle. That is
+      the gap that let a doc/impl contradiction live on a core interface.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
