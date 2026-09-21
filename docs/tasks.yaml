@@ -16376,12 +16376,13 @@ tasks:
   - id: T-559
     milestone: M2-hardening
     title: The 4-builder concurrency cap counts cargo builds but not the hk serve processes agents leave running
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CI
     model: sonnet
     depends_on: []
     use_cases: []
+    branch: task-t559
     acceptance: |
       MEASURED BY T-543: `cargo build -p hk-plugins --bins` - documented as ~0.05 s warm - took
       500 SECONDS at load average 211. The top consumer was an `hk serve` at 930-1300 % CPU (T-542's
@@ -16402,6 +16403,15 @@ tasks:
       Filed 2026-09-20 from T-543's measurement. The coordinator's scheduling caused several of
       today's gate failures; this is the rule that failed to prevent it.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE on branch task-t559: `just builders` (justfile) over the pure, tested
+      `hkpy.builders.assess` (py/hkpy/builders.py) - cargo/rustc grouped by worktree, hk
+      serve/hackriffd processes counted individually (each toward the cap on its own, whether
+      or not that worktree is also building), load(1m) vs a configurable core budget, free disk
+      vs the 20 GB floor, one-line verdict. `py/tests/test_builders.py` (30 cases) covers under/at
+      the cap, hk-serve-alone pushing it over, the coordinator's own full-gate cargo/rustc grouping
+      into one slot, low-disk and high-load. CLAUDE.md's "Worktree launch step" now points at
+      `just builders` instead of relying on the agent to count correctly. Awaiting merge via the
+      merge-runner queue (not merged by this agent).
   - id: T-561
     milestone: M2-hardening
     title: "docs/tasks.yaml classified as prose, so the board test never ran on the commit that broke the board"
