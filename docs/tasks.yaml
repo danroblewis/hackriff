@@ -18570,26 +18570,27 @@ tasks:
     core_interface: true
     model: opus
     effort: medium
-    depends_on: [T-571]
+    depends_on: [T-571, T-572]
     use_cases: [AWARE-011]
     acceptance: |
-      FILED BY T-571, WHICH MEASURED IT. `Pyramid::fold_row_live` propagates a row to the level
-      above only when that level COMMITS - which is the "commits every N" rule and is what makes
-      the fold exactly-once - so a chain of in-progress rows compounds: node (i, j) trails the
-      finest closed row by up to 2^j - 1 of them, plus level 0's own still-open column. Measured
-      on the 4x4 test lattice at 1, 2 and 4 rows for level_t 1, 2 and 3; at the shipped four time
-      levels and a 1 s cell that is up to 7 s at level_t = 3.
-      Node (0, 0) - the live edge itself - is NOT affected: a direct level-0 read stands in for
-      its open column with `column_preview`. The cells are correct throughout; a partial row reads
-      as fewer observed seconds, never as wrong values. The on-demand fold it replaced had no such
-      lag, because it folded open producers on every read.
-      THE DECISION TO MAKE: whether a zoomed-out pane should see a node's in-progress row, the way
-      level 0 sees its open column. It is a product call, not an oversight - showing it means a
-      coarse cell that changes under the viewer as its remaining producer rows land. If the answer
-      is yes, the mechanism already exists (`Tile::row_pending` plus a `column_preview`-shaped
-      read); if no, the canvas should say what it is showing rather than quietly trailing.
-      Assert with COUNTS (a node's newest populated row against level 0's newest closed row),
-      never a wall-clock budget.
+      Filed 2026-09-21 from the user's tile-perf review (their S6; the review's R3).
+      DO THIS AFTER T-571 AND T-572, NOT BEFORE - the review is explicit that reworking the cap
+      first "just moves contention". This ticket exists so the dependency is recorded, not so it
+      is started now.
+      The history store is behind ONE mutex; concurrent tile reads serialise on it and compete
+      with ingest (`tiles.rs:193-202`). The route caps concurrency at TILE_MAX_IN_FLIGHT = 4 and
+      returns 503 above it; the client HALVES its operating limit on any 503 (AIMD,
+      `tilecache.ts:1243-1263`), so a couple of slow coarse tiles drop the whole fill to 1-2
+      in-flight. T-450 measured the consequence: 26 tiles resident against 17 268 CANCELLED in
+      75 s. (T-539, now landed, fixed the half that never recovered the cap on a still view.)
+      Once reads are cheap, consider a read-mostly snapshot / RwLock or per-scheme locks so the
+      cap can rise above 4. Measure the contention before and after rather than assuming it moved.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): concurrent readers admitted without
+      a 503 for a viewport of N tiles; 503s issued during a steady-state fill is zero; cancelled-
+      to-resident ratio for one screen stays under a stated bound. A test that counts 0 of 0
+      requests is vacuous - report what each run actually exercised.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-584
     milestone: MLIVE
     title: Late-path frames reach level 0 only and are invisible to every coarse node under coarse_live
@@ -19128,28 +19129,31 @@ tasks:
     parallel_group: PIPE
     core_interface: true
     model: opus
-    effort: medium
-    depends_on: []
+    effort: high
+    depends_on: [T-586]
     use_cases: [AWARE-011]
     acceptance: |
-      MEASURED BY T-588 while clearing the user's 892.5 MHz report: over a sweep of 1 966 080 cells,
-      1212 cells held a measurement and read `unobserved` - and ALL 1212 are the 25 kHz DC notch at
-      the tuned centre. None at a band edge.
-      `ObservedWindow.dc_excluded` punches a 25 kHz hole in the observation log's coverage while the
-      history pyramid KEEPS ROWS THERE. Inside the IQ ring's retention the ring journal's full-band
-      spans cover the hole; past the ring horizon nothing does, so a 25 kHz stripe down the middle
-      of every band the radio ever sat on turns grey - "we never looked", painted over rows we hold.
-      BOTH HALVES OF THE INVARIANT BREAK AT ONCE: "whenever data exists for that window it must be
-      shown", and "grey = genuinely unobserved". T-441 says three states, three distinct marks; the
-      DC notch is a FOURTH thing wearing the third one's mark. And it is a genuinely different
-      claim - a region deliberately excluded from measurement is useful to tell the user, just not
-      by calling it unobserved.
-      Give the notch its own mark rather than making the observation log lie in the other direction.
-      The ring-journal cover is why this went unseen: it is invisible for the whole ring retention
-      and appears only in older history.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): cells holding a measurement that read
-      unobserved past the ring horizon is ZERO, counted, WITH A FLOOR on how many cells were judged
-      so it cannot pass on zero-of-zero. T-588's guard in `crates/hk-api/src/tiles.rs` is the model.
+      FOUND BY T-586, and it is the half that actually fixes the user's 2026-09-21 field report.
+      T-586 built the cross-centre classifier and proved it works: `RetuneSlope::apply` resolves a
+      +370 kHz LO-relative spur across three centres and labels it. But the flags are COMPUTED AND
+      NEVER WRITTEN BACK, so the inventory still lists that one spur as THREE separate emitters at
+      three different absolute frequencies - which is exactly what the user saw.
+      T-586 also measured why the single-capture flaggers cannot cover this: they caught the DC
+      family (ref-harmonic, dc, dc) and caught the +370 kHz spur NOT AT ALL. Three detections, three
+      absolute frequencies, each individually indistinguishable from a real emission. Only the
+      cross-centre relationship separates them, which is the whole point of retune diversity.
+      Wire the verdict into the survey/scheduler path so the record is load-bearing: a detection
+      resolved as LO-relative carries that on the stored row, and the inventory merges the three
+      sightings into one artefact rather than minting three emitters.
+      MIND THE SIGNAL MODEL WHILE DOING IT. An artefact is still a time-frequency region with a
+      real extent, and "this is LO-relative" is a claim that can be REVOKED by later evidence, the
+      same way a detected end is provisional and revocable. Do not delete the sightings; relate
+      them. And `Absolute` is the weak claim - "not LO-relative", not "real" - because a reference
+      harmonic is absolute-fixed and still an artefact.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): a scene with one LO-relative spur over
+      N centres yields ONE artefact row, not N emitters; real emitters are unaffected in number and
+      in absolute frequency. T-586's fixture (`py/hkpy/synth/retune.py`, scenario
+      `retune_diversity`) reproduces it directly and its assertions already count what matters.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-596
@@ -19386,34 +19390,6 @@ tasks:
       per SNR, and the reasons sum to the number of classifications - a report whose parts do not
       account for the whole is how a skipped stage hides.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-601
-    milestone: M2-hardening
-    title: A retune-sibling artefact reads as a generic "retune artefact" while an image reads as prose
-    status: todo
-    priority: low
-    parallel_group: CANVAS-FE
-    model: sonnet
-    effort: low
-    depends_on: [T-587]
-    use_cases: []
-    acceptance: |
-      Filed 2026-09-21 from T-587. `artifact-of` rows carry backend-rendered prose in
-      `relation.reason` - "image of the 100.8 MHz carrier" - and the UI shows it. A
-      `retune-sibling-of` row gets a generic "retune artefact" chip instead, because no equivalent
-      sentence is rendered for it, even though `detail.slope` and `detail.invariant_hz` are right
-      there and would support something like "same line seen at 3 centres, moves with the LO".
-      Honest today and never blank or wrong - just less specific than its sibling, which is why it
-      is low priority rather than a defect.
-      RENDER THE SENTENCE IN THE BACKEND, not the client. The UI is a thin client over
-      docs/api.md and all the reasoning lives behind it; `relation.reason` is already the field
-      for exactly this, so this is about populating it for the retune kind, not about teaching the
-      client to compose prose from `detail`.
-      Keep T-587's honesty rule intact: the three states - explained artefact, real emission, not
-      yet decided - stay distinct, and `Absolute` is never the source of an artefact label (it
-      means "not LO-relative", not "real").
-      ASSERT ON THE RENDERED TEXT AND THE REQUEST THE CLIENT BUILDS, not wall-clock.
-      Prove the test goes RED without the fix.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-600
     milestone: M2-hardening
     title: A resolved artefact does not rank below a clean row, because the evidence proxy counts only measured flag bits
@@ -19467,6 +19443,34 @@ tasks:
       T-598's files copied byte-for-byte from main's staged working tree, to build and test
       standalone. Merge T-598 first; the overlap should be a trivial/no-op merge since the content
       is identical.
+  - id: T-601
+    milestone: M2-hardening
+    title: A retune-sibling artefact reads as a generic "retune artefact" while an image reads as prose
+    status: todo
+    priority: low
+    parallel_group: CANVAS-FE
+    model: sonnet
+    effort: low
+    depends_on: [T-587]
+    use_cases: []
+    acceptance: |
+      Filed 2026-09-21 from T-587. `artifact-of` rows carry backend-rendered prose in
+      `relation.reason` - "image of the 100.8 MHz carrier" - and the UI shows it. A
+      `retune-sibling-of` row gets a generic "retune artefact" chip instead, because no equivalent
+      sentence is rendered for it, even though `detail.slope` and `detail.invariant_hz` are right
+      there and would support something like "same line seen at 3 centres, moves with the LO".
+      Honest today and never blank or wrong - just less specific than its sibling, which is why it
+      is low priority rather than a defect.
+      RENDER THE SENTENCE IN THE BACKEND, not the client. The UI is a thin client over
+      docs/api.md and all the reasoning lives behind it; `relation.reason` is already the field
+      for exactly this, so this is about populating it for the retune kind, not about teaching the
+      client to compose prose from `detail`.
+      Keep T-587's honesty rule intact: the three states - explained artefact, real emission, not
+      yet decided - stay distinct, and `Absolute` is never the source of an artefact label (it
+      means "not LO-relative", not "real").
+      ASSERT ON THE RENDERED TEXT AND THE REQUEST THE CLIENT BUILDS, not wall-clock.
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-602
     milestone: M2-hardening
     title: POI and occupancy still ask "was it covered?" and never "was it analysed?", so the tuned centre is silently a blind spot to them

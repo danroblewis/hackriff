@@ -173,3 +173,39 @@ def test_no_ticket_lost_its_body_to_a_merge(records) -> None:
         f"{len(thin)} ticket(s) carry neither acceptance nor notes, which is what a merge that ate "
         f"a block looks like: {thin[:10]}"
     )
+
+def test_no_ticket_carries_another_tickets_body() -> None:
+    """Misattribution is the corruption a body-presence check cannot see.
+
+    The 2026-09-21 marker-stripping damage had two shapes. One truncated a block, which
+    `test_no_ticket_lost_its_body_to_a_merge` catches. The other SWAPPED bodies between adjacent
+    blocks — T-598 ended up carrying T-595's acceptance verbatim, and T-581 carried T-583's. Every
+    block still had an acceptance, so that guard passed while the board was wrong: the ticket said
+    one thing in its title and another in its body, and only a person reading both noticed.
+
+    Only PROVENANCE-prefixed bodies are compared. "FOUND BY T-321. …" names one specific discovery
+    and cannot legitimately sit under two ids. Definition-of-done boilerplate is shared across whole
+    families of tickets on purpose and is not evidence of anything.
+
+    Reads the raw file rather than the shared scanner: the scanner keeps only a block scalar's
+    marker, and a fingerprint built from it proved too easy to mis-attribute across blocks.
+    """
+    import re
+
+    text = TASKS.read_text()
+    blocks = re.split(r"^  - id: ", text, flags=re.M)[1:]
+    first_lines: dict[str, list[str]] = {}
+    for blk in blocks:
+        tid = blk.split("\n", 1)[0].strip()
+        m = re.search(r"^    (?:acceptance|notes): \|.*\n(\s+.*)$", blk, re.M)
+        if not m:
+            continue
+        line = m.group(1).strip()
+        if line.startswith(("FOUND BY", "MEASURED BY", "FILED BY", "SURFACED BY", "USER FIELD")):
+            first_lines.setdefault(line, []).append(tid)
+    shared = {b: ids for b, ids in first_lines.items() if len(ids) > 1}
+    assert not shared, (
+        "these tickets open their body with the same provenance sentence, so at least one is "
+        "carrying another ticket's text: "
+        + "; ".join(f"{ids} -> {b[:70]!r}" for b, ids in shared.items())
+    )
