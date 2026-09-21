@@ -119,7 +119,10 @@
 //! |---|---|---|---|
 //! | GET | `/api/coverage` | `f_lo`&`f_hi` (Hz, required), `cells`? (1…4096, default 256), `rows`? (1…4096, default 1), `t0`&`t1`? (Unix s; default the capture window) | `{region, window, grid, devices, any, horizon, sources, resolution}` |
 
-use hk_model::{FreqRange, TimeRange, Timestamp};
+use hk_model::{
+    EmitterId, FreqRange, IdleGap, Presence, PresenceInterval, RepoError, Repository, TimeRange,
+    Timestamp,
+};
 use hk_store::coverage::{
     Coverage, CoverageGrid, CoverageSpan, Device, MAX_COVERAGE_CELLS, MAX_COVERAGE_ROWS,
 };
@@ -190,6 +193,62 @@ impl ObservedCoverage {
             .map(|s| s.time)
             .collect();
         hk_model::IdleGap::from_coverage(&spans, window)
+    }
+
+    /// **The one derivation of an emitter's presence track** (T-591), and therefore of its
+    /// liveness.
+    ///
+    /// Liveness is a property of *the emitter* — one interval `[start, end?]`, ongoing until an
+    /// end is affirmatively detected and revocable afterwards (ADR-0017/0019) — never a property
+    /// of the route the caller happened to ask. It broke exactly once, and instructively:
+    /// `/api/inventory` measured the idle gap off this band's tune history (T-410) while
+    /// `/api/events` and `/api/tiles/events` each hard-coded [`hk_model::IdleGap::conservative`]
+    /// (60 s), so T-254's ISM scene read `open: true` on 3 of 3 events beside inventory rows for
+    /// the same emitter in the same window reading `ended`. Two surfaces, one fact, two
+    /// derivations.
+    ///
+    /// The fix is not two constants agreeing — they would drift apart again the moment one was
+    /// touched — but **one derivation**, here, beside the measurement that feeds it. Every serving
+    /// surface reaches the track through this method and projects it with
+    /// [`PresenceTrack::project`], which reuses the very gap that closed the intervals, so a row's
+    /// `live`/`ended` and the `open` flags on the same emitter's events are one derivation seen
+    /// twice. `inventory_api::hk_api_derives_liveness_in_exactly_one_place` holds the line by
+    /// refusing any other call to `presence_intervals` in this crate.
+    pub fn track(
+        &self,
+        repo: &Repository,
+        id: EmitterId,
+        freq: FreqRange,
+        span: TimeRange,
+        now: Timestamp,
+    ) -> Result<PresenceTrack, RepoError> {
+        let gap = self.idle_gap(freq, span);
+        Ok(PresenceTrack {
+            gap,
+            intervals: repo.presence_intervals(id, gap, now)?,
+        })
+    }
+}
+
+/// One emitter's presence track as [`ObservedCoverage::track`] derived it, carrying the measured
+/// [`IdleGap`] that closed its intervals so every projection of it reads the same gap.
+///
+/// Keeping the gap *with* the intervals is the point: a caller cannot project this track under a
+/// different gap from the one that produced it without saying so, which is the shape of the T-591
+/// defect it exists to prevent.
+#[derive(Clone, Debug)]
+pub struct PresenceTrack {
+    /// The gap measured off the band's tune history, which closed [`Self::intervals`].
+    pub gap: IdleGap,
+    /// The emitter's disjoint presence intervals, in start order (docs/07 §2.27).
+    pub intervals: Vec<PresenceInterval>,
+}
+
+impl PresenceTrack {
+    /// The track projected through one view window: intervals in it, time on air inside it, and
+    /// the `live`/`ended`/`absent` an inventory row renders.
+    pub fn project(&self, span: TimeRange) -> Presence {
+        hk_model::presence_in_window(&self.intervals, span, self.gap)
     }
 }
 

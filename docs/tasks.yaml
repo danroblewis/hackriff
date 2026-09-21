@@ -18290,7 +18290,7 @@ tasks:
   - id: T-591
     milestone: M2-hardening
     title: /api/events and /api/inventory disagree about the same emitter's liveness, which docs/api.md promises cannot happen
-    status: todo
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -18318,6 +18318,39 @@ tasks:
       vacuous - report how many it compared.
       Prove the test goes RED without the fix (T-254's ISM scene reproduces it directly).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    resolved_2026_09_21: |
+      FIXED BY ONE DERIVATION, not by matching the constants. `ObservedCoverage::track`
+      (crates/hk-api/src/coverage.rs) is now the only place in hk-api that calls
+      `Repository::presence_intervals`; it measures the idle gap off the band's tune history
+      (T-410) and returns a `PresenceTrack` carrying that gap WITH the intervals, so
+      `PresenceTrack::project(window)` cannot project under a different gap from the one that
+      closed them. Four surfaces reach liveness through it: /api/inventory (query.rs),
+      /api/events (events.rs), /api/inventory/{id}/presence (presence.rs) and /api/tiles/events
+      (tiles.rs) - the last two were not in the ticket; tiles.rs was a THIRD copy of the same
+      60 s hard-code, so its coarse event counts could disagree with the list it zooms into.
+      `IdleGap::conservative()` now appears nowhere in hk-api's code: `IdleGap::from_coverage`
+      already yields it for a band with no recorded tune history, which is its real meaning.
+      API CHANGE (T-079, docs/api.md + api_contract.rs together): /api/events `emitters[]` gains
+      `liveness` (live/ended/absent) - byte-for-byte /api/inventory's `presence.liveness` for the
+      same emitter and window, because it is the same projection of the same track. Additive; the
+      UI's catalogue reads per-event `open` and needed no change.
+      TESTS, WITH COUNTS, NEVER WALL-CLOCK:
+      - tests/e2e t254_ism_bursts (the scene that measured the defect): every catalogued emitter's
+        liveness must match across both routes, plus "any open event <=> live". GREEN: compared
+        3 of 3 catalogued emitters, 0 disagreed; 1 of 3 events reads open=true (the CW carrier),
+        where 3 of 3 did before.
+      - RED WITHOUT THE FIX (measured, not asserted): restoring the conservative gap in events.rs
+        alone -> "3 of 3 events read open=true", "2 of 3 emitters disagreed", test FAILED. The two
+        that disagree are exactly the burster that stops and the one-off; the carrier agrees
+        because it is live under either gap - which is why a sampled emitter could have missed it.
+      - crates/hk-api/tests/inventory_api.rs::hk_api_derives_liveness_in_exactly_one_place: a
+        code-line (not comment) scan refusing `.presence_intervals(` outside coverage.rs and
+        `IdleGap::conservative()` anywhere, so the next copy cannot be added quietly. Also RED
+        under the reverted events.rs.
+      - api_contract events test: asserts `liveness` is served and equals the inventory row's for
+        every catalogued emitter, printing the count (1 emitter on the FM scene) and failing a
+        vacuous zero-emitter comparison.
+      TARGETED RESULTS: hk-api 218/218, hk-cli api_contract 53/53, hk-e2e acceptance_ism 2/2.
   - id: T-589
     milestone: M3
     title: C14 never reports a trusted symbol rate on genuine 8-PSK at 20 or 30 dB, so in production the verifier can never run on it
