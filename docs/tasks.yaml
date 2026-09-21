@@ -17391,6 +17391,9 @@ tasks:
       cost into a data-entry cost, for every protocol whose structure the existing block
       catalogue can already express.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-575
+    milestone: MAUTO
+    title: "MAUTO: the derived ConfirmPolicy - analytic hold-out bits, per-stage look-elsewhere, differences not distinct_valid, and the decision-rate counter the budget rests on"
   - id: T-565
     milestone: MAUTO
     title: "MAUTO: the search trace, produced INSIDE the beam - a bounded TraceNode record of what M-3 tried, pruned, deferred and refused to try"
@@ -17488,6 +17491,73 @@ tasks:
     priority: high
     parallel_group: W
     model: opus
+    depends_on: [T-565]
+    use_cases: [SIGNAL-001, SIGNAL-062, RESEARCH-009]
+    core_interface: true
+    acceptance: |
+      Applies ADR-0022 to ADR-0015 section 10's M-9 row and section 11.9's CP-4, and rewrites
+      ADR-0015 sections 5.5 and 11.5, which this branch only pointed at.
+      WHY IT IS core_interface: it is the gate on an IRREVERSIBLE transition. `change_emitter_
+      lifecycle` forbids a return to candidate (ADR-0015 section 11.5), so a wrong auto-confirm is
+      undone only by a user deleting the row - and that row is a measurement-backed fact that
+      outranks the known-signal database, seeds a C18 signature and a C15 rank-1 classification,
+      and can become a template that biases later searches.
+      WHAT TO BUILD.
+      1. `analytic_holdout_bits` on the hold-out result: the sum over ANALYTIC-null stages of the
+         winning prefix only (check_distinct_valid, sync_excess, field_fit, identity_recurrence),
+         each NET OF THE LOOK-ELSEWHERE CHARGED AT ITS OWN STAGE. The calibrated metrics
+         (snr, bimodality, eye_open, timing_var, evm, line_violations, bit_structure) keep every
+         other job - ranking, pruning, the ladder, the UI - and pay for NO confirmation. ADR-0022
+         section 2 states why: those are the tails T-547 questions, and an irreversible decision may
+         not rest on an unmeasured scale.
+      2. NOT the job-total `look_elsewhere_bits` (ADR-0021 section 7A.2). That field stays a
+         REPORTING field. Using it here would double-charge stages that already paid their own L,
+         and would make an ADS-B squitter stop confirming because the job searched a busy window
+         elsewhere. The correction must be attributable to the hypothesis being confirmed.
+      3. The gate, in order (ADR-0022 section 6): width >= 8; check_bits >= 16 (a confirm always
+         carries a CHECK, never sync excess alone); analytic_holdout_bits >= 24; for a SEARCHED
+         check the ADR-0021 section 8.2 null control ran and did not cap; front-end trust
+         unchanged; `quick` never confirms.
+      4. `differences`, NOT `distinct_valid`. assist::codes already computes the chance-corrected
+         count (frames counted once however often they repeat; differences repeating with period
+         <= 16 bits not counted). `distinct_valid` over-credits a beacon sending the same payload
+         every frame, which is most beacons. T-210's rule is unchanged and folded in: FEC-corrected
+         frames are never CRC-valid evidence and contribute 0 bits.
+      5. DELETE `min_evidence_bits` (64: wrong currency) and `min_distinct_valid` (3: a constant
+         standing in for `max(1, ceil((24 + L_check) / width))`, right for a searched CRC-16 and
+         wrong everywhere else). The frame count is DERIVED PER JOB, not stored.
+      6. THE LAUNDERING RULE (ADR-0022 section 5.1). "Template-fixed" means provenance `builtin` or
+         user-authored, and only then is L_check 0. A template DISCOVERED by a previous search
+         records `discovery_look_elsewhere_bits` at save-as-template time (section 4.3) and every
+         later use INHERITS it. Without this, a search launders its own multiplicity: try 10^4
+         polynomials, save the winner, confirm free forever.
+      7. THE DECISION-RATE COUNTER (ADR-0022 section 8). The threshold delivers the budgeted RATE
+         only at the assumed rate of 20 000 confirm decisions per device-week. Count
+         ConfirmPolicy::synthesized evaluations over a rolling 7 days; above the assumed figure the
+         BUDGET CLAIM IS VOID and the device says so - a surfaced state, in the register of
+         ADR-0021's "the null control ran and passed" being a visible fact. A running per-session
+         look-elsewhere term is the REJECTED alternative: it would make identical evidence worth
+         less on a device with longer uptime.
+      8. docs/07 deltas per ADR-0022 section 11.3: ConfirmPolicy fields; Decode provenance gains
+         analytic_holdout_bits / check_bits / l_check / check_searched / template_provenance so a
+         confirmation's arithmetic is reconstructible from the row; the lifecycle reason text
+         carries the arithmetic; template rows gain `discovery_look_elsewhere_bits`.
+      TESTS: a template-fixed CRC-24 single frame confirms and the same frame searched does not;
+      a repeated-payload beacon does not confirm on repeat count; a result with 70 evidence bits of
+      which 22 are analytic does not confirm; the job-total look-elsewhere never reaches the gate;
+      a discovered template confirms only with its inherited L charged.
+      NUMBERS: 24 and 16 are DERIVED (ADR-0022 section 3); the width floor of 8 is an ASSUMPTION
+      T-577 measures. Do not treat the floor as settled and do not loosen any of them.
+    notes: |
+      Filed 2026-09-21 with ADR-0022 (T-548). HIGH: every MAUTO engine ticket bakes ConfirmPolicy's
+      constants in, and they are currently the guessed 64 / 3 / 16.
+      Reads on T-547: nothing in this gate's SOUNDNESS depends on it, by construction - a NO-GO
+      leaves 24 and the formula untouched. A GO or CONDITIONAL buys RECALL, through an explicit
+      ADR-0022 amendment, never automatically. Do not wire calibrated bits into the gate here.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-576
+    milestone: MAUTO
+    title: "MAUTO: the false-confirm acceptance suite - zero confirms on negatives, the analytic null's measured tail, and a recall control so the suite is not passed by never confirming"
     depends_on: [T-550, T-565]
     use_cases: [RESEARCH-007, RESEARCH-013, SIGNAL-052]
     core_interface: true
@@ -17548,6 +17618,90 @@ tasks:
     priority: high
     parallel_group: M-E
     model: opus
+    depends_on: [T-568, T-575]
+    use_cases: [SIGNAL-001, SIGNAL-062, RESEARCH-009]
+    core_interface: false
+    acceptance: |
+      `acceptance_mauto::false_confirm_budget`, per ADR-0022 section 10. Extends T-568's negative
+      populations rather than duplicating them.
+      PROTOCOL, NON-NEGOTIABLE (CLAUDE.md + ADR-0021 section 8.4): fixtures replay THROUGH THE MOCK
+      SDR behind the ordinary device interface; jobs start via `POST /api/analyze`; targets come
+      from BLIND DETECTION or an ad-hoc band, NEVER a truth frequency; truth is loaded only by the
+      assert harness; jobs are bounded by `max_evaluations`, never by wall.
+      THREE ASSERTIONS, because one has no power and one is passed by doing nothing.
+      A1, THE DIRECT ONE (necessary, weak): over T-568's N1 + N2 + N4 at each of `standard` and
+      `deep`, `confirms == 0` and `emitters_created == 0`.
+      A2, THE ONE WITH POWER: report the MAXIMUM `analytic_holdout_bits` reached by any rank-1
+      hold-out result on input with nothing to find, plus p50/p99 per population per profile, and
+      assert `max <= 18.0` against the 24-bit threshold. This measures ADR-0022 section 3.2's
+      9.7-bit model margin DIRECTLY instead of waiting for a threshold crossing a 24-bit gate makes
+      vanishingly rare. If the observed max is 21 bits the true margin is 3 bits, not 9.7, and the
+      budget is missed by ~100x WHILE A1 STILL READS ZERO.
+      A3, THE RECALL CONTROL, because a false-confirm suite with no recall control is passed by
+      never confirming: ADR-0015 section 7's positive rows still confirm under the new gate, and
+      specifically (a) at least one ADS-B single squitter confirms ON ONE FRAME (the ADR-0022
+      section 4.2 case the old rule blocked), (b) a template-fixed CRC-8 emitter confirms at 3
+      differing frames (the case the old width-16 floor refused outright), (c) a repeated-payload
+      beacon does NOT confirm on repeat count alone - `differences`, not `distinct_valid`.
+      WHAT THE SUITE HONESTLY BOUNDS, stated in the report and not implied: zero confirms at
+      n = 800 per profile bounds the true per-decision rate to <= 3.7e-3 at 95 % (rule of three),
+      against a budget of 5.0e-5. A1 IS 75x TOO WEAK TO DEMONSTRATE THE BUDGET and must never be
+      quoted as doing so - it can only fail to contradict it. Demonstrating 5.0e-5 from a
+      zero-failure run at 95 % needs n ~ 60 000 negative decisions. DECIDE AND STATE whether a
+      nightly or milestone run at that scale is worth building outside CI; inventing the number in
+      CI would be the same defect as quoting it (docs/17 section 1's four-decimal error).
+      THE FAILURE MESSAGE IS PART OF THE DELIVERABLE. ADR-0022 section 10.2 gives the format: the
+      budget and its units, the threshold with its two terms, the observation, the IMPLIED MARGIN
+      ("the analytic nulls are optimistic by >= 2^7.1 = 137x more than assumed"), what that means in
+      wrong rows per week, the winning result's check/width/differences/L_check/null-control margin,
+      and the replay command for the offending fixture. A bare `assert!(max <= 18.0)` tells a reader
+      none of it.
+      DoD: the three assertions, the honest-bound paragraph in the report, the legible failure
+      format, and a stated position on the n ~ 60 000 question.
+    notes: |
+      Filed 2026-09-21 with ADR-0022 (T-548). HIGH: it is the only evidence the derived threshold
+      actually delivers the budget, and A2 is the only part of it with any statistical power.
+      Runs after T-568 builds the populations; do not rebuild them.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-577
+    milestone: MAUTO
+    title: "MAUTO-RESEARCH: measure the two numbers the false-confirm derivation could NOT derive - the check-width floor and the degenerate-framing null"
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-568]
+    use_cases: [RESEARCH-009, SIGNAL-062]
+    acceptance: |
+      RESEARCH / MEASUREMENT ONLY. ADR-0022 section 4.3 states plainly that the check-width floor
+      is an ASSUMPTION and not a derivation: the budget constrains a RATE, and the section 4.2
+      inequality already converts any width into the frame count that meets it (width 4 with 7
+      differences is arithmetically the same 28 bits as width 16 with 2). What the budget cannot
+      see is a DEGENERATE NULL - below about a byte a check can be satisfied by a framing artefact
+      rather than by a code, the chance-corrected `differences` guard has too little to work with,
+      and per-frame independence degrades fastest. 8 is a judgement about where a byte stops
+      meaning something. This ticket measures it instead.
+      WHAT TO MEASURE, over ADR-0021's N2 (energy without symbols) and N3 (out-of-catalogue
+      structure) populations plus synthetic framing-artefact cases:
+      1. Per check width w in {4, 8, 12, 16, 24, 32}: the observed rate at which a width-w check
+         reaches `distinct_valid` and `differences` >= the ADR-0022 section 4.2 requirement on
+         input with NO code present. This is the degenerate null's actual tail.
+      2. The gap between `distinct_valid` and `differences` on real repeated-payload emitters, which
+         is the quantity T-575's swap is justified by. Report it; if the gap is negligible the swap
+         costs nothing and if it is large the old rule was over-crediting by that much.
+      3. `max_countable_differences`: at what frame count do additional frames stop being
+         independent trials? assist::codes' chance-factor confidence saturates near 8 frames
+         (0.1 at 3, 0.4 at 4, 0.95 at 8, docs/api.md); whether the INDEPENDENCE assumption saturates
+         at the same place is a separate question and is the one that matters for bits.
+      DoD: a findings section stating, per width, the measured degenerate-null rate, and a
+      GO / CHANGE-THE-FLOOR verdict with the number. A verdict that the floor should be HIGHER than
+      8 is a legitimate outcome and is cheaper here than after M-9. Feed the result back into
+      ADR-0022 section 4.3 and T-575's `min_check_width`.
+    notes: |
+      Filed 2026-09-21 with ADR-0022 (T-548). NORMAL, not high: the floor at 8 is conservative
+      relative to the shipped guess of 16 only in the direction of ADMITTING more (CRC-8 sensors in
+      902-928 MHz), so getting it wrong costs false confirms on exactly one population - which
+      T-576's A2 measures anyway. Worth doing before M-9 ships, not before T-575 starts.
     depends_on: [T-550, T-565, T-567]
     use_cases: [RESEARCH-007, RESEARCH-013, SIGNAL-052]
     core_interface: false
