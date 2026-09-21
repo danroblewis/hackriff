@@ -361,14 +361,21 @@ function tileAnswer(a: TileAddr, lat: Lattice = LAT) {
  * number was a property OF. A repeat count is only evidence about the refresh lane once the
  * ordinary path is known to be working.
  */
-function assertTilesArrived(preview: SurfacePreview): void {
+function assertTilesArrived(preview: SurfacePreview, d: Drive): void {
   const cache = preview.view.surface.cache;
   assert.equal(cache.stats.failures, 0,
     `${cache.stats.failures} tile fetches failed: the fixture no longer decodes, so nothing below is ` +
     "about the live edge. Check this file's `tileAnswer` against `ui/src/surface/tile.ts`.");
   assert.ok(cache.residentTiles > 0, "no tile is resident, so there is nothing for a refresh to replace");
-  const drew = preview.lastFrame!.reports.reduce((n, r) => n + r.tiles, 0);
-  assert.ok(drew > 0, "the renderer drew no resident tile this frame");
+  // **Not "this frame"** (T-537). `drew > 0` was read off `lastFrame` after a fixed WALL-CLOCK
+  // budget, and residency is a property of the limit rather than of an instant — so on a loaded
+  // machine the budget bought one frame, the opening one, drawn before any answer could arrive.
+  // Measured at load 130: `resident=157 … drew=0`, i.e. the tiles were in hand and the frame that
+  // was asked about predated them. `drive()` ends on the property instead, so the frame reported
+  // here is the frame the property was read at.
+  assert.ok(d.ok,
+    `no viewport became fully resident in ${d.frames} frames (${d.ms} ms): ${d.last}\n` +
+    `cache: ${d.stats}`);
 }
 
 test("every viewport is FROZEN at open: this preview has no live edge to follow", () => {
@@ -409,19 +416,51 @@ test("every viewport is FROZEN at open: this preview has no live edge to follow"
  * a test's lifetime rather than in the product's 1 s. Nothing else about it is special. */
 const LIVE_LAT: Lattice = { scheme: "view", cells: 64, f0Hz: 6250, t0Ns: 1e6, levelsF: 20, levelsT: 15 };
 /**
- * Capture ns the reported edge advances per millisecond of wall time.
+ * Capture ns the reported edge advances **per frame this test draws** (T-537).
  *
- * Small on purpose. A tile here is 64 ms of capture, and the subject is a tile that stays the same
- * ADDRESS while its newest rows are written — so over a 700 ms run the edge must move far enough to
- * be worth re-asking for (it moves ~35 ms, thirty-five 1 ms cells) and not so far that the pane
- * scrolls into a new tile and the re-ask becomes an ordinary miss.
+ * It was per millisecond of *this machine's wall clock*, which made the subject of the test — how
+ * far the edge moved between two frames — a function of the load the machine happened to be under.
+ * The edge is a backend number the client is *told*, never one it reads off its own clock, so a
+ * virtual capture clock the test steps once per frame is both the deterministic instrument and the
+ * faithful one.
+ *
+ * Small on purpose. A tile here is 64 ms of capture and the subject is a tile that keeps the same
+ * ADDRESS while its newest rows are written, so the edge must move (a still edge is fresh by
+ * [[TileCache.behindTheEdge]] and correctly produces no second request) and must not move so far
+ * that the pane scrolls into a new tile and the re-ask becomes an ordinary miss. At the level the
+ * pane draws at — `level_t = 3`, 8 ms cells, a 512 ms tile — the whole [[MAX_FRAMES]] budget moves
+ * it 120 ms, under a quarter of one tile, and a passing run moves it 19 ms (measured, and printed
+ * by the test): two cells, inside the one tile throughout.
  */
-const LIVE_EDGE_NS_PER_MS = 5e4;
+const LIVE_EDGE_NS_PER_FRAME = 2e5;
+/**
+ * The frame budget a [[drive]] is bounded by — **frames, not milliseconds** (T-537).
+ *
+ * Wall time is the wrong budget for "let this converge": under load a `setTimeout(10)` fires 700 ms
+ * late, so a 700 ms budget bought a single frame and the test then asked its question of the opening
+ * frame. Frames are the unit the thing under test actually advances in, and each one here is
+ * followed by a settle, so the count means the same on an idle machine and a saturated one.
+ *
+ * The real-time rate limits inside `TileCache` (a 250 ms edge scan, a per-lane duty cycle of
+ * `REFRESH_DUTY x` the measured service time) are not bypassed and are not meant to be: they are
+ * part of the behaviour under test. They are satisfied by the pacing sleep below, and a machine so
+ * loaded that frames are slow satisfies them in FEWER frames, never more.
+ */
+const MAX_FRAMES = 600;
+/**
+ * Frames the CONTROL keeps drawing after it has filled, to make "nothing was refreshed" a claim
+ * about a run rather than about a first fill. It is a fixed count rather than the live arm's own
+ * (which stops as soon as its property arrives, so it varies), and comfortably more than the live
+ * arm needs — 94 frames idle, and fewer under load, because the gates it waits on are real-time
+ * ones that a slow frame satisfies in fewer frames — so the control is never the shorter exercise.
+ */
+const CONTROL_FRAMES = 250;
 
 function liveHarness({ live = true } = {}) {
   const g = stubGl(1200, 600);
   const asked: TileAddr[] = [];
-  const t0 = Date.now();
+  /** The virtual capture clock, in ns advanced. [[drive]] steps it; nothing reads a wall clock. */
+  const clock = { ns: 0 };
   const fetchFn = async (url: string) => {
     const a = parseTileUrl(url);
     asked.push(a);
@@ -434,20 +473,84 @@ function liveHarness({ live = true } = {}) {
   const preview = new SurfacePreview({
     canvas: g.canvas, probe, token: "t", fetchFn, chrome: null, minimapPx: 120,
     // The ONE difference between the two arms: whether a growing edge is reported in at all.
-    edge: live ? () => probe.origin.edgeNs + (Date.now() - t0) * LIVE_EDGE_NS_PER_MS : null,
+    edge: live ? () => probe.origin.edgeNs + clock.ns : null,
   });
-  return { g, preview, asked };
+  return { g, preview, asked, clock };
 }
 
-/** Draw frames for `ms` of real time, letting every fetch settle between them. */
-async function run(preview: SurfacePreview, ms: number) {
-  const t0 = Date.now();
-  while (Date.now() - t0 < ms) {
-    preview.frame();
-    await flush();
-    await new Promise((r) => setTimeout(r, 10));
-  }
+/** What a [[drive]] measured: whether the property arrived, and what was true when it stopped. */
+interface Drive {
+  /** Did `want()` hold before the frame budget ran out? */
+  readonly ok: boolean;
+  readonly frames: number;
+  /** Wall time the drive took. **Reported, never asserted on** — it is load, not behaviour. */
+  readonly ms: number;
+  /** The last frame's per-viewport `PaneReport`s, formatted for a failure message. */
+  readonly last: string;
+  readonly stats: string;
+  /**
+   * Frames on which a viewport reported `pending` although **no new address was requested that
+   * frame** — i.e. it went back to pending for a place it already held.
+   *
+   * This is the deterministic form of "a refresh must never put a pane back to pending". The old
+   * form read `pending` off the last frame, which is also non-zero for the one frame after a
+   * following pane's window slides across a tile boundary and discovers a genuinely new address —
+   * a legitimate miss that the edge's own motion produces, and which an instant sample cannot tell
+   * from the defect. `stats.distinctKeys` is `everRequested.size`, so comparing it across the frame
+   * separates the two exactly: a new place explains a pending, a place already in hand does not.
+   */
+  readonly heldThenPending: string[];
 }
+
+/**
+ * Draw frames, stepping the virtual capture clock once per frame, **until `want()` holds** or the
+ * frame budget runs out. Never throws: the caller states the claim and reports the measurement.
+ *
+ * The 1 ms pace is what lets `TileCache`'s own real-time gates elapse; it is not a budget, and
+ * nothing here is asserted against elapsed time.
+ */
+async function drive(
+  preview: SurfacePreview,
+  clock: { ns: number },
+  want: () => boolean,
+  { frames = MAX_FRAMES, watchPending = false } = {},
+): Promise<Drive> {
+  const t0 = Date.now();
+  const cache = preview.view.surface.cache;
+  const heldThenPending: string[] = [];
+  let last = "";
+  let drawn = 0;
+  for (let n = 0; n < frames; n++) {
+    drawn++;
+    clock.ns += LIVE_EDGE_NS_PER_FRAME;
+    const discovered = cache.stats.distinctKeys;
+    const f = preview.frame();
+    last = `frame ${n + 1}: ` + f.reports.map((r) =>
+      `${r.id}[level ${r.levelF}/${r.levelT} · ${r.tiles} tiles · ${r.fallbacks} coarse · ` +
+      `${r.pending} pending · ${r.refused} refused]`).join("  ");
+    if (watchPending && cache.stats.distinctKeys === discovered) {
+      for (const r of f.reports) if (r.pending > 0) { heldThenPending.push(last); break; }
+    }
+    // Settle every fetch this frame issued. Twice: the stub answers in microtasks, and one
+    // `setImmediate` is only guaranteed to be after the microtasks queued before it.
+    await flush();
+    await flush();
+    if (want()) break;
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  const s = cache.stats;
+  return {
+    ok: want(), frames: drawn, ms: Date.now() - t0, last, heldThenPending,
+    stats: `${cache.residentTiles} resident · ${s.requests} requests · ${s.distinctKeys} distinct · ` +
+      `${s.edgeRefreshes} refreshes (${s.edgeRefreshApplied} applied) · ${s.failures} failures · ` +
+      `${s.cancelled} cancelled · ${s.evictions} evictions`,
+  };
+}
+
+/** Every viewport is drawing its own tiles and waiting for none: the premise both guards rest on. */
+const allResident = (preview: SurfacePreview) => () =>
+  !!preview.lastFrame && preview.lastFrame.reports.length > 0 &&
+  preview.lastFrame.reports.every((r) => r.tiles > 0 && r.pending === 0);
 
 const repeats = (asked: TileAddr[]) => {
   const seen = new Set<string>(), again = new Set<string>();
@@ -455,42 +558,76 @@ const repeats = (asked: TileAddr[]) => {
   return again;
 };
 
-test("a FOLLOWING pane re-asks for the live-edge tile: the rows recorded since are fetched", async () => {
-  const { preview, asked } = liveHarness();
+// **Both arms are driven in FRAMES and stopped on the PROPERTY** (T-537). They were driven for a
+// fixed 700 ms of wall clock and then asked their question of `lastFrame`, and at load 129 that
+// budget bought exactly one frame — the opening one, before any answer could have arrived — so the
+// test reported "the renderer drew no resident tile this frame" about a frame drawn before the 157
+// tiles it was asking about existed. Residency, a repeat and an applied refresh are all properties
+// of the limit, not of an instant; each is now waited for with a stated budget and each failure
+// prints the value it measured. See [[MAX_FRAMES]] and [[LIVE_EDGE_NS_PER_FRAME]].
+
+test("a FOLLOWING pane re-asks for the live-edge tile: the rows recorded since are fetched", async (t) => {
+  const { preview, asked, clock } = liveHarness();
   assert.equal(preview.view.panes.isFollowing(preview.activePane), true,
     "a reported edge opens the first pane following — otherwise this tests nothing");
-  await run(preview, 700);
-  assertTilesArrived(preview);
-
   const cache = preview.view.surface.cache;
-  const again = repeats(asked);
-  assert.ok(again.size > 0,
-    "no address was ever asked for twice in 700 ms on a following pane: this is T-460, the frozen live edge");
-  assert.ok(cache.stats.edgeRefreshApplied > 0,
-    `${cache.stats.edgeRefreshes} refresh(es) issued but none replaced a resident tile — asking is not arriving`);
+
+  // 1. The premise: the ordinary path works and every viewport is drawing its own tiles. A repeat
+  //    count is only evidence about the refresh lane once this holds.
+  const filled = await drive(preview, clock, allResident(preview));
+  assertTilesArrived(preview, filled);
+
+  // 2. The claim: with the edge advancing, the live-edge tile is asked for AGAIN and the answer
+  //    replaces the resident copy. Both are waited for, because both are things that arrive.
+  const again = () => repeats(asked);
+  const refreshed = await drive(preview, clock,
+    () => cache.stats.edgeRefreshApplied > 0 && again().size > 0,
+    { frames: MAX_FRAMES - filled.frames, watchPending: true });
+  assert.ok(refreshed.ok,
+    `over ${filled.frames + refreshed.frames} frames on a following pane whose edge advanced ` +
+    `${((filled.frames + refreshed.frames) * LIVE_EDGE_NS_PER_FRAME) / 1e6} ms of capture, ` +
+    `${again().size} address(es) were asked for twice and ${cache.stats.edgeRefreshApplied} of ` +
+    `${cache.stats.edgeRefreshes} refresh(es) replaced a resident tile. This is T-460, the frozen ` +
+    `live edge: the rows were recorded and served, and the client stopped asking.\n  ${refreshed.stats}\n  ${refreshed.last}`);
+  // **Printed on a PASS too**, because the numbers that drifting would silently make this test
+  // vacuous — how few frames of the budget it actually needs, and how far the edge moved inside one
+  // 512 ms tile — are invisible in a green tick. [[CONTROL_FRAMES]] is sized off the first of them.
+  t.diagnostic(`filled in ${filled.frames} frames (${filled.ms} ms); the live edge was re-asked and ` +
+    `applied ${refreshed.frames} frames later (${refreshed.ms} ms), the edge having advanced ` +
+    `${((filled.frames + refreshed.frames) * LIVE_EDGE_NS_PER_FRAME) / 1e6} ms of capture out of ` +
+    `${MAX_FRAMES} frames budgeted. ${refreshed.stats}`);
+
   // Every repeat is a live-edge tile at the level the pane was DRAWN at, never a parent pin and
   // never a tile some other viewport wanted.
   const drawn = preview.lastFrame!.reports.find((r) => r.id === preview.activePane)!;
-  for (const k of again) {
+  for (const k of again()) {
     const a = parseKey(k)!;
     assert.equal(a.levelT, drawn.levelT, `refreshed ${k}, which the pane is not drawing`);
     assert.equal(a.levelF, drawn.levelF, `refreshed ${k}, which the pane is not drawing`);
   }
-  assert.deepEqual(preview.lastFrame!.reports.map((r) => r.pending), preview.lastFrame!.reports.map(() => 0),
-    "a refresh must never put a pane back to pending: the stale copy stays drawn until the new one lands");
+  assert.deepEqual(refreshed.heldThenPending, [],
+    "a refresh must never put a pane back to pending: the stale copy stays drawn until the new one " +
+    "lands. These frames reported pending without requesting a new address, so the place was one " +
+    "already in hand:\n  " + refreshed.heldThenPending.join("\n  "));
 });
 
 test("…and the CONTROL: T-450's historical preview refreshes NOTHING", async () => {
   // Non-vacuity for the test above, and the guarantee this ticket owed the preview page: with no
   // edge reported in, every viewport is frozen, the data under it cannot change, and a refresh
   // would be cost with nothing to show for it.
-  const { preview, asked } = liveHarness({ live: false });
+  const { preview, asked, clock } = liveHarness({ live: false });
   assert.equal(preview.view.panes.isFollowing(preview.activePane), false);
-  await run(preview, 700);
-  assertTilesArrived(preview);
+  const filled = await drive(preview, clock, allResident(preview));
+  assertTilesArrived(preview, filled);
+  // And then the same exercise the live arm gets: frames, and a clock that steps — which nothing
+  // here reads, because no edge is reported in. A control that stopped at the first fill would be
+  // asserting that nothing happened in less work than the arm it is the control for.
+  const idle = await drive(preview, clock, () => false, { frames: CONTROL_FRAMES });
   assert.equal(preview.view.surface.cache.stats.edgeRefreshes, 0,
-    "the historical preview issued a refresh, and nothing there is following a growing edge");
-  assert.equal(repeats(asked).size, 0, "the historical preview re-asked for a tile whose data cannot change");
+    "the historical preview issued a refresh, and nothing there is following a growing edge.\n  " + idle.stats);
+  assert.equal(repeats(asked).size, 0,
+    `the historical preview re-asked for a tile whose data cannot change, over ${idle.frames} idle ` +
+    `frames.\n  ${idle.stats}`);
 });
 
 test("no live-edge mark is drawn: the active-capture list is never even read here", () => {
