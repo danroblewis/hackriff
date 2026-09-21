@@ -13068,7 +13068,8 @@ tasks:
   - id: T-462
     milestone: MLIVE
     title: Make the level_f=0 time column incrementally maintained - the 15 coarse nodes, not the whole lattice
-    status: todo
+    status: cancelled
+    cancelled_reason: "Absorbed by T-571 (user perf review S1, 2026-09-21). T-462 scoped only the in-memory incremental fold and left coarse tiles written-on-demand, which is what leaves the read-time fold in place; T-571 carries its measurements forward and commits every N."
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -17259,6 +17260,143 @@ tasks:
       direction: it converts "support many more decode types" from a per-decoder engineering
       cost into a data-entry cost, for every protocol whose structure the existing block
       catalogue can already express.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-571
+    milestone: MLIVE
+    title: Coarse view-lattice tiles are folded ON DEMAND at read time - up to 1024 producer tiles per tile - instead of maintained live
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: high
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER PRIORITY, FILED 2026-09-21 FROM THE USER'S PERF REVIEW (their S1). THE USER HAS ASKED FOR
+      LIVE TILES REPEATEDLY; THIS IS THE PRIMARY CAUSE OF TILE SLOWNESS AND IT IS A STANDING
+      INVARIANT VIOLATION, NOT AN OPTIMISATION.
+      CLAUDE.md, "Live rendering, tile maintenance and playback": "Tiles are maintained LIVE and
+      INCREMENTALLY, per downsample interval... A level that downsamples every N rows adjusts its
+      in-progress top row as rows arrive and COMMITS EVERY N - the same rule at 2, 4, 8, 16, 32.
+      Coarse levels are incrementally maintained structures, NOT batch materialize-on-demand work."
+      What the code does instead: a coarse tile is FOLDED AT READ TIME from its producers, up to
+      1024 producer tiles for one coarse tile, so a cold screen pays 50-110 s. That is the
+      "batch materialize-on-demand" the invariant names, and the live edge is gated on it.
+      THE FIX: true streaming incremental coarse maintenance. Each level keeps its in-progress top
+      row, adjusts it as rows arrive, and COMMITS EVERY N. Per arriving row the work is O(1) per
+      level and residency is O(levels), not O(tiles). A coarse tile read then becomes an ordinary
+      disk read of an already-committed tile.
+      ABSORBS T-462, WHICH IS CANCELLED IN FAVOUR OF THIS. T-462 scoped the in-memory incremental
+      fold and concluded coarse tiles should stay WRITTEN-ON-DEMAND; that half-measure is what
+      leaves the read-time fold in place. Its measurements stand and are the starting point:
+      level 0 is ALREADY incrementally maintained, so only the coarse nodes are at issue;
+      per-row folding of the whole lattice is ~4.5x today's level-0 arithmetic, about 0.7 percent
+      of one core on the hk-view ViewWriter thread, which already cannot reach the ring; and the
+      real cost is RESIDENCY - 2 open accumulators become 32, about 18 MB -> 145 MB at a 20 MHz
+      edge, which is why T-462 proposed building only the level_f=0 time column (+18 MB). Decide
+      that residency question explicitly here and state the number; do not inherit it silently.
+      T-453'S CONSTRAINT STILL BINDS AND IS WHAT TO MEASURE AGAINST: work on the capture thread is
+      paid whether or not anyone looks, and that thread gates the ring, so PER-ARRIVING-ROW COST
+      MUST BE MEASURED, NOT ASSUMED, and residency must not grow back with node count. Note that
+      T-453's own regression was FILE WRITES under 28-way harness concurrency (5.1x wall for
+      IDENTICAL CPU and RSS - the runs were WAITING, not computing), so commit-every-N must be
+      counted in WRITES, not guessed.
+      HOW TO ASSERT IT (USER, 2026-09-21): COUNT ASSERTIONS AND A RESPONSE-SIZE CAP, NEVER A
+      WALL-CLOCK BUDGET. A wall-clock bound measures the machine, not the code - T-537 is the
+      precedent, where a 700 ms budget bought exactly one frame under load. So assert: the number
+      of producer tiles read to serve a coarse tile is O(1) (1, not up to 1024); the number of
+      tile-generation runs triggered by a viewport read is ZERO; per-arriving-row fold work and
+      writes are bounded per level and do not grow with node count; a response-size cap on the
+      tile route. Each of these fails legibly and holds under any load.
+      Prove the tests go RED without the fix (standing project rule).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-572
+    milestone: MLIVE
+    title: An in-memory hot-tile LRU - a viewport re-read goes to RAM, not to the filesystem
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      Filed 2026-09-21 from the user's perf review (their S2), one of three fast wins behind T-571.
+      A viewport that has not moved re-reads the same tiles from the filesystem every poll. Hold a
+      bounded in-memory LRU of hot tiles in front of the tile route.
+      BOUNDED IS THE POINT: state the cap in bytes and in entries, and make eviction observable.
+      An unbounded cache is the "no unbounded accumulators" rule broken in a new place.
+      INVALIDATION IS THE CORRECTNESS RISK, NOT THE SPEED: a SEALED tile is immutable and may be
+      cached freely; a LIVE tile at the growing edge changes on every arriving row and must never
+      be served stale. Make that distinction explicit in the cache key/policy, and test it -
+      "show all the data that exists" is violated by a stale live tile just as much as by a
+      missing one.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): filesystem reads per repeated
+      viewport poll drops to zero for sealed tiles; a live tile is re-read (or invalidated) on
+      every commit; cache entries and bytes stay under the stated cap under sustained scrolling.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-573
+    milestone: MLIVE
+    title: HTTP keep-alive and a BATCH /api/tiles endpoint - one request per viewport, not one per tile
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      Filed 2026-09-21 from the user's perf review (their S3), one of three fast wins behind T-571.
+      A viewport needs many tiles and asks for them one HTTP request at a time. Add a BATCH tile
+      endpoint that takes the viewport's tile addresses in one request and returns them together,
+      and make sure connections are kept alive rather than re-established per tile.
+      THE BATCH ROUTE IS A CORE INTERFACE: adding it means updating `docs/api.md` AND its contract
+      tests (`crates/hk-cli/tests/api_contract.rs`) TOGETHER (T-079).
+      A PARTIAL ANSWER MUST STAY HONEST. The batch response must distinguish, per address, the
+      three marks the canvas already depends on: data, genuinely-unobserved, and
+      observed-but-not-yet-measured. A batch that collapses a missing tile into an empty one
+      recreates the exact defect the coverage map exists to prevent. A tile with no data is still
+      answered immediately from the coverage map and never runs the generation path.
+      RESPONSE-SIZE CAP IS PART OF THE CONTRACT (user, 2026-09-21): state a maximum number of
+      addresses per request and a maximum response size, and define what the route does when a
+      viewport exceeds them - refuse, or truncate with the remainder addressable. An unbounded
+      batch endpoint is a new way to stall the live edge.
+      ASSERT WITH COUNTS AND SIZES, NOT WALL-CLOCK: HTTP requests per viewport render drops to a
+      small constant; connections opened per render is bounded; the cap is enforced and its
+      refusal/truncation is asserted; the per-address marks survive batching.
+      ALSO GUARD THE CLIENT SIDE: no gate covers a client asking for the wrong thing (T-367
+      requested /api/timeline with no band and drew an empty canvas while every suite stayed
+      green). Assert the REQUEST the client builds in `ui/test`, not only the response it renders.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-574
+    milestone: MLIVE
+    title: Sealed tiles are immutable - serve them with an ETag and a long immutable cache, so a re-read is a 304
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      Filed 2026-09-21 from the user's perf review (their S4), one of three fast wins behind T-571.
+      A sealed tile can never change again, so it should carry an ETag and a long immutable
+      cache-control, and a re-read should be a 304 rather than a re-transfer.
+      THE SEALED/LIVE DISTINCTION IS THE WHOLE TICKET, and getting it wrong is a correctness bug,
+      not a performance one. A LIVE tile at the growing edge changes on every arriving row and
+      must NEVER be served as immutable - that would freeze the live edge in the browser cache,
+      which is the "we have it but did not render it" bug with a new cause. Derive
+      sealed-vs-live from the tile's own state, not from its age or from a guess.
+      ASSERT WITH COUNTS AND STATUS CODES, NOT WALL-CLOCK (user, 2026-09-21): a repeated request
+      for a sealed tile returns 304 and transfers no body; a live tile is never served with an
+      immutable cache-control and never returns a stale 304; bytes transferred per repeated
+      viewport poll drops to zero for the sealed part of the viewport. A response-size assertion
+      belongs here too, since the point of the ticket is bytes not transferred.
+      Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
