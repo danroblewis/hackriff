@@ -3516,6 +3516,10 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+    high_effort_reason: "T-563: GPU-provider integration under the hk-ml conformance suite, mirrored
+      from a Mac provider design nobody has run on this hardware yet - the kind of dropped-samples/
+      throughput judgment call model-selection.md reserves high effort for, not a bounded single-crate
+      change with an obvious test."
     rehomed_2026_09_16: 'Moved from its original milestone to M7 (Device hardening + TX, the hardware
       phase), which is when Jetson work begins. Status, needs: hardware and parallel_group JET are
       unchanged - still blocked on the Jetson purchase. This only stops it reading as a straggler
@@ -4920,9 +4924,15 @@ tasks:
     acceptance: 'tiered against the existing permanent ids, minting none: SIGNAL-027 (Meteor-M LRPT 137.1/137.9 MHz) and SIGNAL-029 (NOAA POES 137 MHz) are NATIVE - a simple V-dipole or QFH, no dish - via SatDump as the reused decoder, not a reimplementation; SIGNAL-025 (GOES HRIT 1694.1 MHz) and SIGNAL-028 (~1.7 GHz AHRPT) need a dish plus LNA; SIGNAL-040 X-band ~8 GHz is ABOVE THE 6 GHz CEILING and must be retagged out-of-band by T-258 rather than reading as needs-accessory. Hardware captures are user-triggered'
     area: plugins/ (SatDump wrapper), crates/hk-context, docs/use-cases.yaml
     needs: none
-    model: opus
-    effort: high
+    model: sonnet
+    effort: medium
     core_interface: false
+    retiered_2026_09_21: "T-563: was opus/high with no core_interface flag and no stated reason.
+      This is a SatDump plugin wrap plus hardware_fit/fit_note tiering of four already-permanent
+      use-case ids against an existing taxonomy - model-selection.md names both patterns
+      (\"wrapping existing decoders as plugins\", \"bulk mapping and classification work with a
+      fixed rubric\") as Sonnet/medium explicitly. Escalate one tier if T-258's coordination on
+      the X-band retag proves ambiguous."
   - id: T-276
     milestone: M5
     title: 'M5 pass scheduling: TLE / satellite-pass context feed drives the attention scheduler'
@@ -4937,7 +4947,11 @@ tasks:
     needs: none
     model: opus
     effort: high
-    core_interface: false
+    core_interface: true
+    retiered_2026_09_21: "T-563: was core_interface: false but this ticket changes the C04 attention
+      scheduler's reservation/pre-emption policy, which model-selection.md names explicitly under
+      Fable/Opus-high work and CLAUDE.md marks core_interface. Flagging it true is the accurate
+      record, not a downgrade - opus/high stands."
   - id: T-277
     milestone: M5
     title: 'M5 HF/VLF science front ends (accessory-gated)'
@@ -4949,9 +4963,13 @@ tasks:
     acceptance: 'the HF/VLF cluster behind its accessory (upconverter / VLF receiver + soundcard): SPACE-001 SID flare monitor, SPACE-041 research-grade ELF/VLF, PROP-019 phase and reflection height. Each stays needs-accessory and none is claimed reachable without it'
     area: crates/hk-core (source abstraction), docs/capabilities
     needs: none
-    model: opus
-    effort: high
+    model: sonnet
+    effort: medium
     core_interface: false
+    retiered_2026_09_21: "T-563: was opus/high with no core_interface flag and no stated reason.
+      This ticket's whole acceptance is tagging three already-permanent use-case ids as
+      needs-accessory in hardware_fit/fit_note - the fixed-rubric bulk-classification pattern
+      model-selection.md names for Sonnet/medium, not new capability design."
   - id: T-278
     milestone: M5
     title: 'M5 radiometry science (C33) behind a dish, and Ku via LNB'
@@ -4963,9 +4981,14 @@ tasks:
     acceptance: 'the radiometry cluster gated on a dish (and Ku behind an LNB): state the accessory in hardware_fit and fit_note for every use case it unlocks, and report what the 8-bit front end without preselection costs in radiometric accuracy rather than implying laboratory precision'
     area: crates/hk-dsp (radiometry), docs/capabilities/C33
     needs: none
-    model: opus
-    effort: high
+    model: sonnet
+    effort: medium
     core_interface: false
+    retiered_2026_09_21: "T-563: was opus/high with no core_interface flag and no stated reason.
+      Same bulk-tagging pattern as T-277 (hardware_fit/fit_note gating of existing use-case ids)
+      plus one stated accuracy caveat, not new detection logic. Escalation rule applies as-is if
+      the 8-bit/no-preselection radiometric-accuracy write-up turns out to need real DSP derivation
+      rather than a stated caveat."
   - id: T-279
     milestone: M1
     title: 'rds.recipe.json has no group-4A Clock-Time node, so RDS clock (CT) can
@@ -16833,6 +16856,56 @@ tasks:
       and (2): most of today's agents were Opus, and several briefs asked agents to re-measure things
       an earlier ticket had already measured.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      WORKED 2026-09-21 (branch task-t563). Part of lever (1) was already done before this ticket
+      started: `prompts/model-selection.md` already carries the complexity rubric and
+      `test_task_board.py` already stops a core_interface ticket going to a cheap model. What was
+      missing was measurement and the symmetric (over-tiering) check, per the ticket's own framing.
+
+      MEASURED DISTRIBUTION (open tickets, i.e. not done/cancelled/deferred/reverted - 86 before,
+      87 after filing T-620): opus/no-effort 39, opus/medium 18, opus/high 10, sonnet/no-effort 6,
+      sonnet/low 3, sonnet/medium 2->3 (after retiering), opus/xhigh 2, fable/high 1, unset 4. So
+      today's OPEN board is not "almost everything is Opus-high" - that was true of the historical
+      /perf window (184h across ~500 done tickets, mostly before the rubric existed), but the open
+      board is already mostly opus/medium or below when effort is set at all. The real gap in (1)
+      was enforcement, not distribution: nothing stopped a non-core-interface ticket sitting at
+      opus/high by default, and 39 open opus tickets have effort unset entirely (reviewable but not
+      yet enforced - left as a finding, not fixed here, since backfilling 39 judgment calls is not
+      a mechanical task).
+
+      LEVER 1, symmetric check: added `test_high_effort_opus_or_fable_tickets_justify_it` to
+      `py/tests/test_task_board.py`, the mirror of the existing core_interface-vs-cheap-model test.
+      Rule: an open opus/fable ticket at effort high|xhigh must be core_interface: true or carry an
+      explicit reason field. BEFORE CHOOSING IT, checked what it would flag: exactly 5 of 86 open
+      tickets (T-216, T-275, T-276, T-277, T-278) - small enough to inspect each on the honesty
+      requirement rather than write a rule that fails on legitimate work. Outcome: T-277/T-278/T-275
+      were genuinely over-tiered and retiered to sonnet/medium (they match model-selection.md's own
+      "bulk mapping/classification with a fixed rubric" and "wrapping existing decoders as plugins"
+      Sonnet patterns exactly); T-276 turned out to touch the C04 attention scheduler and was
+      correctly reflagged core_interface: true (opus/high stands, now accurately); T-216
+      (Jetson/TensorRT, hardware-blocked) got an explicit `high_effort_reason` since it is real
+      GPU-provider design work. The test now passes cleanly against the whole board (0 tickets
+      flagged) - not "fixed by weakening the rule", fixed by correcting three tickets and truing up
+      one flag.
+
+      LEVER 3, context cost: capability cards are NOT the re-reading cost - all 14 are 107-125
+      lines, already the cheap scoped design CLAUDE.md intends. ADRs are: 23-799 lines, and the
+      large ones are cited constantly (ADR-0016 784 lines / 49 ticket references, ADR-0017 530/28,
+      ADR-0015 681/24, ADR-0013 560/19, ADR-0012 799/16, ADR-0011 558/15). A brief that names
+      "ADR-0016" with no section pointer pays for the whole 784-line document every time a fresh
+      agent is briefed into that area. Filed T-620 rather than editing the ADRs myself - CLAUDE.md
+      requires Fable + the user for any change to a settled ADR, and even a non-decision structural
+      addition (a table of contents) needs that sign-off first per the same rule; T-620 states the
+      three candidate fixes and which one needs that approval before landing.
+
+      LEVER 2 (fewer round-trips): not separately measured this session - it is a per-brief
+      discipline (CLAUDE.md already states it, e.g. "make all of the independent calls in the same
+      block"); no board-level artifact to check it against was found, so nothing filed for it beyond
+      noting it's covered by existing instruction text, not a gap.
+
+      NOT DONE: the DoD's "a measurable drop in model time per landed ticket" needs a day of tickets
+      landing under the corrected board to check against /perf, which this single session cannot
+      produce - that's the honest state to hand back with rather than claiming it.
   - id: T-564
     milestone: M3
     title: "The synthetic grid's delivered analysis geometry is a statistic of the noise - OBW99 moves 2x with SNR on 23 percent of ladders"
@@ -20158,6 +20231,47 @@ tasks:
       implying resolution it never captured.
       ASSERT WITH COUNTS, NOT WALL-CLOCK: a four-level 100 %-duty emission placed OUTSIDE the
       trigger band is found, or the ticket records why it cannot be.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-620
+    milestone: M2-hardening
+    title: "Briefs point agents at whole ADRs, not sections - the biggest ones are read in full repeatedly"
+    status: todo
+    priority: normal
+    parallel_group: CI
+    model: opus
+    effort: medium
+    core_interface: false
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-563's lever-3 measurement: docs/capabilities/*.md cards are NOT the problem - all
+      14 are 107-125 lines, exactly the cheap, scoped-small design CLAUDE.md describes. The cost is
+      ADRs. `docs/adr/*.md` ranges 23-799 lines; the largest are named by open+closed tickets a LOT:
+      ADR-0016 (784 lines) by 49 tickets, ADR-0017 (530 lines) by 28, ADR-0015 (681 lines) by 24,
+      ADR-0013 (560 lines) by 19, ADR-0012 (799 lines) by 16, ADR-0011 (558 lines) by 15. CLAUDE.md
+      tells agents to "read the ADRs a task names", with no per-task pointer to a section, so a task
+      that names ADR-0016 for one contract (say, the taxonomy-versioning rule) has no way to avoid
+      paying for the whole 784-line document, every time a fresh agent is briefed into that area -
+      and a fresh agent is briefed into ADR-0016's area on the order of once every couple of tickets,
+      given 49 references.
+      THE FIX IS NOT TO SHRINK THE ADRs. CLAUDE.md: "changing an ACCEPTED ADR goes to Fable + the
+      user" - this ticket must not edit ADR content, and splitting/summarising one is a change to a
+      settled document, not a formatting nit.
+      WHAT TO DO INSTEAD: (a) add a short "date/agents cite this ADR mostly for: <section>" pointer
+      to each `use_cases`/task-entry citation going forward, OR (b) add a table of contents with
+      line-anchored section names at the top of the 6+ large ADRs (a structural aid, arguably not a
+      decision change - confirm with Fable/the user before landing it, per the ADR-change rule) so a
+      brief can say "ADR-0016 SS3-4" instead of "ADR-0016", OR (c) if neither is cheap, at minimum
+      change the *briefing convention* in CLAUDE.md/coordinator role docs so a task entry that names
+      a >300-line ADR also names the section, going forward - cheapest lever, no ADR content touched.
+      MEASURE, do not assume: before landing anything, get a rough token cost of "read ADR-0016 in
+      full" vs "read the ~80-line section a task actually needs" from a live brief, so the fix is
+      justified by a number rather than the plausible story above.
+    notes: |
+      Filed by T-563 (2026-09-21), which found this while checking lever 3 (context re-reading) and
+      deliberately did not fix it itself - editing ADR content is a Fable+user decision, and the
+      cheapest fix (b) needs to be run past that rule before landing, not assumed to be a formatting
+      nit.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

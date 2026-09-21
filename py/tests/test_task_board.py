@@ -151,6 +151,51 @@ def test_effort_is_a_known_tier_and_core_interface_never_goes_to_a_cheap_model(r
                 "Sonnet or Haiku alone"
             )
 
+def test_high_effort_opus_or_fable_tickets_justify_it(records) -> None:
+    """The symmetric check to the one above: over-tiering, not just under-tiering (T-563).
+
+    The existing test stops a core_interface ticket going to a cheap model. Nothing stopped the
+    opposite mistake, which is the one the /perf measurement actually blamed: a ticket landing on
+    Opus at high/xhigh effort by habit rather than by the rubric in `prompts/model-selection.md`.
+    Measured on 2026-09-21: 5 of 86 open tickets were `model: opus`, `effort: high|xhigh`, with
+    `core_interface` not `true` and no stated reason - T-216, T-275, T-276, T-277, T-278. Three
+    matched the rubric's own Sonnet/medium patterns ("bulk mapping and classification work with a
+    fixed rubric", "wrapping existing decoders as plugins") and were retiered; one turned out to
+    genuinely touch the C04 attention scheduler and was correctly reflagged core_interface: true;
+    one (Jetson/TensorRT, blocked on hardware) got an explicit `high_effort_reason` because it is
+    real GPU-provider design work, not a bounded change.
+
+    So the rule: an open, non-cheap-model-exempt ticket at `effort: high` or `xhigh` on `opus` or
+    `fable` must carry either `core_interface: true` or a non-empty reason field explaining why
+    (`high_effort_reason:`, or any `*_reason:`/`retiered_*:` key recording the same judgment call).
+    This is deliberately a presence check, not a correctness check - it cannot tell a good reason
+    from a bad one, only that someone stated one instead of defaulting to the expensive tier. That
+    is enough to make the choice reviewable, which is what CLAUDE.md's tiering conventions ask for.
+
+    Checked against the whole open board before landing: this flagged exactly the 5 tickets above
+    and nothing else, so it isn't a rule that would fail on legitimate work - the standard T-563
+    itself sets ("if a rule would fail on many existing legitimate tickets, that rule is wrong").
+    """
+    expensive = {"opus", "fable"}
+    for tid, rec in records:
+        if rec.get("status") in {"done", "cancelled", "deferred", "reverted"}:
+            continue
+        if rec.get("model") not in expensive:
+            continue
+        if rec.get("effort") not in {"high", "xhigh"}:
+            continue
+        if rec.get("core_interface") == "true":
+            continue
+        has_reason = any(
+            key.endswith("_reason") or key.startswith("retiered_") for key in rec
+        )
+        assert has_reason, (
+            f"{tid} is {rec.get('model')}/{rec.get('effort')} but is not core_interface and states "
+            "no reason (a *_reason or retiered_* field); either justify the tier explicitly or "
+            "drop to the rubric's default in prompts/model-selection.md"
+        )
+
+
 def test_no_ticket_lost_its_body_to_a_merge(records) -> None:
     """A truncated ticket is the failure a YAML parser cannot see.
 
