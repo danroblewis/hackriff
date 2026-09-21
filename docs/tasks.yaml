@@ -6008,7 +6008,8 @@ tasks:
     milestone: M2-hardening
     title: The /api/baselines chain field is documented but not contract-tested, so docs and contract can
       drift
-    status: deferred
+    status: done
+    commit: "33bed846"
     priority: low
     deps:
     - T-303
@@ -6023,6 +6024,7 @@ tasks:
       a test failing is documentation, not a contract. Report any others found rather than fixing them all
       here
     notes: |
+      DELIVERED by the T-502 batch (33bed846); the board was left saying deferred.
       SUPERSEDED BY T-502 (2026-09-18): batched with the other hk-api
       field-consistency fixes into one ticket, one agent session and one gate. The merge
       queue, not builder capacity, is the bottleneck - four separate merges of four
@@ -6963,7 +6965,8 @@ tasks:
     milestone: M2-hardening
     title: /api/status carries no server timestamp, and scheduler leases carry a duration with no start
       or expiry
-    status: deferred
+    status: done
+    commit: "33bed846"
     priority: low
     deps:
     - T-337
@@ -6977,6 +6980,7 @@ tasks:
       to status; give leases an absolute start and expiry rather than a bare duration. Update docs/api.md
       and api_contract.rs together per T-079, asserting values
     notes: |
+      DELIVERED by the T-502 batch (33bed846); the board was left saying deferred.
       SUPERSEDED BY T-502 (2026-09-18): batched with the other hk-api
       field-consistency fixes into one ticket, one agent session and one gate. The merge
       queue, not builder capacity, is the bottleneck - four separate merges of four
@@ -7056,7 +7060,8 @@ tasks:
     milestone: M2-hardening
     title: 'Frequency fields are inconsistently suffixed: FreqRange says lo_hz but several envelopes answer
       bare f_lo'
-    status: deferred
+    status: done
+    commit: "33bed846"
     priority: low
     deps:
     - T-349
@@ -7070,6 +7075,7 @@ tasks:
       did, and remove the exemptions so the detector covers frequencies too. Update docs/api.md and api_contract.rs
       together per T-079, asserting values
     notes: |
+      DELIVERED by the T-502 batch (33bed846); the board was left saying deferred.
       SUPERSEDED BY T-502 (2026-09-18): batched with the other hk-api
       field-consistency fixes into one ticket, one agent session and one gate. The merge
       queue, not builder capacity, is the bottleneck - four separate merges of four
@@ -7508,7 +7514,8 @@ tasks:
     milestone: M2-hardening
     title: /api/selections/{id}/watch serves nanoseconds under a bare t, and the unit sweep cannot reach
       it
-    status: deferred
+    status: done
+    commit: "33bed846"
     priority: normal
     deps:
     - T-354
@@ -7527,6 +7534,7 @@ tasks:
       A detector that cannot reach a route is not evidence about that route, and this is now the second
       field it missed for that reason rather than for a listing error'
     notes: |
+      DELIVERED by the T-502 batch (33bed846); the board was left saying deferred.
       SUPERSEDED BY T-502 (2026-09-18): batched with the other hk-api
       field-consistency fixes into one ticket, one agent session and one gate. The merge
       queue, not builder capacity, is the bottleneck - four separate merges of four
@@ -7874,7 +7882,7 @@ tasks:
   - id: T-380
     title: One view window, even with multiple SDRs - extra front ends widen coverage, they never split the view
     milestone: M2-hardening
-    status: deferred
+    status: done
     priority: normal
     parallel_group: UI
     core_interface: true
@@ -7913,7 +7921,11 @@ tasks:
       solve, and it is now §8.4 rather than a separate ticket.
       Deferred rather than cancelled: if the T-437 spike does not prove out, this invariant still
       needs a home and this ticket is it.
-
+    notes: |
+      CLOSED 2026-09-20 on verification, not on work: MCANVAS made the UI ONE surface over one
+      (time x frequency) window, which is the invariant this ticket asked for. Panes are where you
+      look from, not extra subjects, and a pane's device only chooses whose coverage decides its
+      grey. Nothing further to build.
   - id: T-381
     title: The slots row still does not name its receive chain, the same gap T-371 just closed for the bias tee
     milestone: M4
@@ -12814,7 +12826,8 @@ tasks:
   - id: T-459
     milestone: MCANVAS
     title: Axis ticks with labels - each viewport states its window as a readout, and a readout is not a ruler
-    status: deferred
+    status: done
+    commit: "71a4a341"
     priority: low
     parallel_group: CANVAS-FE
     depends_on: [T-445]
@@ -12832,6 +12845,7 @@ tasks:
       Honesty applies: a tick interval finer than the cell size drawn would imply resolution the
       hardware did not capture, which docs/16's honesty tiers forbid.
     notes: |
+      DELIVERED by the T-503 batch (71a4a341); the board was left saying deferred.
       SUPERSEDED BY T-503 (2026-09-18): batched with the other visible UI-polish
       tickets into one ticket, one agent session and one gate. Deferred rather than
       cancelled - the work is wanted, it travels with T-503.
@@ -13302,7 +13316,7 @@ tasks:
   - id: T-471
     milestone: MCANVAS
     title: Prefetch a bounded ring of tiles around the viewport, at lower priority, cancelled on move
-    status: todo
+    status: cancelled
     commit: "c38cb349"
     priority: low
     parallel_group: CANVAS-FE
@@ -13328,6 +13342,10 @@ tasks:
       prefetches; the memory bound holds under a pan storm; and T-454's peak-at-cap property still
       holds exactly, since that is the guard that proves the cap is respected.
     notes: |
+      ABANDONED 2026-09-20: merged, then REVERTED off main (70ebe71f) after bisection showed it made
+      main red - it charged the tile route a slot for a speculative read it then abandoned, and gated
+      its own backoff on the budget rather than the cap. The re-land, with the requirements it must
+      meet, is T-538; the guard that missed it is now non-vacuous.
       Filed 2026-09-17 from /tmp/claude-501/surface-polish-brief.md item 2. Low priority, explicitly.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-472
@@ -13422,7 +13440,8 @@ tasks:
   - id: T-474
     milestone: M2-hardening
     title: A --loop replay makes capture time go BACKWARDS while the client's edge clamps monotone
-    status: in-progress
+    status: done
+    commit: "7361fe82"
     priority: normal
     parallel_group: PIPE
     depends_on: []
@@ -14089,7 +14108,8 @@ tasks:
   - id: T-485
     milestone: MCANVAS
     title: A SHADOW tier - echo an earlier scan into unobserved cells, render-time only, never stored and never detected on
-    status: todo
+    status: done
+    commit: "2ec2179e"
     priority: low
     parallel_group: CANVAS-FE
     depends_on: [T-483, T-484]
@@ -14137,6 +14157,12 @@ tasks:
       inspection; the tier is visually distinct from all three honest tiers AND from grey; its age is
       stated; and the coverage map is byte-identical with shadows on and off.
     notes: |
+      DELIVERED by the fog-of-war chain: T-519 (last-known carry-forward query + shadow plane),
+      T-520 (the client's dim scanlined SHADOW tier) and T-527 (every time gap in an observed
+      column). ONE DELIBERATE NARROWING, on the user's later instruction: a cell NEVER observed
+      stays GREY rather than borrowing a prior-date scan - swept-then-departed is shadow, never
+      swept is grey, re-swept is bright. The honesty rule this ticket insisted on is kept and is
+      guarded by T-521's standing e2e.
       Filed 2026-09-18 from a user idea, LOW priority and explicitly not to be prioritised. The queue
       stays T-460, then T-483/T-484 (fidelity), then the canvas e2e (T-481).
       Depends on T-483/T-484 because the fidelity work decides what the finest live tier actually
@@ -14590,7 +14616,8 @@ tasks:
   - id: T-493
     milestone: M2-hardening
     title: The hk-plugins spawn race is capped at 8 threads where T-257 measured zero only at 6
-    status: in-progress
+    status: done
+    commit: "7361fe82"
     priority: normal
     parallel_group: CI
     depends_on: []
@@ -14734,7 +14761,8 @@ tasks:
   - id: T-496
     milestone: MCANVAS
     title: Capture width is changeable but not discoverable - it is a side effect of zoom-then-retune
-    status: deferred
+    status: done
+    commit: "71a4a341"
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-476]
@@ -14770,6 +14798,7 @@ tasks:
       than hidden; T-340 passes verbatim; and one target-derivation path, demonstrated rather than
       asserted.
     notes: |
+      DELIVERED by the T-503 batch (71a4a341); the board was left saying deferred.
       SUPERSEDED BY T-503 (2026-09-18): batched with the other visible UI-polish
       tickets into one ticket, one agent session and one gate. Deferred rather than
       cancelled - the work is wanted, it travels with T-503.
@@ -14841,7 +14870,8 @@ tasks:
   - id: T-498
     milestone: MCANVAS
     title: The retune label states only the CENTRE, not the SPAN it will capture
-    status: deferred
+    status: done
+    commit: "71a4a341"
     priority: normal
     parallel_group: CANVAS-FE
     depends_on: [T-476]
@@ -14869,6 +14899,7 @@ tasks:
       to equal what the retune actually commits; the disabled wordings are unchanged; and T-476's
       existing e2e assertions still pass, with the label check updated rather than loosened.
     notes: |
+      DELIVERED by the T-503 batch (71a4a341); the board was left saying deferred.
       SUPERSEDED BY T-503 (2026-09-18): batched with the other visible UI-polish
       tickets into one ticket, one agent session and one gate. Deferred rather than
       cancelled - the work is wanted, it travels with T-503.
@@ -15146,7 +15177,8 @@ tasks:
   - id: T-506
     milestone: MCANVAS
     title: Remove the Capture panel - but first move the IQ horizon, the retention bound and the capture clock onto the canvas
-    status: in-progress
+    status: done
+    commit: "7361fe82"
     priority: high
     parallel_group: CANVAS-FE
     model: opus
@@ -15594,7 +15626,8 @@ tasks:
   - id: T-523
     milestone: MSCAN
     title: Fog-of-war regressed the live view - the live edge stalls until a resize, and zoom bursts draw 502s
-    status: in-progress
+    status: done
+    commit: "35386404"
     priority: high
     parallel_group: CANVAS-FE
     model: opus
@@ -15610,6 +15643,10 @@ tasks:
       regression test RED on main - live edge advances through a zoom burst with injected 502s and
       no resize; shadow-search cost cut and measured; honesty cap test kept meaningful.
     notes: |
+      DELIVERED. The retry taxonomy and the shadow-search budget landed on main at 35386404 (via a
+      coordinator commit that completed a staged merge - recorded honestly rather than tidied away);
+      the app-trace classifier fix landed via check-main (70ebe71f), and the live-edge unit guard it
+      exposed is T-537.
       PAUSED 2026-09-18 by the user (budget: DC notch only). CHECKPOINT task-t523 @ 91a2ee1e.
       MECHANISM CONFIRMED, AND IT IS NOT THE BACKOFF: tile.ts fetchTile turns a proxy 502/504 into a
       status error and tilecache.ts retryable() treats ANY status as terminal, so a place the tunnel
@@ -15650,7 +15687,8 @@ tasks:
   - id: T-525
     milestone: MSCAN
     title: A full 1-6000 MHz sweep on the LIVE HackRF crashes hk serve - a failed or edge retune must skip the step, never take the server down
-    status: in-progress
+    status: done
+    commit: "7361fe82"
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15726,7 +15764,8 @@ tasks:
   - id: T-528
     milestone: MSCAN
     title: Viewport-dynamic auto-contrast as a toggle - scale to what is on screen now
-    status: in-progress
+    status: done
+    commit: "7361fe82"
     priority: normal
     parallel_group: CANVAS-FE
     model: opus
@@ -15748,7 +15787,8 @@ tasks:
   - id: T-529
     milestone: MLIVE
     title: A UI retune is TWO posts down TWO paths, so T-508's one-shot mock fault lands on whichever wins - the test flakes on main
-    status: in-progress
+    status: done
+    commit: "7361fe82"
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -15778,7 +15818,8 @@ tasks:
   - id: T-530
     milestone: MLIVE
     title: A re-plumb leaves /ws/spectrum/live answering 410 "finished" during a gap that is not the end
-    status: in-progress
+    status: done
+    commit: "7361fe82"
     priority: high
     parallel_group: PIPE
     core_interface: true
