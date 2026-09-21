@@ -18,7 +18,10 @@
 //!      apart, so it is the signal the user already confirmed, seen again;
 //!    - [`RelationKind::DuplicateOf`] — it is the weaker box of a duplicate group;
 //!    - [`RelationKind::ArtifactOf`] — it is an image, harmonic or intermod product of a confirmed
-//!      source: the receiver's own arithmetic, not something on the air.
+//!      source: the receiver's own arithmetic, not something on the air;
+//!    - [`RelationKind::RetuneSiblingOf`] (T-598) — it is the same LO-relative receiver artefact
+//!      as another row, seen from a different tuning centre: the cross-centre retune test already
+//!      resolved that family, and the row representing it is the one a watch may speak about.
 //!
 //!    This is the difference between a watch worth arming and one the user learns to ignore. A
 //!    watch that fires on the front end's own images, or on a second box over a station already
@@ -169,6 +172,14 @@ impl StandingRelation {
             ),
             (RelationKind::ArtifactOf, None) => {
                 "a receiver artifact of a confirmed source, not an emission on the air".into()
+            }
+            // T-598: the cross-centre retune test found this sighting and another on one
+            // LO-relative invariant coordinate, so they are one receiver artefact seen from two
+            // centres. The row it names is the sighting that represents the family.
+            (RelationKind::RetuneSiblingOf, _) => {
+                "the same LO-relative receiver artefact as another row, seen from a different \
+                 tuning centre, so not an emission on the air"
+                    .into()
             }
         }
     }
@@ -397,9 +408,9 @@ mod tests {
         ));
     }
 
-    /// The heart of T-166: a row the T-219 rules record as deferring to another row is never new
-    /// activity, whichever of the three claims it is — and the skip quotes that claim's own
-    /// reasoning rather than just refusing.
+    /// The heart of T-166: a row the relationship rules record as deferring to another row is
+    /// never new activity, whichever claim it is — and the skip quotes that claim's own reasoning
+    /// rather than just refusing.
     #[test]
     fn a_suppressed_duplicate_or_attributed_artifact_never_alerts() {
         let region = watched();
@@ -409,6 +420,7 @@ mod tests {
             (RelationKind::ArtifactOf, Some(ArtifactKind::Image)),
             (RelationKind::ArtifactOf, Some(ArtifactKind::Harmonic)),
             (RelationKind::ArtifactOf, Some(ArtifactKind::Intermod)),
+            (RelationKind::RetuneSiblingOf, None),
         ] {
             let mut a = activity(100.3e6, 180e3);
             a.relations = vec![relation(kind, artifact)];

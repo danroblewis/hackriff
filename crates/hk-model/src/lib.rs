@@ -135,11 +135,13 @@ pub use relate::{
 pub use repo::{
     BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind, EmitterUpsert,
     HarmonicFamilyRow, LIFECYCLE_TEXT_MAX, LatestMeasurement, MAX_FAMILY_CANDIDATES,
-    ProvenanceChain, REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning, RepoBatch,
-    RepoError, Repository, SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX,
-    SELECTION_NOTES_MAX, SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, Selection,
-    SelectionLink, SelectionLinkKind, SelectionWatch, TrustTest, TrustVerdict,
-    USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand,
+    MAX_LO_SPAN_HZ, MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, ProvenanceChain,
+    REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RETUNE_RULE, RefinedTuning, RepoBatch,
+    RepoError, Repository, RetuneFamily, RetuneOutcome, RetuneVerdict, SELECTION_LINK_REF_MAX,
+    SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX, SELECTION_TAG_MAX,
+    SELECTION_TAGS_MAX, SELECTIONS_MAX, Selection, SelectionLink, SelectionLinkKind,
+    SelectionWatch, TrustTest, TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ,
+    UserBand,
 };
 pub use retune::{
     RETUNE_MIN_CENTRES, RETUNE_MIN_TOLERANCE_HZ, RETUNE_TOLERANCE_BW_FRACTION, RetuneGroup,

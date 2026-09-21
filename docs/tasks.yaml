@@ -18290,7 +18290,7 @@ tasks:
   - id: T-591
     milestone: M2-hardening
     title: /api/events and /api/inventory disagree about the same emitter's liveness, which docs/api.md promises cannot happen
-    status: todo
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -18318,6 +18318,39 @@ tasks:
       vacuous - report how many it compared.
       Prove the test goes RED without the fix (T-254's ISM scene reproduces it directly).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    resolved_2026_09_21: |
+      FIXED BY ONE DERIVATION, not by matching the constants. `ObservedCoverage::track`
+      (crates/hk-api/src/coverage.rs) is now the only place in hk-api that calls
+      `Repository::presence_intervals`; it measures the idle gap off the band's tune history
+      (T-410) and returns a `PresenceTrack` carrying that gap WITH the intervals, so
+      `PresenceTrack::project(window)` cannot project under a different gap from the one that
+      closed them. Four surfaces reach liveness through it: /api/inventory (query.rs),
+      /api/events (events.rs), /api/inventory/{id}/presence (presence.rs) and /api/tiles/events
+      (tiles.rs) - the last two were not in the ticket; tiles.rs was a THIRD copy of the same
+      60 s hard-code, so its coarse event counts could disagree with the list it zooms into.
+      `IdleGap::conservative()` now appears nowhere in hk-api's code: `IdleGap::from_coverage`
+      already yields it for a band with no recorded tune history, which is its real meaning.
+      API CHANGE (T-079, docs/api.md + api_contract.rs together): /api/events `emitters[]` gains
+      `liveness` (live/ended/absent) - byte-for-byte /api/inventory's `presence.liveness` for the
+      same emitter and window, because it is the same projection of the same track. Additive; the
+      UI's catalogue reads per-event `open` and needed no change.
+      TESTS, WITH COUNTS, NEVER WALL-CLOCK:
+      - tests/e2e t254_ism_bursts (the scene that measured the defect): every catalogued emitter's
+        liveness must match across both routes, plus "any open event <=> live". GREEN: compared
+        3 of 3 catalogued emitters, 0 disagreed; 1 of 3 events reads open=true (the CW carrier),
+        where 3 of 3 did before.
+      - RED WITHOUT THE FIX (measured, not asserted): restoring the conservative gap in events.rs
+        alone -> "3 of 3 events read open=true", "2 of 3 emitters disagreed", test FAILED. The two
+        that disagree are exactly the burster that stops and the one-off; the carrier agrees
+        because it is live under either gap - which is why a sampled emitter could have missed it.
+      - crates/hk-api/tests/inventory_api.rs::hk_api_derives_liveness_in_exactly_one_place: a
+        code-line (not comment) scan refusing `.presence_intervals(` outside coverage.rs and
+        `IdleGap::conservative()` anywhere, so the next copy cannot be added quietly. Also RED
+        under the reverted events.rs.
+      - api_contract events test: asserts `liveness` is served and equals the inventory row's for
+        every catalogued emitter, printing the count (1 emitter on the FM scene) and failing a
+        vacuous zero-emitter comparison.
+      TARGETED RESULTS: hk-api 218/218, hk-cli api_contract 53/53, hk-e2e acceptance_ism 2/2.
   - id: T-589
     milestone: M3
     title: C14 never reports a trusted symbol rate on genuine 8-PSK at 20 or 30 dB, so in production the verifier can never run on it
@@ -18623,7 +18656,7 @@ tasks:
   - id: T-582
     milestone: M2-hardening
     title: Every pair of branches that files a ticket conflicts on docs/tasks.yaml's tail
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: OPS
     model: sonnet
@@ -18990,7 +19023,7 @@ tasks:
   - id: T-595
     milestone: MLIVE
     title: The DC notch turns grey once its IQ-ring segment ages out - a fourth thing painted with the third mark
-    status: todo
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -19019,10 +19052,60 @@ tasks:
       so it cannot pass on zero-of-zero. T-588's guard in `crates/hk-api/src/tiles.rs` is the model.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    done_note: |
+      DONE 2026-09-21 (task-t595). THE MARK: a FIFTH coverage state, `"excluded"` - sampled, and
+      deliberately left out of ANALYSIS. Reasoning: the notch is not an absence of observation at
+      all. The ADC digitised it, the FFT produced bins for it and the pyramid keeps rows across it;
+      only the detector skipped it (`DcRule` +/-15 kHz). So it is a property OF an observation, not
+      a fourth kind of ignorance: `hk_store::coverage::Coverage` still has exactly two variants and
+      `Sampled` gained `analysed_ns` (of `observed_ns`, how many ns the analysis ran on).
+      `analysed_ns == 0` IS `"excluded"`, so the claim is checkable as a number (`analysed_s` on
+      every observed cell) rather than a word. A part-analysed cell - any cell wider than the 30 kHz
+      notch, and every coarse tile - reports `0 < analysed_s <= observed_s` and stays `"observed"`.
+      RECORDED: `hk_store::coverage::Analysis{Analysed,Excluded}` on `CoverageSpan`;
+      `spans_from_records` now emits THREE spans for a notched dwell (two analysed sides + the notch
+      as Excluded) instead of two and a hole; `Acc` merges an analysed-interval list beside the
+      sampled one; `coarsen` folds `analysed_ns` with the same floor as `observed_ns`. Ring-journal
+      spans stay `Analysed` on purpose (the ring holds the samples, DC included; a segment records
+      no exclusion and inventing one would be a guess) - so the same cell honestly reads `observed`
+      inside the ring and `excluded` past it.
+      SERVED: `COVERAGE_STATES` gained a 4th entry, APPENDED (`["unobserved","observed","unknown",
+      "excluded"]`) so every cached code keeps its meaning; `cell_json` state + `analysed_s`;
+      `plane_json`/`grid_json` `excluded_cells`; grey_rule/encoding_rule text; docs/api.md (new
+      "fifth state" section + the five-state table) and `api_contract.rs` updated together (T-079).
+      DRAWN: `ui/src/surface/cellrule.ts` CELL.EXCLUDED (7th state) - the ordinary ramp, undimmed,
+      with a VERTICAL rule inked over it (the transpose of the shadow's scanlines; frequency is the
+      axis a notch is a stripe on). `tile.ts` decodes it; unknown state names still fall through to
+      drawing the level, never to grey. Legend row added. It does NOT set the display range and is
+      not plotted on the trace (inside the notch the level is the receiver's own LO leakage):
+      vscale/trace still take CELL.OBSERVED alone.
+      COUNTS: hk-api `the_dc_notch_past_the_ring_horizon_is_excluded_never_a_cell_greyed_over_a_
+      measurement` - no IQ ring (= past the ring horizon), floor `measured >= N*N/2` (judged 3072 of
+      4096 cells), cells-with-a-measurement-reading-unobserved-or-unknown = 0, notch cells = 4 per
+      row x 64 rows = 256 `"excluded"`, plus the never-tuned quarter still grey with a null level as
+      the control. RED without the fix: "256 of 3072 cells hold a measurement and are drawn grey".
+      hk-store `the_declared_dc_notch_rasterises_as_excluded_and_never_as_unobserved` covers the
+      fold and the coarsen (a 200 kHz cell swallowing the notch reads analysed).
+      TESTS: `cargo nextest run -p hk-store -p hk-api` 420/420; `hk-cli -E binary(api_contract)`
+      53/53; `-p hk-pipeline -p hk-context` 542/542; `just test-ui` 49/49. `just precheck hk-store
+      hk-api hk-pipeline` clean.
+      FOLLOW-UP FIX (same branch): `hk-pipeline::iterative_scan::a_notched_dwell_reaches_the_
+      rasteriser_as_two_bands` counted the OLD shape (two spans and a hole) and failed a bulk gate.
+      The rasteriser is a COVERAGE consumer, not an analysis one - it must see the notch or it
+      answers "nothing ever looked" over rows we hold - so the test was rewritten, not the code:
+      renamed `..._as_two_analysed_bands_and_one_excluded_notch`, it now partitions the spans by
+      `analysis`, asserts 2/step analysed + 1/step excluded, keeps the original intent precisely
+      (no ANALYSED span may straddle the tuned centre; the one span that covers it is exactly the
+      producer's own +/-`dc_half_hz`), and adds the consequence through the same chain - the centre
+      cell reads `excluded`, a quarter MHz off centre reads ordinary `observed`.
+      NOTED, not chased: `hk-pipeline::data_path::a_live_chain_feeds_a_plugin_that_never_reports_
+      ready_after_its_bounded_wait` failed once under load (load avg ~9-13) and PASSES IN ISOLATION
+      and on a clean re-run (542/542) - a load-flake for the deflaker, unrelated to this diff.
+
   - id: T-598
     milestone: M2-hardening
     title: The retune verdict is computed and thrown away - the inventory still lists one moving spur as three emitters
-    status: todo
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -19189,6 +19272,68 @@ tasks:
       `retune_diversity`) reproduces it directly and its assertions already count what matters.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      DONE 2026-09-21 (branch task-t598). The verdict is now written down and load-bearing.
+      WHERE IT IS PERSISTED. Two records, both APPEND-ONLY and both revocable.
+      (a) `detection_retune` (migration 0015, hk-model): one row per claim ABOUT a detection -
+      slope (absolute / lo-locked / image), the invariant coordinate `f - slope*f_LO`, the number
+      of distinct LOs that decided it, the spread, and the flag bits the slope implies. It is a
+      separate table because a detection row is IMMUTABLE by trigger (`detection_immutable`): a
+      measurement is what was measured and an interpretation must never rewrite it. The implied
+      suspect flags are applied on the READ path (`Repository::detection` /
+      `detections_in_region` -> `repo::retune::apply_verdicts`), so a reader sees
+      spur_candidate + lo-relative without the measurement being edited, and a revocation takes
+      them away by construction rather than by guessing which bits to unset.
+      (b) `RelationKind::RetuneSiblingOf` on `emitter_relation`: the N sightings of one LO-relative
+      family are RELATED to the one that represents them, so `/api/inventory` (which already hides
+      deferring rows by default) shows ONE artefact. Nothing is deleted: every sighting keeps its
+      id, detections, time extent and history, and is listed with `relations=all`. It is its own
+      kind, not `duplicate-of` / `artifact-of`, because the T-219 overlap resolver CLAIMS AND
+      REVOKES those two over overlapping bands and these sightings do not overlap at all (that is
+      the whole point) - a shared kind would have the two rules revoking each other every pass.
+      Migration 0015 rebuilds `emitter_relation` to widen its kind CHECK (SQLite cannot relax one
+      in place), copying every row, and adds an expression index on the provenance tune centre.
+      REVOCATION. `Repository::resolve_retune` re-derives the verdict from the stored rows and:
+      appends `active = 0` over any standing verdict whose slope changed (then the new claim);
+      revokes the sibling relation of any row the measurement no longer places in a family. The
+      sweep includes rows that merely DEFER TO an examined row even when they are no longer live,
+      so a claim cannot outlive the evidence. A verdict identical to the one standing writes
+      nothing. An `absolute` verdict is recorded and implies zero flag bits: it is the WEAK claim,
+      "not LO-relative", never "real" (a reference harmonic is absolute-fixed and still an
+      artefact).
+      WIRING AND ITS BOUND. `hk_pipeline::inventory::TrackInventory::touch` calls it after
+      `resolve_overlaps`, i.e. on every seam that reaches an entry. A cross-centre verdict can only
+      change when a NEW CENTRE appears, so the pass runs at most once per row per distinct-centre
+      count (`Repository::tune_centre_count`, answered from the new index) and not at all below
+      two centres - never once per sighting. The neighbourhood is bounded at 64 rows, 32 detections
+      per row and a band derived from the LOs within 100 MHz of the seed's own.
+      MEASURED, on T-586's `retune_diversity` fixture through the mock SDR (15 detections, 3
+      centres, 5 lines): BEFORE 3 emitters + 6 artefact rows = 9 shown; AFTER 3 emitters + 2
+      artefact rows = 5 shown, with all 6 artefact sightings still present under `relations=all`.
+      Stored verdicts 6 lo-locked + 9 absolute over 15 detections. Real emitters unchanged in
+      number and in absolute frequency (99.78 / 100.68 / 101.18 MHz).
+      RED WHEN BROKEN, both halves proven by removing the `touch` call: the verdict check failed
+      with "0 detections were recorded LO-relative" and, with that check skipped, the inventory
+      check failed with "the artefact at LO offset 0.0 kHz is shown as 3 emitters, not one".
+      Neither is vacuous: the scene asserts 3 sightings were kept per family (so there was
+      something to collapse) and 3 distinct centres were compared.
+      TESTS: 5 unit tests in `crates/hk-model/src/repo/retune_tests.rs` (the bug reproduced; the
+      fix; absolute flags nothing; revocation restores the prior single-capture flags exactly;
+      one centre claims nothing) and 2 new checks in the T-586 acceptance scene
+      `tests/e2e/tests/acceptance/t586_retune_diversity.rs`. Targeted runs: hk-model 317/317,
+      hk-model + hk-context 548/548, hk-pipeline 307/307, acceptance_m0 t586 2/2 (and an earlier
+      full acceptance_m0 50/50). `just precheck hk-model hk-pipeline hk-context hk-e2e` clean.
+      API: `docs/api.md` documents the new `relation.kind` value and its `detail`. The ROW SHAPE
+      and every route are unchanged - only a new enum value in an existing field - so
+      `api_contract.rs` (which asserts the `relation` key, not its vocabulary) needed no change.
+      FOLLOW-UPS SURFACED, NOT CHASED: (a) `hk_context::watch::StandingRelation::label` now has a
+      sentence for the new kind, but the SQL rank/trust proxy in `repo/relate.rs` still counts only
+      the MEASURED flag bits, so a resolved artefact does not yet rank below a clean row - joining
+      `detection_retune.flag_bits` into `EMITTER_DETECTION_EVIDENCE_SQL` is a small follow-up;
+      (b) the primary of a family is the row with most sightings, then the earliest - a Confirmed
+      row is never hidden by this rule, which is deliberate but means a wrongly-confirmed artefact
+      stays visible until a person acts; (c) the image slope (2) is still exercised by unit tests
+      only, since T-586's fixture omits images on purpose.
   - id: T-599
     milestone: M2-hardening
     title: Two loose ends from T-586 - the DC line is labelled ref-harmonic, and the image slope is unit-tested only
@@ -19246,6 +19391,33 @@ tasks:
       per SNR, and the reasons sum to the number of classifications - a report whose parts do not
       account for the whole is how a skipped stage hides.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-600
+    milestone: M2-hardening
+    title: A resolved artefact does not rank below a clean row, because the evidence proxy counts only measured flag bits
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    effort: low
+    depends_on: [T-598]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-598. `EMITTER_DETECTION_EVIDENCE_SQL` in `crates/hk-model/src/repo/relate.rs`
+      counts only the flag bits stored ON the detection row. T-598 deliberately does NOT write to
+      that row - a detection is immutable by trigger (`detection_immutable`), because a measurement
+      is what was measured and an interpretation must not rewrite it - so the retune verdict lives
+      in `detection_retune` and is applied on the read path.
+      Consequence: a detection the system has resolved as LO-relative still ranks as though nothing
+      were known about it. Join `detection_retune.flag_bits` into the evidence proxy so a resolved
+      artefact ranks below a clean row.
+      KEEP T-598'S RULE INTACT WHILE DOING IT: read-path application, no write to the measurement.
+      The point of the split is that the measurement and the interpretation have different
+      lifetimes - the interpretation is revocable and the measurement is not.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): a resolved LO-relative detection ranks
+      strictly below an unflagged one with otherwise equal evidence, and revoking the verdict
+      restores its rank - the second half matters, because a one-way change would make the ranking
+      outlive the claim.
+      Prove the test goes RED without the fix.
   - id: T-601
     milestone: M2-hardening
     title: A retune-sibling artefact reads as a generic "retune artefact" while an image reads as prose
@@ -19274,6 +19446,72 @@ tasks:
       ASSERT ON THE RENDERED TEXT AND THE REQUEST THE CLIENT BUILDS, not wall-clock.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-602
+    milestone: M2-hardening
+    title: POI and occupancy still ask "was it covered?" and never "was it analysed?", so the tuned centre is silently a blind spot to them
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: [T-595]
+    use_cases: []
+    acceptance: |
+      SURFACED BY T-595, not chased there. T-595 split "sampled" from "analysed": a dwell's DC notch
+      is now recorded as sampled-but-excluded, carried as `analysed_ns` on the span and served as the
+      `excluded` coverage state. `hk-pipeline` and `hk-context` still call
+      `ObservedWindow::covered()` for POI selection and occupancy, which answers the OLD question -
+      was this span sampled - and they have no way to ask the new one.
+      Their semantics are unchanged and nothing is wrong today. The gap is that a ±15 kHz stripe at
+      every tuned centre is, to them, indistinguishable from spectrum that was analysed and found
+      quiet. T-595 put it exactly: worth a look if "why is there never a detection at the tuned
+      centre" ever becomes a question. Occupancy in particular integrates over a band and will
+      quietly count excluded time as measured-and-empty, which biases the figure downward by the
+      notch's share of the band - small at 20 MHz, not small at a narrow dwell.
+      Decide, per caller, which question it should be asking, and make the answer explicit rather
+      than implied by whichever method was to hand. If a caller genuinely wants "sampled", say so in
+      a comment naming why - the point is that the choice becomes visible.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): occupancy over a band containing a
+      notch reports the excluded share separately from the quiet share, and a POI query does not
+      treat the notch as analysed-and-empty. A test that runs on a band with no notch is vacuous -
+      report the notch width and the band width it judged.
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-603
+    milestone: M2-hardening
+    title: The listen acceptance test's listener-cap assertion is load-sensitive, and the acceptance suites are outside every serial protection
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      MEASURED 2026-09-21. `hk-e2e acceptance_m0
+      listen::signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches` failed a merge gate
+      at `listen.rs:234` - the assertion that a SECOND listener is admitted before a third is
+      refused at the cap - and PASSED ALONE in 24.83 s on the same commit. Classic load-flake, and
+      the branch it sank (a merge driver plus Python tests) could not have touched it.
+      TWO SEPARATE THINGS, AND THE SECOND IS THE STRUCTURAL ONE.
+      (1) The assertion turns on a listener being admitted within some implicit window while the
+      machine is loaded. Make it wait on the ADMISSION EVENT rather than on whatever the cap
+      happens to do in time - the claim is about the cap's ORDERING (second admitted, third
+      refused with 503), not about elapsed time. Do not lengthen a wait; that makes it rarer, which
+      is the pattern this project rejects.
+      (2) THE ACCEPTANCE SUITES ARE OUTSIDE EVERY PROTECTION THE PROJECT THINKS IT HAS.
+      `.config/nextest.toml` caps `test-threads` and pins a `heavy-serial` group, but `just
+      acceptance` and `just e2e-harness` run through PLAIN `cargo test`, so neither applies. The
+      group's own filter is `package(hk-pipeline) and test(listen)`, and this test is in `hk-e2e` -
+      so a test whose name matches the protected pattern, in a suite that drives a real server, was
+      protected by neither. A `RUST_TEST_THREADS` cap now removes the self-inflicted parallelism,
+      but that only reduces false reds; it is not determinism.
+      AUDIT THE REST WHILE THERE: how many other timing-sensitive tests sit in `hk-e2e` believing
+      they are covered by a nextest group that cannot see them? That count is the real finding.
+      ASSERT WITH COUNTS AND ORDERING, NOT WALL-CLOCK (user, 2026-09-21). Measure the failure rate
+      under deliberate load before and after - "it passes now" on a quiet machine is the evidence
+      that misled everyone here.
+      Prove the fixed test still catches a real cap violation.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

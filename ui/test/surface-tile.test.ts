@@ -20,7 +20,7 @@ import type { TileAddr } from "../src/surface/lattice";
 const ADDR: TileAddr = { device: "any", scheme: "view", levelF: 1, levelT: 2, fIndex: 3, tIndex: 4, cells: 2 };
 
 /** The alphabet the route serves beside its planes (T-467), in the route's own order. */
-const STATES = ["unobserved", "observed", "unknown"];
+const STATES = ["unobserved", "observed", "unknown", "excluded"];
 
 /** Run-length encodes a list of state names exactly as `hk-api`'s `rle` does. */
 function runsOf(cells: readonly string[]): number[] {
@@ -139,6 +139,30 @@ test("`measured` is how many cells were really measured, so a replicated axis ca
   // Absent fold info: the tile's own grid, because claiming LESS measured detail than we can show
   // would be its own invention.
   assert.deepEqual(decodeTile(ADDR, resp()).measured, { nf: 2, nt: 2 });
+});
+
+test("T-595: `excluded` draws its measurement and is never grey", () => {
+  // The DC notch past the IQ-ring horizon: the radio sampled it, the pyramid holds rows across it,
+  // and the observation log says only that the ANALYSIS skipped it. T-588 measured 1 212 such cells
+  // holding a measurement and reading `unobserved`.
+  const t = decodeTile(ADDR, resp({
+    grid: { nt: 2, nf: 2, max_db: [-90, -70, null, -60], frames: [4, 4, 0, 4] },
+    coverage: coverage(["observed", "excluded", "excluded", "unobserved"]),
+  }));
+  assert.deepEqual([...t.state], [CELL.OBSERVED, CELL.EXCLUDED, CELL.AWAITING, CELL.UNOBSERVED]);
+  // The level is carried, undimmed and unaltered: it is a real measurement of THIS cell.
+  assert.equal(t.value[1], -70);
+  // With no level in hand the marks that claim least still answer — an exclusion is not a licence
+  // to invent a level, and it is never grey either way.
+  assert.ok(Number.isNaN(t.value[2]));
+
+  // A client that has not learned the word falls through to drawing the measurement, never to grey:
+  // the safe direction, because the level is real. (This is the old alphabet, verbatim.)
+  const old = decodeTile(ADDR, resp({
+    grid: { nt: 2, nf: 2, max_db: [-90, -70, -80, -60] },
+    coverage: { ...coverage(["observed", "excluded", "excluded", "unobserved"]), states: ["unobserved", "observed", "unknown", "something-new"] },
+  }));
+  assert.deepEqual([...old.state], [CELL.OBSERVED, CELL.OBSERVED, CELL.OBSERVED, CELL.UNOBSERVED]);
 });
 
 test("five cell states, and none of them collapses into another", () => {
