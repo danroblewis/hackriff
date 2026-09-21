@@ -6270,10 +6270,26 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
         tuned["resolution"]["grey_rule"],
         json!(
             "grey a cell if and only if its state is \"unobserved\"; \"unknown\" is not grey and \
-             not a level — draw it as a fourth thing (hatching, per T-413)"
+             not a level — draw it as a fourth thing (hatching, per T-413); \"excluded\" (T-595) \
+             is spectrum the radio DID sample and the analysis skipped — draw the measurement, \
+             mark it distinctly, never grey"
         ),
         "{tuned}"
     );
+    // T-595: every OBSERVED cell states how much of its extent the analysis actually ran on, so
+    // "excluded" is a number a client can check and not a word it must take. An unobserved cell
+    // carries no such key — that absence is the structural rule above, unchanged.
+    for c in tuned["any"]["cells"].as_array().expect("cells") {
+        if c["state"] == json!("observed") {
+            let a = c["analysed_s"].as_f64().unwrap_or_else(|| panic!("{c}"));
+            let o = c["observed_s"].as_f64().unwrap();
+            assert!(a > 0.0 && a <= o, "an observed cell was analysed: {c}");
+        }
+    }
+    for c in fresh["any"]["cells"].as_array().expect("cells") {
+        assert!(c.get("analysed_s").is_none(), "{c}");
+    }
+    assert_eq!(fresh["any"]["excluded_cells"], json!(0), "{fresh}");
     // T-342: and so is the SHADE's rule. A 0–1 number normalised against a range the response never
     // named is a measurement the consumer cannot check or match: the strip must be able to share
     // the waterfall's scaling, which needs the range and the scale on the wire, not just the ratio.
@@ -7197,11 +7213,13 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         json!("plane-table-rle"),
         "{fine}"
     );
-    // THREE states, in the answer's own alphabet: a code is never read against one the client
-    // assumed, and `unknown` (T-423) is never spelled as `unobserved`.
+    // FOUR states, in the answer's own alphabet: a code is never read against one the client
+    // assumed, `unknown` (T-423) is never spelled as `unobserved`, and `excluded` (T-595 — sampled,
+    // deliberately left out of analysis: the DC notch) is neither. It is APPENDED, so every code an
+    // older client cached keeps its meaning.
     assert_eq!(
         fine["coverage"]["states"],
-        json!(["unobserved", "observed", "unknown"]),
+        json!(["unobserved", "observed", "unknown", "excluded"]),
         "{fine}"
     );
     let planes = fine["coverage"]["planes"].as_array().unwrap();
@@ -7217,9 +7235,9 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
             .collect();
         assert_eq!(runs.len() % 2, 0, "{p}");
         let mut total = 0u64;
-        let mut counts = [0u64; 3];
+        let mut counts = [0u64; 4];
         for pair in runs.chunks(2) {
-            assert!(pair[0] < 3, "code outside the served alphabet: {p}");
+            assert!(pair[0] < 4, "code outside the served alphabet: {p}");
             counts[pair[0] as usize] += pair[1];
             total += pair[1];
         }
@@ -7229,6 +7247,7 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         assert_eq!(p["observed_cells"], json!(counts[1]), "{p}");
         assert_eq!(p["unobserved_cells"], json!(counts[0]), "{p}");
         assert_eq!(p["unknown_cells"], json!(counts[2]), "{p}");
+        assert_eq!(p["excluded_cells"], json!(counts[3]), "{p}");
         // And no cell on this plane carries a measurement key of any kind — there is nothing here
         // that could be read as a level of zero. The measurement plane is `grid`, separately.
         for k in [

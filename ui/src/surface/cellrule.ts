@@ -77,6 +77,26 @@ export const CELL = {
    * `unobserved` cell with no run is still [[UNOBSERVED]], THE grey, and nothing else is.
    */
   SHADOW: 5,
+  /**
+   * **The seventh state (T-595): sampled, and deliberately excluded from analysis** — the
+   * receiver's own DC/LO-leakage notch at the tuned centre.
+   *
+   * `coverage` says `"excluded"`. The radio was here, the pyramid holds rows here, and the only
+   * thing that did not happen is the detector's analysis. So this is **not** grey and not an
+   * absence: the measurement is drawn on the ordinary ramp at the ordinary scale, with an ink ruled
+   * along the *frequency* axis over it — the axis the exclusion is a stripe on, and the only mark
+   * on this surface ruled that way ([[CELL.SHADOW]] rules along time).
+   *
+   * It is the fourth thing that used to wear [[CELL.UNOBSERVED]]'s mark: past the IQ ring's horizon
+   * the observation log's notch punched a 25 kHz hole in coverage, and T-588 measured 1 212 cells
+   * holding a measurement and reading `unobserved` — every one of them this notch.
+   *
+   * **It does not set the display range and is not plotted on the trace.** Inside the notch the
+   * level is the receiver's own LO leakage, not a measurement of the air; drawing it is honest
+   * (we have it, and we say why it is marked), letting it decide the ramp or read as a signal
+   * would not be. `vscale.ts` and `trace.ts` both take `CELL.OBSERVED` and nothing else.
+   */
+  EXCLUDED: 6,
 } as const;
 
 export type CellState = (typeof CELL)[keyof typeof CELL];
@@ -112,6 +132,9 @@ export const PATTERNS = {
   /** Horizontal rules only: scanlines. The last-known [[CELL.SHADOW]] mark (T-520) — the one mark
    * ruled along a single axis, and ruled along *time*, the axis the value is carried down. */
   scan: "fract(px.y / p.y) < 0.4",
+  /** Vertical rules only. The [[CELL.EXCLUDED]] mark (T-595) — ruled along *frequency*, because a
+   * DC notch is a stripe on the frequency axis; the one mark that is the transpose of [[scan]]. */
+  stripe: "fract(px.x / p.x) < 0.4",
 } as const;
 
 export type PatternName = keyof typeof PATTERNS;
@@ -148,6 +171,7 @@ const COMPILED: Readonly<Record<PatternName, PatternFn>> = {
   grid: (px, p, fr) => fr(px.x / p.x) < 0.10 || fr(px.y / p.y) < 0.10,
   cross: (px, p, fr) => fr((px.x + px.y) / p.x) < 0.22 || fr((px.y - px.x) / p.x) < 0.22,
   scan: (px, p, fr) => fr(px.y / p.y) < 0.4,
+  stripe: (px, p, fr) => fr(px.x / p.x) < 0.4,
 };
 
 /** Is this pixel on the pattern? The same expression the shader runs, evaluated on the CPU. */
@@ -168,7 +192,12 @@ export type CellMark =
   /** **The ramp, remembered** (T-520): `cmap(x) * gain` — the same ramp at the same scale, held
    * under a hard ceiling — with a pattern inked over it in a fixed colour. The ground carries the
    * level; the ink says it is not a level of *this* cell. */
-  | { readonly kind: "shadow"; readonly gain: number; readonly ink: Rgb; readonly pattern: PatternName; readonly pitchPx: number };
+  | { readonly kind: "shadow"; readonly gain: number; readonly ink: Rgb; readonly pattern: PatternName; readonly pitchPx: number }
+  /** **The ramp, qualified** (T-595): `cmap(x)` at full scale — the measurement, undimmed, because
+   * it is a measurement of *this* cell — with a pattern inked over it saying the analysis did not
+   * run here. Unlike [[CellMark]]'s `shadow` there is no gain: nothing about the level is in
+   * doubt, only what was done with it. */
+  | { readonly kind: "inked"; readonly ink: Rgb; readonly pattern: PatternName; readonly pitchPx: number };
 
 /**
  * The rule, as data. Index is the state byte.
@@ -176,7 +205,8 @@ export type CellMark =
  * The marks are deliberately far apart in hue, lightness **and shape**: a viewer must be able to
  * tell "never looked" from "looked, kept nothing" from "no longer know" from "looked, nothing
  * folded yet" at a glance, and T-413 declined the obvious rendering precisely because reusing one
- * mark for two of them spells *looked and it was quiet* as *never looked*. Six states, six marks.
+ * mark for two of them spells *looked and it was quiet* as *never looked*. Seven states, seven
+ * marks.
  */
 export const CELL_MARKS: readonly CellMark[] = [
   { kind: "flat", rgb: [0.155, 0.16, 0.18] }, // UNOBSERVED — THE grey
@@ -192,6 +222,9 @@ export const CELL_MARKS: readonly CellMark[] = [
   // and not higher is [[SHADOW_MARK]]'s second paragraph: above ~0.349 the always-brighter-than-
   // shadow band collapses off the bottom of the ramp.
   { kind: "shadow", gain: 0.32, ink: [0.24, 0.19, 0.1], pattern: "scan", pitchPx: 5 },
+  // EXCLUDED — the seventh (T-595). The measurement on the ordinary ramp, ruled along frequency in
+  // a cold ink on no position of the ramp: "we sampled this and did not analyse it".
+  { kind: "inked", ink: [0.52, 0.56, 0.62], pattern: "stripe", pitchPx: 4 },
 ];
 
 /**
@@ -399,6 +432,10 @@ export function cellPixel(args: {
     const gain = args.shadowGain ?? m.gain;
     if (patternHit(m.pattern, args.px, { x: m.pitchPx, y: m.pitchPx })) col = [...m.ink] as [number, number, number];
     else { const c = cmap(args.x); col = [c[0] * gain, c[1] * gain, c[2] * gain]; }
+  } else if (m.kind === "inked") {
+    col = patternHit(m.pattern, args.px, { x: m.pitchPx, y: m.pitchPx })
+      ? ([...m.ink] as [number, number, number])
+      : cmap(args.x);
   } else if (m.kind === "flat") col = [...m.rgb] as [number, number, number];
   else col = [...(patternHit(m.pattern, args.px, { x: m.pitchPx, y: m.pitchPx }) ? m.ink : m.rgb)] as [number, number, number];
 
@@ -430,7 +467,7 @@ const patFn = (name: PatternName) => `pat_${name}`;
  * [[FALLBACK_MARK]]:
  *
  * ```glsl
- * vec3 cellMark(int s, float x, vec2 px, float gain); // the six states; `gain` is the shadow's only
+ * vec3 cellMark(int s, float x, vec2 px, float gain); // the seven states; `gain` is the shadow's only
  * vec3 tierMark(int t, vec3 col, vec2 px, vec2 srcPx);  // the three honesty tiers
  * vec3 fallbackMark(vec3 col, vec2 px);           // the stand-in
  * ```
@@ -456,6 +493,8 @@ export const CELL_RULE_GLSL: string = (() => {
         ? "cmap(x)"
         : m.kind === "shadow"
           ? `(${patFn(m.pattern)}(px, ${vec2(m.pitchPx)}) ? ${vec3(m.ink)} : cmap(x) * gain)`
+          : m.kind === "inked"
+          ? `(${patFn(m.pattern)}(px, ${vec2(m.pitchPx)}) ? ${vec3(m.ink)} : cmap(x))`
           : m.kind === "flat"
           ? vec3(m.rgb)
           : `(${patFn(m.pattern)}(px, ${vec2(m.pitchPx)}) ? ${vec3(m.ink)} : ${vec3(m.rgb)})`;

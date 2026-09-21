@@ -712,7 +712,8 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
   "devices": [{                                // one entry per front end that actually sampled here
     "device": "hackrf:0000000000000000a06063c8234e925f",
     "named": true,                             // false for the "unknown" and "any" labels
-    "observed_cells": 2, "unobserved_cells": 2, "unknown_cells": 0, "observed_fraction": 0.5,
+    "observed_cells": 2, "unobserved_cells": 2, "unknown_cells": 0, "excluded_cells": 1,
+    "observed_fraction": 0.5,
     "cells": [
       // 1. observed, and there was energy
       { "state": "observed", "spans": 1, "observed_s": 600.0, "duty": 1.0,
@@ -725,9 +726,15 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
       // 3. never observed — no claim either way. This is the grey cell.
       { "state": "unobserved" },
       // observed, but the history keeps no level here: neither grey nor the ramp's bottom
-      { "state": "observed", "spans": 2, "observed_s": 41.5, "duty": 0.069,
+      { "state": "observed", "spans": 2, "observed_s": 41.5, "duty": 0.069, "analysed_s": 41.5,
         "last_s": 1789300880.0, "center_hz": 104000000.0, "sample_rate_hz": 2400000.0,
-        "shade": null }
+        "shade": null },
+      // 5. sampled, and DELIBERATELY excluded from analysis (T-595): the DC/LO notch. Every
+      // measurement key an observed cell has, plus `analysed_s: 0.0` saying why it is not
+      // simply "observed". NOT grey: the radio was here and the history holds rows.
+      { "state": "excluded", "spans": 1, "observed_s": 600.0, "duty": 1.0, "analysed_s": 0.0,
+        "last_s": 1789300920.0, "center_hz": 100800000.0, "sample_rate_hz": 2400000.0,
+        "shade": 0.41 }
     ]
   }],
   "any": { "device": "any", "named": false, "observed_cells": 3, "unobserved_cells": 1,
@@ -756,7 +763,7 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
 }
 ```
 
-#### Four states, and none of them can be spelled as another
+#### Five states, and none of them can be spelled as another
 
 | State | Meaning | On the wire |
 |---|---|---|
@@ -764,10 +771,26 @@ Query parameters: `f_lo`&`f_hi` (Hz, **required** — the band to report on), `c
 | 2 | observed, and it was **quiet** — a finding | `"state": "observed"` with a low `shade` |
 | 3 | **never observed** — no claim either way | `"state": "unobserved"`, **and no measurement keys at all** |
 | 4 | **we no longer know whether we looked** (T-423) | `"state": "unknown"`, and no measurement keys either |
+| 5 | observed, and **deliberately excluded from analysis** (T-595) | `"state": "excluded"`, with every measurement key an `"observed"` cell has and `"analysed_s": 0.0` |
 
 The pair that gets collapsed is 2 and 3, and collapsing them is how a view comes to report "nothing here" about spectrum nothing ever looked at. So an unobserved cell carries **no `shade`, no `duty`, no `observed_s`** — not `null` ones. That is stronger than a nullable number, because there is no field a client can read as zero: the absence is structural. It is the same rule as `bias_tee: "unknown"` ≠ `"off"` — **nothing said is never permissive** — and it holds in the type as well as the JSON: `hk_store::coverage::Coverage::of` refuses to mint an observation out of a zero span count or a zero sampled duration, and hands back `Coverage::Unobserved` instead.
 
 `shade: null` on an **observed** cell is a different thing again: sampled, but the spectrum history keeps no level for it. A client draws that differently from grey and differently from the bottom of the ramp. **Grey is `state == "unobserved"` and nothing else**, which is what `resolution.grey_rule` says in the response.
+
+#### The fifth state: `"excluded"` means *we sampled it and deliberately did not analyse it* (T-595)
+
+The receiver excludes its own DC/LO-leakage notch — ±15 kHz around the tuned centre, `hk_detect::DcRule`'s tolerance, the same number `dc_excluded_hz` reports on the spectrum header — from **detection**. The observation log records that as `records[].window.dc_excluded`, and until T-595 the coverage fold read the hole as an absence of *sampling*: the notch contributed no span at all, so it rasterised as `"unobserved"`.
+
+It is not unobserved. The ADC digitised it, the FFT produced bins for it, and the spectrum-history pyramid keeps rows right across it. **T-588 measured the consequence**: over a sweep of 1 966 080 cells, 1 212 cells held a measurement and read `unobserved` — and *all 1 212 were the DC notch*. Both halves of the invariant broke at once: data that exists was not shown, and grey stopped meaning genuinely unobserved.
+
+Why it went unseen for so long: inside the IQ ring's retention the **ring journal**'s segments cover the whole tuned window with no notch (the ring holds the samples, DC included, so a client can re-analyse them), and those spans paper over the hole. Past the ring horizon only the observation log is left, and the stripe appears. A test that looks only at recent history passes while the defect is intact.
+
+The fix gives the notch its own mark rather than making the observation log lie in the other direction by declaring it analysed:
+
+- **It is an observation, not an absence.** `"excluded"` carries every measurement key `"observed"` carries — `spans`, `observed_s`, `duty`, `last_s`, `center_hz`, `sample_rate_hz`, `shade` — because all of them are true. It is not a fourth kind of ignorance; `hk_store::coverage::Coverage` still has exactly two variants, and *excluded* is a property of the observation (`analysed_ns == 0`), not a value beside `Unobserved`.
+- **`analysed_s` is the number behind the word.** Every observed cell now carries it: of `observed_s`, how many seconds the analysis actually ran on. `analysed_s == 0.0` *is* `"excluded"`, so a client can check the claim instead of taking it. A cell whose extent is partly analysed (a coverage cell wider than the notch, or a coarse tile that swallows it) reports what it is — `0 < analysed_s <= observed_s` — and reads `"observed"`: a 30 kHz exclusion is not a claim about a 200 kHz cell.
+- **Draw the measurement, mark it distinctly, never grey.** `resolution.grey_rule` says so in the response. The canvas draws the level on the same ramp with a vertical-rule ink over it (`ui/src/surface/cellrule.ts`, the seventh cell state) — a mark ruled along the *frequency* axis, which is the axis the exclusion is a stripe on.
+- **It can change at the ring horizon, honestly.** Inside the ring the same cell reads `"observed"`, because the raw samples are there to analyse; past it, `"excluded"`, because the only surviving evidence is a record that says the analysis skipped it. Each is the truth about what we can still say.
 
 #### The time axis: `rows` (T-423)
 
@@ -854,10 +877,10 @@ One route serves every viewport — the panes, the zoomable minimap and the live
   "coverage": { "encoding": "plane-table-rle",
                 "grid": { "nt": 256, "nf": 256, "t0_s": …, "t_cell_s": 32.0, "f_lo_hz": …,
                           "f_cell_hz": 50000.0, "aligned": true, "order": "row-major: …" },
-                "states": ["unobserved", "observed", "unknown"],
+                "states": ["unobserved", "observed", "unknown", "excluded"],
                 "planes": [ { "runs": [0, 12288, 1, 53248], "cells": 65536, "uniform": null,
                               "observed_cells": 53248, "unobserved_cells": 12288,
-                              "unknown_cells": 0, "observed_fraction": 0.8125 } ],
+                              "unknown_cells": 0, "excluded_cells": 0, "observed_fraction": 0.8125 } ],
                 "any": { "device": "any", "named": false, "plane": 0 },
                 "devices": [ { "device": "hackrf:0000…925f", "named": true, "plane": 0 } ],
                 "selected": { "device": "any", "named": false, "present": true, "plane": 0,
@@ -924,13 +947,13 @@ One route serves every viewport — the panes, the zoomable minimap and the live
 
 `coverage` on this route is **not** `/api/coverage`'s per-cell form. It was, and measured against the demo backend that cost **99 % of a 19.34 MB tile body**: each of 65 536 cells serialised `{"state":…,"duty":…,"observed_s":…,"last_s":…,"spans":…,"center_hz":…,"sample_rate_hz":…}` at ~146 B, **twice** — once as `coverage.any` and once as `coverage.devices[0]`, byte-identical on a one-device server — to carry the one field a renderer reads. Measured in-process on the same 256 × 256 grid: **19 818 236 B → 2 906 B, a factor of 6 820**; end to end the tile body went **18.42 MB → 1.12 MB**.
 
-- **`states` is the alphabet, served with the planes.** A code is never resolved against an alphabet the answer did not state. There are **three** and they never collapse into two: `unobserved` (nothing ever looked — grey, and *only* this is grey), `observed`, and `unknown` (T-423: we no longer know whether we looked — not grey, not a level).
+- **`states` is the alphabet, served with the planes.** A code is never resolved against an alphabet the answer did not state. There are **four** and they never collapse: `unobserved` (nothing ever looked — grey, and *only* this is grey), `observed`, `unknown` (T-423: we no longer know whether we looked — not grey, not a level) and `excluded` (T-595: sampled, and **deliberately left out of analysis** — the receiver's own DC/LO notch. The measurement exists and must be drawn; only the detector skipped it). `excluded` was **appended**, so every code an older client cached keeps its meaning, and a client that does not know the word falls through to drawing the level — the safe direction, since the level is real.
 - **`planes[i].runs` is a flat `[code, count, code, count, …]`** over the cells in `grid.order`. The counts sum to `planes[i].cells`; each code indexes `states`. A coverage plane is the rasterisation of tuned **spans**, so it changes state only where a band begins or ends — a handful of runs a row, not an entry a cell.
 - **`planes[i].uniform`** is the one state the whole plane is in, or `null`. Derived from the same runs, never asserted beside them.
 - **A plane appears once.** `any.plane` and each `devices[].plane` are indices into `planes`, so two front ends whose coverage genuinely differs cost two entries and a front end whose coverage *is* the union costs an index. The duplication this ticket was filed about is gone by construction, not by a special case for one-device servers. When devices genuinely differ the cost is one RLE plane per distinct plane — a few KB each, linear in *distinct* planes rather than in devices × cells.
 - **`selected.plane`** is the index the route's own selection rule picks: `any` → the union; a named device → **that front end's plane and never the union**. `present: false` with `plane: null` is a named device this answer holds no plane for, which is `unobserved` *for that device* — a coverage answer, not a missing one.
 - **No cell on this plane carries a measurement key of any kind**, so there is nothing here a client can read as a level of zero. That is *stronger* than the per-cell form's rule that an unobserved cell carries no measurement keys, not weaker: here no cell does. The measurement plane is `grid`, and it is separate on purpose.
-- **The per-cell sampling metadata moved, it did not vanish.** `duty`, `observed_s`, `last_s`, `spans`, `center_hz` and `sample_rate_hz` are a question about *one* cell — hover — and [`GET /api/coverage`](#get-apicoverage--the-coverage-map-grey-means-genuinely-unobserved-t-368) answers it per cell over any `f_lo`/`f_hi`/`t0`/`t1`/`cells`/`rows`, in the same three-state vocabulary. `/api/timeline`'s overlay is unchanged and still serves the per-cell form.
+- **The per-cell sampling metadata moved, it did not vanish.** `duty`, `observed_s`, `last_s`, `spans`, `center_hz` and `sample_rate_hz` are a question about *one* cell — hover — and [`GET /api/coverage`](#get-apicoverage--the-coverage-map-grey-means-genuinely-unobserved-t-368) answers it per cell over any `f_lo`/`f_hi`/`t0`/`t1`/`cells`/`rows`, in the same four-state vocabulary. `/api/timeline`'s overlay is unchanged and still serves the per-cell form.
 - **A plane that does not decode exactly is not a coverage answer.** An odd run list, a code outside the alphabet, a run that overruns, a total that is not `cells`, or a missing `states`: the client throws and the place stays *pending*, never grey and never observed (`ui/src/surface/tile.ts`).
 
 #### `shadow` — the last-known / stale tier, a band's most-recent-known value (T-519, T-527, [ADR-0020](adr/0020-last-known-shadow-tier.md))

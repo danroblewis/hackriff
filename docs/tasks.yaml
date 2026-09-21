@@ -18932,7 +18932,7 @@ tasks:
   - id: T-595
     milestone: MLIVE
     title: The DC notch turns grey once its IQ-ring segment ages out - a fourth thing painted with the third mark
-    status: todo
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -18961,6 +18961,43 @@ tasks:
       so it cannot pass on zero-of-zero. T-588's guard in `crates/hk-api/src/tiles.rs` is the model.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    done_note: |
+      DONE 2026-09-21 (task-t595). THE MARK: a FIFTH coverage state, `"excluded"` - sampled, and
+      deliberately left out of ANALYSIS. Reasoning: the notch is not an absence of observation at
+      all. The ADC digitised it, the FFT produced bins for it and the pyramid keeps rows across it;
+      only the detector skipped it (`DcRule` +/-15 kHz). So it is a property OF an observation, not
+      a fourth kind of ignorance: `hk_store::coverage::Coverage` still has exactly two variants and
+      `Sampled` gained `analysed_ns` (of `observed_ns`, how many ns the analysis ran on).
+      `analysed_ns == 0` IS `"excluded"`, so the claim is checkable as a number (`analysed_s` on
+      every observed cell) rather than a word. A part-analysed cell - any cell wider than the 30 kHz
+      notch, and every coarse tile - reports `0 < analysed_s <= observed_s` and stays `"observed"`.
+      RECORDED: `hk_store::coverage::Analysis{Analysed,Excluded}` on `CoverageSpan`;
+      `spans_from_records` now emits THREE spans for a notched dwell (two analysed sides + the notch
+      as Excluded) instead of two and a hole; `Acc` merges an analysed-interval list beside the
+      sampled one; `coarsen` folds `analysed_ns` with the same floor as `observed_ns`. Ring-journal
+      spans stay `Analysed` on purpose (the ring holds the samples, DC included; a segment records
+      no exclusion and inventing one would be a guess) - so the same cell honestly reads `observed`
+      inside the ring and `excluded` past it.
+      SERVED: `COVERAGE_STATES` gained a 4th entry, APPENDED (`["unobserved","observed","unknown",
+      "excluded"]`) so every cached code keeps its meaning; `cell_json` state + `analysed_s`;
+      `plane_json`/`grid_json` `excluded_cells`; grey_rule/encoding_rule text; docs/api.md (new
+      "fifth state" section + the five-state table) and `api_contract.rs` updated together (T-079).
+      DRAWN: `ui/src/surface/cellrule.ts` CELL.EXCLUDED (7th state) - the ordinary ramp, undimmed,
+      with a VERTICAL rule inked over it (the transpose of the shadow's scanlines; frequency is the
+      axis a notch is a stripe on). `tile.ts` decodes it; unknown state names still fall through to
+      drawing the level, never to grey. Legend row added. It does NOT set the display range and is
+      not plotted on the trace (inside the notch the level is the receiver's own LO leakage):
+      vscale/trace still take CELL.OBSERVED alone.
+      COUNTS: hk-api `the_dc_notch_past_the_ring_horizon_is_excluded_never_a_cell_greyed_over_a_
+      measurement` - no IQ ring (= past the ring horizon), floor `measured >= N*N/2` (judged 3072 of
+      4096 cells), cells-with-a-measurement-reading-unobserved-or-unknown = 0, notch cells = 4 per
+      row x 64 rows = 256 `"excluded"`, plus the never-tuned quarter still grey with a null level as
+      the control. RED without the fix: "256 of 3072 cells hold a measurement and are drawn grey".
+      hk-store `the_declared_dc_notch_rasterises_as_excluded_and_never_as_unobserved` covers the
+      fold and the coarsen (a 200 kHz cell swallowing the notch reads analysed).
+      TESTS: `cargo nextest run -p hk-store -p hk-api` 420/420; `hk-cli -E binary(api_contract)`
+      53/53; `just test-ui` 49/49. `just precheck hk-store hk-api hk-cli` clean.
+
   - id: T-598
     milestone: M2-hardening
     title: The retune verdict is computed and thrown away - the inventory still lists one moving spur as three emitters
