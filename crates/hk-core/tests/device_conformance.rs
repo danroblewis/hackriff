@@ -1029,6 +1029,93 @@ fn an_armed_retune_fault_fails_the_read_that_applies_it_and_the_device_stays_put
     );
     assert!(MockFault::parse("retune-apply-fails:0").is_err());
     assert!(MockFault::parse("tune-sometimes").is_err());
+    // T-541: the two fault shapes a soak run needs — one that keeps recurring, and one that
+    // fails on the control thread rather than the capture thread.
+    assert_eq!(
+        MockFault::parse("read-fails-every:4"),
+        Ok(Some(MockFault::ReadFailsEvery { n: 4 }))
+    );
+    assert!(MockFault::parse("read-fails-every:0").is_err());
+    assert_eq!(
+        MockFault::parse("read-fails-every"),
+        Ok(Some(MockFault::ReadFailsEvery { n: 1 })),
+        "bare `read-fails-every` is every read, the same default the other counted specs take"
+    );
+    assert_eq!(
+        MockFault::parse("refuse-rate"),
+        Ok(Some(MockFault::RefuseRate { count: 1 }))
+    );
+    assert_eq!(
+        MockFault::parse("refuse-rate:always"),
+        Ok(Some(MockFault::RefuseRate { count: u32::MAX }))
+    );
+}
+
+/// **T-541 — the two fault shapes `ops/fuzz-rig.sh` soaks with, through the device contract.**
+///
+/// `read-fails-every:N` is a stall that **clears**: the read after the failure delivers, which is
+/// what makes it the shape a long run must survive over and over rather than end on.
+/// `refuse-rate` fails in `set_sample_rate` itself — the control thread, not the capture thread,
+/// which is the path `MockFault::RetuneApplyFails` cannot reach.
+#[test]
+fn t541_fault_shapes_recur_and_refuse_on_the_control_thread() {
+    let dir = Scratch::new("t541-shapes");
+    let meta = Synth {
+        fs: 4e6,
+        secs: 0.5,
+        ..Synth::new(Datatype::Ci8)
+    }
+    .write(&dir.0, "t541");
+    let mut buf = Vec::new();
+
+    // A stall every 3 reads, and the run continues after each one.
+    let driver = MockSdrDriver::new(
+        &meta,
+        MockOptions {
+            block_len: 4096,
+            fault: Some(MockFault::ReadFailsEvery { n: 3 }),
+            ..MockOptions::default()
+        },
+    )
+    .unwrap();
+    let mut src = driver.open_mock(&driver.default_request()).unwrap();
+    let (mut ok, mut failed) = (0, 0);
+    for _ in 0..12 {
+        match src.read_block_ci8(&mut buf) {
+            Ok(_) => ok += 1,
+            Err(_) => failed += 1,
+        }
+    }
+    assert!(failed >= 3, "the stall must recur, not fire once: {failed}");
+    assert!(
+        ok >= 6,
+        "and it must CLEAR — a device that never delivers again is `gone-on-retune`, a different \
+         fault: {ok} good reads"
+    );
+
+    // A refused rate, on the control thread, without touching the capture thread.
+    let driver = MockSdrDriver::new(
+        &meta,
+        MockOptions {
+            block_len: 4096,
+            fault: Some(MockFault::RefuseRate { count: 1 }),
+            ..MockOptions::default()
+        },
+    )
+    .unwrap();
+    let mut src = driver.open_mock(&driver.default_request()).unwrap();
+    let control = src.control();
+    assert!(
+        control.set_sample_rate(8e6).is_err(),
+        "the first rate change is refused"
+    );
+    assert!(
+        src.read_block_ci8(&mut buf).is_ok(),
+        "a refused CONTROL call does not break the stream"
+    );
+    control
+        .set_sample_rate(8e6)
+        .expect("the second rate change is accepted (count: 1)");
 }
 
 /// T-508: `gone-on-retune` — the first retune takes the device away, and nothing brings it back:

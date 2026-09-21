@@ -208,6 +208,10 @@ impl Lent {
         })
     }
 
+    /// **T-541 audit: unreachable, and left as an `expect` for that reason.** `inner` is `Some`
+    /// from [`Lent::wrap`] and is taken only in `Drop`, after which no method of this type can be
+    /// called. Rewriting it as a handled error would invent a failure mode the type does not
+    /// have, and a `Source` method has nowhere honest to report one to.
     fn get(&self) -> &dyn Source {
         self.inner.as_deref().expect("lent source present")
     }
@@ -642,6 +646,16 @@ pub(crate) struct Shared {
     pub display: Arc<DisplayControl>,
     /// The run continues in a new segment after this one: history is not sealed at its end.
     pub continues: AtomicBool,
+    /// T-541: how long a consumer arriving **after** this segment's publishers end is told the
+    /// stream is between windows rather than gone
+    /// ([`hk_stream::Publisher::finish_between_windows_for`]), in milliseconds.
+    ///
+    /// A re-plumb keeps [`hk_stream::BETWEEN_WINDOWS_GRACE`] (the default here): the handover is
+    /// the producer's own and measured at ~0.17 s since T-525. A segment that ended because the
+    /// **device** failed sets [`RECOVERY_SUCCESSOR_GRACE`] instead, because its successor cannot
+    /// arrive until [`recover`] has worked through [`recovery_backoff`] — and until it does, or
+    /// gives up, "the stream is gone" is not true.
+    pub successor_grace_ms: AtomicU64,
     /// Burst taps of the run (T-060).
     pub bursts: Arc<crate::chains::taps::BurstHub>,
     /// Which analog chain owns each emission (T-071 dedupe).
@@ -701,6 +715,11 @@ pub struct ControlStats {
     /// past [`unwrap_shared`]'s bound (T-508): a fresh database connection, and the inventory taken
     /// from under the straggler. It used to end the run.
     pub segments_salvaged: AtomicU64,
+    /// T-541: pipeline threads that ended by **panicking** rather than returning. Always a defect
+    /// — nothing in the pipeline is supposed to unwind — but a *reported* one: the thread's death
+    /// ends its segment, so the supervisor sees it and either recovers or ends the run with the
+    /// panic as the cause, instead of leaving a run that reads `running` with a reader missing.
+    pub worker_panics: AtomicU64,
     /// Manual recordings started.
     pub recordings_started: AtomicU64,
     /// Manual recordings refused by the content class.
@@ -817,6 +836,17 @@ pub fn recovery_backoff(attempt: u32) -> Duration {
     Duration::from_millis(250u64 << attempt.saturating_sub(1).min(4))
 }
 
+/// T-541 — how long a would-be consumer arriving during a **capture recovery** is told the stream
+/// is between windows rather than finished ([`Shared::successor_grace_ms`]).
+///
+/// The whole recovery budget with room for the restarts themselves: [`recovery_backoff`] sums to
+/// 7.75 s over [`MAX_RECOVERY_ATTEMPTS`], and each attempt then re-sends the window and starts a
+/// segment. Past this the run really has given up and `410` is the honest answer again — which is
+/// the point of putting a *bound* on it rather than holding the claim open for ever: a server that
+/// says "try again" about a run that has ended is exactly as dishonest as one that says "gone"
+/// about a run that is recovering.
+pub const RECOVERY_SUCCESSOR_GRACE: Duration = Duration::from_secs(20);
+
 /// How long [`PipelineController::retune`] waits for a re-plumb.
 pub const REPLUMB_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -888,9 +918,41 @@ struct Common {
     /// T-508 test seam: segment starts still to fail, at the last step (after every reader has
     /// spawned, before the capture thread), so the cleanup path is the one exercised.
     fail_segment_starts: std::sync::atomic::AtomicU32,
+    /// T-541: the first pipeline thread panic of the run, as [`guarded`] recorded it.
+    ///
+    /// The **first**, not the latest: a panic in one reader usually takes the segment down and
+    /// several threads report the fall-out, and the first one is the cause. Cleared when the
+    /// supervisor has consumed it as a segment's cause, so a later segment's panic is its own.
+    worker_panic: Arc<Mutex<Option<String>>>,
+    /// T-541 test seam: `(thread name, how many more of its starts panic)`
+    /// ([`PipelineHandle::panic_worker`]). There is no other way to get an unwinding pipeline
+    /// thread on demand, and a guard over a panic that no test can produce is not a guard.
+    panic_worker: Mutex<Option<(String, u32)>>,
 }
 
 impl Common {
+    /// T-541 test seam: whether the worker `name` starting now must panic, consuming one of the
+    /// armed starts. Decided here rather than inside the thread, so "which starts panic" is a
+    /// fact about the spawn order and not about the scheduler.
+    fn panic_seam(&self, name: &str) -> bool {
+        let mut g = self
+            .panic_worker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match g.as_mut() {
+            Some((n, left)) if n == name => {
+                if *left != u32::MAX {
+                    *left -= 1;
+                    if *left == 0 {
+                        *g = None;
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Ends the manual recording (if any) and keeps its final status.
     fn finish_recorder(&self) {
         let rec = self
@@ -951,6 +1013,69 @@ impl Supervisor {
 pub struct Pipeline;
 
 type Worker = (&'static str, JoinHandle<anyhow::Result<()>>);
+
+/// What a panic payload says, as far as it can be recovered (T-541).
+///
+/// `panic!("…")` gives a `String` and `panic!("literal")` a `&'static str`; anything else — a
+/// `panic_any`, a foreign payload — has no text, and "an unprintable payload" is still better
+/// than nothing, because the *fact* of the panic is what the run has to state.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+        .unwrap_or_else(|| "an unprintable payload".to_owned())
+}
+
+/// **T-541 — a pipeline thread that panics must be observed, not silently absent.**
+///
+/// Wraps a worker body so an unwinding panic becomes three things instead of a dead thread:
+///
+/// 1. an `Err` naming the thread and the payload, which [`join_workers`] already collects;
+/// 2. a recorded **cause** on the run ([`Common::worker_panic`]), which [`supervise`] turns into
+///    `capture_note` — so `/api/status` says what happened rather than `capture: running`;
+/// 3. a **stop of the segment**, so the loss is noticed at the next supervisor wake-up.
+///
+/// (3) is the part that matters. Without it a panicking reader is joined only when the segment
+/// ends for some *other* reason, which on a live run may be never: the capture thread keeps
+/// filling the ring, `/api/status` keeps saying `running`, and the surface the dead reader fed
+/// — the spectrum rows, the history pyramid — simply stops advancing. That is the user's "frozen
+/// edge that looks live", produced by a thread nobody was waiting on. Ending the segment costs a
+/// restart (a live run recovers; a replay ends with the panic as its stated cause) and buys the
+/// invariant that no pipeline thread can die unnoticed.
+fn guarded(
+    name: &'static str,
+    shared: Arc<Shared>,
+    stats: Arc<ControlStats>,
+    slot: Arc<Mutex<Option<String>>>,
+    seam: bool,
+    f: Box<dyn FnOnce() -> anyhow::Result<()> + Send>,
+) -> impl FnOnce() -> anyhow::Result<()> + Send {
+    move || {
+        // The seam panics *inside* the guard, not before it: a test seam that escaped the thing
+        // it exists to exercise would prove the opposite of what it claims.
+        let body = move || {
+            assert!(!seam, "injected worker panic (T-541 test seam)");
+            f()
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+            Ok(r) => r,
+            Err(p) => {
+                let why = format!("the {name} thread panicked: {}", panic_text(&*p));
+                eprintln!("hk-pipeline: {why}");
+                inc(&stats.worker_panics);
+                let mut first = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                if first.is_none() {
+                    *first = Some(why.clone());
+                }
+                drop(first);
+                // The segment is now short a reader: end it rather than run on without one.
+                shared.stop.store(true, Ordering::SeqCst);
+                Err(anyhow::anyhow!(why))
+            }
+        }
+    }
+}
 
 struct Started {
     shared: Arc<Shared>,
@@ -1148,6 +1273,8 @@ impl Pipeline {
             .map_err(|e| eprintln!("observation log disabled: {e:#}"))
             .ok(),
             fail_segment_starts: std::sync::atomic::AtomicU32::new(0),
+            worker_panic: Arc::default(),
+            panic_worker: Mutex::new(None),
         };
         // T-118: visits and tiers from the T-115 log when it opened.
         if let Some(log) = &common.observations {
@@ -1197,7 +1324,42 @@ impl Pipeline {
         let thread = thread::Builder::new()
             .name("hk-supervisor".into())
             .spawn(move || {
-                let finished = supervise(&s, workers);
+                // **T-541: the supervisor is the one thread whose death nothing else observes.**
+                // Every other thread is joined by it; it is joined only by
+                // [`PipelineHandle::wait`], which a server calls at shutdown and never before. So
+                // an unwinding panic here left `hk serve` answering every route, `finished: false`
+                // and `capture: running` for ever, with the live edge frozen — *indistinguishable
+                // from a dead process*, which is the exact shape of the defect this ticket exists
+                // to rule out. Catching it does not make the panic acceptable; it makes the run
+                // **say** it, which is the difference between a degraded server and a lying one.
+                let finished = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    supervise(&s, workers)
+                })) {
+                    Ok(f) => f,
+                    Err(p) => {
+                        let why = format!("the pipeline supervisor panicked: {}", panic_text(&*p));
+                        eprintln!("hk-pipeline: {why}");
+                        inc(&s.common.stats.worker_panics);
+                        let mut st = s.lock();
+                        if let Some(shared) = st.shared.take() {
+                            shared.stop.store(true, Ordering::SeqCst);
+                        }
+                        st.tx = None;
+                        st.finished = true;
+                        st.recovering = false;
+                        st.capture_note = Some(why.clone());
+                        // A control caller blocked on a re-plumb would otherwise wait out
+                        // `REPLUMB_TIMEOUT` for an answer that is never coming.
+                        if st.result.is_none() && st.request.take().is_some() {
+                            st.result = Some(Err(ControlFailure::Failed(why.clone())));
+                        }
+                        drop(st);
+                        s.cv.notify_all();
+                        Finished {
+                            errors: vec![format!("hk-supervisor: {why}")],
+                        }
+                    }
+                };
                 // The run is over: burst taps finish their streams.
                 s.common.bursts.close();
                 finished
@@ -1360,6 +1522,7 @@ fn start_segment(
         specs,
         display: Arc::clone(&common.display),
         continues: AtomicBool::new(false),
+        successor_grace_ms: AtomicU64::new(hk_stream::BETWEEN_WINDOWS_GRACE.as_millis() as u64),
         bursts: Arc::clone(&common.bursts),
         claims: crate::chains::EmissionClaims::default(),
         track_decodes: Arc::default(),
@@ -1375,10 +1538,19 @@ fn start_segment(
     // (T-508) — the source is already back in the slot by then, because whatever held it has been
     // dropped with this closure.
     let spawned = (|| -> anyhow::Result<()> {
+        // T-541: every reader goes through `guarded`, so none of them can die unnoticed.
         let spawn = |name: &'static str,
                      f: Box<dyn FnOnce() -> anyhow::Result<()> + Send>|
          -> anyhow::Result<Worker> {
-            Ok((name, thread::Builder::new().name(name.into()).spawn(f)?))
+            let body = guarded(
+                name,
+                Arc::clone(&shared),
+                Arc::clone(&common.stats),
+                Arc::clone(&common.worker_panic),
+                common.panic_seam(name),
+                f,
+            );
+            Ok((name, thread::Builder::new().name(name.into()).spawn(body)?))
         };
         {
             let (s, t) = (Arc::clone(&shared), tx.clone());
@@ -1449,10 +1621,22 @@ fn start_segment(
         {
             anyhow::bail!("injected segment-start failure (T-508 test seam)");
         }
-        let s = Arc::clone(&shared);
+        // T-541: the capture thread gets the same guard as the readers. `join_workers` already
+        // treated a panicked `hk-capture` as a capture failure, which is right, but it could only
+        // report the word "panicked"; through `guarded` the payload reaches `capture_note`, so
+        // `/api/status` names what went wrong on the one thread the run cannot do without.
+        let (s, stats, slot, seam) = (
+            Arc::clone(&shared),
+            Arc::clone(&common.stats),
+            Arc::clone(&common.worker_panic),
+            common.panic_seam("hk-capture"),
+        );
         let capture = hk_core::rt::spawn_capture_thread("hk-capture", move |_priority| {
-            let (writer, s) = (writer, s);
-            let r = crate::capture::run(source, reopen, writer, Arc::clone(&s));
+            let inner: Box<dyn FnOnce() -> anyhow::Result<()> + Send> = {
+                let s = Arc::clone(&s);
+                Box::new(move || crate::capture::run(source, reopen, writer, s))
+            };
+            let r = guarded("hk-capture", Arc::clone(&s), stats, slot, seam, inner)();
             if r.is_err() {
                 s.stop.store(true, Ordering::SeqCst);
             }
@@ -1612,6 +1796,19 @@ fn supervise(sup: &Supervisor, mut workers: Vec<Worker>) -> Finished {
             &mut errors,
             c.user_stop.load(Ordering::SeqCst),
         );
+        // **T-541: a reader that panicked is a segment failure like any other.** [`guarded`] has
+        // already stopped the segment and recorded the cause; taking it here is what turns it
+        // from a line in `errors` that nobody reads into the run's *stated* reason for
+        // recovering or ending. Taken unconditionally, so a panic that arrived alongside a
+        // capture failure cannot leak into the next segment's decision — and `or` keeps the
+        // capture thread's own error first when both are set, because that is the one the
+        // recovery is about.
+        let panicked = c
+            .worker_panic
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let capture_failed = capture_failed.or(panicked);
         let mut st = sup.lock();
         if get(&c.counters.source.samples) > st.samples_at_start {
             st.last_good = (st.window, st.class);
@@ -1647,6 +1844,14 @@ fn supervise(sup: &Supervisor, mut workers: Vec<Worker>) -> Finished {
                     inc(&c.stats.capture_failures);
                     eprintln!("the front end failed while a re-plumb was queued: {e}");
                 }
+                // **T-541 audit.** `shared` is `None` only between the two `take`s in this loop
+                // and the `install` that follows each of them, and the loop is the only writer,
+                // so at the top of an iteration it is always `Some`. It is left as an `expect`
+                // rather than rewritten: the invariant is real and an `if let` here would
+                // silently skip a segment's teardown instead of stating that the loop is wrong.
+                // What T-541 changes is the *consequence* — this thread now unwinds into
+                // `catch_unwind` at its spawn, which ends the run with the panic as its stated
+                // cause, rather than leaving `hk serve` reporting `capture: running` for ever.
                 let old = st.shared.take().expect("a running segment");
                 st.tx = None;
                 drop(st);
@@ -2156,6 +2361,10 @@ impl PipelineController {
                 "replumb_failures": get(&stats.replumb_failures),
                 "capture_recoveries": get(&stats.capture_recoveries),
                 "segments_salvaged": get(&stats.segments_salvaged),
+                // T-541: pipeline threads that ended by panicking. Always a defect, and served
+                // rather than kept internal for the same reason as `window_settle_timeouts`:
+                // a fault the system handled is still a fault the operator should be able to see.
+                "worker_panics": get(&stats.worker_panics),
                 "recordings_started": get(&stats.recordings_started),
                 "recordings_refused_class": get(&stats.recordings_refused_class),
             }),
@@ -2822,6 +3031,30 @@ impl PipelineHandle {
             .common
             .fail_segment_starts
             .store(n, Ordering::SeqCst);
+    }
+
+    /// T-541 test seam: the worker thread whose body **panics** as soon as it starts, by name
+    /// (`"hk-capture"`, `"hk-spectrum"`, `"hk-detect"`, `"hk-history"`, …), for its next `starts`
+    /// starts (`u32::MAX`: every one, for ever); `None` clears it.
+    ///
+    /// A count rather than a flag, because the two cases the guard has to get right are
+    /// different: **one** panic must be recovered from and leave the run running, while a reader
+    /// that panics **every** time must end the run honestly instead of restarting for ever. There
+    /// is no way to make a real reader unwind on demand, and a guard over a panic no test can
+    /// produce is not a guard.
+    pub fn panic_worker(&self, name: Option<(&str, u32)>) {
+        *self
+            .sup
+            .common
+            .panic_worker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) =
+            name.map(|(n, starts)| (n.to_owned(), starts));
+    }
+
+    /// T-541: pipeline threads that ended by panicking (`ControlStats::worker_panics`).
+    pub fn worker_panics(&self) -> u64 {
+        get(&self.sup.common.stats.worker_panics)
     }
 
     /// The run's rolling IQ capture buffer (T-157): status and clip export.

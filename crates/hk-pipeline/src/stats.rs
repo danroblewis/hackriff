@@ -71,6 +71,12 @@ counter_group!(
         ring_errors,
         /// Source read errors.
         read_errors,
+        /// **Blocks refused because their provenance could not be true** (T-541): a sample rate
+        /// that is zero, negative or not finite, or a centre that is not finite. A front end
+        /// cannot produce such a block, so it is a corrupt transfer or an uninitialised driver
+        /// struct, and it is dropped at this boundary rather than divided by downstream. Non-zero
+        /// is a defect signal about the front end, never a normal outcome.
+        bad_blocks,
         /// cf32/ci16 blocks quantised to ci8 for the ring.
         quantised_blocks,
         /// Tune changes the capture thread held for the coverage-chain poll (lossless replay).
