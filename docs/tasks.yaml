@@ -5687,6 +5687,12 @@ tasks:
     deps: [T-268]
     parallel_group: M4A
     acceptance: 'T-268 decided BUILD over WRAP for sound reasons (no compliant CC recording exists, so wrapping would need a compliant ENCODER first, and a GPLv3 binary as a hard CI dependency would make the blind acceptance test SKIP in CI). That decision is right for the RUNTIME and leaves a real hole in VERIFICATION: the decoder and the generator were written from the same reading of the same references, so a shared misreading passes both. Close it the way C23 Testing already says to - compare against Trunk Recorder or SDRTrunk on the SAME IQ, as an ORACLE not a runtime, behind the C22 plugin boundary per ADR-0010, and gate it on hardware/off-air tier so CI never depends on it. Blocked until a real off-air P25 capture exists (user-triggered); until then record explicitly in the module header that no independent oracle has confirmed this decoder'
+    notes: |
+      2026-09-20 (T-544): the blocker is being lifted. T-544 captures real off-air BART 800 MHz P25
+      (docs/18) and its ground-truth plan REQUIRES exactly this oracle - SDRTrunk/OP25/DSD+ offline
+      over the same IQ, behind the C22 plugin boundary, hardware/off-air tier only, cross-validated
+      against a spectrogram-derived grant/activity check so no single decoder authors the answer
+      key. Pick this up when T-544's capture lands.
   - id: T-300
     title: 'T-267 confirmer uses CRC-16/CCITT-FALSE, but real P25 TSBKs use the AUGMENTED CRC-CCITT - on the first real capture this will look like a demodulator fault'
     milestone: M4
@@ -16168,7 +16174,7 @@ tasks:
     parallel_group: FIXTURE
     model: opus
     depends_on: []
-    use_cases: [SIGNAL-001]
+    use_cases: [SIGNAL-087]
     acceptance: |
       USER 2026-09-20. BART (SF Bay Area transit) broadcasts around 851 MHz. This is phase 1 of a
       blind auto-decode acceptance test - the first end-to-end MAUTO target on a REAL signal the
@@ -16205,7 +16211,7 @@ tasks:
     core_interface: true
     model: opus
     depends_on: [T-544]
-    use_cases: [SIGNAL-001]
+    use_cases: [SIGNAL-087]
     acceptance: |
       Phase 2 of the BART auto-decode target. Write the acceptance tests FIRST and expect them to
       FAIL - they define what MAUTO must achieve.
@@ -16234,7 +16240,7 @@ tasks:
     core_interface: true
     model: opus
     depends_on: [T-545]
-    use_cases: [SIGNAL-001]
+    use_cases: [SIGNAL-087]
     acceptance: |
       Phase 3: improve the MAUTO auto-discovery pipeline until T-545's blind tests pass on real
       captured RF. This is the north-star workflow made real - detect blindly, characterise,
