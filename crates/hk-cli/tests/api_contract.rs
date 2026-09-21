@@ -1831,6 +1831,7 @@ fn events_and_presence_serve_the_durable_catalogue() {
             "withheld",
             "events",
             "on_air_s",
+            "liveness",
             "count",
         ] {
             assert!(
@@ -1843,7 +1844,43 @@ fn events_and_presence_serve_the_durable_catalogue() {
             m["events"].as_u64().is_some_and(|n| n > 0),
             "an emitter is listed only when it has events in the window: {m}"
         );
+        assert!(
+            matches!(m["liveness"].as_str(), Some("live" | "ended" | "absent")),
+            "liveness is live/ended/absent: {m}"
+        );
     }
+    // T-591: **the two surfaces cannot disagree about one emitter's liveness.** An emitter's
+    // presence is one interval `[start, end?]` (ADR-0017/0019), so liveness is a property of the
+    // emitter and not of the route asked. `/api/events` used to derive it under
+    // `IdleGap::conservative()` (60 s) while `/api/inventory` measured the gap off the band's tune
+    // history (T-410), and they disagreed. Asserted over EVERY emitter the catalogue listed, with
+    // the count reported — a comparison of zero emitters would be vacuous.
+    let (st, inv) = get(
+        addr,
+        &format!("/api/inventory?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&limit=500"),
+    );
+    assert_eq!(st, 200, "{inv}");
+    let rows = inv["entries"].as_array().expect("inventory entries");
+    let mut compared = 0usize;
+    for m in emitters {
+        let id = m["id"].as_str().unwrap();
+        let Some(row) = rows.iter().find(|r| r["id"] == json!(id)) else {
+            continue;
+        };
+        assert_eq!(
+            m["liveness"], row["presence"]["liveness"],
+            "/api/events and /api/inventory disagree about emitter {id} in the same window: \
+             events {m}, inventory row presence {}",
+            row["presence"]
+        );
+        compared += 1;
+    }
+    assert!(
+        compared > 0,
+        "liveness was compared for {compared} emitters — a vacuous comparison: events {v}, \
+         inventory {inv}"
+    );
+    eprintln!("T-591: liveness compared across both surfaces for {compared} emitters");
     // Coverage always answers, and always in words a client can show beside an empty list: an
     // unobserved stretch is never reported as a quiet band (C26).
     let statement = v["coverage"]["statement"]

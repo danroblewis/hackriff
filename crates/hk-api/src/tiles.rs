@@ -122,7 +122,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use hk_model::{FreqRange, IdleGap, TimeRange, Timestamp};
+use hk_model::{FreqRange, TimeRange, Timestamp};
 use hk_store::history::Geometry;
 use hk_store::{Overview, OverviewCell, RegionQuery, Resolution};
 use serde_json::{Value, json};
@@ -1854,11 +1854,23 @@ pub fn tile_events_json(state: &ApiState, q: &Params) -> Result<Value, ApiError>
         .map_err(|_| ApiError::new(500, "event query failed"))?;
     let mut total = 0u64;
     let mut placed = 0u64;
+    // T-591: the same tune history `/api/events` and `/api/inventory` read, so a count on this
+    // tile is a count of the same events those surfaces list. It used to be
+    // `IdleGap::conservative` here, which is a *different* interval decomposition of the same
+    // ledger — the coarse view could disagree with the list it zooms into about how many events
+    // there were.
+    let coverage = crate::coverage::ObservedCoverage::of(state, window);
     for entry in &page.entries {
-        let intervals = repo
-            .presence_intervals(entry.emitter.id, IdleGap::conservative(), window.end)
+        let track = coverage
+            .track(
+                &repo,
+                entry.emitter.id,
+                entry.emitter.freq(),
+                window,
+                window.end,
+            )
             .map_err(|_| ApiError::new(500, "event query failed"))?;
-        for i in intervals.iter().filter(|i| i.time.overlaps(&window)) {
+        for i in track.intervals.iter().filter(|i| i.time.overlaps(&window)) {
             total += 1;
             let t = (i.time.start.as_unix_nanos() - key.region.t0_ns) / key.t_cell_ns;
             // An interval with no measured centre has no column: it is counted in `total` and not

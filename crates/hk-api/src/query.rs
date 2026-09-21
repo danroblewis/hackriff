@@ -1613,9 +1613,14 @@ pub fn inventory_entry_json_at(
         // T-410 (ADR-0019 §3): the idle gap is **measured** off this band's coverage, not defaulted
         // to the 60 s unknown. It closes this row's interval, so it is also how long the row's box
         // runs to the live edge before capping — 60 s on a band the receiver never looked away from
-        // was a box over-claiming a minute of silent air.
-        let gap = coverage.idle_gap(e.freq(), span);
-        let presence = presence_json(&repo.presence(e.id, span, gap, now)?);
+        // was a box over-claiming a minute of silent air. T-591: and through
+        // [`ObservedCoverage::presence`], the crate's **one** derivation of liveness, so this row
+        // and the same emitter's events on `/api/events` cannot read differently.
+        let presence = presence_json(
+            &coverage
+                .track(repo, e.id, e.freq(), span, now)?
+                .project(span),
+        );
         // ADR-0017 §7.1: the same arbitration ladder over the rows inside the window. `family`
         // above stays the all-time answer — identity evidence is time-invariant — and this says
         // whether anything *in these minutes* re-evidenced it. `null` when nothing did, so a

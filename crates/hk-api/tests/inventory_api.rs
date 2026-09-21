@@ -288,6 +288,69 @@ fn hk_api_never_calls_the_ungated_emitter_getters() {
     assert!(!query.contains("OwnTrafficAuthorised"));
 }
 
+/// T-591: **liveness is derived in exactly one place.** An emitter's presence is one interval
+/// `[start, end?]` (ADR-0017/0019), so `live`/`ended` is a property of the emitter and not of the
+/// route asked — yet `/api/events` and `/api/tiles/events` each hard-coded `IdleGap::conservative()`
+/// (60 s) while `/api/inventory` measured the gap off the band's tune history (T-410), and T-254's
+/// ISM scene read `open: true` on 3 of 3 events beside rows reading `ended`.
+///
+/// Two constants agreeing would have drifted apart again. `ObservedCoverage::track` is the single
+/// derivation; this refuses any other route into `Repository::presence_intervals`, and refuses the
+/// conservative constant anywhere in the crate — `IdleGap::from_coverage` already yields it for a
+/// band with no recorded tune history, which is its real meaning.
+#[test]
+fn hk_api_derives_liveness_in_exactly_one_place() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut callers: Vec<String> = Vec::new();
+    let mut conservative: Vec<String> = Vec::new();
+    let mut scanned = 0;
+    for entry in std::fs::read_dir(&src).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let text = std::fs::read_to_string(&path).unwrap();
+        scanned += 1;
+        // Code only: both of these are named in prose here and in `coverage.rs`, describing the
+        // defect and the rule, and a guard that forbade *writing them down* would forbid the
+        // explanation along with the call.
+        let code = |needle: &str| {
+            text.lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .any(|l| l.contains(needle))
+        };
+        // `coverage.rs` is the one derivation. Every other file must reach the track through it.
+        if name != "coverage.rs" && code(".presence_intervals(") {
+            callers.push(name.clone());
+        }
+        if code("IdleGap::conservative()") {
+            conservative.push(name);
+        }
+    }
+    assert!(scanned >= 5, "scanned {scanned} files");
+    assert!(
+        callers.is_empty(),
+        "these derive presence outside ObservedCoverage::track: {callers:?}"
+    );
+    assert!(
+        conservative.is_empty(),
+        "these hard-code the 60 s unknown where a measurement exists: {conservative:?}"
+    );
+    // And the one place really is one place: the derivation, and the projection that reuses its gap.
+    let coverage = std::fs::read_to_string(src.join("coverage.rs")).unwrap();
+    assert_eq!(
+        coverage
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains(".presence_intervals("))
+            .count(),
+        1
+    );
+    assert!(coverage.contains("pub fn track("));
+    assert!(coverage.contains("pub fn project("));
+}
+
 /// T-054: `/api/inventory` serves explanations only from the family map's Classifier annotations
 /// (`author_ref == EXPLANATIONS_AUTHOR_REF`); a later Classifier annotation by another author
 /// carrying an `explanations` key is not served.
