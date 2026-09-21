@@ -790,8 +790,7 @@ impl Pyramid {
             // tile is written, and while the levels above it are still open, which the ascending
             // level order guarantees.
             if self.cfg.coarse_live {
-                for i in 0..keys.len() {
-                    let (fb, tb) = keys[i];
+                for &(fb, tb) in &keys {
                     let flushed = if level == 0 {
                         let Self { open, scratch, .. } = self;
                         open[0]
