@@ -384,7 +384,7 @@ fn the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture()
 /// an open tile depends on where the watermark sits modulo each node's tile duration, so one
 /// snapshot varies by 2× and is not a bound.
 ///
-/// # What T-439 measured, and what T-453 changed
+/// # What T-439 measured, what T-453 changed, and **what T-571 pays for live tiles**
 ///
 /// T-439 measured, and did not predict, that **only the `level_f = 0` column is ever resident**: a
 /// frequency-coarser node has the *same* time cell as its producer, so the fold that fills it runs
@@ -392,14 +392,37 @@ fn the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture()
 /// sealed in the same pass instead of being left open. Residency was one tile row per **time**
 /// level, not per node: an eighth of the obvious estimate. The peak came out **one row above** that,
 /// because inside `seal_lag` a node's outgoing tile is still open while its successor has been
-/// created.
+/// created. Measured: **2.28 MB/MHz peak against a 3.65 MB/MHz bound**.
 ///
-/// **T-453 collapses that to one level.** `docs/16` §5.2 decided the coarse nodes are built on
-/// demand, so capture opens an accumulator for node (0, 0) and for nothing else, whichever axis a
-/// node coarsens: the *whole lattice's* floor is now one node's, and it does not move when the
-/// lattice grows. That is the residency half of making the node count a reach decision — the write
-/// half is in [`VIEW_F_CELLS_PER_BLOCK`]. The seal-lag row survives, and is why the bound is two
-/// rows rather than one: it is a property of sealing, not of the lattice.
+/// **T-453 collapsed that to one level** — coarse nodes built on demand, so capture opened an
+/// accumulator for node (0, 0) and for nothing else: **0.91 MB/MHz**, and it did not move when the
+/// lattice grew. It bought that by folding a coarse tile out of up to 1024 producer tiles **while
+/// a reader waited**, which is the defect T-571 is about.
+///
+/// **T-571 is the explicit residency decision the ticket asked for, and this test is the number.**
+/// Live maintenance means every node holds an open accumulator for the tile it is filling, because
+/// **the tile is the write unit**: a row committed into a coarse tile has to live somewhere between
+/// its commit and that tile's seal, and the only two places are RAM and a row-granular tile file
+/// that `history::codec` does not have. So the floor goes back up, past T-439's, and the honest
+/// statement is:
+///
+/// | | resident floor | what a read of a coarse tile costs |
+/// |---|---|---|
+/// | T-439 eager-at-seal | 2.28 MB/MHz | 1 tile, but up to a whole producer tile stale at the edge |
+/// | T-453 on demand | **0.91 MB/MHz** | up to 1024 producer tiles, ~500 ms, folded in the request |
+/// | T-571 live | ~7.8 MB/MHz at one block, **~4.9 MB/MHz at 20 MHz** | 1 tile, ≤1 producer *cell* stale |
+///
+/// The per-MHz coefficient **falls** as the span widens, because a frequency-coarser node covers
+/// 2× the spectrum per tile: at one 6.4 MHz block every node needs one block, at 20 MHz the four
+/// frequency levels need 4, 2, 1 and 1. The bound below is computed per node from its own block
+/// width rather than extrapolated, for exactly that reason.
+///
+/// **It does grow with node count, and that is the cost this ticket accepted**, stated rather than
+/// hidden: 16 nodes, 16 open accumulators. The knob that would take it back is the one
+/// [`VIEW_T_CELLS_PER_BLOCK`] already names as the **memory** decision — a shorter tile seals
+/// sooner and is resident for less of its life — and the structural fix is holding a coarse tile's
+/// already-committed rows in their encoded form, leaving only the in-progress row as an
+/// accumulator. Both are stored-format changes; neither is this ticket.
 #[test]
 fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     use hk_model::PowerUnit;
@@ -447,8 +470,8 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
             let open = p.open_keys(level).len();
             tiles += open;
             bytes += open * (nf * g.levels[level].nt * BYTES_PER_CELL + nf * bins * 4);
-            // T-453: ANY node above (0, 0), on either axis. T-439 could only count the frequency
-            // column, because the time column was resident by construction.
+            // ANY node above (0, 0), on either axis. T-439 could only count the frequency column,
+            // because the time column was resident by construction.
             if level > 0 {
                 coarse += open;
             }
@@ -477,24 +500,36 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
 
     let g = p.geometry().clone();
     // Blocks the span actually covers, counted the way the store tiles them (aligned to the
-    // epoch of frequency, not to the span's own lower edge).
+    // epoch of frequency, not to the span's own lower edge) — **per node**, because a
+    // frequency-coarser node's block is 2× as wide and it needs half as many of them.
+    let level_blocks = |l: usize| -> f64 {
+        let bw = g.levels[l].f_cell_hz * f64::from(VIEW_F_CELLS_PER_BLOCK);
+        ((F_LO + SPAN_HZ) / bw).ceil() - (F_LO / bw).floor()
+    };
     let bw = f_cell * f64::from(VIEW_F_CELLS_PER_BLOCK);
     let blocks = ((F_LO + SPAN_HZ) / bw).ceil() - (F_LO / bw).floor();
-    // **T-453: one tile row, plus one.** Capture opens node (0, 0) and nothing else, so the steady
-    // set is one row however many nodes the lattice has; inside `seal_lag` that row's outgoing tile
-    // is still open while its successor has been created, which is the second. T-439 measured
-    // `VIEW_LEVELS + 1` rows here, one per TIME level plus the seal lag — the difference between
-    // the two numbers is exactly the eager fold this ticket removed, and the remaining term is a
-    // property of sealing rather than of the lattice. Measured, not assumed.
-    const RESIDENT_ROWS: f64 = 2.0;
-    let bound = RESIDENT_ROWS * blocks * per_tile as f64;
+    // **T-571: one open tile per node, plus a seal-lag overlap.** Every node is filled as rows
+    // close, so every node holds the tile it is filling; inside `seal_lag` a node's outgoing tile
+    // is still open while its successor has been created, which is the `+ blocks` term (a whole
+    // extra row of the finest node is the worst that overlap can be).
+    let per_node: f64 = (0..g.n_levels())
+        .map(|l| level_blocks(l) * (nf * g.levels[l].nt * BYTES_PER_CELL + nf * bins * 4) as f64)
+        .sum();
+    let bound = per_node + blocks * per_tile as f64;
     let mb = |b: f64| b / (1 << 20) as f64;
     let per_mhz = |b: f64| mb(b) / (SPAN_HZ / 1e6);
+    // What the same bound says at a real live edge, where the coarse nodes need fewer blocks.
+    let edge_bound: f64 = (0..g.n_levels())
+        .map(|l| {
+            let bw = g.levels[l].f_cell_hz * f64::from(VIEW_F_CELLS_PER_BLOCK);
+            (LIVE_EDGE_HZ / bw).ceil() * (nf * g.levels[l].nt * BYTES_PER_CELL + nf * bins * 4) as f64
+        })
+        .sum();
     eprintln!(
-        "T-453 view-lattice floor ({:.2} kHz x 1 s, {nf}x{} cells/block, {} nodes), {:.1} MHz \
+        "T-571 view-lattice floor ({:.2} kHz x 1 s, {nf}x{} cells/block, {} nodes), {:.1} MHz \
          tuned:\n  measured peak {peak_tiles} tiles, {:.1} MB resident, {:.0} KB/tile, \
-         {:.2} MB/MHz\n  bound (node (0, 0)'s tile row, plus a seal-lag overlap; {} nodes, and \
-         the count does not enter): {:.1} MB, \
+         {:.2} MB/MHz\n  bound (one open tile per node, plus a seal-lag overlap; {} nodes, and \
+         the count DOES enter — T-571's stated cost): {:.1} MB, \
          {:.2} MB/MHz -> {:.0} MB at a {:.0} MHz live edge",
         f_cell / 1e3,
         VIEW_T_CELLS_PER_BLOCK,
@@ -506,7 +541,7 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
         VIEW_LEVELS * VIEW_LEVELS,
         mb(bound),
         per_mhz(bound),
-        per_mhz(bound) * LIVE_EDGE_HZ / 1e6,
+        mb(edge_bound),
         LIVE_EDGE_HZ / 1e6,
     );
 
@@ -520,13 +555,14 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
         (2_500_000..3_500_000).contains(&per_tile),
         "~2.9 MB per tile — scheme 1's own level-0 tile shape, got {per_tile}"
     );
-    // The mechanism, over the WHOLE run rather than at its end: no coarse node — on either axis —
-    // ever holds an open accumulator, because capture never folds one. This is the assertion that
-    // makes the floor independent of the node count, so growing the lattice cannot move it.
-    assert_eq!(
-        ever_coarse, 0,
-        "a coarse node held an open tile at some point: with docs/16 §5.2's on-demand folding, \
-         capture opens node (0, 0) and nothing else, and the sizing bound assumes it"
+    // The mechanism, over the WHOLE run rather than at its end, and the exact inverse of what
+    // T-453 asserted here: coarse nodes DO hold open accumulators, because they are being filled
+    // row by row. If this were 0 again the lattice would be back to folding at read time.
+    assert!(
+        ever_coarse >= g.n_levels() - 1,
+        "only {ever_coarse} of {} coarse nodes ever held an open accumulator: a live lattice \
+         fills every node as rows close",
+        g.n_levels() - 1
     );
     // The peak must sit inside the bound, and near enough to it that the bound is not vacuous.
     assert!(
@@ -543,8 +579,16 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     // hundreds the naive per-NODE estimate gives, and not the tens of KB that would mean nothing
     // had opened.
     assert!(
-        (0.5..5.0).contains(&per_mhz(bound)),
+        (0.5..12.0).contains(&per_mhz(bound)),
         "{:.2} MB/MHz is outside the range the settings doc quotes",
         per_mhz(bound)
+    );
+    // And the figure that actually sizes a device: a 20 MHz live edge stays in the HUNDREDS of MB,
+    // not GB. This is the number T-571 accepted; if it moves, the ticket's decision has moved.
+    assert!(
+        (40.0..160.0).contains(&mb(edge_bound)),
+        "{:.0} MB at a {:.0} MHz live edge is not what T-571 decided",
+        mb(edge_bound),
+        LIVE_EDGE_HZ / 1e6
     );
 }

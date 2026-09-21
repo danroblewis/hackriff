@@ -17264,7 +17264,7 @@ tasks:
   - id: T-571
     milestone: MLIVE
     title: Coarse view-lattice tiles are folded ON DEMAND at read time - up to 1024 producer tiles per tile - instead of maintained live
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -17311,6 +17311,89 @@ tasks:
       tile route. Each of these fails legibly and holds under any load.
       Prove the tests go RED without the fix (standing project rule).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    branch: task-t571
+    notes: |
+      DONE on task-t571, awaiting merge. Coarse view-lattice nodes are now maintained LIVE and
+      INCREMENTALLY. `PyramidConfig::coarse_live` replaces `coarse_on_demand` for the view lattice;
+      `Tile::fold_row` folds ONE producer row (with its frequency footprint) into its consumer and
+      reports the consumer rows that completed; `Pyramid::fold_row_live` cascades that through the
+      lattice on every level-0 column close and on every seal. A coarse tile read is now an
+      ordinary read of an already-committed tile.
+
+      MEASURED - all counts, no wall-clock assertion anywhere (user instruction 2026-09-21):
+
+      - Producer tiles folded to serve ONE coarse tile: control (on demand) 70, live 0. Source
+        tiles read to answer it: 1. A viewport of all 16 nodes: control ran 791 generation passes,
+        live ran 0 and all 16 nodes answered with data. At the hk-api route the control generated
+        48 tiles from 94 producer tiles; live generated 0 and folded 0.
+      - Per arriving row: 4x4 lattice 80.5 producer cells folded per level-0 row (5.03x one
+        16-cell row); 8x8 lattice 97.4 (6.09x). Quadrupling the node count costs 1.21x, not 4x -
+        both series converge (the footprint halves at each frequency step; a time step is visited
+        once per t_factor rows). Confirms T-462's ~4.5x estimate without re-measuring it.
+      - Writes: 70,800 rows committed into coarse nodes produced 2,085 tile writes == 2,085 tile
+        files on disk. A row commit writes NOTHING; a tile is still written once, when it seals.
+        Capture does now write the whole lattice (450 tiles against 128 at node (0,0) on the cost
+        fixture, 4.80x the finest level in bytes) - docs/16 6.4a's ~4x, paid by capture. That is
+        the trade, and it is the same write count the eager-at-seal scheme would have had.
+      - RESPONSE-SIZE CAP on /api/tiles: a fully-observed 256x256 answer <= 4 MiB (measured
+        2.07 MB; the T-467 regression was 19.34 MB); an unobserved answer <= 3 MiB (measured
+        1.06 MB) and strictly under the observed one; the run-length-encoded `coverage` plane
+        <= 8 KiB (measured 3,071 B), which is the half of T-467 that is really an encoding win.
+        `grid` is ~1.05 MB whether or not anything was observed - a value per cell either way -
+        which is the review's S3, not this ticket, and is capped rather than fixed here.
+
+      RESIDENCY DECISION, stated explicitly as the ticket required. Every node now holds an open
+      accumulator for the tile it is filling, because THE TILE IS THE WRITE UNIT: a row committed
+      into a coarse tile must live somewhere between its commit and that tile's seal, and the only
+      alternative to RAM is a row-granular tile file, which history::codec does not have. Measured
+      through a real pyramid (hk-pipeline the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs):
+
+      - T-439 eager-at-seal: 2.28 MB/MHz measured (3.65 bound); a coarse read was 1 tile but up to
+        a whole producer tile stale at the edge.
+      - T-453 on demand: 0.91 MB/MHz; a coarse read folded up to 1024 producer tiles, ~500 ms,
+        inside the request.
+      - T-571 live: 7.76 MB/MHz at one 6.4 MHz block, ~4.9 MB/MHz at 20 MHz (98 MB); a coarse read
+        is 1 tile and at most one producer CELL stale.
+
+      So residency DOES grow with node count - 16 nodes, 16 open accumulators - and that is
+      accepted here rather than hidden, because the only thing that kept 0.91 MB/MHz was the
+      read-time fold this ticket exists to delete. The per-MHz coefficient falls as the span
+      widens (a frequency-coarser node covers 2x the spectrum per tile: at 20 MHz the four
+      frequency levels need 4, 2, 1 and 1 blocks), which is why the bound is computed per node
+      rather than extrapolated. The two levers that would take it back down are both stored-format
+      changes and are deliberately NOT in this ticket: VIEW_T_CELLS_PER_BLOCK (which the settings
+      doc already names as the MEMORY knob - a shorter tile is resident for less of its life, at
+      4x the tile files and a scheme bump), and holding a coarse tile's already-committed rows in
+      their ENCODED form (~3.5 B/cell measured, against 44 B/cell resident) so only the in-progress
+      row is an accumulator. Recommended as a follow-up; not
+        filed here, because this agent's brief scoped it to T-571's own block.
+
+      OTHER CONSEQUENCES, deliberate and documented in the code:
+
+      - A coarse node now lags level 0 by at most ONE producer time cell (1 s at the shipped
+        floor), where the on-demand fold lagged only in occupancy. A row is folded when its column
+        CLOSES, which is what "commits every N" means. Node (0,0) - the live edge itself - is
+        unaffected: a direct level-0 read still stands in for its open column with column_preview.
+      - Provenance merges once, when a producer tile SEALS, not per row: a summary is not a
+        per-row quantity and merging it per row would multiply every count it holds. Inside the
+        current block a coarse tile carries cells without provenance.
+      - coarse_live requires every producing level to coarsen ONE axis (f_factor == 1 ||
+        t_factor == 1) and not to be welded; PyramidConfig::geometry enforces it and
+        ViewLattice::levels satisfies it by construction. The occupancy RATIO is the reason:
+        fold_child maxes it over the producer's frequency cells after summing each over the
+        producer's rows, and that maximum cannot be updated one row at a time without a
+        per-producer-cell running (obs, occ) - residency proportional to a producer row per node,
+        for a shape no scheme uses.
+      - coarse_on_demand remains a supported mode and keeps its tests; scheme 1's eager-at-seal
+        ladder is untouched.
+
+      RED-WHEN-BROKEN: every new test carries the broken design as a CONTROL in the same run over
+      the same frames (a second store built coarse_on_demand), asserted to show the defect before
+      the live store is asserted to show none of it - so the evidence is permanent rather than a
+      one-off, and a test that judged nothing fails on the control first.
+
+      Tests: hk-store history::tests::live_coarse (4), hk-api tile_no_generation (1), plus the
+      rewritten hk-store lattice/lattice_cost T-453 tests and hk-pipeline's residency measurement.
   - id: T-572
     milestone: MLIVE
     title: An in-memory hot-tile LRU - a viewport re-read goes to RAM, not to the filesystem

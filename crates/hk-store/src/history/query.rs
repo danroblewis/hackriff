@@ -1572,6 +1572,10 @@ impl Pyramid {
         margin: f32,
         pct: (f32, f32),
     ) -> Result<Option<Source<'_>>, StoreError> {
+        // T-571: every tile this read consults, wherever it lives. A coarse tile of a live
+        // lattice costs ONE of these; the read-time fold it replaced cost one per producer tile,
+        // up to `MAX_MATERIALIZE_TILES` of them for a single address.
+        self.count_source_tile();
         if let Some(t) = self.open[level].get(&(fb, tb)) {
             let preview = if level == 0 {
                 t.column_preview(margin, pct)

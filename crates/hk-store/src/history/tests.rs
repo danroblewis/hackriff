@@ -19,6 +19,7 @@ mod followups;
 mod last_known;
 mod lattice;
 mod lattice_cost;
+mod live_coarse;
 mod maturity;
 mod mixture;
 mod origins;
