@@ -73,7 +73,16 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
+
+try:  # `python -m hkpy.gate` (how `just gate` runs it)
+    from . import crates as crate_select
+    from . import gatelog
+except ImportError:  # `python3 py/hkpy/gate.py`, the direct-execution path the docstring promises
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from hkpy import crates as crate_select  # type: ignore[no-redef]
+    from hkpy import gatelog  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
 # Classes
@@ -585,6 +594,77 @@ def render(decision: Decision, source: Source, phase: str) -> list[str]:
     return out
 
 
+#: T-543. The one place the crate narrowing reaches the suites: the justfile's `lint-rust`,
+#: `test-rust` and `test-doc` read this variable and turn it into `-p` flags. **Unset means
+#: the whole workspace**, so the failure mode of every bug in this path — a crash, a missing
+#: `cargo`, a typo, an old justfile — is the expensive gate, never a cheap one. That is the
+#: same fail-closed shape as `classify_path`'s unknown-is-FULL, moved one level down.
+CRATES_ENV = "HK_GATE_CRATES"
+
+
+def resolve_selection(
+    decision: Decision, source: Source, root: str, *, no_select: bool = False
+) -> "crate_select.Selection":
+    """Narrow the Rust suite to the crates a `full`-class diff can reach, or don't.
+
+    Only the `full` class is refined, and only when the changed-path list is known: a forced
+    full gate (an unreadable diff, a CI push build, `--merge` outside a merge) has no path
+    list to reason from, so by construction it gets the whole workspace.
+    """
+    if no_select:
+        return crate_select.Selection(None, "--no-select: crate narrowing disabled")
+    if not decision.is_full:
+        return crate_select.Selection(None, "not the full class — no Rust suite to narrow")
+    if decision.forced_reason or source.paths is None:
+        return crate_select.Selection(
+            None, "the changed-path list is unknown — running the whole workspace"
+        )
+    return crate_select.select(source.paths, crate_select.load_workspace(root))
+
+
+def render_selection(selection: "crate_select.Selection") -> list[str]:
+    """The crate decision, printed like the class decision: never silent."""
+    if selection.is_workspace:
+        return [f"gate: crates   = WHOLE WORKSPACE ({selection.reason})"]
+    return [
+        f"gate: crates   = {len(selection.crates or ())} of the workspace: "
+        + " ".join(selection.crates or ()),
+        f"gate:            {selection.reason}",
+    ]
+
+
+def selection_env(
+    base: dict[str, str], selection: "crate_select.Selection"
+) -> dict[str, str]:
+    """`base` with `HK_GATE_CRATES` set, or explicitly cleared for a workspace run.
+
+    Cleared, not left alone: an inherited `HK_GATE_CRATES` from an outer shell must not
+    silently narrow a gate that decided on the whole workspace.
+    """
+    env = dict(base)
+    if selection.is_workspace or not selection.crates:
+        env.pop(CRATES_ENV, None)
+    else:
+        env[CRATES_ENV] = " ".join(selection.crates)
+    return env
+
+
+def current_branch(root: str) -> str | None:
+    """The branch being gated, for the cycle-time ledger. `None` on a detached HEAD.
+
+    Never raises: this is a label on a measurement, and a measurement must not be able to
+    fail the thing it measures. Same rule as `gatelog.append`.
+    """
+    try:
+        out = _git_ok(["rev-parse", "--abbrev-ref", "HEAD"], root)
+    except Exception:
+        return None
+    if out is None:
+        return None
+    name = out.strip()
+    return None if not name or name == "HEAD" else name
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="just gate",
@@ -623,6 +703,14 @@ def main(argv: list[str] | None = None) -> int:
         help="print the decision and the suites, run nothing",
     )
     parser.add_argument(
+        "--no-select",
+        action="store_true",
+        help=(
+            "run the Rust suite over the whole workspace even when the diff touches only "
+            "a few crates (T-543). The expensive answer, for when you want it."
+        ),
+    )
+    parser.add_argument(
         "--root", default=None, help="repo root (default: the git toplevel)"
     )
     args = parser.parse_args(argv)
@@ -639,6 +727,13 @@ def main(argv: list[str] | None = None) -> int:
         decision = classify(source.paths)
 
     for line in render(decision, source, args.phase):
+        print(line, flush=True)
+
+    # T-543: which CRATES, once the class is `full`. Purely a narrowing of the Rust suite
+    # inside the same class — never a change of class, and never applied when the answer is
+    # not certain (`crates.select` returns the whole workspace then). See `crates.py`.
+    selection = resolve_selection(decision, source, root, no_select=args.no_select)
+    for line in render_selection(selection):
         print(line, flush=True)
 
     commands = decision.commands(args.phase)
@@ -659,14 +754,53 @@ def main(argv: list[str] | None = None) -> int:
         + " (T-400, this process only)",
         flush=True,
     )
+    env = selection_env(env, selection)
 
+    # T-543: the gate times itself, every run, and writes the result somewhere durable. The
+    # start line goes out BEFORE the first suite so that a killed or starved run — the one
+    # worth knowing about — still leaves a trace. See `gatelog.py`.
+    run_id = gatelog.new_run_id()
+    started = time.monotonic()
+    gatelog.append(
+        gatelog.start_record(
+            run_id,
+            klass=decision.label,
+            phase=args.phase,
+            source=source.description,
+            n_files=len(decision.files),
+            crates=list(selection.crates) if selection.crates else None,
+            crate_selection=selection.reason,
+            branch=current_branch(root),
+            root=root,
+        )
+    )
+    print(f"gate: timing   = run {run_id} -> {gatelog.log_path()}", flush=True)
+
+    result = 0
     for cmd in commands:
         print(f"gate: running {' '.join(cmd)}", flush=True)
+        cmd_started = time.monotonic()
         rc = subprocess.run(cmd, cwd=root, env=env, check=False).returncode
+        elapsed = time.monotonic() - cmd_started
+        gatelog.append(gatelog.suite_record(run_id, cmd=cmd, seconds=elapsed, rc=rc))
+        print(f"gate: {' '.join(cmd)} took {elapsed:.0f}s (exit {rc})", flush=True)
         if rc != 0:
             print(f"gate: FAILED {' '.join(cmd)} (exit {rc})", file=sys.stderr)
-            return rc
-    print(f"gate: passed ({decision.label})", flush=True)
+            result = rc
+            break
+    total = time.monotonic() - started
+    gatelog.append(
+        gatelog.end_record(
+            run_id,
+            klass=decision.label,
+            phase=args.phase,
+            seconds=total,
+            rc=result,
+        )
+    )
+    if result != 0:
+        return result
+    print(f"gate: passed ({decision.label}) in {total:.0f}s", flush=True)
     return 0
 
 

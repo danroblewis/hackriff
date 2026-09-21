@@ -71,6 +71,15 @@ gate-merge *args:
 reconcile *args:
     uv run --locked --project py python -m hkpy.reconcile {{args}}
 
+# WHAT THE TICKET CYCLE ACTUALLY COSTS (T-543), from records rather than memory: gate duration
+# by class and by phase from $HACKRIFF_OPS/gate-timings.jsonl (which `just gate` writes on every
+# run), and branch cut -> first commit -> queued -> merged from ops/merge-runner.log plus git.
+# Run it when the loop feels slow; the point is that a slow-down shows up as data before anyone
+# has to notice it. First measurement, 2026-09-20: gate median 21.4 min, but QUEUE WAIT median
+# 119.7 min and commit->merge median 272.6 min - the gate is ~8 % of a ticket's cycle.
+cycle-time *args:
+    uv run --locked --project py python -m hkpy.cycletime {{args}}
+
 # Build the Rust workspace (CPU path; `gpu` off)
 build:
     cargo build --workspace
@@ -105,17 +114,57 @@ test-rust:
     # compile time. `--workspace` does not reliably rebuild them if hk-plugins' own fingerprint
     # is otherwise fresh — the same one line `acceptance` (below) already runs before its
     # hk-e2e tests, for the same reason. A no-op relink on a warm target (measured: ~0.05s).
+    # Unconditional: it is cheap, and it is a build the *selected* set may still spawn.
     cargo build -p hk-plugins --bins
+    scope=$(just _crate-scope hk-e2e)
     if command -v cargo-nextest >/dev/null 2>&1; then
-        cargo nextest run --workspace --exclude hk-e2e
+        cargo nextest run $scope
     else
         echo "test-rust: cargo-nextest not found; falling back to plain 'cargo test' (see just test-seq)" >&2
-        cargo test --workspace --exclude hk-e2e
+        cargo test $scope
     fi
 
 # nextest doesn't run doctests, so `just test` runs them separately.
 test-doc:
-    cargo test --workspace --exclude hk-e2e --doc
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo test $(just _crate-scope hk-e2e) --doc
+
+# T-543. The ONE place `$HK_GATE_CRATES` becomes cargo arguments, printed on stderr so a
+# narrowed run always says so. `$1` is a package to drop from the selection (hk-e2e, which
+# `just test` has always excluded and which `just acceptance-ci` owns instead).
+#
+# UNSET MEANS THE WHOLE WORKSPACE, and that is the safety property, not an implementation
+# detail: every way this path can go wrong — an old justfile, a `just test-rust` typed by
+# hand, a crashed classifier, a shell that dropped the variable — lands on `--workspace`,
+# the expensive answer. Only `just gate` sets it, only after `py/hkpy/crates.py` has proved
+# the closure, and `crates.py` returns "whole workspace" whenever it is not certain. Same
+# fail-closed shape as the class rule one level up, and the same reason: nothing said is
+# never permissive.
+_crate-scope exclude="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${HK_GATE_CRATES:-}" ]; then
+        if [ -n "{{exclude}}" ]; then echo "--workspace --exclude {{exclude}}"; else echo "--workspace"; fi
+        exit 0
+    fi
+    out=""; kept=0
+    for p in ${HK_GATE_CRATES}; do
+        # `if`, not `[ ... ] && continue`: under `set -e` a false test as the last command
+        # of the loop body kills the script, which would silently produce an empty scope.
+        if [ "$p" != "{{exclude}}" ]; then
+            out="$out -p $p"; kept=$((kept+1))
+        fi
+    done
+    if [ "$kept" -eq 0 ]; then
+        # Every selected crate was the excluded one: there is nothing for this suite to run,
+        # but "no arguments" would mean the current package, so fall back to the workspace
+        # rather than silently running something else.
+        if [ -n "{{exclude}}" ]; then echo "--workspace --exclude {{exclude}}"; else echo "--workspace"; fi
+        exit 0
+    fi
+    echo "crate scope (T-543, HK_GATE_CRATES):$out" >&2
+    echo "$out"
 
 # Fully sequential fallback (no nextest, no parallelism, no serial groups needed): matches
 # pre-T-077 behaviour, for bisecting a nextest-only failure or when nextest isn't installed.
@@ -347,8 +396,12 @@ fmt:
 lint: lint-rust lint-py
 
 lint-rust:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `cargo fmt` is whole-tree always: it is seconds, and a narrowed format check would be
+    # the one place this ticket bought speed with coverage for no measurable gain.
     cargo fmt --all --check
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy $(just _crate-scope) --all-targets -- -D warnings
 
 lint-py:
     cd py && uv run --locked ruff check .
