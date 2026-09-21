@@ -4050,7 +4050,7 @@ tasks:
     milestone: M3
     title: 'Verifier psk-qam ALRT is monotone in constellation size on every input:
       it re-ranks 8psk -> qam64 on 100%% of bpsk and qpsk snippets'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: M3A
@@ -4102,7 +4102,31 @@ tasks:
       EVM while reaching 1.29 %% on a clean control, so those waveforms sit ~15 N0 from
       their own constellation before any receiver touches them. T-246 stays OPEN and is
       blocked by T-296, not by the ALRT derivation.'
-
+    resolved_by_t246_2026_09_21: 'FIXED, and neither earlier attribution was right. Measured at the STAGE
+      INPUT on 36 blind psk snippets (bpsk/qpsk/8psk x 20/30 dB x 6 seeds), against the generator''s own
+      symbol rate reproduced exactly: the symbol CLOCK is exact - C14''s sps matches the generator to
+      within 21 ppm, worst end-to-end slip 0.041 symbols over 256 - while the residual CARRIER offset
+      is 0.4-3.6 % of the symbol rate (up to 2.3 kHz), i.e. 1 to 9 whole rotations across the same window.
+      The ALRT estimated ONE CONSTANT phase per hypothesis from an M-th-power sum, which cannot remove
+      a frequency, so it was scoring a RING, and a ring fits the densest alphabet best for a reason unrelated
+      to the modulation. So the likelihood was never mis-derived, and T-296''s generator work was not
+      the blocker either: the missing stage was carrier recovery, T-291''s route (a), done narrowly. FIX:
+      verify::remove_residual_cfo, a hypothesis-INDEPENDENT 8th-power line (8 = lcm of 2,4,8) maximised
+      over frequency (not a lag-1 difference, which injected noise and made one 20 dB bpsk snippet worse),
+      applied in symbol_samples alongside the roll-off and the timing. MEASURED: genuine-member own-constellation
+      residual 1.7-267 N0 -> 0.67-2.6 N0 (a synced receiver sits near 1); ALRT arg-max correct 20/36 ->
+      36/36; arg-max = largest constellation 28/36 -> 12/36, and those 12 are exactly the genuine 8-PSK
+      ones. No measurable cost: verifier_gain 24.6 s with the correction vs 27.6 s without. TESTS (all
+      in verify.rs, all shown RED with only the one call removed): t246_stage_input_carries_residual_cfo_not_timing_error
+      (the measurement; asserts the clock is exact and the carrier is not), the_psk_qam_alrt_ranks_by_the_data_not_by_constellation_size
+      (ran on 36 of 36; asserts the largest-alphabet count is exactly the 12 genuine ones), and a_two_candidate_prior_is_reranked_to_the_truth_not_to_the_larger_alphabet,
+      which FORCES two candidates above CANDIDATE_MIN_P so the stage actually runs (22 of 24; the other
+      2 skip on NoClockLock, asserted) - that is the SingleCandidate mask the ticket warned about, defeated
+      rather than re-hidden. hk-classify 106/106 green, including accuracy_sweep''s ADR-0016 floors and
+      family_level_answers_are_bit_identical_with_and_without_the_verifier. FOLLOW-UP surfaced, not chased:
+      C14 never reports a trusted rate on genuine 8-PSK at 20 or 30 dB (0 of 12), so the verifier can
+      never run on it in production; and qam16/qam64 stay declined by T-422, which is now worth revisiting
+      because the smear that motivated that decision is gone.'
   - id: T-247
     milestone: M3
     title: 'hk_pipeline::classify::classify_box and ::record have NO CALLER anywhere
@@ -18235,6 +18259,58 @@ tasks:
       ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): thread counts, running-chain counts,
       buffer bytes. Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-589
+    milestone: M3
+    title: C14 never reports a trusted symbol rate on genuine 8-PSK at 20 or 30 dB, so in production the verifier can never run on it
+    status: todo
+    priority: high
+    parallel_group: M3A
+    model: opus
+    effort: high
+    depends_on: [T-246]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-246 WHILE FIXING THE ALRT, and it is the more serious of the two findings. Measured
+      over the blind snippet set: C14 reported a trusted symbol rate on genuine 8-PSK at 20 and 30 dB
+      in ZERO of 12 cases. The consequence is not a degraded verifier, it is an absent one - the
+      psk-qam verifier cannot run on 8-PSK at all in production, so T-246's fix is exercised at the
+      likelihood level by supplying the generator's geometry and never by the shipped path.
+      This is a C14 (symbol-rate estimation) gap, not a verifier one, and it is the same class of
+      defect the project keeps finding: a stage that silently does not run reads identically to a
+      stage that ran and agreed. Whatever the fix, the absence of a clock lock on a class the system
+      claims to handle must be VISIBLE - an explicit NoClockLock outcome that is counted and
+      surfaced, not a quiet skip.
+      Establish first WHY the lock fails on 8-PSK specifically when it succeeds on bpsk/qpsk -
+      8-PSK's tighter symbol spacing and the 8th-power line are the obvious suspects, but measure
+      before concluding, as T-246 did (it refuted two earlier attributions that way).
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): lock rate per class and SNR, and the
+      number of times the verifier actually RAN - a test that passes because the stage skipped is
+      the vacuous-guard failure this project has been bitten by.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-590
+    milestone: M3
+    title: Re-measure T-422's decline of qam16/qam64 - the smear it was based on is gone
+    status: todo
+    priority: normal
+    parallel_group: M3A
+    model: opus
+    effort: medium
+    depends_on: [T-246]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-246. T-422 declined qam16/qam64 from the hypothesis set, and its stated reason was
+      that the residual is dominated by a smear that does not shrink with SNR. T-246 identified that
+      smear as uncorrected residual carrier offset - 0.4 to 3.6 percent of the symbol rate, i.e. one
+      to nine full rotations over a 256-symbol window - and removed it: the genuine-member residual
+      fell from 1.7-267 N0 to 0.67-2.6 N0. The premise T-422 rested on no longer holds, so the
+      decision is worth re-measuring.
+      DO NOT SIMPLY RESTORE THE LABELS. Restoring two labels to the hypothesis set is a
+      classification-BEHAVIOUR change: it alters what the system will claim about real signals, and
+      a wrong qam64 call is exactly the confidently-wrong outcome the open-set stance exists to
+      avoid. Re-measure first, then decide, and state the false-label cost either way.
+      Relates to ADR-0016's exit gates and to T-306's confidently-wrong analysis.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21).
   - id: T-583
     milestone: MLIVE
     title: A coarse node trails the live edge by 2^j - 1 finest rows, because the live cascade propagates only on commit
