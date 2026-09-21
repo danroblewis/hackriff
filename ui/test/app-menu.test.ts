@@ -240,9 +240,11 @@ test("signalMenuItems: Delete DELETEs the entry, then reloads both inventory tab
   // listed after the delete. The asymmetry lives in the request, which is what this asserts.
   // T-389: Confirmed still carries no `t0`/`t1` — but it does name the capture clock's live edge
   // as `at`, which scopes its rows' `presence` without selecting any of them.
-  assert.ok(calls.includes("GET /api/inventory?state=confirmed&at=1789297847&limit=200"), calls.join(", "));
+  // T-587: `relations=all` now rides every Explore query (see app-explore.test.ts) — an artefact
+  // the backend has explained must reach the list, not be hidden by the `shown` default.
+  assert.ok(calls.includes("GET /api/inventory?state=confirmed&at=1789297847&relations=all&limit=200"), calls.join(", "));
   assert.ok(
-    calls.some((c) => /^GET \/api\/inventory\?state=candidate&t0=[\d.]+&t1=[\d.]+&limit=200$/.test(c)),
+    calls.some((c) => /^GET \/api\/inventory\?state=candidate&t0=[\d.]+&t1=[\d.]+&relations=all&limit=200$/.test(c)),
     calls.join(", "),
   );
 });

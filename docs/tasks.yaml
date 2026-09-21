@@ -18813,7 +18813,7 @@ tasks:
   - id: T-587
     milestone: M2-hardening
     title: An artefact reads as a LABELLED artefact in the UI - DC spike, image of X, IM3 product - not as a mystery signal
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: CANVAS-FE
     model: sonnet
@@ -18843,6 +18843,64 @@ tasks:
       lives in `ui/test`.
       Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      DONE 2026-09-21 (branch task-t587). Everything needed was already on the wire — no backend
+      change, no docs/api.md change, no api_contract.rs change. `relation.reason`/`relation.artifact`/
+      `relation.kind` (T-219/T-307/T-598) already carry the backend-rendered explanation; the whole
+      defect was client-side: `GET /api/inventory`'s `relations=shown` default (the T-219 declutter
+      rule) hides ANY row with a standing relation claim, including `artifact-of`/`retune-sibling-of`,
+      so an explained artefact was never even fetched.
+      FIX: `ui/src/app/explore/inventory.ts` `viewFilters` now asks `relations=all` (both Candidate
+      and Confirmed queries; `ui/src/inventory.ts` grew the `relations` `Filters` field and the
+      `Relation` type). `renderedInventory` still declutters `suppressed-by`/`duplicate-of`
+      client-side on the already-asserted `relation.kind` (T-219, unchanged) but now lists and boxes
+      `artifact-of`/`retune-sibling-of` rows instead of dropping them.
+      THREE STATES (`explanationState` in `ui/src/app/explore/inventory.ts`): `artifact` = `relation.
+      kind` is `artifact-of`/`retune-sibling-of` (the only two kinds the backend ever asserts from a
+      geometric/cross-centre artefact test — confirmed `RetuneSlope::Absolute` never produces a
+      `retune-sibling-of` claim, so the weak "not LO-relative" reading can never surface as an
+      artefact label); `real` = Confirmed with no such relation (a verified emitter, per the product
+      model); `undecided` = Candidate with no such relation (today's plain rendering, unchanged) — the
+      three read as distinct because only the first draws the new chip/box.
+      RENDERED: `explanationChip`/`explanationReasonText` put the backend's own `relation.reason`
+      verbatim on screen (sidebar row + focus panel), as a dedicated grey "Artifact · <mechanism>"
+      chip (own CSS class, distinct from known/unknown/flag/cluster) plus the reason as VISIBLE text,
+      not hover-only (`explore.css` `.artifact-reason`). `ui/src/surface/marks.ts` gained
+      `ARTIFACT_MARK` (neutral grey, distinct from `CANDIDATE_MARK`/`CONFIRMED_MARK`) and
+      `signalMarkBoxes` now draws an explained-artefact row's box in that ink on either tab, instead
+      of the plain candidate/confirmed colour.
+      REQUEST ASSERTED (T-367 guard, `ui/test/app-explore.test.ts`): `viewFilters` test on `relations`
+      alone; `loadInventoryRows: THE REQUEST` asserts both live `/api/inventory` calls carry
+      `relations=all` on the wire. Also updated two PRE-EXISTING request-shape assertions (`viewFilters
+      carries the frequency span…`, `scrubbed back: Confirmed names…`, plus one in
+      `ui/test/app-menu.test.ts`) that hard-coded the exact query string/params object and would
+      otherwise have gone red from the new param alone.
+      RED-WHEN-BROKEN, verified by reverting each piece and re-running `node test/run.mjs app-explore`
+      (restored after each, all 49 suites green again): (1) `viewFilters` without `relations: "all"` →
+      2 new tests fail with the actual request lacking `relations=all`; (2) `explanationState`
+      hard-coded to ignore `relation` → the three-state test and the chip/reason test fail (a real
+      artefact would then read `undecided`, the exact defect); (3) `signalMarkBoxes` without the
+      artefact-ink branch → the box-colour test fails, an artefact row draws plain
+      `CANDIDATE_MARK`/`CONFIRMED_MARK` again.
+      Counts per run (non-vacuous — all three states exercised each pass): the T-587 explanationState
+      test alone exercises 2 artefact rows (image + retune-sibling), 1 real row, 1 undecided row, plus
+      2 non-artefact-relation rows (suppressed-by/duplicate-of) that must stay `undecided`; the
+      `renderedInventory` test lists 1 artefact + 1 plain row and hides 1 suppressed-by + 1
+      duplicate-of; the `signalMarkBoxes` test draws 2 artefact boxes (candidate+confirmed), 2 plain
+      boxes, and confirms 1 suppressed-by draws nothing.
+      TARGETED TESTS: `ui/` typecheck (`npm run typecheck`) clean; `node test/run.mjs` 49/49 suites
+      green (`ui/test/app-explore.test.ts`, `ui/test/app-menu.test.ts` plus the other 47 unaffected
+      suites). No Rust touched, so `just precheck` does not apply; ran `just test-ui`'s own checks
+      directly instead (typecheck + full `ui/` node test runner) since the hook blocks `just gate`/
+      `just test` in-worktree.
+      FILES: ui/src/inventory.ts, ui/src/app/explore/inventory.ts, ui/src/app/explore/index.ts,
+      ui/src/app/explore/explore.css, ui/src/surface/marks.ts, ui/test/app-explore.test.ts,
+      ui/test/app-menu.test.ts. Branch tip: see `git log -1 task-t587`.
+      FOLLOW-UP (not chased, for the coordinator to file if wanted): `explanationChip`'s mechanism
+      label for `retune-sibling-of` is the generic "retune artefact" string rather than surfacing
+      `detail.slope`/`detail.invariant_hz` — sufficient to satisfy the honesty constraint (it is
+      never blank, never wrong) but a nicer label ("same line at 3 centres") would read `detail`
+      the way the reason text already does for `artifact-of`.
   - id: T-588
     milestone: MLIVE
     title: The 892.5 MHz signal vanishes on zoom+retune - does the backend have data the canvas never draws?
@@ -19231,6 +19289,34 @@ tasks:
       notch reports the excluded share separately from the quiet share, and a POI query does not
       treat the notch as analysed-and-empty. A test that runs on a band with no notch is vacuous -
       report the notch width and the band width it judged.
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-601
+    milestone: M2-hardening
+    title: A retune-sibling artefact reads as a generic "retune artefact" while an image reads as prose
+    status: todo
+    priority: low
+    parallel_group: CANVAS-FE
+    model: sonnet
+    effort: low
+    depends_on: [T-587]
+    use_cases: []
+    acceptance: |
+      Filed 2026-09-21 from T-587. `artifact-of` rows carry backend-rendered prose in
+      `relation.reason` - "image of the 100.8 MHz carrier" - and the UI shows it. A
+      `retune-sibling-of` row gets a generic "retune artefact" chip instead, because no equivalent
+      sentence is rendered for it, even though `detail.slope` and `detail.invariant_hz` are right
+      there and would support something like "same line seen at 3 centres, moves with the LO".
+      Honest today and never blank or wrong - just less specific than its sibling, which is why it
+      is low priority rather than a defect.
+      RENDER THE SENTENCE IN THE BACKEND, not the client. The UI is a thin client over
+      docs/api.md and all the reasoning lives behind it; `relation.reason` is already the field
+      for exactly this, so this is about populating it for the retune kind, not about teaching the
+      client to compose prose from `detail`.
+      Keep T-587's honesty rule intact: the three states - explained artefact, real emission, not
+      yet decided - stay distinct, and `Absolute` is never the source of an artefact label (it
+      means "not LO-relative", not "real").
+      ASSERT ON THE RENDERED TEXT AND THE REQUEST THE CLIENT BUILDS, not wall-clock.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:

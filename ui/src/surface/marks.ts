@@ -36,6 +36,11 @@ export const CONFIRMED_MARK: readonly [number, number, number, number] = [0.322,
 export const CANDIDATE_MARK: readonly [number, number, number, number] = [0.639, 0.584, 0.878, 0.85];
 /** A selection: amber, as it has always been. */
 export const SELECTION_MARK: readonly [number, number, number, number] = [0.941, 0.647, 0.259, 0.85];
+/** T-587: a row the backend has explained as a receiver artifact (`relation.kind` `artifact-of` or
+ * `retune-sibling-of`) — neutral grey, deliberately outside the teal/lavender "this is a signal"
+ * palette, so an explained artifact reads as explained on the surface too, not as a third kind of
+ * mystery signal. Drawn thinner than either signal mark: the weakest claim of the three. */
+export const ARTIFACT_MARK: readonly [number, number, number, number] = [0.55, 0.58, 0.6, 0.7];
 /** The focused row or selection, whichever it is: the same hue, opaque. */
 export const FOCUS_ALPHA = 1;
 /**
@@ -88,6 +93,9 @@ export interface MarkRow {
   /** `GET /api/inventory`'s user-band override, in its own wire shape (`f_lo`/`f_hi`). */
   readonly user_band?: { f_lo: number; f_hi: number } | null;
   readonly presence?: { last_interval?: { t_start_s: number; t_end_s: number; open: boolean } | null } | null;
+  /** T-587: `relation.kind`, narrowed to what a box's ink needs — `docs/api.md` `relation` or
+   * `null`/`undefined` for a row with no standing claim. */
+  readonly relation?: { kind: string } | null;
 }
 
 /** A selection as this file reads it (`GET /api/selections`). */
@@ -118,7 +126,15 @@ export function signalMarkBoxes(rows: readonly MarkRow[], focusedId: string | nu
     if (r.state !== "candidate" && r.state !== "confirmed") continue;
     const iv = r.presence?.last_interval;
     if (!iv) continue;
-    const base = r.state === "confirmed" ? CONFIRMED_MARK : CANDIDATE_MARK;
+    // T-219, unchanged: `suppressed-by`/`duplicate-of` stay undrawn — a stronger row already
+    // covers them, so there is no second box to draw at all, on the list or the surface.
+    const relKind = r.relation?.kind;
+    if (relKind === "suppressed-by" || relKind === "duplicate-of") continue;
+    // T-587: an explained artifact draws its own neutral ink, on either tab — the point is that
+    // the box on screen is no longer indistinguishable from an unexplained signal's.
+    const base = relKind === "artifact-of" || relKind === "retune-sibling-of"
+      ? ARTIFACT_MARK
+      : r.state === "confirmed" ? CONFIRMED_MARK : CANDIDATE_MARK;
     const band = r.user_band ?? null;
     out.push({
       id: r.id, kind: "signal-box",
