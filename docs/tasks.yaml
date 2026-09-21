@@ -16938,7 +16938,7 @@ tasks:
   - id: T-549
     milestone: MAUTO
     title: 'MAUTO-DESIGN: the search trace - what the engine tried, what it pruned and why, so the decision tree is inspectable rather than a black box'
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -17001,7 +17001,7 @@ tasks:
   - id: T-550
     milestone: MAUTO
     title: 'MAUTO-DESIGN: how an unknown stays unknown - the negative-result contract when the search finds nothing, and the guard against a search that always finds something'
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -17394,6 +17394,99 @@ tasks:
   - id: T-575
     milestone: MAUTO
     title: "MAUTO: the derived ConfirmPolicy - analytic hold-out bits, per-stage look-elsewhere, differences not distinct_valid, and the decision-rate counter the budget rests on"
+  - id: T-565
+    milestone: MAUTO
+    title: "MAUTO: the search trace, produced INSIDE the beam - a bounded TraceNode record of what M-3 tried, pruned, deferred and refused to try"
+    status: todo
+    priority: normal
+    parallel_group: SYN-E
+    model: opus
+    depends_on: [T-549]
+    use_cases: [RESEARCH-001, RESEARCH-003, RESEARCH-006]
+    core_interface: true
+    acceptance: |
+      Amends ADR-0015 section 10's M-3 row (search engine) and M-1's type declarations, per
+      ADR-0021 sections 2, 3 and 12. Do NOT add this after M-3: a beam that has already discarded
+      the information cannot have it retrofitted, only re-instrumented, so this is M-3's scope.
+      WHAT TO BUILD.
+      1. `hk_synth::TraceNode` and the closed `outcome` enum (ADR-0021 section 2.2). TWELVE
+         variants in two groups, and the group is SERVED as a `tried` boolean, never inferred:
+         TRIED (`measured` non-null) survived / pruned_floor / pruned_bound / pruned_beam /
+         evaluated_worse / refined_into / memoised; NOT TRIED (`measured` null) deferred_prior /
+         deferred_budget / unsupported / not_applicable / refused_power. Each carries a typed
+         `outcome_detail` of NUMBERS, never prose, plus a backend-rendered `summary`.
+      2. A `TraceSink` threaded through the search, called at EVERY site that removes a node from
+         the frontier, refuses to add one, or skips one. There is no quiet-prune path; that is the
+         point of the ticket.
+      3. Retention applied ON INSERT (ADR-0021 section 2.3): `max_trace_nodes` 128/512/2048 by
+         profile, `max_trace_bytes` 256 KiB. NEVER dropped: the root, every ancestor of a node in
+         `results[]`, every not-tried node, the best node per (stage, family), one node per
+         distinct `unsupported.structure`. Dropped first, in order: memoised, pruned_beam
+         ascending, pruned_bound, pruned_floor beyond the best two per (stage, family),
+         evaluated_worse beyond rank 10. Every drop increments an `elided` bucket keyed by
+         (stage, family, outcome) with count/bits_max/bits_min/evaluations.
+      4. ADR-0015 section 1.3's "the best pruned node is kept as a partial result" is SUPERSEDED:
+         it stays a partial result and becomes one retained trace node among the set.
+      5. `progress` (section 5.2) keeps its four counters and gains `tried`, `not_tried`, `elided`.
+      6. `replay_key` (ADR-0021 section 5) recorded on the job; `deferred_budget` nodes and a
+         `plateau` stop carry `nondeterministic: true` and clear `trace_summary.replayable`.
+      TESTS (targeted, in `hk-synth`).
+      - THE ACCOUNTING IDENTITY: sum of `evaluations` over recorded nodes plus sum over `elided`
+        buckets equals `job.used.evaluations`. The trace names a subset of the decisions and
+        ACCOUNTS FOR ALL of the work.
+      - Residency never exceeds the bound, checked DURING the search, not after.
+      - A grid sweep produces ONE node with a `swept` descriptor, not one node per grid point.
+      - Two runs with an identical `replay_key` and an evaluation-bounded budget produce an
+        identical node list (byte-for-byte on the deterministic fields).
+      - Not-tried nodes survive eviction under a cap that drops 95 % of the tried ones.
+      MEASURE, DO NOT ASSUME (T-453's constraint applies): report the trace's wall and allocation
+      cost as a fraction of the search. ADR-0021 claims it is negligible; that is a claim to check.
+    notes: |
+      Filed 2026-09-21 with ADR-0021 (T-549). This is the ticket T-549's note asked for: nothing in
+      ADR-0015 section 10 owned the search trace, and M-3 as specified actively discarded it.
+      Scheduled with MAUTO, after the M3 exit - not before.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-566
+    milestone: MAUTO
+    title: "MAUTO: serve the trace and the resolution - GET /api/analyze/{id}/trace, trace_summary, the `trace` stream record"
+    status: todo
+    priority: normal
+    parallel_group: API
+    model: opus
+    depends_on: [T-549, T-550, T-565]
+    use_cases: [RESEARCH-001, RESEARCH-003, RESEARCH-007]
+    core_interface: true
+    acceptance: |
+      Amends ADR-0015 section 10's M-8 row, per ADR-0021 sections 4 and 11.1.
+      ROUTES AND FIELDS.
+      1. `AnalyzeJob` gains `trace_summary` (decisions, nodes_recorded, nodes_elided, truncated,
+         by_outcome, by_stage with the tried/not_tried split, replayable) and `resolution`
+         (ADR-0021 section 7A.2). `progress` gains `tried`/`not_tried`/`elided`.
+      2. NEW `GET /api/analyze/{id}/trace` with filters `?stage`, `?outcome`, `?family`,
+         `?tried`, `?limit` (<= 512), returning `{job_id, engine, replay_key, bounds, nodes,
+         elided}`. It is a SEPARATE fetch on purpose: `GET /api/analyze/{id}` is polled and every
+         stream record is an idempotent snapshot, so a 256 KiB trace on each one is waste on a
+         battery device.
+      3. `404 not_found` (no such job) and `410 gone` (it ran and has been forgotten, or its trace
+         was evicted with it) are DISTINCT codes. "We forgot" is not "it never ran" - the same
+         distinction the trace exists to preserve.
+      4. Stream: a `trace` record on `hackriff.analyze/1`, at most ONCE PER STAGE COMPLETION, never
+         per decision, carrying that stage's counts and its <= 8 highest-bits nodes. The GET stays
+         authoritative because stream records drop. `done` carries the `resolution`.
+      5. `GET /api/inventory` rows gain `resolution: {kind, reason, t, profile}` and the filter
+         `?resolution=not-searched|unknown|structured-unidentified|unsupported-structure`.
+         `GET /api/inventory/{id}/pipelines`: a `synthesis`-origin row gains `trace_ref`.
+      T-079 RULE: `docs/api.md` and `crates/hk-cli/tests/api_contract.rs` move TOGETHER, and
+      `docs/stream-contract.md` moves with the stream record. Replaces the T-190 `501` section.
+      TESTS: contract tests per route and per error code; a test asserting `404` and `410` are
+      never conflated; a test that the trace route honours every filter and that an unknown filter
+      value is `400 invalid` rather than silently ignored.
+    notes: |
+      Filed 2026-09-21 with ADR-0021 (T-549/T-550).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-567
+    milestone: MAUTO
+    title: "MAUTO: the sealed Resolution - unknown as a durable finding, not-searched as its own state, and the shuffled-null control that caps a manufactured verdict"
     status: todo
     priority: high
     parallel_group: W
@@ -17465,6 +17558,62 @@ tasks:
   - id: T-576
     milestone: MAUTO
     title: "MAUTO: the false-confirm acceptance suite - zero confirms on negatives, the analytic null's measured tail, and a recall control so the suite is not passed by never confirming"
+    depends_on: [T-550, T-565]
+    use_cases: [RESEARCH-007, RESEARCH-013, SIGNAL-052]
+    core_interface: true
+    acceptance: |
+      Amends ADR-0015 section 10's M-9 row, per ADR-0021 sections 7A, 8.1-8.2, 9.3 and 11.2.
+      This is the half that protects CLAUDE.md's "unknown signals are the priority": an engine that
+      turns unknowns into plausible wrong answers destroys the thing the product is for, invisibly.
+      WHAT TO BUILD.
+      1. `hk_synth::Resolution`, CONSTRUCTED AND SEALED by hk-synth before any context lookup runs.
+         `kind` in {unknown, structured-unidentified, unsupported-structure, not-searched};
+         `reason` a CLOSED enum of five - no-signal, nothing-scored, tied, budget-exhausted,
+         unsupported-structure - each with the mechanical test that distinguishes it (ADR-0021
+         section 7A.3). `no-signal` and `nothing-scored` MUST NOT be merged: a noise window and a
+         strong unmodulated carrier the engine cannot structure are different facts.
+      2. `coverage`: the decode-side coverage map - skeletons offered/tried/deferred/unsupported,
+         per-family state with deepest stage and best bits, budget spent and `stop`, hypotheses,
+         look-elsewhere bits, window SNR/duration/bursts.
+      3. NOT-SEARCHED IS NOT UNKNOWN. An emitter with no `emitter_synthesis` row reads
+         `not-searched` with `coverage: null`; a cancelled or failed job writes `not-searched` with
+         `last_attempt`; only a FINISHED job writes `unknown`. This is the decode-side statement of
+         the canvas's grey rule, and it is an invariant test, not a convention.
+      4. `characterisation` on a `structured-unidentified` result (framing / check / payload
+         entropy / constant and counter fields). It ranks, displays and persists like any result;
+         it writes NO family to Classification (ADR-0016 section 8) and proposes a C18 signature
+         with provenance `structure-proposed`, never `decoder-confirmed`. A Confirmed emitter with
+         no identity at all is a LEGAL, INTENDED state.
+      5. THE SHUFFLED-NULL CONTROL (ADR-0021 section 8.2). Before an OPEN (non-template) search
+         reports `solved` or `checked`, re-run the winning prefix UNCHANGED over K null windows
+         from the same IQ at the same gain state: time-reversed, phase-randomised surrogates (same
+         magnitude spectrum, randomised phase - preserves PSD, destroys symbol structure), and an
+         adjacent no-detection window where the coverage map says one exists. K = 0/2/8 by profile,
+         <= 5 % of `max_evaluations`. If `holdout_bits - best_null_bits < 8`, CAP the verdict at
+         `framed`, refuse confirmation, and set `kind: unknown, reason: tied`. It can ONLY CAP,
+         never raise, and it is recorded whether or not it fires.
+      6. `retry` (ADR-0021 section 10): the reason code decides. `budget-not-binding` means more
+         budget buys NOTHING - never auto-retry; `unsupported` means never retry until the named
+         block exists; `min_retry_interval` 1 h and never on `battery`. Overlap-triggered
+         re-analysis (CLAUDE.md) is about DETECTION and is explicitly out of this rule's scope.
+      7. Attach persists `resolution`, `trace_summary`, `replay_key` and `null_control` on the
+         append-only `emitter_synthesis` row, so a second look reads the HISTORY of what earlier
+         looks ruled out. docs/07 section 2.29 `Resolution` + the section 2.11 / 2.21 / 2.28 deltas
+         listed in ADR-0021 section 11.2.
+      TESTS: each `reason` reached by a constructed case; not-searched never rendered as unknown;
+      the null control caps and never raises; a capped job records the control either way.
+      NUMBERS ARE FIRST GUESSES: K, the 8-bit margin, 1 h and 3 dB are ADR-0021's unverified
+      values. T-568 measures them; do not treat them as settled.
+    notes: |
+      Filed 2026-09-21 with ADR-0021 (T-550). HIGH: it sits in front of an irreversible transition
+      (no rule demotes, ADR-0015 section 11.5) and it is the only MECHANISM against a search that
+      always finds something - section 7's over-claim floor is a measurement, not a guard.
+      Reads on T-548: the searched-generator discount for a found-rather-than-specified CRC is
+      T-548's number, not this ticket's. Not a hard dep; record the dependency.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-568
+    milestone: MAUTO
+    title: "MAUTO: the negative-control guard suite - four populations, a stated false-label budget, and zero labels on input with nothing to find"
     status: todo
     priority: high
     parallel_group: M-E
@@ -17553,6 +17702,142 @@ tasks:
       relative to the shipped guess of 16 only in the direction of ADMITTING more (CRC-8 sensors in
       902-928 MHz), so getting it wrong costs false confirms on exactly one population - which
       T-576's A2 measures anyway. Worth doing before M-9 ships, not before T-575 starts.
+    depends_on: [T-550, T-565, T-567]
+    use_cases: [RESEARCH-007, RESEARCH-013, SIGNAL-052]
+    core_interface: false
+    acceptance: |
+      Amends ADR-0015 section 10's M-12 row, per ADR-0021 section 8.3-8.4. This is the guard
+      against a search that always finds something, measured.
+      PROTOCOL, NON-NEGOTIABLE (CLAUDE.md + ADR-0015 section 7): fixtures replay THROUGH THE MOCK
+      SDR behind the ordinary device interface; jobs start via `POST /api/analyze`; targets come
+      from BLIND DETECTION or an ad-hoc band, NEVER a truth frequency; truth is loaded only by the
+      assert harness. Jobs are bounded by `max_evaluations`, NEVER by wall, so the suite is
+      deterministic and a search regression shows as a trace diff rather than a flaky pass.
+      FOUR POPULATIONS, because "nothing to find" has four shapes that fail differently:
+        N1 thermal noise, 400 windows at the fixture's gain state -> kind unknown, reason
+           `no-signal`, deepest verdict `energy`, 0 labels >= `framed`, 0 emitters created.
+        N2 energy without symbols, 200: CW carrier, analog FM voice, AM voice -> reason
+           `nothing-scored`, deepest verdict <= `demodulated`, 0 >= `framed`.
+        N3 out-of-catalogue structure, 200: synthetic OFDM (non-standard CP), DSSS, CSS/LoRa-like,
+           16-QAM -> kind `unsupported-structure` NAMING the structure and `missing_block`;
+           0 `solved`; `framed` permitted ONLY where the trace shows a measured framing, because a
+           real preamble is a real measurement. SCORED SEPARATELY for that reason.
+        N4 real empty capture: the 433 MHz empty capture + the 50 ohm terminator capture (T-375)
+           -> as N1, AND a spur is never a label (attributed via `artifact_of`, never a verdict
+           >= `demodulated`).
+      THE BUDGET, STATED: at most ONE FALSE LABEL PER 1 000 analyze jobs on signal-free or
+      out-of-catalogue input, at every profile. False CONFIRMS stay on T-548's budget and this
+      ticket may not loosen it; where the two disagree, the stricter binds. A label is a verdict
+      >= `framed` reported to the user; a confirm is a lifecycle change. They differ because their
+      blast radii differ.
+      THE ASSERTION, AND WHAT IT HONESTLY BOUNDS: `false_labels == 0` over N1 + N2 + N4
+      (n = 800) at each of `standard` and `deep`. State in the report that 0 of 800 is consistent
+      with a true rate up to about 0.0037 at 95 %, so the suite supports the 1/1000 claim only to
+      that precision. Quoting "one in a thousand, measured" from a zero at n = 800 is exactly the
+      four-decimal error docs/17 section 1 documents.
+      ALSO REPORTED (so drift is visible while the assertion stays at zero): `labels_per_1000` per
+      population with a WILSON INTERVAL per profile; the distribution of `resolution.reason` per
+      population; the best `evidence_bits` reached per population (the early-warning number - it
+      rises long before a label appears); and the NULL-CONTROL SAVE COUNT.
+      THE FALSIFIABILITY CLAUSE: if the null control saves ZERO jobs across the whole suite, it is
+      dead weight and ADR-0021 section 8.2 should be reconsidered. A mechanism that never acts is a
+      cost with no evidence behind it. Report the number rather than defending the mechanism.
+      SUBSUMES ADR-0015 section 7's negatives row: `0 solved` becomes `0 labels >= framed`
+      (strictly harder), 200 windows become 800, real captures join the synthetic ones. Section 7's
+      standing rule holds - the review may tighten, never loosen after seeing results.
+      Also measures ADR-0021's unverified numbers against these populations: K, the 8-bit null
+      margin, and the node/byte caps.
+    notes: |
+      Filed 2026-09-21 with ADR-0021 (T-550). HIGH: this is the only thing standing between a deep
+      search and a manufactured verdict that looks exactly like a right one.
+      The 50 ohm terminator capture (T-375) is a user/hardware item; N1-N3 do not wait on it, and
+      N4 runs with the 433 MHz empty capture alone until it exists.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-569
+    milestone: MAUTO
+    title: "MAUTO: a database suggestion explains a result and never becomes one - explanations[] beside a sealed Resolution, enforced by the crate graph"
+    status: todo
+    priority: normal
+    parallel_group: W
+    model: opus
+    depends_on: [T-550, T-567]
+    use_cases: [RESEARCH-007, RESEARCH-013]
+    core_interface: true
+    acceptance: |
+      Per ADR-0021 section 9. The failure this prevents is narrower and more specific than
+      "the database is never truth": a SUGGESTION TURNING AN `unknown` INTO A LABEL.
+      1. TWO ATTACH POINTS, and no others. Into the SEARCH as `prior_bits` in `hk_synth::seed`
+         (ADR-0015 section 4.2) - already bounded: priors order and never rank or confirm, a
+         template's `bands_hz` only raises rank for an emitter ALREADY DETECTED there, and
+         ADR-0016 section 8's "order by posterior, prune by likelihood" keeps a prior from pruning.
+         Onto the RESULT as `resolution.explanations[]`, computed by hk-context AFTER the
+         `Resolution` is final, from MEASURED parameters only:
+         `{source: alloc|band-plan|licence|catalogue|history, identity, score, distance_hz,
+           status: expected|unexpected|no_reference_data, data_age_days, reasoning}`.
+      2. WHAT IT MAY NOT MODIFY: `resolution.kind`, `.reason`, `.coverage`, `.null_control`,
+         `verdict`, `stage_reached`, `evidence_bits`, `prior_bits`, `check`, `characterisation`,
+         the emitter's measured f/BW, any lifecycle state, any Classification row.
+      3. ENFORCED STRUCTURALLY, NOT BY PROSE. `hk-pipeline::synth` passes hk-context an IMMUTABLE
+         `&Resolution` and receives back only a `Vec<Explanation>` to attach. `hk-synth` DOES NOT
+         DEPEND ON `hk-context` and must not, so the search cannot read a suggestion even by
+         accident and no future edit inside hk-synth can reach one. A BOUNDARY TEST asserts that
+         direction, in the same spirit as ADR-0018's guard confining the GNSS known-code exception:
+         the confinement is a test, not a promise.
+      4. The mismatch case stays a FLAG: an emitter measured 150 kHz off the FM raster gets
+         `status: unexpected` and keeps its measured centre. That is the interesting case
+         (CLAUDE.md), not an error to correct.
+      5. The negative-result path adds NO new database read.
+      6. `missing_block` backlog (ADR-0021 section 9.4): a group-by over `emitter_synthesis` so the
+         device can say "3 emitters are waiting on psk_demod". Costs nothing and is the strongest
+         available argument for ADR-0015's optional M-14, made from the device's own data.
+      TESTS: the crate-boundary test; a test that an `unknown` with three high-scoring
+      explanations is still `unknown`; a test that a `tied` result is never resolved by a
+      suggestion (the precise failure blind-first exists to prevent).
+    notes: |
+      Filed 2026-09-21 with ADR-0021 (T-550). core_interface because it is the code-level
+      expression of CLAUDE.md's blind-first invariant on the decode side.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-570
+    milestone: MAUTO
+    title: "MUI: the trace panel - why not PSK, answered with five distinct served answers and no signal logic in the client"
+    status: todo
+    priority: normal
+    parallel_group: MUI-X1
+    model: sonnet
+    depends_on: [T-566]
+    use_cases: [RESEARCH-001, RESEARCH-003]
+    core_interface: false
+    acceptance: |
+      Amends ADR-0015 section 10's M-11 row, per ADR-0021 section 6A. THIN CLIENT: everything here
+      is filtering, grouping and formatting over already-decided fields. All wording is the
+      backend's `summary`; the UI does no signal logic and no threshold arithmetic.
+      1. Per stage, a column of rows in the BACKEND's order, each showing the backend's `summary`.
+      2. TWO VISUAL REGISTERS, decided by the SERVED `tried` boolean - never by the client
+         inspecting `measured` or parsing an outcome string: TRIED AND REJECTED reads as a
+         measurement (bits against floor); NOT TRIED reads as the decode-side grey. This is the
+         same distinction the canvas draws between grey and a measured tile, and the two must not
+         read alike.
+      3. "Why not PSK?" is `GET /api/analyze/{id}/trace?family=psk`, and the answer is whatever
+         comes back: `unsupported` -> "not tried: this build has no PSK demodulator";
+         `deferred_budget` -> "queued and never reached" + a RE-RUN AT DEEP action;
+         `deferred_prior` -> "ranked below 0.02 and waited" + re-run at deep;
+         `pruned_floor` -> "tried: 3.2 bits, below the 6-bit floor" (no action - this is an answer).
+      4. AN EMPTY PANEL IS NEVER THE ANSWER. The backend emits an explicit `not_applicable` root
+         node for a family absent from the skeleton set, and the UI renders that sentence. Same
+         rule as the canvas: a surface may be empty only where the backend has said, in data, that
+         nothing exists.
+      5. TRUNCATION IS SHOWN: `nodes_elided` and `truncated` beside the list, with the `elided`
+         buckets as a tail row ("412 more PSK hypotheses tried at S3, best 4.6 bits"). A shorter
+         list with no note would imply a smaller search - exactly the defect a fixed-size
+         placeholder is.
+      6. The `resolution` renders as the panel's headline when nothing solved, with
+         `explanations[]` SUBORDINATE to it - never in its place, never as the row's headline.
+         `not-searched` and `unknown` are visually distinct.
+      TESTS in `ui/test`: ASSERT THE REQUEST THE CLIENT BUILDS (the T-367 guard), not only the
+      response it renders - the filter query, and that no trace interaction reaches a device route.
+    notes: |
+      Filed 2026-09-21 with ADR-0021 (T-549). Sonnet with an Opus review: the panel is
+      well-specified but the tried/not-tried register is an honesty invariant, not styling.
   - id: T-571
     milestone: MLIVE
     title: Coarse view-lattice tiles are folded ON DEMAND at read time - up to 1024 producer tiles per tile - instead of maintained live

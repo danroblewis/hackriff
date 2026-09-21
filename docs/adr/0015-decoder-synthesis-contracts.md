@@ -371,6 +371,8 @@ Scheduled only after the M3 exit (T-206). There are no Fable tasks; core-interfa
 
 **Waves** (≤ 4 Rust builders at once): (1) M-1; (2) M-2, M-3, M-4, M-6, with M-5 once T-199/T-201 are done; (3) M-7, M-8, M-5; (4) M-9, M-10, M-11; (5) M-12, then M-13.
 
+**Amended by [ADR-0021](0021-search-trace-and-negative-result.md) (T-549/T-550).** Nothing in this table owned the **search trace** — M-3 prunes, M-8 serves, M-11 renders, and the record of what the engine rejected and why was produced by nobody — and nothing owned the **negative result**, so `energy` because the beam never left S0 read identically to `energy` because every S1 family measured below its floor. ADR-0021 gives the trace to **M-3** (inside the beam: a beam that has discarded the information cannot have it retrofitted, only re-instrumented) and widens M-1, M-8, M-9, M-11 and M-12; see its §12 for the amended rows, and §11.3 for the changes it makes to §§1.3, 3.4, 5.1–5.5, 7, 8 and 11.1 above.
+
 ## Options considered
 
 - **Brute-force grid over recipes.** Rejected: it is intractable (docs/15 §1), and it can't use proposal operators for sync words or polynomials.
