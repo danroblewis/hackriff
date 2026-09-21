@@ -1171,29 +1171,48 @@ struct OrderException {
 /// against a true 0.050 / 0.950, and the `ppm`-vs-`pulse` order no longer inverts on either. The
 /// exact-set assertion is what made that a completion check rather than a discipline: leaving
 /// either entry behind fails the test naming it.
+/// **Four entries were deleted by T-564, all of them `am`'s** — `sigma_af` Am-vs-Cw, `gamma_max`
+/// Am-vs-Cw, `c42_norm` Am-vs-Cw and `c42_norm` Am-vs-Wfm. They stopped reproducing when the
+/// harness stopped re-deriving its analysis geometry from the noisy snippet at every rung, and
+/// that is a fix at source, not a weakened guard: `am` was the worst case of the defect. 99 % of
+/// its power is its carrier, so the old noise-referenced OBW99 read 61 kHz for a 9 kHz emission at
+/// 10 dB and collapsed onto the carrier bin once the noise fell (T-435's ladder: 82 / 31 / 1 / 1 /
+/// 1 / 1 / 1 kHz). `am` was therefore delivered in a five-times-too-wide band at the bottom of the
+/// ladder and a hundred-times-too-narrow one at the top. **Most of what these four entries
+/// recorded as an inherent SNR law was `am` being handed a different filter at each rung.**
+///
+/// Re-measured on the corrected grid, 6 seeds at 10/15/20/25/30 dB, each pair now ordered the same
+/// way at **every** rung:
+///
+/// - `sigma_af`: `am` 0.3181 / 0.1832 / 0.1042 / 0.0589 / 0.0332 against `cw` 0.1540 / 0.0857 /
+///   0.0480 / 0.0270 / 0.0152 — both still slide about 1/sqrt(rho), which is the real law T-249
+///   found; what vanished is the *crossing* (`am` used to run 1.030 at 10 dB and 0.004 at 30 dB,
+///   a 264-fold move, and dived under `cw`).
+/// - `gamma_max`: `am` 75.0 / 122.4 / 153.0 / 165.9 / 170.5 against `cw` 53.6 / 58.9 / 60.7 /
+///   61.4 / 61.6 (`am` used to start at 11.2, far below `cw`).
+/// - `c42_norm`: `am` -1.480 / -1.749 / -1.851 / -1.886 / -1.897 against `cw` -1.245 / -1.399 /
+///   -1.454 / -1.473 / -1.479 and `wfm` -0.934 / -1.011 / -1.038 / -1.047 / -1.050.
+///
+/// The estimators were not touched. What changed is that the emission they were measured on is now
+/// the same emission at every rung.
 const SNR_ORDER_EXCEPTIONS: &[OrderException] = &[
     OrderException {
-        feature: "sigma_af",
-        a: Class::Am,
-        b: Class::Cw,
-        why: "T-249, the second case this axis was built for. The instantaneous frequency of noise \
-              is near-uniform on (-pi, pi], so a measured sigma_af is sqrt(emission^2 + c/rho) - a \
-              clean 1/sqrt(rho) law on a feature NAMED as a frequency excursion. `am` has \
-              essentially no excursion of its own (0.004 rad/sample at 30 dB) so it is ENTIRELY \
-              noise-limited and slides 1.030 -> 0.004, a 264-fold move; `cw` slides 8-fold, 0.148 \
-              / 0.071 / 0.044 / 0.029 / 0.018. The two cross between 10 and 20 dB: the carrier \
-              with NO frequency excursion reads the LARGER excursion at 10 dB. T-249's `cw` \
-              conjunct `sigma_af < 0.02` was written against the 30 dB end and could not fire \
-              below ~28 dB, which is this entry stated as a constant. \
-              T-488 SURVIVED BY THIS ENTRY, AND THAT IS THE MEASUREMENT, NOT AN ASSUMPTION. T-488 \
-              took the instantaneous frequency over the emission's own ON LEVEL instead of 0.5 x \
-              mean(a), which removed the off-gap noise from every keyed class - `cw` 0.206 -> \
-              0.148 at 10 dB, `pulse` 1.718 -> 0.100, `ppm` 0.321 -> 0.094 - and left THIS pair \
-              inverting, because `am` is CONTINUOUS: it has no off gaps to exclude, its subset \
-              barely moves (1.067 -> 1.030 at 10 dB), and what limits it is the phase noise in the \
-              troughs of its own envelope. Selecting the right samples cannot repair a feature \
-              whose reading, on a class with no excursion of its own, IS the noise. Two \
-              independent defects, one fixed, and this is the other.",
+        feature: "if_modality",
+        a: Class::Fsk2,
+        b: Class::Fsk4,
+        why: "INHERENT to a MODE COUNT, and surfaced by T-564 rather than caused by it. `if_modality` counts resolvable modes in the instantaneous-frequency histogram, and four tones can only be counted once the noise is small enough to separate them: below that SNR a 4-FSK genuinely PRESENTS as one broad mode, and no estimator reading only this record can say otherwise. Measured ladder, 6 seeds at 10/15/20/25/30 dB: `4fsk` 1.0000 +- 0.0000, 2.5000 +- 1.1180, 4.0000 +- 0.0000, 4.0000 +- 0.0000, 4.0000 +- 0.0000 - a 1 -> 4 climb as the tones resolve - against `2fsk` flat at 2.0000 +- 0.0000 (2.3333 +- 0.7454 at 30 dB), `gfsk` 1.8333 +- 0.3727 then 2.0000 +- 0.0000, and `msk` 2.0000 +- 0.0000 (2.5000 +- 1.1180 at 30 dB). Each of the three crosses `4fsk` between 10 and 20 dB, where it reads FEWER modes than a 2-level emission. It became visible when T-564 stopped the analysis geometry moving with the noise: the old grid widened the channel at low SNR, decimated the snippet less, and left `4fsk`'s IF histogram wide enough to keep more than one mode. That was the harness hiding an SNR dependence of the statistic, not the statistic being SNR-independent. What is forbidden remains a CONSTANT across it: no rule may test `if_modality` against a fixed number without bounding the SNR it was written at.",
+    },
+    OrderException {
+        feature: "if_modality",
+        a: Class::Gfsk,
+        b: Class::Fsk4,
+        why: "INHERENT to a MODE COUNT, and surfaced by T-564 rather than caused by it. `if_modality` counts resolvable modes in the instantaneous-frequency histogram, and four tones can only be counted once the noise is small enough to separate them: below that SNR a 4-FSK genuinely PRESENTS as one broad mode, and no estimator reading only this record can say otherwise. Measured ladder, 6 seeds at 10/15/20/25/30 dB: `4fsk` 1.0000 +- 0.0000, 2.5000 +- 1.1180, 4.0000 +- 0.0000, 4.0000 +- 0.0000, 4.0000 +- 0.0000 - a 1 -> 4 climb as the tones resolve - against `2fsk` flat at 2.0000 +- 0.0000 (2.3333 +- 0.7454 at 30 dB), `gfsk` 1.8333 +- 0.3727 then 2.0000 +- 0.0000, and `msk` 2.0000 +- 0.0000 (2.5000 +- 1.1180 at 30 dB). Each of the three crosses `4fsk` between 10 and 20 dB, where it reads FEWER modes than a 2-level emission. It became visible when T-564 stopped the analysis geometry moving with the noise: the old grid widened the channel at low SNR, decimated the snippet less, and left `4fsk`'s IF histogram wide enough to keep more than one mode. That was the harness hiding an SNR dependence of the statistic, not the statistic being SNR-independent. What is forbidden remains a CONSTANT across it: no rule may test `if_modality` against a fixed number without bounding the SNR it was written at.",
+    },
+    OrderException {
+        feature: "if_modality",
+        a: Class::Msk,
+        b: Class::Fsk4,
+        why: "INHERENT to a MODE COUNT, and surfaced by T-564 rather than caused by it. `if_modality` counts resolvable modes in the instantaneous-frequency histogram, and four tones can only be counted once the noise is small enough to separate them: below that SNR a 4-FSK genuinely PRESENTS as one broad mode, and no estimator reading only this record can say otherwise. Measured ladder, 6 seeds at 10/15/20/25/30 dB: `4fsk` 1.0000 +- 0.0000, 2.5000 +- 1.1180, 4.0000 +- 0.0000, 4.0000 +- 0.0000, 4.0000 +- 0.0000 - a 1 -> 4 climb as the tones resolve - against `2fsk` flat at 2.0000 +- 0.0000 (2.3333 +- 0.7454 at 30 dB), `gfsk` 1.8333 +- 0.3727 then 2.0000 +- 0.0000, and `msk` 2.0000 +- 0.0000 (2.5000 +- 1.1180 at 30 dB). Each of the three crosses `4fsk` between 10 and 20 dB, where it reads FEWER modes than a 2-level emission. It became visible when T-564 stopped the analysis geometry moving with the noise: the old grid widened the channel at low SNR, decimated the snippet less, and left `4fsk`'s IF histogram wide enough to keep more than one mode. That was the harness hiding an SNR dependence of the statistic, not the statistic being SNR-independent. What is forbidden remains a CONSTANT across it: no rule may test `if_modality` against a fixed number without bounding the SNR it was written at.",
     },
     OrderException {
         feature: "carrier_line_db",
@@ -1207,45 +1226,6 @@ const SNR_ORDER_EXCEPTIONS: &[OrderException] = &[
               rising against a fixed floor - against ppm flat at 23.0-23.6, whose strongest line \
               is its frame rate rather than a carrier and so sits at a fixed distance from its own \
               sidebands. Not fixable without changing what the dimension means.",
-    },
-    OrderException {
-        feature: "gamma_max",
-        a: Class::Am,
-        b: Class::Cw,
-        why: "INHERENT, same shape as carrier_line_db: peak-to-mean of the ENVELOPE spectrum is a \
-              signal-to-noise ratio of the envelope - the numerator is the modulation's line, the \
-              denominator includes the broadband contribution the noise makes to the envelope. \
-              `am` is a single envelope tone, so its peak-to-mean is bounded only by the noise and \
-              slides 11.2 / 122.5 / 157.4 / 161.5 / 162.3; `cw`'s keyed envelope spreads its \
-              energy over keying harmonics, so no single line dominates and it holds 54.6 / 60.3 / \
-              63.0 / 63.3 / 63.2. They cross between 10 and 20 dB. The dimension is doing its job; \
-              what is forbidden is a constant across it.",
-    },
-    OrderException {
-        feature: "c42_norm",
-        a: Class::Am,
-        b: Class::Cw,
-        why: "INHERENT, and the law is exact. C42 is a fourth CUMULANT, to which Gaussian noise \
-              contributes zero, while the normaliser C21 is the TOTAL power, signal plus noise - \
-              so the measured value is the emission's attenuated by (rho/(1+rho))^2. CHECKED, not \
-              assumed: `cw` reads -1.254 / -1.366 / -1.404 / -1.418 / -1.425, i.e. 0.880 / 0.959 / \
-              0.985 / 0.995 / 1.000 of its 30 dB value, against the law's 0.828 / 0.942 / 0.982 / \
-              0.996 / 1.000. `am` is attenuated far harder at 10 dB (-0.503 against -1.889, a \
-              factor 0.27) because its envelope TROUGHS reach the noise there, which is the same \
-              mechanism T-249 recorded for `am` being read as `ssb` at 10 dB. The pair crosses \
-              between 10 and 15 dB. De-noising the normaliser with the measured SNR is possible \
-              and would change the feature's meaning and FEATURES_VERSION with it.",
-    },
-    OrderException {
-        feature: "c42_norm",
-        a: Class::Am,
-        b: Class::Wfm,
-        why: "The same attenuation, against a second partner: `wfm` is constant-envelope so it \
-              holds -0.930 / -1.001 / -1.026 / -1.035 / -1.038 (0.896 of its 30 dB value at 10 dB, \
-              the law's 0.828) while `am` collapses to -0.503, crossing between 10 and 15 dB. Two \
-              entries and not one because the guard's unit is the PAIR: `am` inverts against both \
-              of the analog classes whose 30 dB value lies between its 10 dB and 30 dB readings, \
-              and folding them into one name would hide which pairs were measured.",
     },
 ];
 

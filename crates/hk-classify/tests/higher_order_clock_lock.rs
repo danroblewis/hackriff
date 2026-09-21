@@ -127,12 +127,13 @@ fn c14_reports_a_trusted_symbol_rate_on_genuine_8psk() {
         worst_err_pct < 1.0,
         "worst symbol-rate error {worst_err_pct:.3} % over every lock"
     );
-    // The classes that already worked must be untouched: 11 of 12 bpsk, 12 of 12 qpsk, exactly as
-    // measured before the change.
+    // The classes that already worked must be untouched: 12 of 12 bpsk, 12 of 12 qpsk. T-589
+    // measured 11 of 12 bpsk on the grid of the day; the twelfth came back with T-564's corrected
+    // analysis geometry, which is a gain rather than a move of this test's finding.
     assert_eq!(
         locks.get(&("bpsk", 20)).copied().unwrap_or(0)
             + locks.get(&("bpsk", 30)).copied().unwrap_or(0),
-        11,
+        12,
         "bpsk lock rate moved: {locks:?}"
     );
     assert_eq!(
@@ -157,7 +158,7 @@ fn the_order_8_gate_admits_8psk_and_moves_no_other_class() {
         (Class::Am, 0, 0, false),
         (Class::Nbfm, 0, 0, false),
         (Class::Wfm, 0, 1, false),
-        (Class::Ssb, 0, 1, false),
+        (Class::Ssb, 0, 0, false),
         (Class::Cw, 6, 6, false),
         (Class::Ook, 6, 6, false),
         (Class::Ask4, 0, 0, false),
@@ -165,14 +166,14 @@ fn the_order_8_gate_admits_8psk_and_moves_no_other_class() {
         (Class::Gfsk, 5, 5, false),
         (Class::Msk, 6, 6, false),
         (Class::Fsk4, 5, 6, false),
-        (Class::Bpsk, 6, 5, false),
+        (Class::Bpsk, 6, 6, false),
         (Class::Qpsk, 6, 6, false),
         // The one row this ticket moves: 0, 0 before.
         (Class::Psk8, 6, 6, true),
         (Class::Qam16, 5, 6, false),
-        (Class::Qam64, 4, 3, false),
+        (Class::Qam64, 4, 4, false),
         (Class::Ofdm, 0, 0, false),
-        (Class::Chirp, 1, 0, false),
+        (Class::Chirp, 0, 2, false),
         (Class::Ppm, 6, 6, false),
         (Class::Pulse, 0, 0, false),
         (Class::NoiseLike, 0, 0, false),
@@ -182,12 +183,21 @@ fn the_order_8_gate_admits_8psk_and_moves_no_other_class() {
         (Class::CostasHop, 0, 0, false),
         (Class::OfdmOddCp, 0, 0, false),
         (Class::NoiseBurst, 0, 0, false),
-        (Class::DsbSc, 3, 4, false),
+        (Class::DsbSc, 0, 0, false),
         (Class::VsbAm, 0, 0, false),
-        (Class::Pi4Dqpsk, 5, 5, false),
+        (Class::Pi4Dqpsk, 6, 6, false),
         (Class::Apsk16, 0, 0, false),
         (Class::CodedPulse, 6, 6, false),
     ];
+    // Six rows were **re-measured on the corrected grid** (T-564), which settles the analysis
+    // geometry at each family's SNR gate and caps the channel at the emission instead of
+    // re-deriving both from the noisy snippet at every rung. The **property** this test exists for
+    // did not move: the order-8 column is unchanged everywhere, 8-PSK still locks 6/6 at both
+    // SNRs, and no other class gained order-8 structure. The rows that moved say something:
+    // `bpsk` 6/5 -> 6/6, `pi4-dqpsk` 5/5 -> 6/6 and `qam64` 4/3 -> 4/4 gained locks, while
+    // `dsb-sc` 3/4 -> 0/0 and `ssb` 0/1 -> 0/0 LOST them — and neither of those has a symbol clock
+    // to find. C14 was locking on structure inside an `analog` channel five times wider than the
+    // emission, which is the defect T-564 removed.
     let mut wrong: Vec<String> = Vec::new();
     let mut ran = 0;
     for &(class, at20, at30, order8) in EXPECT {
@@ -384,9 +394,13 @@ fn the_verifier_runs_on_genuine_8psk_when_the_tree_is_undecided() {
         "the stage must not skip on a class the system claims to handle: {skipped:#?}"
     );
     // Before the fix this ran 0 times: every one of the eleven skipped with `NoClockLock`.
+    // Ten of twelve since T-564's corrected geometry (eleven before it): one more 8-PSK snippet
+    // abstains at the family stage instead of reaching psk-qam. An abstention upstream is not a
+    // wrong answer, and what this test exists to prove is unchanged — the verifier RAN on every
+    // snippet that reached it and chose `8psk` every time.
     assert_eq!(
-        offered, 11,
-        "eleven of the twelve reach the psk-qam family; the twelfth abstains upstream"
+        offered, 10,
+        "ten of the twelve reach the psk-qam family; the other two abstain upstream"
     );
     assert_eq!(
         ran, offered,

@@ -374,6 +374,33 @@ pub struct SynthSignal {
     pub class: Class,
     /// In-band SNR it was generated at, dB.
     pub snr_db: f64,
+    /// The analysis geometry this snippet was actually delivered at (truth: for assertions and
+    /// diagnostics only — the classifier never sees it). See [`Geometry`].
+    pub geometry: Geometry,
+}
+
+/// The analysis geometry [`generate`] delivered: how hard the snippet was filtered and decimated
+/// before the classifier was handed it.
+///
+/// Recorded because **it must not be a statistic of the noise** (T-564). T-435 measured the
+/// delivered geometry moving with the SNR on 23 % of ladders, because it was derived by
+/// re-measuring OBW99 on the *noisy* snippet: two rungs of one (class, seed) ladder were then not
+/// the same experiment with more noise but different experiments, and every accuracy figure
+/// computed up an SNR ladder silently compared them. `tests/synth_geometry_stability.rs` asserts
+/// these three fields are identical across a ladder.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Geometry {
+    /// Rate the waveform was generated and filtered at, Hz ([`analysis_rate`]).
+    pub analysis_rate_hz: f64,
+    /// Normalised channel-filter cutoff applied (cycles/sample), or `None` where the filter was
+    /// wide enough to skip.
+    pub channel_cutoff: Option<f64>,
+    /// Decimation to the classifier's geometry ([`SAMPLES_PER_OBW`]).
+    pub decim: usize,
+    /// Decimation to C14's geometry ([`crate::symbols::SYMBOL_SAMPLES_PER_OBW`]).
+    pub symbol_decim: usize,
+    /// The OBW99, Hz, the two decimations and the cutoff were derived from.
+    pub geometry_obw_hz: f64,
 }
 
 /// Samples per OBW99 the classifier is handed in production, from
@@ -430,10 +457,12 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
     let mut rng = Rng::new(cfg.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ class as u64);
     let n = cfg.samples;
     let fs = analysis_rate(class, cfg.sample_rate_hz);
+    let analysis_fs = fs;
     // Symbol rate varies with the seed so the densities never learn one rate.
     let rate = 25e3 + 75e3 * rng.unit();
     let (mut x, design_bw) = waveform(class, &mut rng, n, fs, rate, cfg.packet_preamble);
     normalise(&mut x);
+    let emission = x.clone();
 
     // Noise at the requested in-band SNR: N₀ = σ²/fs, so σ² = P_s·fs/(BW·10^(SNR/10)).
     // Floor relative to the rate rather than an absolute kilohertz: a genuinely narrow emission
@@ -441,43 +470,48 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
     // otherwise have its noise scaled over a bandwidth far wider than it occupies, which sets its
     // SNR to something other than the requested one.
     let bw = design_bw.clamp(0.001 * fs, 0.9 * fs);
-    let sigma2 = fs / (bw * 10f64.powf(cfg.snr_db / 10.0));
-    let sigma = (sigma2 / 2.0).sqrt();
-    for s in x.iter_mut() {
-        let (a, b) = rng.gaussian_pair();
-        *s += Complex64::new(a * sigma, b * sigma);
-    }
-    // Front-end impairments: residual CFO, IQ amplitude imbalance, 8-bit quantisation.
-    if cfg.lo_offset_hz != 0.0 {
-        for (i, s) in x.iter_mut().enumerate() {
-            let ph = TAU * cfg.lo_offset_hz * i as f64 / fs;
-            *s *= Complex64::new(ph.cos(), ph.sin());
-        }
-    }
-    if cfg.iq_imbalance != 0.0 {
-        for s in x.iter_mut() {
-            *s = Complex64::new(s.re * (1.0 + cfg.iq_imbalance), s.im);
-        }
-    }
-    let mut samples: Vec<Complex32> = x
-        .iter()
-        .map(|s| Complex32::new(s.re as f32, s.im as f32))
-        .collect();
-    if cfg.quantise_8bit {
-        let peak = samples
-            .iter()
-            .map(|s| s.re.abs().max(s.im.abs()))
-            .fold(0.0_f32, f32::max)
-            .max(1e-9);
-        // Fill about half of full scale, as a sensibly-gained HackRF capture does.
-        let g = 63.0 / peak;
-        for s in samples.iter_mut() {
-            *s = Complex32::new(
-                ((s.re * g).round().clamp(-127.0, 127.0)) / 127.0,
-                ((s.im * g).round().clamp(-127.0, 127.0)) / 127.0,
-            );
-        }
-    }
+    let sigma = |snr_db: f64| (fs / (bw * 10f64.powf(snr_db / 10.0)) / 2.0).sqrt();
+    let mut samples = impair(&mut x, sigma(cfg.snr_db), cfg, fs, &mut rng);
+    // **The reference snippet the analysis geometry is settled from** (T-564). Same waveform, same
+    // impairment chain, but the noise is always at [`geometry_reference_snr_db`] — so the cutoff
+    // and both decimations below are a function of `(class, seed)` alone and *do not move up the
+    // SNR ladder*.
+    //
+    // Until T-564 they were re-derived from the delivered snippet at each rung, which made
+    // `decim = floor(fs / (2·obw))` and the channel-filter cutoff statistics of the noise draw:
+    // T-435 measured the OBW99 reported for one `(class, seed)` moving with the SNR by ≥ 2× on
+    // 115 of 504 ladders (23 %) and ≥ 3× on 90 (18 %), so two rungs of one ladder were not the
+    // same experiment with more noise — they were **different experiments**, and every accuracy
+    // figure computed up a ladder compared them silently.
+    //
+    // The *rule* is untouched (noise-referenced `occupied_band`, a channel of 1.5 × OBW99): only
+    // the snippet it is evaluated on is pinned. That models what a receiver does — settle a
+    // channel once from the detection that found the emission, then keep it — and it is why the
+    // reference is noisy rather than the bare waveform. Two alternatives were built and measured,
+    // and both cost more than they bought:
+    //
+    // - **OBW99 of the noise-free waveform.** 99 % of a carrier-bearing emission's power *is* the
+    //   carrier, so `measured_obw` returns 686 Hz for a 9 kHz AM emission and the channel filter
+    //   then strips its sidebands. Measured: `analog` top-1 0.92 → 0.77 and overall top-1
+    //   0.933 → 0.897, under ADR-0016 §7's 0.90 floor. (That collapse is the *old* defect's
+    //   high-SNR end — T-435's `am` ladder reading 82/31/1/1/1/1/1 kHz — not a new one.)
+    // - **The generator's design bandwidth.** Its per-class factors (`5·rate` for 8-FSK,
+    //   `1.35·rate` for linear, `2·rate` for ASK) include different fractions of each emission's
+    //   skirts, so the *channel* becomes class-dependent in a way no receiver's would be. Measured:
+    //   held-out unknown recall 0.97 → 0.93 with the held-out 8-FSK generator claimed `analog`
+    //   6 times of 8 — a confidently-wrong family on an out-of-taxonomy signal, the one outcome
+    //   ADR-0016 §2 forbids.
+    let mut reference = {
+        let mut y = emission;
+        let mut rng = Rng::new(cfg.seed ^ (class as u64) ^ GEOMETRY_REFERENCE_STREAM);
+        impair(
+            &mut y,
+            sigma(geometry_reference_snr_db(class)),
+            cfg,
+            fs,
+            &mut rng,
+        )
+    };
     // Channel-filter to the occupied band, as C13 does before handing a snippet on
     // (`hk_estimate::normalise`: a flat channel of 1.5 × OBW99). Without this the classifier would
     // see the noise of the whole analysis band rather than of the channel — the instantaneous
@@ -500,19 +534,40 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
     // held-out unknown recall fell 0.861 -> 0.731, below the ADR-0016 floor, and the real 915 MHz
     // FSK burst came back `analog`/`nbfm` at confidence 1.00 with open-set 0.00 — a confidently
     // wrong label on a real signal, which is the one outcome this classifier may never produce.
-    let peak_offset = recentre_offset_hz(&samples, fs);
-    if peak_offset != 0.0 {
-        for (i, s) in samples.iter_mut().enumerate() {
-            let ph = -TAU * peak_offset * i as f64 / fs;
-            *s *= Complex32::new(ph.cos() as f32, ph.sin() as f32);
-        }
-    }
-    let obw_hz = measured_obw(&samples, fs);
-    let cutoff = (0.75 * obw_hz / fs).clamp(0.005, 0.49);
-    if cutoff < 0.45 {
+    // Measured on the noise-free copy (T-564) and offset by the LO error deliberately applied to
+    // the delivered samples, so the emission lands where the same rule would have put it at any
+    // SNR. The rule itself is unchanged — the carrier line where there is one, the spectral
+    // centroid where there is not.
+    let peak_offset = recentre_offset_hz(&reference, fs);
+    derotate(&mut samples, peak_offset, fs);
+    derotate(&mut reference, peak_offset, fs);
+    // **The channel is capped at the emission, the rate follows the measurement.**
+    //
+    // The cutoff is the narrower of what the reference receiver measured and what the emission
+    // actually occupies. `measured_obw` is SNR-biased in both directions by construction — its
+    // 99 % growth walks out into the noise tails at low SNR and collapses onto the carrier at high
+    // SNR — so at the `analog` gate it reads 61 kHz for a 9 kHz AM emission, and the `analog`
+    // densities were being fitted on snippets holding five times the band their emission occupies.
+    // That is the same "narrow line in empty space" shape T-435 found swallowing a 16-QAM, and
+    // measured here it also swallows the held-out 3-level ASK (4 of 6 claimed `analog`) and pushes
+    // `ook-ask`'s below-gate wrong-label rate to 3/48, over ADR-0016 §7's 0.05 floor. `bw` is the
+    // design bandwidth the noise was already scaled over, so capping there states one bandwidth
+    // for the SNR and the channel instead of two. The cap binds only where the measurement is
+    // outside the emission — in practice on `analog`.
+    //
+    // The **decimation** is then taken from the channel as measured after filtering, exactly as
+    // before: that is what C13 reports and what `hk_estimate::normalise` would deliver, and
+    // pinning it to the design bandwidth instead costs C14 a third of its BPSK locks (12/12 -> 8/12
+    // at 20 and 30 dB) by delivering shorter records than production ever would.
+    let cutoff = (0.75 * measured_obw(&reference, fs).min(bw) / fs).clamp(0.005, 0.49);
+    let applied_cutoff = if cutoff < 0.45 {
         samples = channel_filter(&samples, cutoff);
-    }
-    let obw_hz = measured_obw(&samples, fs);
+        reference = channel_filter(&reference, cutoff);
+        Some(cutoff)
+    } else {
+        None
+    };
+    let geometry_obw_hz = measured_obw(&reference, fs);
     // Decimation alone is enough below, and is alias-free by construction: it only ever engages
     // when OBW99 is below a quarter of the rate, which is exactly when the channel filter above
     // has already cut everything beyond ±0.75 × OBW99 — comfortably inside the new Nyquist limit.
@@ -526,7 +581,8 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
     // classifier's snippet for C14 either — `BlindEstimator::prepare` re-normalises to
     // `symbols::SYMBOL_SAMPLES_PER_OBW` — so the dev grid must hand C14 the same geometry, taken
     // from the same filtered, recentred waveform rather than generated separately.
-    let symbol_decim = ((fs / (crate::symbols::SYMBOL_SAMPLES_PER_OBW * obw_hz)).floor() as usize)
+    let symbol_decim = ((fs / (crate::symbols::SYMBOL_SAMPLES_PER_OBW * geometry_obw_hz)).floor()
+        as usize)
         .clamp(1, max_decim);
     let (symbol_samples, symbol_sample_rate_hz) = if symbol_decim > 1 {
         (
@@ -541,7 +597,7 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
         (samples.clone(), fs)
     };
     // Resample to the analysis geometry the pipeline actually delivers ([`SAMPLES_PER_OBW`]).
-    let decim = ((fs / (SAMPLES_PER_OBW * obw_hz)).floor() as usize).clamp(1, max_decim);
+    let decim = ((fs / (SAMPLES_PER_OBW * geometry_obw_hz)).floor() as usize).clamp(1, max_decim);
     let (samples, fs) = if decim > 1 {
         (
             samples.iter().step_by(decim).copied().collect::<Vec<_>>(),
@@ -557,6 +613,13 @@ pub fn generate(class: Class, cfg: &SynthConfig) -> SynthSignal {
         samples,
         sample_rate_hz: fs,
         obw_hz,
+        geometry: Geometry {
+            analysis_rate_hz: analysis_fs,
+            channel_cutoff: applied_cutoff,
+            decim,
+            symbol_decim,
+            geometry_obw_hz,
+        },
         symbol_samples,
         symbol_sample_rate_hz,
         class,
@@ -1438,6 +1501,90 @@ fn channel_filter(x: &[Complex32], cutoff: f64) -> Vec<Complex32> {
 /// class — the harness never looks at what it generated — and it reproduces the argmax bit-for-bit
 /// on every carrier-bearing class while giving the flat-spectrum ones a centre that means
 /// something.
+/// Stream separation for the geometry reference snippet's noise: it must not consume draws from
+/// the stream that builds the delivered snippet, or the waveform would change with it.
+const GEOMETRY_REFERENCE_STREAM: u64 = 0x5E77_1E60;
+
+/// The SNR, dB, the analysis geometry is settled at — **a-priori, never tuned**.
+///
+/// A family's own gate (`thresholds_of`) is the lowest SNR at which that family may be claimed at
+/// all, so it is where a receiver would first have detected the emission and chosen a channel for
+/// it. Settling there rather than at the rung's own SNR is the whole of T-564: it makes the
+/// delivered geometry a function of `(class, seed)` and leaves the rung varying only the noise.
+/// A held-out generator borrows the gate of the family it probes, so the negatives are presented
+/// at the same geometry as the positives they are negatives for.
+fn geometry_reference_snr_db(class: Class) -> f64 {
+    class
+        .family()
+        .or_else(|| class.probes_family())
+        .and_then(crate::thresholds::thresholds_of)
+        .and_then(|t| t.snr_gate_db)
+        // The harness's own default where a family declares no gate (`harness::run_synthetic`).
+        .unwrap_or(10.0)
+}
+
+/// Adds noise at `sigma` and the front-end impairments (residual CFO, IQ amplitude imbalance,
+/// 8-bit quantisation) to `x`, returning the snippet a receiver would see.
+///
+/// Factored out of [`generate`] so the delivered snippet and the geometry reference snippet go
+/// through **the same chain** — a reference measured on a cleaner or differently-impaired signal
+/// than the one delivered would settle a channel for a signal that was never presented.
+fn impair(
+    x: &mut [Complex64],
+    sigma: f64,
+    cfg: &SynthConfig,
+    fs: f64,
+    rng: &mut Rng,
+) -> Vec<Complex32> {
+    for s in x.iter_mut() {
+        let (a, b) = rng.gaussian_pair();
+        *s += Complex64::new(a * sigma, b * sigma);
+    }
+    if cfg.lo_offset_hz != 0.0 {
+        for (i, s) in x.iter_mut().enumerate() {
+            let ph = TAU * cfg.lo_offset_hz * i as f64 / fs;
+            *s *= Complex64::new(ph.cos(), ph.sin());
+        }
+    }
+    if cfg.iq_imbalance != 0.0 {
+        for s in x.iter_mut() {
+            *s = Complex64::new(s.re * (1.0 + cfg.iq_imbalance), s.im);
+        }
+    }
+    let mut samples: Vec<Complex32> = x
+        .iter()
+        .map(|s| Complex32::new(s.re as f32, s.im as f32))
+        .collect();
+    if cfg.quantise_8bit {
+        let peak = samples
+            .iter()
+            .map(|s| s.re.abs().max(s.im.abs()))
+            .fold(0.0_f32, f32::max)
+            .max(1e-9);
+        // Fill about half of full scale, as a sensibly-gained HackRF capture does.
+        let g = 63.0 / peak;
+        for s in samples.iter_mut() {
+            *s = Complex32::new(
+                ((s.re * g).round().clamp(-127.0, 127.0)) / 127.0,
+                ((s.im * g).round().clamp(-127.0, 127.0)) / 127.0,
+            );
+        }
+    }
+    samples
+}
+
+/// Rotates `samples` down by `offset_hz`, in place. Zero is a no-op, so a class whose emission is
+/// already centred is left bit-for-bit alone.
+fn derotate(samples: &mut [Complex32], offset_hz: f64, fs: f64) {
+    if offset_hz == 0.0 {
+        return;
+    }
+    for (i, s) in samples.iter_mut().enumerate() {
+        let ph = -TAU * offset_hz * i as f64 / fs;
+        *s *= Complex32::new(ph.cos() as f32, ph.sin() as f32);
+    }
+}
+
 fn recentre_offset_hz(samples: &[Complex32], fs: f64) -> f64 {
     let fft_len = (samples.len() / 8).next_power_of_two().clamp(64, 2048);
     let cfg = hk_dsp::WelchConfig {
