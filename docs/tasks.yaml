@@ -16168,10 +16168,17 @@ tasks:
       `just gate --base <pre-batch sha>`; (b) gate self-timing to $HACKRIFF_OPS/gate-timings.jsonl
       plus `just cycle-time`; (c) affected-crate selection through HK_GATE_CRATES (hk-cli 2 of 20,
       hk-pipeline 3, hk-dsp 14, hk-model 20) - acceptance and the UI tiers are NOT narrowed.
+      Also landed: `just test-ui` skipped for a diff with no ui/ path (the browser tier still runs);
+      `npm ci` only when package-lock.json changed; `just gate-stats` p50/p90 plus a rolling-median
+      budget a py test asserts; $HACKRIFF_OPS/landed.jsonl per landed ticket.
       REJECTED WITH NUMBERS: sccache 0.00 percent hit rate, and cross-worktree reuse is structurally
       impossible (sccache keys Rust entries on the cwd; SCCACHE_BASEDIR and --remap-path-prefix both
-      fail to fix it) - leave it on, stop counting it. Acceptance stays on plain cargo test, because
-      nextest would pin hk-e2e to max-threads=1 and serialise it.
+      fail to fix it) - leave it on, stop counting it. ld64.lld is equal-to-slightly-slower than
+      Apple's ld (6 alternating pairs, 47 MB binary 1.35 vs 1.51 s, 28 MB test binary 2.23 vs 2.27 s;
+      Apple ships ld64-954/ld-prime, mold has no Mach-O backend). CARGO_INCREMENTAL=1 produced a
+      21 GB target/debug/incremental for a PARTIAL -p hk-dsp rebuild and took free disk 24 -> 13 GB,
+      so the =0 has a second justification independent of sccache. Acceptance stays on plain cargo
+      test, because nextest would pin hk-e2e to max-threads=1 and serialise it.
       THE REAL CONSTRAINT IS THE BOX, NOT THE GATE: `cargo build -p hk-plugins --bins`, documented
       as ~0.05 s warm, took 500 s at load 211 with three agents building and an `hk serve` holding
       9-13 cores. Follow-ups worth filing: count long-running `hk serve` against the 4-builder cap;
