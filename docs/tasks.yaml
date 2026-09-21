@@ -4400,7 +4400,7 @@ tasks:
     milestone: M2-hardening
     title: 'Burst acceptance scene over 902-928 MHz (915 ISM) through the IQ ring: the
       canonical short-burst playground as a blind fixture'
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-250
@@ -4424,6 +4424,7 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    result: "tests/e2e/tests/acceptance_ism.rs + acceptance/t254_ism_bursts.rs (new `just acceptance-ism` target, listed in e2e_milestones and acceptance-milestones): the 902-928 MHz playground blind through the mock SDR AND the IQ ring. Scene = shared `lora_ism_burst` generator (seed 254, 6 s at 500 kSps, centre 903.0 MHz) with three species separating the claim: CW carrier at 902.82 MHz on air throughout (the control), six 16.7 ms FSK sensor bursts at 902.94 MHz over 0.20-1.22 s then silent (the rtl_433-shaped burster that stops), one 132 ms LoRa packet at 903.10 MHz at 2.00 s (the ephemeral one-off). Measured: every truth emission found blind with `ism` in its top-3; sensor detections occupy 2.0 % of the recording and the one-off 2.3 % (ceiling 34 %), the carrier 99.9 % (floor 66 %); last sensor detection ends 1.217 s, exactly when it stopped; ONE inventory row per species (3 rows total, no skirt fragments - T-250 holds in the burst band); /api/events catalogues sensor 0.197-1.217 s (1.02 s) and one-off 1.999-2.138 s (0.139 s), each with its own timespan; at the run's live edge /api/inventory reads sensor `ended` (confidence 0.023), one-off `ended` (0.057), carrier `live` (1.0), and hk_model::presence_in_window agrees. The ring is configured and its allocation waited on (T-178) because liveness inside a 6 s recording is only answerable from the ring-measured idle gap (ADR-0019 3); the test asserts the ring actually buffered (1 segment, 6.000 s, 3 000 000 samples) so no silent fallback to the conservative 60 s gap can pass. Thresholds a priori, none moved. 100.3 MHz field case (B0.497) checked on the real 2026-09-15 FM capture: the burst path fires 2 short detections (100.298/100.302 MHz, 4.4/5.2 dB, ms-long) in the window the annotation pass measured SILENT, minting 1 candidate, never confirmed - so the sighting is NOT reproduced from any recording we hold (it was off air at capture) and what sits there is the designed false-alarm allowance being spent, at its ceiling of 2. Two findings filed as follow-ups: /api/events refuses its own documented limit>500, and its `open` uses the conservative gap while /api/inventory uses the ring-measured one, so the two surfaces disagree about the same emitter in the same window (3 of 3 events open=true beside rows reading ended)."
   - id: T-255
     milestone: M2-hardening
     title: 'Synthetic LoRa scenario in the py/ synth tooling: deterministic up-chirps
